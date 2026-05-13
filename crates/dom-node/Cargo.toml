@@ -29,4 +29,3 @@ hex.workspace           = true
 dom-serialization.workspace = true
 primitive-types.workspace = true
 randomx-rs.workspace     = true
-sha2.workspace = true

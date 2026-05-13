@@ -80,18 +80,10 @@ async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
             .map_err(|e| DomError::Internal(format!("genesis serialize: {e}")))?
     };
 
-    // Calcula hash do genesis
-    let genesis_hash = {
-        use sha2::{Sha256, Digest};
-
-
-        let mut h = Sha256::new();
-        h.update(&header_bytes);
-        let r = h.finalize();
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&r);
-        arr
-    };
+    // Calcula hash do genesis usando Blake2b-256 (consenso DOM).
+    // RFC-0001: todo Hash256 do protocolo é Blake2b. Usar SHA256 aqui
+    // produziria genesis hash incompatível com outras implementações.
+    let genesis_hash = *dom_crypto::hash::blake2b_256(&header_bytes).as_bytes();
 
     chain.store.commit_block(
         &genesis_hash,
