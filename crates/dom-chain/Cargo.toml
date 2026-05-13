@@ -1,0 +1,23 @@
+[package]
+name        = "dom-chain"
+description = "DOM chain state — IBD, reorganization, chain selection"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+dom-core.workspace          = true
+dom-consensus.workspace     = true
+dom-serialization.workspace = true
+dom-store.workspace         = true
+dom-pow.workspace           = true
+dom-pmmr.workspace          = true
+dom-crypto.workspace        = true
+thiserror.workspace         = true
+tracing.workspace           = true
+tokio.workspace             = true
+
+primitive-types.workspace = true
+blake2.workspace            = true
+hex.workspace               = true

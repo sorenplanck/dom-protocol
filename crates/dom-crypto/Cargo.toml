@@ -1,0 +1,27 @@
+[package]
+name        = "dom-crypto"
+description = "DOM protocol — cryptographic primitives (RFC-0001, RFC-0009)"
+version.workspace    = true
+edition.workspace    = true
+rust-version.workspace = true
+authors.workspace    = true
+license.workspace    = true
+
+[dependencies]
+dom-core.workspace   = true
+secp256k1.workspace     = true
+secp256k1-zkp = { git = "https://github.com/BlockstreamResearch/rust-secp256k1-zkp", branch = "master", features = ["global-context", "rand-std"] }
+blake2.workspace     = true
+sha2.workspace       = true
+hmac.workspace       = true
+hkdf.workspace       = true
+k256.workspace       = true
+zeroize.workspace    = true
+subtle.workspace     = true
+hex.workspace        = true
+thiserror.workspace  = true
+rand.workspace       = true
+
+[dev-dependencies]
+hex.workspace = true
+rand.workspace = true

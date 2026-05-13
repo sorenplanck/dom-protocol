@@ -1,0 +1,17 @@
+[package]
+name        = "dom-store"
+description = "DOM persistent storage — LMDB backend"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+dom-core.workspace          = true
+dom-consensus.workspace     = true
+dom-serialization.workspace = true
+dom-pmmr.workspace          = true
+lmdb.workspace              = true
+thiserror.workspace         = true
+blake2.workspace            = true
+tracing.workspace           = true

@@ -1,0 +1,16 @@
+[package]
+name        = "dom-core"
+description = "DOM protocol — consensus constants and primitive types"
+version.workspace    = true
+edition.workspace    = true
+rust-version.workspace = true
+authors.workspace    = true
+license.workspace    = true
+
+[dependencies]
+thiserror.workspace = true
+zeroize.workspace   = true
+subtle.workspace    = true
+hex.workspace       = true
+
+[dev-dependencies]

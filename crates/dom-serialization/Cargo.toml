@@ -1,0 +1,12 @@
+[package]
+name        = "dom-serialization"
+description = "DOM protocol — canonical serialization layer (RFC-0002)"
+version.workspace    = true
+edition.workspace    = true
+rust-version.workspace = true
+authors.workspace    = true
+license.workspace    = true
+
+[dependencies]
+dom-core.workspace  = true
+thiserror.workspace = true

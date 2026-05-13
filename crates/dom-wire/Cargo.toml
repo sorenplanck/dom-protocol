@@ -1,0 +1,23 @@
+[package]
+name        = "dom-wire"
+description = "DOM P2P wire protocol — Noise_XX transport + message framing"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+dom-core.workspace          = true
+dom-consensus.workspace     = true
+dom-serialization.workspace = true
+dom-config.workspace        = true
+tokio.workspace             = true
+snow.workspace              = true
+x25519-dalek.workspace      = true
+serde.workspace             = true
+serde_json.workspace        = true
+thiserror.workspace         = true
+blake2.workspace            = true
+tracing.workspace           = true
+rand.workspace              = true
+futures.workspace           = true

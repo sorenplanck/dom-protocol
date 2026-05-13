@@ -1,0 +1,13 @@
+[package]
+name        = "dom-config"
+description = "DOM node configuration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+dom-core.workspace    = true
+serde.workspace       = true
+serde_json.workspace  = true
+thiserror.workspace   = true

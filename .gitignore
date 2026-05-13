@@ -1,0 +1,25 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node data — never commit chain data or keys
+dom-testnet-data/
+dom-mainnet-data/
+*.lmdb
+*.mdb
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+
+# OS metadata
+Thumbs.db
+desktop.ini

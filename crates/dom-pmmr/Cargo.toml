@@ -1,0 +1,13 @@
+[package]
+name        = "dom-pmmr"
+description = "DOM protocol — Pruned Merkle Mountain Range (RFC-0004)"
+version.workspace    = true
+edition.workspace    = true
+rust-version.workspace = true
+authors.workspace    = true
+license.workspace    = true
+
+[dependencies]
+dom-core.workspace   = true
+dom-crypto.workspace = true
+thiserror.workspace  = true
