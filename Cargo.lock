@@ -431,7 +431,6 @@ dependencies = [
  "primitive-types",
  "randomx-rs",
  "serde_json",
- "sha2",
  "tokio",
  "tracing",
  "tracing-subscriber",
