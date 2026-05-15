@@ -1,6 +1,6 @@
 //! Consensus constants verification vectors.
 //!
-//! These tests verify that the compiled constants match the RFC-0000 specification.
+//! These tests verify that the compiled constants match the DOM whitepaper.
 //! Any mismatch here means the implementation is non-conforming.
 
 #[cfg(test)]
@@ -8,7 +8,7 @@ mod tests {
     use dom_core::*;
 
     #[test]
-    fn target_spacing_is_1800_seconds() {
+    fn target_spacing_is_120_seconds() {
         assert_eq!(TARGET_SPACING, 120);
     }
 
@@ -23,31 +23,28 @@ mod tests {
     }
 
     #[test]
-    fn initial_reward_is_369_dom() {
-        assert_eq!(INITIAL_BLOCK_REWARD, 24 * COIN_UNIT);
-        assert_eq!(INITIAL_BLOCK_REWARD, 2_400_000_000);
+    fn initial_reward_is_33_dom() {
+        assert_eq!(INITIAL_BLOCK_REWARD, 33 * COIN_UNIT);
+        assert_eq!(INITIAL_BLOCK_REWARD, 3_300_000_000);
     }
 
     #[test]
-    fn halving_interval_is_44715() {
-        assert_eq!(HALVING_INTERVAL, 670_725);
+    fn halving_interval_is_330000() {
+        assert_eq!(HALVING_INTERVAL, 330_000);
     }
 
     #[test]
-    fn halving_digit_sum_is_21() {
-        // 670_725 → 6+7+0+7+2+5 = 27
-        // This is a consensus-documented mathematical property
-        let digits: u32 = 670_725u32
-            .to_string()
-            .chars()
-            .map(|c| c.to_digit(10).unwrap())
-            .sum();
-        assert_eq!(digits, 27, "HALVING_INTERVAL digit sum must be 27");
+    fn halving_epochs_is_55() {
+        assert_eq!(HALVING_EPOCHS, 55);
+    }
+
+    #[test]
+    fn max_future_block_time_is_120() {
+        assert_eq!(MAX_FUTURE_BLOCK_TIME, 120);
     }
 
     #[test]
     fn network_magic_mainnet_is_dom1() {
-        // ASCII: D=0x44, O=0x4F, M=0x4D, 1=0x31
         assert_eq!(NETWORK_MAGIC_MAINNET, 0x444F_4D31);
         let bytes = NETWORK_MAGIC_MAINNET.to_be_bytes();
         assert_eq!(&bytes, b"DOM1");
@@ -61,27 +58,24 @@ mod tests {
     }
 
     #[test]
-    fn p2p_port_encodes_33_and_369() {
+    fn p2p_port_encodes_33_supply() {
         assert_eq!(P2P_PORT_MAINNET, 33_369);
-        // 33 = supply in millions / 1M prefix
-        // 369 = block reward
     }
 
     #[test]
-    fn supply_ceiling_computation() {
-        // Supply = INITIAL_BLOCK_REWARD * HALVING_INTERVAL * 2
-        let theoretical = INITIAL_BLOCK_REWARD
-            .checked_mul(HALVING_INTERVAL).unwrap()
-            .checked_mul(2).unwrap();
-        // 24 * 670_725 * 2 = 32_194_800 DOM
-        let dom = theoretical / COIN_UNIT;
-        assert!(dom > 30_000_000, "Supply should be >30M DOM, got {dom}");
-        assert!(dom < 35_000_000, "Supply should be <35M DOM, got {dom}");
+    fn supply_ceiling_is_approximately_33m() {
+        // Per whitepaper: ~33,000,000 DOM total supply.
+        // Real value with integer arithmetic: 32,999,999.769 DOM
+        let dom = MAX_SUPPLY_NOMS / COIN_UNIT;
+        assert!(dom >= 32_000_000, "Supply should be >= 32M DOM, got {dom}");
+        assert!(dom < 33_000_000, "Supply should be < 33M DOM, got {dom}");
+        // Exact pre-computed value
+        assert_eq!(MAX_SUPPLY_NOMS, 3_299_999_976_900_000);
     }
 
     #[test]
     fn reward_halving_schedule() {
-        // Verify the halving produces diminishing rewards
+        // Verify the halving produces diminishing rewards using 0.67 multiplier.
         let mut prev = block_reward(BlockHeight(0));
         for epoch in 1u64..10 {
             let h = BlockHeight(HALVING_INTERVAL * epoch);
@@ -91,10 +85,18 @@ mod tests {
                 "Reward at epoch {epoch} should be less than epoch {}",
                 epoch - 1
             );
-            // Should be exactly half
-            assert_eq!(curr.noms(), prev.noms() / 2);
+            // Per whitepaper: reward(n) = (reward(n-1) * 67) / 100
+            assert_eq!(curr.noms(), (prev.noms() * 67) / 100);
             prev = curr;
         }
+    }
+
+    #[test]
+    fn reward_zero_after_epoch_54() {
+        let h = BlockHeight(HALVING_INTERVAL * 54);
+        assert_eq!(block_reward(h).noms(), 0);
+        let h = BlockHeight(HALVING_INTERVAL * 100);
+        assert_eq!(block_reward(h).noms(), 0);
     }
 
     #[test]

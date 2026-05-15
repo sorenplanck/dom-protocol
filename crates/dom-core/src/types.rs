@@ -25,8 +25,7 @@ impl Hash256 {
 
     /// Parse from a hex string (64 hex chars).
     pub fn from_hex(s: &str) -> Result<Self, DomError> {
-        let bytes = hex::decode(s)
-            .map_err(|e| DomError::Malformed(format!("invalid hex: {e}")))?;
+        let bytes = hex::decode(s).map_err(|e| DomError::Malformed(format!("invalid hex: {e}")))?;
         let arr: [u8; 32] = bytes
             .try_into()
             .map_err(|_| DomError::Malformed("hash must be 32 bytes".into()))?;
@@ -155,7 +154,7 @@ impl Amount {
 
 impl std::fmt::Display for Amount {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let dom = self.0 / crate::constants::COIN_UNIT;
+        let dom = (self.0 as f64) / (crate::constants::COIN_UNIT as f64);
         let noms = self.0 % crate::constants::COIN_UNIT;
         write!(f, "{dom}.{noms:08} DOM")
     }
@@ -165,17 +164,16 @@ impl std::fmt::Display for Amount {
 
 /// Compute the block subsidy for a given height.
 ///
-/// Uses integer shift (halving) — no floating point.
-/// Returns 0 once the shift exceeds 63 (all coins issued).
+/// Returns 0 for any height in epoch >= HALVING_EPOCHS (after all coins issued).
+/// Uses the deterministic pre-computed BLOCK_REWARD_TABLE — no floating-point,
+/// no recomputation. Reproducible bit-exact across all architectures.
 pub fn block_reward(height: BlockHeight) -> Amount {
     let epoch = height.halving_epoch();
-    if epoch >= 64 {
+    if epoch >= crate::constants::HALVING_EPOCHS as u64 {
         return Amount::ZERO;
     }
-    // Arithmetic right shift — safe because epoch < 64
-    let reward = crate::constants::INITIAL_BLOCK_REWARD >> epoch;
-    // reward can never exceed INITIAL_BLOCK_REWARD which is < MAX_SUPPLY_NOMS
-    Amount(reward)
+    let idx = usize::try_from(epoch).expect("epoch < HALVING_EPOCHS (55) always fits in usize");
+    Amount(crate::constants::BLOCK_REWARD_TABLE[idx])
 }
 
 #[cfg(test)]
@@ -184,30 +182,37 @@ mod tests {
     use crate::constants::*;
 
     #[test]
-    fn genesis_reward_is_24_dom() {
+    fn genesis_reward_is_33_dom() {
         let r = block_reward(BlockHeight::GENESIS);
-        assert_eq!(r.noms(), INITIAL_BLOCK_REWARD);  // 24 DOM
-        assert_eq!(r.noms(), 24 * COIN_UNIT);
+        assert_eq!(r.noms(), INITIAL_BLOCK_REWARD);
+        assert_eq!(r.noms(), 33 * COIN_UNIT);
     }
 
     #[test]
-    fn first_halving_halves_reward() {
+    fn first_halving_applies_67_percent() {
         let h = BlockHeight(HALVING_INTERVAL);
         let r = block_reward(h);
-        assert_eq!(r.noms(), INITIAL_BLOCK_REWARD / 2);
+        assert_eq!(r.noms(), (INITIAL_BLOCK_REWARD * 67) / 100);
     }
 
     #[test]
     fn second_halving() {
         let h = BlockHeight(HALVING_INTERVAL.checked_mul(2).unwrap());
         let r = block_reward(h);
-        assert_eq!(r.noms(), INITIAL_BLOCK_REWARD / 4);
+        let expected = ((INITIAL_BLOCK_REWARD * 67) / 100 * 67) / 100;
+        assert_eq!(r.noms(), expected);
     }
 
     #[test]
     fn reward_eventually_zero() {
-        let h = BlockHeight(HALVING_INTERVAL.checked_mul(64).unwrap());
+        let h = BlockHeight(HALVING_INTERVAL.checked_mul(HALVING_EPOCHS as u64).unwrap());
         assert_eq!(block_reward(h), Amount::ZERO);
+    }
+
+    #[test]
+    fn reward_zero_at_epoch_54() {
+        let h = BlockHeight(HALVING_INTERVAL.checked_mul(54).unwrap());
+        assert_eq!(block_reward(h).noms(), 0);
     }
 
     #[test]
