@@ -4,35 +4,37 @@
 
 use dom_core::DomError;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
-use k256::{
-    ProjectivePoint, AffinePoint, Scalar,
-    elliptic_curve::{
-        PrimeField,
-    },
-    EncodedPoint,
-};
+use k256::{elliptic_curve::PrimeField, AffinePoint, EncodedPoint, ProjectivePoint, Scalar};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 fn affine_from_encoded(encoded: &EncodedPoint) -> Option<AffinePoint> {
     let ct = AffinePoint::from_encoded_point(encoded);
-    if ct.is_some().into() { Some(ct.unwrap()) } else { None }
+    if ct.is_some().into() {
+        Some(ct.unwrap())
+    } else {
+        None
+    }
 }
 
 fn scalar_from_bytes(bytes: &[u8]) -> Option<Scalar> {
     let arr: &[u8; 32] = bytes.try_into().ok()?;
     let fb = k256::FieldBytes::from(*arr);
     let ct = Scalar::from_repr(fb);
-    if ct.is_some().into() { Some(ct.unwrap()) } else { None }
+    if ct.is_some().into() {
+        Some(ct.unwrap())
+    } else {
+        None
+    }
 }
 
 fn h_point() -> ProjectivePoint {
     let h_bytes = crate::h_generator::h_compressed()
         .expect("H generator not finalized — run: cargo test -p dom-crypto print_h_generator");
-    let encoded = EncodedPoint::from_bytes(&h_bytes)
-        .expect("h_compressed() guarantees valid encoding");
-    let affine = affine_from_encoded(&encoded)
-        .expect("h_compressed() guarantees valid curve point");
+    let encoded =
+        EncodedPoint::from_bytes(h_bytes).expect("h_compressed() guarantees valid encoding");
+    let affine =
+        affine_from_encoded(&encoded).expect("h_compressed() guarantees valid curve point");
     ProjectivePoint::from(affine)
 }
 
@@ -43,18 +45,14 @@ impl Commitment {
     pub fn commit(value: u64, blinding: &BlindingFactor) -> Self {
         let h = h_point();
         let g = ProjectivePoint::GENERATOR;
-
         let v_scalar = Scalar::from(value);
         let vh = h * v_scalar;
-
-        let r_scalar = scalar_from_bytes(blinding.as_bytes())
-            .expect("blinding factor already validated");
+        let r_scalar =
+            scalar_from_bytes(blinding.as_bytes()).expect("blinding factor already validated");
         let rg = g * r_scalar;
-
         let c = vh + rg;
         let affine: AffinePoint = c.into();
         let encoded = EncodedPoint::from(affine).compress();
-
         let mut bytes = [0u8; 33];
         bytes.copy_from_slice(encoded.as_bytes());
         Self(bytes)
@@ -63,20 +61,25 @@ impl Commitment {
     pub fn from_compressed_bytes(bytes: &[u8]) -> Result<Self, DomError> {
         if bytes.len() != 33 {
             return Err(DomError::Malformed(format!(
-                "commitment must be 33 bytes, got {}", bytes.len()
+                "commitment must be 33 bytes, got {}",
+                bytes.len()
             )));
         }
         let encoded = EncodedPoint::from_bytes(bytes)
             .map_err(|_| DomError::Invalid("commitment: invalid SEC1 encoding".into()))?;
         if affine_from_encoded(&encoded).is_none() {
-            return Err(DomError::Invalid("commitment: point not on secp256k1 curve".into()));
+            return Err(DomError::Invalid(
+                "commitment: point not on secp256k1 curve".into(),
+            ));
         }
         let mut arr = [0u8; 33];
         arr.copy_from_slice(bytes);
         Ok(Self(arr))
     }
 
-    pub fn as_bytes(&self) -> &[u8; 33] { &self.0 }
+    pub fn as_bytes(&self) -> &[u8; 33] {
+        &self.0
+    }
 
     pub fn add(&self, other: &Self) -> Result<Self, DomError> {
         let a = self.to_projective()?;
@@ -104,7 +107,7 @@ impl Commitment {
     }
 
     fn to_projective(&self) -> Result<ProjectivePoint, DomError> {
-        let encoded = EncodedPoint::from_bytes(&self.0)
+        let encoded = EncodedPoint::from_bytes(self.0)
             .map_err(|_| DomError::Invalid("invalid commitment encoding".into()))?;
         let affine = affine_from_encoded(&encoded)
             .ok_or_else(|| DomError::Invalid("commitment point not on curve".into()))?;
@@ -128,15 +131,16 @@ impl BlindingFactorOrZero {
     pub fn require_nonzero(self) -> Result<BlindingFactor, DomError> {
         match self {
             Self::NonZero(bf) => Ok(bf),
-            Self::Zero => Err(DomError::Invalid("expected non-zero blinding factor".into())),
+            Self::Zero => Err(DomError::Invalid(
+                "expected non-zero blinding factor".into(),
+            )),
         }
     }
 
     pub fn to_excess_point(&self) -> ProjectivePoint {
         match self {
             Self::NonZero(bf) => {
-                let s = scalar_from_bytes(&bf.0)
-                    .expect("NonZero BlindingFactor is always valid");
+                let s = scalar_from_bytes(&bf.0).expect("NonZero BlindingFactor is always valid");
                 ProjectivePoint::GENERATOR * s
             }
             Self::Zero => ProjectivePoint::IDENTITY,
@@ -152,13 +156,15 @@ impl BlindingFactor {
         let s = scalar_from_bytes(&bytes);
         match s {
             None => Err(DomError::Invalid("blinding factor out of range".into())),
-            Some(s) if s.is_zero().into() => Err(DomError::Invalid("blinding factor is zero".into())),
+            Some(s) if s.is_zero().into() => {
+                Err(DomError::Invalid("blinding factor is zero".into()))
+            }
             _ => Ok(Self(bytes)),
         }
     }
 
     pub fn random() -> Self {
-        use rand::RngCore;  // já importado via workspace
+        use rand::RngCore; // já importado via workspace
         let mut bytes = [0u8; 32];
         loop {
             rand::thread_rng().fill_bytes(&mut bytes);
@@ -168,7 +174,9 @@ impl BlindingFactor {
         }
     }
 
-    pub fn as_bytes(&self) -> &[u8; 32] { &self.0 }
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 
     pub fn add(&self, other: &Self) -> Result<Self, DomError> {
         let a = scalar_from_bytes(&self.0)
@@ -201,7 +209,7 @@ impl BlindingFactor {
         match self.sub(other)? {
             BlindingFactorOrZero::NonZero(bf) => Ok(bf),
             BlindingFactorOrZero::Zero => Err(DomError::Invalid(
-                "blinding factor difference is zero".into()
+                "blinding factor difference is zero".into(),
             )),
         }
     }
@@ -251,7 +259,9 @@ fn sum_projective(commits: &[Commitment]) -> Result<ProjectivePoint, DomError> {
 mod tests {
     use super::*;
 
-    fn rand_bf() -> BlindingFactor { BlindingFactor::random() }
+    fn rand_bf() -> BlindingFactor {
+        BlindingFactor::random()
+    }
 
     #[test]
     fn commitment_deterministic() {
@@ -334,43 +344,45 @@ mod tests {
             sum_out.sub(&r_in).unwrap().require_nonzero().unwrap()
         };
         let input = Commitment::commit(50, &r_in);
-        let out1  = Commitment::commit(30, &r_out1);
-        let out2  = Commitment::commit(19, &r_out2);
+        let out1 = Commitment::commit(30, &r_out1);
+        let out2 = Commitment::commit(19, &r_out2);
         let kernel_excess = Commitment::commit(0, &r_excess);
-        let valid = verify_balance_equation(
-            &[out1, out2], &[input], &[kernel_excess], &[0u8; 32], 1,
-        ).unwrap();
+        let valid =
+            verify_balance_equation(&[out1, out2], &[input], &[kernel_excess], &[0u8; 32], 1)
+                .unwrap();
         assert!(valid);
     }
 
     #[test]
     fn balance_equation_no_fee() {
-        let r_in  = rand_bf();
+        let r_in = rand_bf();
         let r_out = rand_bf();
         let r_excess = r_out.sub(&r_in).unwrap().require_nonzero().unwrap();
-        let input  = Commitment::commit(10, &r_in);
+        let input = Commitment::commit(10, &r_in);
         let output = Commitment::commit(10, &r_out);
         let excess = Commitment::commit(0, &r_excess);
-        let valid = verify_balance_equation(
-            &[output], &[input], &[excess], &[0u8; 32], 0,
-        ).unwrap();
+        let valid = verify_balance_equation(&[output], &[input], &[excess], &[0u8; 32], 0).unwrap();
         assert!(valid);
     }
 
     #[test]
     fn balance_equation_with_offset() {
-        let r_in     = rand_bf();
-        let r_out    = rand_bf();
+        let r_in = rand_bf();
+        let r_out = rand_bf();
         let offset_r = BlindingFactor::from_bytes([3u8; 32]).unwrap();
-        let r_excess = r_out.sub(&r_in).unwrap().require_nonzero().unwrap()
-            .sub_nonzero(&offset_r).unwrap();
-        let input  = Commitment::commit(10, &r_in);
+        let r_excess = r_out
+            .sub(&r_in)
+            .unwrap()
+            .require_nonzero()
+            .unwrap()
+            .sub_nonzero(&offset_r)
+            .unwrap();
+        let input = Commitment::commit(10, &r_in);
         let output = Commitment::commit(10, &r_out);
         let excess = Commitment::commit(0, &r_excess);
         let offset_bytes = *offset_r.as_bytes();
-        let valid = verify_balance_equation(
-            &[output], &[input], &[excess], &offset_bytes, 0,
-        ).unwrap();
+        let valid =
+            verify_balance_equation(&[output], &[input], &[excess], &offset_bytes, 0).unwrap();
         assert!(valid);
     }
 
@@ -384,9 +396,9 @@ mod tests {
         let kernel_excess = Commitment::commit(0, &r_excess);
         let wrong_r = rand_bf();
         let wrong_output = Commitment::commit(11, &wrong_r);
-        let valid = verify_balance_equation(
-            &[wrong_output], &[input], &[kernel_excess], &[0u8; 32], 0,
-        ).unwrap();
+        let valid =
+            verify_balance_equation(&[wrong_output], &[input], &[kernel_excess], &[0u8; 32], 0)
+                .unwrap();
         assert!(!valid);
     }
 }
