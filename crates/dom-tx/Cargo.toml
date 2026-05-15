@@ -9,4 +9,6 @@ license.workspace    = true
 
 [dependencies]
 dom-core.workspace = true
+dom-consensus.workspace = true
+dom-crypto.workspace = true
 thiserror.workspace = true
