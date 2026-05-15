@@ -1,6 +1,6 @@
 [package]
 name        = "dom-wallet"
-description = "DOM protocol — dom-wallet"
+description = "DOM Protocol — Mimblewimble wallet with persistent encrypted storage"
 version.workspace    = true
 edition.workspace    = true
 rust-version.workspace = true
@@ -8,5 +8,29 @@ authors.workspace    = true
 license.workspace    = true
 
 [dependencies]
-dom-core.workspace = true
+dom-core.workspace          = true
+dom-crypto.workspace        = true
+dom-consensus.workspace     = true
+dom-tx.workspace            = true
+dom-serialization.workspace = true
+
+# Security & Cryptography
+zeroize.workspace          = true
+sha2.workspace             = true
+hkdf.workspace             = true
+chacha20poly1305.workspace = true
+
+# Storage & Serialization
+serde.workspace      = true
+serde_json.workspace = true
+
+# Error handling & logging
 thiserror.workspace = true
+tracing.workspace   = true
+
+# Random & encoding
+rand.workspace = true
+hex.workspace  = true
+
+[dev-dependencies]
+tempfile = "3.10"
