@@ -12,7 +12,7 @@
 //!
 //! 1.  canonical decode
 //! 2.  primitive validation (limits, kernel features, coinbase maturity)
-//! 2b. lock_height check
+//!     2b. lock_height check
 //! 3.  scalar validation
 //! 4.  point validation
 //! 5.  duplicate detection
@@ -32,9 +32,9 @@
 //! 6.  PoW validation  ← REQUIRES randomx-rs [RELEASE BLOCKER]
 //! 7.  total difficulty
 //! 8.  transaction validation (each tx, steps above)
-//! 9a. duplicate detection before cut-through
-//! 9b. deterministic cut-through
-//! 9c. duplicate detection after cut-through
+//!     9a. duplicate detection before cut-through
+//!     9b. deterministic cut-through
+//!     9c. duplicate detection after cut-through
 //! 10. PMMR update
 //! 11. PMMR root verification
 //! 12. aggregate block balance equation
@@ -45,17 +45,18 @@
 #![deny(missing_docs)]
 
 pub mod block;
-pub mod transaction;
+pub mod block_full;
 pub mod cutthrough;
+pub mod transaction;
 
 pub use block::BlockHeader;
-pub use transaction::{
-    Transaction, TransactionKernel, TransactionInput, TransactionOutput,
-    CoinbaseKernel, CoinbaseTransaction,
-    validate_transaction_structure, validate_lock_heights,
-    validate_range_proofs, validate_balance_equation,
-};
+pub use block_full::{validate_block, Block};
 pub use cutthrough::apply_cut_through;
+pub use transaction::{
+    validate_balance_equation, validate_lock_heights, validate_range_proofs,
+    validate_transaction_structure, CoinbaseKernel, CoinbaseTransaction, Transaction,
+    TransactionInput, TransactionKernel, TransactionOutput,
+};
 
 use dom_core::{BlockHeight, DomError, Timestamp, MAX_BLOCK_WEIGHT};
 
@@ -77,10 +78,7 @@ pub struct ValidationContext {
 /// Steps 6 (Bulletproofs+) and 7 (Schnorr) return errors until
 /// secp256k1-zkp is integrated. These are RELEASE BLOCKERS that prevent
 /// testnet launch, not optional checks.
-pub fn validate_transaction(
-    tx: &Transaction,
-    ctx: &ValidationContext,
-) -> Result<(), DomError> {
+pub fn validate_transaction(tx: &Transaction, ctx: &ValidationContext) -> Result<(), DomError> {
     // Step 1: canonical decode — done by caller (DomDeserialize::from_bytes)
 
     // Step 2: primitive validation + coinbase restriction + lock_height
@@ -95,12 +93,11 @@ pub fn validate_transaction(
     // Step 5: duplicate detection — inside validate_transaction_structure
 
     // Step 6: Bulletproofs+ range proof validation [RELEASE BLOCKER]
-    validate_range_proofs(tx)
-        .map_err(|e| match e {
-            // Propagate Internal errors (release blocker) distinctly
-            DomError::Internal(_) => e,
-            other => DomError::Invalid(format!("range proof: {other}")),
-        })?;
+    validate_range_proofs(tx).map_err(|e| match e {
+        // Propagate Internal errors (release blocker) distinctly
+        DomError::Internal(_) => e,
+        other => DomError::Invalid(format!("range proof: {other}")),
+    })?;
 
     // Step 7: Kernel signature validation [RELEASE BLOCKER]
     validate_kernel_signatures(tx, &ctx.chain_id)?;
@@ -112,7 +109,8 @@ pub fn validate_transaction(
     let w = tx.weight();
     if w > dom_core::MAX_TX_WEIGHT {
         return Err(DomError::Invalid(format!(
-            "tx weight {w} > MAX_TX_WEIGHT {}", dom_core::MAX_TX_WEIGHT
+            "tx weight {w} > MAX_TX_WEIGHT {}",
+            dom_core::MAX_TX_WEIGHT
         )));
     }
 
@@ -129,12 +127,9 @@ pub fn validate_transaction(
 ///
 /// RELEASE BLOCKER: requires secp256k1-zkp for production Schnorr verify.
 /// Currently returns Internal error until integrated.
-pub fn validate_kernel_signatures(
-    tx: &Transaction,
-    chain_id: &[u8; 32],
-) -> Result<(), DomError> {
-    use dom_crypto::hash::blake2b_256_tagged;
+pub fn validate_kernel_signatures(tx: &Transaction, chain_id: &[u8; 32]) -> Result<(), DomError> {
     use dom_core::TAG_KERNEL_MSG;
+    use dom_crypto::hash::blake2b_256_tagged;
 
     for (i, kernel) in tx.kernels.iter().enumerate() {
         // Build the kernel message that was signed.
@@ -169,7 +164,7 @@ pub fn validate_kernel_signatures(
             }
             Err(DomError::Internal(msg)) => {
                 // secp256k1-zkp not yet integrated — propagate as release blocker
-                return Err(DomError::Internal(format!("kernel sig [RELEASE BLOCKER]: {msg}")));
+                return Err(DomError::Internal(format!("kernel sig: {msg}")));
             }
             Err(e) => return Err(e),
         }
@@ -199,12 +194,15 @@ pub fn validate_block_transactions(
     for (i, tx) in transactions.iter().enumerate() {
         validate_transaction(tx, ctx)?;
 
-        let tx_fees = tx.total_fee()
+        let tx_fees = tx
+            .total_fee()
             .map_err(|e| DomError::Invalid(format!("tx {i} fee error: {e}")))?;
-        actual_total_fees = actual_total_fees.checked_add(tx_fees)
+        actual_total_fees = actual_total_fees
+            .checked_add(tx_fees)
             .ok_or_else(|| DomError::Invalid("block total fees overflow".into()))?;
 
-        total_block_weight = total_block_weight.checked_add(tx.weight())
+        total_block_weight = total_block_weight
+            .checked_add(tx.weight())
             .ok_or_else(|| DomError::Invalid("block weight overflow".into()))?;
     }
 
@@ -229,12 +227,9 @@ pub fn validate_block_transactions(
 }
 
 /// Derive chain_id from network magic and genesis hash (RFC-0009 §4.1).
-pub fn derive_chain_id(
-    network_magic: u32,
-    genesis_hash: &dom_core::Hash256,
-) -> dom_core::Hash256 {
-    use dom_crypto::hash::blake2b_256_tagged;
+pub fn derive_chain_id(network_magic: u32, genesis_hash: &dom_core::Hash256) -> dom_core::Hash256 {
     use dom_core::TAG_CHAIN_ID;
+    use dom_crypto::hash::blake2b_256_tagged;
     let mut data = Vec::with_capacity(4 + 32);
     data.extend_from_slice(&network_magic.to_be_bytes());
     data.extend_from_slice(genesis_hash.as_bytes());
@@ -244,14 +239,16 @@ pub fn derive_chain_id(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dom_core::{Amount, BlockHeight, Timestamp, KERNEL_FEAT_PLAIN, INITIAL_BLOCK_REWARD};
+    use crate::transaction::{TransactionKernel, TransactionOutput};
+    use dom_core::{Amount, BlockHeight, Timestamp, INITIAL_BLOCK_REWARD, KERNEL_FEAT_PLAIN};
     use dom_crypto::pedersen::Commitment;
-    use crate::transaction::{TransactionOutput, TransactionKernel};
 
     fn g_point() -> Commitment {
-        let g = [0x02u8,0x79,0xBE,0x66,0x7E,0xF9,0xDC,0xBB,0xAC,0x55,0xA0,
-                 0x62,0x95,0xCE,0x87,0x0B,0x07,0x02,0x9B,0xFC,0xDB,0x2D,0xCE,
-                 0x28,0xD9,0x59,0xF2,0x81,0x5B,0x16,0xF8,0x17,0x98];
+        let g = [
+            0x02u8, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE,
+            0x87, 0x0B, 0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9, 0x59, 0xF2, 0x81,
+            0x5B, 0x16, 0xF8, 0x17, 0x98,
+        ];
         Commitment::from_compressed_bytes(&g).unwrap()
     }
 
@@ -289,14 +286,16 @@ mod tests {
         // With release blockers (Bulletproofs not integrated), we expect
         // Internal error from step 6 or step 7 — NOT a silent Ok(())
         match result {
-            Ok(()) => panic!(
-                "validate_transaction must not return Ok() with release blockers present"
-            ),
+            Ok(()) => {
+                panic!("validate_transaction must not return Ok() with release blockers present")
+            }
             Err(DomError::Internal(msg)) => {
                 // Expected: release blocker error propagated correctly
                 assert!(
-                    msg.contains("RELEASE BLOCKER") || msg.contains("secp256k1-zkp")
-                        || msg.contains("Bulletproofs") || msg.contains("RandomX"),
+                    msg.contains("RELEASE BLOCKER")
+                        || msg.contains("secp256k1-zkp")
+                        || msg.contains("Bulletproofs")
+                        || msg.contains("RandomX"),
                     "Internal error must mention release blocker, got: {msg}"
                 );
             }

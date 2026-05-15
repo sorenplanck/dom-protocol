@@ -1,18 +1,18 @@
 //! Full node orchestration.
 
+use crate::miner::mining_loop;
+use dom_chain::ChainState;
 use dom_config::NodeConfig;
 use dom_core::DomError;
-use dom_store::DomStore;
-use dom_chain::ChainState;
-use dom_mempool::Mempool;
-use dom_wire::manager::PeerManager;
-use dom_wire::dandelion::DandelionRouter;
 use dom_core::Hash256;
+use dom_mempool::Mempool;
+use dom_store::DomStore;
+use dom_wire::dandelion::DandelionRouter;
+use dom_wire::manager::PeerManager;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
-use crate::miner::mining_loop;
 
 /// The full DOM node.
 pub struct DomNode {
@@ -102,7 +102,8 @@ impl DomNode {
 
     /// Listen for incoming P2P connections.
     async fn run_p2p_listener(&self, addr: &str) -> Result<(), DomError> {
-        let listener = tokio::net::TcpListener::bind(addr).await
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
             .map_err(|e| DomError::Internal(format!("bind {addr}: {e}")))?;
         info!("P2P listening on {addr}");
 
@@ -143,11 +144,9 @@ impl DomNode {
             if needs_more {
                 let is_mainnet = self.config.network == dom_config::Network::Mainnet;
                 let port = self.config.network.default_port();
-                let mut addrs = dom_wire::dns_seed::resolve_seeds(
-                    is_mainnet,
-                    port,
-                    &self.config.dns_seeds,
-                ).await;
+                let mut addrs =
+                    dom_wire::dns_seed::resolve_seeds(is_mainnet, port, &self.config.dns_seeds)
+                        .await;
 
                 // Also try configured seed peers
                 addrs.extend(self.config.seed_peers.iter().cloned());
@@ -157,7 +156,9 @@ impl DomNode {
                         let mgr = self.peers.lock().await;
                         mgr.peers.contains_key(&addr)
                     };
-                    if already_connected { continue; }
+                    if already_connected {
+                        continue;
+                    }
 
                     let config = self.config.clone();
                     let privkey = self.noise_privkey;
@@ -186,7 +187,9 @@ async fn handle_inbound(
         &privkey,
         config.network.magic(),
         &chain_id,
-    ).await {
+    )
+    .await
+    {
         Ok(_transport) => {
             info!("Noise handshake complete with {addr}");
             // TODO: Hello exchange, then message loop
@@ -206,7 +209,9 @@ async fn connect_outbound(addr: &str, config: NodeConfig, privkey: [u8; 32]) {
                 &privkey,
                 config.network.magic(),
                 &chain_id,
-            ).await {
+            )
+            .await
+            {
                 Ok(_transport) => {
                     info!("Connected to {addr}");
                     // TODO: Hello exchange, message loop, IBD
