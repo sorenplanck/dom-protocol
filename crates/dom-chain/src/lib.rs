@@ -19,4 +19,4 @@ pub mod ibd;
 pub mod reorg;
 
 pub use chain_state::ChainState;
-pub use ibd::{IbdState, IbdPhase};
+pub use ibd::{IbdPhase, IbdState};

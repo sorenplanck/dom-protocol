@@ -7,21 +7,27 @@ use serde::{Deserialize, Serialize};
 
 /// Network selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Network { 
+pub enum Network {
     /// Mainnet.
-    Mainnet, 
+    Mainnet,
     /// Testnet.
-    Testnet 
+    Testnet,
 }
 
 impl Network {
     /// Default P2P port.
     pub fn default_port(&self) -> u16 {
-        match self { Network::Mainnet => P2P_PORT_MAINNET, Network::Testnet => P2P_PORT_TESTNET }
+        match self {
+            Network::Mainnet => P2P_PORT_MAINNET,
+            Network::Testnet => P2P_PORT_TESTNET,
+        }
     }
     /// Network magic bytes.
     pub fn magic(&self) -> u32 {
-        match self { Network::Mainnet => dom_core::NETWORK_MAGIC_MAINNET, Network::Testnet => dom_core::NETWORK_MAGIC_TESTNET }
+        match self {
+            Network::Mainnet => dom_core::NETWORK_MAGIC_MAINNET,
+            Network::Testnet => dom_core::NETWORK_MAGIC_TESTNET,
+        }
     }
 }
 
@@ -57,9 +63,15 @@ impl NodeConfig {
             network: Network::Mainnet,
             data_dir: "./dom-data".into(),
             p2p_listen_addr: format!("0.0.0.0:{P2P_PORT_MAINNET}"),
-            max_inbound: 125, min_outbound: 8,
-            dns_seeds: vec!["seed1.dom-protocol.org".into(), "seed2.dom-protocol.org".into()],
-            seed_peers: vec![], mine: false, miner_address: None,
+            max_inbound: 125,
+            min_outbound: 8,
+            dns_seeds: vec![
+                "seed1.dom-protocol.org".into(),
+                "seed2.dom-protocol.org".into(),
+            ],
+            seed_peers: vec![],
+            mine: false,
+            miner_address: None,
             log_level: "info".into(),
         }
     }
@@ -69,9 +81,12 @@ impl NodeConfig {
             network: Network::Testnet,
             data_dir: "./dom-testnet-data".into(),
             p2p_listen_addr: format!("0.0.0.0:{P2P_PORT_TESTNET}"),
-            max_inbound: 50, min_outbound: 4,
+            max_inbound: 50,
+            min_outbound: 4,
             dns_seeds: vec!["testnet-seed1.dom-protocol.org".into()],
-            seed_peers: vec![], mine: true, miner_address: None,
+            seed_peers: vec![],
+            mine: true,
+            miner_address: None,
             log_level: "debug".into(),
         }
     }

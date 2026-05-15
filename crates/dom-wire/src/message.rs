@@ -36,13 +36,21 @@ impl Command {
     /// Parse from byte.
     pub fn from_byte(b: u8) -> Result<Self, DomError> {
         match b {
-            0x01 => Ok(Self::Hello),    0x02 => Ok(Self::Ping),
-            0x03 => Ok(Self::Pong),     0x04 => Ok(Self::Inv),
-            0x05 => Ok(Self::GetHeaders), 0x06 => Ok(Self::Headers),
-            0x07 => Ok(Self::GetBlock), 0x08 => Ok(Self::Block),
-            0x09 => Ok(Self::Tx),       0x0A => Ok(Self::GetAddr),
-            0x0B => Ok(Self::Addr),     0x0C => Ok(Self::GetBlockData),
-            other => Err(DomError::Malformed(format!("unknown command 0x{other:02x}"))),
+            0x01 => Ok(Self::Hello),
+            0x02 => Ok(Self::Ping),
+            0x03 => Ok(Self::Pong),
+            0x04 => Ok(Self::Inv),
+            0x05 => Ok(Self::GetHeaders),
+            0x06 => Ok(Self::Headers),
+            0x07 => Ok(Self::GetBlock),
+            0x08 => Ok(Self::Block),
+            0x09 => Ok(Self::Tx),
+            0x0A => Ok(Self::GetAddr),
+            0x0B => Ok(Self::Addr),
+            0x0C => Ok(Self::GetBlockData),
+            other => Err(DomError::Malformed(format!(
+                "unknown command 0x{other:02x}"
+            ))),
         }
     }
 }
@@ -108,14 +116,18 @@ impl WireMessage {
         if checksum != expected_checksum {
             return Err(DomError::Malformed("checksum mismatch".into()));
         }
-        Ok(Self { magic, command, payload })
+        Ok(Self {
+            magic,
+            command,
+            payload,
+        })
     }
 }
 
 /// Simple 4-byte checksum: first 4 bytes of Blake2b-256(payload).
 fn compute_checksum(data: &[u8]) -> u32 {
-    use blake2::{Blake2b, Digest};
     use blake2::digest::consts::U32;
+    use blake2::{Blake2b, Digest};
     type B2b256 = Blake2b<U32>;
     let mut h = B2b256::new();
     h.update(data);
@@ -176,7 +188,14 @@ impl HelloPayload {
             return Err(DomError::Malformed("hello truncated".into()));
         }
         let user_agent = String::from_utf8_lossy(&data[82..82 + ua_len]).into_owned();
-        Ok(Self { version, network_magic, chain_id, best_height, best_hash, user_agent })
+        Ok(Self {
+            version,
+            network_magic,
+            chain_id,
+            best_height,
+            best_hash,
+            user_agent,
+        })
     }
 }
 

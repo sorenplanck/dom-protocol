@@ -101,7 +101,11 @@ mod tests {
     #[test]
     fn hash_vectors_are_nonzero() {
         for (desc, hex) in generate_hash_vectors() {
-            assert_eq!(hex.len(), 64, "Hash must be 32 bytes (64 hex chars): {desc}");
+            assert_eq!(
+                hex.len(),
+                64,
+                "Hash must be 32 bytes (64 hex chars): {desc}"
+            );
             assert_ne!(
                 hex, "0000000000000000000000000000000000000000000000000000000000000000",
                 "Hash must not be zero: {desc}"

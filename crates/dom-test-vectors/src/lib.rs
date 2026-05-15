@@ -19,7 +19,7 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod constants_vectors;
 pub mod hash_vectors;
 pub mod pmmr_vectors;
 pub mod serialization_vectors;
-pub mod constants_vectors;

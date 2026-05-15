@@ -9,19 +9,25 @@ pub fn verify_all_roundtrips() -> Result<(), String> {
     let h = Hash256::from_bytes([0xABu8; 32]);
     let bytes = h.to_bytes().map_err(|e| e.to_string())?;
     let h2 = Hash256::from_bytes(bytes.try_into().map_err(|_| "invalid length".to_string())?);
-    if h != h2 { return Err("Hash256 roundtrip failed".into()); }
+    if h != h2 {
+        return Err("Hash256 roundtrip failed".into());
+    }
 
     // BlockHeight
     let bh = BlockHeight(12_345_678);
     let bytes = bh.to_bytes().map_err(|e| e.to_string())?;
     let bh2 = BlockHeight::from_bytes(&bytes).map_err(|e| e.to_string())?;
-    if bh != bh2 { return Err("BlockHeight roundtrip failed".into()); }
+    if bh != bh2 {
+        return Err("BlockHeight roundtrip failed".into());
+    }
 
     // Amount
     let a = Amount::from_noms(369 * COIN_UNIT).map_err(|e| e.to_string())?;
     let bytes = a.to_bytes().map_err(|e| e.to_string())?;
     let a2 = Amount::from_bytes(&bytes).map_err(|e| e.to_string())?;
-    if a != a2 { return Err("Amount roundtrip failed".into()); }
+    if a != a2 {
+        return Err("Amount roundtrip failed".into());
+    }
 
     Ok(())
 }
@@ -29,8 +35,8 @@ pub fn verify_all_roundtrips() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dom_serialization::{Reader, Writer};
     use dom_core::COIN_UNIT;
+    use dom_serialization::{Reader, Writer};
 
     #[test]
     fn all_primitives_roundtrip() {
@@ -41,7 +47,7 @@ mod tests {
         let reward = Amount::from_noms(369 * COIN_UNIT).unwrap();
         let bytes = reward.to_bytes().unwrap();
         assert_eq!(bytes.len(), 8); // u64 LE
-        // 369 * 100_000_000 = 36_900_000_000 = 0x8984_7680
+                                    // 369 * 100_000_000 = 36_900_000_000 = 0x8984_7680
         let expected: u64 = 369 * COIN_UNIT;
         assert_eq!(bytes, expected.to_le_bytes());
 

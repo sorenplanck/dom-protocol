@@ -31,12 +31,18 @@ impl UtxoEntry {
         let block_height = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
         let is_coinbase = bytes[8] != 0;
         let proof = bytes[9..].to_vec();
-        Ok(Self { block_height, is_coinbase, proof })
+        Ok(Self {
+            block_height,
+            is_coinbase,
+            proof,
+        })
     }
 
     /// Check if this UTXO is mature enough to spend at `current_height`.
     pub fn is_mature(&self, current_height: u64) -> bool {
-        if !self.is_coinbase { return true; }
+        if !self.is_coinbase {
+            return true;
+        }
         current_height.saturating_sub(self.block_height) >= COINBASE_MATURITY
     }
 }
@@ -47,10 +53,7 @@ pub struct UtxoSet;
 impl UtxoSet {
     /// Validate that an input commitment exists and is mature.
     /// Returns the UtxoEntry if valid.
-    pub fn validate_input(
-        entry: &UtxoEntry,
-        current_height: BlockHeight,
-    ) -> Result<(), DomError> {
+    pub fn validate_input(entry: &UtxoEntry, current_height: BlockHeight) -> Result<(), DomError> {
         if !entry.is_mature(current_height.0) {
             return Err(DomError::TemporarilyInvalid(format!(
                 "coinbase output not mature until height {}",

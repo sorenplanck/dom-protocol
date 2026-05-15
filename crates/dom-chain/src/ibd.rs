@@ -5,9 +5,9 @@
 //!
 //! This prevents wasting CPU validating transactions on a low-work chain.
 
-use dom_core::{DomError, Timestamp};
 use dom_consensus::block::BlockHeader;
-use tracing::{info, debug};
+use dom_core::{DomError, Timestamp};
+use tracing::{debug, info};
 
 /// Maximum headers per GET_HEADERS request.
 pub const MAX_HEADERS_PER_REQUEST: usize = 2000;
@@ -66,8 +66,10 @@ impl IbdState {
             // No more headers — we're caught up to this peer
             if self.headers_height >= self.best_peer_height {
                 self.phase = IbdPhase::Blocks;
-                info!("Headers phase complete at height {}. Starting block download.",
-                    self.headers_height);
+                info!(
+                    "Headers phase complete at height {}. Starting block download.",
+                    self.headers_height
+                );
                 return Ok(IbdAction::StartBlockDownload);
             }
             return Ok(IbdAction::RequestMoreHeaders(self.headers_height));
@@ -81,7 +83,8 @@ impl IbdState {
             if header.height.0 != last_height + 1 {
                 return Err(DomError::Invalid(format!(
                     "header gap: expected height {}, got {}",
-                    last_height + 1, header.height.0
+                    last_height + 1,
+                    header.height.0
                 )));
             }
 
@@ -101,12 +104,18 @@ impl IbdState {
         self.headers_height = last_height;
         self.pending_blocks.extend(new_hashes);
 
-        debug!("IBD headers: validated up to height {}", self.headers_height);
+        debug!(
+            "IBD headers: validated up to height {}",
+            self.headers_height
+        );
 
         if self.headers_height >= self.best_peer_height {
             self.phase = IbdPhase::Blocks;
-            info!("Headers caught up at height {}. Downloading {} blocks.",
-                self.headers_height, self.pending_blocks.len());
+            info!(
+                "Headers caught up at height {}. Downloading {} blocks.",
+                self.headers_height,
+                self.pending_blocks.len()
+            );
             Ok(IbdAction::StartBlockDownload)
         } else {
             Ok(IbdAction::RequestMoreHeaders(self.headers_height))
@@ -146,8 +155,8 @@ pub enum IbdAction {
 }
 
 fn compute_hash(data: &[u8]) -> [u8; 32] {
-    use blake2::{Blake2b, Digest};
     use blake2::digest::consts::U32;
+    use blake2::{Blake2b, Digest};
     type B2b256 = Blake2b<U32>;
     let mut h = B2b256::new();
     h.update(data);

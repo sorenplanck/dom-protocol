@@ -39,7 +39,9 @@ impl Writer {
 
     /// Create with pre-allocated capacity.
     pub fn with_capacity(cap: usize) -> Self {
-        Self { buf: Vec::with_capacity(cap) }
+        Self {
+            buf: Vec::with_capacity(cap),
+        }
     }
 
     /// Write a single byte.
@@ -86,10 +88,7 @@ impl Writer {
     }
 
     /// Write a length-prefixed list of serializable items.
-    pub fn write_list<T: DomSerialize>(
-        &mut self,
-        items: &[T],
-    ) -> Result<(), DomError> {
+    pub fn write_list<T: DomSerialize>(&mut self, items: &[T]) -> Result<(), DomError> {
         let len: u32 = items
             .len()
             .try_into()
@@ -224,10 +223,7 @@ impl<'a> Reader<'a> {
     /// Read a length-prefixed list of deserializable items.
     ///
     /// Rejects if count exceeds `max_count`.
-    pub fn read_list<T: DomDeserialize>(
-        &mut self,
-        max_count: usize,
-    ) -> Result<Vec<T>, DomError> {
+    pub fn read_list<T: DomDeserialize>(&mut self, max_count: usize) -> Result<Vec<T>, DomError> {
         let count = self.read_u32()? as usize;
         if count > max_count {
             return Err(DomError::Malformed(format!(
@@ -251,7 +247,7 @@ impl<'a> Reader<'a> {
         if self.pos != self.data.len() {
             return Err(DomError::Malformed(format!(
                 "trailing bytes: {} byte(s) unconsumed",
-                self.data.len() - self.pos
+                self.data.len().saturating_sub(self.pos)
             )));
         }
         Ok(())

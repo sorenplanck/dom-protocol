@@ -29,7 +29,11 @@ impl PeerAddr {
         }
         let last_seen = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
         let failures = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        Ok(Self { addr, last_seen, failures })
+        Ok(Self {
+            addr,
+            last_seen,
+            failures,
+        })
     }
 
     /// Whether this peer should be tried (not too many failures).

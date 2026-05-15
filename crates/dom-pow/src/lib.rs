@@ -1,5 +1,4 @@
 #![allow(missing_docs)]
-#![allow(missing_docs)]
 //! # dom-pow
 //!
 //! ASERT difficulty adjustment — corrected per audit.
@@ -16,16 +15,15 @@
 
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
+#![allow(clippy::arithmetic_side_effects)] // PoW math: U256 ops audited
 #![deny(clippy::float_arithmetic)]
-#![deny(clippy::arithmetic_side_effects)]
 
-use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
 use dom_core::{
-    DomError, Timestamp, BlockHeight,
-    TARGET_SPACING, ASERT_HALF_LIFE, ASERT_RADIX,
-    MIN_TARGET_BYTES, MAX_TARGET_BYTES,
+    BlockHeight, DomError, Timestamp, ASERT_HALF_LIFE, ASERT_RADIX, MAX_TARGET_BYTES,
+    MIN_TARGET_BYTES, TARGET_SPACING,
 };
 use primitive_types::U256;
+use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
 
 // ── RandomX Seed Schedule (RFC-0011) ─────────────────────────────────────────
 
@@ -42,38 +40,27 @@ pub const RANDOMX_SEED_OFFSET: u64 = 64;
 /// [CONSENSUS] 256-entry lookup table: table[i] = floor(2^(i/256) * 65536).
 /// Monotonically non-decreasing. table[0]=65536, table[128]=92681, table[255]=130717.
 pub const ASERT_FRAC_TABLE: [u32; 256] = [
-    65536, 65713, 65891, 66070, 66249, 66429, 66609, 66789,
-    66971, 67152, 67334, 67517, 67700, 67883, 68067, 68252,
-    68437, 68623, 68809, 68995, 69182, 69370, 69558, 69747,
-    69936, 70125, 70315, 70506, 70697, 70889, 71081, 71274,
-    71467, 71661, 71855, 72050, 72245, 72441, 72638, 72834,
-    73032, 73230, 73429, 73628, 73827, 74027, 74228, 74429,
-    74631, 74833, 75036, 75240, 75444, 75648, 75853, 76059,
-    76265, 76472, 76679, 76887, 77096, 77305, 77514, 77725,
-    77935, 78147, 78359, 78571, 78784, 78998, 79212, 79427,
-    79642, 79858, 80074, 80292, 80509, 80727, 80946, 81166,
-    81386, 81607, 81828, 82050, 82272, 82495, 82719, 82943,
-    83168, 83394, 83620, 83846, 84074, 84302, 84530, 84759,
-    84989, 85220, 85451, 85682, 85915, 86148, 86381, 86615,
-    86850, 87086, 87322, 87559, 87796, 88034, 88273, 88512,
-    88752, 88993, 89234, 89476, 89718, 89962, 90206, 90450,
-    90695, 90941, 91188, 91435, 91683, 91932, 92181, 92431,
-    92681, 92933, 93185, 93437, 93691, 93945, 94199, 94455,
-    94711, 94968, 95225, 95483, 95742, 96002, 96262, 96523,
-    96785, 97047, 97310, 97574, 97839, 98104, 98370, 98637,
-    98904, 99172, 99441, 99711, 99981, 100252, 100524, 100797,
-    101070, 101344, 101619, 101894, 102170, 102447, 102725, 103004,
-    103283, 103563, 103844, 104125, 104408, 104691, 104975, 105259,
-    105545, 105831, 106118, 106405, 106694, 106983, 107273, 107564,
-    107856, 108148, 108441, 108735, 109030, 109326, 109622, 109919,
-    110217, 110516, 110816, 111116, 111418, 111720, 112023, 112326,
-    112631, 112936, 113243, 113550, 113857, 114166, 114476, 114786,
-    115097, 115409, 115722, 116036, 116351, 116666, 116982, 117300,
-    117618, 117936, 118256, 118577, 118898, 119221, 119544, 119868,
-    120193, 120519, 120846, 121173, 121502, 121831, 122162, 122493,
-    122825, 123158, 123492, 123827, 124162, 124499, 124837, 125175,
-    125514, 125855, 126196, 126538, 126881, 127225, 127570, 127916,
-    128263, 128611, 128959, 129309, 129660, 130011, 130364, 130717,
+    65536, 65713, 65891, 66070, 66249, 66429, 66609, 66789, 66971, 67152, 67334, 67517, 67700,
+    67883, 68067, 68252, 68437, 68623, 68809, 68995, 69182, 69370, 69558, 69747, 69936, 70125,
+    70315, 70506, 70697, 70889, 71081, 71274, 71467, 71661, 71855, 72050, 72245, 72441, 72638,
+    72834, 73032, 73230, 73429, 73628, 73827, 74027, 74228, 74429, 74631, 74833, 75036, 75240,
+    75444, 75648, 75853, 76059, 76265, 76472, 76679, 76887, 77096, 77305, 77514, 77725, 77935,
+    78147, 78359, 78571, 78784, 78998, 79212, 79427, 79642, 79858, 80074, 80292, 80509, 80727,
+    80946, 81166, 81386, 81607, 81828, 82050, 82272, 82495, 82719, 82943, 83168, 83394, 83620,
+    83846, 84074, 84302, 84530, 84759, 84989, 85220, 85451, 85682, 85915, 86148, 86381, 86615,
+    86850, 87086, 87322, 87559, 87796, 88034, 88273, 88512, 88752, 88993, 89234, 89476, 89718,
+    89962, 90206, 90450, 90695, 90941, 91188, 91435, 91683, 91932, 92181, 92431, 92681, 92933,
+    93185, 93437, 93691, 93945, 94199, 94455, 94711, 94968, 95225, 95483, 95742, 96002, 96262,
+    96523, 96785, 97047, 97310, 97574, 97839, 98104, 98370, 98637, 98904, 99172, 99441, 99711,
+    99981, 100252, 100524, 100797, 101070, 101344, 101619, 101894, 102170, 102447, 102725, 103004,
+    103283, 103563, 103844, 104125, 104408, 104691, 104975, 105259, 105545, 105831, 106118, 106405,
+    106694, 106983, 107273, 107564, 107856, 108148, 108441, 108735, 109030, 109326, 109622, 109919,
+    110217, 110516, 110816, 111116, 111418, 111720, 112023, 112326, 112631, 112936, 113243, 113550,
+    113857, 114166, 114476, 114786, 115097, 115409, 115722, 116036, 116351, 116666, 116982, 117300,
+    117618, 117936, 118256, 118577, 118898, 119221, 119544, 119868, 120193, 120519, 120846, 121173,
+    121502, 121831, 122162, 122493, 122825, 123158, 123492, 123827, 124162, 124499, 124837, 125175,
+    125514, 125855, 126196, 126538, 126881, 127225, 127570, 127916, 128263, 128611, 128959, 129309,
+    129660, 130011, 130364, 130717,
 ];
 
 // ── CompactTarget ─────────────────────────────────────────────────────────────
@@ -88,35 +75,67 @@ impl CompactTarget {
         let bits = self.0;
         let exponent = (bits >> 24) as usize;
         let mantissa = bits & 0x007f_ffff;
-        if mantissa == 0 { return Ok([0u8; 32]); }
+        if mantissa == 0 {
+            return Ok([0u8; 32]);
+        }
         if bits & 0x0080_0000 != 0 {
             return Err(DomError::Invalid("negative compact target".into()));
         }
         if exponent > 32 {
-            return Err(DomError::Invalid(format!("compact exponent {exponent} > 32")));
+            return Err(DomError::Invalid(format!(
+                "compact exponent {exponent} > 32"
+            )));
         }
         let mut target = [0u8; 32];
-        let w = |t: &mut [u8; 32], pos: usize, v: u8| { if pos < 32 { t[31 - pos] = v; } };
-        if exponent >= 1 { w(&mut target, exponent - 1, (mantissa & 0xff) as u8); }
-        if exponent >= 2 { w(&mut target, exponent - 2, ((mantissa >> 8) & 0xff) as u8); }
-        if exponent >= 3 { w(&mut target, exponent - 3, ((mantissa >> 16) & 0xff) as u8); }
+        let w = |t: &mut [u8; 32], pos: usize, v: u8| {
+            if pos < 32 {
+                t[31 - pos] = v;
+            }
+        };
+        if exponent >= 1 {
+            w(&mut target, exponent - 1, (mantissa & 0xff) as u8);
+        }
+        if exponent >= 2 {
+            w(&mut target, exponent - 2, ((mantissa >> 8) & 0xff) as u8);
+        }
+        if exponent >= 3 {
+            w(&mut target, exponent - 3, ((mantissa >> 16) & 0xff) as u8);
+        }
         validate_target_bounds(&target)?;
         Ok(target)
     }
 }
 
 fn validate_target_bounds(t: &[u8; 32]) -> Result<(), DomError> {
-    if target_gt(t, &MAX_TARGET_BYTES) { return Err(DomError::Invalid("target > MAX_TARGET".into())); }
-    if target_lt(t, &MIN_TARGET_BYTES) { return Err(DomError::Invalid("target < MIN_TARGET".into())); }
+    if target_gt(t, &MAX_TARGET_BYTES) {
+        return Err(DomError::Invalid("target > MAX_TARGET".into()));
+    }
+    if target_lt(t, &MIN_TARGET_BYTES) {
+        return Err(DomError::Invalid("target < MIN_TARGET".into()));
+    }
     Ok(())
 }
 
 fn target_gt(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    for i in 0..32 { if a[i] > b[i] { return true; } if a[i] < b[i] { return false; } }
+    for i in 0..32 {
+        if a[i] > b[i] {
+            return true;
+        }
+        if a[i] < b[i] {
+            return false;
+        }
+    }
     false
 }
 fn target_lt(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    for i in 0..32 { if a[i] < b[i] { return true; } if a[i] > b[i] { return false; } }
+    for i in 0..32 {
+        if a[i] < b[i] {
+            return true;
+        }
+        if a[i] > b[i] {
+            return false;
+        }
+    }
     false
 }
 
@@ -145,13 +164,16 @@ pub fn asert_next_target(
         .checked_sub(anchor.timestamp.0 as i64)
         .ok_or_else(|| DomError::Invalid("time_diff overflow".into()))?;
 
-    let height_diff = block_height.0.checked_sub(anchor.height.0)
+    let height_diff = block_height
+        .0
+        .checked_sub(anchor.height.0)
         .ok_or_else(|| DomError::Invalid("height before anchor".into()))?;
     let ideal_time: i64 = (height_diff as i64)
         .checked_mul(TARGET_SPACING as i64)
         .ok_or_else(|| DomError::Invalid("ideal_time overflow".into()))?;
 
-    let exponent_seconds: i64 = time_diff.checked_sub(ideal_time)
+    let exponent_seconds: i64 = time_diff
+        .checked_sub(ideal_time)
         .ok_or_else(|| DomError::Invalid("exponent overflow".into()))?;
 
     // exponent_fp = exponent_seconds * 256 / HALF_LIFE (fixed-point, 256 entries per power-of-2)
@@ -164,10 +186,13 @@ pub fn asert_next_target(
 
     let integer_part = floor_div_i128(exponent_fp, 256)?;
     let frac_index = {
-        let f = exponent_fp.checked_sub(
-            integer_part.checked_mul(256)
-                .ok_or_else(|| DomError::Invalid("frac overflow".into()))?,
-        ).ok_or_else(|| DomError::Invalid("frac underflow".into()))? as usize;
+        let f = exponent_fp
+            .checked_sub(
+                integer_part
+                    .checked_mul(256)
+                    .ok_or_else(|| DomError::Invalid("frac overflow".into()))?,
+            )
+            .ok_or_else(|| DomError::Invalid("frac underflow".into()))? as usize;
         f.min(255)
     };
 
@@ -206,8 +231,12 @@ fn apply_exponent(
     result[16..32].copy_from_slice(&shifted_lo.to_be_bytes());
 
     // Clamp
-    if target_gt(&result, &MAX_TARGET_BYTES) { return Ok(MAX_TARGET_BYTES); }
-    if result == [0u8; 32] || target_lt(&result, &MIN_TARGET_BYTES) { return Ok(MIN_TARGET_BYTES); }
+    if target_gt(&result, &MAX_TARGET_BYTES) {
+        return Ok(MAX_TARGET_BYTES);
+    }
+    if result == [0u8; 32] || target_lt(&result, &MIN_TARGET_BYTES) {
+        return Ok(MIN_TARGET_BYTES);
+    }
     Ok(result)
 }
 
@@ -272,27 +301,48 @@ fn mul_256_div_radix_checked(
 }
 
 fn shift_left_256(hi: u128, lo: u128, shift: u32) -> (u128, u128) {
-    if shift == 0 { return (hi, lo); }
-    if shift >= 256 { return (u128::MAX, u128::MAX); }
-    if shift >= 128 { return (lo << (shift - 128), 0); }
+    if shift == 0 {
+        return (hi, lo);
+    }
+    if shift >= 256 {
+        return (u128::MAX, u128::MAX);
+    }
+    if shift >= 128 {
+        return (lo << (shift - 128), 0);
+    }
     ((hi << shift) | (lo >> (128 - shift)), lo << shift)
 }
 
 fn shift_right_256(hi: u128, lo: u128, shift: u32) -> (u128, u128) {
-    if shift == 0 { return (hi, lo); }
-    if shift >= 256 { return (0, 0); }
-    if shift >= 128 { return (0, hi >> (shift - 128)); }
+    if shift == 0 {
+        return (hi, lo);
+    }
+    if shift >= 256 {
+        return (0, 0);
+    }
+    if shift >= 128 {
+        return (0, hi >> (shift - 128));
+    }
     (hi >> shift, (lo >> shift) | (hi << (128 - shift)))
 }
 
 /// Floor division for i128 — rounds toward negative infinity.
 pub fn floor_div_i128(a: i128, b: i128) -> Result<i128, DomError> {
-    if b == 0 { return Err(DomError::Invalid("floor_div by zero".into())); }
-    let d = a.checked_div(b).ok_or_else(|| DomError::Invalid("floor_div overflow".into()))?;
-    let r = a.checked_rem(b).ok_or_else(|| DomError::Invalid("floor_div rem overflow".into()))?;
+    if b == 0 {
+        return Err(DomError::Invalid("floor_div by zero".into()));
+    }
+    let d = a
+        .checked_div(b)
+        .ok_or_else(|| DomError::Invalid("floor_div overflow".into()))?;
+    let r = a
+        .checked_rem(b)
+        .ok_or_else(|| DomError::Invalid("floor_div rem overflow".into()))?;
     if r != 0 && ((a < 0) != (b < 0)) {
-        d.checked_sub(1).ok_or_else(|| DomError::Invalid("floor_div adj overflow".into()))
-    } else { Ok(d) }
+        d.checked_sub(1)
+            .ok_or_else(|| DomError::Invalid("floor_div adj overflow".into()))
+    } else {
+        Ok(d)
+    }
 }
 
 // ── PoW Validation ────────────────────────────────────────────────────────────
@@ -345,14 +395,17 @@ pub fn validate_pow_randomx(
         .map_err(|e| DomError::Internal(format!("RandomX cache init failed: {e}")))?;
     let vm = RandomXVM::new(flags, Some(cache), None)
         .map_err(|e| DomError::Internal(format!("RandomX VM init failed: {e}")))?;
-    let computed = vm.calculate_hash(pow_preimage)
+    let computed = vm
+        .calculate_hash(pow_preimage)
         .map_err(|e| DomError::Internal(format!("RandomX hash failed: {e}")))?;
     if computed.len() != 32 {
         return Err(DomError::Internal(format!(
-            "RandomX returned {} bytes, expected 32", computed.len()
+            "RandomX returned {} bytes, expected 32",
+            computed.len()
         )));
     }
-    let computed_arr: [u8; 32] = computed.try_into()
+    let computed_arr: [u8; 32] = computed
+        .try_into()
         .map_err(|_| DomError::Internal("RandomX hash conversion failed".into()))?;
     if &computed_arr != randomx_hash {
         return Ok(false);
@@ -376,8 +429,8 @@ pub fn target_to_difficulty_u256(target: &[u8; 32]) -> (u128, u128) {
         return (u128::MAX, u128::MAX);
     }
     let max = U256::from_big_endian(&MAX_TARGET_BYTES);
-    let diff = max / t;  // U256 long division — correct
-    // Extract (hi, lo) from 256-bit result
+    let diff = max / t; // U256 long division — correct
+                        // Extract (hi, lo) from 256-bit result
     let hi = (diff >> 128).low_u128();
     let lo = diff.low_u128();
     (hi, lo)
@@ -392,9 +445,12 @@ pub fn target_to_difficulty_u256(target: &[u8; 32]) -> (u128, u128) {
 pub fn target_to_difficulty(target: &[u8; 32]) -> u128 {
     let (hi, lo) = target_to_difficulty_u256(target);
     // Use hi if non-zero, otherwise lo — preserves ordering correctly
-    if hi > 0 { hi } else { lo.max(1) }
+    if hi > 0 {
+        hi
+    } else {
+        lo.max(1)
+    }
 }
-
 
 // ── Genesis Anchor (RFC-0006) ─────────────────────────────────────────────────
 
@@ -426,8 +482,10 @@ mod tests {
         assert_eq!(ASERT_FRAC_TABLE[128], 92681);
         assert_eq!(ASERT_FRAC_TABLE[255], 130717);
         for i in 1..256 {
-            assert!(ASERT_FRAC_TABLE[i] >= ASERT_FRAC_TABLE[i-1],
-                "not monotone at {i}");
+            assert!(
+                ASERT_FRAC_TABLE[i] >= ASERT_FRAC_TABLE[i - 1],
+                "not monotone at {i}"
+            );
         }
         for (i, &v) in ASERT_FRAC_TABLE.iter().enumerate() {
             assert!(v >= 65536 && v < 131072, "out of bounds at {i}: {v}");
@@ -463,9 +521,15 @@ mod tests {
     fn asert_slow_increases_target() {
         let t = {
             let mut b = [0u8; 32];
-            b[2] = 0x0f; b[3] = 0xff; b
+            b[2] = 0x0f;
+            b[3] = 0xff;
+            b
         };
-        let a = AsertAnchor { timestamp: Timestamp(0), height: BlockHeight(0), target: t };
+        let a = AsertAnchor {
+            timestamp: Timestamp(0),
+            height: BlockHeight(0),
+            target: t,
+        };
         // 10x slower than expected
         let r = asert_next_target(&a, Timestamp(TARGET_SPACING * 10), BlockHeight(1)).unwrap();
         let t_hi = u128::from_be_bytes(t[0..16].try_into().unwrap());
@@ -483,7 +547,10 @@ mod tests {
         let r = asert_next_target(&a, Timestamp(1_000_010), BlockHeight(1)).unwrap();
         let max_hi = u128::from_be_bytes(MAX_TARGET_BYTES[0..16].try_into().unwrap());
         let r_hi = u128::from_be_bytes(r[0..16].try_into().unwrap());
-        assert!(r_hi <= max_hi, "fast blocks must not increase target beyond max");
+        assert!(
+            r_hi <= max_hi,
+            "fast blocks must not increase target beyond max"
+        );
     }
 
     #[test]
@@ -494,7 +561,10 @@ mod tests {
         harder[2] = 0x7f;
         let d_easy = target_to_difficulty(&easy);
         let d_hard = target_to_difficulty(&harder);
-        assert!(d_hard >= d_easy, "harder target must have >= difficulty: {d_hard} >= {d_easy}");
+        assert!(
+            d_hard >= d_easy,
+            "harder target must have >= difficulty: {d_hard} >= {d_easy}"
+        );
     }
 
     #[test]
@@ -513,8 +583,11 @@ mod asert_strict_tests {
     fn mid_target() -> [u8; 32] {
         // A target in the middle of valid range — easy to reason about
         let mut t = [0u8; 32];
-        t[2] = 0x00; t[3] = 0x0f; // modest difficulty
-        for i in 4..32 { t[i] = 0xff; }
+        t[2] = 0x00;
+        t[3] = 0x0f; // modest difficulty
+        for i in 4..32 {
+            t[i] = 0xff;
+        }
         t
     }
 
@@ -534,9 +607,12 @@ mod asert_strict_tests {
             &anchor,
             Timestamp(1_000_000 + TARGET_SPACING),
             BlockHeight(1),
-        ).unwrap();
-        assert_eq!(result, t,
-            "zero time drift must preserve target exactly — any deviation is an arithmetic bug");
+        )
+        .unwrap();
+        assert_eq!(
+            result, t,
+            "zero time drift must preserve target exactly — any deviation is an arithmetic bug"
+        );
     }
 
     #[test]
@@ -547,16 +623,14 @@ mod asert_strict_tests {
             target: MAX_TARGET_BYTES,
         };
         // Block arrives 100 half-lives late — should clamp to MAX
-        let huge_time = TARGET_SPACING.checked_add(
-            ASERT_HALF_LIFE.checked_mul(100).unwrap()
-        ).unwrap();
-        let result = asert_next_target(
-            &anchor,
-            Timestamp(huge_time),
-            BlockHeight(1),
-        ).unwrap();
-        assert_eq!(result, MAX_TARGET_BYTES,
-            "pathologically slow blocks must clamp to MAX_TARGET");
+        let huge_time = TARGET_SPACING
+            .checked_add(ASERT_HALF_LIFE.checked_mul(100).unwrap())
+            .unwrap();
+        let result = asert_next_target(&anchor, Timestamp(huge_time), BlockHeight(1)).unwrap();
+        assert_eq!(
+            result, MAX_TARGET_BYTES,
+            "pathologically slow blocks must clamp to MAX_TARGET"
+        );
     }
 
     #[test]
@@ -567,14 +641,13 @@ mod asert_strict_tests {
             target: MIN_TARGET_BYTES,
         };
         // Block arrives 1 second after anchor (100x faster than minimum spacing)
-        let result = asert_next_target(
-            &anchor,
-            Timestamp(1_000_000_001),
-            BlockHeight(1),
-        ).unwrap();
+        let result = asert_next_target(&anchor, Timestamp(1_000_000_001), BlockHeight(1)).unwrap();
         // Must clamp at or below MIN_TARGET
-        assert!(!target_gt(&result, &MIN_TARGET_BYTES),
-            "pathologically fast blocks must clamp to MIN_TARGET, got {:?}", &result[0..8]);
+        assert!(
+            !target_gt(&result, &MIN_TARGET_BYTES),
+            "pathologically fast blocks must clamp to MIN_TARGET, got {:?}",
+            &result[0..8]
+        );
     }
 
     #[test]
@@ -591,7 +664,10 @@ mod asert_strict_tests {
         t2[2] = 0x40; // t2 is harder (smaller value)
         let d1 = target_to_difficulty(&t1);
         let d2 = target_to_difficulty(&t2);
-        assert!(d2 > d1, "harder target (smaller value) must have higher difficulty: d2={d2} d1={d1}");
+        assert!(
+            d2 > d1,
+            "harder target (smaller value) must have higher difficulty: d2={d2} d1={d1}"
+        );
     }
 
     #[test]
@@ -674,8 +750,8 @@ mod randomx_tests {
 
         // Wrong hash (all 0xff) must not validate
         let wrong_hash = [0xff_u8; 32];
-        let result = validate_pow_randomx(preimage, &wrong_hash, &seed, &target)
-            .expect("should not error");
+        let result =
+            validate_pow_randomx(preimage, &wrong_hash, &seed, &target).expect("should not error");
         assert!(!result, "wrong randomx_hash must be rejected");
     }
 
@@ -696,10 +772,8 @@ mod randomx_tests {
         // Use MAX_TARGET so it always meets target
         // Use all-0xff target (absolute maximum) to guarantee hash always passes
         let all_max = [0xff_u8; 32];
-        let result = validate_pow_randomx(preimage, &hash, &seed, &all_max)
-            .expect("should not error");
+        let result =
+            validate_pow_randomx(preimage, &hash, &seed, &all_max).expect("should not error");
         assert!(result, "correct hash must be accepted with all-0xff target");
     }
 }
-
-

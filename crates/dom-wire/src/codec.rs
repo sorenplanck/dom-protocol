@@ -1,9 +1,9 @@
 //! Noise-encrypted message codec for tokio streams.
 
-use snow::TransportState;
-use dom_core::DomError;
-use crate::message::WireMessage;
 use crate::handshake::{read_framed, write_framed};
+use crate::message::WireMessage;
+use dom_core::DomError;
+use snow::TransportState;
 
 /// Encrypted connection wrapper.
 pub struct NoiseCodec {
@@ -14,7 +14,10 @@ pub struct NoiseCodec {
 impl NoiseCodec {
     /// Create from completed Noise handshake.
     pub fn new(transport: TransportState, network_magic: u32) -> Self {
-        Self { transport, network_magic }
+        Self {
+            transport,
+            network_magic,
+        }
     }
 
     /// Encrypt and send a message.
@@ -25,7 +28,9 @@ impl NoiseCodec {
     ) -> Result<(), DomError> {
         let plaintext = msg.to_bytes();
         let mut ciphertext = vec![0u8; plaintext.len() + 16]; // +16 for AEAD tag
-        let len = self.transport.write_message(&plaintext, &mut ciphertext)
+        let len = self
+            .transport
+            .write_message(&plaintext, &mut ciphertext)
             .map_err(|e| DomError::Internal(format!("noise encrypt: {e}")))?;
         write_framed(stream, &ciphertext[..len]).await
     }
@@ -42,11 +47,16 @@ impl NoiseCodec {
             read_framed(stream),
         )
         .await
-        .map_err(|_| dom_core::DomError::PolicyRejected(
-            format!("idle timeout after {}s", crate::handshake::IDLE_TIMEOUT_SECS)
-        ))??;
+        .map_err(|_| {
+            dom_core::DomError::PolicyRejected(format!(
+                "idle timeout after {}s",
+                crate::handshake::IDLE_TIMEOUT_SECS
+            ))
+        })??;
         let mut plaintext = vec![0u8; ciphertext.len()];
-        let len = self.transport.read_message(&ciphertext, &mut plaintext)
+        let len = self
+            .transport
+            .read_message(&ciphertext, &mut plaintext)
             .map_err(|e| DomError::Invalid(format!("noise decrypt: {e}")))?;
         WireMessage::from_bytes(&plaintext[..len], self.network_magic)
     }

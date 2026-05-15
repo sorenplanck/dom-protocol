@@ -67,7 +67,8 @@ impl PeerInfo {
     /// Create for a new connection.
     pub fn new(addr: SocketAddr, outbound: bool) -> Self {
         Self {
-            addr, outbound,
+            addr,
+            outbound,
             state: PeerState::Handshaking,
             connected_at: Instant::now(),
             best_height: 0,

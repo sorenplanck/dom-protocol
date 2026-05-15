@@ -7,8 +7,8 @@
 //!
 //! Any MITM modification to the prologue causes MAC failure — detected cryptographically.
 
-use snow::{Builder, HandshakeState, TransportState};
 use dom_core::{DomError, PROTOCOL_VERSION};
+use snow::{Builder, HandshakeState, TransportState};
 
 const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 
@@ -96,9 +96,9 @@ pub async fn perform_handshake_initiator(
         perform_handshake_initiator_inner(stream, static_privkey, network_magic, chain_id),
     )
     .await
-    .map_err(|_| DomError::PolicyRejected(format!(
-        "handshake timeout after {HANDSHAKE_TIMEOUT_SECS}s"
-    )))?
+    .map_err(|_| {
+        DomError::PolicyRejected(format!("handshake timeout after {HANDSHAKE_TIMEOUT_SECS}s"))
+    })?
 }
 
 async fn perform_handshake_initiator_inner(
@@ -107,13 +107,12 @@ async fn perform_handshake_initiator_inner(
     network_magic: u32,
     chain_id: &[u8; 32],
 ) -> Result<TransportState, DomError> {
-    
-
     let mut hs = build_initiator(static_privkey, network_magic, chain_id)?;
     let mut buf = vec![0u8; NOISE_MAX_MSG];
 
     // -> e  (message 1)
-    let len = hs.write_message(&[], &mut buf)
+    let len = hs
+        .write_message(&[], &mut buf)
         .map_err(|e| DomError::Internal(format!("noise write msg1: {e}")))?;
     write_framed(stream, &buf[..len]).await?;
 
@@ -124,7 +123,8 @@ async fn perform_handshake_initiator_inner(
         .map_err(|e| DomError::Invalid(format!("noise read msg2: {e}")))?;
 
     // -> s, se  (message 3)
-    let len = hs.write_message(&[], &mut buf)
+    let len = hs
+        .write_message(&[], &mut buf)
         .map_err(|e| DomError::Internal(format!("noise write msg3: {e}")))?;
     write_framed(stream, &buf[..len]).await?;
 
@@ -144,9 +144,9 @@ pub async fn perform_handshake_responder(
         perform_handshake_responder_inner(stream, static_privkey, network_magic, chain_id),
     )
     .await
-    .map_err(|_| DomError::PolicyRejected(format!(
-        "handshake timeout after {HANDSHAKE_TIMEOUT_SECS}s"
-    )))?
+    .map_err(|_| {
+        DomError::PolicyRejected(format!("handshake timeout after {HANDSHAKE_TIMEOUT_SECS}s"))
+    })?
 }
 
 async fn perform_handshake_responder_inner(
@@ -155,8 +155,6 @@ async fn perform_handshake_responder_inner(
     network_magic: u32,
     chain_id: &[u8; 32],
 ) -> Result<TransportState, DomError> {
-    
-
     let mut hs = build_responder(static_privkey, network_magic, chain_id)?;
     let mut buf = vec![0u8; NOISE_MAX_MSG];
 
@@ -167,7 +165,8 @@ async fn perform_handshake_responder_inner(
         .map_err(|e| DomError::Invalid(format!("noise read msg1: {e}")))?;
 
     // -> e, ee, s, es  (message 2)
-    let len = hs.write_message(&[], &mut buf)
+    let len = hs
+        .write_message(&[], &mut buf)
         .map_err(|e| DomError::Internal(format!("noise write msg2: {e}")))?;
     write_framed(stream, &buf[..len]).await?;
 
@@ -181,33 +180,36 @@ async fn perform_handshake_responder_inner(
 }
 
 /// Write a length-prefixed frame: u32_le(len) || data.
-pub async fn write_framed(
-    stream: &mut tokio::net::TcpStream,
-    data: &[u8],
-) -> Result<(), DomError> {
+pub async fn write_framed(stream: &mut tokio::net::TcpStream, data: &[u8]) -> Result<(), DomError> {
     use tokio::io::AsyncWriteExt;
     let len = (data.len() as u32).to_le_bytes();
-    stream.write_all(&len).await
+    stream
+        .write_all(&len)
+        .await
         .map_err(|e| DomError::Internal(format!("write frame len: {e}")))?;
-    stream.write_all(data).await
+    stream
+        .write_all(data)
+        .await
         .map_err(|e| DomError::Internal(format!("write frame data: {e}")))?;
     Ok(())
 }
 
 /// Read a length-prefixed frame.
-pub async fn read_framed(
-    stream: &mut tokio::net::TcpStream,
-) -> Result<Vec<u8>, DomError> {
+pub async fn read_framed(stream: &mut tokio::net::TcpStream) -> Result<Vec<u8>, DomError> {
     use tokio::io::AsyncReadExt;
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await
+    stream
+        .read_exact(&mut len_buf)
+        .await
         .map_err(|e| DomError::Internal(format!("read frame len: {e}")))?;
     let len = u32::from_le_bytes(len_buf) as usize;
     if len > NOISE_MAX_MSG {
         return Err(DomError::Malformed(format!("frame too large: {len}")));
     }
     let mut data = vec![0u8; len];
-    stream.read_exact(&mut data).await
+    stream
+        .read_exact(&mut data)
+        .await
         .map_err(|e| DomError::Internal(format!("read frame data: {e}")))?;
     Ok(data)
 }

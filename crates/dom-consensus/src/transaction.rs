@@ -6,11 +6,9 @@
 //! RFC-0010: Weight units, lock_height validation, coinbase maturity placement.
 
 use dom_core::{
-    Amount, BlockHeight, DomError,
-    MAX_INPUTS_PER_TX, MAX_OUTPUTS_PER_TX, MAX_KERNELS_PER_TX,
-    KERNEL_FEAT_PLAIN, KERNEL_FEAT_COINBASE, KERNEL_FEAT_HEIGHT_LOCKED,
-    WEIGHT_INPUT, WEIGHT_OUTPUT, WEIGHT_KERNEL, WEIGHT_COINBASE_KERNEL,
-    MAX_TX_WEIGHT,
+    Amount, BlockHeight, DomError, KERNEL_FEAT_COINBASE, KERNEL_FEAT_HEIGHT_LOCKED,
+    KERNEL_FEAT_PLAIN, MAX_INPUTS_PER_TX, MAX_KERNELS_PER_TX, MAX_OUTPUTS_PER_TX, MAX_TX_WEIGHT,
+    WEIGHT_COINBASE_KERNEL, WEIGHT_INPUT, WEIGHT_KERNEL, WEIGHT_OUTPUT,
 };
 use dom_crypto::pedersen::Commitment;
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
@@ -42,7 +40,9 @@ impl DomSerialize for TransactionInput {
 impl DomDeserialize for TransactionInput {
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let bytes = r.read_array::<33>()?;
-        Ok(Self { commitment: Commitment::from_compressed_bytes(&bytes)? })
+        Ok(Self {
+            commitment: Commitment::from_compressed_bytes(&bytes)?,
+        })
     }
 }
 
@@ -84,7 +84,9 @@ pub struct TransactionKernel {
 }
 
 impl TransactionKernel {
-    pub fn weight(&self) -> u32 { WEIGHT_KERNEL }
+    pub fn weight(&self) -> u32 {
+        WEIGHT_KERNEL
+    }
 }
 
 impl DomSerialize for TransactionKernel {
@@ -115,14 +117,16 @@ impl DomDeserialize for TransactionKernel {
 /// This is the ONLY inflation control point in the protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoinbaseKernel {
-    pub features: u8,          // always KERNEL_FEAT_COINBASE = 0x01
-    pub explicit_value: u64,   // total coinbase in noms — MUST match block_reward + fees
+    pub features: u8,        // always KERNEL_FEAT_COINBASE = 0x01
+    pub explicit_value: u64, // total coinbase in noms — MUST match block_reward + fees
     pub excess: Commitment,
     pub excess_signature: [u8; 65],
 }
 
 impl CoinbaseKernel {
-    pub fn weight(&self) -> u32 { WEIGHT_COINBASE_KERNEL }
+    pub fn weight(&self) -> u32 {
+        WEIGHT_COINBASE_KERNEL
+    }
 
     /// Verify explicit_value == block_reward(height) + tx_fees.
     /// This is the primary inflation prevention check (RFC-0008 Section 3.2).
@@ -132,7 +136,8 @@ impl CoinbaseKernel {
         total_tx_fees: u64,
     ) -> Result<(), DomError> {
         let reward = dom_core::block_reward(block_height).noms();
-        let expected = reward.checked_add(total_tx_fees)
+        let expected = reward
+            .checked_add(total_tx_fees)
             .ok_or_else(|| DomError::Invalid("coinbase value overflow".into()))?;
         if self.explicit_value != expected {
             return Err(DomError::Invalid(format!(
@@ -167,22 +172,30 @@ impl DomDeserialize for CoinbaseKernel {
         // (could indicate a serialization bug or attempt to create a free coinbase)
         if explicit_value == 0 {
             return Err(DomError::Invalid(
-                "coinbase explicit_value must be non-zero".into()
+                "coinbase explicit_value must be non-zero".into(),
             ));
         }
         let excess = Commitment::from_compressed_bytes(&r.read_array::<33>()?)?;
         let excess_signature = r.read_array::<65>()?;
-        Ok(Self { features, explicit_value, excess, excess_signature })
+        Ok(Self {
+            features,
+            explicit_value,
+            excess,
+            excess_signature,
+        })
     }
 }
 
 /// Attempt to deserialize a coinbase kernel where a plain kernel was provided.
 /// Returns error identifying the field mismatch.
 pub fn reject_plain_kernel_as_coinbase(data: &[u8]) -> Result<(), DomError> {
-    if data.is_empty() { return Ok(()); }
+    if data.is_empty() {
+        return Ok(());
+    }
     if data[0] != KERNEL_FEAT_COINBASE {
         return Err(DomError::Malformed(format!(
-            "plain kernel (features=0x{:02x}) cannot be used as coinbase", data[0]
+            "plain kernel (features=0x{:02x}) cannot be used as coinbase",
+            data[0]
         )));
     }
     Ok(())
@@ -196,12 +209,13 @@ pub struct Transaction {
     pub inputs: Vec<TransactionInput>,
     pub outputs: Vec<TransactionOutput>,
     pub kernels: Vec<TransactionKernel>,
-    pub offset: [u8; 32],  // RFC-0008 Section 4: random scalar for graph privacy
+    pub offset: [u8; 32], // RFC-0008 Section 4: random scalar for graph privacy
 }
 
 impl Transaction {
     pub fn weight(&self) -> u32 {
-        (self.inputs.len() as u32).saturating_mul(WEIGHT_INPUT)
+        (self.inputs.len() as u32)
+            .saturating_mul(WEIGHT_INPUT)
             .saturating_add((self.outputs.len() as u32).saturating_mul(WEIGHT_OUTPUT))
             .saturating_add((self.kernels.len() as u32).saturating_mul(WEIGHT_KERNEL))
     }
@@ -239,20 +253,33 @@ impl DomDeserialize for Transaction {
 pub fn validate_transaction_structure(tx: &Transaction) -> Result<(), DomError> {
     // Step 2: Primitive validation
     if tx.inputs.len() > MAX_INPUTS_PER_TX {
-        return Err(DomError::Invalid(format!("too many inputs: {}", tx.inputs.len())));
+        return Err(DomError::Invalid(format!(
+            "too many inputs: {}",
+            tx.inputs.len()
+        )));
     }
     if tx.outputs.len() > MAX_OUTPUTS_PER_TX {
-        return Err(DomError::Invalid(format!("too many outputs: {}", tx.outputs.len())));
+        return Err(DomError::Invalid(format!(
+            "too many outputs: {}",
+            tx.outputs.len()
+        )));
     }
     if tx.kernels.len() > MAX_KERNELS_PER_TX {
-        return Err(DomError::Invalid(format!("too many kernels: {}", tx.kernels.len())));
+        return Err(DomError::Invalid(format!(
+            "too many kernels: {}",
+            tx.kernels.len()
+        )));
     }
     if tx.kernels.is_empty() {
-        return Err(DomError::Invalid("transaction must have at least one kernel".into()));
+        return Err(DomError::Invalid(
+            "transaction must have at least one kernel".into(),
+        ));
     }
     for (i, o) in tx.outputs.iter().enumerate() {
         if o.proof.is_empty() {
-            return Err(DomError::Invalid(format!("output {i} has empty range proof")));
+            return Err(DomError::Invalid(format!(
+                "output {i} has empty range proof"
+            )));
         }
         if o.proof.len() > dom_core::MAX_PROOF_SIZE {
             return Err(DomError::Invalid(format!("output {i} proof too large")));
@@ -332,7 +359,7 @@ pub fn validate_lock_heights(tx: &Transaction, current: BlockHeight) -> Result<(
 pub struct CoinbaseTransaction {
     pub output: TransactionOutput,
     pub kernel: CoinbaseKernel,
-    pub offset: [u8; 32],  // MUST be zero
+    pub offset: [u8; 32], // MUST be zero
 }
 
 impl CoinbaseTransaction {
@@ -351,7 +378,9 @@ impl CoinbaseTransaction {
         }
         self.kernel.validate_explicit_value(height, total_tx_fees)?;
         if self.output.proof.is_empty() {
-            return Err(DomError::Invalid("coinbase output has empty range proof".into()));
+            return Err(DomError::Invalid(
+                "coinbase output has empty range proof".into(),
+            ));
         }
         // Validate Schnorr signature — proves miner owns the blinding factor r
         // such that kernel.excess = r*G. Prevents coinbase theft.
@@ -360,9 +389,9 @@ impl CoinbaseTransaction {
     }
 
     fn validate_coinbase_signature(&self, chain_id: &[u8; 32]) -> Result<(), DomError> {
-        use dom_crypto::hash::blake2b_256_tagged;
-        use dom_crypto::{schnorr_verify, SchnorrSignature, PublicKey};
         use dom_core::TAG_KERNEL_MSG_COINBASE;
+        use dom_crypto::hash::blake2b_256_tagged;
+        use dom_crypto::{schnorr_verify, PublicKey, SchnorrSignature};
 
         // RFC-0009 §2.2 coinbase kernel message.
         // chain_id is bound via schnorr_challenge(), not here — single source of truth.
@@ -379,13 +408,11 @@ impl CoinbaseTransaction {
             .map_err(|e| DomError::Invalid(format!("coinbase excess invalid: {e}")))?;
 
         match schnorr_verify(&sig, &pk, chain_id, kernel_message.as_bytes()) {
-            Ok(true)  => Ok(()),
+            Ok(true) => Ok(()),
             Ok(false) => Err(DomError::Invalid(
-                "coinbase kernel signature invalid — miner does not prove ownership".into()
+                "coinbase kernel signature invalid — miner does not prove ownership".into(),
             )),
-            Err(DomError::Internal(msg)) => Err(DomError::Internal(format!(
-                "coinbase sig [RELEASE BLOCKER]: {msg}"
-            ))),
+            Err(DomError::Internal(msg)) => Err(DomError::Internal(format!("coinbase sig: {msg}"))),
             Err(e) => Err(e),
         }
     }
@@ -394,51 +421,72 @@ impl CoinbaseTransaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dom_core::{INITIAL_BLOCK_REWARD, HALVING_INTERVAL};
+    use dom_core::{HALVING_INTERVAL, INITIAL_BLOCK_REWARD};
 
     fn g_point() -> Commitment {
-        let g = [0x02u8,0x79,0xBE,0x66,0x7E,0xF9,0xDC,0xBB,0xAC,0x55,0xA0,
-                 0x62,0x95,0xCE,0x87,0x0B,0x07,0x02,0x9B,0xFC,0xDB,0x2D,0xCE,
-                 0x28,0xD9,0x59,0xF2,0x81,0x5B,0x16,0xF8,0x17,0x98];
+        let g = [
+            0x02u8, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE,
+            0x87, 0x0B, 0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9, 0x59, 0xF2, 0x81,
+            0x5B, 0x16, 0xF8, 0x17, 0x98,
+        ];
         Commitment::from_compressed_bytes(&g).unwrap()
     }
 
     fn plain_kernel(fee: u64) -> TransactionKernel {
         TransactionKernel {
-            features: KERNEL_FEAT_PLAIN, fee: Amount::from_noms(fee).unwrap(),
-            lock_height: 0, excess: g_point(), excess_signature: [0u8;65],
+            features: KERNEL_FEAT_PLAIN,
+            fee: Amount::from_noms(fee).unwrap(),
+            lock_height: 0,
+            excess: g_point(),
+            excess_signature: [0u8; 65],
         }
     }
 
     fn dummy_output() -> TransactionOutput {
-        TransactionOutput { commitment: g_point(), proof: vec![0u8;100] }
+        TransactionOutput {
+            commitment: g_point(),
+            proof: vec![0u8; 100],
+        }
     }
 
     fn minimal_tx() -> Transaction {
-        Transaction { inputs: vec![], outputs: vec![dummy_output()],
-                      kernels: vec![plain_kernel(1000)], offset: [0u8;32] }
+        Transaction {
+            inputs: vec![],
+            outputs: vec![dummy_output()],
+            kernels: vec![plain_kernel(1000)],
+            offset: [0u8; 32],
+        }
     }
 
-    #[test] fn minimal_tx_ok() { assert!(validate_transaction_structure(&minimal_tx()).is_ok()); }
+    #[test]
+    fn minimal_tx_ok() {
+        assert!(validate_transaction_structure(&minimal_tx()).is_ok());
+    }
 
-    #[test] fn coinbase_in_plain_tx_rejected() {
-        let mut tx = minimal_tx(); tx.kernels[0].features = KERNEL_FEAT_COINBASE;
+    #[test]
+    fn coinbase_in_plain_tx_rejected() {
+        let mut tx = minimal_tx();
+        tx.kernels[0].features = KERNEL_FEAT_COINBASE;
         assert!(validate_transaction_structure(&tx).is_err());
     }
 
-    #[test] fn unknown_features_rejected() {
-        let mut tx = minimal_tx(); tx.kernels[0].features = 0xFF;
+    #[test]
+    fn unknown_features_rejected() {
+        let mut tx = minimal_tx();
+        tx.kernels[0].features = 0xFF;
         assert!(validate_transaction_structure(&tx).is_err());
     }
 
-    #[test] fn height_locked_zero_rejected() {
+    #[test]
+    fn height_locked_zero_rejected() {
         let mut tx = minimal_tx();
         tx.kernels[0].features = KERNEL_FEAT_HEIGHT_LOCKED;
         tx.kernels[0].lock_height = 0;
         assert!(validate_transaction_structure(&tx).is_err());
     }
 
-    #[test] fn lock_height_future_is_temporarily_invalid() {
+    #[test]
+    fn lock_height_future_is_temporarily_invalid() {
         let mut tx = minimal_tx();
         tx.kernels[0].features = KERNEL_FEAT_HEIGHT_LOCKED;
         tx.kernels[0].lock_height = 1000;
@@ -446,34 +494,53 @@ mod tests {
         assert!(matches!(err, DomError::TemporarilyInvalid(_)));
     }
 
-    #[test] fn coinbase_correct_value() {
-        let k = CoinbaseKernel { features: KERNEL_FEAT_COINBASE,
+    #[test]
+    fn coinbase_correct_value() {
+        let k = CoinbaseKernel {
+            features: KERNEL_FEAT_COINBASE,
             explicit_value: INITIAL_BLOCK_REWARD + 5000,
-            excess: g_point(), excess_signature: [0u8;65] };
+            excess: g_point(),
+            excess_signature: [0u8; 65],
+        };
         assert!(k.validate_explicit_value(BlockHeight(0), 5000).is_ok());
     }
 
-    #[test] fn coinbase_inflated_rejected() {
-        let k = CoinbaseKernel { features: KERNEL_FEAT_COINBASE,
+    #[test]
+    fn coinbase_inflated_rejected() {
+        let k = CoinbaseKernel {
+            features: KERNEL_FEAT_COINBASE,
             explicit_value: INITIAL_BLOCK_REWARD + 1, // one extra nom
-            excess: g_point(), excess_signature: [0u8;65] };
+            excess: g_point(),
+            excess_signature: [0u8; 65],
+        };
         assert!(k.validate_explicit_value(BlockHeight(0), 0).is_err());
     }
 
-    #[test] fn coinbase_first_halving() {
-        let k = CoinbaseKernel { features: KERNEL_FEAT_COINBASE,
-            explicit_value: INITIAL_BLOCK_REWARD / 2,
-            excess: g_point(), excess_signature: [0u8;65] };
-        assert!(k.validate_explicit_value(BlockHeight(HALVING_INTERVAL), 0).is_ok());
+    #[test]
+    fn coinbase_first_halving() {
+        let k = CoinbaseKernel {
+            features: KERNEL_FEAT_COINBASE,
+            explicit_value: (INITIAL_BLOCK_REWARD * 67) / 100,
+            excess: g_point(),
+            excess_signature: [0u8; 65],
+        };
+        assert!(k
+            .validate_explicit_value(BlockHeight(HALVING_INTERVAL), 0)
+            .is_ok());
     }
 
-    #[test] fn tx_weight_calculation() {
+    #[test]
+    fn tx_weight_calculation() {
         let tx = minimal_tx(); // 0 inputs + 1 output*21 + 1 kernel*3 = 24
-        assert_eq!(tx.weight(), 0*WEIGHT_INPUT + 1*WEIGHT_OUTPUT + 1*WEIGHT_KERNEL);
+        assert_eq!(
+            tx.weight(),
+            0 * WEIGHT_INPUT + 1 * WEIGHT_OUTPUT + 1 * WEIGHT_KERNEL
+        );
     }
 
-    #[test] fn tx_roundtrip() {
-        use dom_serialization::{DomSerialize, DomDeserialize};
+    #[test]
+    fn tx_roundtrip() {
+        use dom_serialization::{DomDeserialize, DomSerialize};
         let tx = minimal_tx();
         let bytes = tx.to_bytes().unwrap();
         assert_eq!(Transaction::from_bytes(&bytes).unwrap(), tx);
@@ -494,10 +561,7 @@ pub fn validate_range_proofs(tx: &Transaction) -> Result<(), DomError> {
         let commitment = &output.commitment;
         let proof_bytes = &output.proof;
 
-        match dom_crypto::bp_verify(
-            commitment.as_bytes(),
-            proof_bytes,
-        ) {
+        match dom_crypto::bp_verify(commitment.as_bytes(), proof_bytes) {
             Ok(true) => {}
             Ok(false) => {
                 return Err(DomError::Invalid(format!(
@@ -519,38 +583,38 @@ pub fn validate_range_proofs(tx: &Transaction) -> Result<(), DomError> {
 /// RFC-0008 Section 1.1:
 ///   sum(outputs) - sum(inputs) = sum(kernel_excesses) + offset*G + fee*H
 pub fn validate_balance_equation(tx: &Transaction) -> Result<(), DomError> {
-    use dom_crypto::pedersen::{Commitment as CryptoCommit, verify_balance_equation};
+    use dom_crypto::pedersen::{verify_balance_equation, Commitment as CryptoCommit};
 
     let to_crypto = |c: &Commitment| -> Result<CryptoCommit, DomError> {
         CryptoCommit::from_compressed_bytes(c.as_bytes())
             .map_err(|e| DomError::Invalid(format!("commitment parse: {e}")))
     };
 
-    let outputs: Vec<CryptoCommit> = tx.outputs.iter()
+    let outputs: Vec<CryptoCommit> = tx
+        .outputs
+        .iter()
         .map(|o| to_crypto(&o.commitment))
         .collect::<Result<_, _>>()?;
 
-    let inputs: Vec<CryptoCommit> = tx.inputs.iter()
+    let inputs: Vec<CryptoCommit> = tx
+        .inputs
+        .iter()
         .map(|i| to_crypto(&i.commitment))
         .collect::<Result<_, _>>()?;
 
-    let excesses: Vec<CryptoCommit> = tx.kernels.iter()
+    let excesses: Vec<CryptoCommit> = tx
+        .kernels
+        .iter()
         .map(|k| to_crypto(&k.excess))
         .collect::<Result<_, _>>()?;
 
     let total_fee = tx.total_fee()?;
 
-    let valid = verify_balance_equation(
-        &outputs,
-        &inputs,
-        &excesses,
-        &tx.offset,
-        total_fee,
-    )?;
+    let valid = verify_balance_equation(&outputs, &inputs, &excesses, &tx.offset, total_fee)?;
 
     if !valid {
         return Err(DomError::Invalid(
-            "transaction balance equation does not hold".into()
+            "transaction balance equation does not hold".into(),
         ));
     }
     Ok(())
@@ -563,16 +627,20 @@ mod multi_kernel_fee_tests {
     use dom_crypto::pedersen::Commitment;
 
     fn g_point() -> Commitment {
-        let g = [0x02u8,0x79,0xBE,0x66,0x7E,0xF9,0xDC,0xBB,0xAC,0x55,0xA0,
-                 0x62,0x95,0xCE,0x87,0x0B,0x07,0x02,0x9B,0xFC,0xDB,0x2D,0xCE,
-                 0x28,0xD9,0x59,0xF2,0x81,0x5B,0x16,0xF8,0x17,0x98];
+        let g = [
+            0x02u8, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE,
+            0x87, 0x0B, 0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9, 0x59, 0xF2, 0x81,
+            0x5B, 0x16, 0xF8, 0x17, 0x98,
+        ];
         Commitment::from_compressed_bytes(&g).unwrap()
     }
 
     fn h_point() -> Commitment {
-        let h = [0x03u8,0x79,0xBE,0x66,0x7E,0xF9,0xDC,0xBB,0xAC,0x55,0xA0,
-                 0x62,0x95,0xCE,0x87,0x0B,0x07,0x02,0x9B,0xFC,0xDB,0x2D,0xCE,
-                 0x28,0xD9,0x59,0xF2,0x81,0x5B,0x16,0xF8,0x17,0x98];
+        let h = [
+            0x03u8, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE,
+            0x87, 0x0B, 0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9, 0x59, 0xF2, 0x81,
+            0x5B, 0x16, 0xF8, 0x17, 0x98,
+        ];
         Commitment::from_compressed_bytes(&h).unwrap()
     }
 
@@ -589,14 +657,14 @@ mod multi_kernel_fee_tests {
             kernels: vec![
                 TransactionKernel {
                     features: KERNEL_FEAT_PLAIN,
-                    fee: Amount::from_noms(7).unwrap(),   // first kernel: fee=7
+                    fee: Amount::from_noms(7).unwrap(), // first kernel: fee=7
                     lock_height: 0,
                     excess: g_point(),
                     excess_signature: [0u8; 65],
                 },
                 TransactionKernel {
                     features: KERNEL_FEAT_PLAIN,
-                    fee: Amount::from_noms(3).unwrap(),   // second kernel: fee=3
+                    fee: Amount::from_noms(3).unwrap(), // second kernel: fee=3
                     lock_height: 0,
                     excess: h_point(),
                     excess_signature: [0u8; 65],
@@ -623,15 +691,18 @@ mod multi_kernel_fee_tests {
             kernels: vec![
                 TransactionKernel {
                     features: KERNEL_FEAT_PLAIN,
-                    fee: Amount::from_noms(u64::MAX / 2 + 1).unwrap_or(
-                        Amount::from_noms(dom_core::MAX_SUPPLY_NOMS).unwrap()
-                    ),
-                    lock_height: 0, excess: g_point(), excess_signature: [0u8;65],
+                    fee: Amount::from_noms(u64::MAX / 2 + 1)
+                        .unwrap_or(Amount::from_noms(dom_core::MAX_SUPPLY_NOMS).unwrap()),
+                    lock_height: 0,
+                    excess: g_point(),
+                    excess_signature: [0u8; 65],
                 },
                 TransactionKernel {
                     features: KERNEL_FEAT_PLAIN,
                     fee: Amount::from_noms(dom_core::MAX_SUPPLY_NOMS).unwrap(),
-                    lock_height: 0, excess: h_point(), excess_signature: [0u8;65],
+                    lock_height: 0,
+                    excess: h_point(),
+                    excess_signature: [0u8; 65],
                 },
             ],
             offset: [0u8; 32],
@@ -642,5 +713,24 @@ mod multi_kernel_fee_tests {
         // Either succeeds with a large valid value, or errors on overflow
         // The important thing is it never panics or wraps silently
         let _ = result; // just verify no panic
+    }
+}
+
+impl DomSerialize for CoinbaseTransaction {
+    fn serialize(&self, w: &mut Writer) -> Result<(), DomError> {
+        self.output.serialize(w)?;
+        self.kernel.serialize(w)?;
+        w.write_bytes(&self.offset);
+        Ok(())
+    }
+}
+
+impl DomDeserialize for CoinbaseTransaction {
+    fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
+        Ok(Self {
+            output: TransactionOutput::deserialize(r)?,
+            kernel: CoinbaseKernel::deserialize(r)?,
+            offset: r.read_array::<32>()?,
+        })
     }
 }

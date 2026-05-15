@@ -8,9 +8,9 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
-use std::collections::{HashMap, BTreeMap};
+use dom_consensus::transaction::{validate_transaction_structure, Transaction};
 use dom_core::{DomError, MAX_BLOCK_WEIGHT, MIN_RELAY_FEE_RATE};
-use dom_consensus::transaction::{Transaction, validate_transaction_structure};
+use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 
 /// A mempool entry.
@@ -36,7 +36,14 @@ impl MempoolEntry {
         let fee = tx.total_fee()?;
         let weight = tx.weight();
         let fee_rate = if weight == 0 { 0 } else { fee / weight as u64 };
-        Ok(Self { tx, tx_hash, fee, weight, fee_rate, received_at })
+        Ok(Self {
+            tx,
+            tx_hash,
+            fee,
+            weight,
+            fee_rate,
+            received_at,
+        })
     }
 }
 
@@ -84,7 +91,9 @@ impl Mempool {
     ) -> Result<(), DomError> {
         // Already in pool?
         if self.entries.contains_key(&tx_hash) {
-            return Err(DomError::PolicyRejected("transaction already in mempool".into()));
+            return Err(DomError::PolicyRejected(
+                "transaction already in mempool".into(),
+            ));
         }
 
         // Structural validation
@@ -105,7 +114,11 @@ impl Mempool {
             self.evict_lowest_fee(entry.fee_rate)?;
         }
 
-        debug!("Mempool: accepted tx {} fee_rate={}", hex::encode(tx_hash), entry.fee_rate);
+        debug!(
+            "Mempool: accepted tx {} fee_rate={}",
+            hex::encode(tx_hash),
+            entry.fee_rate
+        );
         self.total_weight += entry.weight as u64;
         self.fee_index.insert((entry.fee_rate, tx_hash), ());
         self.entries.insert(tx_hash, entry);
@@ -131,7 +144,9 @@ impl Mempool {
         for ((_fee_rate, hash), _) in self.fee_index.iter().rev() {
             if let Some(entry) = self.entries.get(hash) {
                 let new_weight = used_weight.saturating_add(entry.weight);
-                if new_weight > max_weight { continue; }
+                if new_weight > max_weight {
+                    continue;
+                }
                 used_weight = new_weight;
                 selected.push(entry);
             }
@@ -144,9 +159,15 @@ impl Mempool {
         // Find the lowest fee-rate entry
         if let Some((&(lowest_rate, hash), _)) = self.fee_index.iter().next() {
             if lowest_rate >= min_fee_rate {
-                return Err(DomError::PolicyRejected("mempool full, fee too low to evict".into()));
+                return Err(DomError::PolicyRejected(
+                    "mempool full, fee too low to evict".into(),
+                ));
             }
-            warn!("Mempool evicting tx {} (fee_rate={})", hex::encode(hash), lowest_rate);
+            warn!(
+                "Mempool evicting tx {} (fee_rate={})",
+                hex::encode(hash),
+                lowest_rate
+            );
             let hash_copy = hash;
             self.remove_tx(&hash_copy);
         }
@@ -167,8 +188,14 @@ impl Mempool {
     pub fn remove_confirmed(&mut self, spent_commitments: &[[u8; 33]]) {
         let spent_set: std::collections::HashSet<[u8; 33]> =
             spent_commitments.iter().cloned().collect();
-        let to_remove: Vec<[u8; 32]> = self.entries.values()
-            .filter(|e| e.tx.inputs.iter().any(|i| spent_set.contains(i.commitment.as_bytes())))
+        let to_remove: Vec<[u8; 32]> = self
+            .entries
+            .values()
+            .filter(|e| {
+                e.tx.inputs
+                    .iter()
+                    .any(|i| spent_set.contains(i.commitment.as_bytes()))
+            })
             .map(|e| e.tx_hash)
             .collect();
         for hash in to_remove {
@@ -178,20 +205,24 @@ impl Mempool {
 }
 
 impl Default for Mempool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dom_consensus::transaction::{TransactionOutput, TransactionKernel, CoinbaseKernel};
+    use dom_consensus::transaction::{CoinbaseKernel, TransactionKernel, TransactionOutput};
+    use dom_core::{Amount, COIN_UNIT, KERNEL_FEAT_PLAIN};
     use dom_crypto::pedersen::Commitment;
-    use dom_core::{Amount, KERNEL_FEAT_PLAIN, COIN_UNIT};
 
     fn g_commitment() -> Commitment {
-        let g = [0x02u8,0x79,0xBE,0x66,0x7E,0xF9,0xDC,0xBB,0xAC,0x55,0xA0,
-                 0x62,0x95,0xCE,0x87,0x0B,0x07,0x02,0x9B,0xFC,0xDB,0x2D,0xCE,
-                 0x28,0xD9,0x59,0xF2,0x81,0x5B,0x16,0xF8,0x17,0x98];
+        let g = [
+            0x02u8, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE,
+            0x87, 0x0B, 0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9, 0x59, 0xF2, 0x81,
+            0x5B, 0x16, 0xF8, 0x17, 0x98,
+        ];
         Commitment::from_compressed_bytes(&g).unwrap()
     }
 
@@ -234,7 +265,7 @@ mod tests {
     #[test]
     fn select_orders_by_fee_rate() {
         let mut pool = Mempool::new();
-        let (tx_low, h_low) = make_tx(MIN_RELAY_FEE_RATE * 24 * 1);  // fee_rate=1000
+        let (tx_low, h_low) = make_tx(MIN_RELAY_FEE_RATE * 24 * 1); // fee_rate=1000
         let (tx_high, h_high) = make_tx(MIN_RELAY_FEE_RATE * 24 * 5); // fee_rate=5000
         pool.accept_tx(tx_low, h_low, 0).unwrap();
         pool.accept_tx(tx_high, h_high, 1).unwrap();

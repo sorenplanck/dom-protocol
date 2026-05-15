@@ -3,8 +3,8 @@
 //! RFC-0004: Required vectors for leaf counts 0,1,2,3,4,7,8,15,16.
 //! These MUST be independently reproduced before testnet launch.
 
-use dom_pmmr::Pmmr;
 use dom_core::Hash256;
+use dom_pmmr::Pmmr;
 
 /// A PMMR test vector.
 pub struct PmmrVector {
@@ -20,15 +20,51 @@ pub struct PmmrVector {
 /// Leaf i has payload = i.to_le_bytes() (8 bytes).
 pub fn required_pmmr_vectors() -> Vec<PmmrVector> {
     vec![
-        PmmrVector { leaf_count: 0,  expected_root_hex: "", leaf_data_description: "empty" },
-        PmmrVector { leaf_count: 1,  expected_root_hex: "", leaf_data_description: "leaf_0" },
-        PmmrVector { leaf_count: 2,  expected_root_hex: "", leaf_data_description: "leaf_0..1" },
-        PmmrVector { leaf_count: 3,  expected_root_hex: "", leaf_data_description: "leaf_0..2" },
-        PmmrVector { leaf_count: 4,  expected_root_hex: "", leaf_data_description: "leaf_0..3" },
-        PmmrVector { leaf_count: 7,  expected_root_hex: "", leaf_data_description: "leaf_0..6" },
-        PmmrVector { leaf_count: 8,  expected_root_hex: "", leaf_data_description: "leaf_0..7" },
-        PmmrVector { leaf_count: 15, expected_root_hex: "", leaf_data_description: "leaf_0..14" },
-        PmmrVector { leaf_count: 16, expected_root_hex: "", leaf_data_description: "leaf_0..15" },
+        PmmrVector {
+            leaf_count: 0,
+            expected_root_hex: "",
+            leaf_data_description: "empty",
+        },
+        PmmrVector {
+            leaf_count: 1,
+            expected_root_hex: "",
+            leaf_data_description: "leaf_0",
+        },
+        PmmrVector {
+            leaf_count: 2,
+            expected_root_hex: "",
+            leaf_data_description: "leaf_0..1",
+        },
+        PmmrVector {
+            leaf_count: 3,
+            expected_root_hex: "",
+            leaf_data_description: "leaf_0..2",
+        },
+        PmmrVector {
+            leaf_count: 4,
+            expected_root_hex: "",
+            leaf_data_description: "leaf_0..3",
+        },
+        PmmrVector {
+            leaf_count: 7,
+            expected_root_hex: "",
+            leaf_data_description: "leaf_0..6",
+        },
+        PmmrVector {
+            leaf_count: 8,
+            expected_root_hex: "",
+            leaf_data_description: "leaf_0..7",
+        },
+        PmmrVector {
+            leaf_count: 15,
+            expected_root_hex: "",
+            leaf_data_description: "leaf_0..14",
+        },
+        PmmrVector {
+            leaf_count: 16,
+            expected_root_hex: "",
+            leaf_data_description: "leaf_0..15",
+        },
     ]
 }
 

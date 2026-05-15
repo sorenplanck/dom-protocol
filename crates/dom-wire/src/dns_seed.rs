@@ -1,6 +1,5 @@
 //! DNS seed peer discovery.
 
-
 /// Hardcoded DNS seeds — must be controlled by independent operators.
 const MAINNET_DNS_SEEDS: &[&str] = &[
     "seed1.dom-protocol.org",
@@ -24,11 +23,7 @@ const MAINNET_SEED_IPS: &[&str] = &[
 /// Resolve DNS seeds to IP:port pairs.
 ///
 /// Uses the system resolver. On failure, falls back to hardcoded IPs.
-pub async fn resolve_seeds(
-    mainnet: bool,
-    port: u16,
-    custom_seeds: &[String],
-) -> Vec<String> {
+pub async fn resolve_seeds(mainnet: bool, port: u16, custom_seeds: &[String]) -> Vec<String> {
     use tokio::net::lookup_host;
 
     let seeds: Vec<&str> = if !custom_seeds.is_empty() {

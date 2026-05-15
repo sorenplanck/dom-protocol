@@ -6,16 +6,17 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod h_generator;
 pub mod hash;
 pub mod keys;
-pub mod schnorr;
-pub mod h_generator;
 pub mod pedersen;
+pub mod schnorr;
 
+pub use dom_core::Hash256;
+pub use h_generator::{derive_h_generator, h_compressed, verify_h_matches_derivation};
 pub use hash::{blake2b_256, blake2b_256_tagged, DomHasher};
-pub use keys::{PublicKey, SecretKey, Scalar};
-pub use schnorr::{SchnorrSignature, schnorr_challenge, schnorr_sign, schnorr_verify};
-pub use h_generator::{derive_h_generator, verify_h_matches_derivation, h_compressed};
-pub use pedersen::BlindingFactorOrZero;
+pub use keys::{PublicKey, Scalar, SecretKey};
+pub use pedersen::{BlindingFactor, BlindingFactorOrZero};
+pub use schnorr::{schnorr_challenge, schnorr_sign, schnorr_verify, SchnorrSignature};
 pub mod bulletproof;
 pub use bulletproof::{prove as bp_prove, verify as bp_verify, RangeProof};

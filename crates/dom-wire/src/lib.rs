@@ -10,9 +10,9 @@
 #![deny(missing_docs)]
 
 pub mod codec;
-pub mod handshake;
-pub mod message;
-pub mod peer;
-pub mod manager;
 pub mod dandelion;
 pub mod dns_seed;
+pub mod handshake;
+pub mod manager;
+pub mod message;
+pub mod peer;

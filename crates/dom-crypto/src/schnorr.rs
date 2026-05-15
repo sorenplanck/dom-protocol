@@ -6,20 +6,15 @@ use crate::hash::blake2b_256_tagged;
 use crate::keys::{PublicKey, SecretKey};
 use dom_core::{DomError, Hash256, TAG_KERNEL_SIG};
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
-use k256::{
-    ProjectivePoint, Scalar,
-    elliptic_curve::PrimeField,
-};
+use k256::{elliptic_curve::PrimeField, ProjectivePoint, Scalar};
+use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
 const SECP256K1_N: [u8; 32] = [
-    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
-    0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFE,
-    0xBA,0xAE,0xDC,0xE6,0xAF,0x48,0xA0,0x3B,
-    0xBF,0xD2,0x5E,0x8C,0xD0,0x36,0x41,0x41,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
+    0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
 ];
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -32,7 +27,8 @@ impl SchnorrSignature {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DomError> {
         if bytes.len() != 65 {
             return Err(DomError::Malformed(format!(
-                "signature must be 65 bytes, got {}", bytes.len()
+                "signature must be 65 bytes, got {}",
+                bytes.len()
             )));
         }
         let mut r_compressed = [0u8; 33];
@@ -41,7 +37,9 @@ impl SchnorrSignature {
         s.copy_from_slice(&bytes[33..]);
         crate::keys::PublicKey::from_compressed_bytes(&r_compressed)?;
         if !is_scalar_valid(&s) {
-            return Err(DomError::Invalid("signature scalar s is zero or >= n".into()));
+            return Err(DomError::Invalid(
+                "signature scalar s is zero or >= n".into(),
+            ));
         }
         Ok(Self { r_compressed, s })
     }
@@ -53,7 +51,9 @@ impl SchnorrSignature {
         out
     }
 
-    pub fn r_compressed(&self) -> &[u8; 33] { &self.r_compressed }
+    pub fn r_compressed(&self) -> &[u8; 33] {
+        &self.r_compressed
+    }
 }
 
 pub fn schnorr_challenge(
@@ -74,11 +74,14 @@ pub fn schnorr_challenge(
 fn scalar_from_bytes(bytes: &[u8; 32]) -> Option<Scalar> {
     let fb = k256::FieldBytes::from(*bytes);
     let ct = Scalar::from_repr(fb);
-    if ct.is_some().into() { Some(ct.unwrap()) } else { None }
+    if ct.is_some().into() {
+        Some(ct.unwrap())
+    } else {
+        None
+    }
 }
 
 fn projective_to_compressed(p: &ProjectivePoint) -> [u8; 33] {
-    
     let affine: k256::AffinePoint = (*p).into();
     let encoded = k256::EncodedPoint::from(affine).compress();
     let mut out = [0u8; 33];
@@ -116,7 +119,10 @@ pub fn schnorr_sign(
     // s = k + c*sk mod n
     let s_bytes = scalar_add_mul(&k_bytes, &c_bytes, &sk_bytes)?;
 
-    Ok(SchnorrSignature { r_compressed, s: s_bytes })
+    Ok(SchnorrSignature {
+        r_compressed,
+        s: s_bytes,
+    })
 }
 
 pub fn schnorr_verify(
@@ -165,13 +171,19 @@ fn rfc6979_nonce(sk: &[u8; 32], msg: &[u8; 32]) -> Result<[u8; 32], DomError> {
     let mut v = [0x01u8; 32];
     let mut k = [0x00u8; 32];
     let mut mac = HmacSha256::new_from_slice(&k).unwrap();
-    mac.update(&v); mac.update(&[0x00]); mac.update(sk); mac.update(msg);
+    mac.update(&v);
+    mac.update(&[0x00]);
+    mac.update(sk);
+    mac.update(msg);
     k = mac.finalize().into_bytes().into();
     let mut mac = HmacSha256::new_from_slice(&k).unwrap();
     mac.update(&v);
     v = mac.finalize().into_bytes().into();
     let mut mac = HmacSha256::new_from_slice(&k).unwrap();
-    mac.update(&v); mac.update(&[0x01]); mac.update(sk); mac.update(msg);
+    mac.update(&v);
+    mac.update(&[0x01]);
+    mac.update(sk);
+    mac.update(msg);
     k = mac.finalize().into_bytes().into();
     let mut mac = HmacSha256::new_from_slice(&k).unwrap();
     mac.update(&v);
@@ -180,15 +192,20 @@ fn rfc6979_nonce(sk: &[u8; 32], msg: &[u8; 32]) -> Result<[u8; 32], DomError> {
         let mut mac = HmacSha256::new_from_slice(&k).unwrap();
         mac.update(&v);
         v = mac.finalize().into_bytes().into();
-        if is_scalar_valid(&v) { return Ok(v); }
+        if is_scalar_valid(&v) {
+            return Ok(v);
+        }
         let mut mac = HmacSha256::new_from_slice(&k).unwrap();
-        mac.update(&v); mac.update(&[0x00]);
+        mac.update(&v);
+        mac.update(&[0x00]);
         k = mac.finalize().into_bytes().into();
         let mut mac = HmacSha256::new_from_slice(&k).unwrap();
         mac.update(&v);
         v = mac.finalize().into_bytes().into();
     }
-    Err(DomError::Internal("RFC6979 failed after 100 attempts".into()))
+    Err(DomError::Internal(
+        "RFC6979 failed after 100 attempts".into(),
+    ))
 }
 
 fn scalar_add_mul(a: &[u8; 32], c: &[u8; 32], b: &[u8; 32]) -> Result<[u8; 32], DomError> {
@@ -200,14 +217,20 @@ fn scalar_add_mul(a: &[u8; 32], c: &[u8; 32], b: &[u8; 32]) -> Result<[u8; 32], 
 }
 
 fn is_scalar_valid(bytes: &[u8; 32]) -> bool {
-    if bytes.iter().all(|&b| b == 0) { return false; }
+    if bytes.iter().all(|&b| b == 0) {
+        return false;
+    }
     bytes_lt(bytes, &SECP256K1_N)
 }
 
 fn bytes_lt(a: &[u8; 32], b: &[u8; 32]) -> bool {
     for i in 0..32 {
-        if a[i] < b[i] { return true; }
-        if a[i] > b[i] { return false; }
+        if a[i] < b[i] {
+            return true;
+        }
+        if a[i] > b[i] {
+            return false;
+        }
     }
     false
 }
@@ -218,35 +241,45 @@ mod tests {
     const MAINNET_CHAIN_ID: [u8; 32] = [0x01u8; 32];
     const TESTNET_CHAIN_ID: [u8; 32] = [0x02u8; 32];
 
-    fn sk() -> SecretKey { SecretKey::from_bytes(&[1u8; 32]).unwrap() }
+    fn sk() -> SecretKey {
+        SecretKey::from_bytes(&[1u8; 32]).unwrap()
+    }
 
-    #[test] fn sign_verify_roundtrip() {
-        let sk = sk(); let pk = sk.public_key();
+    #[test]
+    fn sign_verify_roundtrip() {
+        let sk = sk();
+        let pk = sk.public_key();
         let sig = schnorr_sign(&sk, b"msg", &MAINNET_CHAIN_ID).unwrap();
         assert!(schnorr_verify(&sig, &pk, &MAINNET_CHAIN_ID, b"msg").unwrap());
     }
 
-    #[test] fn wrong_chain_id_fails_verify() {
-        let sk = sk(); let pk = sk.public_key();
+    #[test]
+    fn wrong_chain_id_fails_verify() {
+        let sk = sk();
+        let pk = sk.public_key();
         let sig = schnorr_sign(&sk, b"msg", &MAINNET_CHAIN_ID).unwrap();
         let valid = schnorr_verify(&sig, &pk, &TESTNET_CHAIN_ID, b"msg").unwrap();
         assert!(!valid);
     }
 
-    #[test] fn wrong_message_fails() {
-        let sk = sk(); let pk = sk.public_key();
+    #[test]
+    fn wrong_message_fails() {
+        let sk = sk();
+        let pk = sk.public_key();
         let sig = schnorr_sign(&sk, b"correct", &MAINNET_CHAIN_ID).unwrap();
         assert!(!schnorr_verify(&sig, &pk, &MAINNET_CHAIN_ID, b"wrong").unwrap());
     }
 
-    #[test] fn deterministic_signing() {
+    #[test]
+    fn deterministic_signing() {
         let sk = sk();
         let s1 = schnorr_sign(&sk, b"m", &MAINNET_CHAIN_ID).unwrap();
         let s2 = schnorr_sign(&sk, b"m", &MAINNET_CHAIN_ID).unwrap();
         assert_eq!(s1, s2);
     }
 
-    #[test] fn signature_fields_private() {
+    #[test]
+    fn signature_fields_private() {
         let sk = sk();
         let sig = schnorr_sign(&sk, b"msg", &MAINNET_CHAIN_ID).unwrap();
         let bytes = sig.to_bytes();
@@ -254,14 +287,17 @@ mod tests {
         assert_eq!(sig, sig2);
     }
 
-    #[test] fn invalid_s_zero_rejected() {
+    #[test]
+    fn invalid_s_zero_rejected() {
         let mut bytes = [0u8; 65];
         bytes[0] = 0x02;
         assert!(SchnorrSignature::from_bytes(&bytes).is_err());
     }
 
-    #[test] fn cross_chain_replay_prevented() {
-        let sk = sk(); let pk = sk.public_key();
+    #[test]
+    fn cross_chain_replay_prevented() {
+        let sk = sk();
+        let pk = sk.public_key();
         let sig = schnorr_sign(&sk, b"transfer 100 DOM", &MAINNET_CHAIN_ID).unwrap();
         let replay = schnorr_verify(&sig, &pk, &TESTNET_CHAIN_ID, b"transfer 100 DOM");
         assert!(matches!(replay, Ok(false) | Err(_)));

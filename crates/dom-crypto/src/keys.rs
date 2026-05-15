@@ -57,8 +57,7 @@ impl Scalar {
     /// Convert to a secp256k1 SecretKey.
     #[allow(dead_code)]
     pub(crate) fn to_secret_key(&self) -> secp256k1::SecretKey {
-        secp256k1::SecretKey::from_slice(&self.to_be_bytes())
-            .expect("Scalar is already validated")
+        secp256k1::SecretKey::from_slice(&self.to_be_bytes()).expect("Scalar is already validated")
     }
 }
 
@@ -92,7 +91,10 @@ impl SecretKey {
     /// Parse from 32 big-endian bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DomError> {
         if bytes.len() != 32 {
-            return Err(DomError::Malformed(format!("secret key must be 32 bytes, got {}", bytes.len())));
+            return Err(DomError::Malformed(format!(
+                "secret key must be 32 bytes, got {}",
+                bytes.len()
+            )));
         }
         secp256k1::SecretKey::from_slice(bytes)
             .map_err(|e| DomError::Invalid(format!("invalid secret key: {e}")))?;

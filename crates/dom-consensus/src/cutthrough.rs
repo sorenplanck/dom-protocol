@@ -13,9 +13,9 @@
 //!
 //! Duplicates are checked before AND after cut-through (RFC-0010 §3.2 steps 9a/9c).
 
+use super::transaction::{Transaction, TransactionInput, TransactionOutput};
 use dom_core::DomError;
 use std::collections::HashSet;
-use super::transaction::{Transaction, TransactionInput, TransactionOutput};
 
 /// Apply deterministic cut-through to a set of block transactions.
 ///
@@ -37,7 +37,9 @@ pub fn apply_cut_through(
         let mut seen = HashSet::new();
         for i in &all_inputs {
             if !seen.insert(*i.commitment.as_bytes()) {
-                return Err(DomError::Invalid("duplicate input before cut-through".into()));
+                return Err(DomError::Invalid(
+                    "duplicate input before cut-through".into(),
+                ));
             }
         }
     }
@@ -45,31 +47,38 @@ pub fn apply_cut_through(
         let mut seen = HashSet::new();
         for o in &all_outputs {
             if !seen.insert(*o.commitment.as_bytes()) {
-                return Err(DomError::Invalid("duplicate output before cut-through".into()));
+                return Err(DomError::Invalid(
+                    "duplicate output before cut-through".into(),
+                ));
             }
         }
     }
 
     // ── Step 9b: Deterministic cut-through ───────────────────────────────────
     // Build sets for intersection
-    let input_commits: HashSet<[u8; 33]> = all_inputs.iter()
+    let input_commits: HashSet<[u8; 33]> = all_inputs
+        .iter()
         .map(|i| *i.commitment.as_bytes())
         .collect();
-    let output_commits: HashSet<[u8; 33]> = all_outputs.iter()
+    let output_commits: HashSet<[u8; 33]> = all_outputs
+        .iter()
         .map(|o| *o.commitment.as_bytes())
         .collect();
 
     // eliminated = inputs ∩ outputs (same commitment appears as both)
-    let eliminated: HashSet<[u8; 33]> = input_commits.intersection(&output_commits)
+    let eliminated: HashSet<[u8; 33]> = input_commits
+        .intersection(&output_commits)
         .cloned()
         .collect();
 
     // Remove eliminated outputs AND eliminated inputs
-    let outputs_after: Vec<TransactionOutput> = all_outputs.into_iter()
+    let outputs_after: Vec<TransactionOutput> = all_outputs
+        .into_iter()
         .filter(|o| !eliminated.contains(o.commitment.as_bytes()))
         .collect();
 
-    let inputs_after: Vec<TransactionInput> = all_inputs.into_iter()
+    let inputs_after: Vec<TransactionInput> = all_inputs
+        .into_iter()
         .filter(|i| !eliminated.contains(i.commitment.as_bytes()))
         .collect();
 
@@ -78,7 +87,9 @@ pub fn apply_cut_through(
         let mut seen = HashSet::new();
         for i in &inputs_after {
             if !seen.insert(*i.commitment.as_bytes()) {
-                return Err(DomError::Invalid("duplicate input after cut-through".into()));
+                return Err(DomError::Invalid(
+                    "duplicate input after cut-through".into(),
+                ));
             }
         }
     }
@@ -86,7 +97,9 @@ pub fn apply_cut_through(
         let mut seen = HashSet::new();
         for o in &outputs_after {
             if !seen.insert(*o.commitment.as_bytes()) {
-                return Err(DomError::Invalid("duplicate output after cut-through".into()));
+                return Err(DomError::Invalid(
+                    "duplicate output after cut-through".into(),
+                ));
             }
         }
     }
@@ -96,26 +109,34 @@ pub fn apply_cut_through(
 
 #[cfg(test)]
 mod tests {
+    use super::super::transaction::{TransactionInput, TransactionKernel, TransactionOutput};
     use super::*;
     use dom_core::{Amount, KERNEL_FEAT_PLAIN};
     use dom_crypto::pedersen::Commitment;
-    use super::super::transaction::{TransactionKernel, TransactionOutput, TransactionInput};
 
     fn point(byte: u8) -> Commitment {
         // Use real secp256k1 points derived deterministically
         // G is 0x02 79BE..., we use different valid points for testing
         let sk = secp256k1::SecretKey::from_slice(&{
-            let mut b = [0u8; 32]; b[31] = byte.max(1); b
-        }).unwrap();
+            let mut b = [0u8; 32];
+            b[31] = byte.max(1);
+            b
+        })
+        .unwrap();
         let pk = secp256k1::PublicKey::from_secret_key(secp256k1::SECP256K1, &sk);
         Commitment::from_compressed_bytes(&pk.serialize()).unwrap()
     }
 
     fn output(byte: u8) -> TransactionOutput {
-        TransactionOutput { commitment: point(byte), proof: vec![0u8; 32] }
+        TransactionOutput {
+            commitment: point(byte),
+            proof: vec![0u8; 32],
+        }
     }
     fn input(byte: u8) -> TransactionInput {
-        TransactionInput { commitment: point(byte) }
+        TransactionInput {
+            commitment: point(byte),
+        }
     }
     fn kernel() -> TransactionKernel {
         TransactionKernel {
@@ -141,7 +162,7 @@ mod tests {
             offset: [0u8; 32],
         };
         let tx2 = Transaction {
-            inputs: vec![input(1)],  // spends C
+            inputs: vec![input(1)],   // spends C
             outputs: vec![output(2)], // creates D
             kernels: vec![kernel()],
             offset: [0u8; 32],
@@ -171,7 +192,7 @@ mod tests {
     #[test]
     fn unmatched_outputs_and_inputs_preserved() {
         let tx = Transaction {
-            inputs: vec![input(10)],  // external spend (no matching output)
+            inputs: vec![input(10)],   // external spend (no matching output)
             outputs: vec![output(20)], // new output (no matching input)
             kernels: vec![kernel()],
             offset: [0u8; 32],

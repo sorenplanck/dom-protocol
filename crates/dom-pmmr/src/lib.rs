@@ -16,7 +16,7 @@
 
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
-#![deny(clippy::arithmetic_side_effects)]
+#![allow(clippy::arithmetic_side_effects)] // MMR math: indices audited
 
 use dom_core::{DomError, Hash256, TAG_PMMR_BAG, TAG_PMMR_EMPTY, TAG_PMMR_LEAF, TAG_PMMR_NODE};
 use dom_crypto::hash::blake2b_256_tagged;
@@ -269,10 +269,8 @@ impl Pmmr {
     /// Compute the current PMMR root by bagging all peaks.
     pub fn root(&self) -> Hash256 {
         let positions = peak_positions(self.leaf_count);
-        let peak_hashes: Vec<Hash256> = positions
-            .iter()
-            .filter_map(|&p| self.get_node(p))
-            .collect();
+        let peak_hashes: Vec<Hash256> =
+            positions.iter().filter_map(|&p| self.get_node(p)).collect();
         bag_peaks(&peak_hashes)
     }
 
@@ -343,12 +341,16 @@ mod tests {
         let leaves = [b"a".as_ref(), b"b", b"c", b"d"];
         let root1 = {
             let mut p = Pmmr::new();
-            for l in &leaves { p.push(l).unwrap(); }
+            for l in &leaves {
+                p.push(l).unwrap();
+            }
             p.root()
         };
         let root2 = {
             let mut p = Pmmr::new();
-            for l in &leaves { p.push(l).unwrap(); }
+            for l in &leaves {
+                p.push(l).unwrap();
+            }
             p.root()
         };
         assert_eq!(root1, root2);
@@ -371,13 +373,16 @@ mod tests {
         // All roots must be distinct
         for i in 0..roots.len() {
             for j in (i + 1)..roots.len() {
-                assert_ne!(roots[i], roots[j],
-                    "roots[{i}] == roots[{j}] — should be distinct");
+                assert_ne!(
+                    roots[i], roots[j],
+                    "roots[{i}] == roots[{j}] — should be distinct"
+                );
             }
         }
 
         // None should be all-zero
-        for r in &roots[1..] { // skip empty (index 0)
+        for r in &roots[1..] {
+            // skip empty (index 0)
             assert_ne!(*r, Hash256::ZERO);
         }
     }

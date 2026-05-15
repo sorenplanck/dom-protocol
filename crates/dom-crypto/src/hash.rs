@@ -4,8 +4,8 @@
 //! All consensus hash operations use domain-separated tagged hashing
 //! to prevent cross-context hash collisions.
 
-use blake2::{Blake2b, Digest};
 use blake2::digest::consts::U32;
+use blake2::{Blake2b, Digest};
 use dom_core::Hash256;
 
 type Blake2b256 = Blake2b<U32>;

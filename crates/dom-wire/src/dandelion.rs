@@ -44,7 +44,9 @@ pub struct DandelionRouter {
 impl DandelionRouter {
     /// Create a new router.
     pub fn new() -> Self {
-        Self { stem_txs: HashMap::new() }
+        Self {
+            stem_txs: HashMap::new(),
+        }
     }
 
     /// Decide the routing phase for a new transaction.
@@ -69,10 +71,13 @@ impl DandelionRouter {
         let idx = (rand_f64() * available_peers.len() as f64) as usize;
         let stem_peer = available_peers[idx.min(available_peers.len() - 1)].clone();
 
-        self.stem_txs.insert(tx_hash, StemState {
-            stem_start: Instant::now(),
-            stem_peer: stem_peer.clone(),
-        });
+        self.stem_txs.insert(
+            tx_hash,
+            StemState {
+                stem_start: Instant::now(),
+                stem_peer: stem_peer.clone(),
+            },
+        );
 
         DandelionPhase::Stem
     }
@@ -94,7 +99,8 @@ impl DandelionRouter {
             }
         }
         // Route as new tx but exclude the sending peer
-        let peers: Vec<String> = available_peers.iter()
+        let peers: Vec<String> = available_peers
+            .iter()
             .filter(|p| p.as_str() != from_peer)
             .cloned()
             .collect();
@@ -122,7 +128,9 @@ impl DandelionRouter {
 }
 
 impl Default for DandelionRouter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 fn rand_f64() -> f64 {

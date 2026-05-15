@@ -24,12 +24,12 @@
 // unsafe allowed for lmdb API
 #![deny(missing_docs)]
 
-pub mod utxo;
 pub mod block_store;
-pub mod peer_store;
 pub mod db;
+pub mod peer_store;
+pub mod utxo;
 
-pub use db::DomStore;
-pub use utxo::{UtxoEntry, UtxoSet};
 pub use block_store::BlockStore;
+pub use db::DomStore;
 pub use peer_store::PeerAddr;
+pub use utxo::{UtxoEntry, UtxoSet};

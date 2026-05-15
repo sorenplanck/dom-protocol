@@ -4,10 +4,10 @@
 //! DOM_RFC_0007_Validation_Order.md — Block validation steps 1-7.
 
 use dom_core::{
-    BlockHeight, DomError, Hash256, Timestamp,
-    MAX_FUTURE_BLOCK_TIME, MEDIAN_TIME_WINDOW, PROTOCOL_VERSION,
+    BlockHeight, DomError, Hash256, Timestamp, MAX_FUTURE_BLOCK_TIME, MEDIAN_TIME_WINDOW,
+    PROTOCOL_VERSION,
 };
-use dom_pow::{CompactTarget, hash_meets_target};
+use dom_pow::{hash_meets_target, CompactTarget};
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
 use primitive_types::U256;
 
@@ -121,13 +121,13 @@ pub fn validate_header_syntax(header: &BlockHeader) -> Result<(), DomError> {
     // Genesis must have zero prev_hash
     if header.height == BlockHeight::GENESIS && header.prev_hash != Hash256::ZERO {
         return Err(DomError::Invalid(
-            "genesis block must have zero prev_hash".into()
+            "genesis block must have zero prev_hash".into(),
         ));
     }
     // Non-genesis must have non-zero prev_hash
     if header.height != BlockHeight::GENESIS && header.prev_hash == Hash256::ZERO {
         return Err(DomError::Invalid(
-            "non-genesis block must have non-zero prev_hash".into()
+            "non-genesis block must have non-zero prev_hash".into(),
         ));
     }
     // AUDIT: total_kernel_offset must be a canonical scalar in [0, n-1]
@@ -141,33 +141,31 @@ pub fn validate_header_syntax(header: &BlockHeader) -> Result<(), DomError> {
 fn validate_kernel_offset_canonical(offset: &[u8; 32]) -> Result<(), DomError> {
     // secp256k1 order n (big-endian)
     const SECP256K1_N: [u8; 32] = [
-        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
-        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFE,
-        0xBA,0xAE,0xDC,0xE6,0xAF,0x48,0xA0,0x3B,
-        0xBF,0xD2,0x5E,0x8C,0xD0,0x36,0x41,0x41,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36,
+        0x41, 0x41,
     ];
     // offset >= n is non-canonical (zero is valid — zero offset means no graph privacy)
     for i in 0..32 {
-        if offset[i] < SECP256K1_N[i] { return Ok(()); }
+        if offset[i] < SECP256K1_N[i] {
+            return Ok(());
+        }
         if offset[i] > SECP256K1_N[i] {
             return Err(DomError::Malformed(
-                "total_kernel_offset >= secp256k1 order n — non-canonical scalar".into()
+                "total_kernel_offset >= secp256k1 order n — non-canonical scalar".into(),
             ));
         }
     }
     // offset == n: also non-canonical (must be in [0, n-1])
     Err(DomError::Malformed(
-        "total_kernel_offset == secp256k1 order n — non-canonical scalar".into()
+        "total_kernel_offset == secp256k1 order n — non-canonical scalar".into(),
     ))
 }
 
 /// Check that the block timestamp is not too far in the future (step 5).
 ///
 /// Returns TemporarilyInvalid if timestamp > now + MAX_FUTURE_BLOCK_TIME.
-pub fn validate_future_timestamp(
-    header: &BlockHeader,
-    now: Timestamp,
-) -> Result<(), DomError> {
+pub fn validate_future_timestamp(header: &BlockHeader, now: Timestamp) -> Result<(), DomError> {
     let limit = now
         .checked_add_secs(MAX_FUTURE_BLOCK_TIME)
         .ok_or_else(|| DomError::Internal("timestamp limit overflow".into()))?;
@@ -211,12 +209,12 @@ pub fn validate_median_time_past(
 
 /// Validate PoW (step 6): block hash must meet the target.
 pub fn validate_pow(header: &BlockHeader, block_hash: &Hash256) -> Result<(), DomError> {
-    let target = header.target.to_target()
+    let target = header
+        .target
+        .to_target()
         .map_err(|e| DomError::Invalid(format!("invalid compact target: {e}")))?;
     if !hash_meets_target(block_hash.as_bytes(), &target) {
-        return Err(DomError::Invalid(
-            "block hash does not meet target".into()
-        ));
+        return Err(DomError::Invalid("block hash does not meet target".into()));
     }
     Ok(())
 }
@@ -267,13 +265,13 @@ mod tests {
     fn future_timestamp_rejected() {
         let h = dummy_header();
         let now = Timestamp(100); // now is before block timestamp
-        // block timestamp 1_704_067_200 >> now 100 + MAX_FUTURE_BLOCK_TIME
+                                  // block timestamp 1_704_067_200 >> now 100 + MAX_FUTURE_BLOCK_TIME
         assert!(validate_future_timestamp(&h, now).is_err());
     }
 
     #[test]
     fn header_serialization_roundtrip() {
-        use dom_serialization::{DomSerialize, DomDeserialize};
+        use dom_serialization::{DomDeserialize, DomSerialize};
         let h = dummy_header();
         let bytes = h.to_bytes().unwrap();
         let h2 = BlockHeader::from_bytes(&bytes).unwrap();
