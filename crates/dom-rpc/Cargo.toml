@@ -8,5 +8,23 @@ authors.workspace    = true
 license.workspace    = true
 
 [dependencies]
-dom-core.workspace = true
-thiserror.workspace = true
+tower = { version = "0.4", features = ["timeout", "limit", "util"] }
+dom-core.workspace      = true
+dom-mempool.workspace   = true
+dom-consensus.workspace = true
+dom-serialization.workspace = true
+thiserror.workspace     = true
+tokio.workspace         = true
+serde.workspace         = true
+serde_json.workspace    = true
+tracing.workspace       = true
+hex.workspace           = true
+axum = { version = "0.7", features = ["json"] }
+tower_governor = "0.4"
+tower-http = { version = "0.5", features = ["cors", "timeout", "limit"] }
+rand = "0.8"
+governor = "0.6"
+
+[dev-dependencies]
+http-body-util = "0.1"
+
