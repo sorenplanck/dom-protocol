@@ -241,7 +241,7 @@ fn mine_blocking(
                 randomx_hash: Hash256::ZERO,
             },
         };
-        let preimage = serialize_preimage(&header)?;
+        let preimage = header.pow_preimage();
         let hash = randomx_hash(&vm, &preimage)?;
         if hash_meets_target(&hash, &target) {
             let mut final_header = header;
@@ -262,24 +262,6 @@ fn randomx_hash(vm: &randomx_rs::RandomXVM, preimage: &[u8]) -> Result<[u8; 32],
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&v);
     Ok(arr)
-}
-
-fn serialize_preimage(h: &BlockHeader) -> Result<Vec<u8>, DomError> {
-    let mut out = Vec::with_capacity(200);
-    out.extend_from_slice(&h.version.to_le_bytes());
-    out.extend_from_slice(h.prev_hash.as_bytes());
-    out.extend_from_slice(&h.height.0.to_le_bytes());
-    out.extend_from_slice(&h.timestamp.0.to_le_bytes());
-    out.extend_from_slice(h.output_root.as_bytes());
-    out.extend_from_slice(h.kernel_root.as_bytes());
-    out.extend_from_slice(h.rangeproof_root.as_bytes());
-    out.extend_from_slice(&h.total_kernel_offset);
-    out.extend_from_slice(&h.target.0.to_le_bytes());
-    let mut td = [0u8; 32];
-    h.total_difficulty.to_big_endian(&mut td);
-    out.extend_from_slice(&td);
-    out.extend_from_slice(&h.pow.nonce.to_le_bytes());
-    Ok(out)
 }
 
 fn target_to_compact(t: &[u8; 32]) -> u32 {

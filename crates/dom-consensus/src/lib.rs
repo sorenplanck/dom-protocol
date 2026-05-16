@@ -29,7 +29,7 @@
 //! 3.  parent lookup
 //! 4.  median-time-past
 //! 5.  future timestamp
-//! 6.  PoW validation  ← REQUIRES randomx-rs [RELEASE BLOCKER]
+//! 6.  PoW validation (RandomX, RFC-0011) — active
 //! 7.  total difficulty
 //! 8.  transaction validation (each tx, steps above)
 //!     9a. duplicate detection before cut-through

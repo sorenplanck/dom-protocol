@@ -7,7 +7,7 @@ use dom_consensus::block::{
 };
 use dom_consensus::{derive_chain_id, validate_block, Block, ValidationContext};
 use dom_core::{BlockHeight, DomError, Hash256, Timestamp, NETWORK_MAGIC_MAINNET};
-use dom_pow::{target_to_difficulty, AsertAnchor, CompactTarget};
+use dom_pow::{randomx_seed_height, target_to_difficulty, AsertAnchor, CompactTarget};
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::DomStore;
 use primitive_types::U256;
@@ -92,7 +92,8 @@ impl ChainState {
         }
 
         validate_future_timestamp(header, now)?;
-        validate_pow(header, &block_hash)?;
+        let seed = self.compute_randomx_seed(header.height.0)?;
+        validate_pow(header, &seed)?;
 
         let parent_difficulty = if header.height == BlockHeight::GENESIS {
             U256::zero()
@@ -211,12 +212,24 @@ impl ChainState {
         header: &BlockHeader,
         now: Timestamp,
     ) -> Result<(), DomError> {
-        let header_bytes = header.to_bytes()?;
-        let block_hash = compute_block_hash(&header_bytes);
         validate_header_syntax(header)?;
         validate_future_timestamp(header, now)?;
-        validate_pow(header, &block_hash)?;
+        let seed = self.compute_randomx_seed(header.height.0)?;
+        validate_pow(header, &seed)?;
         Ok(())
+    }
+
+    /// Compute the RandomX seed for a block at `height`.
+    ///
+    /// Seed = hash of block at `randomx_seed_height(height)`.
+    /// For early blocks where the seed_height has no block yet (chain bootstrap),
+    /// returns [0u8; 32] by convention.
+    fn compute_randomx_seed(&self, height: u64) -> Result<[u8; 32], DomError> {
+        let seed_height = randomx_seed_height(height);
+        match self.store.get_hash_at_height(seed_height)? {
+            Some(hash) => Ok(hash),
+            None => Ok([0u8; 32]),
+        }
     }
 
     fn get_recent_timestamps(

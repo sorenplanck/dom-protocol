@@ -7,7 +7,7 @@ use dom_core::{
     BlockHeight, DomError, Hash256, Timestamp, MAX_FUTURE_BLOCK_TIME, MEDIAN_TIME_WINDOW,
     PROTOCOL_VERSION,
 };
-use dom_pow::{hash_meets_target, CompactTarget};
+use dom_pow::CompactTarget;
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
 use primitive_types::U256;
 
@@ -40,6 +40,32 @@ pub struct BlockHeader {
     pub total_difficulty: U256,
     /// Proof of work data.
     pub pow: ProofOfWork,
+}
+
+impl BlockHeader {
+    /// Canonical byte sequence hashed by RandomX for proof-of-work.
+    ///
+    /// This MUST match exactly between miner and validator or consensus breaks.
+    /// Field order: version, prev_hash, height, timestamp, output_root,
+    /// kernel_root, rangeproof_root, total_kernel_offset, target,
+    /// total_difficulty (32-byte big-endian), nonce.
+    pub fn pow_preimage(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(200);
+        out.extend_from_slice(&self.version.to_le_bytes());
+        out.extend_from_slice(self.prev_hash.as_bytes());
+        out.extend_from_slice(&self.height.0.to_le_bytes());
+        out.extend_from_slice(&self.timestamp.0.to_le_bytes());
+        out.extend_from_slice(self.output_root.as_bytes());
+        out.extend_from_slice(self.kernel_root.as_bytes());
+        out.extend_from_slice(self.rangeproof_root.as_bytes());
+        out.extend_from_slice(&self.total_kernel_offset);
+        out.extend_from_slice(&self.target.0.to_le_bytes());
+        let mut td = [0u8; 32];
+        self.total_difficulty.to_big_endian(&mut td);
+        out.extend_from_slice(&td);
+        out.extend_from_slice(&self.pow.nonce.to_le_bytes());
+        out
+    }
 }
 
 /// Proof of work attachment to a block header.
@@ -208,13 +234,26 @@ pub fn validate_median_time_past(
 }
 
 /// Validate PoW (step 6): block hash must meet the target.
-pub fn validate_pow(header: &BlockHeader, block_hash: &Hash256) -> Result<(), DomError> {
+/// Validate proof-of-work via RandomX.
+///
+/// `seed` is the 32-byte hash of the block at `randomx_seed_height(header.height)`.
+/// For early blocks (height < 2048), the seed is [0u8; 32] by convention.
+///
+/// Verifies:
+///   1. RandomX(seed, header.pow_preimage()) == header.pow.randomx_hash
+///   2. header.pow.randomx_hash meets the target
+pub fn validate_pow(header: &BlockHeader, seed: &[u8; 32]) -> Result<(), DomError> {
     let target = header
         .target
         .to_target()
         .map_err(|e| DomError::Invalid(format!("invalid compact target: {e}")))?;
-    if !hash_meets_target(block_hash.as_bytes(), &target) {
-        return Err(DomError::Invalid("block hash does not meet target".into()));
+    let preimage = header.pow_preimage();
+    let claimed_hash = header.pow.randomx_hash.as_bytes();
+    let ok = dom_pow::validate_pow_randomx(&preimage, claimed_hash, seed, &target)?;
+    if !ok {
+        return Err(DomError::Invalid(
+            "proof-of-work invalid: RandomX hash mismatch or does not meet target".into(),
+        ));
     }
     Ok(())
 }
