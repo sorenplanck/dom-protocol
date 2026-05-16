@@ -521,9 +521,15 @@ mod tests {
             );
             Ok(hash)
         }
-        fn get_block_header(&self, _: &[u8; 32]) -> Option<Vec<u8>> { None }
-        fn get_block_hash_at_height(&self, _: u64) -> Option<[u8; 32]> { None }
-        fn get_utxo(&self, _: &[u8; 33]) -> Option<UtxoInfo> { None }
+        fn get_block_header(&self, _: &[u8; 32]) -> Option<Vec<u8>> {
+            None
+        }
+        fn get_block_hash_at_height(&self, _: u64) -> Option<[u8; 32]> {
+            None
+        }
+        fn get_utxo(&self, _: &[u8; 33]) -> Option<UtxoInfo> {
+            None
+        }
     }
 
     struct RejectNode;
@@ -543,9 +549,15 @@ mod tests {
         fn submit_tx(&self, _: Vec<u8>) -> Result<[u8; 32], RpcError> {
             Err(RpcError::Rejected("already in mempool".to_owned()))
         }
-        fn get_block_header(&self, _: &[u8; 32]) -> Option<Vec<u8>> { None }
-        fn get_block_hash_at_height(&self, _: u64) -> Option<[u8; 32]> { None }
-        fn get_utxo(&self, _: &[u8; 33]) -> Option<UtxoInfo> { None }
+        fn get_block_header(&self, _: &[u8; 32]) -> Option<Vec<u8>> {
+            None
+        }
+        fn get_block_hash_at_height(&self, _: u64) -> Option<[u8; 32]> {
+            None
+        }
+        fn get_utxo(&self, _: &[u8; 33]) -> Option<UtxoInfo> {
+            None
+        }
     }
 
     struct OverloadNode;
@@ -565,9 +577,15 @@ mod tests {
         fn submit_tx(&self, _: Vec<u8>) -> Result<[u8; 32], RpcError> {
             Err(RpcError::Overloaded("mempool full".to_owned()))
         }
-        fn get_block_header(&self, _: &[u8; 32]) -> Option<Vec<u8>> { None }
-        fn get_block_hash_at_height(&self, _: u64) -> Option<[u8; 32]> { None }
-        fn get_utxo(&self, _: &[u8; 33]) -> Option<UtxoInfo> { None }
+        fn get_block_header(&self, _: &[u8; 32]) -> Option<Vec<u8>> {
+            None
+        }
+        fn get_block_hash_at_height(&self, _: u64) -> Option<[u8; 32]> {
+            None
+        }
+        fn get_utxo(&self, _: &[u8; 33]) -> Option<UtxoInfo> {
+            None
+        }
     }
 
     async fn body_json(r: axum::response::Response) -> Value {

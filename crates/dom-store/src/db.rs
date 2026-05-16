@@ -124,7 +124,10 @@ impl DomStore {
 
     /// Get a UTXO entry by commitment (33-byte compressed point).
     /// Returns None if the UTXO does not exist (spent or never created).
-    pub fn get_utxo(&self, commitment: &[u8; 33]) -> Result<Option<crate::utxo::UtxoEntry>, DomError> {
+    pub fn get_utxo(
+        &self,
+        commitment: &[u8; 33],
+    ) -> Result<Option<crate::utxo::UtxoEntry>, DomError> {
         let txn = self
             .env
             .begin_ro_txn()

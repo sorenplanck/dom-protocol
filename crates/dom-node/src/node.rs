@@ -185,7 +185,10 @@ impl dom_rpc::NodeHandle for DomNode {
     }
 
     fn mempool_tx_hashes(&self) -> Vec<[u8; 32]> {
-        self.mempool.try_lock().map(|m| m.all_hashes()).unwrap_or_default()
+        self.mempool
+            .try_lock()
+            .map(|m| m.all_hashes())
+            .unwrap_or_default()
     }
 
     fn get_mempool_tx(&self, hash: &[u8; 32]) -> Option<dom_rpc::MempoolTxInfo> {
@@ -206,14 +209,16 @@ impl dom_rpc::NodeHandle for DomNode {
         let tx = dom_consensus::Transaction::from_bytes(&tx_bytes)
             .map_err(|e| dom_rpc::RpcError::InvalidHex(format!("invalid tx: {e}")))?;
         let hash = {
-            let mut data = tx_bytes.clone();
+            let data = tx_bytes.clone();
             *dom_crypto::hash::blake2b_256(&data).as_bytes()
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let mut pool = self.mempool.try_lock()
+        let mut pool = self
+            .mempool
+            .try_lock()
             .map_err(|_| dom_rpc::RpcError::Internal("mempool locked".into()))?;
         pool.accept_tx(tx, hash, now)
             .map_err(|e| dom_rpc::RpcError::Rejected(e.to_string()))?;
@@ -243,15 +248,20 @@ impl dom_rpc::NodeHandle for DomNode {
     }
 
     fn get_peers(&self) -> Vec<dom_rpc::PeerInfo> {
-        let Ok(peers) = self.peers.try_lock() else { return Vec::new() };
-        peers.connected_peers().into_iter().map(|addr| dom_rpc::PeerInfo {
-            addr,
-            direction: "inbound".into(),
-            connected_since: 0,
-        }).collect()
+        let Ok(peers) = self.peers.try_lock() else {
+            return Vec::new();
+        };
+        peers
+            .connected_peers()
+            .into_iter()
+            .map(|addr| dom_rpc::PeerInfo {
+                addr,
+                direction: "inbound".into(),
+                connected_since: 0,
+            })
+            .collect()
     }
 }
-
 
 async fn handle_inbound(
     mut stream: tokio::net::TcpStream,

@@ -11,7 +11,7 @@ use dom_pow::{target_to_difficulty, AsertAnchor, CompactTarget};
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::DomStore;
 use primitive_types::U256;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 pub struct ChainState {
     pub store: DomStore,
@@ -125,22 +125,66 @@ impl ChainState {
             now,
         };
 
-        // Temporary defensive mode: full block validation failures are logged but
-        // not yet rejected until the miner emits cryptographically valid coinbase
-        // data, transaction roots, and PMMR commitments in a later hardening step.
-        if let Err(e) = validate_block(block, &ctx) {
-            warn!(
-                "full block validation failed in warn-only mode: hash={}, error={}",
-                block_hash, e
-            );
+        validate_block(block, &ctx).map_err(|e| {
+            DomError::Invalid(format!(
+                "block validation failed: hash={block_hash}, error={e}"
+            ))
+        })?;
+
+        // Validate every input exists in UTXO set and coinbase outputs are mature.
+        // This protects against double-spend and immature coinbase spend (reorg risk).
+        for tx in &block.transactions {
+            for input in &tx.inputs {
+                let commitment_bytes = input.commitment.as_bytes();
+                let entry = self.store.get_utxo(commitment_bytes)?.ok_or_else(|| {
+                    DomError::Invalid(format!(
+                        "input commitment not found in UTXO set: {}",
+                        hex::encode(commitment_bytes)
+                    ))
+                })?;
+                if entry.is_coinbase && !entry.is_mature(header.height.0) {
+                    return Err(DomError::Invalid(format!(
+                        "immature coinbase spend at height {} (created at {})",
+                        header.height.0, entry.block_height
+                    )));
+                }
+            }
+        }
+
+        // Build UTXO changeset from block contents.
+        // Coinbase output is marked is_coinbase=true (subject to maturity rule).
+        let mut new_utxos: Vec<([u8; 33], Vec<u8>)> = Vec::new();
+        let coinbase_entry = dom_store::utxo::UtxoEntry {
+            block_height: header.height.0,
+            is_coinbase: true,
+            proof: block.coinbase.output.proof.clone(),
+        };
+        new_utxos.push((
+            *block.coinbase.output.commitment.as_bytes(),
+            coinbase_entry.to_bytes(),
+        ));
+
+        let mut spent_utxos: Vec<[u8; 33]> = Vec::new();
+        for tx in &block.transactions {
+            for input in &tx.inputs {
+                spent_utxos.push(*input.commitment.as_bytes());
+            }
+            for output in &tx.outputs {
+                let entry = dom_store::utxo::UtxoEntry {
+                    block_height: header.height.0,
+                    is_coinbase: false,
+                    proof: output.proof.clone(),
+                };
+                new_utxos.push((*output.commitment.as_bytes(), entry.to_bytes()));
+            }
         }
 
         self.store.commit_block(
             block_hash.as_bytes(),
             header.height.0,
             &header_bytes,
-            &[],
-            &[],
+            &new_utxos,
+            &spent_utxos,
             &[],
         )?;
 
