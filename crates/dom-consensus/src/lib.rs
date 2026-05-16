@@ -16,8 +16,8 @@
 //! 3.  scalar validation
 //! 4.  point validation
 //! 5.  duplicate detection
-//! 6.  Bulletproofs+ validation  ← REQUIRES secp256k1-zkp [RELEASE BLOCKER]
-//! 7.  kernel signature validation ← REQUIRES secp256k1-zkp [RELEASE BLOCKER]
+//! 6.  Bulletproofs+ range proof validation (via secp256k1-zkp)
+//! 7.  kernel signature validation (Schnorr via secp256k1-zkp)
 //! 8.  fee calculation
 //! 9.  weight calculation
 //! 10. transaction balance equation
@@ -75,9 +75,9 @@ pub struct ValidationContext {
 /// This is the ONLY function that should be called for transaction validation.
 /// It calls every validation step — structural, cryptographic, and arithmetic.
 ///
-/// Steps 6 (Bulletproofs+) and 7 (Schnorr) return errors until
-/// secp256k1-zkp is integrated. These are RELEASE BLOCKERS that prevent
-/// testnet launch, not optional checks.
+/// All cryptographic steps (PoW, range proofs, kernel signatures) are
+/// active. Any failure returns the appropriate DomError variant which
+/// determines peer ban scoring.
 pub fn validate_transaction(tx: &Transaction, ctx: &ValidationContext) -> Result<(), DomError> {
     // Step 1: canonical decode — done by caller (DomDeserialize::from_bytes)
 
@@ -92,14 +92,10 @@ pub fn validate_transaction(tx: &Transaction, ctx: &ValidationContext) -> Result
 
     // Step 5: duplicate detection — inside validate_transaction_structure
 
-    // Step 6: Bulletproofs+ range proof validation [RELEASE BLOCKER]
-    validate_range_proofs(tx).map_err(|e| match e {
-        // Propagate Internal errors (release blocker) distinctly
-        DomError::Internal(_) => e,
-        other => DomError::Invalid(format!("range proof: {other}")),
-    })?;
+    // Step 6: Bulletproofs+ range proof validation
+    validate_range_proofs(tx)?;
 
-    // Step 7: Kernel signature validation [RELEASE BLOCKER]
+    // Step 7: Kernel signature validation (Schnorr)
     validate_kernel_signatures(tx, &ctx.chain_id)?;
 
     // Step 8: fee calculation (checked sum, no overflow)
@@ -125,8 +121,7 @@ pub fn validate_transaction(tx: &Transaction, ctx: &ValidationContext) -> Result
 /// Each kernel must have a valid Schnorr signature over its kernel_message
 /// which includes the chain_id (replay protection).
 ///
-/// RELEASE BLOCKER: requires secp256k1-zkp for production Schnorr verify.
-/// Currently returns Internal error until integrated.
+/// Uses dom_crypto::schnorr_verify which is backed by secp256k1-zkp.
 pub fn validate_kernel_signatures(tx: &Transaction, chain_id: &[u8; 32]) -> Result<(), DomError> {
     use dom_core::TAG_KERNEL_MSG;
     use dom_crypto::hash::blake2b_256_tagged;
@@ -163,7 +158,6 @@ pub fn validate_kernel_signatures(tx: &Transaction, chain_id: &[u8; 32]) -> Resu
                 )));
             }
             Err(DomError::Internal(msg)) => {
-                // secp256k1-zkp not yet integrated — propagate as release blocker
                 return Err(DomError::Internal(format!("kernel sig: {msg}")));
             }
             Err(e) => return Err(e),
@@ -177,7 +171,7 @@ pub fn validate_kernel_signatures(tx: &Transaction, chain_id: &[u8; 32]) -> Resu
 /// Returns Ok(()) only if every step passes. Any failure returns the
 /// appropriate DomError variant which determines peer ban scoring.
 ///
-/// Steps marked RELEASE BLOCKER will return DomError::Internal until
+/// All crypto steps active — any failure is a real consensus rejection, until
 /// the required dependencies are integrated. These MUST NOT be
 /// bypassed in production builds.
 pub fn validate_block_transactions(
@@ -279,34 +273,20 @@ mod tests {
     }
 
     #[test]
-    fn validate_transaction_calls_all_steps() {
+    fn validate_transaction_rejects_minimal_tx() {
+        // minimal_tx() builds a transaction with zeroed range proof bytes and
+        // zeroed Schnorr signature bytes. Both are cryptographically invalid,
+        // so validate_transaction MUST reject it.
+        //
+        // This test guards against accidental regression where a validation
+        // step is silently removed or short-circuited to Ok(()).
         let tx = minimal_tx();
         let ctx = test_ctx();
         let result = validate_transaction(&tx, &ctx);
-        // With release blockers (Bulletproofs not integrated), we expect
-        // Internal error from step 6 or step 7 — NOT a silent Ok(())
-        match result {
-            Ok(()) => {
-                panic!("validate_transaction must not return Ok() with release blockers present")
-            }
-            Err(DomError::Internal(msg)) => {
-                // Expected: release blocker error propagated correctly
-                assert!(
-                    msg.contains("RELEASE BLOCKER")
-                        || msg.contains("secp256k1-zkp")
-                        || msg.contains("Bulletproofs")
-                        || msg.contains("RandomX"),
-                    "Internal error must mention release blocker, got: {msg}"
-                );
-            }
-            Err(DomError::Invalid(msg)) => {
-                // Also acceptable if structural validation catches something first
-                // (e.g., invalid signature bytes)
-            }
-            Err(other) => {
-                // Any error is acceptable — the key invariant is that Ok(()) is NOT returned
-            }
-        }
+        assert!(
+            result.is_err(),
+            "validate_transaction must reject a transaction with invalid crypto, got Ok(())"
+        );
     }
 
     #[test]
