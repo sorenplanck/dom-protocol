@@ -4,17 +4,16 @@
 mod middleware;
 mod token;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use dom_consensus::transaction::Transaction;
 use dom_core::PROTOCOL_VERSION;
-use dom_serialization::DomDeserialize;
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::Arc};
+use tracing::{error, info, warn};
 
 pub trait NodeHandle: Send + Sync + 'static {
     fn chain_height(&self) -> u64;
@@ -40,7 +39,7 @@ pub struct MempoolTxInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerInfo {
     pub addr: String,
-    pub direction: String, // "inbound" | "outbound"
+    pub direction: String,
     pub connected_since: u64,
 }
 
@@ -52,8 +51,21 @@ pub enum RpcError {
     InvalidTx(String),
     #[error("rejected: {0}")]
     Rejected(String),
+    #[error("overloaded: {0}")]
+    Overloaded(String),
     #[error("internal: {0}")]
     Internal(String),
+}
+
+impl RpcError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Self::InvalidHex(_) | Self::InvalidTx(_) => StatusCode::BAD_REQUEST,
+            Self::Rejected(_) => StatusCode::CONFLICT,
+            Self::Overloaded(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -63,10 +75,7 @@ struct ErrorResponse {
 
 impl IntoResponse for RpcError {
     fn into_response(self) -> Response {
-        let status = match self {
-            Self::InvalidHex(_) | Self::InvalidTx(_) | Self::Rejected(_) => StatusCode::BAD_REQUEST,
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        };
+        let status = self.status_code();
         (
             status,
             Json(ErrorResponse {
@@ -90,9 +99,26 @@ struct StatusResponse {
     network: &'static str,
 }
 
+#[derive(Debug, Deserialize)]
+struct MempoolQuery {
+    #[serde(default)]
+    page: usize,
+    #[serde(default = "default_mempool_limit")]
+    limit: usize,
+}
+
+fn default_mempool_limit() -> usize {
+    100
+}
+
+const MEMPOOL_MAX_LIMIT: usize = 1_000;
+
 #[derive(Debug, Serialize)]
 struct MempoolResponse {
     count: usize,
+    total: usize,
+    page: usize,
+    limit: usize,
     tx_hashes: Vec<String>,
 }
 
@@ -129,25 +155,22 @@ use std::time::Duration;
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 
 pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Router {
-    let body_limit = RequestBodyLimitLayer::new(1_024_000); // 1MB
+    let body_limit = RequestBodyLimitLayer::new(1_024_000);
     let timeout = TimeoutLayer::new(Duration::from_secs(30));
 
     let rate_limit_read = middleware::rate_limit_read();
     let rate_limit_submit = middleware::rate_limit_submit();
 
-    // Public read endpoints with light rate limiting
     let public_routes = Router::new()
         .route("/status", get(status))
         .route("/mempool", get(mempool))
         .route("/tx/:tx_hash", get(get_tx))
         .layer(rate_limit_read);
 
-    // Submit endpoint with strict rate limiting
     let submit_route = Router::new()
         .route("/tx/submit", post(submit_tx))
         .layer(rate_limit_submit);
 
-    // Authenticated endpoints (Phase 3 placeholder)
     let auth_routes = Router::new()
         .route("/peers", get(get_peers_handler))
         .route_layer(axum::middleware::from_fn_with_state(
@@ -155,9 +178,8 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
             middleware::require_bearer_token,
         ));
 
-    // Combine all routes
     Router::new()
-        .route("/health", get(health)) // No rate limit for load balancers
+        .route("/health", get(health))
         .merge(public_routes)
         .merge(submit_route)
         .merge(auth_routes)
@@ -171,8 +193,14 @@ async fn get_peers_handler(State(handle): State<Arc<dyn NodeHandle>>) -> Json<Ve
     Json(handle.get_peers())
 }
 
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to install CTRL+C signal handler");
+    info!("Shutdown signal received, stopping RPC server");
+}
+
 pub async fn serve(handle: Arc<dyn NodeHandle>, addr: SocketAddr) -> Result<(), RpcError> {
-    // Initialize Bearer token
     let token_str = token::get_or_create_token()
         .map_err(|e| RpcError::Internal(format!("failed to init token: {e}")))?;
     let bearer_token = Arc::new(BearerToken(token_str));
@@ -180,9 +208,16 @@ pub async fn serve(handle: Arc<dyn NodeHandle>, addr: SocketAddr) -> Result<(), 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| RpcError::Internal(format!("failed to bind {addr}: {e}")))?;
+
+    info!("RPC server listening on {addr}");
+
     axum::serve(listener, router(handle, bearer_token))
+        .with_graceful_shutdown(shutdown_signal())
         .await
-        .map_err(|e| RpcError::Internal(format!("server error: {e}")))
+        .map_err(|e| RpcError::Internal(format!("server error: {e}")))?;
+
+    warn!("RPC server stopped");
+    Ok(())
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -198,14 +233,30 @@ async fn status(State(handle): State<Arc<dyn NodeHandle>>) -> Json<StatusRespons
     })
 }
 
-async fn mempool(State(handle): State<Arc<dyn NodeHandle>>) -> Json<MempoolResponse> {
-    let tx_hashes = handle
-        .mempool_tx_hashes()
+async fn mempool(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Query(params): Query<MempoolQuery>,
+) -> impl IntoResponse {
+    let limit = params.limit.clamp(1, MEMPOOL_MAX_LIMIT);
+    let page = params.page;
+
+    let all_hashes = handle.mempool_tx_hashes();
+    let total = all_hashes.len();
+
+    let tx_hashes = all_hashes
         .into_iter()
+        .skip(page * limit)
+        .take(limit)
         .map(hex::encode)
         .collect::<Vec<_>>();
+
+    let count = tx_hashes.len();
+
     Json(MempoolResponse {
-        count: tx_hashes.len(),
+        count,
+        total,
+        page,
+        limit,
         tx_hashes,
     })
 }
@@ -216,11 +267,11 @@ async fn submit_tx(
 ) -> impl IntoResponse {
     let tx_bytes = match decode_hex(&payload.tx_hex) {
         Ok(b) => b,
-        Err(e) => return submit_error(e),
+        Err(e) => {
+            warn!("submit_tx: invalid hex: {e}");
+            return submit_error(e);
+        }
     };
-    if let Err(e) = Transaction::from_bytes(&tx_bytes) {
-        return submit_error(RpcError::InvalidTx(e.to_string()));
-    }
     match handle.submit_tx(tx_bytes) {
         Ok(hash) => (
             StatusCode::OK,
@@ -230,7 +281,15 @@ async fn submit_tx(
                 error: None,
             }),
         ),
-        Err(e) => submit_error(e),
+        Err(e) => {
+            match &e {
+                RpcError::Internal(msg) => error!("submit_tx: internal error: {msg}"),
+                RpcError::Overloaded(msg) => warn!("submit_tx: overloaded: {msg}"),
+                RpcError::Rejected(msg) => warn!("submit_tx: rejected: {msg}"),
+                _ => warn!("submit_tx: error: {e}"),
+            }
+            submit_error(e)
+        }
     }
 }
 
@@ -257,8 +316,9 @@ async fn get_tx(
 }
 
 fn submit_error(err: RpcError) -> (StatusCode, Json<SubmitTxResponse>) {
+    let status = err.status_code();
     (
-        StatusCode::BAD_REQUEST,
+        status,
         Json(SubmitTxResponse {
             accepted: false,
             tx_hash: None,
@@ -334,6 +394,44 @@ mod tests {
         }
     }
 
+    struct RejectNode;
+    impl NodeHandle for RejectNode {
+        fn chain_height(&self) -> u64 {
+            0
+        }
+        fn mempool_size(&self) -> usize {
+            0
+        }
+        fn mempool_tx_hashes(&self) -> Vec<[u8; 32]> {
+            vec![]
+        }
+        fn get_mempool_tx(&self, _: &[u8; 32]) -> Option<MempoolTxInfo> {
+            None
+        }
+        fn submit_tx(&self, _: Vec<u8>) -> Result<[u8; 32], RpcError> {
+            Err(RpcError::Rejected("already in mempool".to_owned()))
+        }
+    }
+
+    struct OverloadNode;
+    impl NodeHandle for OverloadNode {
+        fn chain_height(&self) -> u64 {
+            0
+        }
+        fn mempool_size(&self) -> usize {
+            0
+        }
+        fn mempool_tx_hashes(&self) -> Vec<[u8; 32]> {
+            vec![]
+        }
+        fn get_mempool_tx(&self, _: &[u8; 32]) -> Option<MempoolTxInfo> {
+            None
+        }
+        fn submit_tx(&self, _: Vec<u8>) -> Result<[u8; 32], RpcError> {
+            Err(RpcError::Overloaded("mempool full".to_owned()))
+        }
+    }
+
     async fn body_json(r: axum::response::Response) -> Value {
         let b = r.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&b).unwrap()
@@ -342,6 +440,11 @@ mod tests {
     fn app() -> Router {
         let token = Arc::new(middleware::BearerToken("test-token".to_string()));
         router(Arc::new(MockNode::new(42)), token)
+    }
+
+    fn app_with<N: NodeHandle>(node: N) -> Router {
+        let token = Arc::new(middleware::BearerToken("test-token".to_string()));
+        router(Arc::new(node), token)
     }
 
     #[tokio::test]
@@ -389,7 +492,73 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
-        assert_eq!(body_json(r).await["count"], serde_json::json!(0));
+        let body = body_json(r).await;
+        assert_eq!(body["count"], serde_json::json!(0));
+        assert_eq!(body["total"], serde_json::json!(0));
+        assert_eq!(body["page"], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn mempool_pagination_page_and_limit() {
+        let node = MockNode::new(0);
+        for i in 1u8..=5 {
+            let mut hash = [0u8; 32];
+            hash[0] = i;
+            node.txs.lock().unwrap().insert(
+                hash,
+                MempoolTxInfo {
+                    tx_hash: hash,
+                    fee: 0,
+                    fee_rate: 0,
+                    weight: 0,
+                },
+            );
+        }
+        let app = app_with(node);
+
+        let r = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/mempool?page=0&limit=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_json(r).await;
+        assert_eq!(body["total"], serde_json::json!(5));
+        assert_eq!(body["count"], serde_json::json!(2));
+        assert_eq!(body["limit"], serde_json::json!(2));
+        assert_eq!(body["page"], serde_json::json!(0));
+
+        let r = app
+            .oneshot(
+                Request::builder()
+                    .uri("/mempool?page=2&limit=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_json(r).await;
+        assert_eq!(body["total"], serde_json::json!(5));
+        assert_eq!(body["count"], serde_json::json!(1));
+    }
+
+    #[tokio::test]
+    async fn mempool_limit_capped_at_1000() {
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/mempool?limit=9999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_json(r).await;
+        assert_eq!(body["limit"], serde_json::json!(1000));
     }
 
     #[tokio::test]
@@ -406,6 +575,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(r).await["accepted"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
+    async fn submit_rejected_returns_409() {
+        let valid_tx_hex = hex::encode(vec![0xdeu8; 64]);
+        let r = app_with(RejectNode)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tx/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"tx_hex":"{valid_tx_hex}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(r).await["accepted"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
+    async fn submit_overloaded_returns_503() {
+        let valid_tx_hex = hex::encode(vec![0xdeu8; 64]);
+        let r = app_with(OverloadNode)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tx/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"tx_hex":"{valid_tx_hex}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body_json(r).await["accepted"], serde_json::json!(false));
     }
 
