@@ -175,6 +175,84 @@ impl DomNode {
     }
 }
 
+impl dom_rpc::NodeHandle for DomNode {
+    fn chain_height(&self) -> u64 {
+        self.chain.try_lock().map(|c| c.tip_height.0).unwrap_or(0)
+    }
+
+    fn mempool_size(&self) -> usize {
+        self.mempool.try_lock().map(|m| m.len()).unwrap_or(0)
+    }
+
+    fn mempool_tx_hashes(&self) -> Vec<[u8; 32]> {
+        self.mempool.try_lock().map(|m| m.all_hashes()).unwrap_or_default()
+    }
+
+    fn get_mempool_tx(&self, hash: &[u8; 32]) -> Option<dom_rpc::MempoolTxInfo> {
+        let pool = self.mempool.try_lock().ok()?;
+        let entry = pool.get_tx(hash)?;
+        let fee = entry.tx.total_fee().ok()?;
+        let weight = entry.tx.weight();
+        Some(dom_rpc::MempoolTxInfo {
+            tx_hash: *hash,
+            fee,
+            fee_rate: if weight > 0 { fee / weight as u64 } else { 0 },
+            weight,
+        })
+    }
+
+    fn submit_tx(&self, tx_bytes: Vec<u8>) -> Result<[u8; 32], dom_rpc::RpcError> {
+        use dom_serialization::DomDeserialize;
+        let tx = dom_consensus::Transaction::from_bytes(&tx_bytes)
+            .map_err(|e| dom_rpc::RpcError::InvalidHex(format!("invalid tx: {e}")))?;
+        let hash = {
+            let mut data = tx_bytes.clone();
+            *dom_crypto::hash::blake2b_256(&data).as_bytes()
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut pool = self.mempool.try_lock()
+            .map_err(|_| dom_rpc::RpcError::Internal("mempool locked".into()))?;
+        pool.accept_tx(tx, hash, now)
+            .map_err(|e| dom_rpc::RpcError::Rejected(e.to_string()))?;
+        Ok(hash)
+    }
+
+    fn get_block_header(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
+        let chain = self.chain.try_lock().ok()?;
+        chain.store.get_block_header(hash).ok()?
+    }
+
+    fn get_block_hash_at_height(&self, height: u64) -> Option<[u8; 32]> {
+        let chain = self.chain.try_lock().ok()?;
+        chain.store.get_hash_at_height(height).ok()?
+    }
+
+    fn get_utxo(&self, commitment: &[u8; 33]) -> Option<dom_rpc::UtxoInfo> {
+        let chain = self.chain.try_lock().ok()?;
+        let tip_height = chain.tip_height.0;
+        let entry = chain.store.get_utxo(commitment).ok()??;
+        Some(dom_rpc::UtxoInfo {
+            commitment: hex::encode(commitment),
+            block_height: entry.block_height,
+            is_coinbase: entry.is_coinbase,
+            is_mature: entry.is_mature(tip_height),
+        })
+    }
+
+    fn get_peers(&self) -> Vec<dom_rpc::PeerInfo> {
+        let Ok(peers) = self.peers.try_lock() else { return Vec::new() };
+        peers.connected_peers().into_iter().map(|addr| dom_rpc::PeerInfo {
+            addr,
+            direction: "inbound".into(),
+            connected_since: 0,
+        }).collect()
+    }
+}
+
+
 async fn handle_inbound(
     mut stream: tokio::net::TcpStream,
     addr: std::net::SocketAddr,

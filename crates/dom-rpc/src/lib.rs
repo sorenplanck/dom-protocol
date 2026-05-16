@@ -22,7 +22,16 @@ pub trait NodeHandle: Send + Sync + 'static {
     fn get_mempool_tx(&self, hash: &[u8; 32]) -> Option<MempoolTxInfo>;
     fn submit_tx(&self, tx_bytes: Vec<u8>) -> Result<[u8; 32], RpcError>;
 
-    /// Get list of connected peers. Returns empty vec by default (Phase 3).
+    /// Get block header bytes by hash. Returns None if not found.
+    fn get_block_header(&self, hash: &[u8; 32]) -> Option<Vec<u8>>;
+
+    /// Get block hash at a given height. Returns None if height unknown.
+    fn get_block_hash_at_height(&self, height: u64) -> Option<[u8; 32]>;
+
+    /// Get UTXO info by commitment (33 bytes). Returns None if spent or never created.
+    fn get_utxo(&self, commitment: &[u8; 33]) -> Option<UtxoInfo>;
+
+    /// Get list of connected peers.
     fn get_peers(&self) -> Vec<PeerInfo> {
         Vec::new()
     }
@@ -41,6 +50,14 @@ pub struct PeerInfo {
     pub addr: String,
     pub direction: String,
     pub connected_since: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UtxoInfo {
+    pub commitment: String,
+    pub block_height: u64,
+    pub is_coinbase: bool,
+    pub is_mature: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -150,6 +167,34 @@ struct TxNotFoundResponse {
     found: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct BlockHeaderResponse {
+    height: u64,
+    hash: String,
+    prev_hash: String,
+    timestamp: u64,
+    target: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BlockNotFoundResponse {
+    found: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct UtxoFoundResponse {
+    found: bool,
+    commitment: String,
+    block_height: u64,
+    is_coinbase: bool,
+    is_mature: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct UtxoNotFoundResponse {
+    found: bool,
+}
+
 use middleware::BearerToken;
 use std::time::Duration;
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
@@ -165,6 +210,8 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
         .route("/status", get(status))
         .route("/mempool", get(mempool))
         .route("/tx/:tx_hash", get(get_tx))
+        .route("/block/:height_or_hash", get(get_block))
+        .route("/utxo/:commitment", get(get_utxo))
         .layer(rate_limit_read);
 
     let submit_route = Router::new()
@@ -315,6 +362,88 @@ async fn get_tx(
     }
 }
 
+async fn get_block(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Path(height_or_hash): Path<String>,
+) -> Result<Response, RpcError> {
+    // Determine if input is height (all digits) or hash (64 hex chars)
+    let hash = if height_or_hash.chars().all(|c| c.is_ascii_digit()) {
+        let height: u64 = height_or_hash
+            .parse()
+            .map_err(|_| RpcError::InvalidHex("invalid height".into()))?;
+        match handle.get_block_hash_at_height(height) {
+            Some(h) => h,
+            None => {
+                return Ok((
+                    StatusCode::NOT_FOUND,
+                    Json(BlockNotFoundResponse { found: false }),
+                )
+                    .into_response())
+            }
+        }
+    } else {
+        parse_hash_hex(&height_or_hash)?
+    };
+
+    match handle.get_block_header(&hash) {
+        Some(header_bytes) => {
+            use dom_consensus::block::BlockHeader;
+            use dom_serialization::DomDeserialize;
+            let header = BlockHeader::from_bytes(&header_bytes)
+                .map_err(|e| RpcError::Internal(format!("corrupt header: {e}")))?;
+            Ok((
+                StatusCode::OK,
+                Json(BlockHeaderResponse {
+                    height: header.height.0,
+                    hash: hex::encode(hash),
+                    prev_hash: hex::encode(header.prev_hash.as_bytes()),
+                    timestamp: header.timestamp.0,
+                    target: hex::encode(header.target.0.to_be_bytes()),
+                }),
+            )
+                .into_response())
+        }
+        None => Ok((
+            StatusCode::NOT_FOUND,
+            Json(BlockNotFoundResponse { found: false }),
+        )
+            .into_response()),
+    }
+}
+
+async fn get_utxo(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Path(commitment_hex): Path<String>,
+) -> Result<Response, RpcError> {
+    let bytes = decode_hex(&commitment_hex)?;
+    if bytes.len() != 33 {
+        return Err(RpcError::InvalidHex(
+            "commitment must be 33 bytes (66 hex chars)".into(),
+        ));
+    }
+    let mut commitment = [0u8; 33];
+    commitment.copy_from_slice(&bytes);
+
+    match handle.get_utxo(&commitment) {
+        Some(info) => Ok((
+            StatusCode::OK,
+            Json(UtxoFoundResponse {
+                found: true,
+                commitment: commitment_hex,
+                block_height: info.block_height,
+                is_coinbase: info.is_coinbase,
+                is_mature: info.is_mature,
+            }),
+        )
+            .into_response()),
+        None => Ok((
+            StatusCode::NOT_FOUND,
+            Json(UtxoNotFoundResponse { found: false }),
+        )
+            .into_response()),
+    }
+}
+
 fn submit_error(err: RpcError) -> (StatusCode, Json<SubmitTxResponse>) {
     let status = err.status_code();
     (
@@ -392,6 +521,9 @@ mod tests {
             );
             Ok(hash)
         }
+        fn get_block_header(&self, _: &[u8; 32]) -> Option<Vec<u8>> { None }
+        fn get_block_hash_at_height(&self, _: u64) -> Option<[u8; 32]> { None }
+        fn get_utxo(&self, _: &[u8; 33]) -> Option<UtxoInfo> { None }
     }
 
     struct RejectNode;
@@ -411,6 +543,9 @@ mod tests {
         fn submit_tx(&self, _: Vec<u8>) -> Result<[u8; 32], RpcError> {
             Err(RpcError::Rejected("already in mempool".to_owned()))
         }
+        fn get_block_header(&self, _: &[u8; 32]) -> Option<Vec<u8>> { None }
+        fn get_block_hash_at_height(&self, _: u64) -> Option<[u8; 32]> { None }
+        fn get_utxo(&self, _: &[u8; 33]) -> Option<UtxoInfo> { None }
     }
 
     struct OverloadNode;
@@ -430,6 +565,9 @@ mod tests {
         fn submit_tx(&self, _: Vec<u8>) -> Result<[u8; 32], RpcError> {
             Err(RpcError::Overloaded("mempool full".to_owned()))
         }
+        fn get_block_header(&self, _: &[u8; 32]) -> Option<Vec<u8>> { None }
+        fn get_block_hash_at_height(&self, _: u64) -> Option<[u8; 32]> { None }
+        fn get_utxo(&self, _: &[u8; 33]) -> Option<UtxoInfo> { None }
     }
 
     async fn body_json(r: axum::response::Response) -> Value {

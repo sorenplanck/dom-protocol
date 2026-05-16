@@ -122,6 +122,20 @@ impl DomStore {
         }
     }
 
+    /// Get a UTXO entry by commitment (33-byte compressed point).
+    /// Returns None if the UTXO does not exist (spent or never created).
+    pub fn get_utxo(&self, commitment: &[u8; 33]) -> Result<Option<crate::utxo::UtxoEntry>, DomError> {
+        let txn = self
+            .env
+            .begin_ro_txn()
+            .map_err(|e| DomError::Internal(format!("ro txn: {e}")))?;
+        match txn.get(self.db_utxos, commitment) {
+            Ok(bytes) => Ok(Some(crate::utxo::UtxoEntry::from_bytes(bytes)?)),
+            Err(lmdb::Error::NotFound) => Ok(None),
+            Err(e) => Err(DomError::Internal(format!("get utxo: {e}"))),
+        }
+    }
+
     /// Atomically commit a validated block to storage.
     ///
     /// RFC-0007 step 14: ALL writes in ONE transaction.

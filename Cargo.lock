@@ -521,6 +521,7 @@ dependencies = [
  "dom-crypto",
  "dom-mempool",
  "dom-pow",
+ "dom-rpc",
  "dom-serialization",
  "dom-store",
  "dom-wire",

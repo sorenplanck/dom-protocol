@@ -29,3 +29,4 @@ hex.workspace           = true
 dom-serialization.workspace = true
 primitive-types.workspace = true
 randomx-rs.workspace     = true
+dom-rpc                 = { path = "../dom-rpc" }
