@@ -218,6 +218,192 @@ pub struct InvItem {
     pub hash: [u8; 32],
 }
 
+/// GetHeaders request: peer asks for headers starting at the first match
+/// of `locator_hashes` (newest first), up to `stop_hash` (or MAX_HEADERS_PER_MSG).
+#[derive(Debug, Clone)]
+pub struct GetHeadersPayload {
+    /// Block hashes from newest-to-genesis as a sparse locator (BIP-31 style).
+    pub locator_hashes: Vec<[u8; 32]>,
+    /// Stop hash; all-zero means "send up to MAX_HEADERS_PER_MSG".
+    pub stop_hash: [u8; 32],
+}
+
+impl GetHeadersPayload {
+    /// Serialize.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, DomError> {
+        if self.locator_hashes.len() > dom_core::MAX_LOCATOR_HASHES {
+            return Err(DomError::Invalid("too many locator hashes".into()));
+        }
+        let mut out = Vec::with_capacity(2 + self.locator_hashes.len() * 32 + 32);
+        out.extend_from_slice(&(self.locator_hashes.len() as u16).to_le_bytes());
+        for h in &self.locator_hashes {
+            out.extend_from_slice(h);
+        }
+        out.extend_from_slice(&self.stop_hash);
+        Ok(out)
+    }
+
+    /// Deserialize.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, DomError> {
+        if data.len() < 2 + 32 {
+            return Err(DomError::Malformed("getheaders too short".into()));
+        }
+        let n = u16::from_le_bytes(data[0..2].try_into().unwrap()) as usize;
+        if n > dom_core::MAX_LOCATOR_HASHES {
+            return Err(DomError::Malformed(format!("too many locator hashes: {n}")));
+        }
+        let expected_len = 2 + n * 32 + 32;
+        if data.len() != expected_len {
+            return Err(DomError::Malformed(format!(
+                "getheaders length mismatch: got {} expected {expected_len}",
+                data.len()
+            )));
+        }
+        let mut locator_hashes = Vec::with_capacity(n);
+        for i in 0..n {
+            let s = 2 + i * 32;
+            locator_hashes.push(data[s..s + 32].try_into().unwrap());
+        }
+        let stop_hash: [u8; 32] = data[2 + n * 32..2 + n * 32 + 32].try_into().unwrap();
+        Ok(Self {
+            locator_hashes,
+            stop_hash,
+        })
+    }
+}
+
+/// Headers response: list of header bytes (each serialized BlockHeader).
+#[derive(Debug, Clone)]
+pub struct HeadersPayload {
+    /// Serialized headers in chain order (oldest first).
+    pub headers: Vec<Vec<u8>>,
+}
+
+impl HeadersPayload {
+    /// Serialize.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, DomError> {
+        if self.headers.len() > dom_core::MAX_HEADERS_PER_MSG {
+            return Err(DomError::Invalid("too many headers".into()));
+        }
+        let mut out =
+            Vec::with_capacity(2 + self.headers.iter().map(|h| 4 + h.len()).sum::<usize>());
+        out.extend_from_slice(&(self.headers.len() as u16).to_le_bytes());
+        for h in &self.headers {
+            out.extend_from_slice(&(h.len() as u32).to_le_bytes());
+            out.extend_from_slice(h);
+        }
+        Ok(out)
+    }
+
+    /// Deserialize.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, DomError> {
+        if data.len() < 2 {
+            return Err(DomError::Malformed("headers too short".into()));
+        }
+        let n = u16::from_le_bytes(data[0..2].try_into().unwrap()) as usize;
+        if n > dom_core::MAX_HEADERS_PER_MSG {
+            return Err(DomError::Malformed(format!("too many headers: {n}")));
+        }
+        let mut headers = Vec::with_capacity(n);
+        let mut pos = 2;
+        for _ in 0..n {
+            if data.len() < pos + 4 {
+                return Err(DomError::Malformed("header length truncated".into()));
+            }
+            let hlen = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+            if hlen > 1024 {
+                return Err(DomError::Malformed(format!("header too large: {hlen}")));
+            }
+            if data.len() < pos + hlen {
+                return Err(DomError::Malformed("header bytes truncated".into()));
+            }
+            headers.push(data[pos..pos + hlen].to_vec());
+            pos += hlen;
+        }
+        Ok(Self { headers })
+    }
+}
+
+/// GetBlockData request: list of block hashes the requester wants bodies for.
+#[derive(Debug, Clone)]
+pub struct GetBlockDataPayload {
+    /// Block hashes to fetch (up to MAX_GETBLOCKDATA_HASHES).
+    pub hashes: Vec<[u8; 32]>,
+}
+
+impl GetBlockDataPayload {
+    /// Serialize.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, DomError> {
+        if self.hashes.len() > dom_core::MAX_GETBLOCKDATA_HASHES {
+            return Err(DomError::Invalid("too many block hashes".into()));
+        }
+        let mut out = Vec::with_capacity(2 + self.hashes.len() * 32);
+        out.extend_from_slice(&(self.hashes.len() as u16).to_le_bytes());
+        for h in &self.hashes {
+            out.extend_from_slice(h);
+        }
+        Ok(out)
+    }
+
+    /// Deserialize.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, DomError> {
+        if data.len() < 2 {
+            return Err(DomError::Malformed("getblockdata too short".into()));
+        }
+        let n = u16::from_le_bytes(data[0..2].try_into().unwrap()) as usize;
+        if n > dom_core::MAX_GETBLOCKDATA_HASHES {
+            return Err(DomError::Malformed(format!("too many hashes: {n}")));
+        }
+        if data.len() != 2 + n * 32 {
+            return Err(DomError::Malformed("getblockdata length mismatch".into()));
+        }
+        let mut hashes = Vec::with_capacity(n);
+        for i in 0..n {
+            let s = 2 + i * 32;
+            hashes.push(data[s..s + 32].try_into().unwrap());
+        }
+        Ok(Self { hashes })
+    }
+}
+
+/// Block payload: full serialized Block (header + coinbase + transactions).
+#[derive(Debug, Clone)]
+pub struct BlockPayload {
+    /// Serialized block bytes (Block::to_bytes()).
+    pub block_bytes: Vec<u8>,
+}
+
+impl BlockPayload {
+    /// Serialize.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, DomError> {
+        if self.block_bytes.len() > dom_core::MAX_BLOCK_SERIALIZED_SIZE {
+            return Err(DomError::Invalid("block too large".into()));
+        }
+        let mut out = Vec::with_capacity(4 + self.block_bytes.len());
+        out.extend_from_slice(&(self.block_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.block_bytes);
+        Ok(out)
+    }
+
+    /// Deserialize.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, DomError> {
+        if data.len() < 4 {
+            return Err(DomError::Malformed("block payload too short".into()));
+        }
+        let n = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        if n > dom_core::MAX_BLOCK_SERIALIZED_SIZE {
+            return Err(DomError::Malformed(format!("block too large: {n}")));
+        }
+        if data.len() != 4 + n {
+            return Err(DomError::Malformed("block payload length mismatch".into()));
+        }
+        Ok(Self {
+            block_bytes: data[4..].to_vec(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +430,60 @@ mod tests {
         };
         let bytes = msg.to_bytes();
         assert!(WireMessage::from_bytes(&bytes, dom_core::NETWORK_MAGIC_TESTNET).is_err());
+    }
+
+    #[test]
+    fn getheaders_roundtrip() {
+        let p = GetHeadersPayload {
+            locator_hashes: vec![[1u8; 32], [2u8; 32], [3u8; 32]],
+            stop_hash: [9u8; 32],
+        };
+        let bytes = p.to_bytes().unwrap();
+        let p2 = GetHeadersPayload::from_bytes(&bytes).unwrap();
+        assert_eq!(p2.locator_hashes.len(), 3);
+        assert_eq!(p2.locator_hashes[0], [1u8; 32]);
+        assert_eq!(p2.stop_hash, [9u8; 32]);
+    }
+
+    #[test]
+    fn headers_roundtrip() {
+        let p = HeadersPayload {
+            headers: vec![vec![0u8; 200], vec![1u8; 200], vec![2u8; 200]],
+        };
+        let bytes = p.to_bytes().unwrap();
+        let p2 = HeadersPayload::from_bytes(&bytes).unwrap();
+        assert_eq!(p2.headers.len(), 3);
+        assert_eq!(p2.headers[0].len(), 200);
+    }
+
+    #[test]
+    fn getblockdata_roundtrip() {
+        let p = GetBlockDataPayload {
+            hashes: vec![[7u8; 32]; 5],
+        };
+        let bytes = p.to_bytes().unwrap();
+        let p2 = GetBlockDataPayload::from_bytes(&bytes).unwrap();
+        assert_eq!(p2.hashes.len(), 5);
+        assert_eq!(p2.hashes[2], [7u8; 32]);
+    }
+
+    #[test]
+    fn block_payload_roundtrip() {
+        let p = BlockPayload {
+            block_bytes: vec![0xab; 1024],
+        };
+        let bytes = p.to_bytes().unwrap();
+        let p2 = BlockPayload::from_bytes(&bytes).unwrap();
+        assert_eq!(p2.block_bytes.len(), 1024);
+        assert_eq!(p2.block_bytes[100], 0xab);
+    }
+
+    #[test]
+    fn headers_too_many_rejected() {
+        let p = HeadersPayload {
+            headers: vec![vec![0u8; 10]; dom_core::MAX_HEADERS_PER_MSG + 1],
+        };
+        assert!(p.to_bytes().is_err());
     }
 
     #[test]

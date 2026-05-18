@@ -164,6 +164,15 @@ pub const MAX_PROOF_SIZE: usize = 6_144;
 /// [CONSENSUS] Maximum serialized block size in bytes (16 MiB).
 pub const MAX_BLOCK_SERIALIZED_SIZE: usize = 16 * 1_024 * 1_024;
 
+/// [POLICY] Maximum headers per Headers message (IBD batch size).
+pub const MAX_HEADERS_PER_MSG: usize = 2_000;
+
+/// [POLICY] Maximum block hashes a GetBlockData request can list.
+pub const MAX_GETBLOCKDATA_HASHES: usize = 128;
+
+/// [POLICY] Maximum block locator hashes in GetHeaders.
+pub const MAX_LOCATOR_HASHES: usize = 32;
+
 // ── Network & Timing Validation ──────────────────────────────────────────────
 
 /// [CONSENSUS] Maximum seconds a block timestamp may be ahead of the local
