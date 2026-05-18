@@ -118,9 +118,8 @@ pub fn validate_block(block: &Block, ctx: &ValidationContext) -> Result<(), DomE
         total_fees,
     )?;
 
-    // TODO Etapa 2: validate PMMR roots against
-    // block.header.output_root, block.header.kernel_root, block.header.rangeproof_root
-
+    // RFC-0007 step 17: validate PMMR roots
+    crate::validate_pmmr_roots(block)?;
     Ok(())
 }
 

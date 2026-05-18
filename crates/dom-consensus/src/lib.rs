@@ -221,6 +221,64 @@ pub fn validate_block_transactions(
 }
 
 /// Derive chain_id from network magic and genesis hash (RFC-0009 §4.1).
+/// Validate that the three PMMR roots in the block header match the roots
+/// recomputed from the block body.
+///
+/// Output MMR: one leaf per output (coinbase + tx outputs), payload = commitment bytes (33).
+/// Kernel MMR: one leaf per kernel (coinbase + tx kernels), payload = excess bytes (33).
+/// Rangeproof MMR: one leaf per output (coinbase + tx outputs), payload = proof bytes.
+///
+/// This is RFC-0007 step 17.
+pub fn validate_pmmr_roots(block: &Block) -> Result<(), dom_core::DomError> {
+    use dom_pmmr::Pmmr;
+
+    let mut output_mmr = Pmmr::new();
+    let mut kernel_mmr = Pmmr::new();
+    let mut rangeproof_mmr = Pmmr::new();
+
+    // Coinbase output and kernel first
+    output_mmr.push(block.coinbase.output.commitment.as_bytes())?;
+    rangeproof_mmr.push(&block.coinbase.output.proof)?;
+    kernel_mmr.push(block.coinbase.kernel.excess.as_bytes())?;
+
+    // Transaction outputs and kernels
+    for tx in &block.transactions {
+        for output in &tx.outputs {
+            output_mmr.push(output.commitment.as_bytes())?;
+            rangeproof_mmr.push(&output.proof)?;
+        }
+        for kernel in &tx.kernels {
+            kernel_mmr.push(kernel.excess.as_bytes())?;
+        }
+    }
+
+    let computed_output_root = output_mmr.root();
+    let computed_kernel_root = kernel_mmr.root();
+    let computed_rangeproof_root = rangeproof_mmr.root();
+
+    if computed_output_root != block.header.output_root {
+        return Err(dom_core::DomError::Invalid(format!(
+            "output_root mismatch: header={} computed={}",
+            block.header.output_root, computed_output_root,
+        )));
+    }
+    if computed_kernel_root != block.header.kernel_root {
+        return Err(dom_core::DomError::Invalid(format!(
+            "kernel_root mismatch: header={} computed={}",
+            block.header.kernel_root, computed_kernel_root,
+        )));
+    }
+    if computed_rangeproof_root != block.header.rangeproof_root {
+        return Err(dom_core::DomError::Invalid(format!(
+            "rangeproof_root mismatch: header={} computed={}",
+            block.header.rangeproof_root, computed_rangeproof_root,
+        )));
+    }
+
+    Ok(())
+}
+
+/// Derive the chain ID from the network magic and genesis hash (RFC-0009).
 pub fn derive_chain_id(network_magic: u32, genesis_hash: &dom_core::Hash256) -> dom_core::Hash256 {
     use dom_core::TAG_CHAIN_ID;
     use dom_crypto::hash::blake2b_256_tagged;
