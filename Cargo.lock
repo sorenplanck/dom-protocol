@@ -540,6 +540,7 @@ dependencies = [
  "dom-wire",
  "hex",
  "primitive-types",
+ "rand",
  "randomx-rs",
  "serde_json",
  "tokio",

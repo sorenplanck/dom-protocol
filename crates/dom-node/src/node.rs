@@ -298,7 +298,9 @@ async fn handle_inbound(
                 "Hello from {addr}: height={} ua={:?}",
                 peer_hello.best_height, peer_hello.user_agent
             );
-            // TODO Phase 2: message loop
+            if let Err(e) = message_loop(&mut stream, &mut codec, &config, addr).await {
+                info!("Connection to {addr} closed: {e}");
+            }
         }
         Err(e) => warn!("Hello exchange with {addr} failed: {e}"),
     }
@@ -341,7 +343,17 @@ async fn connect_outbound(
                 "Hello from {addr}: height={} ua={:?}",
                 peer_hello.best_height, peer_hello.user_agent
             );
-            // TODO Phase 2: message loop, IBD if peer ahead
+            // TODO Phase 3: IBD if peer.best_height > our height
+            let peer_addr = match stream.peer_addr() {
+                Ok(a) => a,
+                Err(_) => {
+                    warn!("Could not resolve peer_addr for {addr}");
+                    return;
+                }
+            };
+            if let Err(e) = message_loop(&mut stream, &mut codec, &config, peer_addr).await {
+                info!("Connection to {addr} closed: {e}");
+            }
         }
         Err(e) => warn!("Hello exchange with {addr} failed: {e}"),
     }
@@ -414,4 +426,74 @@ async fn hello_exchange(
     }
 
     Ok(peer_hello)
+}
+
+/// Persistent message loop after Hello exchange.
+///
+/// Reads framed messages from the peer in a loop and dispatches by command:
+/// - Ping: reply with Pong echoing the payload
+/// - Pong: ignored (could update last-seen for liveness tracking)
+/// - Other commands: logged and ignored (IBD/relay handled in Phase 3)
+///
+/// Sends a Ping every `PING_INTERVAL_SECS` to detect dead peers.
+/// Exits on any I/O error or idle timeout (NoiseCodec::recv enforces it).
+async fn message_loop(
+    stream: &mut tokio::net::TcpStream,
+    codec: &mut dom_wire::codec::NoiseCodec,
+    config: &NodeConfig,
+    peer_addr: std::net::SocketAddr,
+) -> Result<(), DomError> {
+    use dom_wire::message::{Command, WireMessage};
+
+    const PING_INTERVAL_SECS: u64 = 60;
+    let mut ping_timer =
+        tokio::time::interval(tokio::time::Duration::from_secs(PING_INTERVAL_SECS));
+    // Skip the immediate first tick.
+    ping_timer.tick().await;
+
+    loop {
+        tokio::select! {
+            // Periodic ping
+            _ = ping_timer.tick() => {
+                let nonce: [u8; 8] = rand::random();
+                let ping = WireMessage {
+                    magic: config.network.magic(),
+                    command: Command::Ping,
+                    payload: nonce.to_vec(),
+                };
+                if let Err(e) = codec.send(stream, &ping).await {
+                    return Err(DomError::Internal(format!("ping send to {peer_addr}: {e}")));
+                }
+            }
+            // Inbound message
+            recv = codec.recv(stream) => {
+                let msg = recv?;
+                match msg.command {
+                    Command::Ping => {
+                        // Echo payload as Pong
+                        let pong = WireMessage {
+                            magic: config.network.magic(),
+                            command: Command::Pong,
+                            payload: msg.payload,
+                        };
+                        codec.send(stream, &pong).await?;
+                    }
+                    Command::Pong => {
+                        // Liveness confirmed; nothing else to do until peer tracking added
+                    }
+                    Command::Hello => {
+                        // Second Hello after handshake is a protocol violation
+                        return Err(DomError::Invalid(
+                            "unexpected Hello in message loop [ban+20]".into(),
+                        ));
+                    }
+                    other => {
+                        // Inv, GetHeaders, Headers, GetBlock, Block, Tx, GetAddr, Addr,
+                        // GetBlockData: deferred to Phase 3 (IBD + relay).
+                        tracing::debug!("ignoring {other:?} from {peer_addr} (Phase 2)");
+                    }
+                }
+            }
+        }
+    }
 }
