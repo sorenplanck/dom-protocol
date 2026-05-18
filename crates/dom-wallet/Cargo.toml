@@ -16,6 +16,7 @@ dom-serialization.workspace = true
 
 # Security & Cryptography
 zeroize.workspace          = true
+argon2.workspace           = true
 sha2.workspace             = true
 hkdf.workspace             = true
 chacha20poly1305.workspace = true

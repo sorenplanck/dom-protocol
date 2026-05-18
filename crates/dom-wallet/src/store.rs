@@ -164,16 +164,29 @@ pub struct PendingTx {
 ///
 /// DO NOT USE THIS WALLET FOR REAL FUNDS.
 ///
-/// TODO(mainnet-blocker): Replace with Argon2id (m=64MB, t=3, p=4)
-/// or scrypt (N=2^17, r=8, p=1). See OWASP Password Storage Cheat Sheet.
+/// Derives the wallet encryption key from a password using Argon2id.
 ///
-/// The salt should be the per-wallet 32-byte salt stored in the file header.
-/// The info string is fixed to `"DOM:wallet-key:v1"` for domain separation.
+/// Parameters: m=65536 KiB (64 MiB), t=3, p=1 — OWASP recommended.
+/// The stretched key is then domain-separated via HKDF-SHA256 with
+/// info=`"DOM:wallet-key:v1"`.
+/// The salt is the per-wallet 32-byte random salt from the file header.
 pub(crate) fn derive_key(
     password: &str,
     salt: &[u8; 32],
 ) -> Result<Zeroizing<[u8; 32]>, WalletError> {
-    let hkdf = Hkdf::<Sha256>::new(Some(&salt[..]), password.as_bytes());
+    use argon2::{Algorithm, Argon2, Params, Version};
+    // Argon2id — OWASP recommended: m=65536 KiB (64 MiB), t=3, p=1.
+    // Salt is the per-wallet 32-byte random salt from the file header.
+    // Output is tagged with HKDF_INFO for domain separation after stretching.
+    let params = Params::new(65536, 3, 1, Some(32))
+        .map_err(|e| WalletError::Crypto(format!("Argon2 params: {e}")))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut stretched = Zeroizing::new([0u8; 32]);
+    argon2
+        .hash_password_into(password.as_bytes(), salt, &mut stretched[..])
+        .map_err(|e| WalletError::Crypto(format!("Argon2id failed: {e}")))?;
+    // Domain-separate the stretched key with HKDF.
+    let hkdf = Hkdf::<Sha256>::new(Some(&salt[..]), &stretched[..]);
     let mut key = Zeroizing::new([0u8; 32]);
     hkdf.expand(HKDF_INFO, &mut key[..])
         .map_err(|_| WalletError::Crypto("HKDF expansion failed".into()))?;
