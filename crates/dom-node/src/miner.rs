@@ -187,7 +187,11 @@ async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
 
     let new_height = tip_height.0 + 1;
     let anchor = genesis_anchor();
-    let target = if new_height == 1 {
+    // Testnet: use easy target so blocks are findable in seconds on a CPU.
+    // Mainnet: full ASERT difficulty from anchor.
+    let target = if node.config.network == dom_config::Network::Testnet {
+        dom_core::MAX_TARGET_BYTES
+    } else if new_height == 1 {
         anchor.target
     } else {
         asert_next_target(&anchor, Timestamp(now_secs()), BlockHeight(new_height))?
@@ -268,7 +272,7 @@ fn mine_blocking(
             kernel_root: Hash256::ZERO,
             rangeproof_root: Hash256::ZERO,
             total_kernel_offset: [0u8; 32],
-            target: CompactTarget(dom_core::GENESIS_TARGET_COMPACT),
+            target: CompactTarget(target_to_compact(&target)),
             total_difficulty: new_total_diff,
             pow: ProofOfWork {
                 nonce,
