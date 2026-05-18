@@ -298,7 +298,9 @@ async fn handle_inbound(
                 "Hello from {addr}: height={} ua={:?}",
                 peer_hello.best_height, peer_hello.user_agent
             );
-            if let Err(e) = message_loop(&mut stream, &mut codec, &config, addr).await {
+            if let Err(e) =
+                message_loop(&mut stream, &mut codec, &config, addr, chain.clone()).await
+            {
                 info!("Connection to {addr} closed: {e}");
             }
         }
@@ -351,7 +353,9 @@ async fn connect_outbound(
                     return;
                 }
             };
-            if let Err(e) = message_loop(&mut stream, &mut codec, &config, peer_addr).await {
+            if let Err(e) =
+                message_loop(&mut stream, &mut codec, &config, peer_addr, chain.clone()).await
+            {
                 info!("Connection to {addr} closed: {e}");
             }
         }
@@ -437,13 +441,61 @@ async fn hello_exchange(
 ///
 /// Sends a Ping every `PING_INTERVAL_SECS` to detect dead peers.
 /// Exits on any I/O error or idle timeout (NoiseCodec::recv enforces it).
+/// Build a Headers response for a GetHeaders request.
+///
+/// Finds the most recent locator hash on our main chain, then returns up to
+/// MAX_HEADERS_PER_MSG headers forward from there, stopping at stop_hash or tip.
+async fn build_headers_response(
+    chain: &Arc<Mutex<ChainState>>,
+    req: &dom_wire::message::GetHeadersPayload,
+) -> Result<Vec<Vec<u8>>, DomError> {
+    use dom_serialization::DomDeserialize;
+    let c = chain.lock().await;
+    let tip_height = c.tip_height.0;
+
+    let mut start_height: u64 = 0;
+    for h in &req.locator_hashes {
+        if let Some(header_bytes) = c.store.get_block_header(h)? {
+            let header = dom_consensus::block::BlockHeader::from_bytes(&header_bytes)?;
+            if c.store.get_hash_at_height(header.height.0)? == Some(*h) {
+                start_height = header.height.0 + 1;
+                break;
+            }
+        }
+    }
+
+    let max = dom_core::MAX_HEADERS_PER_MSG;
+    let stop_is_zero = req.stop_hash == [0u8; 32];
+    let mut out: Vec<Vec<u8>> = Vec::with_capacity(max);
+    let mut h = start_height;
+    while h <= tip_height && out.len() < max {
+        let hash = match c.store.get_hash_at_height(h)? {
+            Some(x) => x,
+            None => break,
+        };
+        let bytes = match c.store.get_block_header(&hash)? {
+            Some(b) => b,
+            None => break,
+        };
+        out.push(bytes);
+        if !stop_is_zero && hash == req.stop_hash {
+            break;
+        }
+        h += 1;
+    }
+    Ok(out)
+}
+
 async fn message_loop(
     stream: &mut tokio::net::TcpStream,
     codec: &mut dom_wire::codec::NoiseCodec,
     config: &NodeConfig,
     peer_addr: std::net::SocketAddr,
+    chain: Arc<Mutex<ChainState>>,
 ) -> Result<(), DomError> {
-    use dom_wire::message::{Command, WireMessage};
+    use dom_wire::message::{
+        BlockPayload, Command, GetBlockDataPayload, GetHeadersPayload, HeadersPayload, WireMessage,
+    };
 
     const PING_INTERVAL_SECS: u64 = 60;
     let mut ping_timer =
@@ -487,10 +539,37 @@ async fn message_loop(
                             "unexpected Hello in message loop [ban+20]".into(),
                         ));
                     }
+                    Command::GetHeaders => {
+                        let req = GetHeadersPayload::from_bytes(&msg.payload)?;
+                        let headers = build_headers_response(&chain, &req).await?;
+                        let resp = HeadersPayload { headers };
+                        let wire = WireMessage {
+                            magic: config.network.magic(),
+                            command: Command::Headers,
+                            payload: resp.to_bytes()?,
+                        };
+                        codec.send(stream, &wire).await?;
+                    }
+                    Command::GetBlockData => {
+                        let req = GetBlockDataPayload::from_bytes(&msg.payload)?;
+                        for hash in &req.hashes {
+                            let body = {
+                                let c = chain.lock().await;
+                                c.store.get_block_body(hash)?
+                            };
+                            if let Some(bytes) = body {
+                                let resp = BlockPayload { block_bytes: bytes };
+                                let wire = WireMessage {
+                                    magic: config.network.magic(),
+                                    command: Command::Block,
+                                    payload: resp.to_bytes()?,
+                                };
+                                codec.send(stream, &wire).await?;
+                            }
+                        }
+                    }
                     other => {
-                        // Inv, GetHeaders, Headers, GetBlock, Block, Tx, GetAddr, Addr,
-                        // GetBlockData: deferred to Phase 3 (IBD + relay).
-                        tracing::debug!("ignoring {other:?} from {peer_addr} (Phase 2)");
+                        tracing::debug!("ignoring {other:?} from {peer_addr}");
                     }
                 }
             }

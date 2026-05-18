@@ -157,9 +157,21 @@ async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
             .map_err(|e| DomError::Internal(format!("genesis serialize: {e}")))?
     };
     let genesis_hash = *dom_crypto::hash::blake2b_256(&header_bytes).as_bytes();
-    chain
-        .store
-        .commit_block(&genesis_hash, 0, &header_bytes, &[], &[], &[])?;
+    let genesis_body = {
+        use dom_serialization::DomSerialize;
+        genesis_block
+            .to_bytes()
+            .map_err(|e| DomError::Internal(format!("genesis body serialize: {e}")))?
+    };
+    chain.store.commit_block(
+        &genesis_hash,
+        0,
+        &header_bytes,
+        &genesis_body,
+        &[],
+        &[],
+        &[],
+    )?;
     chain.tip_hash = Hash256::from_bytes(genesis_hash);
     chain.tip_height = dom_core::BlockHeight::GENESIS;
     chain.genesis_hash = Hash256::from_bytes(genesis_hash);

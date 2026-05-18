@@ -180,10 +180,14 @@ impl ChainState {
             }
         }
 
+        // Serialize full block body for IBD responses (peers ask for bodies by hash).
+        let block_body_bytes = block.to_bytes()?;
+
         self.store.commit_block(
             block_hash.as_bytes(),
             header.height.0,
             &header_bytes,
+            &block_body_bytes,
             &new_utxos,
             &spent_utxos,
             &[],

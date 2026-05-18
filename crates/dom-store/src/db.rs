@@ -10,6 +10,7 @@ const MAX_DBS: u32 = 16;
 
 /// Named LMDB databases.
 pub const DB_BLOCKS: &str = "blocks";
+pub const DB_BLOCK_BODIES: &str = "block_bodies";
 pub const DB_BLOCK_HEIGHT: &str = "block_height";
 pub const DB_CHAIN_TIP: &str = "chain_tip";
 pub const DB_UTXOS: &str = "utxos";
@@ -22,6 +23,8 @@ pub struct DomStore {
     pub env: Environment,
     /// blocks: hash → header bytes
     pub db_blocks: Database,
+    /// block_bodies: hash → serialized Block body (full block bytes minus header)
+    pub db_block_bodies: Database,
     /// block_height: height_le8 → hash
     pub db_height: Database,
     /// chain_tip: "tip" → hash
@@ -63,6 +66,7 @@ impl DomStore {
 
         Ok(Self {
             db_blocks: open_db(DB_BLOCKS)?,
+            db_block_bodies: open_db(DB_BLOCK_BODIES)?,
             db_height: open_db(DB_BLOCK_HEIGHT)?,
             db_tip: open_db(DB_CHAIN_TIP)?,
             db_utxos: open_db(DB_UTXOS)?,
@@ -139,15 +143,32 @@ impl DomStore {
         }
     }
 
+    /// Get the full serialized block body by hash.
+    ///
+    /// Returns None if the block is unknown (not yet committed or pruned).
+    pub fn get_block_body(&self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>, DomError> {
+        let txn = self
+            .env
+            .begin_ro_txn()
+            .map_err(|e| DomError::Internal(format!("ro txn: {e}")))?;
+        match txn.get(self.db_block_bodies, hash) {
+            Ok(bytes) => Ok(Some(bytes.to_vec())),
+            Err(lmdb::Error::NotFound) => Ok(None),
+            Err(e) => Err(DomError::Internal(format!("get block body: {e}"))),
+        }
+    }
+
     /// Atomically commit a validated block to storage.
     ///
     /// RFC-0007 step 14: ALL writes in ONE transaction.
     /// On any error the transaction is aborted — no partial state.
+    #[allow(clippy::too_many_arguments)]
     pub fn commit_block(
         &self,
         block_hash: &[u8; 32],
         block_height: u64,
         header_bytes: &[u8],
+        block_body_bytes: &[u8],
         new_utxos: &[([u8; 33], Vec<u8>)], // (commitment, utxo_entry)
         spent_utxos: &[[u8; 33]],          // commitments to remove
         kernel_excesses: &[([u8; 33], [u8; 32])], // (excess, block_hash)
@@ -165,6 +186,15 @@ impl DomStore {
             WriteFlags::empty(),
         )
         .map_err(|e| DomError::Internal(format!("put block: {e}")))?;
+
+        // Store block body (full serialized block) for IBD responses
+        txn.put(
+            self.db_block_bodies,
+            block_hash,
+            &block_body_bytes.to_vec(),
+            WriteFlags::empty(),
+        )
+        .map_err(|e| DomError::Internal(format!("put block body: {e}")))?;
 
         // Store height → hash index
         let height_key = block_height.to_le_bytes();
