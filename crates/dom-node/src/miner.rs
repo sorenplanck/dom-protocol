@@ -4,7 +4,6 @@ use crate::node::DomNode;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
 use dom_core::{BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE};
-use dom_crypto::pedersen::Commitment;
 use dom_pow::{
     asert_next_target, genesis_anchor, hash_meets_target, randomx_seed_height,
     target_to_difficulty, CompactTarget,
@@ -32,44 +31,67 @@ pub fn block_reward(height: u64) -> u64 {
     }
 }
 
-const SECP256K1_GENERATOR_COMPRESSED: [u8; 33] = [
-    0x02, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87, 0x0B,
-    0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9, 0x59, 0xF2, 0x81, 0x5B, 0x16, 0xF8, 0x17,
-    0x98,
-];
-
-fn generator_commitment() -> Result<Commitment, DomError> {
-    Commitment::from_compressed_bytes(&SECP256K1_GENERATOR_COMPRESSED)
-        .map_err(|e| DomError::Internal(format!("placeholder generator commitment: {e}")))
-}
-
-// TODO(mainnet-blocker): build_placeholder_coinbase uses dummy commitment (G point),
-// dummy range proof (vec![0u8; 100]), and zero excess signature ([0u8; 65]).
-// MUST be replaced with real CoinbaseBuilder using secp256k1-zkp + Bulletproof
-// before mainnet. This placeholder is consensus-invalid on a real network.
-fn build_placeholder_coinbase(
+/// Build a cryptographically valid coinbase transaction.
+///
+/// Generates a fresh random blinding factor for every block. The blinding
+/// factor is used as both the output blinding and the kernel signing key
+/// (Mimblewimble: excess = r*G, signature proves knowledge of r).
+///
+/// The blinding is discarded after signing — the coinbase is consensus-valid
+/// but unspendable. A wallet-integrated miner would persist the blinding.
+fn build_real_coinbase(
     height: BlockHeight,
     total_tx_fees: u64,
+    chain_id: &[u8; 32],
 ) -> Result<CoinbaseTransaction, DomError> {
+    use dom_crypto::bulletproof;
+    use dom_crypto::hash::blake2b_256_tagged;
+    use dom_crypto::keys::SecretKey;
+    use dom_crypto::pedersen::{BlindingFactor, Commitment};
+    use dom_crypto::schnorr_sign;
+
     let reward = dom_core::block_reward(height).noms();
     let explicit_value = reward
         .checked_add(total_tx_fees)
         .ok_or_else(|| DomError::Invalid("coinbase value overflow".into()))?;
-    let generator = generator_commitment()?;
 
-    // This placeholder coinbase is intentionally not cryptographically valid.
-    // Full validation currently logs a warning until the miner owns a real
-    // signing key and can produce a real range proof and kernel signature.
+    // Fresh random blinding factor for this block.
+    let blinding = BlindingFactor::random();
+
+    // Output commitment: C = value*H + r*G
+    let output_commitment = Commitment::commit(explicit_value, &blinding);
+
+    // Range proof: proves value in [0, 2^52)
+    let (range_proof, _) = bulletproof::prove(explicit_value, &blinding)
+        .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?;
+
+    // Kernel excess = r*G (Mimblewimble: coinbase creates value, excess is blinding only)
+    let excess = Commitment::commit(0, &blinding);
+
+    // Kernel message: TAG_KERNEL_MSG_COINBASE || features || explicit_value_le8
+    let kernel_message = {
+        let mut data = Vec::with_capacity(9);
+        data.push(KERNEL_FEAT_COINBASE);
+        data.extend_from_slice(&explicit_value.to_le_bytes());
+        blake2b_256_tagged(dom_core::TAG_KERNEL_MSG_COINBASE, &data)
+    };
+
+    // Sign with blinding as secret key — proves ownership of the excess point
+    let sk = SecretKey::from_bytes(blinding.as_bytes())
+        .map_err(|e| DomError::Internal(format!("coinbase blinding as key: {e}")))?;
+    let signature = schnorr_sign(&sk, kernel_message.as_bytes(), chain_id)
+        .map_err(|e| DomError::Internal(format!("coinbase sign failed: {e}")))?;
+
     Ok(CoinbaseTransaction {
         output: TransactionOutput {
-            commitment: generator.clone(),
-            proof: vec![0u8; 100],
+            commitment: output_commitment,
+            proof: range_proof.bytes,
         },
         kernel: CoinbaseKernel {
             features: KERNEL_FEAT_COINBASE,
             explicit_value,
-            excess: generator,
-            excess_signature: [0u8; 65],
+            excess,
+            excess_signature: signature.to_bytes(),
         },
         offset: [0u8; 32],
     })
@@ -122,7 +144,7 @@ async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
 
     let genesis_block = Block {
         header: genesis_header,
-        coinbase: build_placeholder_coinbase(BlockHeight::GENESIS, 0)?,
+        coinbase: build_real_coinbase(BlockHeight::GENESIS, 0, &[0u8; 32])?,
         transactions: Vec::new(),
     };
 
@@ -195,7 +217,7 @@ async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
 
     let block = Block {
         header,
-        coinbase: build_placeholder_coinbase(BlockHeight(new_height), 0)?,
+        coinbase: build_real_coinbase(BlockHeight(new_height), 0, &[0u8; 32])?,
         transactions: Vec::new(),
     };
 
