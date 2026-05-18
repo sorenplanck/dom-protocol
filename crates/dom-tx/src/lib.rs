@@ -204,12 +204,11 @@ impl SpendBuilder {
             });
         }
 
-        // TODO(mainnet): Replace with random scalar for graph privacy.
-        // Zero offset is consensus-valid but allows transaction linkability:
-        // kernel_excess = sum(output_blindings) - sum(input_blindings) directly,
-        // without randomization. Acceptable for testnet.
-        // See: Mimblewimble offset privacy in Grin docs.
-        let offset = [0u8; 32];
+        // Random offset for graph privacy. Without this, kernel_excess equals
+        // sum(output_blindings) - sum(input_blindings) directly, making transaction
+        // graphs linkable. The offset randomizes the excess so observers cannot
+        // correlate inputs and outputs by arithmetic.
+        let offset = *BlindingFactor::random().as_bytes();
 
         let excess_blinding = self.compute_kernel_excess_blinding(&offset)?;
         let excess = Commitment::commit(0, &excess_blinding);
