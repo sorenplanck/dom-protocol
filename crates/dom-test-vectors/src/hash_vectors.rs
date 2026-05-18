@@ -28,43 +28,43 @@ pub fn all_hash_vectors() -> Vec<HashVector> {
             description: "empty input, kernel-sig tag",
             tag: dom_core::TAG_KERNEL_SIG,
             input_hex: "",
-            expected_hex: "", // RELEASE BLOCKER
+            expected_hex: "768031158853b4e3592808850df95afbe12abc27cd702b0563b8c7af2a789b51",
         },
         HashVector {
             description: "empty input, PMMR empty tag",
             tag: dom_core::TAG_PMMR_EMPTY,
             input_hex: "",
-            expected_hex: "", // RELEASE BLOCKER
+            expected_hex: "4af723a9c80c18bbb3f064a0268049dffb15a1e7c4c7fa5e8062ebbb61f532f0",
         },
         HashVector {
             description: "empty input, PMMR bag tag",
             tag: dom_core::TAG_PMMR_BAG,
             input_hex: "",
-            expected_hex: "", // RELEASE BLOCKER
+            expected_hex: "6442732844d37c59e33ab28519e0dff20c3c5a4676e3f47a0d5d6ee1801237c9",
         },
         HashVector {
             description: "empty input, PMMR leaf tag",
             tag: dom_core::TAG_PMMR_LEAF,
             input_hex: "",
-            expected_hex: "", // RELEASE BLOCKER
+            expected_hex: "09f0993d0858a0e52b66771483abc0264366e6c3fa458ec682cee22ffa632e50",
         },
         HashVector {
             description: "empty input, PMMR node tag",
             tag: dom_core::TAG_PMMR_NODE,
             input_hex: "",
-            expected_hex: "", // RELEASE BLOCKER
+            expected_hex: "7d4f228f3dfb2fc422c09301d6654ab479386d8b742f15ae9efbd13c422edf7f",
         },
         HashVector {
             description: "empty input, H2C tag",
             tag: dom_core::TAG_H2C,
             input_hex: "",
-            expected_hex: "", // RELEASE BLOCKER
+            expected_hex: "c103e42fd1ceb70815b30fd3777648d7755ea4520d14d7c82c962f6c44fa27ab",
         },
         HashVector {
             description: "known bytes, kernel-sig tag",
             tag: dom_core::TAG_KERNEL_SIG,
             input_hex: "deadbeef",
-            expected_hex: "", // RELEASE BLOCKER
+            expected_hex: "1b9bfc4688d439f86bc532b5848672fc1e34bd2290973b49da2bd0bbd7bac319",
         },
     ]
 }

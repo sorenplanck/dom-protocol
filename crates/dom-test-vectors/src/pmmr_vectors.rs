@@ -22,47 +22,47 @@ pub fn required_pmmr_vectors() -> Vec<PmmrVector> {
     vec![
         PmmrVector {
             leaf_count: 0,
-            expected_root_hex: "",
+            expected_root_hex: "4af723a9c80c18bbb3f064a0268049dffb15a1e7c4c7fa5e8062ebbb61f532f0",
             leaf_data_description: "empty",
         },
         PmmrVector {
             leaf_count: 1,
-            expected_root_hex: "",
+            expected_root_hex: "d7834b348a8e70f74fe0f71c3314f21252d92569bc2d501c78ee958bfe42df1e",
             leaf_data_description: "leaf_0",
         },
         PmmrVector {
             leaf_count: 2,
-            expected_root_hex: "",
+            expected_root_hex: "a40923de756509b777bc9f921272ec6118a1981f64c6e3c5ddf67ea12a01b51d",
             leaf_data_description: "leaf_0..1",
         },
         PmmrVector {
             leaf_count: 3,
-            expected_root_hex: "",
+            expected_root_hex: "1cd685bbcd434837323b19224d880d82df8ffe6d17b802b05d8e72be8180da95",
             leaf_data_description: "leaf_0..2",
         },
         PmmrVector {
             leaf_count: 4,
-            expected_root_hex: "",
+            expected_root_hex: "2db336f7bb98da35f606de3a8d208820eaebc96be5e034502b0f7087a4d47636",
             leaf_data_description: "leaf_0..3",
         },
         PmmrVector {
             leaf_count: 7,
-            expected_root_hex: "",
+            expected_root_hex: "4918c0a56eb91ce2374664a34c28fe12b6873fd5830e3946b6536271864d1a27",
             leaf_data_description: "leaf_0..6",
         },
         PmmrVector {
             leaf_count: 8,
-            expected_root_hex: "",
+            expected_root_hex: "645878c1cc2fc2dc1b475d055316dcf3b6c7e9d7ac17d8ff7ff390ee45528287",
             leaf_data_description: "leaf_0..7",
         },
         PmmrVector {
             leaf_count: 15,
-            expected_root_hex: "",
+            expected_root_hex: "5bbf01196c35662a7ccb42efd1880251567e1ba4dcb2120f99096c0dd71d6d43",
             leaf_data_description: "leaf_0..14",
         },
         PmmrVector {
             leaf_count: 16,
-            expected_root_hex: "",
+            expected_root_hex: "4091b9197df8301058216295e46b61d8802f48f42422dcb2bdde640f9f343dc0",
             leaf_data_description: "leaf_0..15",
         },
     ]
