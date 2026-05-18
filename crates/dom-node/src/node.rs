@@ -5,6 +5,7 @@ use dom_chain::ChainState;
 use dom_config::NodeConfig;
 use dom_core::DomError;
 use dom_core::Hash256;
+use dom_core::Timestamp;
 use dom_mempool::Mempool;
 use dom_store::DomStore;
 use dom_wire::dandelion::DandelionRouter;
@@ -345,7 +346,6 @@ async fn connect_outbound(
                 "Hello from {addr}: height={} ua={:?}",
                 peer_hello.best_height, peer_hello.user_agent
             );
-            // TODO Phase 3: IBD if peer.best_height > our height
             let peer_addr = match stream.peer_addr() {
                 Ok(a) => a,
                 Err(_) => {
@@ -353,6 +353,31 @@ async fn connect_outbound(
                     return;
                 }
             };
+
+            // IBD loop: keep syncing while peer claims to be ahead.
+            // Each ibd_sync_round returns false when the peer has nothing new.
+            let our_height = chain.lock().await.tip_height.0;
+            if peer_hello.best_height > our_height {
+                info!(
+                    "Starting IBD from {addr}: our={our_height} peer={}",
+                    peer_hello.best_height
+                );
+                loop {
+                    match ibd_sync_round(&mut stream, &mut codec, &config, &chain, peer_addr).await
+                    {
+                        Ok(true) => continue,
+                        Ok(false) => {
+                            info!("IBD with {addr} caught up");
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("IBD with {addr} failed: {e}");
+                            return;
+                        }
+                    }
+                }
+            }
+
             if let Err(e) =
                 message_loop(&mut stream, &mut codec, &config, peer_addr, chain.clone()).await
             {
@@ -441,6 +466,148 @@ async fn hello_exchange(
 ///
 /// Sends a Ping every `PING_INTERVAL_SECS` to detect dead peers.
 /// Exits on any I/O error or idle timeout (NoiseCodec::recv enforces it).
+/// Build a sparse block locator (newest tip first, exponentially-spaced).
+///
+/// Format: [tip, tip-1, tip-2, tip-4, tip-8, tip-16, ..., genesis].
+/// This lets the peer find the common ancestor in O(log n) headers.
+async fn build_locator(chain: &Arc<Mutex<ChainState>>) -> Result<Vec<[u8; 32]>, DomError> {
+    let c = chain.lock().await;
+    let tip_height = c.tip_height.0;
+    let mut out: Vec<[u8; 32]> = Vec::new();
+    let mut step: u64 = 1;
+    let mut h: i64 = tip_height as i64;
+    while h >= 0 && out.len() < dom_core::MAX_LOCATOR_HASHES {
+        if let Some(hash) = c.store.get_hash_at_height(h as u64)? {
+            out.push(hash);
+        }
+        if out.len() >= 10 {
+            step = step.saturating_mul(2);
+        }
+        h -= step as i64;
+    }
+    Ok(out)
+}
+
+/// Run a single IBD sync round against one peer.
+///
+/// Sends GetHeaders, receives headers, requests bodies in batches, and connects
+/// each block via ChainState::connect_block. Returns Ok(true) if any progress
+/// was made (at least one block accepted), Ok(false) if peer had nothing new.
+async fn ibd_sync_round(
+    stream: &mut tokio::net::TcpStream,
+    codec: &mut dom_wire::codec::NoiseCodec,
+    config: &NodeConfig,
+    chain: &Arc<Mutex<ChainState>>,
+    peer_addr: std::net::SocketAddr,
+) -> Result<bool, DomError> {
+    use dom_consensus::Block;
+    use dom_serialization::DomDeserialize;
+    use dom_wire::message::{
+        BlockPayload, Command, GetBlockDataPayload, GetHeadersPayload, HeadersPayload, WireMessage,
+    };
+
+    // 1. Request headers from peer using our locator.
+    let locator = build_locator(chain).await?;
+    let req = GetHeadersPayload {
+        locator_hashes: locator,
+        stop_hash: [0u8; 32],
+    };
+    let wire = WireMessage {
+        magic: config.network.magic(),
+        command: Command::GetHeaders,
+        payload: req.to_bytes()?,
+    };
+    codec.send(stream, &wire).await?;
+
+    // 2. Receive Headers (skip non-Headers messages).
+    let headers_msg = loop {
+        let msg = codec.recv(stream).await?;
+        match msg.command {
+            Command::Headers => break msg,
+            Command::Ping => {
+                let pong = WireMessage {
+                    magic: config.network.magic(),
+                    command: Command::Pong,
+                    payload: msg.payload,
+                };
+                codec.send(stream, &pong).await?;
+            }
+            Command::Pong => {}
+            other => {
+                tracing::debug!("IBD: ignoring {other:?} while waiting for Headers");
+            }
+        }
+    };
+    let headers_payload = HeadersPayload::from_bytes(&headers_msg.payload)?;
+    if headers_payload.headers.is_empty() {
+        return Ok(false); // peer has nothing new for us
+    }
+
+    // 3. Compute block hashes; request bodies in batches of MAX_GETBLOCKDATA_HASHES.
+    let mut block_hashes: Vec<[u8; 32]> = Vec::with_capacity(headers_payload.headers.len());
+    for h_bytes in &headers_payload.headers {
+        let hash = *dom_crypto::hash::blake2b_256(h_bytes).as_bytes();
+        block_hashes.push(hash);
+    }
+
+    let mut connected_any = false;
+    let now = Timestamp(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    );
+
+    for batch in block_hashes.chunks(dom_core::MAX_GETBLOCKDATA_HASHES) {
+        let req = GetBlockDataPayload {
+            hashes: batch.to_vec(),
+        };
+        let wire = WireMessage {
+            magic: config.network.magic(),
+            command: Command::GetBlockData,
+            payload: req.to_bytes()?,
+        };
+        codec.send(stream, &wire).await?;
+
+        // Receive one Block per requested hash, in order.
+        for _ in 0..batch.len() {
+            let msg = loop {
+                let m = codec.recv(stream).await?;
+                match m.command {
+                    Command::Block => break m,
+                    Command::Ping => {
+                        let pong = WireMessage {
+                            magic: config.network.magic(),
+                            command: Command::Pong,
+                            payload: m.payload,
+                        };
+                        codec.send(stream, &pong).await?;
+                    }
+                    Command::Pong => {}
+                    other => {
+                        tracing::debug!("IBD: ignoring {other:?} while waiting for Block");
+                    }
+                }
+            };
+            let payload = BlockPayload::from_bytes(&msg.payload)?;
+            let block = Block::from_bytes(&payload.block_bytes)?;
+            let mut c = chain.lock().await;
+            match c.connect_block(&block, now) {
+                Ok(_) => {
+                    connected_any = true;
+                }
+                Err(e) => {
+                    return Err(DomError::Invalid(format!(
+                        "IBD from {peer_addr}: connect_block rejected: {e}"
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(connected_any)
+}
+
 /// Build a Headers response for a GetHeaders request.
 ///
 /// Finds the most recent locator hash on our main chain, then returns up to
