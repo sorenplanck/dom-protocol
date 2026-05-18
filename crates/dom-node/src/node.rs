@@ -122,8 +122,9 @@ impl DomNode {
                     // Spawn connection handler
                     let config = self.config.clone();
                     let privkey = self.noise_privkey;
+                    let chain = self.chain.clone();
                     tokio::spawn(async move {
-                        handle_inbound(stream, peer_addr, config, privkey).await;
+                        handle_inbound(stream, peer_addr, config, privkey, chain).await;
                     });
                 }
                 Err(e) => {
@@ -162,9 +163,10 @@ impl DomNode {
 
                     let config = self.config.clone();
                     let privkey = self.noise_privkey;
+                    let chain = self.chain.clone();
                     info!("Connecting to peer {addr}");
                     tokio::spawn(async move {
-                        connect_outbound(&addr, config, privkey).await;
+                        connect_outbound(&addr, config, privkey, chain).await;
                     });
                 }
             }
@@ -268,9 +270,12 @@ async fn handle_inbound(
     addr: std::net::SocketAddr,
     config: NodeConfig,
     privkey: [u8; 32],
+    chain: Arc<Mutex<ChainState>>,
 ) {
-    let chain_id = [0u8; 32]; // TODO: use real chain_id from RFC-0009
-    match dom_wire::handshake::perform_handshake_responder(
+    // chain_id derived from network magic + genesis hash (currently ZERO until
+    // genesis hash is finalized — same as in validate_kernel_signatures context).
+    let chain_id = [0u8; 32];
+    let transport = match dom_wire::handshake::perform_handshake_responder(
         &mut stream,
         &privkey,
         config.network.magic(),
@@ -278,35 +283,135 @@ async fn handle_inbound(
     )
     .await
     {
-        Ok(_transport) => {
-            info!("Noise handshake complete with {addr}");
-            // TODO: Hello exchange, then message loop
-        }
+        Ok(t) => t,
         Err(e) => {
             warn!("Handshake failed with {addr}: {e}");
+            return;
         }
+    };
+    info!("Noise handshake complete with {addr}");
+
+    let mut codec = dom_wire::codec::NoiseCodec::new(transport, config.network.magic());
+    match hello_exchange(&mut stream, &mut codec, &config, &chain_id, &chain).await {
+        Ok(peer_hello) => {
+            info!(
+                "Hello from {addr}: height={} ua={:?}",
+                peer_hello.best_height, peer_hello.user_agent
+            );
+            // TODO Phase 2: message loop
+        }
+        Err(e) => warn!("Hello exchange with {addr} failed: {e}"),
     }
 }
 
-async fn connect_outbound(addr: &str, config: NodeConfig, privkey: [u8; 32]) {
-    match tokio::net::TcpStream::connect(addr).await {
-        Ok(mut stream) => {
-            let chain_id = [0u8; 32]; // TODO: real chain_id
-            match dom_wire::handshake::perform_handshake_initiator(
-                &mut stream,
-                &privkey,
-                config.network.magic(),
-                &chain_id,
-            )
-            .await
-            {
-                Ok(_transport) => {
-                    info!("Connected to {addr}");
-                    // TODO: Hello exchange, message loop, IBD
-                }
-                Err(e) => warn!("Handshake failed with {addr}: {e}"),
-            }
+async fn connect_outbound(
+    addr: &str,
+    config: NodeConfig,
+    privkey: [u8; 32],
+    chain: Arc<Mutex<ChainState>>,
+) {
+    let mut stream = match tokio::net::TcpStream::connect(addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Connection to {addr} failed: {e}");
+            return;
         }
-        Err(e) => warn!("Connection to {addr} failed: {e}"),
+    };
+    let chain_id = [0u8; 32];
+    let transport = match dom_wire::handshake::perform_handshake_initiator(
+        &mut stream,
+        &privkey,
+        config.network.magic(),
+        &chain_id,
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("Handshake failed with {addr}: {e}");
+            return;
+        }
+    };
+    info!("Connected to {addr}");
+
+    let mut codec = dom_wire::codec::NoiseCodec::new(transport, config.network.magic());
+    match hello_exchange(&mut stream, &mut codec, &config, &chain_id, &chain).await {
+        Ok(peer_hello) => {
+            info!(
+                "Hello from {addr}: height={} ua={:?}",
+                peer_hello.best_height, peer_hello.user_agent
+            );
+            // TODO Phase 2: message loop, IBD if peer ahead
+        }
+        Err(e) => warn!("Hello exchange with {addr} failed: {e}"),
     }
+}
+
+/// Perform the Hello message exchange after the Noise handshake completes.
+///
+/// Sends our Hello with our current tip, receives theirs, and validates:
+/// - protocol version matches
+/// - network_magic matches
+/// - chain_id matches (same network, same genesis)
+///
+/// Returns the peer's HelloPayload on success.
+async fn hello_exchange(
+    stream: &mut tokio::net::TcpStream,
+    codec: &mut dom_wire::codec::NoiseCodec,
+    config: &NodeConfig,
+    chain_id: &[u8; 32],
+    chain: &Arc<Mutex<ChainState>>,
+) -> Result<dom_wire::message::HelloPayload, DomError> {
+    use dom_wire::message::{Command, HelloPayload, WireMessage};
+
+    // Snapshot our tip under the lock.
+    let (best_height, best_hash) = {
+        let c = chain.lock().await;
+        (c.tip_height.0, *c.tip_hash.as_bytes())
+    };
+
+    let our_hello = HelloPayload {
+        version: dom_core::PROTOCOL_VERSION,
+        network_magic: config.network.magic(),
+        chain_id: *chain_id,
+        best_height,
+        best_hash,
+        user_agent: format!("dom-node/{}", env!("CARGO_PKG_VERSION")),
+    };
+
+    let msg = WireMessage {
+        magic: config.network.magic(),
+        command: Command::Hello,
+        payload: our_hello.to_bytes()?,
+    };
+    codec.send(stream, &msg).await?;
+
+    let peer_msg = codec.recv(stream).await?;
+    if peer_msg.command != Command::Hello {
+        return Err(DomError::Invalid(format!(
+            "expected Hello, got {:?}",
+            peer_msg.command
+        )));
+    }
+    let peer_hello = HelloPayload::from_bytes(&peer_msg.payload)?;
+
+    if peer_hello.version != dom_core::PROTOCOL_VERSION {
+        return Err(DomError::Invalid(format!(
+            "protocol version mismatch: ours={} theirs={}",
+            dom_core::PROTOCOL_VERSION,
+            peer_hello.version
+        )));
+    }
+    if peer_hello.network_magic != config.network.magic() {
+        return Err(DomError::Invalid(format!(
+            "network_magic mismatch: ours=0x{:08x} theirs=0x{:08x}",
+            config.network.magic(),
+            peer_hello.network_magic
+        )));
+    }
+    if peer_hello.chain_id != *chain_id {
+        return Err(DomError::Invalid("chain_id mismatch".into()));
+    }
+
+    Ok(peer_hello)
 }
