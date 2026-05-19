@@ -1,7 +1,7 @@
 # DOM: A Peer-to-Peer Electronic Cash System
 
 **Soren Planck**
-**May 2026**
+**Version 4 — May 2026**
 
 ---
 
@@ -31,15 +31,15 @@ Mimblewimble [2] removes addresses and explicit amounts from the blockchain. Eve
 C = v * H + r * G
 ```
 
-where `v` is the value, `r` is a random blinding factor, `G` is the secp256k1 generator, and `H` is a second generator with no known discrete logarithm relation to `G` (derived in DOM via RFC9380 hash-to-curve). The blinding factor hides the value; the commitment proves the value is some specific number without revealing which.
+where `v` is the value, `r` is a random blinding factor, `G` is the secp256k1 generator, and `H` is a second generator with no known discrete logarithm relation to `G` (derived in DOM via RFC9380 hash-to-curve [8]). The blinding factor hides the value; the commitment proves the value is some specific number without revealing which.
 
-A transaction is valid when the sum of input commitments equals the sum of output commitments plus the fee:
+A transaction is valid when the conservation equation holds:
 
 ```
-sum(outputs) - sum(inputs) + fee * H = sum(kernel_excesses) + offset * G
+sum(outputs) - sum(inputs) = sum(kernel_excesses) + offset * G + fee * H
 ```
 
-This conservation equation can be verified by anyone, in any order, without knowing the values involved. No addresses, no amounts, no balances appear on the chain.
+This equation can be verified by anyone, in any order, without knowing the values involved. No addresses, no amounts, no balances appear on the chain.
 
 Mimblewimble has two additional properties critical for DOM:
 
@@ -47,7 +47,7 @@ Mimblewimble has two additional properties critical for DOM:
 
 **No script.** There is no scripting language. No smart contracts. This is a deliberate design choice: scripts are the source of most consensus bugs and most surveillance surface in other cryptocurrencies. DOM does one thing — move money — and does it without ambiguity.
 
-DOM uses range proofs (Bulletproofs+ [3]) to prove that each committed value lies in `[0, 2^52)`. This prevents creation of outputs with negative values, which would otherwise allow silent inflation. The range `2^52` is chosen because it exceeds the total supply of DOM in noms, while avoiding an overflow bug in the `secp256k1-zkp` library at `2^64`.
+DOM uses range proofs (Bulletproofs+ [3]) to prove that each committed value lies in `[0, 2^52)`. This prevents creation of outputs with negative values, which would otherwise allow silent inflation. The range `2^52 ≈ 4.5 × 10^15` is chosen because it exceeds the total supply of DOM in noms (`~3.3 × 10^15`), while avoiding an overflow bug in the `secp256k1-zkp` library at `2^64`.
 
 ---
 
@@ -67,7 +67,7 @@ Mining DOM on a laptop is competitive with mining DOM on a server. There is no "
 
 ### 3.1 Difficulty: ASERT
 
-DOM uses ASERT (Absolutely Scheduled Exponential Rising Targets) for difficulty adjustment. Unlike Bitcoin's epoch-based retargeting (every 2016 blocks), ASERT adjusts difficulty *every block* based on the deviation between the actual block timestamp and an absolute schedule anchored at the genesis block.
+DOM uses ASERT (Absolutely Scheduled Exponential Rising Targets) for difficulty adjustment [6]. Unlike Bitcoin's epoch-based retargeting (every 2016 blocks), ASERT adjusts difficulty *every block* based on the deviation between the actual block timestamp and an absolute schedule anchored at the genesis block.
 
 The target for block at height `h` and timestamp `t` is:
 
@@ -75,9 +75,14 @@ The target for block at height `h` and timestamp `t` is:
 T(h, t) = T_anchor * 2^((t - t_anchor - TARGET_SPACING * (h - h_anchor)) / HALF_LIFE)
 ```
 
-where `HALF_LIFE = 172,800 seconds` (2 days) is the time it takes difficulty to halve or double in response to sustained hashrate change.
+where:
+- `TARGET_SPACING = 120 seconds` (2 minutes)
+- `HALF_LIFE = 172,800 seconds` (2 days)
+
+`HALF_LIFE` is the time it takes difficulty to halve or double in response to sustained hashrate change.
 
 ASERT has three advantages over Bitcoin's algorithm:
+
 - **No retargeting boundaries** to exploit (no two-week manipulation windows)
 - **Smooth response** to hashrate changes — no overshoot oscillations
 - **Anchor-based math** — difficulty calculation is stateless and does not depend on historical blocks
@@ -88,22 +93,55 @@ The ASERT anchor is hardcoded at genesis. Every node computes the same target fr
 
 ## 4. Supply
 
-DOM has a fixed total supply approaching 32,194,800 DOM, distributed via mining. The schedule:
+DOM has a fixed total supply of **33,000,000 DOM**, distributed entirely via mining. The schedule:
 
-- **Initial block reward:** 24 DOM (2.4 billion noms)
-- **Halving interval:** 670,725 blocks (approximately 2.55 years at 2-minute blocks)
-- **Halvings:** 30 epochs, after which the reward is effectively zero
-- **Block time:** 2 minutes target
+| Parameter | Value |
+|-----------|-------|
+| **Initial block reward** | 33 DOM (3,300,000,000 noms) |
+| **Halving interval** | 330,000 blocks (~1.25 years at 2-minute blocks) |
+| **Halving epochs** | 55 (after epoch 54, reward reaches 0) |
+| **Block time** | 2 minutes (120 seconds) |
+| **Smallest unit** | 1 nom = 10⁻⁸ DOM |
+| **Max supply (noms)** | 3,299,999,976,900,000 |
 
-The reward function is `reward(epoch) = 24 DOM >> epoch`. Summed over all epochs, the total supply is:
+### 4.1 Reward Schedule
+
+The reward at epoch `n` is derived by integer arithmetic:
 
 ```
-total = 670725 * 24 * (1 + 1/2 + 1/4 + ...) ≈ 32,194,800 DOM
+reward(0) = 33 * COIN_UNIT = 3,300,000,000 noms
+reward(n) = (reward(n-1) * 67) / 100
 ```
 
-There is no premine. The first DOM ever mined is the block 0 coinbase, and it is mined by whoever runs the protocol first. The smallest unit is 1 nom = 10^-8 DOM, identical in granularity to Bitcoin's satoshi.
+This is **not** a strict halving but a 67% retention factor per epoch. The choice produces a smooth supply curve that approaches the cap asymptotically. By epoch 54, the reward reaches 0 noms (integer arithmetic floor).
 
-The fee model is direct: every transaction declares a fee, the fee is added to the coinbase reward of the block that includes it, and the fee appears in the balance equation as `fee * H` on the input side. Zero-fee transactions are consensus-valid but relay-policy rejected.
+The total supply is computed deterministically:
+
+```
+total = Σ (BLOCK_REWARD_TABLE[epoch] * HALVING_INTERVAL)  for epoch in 0..55
+      = 3,299,999,976,900,000 noms
+      ≈ 33,000,000 DOM
+```
+
+Integer arithmetic ensures bit-exact reproducibility across all architectures. Floating-point math is forbidden in consensus paths.
+
+### 4.2 No Premine
+
+There is no premine. The first DOM ever mined is the block 0 coinbase, and it is mined by whoever runs the protocol first. The smallest unit is 1 nom = 10⁻⁸ DOM, identical in granularity to Bitcoin's satoshi.
+
+### 4.3 Fee Model
+
+Every transaction declares a fee, the fee is added to the coinbase reward of the block that includes it, and the fee appears in the balance equation as `fee * H` on the LHS:
+
+```
+sum(outputs) - sum(inputs) + fee * H = sum(kernel_excesses) + offset * G
+```
+
+Zero-fee transactions are consensus-valid but relay-policy rejected.
+
+### 4.4 Coinbase Maturity
+
+Coinbase outputs are locked for **1,000 blocks** (~1.4 days at target spacing) before they can be spent. This prevents miners from spending newly-minted coins in transactions that might be invalidated by a reorganization.
 
 ---
 
@@ -121,6 +159,8 @@ After several stem hops, the IP that announces the transaction in fluff phase ha
 
 Dandelion++ does not require user configuration. It is part of the protocol.
 
+> **Implementation status:** Dandelion++ is specified for v1.0 but the message-loop integration is deferred to v1.1. v1.0 uses simple flood relay with random offset for graph privacy.
+
 ---
 
 ## 6. P2P Transport
@@ -135,14 +175,28 @@ The result is mutual authentication and a session-keyed encrypted channel. Netwo
 
 Each node has a persistent Noise static keypair. The public key serves as the node identity for the lifetime of that data directory. There is no association between node identity and any transaction.
 
+### 6.1 Peer Scoring
+
 Peer scoring enforces protocol compliance:
-- Malformed message: +20 score
-- Wrong chain magic: +100 score (immediate ban)
-- Invalid PoW: +50 score
-- Address flooding: +30 score
-- Ban threshold: 100
+
+| Behavior | Score |
+|----------|-------|
+| Malformed message | +20 |
+| Wrong chain magic | +100 (immediate ban) |
+| Invalid PoW | +50 |
+| Address flooding | +30 |
+| **Ban threshold** | 100 |
 
 Banned peers are persisted in the local store with an expiration timestamp.
+
+### 6.2 Network Identity
+
+| Network | Magic | P2P Port |
+|---------|-------|----------|
+| **Mainnet** | `0x444F4D31` ("DOM1") | 33,369 |
+| **Testnet** | `0x444F4D54` ("DOMT") | 33,370 |
+
+The chain_id is derived deterministically from `Blake2b(magic || genesis_hash)` and is included in every Schnorr signature challenge, preventing cross-network replay attacks.
 
 ---
 
@@ -150,59 +204,95 @@ Banned peers are persisted in the local store with an expiration timestamp.
 
 A DOM block consists of:
 
-**Header (fixed size):**
-- Version (u32)
-- Height (u64)
-- Previous block hash (32 bytes)
-- Timestamp (u64)
-- Output PMMR root (32 bytes)
-- Kernel PMMR root (32 bytes)
-- Range proof PMMR root (32 bytes)
-- Total kernel offset (32 bytes — canonical secp256k1 scalar)
-- Compact target (u32)
-- Total difficulty (U256, 32 bytes big-endian)
-- Proof of work: nonce (u64) + RandomX hash (32 bytes)
+### 7.1 Header (fixed size)
 
-**Body:**
-- Inputs: list of 33-byte commitments being spent
-- Outputs: list of (commitment, range proof) pairs
-- Kernels: list of (features, fee/explicit_value, lock_height, excess, signature)
+| Field | Type | Size |
+|-------|------|------|
+| Version | u32 | 4 bytes |
+| Height | u64 | 8 bytes |
+| Previous block hash | Hash256 | 32 bytes |
+| Timestamp | u64 | 8 bytes |
+| Output PMMR root | Hash256 | 32 bytes |
+| Kernel PMMR root | Hash256 | 32 bytes |
+| Range proof PMMR root | Hash256 | 32 bytes |
+| Total kernel offset | bytes | 32 bytes |
+| Compact target | u32 | 4 bytes |
+| Total difficulty | U256 (big-endian) | 32 bytes |
+| Nonce | u64 | 8 bytes |
+| RandomX hash | Hash256 | 32 bytes |
+
+### 7.2 Body
+
+- **Inputs:** list of 33-byte commitments being spent
+- **Outputs:** list of (commitment, range proof) pairs
+- **Kernels:** list of (features, fee/explicit_value, lock_height, excess, signature)
+- **Coinbase:** exactly one CoinbaseTransaction (output + coinbase kernel)
+
+### 7.3 Consensus Limits
+
+| Limit | Value |
+|-------|-------|
+| **Max block weight** | 40,000 units |
+| **Max TX weight** | 4,000 units |
+| **Max inputs/TX** | 255 |
+| **Max outputs/TX** | 255 |
+| **Max kernels/TX** | 16 |
+| **Max TXs/block** | 5,000 |
+| **Max proof size** | 6,144 bytes |
+| **Max block size** | 16 MiB |
+| **Max future timestamp** | 120 seconds |
+| **Median-time window** | 11 blocks |
+
+Weight is calculated as: `1 * inputs + 21 * outputs + 3 * kernels`, plus `2` for coinbase kernels.
 
 The body is verified against:
+
 1. The conservation equation (Mimblewimble balance)
-2. The range proofs (each output value in [0, 2^52))
+2. The range proofs (each output value in [0, 2⁵²))
 3. The Schnorr signatures on the kernels (proof of knowledge of the excess private key)
 4. The cut-through invariants (no duplicate commitments, no orphaned inputs)
-5. The coinbase rules (one and only one coinbase kernel per block; coinbase outputs locked for COINBASE_MATURITY blocks)
+5. The coinbase rules (one and only one coinbase kernel per block; coinbase outputs locked for 1,000 blocks)
 
 ---
 
 ## 8. Validation Pipeline
 
-A block is accepted when it passes a strict 18-step pipeline (specified in RFC-0010):
+A block is accepted when it passes a strict 18-step pipeline (specified in RFC-0007 and RFC-0010):
 
-1. Header syntax
-2. PoW (block hash meets compact target)
+### 8.1 Header Validation
+
+1. Header syntax (version, structure)
+2. PoW (block hash meets compact target via RandomX)
 3. Future timestamp bound (`t < now + 120s`)
-4. Median time past (strict monotonic)
+4. Median time past (strict monotonic over 11-block window)
 5. Previous block exists and is in the main chain
 6. Height = prev.height + 1
 7. Target matches ASERT calculation
 8. Total difficulty matches prev + target_to_difficulty(target)
+
+### 8.2 Body Validation
+
 9a. No duplicate commitments within block
 9b. All inputs reference existing unspent outputs
 9c. No output created and spent in same block (cut-through done before broadcast)
 10. All output range proofs verify
-11. All kernel signatures verify
+11. All kernel signatures verify (Schnorr with chain_id)
 12. Block-level balance equation holds (including coinbase)
-13. Aggregate offset is canonical
+13. Aggregate offset is canonical (in [0, n-1])
 14. Coinbase has exactly one kernel with features=COINBASE
 15. Coinbase explicit_value ≤ subsidy(height) + sum(tx_fees)
-16. Coinbase output locked for COINBASE_MATURITY blocks
+16. Coinbase output locked for 1,000 blocks
 17. PMMR roots match recomputed roots after applying the block
-18. Block weight ≤ MAX_BLOCK_WEIGHT
+18. Block weight ≤ MAX_BLOCK_WEIGHT (40,000)
 
-Any failure rejects the block as `Invalid` (consensus-fatal). A `Malformed` error rejects the message but does not penalize the peer beyond the ban score. `TemporarilyInvalid` errors allow retry (e.g., orphan blocks waiting for parent).
+### 8.3 Error Classification
+
+| Error | Behavior |
+|-------|----------|
+| `Invalid` | Consensus-fatal; block rejected, peer scored |
+| `Malformed` | Message rejected; peer scored only for ban threshold |
+| `TemporarilyInvalid` | Retry allowed (e.g., orphan blocks waiting for parent) |
+| `PolicyRejected` | Local relay rejection; no peer penalty |
 
 ---
 
@@ -210,17 +300,42 @@ Any failure rejects the block as `Invalid` (consensus-fatal). A `Malformed` erro
 
 DOM's cryptographic primitives are conservative and standard:
 
-- **Curve:** secp256k1 (the Bitcoin curve)
-- **Schnorr signatures:** as in BIP-340, with chain_id included in the challenge to prevent cross-network replay
-- **MuSig2:** for multi-signature kernels (specified, implementation deferred to v1.1)
-- **Hash function:** Blake2b-256 for structural hashing; SHA-256 for genesis hash and Bitcoin compatibility
-- **MAC:** HMAC-SHA256 for RFC 6979 deterministic nonces
-- **AEAD:** ChaCha20-Poly1305 for Noise transport
-- **Key derivation:** HKDF-SHA256
-- **Hash-to-curve:** RFC9380 for the H generator (`H = 020e2cfc9aba78455ffd390cf5f1d17b9982d0ee29b266bb3ea6217b078f09d550`)
-- **Range proofs:** Bulletproofs+ via `secp256k1-zkp`
+| Component | Algorithm | RFC |
+|-----------|-----------|-----|
+| **Curve** | secp256k1 | Bitcoin reference |
+| **Schnorr signatures** | BIP-340 with chain_id binding | RFC-0009 |
+| **Hash function (structural)** | Blake2b-256 (tagged) | RFC-0001 |
+| **Hash function (PoW seed)** | RandomX preimage | RFC-0005 |
+| **MAC** | HMAC-SHA256 (RFC 6979 nonces) | RFC 6979 |
+| **AEAD** | ChaCha20-Poly1305 (Noise) | RFC 7539 |
+| **Key derivation (wallet)** | Argon2id + HKDF-SHA256 | OWASP |
+| **Hash-to-curve** | RFC9380 | RFC 9380 |
+| **Range proofs** | Bulletproofs+ (via secp256k1-zkp) | RFC-0002 |
 
-The H generator is derived deterministically and verified at node startup. A node refuses to start with a placeholder H. This prevents an attack class where a backdoored H with a known discrete log relation to G would enable silent inflation.
+### 9.1 H Generator
+
+The H generator is derived deterministically via RFC9380 [8] hash-to-curve with the domain separation tag `"DOM:h2c:secp256k1:v6.1"`:
+
+```
+H_DOM = hash_to_curve(b"", DST="DOM:h2c:secp256k1:v6.1")
+H_DOM_COMPRESSED = 020e2cfc9aba78455ffd390cf5f1d17b9982d0ee29b266bb3ea6217b078f09d550
+```
+
+The H generator is verified at node startup. A node refuses to start with a placeholder H. This prevents an attack class where a backdoored H with a known discrete log relation to G would enable silent inflation.
+
+### 9.2 Domain Separation
+
+All consensus hashes use tagged hashing with format:
+
+```
+Blake2b-256( u16_le(len(tag)) || tag || data )
+```
+
+Tags are namespaced (e.g., `DOM:kernel-sig:v1`, `DOM:chain-id:v1`, `DOM:pmmr-leaf:v1`) to prevent cross-context hash collisions.
+
+### 9.3 Multi-Signature (Deferred)
+
+MuSig2 multi-signature aggregation is specified in RFC-0009 but **deferred to v1.1**. v1.0 supports only single-key Schnorr kernels.
 
 ---
 
@@ -238,9 +353,61 @@ This minimalism is not a missing feature list. It is the feature list. Every lin
 
 ---
 
-## 11. Launch
+## 11. Implementation Status
 
-DOM launches when the protocol implementation is feature-complete, the genesis timestamp is finalized, and the code is published.
+DOM is implemented in Rust as a workspace of 16 crates. As of May 2026:
+
+| Component | Status |
+|-----------|--------|
+| **Consensus validators (V1-V18)** | ✅ Implemented |
+| **Cryptographic primitives** | ✅ Implemented (Schnorr, Pedersen, Bulletproofs+, H_DOM) |
+| **Serialization (canonical)** | ✅ Implemented |
+| **PMMR (Pruned Merkle Mountain Range)** | ✅ Implemented |
+| **PoW (RandomX + ASERT)** | ✅ Implemented |
+| **Storage (LMDB)** | ✅ Implemented |
+| **P2P (Noise XX)** | ✅ Implemented |
+| **IBD (Initial Block Download)** | ✅ Phases 1-3 complete |
+| **JSON-RPC** | ✅ Implemented |
+| **Wallet (encrypted, Argon2id)** | ✅ Implemented |
+| **Mining loop** | ✅ Implemented |
+| **Dandelion++** | ⏳ Deferred to v1.1 |
+| **MuSig2** | ⏳ Deferred to v1.1 |
+| **Wallet slate protocol** | ⏳ Deferred to v1.1 |
+
+### 11.1 Test Coverage
+
+```
+Total unit tests:       238 passing, 0 failures
+Crates with tests:      13 / 16
+Clippy warnings:        0
+Format compliance:      100%
+```
+
+### 11.2 Testnet Burn-In
+
+A private testnet has been running continuously since 2026-05-19:
+
+| Metric | Value |
+|--------|-------|
+| **Blocks mined** | 156+ |
+| **Continuous uptime** | 18h+ |
+| **Consensus failures** | 0 |
+| **Average block time** | ~7.2 min (testnet easy difficulty) |
+| **Critical errors** | 0 |
+
+A public testnet announcement is pending completion of Phase 1 and Phase 2 security audits.
+
+---
+
+## 12. Launch
+
+DOM launches when:
+
+1. Phase 1 audit (consensus + crypto) is complete
+2. Phase 2 audit (storage + P2P + PoW) is complete
+3. Public testnet has run stable for 3+ months
+4. Genesis parameters are finalized
+5. Code is published
 
 The genesis coinbase contains the message:
 
@@ -250,9 +417,11 @@ No participant — including the protocol author — has any advantage at launch
 
 There is no announcement, no ICO, no airdrop, no premine, no founder allocation. DOM either succeeds as a means of exchange because people choose to use it, or it does not. The protocol does not depend on its author after launch.
 
+**Target launch:** Q3 2026, pending audit completion.
+
 ---
 
-## 12. Conclusion
+## 13. Conclusion
 
 DOM is what Bitcoin was supposed to be — a peer-to-peer electronic cash system used for actual transactions. Every design choice serves this end: privacy by default, mining accessible to ordinary hardware, smooth difficulty adjustment, constant chain size, minimal attack surface, transparent launch.
 
@@ -279,3 +448,21 @@ What is new is the synthesis, the launch model, and the commitment to remain a c
 [7] Yu, G. (2020). *Mimblewimble Non-Interactive Transaction Scheme.* IACR ePrint 2020/1064.
 
 [8] Faz-Hernandez, A., Scott, S., Sullivan, N., Wahby, R. S., Wood, C. A. (2023). *RFC 9380: Hashing to Elliptic Curves.* IETF.
+
+---
+
+## Appendix A: Whitepaper Changelog
+
+| Version | Date | Changes |
+|---------|------|---------|
+| v1 | 2026-05 (early) | Initial draft |
+| v2 | 2026-05 | Minor revisions |
+| v3 | 2026-05 (mid) | Reward = 24 DOM, Halving = 670,725, 30 epochs (placeholder values) |
+| **v4** | **2026-05-19** | **Reward = 33 DOM, Halving = 330,000, 55 epochs, Supply = 33M (production values)** |
+
+---
+
+**Document Owner:** Soren Planck
+**Contact:** sorenplanck@tutamail.com
+**Repository:** github.com/sorenplanck/dom-protocol
+**License:** [TBD — Choose MIT, Apache 2.0, or dual]
