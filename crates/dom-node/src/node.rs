@@ -30,6 +30,10 @@ pub struct DomNode {
     pub dandelion: Arc<Mutex<DandelionRouter>>,
     /// Node's Noise static keypair private key.
     pub noise_privkey: [u8; 32],
+    /// Broadcast channel for relaying newly-mined or received blocks to all peers.
+    /// Senders: miner after connect_block; message_loop after accepting a relayed Block.
+    /// Receivers: one per connected peer task.
+    pub block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
 }
 
 impl DomNode {
@@ -53,8 +57,11 @@ impl DomNode {
         let (noise_privkey, noise_pubkey) = dom_wire::handshake::generate_static_keypair();
         info!("Node identity: {}", hex::encode(noise_pubkey));
 
+        let (block_relay_tx, _) = tokio::sync::broadcast::channel(64);
+
         Ok(Self {
             noise_privkey,
+            block_relay_tx,
             config: config.clone(),
             chain: Arc::new(Mutex::new(chain)),
             mempool: Arc::new(Mutex::new(Mempool::new())),
@@ -125,8 +132,10 @@ impl DomNode {
                     let config = self.config.clone();
                     let privkey = self.noise_privkey;
                     let chain = self.chain.clone();
+                    let block_relay_tx = self.block_relay_tx.clone();
                     tokio::spawn(async move {
-                        handle_inbound(stream, peer_addr, config, privkey, chain).await;
+                        handle_inbound(stream, peer_addr, config, privkey, chain, block_relay_tx)
+                            .await;
                     });
                 }
                 Err(e) => {
@@ -166,9 +175,10 @@ impl DomNode {
                     let config = self.config.clone();
                     let privkey = self.noise_privkey;
                     let chain = self.chain.clone();
+                    let block_relay_tx = self.block_relay_tx.clone();
                     info!("Connecting to peer {addr}");
                     tokio::spawn(async move {
-                        connect_outbound(&addr, config, privkey, chain).await;
+                        connect_outbound(&addr, config, privkey, chain, block_relay_tx).await;
                     });
                 }
             }
@@ -273,6 +283,7 @@ async fn handle_inbound(
     config: NodeConfig,
     privkey: [u8; 32],
     chain: Arc<Mutex<ChainState>>,
+    block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
 ) {
     // Derive chain_id from network magic + canonical genesis hash.
     let genesis_hash = match config.network {
@@ -304,8 +315,16 @@ async fn handle_inbound(
                 "Hello from {addr}: height={} ua={:?}",
                 peer_hello.best_height, peer_hello.user_agent
             );
-            if let Err(e) =
-                message_loop(&mut stream, &mut codec, &config, addr, chain.clone()).await
+            if let Err(e) = message_loop(
+                &mut stream,
+                &mut codec,
+                &config,
+                addr,
+                chain.clone(),
+                block_relay_tx.subscribe(),
+                block_relay_tx.clone(),
+            )
+            .await
             {
                 info!("Connection to {addr} closed: {e}");
             }
@@ -319,6 +338,7 @@ async fn connect_outbound(
     config: NodeConfig,
     privkey: [u8; 32],
     chain: Arc<Mutex<ChainState>>,
+    block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
 ) {
     let mut stream = match tokio::net::TcpStream::connect(addr).await {
         Ok(s) => s,
@@ -388,8 +408,16 @@ async fn connect_outbound(
                 }
             }
 
-            if let Err(e) =
-                message_loop(&mut stream, &mut codec, &config, peer_addr, chain.clone()).await
+            if let Err(e) = message_loop(
+                &mut stream,
+                &mut codec,
+                &config,
+                peer_addr,
+                chain.clone(),
+                block_relay_tx.subscribe(),
+                block_relay_tx.clone(),
+            )
+            .await
             {
                 info!("Connection to {addr} closed: {e}");
             }
@@ -669,6 +697,8 @@ async fn message_loop(
     config: &NodeConfig,
     peer_addr: std::net::SocketAddr,
     chain: Arc<Mutex<ChainState>>,
+    mut block_relay_rx: tokio::sync::broadcast::Receiver<Vec<u8>>,
+    block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
 ) -> Result<(), DomError> {
     use dom_wire::message::{
         BlockPayload, Command, GetBlockDataPayload, GetHeadersPayload, HeadersPayload, WireMessage,
@@ -682,6 +712,28 @@ async fn message_loop(
 
     loop {
         tokio::select! {
+            // Relay broadcast: someone (miner or another peer task) wants to send a Block
+            relay = block_relay_rx.recv() => {
+                match relay {
+                    Ok(block_bytes) => {
+                        let payload = BlockPayload { block_bytes };
+                        let msg = WireMessage {
+                            magic: config.network.magic(),
+                            command: Command::Block,
+                            payload: payload.to_bytes()?,
+                        };
+                        if let Err(e) = codec.send(stream, &msg).await {
+                            return Err(DomError::Internal(format!("relay send to {peer_addr}: {e}")));
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("relay lagged by {n} for {peer_addr}");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Err(DomError::Internal("relay channel closed".into()));
+                    }
+                }
+            }
             // Periodic ping
             _ = ping_timer.tick() => {
                 let nonce: [u8; 8] = rand::random();
@@ -726,6 +778,35 @@ async fn message_loop(
                             payload: resp.to_bytes()?,
                         };
                         codec.send(stream, &wire).await?;
+                    }
+                    Command::Block => {
+                        // Peer relayed a block to us. Validate and accept.
+                        use dom_serialization::DomDeserialize;
+                        let payload = BlockPayload::from_bytes(&msg.payload)?;
+                        let block = dom_consensus::Block::from_bytes(&payload.block_bytes)?;
+                        let now = dom_core::Timestamp(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                        );
+                        let result = {
+                            let mut c = chain.lock().await;
+                            c.connect_block(&block, now)
+                        };
+                        match result {
+                            Ok(_) => {
+                                tracing::info!("Accepted relayed block from {peer_addr}");
+                                // Re-relay to all OTHER peers via broadcast.
+                                let _ = block_relay_tx.send(payload.block_bytes);
+                            }
+                            Err(dom_core::DomError::Invalid(e)) => {
+                                tracing::warn!("Rejected block from {peer_addr}: {e}");
+                            }
+                            Err(e) => {
+                                tracing::debug!("Block from {peer_addr} not accepted: {e}");
+                            }
+                        }
                     }
                     Command::GetBlockData => {
                         let req = GetBlockDataPayload::from_bytes(&msg.payload)?;

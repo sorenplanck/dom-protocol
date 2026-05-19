@@ -321,6 +321,15 @@ async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
             .map_err(|e| DomError::Internal(format!("connect_block: {e}")))?;
     }
 
+    // Relay newly-mined block to all connected peers via broadcast channel.
+    let block_bytes = {
+        use dom_serialization::DomSerialize;
+        block
+            .to_bytes()
+            .map_err(|e| DomError::Internal(format!("serialize block for relay: {e}")))?
+    };
+    let _ = node.block_relay_tx.send(block_bytes);
+
     Ok(new_height)
 }
 
