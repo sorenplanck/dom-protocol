@@ -272,6 +272,21 @@ pub const TAG_MUSIG2_NONCE: &str = "DOM:musig2-nonce:v1";
 /// Tag for deriving the canonical genesis coinbase blinding factor.
 /// Used to make the genesis block fully deterministic across all nodes.
 pub const TAG_GENESIS_BLINDING: &str = "DOM:genesis-blinding:v1";
+
+/// Canonical genesis block hash for Testnet.
+///
+/// Derived deterministically from the canonical genesis coinbase + header.
+/// Must be updated whenever any genesis input changes (tag, timestamp, target,
+/// PMMR construction, coinbase structure).
+///
+/// Last computed: 2026-05-19 from clean run with TAG_GENESIS_BLINDING:v1.
+pub const GENESIS_HASH_TESTNET: [u8; 32] = [
+    0x78, 0xf5, 0xe0, 0xf4, 0x8d, 0xe6, 0x8f, 0x00, 0x4c, 0x7b, 0x4e, 0x1a, 0x3a, 0xee, 0x79, 0xee,
+    0x42, 0xc0, 0x71, 0xa4, 0x0a, 0xb1, 0x76, 0xcb, 0x92, 0x61, 0x52, 0x65, 0x1d, 0x9b, 0xee, 0x27,
+];
+
+/// Canonical genesis block hash for Mainnet — UNFINALIZED until mainnet launch.
+pub const GENESIS_HASH_MAINNET: [u8; 32] = [0u8; 32];
 pub const TAG_PMMR_EMPTY: &str = "DOM:pmmr-empty:v1";
 pub const TAG_PMMR_BAG: &str = "DOM:pmmr-bag:v1";
 pub const TAG_PMMR_LEAF: &str = "DOM:pmmr-leaf:v1";

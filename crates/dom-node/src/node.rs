@@ -3,6 +3,7 @@
 use crate::miner::mining_loop;
 use dom_chain::ChainState;
 use dom_config::NodeConfig;
+use dom_consensus::derive_chain_id;
 use dom_core::DomError;
 use dom_core::Hash256;
 use dom_core::Timestamp;
@@ -273,9 +274,13 @@ async fn handle_inbound(
     privkey: [u8; 32],
     chain: Arc<Mutex<ChainState>>,
 ) {
-    // chain_id derived from network magic + genesis hash (currently ZERO until
-    // genesis hash is finalized — same as in validate_kernel_signatures context).
-    let chain_id = [0u8; 32];
+    // Derive chain_id from network magic + canonical genesis hash.
+    let genesis_hash = match config.network {
+        dom_config::Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
+        dom_config::Network::Testnet => dom_core::GENESIS_HASH_TESTNET,
+    };
+    let chain_id =
+        *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes();
     let transport = match dom_wire::handshake::perform_handshake_responder(
         &mut stream,
         &privkey,
@@ -322,7 +327,12 @@ async fn connect_outbound(
             return;
         }
     };
-    let chain_id = [0u8; 32];
+    let genesis_hash = match config.network {
+        dom_config::Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
+        dom_config::Network::Testnet => dom_core::GENESIS_HASH_TESTNET,
+    };
+    let chain_id =
+        *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes();
     let transport = match dom_wire::handshake::perform_handshake_initiator(
         &mut stream,
         &privkey,

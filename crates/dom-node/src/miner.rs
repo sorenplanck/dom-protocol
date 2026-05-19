@@ -2,6 +2,7 @@
 
 use crate::node::DomNode;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
+use dom_consensus::derive_chain_id;
 use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
 use dom_core::{BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE};
 use dom_pow::{
@@ -29,6 +30,15 @@ pub fn block_reward(height: u64) -> u64 {
         Ok(idx) => dom_core::BLOCK_REWARD_TABLE[idx],
         Err(_) => 0,
     }
+}
+
+/// Compute the canonical chain_id from the node's network configuration.
+fn chain_id_for(config: &dom_config::NodeConfig) -> [u8; 32] {
+    let genesis_hash = match config.network {
+        dom_config::Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
+        dom_config::Network::Testnet => dom_core::GENESIS_HASH_TESTNET,
+    };
+    *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes()
 }
 
 /// Build a cryptographically valid coinbase transaction.
@@ -174,7 +184,7 @@ async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     let anchor = genesis_anchor();
 
     // Deterministic genesis coinbase — identical on every node.
-    let genesis_coinbase = build_genesis_coinbase(&[0u8; 32])?;
+    let genesis_coinbase = build_genesis_coinbase(&chain_id_for(&node.config))?;
 
     // Compute PMMR roots from the coinbase so the header is self-consistent.
     let output_root = {
@@ -300,7 +310,7 @@ async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
 
     let block = Block {
         header,
-        coinbase: build_real_coinbase(BlockHeight(new_height), 0, &[0u8; 32])?,
+        coinbase: build_real_coinbase(BlockHeight(new_height), 0, &chain_id_for(&node.config))?,
         transactions: Vec::new(),
     };
 
