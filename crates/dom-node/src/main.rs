@@ -17,7 +17,34 @@ async fn main() -> anyhow::Result<()> {
     info!("License: MIT");
 
     // Load config — default to testnet for now
-    let config = NodeConfig::testnet();
+    let mut config = NodeConfig::testnet();
+
+    // Allow override of seed peers via DOM_SEED_PEERS env var (CSV of host:port).
+    // Useful for testnet privado where DNS seeds don't exist.
+    if let Ok(seeds_csv) = std::env::var("DOM_SEED_PEERS") {
+        let seeds: Vec<String> = seeds_csv
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !seeds.is_empty() {
+            info!("Using seed peers from DOM_SEED_PEERS: {seeds:?}");
+            config.seed_peers = seeds;
+        }
+    }
+
+    // Allow override of P2P listen address via DOM_P2P_LISTEN_ADDR.
+    // Useful when running multiple nodes on the same host.
+    if let Ok(addr) = std::env::var("DOM_P2P_LISTEN_ADDR") {
+        info!("Overriding P2P listen address: {addr}");
+        config.p2p_listen_addr = addr;
+    }
+
+    // Allow override of data dir via DOM_DATA_DIR.
+    if let Ok(dir) = std::env::var("DOM_DATA_DIR") {
+        info!("Overriding data dir: {dir}");
+        config.data_dir = dir;
+    }
 
     // Initialize node
     let node = Arc::new(DomNode::init(config)?);
