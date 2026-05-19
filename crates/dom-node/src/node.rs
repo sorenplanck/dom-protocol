@@ -50,7 +50,7 @@ impl DomNode {
         let genesis_hash = Hash256::ZERO;
 
         // Initialize chain state
-        let chain = ChainState::open(store, genesis_hash)?;
+        let chain = ChainState::open(store, genesis_hash, config.network.magic())?;
         info!("Chain tip: height={}", chain.tip_height);
 
         // Generate or load Noise keypair
@@ -704,7 +704,7 @@ async fn message_loop(
         BlockPayload, Command, GetBlockDataPayload, GetHeadersPayload, HeadersPayload, WireMessage,
     };
 
-    const PING_INTERVAL_SECS: u64 = 60;
+    const PING_INTERVAL_SECS: u64 = 30;
     let mut ping_timer =
         tokio::time::interval(tokio::time::Duration::from_secs(PING_INTERVAL_SECS));
     // Skip the immediate first tick.

@@ -6,7 +6,7 @@ use dom_consensus::block::{
     BlockHeader,
 };
 use dom_consensus::{derive_chain_id, validate_block, Block, ValidationContext};
-use dom_core::{BlockHeight, DomError, Hash256, Timestamp, NETWORK_MAGIC_MAINNET};
+use dom_core::{BlockHeight, DomError, Hash256, Timestamp};
 use dom_pow::{randomx_seed_height, target_to_difficulty, AsertAnchor, CompactTarget};
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::DomStore;
@@ -20,10 +20,15 @@ pub struct ChainState {
     pub tip_difficulty: U256,
     pub genesis_hash: Hash256,
     pub asert_anchor: AsertAnchor,
+    pub network_magic: u32,
 }
 
 impl ChainState {
-    pub fn open(store: DomStore, genesis_hash: Hash256) -> Result<Self, DomError> {
+    pub fn open(
+        store: DomStore,
+        genesis_hash: Hash256,
+        network_magic: u32,
+    ) -> Result<Self, DomError> {
         let genesis_target = CompactTarget(dom_core::GENESIS_TARGET_COMPACT)
             .to_target()
             .map_err(|e| DomError::Internal(format!("GENESIS_TARGET_COMPACT: {e}")))?;
@@ -55,6 +60,7 @@ impl ChainState {
             tip_difficulty,
             genesis_hash,
             asert_anchor,
+            network_magic,
         })
     }
 
@@ -119,7 +125,7 @@ impl ChainState {
             )));
         }
 
-        let chain_id = derive_chain_id(NETWORK_MAGIC_MAINNET, &self.genesis_hash);
+        let chain_id = derive_chain_id(self.network_magic, &self.genesis_hash);
         let ctx = ValidationContext {
             current_height: header.height,
             chain_id: *chain_id.as_bytes(),

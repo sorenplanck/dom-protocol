@@ -251,6 +251,7 @@ async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     )?;
     chain.tip_hash = Hash256::from_bytes(genesis_hash);
     chain.tip_height = dom_core::BlockHeight::GENESIS;
+    chain.tip_difficulty = primitive_types::U256::one();
     chain.genesis_hash = Hash256::from_bytes(genesis_hash);
     info!("✅ Genesis criado! hash={}", hex::encode(genesis_hash));
     Ok(())
@@ -293,24 +294,49 @@ async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
             .unwrap_or([0u8; 32])
     };
 
-    let (tx, rx) = tokio::sync::oneshot::channel::<Result<BlockHeader, String>>();
+    // Build coinbase before mining so we can include PMMR roots in the header.
+    let coinbase = build_real_coinbase(BlockHeight(new_height), 0, &chain_id_for(&node.config))?;
 
+    let output_root = {
+        let mut mmr = dom_pmmr::Pmmr::new();
+        mmr.push(coinbase.output.commitment.as_bytes())?;
+        mmr.root()
+    };
+    let kernel_root = {
+        let mut mmr = dom_pmmr::Pmmr::new();
+        mmr.push(coinbase.kernel.excess.as_bytes())?;
+        mmr.root()
+    };
+    let rangeproof_root = {
+        let mut mmr = dom_pmmr::Pmmr::new();
+        mmr.push(&coinbase.output.proof)?;
+        mmr.root()
+    };
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<BlockHeader, String>>();
     std::thread::Builder::new()
         .name(format!("miner-{}", new_height))
         .spawn(move || {
-            let result = mine_blocking(new_height, tip_hash, target, new_total_diff, seed_hash);
+            let result = mine_blocking(
+                new_height,
+                tip_hash,
+                target,
+                new_total_diff,
+                seed_hash,
+                output_root,
+                kernel_root,
+                rangeproof_root,
+            );
             let _ = tx.send(result.map_err(|e| e.to_string()));
         })
         .map_err(|e| DomError::Internal(format!("spawn thread: {e}")))?;
-
     let header = rx
         .await
         .map_err(|e| DomError::Internal(format!("channel: {e}")))?
         .map_err(DomError::Internal)?;
-
     let block = Block {
         header,
-        coinbase: build_real_coinbase(BlockHeight(new_height), 0, &chain_id_for(&node.config))?,
+        coinbase,
         transactions: Vec::new(),
     };
 
@@ -333,18 +359,24 @@ async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     Ok(new_height)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mine_blocking(
     new_height: u64,
     tip_hash: Hash256,
     target: [u8; 32],
     new_total_diff: U256,
     seed_hash: [u8; 32],
+    output_root: Hash256,
+    kernel_root: Hash256,
+    rangeproof_root: Hash256,
 ) -> Result<BlockHeader, DomError> {
-    use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
-    let flags = RandomXFlag::FLAG_DEFAULT;
+    use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
+    let flags = RandomXFlag::get_recommended_flags() | RandomXFlag::FLAG_FULL_MEM;
     let cache = RandomXCache::new(flags, &seed_hash)
         .map_err(|e| DomError::Internal(format!("cache: {e}")))?;
-    let vm = RandomXVM::new(flags, Some(cache), None)
+    let dataset = RandomXDataset::new(flags, cache.clone(), 0)
+        .map_err(|e| DomError::Internal(format!("dataset: {e}")))?;
+    let vm = RandomXVM::new(flags, Some(cache), Some(dataset))
         .map_err(|e| DomError::Internal(format!("vm: {e}")))?;
 
     let mut nonce = 0u64;
@@ -354,9 +386,9 @@ fn mine_blocking(
             prev_hash: tip_hash,
             height: BlockHeight(new_height),
             timestamp: Timestamp(now_secs()),
-            output_root: Hash256::ZERO,
-            kernel_root: Hash256::ZERO,
-            rangeproof_root: Hash256::ZERO,
+            output_root,
+            kernel_root,
+            rangeproof_root,
             total_kernel_offset: [0u8; 32],
             target: CompactTarget(target_to_compact(&target)),
             total_difficulty: new_total_diff,
