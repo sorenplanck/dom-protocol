@@ -268,6 +268,10 @@ pub const TAG_BP_H: &str = "DOM:bp-H:v1";
 pub const TAG_CHAIN_ID: &str = "DOM:chain-id:v1";
 pub const TAG_MUSIG2_TRANSCRIPT: &str = "DOM:musig2-transcript:v1";
 pub const TAG_MUSIG2_NONCE: &str = "DOM:musig2-nonce:v1";
+
+/// Tag for deriving the canonical genesis coinbase blinding factor.
+/// Used to make the genesis block fully deterministic across all nodes.
+pub const TAG_GENESIS_BLINDING: &str = "DOM:genesis-blinding:v1";
 pub const TAG_PMMR_EMPTY: &str = "DOM:pmmr-empty:v1";
 pub const TAG_PMMR_BAG: &str = "DOM:pmmr-bag:v1";
 pub const TAG_PMMR_LEAF: &str = "DOM:pmmr-leaf:v1";

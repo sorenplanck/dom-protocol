@@ -44,6 +44,45 @@ fn build_real_coinbase(
     total_tx_fees: u64,
     chain_id: &[u8; 32],
 ) -> Result<CoinbaseTransaction, DomError> {
+    build_coinbase_with_blinding(height, total_tx_fees, chain_id, None, None)
+}
+
+/// Build the canonical genesis coinbase using a deterministic blinding factor.
+///
+/// The blinding is derived from `TAG_GENESIS_BLINDING` so every node produces
+/// the same commitment and signature for the genesis block. This is required
+/// for genesis_hash to be identical across all nodes — otherwise nodes can't
+/// agree on the chain they're on.
+fn build_genesis_coinbase(chain_id: &[u8; 32]) -> Result<CoinbaseTransaction, DomError> {
+    use dom_crypto::hash::blake2b_256_tagged;
+    use dom_crypto::pedersen::BlindingFactor;
+
+    // Derive deterministic blinding from a public tag — public knowledge,
+    // since the genesis coinbase recipient is "everyone".
+    let blinding_hash = blake2b_256_tagged(dom_core::TAG_GENESIS_BLINDING, b"");
+    let blinding = BlindingFactor::from_bytes(*blinding_hash.as_bytes())
+        .map_err(|e| DomError::Internal(format!("genesis blinding: {e}")))?;
+
+    // Derive a deterministic bulletproof nonce too, so the range proof is reproducible.
+    let nonce_hash = blake2b_256_tagged(dom_core::TAG_GENESIS_BLINDING, b"bulletproof-nonce");
+    let nonce = *nonce_hash.as_bytes();
+
+    build_coinbase_with_blinding(
+        BlockHeight::GENESIS,
+        0,
+        chain_id,
+        Some(blinding),
+        Some(nonce),
+    )
+}
+
+fn build_coinbase_with_blinding(
+    height: BlockHeight,
+    total_tx_fees: u64,
+    chain_id: &[u8; 32],
+    blinding_override: Option<dom_crypto::pedersen::BlindingFactor>,
+    bulletproof_nonce: Option<[u8; 32]>,
+) -> Result<CoinbaseTransaction, DomError> {
     use dom_crypto::bulletproof;
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::keys::SecretKey;
@@ -55,15 +94,22 @@ fn build_real_coinbase(
         .checked_add(total_tx_fees)
         .ok_or_else(|| DomError::Invalid("coinbase value overflow".into()))?;
 
-    // Fresh random blinding factor for this block.
-    let blinding = BlindingFactor::random();
+    // Either use the provided blinding (genesis) or generate fresh (normal blocks).
+    let blinding = match blinding_override {
+        Some(b) => b,
+        None => BlindingFactor::random(),
+    };
 
     // Output commitment: C = value*H + r*G
     let output_commitment = Commitment::commit(explicit_value, &blinding);
 
     // Range proof: proves value in [0, 2^52)
-    let (range_proof, _) = bulletproof::prove(explicit_value, &blinding)
-        .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?;
+    let (range_proof, _) = match bulletproof_nonce {
+        Some(nonce) => bulletproof::prove_with_nonce(explicit_value, &blinding, &nonce)
+            .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?,
+        None => bulletproof::prove(explicit_value, &blinding)
+            .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?,
+    };
 
     // Kernel excess = r*G (Mimblewimble: coinbase creates value, excess is blinding only)
     let excess = Commitment::commit(0, &blinding);
@@ -122,17 +168,39 @@ pub async fn mining_loop(node: Arc<DomNode>) {
 
 async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     use dom_core::GENESIS_MESSAGE;
+    use dom_pmmr::Pmmr;
     info!("Criando bloco genesis...");
     info!("Mensagem: {}", GENESIS_MESSAGE);
     let anchor = genesis_anchor();
+
+    // Deterministic genesis coinbase — identical on every node.
+    let genesis_coinbase = build_genesis_coinbase(&[0u8; 32])?;
+
+    // Compute PMMR roots from the coinbase so the header is self-consistent.
+    let output_root = {
+        let mut mmr = Pmmr::new();
+        mmr.push(genesis_coinbase.output.commitment.as_bytes())?;
+        mmr.root()
+    };
+    let kernel_root = {
+        let mut mmr = Pmmr::new();
+        mmr.push(genesis_coinbase.kernel.excess.as_bytes())?;
+        mmr.root()
+    };
+    let rangeproof_root = {
+        let mut mmr = Pmmr::new();
+        mmr.push(&genesis_coinbase.output.proof)?;
+        mmr.root()
+    };
+
     let genesis_header = BlockHeader {
         version: dom_core::PROTOCOL_VERSION,
         prev_hash: Hash256::ZERO,
         height: dom_core::BlockHeight::GENESIS,
         timestamp: anchor.timestamp,
-        output_root: Hash256::ZERO,
-        kernel_root: Hash256::ZERO,
-        rangeproof_root: Hash256::ZERO,
+        output_root,
+        kernel_root,
+        rangeproof_root,
         total_kernel_offset: [0u8; 32],
         target: CompactTarget(target_to_compact(&anchor.target)),
         total_difficulty: U256::one(),
@@ -141,10 +209,9 @@ async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
             randomx_hash: Hash256::ZERO,
         },
     };
-
     let genesis_block = Block {
         header: genesis_header,
-        coinbase: build_real_coinbase(BlockHeight::GENESIS, 0, &[0u8; 32])?,
+        coinbase: genesis_coinbase,
         transactions: Vec::new(),
     };
 

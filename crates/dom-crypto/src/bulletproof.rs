@@ -191,6 +191,48 @@ impl RangeProof {
 
 /// Gera range proof para (value, blinding).
 /// Retorna (proof, commitment_bytes[33]).
+/// Prove with an explicit nonce — for deterministic proofs (e.g. genesis).
+///
+/// The 32-byte nonce must be uniformly random in normal use; this variant
+/// exists so callers can derive it deterministically when reproducibility
+/// across nodes is required.
+pub fn prove_with_nonce(
+    value: u64,
+    blinding: &crate::pedersen::BlindingFactor,
+    nonce_bytes: &[u8; 32],
+) -> Result<(RangeProof, [u8; 33]), DomError> {
+    if value > MAX_PROVABLE_VALUE {
+        return Err(DomError::Invalid(format!(
+            "value {value} > MAX_PROVABLE_VALUE {MAX_PROVABLE_VALUE}"
+        )));
+    }
+    let generator = dom_generator();
+    let commit = zkp_commit(value, blinding.as_bytes())?;
+    let commit_bytes = commit.serialize();
+    let nonce_sk = SecretKey::from_slice(nonce_bytes)
+        .map_err(|e| DomError::Invalid(format!("nonce inválido: {e}")))?;
+    let tweak = Tweak::from_slice(blinding.as_bytes())
+        .map_err(|e| DomError::Invalid(format!("blinding inválido: {e}")))?;
+    let proof = ZkpRangeProof::new(
+        SECP256K1,
+        0,
+        commit,
+        value,
+        tweak,
+        b"DOM:bulletproof:v1",
+        b"",
+        nonce_sk,
+        0,
+        52,
+        generator,
+    )
+    .map_err(|e| DomError::Internal(format!("range proof falhou: {e}")))?;
+    let proof_bytes = proof.serialize();
+    let sec1_bytes = zkp_to_sec1(&commit_bytes)?;
+    Ok((RangeProof::from_bytes(proof_bytes)?, sec1_bytes))
+}
+
+/// Generate a Bulletproof+ range proof for (value, blinding) with a random nonce.
 pub fn prove(
     value: u64,
     blinding: &crate::pedersen::BlindingFactor,

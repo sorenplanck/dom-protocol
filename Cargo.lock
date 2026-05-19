@@ -533,6 +533,7 @@ dependencies = [
  "dom-core",
  "dom-crypto",
  "dom-mempool",
+ "dom-pmmr",
  "dom-pow",
  "dom-rpc",
  "dom-serialization",
