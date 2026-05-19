@@ -23,3 +23,18 @@ data/
 # OS metadata
 Thumbs.db
 desktop.ini
+
+# DOM build prompts (V5 packages — generators, not source)
+PACOTE-*-V5.zip
+pacote-*/
+000-INDICE-V5.md
+000-CHANGELOG-V5.md
+000-COMO-USAR-V5.md
+
+# Logs and build artifacts
+build.log
+test.log
+clippy*.log
+
+# Testnet data (per-node, not consensus)
+dom-testnet-data/
