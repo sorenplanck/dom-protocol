@@ -1,0 +1,19 @@
+[package]
+name = "dom-cli"
+description = "DOM Protocol — Command-line interface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dom-cli"
+path = "src/main.rs"
+
+[dependencies]
+dom-wallet.workspace = true
+dom-core.workspace = true
+
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
