@@ -52,6 +52,14 @@ pub struct NodeConfig {
     pub mine: bool,
     /// Miner reward address.
     pub miner_address: Option<String>,
+    /// Path to the wallet file (.dom). Required if mining and using wallet-integrated mining.
+    /// If None, miner falls back to throwaway random blindings (DOM-SEC-004 unresolved).
+    #[serde(default)]
+    pub wallet_path: Option<String>,
+    /// Password for the wallet file.
+    /// In production, this should come from a separate secret store, not the config TOML.
+    #[serde(default)]
+    pub wallet_password: Option<String>,
     /// Log level.
     pub log_level: String,
 }
@@ -72,6 +80,8 @@ impl NodeConfig {
             seed_peers: vec![],
             mine: false,
             miner_address: None,
+            wallet_path: None,
+            wallet_password: None,
             log_level: "info".into(),
         }
     }
@@ -87,6 +97,8 @@ impl NodeConfig {
             seed_peers: vec![],
             mine: true,
             miner_address: None,
+            wallet_path: None,
+            wallet_password: None,
             log_level: "debug".into(),
         }
     }

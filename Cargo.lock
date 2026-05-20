@@ -538,6 +538,7 @@ dependencies = [
  "dom-rpc",
  "dom-serialization",
  "dom-store",
+ "dom-wallet",
  "dom-wire",
  "hex",
  "primitive-types",

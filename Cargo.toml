@@ -78,6 +78,7 @@ dom-tx             = { path = "crates/dom-tx" }
 dom-mempool        = { path = "crates/dom-mempool" }
 dom-wire           = { path = "crates/dom-wire" }
 dom-config         = { path = "crates/dom-config" }
+dom-wallet         = { path = "crates/dom-wallet" }
 
 [profile.release]
 opt-level       = 3

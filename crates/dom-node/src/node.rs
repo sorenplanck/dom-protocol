@@ -11,6 +11,7 @@ use dom_mempool::Mempool;
 use dom_store::DomStore;
 use dom_wire::dandelion::DandelionRouter;
 use dom_wire::manager::PeerManager;
+use dom_wallet::Wallet;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -34,6 +35,10 @@ pub struct DomNode {
     /// Senders: miner after connect_block; message_loop after accepting a relayed Block.
     /// Receivers: one per connected peer task.
     pub block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    /// Optional wallet for mining rewards.
+    /// If Some, miner uses wallet.build_coinbase() for deterministic blinding.
+    /// If None, miner falls back to random blinding (DOM-SEC-004 unresolved).
+    pub wallet: Option<Arc<Mutex<Wallet>>>,
 }
 
 impl DomNode {
@@ -59,6 +64,37 @@ impl DomNode {
 
         let (block_relay_tx, _) = tokio::sync::broadcast::channel(64);
 
+        // Load or create wallet if configured
+        let wallet = if let (Some(wallet_path), Some(wallet_password)) = 
+            (&config.wallet_path, &config.wallet_password)
+        {
+            use crate::wallet_helpers::wallet_network_from_config;
+            let wallet_net = wallet_network_from_config(config.network);
+            let path = Path::new(wallet_path);
+            
+            match Wallet::open(path, wallet_password) {
+                Ok(w) => {
+                    info!("Wallet loaded from {:?}", path);
+                    Some(Arc::new(Mutex::new(w)))
+                }
+                Err(_) => {
+                    // Create new wallet if doesn't exist
+                    match Wallet::create(path, wallet_password, wallet_net, &genesis_hash) {
+                        Ok(w) => {
+                            info!("New wallet created at {:?}", path);
+                            Some(Arc::new(Mutex::new(w)))
+                        }
+                        Err(e) => {
+                            warn!("Failed to create wallet: {:?}. Mining without wallet (DOM-SEC-004 unresolved).", e);
+                            None
+                        }
+                    }
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             noise_privkey,
             block_relay_tx,
@@ -70,6 +106,7 @@ impl DomNode {
                 config.min_outbound,
             ))),
             dandelion: Arc::new(Mutex::new(DandelionRouter::new())),
+            wallet,
         })
     }
 

@@ -5,7 +5,10 @@ use crate::store::{
     load_wallet as load_wallet_file, save_wallet as save_wallet_file, PendingTx, WalletState,
 };
 use crate::types::{Network, OwnedOutput, WalletBalance, WalletError};
-use dom_consensus::transaction::Transaction;
+use dom_consensus::transaction::{
+    CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionOutput,
+};
+use dom_core::{BlockHeight, KERNEL_FEAT_COINBASE};
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::{blake2b_256_tagged, BlindingFactor, Hash256};
 use dom_serialization::DomSerialize;
@@ -278,6 +281,134 @@ impl Wallet {
     /// Get the network identifier.
     pub fn network(&self) -> Network {
         self.network
+    }
+
+    /// Build a coinbase transaction with a deterministic blinding factor.
+    ///
+    /// The blinding is derived as:
+    /// ```text
+    ///   password_seed = Blake2b-256-tagged("DOM:wallet-coinbase-seed:v1", password_bytes)
+    ///   blinding      = Blake2b-256-tagged(TAG_COINBASE_BLINDING, password_seed || height_le8)
+    /// ```
+    ///
+    /// This allows recovery of all historical coinbase blindings from the
+    /// password alone, even if the on-disk output index is lost. Only the
+    /// password and the list of mined heights are needed for full recovery.
+    ///
+    /// The resulting `OwnedOutput` is added to the wallet's output index, and
+    /// the wallet is persisted to disk (if `file_path` is set).
+    ///
+    /// # Resolves
+    ///
+    /// **DOM-SEC-004 / TC-002 (HIGH)**: Previously the miner generated a fresh
+    /// random `BlindingFactor` for each coinbase and discarded it after signing,
+    /// making mining rewards consensus-valid but unspendable. This method
+    /// derives the blinding deterministically and records the output in the
+    /// wallet so the reward is fully spendable.
+    pub fn build_coinbase(
+        &mut self,
+        height: BlockHeight,
+        total_tx_fees: u64,
+    ) -> Result<CoinbaseTransaction, WalletError> {
+        use dom_crypto::bulletproof;
+        use dom_crypto::keys::SecretKey;
+        use dom_crypto::schnorr_sign;
+
+        debug!(
+            "building coinbase at height {} (fees: {} noms)",
+            height.0, total_tx_fees
+        );
+
+        // Step 1: Compute total value with overflow check.
+        let reward = dom_core::block_reward(height).noms();
+        let explicit_value = reward.checked_add(total_tx_fees).ok_or_else(|| {
+            WalletError::Crypto("coinbase value overflow (reward + fees > u64::MAX)".into())
+        })?;
+
+        // Step 2: Derive the password seed (domain-separated).
+        let password_seed = blake2b_256_tagged(
+            "DOM:wallet-coinbase-seed:v1",
+            self.password.as_bytes(),
+        );
+
+        // Step 3: Derive deterministic blinding factor from (password_seed, height).
+        let mut blinding_input = Vec::with_capacity(32 + 8);
+        blinding_input.extend_from_slice(password_seed.as_bytes());
+        blinding_input.extend_from_slice(&height.0.to_le_bytes());
+
+        let blinding_hash = blake2b_256_tagged(
+            dom_core::TAG_COINBASE_BLINDING,
+            &blinding_input,
+        );
+        let blinding = BlindingFactor::from_bytes(*blinding_hash.as_bytes())
+            .map_err(|e| WalletError::Crypto(format!("blinding from bytes: {e}")))?;
+
+        // Step 4: Output commitment C = value*H + r*G
+        let output_commitment = Commitment::commit(explicit_value, &blinding);
+        // Save the 33-byte SEC1 representation before output_commitment is moved into the tx.
+        let output_commitment_bytes: [u8; 33] = *output_commitment.as_bytes();
+
+        // Step 5: Range proof (Bulletproofs+) proves value in [0, 2^52)
+        let (range_proof, _) = bulletproof::prove(explicit_value, &blinding)
+            .map_err(|e| WalletError::Crypto(format!("coinbase range proof: {e}")))?;
+
+        // Step 6: Kernel excess = 0*H + r*G = r*G  (NOT same as output commitment!)
+        let excess = Commitment::commit(0, &blinding);
+
+        // Step 7: Kernel message = tag(TAG_KERNEL_MSG_COINBASE, features || value_le8)
+        let kernel_message = {
+            let mut data = Vec::with_capacity(9);
+            data.push(KERNEL_FEAT_COINBASE);
+            data.extend_from_slice(&explicit_value.to_le_bytes());
+            blake2b_256_tagged(dom_core::TAG_KERNEL_MSG_COINBASE, &data)
+        };
+
+        // Step 8: Sign with blinding as secret key
+        let sk = SecretKey::from_bytes(blinding.as_bytes())
+            .map_err(|e| WalletError::Crypto(format!("coinbase blinding as key: {e}")))?;
+        let signature = schnorr_sign(&sk, kernel_message.as_bytes(), &self.chain_id)
+            .map_err(|e| WalletError::Crypto(format!("coinbase sign failed: {e}")))?;
+
+        // Step 9: Build the coinbase transaction
+        let coinbase_tx = CoinbaseTransaction {
+            output: TransactionOutput {
+                commitment: output_commitment,
+                proof: range_proof.bytes,
+            },
+            kernel: CoinbaseKernel {
+                features: KERNEL_FEAT_COINBASE,
+                explicit_value,
+                excess,
+                excess_signature: signature.to_bytes(),
+            },
+            offset: [0u8; 32],
+        };
+
+        // Step 10: Record the output in the wallet (so reward is spendable)
+        let owned_output = OwnedOutput::new(
+            output_commitment_bytes,
+            explicit_value,
+            *blinding.as_bytes(),
+            height.0,
+            true, // is_coinbase
+        );
+        self.add_output(owned_output);
+
+        // Step 11: Persist (best effort — blinding is deterministically recoverable)
+        if let Err(e) = self.save() {
+            tracing::warn!(
+                "wallet save failed after building coinbase at height {}: {e:?}. \
+                 Output is recoverable via deterministic blinding from password.",
+                height.0
+            );
+        }
+
+        info!(
+            "coinbase built at height {}: value={} noms ({} reward + {} fees)",
+            height.0, explicit_value, reward, total_tx_fees
+        );
+
+        Ok(coinbase_tx)
     }
 }
 

@@ -19,6 +19,7 @@ dom-chain.workspace     = true
 dom-mempool.workspace   = true
 dom-wire.workspace      = true
 dom-config.workspace    = true
+dom-wallet.workspace    = true
 dom-pow.workspace       = true
 tokio.workspace         = true
 tracing.workspace       = true
