@@ -1,5 +1,7 @@
 //! DOM CLI — command-line interface.
 
+mod node;
+
 use clap::{Parser, Subcommand};
 use dom_wallet::Wallet;
 use std::path::PathBuf;
@@ -18,6 +20,16 @@ enum Commands {
     Wallet {
         #[command(subcommand)]
         command: WalletCommands,
+    },
+    /// Node operations
+    Node {
+        #[command(subcommand)]
+        command: node::NodeCommands,
+    },
+    /// Mining operations
+    Mining {
+        #[command(subcommand)]
+        command: node::MiningCommands,
     },
 }
 
@@ -44,6 +56,8 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Wallet { command } => handle_wallet(command),
+        Commands::Node { command } => node::handle_node(command),
+        Commands::Mining { command } => node::handle_mining(command),
     }
 }
 
