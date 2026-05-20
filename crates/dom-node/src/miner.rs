@@ -295,7 +295,17 @@ async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     };
 
     // Build coinbase before mining so we can include PMMR roots in the header.
-    let coinbase = build_real_coinbase(BlockHeight(new_height), 0, &chain_id_for(&node.config))?;
+    // Build coinbase: use wallet if available, fallback to random blinding
+    let coinbase = if let Some(ref wallet_arc) = node.wallet {
+        // Wallet-integrated mining: deterministic blinding, output recorded
+        let mut wallet = wallet_arc.lock().await;
+        wallet.build_coinbase(BlockHeight(new_height), 0)
+            .map_err(|e| DomError::Internal(format!("wallet coinbase: {e}")))?
+    } else {
+        // Fallback: random blinding, output NOT recorded (DOM-SEC-004 unresolved)
+        warn!("Mining without wallet — rewards will NOT be spendable (DOM-SEC-004)");
+        build_real_coinbase(BlockHeight(new_height), 0, &chain_id_for(&node.config))?
+    };
 
     let output_root = {
         let mut mmr = dom_pmmr::Pmmr::new();
