@@ -38,3 +38,4 @@ clippy*.log
 
 # Testnet data (per-node, not consensus)
 dom-testnet-data/
+*.pid

@@ -51,8 +51,11 @@ impl DomNode {
         let data_path = Path::new(&config.data_dir);
         let store = DomStore::open(data_path)?;
 
-        // Genesis hash — placeholder until RFC-0006 finalizes
-        let genesis_hash = Hash256::ZERO;
+        // Canonical genesis hash for this network.
+        let genesis_hash = Hash256::from_bytes(match config.network {
+            dom_config::Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
+            dom_config::Network::Testnet => dom_core::GENESIS_HASH_TESTNET,
+        });
 
         // Initialize chain state
         let chain = ChainState::open(store, genesis_hash, config.network.magic())?;
