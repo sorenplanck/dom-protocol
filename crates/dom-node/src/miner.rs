@@ -257,7 +257,7 @@ async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     Ok(())
 }
 
-async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
+pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     let (tip_hash, tip_height, tip_difficulty) = {
         let chain = node.chain.lock().await;
         (chain.tip_hash, chain.tip_height, chain.tip_difficulty)

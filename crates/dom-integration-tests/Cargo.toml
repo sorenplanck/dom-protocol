@@ -1,12 +1,20 @@
 [package]
-name        = "dom-integration-tests"
-description = "DOM protocol — dom-integration-tests"
-version.workspace    = true
-edition.workspace    = true
+name = "dom-integration-tests"
+description = "DOM Protocol — End-to-end integration tests"
+version.workspace = true
+edition.workspace = true
 rust-version.workspace = true
-authors.workspace    = true
-license.workspace    = true
+authors.workspace = true
+license.workspace = true
 
 [dependencies]
+dom-node.workspace = true
+dom-config.workspace = true
+dom-wallet.workspace = true
 dom-core.workspace = true
-thiserror.workspace = true
+
+tokio.workspace = true
+anyhow = "1.0"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
