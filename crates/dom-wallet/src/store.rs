@@ -237,13 +237,43 @@ pub fn save_wallet(path: &Path, state: &WalletState, password: &str) -> Result<(
     file_bytes.extend_from_slice(&header);
     file_bytes.extend_from_slice(&ciphertext);
 
-    // Atomic write: write to temp file, then rename.
+    // Atomic write with fsync (DOM-SEC-007 fix).
+    //
+    // 4-step durability guarantee:
+    //   1. Write to <path>.tmp
+    //   2. sync_all() on temp file (data + metadata flushed to disk)
+    //   3. Atomic rename to final path
+    //   4. sync_all() on parent directory (rename durably recorded)
+    //
+    // After this returns Ok, the wallet survives any crash (power loss,
+    // kernel panic, SIGKILL).
     let temp_path = path.with_extension("tmp");
-    fs::write(&temp_path, &file_bytes)
-        .map_err(|e| WalletError::Io(format!("failed to write wallet temp file: {}", e)))?;
 
+    // Step 1+2: Write and fsync the file
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&temp_path)
+            .map_err(|e| WalletError::Io(format!("failed to create wallet temp file: {}", e)))?;
+        f.write_all(&file_bytes)
+            .map_err(|e| WalletError::Io(format!("failed to write wallet temp file: {}", e)))?;
+        f.sync_all()
+            .map_err(|e| WalletError::Io(format!("failed to fsync wallet temp file: {}", e)))?;
+        // f is dropped (closed) here
+    }
+
+    // Step 3: Atomic rename
     fs::rename(&temp_path, path)
         .map_err(|e| WalletError::Io(format!("failed to rename wallet file atomically: {}", e)))?;
+
+    // Step 4: fsync parent directory (ensures rename is durable)
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let dir = std::fs::File::open(parent)
+                .map_err(|e| WalletError::Io(format!("failed to open wallet parent dir for fsync: {}", e)))?;
+            dir.sync_all()
+                .map_err(|e| WalletError::Io(format!("failed to fsync wallet parent dir: {}", e)))?;
+        }
+    }
 
     debug!("wallet saved to {:?}", path);
     Ok(())

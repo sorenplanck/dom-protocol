@@ -273,6 +273,21 @@ pub const TAG_MUSIG2_NONCE: &str = "DOM:musig2-nonce:v1";
 /// Used to make the genesis block fully deterministic across all nodes.
 pub const TAG_GENESIS_BLINDING: &str = "DOM:genesis-blinding:v1";
 
+/// [CONSENSUS-CRITICAL] Domain separator for deterministic coinbase blinding derivation.
+///
+/// The wallet derives a deterministic blinding factor from the miner's secret key
+/// plus block height. This allows wallet recovery from secret_key alone (no need
+/// to backup outputs.bin separately).
+///
+/// Formula:
+/// ```text
+/// blinding = Blake2b-256-tagged(TAG_COINBASE_BLINDING, secret_key || height_le8)
+/// ```
+///
+/// Resolves DOM-SEC-004 / TC-002 (HIGH): coinbase blinding factor previously
+/// discarded after signing, making mining rewards unspendable.
+pub const TAG_COINBASE_BLINDING: &str = "DOM:coinbase-blinding:v1";
+
 /// Canonical genesis block hash for Testnet.
 ///
 /// Derived deterministically from the canonical genesis coinbase + header.
