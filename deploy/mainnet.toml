@@ -1,0 +1,26 @@
+# DOM Protocol — Mainnet Configuration
+
+network = "Mainnet"
+data_dir = "/var/lib/dom-mainnet"
+p2p_listen_addr = "0.0.0.0:33369"
+
+max_inbound = 125
+min_outbound = 8
+
+dns_seeds = [
+    "seed1.dom-protocol.org",
+    "seed2.dom-protocol.org",
+    "seed3.dom-protocol.org",
+]
+
+seed_peers = []
+
+# Mining (set to true for mining nodes)
+mine = false
+miner_address = ""
+
+# Wallet (required if mining)
+# wallet_path = "/var/lib/dom-mainnet/miner.wallet"
+# wallet_password = "SECURE_PASSWORD_FROM_SECRETS_MANAGER"
+
+log_level = "info"

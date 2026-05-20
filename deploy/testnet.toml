@@ -1,0 +1,26 @@
+# DOM Protocol — Testnet Configuration
+
+network = "Testnet"
+data_dir = "/var/lib/dom-testnet"
+p2p_listen_addr = "0.0.0.0:33370"
+
+max_inbound = 50
+min_outbound = 4
+
+dns_seeds = [
+    "testnet-seed1.dom-protocol.org",
+    "testnet-seed2.dom-protocol.org",
+    "testnet-seed3.dom-protocol.org",
+]
+
+seed_peers = []
+
+# Mining
+mine = false
+miner_address = ""
+
+# Wallet (if mining with wallet-integrated mode)
+# wallet_path = "/var/lib/dom-testnet/miner.wallet"
+# wallet_password = "CHANGE_ME_SECURE_PASSWORD"
+
+log_level = "info"

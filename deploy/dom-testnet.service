@@ -1,0 +1,26 @@
+[Unit]
+Description=DOM Protocol Testnet Node
+After=network.target
+
+[Service]
+Type=simple
+User=dom
+WorkingDirectory=/var/lib/dom-testnet
+ExecStart=/usr/local/bin/dom-node
+
+# Environment overrides (optional)
+Environment="DOM_DATA_DIR=/var/lib/dom-testnet"
+Environment="DOM_LOG=info"
+
+Restart=always
+RestartSec=10
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/dom-testnet
+
+[Install]
+WantedBy=multi-user.target
