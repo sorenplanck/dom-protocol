@@ -46,6 +46,18 @@ async fn main() -> anyhow::Result<()> {
         config.data_dir = dir;
     }
 
+    // Allow override of wallet path via DOM_WALLET_PATH.
+    if let Ok(path) = std::env::var("DOM_WALLET_PATH") {
+        info!("Overriding wallet path: {path}");
+        config.wallet_path = Some(path);
+    }
+
+    // Allow override of wallet password via DOM_WALLET_PASSWORD.
+    if let Ok(password) = std::env::var("DOM_WALLET_PASSWORD") {
+        info!("Overriding wallet password: [REDACTED]");
+        config.wallet_password = Some(password);
+    }
+
     // Initialize node
     let node = Arc::new(DomNode::init(config)?);
 
