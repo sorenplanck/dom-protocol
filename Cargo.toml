@@ -19,6 +19,8 @@ members = [
     "crates/dom-rpc",
     "crates/dom-test-vectors",
     "crates/dom-integration-tests",
+    "crates/dom-explorer",
+    "crates/dom-faucet",
 ]
 
 [workspace.package]
@@ -82,6 +84,9 @@ dom-config         = { path = "crates/dom-config" }
 dom-wallet         = { path = "crates/dom-wallet" }
 dom-node           = { path = "crates/dom-node" }
 dom-rpc            = { path = "crates/dom-rpc" }
+axum = { version = "0.7", features = ["json"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+bip39 = { version = "2.0", features = ["rand"] }
 
 [profile.release]
 opt-level       = 3

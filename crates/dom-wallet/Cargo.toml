@@ -8,6 +8,7 @@ authors.workspace    = true
 license.workspace    = true
 
 [dependencies]
+bip39.workspace = true
 dom-core.workspace          = true
 dom-crypto.workspace        = true
 dom-consensus.workspace     = true

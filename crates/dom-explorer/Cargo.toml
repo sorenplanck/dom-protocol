@@ -1,0 +1,18 @@
+[package]
+name        = "dom-explorer"
+description = "DOM Protocol — Block explorer REST API"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+license.workspace      = true
+
+[dependencies]
+dom-core.workspace = true
+tokio.workspace    = true
+serde.workspace    = true
+serde_json.workspace = true
+tracing.workspace  = true
+axum.workspace     = true
+tower-http.workspace = true
+thiserror.workspace = true

@@ -44,6 +44,8 @@ pub mod output_index;
 pub mod store;
 pub mod types;
 pub mod wallet;
+pub mod backup;
+pub mod coin_selection;
 
 pub use types::{Network, OwnedOutput, WalletBalance, WalletError};
 pub use wallet::Wallet;
