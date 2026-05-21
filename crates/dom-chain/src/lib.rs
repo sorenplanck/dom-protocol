@@ -15,8 +15,10 @@
 #![deny(missing_docs)]
 
 pub mod chain_state;
+pub mod genesis;
 pub mod ibd;
 pub mod reorg;
 
 pub use chain_state::ChainState;
+pub use genesis::{GenesisResult, build_genesis, build_mainnet_genesis, build_testnet_genesis};
 pub use ibd::{IbdPhase, IbdState};

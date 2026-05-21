@@ -7,6 +7,8 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+sha2.workspace = true
+blake2.workspace = true
 dom-core.workspace          = true
 dom-consensus.workspace     = true
 dom-serialization.workspace = true
@@ -17,7 +19,5 @@ dom-crypto.workspace        = true
 thiserror.workspace         = true
 tracing.workspace           = true
 tokio.workspace             = true
-
 primitive-types.workspace = true
-blake2.workspace            = true
 hex.workspace               = true
