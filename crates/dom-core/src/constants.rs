@@ -179,13 +179,20 @@ pub const MAX_LOCATOR_HASHES: usize = 32;
 /// clock before being rejected as TemporarilyInvalid. Per whitepaper §9 step 3.
 pub const MAX_FUTURE_BLOCK_TIME: u64 = 120;
 
+/// [POLICY] Soft buffer for blocks slightly beyond MAX_FUTURE_BLOCK_TIME.
+/// Blocks with timestamp in (now+MAX_FUTURE_BLOCK_TIME, now+MAX_FUTURE_BLOCK_TIME+SOFT_BUFFER]
+/// are deferred for re-evaluation rather than immediately rejected.
+/// This reduces orphan rate from transient clock drift without changing
+/// the consensus rule (MAX_FUTURE_BLOCK_TIME remains the hard limit).
+pub const FUTURE_BLOCK_SOFT_BUFFER_SECS: u64 = 60;
+
 /// [CONSENSUS] Median-time-past window size.
 pub const MEDIAN_TIME_WINDOW: usize = 11;
 
 // ── Protocol & Network Identity ──────────────────────────────────────────────
 
 /// [NETWORK] Protocol version.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// [NETWORK] Mainnet magic bytes: ASCII "DOM1" = 0x44_4F_4D_31
 pub const NETWORK_MAGIC_MAINNET: u32 = 0x444F_4D31;
@@ -343,6 +350,25 @@ const _: () = {
 };
 
 // ── Runtime verification tests ────────────────────────────────────────────────
+
+
+// ── Time Discipline Thresholds ───────────────────────────────────────────────
+
+/// [POLICY] Clock drift threshold for warnings.
+/// Nodes with drift above this should be alerted but continue operating.
+pub const CLOCK_DRIFT_WARN_SECS: i64 = 30;
+
+/// [POLICY] Clock drift threshold for critical alerts.
+/// Mining should be disabled if drift exceeds this value.
+pub const CLOCK_DRIFT_ERROR_SECS: i64 = 60;
+
+/// [POLICY] Peer drift threshold for scoring penalty.
+/// Peers with timestamp drift above this trigger moderate scoring.
+pub const PEER_DRIFT_WARN_SECS: i64 = 30;
+
+/// [POLICY] Peer drift threshold for immediate disconnection.
+/// Peers with timestamp drift above this are disconnected.
+pub const PEER_DRIFT_DISCONNECT_SECS: i64 = 90;
 
 #[cfg(test)]
 mod tests {

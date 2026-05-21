@@ -496,6 +496,10 @@ async fn hello_exchange(
         best_height,
         best_hash,
         user_agent: format!("dom-node/{}", env!("CARGO_PKG_VERSION")),
+        local_timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
     };
 
     let msg = WireMessage {

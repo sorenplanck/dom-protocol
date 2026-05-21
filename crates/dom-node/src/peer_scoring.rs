@@ -95,6 +95,38 @@ impl PeerScorer {
         let now = Instant::now();
         self.bans.retain(|_, banned_until| *banned_until > now);
     }
+
+    /// Evaluate peer clock drift and return action recommendation.
+    ///
+    /// Compares peer's reported local_timestamp against our local timestamp.
+    /// Thresholds from dom_core: PEER_DRIFT_WARN_SECS and PEER_DRIFT_DISCONNECT_SECS.
+    pub fn evaluate_peer_drift(
+        &mut self,
+        peer_id: &str,
+        local_timestamp: u64,
+        peer_timestamp: u64,
+    ) -> PeerAction {
+        let drift = (local_timestamp as i64 - peer_timestamp as i64).abs();
+        if drift > dom_core::PEER_DRIFT_DISCONNECT_SECS {
+            return PeerAction::Disconnect(format!("clock drift: {}s", drift));
+        }
+        if drift > dom_core::PEER_DRIFT_WARN_SECS {
+            self.bad_behavior(peer_id, Severity::Moderate);
+            return PeerAction::Warn(format!("clock drift: {}s", drift));
+        }
+        PeerAction::Accept
+    }
+}
+
+/// Action recommended after peer drift evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerAction {
+    /// Peer drift is within acceptable bounds.
+    Accept,
+    /// Peer drift triggered warning; continue but log.
+    Warn(String),
+    /// Peer drift exceeds disconnect threshold; drop connection.
+    Disconnect(String),
 }
 
 #[cfg(test)]
@@ -134,5 +166,28 @@ mod tests {
             scorer.bad_behavior("peer1", Severity::Critical);
         }
         assert_eq!(scorer.get_score("peer1"), MIN_SCORE);
+    }
+
+    #[test]
+    fn peer_drift_accept() {
+        let mut scorer = PeerScorer::new(3600);
+        let action = scorer.evaluate_peer_drift("peer1", 1000, 1010);
+        assert_eq!(action, PeerAction::Accept);
+    }
+
+    #[test]
+    fn peer_drift_warn() {
+        let mut scorer = PeerScorer::new(3600);
+        // drift = 40s > PEER_DRIFT_WARN_SECS (30s)
+        let action = scorer.evaluate_peer_drift("peer1", 1000, 1040);
+        assert!(matches!(action, PeerAction::Warn(_)));
+    }
+
+    #[test]
+    fn peer_drift_disconnect() {
+        let mut scorer = PeerScorer::new(3600);
+        // drift = 100s > PEER_DRIFT_DISCONNECT_SECS (90s)
+        let action = scorer.evaluate_peer_drift("peer1", 1000, 1100);
+        assert!(matches!(action, PeerAction::Disconnect(_)));
     }
 }

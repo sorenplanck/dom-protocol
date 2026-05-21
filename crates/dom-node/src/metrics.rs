@@ -1,6 +1,6 @@
 //! Node metrics for monitoring and observability.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub struct Metrics {
@@ -16,6 +16,16 @@ pub struct Metrics {
     pub txs_relayed: Arc<AtomicU64>,
     pub block_validation_time_ms: Arc<AtomicU64>,
     pub ibd_progress_percent: Arc<AtomicU64>,
+
+    // Time discipline metrics (Doc 4.5)
+    /// Total blocks rejected due to timestamp violations.
+    pub blocks_rejected_timestamp: Arc<AtomicU64>,
+    /// Current local clock drift in seconds (can be negative).
+    pub local_clock_drift_seconds: Arc<AtomicI64>,
+    /// Number of connected peers with drift above threshold.
+    pub peers_with_high_drift: Arc<AtomicU64>,
+    /// Current size of the future block queue.
+    pub future_block_queue_size: Arc<AtomicU64>,
 }
 
 impl Metrics {
@@ -33,6 +43,10 @@ impl Metrics {
             txs_relayed: Arc::new(AtomicU64::new(0)),
             block_validation_time_ms: Arc::new(AtomicU64::new(0)),
             ibd_progress_percent: Arc::new(AtomicU64::new(0)),
+            blocks_rejected_timestamp: Arc::new(AtomicU64::new(0)),
+            local_clock_drift_seconds: Arc::new(AtomicI64::new(0)),
+            peers_with_high_drift: Arc::new(AtomicU64::new(0)),
+            future_block_queue_size: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -51,7 +65,16 @@ impl Metrics {
             ("dom_txs_relayed", "Total txs relayed", "counter", &self.txs_relayed),
             ("dom_block_validation_time_ms", "Block validation time", "gauge", &self.block_validation_time_ms),
             ("dom_ibd_progress_percent", "IBD progress", "gauge", &self.ibd_progress_percent),
+            ("dom_blocks_rejected_timestamp_total", "Blocks rejected by timestamp", "counter", &self.blocks_rejected_timestamp),
+            ("dom_peers_with_high_drift", "Peers with high clock drift", "gauge", &self.peers_with_high_drift),
+            ("dom_future_block_queue_size", "Future block queue size", "gauge", &self.future_block_queue_size),
         ];
+
+        // Export drift separately (AtomicI64 requires different load)
+        out.push_str("# HELP dom_clock_drift_seconds Local clock drift in seconds (can be negative)\n");
+        out.push_str("# TYPE dom_clock_drift_seconds gauge\n");
+        out.push_str(&format!("dom_clock_drift_seconds {}\n\n",
+            self.local_clock_drift_seconds.load(Ordering::Relaxed)));
 
         for (name, help, kind, counter) in metrics_list.iter() {
             out.push_str(&format!("# HELP {} {}\n", name, help));

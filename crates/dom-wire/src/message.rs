@@ -150,6 +150,9 @@ pub struct HelloPayload {
     pub best_hash: [u8; 32],
     /// User agent string (max 256 bytes per RFC-0005).
     pub user_agent: String,
+    /// Local Unix timestamp at handshake time (added in PROTOCOL_VERSION 2).
+    /// Used for peer time discipline evaluation.
+    pub local_timestamp: u64,
 }
 
 impl HelloPayload {
@@ -188,6 +191,13 @@ impl HelloPayload {
             return Err(DomError::Malformed("hello truncated".into()));
         }
         let user_agent = String::from_utf8_lossy(&data[82..82 + ua_len]).into_owned();
+        // local_timestamp: 8 bytes after user_agent (added in PROTOCOL_VERSION 2)
+        let ts_offset = 82 + ua_len;
+        let local_timestamp = if data.len() >= ts_offset + 8 {
+            u64::from_le_bytes(data[ts_offset..ts_offset + 8].try_into().unwrap())
+        } else {
+            0 // backward compat: peers on PROTOCOL_VERSION 1 omit this field
+        };
         Ok(Self {
             version,
             network_magic,
@@ -195,6 +205,7 @@ impl HelloPayload {
             best_height,
             best_hash,
             user_agent,
+            local_timestamp,
         })
     }
 }
@@ -507,6 +518,7 @@ mod tests {
             best_height: 12345,
             best_hash: [0xAAu8; 32],
             user_agent: "dom-node/0.1.0".into(),
+            local_timestamp: 0,
         };
         let bytes = hello.to_bytes().unwrap();
         let hello2 = HelloPayload::from_bytes(&bytes).unwrap();

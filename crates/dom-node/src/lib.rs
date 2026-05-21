@@ -7,3 +7,5 @@ pub mod wallet_helpers;
 pub mod peer_scoring;
 pub mod relay;
 pub mod metrics;
+pub mod future_block_queue;
+pub mod time_health;

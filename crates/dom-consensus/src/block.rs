@@ -4,7 +4,7 @@
 //! DOM_RFC_0007_Validation_Order.md — Block validation steps 1-7.
 
 use dom_core::{
-    BlockHeight, DomError, Hash256, Timestamp, MAX_FUTURE_BLOCK_TIME, MEDIAN_TIME_WINDOW,
+    BlockHeight, DomError, Hash256, Timestamp, MAX_FUTURE_BLOCK_TIME, FUTURE_BLOCK_SOFT_BUFFER_SECS, MEDIAN_TIME_WINDOW,
     PROTOCOL_VERSION,
 };
 use dom_pow::CompactTarget;
@@ -202,6 +202,53 @@ pub fn validate_future_timestamp(header: &BlockHeader, now: Timestamp) -> Result
         )));
     }
     Ok(())
+}
+
+/// Validate block timestamp with soft buffer support.
+///
+/// Returns a 3-way decision:
+/// - `Ok(TimestampDecision::Accept)`: timestamp is within `now + MAX_FUTURE_BLOCK_TIME`
+/// - `Ok(TimestampDecision::Defer)`: timestamp is within the soft buffer; defer for re-evaluation
+/// - `Err(DomError::TemporarilyInvalid)`: timestamp beyond hard limit; reject
+///
+/// The hard consensus rule remains `MAX_FUTURE_BLOCK_TIME = 120s`. The soft buffer
+/// adds `FUTURE_BLOCK_SOFT_BUFFER_SECS = 60s` of grace period during which blocks
+/// are held in a queue for re-validation instead of being immediately discarded.
+/// This reduces orphan rates from transient clock drift.
+pub fn validate_future_timestamp_with_buffer(
+    header: &BlockHeader,
+    now: Timestamp,
+) -> Result<TimestampDecision, DomError> {
+    let hard_limit = now
+        .checked_add_secs(MAX_FUTURE_BLOCK_TIME)
+        .ok_or_else(|| DomError::Invalid("timestamp overflow".into()))?;
+
+    let soft_limit = now
+        .checked_add_secs(MAX_FUTURE_BLOCK_TIME + FUTURE_BLOCK_SOFT_BUFFER_SECS)
+        .ok_or_else(|| DomError::Invalid("timestamp overflow".into()))?;
+
+    if header.timestamp.0 > soft_limit.0 {
+        return Err(DomError::TemporarilyInvalid(format!(
+            "block timestamp {} too far in future (soft limit {})",
+            header.timestamp.0,
+            soft_limit.0
+        )));
+    }
+
+    if header.timestamp.0 > hard_limit.0 {
+        return Ok(TimestampDecision::Defer);
+    }
+
+    Ok(TimestampDecision::Accept)
+}
+
+/// Decision returned by `validate_future_timestamp_with_buffer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimestampDecision {
+    /// Timestamp is within hard limit; block can be processed.
+    Accept,
+    /// Timestamp is within soft buffer; hold for re-evaluation.
+    Defer,
 }
 
 /// Validate median-time-past (step 4).
