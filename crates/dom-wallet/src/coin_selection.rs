@@ -1,32 +1,73 @@
 //! Coin selection algorithms for transaction building.
+//!
+//! Provides multiple strategies for selecting UTXOs to spend in a transaction,
+//! optimizing for different criteria (fewest inputs, defragmentation, FIFO).
+//!
+//! These algorithms operate on an abstract [`SelectableUtxo`] type,
+//! independent of the wallet's concrete `OwnedOutput` type, for
+//! testability and reuse.
 
 use thiserror::Error;
 
+/// Errors that can occur during coin selection.
 #[derive(Debug, Error)]
 pub enum SelectionError {
+    /// Not enough funds available to cover target + fee.
     #[error("insufficient funds: have {have}, need {need}")]
-    InsufficientFunds { have: u64, need: u64 },
+    InsufficientFunds {
+        /// Total value of UTXOs we have.
+        have: u64,
+        /// Total value we need (target + fee).
+        need: u64,
+    },
+
+    /// No UTXOs were provided for selection.
     #[error("no UTXOs available")]
     NoUtxos,
 }
 
+/// An abstract spendable UTXO for coin selection.
+///
+/// This is a minimal representation containing only the fields needed
+/// for selection decisions. The actual wallet output type can be mapped
+/// to this for selection, then mapped back for transaction building.
 #[derive(Debug, Clone)]
 pub struct SelectableUtxo {
+    /// Value of the UTXO in noms.
     pub value: u64,
+    /// Age of the UTXO in blocks (current_height - created_at).
     pub age_blocks: u64,
+    /// Stable index for matching back to the source wallet output.
     pub index: usize,
 }
 
+/// Strategy for choosing which UTXOs to spend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionStrategy {
+    /// Largest UTXOs first — minimizes input count and transaction fees.
     Greedy,
+
+    /// Smallest UTXOs first — defragments the wallet by consolidating dust.
     SmallestFirst,
+
+    /// Oldest UTXOs first — FIFO ordering for predictable spending.
     AgeWeighted,
 }
 
+/// Coin selection algorithms.
 pub struct CoinSelector;
 
 impl CoinSelector {
+    /// Select UTXOs to cover `target + fee` using the given strategy.
+    ///
+    /// Returns the selected UTXOs in the order they were chosen. The total
+    /// value will be at least `target + fee` (any excess becomes change
+    /// at the transaction-building layer).
+    ///
+    /// # Errors
+    /// Returns [`SelectionError::NoUtxos`] if `utxos` is empty, or
+    /// [`SelectionError::InsufficientFunds`] if even after selecting
+    /// all available UTXOs the total is less than `target + fee`.
     pub fn select(
         utxos: &[SelectableUtxo],
         target: u64,
@@ -56,11 +97,21 @@ impl CoinSelector {
         }
 
         if total < needed {
-            return Err(SelectionError::InsufficientFunds { have: total, need: needed });
+            return Err(SelectionError::InsufficientFunds {
+                have: total,
+                need: needed,
+            });
         }
         Ok(selected)
     }
 
+    /// Estimate transaction fee from input and output counts.
+    ///
+    /// Uses a simple linear model:
+    /// `BASE_FEE + (inputs * INPUT_FEE) + (outputs * OUTPUT_FEE)`
+    ///
+    /// where `BASE_FEE = 1000`, `INPUT_FEE = 100`, `OUTPUT_FEE = 200` noms.
+    /// Real-fee estimation should consider mempool weight (see `dom-mempool`).
     pub fn estimate_fee(input_count: usize, output_count: usize) -> u64 {
         const BASE_FEE: u64 = 1_000;
         const INPUT_FEE: u64 = 100;

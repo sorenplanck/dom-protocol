@@ -13,17 +13,22 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use thiserror::Error;
 
+/// Errors that can occur during backup or restore operations.
 #[derive(Debug, Error)]
 pub enum BackupError {
+    /// The mnemonic phrase is structurally invalid (wrong format).
     #[error("invalid mnemonic: {0}")]
     InvalidMnemonic(String),
 
+    /// An error from the underlying bip39 crate.
     #[error("bip39 error: {0}")]
     Bip39(String),
 
+    /// I/O error while reading or writing a backup file.
     #[error("io error: {0}")]
     Io(String),
 
+    /// Backup file is corrupted or has unexpected size.
     #[error("backup file corrupted (expected 32 bytes, got {0})")]
     Corrupted(usize),
 }
@@ -36,23 +41,29 @@ impl From<bip39::Error> for BackupError {
 
 /// Generate a new random BIP-39 mnemonic (12 words, 128-bit entropy).
 ///
-/// This uses bip39 crate's secure random generation. Returns the mnemonic
+/// Uses the `bip39` crate's secure random generation. Returns the mnemonic
 /// as a space-separated string ready for display to the user.
+///
+/// # Errors
+/// Returns [`BackupError::Bip39`] if random generation fails.
 pub fn generate_mnemonic() -> Result<String, BackupError> {
     let mut rng = rand::thread_rng();
     let mnemonic = Mnemonic::generate_in_with(&mut rng, Language::English, 12)?;
     Ok(mnemonic.to_string())
 }
 
-/// Generate mnemonic and derive 32-byte seed (no passphrase).
+/// Generate a mnemonic and derive the 32-byte seed (no passphrase).
 ///
-/// Returns (mnemonic_string, seed_32_bytes).
+/// Returns a tuple `(mnemonic_string, seed_32_bytes)`. The seed is the first
+/// 32 bytes of the BIP-39 64-byte seed.
+///
+/// # Errors
+/// Returns [`BackupError::Bip39`] if random generation or derivation fails.
 pub fn generate_with_seed() -> Result<(String, [u8; 32]), BackupError> {
     let mut rng = rand::thread_rng();
     let mnemonic = Mnemonic::generate_in_with(&mut rng, Language::English, 12)?;
     let full_seed = mnemonic.to_seed("");
 
-    // BIP-39 seed is 64 bytes; we use first 32 for our wallet
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&full_seed[..32]);
 
@@ -61,8 +72,16 @@ pub fn generate_with_seed() -> Result<(String, [u8; 32]), BackupError> {
 
 /// Restore a 32-byte seed from a BIP-39 mnemonic phrase.
 ///
-/// Accepts standard BIP-39 phrases (12, 15, 18, 21, or 24 words).
-/// Optional passphrase support per BIP-39 spec.
+/// Accepts standard BIP-39 phrases of 12, 15, 18, 21, or 24 words.
+/// Optionally accepts a passphrase per the BIP-39 spec (empty string for none).
+///
+/// # Arguments
+/// * `phrase` - Space-separated mnemonic words from the BIP-39 English wordlist
+/// * `passphrase` - Optional passphrase (BIP-39's "25th word" feature)
+///
+/// # Errors
+/// Returns [`BackupError::Bip39`] if the phrase is invalid (bad checksum,
+/// unknown words, wrong word count, etc).
 pub fn import_mnemonic(phrase: &str, passphrase: &str) -> Result<[u8; 32], BackupError> {
     let mnemonic = Mnemonic::parse_in(Language::English, phrase.trim())?;
     let full_seed = mnemonic.to_seed(passphrase);
@@ -73,20 +92,32 @@ pub fn import_mnemonic(phrase: &str, passphrase: &str) -> Result<[u8; 32], Backu
     Ok(seed)
 }
 
-/// Convert a 32-byte seed into a mnemonic phrase.
+/// Convert a 16-byte entropy into a BIP-39 mnemonic phrase.
 ///
-/// NOTE: This is only useful for testing/debugging because the BIP-39
-/// derivation is one-way (PBKDF2 with high iteration count). In practice,
-/// you SHOULD store the mnemonic at generation time and never try to
-/// recover it from a seed.
+/// This is mostly useful for testing with known entropy values, or for
+/// re-encoding entropy obtained from another source as a mnemonic.
 ///
-/// For wallet backup, use `generate_with_seed()` or `export_backup_file()`.
+/// For wallet creation, prefer [`generate_with_seed`] which uses secure
+/// random generation directly.
+///
+/// # Errors
+/// Returns [`BackupError::Bip39`] if entropy length is invalid for the
+/// 12-word mnemonic format (must be exactly 16 bytes).
 pub fn export_mnemonic_from_entropy(entropy_16_bytes: &[u8; 16]) -> Result<String, BackupError> {
     let mnemonic = Mnemonic::from_entropy_in(Language::English, entropy_16_bytes)?;
     Ok(mnemonic.to_string())
 }
 
-/// Recover entropy from mnemonic (inverse of export_mnemonic_from_entropy).
+/// Recover the raw 16-byte entropy from a 12-word mnemonic phrase.
+///
+/// This is the inverse of [`export_mnemonic_from_entropy`]. Note that the
+/// entropy is NOT the same as the seed: the seed requires PBKDF2 derivation
+/// from the mnemonic phrase.
+///
+/// # Errors
+/// Returns [`BackupError::Bip39`] if the phrase is invalid, or
+/// [`BackupError::InvalidMnemonic`] if entropy is not exactly 16 bytes
+/// (i.e., the mnemonic is not a standard 12-word phrase).
 pub fn entropy_from_mnemonic(phrase: &str) -> Result<[u8; 16], BackupError> {
     let mnemonic = Mnemonic::parse_in(Language::English, phrase.trim())?;
     let entropy = mnemonic.to_entropy();
@@ -103,10 +134,20 @@ pub fn entropy_from_mnemonic(phrase: &str) -> Result<[u8; 16], BackupError> {
     Ok(result)
 }
 
-/// Export full 32-byte seed to a password-encrypted backup file.
+/// Export a 32-byte seed to a password-encrypted backup file.
 ///
 /// Uses simple XOR with SHA256(password) for transport encryption.
-/// The wallet itself uses ChaCha20Poly1305 (see dom-wallet::store).
+/// This is intended for moving wallet backups between systems, not for
+/// long-term encrypted storage. The wallet itself uses ChaCha20Poly1305
+/// (see `dom-wallet::store`) for at-rest encryption.
+///
+/// # Arguments
+/// * `seed` - The 32-byte wallet seed to back up
+/// * `password` - Password used to derive the XOR key via SHA256
+/// * `output_path` - File path where the encrypted backup will be written
+///
+/// # Errors
+/// Returns [`BackupError::Io`] if the file cannot be written.
 pub fn export_backup_file(
     seed: &[u8; 32],
     password: &str,
@@ -125,7 +166,15 @@ pub fn export_backup_file(
     Ok(())
 }
 
-/// Import seed from password-encrypted backup file.
+/// Import a 32-byte seed from a password-encrypted backup file.
+///
+/// Inverse of [`export_backup_file`]. The file must be exactly 32 bytes.
+/// Wrong passwords do not raise an error — they simply produce a different
+/// (and useless) seed. Verification must happen at the wallet layer.
+///
+/// # Errors
+/// Returns [`BackupError::Io`] if the file cannot be read, or
+/// [`BackupError::Corrupted`] if the file size is not 32 bytes.
 pub fn import_backup_file(backup_path: &Path, password: &str) -> Result<[u8; 32], BackupError> {
     let encrypted = std::fs::read(backup_path).map_err(|e| BackupError::Io(e.to_string()))?;
     if encrypted.len() != 32 {
@@ -158,16 +207,13 @@ mod tests {
     fn generate_with_seed_works() {
         let (mnemonic, seed) = generate_with_seed().unwrap();
         assert_eq!(mnemonic.split_whitespace().count(), 12);
-        // Seed should not be all zeros
         assert!(seed.iter().any(|&b| b != 0));
     }
 
     #[test]
     fn import_known_mnemonic_works() {
-        // BIP-39 standard test vector
         let phrase = "abandon abandon abandon abandon abandon abandon                       abandon abandon abandon abandon abandon about";
         let seed = import_mnemonic(phrase, "").unwrap();
-        // Seed should be deterministic
         let seed2 = import_mnemonic(phrase, "").unwrap();
         assert_eq!(seed, seed2);
     }
@@ -183,7 +229,7 @@ mod tests {
         let phrase = "abandon abandon abandon abandon abandon abandon                       abandon abandon abandon abandon abandon about";
         let seed_no_pass = import_mnemonic(phrase, "").unwrap();
         let seed_with_pass = import_mnemonic(phrase, "TREZOR").unwrap();
-        assert_ne!(seed_no_pass, seed_with_pass, "passphrase must change seed");
+        assert_ne!(seed_no_pass, seed_with_pass);
     }
 
     #[test]
@@ -222,9 +268,7 @@ mod tests {
 
     #[test]
     fn mnemonic_words_are_from_standard_wordlist() {
-        // Verify we use real BIP-39 wordlist (first word indicator)
         let phrase = "abandon abandon abandon abandon abandon abandon                       abandon abandon abandon abandon abandon about";
-        // This phrase only validates against the OFFICIAL BIP-39 list
         assert!(import_mnemonic(phrase, "").is_ok());
     }
 }
