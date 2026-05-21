@@ -27,11 +27,12 @@ const BECH32M_CONST: u32 = 0x2bc8_30a3;
 const CHARSET: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 
 /// Reverse lookup: ASCII → 5-bit value (0xFF = invalid).
+#[allow(clippy::cast_possible_truncation)]
 const CHARSET_REV: [u8; 128] = {
     let mut rev = [0xFFu8; 128];
     let mut i = 0usize;
     while i < 32 {
-        rev[CHARSET[i] as usize] = i as u8;
+        rev[CHARSET[i] as usize] = i as u8; // safe: i < 32, fits u8
         i += 1;
     }
     rev
@@ -122,8 +123,8 @@ fn polymod(values: &[u8]) -> u32 {
     ];
     let mut chk: u32 = 1;
     for &v in values {
-        let b = (chk >> 25) as u8;
-        chk = ((chk & 0x01ff_ffff) << 5) ^ (v as u32);
+        let b = ((chk >> 25) & 0xFF) as u8;
+        chk = ((chk & 0x01ff_ffff).wrapping_shl(5)) ^ (v as u32);
         for (i, &g) in gen.iter().enumerate() {
             if (b >> i) & 1 == 1 {
                 chk ^= g;
@@ -134,6 +135,7 @@ fn polymod(values: &[u8]) -> u32 {
 }
 
 /// Build HRP expansion for checksum.
+#[allow(clippy::arithmetic_side_effects)]
 fn hrp_expand(hrp: &str) -> Vec<u8> {
     let mut v = Vec::with_capacity(hrp.len() * 2 + 1);
     for c in hrp.bytes() {
@@ -147,25 +149,27 @@ fn hrp_expand(hrp: &str) -> Vec<u8> {
 }
 
 /// Convert bytes to 5-bit groups.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 fn to_5bit(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut acc: u32 = 0;
     let mut bits: u32 = 0;
     for &b in data {
-        acc = (acc << 8) | b as u32;
-        bits += 8;
+        acc = acc.wrapping_shl(8) | b as u32;
+        bits = bits.wrapping_add(8);
         while bits >= 5 {
-            bits -= 5;
+            bits = bits.wrapping_sub(5);
             out.push(((acc >> bits) & 31) as u8);
         }
     }
     if bits > 0 {
-        out.push(((acc << (5 - bits)) & 31) as u8);
+        out.push((acc.wrapping_shl(5u32.wrapping_sub(bits)) & 31) as u8);
     }
     out
 }
 
 /// Convert 5-bit groups back to bytes.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 fn from_5bit(data: &[u8]) -> Result<Vec<u8>, DomError> {
     let mut out = Vec::new();
     let mut acc: u32 = 0;
@@ -174,21 +178,23 @@ fn from_5bit(data: &[u8]) -> Result<Vec<u8>, DomError> {
         if b >= 32 {
             return Err(DomError::Malformed("invalid 5-bit value".into()));
         }
-        acc = (acc << 5) | b as u32;
-        bits += 5;
+        acc = acc.wrapping_shl(5) | b as u32;
+        bits = bits.wrapping_add(5);
         if bits >= 8 {
-            bits -= 8;
+            bits = bits.wrapping_sub(8);
             out.push((acc >> bits) as u8);
         }
     }
     // Remaining bits must be zero padding
-    if bits >= 5 || (acc & ((1 << bits) - 1)) != 0 {
+    let mask = (1u32 << bits).wrapping_sub(1);
+    if bits >= 5 || (acc & mask) != 0 {
         return Err(DomError::Malformed("invalid bech32 padding".into()));
     }
     Ok(out)
 }
 
 /// Encode data as Bech32m with given HRP.
+#[allow(clippy::arithmetic_side_effects)]
 fn bech32m_encode(hrp: &str, data: &[u8]) -> String {
     let mut values = hrp_expand(hrp);
     let data5 = to_5bit(data);
@@ -202,14 +208,16 @@ fn bech32m_encode(hrp: &str, data: &[u8]) -> String {
     for &v in &data5 {
         out.push(CHARSET[v as usize] as char);
     }
-    for i in 0..6 {
-        let shift = 5 * (5 - i);
-        out.push(CHARSET[((checksum >> shift) & 31) as usize] as char);
+    for i in 0u32..6 {
+        let shift = 5u32.wrapping_mul(5u32.wrapping_sub(i));
+        let idx = ((checksum >> shift) & 31) as usize;
+        out.push(CHARSET[idx] as char);
     }
     out
 }
 
 /// Decode a Bech32m string into (hrp, data).
+#[allow(clippy::arithmetic_side_effects)]
 fn bech32m_decode(s: &str) -> Result<(String, Vec<u8>), DomError> {
     let sep = s
         .rfind('1')

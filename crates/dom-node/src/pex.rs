@@ -88,7 +88,7 @@ impl PexManager {
             .collect();
 
         // Sort by most recently seen
-        peers.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        peers.sort_by_key(|p| std::cmp::Reverse(p.last_seen));
         peers.truncate(MAX_ADDR_RESPONSE);
         peers
     }
@@ -97,7 +97,7 @@ impl PexManager {
     pub fn connectable_peers(&self) -> Vec<&PeerAddr> {
         let mut peers: Vec<&PeerAddr> =
             self.known.values().filter(|p| p.is_connectable()).collect();
-        peers.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        peers.sort_by_key(|p| std::cmp::Reverse(p.last_seen));
         peers
     }
 
