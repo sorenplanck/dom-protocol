@@ -81,9 +81,9 @@ impl CoinSelector {
         let needed = target.saturating_add(fee);
         let mut sorted = utxos.to_vec();
         match strategy {
-            SelectionStrategy::Greedy => sorted.sort_by(|a, b| b.value.cmp(&a.value)),
-            SelectionStrategy::SmallestFirst => sorted.sort_by(|a, b| a.value.cmp(&b.value)),
-            SelectionStrategy::AgeWeighted => sorted.sort_by(|a, b| b.age_blocks.cmp(&a.age_blocks)),
+            SelectionStrategy::Greedy => sorted.sort_by_key(|b| std::cmp::Reverse(b.value)),
+            SelectionStrategy::SmallestFirst => sorted.sort_by_key(|a| a.value),
+            SelectionStrategy::AgeWeighted => sorted.sort_by_key(|b| std::cmp::Reverse(b.age_blocks)),
         }
 
         let mut selected = Vec::new();
