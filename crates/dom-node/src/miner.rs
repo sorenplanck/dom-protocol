@@ -357,6 +357,12 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
             .map_err(|e| DomError::Internal(format!("connect_block: {e}")))?;
     }
 
+    // Scan block for wallet outputs (coinbase reward recovery).
+    if let Some(ref wallet_arc) = node.wallet {
+        let mut wallet = wallet_arc.lock().await;
+        wallet.scan_block(&block.transactions, new_height);
+    }
+
     // Relay newly-mined block to all connected peers via broadcast channel.
     let block_bytes = {
         use dom_serialization::DomSerialize;
