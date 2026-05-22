@@ -35,6 +35,35 @@ pub trait NodeHandle: Send + Sync + 'static {
     fn get_peers(&self) -> Vec<PeerInfo> {
         Vec::new()
     }
+    /// Get wallet balance at current height.
+    fn get_wallet_balance(&self) -> Option<WalletBalanceResponse> {
+        None
+    }
+    /// Build and submit a spend transaction from the node wallet.
+    fn wallet_spend(&self, _req: SpendRequest) -> Result<[u8; 32], RpcError> {
+        Err(RpcError::Internal("wallet not available".into()))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpendRequest {
+    /// Recipient commitment (hex-encoded 33 bytes).
+    pub recipient_commitment: String,
+    /// Recipient blinding factor (hex-encoded 32 bytes).
+    pub recipient_blinding: String,
+    /// Amount in noms.
+    pub amount_noms: u64,
+    /// Fee in noms.
+    pub fee_noms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WalletBalanceResponse {
+    pub confirmed_noms: u64,
+    pub immature_noms: u64,
+    pub reserved_noms: u64,
+    pub confirmed_dom: f64,
+    pub immature_dom: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -212,10 +241,12 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
         .route("/tx/:tx_hash", get(get_tx))
         .route("/block/:height_or_hash", get(get_block))
         .route("/utxo/:commitment", get(get_utxo))
+        .route("/wallet/balance", get(wallet_balance_handler))
         .layer(rate_limit_read);
 
     let submit_route = Router::new()
         .route("/tx/submit", post(submit_tx))
+        .route("/wallet/spend", post(wallet_spend_handler))
         .layer(rate_limit_submit);
 
     let auth_routes = Router::new()
@@ -464,6 +495,36 @@ fn parse_hash_hex(value: &str) -> Result<[u8; 32], RpcError> {
     decode_hex(value)?
         .try_into()
         .map_err(|_| RpcError::InvalidHex("hash must be exactly 32 bytes".to_owned()))
+}
+
+async fn wallet_balance_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+) -> impl IntoResponse {
+    match handle.get_wallet_balance() {
+        Some(bal) => (StatusCode::OK, Json(serde_json::to_value(bal).unwrap())).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "wallet not available"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn wallet_spend_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Json(req): Json<SpendRequest>,
+) -> impl IntoResponse {
+    match handle.wallet_spend(req) {
+        Ok(tx_hash) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"tx_hash": hex::encode(tx_hash)})),
+        )
+            .into_response(),
+        Err(e) => {
+            warn!("wallet_spend error: {e}");
+            e.into_response()
+        }
+    }
 }
 
 #[cfg(test)]

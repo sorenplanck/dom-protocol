@@ -119,4 +119,93 @@ impl NodeHandle for NodeHandleImpl {
             Err(_) => Vec::new(),
         }
     }
+
+    fn get_wallet_balance(&self) -> Option<dom_rpc::WalletBalanceResponse> {
+        let wallet = self.0.wallet.as_ref()?.try_lock().ok()?;
+        let height = self.0.chain.try_lock().ok()?.tip_height.0;
+        let bal = wallet.balance(height);
+        const NOMS: f64 = 100_000_000.0;
+        Some(dom_rpc::WalletBalanceResponse {
+            confirmed_noms: bal.confirmed,
+            immature_noms:  bal.immature,
+            reserved_noms:  bal.reserved,
+            confirmed_dom:  bal.confirmed as f64 / NOMS,
+            immature_dom:   bal.immature  as f64 / NOMS,
+        })
+    }
+
+    fn wallet_spend(&self, req: dom_rpc::SpendRequest) -> Result<[u8; 32], dom_rpc::RpcError> {
+        use dom_crypto::{BlindingFactor, pedersen::Commitment};
+        use dom_serialization::DomSerialize;
+
+        // Decode recipient commitment (33 bytes hex)
+        let commitment_bytes = hex::decode(&req.recipient_commitment)
+            .map_err(|e| dom_rpc::RpcError::Rejected(format!("commitment hex: {e}")))?;
+        if commitment_bytes.len() != 33 {
+            return Err(dom_rpc::RpcError::Rejected("commitment must be 33 bytes".into()));
+        }
+        let mut cb = [0u8; 33];
+        cb.copy_from_slice(&commitment_bytes);
+        let recipient_commitment = Commitment::from_compressed_bytes(&cb)
+            .map_err(|e| dom_rpc::RpcError::Rejected(format!("commitment: {e}")))?;
+
+        // Decode recipient blinding (32 bytes hex)
+        let blinding_bytes = hex::decode(&req.recipient_blinding)
+            .map_err(|e| dom_rpc::RpcError::Rejected(format!("blinding hex: {e}")))?;
+        if blinding_bytes.len() != 32 {
+            return Err(dom_rpc::RpcError::Rejected("blinding must be 32 bytes".into()));
+        }
+        let mut bb = [0u8; 32];
+        bb.copy_from_slice(&blinding_bytes);
+        let recipient_blinding = BlindingFactor::from_bytes(bb)
+            .map_err(|e| dom_rpc::RpcError::Rejected(format!("blinding: {e}")))?;
+
+        // Get current height
+        let height = self.0.chain
+            .try_lock()
+            .map_err(|_| dom_rpc::RpcError::Overloaded("chain busy".into()))?
+            .tip_height.0;
+
+        // Build spend transaction via wallet
+        let wallet_arc = self.0.wallet.as_ref()
+            .ok_or_else(|| dom_rpc::RpcError::Internal("wallet not configured".into()))?;
+
+        let tx = {
+            let mut wallet = wallet_arc
+                .try_lock()
+                .map_err(|_| dom_rpc::RpcError::Overloaded("wallet busy".into()))?;
+            wallet.build_spend(
+                recipient_commitment,
+                recipient_blinding,
+                req.amount_noms,
+                req.fee_noms,
+                height,
+            ).map_err(|e| dom_rpc::RpcError::Rejected(format!("build_spend: {e}")))?
+        };
+
+        // Serialize and submit to mempool
+        let tx_bytes = tx.to_bytes()
+            .map_err(|e| dom_rpc::RpcError::Internal(format!("serialize: {e}")))?;
+        let tx_hash = *dom_crypto::blake2b_256(&tx_bytes).as_bytes();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut mempool = self.0.mempool
+            .try_lock()
+            .map_err(|_| dom_rpc::RpcError::Overloaded("mempool busy".into()))?;
+
+        mempool.accept_tx(tx, tx_hash, now)
+            .map_err(|e| dom_rpc::RpcError::Rejected(format!("mempool: {e}")))?;
+
+        // Route via Dandelion++
+        if let (Ok(mut d), Ok(p)) = (self.0.dandelion.try_lock(), self.0.peers.try_lock()) {
+            let peers = p.connected_peers();
+            d.route_new_tx(tx_hash, &peers);
+        }
+
+        Ok(tx_hash)
+    }
 }
