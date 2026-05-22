@@ -1,6 +1,21 @@
 //! Test helpers for integration tests.
 
 use dom_config::NodeConfig;
+use std::sync::Once;
+
+static TRACING_INIT: Once = Once::new();
+
+/// Initialize tracing once per test process. Safe to call from multiple tests.
+pub fn init_tracing() {
+    TRACING_INIT.call_once(|| {
+        let filter = std::env::var("RUST_LOG")
+            .unwrap_or_else(|_| "info,dom_node=debug,dom_wire=debug".into());
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_test_writer()
+            .try_init();
+    });
+}
 use dom_node::node::DomNode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,6 +24,22 @@ use tokio::time::{sleep, timeout};
 /// Spawn a test node with custom config.
 pub async fn spawn_node(config: NodeConfig) -> Arc<DomNode> {
     Arc::new(DomNode::init(config).expect("node init failed"))
+}
+
+/// Wait for a node's P2P listener to be ready (port accepting connections).
+pub async fn wait_for_listener_ready(addr: &str, timeout_secs: u64) -> Result<(), String> {
+    use tokio::net::TcpStream;
+    let start = std::time::Instant::now();
+    let deadline = std::time::Duration::from_secs(timeout_secs);
+    while start.elapsed() < deadline {
+        if TcpStream::connect(addr).await.is_ok() {
+            // Give the listener a moment to fully set up
+            sleep(Duration::from_millis(200)).await;
+            return Ok(());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    Err(format!("listener at {} did not become ready in {}s", addr, timeout_secs))
 }
 
 /// Wait for node to reach a specific height (with timeout).

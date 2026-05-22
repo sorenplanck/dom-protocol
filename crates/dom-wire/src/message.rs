@@ -162,7 +162,7 @@ impl HelloPayload {
         if ua.len() > dom_core::MAX_USER_AGENT_BYTES {
             return Err(DomError::Invalid("user agent too long".into()));
         }
-        let mut out = Vec::with_capacity(4 + 4 + 32 + 8 + 32 + 2 + ua.len());
+        let mut out = Vec::with_capacity(4 + 4 + 32 + 8 + 32 + 2 + ua.len() + 8);
         out.extend_from_slice(&self.version.to_le_bytes());
         out.extend_from_slice(&self.network_magic.to_le_bytes());
         out.extend_from_slice(&self.chain_id);
@@ -170,6 +170,8 @@ impl HelloPayload {
         out.extend_from_slice(&self.best_hash);
         out.extend_from_slice(&(ua.len() as u16).to_le_bytes());
         out.extend_from_slice(ua);
+        // local_timestamp: PROTOCOL_VERSION 2 (Doc 4.5b — time discipline)
+        out.extend_from_slice(&self.local_timestamp.to_le_bytes());
         Ok(out)
     }
 
