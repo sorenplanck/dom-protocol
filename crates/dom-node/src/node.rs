@@ -47,6 +47,22 @@ pub struct DomNode {
     pub future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
 }
 
+/// Per-connection I/O context passed into message_loop.
+struct PeerConn<'a> {
+    stream: &'a mut tokio::net::TcpStream,
+    codec: &'a mut dom_wire::codec::NoiseCodec,
+}
+
+/// Shared node services passed into per-connection tasks.
+/// Groups mempool, dandelion router, and peer manager to stay under
+/// clippy's function-argument limit (max 7).
+#[derive(Clone)]
+struct NodeServices {
+    mempool: Arc<Mutex<dom_mempool::Mempool>>,
+    dandelion: Arc<Mutex<dom_wire::dandelion::DandelionRouter>>,
+    peers: Arc<Mutex<dom_wire::manager::PeerManager>>,
+}
+
 impl DomNode {
     /// Initialize the node from configuration.
     pub fn init(config: NodeConfig) -> Result<Self, DomError> {
@@ -173,6 +189,78 @@ impl DomNode {
             });
         }
 
+        // Start RPC server if configured
+        if let Some(rpc_addr) = self.config.rpc_listen_addr.clone() {
+            use crate::node_handle::NodeHandleImpl;
+            let handle: Arc<dyn dom_rpc::NodeHandle> = Arc::new(NodeHandleImpl(self.clone()));
+            tokio::spawn(async move {
+                let addr: std::net::SocketAddr = match rpc_addr.parse() {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("Invalid RPC listen addr {rpc_addr}: {e}");
+                        return;
+                    }
+                };
+                info!("RPC server listening on {addr}");
+                if let Err(e) = dom_rpc::serve(handle, addr).await {
+                    warn!("RPC server error: {e}");
+                }
+            });
+        }
+
+        // future_block_queue drain loop — re-evaluate deferred blocks every 30s
+        {
+            let queue = self.future_block_queue.clone();
+            let chain = self.chain.clone();
+            let relay_tx = self.block_relay_tx.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(
+                    tokio::time::Duration::from_secs(30)
+                );
+                loop {
+                    interval.tick().await;
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let now = dom_core::Timestamp(now_secs);
+                    let ready = queue.drain_ready(now_secs, dom_core::FUTURE_BLOCK_SOFT_BUFFER_SECS).await;
+                    for deferred in ready {
+                        tracing::debug!(
+                            "Re-evaluating deferred block ts={}",
+                            deferred.timestamp
+                        );
+                        use dom_serialization::DomDeserialize;
+                        match dom_consensus::Block::from_bytes(&deferred.block_bytes) {
+                            Ok(block) => {
+                                let result = {
+                                    let mut c = chain.lock().await;
+                                    c.connect_block(&block, now)
+                                };
+                                match result {
+                                    Ok(_) => {
+                                        tracing::info!(
+                                            "Accepted deferred block ts={}",
+                                            deferred.timestamp
+                                        );
+                                        let _ = relay_tx.send(deferred.block_bytes);
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            "Deferred block still rejected: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Deferred block decode error: {e}");
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
         // Wait for tasks
         tokio::select! {
             _ = listener_task => warn!("P2P listener exited"),
@@ -206,8 +294,9 @@ impl DomNode {
                     let privkey = self.noise_privkey;
                     let chain = self.chain.clone();
                     let block_relay_tx = self.block_relay_tx.clone();
+                    let svc = NodeServices { mempool: self.mempool.clone(), dandelion: self.dandelion.clone(), peers: self.peers.clone() };
                     tokio::spawn(async move {
-                        handle_inbound(stream, peer_addr, config, privkey, chain, block_relay_tx)
+                        handle_inbound(stream, peer_addr, config, privkey, chain, block_relay_tx, svc)
                             .await;
                     });
                 }
@@ -220,6 +309,7 @@ impl DomNode {
 
     /// Connect to peers (DNS seeds + configured peers).
     async fn run_peer_connector(&self) {
+        let svc = NodeServices { mempool: self.mempool.clone(), dandelion: self.dandelion.clone(), peers: self.peers.clone() };
         loop {
             let needs_more = {
                 let mgr = self.peers.lock().await;
@@ -250,8 +340,9 @@ impl DomNode {
                     let chain = self.chain.clone();
                     let block_relay_tx = self.block_relay_tx.clone();
                     info!("Connecting to peer {addr}");
+                    let svc_c = svc.clone();
                     tokio::spawn(async move {
-                        connect_outbound(&addr, config, privkey, chain, block_relay_tx).await;
+                        connect_outbound(&addr, config, privkey, chain, block_relay_tx, svc_c).await;
                     });
                 }
             }
@@ -357,6 +448,7 @@ async fn handle_inbound(
     privkey: [u8; 32],
     chain: Arc<Mutex<ChainState>>,
     block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    svc: NodeServices,
 ) {
     // Derive chain_id from network magic + canonical genesis hash.
     let genesis_hash = match config.network {
@@ -389,13 +481,13 @@ async fn handle_inbound(
                 peer_hello.best_height, peer_hello.user_agent
             );
             if let Err(e) = message_loop(
-                &mut stream,
-                &mut codec,
+                PeerConn { stream: &mut stream, codec: &mut codec },
                 &config,
                 addr,
                 chain.clone(),
                 block_relay_tx.subscribe(),
                 block_relay_tx.clone(),
+                svc.clone(),
             )
             .await
             {
@@ -412,6 +504,7 @@ async fn connect_outbound(
     privkey: [u8; 32],
     chain: Arc<Mutex<ChainState>>,
     block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    svc: NodeServices,
 ) {
     let mut stream = match tokio::net::TcpStream::connect(addr).await {
         Ok(s) => s,
@@ -482,13 +575,13 @@ async fn connect_outbound(
             }
 
             if let Err(e) = message_loop(
-                &mut stream,
-                &mut codec,
+                PeerConn { stream: &mut stream, codec: &mut codec },
                 &config,
                 peer_addr,
                 chain.clone(),
                 block_relay_tx.subscribe(),
                 block_relay_tx.clone(),
+                svc.clone(),
             )
             .await
             {
@@ -787,14 +880,15 @@ async fn build_headers_response(
 }
 
 async fn message_loop(
-    stream: &mut tokio::net::TcpStream,
-    codec: &mut dom_wire::codec::NoiseCodec,
+    conn: PeerConn<'_>,
     config: &NodeConfig,
     peer_addr: std::net::SocketAddr,
     chain: Arc<Mutex<ChainState>>,
     mut block_relay_rx: tokio::sync::broadcast::Receiver<Vec<u8>>,
     block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    svc: NodeServices,
 ) -> Result<(), DomError> {
+    let PeerConn { stream, codec } = conn;
     use dom_wire::message::{
         BlockPayload, Command, GetBlockDataPayload, GetHeadersPayload, HeadersPayload, WireMessage,
     };
@@ -925,6 +1019,39 @@ async fn message_loop(
                             }
                             Err(e) => {
                                 tracing::warn!("Block from {peer_addr} rejected by timestamp: {e}");
+                            }
+                        }
+                    }
+                    Command::Tx => {
+                        // Relayed transaction from peer — payload IS the raw tx bytes
+                        use dom_serialization::DomDeserialize;
+                        use dom_consensus::Transaction;
+                        let tx_bytes = msg.payload.clone();
+                        match Transaction::from_bytes(&tx_bytes) {
+                            Ok(tx) => {
+                                let tx_hash = *dom_crypto::blake2b_256(&tx_bytes).as_bytes();
+                                let now_secs = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                let accepted = {
+                                    let mut m = svc.mempool.lock().await;
+                                    m.accept_tx(tx, tx_hash, now_secs).is_ok()
+                                };
+                                if accepted {
+                                    tracing::debug!(
+                                        "Accepted relayed tx {} from {peer_addr}",
+                                        hex::encode(tx_hash)
+                                    );
+                                    // Dandelion++ re-route
+                                    let peer_list = if let Ok(p) = svc.peers.try_lock() { p.connected_peers() } else { Vec::new() };
+                                    if let Ok(mut d) = svc.dandelion.try_lock() {
+                                        d.route_new_tx(tx_hash, &peer_list);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!("Invalid tx from {peer_addr}: {e}");
                             }
                         }
                     }

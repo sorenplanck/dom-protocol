@@ -62,6 +62,9 @@ pub struct NodeConfig {
     pub wallet_password: Option<String>,
     /// Log level.
     pub log_level: String,
+    /// RPC listen address (e.g. "127.0.0.1:3370"). None = RPC disabled.
+    #[serde(default)]
+    pub rpc_listen_addr: Option<String>,
 }
 
 impl NodeConfig {
@@ -83,6 +86,7 @@ impl NodeConfig {
             wallet_path: None,
             wallet_password: None,
             log_level: "info".into(),
+            rpc_listen_addr: None,
         }
     }
     /// Default testnet config.
@@ -100,6 +104,7 @@ impl NodeConfig {
             wallet_path: None,
             wallet_password: None,
             log_level: "debug".into(),
+            rpc_listen_addr: None,
         }
     }
 }
