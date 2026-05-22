@@ -54,13 +54,14 @@ struct PeerConn<'a> {
 }
 
 /// Shared node services passed into per-connection tasks.
-/// Groups mempool, dandelion router, and peer manager to stay under
+/// Groups mempool, dandelion router, peer manager, and wallet to stay under
 /// clippy's function-argument limit (max 7).
 #[derive(Clone)]
 struct NodeServices {
     mempool: Arc<Mutex<dom_mempool::Mempool>>,
     dandelion: Arc<Mutex<dom_wire::dandelion::DandelionRouter>>,
     peers: Arc<Mutex<dom_wire::manager::PeerManager>>,
+    wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
 }
 
 impl DomNode {
@@ -294,7 +295,7 @@ impl DomNode {
                     let privkey = self.noise_privkey;
                     let chain = self.chain.clone();
                     let block_relay_tx = self.block_relay_tx.clone();
-                    let svc = NodeServices { mempool: self.mempool.clone(), dandelion: self.dandelion.clone(), peers: self.peers.clone() };
+                    let svc = NodeServices { mempool: self.mempool.clone(), dandelion: self.dandelion.clone(), peers: self.peers.clone(), wallet: self.wallet.clone() };
                     tokio::spawn(async move {
                         handle_inbound(stream, peer_addr, config, privkey, chain, block_relay_tx, svc)
                             .await;
@@ -309,7 +310,7 @@ impl DomNode {
 
     /// Connect to peers (DNS seeds + configured peers).
     async fn run_peer_connector(&self) {
-        let svc = NodeServices { mempool: self.mempool.clone(), dandelion: self.dandelion.clone(), peers: self.peers.clone() };
+        let svc = NodeServices { mempool: self.mempool.clone(), dandelion: self.dandelion.clone(), peers: self.peers.clone(), wallet: self.wallet.clone() };
         loop {
             let needs_more = {
                 let mgr = self.peers.lock().await;
@@ -559,7 +560,7 @@ async fn connect_outbound(
                     peer_hello.best_height
                 );
                 loop {
-                    match ibd_sync_round(&mut stream, &mut codec, &config, &chain, peer_addr).await
+                    match ibd_sync_round(&mut stream, &mut codec, &config, &chain, peer_addr, svc.wallet.clone()).await
                     {
                         Ok(true) => continue,
                         Ok(false) => {
@@ -725,6 +726,7 @@ async fn ibd_sync_round(
     config: &NodeConfig,
     chain: &Arc<Mutex<ChainState>>,
     peer_addr: std::net::SocketAddr,
+    wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
 ) -> Result<bool, DomError> {
     use dom_consensus::Block;
     use dom_serialization::DomDeserialize;
@@ -817,16 +819,25 @@ async fn ibd_sync_round(
             };
             let payload = BlockPayload::from_bytes(&msg.payload)?;
             let block = Block::from_bytes(&payload.block_bytes)?;
-            let mut c = chain.lock().await;
-            match c.connect_block(&block, now) {
-                Ok(_) => {
-                    connected_any = true;
+            let height = block.header.height.0;
+            let txs_for_scan = block.transactions.clone();
+            {
+                let mut c = chain.lock().await;
+                match c.connect_block(&block, now) {
+                    Ok(_) => {
+                        connected_any = true;
+                    }
+                    Err(e) => {
+                        return Err(DomError::Invalid(format!(
+                            "IBD from {peer_addr}: connect_block rejected: {e}"
+                        )));
+                    }
                 }
-                Err(e) => {
-                    return Err(DomError::Invalid(format!(
-                        "IBD from {peer_addr}: connect_block rejected: {e}"
-                    )));
-                }
+            }
+            // Scan block for wallet outputs (IBD path).
+            if let Some(ref wallet_arc) = wallet {
+                let mut w = wallet_arc.lock().await;
+                w.scan_block(&txs_for_scan, height);
             }
         }
     }
@@ -984,6 +995,8 @@ async fn message_loop(
                         match validate_future_timestamp_with_buffer(&block.header, now) {
                             Ok(TimestampDecision::Accept) => {
                                 // Normal path: validate and connect
+                                let height = block.header.height.0;
+                                let txs_for_scan = block.transactions.clone();
                                 let result = {
                                     let mut c = chain.lock().await;
                                     c.connect_block(&block, now)
@@ -991,6 +1004,11 @@ async fn message_loop(
                                 match result {
                                     Ok(_) => {
                                         tracing::info!("Accepted relayed block from {peer_addr}");
+                                        // Scan block for wallet outputs (relay path).
+                                        if let Some(ref wallet_arc) = svc.wallet {
+                                            let mut w = wallet_arc.lock().await;
+                                            w.scan_block(&txs_for_scan, height);
+                                        }
                                         let _ = block_relay_tx.send(payload.block_bytes);
                                     }
                                     Err(dom_core::DomError::Invalid(e)) => {
