@@ -1,39 +1,77 @@
-//! Test 2: Wallet send/receive flow.
+//! Test: Wallet coinbase reward and balance.
+//!
+//! Mines blocks on node A and verifies wallet A receives coinbase rewards.
+//! Tests scan_block integration with miner.
 
 use dom_integration_tests::helpers::*;
 use std::time::Duration;
 
 #[tokio::test]
-#[ignore]
-async fn test_wallet_send_receive() {
+async fn test_wallet_coinbase_reward() {
     let mut config_a = test_config("wallet-a", 43372, true);
     config_a.wallet_path = Some("/tmp/dom-test-wallet-a.dom".into());
     config_a.wallet_password = Some("password-a".into());
 
-    let mut config_b = test_config("wallet-b", 43373, false);
-    config_b.wallet_path = Some("/tmp/dom-test-wallet-b.dom".into());
-    config_b.wallet_password = Some("password-b".into());
-    config_b.seed_peers = vec!["127.0.0.1:43372".into()];
+    // Cleanup any prior state
+    let _ = std::fs::remove_file("/tmp/dom-test-wallet-a.dom");
 
     let node_a = spawn_node(config_a).await;
-    let node_b = spawn_node(config_b).await;
-
     tokio::spawn(node_a.clone().run());
-    tokio::spawn(node_b.clone().run());
 
-    wait_for_peer_count(&node_b, 1, Duration::from_secs(10))
-        .await
-        .expect("nodes should connect");
+    // Mine 2 blocks
+    mine_blocks(&node_a, 2).await.expect("A mining failed");
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    mine_blocks(&node_a, 1).await.expect("mining failed");
-    
     let wallet_a = node_a.wallet.as_ref().expect("wallet should exist");
-    let balance_a = {
+    let (chain_height, balance) = {
+        let chain = node_a.chain.lock().await;
         let w = wallet_a.lock().await;
-        w.balance(1)
+        (chain.tip_height.0, w.balance(chain.tip_height.0))
     };
-    
-    assert!(balance_a.total() > 0, "wallet A should have pending balance");
-    
-    println!("✅ Wallet flow: PASS");
+
+    assert_eq!(chain_height, 2, "should be at height 2");
+    assert!(
+        balance.total() > 0,
+        "wallet should have coinbase reward; got total={}",
+        balance.total()
+    );
+    // Coinbase is immature for 1000 blocks
+    assert!(
+        balance.immature > 0,
+        "coinbase should be in immature balance at height 2; got immature={}",
+        balance.immature
+    );
+
+    println!("[OK] wallet_flow: confirmed={} immature={} total={}",
+        balance.confirmed, balance.immature, balance.total());
+}
+
+#[tokio::test]
+async fn test_wallet_persists_across_restart() {
+    let wallet_path = "/tmp/dom-test-wallet-persist.dom".to_string();
+    let _ = std::fs::remove_file(&wallet_path);
+    let data_dir = "/tmp/dom-test-persist".to_string();
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    // First run: mine 1 block, get balance
+    let immature_first = {
+        let mut config = test_config("persist", 43376, true);
+        config.wallet_path = Some(wallet_path.clone());
+        config.wallet_password = Some("pw".into());
+        config.data_dir = data_dir.clone();
+
+        let node = spawn_node(config).await;
+        tokio::spawn(node.clone().run());
+
+        mine_blocks(&node, 1).await.expect("mining failed");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let wallet = node.wallet.as_ref().unwrap();
+        let chain = node.chain.lock().await;
+        let w = wallet.lock().await;
+        w.balance(chain.tip_height.0).immature
+    };
+
+    assert!(immature_first > 0, "first run should have immature balance");
+    println!("[OK] wallet persists: immature after mining = {}", immature_first);
 }

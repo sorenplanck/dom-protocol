@@ -481,6 +481,20 @@ async fn handle_inbound(
                 "Hello from {addr}: height={} ua={:?}",
                 peer_hello.best_height, peer_hello.user_agent
             );
+            // Register peer in manager so connected_peers() sees it
+            {
+                use dom_wire::peer::PeerInfo;
+                let mut peer_info = PeerInfo::new(addr, false);
+                peer_info.state = dom_wire::peer::PeerState::Connected;
+                peer_info.best_height = peer_hello.best_height;
+                peer_info.best_hash = peer_hello.best_hash;
+                peer_info.user_agent = peer_hello.user_agent.clone();
+                let result = svc.peers.lock().await.register_peer(peer_info);
+                info!("register_peer inbound {addr} → {result:?}");
+                if let Err(e) = result {
+                    warn!("Failed to register inbound peer {addr}: {e}");
+                }
+            }
             if let Err(e) = message_loop(
                 PeerConn { stream: &mut stream, codec: &mut codec },
                 &config,
@@ -543,6 +557,30 @@ async fn connect_outbound(
                 "Hello from {addr}: height={} ua={:?}",
                 peer_hello.best_height, peer_hello.user_agent
             );
+            // Register peer in manager so connected_peers() sees it
+            {
+                use dom_wire::peer::PeerInfo;
+                let sock_addr: std::net::SocketAddr = match addr.parse() {
+                    Ok(a) => a,
+                    Err(_) => match stream.peer_addr() {
+                        Ok(a) => a,
+                        Err(e) => {
+                            warn!("Cannot determine addr for register_peer: {e}");
+                            return;
+                        }
+                    },
+                };
+                let mut peer_info = PeerInfo::new(sock_addr, true);
+                peer_info.state = dom_wire::peer::PeerState::Connected;
+                peer_info.best_height = peer_hello.best_height;
+                peer_info.best_hash = peer_hello.best_hash;
+                peer_info.user_agent = peer_hello.user_agent.clone();
+                let result = svc.peers.lock().await.register_peer(peer_info);
+                info!("register_peer outbound {addr} → {result:?}");
+                if let Err(e) = result {
+                    warn!("Failed to register outbound peer {addr}: {e}");
+                }
+            }
             let peer_addr = match stream.peer_addr() {
                 Ok(a) => a,
                 Err(_) => {

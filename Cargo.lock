@@ -667,6 +667,8 @@ dependencies = [
  "dom-node",
  "dom-wallet",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
