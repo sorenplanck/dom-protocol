@@ -83,5 +83,6 @@ pub fn test_config(name: &str, port: u16, mine: bool) -> NodeConfig {
         wallet_path: None,
         wallet_password: None,
         log_level: "debug".into(),
+        rpc_listen_addr: None,
     }
 }

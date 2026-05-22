@@ -10,3 +10,4 @@ pub mod metrics;
 pub mod future_block_queue;
 pub mod pex;
 pub mod time_health;
+pub mod node_handle;
