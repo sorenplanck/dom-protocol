@@ -37,6 +37,16 @@ pub struct DomNode {
     /// Senders: miner after connect_block; message_loop after accepting a relayed Block.
     /// Receivers: one per connected peer task.
     pub block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    /// Broadcast channel for Dandelion++ Fluff-phase transactions.
+    /// Every connected peer task forwards every Fluff envelope to its peer.
+    /// Senders: submit_tx (local origination) and Command::Tx handler when
+    /// process_stem_tx returns Fluff. Also the periodic stem-timeout task.
+    pub tx_fluff_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    /// Broadcast channel for Dandelion++ Stem-phase transactions.
+    /// Every peer task receives the envelope but only the one whose peer_addr
+    /// matches StemEnvelope.target_peer actually forwards to its peer.
+    /// Senders: submit_tx and Command::Tx handler when route decides Stem.
+    pub tx_stem_tx: tokio::sync::broadcast::Sender<dom_wire::dandelion::StemEnvelope>,
     /// Optional wallet for mining rewards.
     /// If Some, miner uses wallet.build_coinbase() for deterministic blinding.
     /// If None, miner falls back to random blinding (DOM-SEC-004 unresolved).
@@ -89,6 +99,8 @@ impl DomNode {
         info!("Node identity: {}", hex::encode(noise_pubkey));
 
         let (block_relay_tx, _) = tokio::sync::broadcast::channel(64);
+        let (tx_fluff_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
+        let (tx_stem_tx, _) = tokio::sync::broadcast::channel::<dom_wire::dandelion::StemEnvelope>(256);
 
         // Load or create wallet if configured
         let wallet = if let (Some(wallet_path), Some(wallet_password)) = 
@@ -149,6 +161,8 @@ impl DomNode {
         Ok(Self {
             noise_privkey,
             block_relay_tx,
+            tx_fluff_tx,
+            tx_stem_tx,
             config: config.clone(),
             chain: Arc::new(Mutex::new(chain)),
             mempool: Arc::new(Mutex::new(Mempool::new())),
@@ -261,6 +275,58 @@ impl DomNode {
                 }
             });
         }
+        // Dandelion++ Stem-timeout promoter.
+        //
+        // Every STEM_CHECK_INTERVAL, walk the router and pull out any tx whose
+        // stem timer expired. For each, re-look up the tx_bytes in the local
+        // mempool, re-serialize them, and broadcast over the Fluff channel so
+        // every peer receives the tx and the propagation completes.
+        //
+        // Without this task, a tx that entered Stem phase but whose target
+        // peer disconnected would stay forever in the local stem map and
+        // never reach the rest of the network — a privacy guarantee turned
+        // into a liveness bug.
+        {
+            let dandelion = self.dandelion.clone();
+            let mempool = self.mempool.clone();
+            let tx_fluff_tx = self.tx_fluff_tx.clone();
+            tokio::spawn(async move {
+                const STEM_CHECK_INTERVAL_SECS: u64 = 5;
+                let mut interval = tokio::time::interval(
+                    tokio::time::Duration::from_secs(STEM_CHECK_INTERVAL_SECS)
+                );
+                interval.tick().await; // skip first immediate tick
+                loop {
+                    interval.tick().await;
+                    let timed_out: Vec<[u8; 32]> = {
+                        let mut d = dandelion.lock().await;
+                        d.collect_timed_out()
+                    };
+                    if timed_out.is_empty() {
+                        continue;
+                    }
+                    tracing::debug!(
+                        "Dandelion: promoting {} stem-timed-out tx(s) to fluff",
+                        timed_out.len()
+                    );
+                    use dom_serialization::DomSerialize;
+                    for tx_hash in timed_out {
+                        let tx_bytes_opt = {
+                            let m = mempool.lock().await;
+                            m.get_tx(&tx_hash).and_then(|e| e.tx.to_bytes().ok())
+                        };
+                        if let Some(tx_bytes) = tx_bytes_opt {
+                            let _ = tx_fluff_tx.send(tx_bytes);
+                        } else {
+                            tracing::debug!(
+                                "Stem-timed-out tx {} not in mempool; dropping",
+                                hex::encode(tx_hash)
+                            );
+                        }
+                    }
+                }
+            });
+        }
 
         // Wait for tasks
         tokio::select! {
@@ -295,9 +361,11 @@ impl DomNode {
                     let privkey = self.noise_privkey;
                     let chain = self.chain.clone();
                     let block_relay_tx = self.block_relay_tx.clone();
+                    let tx_fluff_tx = self.tx_fluff_tx.clone();
+                    let tx_stem_tx = self.tx_stem_tx.clone();
                     let svc = NodeServices { mempool: self.mempool.clone(), dandelion: self.dandelion.clone(), peers: self.peers.clone(), wallet: self.wallet.clone() };
                     tokio::spawn(async move {
-                        handle_inbound(stream, peer_addr, config, privkey, chain, block_relay_tx, svc)
+                        handle_inbound(stream, peer_addr, config, privkey, chain, block_relay_tx, tx_fluff_tx, tx_stem_tx, svc)
                             .await;
                     });
                 }
@@ -340,10 +408,12 @@ impl DomNode {
                     let privkey = self.noise_privkey;
                     let chain = self.chain.clone();
                     let block_relay_tx = self.block_relay_tx.clone();
+                    let tx_fluff_tx = self.tx_fluff_tx.clone();
+                    let tx_stem_tx = self.tx_stem_tx.clone();
                     info!("Connecting to peer {addr}");
                     let svc_c = svc.clone();
                     tokio::spawn(async move {
-                        connect_outbound(&addr, config, privkey, chain, block_relay_tx, svc_c).await;
+                        connect_outbound(&addr, config, privkey, chain, block_relay_tx, tx_fluff_tx, tx_stem_tx, svc_c).await;
                     });
                 }
             }
@@ -449,6 +519,8 @@ async fn handle_inbound(
     privkey: [u8; 32],
     chain: Arc<Mutex<ChainState>>,
     block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    tx_fluff_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    tx_stem_tx: tokio::sync::broadcast::Sender<dom_wire::dandelion::StemEnvelope>,
     svc: NodeServices,
 ) {
     // Derive chain_id from network magic + canonical genesis hash.
@@ -527,6 +599,10 @@ async fn handle_inbound(
                 chain.clone(),
                 block_relay_tx.subscribe(),
                 block_relay_tx.clone(),
+                tx_fluff_tx.subscribe(),
+                tx_fluff_tx.clone(),
+                tx_stem_tx.subscribe(),
+                tx_stem_tx.clone(),
                 svc.clone(),
             )
             .await
@@ -544,6 +620,8 @@ async fn connect_outbound(
     privkey: [u8; 32],
     chain: Arc<Mutex<ChainState>>,
     block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    tx_fluff_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    tx_stem_tx: tokio::sync::broadcast::Sender<dom_wire::dandelion::StemEnvelope>,
     svc: NodeServices,
 ) {
     let mut stream = match tokio::net::TcpStream::connect(addr).await {
@@ -645,6 +723,10 @@ async fn connect_outbound(
                 chain.clone(),
                 block_relay_tx.subscribe(),
                 block_relay_tx.clone(),
+                tx_fluff_tx.subscribe(),
+                tx_fluff_tx.clone(),
+                tx_stem_tx.subscribe(),
+                tx_stem_tx.clone(),
                 svc.clone(),
             )
             .await
@@ -960,6 +1042,10 @@ async fn message_loop(
     chain: Arc<Mutex<ChainState>>,
     mut block_relay_rx: tokio::sync::broadcast::Receiver<Vec<u8>>,
     block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    mut tx_fluff_rx: tokio::sync::broadcast::Receiver<Vec<u8>>,
+    tx_fluff_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    mut tx_stem_rx: tokio::sync::broadcast::Receiver<dom_wire::dandelion::StemEnvelope>,
+    tx_stem_tx: tokio::sync::broadcast::Sender<dom_wire::dandelion::StemEnvelope>,
     svc: NodeServices,
 ) -> Result<(), DomError> {
     let PeerConn { stream, codec } = conn;
@@ -994,6 +1080,55 @@ async fn message_loop(
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         return Err(DomError::Internal("relay channel closed".into()));
+                    }
+                }
+            }
+            // Dandelion++ Fluff: a transaction we want to broadcast to every peer.
+            // Each connected peer task receives every Fluff envelope and forwards it.
+            fluff = tx_fluff_rx.recv() => {
+                match fluff {
+                    Ok(tx_bytes) => {
+                        let msg = WireMessage {
+                            magic: config.network.magic(),
+                            command: Command::Tx,
+                            payload: tx_bytes,
+                        };
+                        if let Err(e) = codec.send(stream, &msg).await {
+                            return Err(DomError::Internal(format!("fluff send to {peer_addr}: {e}")));
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("tx_fluff lagged by {n} for {peer_addr}");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Err(DomError::Internal("tx_fluff channel closed".into()));
+                    }
+                }
+            }
+            // Dandelion++ Stem: a transaction to be forwarded to ONE specific peer.
+            // Every peer task receives the envelope, but only the task whose
+            // peer_addr matches StemEnvelope.target_peer actually sends. This
+            // preserves source-anonymity per the Dandelion++ paper.
+            stem = tx_stem_rx.recv() => {
+                match stem {
+                    Ok(env) => {
+                        if env.target_peer == peer_addr {
+                            let msg = WireMessage {
+                                magic: config.network.magic(),
+                                command: Command::Tx,
+                                payload: env.tx_bytes,
+                            };
+                            if let Err(e) = codec.send(stream, &msg).await {
+                                return Err(DomError::Internal(format!("stem send to {peer_addr}: {e}")));
+                            }
+                        }
+                        // else: this envelope is targeted at a different peer; ignore
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("tx_stem lagged by {n} for {peer_addr}");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Err(DomError::Internal("tx_stem channel closed".into()));
                     }
                 }
             }
@@ -1124,10 +1259,33 @@ async fn message_loop(
                                         "Accepted relayed tx {} from {peer_addr}",
                                         hex::encode(tx_hash)
                                     );
-                                    // Dandelion++ re-route
-                                    let peer_list = if let Ok(p) = svc.peers.try_lock() { p.connected_peers() } else { Vec::new() };
-                                    if let Ok(mut d) = svc.dandelion.try_lock() {
-                                        d.route_new_tx(tx_hash, &peer_list);
+                                    // Dandelion++ re-route: decide Stem vs Fluff,
+                                    // then dispatch the tx over the correct channel.
+                                    let peer_list: Vec<std::net::SocketAddr> = if let Ok(p) = svc.peers.try_lock() {
+                                        p.connected_peers()
+                                            .into_iter()
+                                            .filter_map(|s| s.parse().ok())
+                                            .collect()
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    let phase = {
+                                        let mut d = svc.dandelion.lock().await;
+                                        d.process_stem_tx(tx_hash, &peer_list, peer_addr)
+                                    };
+                                    use dom_wire::dandelion::{DandelionPhase, StemEnvelope};
+                                    match phase {
+                                        DandelionPhase::Fluff => {
+                                            let _ = tx_fluff_tx.send(tx_bytes.clone());
+                                        }
+                                        DandelionPhase::Stem => {
+                                            if let Some(target) = svc.dandelion.lock().await.get_stem_peer(&tx_hash) {
+                                                let _ = tx_stem_tx.send(StemEnvelope {
+                                                    target_peer: target,
+                                                    tx_bytes: tx_bytes.clone(),
+                                                });
+                                            }
+                                        }
                                     }
                                 }
                             }

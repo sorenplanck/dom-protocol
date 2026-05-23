@@ -19,6 +19,17 @@ pub enum DandelionPhase {
     Fluff,
 }
 
+/// Envelope for a stem-phase transaction: contains the target peer that
+/// should forward it. Broadcast to all peer tasks; only the task whose
+/// peer address matches `target_peer` actually sends to its peer.
+#[derive(Debug, Clone)]
+pub struct StemEnvelope {
+    /// Peer address that should forward this transaction.
+    pub target_peer: std::net::SocketAddr,
+    /// Raw transaction bytes (already serialized).
+    pub tx_bytes: Vec<u8>,
+}
+
 /// Probability of transitioning from stem to fluff per hop.
 /// 10% per hop = average stem length of 10 hops.
 const FLUFF_PROBABILITY: f64 = 0.10;
@@ -32,7 +43,7 @@ pub struct StemState {
     /// When stem phase started.
     pub stem_start: Instant,
     /// Which peer this tx should be forwarded to.
-    pub stem_peer: String,
+    pub stem_peer: std::net::SocketAddr,
 }
 
 /// Dandelion++ router.
@@ -55,7 +66,7 @@ impl DandelionRouter {
     pub fn route_new_tx(
         &mut self,
         tx_hash: [u8; 32],
-        available_peers: &[String],
+        available_peers: &[std::net::SocketAddr],
     ) -> DandelionPhase {
         if available_peers.is_empty() {
             return DandelionPhase::Fluff; // no peers → broadcast
@@ -69,13 +80,13 @@ impl DandelionRouter {
 
         // Pick a random peer for stem forwarding
         let idx = (rand_f64() * available_peers.len() as f64) as usize;
-        let stem_peer = available_peers[idx.min(available_peers.len() - 1)].clone();
+        let stem_peer = available_peers[idx.min(available_peers.len() - 1)];
 
         self.stem_txs.insert(
             tx_hash,
             StemState {
                 stem_start: Instant::now(),
-                stem_peer: stem_peer.clone(),
+                stem_peer,
             },
         );
 
@@ -88,8 +99,8 @@ impl DandelionRouter {
     pub fn process_stem_tx(
         &mut self,
         tx_hash: [u8; 32],
-        available_peers: &[String],
-        from_peer: &str,
+        available_peers: &[std::net::SocketAddr],
+        from_peer: std::net::SocketAddr,
     ) -> DandelionPhase {
         // If we already have this in stem, check timeout
         if let Some(state) = self.stem_txs.get(&tx_hash) {
@@ -99,10 +110,10 @@ impl DandelionRouter {
             }
         }
         // Route as new tx but exclude the sending peer
-        let peers: Vec<String> = available_peers
+        let peers: Vec<std::net::SocketAddr> = available_peers
             .iter()
-            .filter(|p| p.as_str() != from_peer)
-            .cloned()
+            .filter(|p| **p != from_peer)
+            .copied()
             .collect();
         self.route_new_tx(tx_hash, &peers)
     }
@@ -122,8 +133,8 @@ impl DandelionRouter {
     }
 
     /// Get stem peer for a transaction (if still in stem phase).
-    pub fn get_stem_peer(&self, tx_hash: &[u8; 32]) -> Option<&str> {
-        self.stem_txs.get(tx_hash).map(|s| s.stem_peer.as_str())
+    pub fn get_stem_peer(&self, tx_hash: &[u8; 32]) -> Option<std::net::SocketAddr> {
+        self.stem_txs.get(tx_hash).map(|s| s.stem_peer)
     }
 }
 
@@ -153,8 +164,8 @@ mod tests {
     fn stem_tx_stored() {
         let mut router = DandelionRouter::new();
         let tx = [1u8; 32];
-        let peers = vec!["127.0.0.1:33369".to_string()];
-        let phase = router.route_new_tx(tx, &peers);
+        let peers: Vec<std::net::SocketAddr> = vec!["127.0.0.1:33369".parse().unwrap()];
+        let _phase = router.route_new_tx(tx, &peers);
         // With only 1 peer and 10% fluff probability, most times should be stem
         // (statistical test — run 10 times, at least one should be stem)
         let mut found_stem = false;
