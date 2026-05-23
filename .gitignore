@@ -39,3 +39,8 @@ clippy*.log
 # Testnet data (per-node, not consensus)
 dom-testnet-data/
 *.pid
+
+# cargo-fuzz artifacts
+**/fuzz/target/
+**/fuzz/corpus/
+**/fuzz/artifacts/
