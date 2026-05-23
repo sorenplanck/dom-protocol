@@ -1,0 +1,32 @@
+# DOM Protocol — testnet node + (optional) explorer
+#
+# Usage:
+#   docker compose -f deploy/docker-compose.testnet.yml up -d
+#   docker compose -f deploy/docker-compose.testnet.yml logs -f dom-node
+#
+# Stops cleanly with: docker compose -f ... down
+
+services:
+  dom-node:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: dom-testnet
+    restart: unless-stopped
+    ports:
+      - "33370:33370"
+    volumes:
+      - dom-testnet-data:/var/lib/dom-testnet
+    environment:
+      DOM_DATA_DIR: /var/lib/dom-testnet
+      DOM_P2P_LISTEN_ADDR: 0.0.0.0:33370
+      DOM_SEED_PEERS: 64.111.92.205:33370
+      RUST_LOG: info
+    healthcheck:
+      test: ["CMD-SHELL", "test -d /var/lib/dom-testnet"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  dom-testnet-data:
