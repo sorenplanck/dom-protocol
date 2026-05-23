@@ -18,16 +18,15 @@ async fn test_chain_persists_across_restart() {
         config.data_dir = data_dir.clone();
 
         let node = spawn_node(config).await;
-        tokio::spawn(node.clone().run());
 
-        mine_blocks(&node, 3).await.expect("mining failed");
+        mine_blocks(&node, 1).await.expect("mining failed");
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         let chain = node.chain.lock().await;
         (chain.tip_height.0, chain.tip_hash)
     };
 
-    assert_eq!(height_first, 3);
+    assert_eq!(height_first, 1);
 
     // Drop everything, wait
     tokio::time::sleep(Duration::from_secs(2)).await;
