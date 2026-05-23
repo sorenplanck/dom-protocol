@@ -235,8 +235,28 @@ pub const MAX_TARGET_BYTES: [u8; 32] = {
     b
 };
 
-/// Easy target for testnet — any RandomX hash passes. NOT for mainnet.
-pub const TESTNET_EASY_TARGET: [u8; 32] = [0xff_u8; 32];
+/// Trivial PoW target for future regtest mode — ANY RandomX hash passes.
+///
+/// CRITICAL: This constant produces zero proof-of-work effort. Any block
+/// with this target is mineable instantly. It exists ONLY to be wired into
+/// a future `Network::Regtest` variant (similar to Bitcoin Core's regtest)
+/// for fast integration tests and CI pipelines.
+///
+/// SECURITY INVARIANTS:
+/// - MUST NEVER be used in Mainnet codepaths
+/// - MUST NEVER be used in Testnet codepaths (testnet is real PoW)
+/// - MUST only be reachable behind an explicit `Network::Regtest` check
+/// - Any codepath that uses this without checking Network enum is a
+///   security-critical bug
+///
+/// Originally defined as `TESTNET_EASY_TARGET` but renamed on 2026-05-23
+/// after audit classified the old name as a trap (DOM-SEC audit findings).
+/// Old name suggested testnet usage; new name screams "do not use".
+///
+/// To activate: add Network::Regtest variant + gate this constant behind
+/// a `match network { Regtest => REGTEST_TRIVIAL_TARGET, _ => ... }` in
+/// the miner and PoW validator. Do NOT skip the match.
+pub const REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION: [u8; 32] = [0xff_u8; 32];
 
 // ── Kernel Features ───────────────────────────────────────────────────────────
 
