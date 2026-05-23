@@ -1,0 +1,47 @@
+[package]
+name = "dom-wire-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-wire]
+path = ".."
+
+[dependencies.dom-serialization]
+path = "../../dom-serialization"
+
+[[bin]]
+name = "fuzz_wire_message"
+path = "fuzz_targets/fuzz_wire_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hello_payload"
+path = "fuzz_targets/fuzz_hello_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_headers_payload"
+path = "fuzz_targets/fuzz_headers_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_block_payload"
+path = "fuzz_targets/fuzz_block_payload.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

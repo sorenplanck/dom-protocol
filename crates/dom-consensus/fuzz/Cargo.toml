@@ -1,0 +1,29 @@
+[package]
+name = "dom-consensus-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-consensus]
+path = ".."
+
+[dependencies.dom-serialization]
+path = "../../dom-serialization"
+
+[dependencies.dom-core]
+path = "../../dom-core"
+
+[[bin]]
+name = "fuzz_validate_block"
+path = "fuzz_targets/fuzz_validate_block.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

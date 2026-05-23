@@ -1,0 +1,37 @@
+[package]
+name = "dom-crypto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-crypto]
+path = ".."
+
+[[bin]]
+name = "fuzz_pedersen_commitment"
+path = "fuzz_targets/fuzz_pedersen_commitment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_schnorr_signature_parse"
+path = "fuzz_targets/fuzz_schnorr_signature_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_schnorr_verify"
+path = "fuzz_targets/fuzz_schnorr_verify.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
