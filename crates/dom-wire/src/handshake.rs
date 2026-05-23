@@ -255,3 +255,112 @@ mod tests {
         assert_ne!(pub1, pub2);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cancel-safe framed read (added to fix tokio::select! cancellation bug).
+//
+// `read_framed` performs two `read_exact` calls (length, then data). When used
+// inside `tokio::select!`, if the future is cancelled between those reads,
+// bytes already consumed from the socket are lost from the application's view,
+// but the socket position has advanced — desynchronizing the framing. The next
+// `read_framed` would read payload bytes as a length prefix and produce
+// "frame too large" errors.
+//
+// `ReadState` holds partial-read progress so the operation can be safely
+// resumed after cancellation.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Resumable state for length-prefixed reads.
+///
+/// `Default` is `Idle`. Pass `&mut ReadState` to `read_framed_cancel_safe` so
+/// that any partial progress survives `tokio::select!` cancellation.
+#[derive(Debug, Default)]
+pub enum ReadState {
+    /// No read in progress.
+    #[default]
+    Idle,
+    /// Reading the 4-byte length prefix.
+    ReadingLen {
+        /// Length-prefix bytes buffer (4 bytes).
+        buf: [u8; 4],
+        /// Number of bytes filled so far (0..=4).
+        filled: usize,
+    },
+    /// Reading the payload of known length.
+    ReadingData {
+        /// Payload buffer pre-allocated to the announced length.
+        buf: Vec<u8>,
+        /// Number of bytes filled so far (0..=buf.len()).
+        filled: usize,
+    },
+}
+
+/// Read a length-prefixed frame, resumable across cancellation.
+///
+/// Unlike `read_framed`, this function persists partial progress in `state` so
+/// it is safe to use inside `tokio::select!`. On any return path (Ok, Err,
+/// or future cancellation), `state` reflects exactly what has been consumed
+/// from the socket.
+pub async fn read_framed_cancel_safe(
+    stream: &mut tokio::net::TcpStream,
+    state: &mut ReadState,
+) -> Result<Vec<u8>, DomError> {
+    use tokio::io::AsyncReadExt;
+
+    // Phase 1: read length prefix.
+    loop {
+        match state {
+            ReadState::Idle => {
+                *state = ReadState::ReadingLen {
+                    buf: [0u8; 4],
+                    filled: 0,
+                };
+            }
+            ReadState::ReadingLen { buf, filled } => {
+                if *filled == 4 {
+                    let len = u32::from_le_bytes(*buf) as usize;
+                    if len > NOISE_MAX_MSG {
+                        // Reset state so a future caller is not stuck.
+                        *state = ReadState::Idle;
+                        return Err(DomError::Malformed(format!("frame too large: {len}")));
+                    }
+                    *state = ReadState::ReadingData {
+                        buf: vec![0u8; len],
+                        filled: 0,
+                    };
+                    continue;
+                }
+                let n = stream
+                    .read(&mut buf[*filled..])
+                    .await
+                    .map_err(|e| DomError::Internal(format!("read frame len: {e}")))?;
+                if n == 0 {
+                    *state = ReadState::Idle;
+                    return Err(DomError::Internal("read frame len: early eof".into()));
+                }
+                *filled += n;
+            }
+            ReadState::ReadingData { buf, filled } => {
+                if *filled == buf.len() {
+                    // Take ownership of the buffer and reset state atomically.
+                    let mut taken = ReadState::Idle;
+                    std::mem::swap(state, &mut taken);
+                    if let ReadState::ReadingData { buf, .. } = taken {
+                        return Ok(buf);
+                    } else {
+                        unreachable!("state swapped from ReadingData");
+                    }
+                }
+                let n = stream
+                    .read(&mut buf[*filled..])
+                    .await
+                    .map_err(|e| DomError::Internal(format!("read frame data: {e}")))?;
+                if n == 0 {
+                    *state = ReadState::Idle;
+                    return Err(DomError::Internal("read frame data: early eof".into()));
+                }
+                *filled += n;
+            }
+        }
+    }
+}

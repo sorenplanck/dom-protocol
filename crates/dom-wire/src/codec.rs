@@ -1,6 +1,6 @@
 //! Noise-encrypted message codec for tokio streams.
 
-use crate::handshake::{read_framed, write_framed};
+use crate::handshake::{read_framed_cancel_safe, write_framed, ReadState};
 use crate::message::WireMessage;
 use dom_core::DomError;
 use snow::TransportState;
@@ -9,6 +9,8 @@ use snow::TransportState;
 pub struct NoiseCodec {
     transport: TransportState,
     network_magic: u32,
+    /// Cancel-safe read state (preserved across tokio::select! cancellation).
+    read_state: ReadState,
 }
 
 impl NoiseCodec {
@@ -17,6 +19,7 @@ impl NoiseCodec {
         Self {
             transport,
             network_magic,
+            read_state: ReadState::Idle,
         }
     }
 
@@ -44,7 +47,7 @@ impl NoiseCodec {
     ) -> Result<WireMessage, DomError> {
         let ciphertext = tokio::time::timeout(
             tokio::time::Duration::from_secs(crate::handshake::IDLE_TIMEOUT_SECS),
-            read_framed(stream),
+            read_framed_cancel_safe(stream, &mut self.read_state),
         )
         .await
         .map_err(|_| {
