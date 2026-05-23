@@ -928,11 +928,47 @@ async fn ibd_sync_round(
         return Ok(false); // peer has nothing new for us
     }
 
-    // 3. Compute block hashes; request bodies in batches of MAX_GETBLOCKDATA_HASHES.
+    // 3. Compute block hashes from headers, then filter out blocks we already
+    // have. Without this filter, a peer that resends the same headers (either
+    // maliciously or due to a relay loop) would cause us to re-download bodies
+    // for blocks already in our store — wasting bandwidth and IBD time.
+    //
+    // DOM-IBD-DUP-001 fix (2026-05-23): pre-filter before batched body request.
+    // The chain_state::connect_block early-return (ab82f89) still catches any
+    // duplicates that slip through, but filtering here avoids the network
+    // round-trip entirely.
     let mut block_hashes: Vec<[u8; 32]> = Vec::with_capacity(headers_payload.headers.len());
-    for h_bytes in &headers_payload.headers {
-        let hash = *dom_crypto::hash::blake2b_256(h_bytes).as_bytes();
-        block_hashes.push(hash);
+    {
+        let c = chain.lock().await;
+        for h_bytes in &headers_payload.headers {
+            let hash = *dom_crypto::hash::blake2b_256(h_bytes).as_bytes();
+            // Skip blocks already in our store — peer may have sent them
+            // redundantly (relay loop, malicious replay, or honest overlap).
+            match c.store.get_block_header(&hash) {
+                Ok(Some(_)) => {
+                    tracing::trace!(
+                        "IBD: skipping already-known block hash {}",
+                        hex::encode(&hash[..4])
+                    );
+                    continue;
+                }
+                Ok(None) => block_hashes.push(hash),
+                Err(e) => {
+                    tracing::warn!("IBD: store lookup error for header hash: {e}");
+                    // Be defensive — include the hash, connect_block will catch
+                    // any real duplicates via its own early-return.
+                    block_hashes.push(hash);
+                }
+            }
+        }
+    }
+
+    if block_hashes.is_empty() {
+        tracing::debug!(
+            "IBD: peer sent {} headers but all are already in our store — no bodies to fetch",
+            headers_payload.headers.len()
+        );
+        return Ok(false);
     }
 
     let mut connected_any = false;
