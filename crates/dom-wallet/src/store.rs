@@ -265,7 +265,14 @@ pub fn save_wallet(path: &Path, state: &WalletState, password: &str) -> Result<(
     fs::rename(&temp_path, path)
         .map_err(|e| WalletError::Io(format!("failed to rename wallet file atomically: {}", e)))?;
 
-    // Step 4: fsync parent directory (ensures rename is durable)
+    // Step 4: fsync parent directory (ensures rename is durable).
+    //
+    // Unix: open the directory and sync_all() to flush the rename to disk.
+    // Windows: NTFS's MoveFileEx (used by std::fs::rename) is durable by
+    // contract; there is no concept of "fsync a directory handle" — opening
+    // a directory as a file fails with ERROR_ACCESS_DENIED (os error 5).
+    // We rely on the rename itself for durability on Windows.
+    #[cfg(unix)]
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             let dir = std::fs::File::open(parent)
