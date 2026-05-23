@@ -1276,8 +1276,22 @@ async fn message_loop(
                                         tracing::debug!(
                                             "Accepted relayed block from {peer_addr} (side chain — no rebroadcast)"
                                         );
-                                        // Still scan for wallet outputs in case the side
-                                        // chain becomes the best chain via later reorg.
+                                        // Scan side chain for wallet outputs in case the
+                                        // side chain becomes best chain via later reorg.
+                                        //
+                                        // WARNING (audit 2026-05-23, ACHADO 3): wallet.scan_block
+                                        // is currently a no-op placeholder. When real scan logic
+                                        // is implemented, this branch MUST be revisited:
+                                        //   - Naive scan would count side-chain UTXOs as if they
+                                        //     were canonical, inflating balance and risking
+                                        //     double-counting on reorg.
+                                        //   - Proper handling: either (a) defer scan until the
+                                        //     side chain wins via reorg, or (b) tag scanned
+                                        //     outputs with their block hash and only count
+                                        //     those whose ancestor is the canonical tip.
+                                        // Also a DoS vector: peer can flood valid side blocks
+                                        // to force repeated scans (DOM-SCAN-001 — rate-limit
+                                        // planned in follow-up commit).
                                         if let Some(ref wallet_arc) = svc.wallet {
                                             let mut w = wallet_arc.lock().await;
                                             w.scan_block(&txs_for_scan, height);
