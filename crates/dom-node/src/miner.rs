@@ -350,11 +350,32 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
         transactions: Vec::new(),
     };
 
-    {
+    let connect_outcome = {
         let mut chain = node.chain.lock().await;
         chain
             .connect_block(&block, Timestamp(now_secs()))
-            .map_err(|e| DomError::Internal(format!("connect_block: {e}")))?;
+            .map_err(|e| DomError::Internal(format!("connect_block: {e}")))?
+    };
+
+    // Miner just produced a fresh block — anything other than BestChain is a bug
+    // (someone else mined the same hash? race? duplicate state?). Log loudly
+    // but don't crash, since the block validation already passed.
+    match connect_outcome {
+        dom_chain::ConnectResult::BestChain => { /* normal path */ }
+        dom_chain::ConnectResult::SideChain => {
+            tracing::warn!(
+                "Miner block at height {} accepted as SideChain — race with another miner?",
+                new_height
+            );
+        }
+        dom_chain::ConnectResult::AlreadyHave => {
+            tracing::warn!(
+                "Miner block at height {} was AlreadyHave — duplicate hash, very unusual",
+                new_height
+            );
+            // Don't relay — peers already have it (somehow).
+            return Ok(new_height);
+        }
     }
 
     // Scan block for wallet outputs (coinbase reward recovery).
@@ -364,6 +385,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     }
 
     // Relay newly-mined block to all connected peers via broadcast channel.
+    // Only reached for BestChain or SideChain (AlreadyHave returns early above).
     let block_bytes = {
         use dom_serialization::DomSerialize;
         block
