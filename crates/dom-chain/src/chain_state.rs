@@ -79,6 +79,27 @@ impl ChainState {
         // identical data, and trigger another rebroadcast — creating an
         // infinite amplification loop. Discovered via Doc 8 two_node test
         // on 2026-05-23.
+        //
+        // DOM-DUP-002 NOTE (audit follow-up, deliberately not implemented):
+        // The auditor suggested checking BOTH header AND body to detect
+        // partial-write corruption. After analysis, the suggestion was
+        // not adopted because:
+        //   1. commit_block in dom-store is atomic (RFC-0007 step 14:
+        //      all puts under a single txn.commit()). Header existence
+        //      implies body existence by construction.
+        //   2. If a future refactor breaks that atomicity, the
+        //      WriteFlags::NO_OVERWRITE protection from DOM-LMDB-001
+        //      (commit 1b26b13) would detect the resulting partial
+        //      state on the next connect attempt: re-committing a
+        //      header that already exists triggers a KeyExist error
+        //      with a loud-fail message identifying the bug.
+        //   3. A check that allowed re-commit on partial state would
+        //      conflict with the NO_OVERWRITE protection — the
+        //      recovery write would itself fail. Better to keep the
+        //      loud-fail signal than to mask it with a silent retry.
+        // If a future change splits commit_block writes across multiple
+        // transactions, the DOM-DUP-002 hardening should be revisited
+        // jointly with that change.
         if self.store.get_block_header(block_hash.as_bytes())?.is_some() {
             return Ok(ConnectResult::AlreadyHave);
         }
