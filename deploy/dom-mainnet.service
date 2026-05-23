@@ -1,0 +1,37 @@
+[Unit]
+Description=DOM Protocol Mainnet Node
+After=network.target time-sync.target
+Wants=time-sync.target
+
+[Service]
+Type=simple
+User=dom
+WorkingDirectory=/var/lib/dom-mainnet
+ExecStart=/usr/local/bin/dom-node
+
+# Environment overrides — point to mainnet data dir and config.
+Environment="DOM_DATA_DIR=/var/lib/dom-mainnet"
+Environment="DOM_P2P_LISTEN_ADDR=0.0.0.0:33369"
+Environment="DOM_LOG=info"
+
+# Restart policy: aggressive on mainnet — minimize downtime.
+Restart=always
+RestartSec=5
+
+# Security hardening (mainnet must run unprivileged).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/dom-mainnet
+LockPersonality=true
+RestrictRealtime=true
+
+# File descriptor limits — P2P + LMDB can open many handles.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
