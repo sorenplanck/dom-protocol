@@ -213,8 +213,8 @@ impl Default for Mempool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dom_consensus::transaction::{CoinbaseKernel, TransactionKernel, TransactionOutput};
-    use dom_core::{Amount, COIN_UNIT, KERNEL_FEAT_PLAIN};
+    use dom_consensus::transaction::{TransactionKernel, TransactionOutput};
+    use dom_core::{Amount, KERNEL_FEAT_PLAIN};
     use dom_crypto::pedersen::Commitment;
 
     fn g_commitment() -> Commitment {
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn select_orders_by_fee_rate() {
         let mut pool = Mempool::new();
-        let (tx_low, h_low) = make_tx(MIN_RELAY_FEE_RATE * 24 * 1); // fee_rate=1000
+        let (tx_low, h_low) = make_tx(MIN_RELAY_FEE_RATE * 24); // fee_rate=1000
         let (tx_high, h_high) = make_tx(MIN_RELAY_FEE_RATE * 24 * 5); // fee_rate=5000
         pool.accept_tx(tx_low, h_low, 0).unwrap();
         pool.accept_tx(tx_high, h_high, 1).unwrap();

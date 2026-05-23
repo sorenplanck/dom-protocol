@@ -81,10 +81,7 @@ impl PexManager {
         let mut peers: Vec<&PeerAddr> = self
             .known
             .values()
-            .filter(|p| {
-                p.is_connectable()
-                    && now.saturating_sub(p.last_seen) < MAX_PEER_AGE_SECS
-            })
+            .filter(|p| p.is_connectable() && now.saturating_sub(p.last_seen) < MAX_PEER_AGE_SECS)
             .collect();
 
         // Sort by most recently seen
@@ -163,7 +160,9 @@ pub fn encode_addr_payload(addrs: &[&PeerAddr]) -> Vec<u8> {
 /// Deserialize Addr payload.
 pub fn decode_addr_payload(data: &[u8]) -> Result<Vec<String>, dom_core::DomError> {
     if data.len() < 2 {
-        return Err(dom_core::DomError::Malformed("addr payload too short".into()));
+        return Err(dom_core::DomError::Malformed(
+            "addr payload too short".into(),
+        ));
     }
     let count = u16::from_le_bytes([data[0], data[1]]) as usize;
     let count = count.min(MAX_ADDR_RESPONSE);
@@ -243,7 +242,7 @@ mod tests {
     fn process_addr_filters_invalid() {
         let mut pex = PexManager::new(1000);
         let addrs = vec![
-            "127.0.0.1:33370".to_string(), // valid
+            "127.0.0.1:33370".to_string(),  // valid
             "not_an_addr".to_string(),      // invalid
             "192.168.1.1:8080".to_string(), // valid
         ];

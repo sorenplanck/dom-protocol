@@ -50,7 +50,10 @@ pub struct Address {
 impl Address {
     /// Create an address from a 33-byte payload.
     pub fn new(payload: [u8; 33], is_mainnet: bool) -> Self {
-        Self { payload, is_mainnet }
+        Self {
+            payload,
+            is_mainnet,
+        }
     }
 
     /// Encode address to Bech32m string.
@@ -88,7 +91,10 @@ impl Address {
         };
         let mut arr = [0u8; 33];
         arr.copy_from_slice(&payload);
-        Ok(Self { payload: arr, is_mainnet })
+        Ok(Self {
+            payload: arr,
+            is_mainnet,
+        })
     }
 
     /// Return the human-readable part for this address.
@@ -118,9 +124,7 @@ impl std::str::FromStr for Address {
 
 /// Compute Bech32m checksum polymod.
 fn polymod(values: &[u8]) -> u32 {
-    let gen: [u32; 5] = [
-        0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3,
-    ];
+    let gen: [u32; 5] = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
     let mut chk: u32 = 1;
     for &v in values {
         let b = ((chk >> 25) & 0xFF) as u8;

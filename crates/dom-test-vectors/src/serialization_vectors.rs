@@ -36,7 +36,7 @@ pub fn verify_all_roundtrips() -> Result<(), String> {
 mod tests {
     use super::*;
     use dom_core::COIN_UNIT;
-    use dom_serialization::{Reader, Writer};
+    use dom_serialization::Writer;
 
     #[test]
     fn all_primitives_roundtrip() {

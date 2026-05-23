@@ -42,8 +42,12 @@ async fn test_wallet_coinbase_reward() {
         balance.immature
     );
 
-    println!("[OK] wallet_flow: confirmed={} immature={} total={}",
-        balance.confirmed, balance.immature, balance.total());
+    println!(
+        "[OK] wallet_flow: confirmed={} immature={} total={}",
+        balance.confirmed,
+        balance.immature,
+        balance.total()
+    );
 }
 
 #[tokio::test]
@@ -73,5 +77,8 @@ async fn test_wallet_persists_across_restart() {
     };
 
     assert!(immature_first > 0, "first run should have immature balance");
-    println!("[OK] wallet persists: immature after mining = {}", immature_first);
+    println!(
+        "[OK] wallet persists: immature after mining = {}",
+        immature_first
+    );
 }

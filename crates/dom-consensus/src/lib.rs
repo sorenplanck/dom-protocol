@@ -292,7 +292,7 @@ pub fn derive_chain_id(network_magic: u32, genesis_hash: &dom_core::Hash256) -> 
 mod tests {
     use super::*;
     use crate::transaction::{TransactionKernel, TransactionOutput};
-    use dom_core::{Amount, BlockHeight, Timestamp, INITIAL_BLOCK_REWARD, KERNEL_FEAT_PLAIN};
+    use dom_core::{Amount, BlockHeight, Timestamp, KERNEL_FEAT_PLAIN};
     use dom_crypto::pedersen::Commitment;
 
     fn g_point() -> Commitment {

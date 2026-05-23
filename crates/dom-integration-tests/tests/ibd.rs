@@ -11,7 +11,9 @@ async fn test_ibd_full_sync() {
     let config_a = test_config("ibd-a", 43382, true);
     let node_a = spawn_node(config_a).await;
     tokio::spawn(node_a.clone().run());
-    wait_for_listener_ready("127.0.0.1:43382", 10).await.expect("A listener");
+    wait_for_listener_ready("127.0.0.1:43382", 10)
+        .await
+        .expect("A listener");
 
     // Mine 5 blocks on A before B exists
     mine_blocks(&node_a, 5).await.expect("A mining failed");
@@ -42,7 +44,10 @@ async fn test_ibd_full_sync() {
         (c.tip_height.0, c.tip_hash)
     };
     assert_eq!(height_a, height_b, "heights diverge after IBD");
-    assert_eq!(hash_a, hash_b, "tip hashes diverge — UTXO sets are different!");
+    assert_eq!(
+        hash_a, hash_b,
+        "tip hashes diverge — UTXO sets are different!"
+    );
 
     println!("[OK] ibd: B synced to height {} hash {}", height_b, hash_b);
 }

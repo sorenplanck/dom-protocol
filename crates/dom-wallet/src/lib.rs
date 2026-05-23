@@ -40,13 +40,13 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
+pub mod backup;
+pub mod coin_selection;
 pub mod hd_wallet;
 pub mod output_index;
 pub mod store;
 pub mod types;
 pub mod wallet;
-pub mod backup;
-pub mod coin_selection;
 
 pub use hd_wallet::{ExtendedPrivKey, HdError, DOM_COIN_TYPE};
 pub use types::{Network, OwnedOutput, WalletBalance, WalletError};

@@ -88,9 +88,7 @@ impl FutureBlockQueue {
         let now = Instant::now();
         let before = entries.len();
 
-        entries.retain(|_, b| {
-            now.duration_since(b.queued_at).as_secs() < max_age_secs
-        });
+        entries.retain(|_, b| now.duration_since(b.queued_at).as_secs() < max_age_secs);
 
         before - entries.len()
     }

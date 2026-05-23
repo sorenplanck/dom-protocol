@@ -316,7 +316,8 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     let coinbase = if let Some(ref wallet_arc) = node.wallet {
         // Wallet-integrated mining: deterministic blinding, output recorded
         let mut wallet = wallet_arc.lock().await;
-        wallet.build_coinbase(BlockHeight(new_height), 0)
+        wallet
+            .build_coinbase(BlockHeight(new_height), 0)
             .map_err(|e| DomError::Internal(format!("wallet coinbase: {e}")))?
     } else {
         // Fallback: random blinding, output NOT recorded (DOM-SEC-004 unresolved)

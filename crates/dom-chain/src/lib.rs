@@ -20,5 +20,5 @@ pub mod ibd;
 pub mod reorg;
 
 pub use chain_state::{ChainState, ConnectResult};
-pub use genesis::{GenesisResult, build_genesis, build_mainnet_genesis, build_testnet_genesis};
+pub use genesis::{build_genesis, build_mainnet_genesis, build_testnet_genesis, GenesisResult};
 pub use ibd::{IbdPhase, IbdState};

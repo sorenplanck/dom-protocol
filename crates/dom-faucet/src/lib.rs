@@ -113,7 +113,10 @@ async fn request_coins<B: FaucetBackend>(
         }
     }
 
-    let tx_hash = match state.backend.send_to_address(&req.address, FAUCET_AMOUNT_NOMS) {
+    let tx_hash = match state
+        .backend
+        .send_to_address(&req.address, FAUCET_AMOUNT_NOMS)
+    {
         Ok(h) => h,
         Err(e) => {
             return (
@@ -134,7 +137,11 @@ async fn request_coins<B: FaucetBackend>(
         StatusCode::OK,
         Json(FaucetResponse {
             success: true,
-            message: format!("Sent {} DOM to {}", FAUCET_AMOUNT_NOMS / 1_000_000_000, req.address),
+            message: format!(
+                "Sent {} DOM to {}",
+                FAUCET_AMOUNT_NOMS / 1_000_000_000,
+                req.address
+            ),
             tx_hash: Some(hex_encode(&tx_hash)),
             amount_noms: Some(FAUCET_AMOUNT_NOMS),
         }),

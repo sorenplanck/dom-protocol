@@ -68,9 +68,7 @@ async fn root() -> &'static str {
     "DOM Protocol Block Explorer API v0.1"
 }
 
-async fn get_info<P: ChainProvider>(
-    State(provider): State<Arc<P>>,
-) -> Json<ChainInfo> {
+async fn get_info<P: ChainProvider>(State(provider): State<Arc<P>>) -> Json<ChainInfo> {
     let hash = provider.chain_tip_hash();
     Json(ChainInfo {
         height: provider.chain_height(),
@@ -103,8 +101,12 @@ mod tests {
 
     struct MockProvider;
     impl ChainProvider for MockProvider {
-        fn chain_height(&self) -> u64 { 100 }
-        fn chain_tip_hash(&self) -> [u8; 32] { [0x42u8; 32] }
+        fn chain_height(&self) -> u64 {
+            100
+        }
+        fn chain_tip_hash(&self) -> [u8; 32] {
+            [0x42u8; 32]
+        }
         fn get_block_at_height(&self, height: u64) -> Option<BlockSummary> {
             Some(BlockSummary {
                 height,
@@ -115,7 +117,9 @@ mod tests {
                 kernel_count: 1,
             })
         }
-        fn get_block_by_hash(&self, _: &[u8; 32]) -> Option<BlockSummary> { None }
+        fn get_block_by_hash(&self, _: &[u8; 32]) -> Option<BlockSummary> {
+            None
+        }
     }
 
     #[test]

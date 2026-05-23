@@ -33,8 +33,7 @@ pub async fn spawn_node(config: NodeConfig) -> Arc<DomNode> {
     let node = Arc::new(DomNode::init(config).expect("node init failed"));
     {
         let chain = node.chain.lock().await;
-        let needs_genesis = chain.tip_height.0 == 0
-            && chain.tip_hash == dom_core::Hash256::ZERO;
+        let needs_genesis = chain.tip_height.0 == 0 && chain.tip_hash == dom_core::Hash256::ZERO;
         drop(chain);
         if needs_genesis {
             dom_node::miner::create_genesis_block(node.clone())
@@ -58,7 +57,10 @@ pub async fn wait_for_listener_ready(addr: &str, timeout_secs: u64) -> Result<()
         }
         sleep(Duration::from_millis(100)).await;
     }
-    Err(format!("listener at {} did not become ready in {}s", addr, timeout_secs))
+    Err(format!(
+        "listener at {} did not become ready in {}s",
+        addr, timeout_secs
+    ))
 }
 
 /// Wait for node to reach a specific height (with timeout).
@@ -72,11 +74,11 @@ pub async fn wait_for_height(
             let chain = node.chain.lock().await;
             let current_height = chain.tip_height.0;
             drop(chain);
-            
+
             if current_height >= target_height {
                 return Ok(());
             }
-            
+
             sleep(Duration::from_millis(100)).await;
         }
     })
@@ -95,11 +97,11 @@ pub async fn wait_for_peer_count(
             let peers = node.peers.lock().await;
             let count = peers.connected_peers().len();
             drop(peers);
-            
+
             if count >= min_peers {
                 return Ok(());
             }
-            
+
             sleep(Duration::from_millis(100)).await;
         }
     })
@@ -116,8 +118,7 @@ pub async fn mine_blocks(node: &Arc<DomNode>, count: u64) -> Result<(), String> 
     // Bootstrap genesis if chain is empty.
     {
         let chain = node.chain.lock().await;
-        let needs_genesis = chain.tip_height.0 == 0
-            && chain.tip_hash == dom_core::Hash256::ZERO;
+        let needs_genesis = chain.tip_height.0 == 0 && chain.tip_hash == dom_core::Hash256::ZERO;
         drop(chain);
         if needs_genesis {
             dom_node::miner::create_genesis_block(node.clone())

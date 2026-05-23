@@ -53,28 +53,107 @@ impl Metrics {
     pub fn export_prometheus(&self) -> String {
         let mut out = String::new();
         let metrics_list = [
-            ("dom_chain_height", "Current blockchain height", "gauge", &self.chain_height),
-            ("dom_total_difficulty", "Total accumulated difficulty", "gauge", &self.total_difficulty),
-            ("dom_peer_count", "Number of connected peers", "gauge", &self.peer_count),
-            ("dom_inbound_peers", "Inbound peer connections", "gauge", &self.inbound_peers),
-            ("dom_outbound_peers", "Outbound peer connections", "gauge", &self.outbound_peers),
-            ("dom_blocks_mined", "Total blocks mined", "counter", &self.blocks_mined),
-            ("dom_mining_active", "Mining status", "gauge", &self.mining_active),
-            ("dom_mempool_size", "Mempool size", "gauge", &self.mempool_size),
-            ("dom_txs_received", "Total txs received", "counter", &self.txs_received),
-            ("dom_txs_relayed", "Total txs relayed", "counter", &self.txs_relayed),
-            ("dom_block_validation_time_ms", "Block validation time", "gauge", &self.block_validation_time_ms),
-            ("dom_ibd_progress_percent", "IBD progress", "gauge", &self.ibd_progress_percent),
-            ("dom_blocks_rejected_timestamp_total", "Blocks rejected by timestamp", "counter", &self.blocks_rejected_timestamp),
-            ("dom_peers_with_high_drift", "Peers with high clock drift", "gauge", &self.peers_with_high_drift),
-            ("dom_future_block_queue_size", "Future block queue size", "gauge", &self.future_block_queue_size),
+            (
+                "dom_chain_height",
+                "Current blockchain height",
+                "gauge",
+                &self.chain_height,
+            ),
+            (
+                "dom_total_difficulty",
+                "Total accumulated difficulty",
+                "gauge",
+                &self.total_difficulty,
+            ),
+            (
+                "dom_peer_count",
+                "Number of connected peers",
+                "gauge",
+                &self.peer_count,
+            ),
+            (
+                "dom_inbound_peers",
+                "Inbound peer connections",
+                "gauge",
+                &self.inbound_peers,
+            ),
+            (
+                "dom_outbound_peers",
+                "Outbound peer connections",
+                "gauge",
+                &self.outbound_peers,
+            ),
+            (
+                "dom_blocks_mined",
+                "Total blocks mined",
+                "counter",
+                &self.blocks_mined,
+            ),
+            (
+                "dom_mining_active",
+                "Mining status",
+                "gauge",
+                &self.mining_active,
+            ),
+            (
+                "dom_mempool_size",
+                "Mempool size",
+                "gauge",
+                &self.mempool_size,
+            ),
+            (
+                "dom_txs_received",
+                "Total txs received",
+                "counter",
+                &self.txs_received,
+            ),
+            (
+                "dom_txs_relayed",
+                "Total txs relayed",
+                "counter",
+                &self.txs_relayed,
+            ),
+            (
+                "dom_block_validation_time_ms",
+                "Block validation time",
+                "gauge",
+                &self.block_validation_time_ms,
+            ),
+            (
+                "dom_ibd_progress_percent",
+                "IBD progress",
+                "gauge",
+                &self.ibd_progress_percent,
+            ),
+            (
+                "dom_blocks_rejected_timestamp_total",
+                "Blocks rejected by timestamp",
+                "counter",
+                &self.blocks_rejected_timestamp,
+            ),
+            (
+                "dom_peers_with_high_drift",
+                "Peers with high clock drift",
+                "gauge",
+                &self.peers_with_high_drift,
+            ),
+            (
+                "dom_future_block_queue_size",
+                "Future block queue size",
+                "gauge",
+                &self.future_block_queue_size,
+            ),
         ];
 
         // Export drift separately (AtomicI64 requires different load)
-        out.push_str("# HELP dom_clock_drift_seconds Local clock drift in seconds (can be negative)\n");
+        out.push_str(
+            "# HELP dom_clock_drift_seconds Local clock drift in seconds (can be negative)\n",
+        );
         out.push_str("# TYPE dom_clock_drift_seconds gauge\n");
-        out.push_str(&format!("dom_clock_drift_seconds {}\n\n",
-            self.local_clock_drift_seconds.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "dom_clock_drift_seconds {}\n\n",
+            self.local_clock_drift_seconds.load(Ordering::Relaxed)
+        ));
 
         for (name, help, kind, counter) in metrics_list.iter() {
             out.push_str(&format!("# HELP {} {}\n", name, help));

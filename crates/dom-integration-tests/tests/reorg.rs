@@ -16,7 +16,9 @@ async fn test_sync_convergence() {
     let node_b = spawn_node(config_b).await;
 
     tokio::spawn(node_a.clone().run());
-    wait_for_listener_ready("127.0.0.1:43380", 10).await.expect("A listener");
+    wait_for_listener_ready("127.0.0.1:43380", 10)
+        .await
+        .expect("A listener");
     tokio::spawn(node_b.clone().run());
 
     wait_for_peer_count(&node_b, 1, Duration::from_secs(35))
@@ -41,5 +43,8 @@ async fn test_sync_convergence() {
     assert_eq!(h_a, h_b, "heights diverge");
     assert_eq!(hash_a, hash_b, "tips diverge");
 
-    println!("[OK] sync_convergence: both nodes at height {} hash {}", h_a, hash_a);
+    println!(
+        "[OK] sync_convergence: both nodes at height {} hash {}",
+        h_a, hash_a
+    );
 }

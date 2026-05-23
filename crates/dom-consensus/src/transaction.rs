@@ -532,10 +532,7 @@ mod tests {
     #[test]
     fn tx_weight_calculation() {
         let tx = minimal_tx(); // 0 inputs + 1 output*21 + 1 kernel*3 = 24
-        assert_eq!(
-            tx.weight(),
-            0 * WEIGHT_INPUT + 1 * WEIGHT_OUTPUT + 1 * WEIGHT_KERNEL
-        );
+        assert_eq!(tx.weight(), WEIGHT_OUTPUT + WEIGHT_KERNEL);
     }
 
     #[test]

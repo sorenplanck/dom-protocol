@@ -1,6 +1,8 @@
 //! Full node orchestration.
 
+use crate::metrics::Metrics;
 use crate::miner::mining_loop;
+use crate::time_health::{check_clock_health, DriftStatus};
 use dom_chain::ChainState;
 use dom_config::NodeConfig;
 use dom_consensus::derive_chain_id;
@@ -9,15 +11,13 @@ use dom_core::Hash256;
 use dom_core::Timestamp;
 use dom_mempool::Mempool;
 use dom_store::DomStore;
+use dom_wallet::Wallet;
 use dom_wire::dandelion::DandelionRouter;
 use dom_wire::manager::PeerManager;
-use dom_wallet::Wallet;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
-use crate::time_health::{check_clock_health, DriftStatus};
-use crate::metrics::Metrics;
 
 /// The full DOM node.
 pub struct DomNode {
@@ -112,16 +112,17 @@ impl DomNode {
 
         let (block_relay_tx, _) = tokio::sync::broadcast::channel(64);
         let (tx_fluff_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
-        let (tx_stem_tx, _) = tokio::sync::broadcast::channel::<dom_wire::dandelion::StemEnvelope>(256);
+        let (tx_stem_tx, _) =
+            tokio::sync::broadcast::channel::<dom_wire::dandelion::StemEnvelope>(256);
 
         // Load or create wallet if configured
-        let wallet = if let (Some(wallet_path), Some(wallet_password)) = 
+        let wallet = if let (Some(wallet_path), Some(wallet_password)) =
             (&config.wallet_path, &config.wallet_password)
         {
             use crate::wallet_helpers::wallet_network_from_config;
             let wallet_net = wallet_network_from_config(config.network);
             let path = Path::new(wallet_path);
-            
+
             match Wallet::open(path, wallet_password) {
                 Ok(w) => {
                     info!("Wallet loaded from {:?}", path);
@@ -157,7 +158,10 @@ impl DomNode {
                 // config.mine = false; // config is not mut here — logged as warning
             }
             Ok(DriftStatus::Warning { drift_secs }) => {
-                warn!("Clock drift warning: {}s — consider synchronizing NTP", drift_secs);
+                warn!(
+                    "Clock drift warning: {}s — consider synchronizing NTP",
+                    drift_secs
+                );
             }
             Ok(DriftStatus::Healthy { drift_secs }) => {
                 info!("Clock health OK: drift={}s", drift_secs);
@@ -241,9 +245,7 @@ impl DomNode {
             let chain = self.chain.clone();
             let relay_tx = self.block_relay_tx.clone();
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(
-                    tokio::time::Duration::from_secs(30)
-                );
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
                 loop {
                     interval.tick().await;
                     let now_secs = std::time::SystemTime::now()
@@ -251,12 +253,11 @@ impl DomNode {
                         .unwrap_or_default()
                         .as_secs();
                     let now = dom_core::Timestamp(now_secs);
-                    let ready = queue.drain_ready(now_secs, dom_core::FUTURE_BLOCK_SOFT_BUFFER_SECS).await;
+                    let ready = queue
+                        .drain_ready(now_secs, dom_core::FUTURE_BLOCK_SOFT_BUFFER_SECS)
+                        .await;
                     for deferred in ready {
-                        tracing::debug!(
-                            "Re-evaluating deferred block ts={}",
-                            deferred.timestamp
-                        );
+                        tracing::debug!("Re-evaluating deferred block ts={}", deferred.timestamp);
                         use dom_serialization::DomDeserialize;
                         match dom_consensus::Block::from_bytes(&deferred.block_bytes) {
                             Ok(block) => {
@@ -285,9 +286,7 @@ impl DomNode {
                                         );
                                     }
                                     Err(e) => {
-                                        tracing::debug!(
-                                            "Deferred block still rejected: {e}"
-                                        );
+                                        tracing::debug!("Deferred block still rejected: {e}");
                                     }
                                 }
                             }
@@ -316,9 +315,9 @@ impl DomNode {
             let tx_fluff_tx = self.tx_fluff_tx.clone();
             tokio::spawn(async move {
                 const STEM_CHECK_INTERVAL_SECS: u64 = 5;
-                let mut interval = tokio::time::interval(
-                    tokio::time::Duration::from_secs(STEM_CHECK_INTERVAL_SECS)
-                );
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+                    STEM_CHECK_INTERVAL_SECS,
+                ));
                 interval.tick().await; // skip first immediate tick
                 loop {
                     interval.tick().await;
@@ -389,7 +388,12 @@ impl DomNode {
                         tx_fluff_tx: self.tx_fluff_tx.clone(),
                         tx_stem_tx: self.tx_stem_tx.clone(),
                     };
-                    let svc = NodeServices { mempool: self.mempool.clone(), dandelion: self.dandelion.clone(), peers: self.peers.clone(), wallet: self.wallet.clone() };
+                    let svc = NodeServices {
+                        mempool: self.mempool.clone(),
+                        dandelion: self.dandelion.clone(),
+                        peers: self.peers.clone(),
+                        wallet: self.wallet.clone(),
+                    };
                     tokio::spawn(async move {
                         handle_inbound(stream, peer_addr, config, privkey, chain, channels, svc)
                             .await;
@@ -404,7 +408,12 @@ impl DomNode {
 
     /// Connect to peers (DNS seeds + configured peers).
     async fn run_peer_connector(&self) {
-        let svc = NodeServices { mempool: self.mempool.clone(), dandelion: self.dandelion.clone(), peers: self.peers.clone(), wallet: self.wallet.clone() };
+        let svc = NodeServices {
+            mempool: self.mempool.clone(),
+            dandelion: self.dandelion.clone(),
+            peers: self.peers.clone(),
+            wallet: self.wallet.clone(),
+        };
         loop {
             let needs_more = {
                 let mgr = self.peers.lock().await;
@@ -549,7 +558,11 @@ async fn handle_inbound(
     channels: BroadcastChannels,
     svc: NodeServices,
 ) {
-    let BroadcastChannels { block_relay_tx, tx_fluff_tx, tx_stem_tx } = channels.clone();
+    let BroadcastChannels {
+        block_relay_tx,
+        tx_fluff_tx,
+        tx_stem_tx,
+    } = channels.clone();
     // Derive chain_id from network magic + canonical genesis hash.
     let genesis_hash = match config.network {
         dom_config::Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
@@ -605,7 +618,15 @@ async fn handle_inbound(
                     peer_hello.best_height
                 );
                 loop {
-                    match ibd_sync_round(&mut stream, &mut codec, &config, &chain, addr, svc.wallet.clone()).await
+                    match ibd_sync_round(
+                        &mut stream,
+                        &mut codec,
+                        &config,
+                        &chain,
+                        addr,
+                        svc.wallet.clone(),
+                    )
+                    .await
                     {
                         Ok(true) => continue,
                         Ok(false) => {
@@ -620,7 +641,10 @@ async fn handle_inbound(
                 }
             }
             if let Err(e) = message_loop(
-                PeerConn { stream: &mut stream, codec: &mut codec },
+                PeerConn {
+                    stream: &mut stream,
+                    codec: &mut codec,
+                },
                 &config,
                 addr,
                 chain.clone(),
@@ -648,7 +672,11 @@ async fn connect_outbound(
     channels: BroadcastChannels,
     svc: NodeServices,
 ) {
-    let BroadcastChannels { block_relay_tx, tx_fluff_tx, tx_stem_tx } = channels.clone();
+    let BroadcastChannels {
+        block_relay_tx,
+        tx_fluff_tx,
+        tx_stem_tx,
+    } = channels.clone();
     let mut stream = match tokio::net::TcpStream::connect(addr).await {
         Ok(s) => s,
         Err(e) => {
@@ -726,7 +754,15 @@ async fn connect_outbound(
                     peer_hello.best_height
                 );
                 loop {
-                    match ibd_sync_round(&mut stream, &mut codec, &config, &chain, peer_addr, svc.wallet.clone()).await
+                    match ibd_sync_round(
+                        &mut stream,
+                        &mut codec,
+                        &config,
+                        &chain,
+                        peer_addr,
+                        svc.wallet.clone(),
+                    )
+                    .await
                     {
                         Ok(true) => continue,
                         Ok(false) => {
@@ -742,7 +778,10 @@ async fn connect_outbound(
             }
 
             if let Err(e) = message_loop(
-                PeerConn { stream: &mut stream, codec: &mut codec },
+                PeerConn {
+                    stream: &mut stream,
+                    codec: &mut codec,
+                },
                 &config,
                 peer_addr,
                 chain.clone(),
@@ -843,7 +882,8 @@ async fn hello_exchange(
     if drift > dom_core::PEER_DRIFT_DISCONNECT_SECS {
         return Err(DomError::Invalid(format!(
             "peer clock drift too large: {}s (limit {}s)",
-            drift, dom_core::PEER_DRIFT_DISCONNECT_SECS
+            drift,
+            dom_core::PEER_DRIFT_DISCONNECT_SECS
         )));
     }
     if drift > dom_core::PEER_DRIFT_WARN_SECS {

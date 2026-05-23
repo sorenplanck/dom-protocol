@@ -100,7 +100,11 @@ impl ChainState {
         // If a future change splits commit_block writes across multiple
         // transactions, the DOM-DUP-002 hardening should be revisited
         // jointly with that change.
-        if self.store.get_block_header(block_hash.as_bytes())?.is_some() {
+        if self
+            .store
+            .get_block_header(block_hash.as_bytes())?
+            .is_some()
+        {
             return Ok(ConnectResult::AlreadyHave);
         }
 
@@ -260,7 +264,11 @@ impl ChainState {
         // IBD/sync codepath that adopts header-first validation.
         let header_bytes = header.to_bytes()?;
         let header_hash = compute_block_hash(&header_bytes);
-        if self.store.get_block_header(header_hash.as_bytes())?.is_some() {
+        if self
+            .store
+            .get_block_header(header_hash.as_bytes())?
+            .is_some()
+        {
             return Ok(());
         }
 
