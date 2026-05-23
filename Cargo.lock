@@ -796,6 +796,7 @@ dependencies = [
  "dom-core",
  "dom-pmmr",
  "dom-serialization",
+ "hex",
  "lmdb",
  "thiserror",
  "tracing",
