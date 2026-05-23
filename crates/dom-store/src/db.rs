@@ -178,23 +178,39 @@ impl DomStore {
             .begin_rw_txn()
             .map_err(|e| DomError::Internal(format!("rw txn: {e}")))?;
 
-        // Store block header
+        // Store block header.
+        // DOM-LMDB-001: NO_OVERWRITE detects duplicates. connect_block's
+        // ab82f89 early-return should prevent this from ever firing; if it
+        // does, upstream dedup was bypassed (security-relevant).
         txn.put(
             self.db_blocks,
             block_hash,
             &header_bytes.to_vec(),
-            WriteFlags::empty(),
+            WriteFlags::NO_OVERWRITE,
         )
-        .map_err(|e| DomError::Internal(format!("put block: {e}")))?;
+        .map_err(|e| match e {
+            lmdb::Error::KeyExist => DomError::Internal(format!(
+                "block header already exists — connect_block dedup bypassed? hash={}",
+                hex::encode(block_hash)
+            )),
+            other => DomError::Internal(format!("put block: {other}")),
+        })?;
 
-        // Store block body (full serialized block) for IBD responses
+        // Store block body (full serialized block) for IBD responses.
+        // DOM-LMDB-001: NO_OVERWRITE — block body is immutable by hash.
         txn.put(
             self.db_block_bodies,
             block_hash,
             &block_body_bytes.to_vec(),
-            WriteFlags::empty(),
+            WriteFlags::NO_OVERWRITE,
         )
-        .map_err(|e| DomError::Internal(format!("put block body: {e}")))?;
+        .map_err(|e| match e {
+            lmdb::Error::KeyExist => DomError::Internal(format!(
+                "block body already exists — connect_block dedup bypassed? hash={}",
+                hex::encode(block_hash)
+            )),
+            other => DomError::Internal(format!("put block body: {other}")),
+        })?;
 
         // Store height → hash index
         let height_key = block_height.to_le_bytes();
@@ -205,10 +221,19 @@ impl DomStore {
         txn.put(self.db_tip, b"tip", block_hash, WriteFlags::empty())
             .map_err(|e| DomError::Internal(format!("put tip: {e}")))?;
 
-        // Add new UTXOs
+        // Add new UTXOs.
+        // DOM-LMDB-001: NO_OVERWRITE — commitments must be unique. Duplicate
+        // commitment means the same (value, blinding) pair was produced twice,
+        // which would be a critical consensus bug (double output).
         for (commitment, entry) in new_utxos {
-            txn.put(self.db_utxos, commitment, entry, WriteFlags::empty())
-                .map_err(|e| DomError::Internal(format!("put utxo: {e}")))?;
+            txn.put(self.db_utxos, commitment, entry, WriteFlags::NO_OVERWRITE)
+                .map_err(|e| match e {
+                    lmdb::Error::KeyExist => DomError::Internal(format!(
+                        "UTXO commitment already exists — consensus bug? commitment={}",
+                        hex::encode(commitment)
+                    )),
+                    other => DomError::Internal(format!("put utxo: {other}")),
+                })?;
         }
 
         // Remove spent UTXOs
@@ -219,10 +244,26 @@ impl DomStore {
             }
         }
 
-        // Index kernels
+        // Index kernels.
+        // DOM-LMDB-001 — MOST CRITICAL of the NO_OVERWRITE conversions.
+        // A duplicate kernel excess is the signature of a kernel-replay
+        // attack: the consensus layer should already reject blocks containing
+        // previously-seen kernels (kernel uniqueness check), so if we ever
+        // get here with KeyExist, either:
+        //   - the consensus check has a bypass (security-critical bug)
+        //   - the same block is being committed twice (caught by db_blocks
+        //     check above first, so this is defense-in-depth)
+        // Either way, loud-fail with explicit error.
         for (excess, hash) in kernel_excesses {
-            txn.put(self.db_kernels, excess, hash, WriteFlags::empty())
-                .map_err(|e| DomError::Internal(format!("put kernel: {e}")))?;
+            txn.put(self.db_kernels, excess, hash, WriteFlags::NO_OVERWRITE)
+                .map_err(|e| match e {
+                    lmdb::Error::KeyExist => DomError::Internal(format!(
+                        "KERNEL REPLAY DETECTED — excess already indexed (DOM-SEC critical): excess={}, block={}",
+                        hex::encode(excess),
+                        hex::encode(hash)
+                    )),
+                    other => DomError::Internal(format!("put kernel: {other}")),
+                })?;
         }
 
         // Single atomic commit — if this fails nothing was written
