@@ -73,6 +73,16 @@ impl ChainState {
         let header_bytes = header.to_bytes()?;
         let block_hash = compute_block_hash(&header_bytes);
 
+        // DOM-SEC-RELAY-LOOP fix: early-return for already-known blocks.
+        // Without this check, duplicate blocks (e.g. from relay loops between
+        // peers) would re-execute full validation, re-write the store with
+        // identical data, and trigger another rebroadcast — creating an
+        // infinite amplification loop. Discovered via Doc 8 two_node test
+        // on 2026-05-23.
+        if self.store.get_block_header(block_hash.as_bytes())?.is_some() {
+            return Ok(ConnectResult::AlreadyHave);
+        }
+
         validate_header_syntax(header)?;
 
         if header.height != BlockHeight::GENESIS {
@@ -266,10 +276,18 @@ impl ChainState {
     }
 }
 
+/// Outcome of attempting to connect a block to the chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectResult {
+    /// Block extended the best chain — new tip. Caller should rebroadcast.
     BestChain,
+    /// Block is valid but on a side chain (lower or equal total difficulty).
+    /// Caller should NOT rebroadcast — would cause network amplification.
     SideChain,
+    /// Block was already known (hash already in store). No-op.
+    /// Caller MUST NOT rebroadcast or re-validate. Critical for preventing
+    /// relay loops (DOM-SEC-RELAY-LOOP, 2026-05-23).
+    AlreadyHave,
 }
 
 fn compute_block_hash(header_bytes: &[u8]) -> Hash256 {
