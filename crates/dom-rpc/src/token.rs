@@ -51,15 +51,18 @@ pub fn get_or_create_token() -> Result<String, std::io::Error> {
     Ok(token)
 }
 
-/// Get the path to ~/.dom/rpc_token
+/// Get the path to ~/.dom/rpc_token (cross-platform via `dirs` crate).
+///
+/// On Unix: $HOME/.dom/rpc_token
+/// On Windows: %USERPROFILE%\.dom\rpc_token
 fn token_file_path() -> Result<PathBuf, std::io::Error> {
-    let home = std::env::var("HOME").map_err(|_| {
+    let home = dirs::home_dir().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "HOME environment variable not set",
+            "home directory not found (HOME/USERPROFILE unset)",
         )
     })?;
-    let dom_dir = PathBuf::from(home).join(".dom");
+    let dom_dir = home.join(".dom");
     Ok(dom_dir.join("rpc_token"))
 }
 

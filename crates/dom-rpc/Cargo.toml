@@ -24,6 +24,7 @@ tower_governor = "0.4"
 tower-http = { version = "0.5", features = ["cors", "timeout", "limit"] }
 rand = "0.8"
 governor = "0.6"
+dirs = "5"
 
 [dev-dependencies]
 http-body-util = "0.1"
