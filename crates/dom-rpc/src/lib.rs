@@ -289,10 +289,19 @@ pub async fn serve(handle: Arc<dyn NodeHandle>, addr: SocketAddr) -> Result<(), 
 
     info!("RPC server listening on {addr}");
 
-    axum::serve(listener, router(handle, bearer_token))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e| RpcError::Internal(format!("server error: {e}")))?;
+    // SmartIpKeyExtractor (used by tower_governor rate limit middleware) requires
+    // ConnectInfo<SocketAddr> to be present in the request extensions. Default
+    // axum::serve doesn't inject it. Use into_make_service_with_connect_info to
+    // wire the peer SocketAddr through. Without this, every rate-limited route
+    // returns 500 "Unable To Extract Key!".
+    axum::serve(
+        listener,
+        router(handle, bearer_token)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .map_err(|e| RpcError::Internal(format!("server error: {e}")))?;
 
     warn!("RPC server stopped");
     Ok(())
