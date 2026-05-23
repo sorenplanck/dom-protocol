@@ -67,13 +67,41 @@ impl NodeHandle for NodeHandleImpl {
         m.accept_tx(tx, tx_hash, now)
             .map_err(|e| RpcError::Rejected(format!("{e}")))?;
 
-        // Route via Dandelion++ stem
-        if let (Ok(mut d), Ok(p)) = (
+        // Route via Dandelion++: decide Stem vs Fluff and dispatch over
+        // the corresponding broadcast channel. Peer tasks pick up envelopes
+        // in their message_loop select! and emit Command::Tx to the wire.
+        let (phase, stem_target) = if let (Ok(mut d), Ok(p)) = (
             self.0.dandelion.try_lock(),
             self.0.peers.try_lock(),
         ) {
-            let peers = p.connected_peers();
-            d.route_new_tx(tx_hash, &peers);
+            let peers: Vec<std::net::SocketAddr> = p
+                .connected_peers()
+                .into_iter()
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            let ph = d.route_new_tx(tx_hash, &peers);
+            let target = d.get_stem_peer(&tx_hash);
+            (ph, target)
+        } else {
+            // Locks unavailable: fall back to Fluff so the tx still propagates.
+            (dom_wire::dandelion::DandelionPhase::Fluff, None)
+        };
+        use dom_wire::dandelion::{DandelionPhase, StemEnvelope};
+        match phase {
+            DandelionPhase::Fluff => {
+                let _ = self.0.tx_fluff_tx.send(tx_bytes.clone());
+            }
+            DandelionPhase::Stem => {
+                if let Some(target) = stem_target {
+                    let _ = self.0.tx_stem_tx.send(StemEnvelope {
+                        target_peer: target,
+                        tx_bytes: tx_bytes.clone(),
+                    });
+                } else {
+                    // Route said Stem but no peer was stored — fall back to Fluff.
+                    let _ = self.0.tx_fluff_tx.send(tx_bytes.clone());
+                }
+            }
         }
 
         Ok(tx_hash)
@@ -200,10 +228,38 @@ impl NodeHandle for NodeHandleImpl {
         mempool.accept_tx(tx, tx_hash, now)
             .map_err(|e| dom_rpc::RpcError::Rejected(format!("mempool: {e}")))?;
 
-        // Route via Dandelion++
-        if let (Ok(mut d), Ok(p)) = (self.0.dandelion.try_lock(), self.0.peers.try_lock()) {
-            let peers = p.connected_peers();
-            d.route_new_tx(tx_hash, &peers);
+        // Route via Dandelion++: decide Stem vs Fluff and dispatch over
+        // the corresponding broadcast channel. Same logic as submit_tx above.
+        let (phase, stem_target) = if let (Ok(mut d), Ok(p)) = (
+            self.0.dandelion.try_lock(),
+            self.0.peers.try_lock(),
+        ) {
+            let peers: Vec<std::net::SocketAddr> = p
+                .connected_peers()
+                .into_iter()
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            let ph = d.route_new_tx(tx_hash, &peers);
+            let target = d.get_stem_peer(&tx_hash);
+            (ph, target)
+        } else {
+            (dom_wire::dandelion::DandelionPhase::Fluff, None)
+        };
+        use dom_wire::dandelion::{DandelionPhase, StemEnvelope};
+        match phase {
+            DandelionPhase::Fluff => {
+                let _ = self.0.tx_fluff_tx.send(tx_bytes.clone());
+            }
+            DandelionPhase::Stem => {
+                if let Some(target) = stem_target {
+                    let _ = self.0.tx_stem_tx.send(StemEnvelope {
+                        target_peer: target,
+                        tx_bytes: tx_bytes.clone(),
+                    });
+                } else {
+                    let _ = self.0.tx_fluff_tx.send(tx_bytes.clone());
+                }
+            }
         }
 
         Ok(tx_hash)
