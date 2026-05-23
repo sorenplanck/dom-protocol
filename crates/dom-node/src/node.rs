@@ -253,12 +253,24 @@ impl DomNode {
                                     c.connect_block(&block, now)
                                 };
                                 match result {
-                                    Ok(_) => {
+                                    Ok(dom_chain::ConnectResult::BestChain) => {
                                         tracing::info!(
-                                            "Accepted deferred block ts={}",
+                                            "Accepted deferred block ts={} (new tip)",
                                             deferred.timestamp
                                         );
                                         let _ = relay_tx.send(deferred.block_bytes);
+                                    }
+                                    Ok(dom_chain::ConnectResult::SideChain) => {
+                                        tracing::debug!(
+                                            "Accepted deferred block ts={} (side chain — no rebroadcast)",
+                                            deferred.timestamp
+                                        );
+                                    }
+                                    Ok(dom_chain::ConnectResult::AlreadyHave) => {
+                                        tracing::trace!(
+                                            "Deferred block ts={} already known — no-op",
+                                            deferred.timestamp
+                                        );
                                     }
                                     Err(e) => {
                                         tracing::debug!(
@@ -969,7 +981,18 @@ async fn ibd_sync_round(
             {
                 let mut c = chain.lock().await;
                 match c.connect_block(&block, now) {
-                    Ok(_) => {
+                    Ok(dom_chain::ConnectResult::BestChain)
+                    | Ok(dom_chain::ConnectResult::SideChain) => {
+                        connected_any = true;
+                    }
+                    Ok(dom_chain::ConnectResult::AlreadyHave) => {
+                        // Peer sent us a block we already have. Unusual during
+                        // IBD but not an error — count as progress to avoid
+                        // stalling the download loop.
+                        tracing::debug!(
+                            "IBD from {peer_addr}: block already known at height {}",
+                            height
+                        );
                         connected_any = true;
                     }
                     Err(e) => {
@@ -1200,14 +1223,34 @@ async fn message_loop(
                                     c.connect_block(&block, now)
                                 };
                                 match result {
-                                    Ok(_) => {
-                                        tracing::info!("Accepted relayed block from {peer_addr}");
+                                    Ok(dom_chain::ConnectResult::BestChain) => {
+                                        tracing::info!("Accepted relayed block from {peer_addr} (new tip)");
                                         // Scan block for wallet outputs (relay path).
                                         if let Some(ref wallet_arc) = svc.wallet {
                                             let mut w = wallet_arc.lock().await;
                                             w.scan_block(&txs_for_scan, height);
                                         }
+                                        // DOM-SEC-RELAY-LOOP: only rebroadcast when we
+                                        // actually extended the best chain. SideChain
+                                        // and AlreadyHave MUST NOT rebroadcast — that
+                                        // creates infinite relay loops between peers.
                                         let _ = block_relay_tx.send(payload.block_bytes);
+                                    }
+                                    Ok(dom_chain::ConnectResult::SideChain) => {
+                                        tracing::debug!(
+                                            "Accepted relayed block from {peer_addr} (side chain — no rebroadcast)"
+                                        );
+                                        // Still scan for wallet outputs in case the side
+                                        // chain becomes the best chain via later reorg.
+                                        if let Some(ref wallet_arc) = svc.wallet {
+                                            let mut w = wallet_arc.lock().await;
+                                            w.scan_block(&txs_for_scan, height);
+                                        }
+                                    }
+                                    Ok(dom_chain::ConnectResult::AlreadyHave) => {
+                                        tracing::trace!(
+                                            "Block from {peer_addr} already known — no-op"
+                                        );
                                     }
                                     Err(dom_core::DomError::Invalid(e)) => {
                                         tracing::warn!("Rejected block from {peer_addr}: {e}");
