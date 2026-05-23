@@ -19,9 +19,13 @@ async fn test_three_node_propagation() {
     let node_c = spawn_node(config_c).await;
 
     tokio::spawn(node_a.clone().run());
-    wait_for_listener_ready("127.0.0.1:43390", 10).await.expect("A listener");
+    wait_for_listener_ready("127.0.0.1:43390", 10)
+        .await
+        .expect("A listener");
     tokio::spawn(node_b.clone().run());
-    wait_for_listener_ready("127.0.0.1:43391", 10).await.expect("B listener");
+    wait_for_listener_ready("127.0.0.1:43391", 10)
+        .await
+        .expect("B listener");
     tokio::spawn(node_c.clone().run());
 
     wait_for_peer_count(&node_b, 1, Duration::from_secs(35))

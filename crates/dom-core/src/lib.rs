@@ -19,7 +19,7 @@ pub mod constants;
 pub mod error;
 pub mod types;
 
+pub use address::{Address, ADDRESS_HRP_MAINNET, ADDRESS_HRP_TESTNET};
 pub use constants::*;
 pub use error::DomError;
-pub use address::{Address, ADDRESS_HRP_MAINNET, ADDRESS_HRP_TESTNET};
 pub use types::*;

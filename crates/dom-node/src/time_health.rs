@@ -107,8 +107,8 @@ fn query_sntp(server: &str) -> Result<u64, TimeError> {
         .next()
         .ok_or_else(|| TimeError::Network(format!("no addr for {}", server)))?;
 
-    let socket = UdpSocket::bind("0.0.0.0:0")
-        .map_err(|e| TimeError::Network(format!("bind: {}", e)))?;
+    let socket =
+        UdpSocket::bind("0.0.0.0:0").map_err(|e| TimeError::Network(format!("bind: {}", e)))?;
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| TimeError::Network(format!("set_timeout: {}", e)))?;
@@ -132,9 +132,8 @@ fn query_sntp(server: &str) -> Result<u64, TimeError> {
 
     // Transmit timestamp is bytes 40-47
     // First 4 bytes: seconds since NTP epoch (1900-01-01)
-    let ntp_seconds = u32::from_be_bytes([
-        response[40], response[41], response[42], response[43]
-    ]) as u64;
+    let ntp_seconds =
+        u32::from_be_bytes([response[40], response[41], response[42], response[43]]) as u64;
 
     // Convert NTP epoch to Unix epoch
     // NTP epoch starts 70 years before Unix epoch
@@ -193,7 +192,7 @@ mod tests {
     fn check_with_unreachable_servers_returns_unknown() {
         // Use IPs that should not respond
         let result = check_clock_health_with_servers(&[
-            "192.0.2.1:123",  // TEST-NET-1, unreachable
+            "192.0.2.1:123", // TEST-NET-1, unreachable
         ]);
         // Either Unknown or network error; both acceptable
         assert!(result.is_ok() || result.is_err());

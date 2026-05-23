@@ -14,7 +14,9 @@ async fn test_two_node_testnet() {
     let node_b = spawn_node(config_b).await;
 
     tokio::spawn(node_a.clone().run());
-    wait_for_listener_ready("127.0.0.1:43370", 10).await.expect("A listener");
+    wait_for_listener_ready("127.0.0.1:43370", 10)
+        .await
+        .expect("A listener");
     tokio::spawn(node_b.clone().run());
 
     wait_for_peer_count(&node_b, 1, Duration::from_secs(35))
@@ -36,8 +38,14 @@ async fn test_two_node_testnet() {
     // Verify both nodes agree on tip
     let chain_a = node_a.chain.lock().await;
     let chain_b = node_b.chain.lock().await;
-    assert_eq!(chain_a.tip_height, chain_b.tip_height, "tip heights diverge");
+    assert_eq!(
+        chain_a.tip_height, chain_b.tip_height,
+        "tip heights diverge"
+    );
     assert_eq!(chain_a.tip_hash, chain_b.tip_hash, "tip hashes diverge");
 
-    println!("[OK] two_node: height={} hash={}", chain_a.tip_height.0, chain_a.tip_hash);
+    println!(
+        "[OK] two_node: height={} hash={}",
+        chain_a.tip_height.0, chain_a.tip_hash
+    );
 }

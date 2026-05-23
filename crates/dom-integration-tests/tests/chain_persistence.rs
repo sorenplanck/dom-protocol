@@ -45,5 +45,8 @@ async fn test_chain_persists_across_restart() {
     assert_eq!(height_first, height_second, "height should persist");
     assert_eq!(hash_first, hash_second, "tip hash should persist");
 
-    println!("[OK] chain_persists: height={} hash={}", height_second, hash_second);
+    println!(
+        "[OK] chain_persists: height={} hash={}",
+        height_second, hash_second
+    );
 }

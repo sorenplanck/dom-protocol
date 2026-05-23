@@ -192,13 +192,16 @@ mod tests {
     fn first_halving_applies_67_percent() {
         let h = BlockHeight(HALVING_INTERVAL);
         let r = block_reward(h);
-        assert_eq!(r.noms(), (INITIAL_BLOCK_REWARD * 67) / 100);
+        #[allow(clippy::integer_division)]
+        let expected = (INITIAL_BLOCK_REWARD * 67) / 100;
+        assert_eq!(r.noms(), expected);
     }
 
     #[test]
     fn second_halving() {
         let h = BlockHeight(HALVING_INTERVAL.checked_mul(2).unwrap());
         let r = block_reward(h);
+        #[allow(clippy::integer_division)]
         let expected = ((INITIAL_BLOCK_REWARD * 67) / 100 * 67) / 100;
         assert_eq!(r.noms(), expected);
     }

@@ -1,7 +1,7 @@
 //! Node commands.
 
-use clap::Subcommand;
 use anyhow::Result;
+use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum NodeCommands {

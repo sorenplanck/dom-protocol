@@ -8,15 +8,15 @@
 //!
 //! RFC-0000 §4: Genesis block specification.
 
+use dom_consensus::{block::ProofOfWork, derive_chain_id, BlockHeader};
 use dom_core::{
-    BlockHeight, DomError, Hash256, Timestamp,
-    GENESIS_MESSAGE, GENESIS_TARGET_COMPACT, GENESIS_TIMESTAMP_PLACEHOLDER,
-    INITIAL_BLOCK_REWARD, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_TESTNET,
+    BlockHeight, DomError, Hash256, Timestamp, GENESIS_MESSAGE, GENESIS_TARGET_COMPACT,
+    GENESIS_TIMESTAMP_PLACEHOLDER, INITIAL_BLOCK_REWARD, NETWORK_MAGIC_MAINNET,
+    NETWORK_MAGIC_TESTNET,
 };
-use dom_consensus::{block::ProofOfWork, BlockHeader, derive_chain_id};
 use dom_pow::CompactTarget;
 use primitive_types::U256;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 /// Result of genesis block generation.
 #[derive(Debug, Clone)]
@@ -47,10 +47,7 @@ impl GenesisResult {
 /// # Parameters
 /// - `network_magic`: NETWORK_MAGIC_MAINNET or NETWORK_MAGIC_TESTNET
 /// - `timestamp`: Unix timestamp for genesis.
-pub fn build_genesis(
-    network_magic: u32,
-    timestamp: u64,
-) -> Result<GenesisResult, DomError> {
+pub fn build_genesis(network_magic: u32, timestamp: u64) -> Result<GenesisResult, DomError> {
     let header = BlockHeader {
         version: dom_core::PROTOCOL_VERSION,
         height: BlockHeight::GENESIS,
@@ -62,7 +59,10 @@ pub fn build_genesis(
         total_kernel_offset: [0u8; 32],
         target: CompactTarget(GENESIS_TARGET_COMPACT),
         total_difficulty: U256::from(1u64),
-        pow: ProofOfWork { nonce: 0, randomx_hash: Hash256::ZERO },
+        pow: ProofOfWork {
+            nonce: 0,
+            randomx_hash: Hash256::ZERO,
+        },
     };
 
     let block_hash = hash_genesis_header(&header, network_magic)?;
@@ -89,10 +89,7 @@ pub fn build_testnet_genesis() -> Result<GenesisResult, DomError> {
 /// Compute the genesis block hash using SHA-256 (per whitepaper).
 ///
 /// genesis_hash = SHA-256(network_magic || timestamp || height || message)
-fn hash_genesis_header(
-    header: &BlockHeader,
-    network_magic: u32,
-) -> Result<Hash256, DomError> {
+fn hash_genesis_header(header: &BlockHeader, network_magic: u32) -> Result<Hash256, DomError> {
     let mut hasher = Sha256::new();
     hasher.update(network_magic.to_le_bytes());
     hasher.update(header.timestamp.0.to_le_bytes());

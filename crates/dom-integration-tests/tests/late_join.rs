@@ -15,7 +15,9 @@ async fn test_late_join_ibd() {
     let node_a = spawn_node(config_a).await;
     let node_b = spawn_node(config_b).await;
     tokio::spawn(node_a.clone().run());
-    wait_for_listener_ready("127.0.0.1:43393", 10).await.expect("A listener");
+    wait_for_listener_ready("127.0.0.1:43393", 10)
+        .await
+        .expect("A listener");
     tokio::spawn(node_b.clone().run());
 
     wait_for_peer_count(&node_b, 1, Duration::from_secs(35))
@@ -31,7 +33,9 @@ async fn test_late_join_ibd() {
     // Now C joins late
     let mut config_c = test_config("late-c", 43395, false);
     config_c.seed_peers = vec!["127.0.0.1:43394".into()]; // connects to B
-    wait_for_listener_ready("127.0.0.1:43394", 10).await.expect("B listener");
+    wait_for_listener_ready("127.0.0.1:43394", 10)
+        .await
+        .expect("B listener");
     let node_c = spawn_node(config_c).await;
     tokio::spawn(node_c.clone().run());
 

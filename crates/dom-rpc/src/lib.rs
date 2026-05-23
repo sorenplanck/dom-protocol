@@ -296,8 +296,7 @@ pub async fn serve(handle: Arc<dyn NodeHandle>, addr: SocketAddr) -> Result<(), 
     // returns 500 "Unable To Extract Key!".
     axum::serve(
         listener,
-        router(handle, bearer_token)
-            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        router(handle, bearer_token).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await
@@ -506,9 +505,7 @@ fn parse_hash_hex(value: &str) -> Result<[u8; 32], RpcError> {
         .map_err(|_| RpcError::InvalidHex("hash must be exactly 32 bytes".to_owned()))
 }
 
-async fn wallet_balance_handler(
-    State(handle): State<Arc<dyn NodeHandle>>,
-) -> impl IntoResponse {
+async fn wallet_balance_handler(State(handle): State<Arc<dyn NodeHandle>>) -> impl IntoResponse {
     match handle.get_wallet_balance() {
         Some(bal) => (StatusCode::OK, Json(serde_json::to_value(bal).unwrap())).into_response(),
         None => (
@@ -845,7 +842,7 @@ mod tests {
         let r = app()
             .oneshot(
                 Request::builder()
-                    .uri(&format!("/tx/{}", "a".repeat(64)))
+                    .uri(format!("/tx/{}", "a".repeat(64)))
                     .body(Body::empty())
                     .unwrap(),
             )

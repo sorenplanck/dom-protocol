@@ -83,7 +83,9 @@ impl CoinSelector {
         match strategy {
             SelectionStrategy::Greedy => sorted.sort_by_key(|b| std::cmp::Reverse(b.value)),
             SelectionStrategy::SmallestFirst => sorted.sort_by_key(|a| a.value),
-            SelectionStrategy::AgeWeighted => sorted.sort_by_key(|b| std::cmp::Reverse(b.age_blocks)),
+            SelectionStrategy::AgeWeighted => {
+                sorted.sort_by_key(|b| std::cmp::Reverse(b.age_blocks))
+            }
         }
 
         let mut selected = Vec::new();
@@ -126,10 +128,26 @@ mod tests {
 
     fn mock_utxos() -> Vec<SelectableUtxo> {
         vec![
-            SelectableUtxo { value: 1000, age_blocks: 100, index: 0 },
-            SelectableUtxo { value: 2000, age_blocks: 50, index: 1 },
-            SelectableUtxo { value: 500, age_blocks: 200, index: 2 },
-            SelectableUtxo { value: 3000, age_blocks: 10, index: 3 },
+            SelectableUtxo {
+                value: 1000,
+                age_blocks: 100,
+                index: 0,
+            },
+            SelectableUtxo {
+                value: 2000,
+                age_blocks: 50,
+                index: 1,
+            },
+            SelectableUtxo {
+                value: 500,
+                age_blocks: 200,
+                index: 2,
+            },
+            SelectableUtxo {
+                value: 3000,
+                age_blocks: 10,
+                index: 3,
+            },
         ]
     }
 
@@ -144,20 +162,26 @@ mod tests {
     #[test]
     fn smallest_first_defragments() {
         let utxos = mock_utxos();
-        let selected = CoinSelector::select(&utxos, 2500, 100, SelectionStrategy::SmallestFirst).unwrap();
+        let selected =
+            CoinSelector::select(&utxos, 2500, 100, SelectionStrategy::SmallestFirst).unwrap();
         assert_eq!(selected.len(), 3);
     }
 
     #[test]
     fn age_weighted_prefers_old() {
         let utxos = mock_utxos();
-        let selected = CoinSelector::select(&utxos, 400, 50, SelectionStrategy::AgeWeighted).unwrap();
+        let selected =
+            CoinSelector::select(&utxos, 400, 50, SelectionStrategy::AgeWeighted).unwrap();
         assert_eq!(selected[0].age_blocks, 200);
     }
 
     #[test]
     fn insufficient_funds_rejected() {
-        let utxos = vec![SelectableUtxo { value: 100, age_blocks: 1, index: 0 }];
+        let utxos = vec![SelectableUtxo {
+            value: 100,
+            age_blocks: 1,
+            index: 0,
+        }];
         assert!(matches!(
             CoinSelector::select(&utxos, 1000, 100, SelectionStrategy::Greedy),
             Err(SelectionError::InsufficientFunds { .. })

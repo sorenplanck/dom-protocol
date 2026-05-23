@@ -275,10 +275,12 @@ pub fn save_wallet(path: &Path, state: &WalletState, password: &str) -> Result<(
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            let dir = std::fs::File::open(parent)
-                .map_err(|e| WalletError::Io(format!("failed to open wallet parent dir for fsync: {}", e)))?;
-            dir.sync_all()
-                .map_err(|e| WalletError::Io(format!("failed to fsync wallet parent dir: {}", e)))?;
+            let dir = std::fs::File::open(parent).map_err(|e| {
+                WalletError::Io(format!("failed to open wallet parent dir for fsync: {}", e))
+            })?;
+            dir.sync_all().map_err(|e| {
+                WalletError::Io(format!("failed to fsync wallet parent dir: {}", e))
+            })?;
         }
     }
 

@@ -13,9 +13,9 @@ use governor::middleware::NoOpMiddleware;
 use std::sync::Arc;
 #[cfg(test)]
 use tower_governor::key_extractor::GlobalKeyExtractor;
-use tower_governor::{
-    governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
-};
+#[cfg(not(test))]
+use tower_governor::key_extractor::SmartIpKeyExtractor;
+use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::cors::{Any, CorsLayer};
 
 /// Bearer token for authenticated endpoints.

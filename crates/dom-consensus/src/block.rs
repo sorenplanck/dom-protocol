@@ -4,8 +4,8 @@
 //! DOM_RFC_0007_Validation_Order.md — Block validation steps 1-7.
 
 use dom_core::{
-    BlockHeight, DomError, Hash256, Timestamp, MAX_FUTURE_BLOCK_TIME, FUTURE_BLOCK_SOFT_BUFFER_SECS, MEDIAN_TIME_WINDOW,
-    PROTOCOL_VERSION,
+    BlockHeight, DomError, Hash256, Timestamp, FUTURE_BLOCK_SOFT_BUFFER_SECS,
+    MAX_FUTURE_BLOCK_TIME, MEDIAN_TIME_WINDOW, PROTOCOL_VERSION,
 };
 use dom_pow::CompactTarget;
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
@@ -230,8 +230,7 @@ pub fn validate_future_timestamp_with_buffer(
     if header.timestamp.0 > soft_limit.0 {
         return Err(DomError::TemporarilyInvalid(format!(
             "block timestamp {} too far in future (soft limit {})",
-            header.timestamp.0,
-            soft_limit.0
+            header.timestamp.0, soft_limit.0
         )));
     }
 

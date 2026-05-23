@@ -272,14 +272,12 @@ impl Wallet {
     /// Non-coinbase outputs (received via Slatepack) are not yet scanned here —
     /// that requires interactive blinding factor exchange (Doc 7).
     pub fn scan_block(&mut self, transactions: &[Transaction], block_height: u64) {
-        use dom_crypto::pedersen::Commitment;
         use dom_core::{BlockHeight, TAG_COINBASE_BLINDING};
+        use dom_crypto::pedersen::Commitment;
 
         // Derive the password seed once per scan (same as build_coinbase step 2).
-        let password_seed = blake2b_256_tagged(
-            "DOM:wallet-coinbase-seed:v1",
-            self.password.as_bytes(),
-        );
+        let password_seed =
+            blake2b_256_tagged("DOM:wallet-coinbase-seed:v1", self.password.as_bytes());
 
         // Derive the candidate blinding for this height.
         let mut blinding_input = Vec::with_capacity(40);
@@ -291,7 +289,9 @@ impl Wallet {
         let blinding = match dom_crypto::BlindingFactor::from_bytes(*blinding_hash.as_bytes()) {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!("scan_block: blinding derivation failed at height {block_height}: {e}");
+                tracing::warn!(
+                    "scan_block: blinding derivation failed at height {block_height}: {e}"
+                );
                 return;
             }
         };
@@ -400,20 +400,15 @@ impl Wallet {
         })?;
 
         // Step 2: Derive the password seed (domain-separated).
-        let password_seed = blake2b_256_tagged(
-            "DOM:wallet-coinbase-seed:v1",
-            self.password.as_bytes(),
-        );
+        let password_seed =
+            blake2b_256_tagged("DOM:wallet-coinbase-seed:v1", self.password.as_bytes());
 
         // Step 3: Derive deterministic blinding factor from (password_seed, height).
         let mut blinding_input = Vec::with_capacity(32 + 8);
         blinding_input.extend_from_slice(password_seed.as_bytes());
         blinding_input.extend_from_slice(&height.0.to_le_bytes());
 
-        let blinding_hash = blake2b_256_tagged(
-            dom_core::TAG_COINBASE_BLINDING,
-            &blinding_input,
-        );
+        let blinding_hash = blake2b_256_tagged(dom_core::TAG_COINBASE_BLINDING, &blinding_input);
         let blinding = BlindingFactor::from_bytes(*blinding_hash.as_bytes())
             .map_err(|e| WalletError::Crypto(format!("blinding from bytes: {e}")))?;
 

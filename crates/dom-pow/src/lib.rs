@@ -488,7 +488,7 @@ mod tests {
             );
         }
         for (i, &v) in ASERT_FRAC_TABLE.iter().enumerate() {
-            assert!(v >= 65536 && v < 131072, "out of bounds at {i}: {v}");
+            assert!((65536..131072).contains(&v), "out of bounds at {i}: {v}");
         }
     }
 
@@ -585,8 +585,8 @@ mod asert_strict_tests {
         let mut t = [0u8; 32];
         t[2] = 0x00;
         t[3] = 0x0f; // modest difficulty
-        for i in 4..32 {
-            t[i] = 0xff;
+        for item in t.iter_mut().skip(4) {
+            *item = 0xff;
         }
         t
     }

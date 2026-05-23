@@ -322,7 +322,10 @@ pub const TAG_COINBASE_BLINDING: &str = "DOM:coinbase-blinding:v1";
 /// PMMR construction, coinbase structure).
 ///
 /// Last computed: 2026-05-19 from clean run with TAG_GENESIS_BLINDING:v1.
-pub const GENESIS_HASH_TESTNET: [u8; 32] = [0xba, 0x73, 0x16, 0xa5, 0x27, 0x03, 0xbf, 0x78, 0x48, 0x25, 0x8b, 0xbb, 0x43, 0x4e, 0xd5, 0xa7, 0xd7, 0x96, 0x14, 0x74, 0x6b, 0x66, 0xe9, 0x16, 0x22, 0x7b, 0xe4, 0x41, 0x0a, 0x9d, 0x8e, 0x5b];
+pub const GENESIS_HASH_TESTNET: [u8; 32] = [
+    0xba, 0x73, 0x16, 0xa5, 0x27, 0x03, 0xbf, 0x78, 0x48, 0x25, 0x8b, 0xbb, 0x43, 0x4e, 0xd5, 0xa7,
+    0xd7, 0x96, 0x14, 0x74, 0x6b, 0x66, 0xe9, 0x16, 0x22, 0x7b, 0xe4, 0x41, 0x0a, 0x9d, 0x8e, 0x5b,
+];
 
 /// Canonical genesis block hash for Mainnet — UNFINALIZED until mainnet launch.
 pub const GENESIS_HASH_MAINNET: [u8; 32] = [0u8; 32];
@@ -368,7 +371,6 @@ const _: () = {
 
 // ── Runtime verification tests ────────────────────────────────────────────────
 
-
 // ── Time Discipline Thresholds ───────────────────────────────────────────────
 
 /// [POLICY] Clock drift threshold for warnings.
@@ -395,12 +397,16 @@ mod tests {
     fn reward_table_is_deterministic() {
         // Recompute the table from scratch with integer arithmetic and compare.
         let mut r: u64 = INITIAL_BLOCK_REWARD;
-        for epoch in 0..55 {
+        for (epoch, _) in BLOCK_REWARD_TABLE.iter().enumerate().take(55) {
             assert_eq!(
                 BLOCK_REWARD_TABLE[epoch], r,
                 "BLOCK_REWARD_TABLE[{epoch}] mismatch"
             );
-            r = (r * 67) / 100;
+            r = {
+                #[allow(clippy::integer_division)]
+                let next = (r * 67) / 100;
+                next
+            };
         }
     }
 
@@ -411,6 +417,7 @@ mod tests {
 
     #[test]
     fn supply_approximately_33m() {
+        #[allow(clippy::integer_division)]
         let dom = MAX_SUPPLY_NOMS / COIN_UNIT;
         assert!(dom >= 32_000_000, "supply should be >= 32M DOM, got {dom}");
         assert!(dom < 33_000_000, "supply should be < 33M DOM, got {dom}");
@@ -426,20 +433,20 @@ mod tests {
     fn max_target_bytes_layout() {
         assert_eq!(MAX_TARGET_BYTES[0], 0x00);
         assert_eq!(MAX_TARGET_BYTES[1], 0x00);
-        for i in 2..32 {
-            assert_eq!(MAX_TARGET_BYTES[i], 0xff);
+        for item in MAX_TARGET_BYTES.iter().skip(2) {
+            assert_eq!(*item, 0xff);
         }
     }
 
     #[test]
     fn min_target_bytes_layout() {
-        for i in 0..26 {
-            assert_eq!(MIN_TARGET_BYTES[i], 0x00);
+        for item in MIN_TARGET_BYTES.iter().take(26) {
+            assert_eq!(*item, 0x00);
         }
         assert_eq!(MIN_TARGET_BYTES[26], 0xff);
         assert_eq!(MIN_TARGET_BYTES[27], 0xff);
-        for i in 28..32 {
-            assert_eq!(MIN_TARGET_BYTES[i], 0x00);
+        for item in MIN_TARGET_BYTES.iter().skip(28) {
+            assert_eq!(*item, 0x00);
         }
     }
 }

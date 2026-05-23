@@ -70,8 +70,8 @@ impl ExtendedPrivKey {
             return Err(HdError::InvalidSeedLength(seed.len()));
         }
         type HmacSha512 = Hmac<Sha512>;
-        let mut mac = HmacSha512::new_from_slice(b"DOM seed")
-            .expect("HMAC can take key of any size");
+        let mut mac =
+            HmacSha512::new_from_slice(b"DOM seed").expect("HMAC can take key of any size");
         mac.update(seed);
         let result = mac.finalize().into_bytes();
 
@@ -95,8 +95,8 @@ impl ExtendedPrivKey {
     /// Derive a child key at given index.
     pub fn child(&self, index: u32) -> Result<Self, HdError> {
         type HmacSha512 = Hmac<Sha512>;
-        let mut mac = HmacSha512::new_from_slice(&self.chain_code)
-            .expect("HMAC can take key of any size");
+        let mut mac =
+            HmacSha512::new_from_slice(&self.chain_code).expect("HMAC can take key of any size");
 
         if index >= HARDENED_OFFSET {
             mac.update(&[0x00]);
@@ -145,7 +145,9 @@ impl ExtendedPrivKey {
                 .map_err(|_| HdError::InvalidPath(format!("bad index: {}", component)))?;
 
             let child_index = if hardened {
-                index.checked_add(HARDENED_OFFSET).ok_or(HdError::InvalidKey)?
+                index
+                    .checked_add(HARDENED_OFFSET)
+                    .ok_or(HdError::InvalidKey)?
             } else {
                 index
             };
@@ -167,11 +169,7 @@ impl ExtendedPrivKey {
         // Build path: m/44'/330'/account'/change/index
         let path = format!(
             "m/44'/{}'/{}'/{}'/{}/{}",
-            44u32,
-            DOM_COIN_TYPE,
-            account,
-            change,
-            index,
+            44u32, DOM_COIN_TYPE, account, change, index,
         );
         let child = self.derive_path(&path)?;
         Ok(child.key.clone())
@@ -186,10 +184,9 @@ impl ExtendedPrivKey {
 /// Add two scalars modulo the secp256k1 order.
 fn add_scalars_mod_order(a: &[u8; 32], b: &Zeroizing<[u8; 32]>) -> Result<[u8; 32], HdError> {
     const ORDER: [u8; 32] = [
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
-        0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B,
-        0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36,
+        0x41, 0x41,
     ];
 
     let mut result = [0u8; 32];
@@ -239,7 +236,10 @@ mod tests {
     fn deterministic_derivation() {
         let m1 = ExtendedPrivKey::from_seed(&test_seed()).unwrap();
         let m2 = ExtendedPrivKey::from_seed(&test_seed()).unwrap();
-        assert_eq!(m1.child(0).unwrap().key_bytes(), m2.child(0).unwrap().key_bytes());
+        assert_eq!(
+            m1.child(0).unwrap().key_bytes(),
+            m2.child(0).unwrap().key_bytes()
+        );
     }
 
     #[test]

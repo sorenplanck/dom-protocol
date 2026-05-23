@@ -76,7 +76,10 @@ mod tests {
         let relay = TxRelay::new(1000);
         let hash = [2u8; 32];
         assert_eq!(relay.process_incoming(hash).await, RelayDecision::Accept);
-        assert_eq!(relay.process_incoming(hash).await, RelayDecision::AlreadySeen);
+        assert_eq!(
+            relay.process_incoming(hash).await,
+            RelayDecision::AlreadySeen
+        );
     }
 
     #[tokio::test]

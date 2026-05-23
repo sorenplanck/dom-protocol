@@ -70,22 +70,20 @@ impl NodeHandle for NodeHandleImpl {
         // Route via Dandelion++: decide Stem vs Fluff and dispatch over
         // the corresponding broadcast channel. Peer tasks pick up envelopes
         // in their message_loop select! and emit Command::Tx to the wire.
-        let (phase, stem_target) = if let (Ok(mut d), Ok(p)) = (
-            self.0.dandelion.try_lock(),
-            self.0.peers.try_lock(),
-        ) {
-            let peers: Vec<std::net::SocketAddr> = p
-                .connected_peers()
-                .into_iter()
-                .filter_map(|s| s.parse().ok())
-                .collect();
-            let ph = d.route_new_tx(tx_hash, &peers);
-            let target = d.get_stem_peer(&tx_hash);
-            (ph, target)
-        } else {
-            // Locks unavailable: fall back to Fluff so the tx still propagates.
-            (dom_wire::dandelion::DandelionPhase::Fluff, None)
-        };
+        let (phase, stem_target) =
+            if let (Ok(mut d), Ok(p)) = (self.0.dandelion.try_lock(), self.0.peers.try_lock()) {
+                let peers: Vec<std::net::SocketAddr> = p
+                    .connected_peers()
+                    .into_iter()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                let ph = d.route_new_tx(tx_hash, &peers);
+                let target = d.get_stem_peer(&tx_hash);
+                (ph, target)
+            } else {
+                // Locks unavailable: fall back to Fluff so the tx still propagates.
+                (dom_wire::dandelion::DandelionPhase::Fluff, None)
+            };
         use dom_wire::dandelion::{DandelionPhase, StemEnvelope};
         match phase {
             DandelionPhase::Fluff => {
@@ -155,22 +153,24 @@ impl NodeHandle for NodeHandleImpl {
         const NOMS: f64 = 100_000_000.0;
         Some(dom_rpc::WalletBalanceResponse {
             confirmed_noms: bal.confirmed,
-            immature_noms:  bal.immature,
-            reserved_noms:  bal.reserved,
-            confirmed_dom:  bal.confirmed as f64 / NOMS,
-            immature_dom:   bal.immature  as f64 / NOMS,
+            immature_noms: bal.immature,
+            reserved_noms: bal.reserved,
+            confirmed_dom: bal.confirmed as f64 / NOMS,
+            immature_dom: bal.immature as f64 / NOMS,
         })
     }
 
     fn wallet_spend(&self, req: dom_rpc::SpendRequest) -> Result<[u8; 32], dom_rpc::RpcError> {
-        use dom_crypto::{BlindingFactor, pedersen::Commitment};
+        use dom_crypto::{pedersen::Commitment, BlindingFactor};
         use dom_serialization::DomSerialize;
 
         // Decode recipient commitment (33 bytes hex)
         let commitment_bytes = hex::decode(&req.recipient_commitment)
             .map_err(|e| dom_rpc::RpcError::Rejected(format!("commitment hex: {e}")))?;
         if commitment_bytes.len() != 33 {
-            return Err(dom_rpc::RpcError::Rejected("commitment must be 33 bytes".into()));
+            return Err(dom_rpc::RpcError::Rejected(
+                "commitment must be 33 bytes".into(),
+            ));
         }
         let mut cb = [0u8; 33];
         cb.copy_from_slice(&commitment_bytes);
@@ -181,7 +181,9 @@ impl NodeHandle for NodeHandleImpl {
         let blinding_bytes = hex::decode(&req.recipient_blinding)
             .map_err(|e| dom_rpc::RpcError::Rejected(format!("blinding hex: {e}")))?;
         if blinding_bytes.len() != 32 {
-            return Err(dom_rpc::RpcError::Rejected("blinding must be 32 bytes".into()));
+            return Err(dom_rpc::RpcError::Rejected(
+                "blinding must be 32 bytes".into(),
+            ));
         }
         let mut bb = [0u8; 32];
         bb.copy_from_slice(&blinding_bytes);
@@ -189,30 +191,39 @@ impl NodeHandle for NodeHandleImpl {
             .map_err(|e| dom_rpc::RpcError::Rejected(format!("blinding: {e}")))?;
 
         // Get current height
-        let height = self.0.chain
+        let height = self
+            .0
+            .chain
             .try_lock()
             .map_err(|_| dom_rpc::RpcError::Overloaded("chain busy".into()))?
-            .tip_height.0;
+            .tip_height
+            .0;
 
         // Build spend transaction via wallet
-        let wallet_arc = self.0.wallet.as_ref()
+        let wallet_arc = self
+            .0
+            .wallet
+            .as_ref()
             .ok_or_else(|| dom_rpc::RpcError::Internal("wallet not configured".into()))?;
 
         let tx = {
             let mut wallet = wallet_arc
                 .try_lock()
                 .map_err(|_| dom_rpc::RpcError::Overloaded("wallet busy".into()))?;
-            wallet.build_spend(
-                recipient_commitment,
-                recipient_blinding,
-                req.amount_noms,
-                req.fee_noms,
-                height,
-            ).map_err(|e| dom_rpc::RpcError::Rejected(format!("build_spend: {e}")))?
+            wallet
+                .build_spend(
+                    recipient_commitment,
+                    recipient_blinding,
+                    req.amount_noms,
+                    req.fee_noms,
+                    height,
+                )
+                .map_err(|e| dom_rpc::RpcError::Rejected(format!("build_spend: {e}")))?
         };
 
         // Serialize and submit to mempool
-        let tx_bytes = tx.to_bytes()
+        let tx_bytes = tx
+            .to_bytes()
             .map_err(|e| dom_rpc::RpcError::Internal(format!("serialize: {e}")))?;
         let tx_hash = *dom_crypto::blake2b_256(&tx_bytes).as_bytes();
 
@@ -221,30 +232,31 @@ impl NodeHandle for NodeHandleImpl {
             .unwrap_or_default()
             .as_secs();
 
-        let mut mempool = self.0.mempool
+        let mut mempool = self
+            .0
+            .mempool
             .try_lock()
             .map_err(|_| dom_rpc::RpcError::Overloaded("mempool busy".into()))?;
 
-        mempool.accept_tx(tx, tx_hash, now)
+        mempool
+            .accept_tx(tx, tx_hash, now)
             .map_err(|e| dom_rpc::RpcError::Rejected(format!("mempool: {e}")))?;
 
         // Route via Dandelion++: decide Stem vs Fluff and dispatch over
         // the corresponding broadcast channel. Same logic as submit_tx above.
-        let (phase, stem_target) = if let (Ok(mut d), Ok(p)) = (
-            self.0.dandelion.try_lock(),
-            self.0.peers.try_lock(),
-        ) {
-            let peers: Vec<std::net::SocketAddr> = p
-                .connected_peers()
-                .into_iter()
-                .filter_map(|s| s.parse().ok())
-                .collect();
-            let ph = d.route_new_tx(tx_hash, &peers);
-            let target = d.get_stem_peer(&tx_hash);
-            (ph, target)
-        } else {
-            (dom_wire::dandelion::DandelionPhase::Fluff, None)
-        };
+        let (phase, stem_target) =
+            if let (Ok(mut d), Ok(p)) = (self.0.dandelion.try_lock(), self.0.peers.try_lock()) {
+                let peers: Vec<std::net::SocketAddr> = p
+                    .connected_peers()
+                    .into_iter()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                let ph = d.route_new_tx(tx_hash, &peers);
+                let target = d.get_stem_peer(&tx_hash);
+                (ph, target)
+            } else {
+                (dom_wire::dandelion::DandelionPhase::Fluff, None)
+            };
         use dom_wire::dandelion::{DandelionPhase, StemEnvelope};
         match phase {
             DandelionPhase::Fluff => {
