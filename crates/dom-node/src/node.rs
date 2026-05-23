@@ -74,6 +74,18 @@ struct NodeServices {
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
 }
 
+/// Broadcast channels shared across connection tasks.
+///
+/// Consolidates the three broadcast senders that were previously passed
+/// individually to connect_outbound / handle_inbound / message_loop,
+/// keeping each function under the clippy::too_many_arguments threshold.
+#[derive(Clone)]
+struct BroadcastChannels {
+    block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    tx_fluff_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    tx_stem_tx: tokio::sync::broadcast::Sender<dom_wire::dandelion::StemEnvelope>,
+}
+
 impl DomNode {
     /// Initialize the node from configuration.
     pub fn init(config: NodeConfig) -> Result<Self, DomError> {
@@ -372,12 +384,14 @@ impl DomNode {
                     let config = self.config.clone();
                     let privkey = self.noise_privkey;
                     let chain = self.chain.clone();
-                    let block_relay_tx = self.block_relay_tx.clone();
-                    let tx_fluff_tx = self.tx_fluff_tx.clone();
-                    let tx_stem_tx = self.tx_stem_tx.clone();
+                    let channels = BroadcastChannels {
+                        block_relay_tx: self.block_relay_tx.clone(),
+                        tx_fluff_tx: self.tx_fluff_tx.clone(),
+                        tx_stem_tx: self.tx_stem_tx.clone(),
+                    };
                     let svc = NodeServices { mempool: self.mempool.clone(), dandelion: self.dandelion.clone(), peers: self.peers.clone(), wallet: self.wallet.clone() };
                     tokio::spawn(async move {
-                        handle_inbound(stream, peer_addr, config, privkey, chain, block_relay_tx, tx_fluff_tx, tx_stem_tx, svc)
+                        handle_inbound(stream, peer_addr, config, privkey, chain, channels, svc)
                             .await;
                     });
                 }
@@ -419,13 +433,15 @@ impl DomNode {
                     let config = self.config.clone();
                     let privkey = self.noise_privkey;
                     let chain = self.chain.clone();
-                    let block_relay_tx = self.block_relay_tx.clone();
-                    let tx_fluff_tx = self.tx_fluff_tx.clone();
-                    let tx_stem_tx = self.tx_stem_tx.clone();
+                    let channels = BroadcastChannels {
+                        block_relay_tx: self.block_relay_tx.clone(),
+                        tx_fluff_tx: self.tx_fluff_tx.clone(),
+                        tx_stem_tx: self.tx_stem_tx.clone(),
+                    };
                     info!("Connecting to peer {addr}");
                     let svc_c = svc.clone();
                     tokio::spawn(async move {
-                        connect_outbound(&addr, config, privkey, chain, block_relay_tx, tx_fluff_tx, tx_stem_tx, svc_c).await;
+                        connect_outbound(&addr, config, privkey, chain, channels, svc_c).await;
                     });
                 }
             }
@@ -530,11 +546,10 @@ async fn handle_inbound(
     config: NodeConfig,
     privkey: [u8; 32],
     chain: Arc<Mutex<ChainState>>,
-    block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
-    tx_fluff_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
-    tx_stem_tx: tokio::sync::broadcast::Sender<dom_wire::dandelion::StemEnvelope>,
+    channels: BroadcastChannels,
     svc: NodeServices,
 ) {
+    let BroadcastChannels { block_relay_tx, tx_fluff_tx, tx_stem_tx } = channels.clone();
     // Derive chain_id from network magic + canonical genesis hash.
     let genesis_hash = match config.network {
         dom_config::Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
@@ -609,12 +624,11 @@ async fn handle_inbound(
                 &config,
                 addr,
                 chain.clone(),
-                block_relay_tx.subscribe(),
-                block_relay_tx.clone(),
-                tx_fluff_tx.subscribe(),
-                tx_fluff_tx.clone(),
-                tx_stem_tx.subscribe(),
-                tx_stem_tx.clone(),
+                BroadcastChannels {
+                    block_relay_tx: block_relay_tx.clone(),
+                    tx_fluff_tx: tx_fluff_tx.clone(),
+                    tx_stem_tx: tx_stem_tx.clone(),
+                },
                 svc.clone(),
             )
             .await
@@ -631,11 +645,10 @@ async fn connect_outbound(
     config: NodeConfig,
     privkey: [u8; 32],
     chain: Arc<Mutex<ChainState>>,
-    block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
-    tx_fluff_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
-    tx_stem_tx: tokio::sync::broadcast::Sender<dom_wire::dandelion::StemEnvelope>,
+    channels: BroadcastChannels,
     svc: NodeServices,
 ) {
+    let BroadcastChannels { block_relay_tx, tx_fluff_tx, tx_stem_tx } = channels.clone();
     let mut stream = match tokio::net::TcpStream::connect(addr).await {
         Ok(s) => s,
         Err(e) => {
@@ -733,12 +746,11 @@ async fn connect_outbound(
                 &config,
                 peer_addr,
                 chain.clone(),
-                block_relay_tx.subscribe(),
-                block_relay_tx.clone(),
-                tx_fluff_tx.subscribe(),
-                tx_fluff_tx.clone(),
-                tx_stem_tx.subscribe(),
-                tx_stem_tx.clone(),
+                BroadcastChannels {
+                    block_relay_tx: block_relay_tx.clone(),
+                    tx_fluff_tx: tx_fluff_tx.clone(),
+                    tx_stem_tx: tx_stem_tx.clone(),
+                },
                 svc.clone(),
             )
             .await
@@ -1099,14 +1111,16 @@ async fn message_loop(
     config: &NodeConfig,
     peer_addr: std::net::SocketAddr,
     chain: Arc<Mutex<ChainState>>,
-    mut block_relay_rx: tokio::sync::broadcast::Receiver<Vec<u8>>,
-    block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
-    mut tx_fluff_rx: tokio::sync::broadcast::Receiver<Vec<u8>>,
-    tx_fluff_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
-    mut tx_stem_rx: tokio::sync::broadcast::Receiver<dom_wire::dandelion::StemEnvelope>,
-    tx_stem_tx: tokio::sync::broadcast::Sender<dom_wire::dandelion::StemEnvelope>,
+    channels: BroadcastChannels,
     svc: NodeServices,
 ) -> Result<(), DomError> {
+    // Subscribe to all broadcast channels for this peer connection.
+    let mut block_relay_rx = channels.block_relay_tx.subscribe();
+    let block_relay_tx = channels.block_relay_tx.clone();
+    let mut tx_fluff_rx = channels.tx_fluff_tx.subscribe();
+    let tx_fluff_tx = channels.tx_fluff_tx.clone();
+    let mut tx_stem_rx = channels.tx_stem_tx.subscribe();
+    let tx_stem_tx = channels.tx_stem_tx.clone();
     let PeerConn { stream, codec } = conn;
     use dom_wire::message::{
         BlockPayload, Command, GetBlockDataPayload, GetHeadersPayload, HeadersPayload, WireMessage,
