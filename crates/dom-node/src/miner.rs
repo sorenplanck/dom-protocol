@@ -176,6 +176,23 @@ pub async fn mining_loop(node: Arc<DomNode>) {
     }
 }
 
+/// Create the deterministic genesis block on a fresh chain.
+///
+/// **TEST-INFRASTRUCTURE API. Not part of the stable public surface.**
+///
+/// Exposed as `pub` so integration test helpers can bootstrap genesis
+/// without spawning the full `mining_loop`. Production code paths reach
+/// genesis creation only via `mining_loop` (which calls this internally
+/// under a tip-height guard) — never call this from production code.
+///
+/// Idempotency: callers MUST guard with a check that `chain.tip_height == 0`
+/// and `chain.tip_hash == Hash256::ZERO`. Calling on an initialized chain
+/// will fail under the LMDB NO_OVERWRITE protection added in DOM-LMDB-001
+/// (commit 1b26b13).
+///
+/// Audit (2026-05-23, second auditor ACHADO 6): marked `#[doc(hidden)]`
+/// to keep this out of generated rustdoc despite needing `pub` visibility.
+#[doc(hidden)]
 pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     use dom_core::GENESIS_MESSAGE;
     use dom_pmmr::Pmmr;
@@ -357,20 +374,25 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
             .map_err(|e| DomError::Internal(format!("connect_block: {e}")))?
     };
 
-    // Miner just produced a fresh block — anything other than BestChain is a bug
-    // (someone else mined the same hash? race? duplicate state?). Log loudly
-    // but don't crash, since the block validation already passed.
+    // Miner just produced a fresh block. BestChain is the normal path.
+    // SideChain is a natural race in PoW (another peer relayed faster, or
+    // two miners found blocks simultaneously) — debug-level, not anomalous.
+    // AlreadyHave on a freshly-mined block is very unusual (nonce collision?
+    // duplicate state?) but not crash-worthy — log and skip relay.
+    //
+    // Audit (2026-05-23, first auditor): SideChain should not be warn-level
+    // because it pollutes logs under normal pool/solo miner concurrency.
     match connect_outcome {
         dom_chain::ConnectResult::BestChain => { /* normal path */ }
         dom_chain::ConnectResult::SideChain => {
-            tracing::warn!(
-                "Miner block at height {} accepted as SideChain — race with another miner?",
+            tracing::debug!(
+                "Miner block at height {} accepted as SideChain (race with relayed block)",
                 new_height
             );
         }
         dom_chain::ConnectResult::AlreadyHave => {
-            tracing::warn!(
-                "Miner block at height {} was AlreadyHave — duplicate hash, very unusual",
+            tracing::debug!(
+                "Miner block at height {} was AlreadyHave (unusual but benign)",
                 new_height
             );
             // Don't relay — peers already have it (somehow).
