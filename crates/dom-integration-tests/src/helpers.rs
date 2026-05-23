@@ -89,7 +89,23 @@ pub async fn wait_for_peer_count(
 }
 
 /// Mine N blocks on a node (blocks until done).
+///
+/// If the chain is empty (no genesis), creates the genesis block first.
+/// This mirrors what `mining_loop` does automatically when `mine: true`,
+/// but lets integration tests control mining deterministically.
 pub async fn mine_blocks(node: &Arc<DomNode>, count: u64) -> Result<(), String> {
+    // Bootstrap genesis if chain is empty.
+    {
+        let chain = node.chain.lock().await;
+        let needs_genesis = chain.tip_height.0 == 0
+            && chain.tip_hash == dom_core::Hash256::ZERO;
+        drop(chain);
+        if needs_genesis {
+            dom_node::miner::create_genesis_block(node.clone())
+                .await
+                .map_err(|e| format!("genesis failed: {:?}", e))?;
+        }
+    }
     for _ in 0..count {
         dom_node::miner::mine_one_block(node.clone())
             .await
@@ -99,7 +115,14 @@ pub async fn mine_blocks(node: &Arc<DomNode>, count: u64) -> Result<(), String> 
 }
 
 /// Create a test NodeConfig with unique data directory.
-pub fn test_config(name: &str, port: u16, mine: bool) -> NodeConfig {
+///
+/// IMPORTANT: the `mine` parameter is accepted for backwards-compat with existing
+/// tests but is FORCED to `false` internally. Auto-mining in `node.run()` spawns
+/// a tight loop that holds `chain.lock()` continuously, which deadlocks against
+/// the manual `mine_blocks()` helper. Integration tests must use deterministic
+/// manual mining via `mine_blocks()` instead — the helper now bootstraps genesis
+/// automatically on first call.
+pub fn test_config(name: &str, port: u16, _mine: bool) -> NodeConfig {
     let data_dir = format!("/tmp/dom-test-{}", name);
     NodeConfig {
         network: dom_config::Network::Testnet,
@@ -109,7 +132,7 @@ pub fn test_config(name: &str, port: u16, mine: bool) -> NodeConfig {
         min_outbound: 1,
         dns_seeds: vec![],
         seed_peers: vec![],
-        mine,
+        mine: false,
         miner_address: None,
         wallet_path: None,
         wallet_password: None,

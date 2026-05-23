@@ -176,7 +176,7 @@ pub async fn mining_loop(node: Arc<DomNode>) {
     }
 }
 
-async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
+pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     use dom_core::GENESIS_MESSAGE;
     use dom_pmmr::Pmmr;
     info!("Criando bloco genesis...");
