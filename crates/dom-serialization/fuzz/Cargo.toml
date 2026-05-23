@@ -1,0 +1,40 @@
+[package]
+name = "dom-serialization-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-serialization]
+path = ".."
+
+[dependencies.dom-consensus]
+path = "../../dom-consensus"
+
+[[bin]]
+name = "fuzz_block_deserialize"
+path = "fuzz_targets/fuzz_block_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_transaction_deserialize"
+path = "fuzz_targets/fuzz_transaction_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_block_header_deserialize"
+path = "fuzz_targets/fuzz_block_header_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
