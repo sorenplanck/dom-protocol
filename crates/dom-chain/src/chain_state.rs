@@ -232,6 +232,17 @@ impl ChainState {
         header: &BlockHeader,
         now: Timestamp,
     ) -> Result<(), DomError> {
+        // DOM-IBD-DUP-001 defense: short-circuit if we already have this header.
+        // Avoids re-running RandomX (expensive ~10ms) for known-good headers.
+        // Currently this function has no production callers (verified via grep),
+        // but the early-return is added as defense-in-depth for any future
+        // IBD/sync codepath that adopts header-first validation.
+        let header_bytes = header.to_bytes()?;
+        let header_hash = compute_block_hash(&header_bytes);
+        if self.store.get_block_header(header_hash.as_bytes())?.is_some() {
+            return Ok(());
+        }
+
         validate_header_syntax(header)?;
         validate_future_timestamp(header, now)?;
         let seed = self.compute_randomx_seed(header.height.0)?;
