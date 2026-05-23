@@ -22,8 +22,27 @@ use std::time::Duration;
 use tokio::time::{sleep, timeout};
 
 /// Spawn a test node with custom config.
+///
+/// Genesis block is created automatically if the chain is empty. This
+/// mirrors production behavior: since `genesis_anchor()` uses
+/// `GENESIS_TIMESTAMP_PLACEHOLDER` (a compile-time constant), every node
+/// produces the same genesis_hash deterministically. In production, every
+/// fresh node bootstraps genesis locally on first start — no P2P sync
+/// needed for height=0. The test harness reflects that.
 pub async fn spawn_node(config: NodeConfig) -> Arc<DomNode> {
-    Arc::new(DomNode::init(config).expect("node init failed"))
+    let node = Arc::new(DomNode::init(config).expect("node init failed"));
+    {
+        let chain = node.chain.lock().await;
+        let needs_genesis = chain.tip_height.0 == 0
+            && chain.tip_hash == dom_core::Hash256::ZERO;
+        drop(chain);
+        if needs_genesis {
+            dom_node::miner::create_genesis_block(node.clone())
+                .await
+                .expect("genesis creation failed");
+        }
+    }
+    node
 }
 
 /// Wait for a node's P2P listener to be ready (port accepting connections).
