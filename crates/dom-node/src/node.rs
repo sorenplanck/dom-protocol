@@ -495,6 +495,31 @@ async fn handle_inbound(
                     warn!("Failed to register inbound peer {addr}: {e}");
                 }
             }
+            // IBD loop: if the inbound peer claims a higher chain, sync from it.
+            // Mirrors connect_outbound logic so inbound-only nodes (behind NAT
+            // who can only accept connections) still converge to the network's
+            // tip instead of remaining stuck at a stale height.
+            let our_height = chain.lock().await.tip_height.0;
+            if peer_hello.best_height > our_height {
+                info!(
+                    "Starting IBD from {addr}: our={our_height} peer={}",
+                    peer_hello.best_height
+                );
+                loop {
+                    match ibd_sync_round(&mut stream, &mut codec, &config, &chain, addr, svc.wallet.clone()).await
+                    {
+                        Ok(true) => continue,
+                        Ok(false) => {
+                            info!("IBD with {addr} caught up");
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("IBD with {addr} failed: {e}");
+                            return;
+                        }
+                    }
+                }
+            }
             if let Err(e) = message_loop(
                 PeerConn { stream: &mut stream, codec: &mut codec },
                 &config,
