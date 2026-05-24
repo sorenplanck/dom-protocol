@@ -125,11 +125,13 @@ impl Wallet {
         }
     }
 
-    /// Compute current balance broken down by maturity and reservation.
+    /// Compute current balance broken down by maturity and reservation,
+    /// honouring the wallet's network coinbase-maturity rule.
     pub fn balance(&self, current_height: u64) -> WalletBalance {
         let mut confirmed = 0u64;
         let mut immature = 0u64;
         let mut reserved = 0u64;
+        let maturity = self.network.coinbase_maturity();
 
         for output in self.outputs.iter() {
             if output.spent {
@@ -141,7 +143,7 @@ impl Wallet {
                 continue;
             }
 
-            if output.is_mature(current_height) {
+            if output.is_mature_for(current_height, maturity) {
                 confirmed = confirmed.saturating_add(output.value);
             } else {
                 immature = immature.saturating_add(output.value);
@@ -185,7 +187,11 @@ impl Wallet {
         let required = amount.saturating_add(fee);
 
         // Coin selection (returns clones we can hand to the builder).
-        let selected = self.outputs.select_for_spend(required, current_height)?;
+        let selected = self.outputs.select_for_spend_with_maturity(
+            required,
+            current_height,
+            self.network.coinbase_maturity(),
+        )?;
         let selected_commitments: Vec<[u8; 33]> = selected.iter().map(|o| o.commitment).collect();
 
         // Build transaction using dom_tx::SpendBuilder.

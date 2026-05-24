@@ -38,24 +38,39 @@ impl OutputIndex {
         self.outputs.values()
     }
 
-    /// Select outputs for spending using greedy coin selection.
+    /// Select outputs for spending using greedy coin selection, applying
+    /// the canonical `COINBASE_MATURITY` (mainnet/testnet) rule.
     ///
-    /// Filters by:
-    /// - Not spent
-    /// - Not reserved
-    /// - Mature (coinbase with 1000-block maturity)
-    ///
-    /// Returns outputs sorted by value (descending) and selected greedily until sum >= amount_needed.
+    /// Wallets running on `Network::Regtest` MUST call
+    /// `select_for_spend_with_maturity` so the relaxed threshold is used.
     pub fn select_for_spend(
         &self,
         amount_needed: u64,
         current_height: u64,
     ) -> Result<Vec<OwnedOutput>, WalletError> {
+        self.select_for_spend_with_maturity(amount_needed, current_height, dom_core::COINBASE_MATURITY)
+    }
+
+    /// Like `select_for_spend` but the caller supplies the maturity
+    /// threshold (typically `Network::coinbase_maturity()`).
+    ///
+    /// Filters by:
+    /// - Not spent
+    /// - Not reserved
+    /// - Mature under `maturity` (non-coinbase outputs always mature)
+    ///
+    /// Returns outputs sorted by value (descending) and selected greedily until sum >= amount_needed.
+    pub fn select_for_spend_with_maturity(
+        &self,
+        amount_needed: u64,
+        current_height: u64,
+        maturity: u64,
+    ) -> Result<Vec<OwnedOutput>, WalletError> {
         // Collect spendable outputs.
         let mut spendable: Vec<_> = self
             .outputs
             .values()
-            .filter(|o| o.is_spendable(current_height))
+            .filter(|o| o.is_spendable_for(current_height, maturity))
             .collect();
 
         // Sort by value descending (prefer larger outputs first).
