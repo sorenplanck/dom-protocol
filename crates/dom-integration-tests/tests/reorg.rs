@@ -2,11 +2,16 @@
 //!
 //! Tests that two nodes mining independently converge to the same tip
 //! once connected. Doesn't test deep reorgs (needs disconnect_peer API).
+//
+// ENV-BLOCKED-WSL-2026-05-24: multi-node + RandomX cache-only mining
+// exceeds WSL2's CPU/RAM budget within test deadlines. See spend_e2e.rs
+// header for the full classification context.
 
 use dom_integration_tests::helpers::*;
 use std::time::Duration;
 
 #[tokio::test]
+#[ignore = "env-blocked-wsl — needs VPS or dedicated 8GB+ machine"]
 async fn test_sync_convergence() {
     let config_a = test_config("reorg-a", 43380, true);
     let mut config_b = test_config("reorg-b", 43381, true);

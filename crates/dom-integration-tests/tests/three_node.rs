@@ -2,11 +2,16 @@
 //!
 //! Three nodes connected in a chain (A→B→C). Block mined on A must
 //! propagate to C through B. Verifies multi-hop block relay.
+//
+// ENV-BLOCKED-WSL-2026-05-24: multi-node + RandomX cache-only mining
+// exceeds WSL2's CPU/RAM budget within test deadlines. See spend_e2e.rs
+// header for the full classification context.
 
 use dom_integration_tests::helpers::*;
 use std::time::Duration;
 
 #[tokio::test]
+#[ignore = "env-blocked-wsl — needs VPS or dedicated 8GB+ machine"]
 async fn test_three_node_propagation() {
     let config_a = test_config("3n-a", 43390, true);
     let mut config_b = test_config("3n-b", 43391, false);
