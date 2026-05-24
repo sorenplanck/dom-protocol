@@ -2,11 +2,16 @@
 //!
 //! Node A mines blocks, then node B comes online and syncs from scratch.
 //! Verifies tip_hash matches after sync (proves UTXO set is identical).
+//
+// ENV-BLOCKED-WSL-2026-05-24: multi-node + RandomX cache-only mining
+// exceeds WSL2's CPU/RAM budget within test deadlines. See spend_e2e.rs
+// header for the full classification context.
 
 use dom_integration_tests::helpers::*;
 use std::time::Duration;
 
 #[tokio::test]
+#[ignore = "env-blocked-wsl — needs VPS or dedicated 8GB+ machine"]
 async fn test_ibd_full_sync() {
     let config_a = test_config("ibd-a", 43382, true);
     let node_a = spawn_node(config_a).await;

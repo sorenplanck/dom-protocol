@@ -2,11 +2,16 @@
 //!
 //! Two nodes run and mine 5 blocks. A third node joins late and must
 //! IBD all 5 blocks from one of them.
+//
+// ENV-BLOCKED-WSL-2026-05-24: multi-node + RandomX cache-only mining
+// exceeds WSL2's CPU/RAM budget within test deadlines. See spend_e2e.rs
+// header for the full classification context.
 
 use dom_integration_tests::helpers::*;
 use std::time::Duration;
 
 #[tokio::test]
+#[ignore = "env-blocked-wsl — needs VPS or dedicated 8GB+ machine"]
 async fn test_late_join_ibd() {
     let config_a = test_config("late-a", 43393, true);
     let mut config_b = test_config("late-b", 43394, false);

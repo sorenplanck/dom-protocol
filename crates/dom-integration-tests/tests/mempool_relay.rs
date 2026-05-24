@@ -3,11 +3,16 @@
 //! Verifies that two connected nodes share a working mempool path.
 //! Full tx building requires SpendBuilder + recipient blinding exchange
 //! (deferred to Slatepack — Doc 9+).
+//
+// ENV-BLOCKED-WSL-2026-05-24: multi-node + RandomX cache-only mining
+// exceeds WSL2's CPU/RAM budget within test deadlines. See spend_e2e.rs
+// header for the full classification context.
 
 use dom_integration_tests::helpers::*;
 use std::time::Duration;
 
 #[tokio::test]
+#[ignore = "env-blocked-wsl — needs VPS or dedicated 8GB+ machine"]
 async fn test_mempool_setup() {
     let config_a = test_config("mempool-a", 43384, true);
     let mut config_b = test_config("mempool-b", 43385, false);

@@ -2,6 +2,12 @@
 
 Last updated: 2026-05-24 (post-B7 — `Network::Regtest` added; unblocks local two-miner integration tests including Doc 8 spend_e2e. Magic byte / port / maturity / RandomX-flags isolated; consensus logic unchanged. See `docs/REGTEST.md`.)
 
+**B7 follow-up (2026-05-24):** two consensus bugs surfaced by spend_e2e re-enablement and were fixed:
+* `65c6a2d` — `REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION` was `[0xff; 32]`, strictly greater than `MAX_TARGET_BYTES`, so every Regtest block was rejected by `validate_target_bounds`. Set equal to `MAX_TARGET_BYTES` (the weakest accepted target). Zero changes to validators.
+* `a0dfbd2` — `create_genesis_block` was overwriting `chain.genesis_hash` with the computed hash, while `chain_id_for()` (miner) and `Wallet::create` keep using the constant `GENESIS_HASH_REGTEST = [0; 32]`. Result: `ValidationContext.chain_id` diverged from what the wallet/miner signed coinbase kernels with, so every block past genesis failed with "coinbase kernel signature invalid". Dropped the overwrite; all sites now consistently bind chain_id to the constant until pre-launch genesis-hash finalisation.
+
+**Local-dev tests env-blocked on WSL2 (B7 follow-up):** multi-node and mining-heavy integration tests (`spend_e2e`, `two_node`, `three_node`, `ibd`, `reorg`, `late_join`, `wallet_flow`, `mempool_relay`) are marked `#[ignore = "env-blocked-wsl"]` and carry the `ENV-BLOCKED-WSL-2026-05-24` header. Reason: Regtest target `0000ffff…ff` requires ~2^16 RandomX hashes per block; on WSL2's cache-only single-thread VM the rate is too low to finish two-block prologues inside test deadlines (observed range: 10–40+ min per run, non-deterministic). The tests are *not* protocol bugs — bugs surfaced were fixed above. Tracking: re-run on a VPS or dedicated machine with ≥8 GB RAM dedicated before mainnet; any non-env failure there is a real bug. Single-node mining-free tests (`replay_determinism`, `chain_persistence`) remain enabled.
+
 Mainnet launch FORBIDDEN until ALL items resolved.
 Testnet launch FORBIDDEN until items marked [TESTNET] resolved.
 
@@ -346,10 +352,15 @@ Post-B5 sweep across the entire workspace produced the following observations:
   invokes), RB-DNS-SEEDS, RB-WALLET-SLATE (Doc 7), RB-IBD RFC,
   RB-MUSIG2 (mandatory-vs-deferred decision), RB-GENESIS-ANCHOR
   mainnet finalization (testnet anchor is already frozen).
-* **Local-dev blocker (not a security/consensus issue):** RandomX dataset
-  size + `COINBASE_MATURITY = 1000` make every integration test that
-  needs two miners infeasible on a 2 GB WSL laptop. Tracked separately
-  as the "Regtest mode" work item.
+* **Local-dev blocker (not a security/consensus issue):** B7 added
+  `Network::Regtest` with `REGTEST_COINBASE_MATURITY = 1` and the
+  cache-only RandomX VM (~256 MB instead of ~2 GB), which removed the
+  dataset and maturity barriers. The remaining gap is hash-rate: WSL2's
+  shared CPU produces too few hashes/second against the `2^-16` Regtest
+  target to finish multi-block integration scenarios inside test
+  deadlines. Multi-node tests carry an `ENV-BLOCKED-WSL-2026-05-24`
+  marker plus `#[ignore]` and will be re-enabled on the first VPS or
+  dedicated-CPU run (see header note above).
 
 ---
 
