@@ -283,14 +283,21 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
 
     let new_height = tip_height.0 + 1;
     let anchor = genesis_anchor();
-    // Testnet: use easy target so blocks are findable in seconds on a CPU.
-    // Mainnet: full ASERT difficulty from anchor.
-    let target = if node.config.network == dom_config::Network::Testnet {
-        dom_core::MAX_TARGET_BYTES
-    } else if new_height == 1 {
-        anchor.target
-    } else {
-        asert_next_target(&anchor, Timestamp(now_secs()), BlockHeight(new_height))?
+    // Network-specific target selection:
+    //   - Regtest: the defensively-named REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION
+    //     (every RandomX hash satisfies it; mining wins on the first nonce).
+    //   - Testnet: MAX_TARGET_BYTES (every CPU finds blocks in seconds).
+    //   - Mainnet: full ASERT difficulty from the genesis anchor.
+    let target = match node.config.network {
+        dom_config::Network::Regtest => dom_core::REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION,
+        dom_config::Network::Testnet => dom_core::MAX_TARGET_BYTES,
+        dom_config::Network::Mainnet => {
+            if new_height == 1 {
+                anchor.target
+            } else {
+                asert_next_target(&anchor, Timestamp(now_secs()), BlockHeight(new_height))?
+            }
+        }
     };
     let block_diff = target_to_difficulty(&target);
     let new_total_diff = tip_difficulty.saturating_add(U256::from(block_diff));
@@ -342,6 +349,12 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
         mmr.root()
     };
 
+    // Regtest mines with the FLAG_LIGHT-equivalent VM (cache only, no
+    // ~2 GB dataset) — affordable on developer laptops where two miners
+    // otherwise OOM. RandomX hash output is identical to FULL_MEM mode
+    // (only the prover speed differs), so consensus validation does not
+    // care which mode the miner used.
+    let light_vm = node.config.network == dom_config::Network::Regtest;
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<BlockHeader, String>>();
     std::thread::Builder::new()
         .name(format!("miner-{}", new_height))
@@ -355,6 +368,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
                 output_root,
                 kernel_root,
                 rangeproof_root,
+                light_vm,
             );
             let _ = tx.send(result.map_err(|e| e.to_string()));
         })
@@ -431,15 +445,31 @@ fn mine_blocking(
     output_root: Hash256,
     kernel_root: Hash256,
     rangeproof_root: Hash256,
+    light_vm: bool,
 ) -> Result<BlockHeader, DomError> {
     use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
-    let flags = RandomXFlag::get_recommended_flags() | RandomXFlag::FLAG_FULL_MEM;
+    // Mainnet / Testnet mining sets `FLAG_FULL_MEM` for throughput
+    // (allocates the ~2 GB RandomX dataset). Regtest opts out via
+    // `light_vm = true` and uses the cache-only VM (~256 MB) — slow per
+    // hash but trivial target means we still find a block on the first
+    // attempt, and two miners fit in a developer laptop's RAM.
+    let flags = if light_vm {
+        RandomXFlag::get_recommended_flags()
+    } else {
+        RandomXFlag::get_recommended_flags() | RandomXFlag::FLAG_FULL_MEM
+    };
     let cache = RandomXCache::new(flags, &seed_hash)
         .map_err(|e| DomError::Internal(format!("cache: {e}")))?;
-    let dataset = RandomXDataset::new(flags, cache.clone(), 0)
-        .map_err(|e| DomError::Internal(format!("dataset: {e}")))?;
-    let vm = RandomXVM::new(flags, Some(cache), Some(dataset))
-        .map_err(|e| DomError::Internal(format!("vm: {e}")))?;
+    let vm = if light_vm {
+        // Cache-only VM. No dataset is allocated.
+        RandomXVM::new(flags, Some(cache), None)
+            .map_err(|e| DomError::Internal(format!("vm: {e}")))?
+    } else {
+        let dataset = RandomXDataset::new(flags, cache.clone(), 0)
+            .map_err(|e| DomError::Internal(format!("dataset: {e}")))?;
+        RandomXVM::new(flags, Some(cache), Some(dataset))
+            .map_err(|e| DomError::Internal(format!("vm: {e}")))?
+    };
 
     let mut nonce = 0u64;
     loop {
