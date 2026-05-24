@@ -141,10 +141,15 @@ pub async fn mine_blocks(node: &Arc<DomNode>, count: u64) -> Result<(), String> 
 /// the manual `mine_blocks()` helper. Integration tests must use deterministic
 /// manual mining via `mine_blocks()` instead — the helper now bootstraps genesis
 /// automatically on first call.
+/// Create a test NodeConfig with unique data directory.
+///
+/// Defaults to Regtest network (trivial PoW, 1-block maturity) for fast local testing.
+/// The `mine` parameter is accepted for backwards-compat but is FORCED to `false`
+/// internally. Auto-mining in `node.run()` would deadlock against manual `mine_blocks()`.
 pub fn test_config(name: &str, port: u16, _mine: bool) -> NodeConfig {
     let data_dir = format!("/tmp/dom-test-{}", name);
     NodeConfig {
-        network: dom_config::Network::Testnet,
+        network: dom_config::Network::Regtest,
         data_dir,
         p2p_listen_addr: format!("127.0.0.1:{}", port),
         max_inbound: 10,

@@ -39,6 +39,8 @@ p2p_listen_addr = "0.0.0.0:33370"
 mine = false
 ```
 
+**Note:** For local development and integration tests, use `network = "Regtest"` instead. See [REGTEST.md](./REGTEST.md) for details.
+
 ---
 
 ## Systemd Service

@@ -6,6 +6,20 @@
 
 ---
 
+## Local Development & Testing
+
+For contributors and auditors:
+
+- Use **Regtest** network for local development and integration tests (see [REGTEST.md](./REGTEST.md))
+  - Trivial PoW (instant mining)
+  - 1-block coinbase maturity
+  - Localhost-only peering
+  - ~100x faster test suite
+- Use **Testnet** for public testing and stress testing against peer network
+- Only use **Mainnet** after completing all pre-launch phases below
+
+---
+
 ## Pre-Launch Phases
 
 ### PHASE 0: Security Audit ✅ IN PROGRESS
