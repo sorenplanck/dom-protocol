@@ -2,7 +2,7 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
-use dom_core::{P2P_PORT_MAINNET, P2P_PORT_TESTNET};
+use dom_core::{P2P_PORT_MAINNET, P2P_PORT_REGTEST, P2P_PORT_TESTNET};
 use serde::{Deserialize, Serialize};
 
 /// Network selection.
@@ -12,6 +12,13 @@ pub enum Network {
     Mainnet,
     /// Testnet.
     Testnet,
+    /// Regtest — DEV-ONLY local network. Distinct magic byte
+    /// (`NETWORK_MAGIC_REGTEST`) prevents peering with Mainnet/Testnet.
+    /// Consensus logic is identical to the real networks; only the PoW
+    /// target, coinbase maturity, and RandomX VM flags differ — see
+    /// `REGTEST_COINBASE_MATURITY` and
+    /// `REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION` in `dom-core`.
+    Regtest,
 }
 
 impl Network {
@@ -20,6 +27,7 @@ impl Network {
         match self {
             Network::Mainnet => P2P_PORT_MAINNET,
             Network::Testnet => P2P_PORT_TESTNET,
+            Network::Regtest => P2P_PORT_REGTEST,
         }
     }
     /// Network magic bytes.
@@ -27,7 +35,28 @@ impl Network {
         match self {
             Network::Mainnet => dom_core::NETWORK_MAGIC_MAINNET,
             Network::Testnet => dom_core::NETWORK_MAGIC_TESTNET,
+            Network::Regtest => dom_core::NETWORK_MAGIC_REGTEST,
         }
+    }
+
+    /// Coinbase maturity (blocks) required before a coinbase output is
+    /// spendable on this network.
+    ///
+    /// Mainnet / Testnet: `dom_core::COINBASE_MATURITY` (1000).
+    /// Regtest: `dom_core::REGTEST_COINBASE_MATURITY` (1).
+    pub fn coinbase_maturity(&self) -> u64 {
+        match self {
+            Network::Mainnet | Network::Testnet => dom_core::COINBASE_MATURITY,
+            Network::Regtest => dom_core::REGTEST_COINBASE_MATURITY,
+        }
+    }
+
+    /// `true` if this network exists for local development only and must
+    /// never reach a real-network peer. Magic-byte isolation is the
+    /// primary guarantee; this helper is informational (e.g. for log
+    /// banners).
+    pub fn is_dev_only(&self) -> bool {
+        matches!(self, Network::Regtest)
     }
 }
 
@@ -100,6 +129,27 @@ impl NodeConfig {
             dns_seeds: vec!["testnet-seed1.dom-protocol.org".into()],
             seed_peers: vec![],
             mine: true,
+            miner_address: None,
+            wallet_path: None,
+            wallet_password: None,
+            log_level: "debug".into(),
+            rpc_listen_addr: None,
+        }
+    }
+
+    /// Default Regtest config — DEV-ONLY. Listens on `127.0.0.1` only,
+    /// no DNS seeds, no remote peering. Suitable for local CI and
+    /// integration tests; never for a production deployment.
+    pub fn regtest() -> Self {
+        Self {
+            network: Network::Regtest,
+            data_dir: "./dom-regtest-data".into(),
+            p2p_listen_addr: format!("127.0.0.1:{P2P_PORT_REGTEST}"),
+            max_inbound: 8,
+            min_outbound: 0,
+            dns_seeds: vec![],
+            seed_peers: vec![],
+            mine: false,
             miner_address: None,
             wallet_path: None,
             wallet_password: None,

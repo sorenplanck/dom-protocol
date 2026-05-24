@@ -135,21 +135,36 @@ impl dom_tx::InputSource for OwnedOutput {
     }
 }
 
-/// Network identifier.
+/// Network identifier (wallet-side mirror of `dom_config::Network`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Network {
     /// Mainnet (magic: 0x444F_4D31).
     Mainnet,
     /// Testnet (magic: 0x444F_4D54).
     Testnet,
+    /// Regtest — DEV-ONLY (magic: 0x444F_4D52). Wallet coinbase maturity
+    /// in this network is `dom_core::REGTEST_COINBASE_MATURITY` instead
+    /// of the canonical `COINBASE_MATURITY`. Magic-byte isolation in
+    /// `dom-wire` prevents Regtest peers from talking to real-network nodes.
+    Regtest,
 }
 
 impl Network {
     /// Get the network magic bytes.
     pub fn magic(self) -> u32 {
         match self {
-            Network::Mainnet => 0x444F_4D31,
-            Network::Testnet => 0x444F_4D54,
+            Network::Mainnet => dom_core::NETWORK_MAGIC_MAINNET,
+            Network::Testnet => dom_core::NETWORK_MAGIC_TESTNET,
+            Network::Regtest => dom_core::NETWORK_MAGIC_REGTEST,
+        }
+    }
+
+    /// Coinbase maturity (blocks) for this network. Mainnet / Testnet:
+    /// `dom_core::COINBASE_MATURITY`. Regtest: `REGTEST_COINBASE_MATURITY`.
+    pub fn coinbase_maturity(self) -> u64 {
+        match self {
+            Network::Mainnet | Network::Testnet => dom_core::COINBASE_MATURITY,
+            Network::Regtest => dom_core::REGTEST_COINBASE_MATURITY,
         }
     }
 }
