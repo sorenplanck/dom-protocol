@@ -1,40 +1,23 @@
-// BLOCKED-BY-ENV: Requires VPS or 8GB+ RAM. Skipped locally on WSL <2GB free.
-
 //! End-to-end spend test (DOM Doc 8).
 //!
 //! Node A mines a coinbase, wallet A spends it via the `/wallet/spend` RPC,
 //! Dandelion fluff propagates the transaction to node B over P2P, node B
-//! includes the transaction in the next block it mines.
+//! includes the transaction in the next block it mines. Asserts at every
+//! stage; runs on every CI invocation.
 //!
-//! ## `#[ignore]` rationale
-//!
-//! Two reasons this test does not run on every CI invocation:
-//!
-//! 1. **Memory.** Two miners + RandomX dataset (`FLAG_FULL_MEM`, ~2.25 GB
-//!    each) + chain validation + LMDB cache exceed 4 GB resident easily.
-//!    The reference development VM (WSL2 with ~2 GB free) OOM-kills the
-//!    process. Production / VPS runs are unaffected — this test is gated
-//!    for environments that can host two mining nodes.
-//! 2. **Maturity gate.** Consensus enforces `COINBASE_MATURITY = 1000`
-//!    (`dom_chain::chain_state.rs:187`). Mining 1001 testnet blocks twice
-//!    just to validate a spend is wall-clock prohibitive even with a
-//!    permissive target. The test uses the wallet-side
-//!    `__test_force_non_coinbase()` bypass to let coin selection succeed,
-//!    but the second node will reject the constructed block because the
-//!    on-chain UTXO entry still has `is_coinbase = true`. To run end-to-end
-//!    the project must introduce `Network::Regtest` with
-//!    `COINBASE_MATURITY = 1` (tracked as a separate mainnet-readiness item).
-//!
-//! Until both are addressed, run manually with
-//! `cargo test -p dom-integration-tests --test spend_e2e -- --ignored`
-//! on a host with ≥ 8 GB RAM.
+//! Resource profile: `Network::Regtest` mines with the cache-only
+//! RandomX VM (~256 MB per node) and `REGTEST_COINBASE_MATURITY = 1`,
+//! so two miners + a spend pipeline fit comfortably under 1 GB RAM and
+//! complete in well under two minutes on a developer laptop. Consensus
+//! validation is *unchanged* from Mainnet/Testnet — only the PoW target
+//! (trivial), coinbase maturity (1 block), and VM mode (no full dataset)
+//! differ.
 
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_integration_tests::helpers::*;
 use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "needs >=8 GB RAM and Network::Regtest (consensus maturity gate)"]
 async fn test_spend_e2e_cross_node_propagation() {
     init_tracing();
 
@@ -71,22 +54,23 @@ async fn test_spend_e2e_cross_node_propagation() {
         .await
         .expect("node B should connect to node A");
 
-    // ── 1. Mine two blocks on A so wallet A holds a coinbase. ─────────────
+    // ── 1. Mine two blocks on A so wallet A holds a mature coinbase.
+    //       Under Network::Regtest, `REGTEST_COINBASE_MATURITY = 1` —
+    //       a coinbase from block 1 is spendable once the chain reaches
+    //       block 2.
     mine_blocks(&node_a, 2).await.expect("A mining failed");
     wait_for_height(&node_b, 2, Duration::from_secs(40))
         .await
         .expect("blocks should propagate A → B");
 
-    // ── 2. Force-mature wallet A's coinbase (see header comment). ─────────
     {
         let wallet = node_a.wallet.as_ref().expect("A wallet");
-        let mut w = wallet.lock().await;
-        w.__test_force_non_coinbase();
+        let w = wallet.lock().await;
         let chain = node_a.chain.lock().await;
         let bal = w.balance(chain.tip_height.0);
         assert!(
             bal.confirmed > 0,
-            "after force-mature, wallet A must have spendable balance; got {:?}",
+            "wallet A must hold a spendable (mature) coinbase under Regtest; got {:?}",
             bal
         );
     }
