@@ -12,6 +12,10 @@ dom-node.workspace = true
 dom-config.workspace = true
 dom-wallet.workspace = true
 dom-core.workspace = true
+dom-chain.workspace = true
+dom-consensus.workspace = true
+dom-serialization.workspace = true
+dom-store.workspace = true
 
 tokio.workspace = true
 anyhow = "1.0"

@@ -87,6 +87,8 @@ dom-rpc            = { path = "crates/dom-rpc" }
 axum = { version = "0.7", features = ["json"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 bip39 = { version = "2.0", features = ["rand"] }
+# Property-based testing (Roadmap v2 Phase 1.1 — replay determinism, reorg fuzz).
+proptest = { version = "1" }
 
 [profile.release]
 opt-level       = 3
