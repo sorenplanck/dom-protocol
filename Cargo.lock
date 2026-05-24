@@ -706,10 +706,14 @@ name = "dom-integration-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dom-chain",
  "dom-config",
+ "dom-consensus",
  "dom-core",
  "dom-crypto",
  "dom-node",
+ "dom-serialization",
+ "dom-store",
  "dom-wallet",
  "hex",
  "reqwest",
@@ -825,6 +829,7 @@ dependencies = [
  "dom-serialization",
  "hex",
  "lmdb",
+ "tempfile",
  "thiserror 1.0.69",
  "tracing",
 ]

@@ -276,7 +276,14 @@ pub const MAX_TARGET_BYTES: [u8; 32] = {
 /// To activate: add Network::Regtest variant + gate this constant behind
 /// a `match network { Regtest => REGTEST_TRIVIAL_TARGET, _ => ... }` in
 /// the miner and PoW validator. Do NOT skip the match.
-pub const REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION: [u8; 32] = [0xff_u8; 32];
+///
+/// NOTE (2026-05-24): set to `MAX_TARGET_BYTES` so this target is accepted
+/// by `validate_target_bounds`. RandomX produces hashes whose first 2 bytes
+/// are zero with probability 2^-16, giving ~milliseconds-per-block on the
+/// cache-only VM used in regtest. The "trivial" label refers to effort
+/// relative to mainnet, not to bypassing consensus validation — any
+/// consensus-frozen invariant (target <= MAX_TARGET) still holds.
+pub const REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION: [u8; 32] = MAX_TARGET_BYTES;
 
 // ── Kernel Features ───────────────────────────────────────────────────────────
 
@@ -505,5 +512,18 @@ mod tests {
         for item in MIN_TARGET_BYTES.iter().skip(28) {
             assert_eq!(*item, 0x00);
         }
+    }
+
+    #[test]
+    fn regtest_trivial_target_is_accepted_by_consensus() {
+        // REGTEST_TRIVIAL_TARGET must be <= MAX_TARGET_BYTES, otherwise any
+        // regtest block carrying it is rejected by validate_target_bounds.
+        // Cheapest invariant: identical to MAX_TARGET_BYTES (equality is the
+        // weakest target consensus accepts).
+        assert_eq!(
+            REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION,
+            MAX_TARGET_BYTES,
+            "REGTEST_TRIVIAL_TARGET must equal MAX_TARGET_BYTES — consensus accepts it"
+        );
     }
 }
