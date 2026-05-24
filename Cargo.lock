@@ -828,6 +828,7 @@ dependencies = [
  "dom-pmmr",
  "dom-serialization",
  "hex",
+ "libc",
  "lmdb",
  "tempfile",
  "thiserror 1.0.69",
