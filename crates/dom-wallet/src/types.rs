@@ -142,14 +142,24 @@ pub enum Network {
     Mainnet,
     /// Testnet (magic: 0x444F_4D54).
     Testnet,
+    /// Regtest (magic: 0x444F_4D52).
+    Regtest,
 }
 
 impl Network {
     /// Get the network magic bytes.
     pub fn magic(self) -> u32 {
         match self {
-            Network::Mainnet => 0x444F_4D31,
-            Network::Testnet => 0x444F_4D54,
+            Network::Mainnet => dom_core::NETWORK_MAGIC_MAINNET,
+            Network::Testnet => dom_core::NETWORK_MAGIC_TESTNET,
+            Network::Regtest => dom_core::NETWORK_MAGIC_REGTEST,
+        }
+    }
+    /// Coinbase maturity threshold for this network.
+    pub fn coinbase_maturity(self) -> u64 {
+        match self {
+            Network::Mainnet | Network::Testnet => dom_core::COINBASE_MATURITY,
+            Network::Regtest => dom_core::REGTEST_COINBASE_MATURITY,
         }
     }
 }

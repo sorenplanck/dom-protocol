@@ -2,7 +2,7 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
-use dom_core::{P2P_PORT_MAINNET, P2P_PORT_TESTNET};
+use dom_core::{P2P_PORT_MAINNET, P2P_PORT_TESTNET, P2P_PORT_REGTEST};
 use serde::{Deserialize, Serialize};
 
 /// Network selection.
@@ -12,6 +12,8 @@ pub enum Network {
     Mainnet,
     /// Testnet.
     Testnet,
+    /// Regtest: local testing network with trivial PoW and 1-block coinbase maturity.
+    Regtest,
 }
 
 impl Network {
@@ -20,6 +22,7 @@ impl Network {
         match self {
             Network::Mainnet => P2P_PORT_MAINNET,
             Network::Testnet => P2P_PORT_TESTNET,
+            Network::Regtest => P2P_PORT_REGTEST,
         }
     }
     /// Network magic bytes.
@@ -27,7 +30,19 @@ impl Network {
         match self {
             Network::Mainnet => dom_core::NETWORK_MAGIC_MAINNET,
             Network::Testnet => dom_core::NETWORK_MAGIC_TESTNET,
+            Network::Regtest => dom_core::NETWORK_MAGIC_REGTEST,
         }
+    }
+    /// Coinbase maturity threshold for this network.
+    pub fn coinbase_maturity(&self) -> u64 {
+        match self {
+            Network::Mainnet | Network::Testnet => dom_core::COINBASE_MATURITY,
+            Network::Regtest => dom_core::REGTEST_COINBASE_MATURITY,
+        }
+    }
+    /// Is this a development-only network?
+    pub fn is_dev_only(&self) -> bool {
+        matches!(self, Network::Regtest)
     }
 }
 
@@ -105,6 +120,24 @@ impl NodeConfig {
             wallet_password: None,
             log_level: "debug".into(),
             rpc_listen_addr: None,
+        }
+    }
+    /// Default regtest config: 127.0.0.1 only, no DNS seeds, no remote peering, auto-mine enabled.
+    pub fn regtest() -> Self {
+        Self {
+            network: Network::Regtest,
+            data_dir: "./dom-regtest-data".into(),
+            p2p_listen_addr: format!("127.0.0.1:{P2P_PORT_REGTEST}"),
+            max_inbound: 0,
+            min_outbound: 0,
+            dns_seeds: vec![],
+            seed_peers: vec![],
+            mine: true,
+            miner_address: None,
+            wallet_path: None,
+            wallet_password: None,
+            log_level: "debug".into(),
+            rpc_listen_addr: Some(format!("127.0.0.1:3371")),
         }
     }
 }
