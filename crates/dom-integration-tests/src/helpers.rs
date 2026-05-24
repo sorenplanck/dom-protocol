@@ -86,6 +86,28 @@ pub async fn wait_for_height(
     .map_err(|_| format!("timeout waiting for height {}", target_height))?
 }
 
+/// Wait for node's mempool to have at least N transactions.
+pub async fn wait_for_mempool_count(
+    node: &Arc<DomNode>,
+    min_count: usize,
+    timeout_duration: Duration,
+) -> Result<(), String> {
+    timeout(timeout_duration, async {
+        loop {
+            let n = {
+                let mempool = node.mempool.lock().await;
+                mempool.len()
+            };
+            if n >= min_count {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .map_err(|_| format!("timeout waiting for {} mempool tx", min_count))?
+}
+
 /// Wait for node to have at least N peers connected.
 pub async fn wait_for_peer_count(
     node: &Arc<DomNode>,

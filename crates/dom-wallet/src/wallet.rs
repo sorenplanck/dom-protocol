@@ -357,6 +357,24 @@ impl Wallet {
         self.network
     }
 
+    /// TEST-ONLY: Reclassify every wallet output as non-coinbase so coin
+    /// selection ignores the `COINBASE_MATURITY` filter.
+    ///
+    /// Intended exclusively for integration tests that must spend a freshly
+    /// mined coinbase without waiting 1000 blocks. The output's on-chain
+    /// status is unchanged; only the wallet-side `is_coinbase` flag flips.
+    /// Production code MUST NOT call this — it would let the wallet attempt
+    /// to spend immature outputs that consensus may later reject.
+    #[doc(hidden)]
+    pub fn __test_force_non_coinbase(&mut self) {
+        let commitments: Vec<[u8; 33]> = self.outputs.iter().map(|o| o.commitment).collect();
+        for c in commitments {
+            if let Some(o) = self.outputs.get_mut(&c) {
+                o.is_coinbase = false;
+            }
+        }
+    }
+
     /// Build a coinbase transaction with a deterministic blinding factor.
     ///
     /// The blinding is derived as:
