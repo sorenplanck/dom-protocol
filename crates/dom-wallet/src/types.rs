@@ -99,17 +99,37 @@ impl OwnedOutput {
         }
     }
 
-    /// Check if this output is mature (coinbase outputs have 1000-block maturity).
+    /// Check if this output is mature under the canonical
+    /// `COINBASE_MATURITY` rule (1000 blocks for coinbase outputs;
+    /// non-coinbase outputs are always mature).
+    ///
+    /// Network-aware callers (e.g. wallets running on `Network::Regtest`)
+    /// MUST use `is_mature_for` so the appropriate threshold is applied.
     pub fn is_mature(&self, current_height: u64) -> bool {
+        self.is_mature_for(current_height, dom_core::COINBASE_MATURITY)
+    }
+
+    /// Check maturity against an explicit threshold (e.g. the
+    /// `Network::coinbase_maturity()` value).
+    pub fn is_mature_for(&self, current_height: u64, maturity: u64) -> bool {
         if !self.is_coinbase {
             return true;
         }
-        current_height.saturating_sub(self.block_height) >= 1000
+        current_height.saturating_sub(self.block_height) >= maturity
     }
 
-    /// Check if this output can be spent (not spent, not reserved, and mature).
+    /// Check if this output can be spent (not spent, not reserved, and
+    /// mature under the mainnet rule). See `is_spendable_for`.
     pub fn is_spendable(&self, current_height: u64) -> bool {
         !self.spent && self.reserved_for_tx.is_none() && self.is_mature(current_height)
+    }
+
+    /// Spend-eligibility check parameterised by `maturity`. Honours the
+    /// caller's network rule (mainnet 1000, regtest 1, etc).
+    pub fn is_spendable_for(&self, current_height: u64, maturity: u64) -> bool {
+        !self.spent
+            && self.reserved_for_tx.is_none()
+            && self.is_mature_for(current_height, maturity)
     }
 }
 
