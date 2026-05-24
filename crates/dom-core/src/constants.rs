@@ -200,11 +200,31 @@ pub const NETWORK_MAGIC_MAINNET: u32 = 0x444F_4D31;
 /// [NETWORK] Testnet magic bytes: ASCII "DOMT" = 0x44_4F_4D_54
 pub const NETWORK_MAGIC_TESTNET: u32 = 0x444F_4D54;
 
+/// [NETWORK — DEV-ONLY] Regtest magic bytes: ASCII "DOMR" = 0x44_4F_4D_52
+///
+/// SECURITY: The magic byte differs from `NETWORK_MAGIC_MAINNET` /
+/// `_TESTNET`, so any Regtest peer attempting to handshake with a
+/// real-network node fails at the frame header. This is the primary
+/// isolation mechanism — DO NOT change it without re-auditing the
+/// peer dispatch path.
+pub const NETWORK_MAGIC_REGTEST: u32 = 0x444F_4D52;
+
 /// [NETWORK] Default P2P port.
 pub const P2P_PORT_MAINNET: u16 = 33_369;
 
 /// [NETWORK] Default P2P port for testnet.
 pub const P2P_PORT_TESTNET: u16 = 33_370;
+
+/// [NETWORK — DEV-ONLY] Default P2P port for Regtest.
+/// Distinct from mainnet/testnet so accidental local conflicts also fail loudly.
+pub const P2P_PORT_REGTEST: u16 = 33_371;
+
+/// [DEV-ONLY] Coinbase maturity on Regtest: one confirmation.
+///
+/// Used exclusively by `Network::Regtest` codepaths so fast integration tests
+/// can exercise the full spend pipeline. `COINBASE_MATURITY` (1000) is still
+/// the canonical constant for Mainnet/Testnet and is unchanged.
+pub const REGTEST_COINBASE_MATURITY: u64 = 1;
 
 /// [NETWORK] Maximum user agent string length in bytes.
 pub const MAX_USER_AGENT_BYTES: usize = 256;
@@ -329,6 +349,15 @@ pub const GENESIS_HASH_TESTNET: [u8; 32] = [
 
 /// Canonical genesis block hash for Mainnet — UNFINALIZED until mainnet launch.
 pub const GENESIS_HASH_MAINNET: [u8; 32] = [0u8; 32];
+
+/// [DEV-ONLY] Canonical genesis block hash for Regtest.
+///
+/// Deterministic placeholder — a Regtest node bootstraps its own genesis
+/// locally on first start (same path mainnet/testnet take through
+/// `create_genesis_block`). Because Regtest peers are isolated by magic
+/// byte (`NETWORK_MAGIC_REGTEST`), this value never reaches a non-Regtest
+/// validator and a zero-array placeholder is acceptable.
+pub const GENESIS_HASH_REGTEST: [u8; 32] = [0u8; 32];
 pub const TAG_PMMR_EMPTY: &str = "DOM:pmmr-empty:v1";
 pub const TAG_PMMR_BAG: &str = "DOM:pmmr-bag:v1";
 pub const TAG_PMMR_LEAF: &str = "DOM:pmmr-leaf:v1";
@@ -358,6 +387,34 @@ const _: () = {
     assert!(
         NETWORK_MAGIC_MAINNET == 0x444F_4D31,
         "Mainnet magic must be ASCII DOM1"
+    );
+    assert!(
+        NETWORK_MAGIC_TESTNET == 0x444F_4D54,
+        "Testnet magic must be ASCII DOMT"
+    );
+    assert!(
+        NETWORK_MAGIC_REGTEST == 0x444F_4D52,
+        "Regtest magic must be ASCII DOMR"
+    );
+    assert!(
+        NETWORK_MAGIC_REGTEST != NETWORK_MAGIC_MAINNET,
+        "Regtest magic must differ from mainnet"
+    );
+    assert!(
+        NETWORK_MAGIC_REGTEST != NETWORK_MAGIC_TESTNET,
+        "Regtest magic must differ from testnet"
+    );
+    assert!(
+        P2P_PORT_REGTEST != P2P_PORT_MAINNET && P2P_PORT_REGTEST != P2P_PORT_TESTNET,
+        "Regtest port must not collide with mainnet/testnet"
+    );
+    assert!(
+        REGTEST_COINBASE_MATURITY < COINBASE_MATURITY,
+        "REGTEST_COINBASE_MATURITY must be strictly less than the mainnet value"
+    );
+    assert!(
+        COINBASE_MATURITY == 1_000,
+        "Mainnet COINBASE_MATURITY must remain 1000 — Regtest uses a separate constant"
     );
     assert!(
         BLOCK_REWARD_TABLE[0] == INITIAL_BLOCK_REWARD,
