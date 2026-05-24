@@ -270,7 +270,14 @@ pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     chain.tip_hash = Hash256::from_bytes(genesis_hash);
     chain.tip_height = dom_core::BlockHeight::GENESIS;
     chain.tip_difficulty = primitive_types::U256::one();
-    chain.genesis_hash = Hash256::from_bytes(genesis_hash);
+    // NOTE: do NOT overwrite chain.genesis_hash with the computed hash here.
+    // The chain_id used for kernel signatures is derived from the *constant*
+    // GENESIS_HASH_{MAINNET,TESTNET,REGTEST} (see chain_id_for() and
+    // Wallet::create). Overwriting chain.genesis_hash with the live
+    // computed hash makes ValidationContext.chain_id diverge from what the
+    // miner/wallet signed with, and every block fails kernel-signature
+    // verification. Pre-launch, set the constants to the real precomputed
+    // genesis hash; until then, all sites consistently use the placeholder.
     info!("✅ Genesis criado! hash={}", hex::encode(genesis_hash));
     Ok(())
 }
