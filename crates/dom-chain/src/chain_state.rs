@@ -21,6 +21,27 @@ pub struct ChainState {
     pub genesis_hash: Hash256,
     pub asert_anchor: AsertAnchor,
     pub network_magic: u32,
+    /// Coinbase maturity threshold derived from `network_magic`.
+    ///
+    /// `COINBASE_MATURITY` for Mainnet/Testnet, `REGTEST_COINBASE_MATURITY`
+    /// for Regtest. Stored on the state so the consensus path can apply
+    /// the network-specific rule without re-deriving on every block —
+    /// and without dragging `dom-config` into the consensus crate.
+    pub coinbase_maturity: u64,
+}
+
+/// Map a 32-bit network magic to the coinbase maturity rule that applies
+/// to that network. Mainnet/Testnet/unknown all use the canonical
+/// `COINBASE_MATURITY`; Regtest uses `REGTEST_COINBASE_MATURITY`.
+///
+/// Keeping the resolution here (rather than in `dom-config`) avoids a
+/// dependency cycle and keeps `dom-chain` self-contained.
+fn coinbase_maturity_for_magic(magic: u32) -> u64 {
+    if magic == dom_core::NETWORK_MAGIC_REGTEST {
+        dom_core::REGTEST_COINBASE_MATURITY
+    } else {
+        dom_core::COINBASE_MATURITY
+    }
 }
 
 impl ChainState {
@@ -61,6 +82,7 @@ impl ChainState {
             genesis_hash,
             asert_anchor,
             network_magic,
+            coinbase_maturity: coinbase_maturity_for_magic(network_magic),
         })
     }
 
@@ -184,10 +206,12 @@ impl ChainState {
                         hex::encode(commitment_bytes)
                     ))
                 })?;
-                if entry.is_coinbase && !entry.is_mature(header.height.0) {
+                if entry.is_coinbase
+                    && !entry.is_mature_for(header.height.0, self.coinbase_maturity)
+                {
                     return Err(DomError::Invalid(format!(
-                        "immature coinbase spend at height {} (created at {})",
-                        header.height.0, entry.block_height
+                        "immature coinbase spend at height {} (created at {}, maturity {})",
+                        header.height.0, entry.block_height, self.coinbase_maturity
                     )));
                 }
             }
