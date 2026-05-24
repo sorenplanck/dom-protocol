@@ -1,6 +1,6 @@
 # DOM Release Blockers — Updated after External Audit
 
-Last updated: 2026-05-24 (post-B6 sweep — verified RB-H-GENERATOR and RB-DANDELION resolved; codebase audit found zero TODO/FIXME/unimplemented!/todo! anywhere in `crates/*/src/`; clippy --all-targets clean; consensus pipeline traced end-to-end)
+Last updated: 2026-05-24 (post-B7 — `Network::Regtest` added; unblocks local two-miner integration tests including Doc 8 spend_e2e. Magic byte / port / maturity / RandomX-flags isolated; consensus logic unchanged. See `docs/REGTEST.md`.)
 
 Mainnet launch FORBIDDEN until ALL items resolved.
 Testnet launch FORBIDDEN until items marked [TESTNET] resolved.

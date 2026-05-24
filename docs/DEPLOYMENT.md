@@ -2,6 +2,15 @@
 
 **Version:** 0.1.0
 
+This document covers Mainnet and Testnet deployment. For local
+development on a laptop / WSL / single CI machine, see
+[`REGTEST.md`](./REGTEST.md) — `Network::Regtest` runs the entire
+consensus stack with a trivial PoW target, 1-block coinbase maturity,
+and a cache-only RandomX VM (~300 MB per node). It is **never** for
+production: its magic byte (`DOMR`) and port (33371) are mutually
+disjoint from Mainnet (`DOM1` / 33369) and Testnet (`DOMT` / 33370),
+so a Regtest node cannot peer with a real network.
+
 ---
 
 ## Hardware Requirements
