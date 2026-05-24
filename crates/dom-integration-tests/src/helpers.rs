@@ -158,6 +158,11 @@ pub async fn mine_blocks(node: &Arc<DomNode>, count: u64) -> Result<(), String> 
 
 /// Create a test NodeConfig with unique data directory.
 ///
+/// Defaults to `Network::Regtest` so the mining path uses the cache-only
+/// RandomX VM (no 2 GB dataset per node) and coinbase outputs mature
+/// after a single confirmation — two miners now fit on a developer
+/// laptop and spend tests no longer need to wait 1000 blocks.
+///
 /// IMPORTANT: the `mine` parameter is accepted for backwards-compat with existing
 /// tests but is FORCED to `false` internally. Auto-mining in `node.run()` spawns
 /// a tight loop that holds `chain.lock()` continuously, which deadlocks against
@@ -167,7 +172,7 @@ pub async fn mine_blocks(node: &Arc<DomNode>, count: u64) -> Result<(), String> 
 pub fn test_config(name: &str, port: u16, _mine: bool) -> NodeConfig {
     let data_dir = format!("/tmp/dom-test-{}", name);
     NodeConfig {
-        network: dom_config::Network::Testnet,
+        network: dom_config::Network::Regtest,
         data_dir,
         p2p_listen_addr: format!("127.0.0.1:{}", port),
         max_inbound: 10,
