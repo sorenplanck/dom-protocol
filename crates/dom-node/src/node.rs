@@ -100,6 +100,7 @@ impl DomNode {
         let genesis_hash = Hash256::from_bytes(match config.network {
             dom_config::Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
             dom_config::Network::Testnet => dom_core::GENESIS_HASH_TESTNET,
+            dom_config::Network::Regtest => dom_core::GENESIS_HASH_REGTEST,
         });
 
         // Initialize chain state
@@ -567,6 +568,7 @@ async fn handle_inbound(
     let genesis_hash = match config.network {
         dom_config::Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
         dom_config::Network::Testnet => dom_core::GENESIS_HASH_TESTNET,
+        dom_config::Network::Regtest => dom_core::GENESIS_HASH_REGTEST,
     };
     let chain_id =
         *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes();
@@ -687,6 +689,7 @@ async fn connect_outbound(
     let genesis_hash = match config.network {
         dom_config::Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
         dom_config::Network::Testnet => dom_core::GENESIS_HASH_TESTNET,
+        dom_config::Network::Regtest => dom_core::GENESIS_HASH_REGTEST,
     };
     let chain_id =
         *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes();

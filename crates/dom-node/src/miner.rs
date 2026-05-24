@@ -37,6 +37,7 @@ fn chain_id_for(config: &dom_config::NodeConfig) -> [u8; 32] {
     let genesis_hash = match config.network {
         dom_config::Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
         dom_config::Network::Testnet => dom_core::GENESIS_HASH_TESTNET,
+        dom_config::Network::Regtest => dom_core::GENESIS_HASH_REGTEST,
     };
     *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes()
 }
