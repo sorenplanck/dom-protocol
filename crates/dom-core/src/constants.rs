@@ -206,6 +206,18 @@ pub const P2P_PORT_MAINNET: u16 = 33_369;
 /// [NETWORK] Default P2P port for testnet.
 pub const P2P_PORT_TESTNET: u16 = 33_370;
 
+/// [NETWORK] Regtest magic bytes: ASCII "DOMR" = 0x44_4F_4D_52
+pub const NETWORK_MAGIC_REGTEST: u32 = 0x444F_4D52;
+
+/// [NETWORK] Default P2P port for regtest.
+pub const P2P_PORT_REGTEST: u16 = 33_371;
+
+/// [CONSENSUS] Coinbase maturity for regtest: 1 block (vs 1000 for Mainnet/Testnet).
+pub const REGTEST_COINBASE_MATURITY: u64 = 1;
+
+/// [NETWORK] Genesis hash placeholder for regtest (deterministic, not used in consensus).
+pub const GENESIS_HASH_REGTEST: [u8; 32] = [0u8; 32];
+
 /// [NETWORK] Maximum user agent string length in bytes.
 pub const MAX_USER_AGENT_BYTES: usize = 256;
 
@@ -363,6 +375,30 @@ const _: () = {
     assert!(
         BLOCK_REWARD_TABLE[54] == 0,
         "Table[54] must be 0 (integer floor)"
+    );
+    assert!(
+        NETWORK_MAGIC_REGTEST == 0x444F_4D52,
+        "Regtest magic must be ASCII DOMR"
+    );
+    assert!(
+        NETWORK_MAGIC_REGTEST != NETWORK_MAGIC_MAINNET,
+        "Regtest magic must differ from Mainnet"
+    );
+    assert!(
+        NETWORK_MAGIC_REGTEST != NETWORK_MAGIC_TESTNET,
+        "Regtest magic must differ from Testnet"
+    );
+    assert!(
+        P2P_PORT_REGTEST != P2P_PORT_MAINNET,
+        "Regtest port must differ from Mainnet"
+    );
+    assert!(
+        P2P_PORT_REGTEST != P2P_PORT_TESTNET,
+        "Regtest port must differ from Testnet"
+    );
+    assert!(
+        REGTEST_COINBASE_MATURITY == 1,
+        "Regtest maturity must be 1 block"
     );
 };
 

@@ -12,6 +12,7 @@ pub fn wallet_network_from_config(config_net: ConfigNetwork) -> WalletNetwork {
     match config_net {
         ConfigNetwork::Mainnet => WalletNetwork::Mainnet,
         ConfigNetwork::Testnet => WalletNetwork::Testnet,
+        ConfigNetwork::Regtest => WalletNetwork::Regtest,
     }
 }
 
@@ -29,5 +30,24 @@ mod tests {
             wallet_network_from_config(ConfigNetwork::Testnet),
             WalletNetwork::Testnet
         );
+        assert_eq!(
+            wallet_network_from_config(ConfigNetwork::Regtest),
+            WalletNetwork::Regtest
+        );
+    }
+
+    #[test]
+    fn test_regtest_magic_isolation() {
+        let regtest_net = wallet_network_from_config(ConfigNetwork::Regtest);
+        let mainnet_net = wallet_network_from_config(ConfigNetwork::Mainnet);
+        let testnet_net = wallet_network_from_config(ConfigNetwork::Testnet);
+        assert_ne!(regtest_net.magic(), mainnet_net.magic());
+        assert_ne!(regtest_net.magic(), testnet_net.magic());
+    }
+
+    #[test]
+    fn test_regtest_maturity_is_one() {
+        let regtest_net = wallet_network_from_config(ConfigNetwork::Regtest);
+        assert_eq!(regtest_net.coinbase_maturity(), 1);
     }
 }

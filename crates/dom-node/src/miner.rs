@@ -37,6 +37,7 @@ fn chain_id_for(config: &dom_config::NodeConfig) -> [u8; 32] {
     let genesis_hash = match config.network {
         dom_config::Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
         dom_config::Network::Testnet => dom_core::GENESIS_HASH_TESTNET,
+        dom_config::Network::Regtest => dom_core::GENESIS_HASH_REGTEST,
     };
     *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes()
 }
@@ -282,9 +283,12 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
 
     let new_height = tip_height.0 + 1;
     let anchor = genesis_anchor();
-    // Testnet: use easy target so blocks are findable in seconds on a CPU.
-    // Mainnet: full ASERT difficulty from anchor.
-    let target = if node.config.network == dom_config::Network::Testnet {
+    // Regtest: trivial target (all hashes pass)
+    // Testnet: easy target (findable in seconds on CPU)
+    // Mainnet: full ASERT difficulty from anchor
+    let target = if node.config.network == dom_config::Network::Regtest {
+        dom_core::REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION
+    } else if node.config.network == dom_config::Network::Testnet {
         dom_core::MAX_TARGET_BYTES
     } else if new_height == 1 {
         anchor.target
@@ -340,6 +344,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
         mmr.root()
     };
 
+    let network = node.config.network;
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<BlockHeader, String>>();
     std::thread::Builder::new()
         .name(format!("miner-{}", new_height))
@@ -353,6 +358,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
                 output_root,
                 kernel_root,
                 rangeproof_root,
+                network,
             );
             let _ = tx.send(result.map_err(|e| e.to_string()));
         })
@@ -429,9 +435,13 @@ fn mine_blocking(
     output_root: Hash256,
     kernel_root: Hash256,
     rangeproof_root: Hash256,
+    network: dom_config::Network,
 ) -> Result<BlockHeader, DomError> {
     use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
-    let flags = RandomXFlag::get_recommended_flags() | RandomXFlag::FLAG_FULL_MEM;
+    let mut flags = RandomXFlag::get_recommended_flags();
+    if network != dom_config::Network::Regtest {
+        flags |= RandomXFlag::FLAG_FULL_MEM;
+    }
     let cache = RandomXCache::new(flags, &seed_hash)
         .map_err(|e| DomError::Internal(format!("cache: {e}")))?;
     let dataset = RandomXDataset::new(flags, cache.clone(), 0)
