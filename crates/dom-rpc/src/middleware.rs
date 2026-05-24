@@ -41,11 +41,15 @@ pub fn rate_limit_submit() -> GovernorLayer<SmartIpKeyExtractor, NoOpMiddleware>
     }
 }
 
-// NOTE: Tests use GlobalKeyExtractor because oneshot() in tests doesn't
-// provide ConnectInfo<SocketAddr>, which SmartIpKeyExtractor requires.
-// This means tests validate that rate limiting EXISTS but not per-IP behavior.
-// TODO(Phase 2): Replace with ConnectInfo injection in test helpers to
-// restore per-IP rate limit testing. See: option B in original design.
+// Design decision (kept long-term): tests use `GlobalKeyExtractor` because
+// `tower::ServiceExt::oneshot()` doesn't inject the `ConnectInfo<SocketAddr>`
+// that `SmartIpKeyExtractor` requires (and `axum::extract::ConnectInfo` cannot
+// be inserted as a plain request extension — its extractor depends on the
+// `MakeService` layer wiring it via `into_make_service_with_connect_info`).
+// The production per-IP flow is wired in `serve()` (`lib.rs`) and exercised
+// end-to-end by `dom-integration-tests` against a bound socket. Unit tests
+// here verify that rate limiting is *configured*; per-IP enforcement is an
+// integration-level concern.
 #[cfg(test)]
 pub fn rate_limit_submit() -> GovernorLayer<GlobalKeyExtractor, NoOpMiddleware> {
     let limit = 10;
@@ -81,11 +85,8 @@ pub fn rate_limit_read() -> GovernorLayer<SmartIpKeyExtractor, NoOpMiddleware> {
     }
 }
 
-// NOTE: Tests use GlobalKeyExtractor because oneshot() in tests doesn't
-// provide ConnectInfo<SocketAddr>, which SmartIpKeyExtractor requires.
-// This means tests validate that rate limiting EXISTS but not per-IP behavior.
-// TODO(Phase 2): Replace with ConnectInfo injection in test helpers to
-// restore per-IP rate limit testing. See: option B in original design.
+// See `rate_limit_submit` above for the rationale — same trade-off applies
+// to the read path.
 #[cfg(test)]
 pub fn rate_limit_read() -> GovernorLayer<GlobalKeyExtractor, NoOpMiddleware> {
     let limit = 100;

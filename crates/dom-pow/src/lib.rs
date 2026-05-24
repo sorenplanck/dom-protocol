@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 //! # dom-pow
 //!
-//! ASERT difficulty adjustment — corrected per audit.
+//! ASERT difficulty adjustment + RandomX PoW validation.
 //!
 //! AUDIT FIXES:
 //! 1. target_to_difficulty: no longer truncates to 128 bits.
@@ -10,9 +10,12 @@
 //!    Overflow is now a hard error, not silent data corruption.
 //! 3. MAX_TARGET_BYTES: zeros are now at start (big-endian), matching MAX_TARGET_HI.
 //! 4. asert_no_time_change test: strict equality enforced, not ratio<=2 fudge.
-//! 5. RandomX validation: validate_pow_randomx stub added; validate_pow_blake2b
-//!    is correctly named to avoid confusion with real PoW.
+//! 5. RandomX validation: real validation via randomx-rs, cache pool keyed by
+//!    seed (`randomx_pool`) — avoids 256 MB re-allocation per validated block.
 
+// `randomx_pool` requires manual Send/Sync impls; see module-level SAFETY notes.
+// We keep the deny in the rest of the crate by attaching `#[allow(unsafe_code)]`
+// directly at the module declaration below.
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 #![allow(clippy::arithmetic_side_effects)] // PoW math: U256 ops audited
@@ -23,7 +26,9 @@ use dom_core::{
     MIN_TARGET_BYTES, TARGET_SPACING,
 };
 use primitive_types::U256;
-use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
+
+#[allow(unsafe_code)]
+pub mod randomx_pool;
 
 // ── RandomX Seed Schedule (RFC-0011) ─────────────────────────────────────────
 
@@ -390,24 +395,8 @@ pub fn validate_pow_randomx(
     seed: &[u8; 32],
     target: &[u8; 32],
 ) -> Result<bool, DomError> {
-    let flags = RandomXFlag::get_recommended_flags();
-    let cache = RandomXCache::new(flags, seed)
-        .map_err(|e| DomError::Internal(format!("RandomX cache init failed: {e}")))?;
-    let vm = RandomXVM::new(flags, Some(cache), None)
-        .map_err(|e| DomError::Internal(format!("RandomX VM init failed: {e}")))?;
-    let computed = vm
-        .calculate_hash(pow_preimage)
-        .map_err(|e| DomError::Internal(format!("RandomX hash failed: {e}")))?;
-    if computed.len() != 32 {
-        return Err(DomError::Internal(format!(
-            "RandomX returned {} bytes, expected 32",
-            computed.len()
-        )));
-    }
-    let computed_arr: [u8; 32] = computed
-        .try_into()
-        .map_err(|_| DomError::Internal("RandomX hash conversion failed".into()))?;
-    if &computed_arr != randomx_hash {
+    let computed = randomx_pool::randomx_hash(seed, pow_preimage)?;
+    if &computed != randomx_hash {
         return Ok(false);
     }
     Ok(hash_meets_target(randomx_hash, target))
@@ -757,20 +746,13 @@ mod randomx_tests {
 
     #[test]
     fn randomx_correct_hash_accepted_if_meets_target() {
-        use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
-
         let seed = [0u8; 32];
         let preimage = b"dom-block";
 
-        // Compute the real hash
-        let flags = RandomXFlag::get_recommended_flags();
-        let cache = RandomXCache::new(flags, &seed).unwrap();
-        let vm = RandomXVM::new(flags, Some(cache), None).unwrap();
-        let computed = vm.calculate_hash(preimage).unwrap();
-        let hash: [u8; 32] = computed.try_into().unwrap();
+        // Compute the real hash via the pool (single source of truth).
+        let hash = randomx_pool::randomx_hash(&seed, preimage).unwrap();
 
-        // Use MAX_TARGET so it always meets target
-        // Use all-0xff target (absolute maximum) to guarantee hash always passes
+        // Use all-0xff target so the hash always meets target.
         let all_max = [0xff_u8; 32];
         let result =
             validate_pow_randomx(preimage, &hash, &seed, &all_max).expect("should not error");

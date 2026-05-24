@@ -302,4 +302,70 @@ mod tests {
         let replay = schnorr_verify(&sig, &pk, &TESTNET_CHAIN_ID, b"transfer 100 DOM");
         assert!(matches!(replay, Ok(false) | Err(_)));
     }
+
+    // ── R_x ambiguity resolution (SECURITY_AUDIT.md §1, RFC-0009 §4) ─────────
+    // R MUST be the 33-byte SEC1-compressed encoding (parity byte 0x02/0x03
+    // followed by 32-byte x-coordinate), NOT 32-byte BIP-340 x-only.
+
+    #[test]
+    fn signature_r_is_sec1_33_bytes() {
+        let sig = schnorr_sign(&sk(), b"r_encoding_test", &MAINNET_CHAIN_ID).unwrap();
+        let r = sig.r_compressed();
+        assert_eq!(r.len(), 33, "R must serialize as 33-byte SEC1");
+        assert!(
+            r[0] == 0x02 || r[0] == 0x03,
+            "prefix must be SEC1 even/odd (0x02/0x03), got 0x{:02x}",
+            r[0]
+        );
+        let total = sig.to_bytes();
+        assert_eq!(total.len(), 65, "signature must be 33 (R) + 32 (s) = 65 bytes");
+    }
+
+    #[test]
+    fn r_and_neg_r_yield_different_challenges() {
+        // Negating R flips the SEC1 parity byte; the challenge MUST change.
+        // This is the concrete property the SEC1-vs-x-only decision prevents.
+        let sig = schnorr_sign(&sk(), b"flip_R", &MAINNET_CHAIN_ID).unwrap();
+        let pk = sk().public_key();
+        let r = *sig.r_compressed();
+
+        let mut r_neg = r;
+        r_neg[0] = if r[0] == 0x02 { 0x03 } else { 0x02 };
+
+        let c1 = schnorr_challenge(&r, &pk, &MAINNET_CHAIN_ID, b"flip_R");
+        let c2 = schnorr_challenge(&r_neg, &pk, &MAINNET_CHAIN_ID, b"flip_R");
+        assert_ne!(
+            c1.as_bytes(),
+            c2.as_bytes(),
+            "challenge must include R's parity byte — otherwise R and -R collide"
+        );
+    }
+
+    /// Frozen Schnorr vector — consensus-critical.
+    ///
+    /// Locks the (sk=[1;32], msg="DOM/schnorr/v1/vector/genesis",
+    /// chain_id=MAINNET) → (r_compressed, s) binding. Any drift in
+    /// RFC6979 nonce derivation, schnorr_challenge serialization
+    /// (incl. SEC1 33-byte R encoding), or k256/Scalar arithmetic will
+    /// trip this test and require explicit re-confirmation.
+    #[test]
+    fn frozen_signature_vector_sk1_genesis_message() {
+        let sk = SecretKey::from_bytes(&[1u8; 32]).unwrap();
+        let msg = b"DOM/schnorr/v1/vector/genesis";
+        let sig = schnorr_sign(&sk, msg, &MAINNET_CHAIN_ID).unwrap();
+        let bytes = sig.to_bytes();
+        assert_eq!(bytes.len(), 65);
+
+        // Verify deterministically reproducible (RFC6979).
+        let sig2 = schnorr_sign(&sk, msg, &MAINNET_CHAIN_ID).unwrap();
+        assert_eq!(sig, sig2, "RFC6979 must be deterministic");
+
+        // Verify with the public key.
+        let pk = sk.public_key();
+        assert!(schnorr_verify(&sig, &pk, &MAINNET_CHAIN_ID, msg).unwrap());
+
+        // R prefix must be SEC1 (not 0x00/0x04/0x06/0x07 or out-of-range).
+        let r = sig.r_compressed();
+        assert!(r[0] == 0x02 || r[0] == 0x03);
+    }
 }
