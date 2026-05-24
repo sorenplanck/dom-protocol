@@ -1,8 +1,14 @@
 # DOM Protocol Mainnet Launch Checklist
 
-**Last Updated:** 2026-05-19  
-**Target Launch:** Q3 2026  
-**Current Phase:** Testnet Burn-In + Phase 1 Audit
+**Last Updated:** 2026-05-24
+**Target Launch:** 12-18 months from 2026-05-24 (revised — see ROADMAP_v2.md)
+**Current Phase:** Phase 1 (Consensus Immutability Lock) + Phase 3 (Storage Durability), parallel
+
+> **Roadmap superseded 2026-05-24.** See
+> [`docs/ROADMAP_v2.md`](./ROADMAP_v2.md) for the full phase breakdown
+> adopted in response to the Track A external audit. The launch
+> checklist below is retained for historical reference only — the
+> authoritative gating criteria live in ROADMAP_v2 Phase 8.
 
 ---
 
