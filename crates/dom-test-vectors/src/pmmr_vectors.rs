@@ -1,7 +1,20 @@
 //! PMMR test vectors.
 //!
-//! RFC-0004: Required vectors for leaf counts 0,1,2,3,4,7,8,15,16.
-//! These MUST be independently reproduced before testnet launch.
+//! RFC-0004: Required vectors for leaf counts 0, 1, 2, 3, 4, 7, 8, 15, 16.
+//! Leaf `i` has payload `i.to_le_bytes()` (8 bytes).
+//!
+//! The hex roots below are the consensus vectors produced by the
+//! Phase B Grin-postorder implementation (commit bcd59ad). They are
+//! enforced by `vectors_match_pinned_hex` so an inadvertent change to
+//! PMMR semantics — leaf hashing, peak ordering, bagging — would
+//! immediately break this test. Any drift here means the protocol
+//! forked on a layout that an external implementer relying on RFC-0004
+//! would no longer reproduce.
+//!
+//! Update procedure (consensus-class): a deliberate change to PMMR
+//! layout REQUIRES re-running `cargo test print_pmmr_vectors --
+//! --nocapture`, replacing the hex below, AND documenting the
+//! migration / fork implications in RFC-0004 + ROADMAP_v2.
 
 use dom_core::Hash256;
 use dom_pmmr::Pmmr;
@@ -10,7 +23,7 @@ use dom_pmmr::Pmmr;
 pub struct PmmrVector {
     /// Number of leaves.
     pub leaf_count: usize,
-    /// Expected root as hex. Empty = RELEASE BLOCKER (not yet captured).
+    /// Expected root as hex (Phase B Grin-postorder).
     pub expected_root_hex: &'static str,
     /// Leaf payloads: each leaf is its index as 8 LE bytes.
     pub leaf_data_description: &'static str,
@@ -32,37 +45,37 @@ pub fn required_pmmr_vectors() -> Vec<PmmrVector> {
         },
         PmmrVector {
             leaf_count: 2,
-            expected_root_hex: "a40923de756509b777bc9f921272ec6118a1981f64c6e3c5ddf67ea12a01b51d",
+            expected_root_hex: "34ed1c907c3daea3e72dec770a6b1fcfe9b5fc22975a047872f0791acd898576",
             leaf_data_description: "leaf_0..1",
         },
         PmmrVector {
             leaf_count: 3,
-            expected_root_hex: "1cd685bbcd434837323b19224d880d82df8ffe6d17b802b05d8e72be8180da95",
+            expected_root_hex: "d73d551a0b06ed3e01816503029245061cf0297b12d6703407f73474cdebb2fe",
             leaf_data_description: "leaf_0..2",
         },
         PmmrVector {
             leaf_count: 4,
-            expected_root_hex: "2db336f7bb98da35f606de3a8d208820eaebc96be5e034502b0f7087a4d47636",
+            expected_root_hex: "d65c11f3f96bc9b9014444698709e55a5925f97608505b6302a464994b7def58",
             leaf_data_description: "leaf_0..3",
         },
         PmmrVector {
             leaf_count: 7,
-            expected_root_hex: "4918c0a56eb91ce2374664a34c28fe12b6873fd5830e3946b6536271864d1a27",
+            expected_root_hex: "4bd0ca87a4b3c45086d0978fba30e44f3fbd2768ba0d909d1ff262c5d5698191",
             leaf_data_description: "leaf_0..6",
         },
         PmmrVector {
             leaf_count: 8,
-            expected_root_hex: "645878c1cc2fc2dc1b475d055316dcf3b6c7e9d7ac17d8ff7ff390ee45528287",
+            expected_root_hex: "d86f63309c5f2cebe71f230af0737aee38d7059114aeb49339cb302ea4e33282",
             leaf_data_description: "leaf_0..7",
         },
         PmmrVector {
             leaf_count: 15,
-            expected_root_hex: "5bbf01196c35662a7ccb42efd1880251567e1ba4dcb2120f99096c0dd71d6d43",
+            expected_root_hex: "265c0a884d2f22a3ebd89e6e3e959571648f96cc9324248efc8012f7d6e1ddcd",
             leaf_data_description: "leaf_0..14",
         },
         PmmrVector {
             leaf_count: 16,
-            expected_root_hex: "4091b9197df8301058216295e46b61d8802f48f42422dcb2bdde640f9f343dc0",
+            expected_root_hex: "70660b13b900c86b443a72b7d5f29519de53350b7bd02484ee85bebaab414094",
             leaf_data_description: "leaf_0..15",
         },
     ]
@@ -107,6 +120,29 @@ mod tests {
                     "PMMR roots must be distinct for different leaf counts"
                 );
             }
+        }
+    }
+
+    /// Pinned consensus contract: every required vector MUST match the
+    /// hex root recorded in `required_pmmr_vectors`. A failure here is
+    /// a consensus-class regression — either the PMMR layout drifted
+    /// from RFC-0004 or the recorded hex was edited without a matching
+    /// protocol bump.
+    #[test]
+    fn vectors_match_pinned_hex() {
+        for vector in required_pmmr_vectors() {
+            let mut pmmr = Pmmr::new();
+            for i in 0..vector.leaf_count {
+                pmmr.push(&(i as u64).to_le_bytes())
+                    .expect("push must succeed");
+            }
+            let computed = pmmr.root();
+            let computed_hex = computed.to_hex();
+            assert_eq!(
+                computed_hex, vector.expected_root_hex,
+                "n={}: PMMR root drifted from RFC-0004 pinned vector",
+                vector.leaf_count
+            );
         }
     }
 
