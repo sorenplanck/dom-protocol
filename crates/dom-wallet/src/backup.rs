@@ -12,6 +12,7 @@ use bip39::{Language, Mnemonic};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 /// Errors that can occur during backup or restore operations.
 #[derive(Debug, Error)]
@@ -41,39 +42,46 @@ impl From<bip39::Error> for BackupError {
 
 /// Generate a new random BIP-39 mnemonic (12 words, 128-bit entropy).
 ///
-/// Uses the `bip39` crate's secure random generation. Returns the mnemonic
-/// as a space-separated string ready for display to the user.
+/// Uses the `bip39` crate's secure random generation. The mnemonic is
+/// returned wrapped in `Zeroizing<String>` so the buffer is wiped from
+/// memory when the caller drops it (Phase 2.5 secret memory hygiene).
 ///
 /// # Errors
 /// Returns [`BackupError::Bip39`] if random generation fails.
-pub fn generate_mnemonic() -> Result<String, BackupError> {
+pub fn generate_mnemonic() -> Result<Zeroizing<String>, BackupError> {
     let mut rng = rand::thread_rng();
     let mnemonic = Mnemonic::generate_in_with(&mut rng, Language::English, 12)?;
-    Ok(mnemonic.to_string())
+    Ok(Zeroizing::new(mnemonic.to_string()))
 }
 
 /// Generate a mnemonic and derive the 32-byte seed (no passphrase).
 ///
-/// Returns a tuple `(mnemonic_string, seed_32_bytes)`. The seed is the first
-/// 32 bytes of the BIP-39 64-byte seed.
+/// Returns a tuple of (`mnemonic`, `seed`), each wrapped in `Zeroizing`
+/// so the caller's secrets are wiped on drop (Phase 2.5). The seed is
+/// the first 32 bytes of the BIP-39 64-byte seed.
 ///
 /// # Errors
 /// Returns [`BackupError::Bip39`] if random generation or derivation fails.
-pub fn generate_with_seed() -> Result<(String, [u8; 32]), BackupError> {
+pub fn generate_with_seed() -> Result<(Zeroizing<String>, Zeroizing<[u8; 32]>), BackupError> {
     let mut rng = rand::thread_rng();
     let mnemonic = Mnemonic::generate_in_with(&mut rng, Language::English, 12)?;
-    let full_seed = mnemonic.to_seed("");
+    // Wrap the BIP-39 64-byte seed immediately so the high-32-byte
+    // tail (which we discard) is also wiped on drop, not left
+    // floating on the stack.
+    let mut full_seed = Zeroizing::new(mnemonic.to_seed(""));
 
-    let mut seed = [0u8; 32];
+    let mut seed = Zeroizing::new([0u8; 32]);
     seed.copy_from_slice(&full_seed[..32]);
+    full_seed.fill(0);
 
-    Ok((mnemonic.to_string(), seed))
+    Ok((Zeroizing::new(mnemonic.to_string()), seed))
 }
 
 /// Restore a 32-byte seed from a BIP-39 mnemonic phrase.
 ///
 /// Accepts standard BIP-39 phrases of 12, 15, 18, 21, or 24 words.
-/// Optionally accepts a passphrase per the BIP-39 spec (empty string for none).
+/// Optionally accepts a passphrase per the BIP-39 spec (empty string
+/// for none). The returned seed is wrapped in `Zeroizing` (Phase 2.5).
 ///
 /// # Arguments
 /// * `phrase` - Space-separated mnemonic words from the BIP-39 English wordlist
@@ -82,12 +90,13 @@ pub fn generate_with_seed() -> Result<(String, [u8; 32]), BackupError> {
 /// # Errors
 /// Returns [`BackupError::Bip39`] if the phrase is invalid (bad checksum,
 /// unknown words, wrong word count, etc).
-pub fn import_mnemonic(phrase: &str, passphrase: &str) -> Result<[u8; 32], BackupError> {
+pub fn import_mnemonic(phrase: &str, passphrase: &str) -> Result<Zeroizing<[u8; 32]>, BackupError> {
     let mnemonic = Mnemonic::parse_in(Language::English, phrase.trim())?;
-    let full_seed = mnemonic.to_seed(passphrase);
+    let mut full_seed = Zeroizing::new(mnemonic.to_seed(passphrase));
 
-    let mut seed = [0u8; 32];
+    let mut seed = Zeroizing::new([0u8; 32]);
     seed.copy_from_slice(&full_seed[..32]);
+    full_seed.fill(0);
 
     Ok(seed)
 }
@@ -103,9 +112,11 @@ pub fn import_mnemonic(phrase: &str, passphrase: &str) -> Result<[u8; 32], Backu
 /// # Errors
 /// Returns [`BackupError::Bip39`] if entropy length is invalid for the
 /// 12-word mnemonic format (must be exactly 16 bytes).
-pub fn export_mnemonic_from_entropy(entropy_16_bytes: &[u8; 16]) -> Result<String, BackupError> {
+pub fn export_mnemonic_from_entropy(
+    entropy_16_bytes: &[u8; 16],
+) -> Result<Zeroizing<String>, BackupError> {
     let mnemonic = Mnemonic::from_entropy_in(Language::English, entropy_16_bytes)?;
-    Ok(mnemonic.to_string())
+    Ok(Zeroizing::new(mnemonic.to_string()))
 }
 
 /// Recover the raw 16-byte entropy from a 12-word mnemonic phrase.
@@ -118,7 +129,7 @@ pub fn export_mnemonic_from_entropy(entropy_16_bytes: &[u8; 16]) -> Result<Strin
 /// Returns [`BackupError::Bip39`] if the phrase is invalid, or
 /// [`BackupError::InvalidMnemonic`] if entropy is not exactly 16 bytes
 /// (i.e., the mnemonic is not a standard 12-word phrase).
-pub fn entropy_from_mnemonic(phrase: &str) -> Result<[u8; 16], BackupError> {
+pub fn entropy_from_mnemonic(phrase: &str) -> Result<Zeroizing<[u8; 16]>, BackupError> {
     let mnemonic = Mnemonic::parse_in(Language::English, phrase.trim())?;
     let entropy = mnemonic.to_entropy();
 
@@ -129,7 +140,7 @@ pub fn entropy_from_mnemonic(phrase: &str) -> Result<[u8; 16], BackupError> {
         )));
     }
 
-    let mut result = [0u8; 16];
+    let mut result = Zeroizing::new([0u8; 16]);
     result.copy_from_slice(&entropy);
     Ok(result)
 }
@@ -237,7 +248,7 @@ mod tests {
         let entropy = [0x42u8; 16];
         let mnemonic = export_mnemonic_from_entropy(&entropy).unwrap();
         let recovered = entropy_from_mnemonic(&mnemonic).unwrap();
-        assert_eq!(entropy, recovered);
+        assert_eq!(entropy, *recovered);
     }
 
     #[test]
