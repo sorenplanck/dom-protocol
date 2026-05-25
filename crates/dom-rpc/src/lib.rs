@@ -278,16 +278,34 @@ async fn shutdown_signal() {
     info!("Shutdown signal received, stopping RPC server");
 }
 
-pub async fn serve(handle: Arc<dyn NodeHandle>, addr: SocketAddr) -> Result<(), RpcError> {
+/// Bind the RPC TCP listener.
+///
+/// Split out from `serve` so callers can fail fast on bind errors
+/// (EADDRINUSE, permission, etc.) before spawning the accept loop in
+/// a detached task. The caller passes the returned listener to `serve`.
+pub async fn bind(addr: SocketAddr) -> Result<tokio::net::TcpListener, RpcError> {
+    tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| RpcError::Internal(format!("failed to bind {addr}: {e}")))
+}
+
+/// Run the RPC accept loop on an already-bound listener.
+///
+/// Use `bind(addr)` first so bind failures surface synchronously to the
+/// caller; once this future is spawned, only per-request errors are
+/// possible — those are logged but never propagated.
+pub async fn serve(
+    handle: Arc<dyn NodeHandle>,
+    listener: tokio::net::TcpListener,
+) -> Result<(), RpcError> {
     let token_str = token::get_or_create_token()
         .map_err(|e| RpcError::Internal(format!("failed to init token: {e}")))?;
     let bearer_token = Arc::new(BearerToken(token_str));
 
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| RpcError::Internal(format!("failed to bind {addr}: {e}")))?;
-
-    info!("RPC server listening on {addr}");
+    let local = listener
+        .local_addr()
+        .map_err(|e| RpcError::Internal(format!("local_addr: {e}")))?;
+    info!("RPC server listening on {local}");
 
     // SmartIpKeyExtractor (used by tower_governor rate limit middleware) requires
     // ConnectInfo<SocketAddr> to be present in the request extensions. Default
