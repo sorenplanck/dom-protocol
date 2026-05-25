@@ -542,3 +542,40 @@ Open follow-ups (tracked separately, not blocking):
 - Stem probability constant audit (vs. RFC-0009 §X.Y recommended 0.9).
 - Multi-hop stem test in `dom-integration-tests` (requires Regtest
   network — see Doc 8 spend_e2e remediation work).
+
+---
+
+## [MAINNET] RB-PMMR-001 — PMMR silent leaf mutation (Phases A–E)
+
+**Severity:** CRITICAL — chainstate forgery primitive.
+**Status:** ✅ RESOLVED in algorithm; deferred validation items tracked below.
+
+Two collaborating defects in `Pmmr::push` collapsed `root()` for any
+multi-leaf MMR to a single peak hash that ignored the inner leaves
+(`node_height` used `trailing_ones` instead of Grin's postorder height;
+`leaf_pos` was the *post*-insert node count, placing fresh leaves into
+parent slots). Combined: any block producer could rewrite historical
+UTXO / kernel sets without disturbing the committed PMMR roots.
+
+Fix: Grin-derived postorder height with `jump_left` until `is_all_ones`;
+`leaf_pos = nodes_before(n) + 1`; `set_node` overwrite guard; shared
+`compute_block_pmmr_roots` helper between miner and validator. Pinned
+RFC-0004 hex vectors enforced via `vectors_match_pinned_hex`.
+
+Resolved commits:
+- `bcd59ad` fix(pmmr): Phase B — Grin-postorder index arithmetic.
+- `91f78ed` test(pmmr): Phase D — adversarial validation suite.
+- `151acbe` fix(node): Phase C — miner packs mempool + shared PMMR helper.
+- `2994048` test(test-vectors): Phase E — recapture RFC-0004 PMMR roots.
+- RFC-0004 normative spec authored (Phase G).
+
+### Deferred Phase F validation gaps (tracking, not closed)
+
+| Gap | Reason for deferral | Tracked under |
+|---|---|---|
+| Cross-platform deterministic roots (Linux / Windows / macOS / ARM64) | No CI matrix yet — single-VPS environment. | Phase 1.4 |
+| Interrupted-flush PMMR-specific harness (kill mid `commit_block`, reopen, equivalence) | Phase 3.2 covers store-level partial persistence; a PMMR-level equivalent over `output_root` / `kernel_root` / `rangeproof_root` is not yet wired. | Phase 3.2 extension |
+| `replay_determinism` re-execution on the corrected algorithm | RandomX FULL_MEM dataset init ≈ 150 s per block on the current VPS — 3-block test budget exceeds practical session timeouts. `chain_persistence` (1-block) was rerun and passed (158.75 s, hash = `a987f084bbd3f31a07a2831fa04e146a82030a9423abd26d9470745dc5201bbb`); 2- and 3-block replay scenarios remain to be re-executed on a dedicated mining host. | Phase 6.1 |
+
+Until those gaps are closed, the Phase F status is "partially validated
+empirically — full closure requires the listed infrastructure".
