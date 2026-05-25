@@ -624,3 +624,45 @@ the nine canonical hex test vectors, the DOM-PMMR-001 bug history, and
 the explicit list of deferred validation gaps (cross-platform,
 interrupted-flush, full replay_determinism re-execution on the
 corrected algorithm).
+
+---
+
+## [MAINNET] RB-FS-MATRIX — filesystem adversarial coverage
+
+**Severity:** IMPORTANT — durability under non-default mount options.
+**Status:** 🟡 PARTIAL — tmpfs + ext4 covered in CI; btrfs / xfs / zfs deferred.
+
+`dom-store/tests/crash_consistency_sigkill.rs` and `lmdb_durability.rs`
+exercise the post-Phase-3.3 fsync-by-default LMDB commit path. On the
+Phase 1.4 CI matrix:
+
+* **tmpfs** — GitHub-hosted runners back `/tmp` (and therefore
+  `tempfile::TempDir`) on tmpfs. tmpfs ignores fsync (data lives in
+  memory until eviction), so these legs validate the consistency
+  contract on the LMDB side without proving the kernel-to-disk path.
+* **ext4** — the default `/` filesystem on `ubuntu-latest` and
+  `ubuntu-22.04-arm` is ext4 with the standard `data=ordered`
+  journal. Tests that explicitly mount or write to `/var` go through
+  ext4 with full journaling.
+* **APFS** (macos-*) and **NTFS** (windows-*) — provided by the
+  hosted runners; not enumerated explicitly but exercised
+  transitively by `cargo test`.
+
+What is NOT yet exercised in CI:
+
+* **btrfs / xfs / zfs**, each with at least one non-default mount
+  option (`commit=N`, `nobarrier`, `sync=disabled`, etc.). The
+  failure shape we care about is: an LMDB commit returns Ok, the
+  power goes out, the filesystem replays its journal and the LMDB
+  meta page comes back at an earlier state than the data pages.
+  Reproducing this on a GitHub-hosted runner requires
+  loop-mounting an image with the target FS, killing power via
+  `qemu` or `dmsetup` snapshots, and remounting — substantially
+  more infrastructure than `tempfile::TempDir`.
+
+Mitigation tracking: this gap does not block mainnet candidate
+status; the Phase 3.3 fsync change already eliminates the most
+likely loss mode (kernel never persisted the dirty page). Filesystem
+journal replay anomalies are tail risk that the bug-bounty / public
+testnet phases (8.1, 8.4) are positioned to surface in the wild
+before mainnet launch.
