@@ -198,13 +198,42 @@ impl DomNode {
     pub async fn run(self: Arc<Self>) -> Result<(), DomError> {
         info!("Starting DOM node services");
 
-        // Start P2P listener
+        // ── Synchronous listener binds ──────────────────────────────────
+        // Bind P2P and RPC sockets BEFORE spawning their accept loops, so
+        // bind errors (EADDRINUSE, permission denied, malformed addr)
+        // propagate to the caller via `Result<(), DomError>` instead of
+        // being swallowed inside a detached task. Previous code spawned
+        // `dom_rpc::serve(handle, addr)` (which binds internally) inside
+        // `tokio::spawn`, so a stale-port collision on the RPC port turned
+        // into a single `warn!` and the node ran indefinitely with a dead
+        // RPC server — making readiness checks lie and external tooling
+        // (curl/CLI/scripts) see ConnectionRefused with no explanation.
         let p2p_addr = self.config.p2p_listen_addr.clone();
+        let p2p_listener = tokio::net::TcpListener::bind(&p2p_addr)
+            .await
+            .map_err(|e| DomError::Internal(format!("P2P bind {p2p_addr}: {e}")))?;
+        info!("P2P listening on {p2p_addr}");
+
+        let rpc_pair = if let Some(rpc_addr) = self.config.rpc_listen_addr.clone() {
+            use crate::node_handle::NodeHandleImpl;
+            let parsed: std::net::SocketAddr = rpc_addr.parse().map_err(|e| {
+                DomError::Internal(format!("Invalid RPC listen addr {rpc_addr}: {e}"))
+            })?;
+            let listener = dom_rpc::bind(parsed)
+                .await
+                .map_err(|e| DomError::Internal(format!("RPC bind {parsed}: {e}")))?;
+            let handle: Arc<dyn dom_rpc::NodeHandle> = Arc::new(NodeHandleImpl(self.clone()));
+            Some((handle, listener))
+        } else {
+            None
+        };
+
+        // ── Accept loops + background tasks ─────────────────────────────
+        // Binds already succeeded; from here on only per-connection /
+        // per-request errors are possible, which are logged in-place.
         let node_listener = self.clone();
         let listener_task = tokio::spawn(async move {
-            if let Err(e) = node_listener.run_p2p_listener(&p2p_addr).await {
-                warn!("P2P listener error: {e}");
-            }
+            node_listener.run_p2p_listener_on(p2p_listener).await;
         });
 
         // Start outbound peer connector
@@ -221,20 +250,9 @@ impl DomNode {
             });
         }
 
-        // Start RPC server if configured
-        if let Some(rpc_addr) = self.config.rpc_listen_addr.clone() {
-            use crate::node_handle::NodeHandleImpl;
-            let handle: Arc<dyn dom_rpc::NodeHandle> = Arc::new(NodeHandleImpl(self.clone()));
+        if let Some((handle, listener)) = rpc_pair {
             tokio::spawn(async move {
-                let addr: std::net::SocketAddr = match rpc_addr.parse() {
-                    Ok(a) => a,
-                    Err(e) => {
-                        warn!("Invalid RPC listen addr {rpc_addr}: {e}");
-                        return;
-                    }
-                };
-                info!("RPC server listening on {addr}");
-                if let Err(e) = dom_rpc::serve(handle, addr).await {
+                if let Err(e) = dom_rpc::serve(handle, listener).await {
                     warn!("RPC server error: {e}");
                 }
             });
@@ -361,13 +379,12 @@ impl DomNode {
         Ok(())
     }
 
-    /// Listen for incoming P2P connections.
-    async fn run_p2p_listener(&self, addr: &str) -> Result<(), DomError> {
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .map_err(|e| DomError::Internal(format!("bind {addr}: {e}")))?;
-        info!("P2P listening on {addr}");
-
+    /// Accept incoming P2P connections on an already-bound listener.
+    ///
+    /// Called by `run()` after `tokio::net::TcpListener::bind` has
+    /// succeeded synchronously, so this loop never observes bind errors —
+    /// only per-connection accept errors, which are logged and skipped.
+    async fn run_p2p_listener_on(&self, listener: tokio::net::TcpListener) {
         loop {
             match listener.accept().await {
                 Ok((stream, peer_addr)) => {
