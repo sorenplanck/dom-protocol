@@ -981,3 +981,86 @@ O que requer trabalho de especificação adicional antes de implementação:
 - O protocolo de slate/carteira
 
 **Estimativa para chegar a spec-ready: 6-8 semanas de trabalho de especificação.**
+
+---
+
+## SEÇÃO 7 — INTERNAL HARDENING FINDINGS (post-audit)
+
+---
+
+### [CRÍTICO — RESOLVED] DOM-PMMR-001 — Silent Leaf Mutation in `Pmmr::push`
+
+**Severidade:** CONSENSUS-CRITICAL — silent chainstate corruption primitive.
+
+**Componente:** `crates/dom-pmmr/src/lib.rs::Pmmr::push` + `node_height`.
+
+**Status:** ✅ RESOLVED — commits `bcd59ad` (fix), `91f78ed` (adversarial
+suite), `151acbe` (miner / validator contract), `2994048` (pinned vectors),
+RFC-0004 normative spec (this commit).
+
+**Problema técnico:**
+
+Duas defeitos colaboravam para reduzir `root()` de qualquer MMR multi-folha a
+uma única peak hash dependendo apenas da última folha:
+
+1. `node_height(pos)` lia `pos.trailing_ones()` diretamente. A altura postorder
+   correta é o índice do most-significant bit após left-jumping até
+   `is_all_ones`. Alturas em posições 1, 3, 5, 7, … saíam um nível alto demais,
+   fazendo o check de altura-igual dentro de `merge_peaks` falhar sempre e
+   suprimindo todo merge.
+
+2. `push` colocava cada nova folha na posição igual à *contagem pós-insert* de
+   nós. Isso equipara a folha nova ao slot de parent que deveria ter sido
+   produzido pelo merge — e o merge é suprimido por (1).
+
+Combinados, o `bag_peaks` reduzia ao final a uma única peak que carregava só
+informação da última folha. Qualquer minerador podia reescrever folhas
+históricas (UTXO set / kernel set) sem alterar os roots committados — primitive
+direto de forjamento de chainstate.
+
+**Vetor de explotação (assumindo PMMR bugado em produção):**
+
+- Atacante mineira um bloco com tx forjada (gastando UTXO que não possui).
+- Roots no header se baseiam só na última folha de cada MMR.
+- Nó honesto recomputa roots → bate (porque ambos usam o mesmo algoritmo
+  bugado).
+- Forgia aceita, supply violada, balance equation impossível de verificar
+  independentemente.
+
+**Correção:**
+
+Substituição direta do algoritmo de altura por Grin's `bintree_postorder_height`
+(jump_left até `is_all_ones`, retorna `msb_pos - 1`). `leaf_pos` agora é
+`nodes_before(n) + 1` calculado da contagem *pré*-insert. `set_node` adicionou
+guard contra overwrite — append-only é invariante de consenso e overwrite
+silencioso é tratado como `DomError::Internal`.
+
+**Evidência de validação:**
+
+| Item | Cobertura | Crate / arquivo |
+|---|---|---|
+| Reproducer determinístico (Phase A) | 7 testes | `dom-pmmr/tests/silent_mutation_reproducer.rs` |
+| Adversarial suite com oráculo independente (Phase D) | 10 testes, ~42s | `dom-pmmr/tests/adversarial_suite.rs` |
+| Tabela postorder pinada (1..=15) | 1 teste | `dom-pmmr/src/lib.rs::tests::node_height_matches_postorder_table` |
+| Overwrite guard | 1 teste | `dom-pmmr/src/lib.rs::tests::set_node_overwrite_is_rejected` |
+| Contrato miner ↔ validator (Phase C) | 5 testes | `dom-consensus/src/lib.rs::tests::*pmmr_roots*` |
+| Pinned RFC-0004 hex vectors (Phase E) | 1 teste, 9 vetores | `dom-test-vectors/src/pmmr_vectors.rs::tests::vectors_match_pinned_hex` |
+
+**Gaps remanescentes (uncertainty-tracked):** ver RELEASE_BLOCKERS.md sob
+"DOM-PMMR-001 deferred validation". Cross-platform equivalence (Phase 1.4),
+interrupted-flush PMMR-specific harness (Phase 3.2 extension) e long-running
+replay-after-restart re-execution na implementação corrigida (replay_determinism
+sobre VPS dedicado) não são executáveis na infraestrutura atual e estão
+documentados como gaps explícitos, não fechados.
+
+**Confidence:**
+- **Confirmed:** o bug existia, foi reproduzido, a correção altera todos os
+  roots multi-folha para os valores corretos hand-computed.
+- **Confirmed:** o algoritmo Grin-derived produz a tabela postorder canônica
+  e atende todos os property tests do oráculo independente.
+- **Likely:** replay determinism preservada — o algoritmo é puramente
+  determinístico em (`leaf_count`, `payloads`), igual antes; o que mudou foi o
+  layout interno. Confirmação empírica requer rerun de `replay_determinism`
+  em ambiente capaz de mining sustentado.
+- **Theoretical (sem evidência empírica nesta sessão):** equivalência
+  cross-platform entre Linux x86_64 / Windows / macOS / ARM64.

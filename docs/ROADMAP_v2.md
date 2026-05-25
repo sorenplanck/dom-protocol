@@ -12,7 +12,15 @@ Docs 1-7: complete.
 Docs 8-10: complete (8 partial — spend_e2e blocked by env until VPS).
 Network::Regtest: complete (commits in B7 series).
 Audit findings A-01..A-06: addressed (commits 74aa11f..1b26b13).
-Tests: 282+ unit, 11 fuzz targets (~55M inputs zero crashes).
+DOM-PMMR-001 (silent-leaf-mutation, consensus-class chainstate forgery
+primitive): RESOLVED — Phases A–E + G complete (commits 596ba5c, bcd59ad,
+91f78ed, 151acbe, 2994048, RFC-0004 authored). Phase F partially validated
+(chain_persistence reran post-fix in 158.75 s; full replay_determinism /
+cross-platform equivalence deferred — see RELEASE_BLOCKERS.md
+RB-PMMR-001).
+Tests: 282+ unit pre-DOM-PMMR-001; +28 PMMR + 5 PMMR-roots + 1 pinned-vectors
+specifically targeting the bug class, 11 fuzz targets (~55M inputs zero
+crashes).
 
 ## Phases
 
@@ -25,10 +33,14 @@ Phase 1 — Consensus Immutability Lock (CRITICAL, ~3-6 months)
  - automated reorg simulation framework
  - randomized reorg fuzzing
  - rollback/replay equivalence assertions
-- 1.3 PMMR formal hardening
- - PMMR corruption tests
- - rewind equivalence tests
- - randomized insertion/removal tests
+- 1.3 PMMR formal hardening — DOM-PMMR-001 RESOLVED via RFC-0004 (see
+      docs/DOM_RFC_0004_PMMR_Hardening.md + SECURITY_AUDIT.md SEÇÃO 7)
+ - PMMR corruption tests — `set_node_overwrite_is_rejected` + adversarial
+   suite (10 tests, ~42 s)
+ - rewind equivalence tests — DEFERRED (no rewind API yet — tracked under
+   Phase 6.1)
+ - randomized insertion/removal tests — proptest oracle covers insertion;
+   removal is not yet a public PMMR operation
 - 1.4 Cross-platform equivalence CI
  - Linux + Windows + macOS
  - x86_64 + ARM
