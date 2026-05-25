@@ -13,6 +13,14 @@ use dom_store::DomStore;
 use primitive_types::U256;
 use tracing::{debug, info};
 
+/// Sentinel substring callers grep for to recognise a chainstate
+/// corruption distinctly from other `DomError::Internal` cases. When
+/// `ChainState::open` returns an error containing this string, the
+/// safe operator response is "stop the node, move the data_dir aside,
+/// re-sync from genesis" — continuing on a corrupted state would
+/// fork the local chain from itself.
+pub const CHAIN_CORRUPT_SENTINEL: &str = "CHAIN_CORRUPT";
+
 pub struct ChainState {
     pub store: DomStore,
     pub tip_hash: Hash256,
@@ -61,10 +69,47 @@ impl ChainState {
 
         let (tip_hash, tip_height, tip_difficulty) = match store.get_chain_tip()? {
             Some(hash) => {
-                let header_bytes = store
-                    .get_block_header(&hash)?
-                    .ok_or_else(|| DomError::Internal("tip header not found".into()))?;
+                let header_bytes = store.get_block_header(&hash)?.ok_or_else(|| {
+                    DomError::Internal(format!(
+                        "{CHAIN_CORRUPT_SENTINEL}: chain_tip {} points at missing header",
+                        hex::encode(hash)
+                    ))
+                })?;
                 let header = BlockHeader::from_bytes(&header_bytes)?;
+                // Body MUST exist alongside the header — commit_block writes
+                // them in the same atomic LMDB txn (RFC-0007 §14). A
+                // header-without-body is one of the partial-persistence
+                // states the chain-init layer is contractually required to
+                // detect (see dom-store/src/db.rs § "Partial-persistence
+                // contract").
+                if store.get_block_body(&hash)?.is_none() {
+                    return Err(DomError::Internal(format!(
+                        "{CHAIN_CORRUPT_SENTINEL}: tip {} has header but no body",
+                        hex::encode(hash)
+                    )));
+                }
+                // The height index MUST match the header's recorded height.
+                // A divergence means an interrupted prior write left the two
+                // databases pointing at different blocks and continuing to
+                // mine from here would fork the local view from itself.
+                match store.get_hash_at_height(header.height.0)? {
+                    Some(indexed) if indexed == hash => {}
+                    Some(other) => {
+                        return Err(DomError::Internal(format!(
+                            "{CHAIN_CORRUPT_SENTINEL}: height_index[{}] = {} but tip = {}",
+                            header.height.0,
+                            hex::encode(other),
+                            hex::encode(hash)
+                        )));
+                    }
+                    None => {
+                        return Err(DomError::Internal(format!(
+                            "{CHAIN_CORRUPT_SENTINEL}: tip {} has no height_index entry at height {}",
+                            hex::encode(hash),
+                            header.height.0
+                        )));
+                    }
+                }
                 (
                     Hash256::from_bytes(hash),
                     header.height,
