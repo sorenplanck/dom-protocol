@@ -605,6 +605,7 @@ dependencies = [
  "hex",
  "primitive-types",
  "sha2",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
