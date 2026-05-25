@@ -579,3 +579,48 @@ Resolved commits:
 
 Until those gaps are closed, the Phase F status is "partially validated
 empirically — full closure requires the listed infrastructure".
+
+---
+
+## [MAINNET] RB-LMDB-MAPSIZE — dynamic map_size growth
+
+**Severity:** IMPORTANT — operational fail-stop, not a consensus bug.
+**Status:** 🔴 OPEN — intentionally deferred from Phase 3.3.
+
+`DomStore::open` pre-allocates a 16 GiB LMDB map. At the current block
+budget (~1 MB per block, ~120 s spacing) this provides ≥5 years of
+headroom; running out is a "next decade" issue. When a commit
+nevertheless hits `MDB_MAP_FULL`, `commit_block` returns a
+`DomError::Internal` carrying the `LMDB_MAP_FULL_SENTINEL` substring so
+the chain-init layer can recognise the condition distinctly.
+
+What is NOT yet implemented:
+
+* Automatic map_size extension while the node is running. Doing this
+  safely requires a quiescent point with no in-flight read txns and
+  proper lock coordination across the async multi-reader pool.
+* Operator runbook for offline extension. The procedure (stop node,
+  call `mdb_env_set_mapsize` from a small helper, restart) is mechanically
+  sound but undocumented; will be added alongside Phase 6
+  rebuild-from-genesis runbooks.
+
+These gaps are not blocking for mainnet candidate status: the sentinel
+fail-stop guarantees we cannot silently lose blocks past the map limit.
+Tracking exists so the deferral does not get forgotten.
+
+---
+
+## [MAINNET] RB-PMMR-001-RFC — RFC-0004 normative PMMR spec
+
+**Severity:** CRITICAL — was the absence of a written spec for the
+exact PMMR layout the protocol runs.
+**Status:** ✅ RESOLVED (commit `ed0492d`).
+
+Full normative specification authored at
+`docs/DOM_RFC_0004_PMMR_Hardening.md`. Pins position arithmetic, the
+four hashing tags, the right-to-left bagging fold, the append
+algorithm plus overwrite invariant, the block-level iteration order,
+the nine canonical hex test vectors, the DOM-PMMR-001 bug history, and
+the explicit list of deferred validation gaps (cross-platform,
+interrupted-flush, full replay_determinism re-execution on the
+corrected algorithm).
