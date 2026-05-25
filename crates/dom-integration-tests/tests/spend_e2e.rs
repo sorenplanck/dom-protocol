@@ -67,12 +67,17 @@ async fn test_spend_e2e_cross_node_propagation() {
         .await
         .expect("node B should connect to node A");
 
-    // ── 1. Mine two blocks on A so wallet A holds a mature coinbase.
-    //       Under Network::Regtest, `REGTEST_COINBASE_MATURITY = 1` —
-    //       a coinbase from block 1 is spendable once the chain reaches
-    //       block 2.
-    mine_blocks(&node_a, 2).await.expect("A mining failed");
-    wait_for_height(&node_b, 2, Duration::from_secs(40))
+    // ── 1. Mine three blocks on A so wallet A holds two mature coinbases.
+    //       Under Network::Regtest, `REGTEST_COINBASE_MATURITY = 1` — a
+    //       coinbase from height H matures at tip H+1. After 3 blocks
+    //       (tip=3) the coinbases from heights 1 and 2 are mature; the
+    //       one from height 3 is not. Two mature coinbases =
+    //       2 × INITIAL_BLOCK_REWARD = 66 DOM, enough to cover the 50 DOM
+    //       spend below + the 0.01 DOM fee. Mining 2 blocks (previous
+    //       value) gives only 1 mature coinbase = 33 DOM, which fails
+    //       with insufficient_funds on the /wallet/spend call.
+    mine_blocks(&node_a, 3).await.expect("A mining failed");
+    wait_for_height(&node_b, 3, Duration::from_secs(40))
         .await
         .expect("blocks should propagate A → B");
 
