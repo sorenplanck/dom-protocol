@@ -1,5 +1,38 @@
 #![allow(missing_docs)]
 //! LMDB environment and database handles.
+//!
+//! ## Partial-persistence contract (Roadmap v2 Phase 3.2)
+//!
+//! Under normal use, every `commit_block` is one LMDB transaction, and
+//! LMDB's per-txn atomicity guarantees that an interrupted process
+//! either persists the whole transaction or nothing. The SIGKILL
+//! harness in `tests/crash_consistency_sigkill.rs` exercises this.
+//!
+//! If something *outside* `commit_block` does manage to leave the
+//! store in a partial state — a future refactor that splits a write
+//! across txns, an external corruption tool, a manual recovery — the
+//! contract is:
+//!
+//! 1. `DomStore::open` MUST succeed on the partial state. It must not
+//!    panic, abort, or refuse to open. Callers need to be able to
+//!    inspect the store in order to repair it; bailing out here would
+//!    deny them that.
+//! 2. Every read method (`get_block_header`, `get_block_body`,
+//!    `get_hash_at_height`, `get_chain_tip`, `get_utxo`) MUST report
+//!    the on-disk state honestly:
+//!      - `Some(v)` if the value is present in its database;
+//!      - `None` if it is not.
+//!
+//!    No silent reconstruction, no fabricated bytes.
+//! 3. Pointer relations (`chain_tip → block`, `height → hash`,
+//!    `kernel_index → block_hash`) MUST be returned verbatim. If the
+//!    pointer survives but its target is missing, the caller observes
+//!    `Some(ptr)` from the pointer read and then `None` from the
+//!    dereference. Detecting that mismatch and reacting (log, abort,
+//!    rebuild) is the chain-init layer's responsibility, not this
+//!    crate's.
+//!
+//! These guarantees are pinned by `tests/partial_persistence.rs`.
 
 use dom_core::DomError;
 use lmdb::{Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
