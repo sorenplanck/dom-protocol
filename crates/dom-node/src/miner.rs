@@ -478,6 +478,13 @@ fn mine_blocking(
             .map_err(|e| DomError::Internal(format!("vm: {e}")))?
     };
 
+    // Heartbeat: blocks can take minutes to hours under low-effort targets +
+    // light VM. Without a periodic log, "stuck" miners are indistinguishable
+    // from "still hashing" — log every HEARTBEAT_NONCES iterations with the
+    // current hash-rate so operators (and tests) see continuous progress.
+    const HEARTBEAT_NONCES: u64 = 5_000;
+    let mining_start = std::time::Instant::now();
+    let mut last_heartbeat = mining_start;
     let mut nonce = 0u64;
     loop {
         let header = BlockHeader {
@@ -504,6 +511,23 @@ fn mine_blocking(
             return Ok(final_header);
         }
         nonce = nonce.wrapping_add(1);
+        if nonce.is_multiple_of(HEARTBEAT_NONCES) {
+            let now = std::time::Instant::now();
+            let window = now.duration_since(last_heartbeat).as_secs_f64();
+            let hps = if window > 0.0 {
+                HEARTBEAT_NONCES as f64 / window
+            } else {
+                0.0
+            };
+            info!(
+                "⛏ minerando h={} | nonces={} | {:.1} H/s | total={:.1}s",
+                new_height,
+                nonce,
+                hps,
+                mining_start.elapsed().as_secs_f64()
+            );
+            last_heartbeat = now;
+        }
     }
 }
 
