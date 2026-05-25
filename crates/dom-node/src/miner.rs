@@ -2,9 +2,14 @@
 
 use crate::node::DomNode;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
-use dom_consensus::derive_chain_id;
-use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
-use dom_core::{BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE};
+use dom_consensus::{compute_block_pmmr_roots, derive_chain_id};
+use dom_consensus::{
+    Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionOutput,
+};
+use dom_core::{
+    BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, MAX_BLOCK_WEIGHT,
+    WEIGHT_COINBASE_KERNEL, WEIGHT_OUTPUT,
+};
 use dom_pow::{
     asert_next_target, genesis_anchor, hash_meets_target, randomx_seed_height,
     target_to_difficulty, CompactTarget,
@@ -196,7 +201,6 @@ pub async fn mining_loop(node: Arc<DomNode>) {
 #[doc(hidden)]
 pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     use dom_core::GENESIS_MESSAGE;
-    use dom_pmmr::Pmmr;
     info!("Criando bloco genesis...");
     info!("Mensagem: {}", GENESIS_MESSAGE);
     let anchor = genesis_anchor();
@@ -204,22 +208,11 @@ pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     // Deterministic genesis coinbase — identical on every node.
     let genesis_coinbase = build_genesis_coinbase(&chain_id_for(&node.config))?;
 
-    // Compute PMMR roots from the coinbase so the header is self-consistent.
-    let output_root = {
-        let mut mmr = Pmmr::new();
-        mmr.push(genesis_coinbase.output.commitment.as_bytes())?;
-        mmr.root()
-    };
-    let kernel_root = {
-        let mut mmr = Pmmr::new();
-        mmr.push(genesis_coinbase.kernel.excess.as_bytes())?;
-        mmr.root()
-    };
-    let rangeproof_root = {
-        let mut mmr = Pmmr::new();
-        mmr.push(&genesis_coinbase.output.proof)?;
-        mmr.root()
-    };
+    // Compute PMMR roots from the coinbase via the shared helper so the
+    // genesis header is byte-identical to what every validator will
+    // recompute on disk during connect_block.
+    let (output_root, kernel_root, rangeproof_root) =
+        compute_block_pmmr_roots(&genesis_coinbase, &[])?;
 
     let genesis_header = BlockHeader {
         version: dom_core::PROTOCOL_VERSION,
@@ -326,35 +319,68 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
             .unwrap_or([0u8; 32])
     };
 
-    // Build coinbase before mining so we can include PMMR roots in the header.
-    // Build coinbase: use wallet if available, fallback to random blinding
+    // ── Mempool inclusion (DOM-PMMR-002 Phase C) ──────────────────────────────
+    //
+    // Snapshot the highest-fee mempool entries that fit under the
+    // block-weight budget once, before mining starts. The mempool lock
+    // is dropped before the wallet or chain locks are acquired, so the
+    // ordering is monotonic and dead-lock free.
+    //
+    // The coinbase always claims 1 output (WEIGHT_OUTPUT) and 1 coinbase
+    // kernel (WEIGHT_COINBASE_KERNEL); reserve those before passing the
+    // tx-weight budget to `select_for_block`. A future block-template
+    // refactor would add per-tx weight tightening (e.g. dropping
+    // marginal-fee txs that no longer fit after the coinbase grows) —
+    // for now the coinbase weight is constant and the conservative
+    // budget below mirrors what validate_block enforces.
+    let tx_weight_budget = MAX_BLOCK_WEIGHT
+        .saturating_sub(WEIGHT_OUTPUT)
+        .saturating_sub(WEIGHT_COINBASE_KERNEL);
+    let selected_txs: Vec<Transaction> = {
+        let mempool = node.mempool.lock().await;
+        mempool
+            .select_for_block(tx_weight_budget)
+            .into_iter()
+            .map(|e| e.tx.clone())
+            .collect()
+    };
+    let total_tx_fees: u64 = selected_txs.iter().try_fold(0u64, |acc, tx| {
+        let fee = tx.total_fee()?;
+        acc.checked_add(fee)
+            .ok_or_else(|| DomError::Invalid("mempool fee sum overflow".into()))
+    })?;
+    if !selected_txs.is_empty() {
+        info!(
+            "Bloco {}: incluindo {} tx(s) da mempool, fees totais = {} noms",
+            new_height,
+            selected_txs.len(),
+            total_tx_fees
+        );
+    }
+
+    // Build coinbase reflecting tx fees so explicit_value == reward + fees.
     let coinbase = if let Some(ref wallet_arc) = node.wallet {
         // Wallet-integrated mining: deterministic blinding, output recorded
         let mut wallet = wallet_arc.lock().await;
         wallet
-            .build_coinbase(BlockHeight(new_height), 0)
+            .build_coinbase(BlockHeight(new_height), total_tx_fees)
             .map_err(|e| DomError::Internal(format!("wallet coinbase: {e}")))?
     } else {
         // Fallback: random blinding, output NOT recorded (DOM-SEC-004 unresolved)
         warn!("Mining without wallet — rewards will NOT be spendable (DOM-SEC-004)");
-        build_real_coinbase(BlockHeight(new_height), 0, &chain_id_for(&node.config))?
+        build_real_coinbase(
+            BlockHeight(new_height),
+            total_tx_fees,
+            &chain_id_for(&node.config),
+        )?
     };
 
-    let output_root = {
-        let mut mmr = dom_pmmr::Pmmr::new();
-        mmr.push(coinbase.output.commitment.as_bytes())?;
-        mmr.root()
-    };
-    let kernel_root = {
-        let mut mmr = dom_pmmr::Pmmr::new();
-        mmr.push(coinbase.kernel.excess.as_bytes())?;
-        mmr.root()
-    };
-    let rangeproof_root = {
-        let mut mmr = dom_pmmr::Pmmr::new();
-        mmr.push(&coinbase.output.proof)?;
-        mmr.root()
-    };
+    // PMMR roots over coinbase + selected mempool txs. Single source
+    // of truth: `compute_block_pmmr_roots` is the same helper that
+    // `validate_pmmr_roots` runs during block acceptance, so the miner
+    // cannot drift on iteration order.
+    let (output_root, kernel_root, rangeproof_root) =
+        compute_block_pmmr_roots(&coinbase, &selected_txs)?;
 
     // All networks mine with FLAG_FULL_MEM (~2 GB dataset + ~256 MB cache
     // per active miner thread) for ~10× hash-rate vs the cache-only VM.
@@ -394,7 +420,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     let block = Block {
         header,
         coinbase,
-        transactions: Vec::new(),
+        transactions: selected_txs,
     };
 
     let connect_outcome = {
@@ -427,6 +453,24 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
             );
             // Don't relay — peers already have it (somehow).
             return Ok(new_height);
+        }
+    }
+
+    // Drain the mempool of every transaction whose inputs were just
+    // confirmed. `remove_confirmed` evicts by input commitment, so any
+    // descendant that would now double-spend a freshly-consumed UTXO
+    // is also cleaned up, not just the txs we packed into the block.
+    {
+        let mut all_inputs: Vec<[u8; 33]> =
+            Vec::with_capacity(block.transactions.iter().map(|tx| tx.inputs.len()).sum());
+        for tx in &block.transactions {
+            for input in &tx.inputs {
+                all_inputs.push(*input.commitment.as_bytes());
+            }
+        }
+        if !all_inputs.is_empty() {
+            let mut mempool = node.mempool.lock().await;
+            mempool.remove_confirmed(&all_inputs);
         }
     }
 

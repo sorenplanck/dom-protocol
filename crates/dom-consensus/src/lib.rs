@@ -220,29 +220,42 @@ pub fn validate_block_transactions(
     Ok(())
 }
 
-/// Derive chain_id from network magic and genesis hash (RFC-0009 §4.1).
-/// Validate that the three PMMR roots in the block header match the roots
-/// recomputed from the block body.
+/// Compute the three PMMR roots (output, kernel, rangeproof) over a
+/// block body. Consensus-critical: the miner and `validate_pmmr_roots`
+/// MUST agree on iteration order, byte payloads, and MMR layout, so
+/// both call this single function and the test suite asserts they
+/// stay aligned.
 ///
 /// Output MMR: one leaf per output (coinbase + tx outputs), payload = commitment bytes (33).
 /// Kernel MMR: one leaf per kernel (coinbase + tx kernels), payload = excess bytes (33).
 /// Rangeproof MMR: one leaf per output (coinbase + tx outputs), payload = proof bytes.
 ///
-/// This is RFC-0007 step 17.
-pub fn validate_pmmr_roots(block: &Block) -> Result<(), dom_core::DomError> {
+/// Iteration order: coinbase output/kernel/proof first, then per-tx
+/// outputs (commitment + proof) followed by per-tx kernels in the
+/// order they appear in `transactions`. Any drift here yields blocks
+/// that fail their own root check.
+pub fn compute_block_pmmr_roots(
+    coinbase: &CoinbaseTransaction,
+    transactions: &[Transaction],
+) -> Result<
+    (
+        dom_core::Hash256,
+        dom_core::Hash256,
+        dom_core::Hash256,
+    ),
+    dom_core::DomError,
+> {
     use dom_pmmr::Pmmr;
 
     let mut output_mmr = Pmmr::new();
     let mut kernel_mmr = Pmmr::new();
     let mut rangeproof_mmr = Pmmr::new();
 
-    // Coinbase output and kernel first
-    output_mmr.push(block.coinbase.output.commitment.as_bytes())?;
-    rangeproof_mmr.push(&block.coinbase.output.proof)?;
-    kernel_mmr.push(block.coinbase.kernel.excess.as_bytes())?;
+    output_mmr.push(coinbase.output.commitment.as_bytes())?;
+    rangeproof_mmr.push(&coinbase.output.proof)?;
+    kernel_mmr.push(coinbase.kernel.excess.as_bytes())?;
 
-    // Transaction outputs and kernels
-    for tx in &block.transactions {
+    for tx in transactions {
         for output in &tx.outputs {
             output_mmr.push(output.commitment.as_bytes())?;
             rangeproof_mmr.push(&output.proof)?;
@@ -252,9 +265,23 @@ pub fn validate_pmmr_roots(block: &Block) -> Result<(), dom_core::DomError> {
         }
     }
 
-    let computed_output_root = output_mmr.root();
-    let computed_kernel_root = kernel_mmr.root();
-    let computed_rangeproof_root = rangeproof_mmr.root();
+    Ok((output_mmr.root(), kernel_mmr.root(), rangeproof_mmr.root()))
+}
+
+/// Derive chain_id from network magic and genesis hash (RFC-0009 §4.1).
+/// Validate that the three PMMR roots in the block header match the roots
+/// recomputed from the block body.
+///
+/// Output MMR: one leaf per output (coinbase + tx outputs), payload = commitment bytes (33).
+/// Kernel MMR: one leaf per kernel (coinbase + tx kernels), payload = excess bytes (33).
+/// Rangeproof MMR: one leaf per output (coinbase + tx outputs), payload = proof bytes.
+///
+/// This is RFC-0007 step 17. Delegates the actual layout to
+/// `compute_block_pmmr_roots` so the miner and the validator cannot
+/// drift on iteration order.
+pub fn validate_pmmr_roots(block: &Block) -> Result<(), dom_core::DomError> {
+    let (computed_output_root, computed_kernel_root, computed_rangeproof_root) =
+        compute_block_pmmr_roots(&block.coinbase, &block.transactions)?;
 
     if computed_output_root != block.header.output_root {
         return Err(dom_core::DomError::Invalid(format!(
@@ -363,5 +390,198 @@ mod tests {
         let id_main = derive_chain_id(dom_core::NETWORK_MAGIC_MAINNET, &h);
         let id_test = derive_chain_id(dom_core::NETWORK_MAGIC_TESTNET, &h);
         assert_ne!(id_main, id_test);
+    }
+
+    // ── PMMR root contract: miner ↔ validator agreement ──────────────────────
+
+    fn h_point() -> Commitment {
+        let h = [
+            0x02u8, 0x0e, 0x2c, 0xfc, 0x9a, 0xba, 0x78, 0x45, 0x5f, 0xfd, 0x39, 0x0c, 0xf5, 0xf1,
+            0xd1, 0x7b, 0x99, 0x82, 0xd0, 0xee, 0x29, 0xb2, 0x66, 0xbb, 0x3e, 0xa6, 0x21, 0x7b,
+            0x07, 0x8f, 0x09, 0xd5, 0x50,
+        ];
+        Commitment::from_compressed_bytes(&h).unwrap()
+    }
+
+    fn dummy_coinbase(explicit_value: u64) -> CoinbaseTransaction {
+        CoinbaseTransaction {
+            output: TransactionOutput {
+                commitment: g_point(),
+                proof: vec![0xAAu8; 100],
+            },
+            kernel: CoinbaseKernel {
+                features: dom_core::KERNEL_FEAT_COINBASE,
+                explicit_value,
+                // h_point() ≠ g_point() — distinct payloads keep the
+                // output_root and kernel_root MMRs in independent hash
+                // domains even when both MMRs hold a single leaf.
+                excess: h_point(),
+                excess_signature: [0u8; 65],
+            },
+            offset: [0u8; 32],
+        }
+    }
+
+    fn dummy_tx(commitment: Commitment, proof_fill: u8, fee_noms: u64) -> Transaction {
+        Transaction {
+            inputs: vec![],
+            outputs: vec![TransactionOutput {
+                commitment: commitment.clone(),
+                proof: vec![proof_fill; 100],
+            }],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(fee_noms).unwrap(),
+                lock_height: 0,
+                excess: commitment,
+                excess_signature: [0u8; 65],
+            }],
+            offset: [0u8; 32],
+        }
+    }
+
+    fn dummy_block_with(
+        coinbase: CoinbaseTransaction,
+        txs: Vec<Transaction>,
+        output_root: dom_core::Hash256,
+        kernel_root: dom_core::Hash256,
+        rangeproof_root: dom_core::Hash256,
+    ) -> Block {
+        use crate::block::ProofOfWork;
+        use dom_core::{Hash256, PROTOCOL_VERSION};
+        use dom_pow::CompactTarget;
+        use primitive_types::U256;
+        Block {
+            header: BlockHeader {
+                version: PROTOCOL_VERSION,
+                height: BlockHeight::GENESIS,
+                prev_hash: Hash256::ZERO,
+                timestamp: Timestamp(1_704_067_200),
+                output_root,
+                kernel_root,
+                rangeproof_root,
+                total_kernel_offset: [0u8; 32],
+                target: CompactTarget(0x1f00_ffff),
+                total_difficulty: U256::one(),
+                pow: ProofOfWork {
+                    nonce: 0,
+                    randomx_hash: Hash256::ZERO,
+                },
+            },
+            coinbase,
+            transactions: txs,
+        }
+    }
+
+    /// `compute_block_pmmr_roots` is deterministic and produces three
+    /// distinct hashes for distinct payload domains (commitment vs
+    /// excess vs rangeproof). Catches a copy-paste mistake that would
+    /// have two MMRs share a payload.
+    #[test]
+    fn compute_pmmr_roots_three_distinct_domains() {
+        let coinbase = dummy_coinbase(33 * 1_000_000_000);
+        let (r1, r2, r3) = compute_block_pmmr_roots(&coinbase, &[]).unwrap();
+        assert_ne!(r1, r2, "output_root and kernel_root must differ");
+        assert_ne!(r1, r3, "output_root and rangeproof_root must differ");
+        assert_ne!(r2, r3, "kernel_root and rangeproof_root must differ");
+
+        // Determinism across calls.
+        let (r1b, r2b, r3b) = compute_block_pmmr_roots(&coinbase, &[]).unwrap();
+        assert_eq!(r1, r1b);
+        assert_eq!(r2, r2b);
+        assert_eq!(r3, r3b);
+    }
+
+    /// A block whose header roots come straight from
+    /// `compute_block_pmmr_roots` MUST satisfy `validate_pmmr_roots`.
+    /// This is the miner / validator contract: as long as the miner
+    /// drives the header from this helper, blocks self-accept.
+    #[test]
+    fn validate_pmmr_roots_accepts_helper_computed_roots() {
+        let coinbase = dummy_coinbase(33 * 1_000_000_000);
+        let tx1 = dummy_tx(h_point(), 0x11, 100);
+
+        let (or, kr, rr) = compute_block_pmmr_roots(&coinbase, std::slice::from_ref(&tx1)).unwrap();
+        let block = dummy_block_with(coinbase, vec![tx1], or, kr, rr);
+        validate_pmmr_roots(&block).expect("helper-computed roots must satisfy the validator");
+    }
+
+    /// Same coinbase, different transaction list MUST produce different
+    /// roots. Catches the bug class where the miner's PMMR ignores tx
+    /// content (which is exactly what an empty `Block.transactions`
+    /// header drift would look like).
+    #[test]
+    fn pmmr_roots_depend_on_tx_set() {
+        let coinbase = dummy_coinbase(33 * 1_000_000_000);
+        let (r_empty_out, r_empty_ker, r_empty_rp) =
+            compute_block_pmmr_roots(&coinbase, &[]).unwrap();
+
+        let tx1 = dummy_tx(h_point(), 0x11, 100);
+        let (r1_out, r1_ker, r1_rp) =
+            compute_block_pmmr_roots(&coinbase, std::slice::from_ref(&tx1)).unwrap();
+
+        assert_ne!(r_empty_out, r1_out);
+        assert_ne!(r_empty_ker, r1_ker);
+        assert_ne!(r_empty_rp, r1_rp);
+
+        // Two transactions instead of one — roots shift again.
+        let tx2 = dummy_tx(h_point(), 0x22, 200);
+        let (r2_out, r2_ker, r2_rp) =
+            compute_block_pmmr_roots(&coinbase, &[tx1.clone(), tx2.clone()]).unwrap();
+        assert_ne!(r1_out, r2_out);
+        assert_ne!(r1_ker, r2_ker);
+        assert_ne!(r1_rp, r2_rp);
+    }
+
+    /// Tx ordering inside the block is consensus. Same set of txs but
+    /// reversed order MUST produce different PMMR roots — even though
+    /// the *output commitment* sets are identical, the rangeproof
+    /// payloads differ per-tx so the rangeproof MMR's leaf positions
+    /// pin the order. The kernel MMR drifts too because the kernel
+    /// excess inherits the tx's distinct commitment in `dummy_tx`.
+    #[test]
+    fn pmmr_roots_depend_on_tx_order() {
+        let coinbase = dummy_coinbase(33 * 1_000_000_000);
+        let tx_a = dummy_tx(g_point(), 0x11, 100);
+        let tx_b = dummy_tx(h_point(), 0x22, 200);
+
+        let forward = compute_block_pmmr_roots(&coinbase, &[tx_a.clone(), tx_b.clone()]).unwrap();
+        let reverse = compute_block_pmmr_roots(&coinbase, &[tx_b, tx_a]).unwrap();
+        assert_ne!(forward.0, reverse.0, "output_root must depend on tx order");
+        assert_ne!(forward.1, reverse.1, "kernel_root must depend on tx order");
+        assert_ne!(
+            forward.2, reverse.2,
+            "rangeproof_root must depend on tx order"
+        );
+    }
+
+    /// Mutating a tx-output proof byte after the header roots were
+    /// frozen MUST make `validate_pmmr_roots` reject the block. This
+    /// is the silent-mutation property at the block level.
+    #[test]
+    fn validate_pmmr_roots_rejects_post_header_mutation() {
+        let coinbase = dummy_coinbase(33 * 1_000_000_000);
+        let tx1 = dummy_tx(h_point(), 0x11, 100);
+
+        // Freeze header roots over the *original* tx.
+        let (or, kr, rr) = compute_block_pmmr_roots(&coinbase, std::slice::from_ref(&tx1)).unwrap();
+
+        // Mutate the rangeproof of the tx after the header is fixed.
+        let mut mutated_tx = tx1;
+        mutated_tx.outputs[0].proof[0] ^= 0xff;
+
+        let block = dummy_block_with(coinbase, vec![mutated_tx], or, kr, rr);
+        let err = validate_pmmr_roots(&block).expect_err(
+            "validator must reject a block whose body diverges from its frozen header roots",
+        );
+        match err {
+            dom_core::DomError::Invalid(msg) => {
+                assert!(
+                    msg.contains("rangeproof_root mismatch"),
+                    "expected rangeproof_root mismatch, got: {msg}"
+                );
+            }
+            other => panic!("expected Invalid(rangeproof_root mismatch), got {other:?}"),
+        }
     }
 }
