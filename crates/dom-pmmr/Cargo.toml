@@ -11,3 +11,7 @@ license.workspace    = true
 dom-core.workspace   = true
 dom-crypto.workspace = true
 thiserror.workspace  = true
+
+[dev-dependencies]
+proptest.workspace   = true
+rand.workspace       = true
