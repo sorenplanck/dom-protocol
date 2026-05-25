@@ -610,3 +610,133 @@ fn target_to_compact(t: &[u8; 32]) -> u32 {
     };
     (exp << 24) | (m & 0x007f_ffff)
 }
+
+#[cfg(test)]
+mod genesis_determinism_tests {
+    //! Roadmap v2 Phase 6.3 — Bootstrap recoverability proofs.
+    //!
+    //! The protocol's "wipe the data_dir and rebuild from genesis"
+    //! recovery story is only useful if the rebuilt genesis is
+    //! byte-identical to the one that any other node would build from
+    //! the same constants. These tests pin that property at the
+    //! coinbase + PMMR-root layer, without going through RandomX
+    //! (which is what makes the full chain_persistence integration
+    //! test slow — see RB-PMMR-001 deferred validation gaps).
+    //!
+    //! Coverage:
+    //!   1. `build_genesis_coinbase` is deterministic across N calls.
+    //!   2. The three PMMR roots over the genesis coinbase are
+    //!      deterministic across N calls.
+    //!   3. Different chain_ids produce different coinbases (sanity:
+    //!      Mainnet vs Testnet vs Regtest genesis must NOT collide).
+
+    use super::build_genesis_coinbase;
+    use dom_consensus::compute_block_pmmr_roots;
+    use dom_serialization::DomSerialize;
+
+    fn chain_id_mainnet() -> [u8; 32] {
+        use dom_consensus::derive_chain_id;
+        use dom_core::Hash256;
+        *derive_chain_id(
+            dom_core::NETWORK_MAGIC_MAINNET,
+            &Hash256::from_bytes(dom_core::GENESIS_HASH_MAINNET),
+        )
+        .as_bytes()
+    }
+
+    fn chain_id_testnet() -> [u8; 32] {
+        use dom_consensus::derive_chain_id;
+        use dom_core::Hash256;
+        *derive_chain_id(
+            dom_core::NETWORK_MAGIC_TESTNET,
+            &Hash256::from_bytes(dom_core::GENESIS_HASH_TESTNET),
+        )
+        .as_bytes()
+    }
+
+    fn chain_id_regtest() -> [u8; 32] {
+        use dom_consensus::derive_chain_id;
+        use dom_core::Hash256;
+        *derive_chain_id(
+            dom_core::NETWORK_MAGIC_REGTEST,
+            &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+        )
+        .as_bytes()
+    }
+
+    /// Building the genesis coinbase N times for the same chain_id
+    /// MUST produce byte-identical commitment, excess, and signature.
+    /// A divergence here means a node restarted with the data_dir
+    /// wiped would compute a different genesis hash than its peers —
+    /// silent fork at height 0.
+    #[test]
+    fn genesis_coinbase_is_deterministic_across_runs() {
+        for cid_fn in [
+            chain_id_mainnet as fn() -> [u8; 32],
+            chain_id_testnet,
+            chain_id_regtest,
+        ] {
+            let cid = cid_fn();
+            let a = build_genesis_coinbase(&cid).expect("build genesis coinbase #1");
+            for trial in 0..8 {
+                let b = build_genesis_coinbase(&cid).expect("build genesis coinbase #N");
+                let a_bytes = a.to_bytes().expect("serialize a");
+                let b_bytes = b.to_bytes().expect("serialize b");
+                assert_eq!(
+                    a_bytes, b_bytes,
+                    "trial {trial}: genesis coinbase is non-deterministic on this network"
+                );
+                assert_eq!(
+                    a.output.commitment.as_bytes(),
+                    b.output.commitment.as_bytes()
+                );
+                assert_eq!(a.kernel.excess.as_bytes(), b.kernel.excess.as_bytes());
+                assert_eq!(a.kernel.excess_signature, b.kernel.excess_signature);
+            }
+        }
+    }
+
+    /// The three PMMR roots over the genesis coinbase MUST be
+    /// deterministic across N rebuilds. This is the bootstrap
+    /// invariant a "wipe and re-sync from genesis" workflow depends
+    /// on: every fresh node must produce the same output_root /
+    /// kernel_root / rangeproof_root for the genesis block.
+    #[test]
+    fn genesis_pmmr_roots_are_deterministic_across_runs() {
+        let cid = chain_id_regtest();
+        let a = build_genesis_coinbase(&cid).expect("build genesis coinbase");
+        let (a_or, a_kr, a_rr) =
+            compute_block_pmmr_roots(&a, &[]).expect("compute genesis roots");
+
+        for trial in 0..8 {
+            let b = build_genesis_coinbase(&cid).expect("build genesis coinbase #N");
+            let (b_or, b_kr, b_rr) =
+                compute_block_pmmr_roots(&b, &[]).expect("compute genesis roots #N");
+            assert_eq!(a_or, b_or, "trial {trial}: output_root drift");
+            assert_eq!(a_kr, b_kr, "trial {trial}: kernel_root drift");
+            assert_eq!(a_rr, b_rr, "trial {trial}: rangeproof_root drift");
+        }
+    }
+
+    /// Sanity: distinct chain_ids must produce distinct genesis
+    /// coinbases. This is the cross-network safety property — a
+    /// mainnet genesis MUST NOT replay onto testnet.
+    #[test]
+    fn genesis_coinbase_differs_across_networks() {
+        let m = build_genesis_coinbase(&chain_id_mainnet()).expect("mainnet");
+        let t = build_genesis_coinbase(&chain_id_testnet()).expect("testnet");
+        let r = build_genesis_coinbase(&chain_id_regtest()).expect("regtest");
+        assert_ne!(
+            m.kernel.excess_signature, t.kernel.excess_signature,
+            "mainnet and testnet genesis signatures must differ"
+        );
+        assert_ne!(
+            m.kernel.excess_signature, r.kernel.excess_signature,
+            "mainnet and regtest genesis signatures must differ"
+        );
+        assert_ne!(
+            t.kernel.excess_signature, r.kernel.excess_signature,
+            "testnet and regtest genesis signatures must differ"
+        );
+    }
+}
