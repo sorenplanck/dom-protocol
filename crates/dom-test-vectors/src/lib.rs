@@ -21,5 +21,6 @@
 
 pub mod constants_vectors;
 pub mod hash_vectors;
+pub mod invariants;
 pub mod pmmr_vectors;
 pub mod serialization_vectors;
