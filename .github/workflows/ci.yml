@@ -1,0 +1,150 @@
+name: CI
+
+# Phase 1.4 — cross-platform equivalence CI. Builds, clippies, and
+# tests the workspace on the four host matrices the protocol must
+# remain deterministic across. The Windows leg is intentionally
+# marked `continue-on-error: true` until the secp256k1-zkp / randomx-rs
+# C builds are pinned to an MSVC toolchain proven to reproduce the
+# RFC-0004 PMMR roots — see docs/RELEASE_BLOCKERS.md (RB-PMMR-001).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  # randomx-rs requires the C library to build; integration tests are
+  # excluded across the matrix because the FULL_MEM dataset (~2 GB) is
+  # far above GitHub-hosted runner budgets. Single-host validation of
+  # the heavy integration suite is tracked separately.
+
+jobs:
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  build-test:
+    name: build + clippy + test (${{ matrix.host }})
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: linux-x86_64
+            runner: ubuntu-latest
+            experimental: false
+          - host: linux-arm64
+            runner: ubuntu-22.04-arm
+            experimental: false
+          - host: macos-arm64
+            runner: macos-latest
+            experimental: false
+          - host: macos-x86_64
+            runner: macos-13
+            experimental: false
+          - host: windows-x86_64
+            runner: windows-latest
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ matrix.host }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ matrix.host }}-
+
+      # secp256k1-zkp and randomx-rs link against C — make sure
+      # build-essential / Xcode CLT / MSVC are present. On Linux runners
+      # these are preinstalled; macOS ships clang; Windows needs Visual
+      # C++ Build Tools which `windows-latest` provides by default.
+      - name: Install Linux build tooling
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: cargo build --workspace
+        run: cargo build --workspace --all-targets
+
+      - name: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test --workspace (excluding integration)
+        run: cargo test --workspace --exclude dom-integration-tests --all-targets
+
+  pmmr-vectors-cross-platform:
+    name: pinned PMMR vectors must reproduce on ${{ matrix.host }}
+    runs-on: ${{ matrix.runner }}
+    needs: build-test
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: linux-x86_64
+            runner: ubuntu-latest
+            experimental: false
+          - host: linux-arm64
+            runner: ubuntu-22.04-arm
+            experimental: false
+          - host: macos-arm64
+            runner: macos-latest
+            experimental: false
+          - host: macos-x86_64
+            runner: macos-13
+            experimental: false
+          - host: windows-x86_64
+            runner: windows-latest
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build tooling
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      # The pinned RFC-0004 hex vectors are the cross-platform contract
+      # for the PMMR layout. If this leg fails on a runner where
+      # build-test passed, the protocol has lost cross-platform
+      # determinism on that platform.
+      - name: Run pinned PMMR vector tests
+        run: |
+          cargo test -p dom-test-vectors --lib pmmr_vectors
+
+      - name: Run hash + serialization vector tests
+        run: |
+          cargo test -p dom-test-vectors --lib hash_vectors
+          cargo test -p dom-test-vectors --lib serialization_vectors
+
+      - name: Run PMMR adversarial + reproducer suite
+        run: |
+          cargo test -p dom-pmmr --tests
+
+      - name: Print pinned PMMR vectors (cross-platform audit log)
+        run: |
+          cargo test -p dom-test-vectors --lib pmmr_vectors::tests::print_pmmr_vectors -- --nocapture
