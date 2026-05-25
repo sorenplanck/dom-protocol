@@ -19,6 +19,7 @@ hex.workspace               = true
 
 [dev-dependencies]
 tempfile = "3.10"
+lmdb.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
