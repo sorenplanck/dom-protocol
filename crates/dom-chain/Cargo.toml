@@ -21,3 +21,6 @@ tracing.workspace           = true
 tokio.workspace             = true
 primitive-types.workspace = true
 hex.workspace               = true
+
+[dev-dependencies]
+tempfile = "3.10"
