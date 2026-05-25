@@ -1,6 +1,48 @@
 #![allow(missing_docs)]
 //! LMDB environment and database handles.
 //!
+//! ## Durability stance (Roadmap v2 Phase 3.3)
+//!
+//! The environment is opened with the *default* sync mode. Concretely:
+//!
+//! - `MDB_NOSYNC` is NOT set. `mdb_txn_commit` therefore fsyncs the
+//!   data file before returning. A successful `commit_block` MUST mean
+//!   the block is durable across a power loss or kernel panic — that
+//!   is the consensus-grade contract a blockchain store has to honour.
+//! - `MDB_NOMETASYNC` is NOT set. The meta page (the LMDB superblock)
+//!   is fsynced too; without it a power loss can leave the file
+//!   structurally inconsistent.
+//!
+//! The pre-Phase-3.3 flag set (`NO_TLS | NO_SYNC`) traded durability
+//! for a throughput win that does not exist at our commit cadence
+//! (~one fsync per ≥120-second block) and that the LMDB docs
+//! explicitly warn "can corrupt the database or lose the last
+//! transactions". A blockchain cannot accept either outcome.
+//!
+//! `NO_TLS` is retained: it disables the per-thread reader-slot
+//! reservation that prevents a single thread from opening multiple
+//! read transactions concurrently. The DomStore caller pool is async
+//! / multi-thread and the slot model would otherwise serialise reads.
+//!
+//! ## Map size (Roadmap v2 Phase 3.3)
+//!
+//! `MAP_SIZE` is the maximum mapped region size — LMDB will refuse
+//! commits with `MDB_MAP_FULL` once the file grows past it. We
+//! pre-allocate 16 GiB on every host; that buys >5 years at the
+//! current 33-DOM block reward + typical 1 MB block budget before any
+//! manual extension is needed. When a commit fails with `MapFull`,
+//! `commit_block` returns a tagged `DomError::Internal` containing
+//! `"LMDB_MAP_FULL"` so the chain-init layer can surface the
+//! condition distinctly from a generic LMDB error.
+//!
+//! Dynamic map_size growth is intentionally deferred: it requires a
+//! safe quiescent point with no in-flight read transactions, and the
+//! current async multi-reader model can't guarantee that cheaply.
+//! Once Phase 6 lands rebuild-from-genesis, the operator path
+//! "raise the limit and restart" becomes equivalent to "wait,
+//! redeliver" and the deferral is no longer a release blocker.
+//! Tracked under RB-LMDB-MAPSIZE in RELEASE_BLOCKERS.
+//!
 //! ## Partial-persistence contract (Roadmap v2 Phase 3.2)
 //!
 //! Under normal use, every `commit_block` is one LMDB transaction, and
@@ -38,8 +80,14 @@ use dom_core::DomError;
 use lmdb::{Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
 use std::path::Path;
 
-const MAP_SIZE: usize = 1 << 34; // 16 GiB — expandable
+const MAP_SIZE: usize = 1 << 34; // 16 GiB — see module doc § "Map size"
 const MAX_DBS: u32 = 16;
+
+/// Sentinel substring callers can grep for in `DomError::Internal`
+/// messages to detect LMDB map-full conditions distinctly from other
+/// internal errors. Exposed as a constant so the chain-init layer can
+/// match exactly without typo risk.
+pub const LMDB_MAP_FULL_SENTINEL: &str = "LMDB_MAP_FULL";
 
 /// Named LMDB databases.
 pub const DB_BLOCKS: &str = "blocks";
@@ -76,8 +124,11 @@ impl DomStore {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| DomError::Internal(format!("create data dir: {e}")))?;
 
+        // NO_TLS only — see module doc § "Durability stance". NO_SYNC and
+        // NO_META_SYNC are intentionally absent: every commit_block must
+        // fsync the data file + meta page before returning.
         let env = Environment::new()
-            .set_flags(EnvironmentFlags::NO_TLS | EnvironmentFlags::NO_SYNC)
+            .set_flags(EnvironmentFlags::NO_TLS)
             .set_max_dbs(MAX_DBS)
             .set_map_size(MAP_SIZE)
             .open(data_dir)
@@ -299,9 +350,17 @@ impl DomStore {
                 })?;
         }
 
-        // Single atomic commit — if this fails nothing was written
-        txn.commit()
-            .map_err(|e| DomError::Internal(format!("commit block: {e}")))?;
+        // Single atomic commit — if this fails nothing was written.
+        // MDB_MAP_FULL is tagged with LMDB_MAP_FULL_SENTINEL so the
+        // chain-init layer can recognise it without parsing free-form
+        // error text.
+        txn.commit().map_err(|e| match e {
+            lmdb::Error::MapFull => DomError::Internal(format!(
+                "{LMDB_MAP_FULL_SENTINEL}: map_size={MAP_SIZE} exhausted while committing block {} at height {block_height}",
+                hex::encode(block_hash)
+            )),
+            other => DomError::Internal(format!("commit block: {other}")),
+        })?;
 
         Ok(())
     }
