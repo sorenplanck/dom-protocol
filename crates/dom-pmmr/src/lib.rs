@@ -22,29 +22,73 @@ use dom_core::{DomError, Hash256, TAG_PMMR_BAG, TAG_PMMR_EMPTY, TAG_PMMR_LEAF, T
 use dom_crypto::hash::blake2b_256_tagged;
 
 // ── Position arithmetic ───────────────────────────────────────────────────────
+//
+// Convention (RFC-0004, matching Grin's `core/src/core/pmmr/pmmr.rs`):
+//
+//   * 1-indexed MMR postorder positions: leaves and internal nodes share
+//     the same monotone numbering. The empty MMR has no position 0.
+//   * Height 0 = leaf. A node at height h is the root of a perfect
+//     binary subtree containing 2^h leaves and 2^(h+1) - 1 nodes.
+//   * Leaf positions are NOT given by `trailing_ones`; postorder height
+//     must be computed by left-jumping until the position becomes
+//     "all-ones" (2^k - 1) and reading the most-significant bit index.
+//
+// The pre-Phase-B implementation used `pos.trailing_ones()` directly
+// (DOM-PMMR-001), inflating heights at positions 1, 3, 5, 7, … by one
+// and suppressing every merge inside `merge_peaks`.
 
-/// Returns true if `pos` (1-indexed) is a leaf in the MMR.
-///
-/// In a MMR, leaves are at positions where the number of trailing
-/// ones in binary is even (0, 2, 4, ...).
-#[allow(dead_code)]
-fn is_leaf(pos: u64) -> bool {
-    pos.trailing_ones() % 2 == 0
+/// True iff `n` is of the form `2^k - 1` (binary representation is all
+/// ones below the most-significant bit). Used by the postorder height
+/// loop as the termination predicate.
+#[inline]
+fn is_all_ones(n: u64) -> bool {
+    // n = 2^k - 1  ⇔  n+1 is a non-zero power of two.
+    n != 0 && n.checked_add(1).map(u64::is_power_of_two).unwrap_or(false)
 }
 
-/// Returns the height of a node at `pos` in the MMR.
+/// 1-indexed position of the most-significant set bit (msb_pos(1) = 1,
+/// msb_pos(0) = 0). Equivalent to `64 - n.leading_zeros()` for `n > 0`.
+#[inline]
+fn most_significant_pos(n: u64) -> u32 {
+    if n == 0 {
+        0
+    } else {
+        64 - n.leading_zeros()
+    }
+}
+
+/// Move `pos` to the leftmost sibling at the same height by subtracting
+/// the size of the subtree rooted at the most-significant level minus
+/// one. Mirrors Grin's `bintree_jump_left`.
+#[inline]
+fn jump_left(pos: u64) -> u64 {
+    let msb = most_significant_pos(pos);
+    // msb is at least 1 here because the caller only invokes jump_left
+    // when `pos > 0` and `!is_all_ones(pos)` — i.e. pos has at least
+    // one zero bit below the msb, which forces msb >= 2.
+    let shift = msb.saturating_sub(1);
+    pos - ((1u64 << shift) - 1)
+}
+
+/// Returns the postorder height of the node at MMR position `pos`.
 ///
-/// Height 0 = leaf. Height h means the node is the root of a
-/// perfect binary tree with 2^h leaves.
+/// Height 0 = leaf. The Grin-derived algorithm: keep jumping left until
+/// the position is `2^k - 1` (a perfect-subtree root), then height =
+/// `msb_pos - 1`.
+///
+/// Examples (1-indexed): heights at 1..15 =
+///   [0, 0, 1, 0, 0, 1, 2, 0, 0, 1, 0, 0, 1, 2, 3].
 fn node_height(pos: u64) -> u32 {
-    pos.trailing_ones()
+    if pos == 0 {
+        return 0;
+    }
+    let mut h = pos;
+    while !is_all_ones(h) {
+        h = jump_left(h);
+    }
+    most_significant_pos(h) - 1
 }
 
-/// Returns the number of leaves in a perfect binary tree of height h.
-#[allow(dead_code)]
-fn leaves_in_subtree(height: u32) -> u64 {
-    1u64 << height
-}
 
 /// Given a leaf count `n`, return the list of peak positions (1-indexed).
 ///
@@ -191,30 +235,44 @@ impl Pmmr {
 
     /// Append a new leaf with the given payload.
     ///
-    /// Returns the position of the appended leaf.
+    /// Returns the MMR postorder position of the appended leaf. With
+    /// `n - 1` leaves already in the MMR, the new leaf is placed
+    /// immediately after the last existing node:
+    ///
+    /// ```text
+    ///   leaf_pos(n) = nodes_before(n) + 1
+    ///              = (2*(n-1) - popcount(n-1)) + 1
+    ///              = 2*n - 1 - popcount(n-1)
+    /// ```
+    ///
+    /// Pre-Phase-B (DOM-PMMR-001) this used the *post*-insert node
+    /// count, which placed each fresh leaf into the parent slot it
+    /// would have been merged into, suppressing every subsequent merge
+    /// and collapsing `root()` to `leaf_hash(last_pos, last_payload)`.
     pub fn push(&mut self, payload: &[u8]) -> Result<u64, DomError> {
         let new_leaf_count = self
             .leaf_count
             .checked_add(1)
             .ok_or_else(|| DomError::Internal("PMMR leaf count overflow".into()))?;
 
-        // Compute the position of the new leaf
-        // New MMR node count after adding this leaf
-        let new_node_count = {
-            let n = new_leaf_count;
+        // Position of the new leaf = (nodes already present) + 1.
+        let nodes_before = {
+            let n = self.leaf_count;
             let pc = n.count_ones() as u64;
             n.checked_mul(2)
                 .and_then(|x| x.checked_sub(pc))
                 .ok_or_else(|| DomError::Internal("node count overflow".into()))?
         };
+        let leaf_pos = nodes_before
+            .checked_add(1)
+            .ok_or_else(|| DomError::Internal("leaf_pos overflow".into()))?;
 
-        let leaf_pos = new_node_count; // new leaf is the last node appended
-
-        // Compute leaf hash
+        // Compute leaf hash and place it.
         let lh = leaf_hash(leaf_pos, payload);
         self.set_node(leaf_pos, lh)?;
 
-        // Merge peaks: any two adjacent peaks of equal height merge into a parent
+        // Merge peaks: any two adjacent peaks of equal height merge
+        // into a parent at the position immediately to the right.
         self.merge_peaks(leaf_pos)?;
 
         self.leaf_count = new_leaf_count;
@@ -274,14 +332,22 @@ impl Pmmr {
         bag_peaks(&peak_hashes)
     }
 
+    /// Place a node hash at `pos`. The MMR is append-only; overwriting
+    /// an existing entry is a consensus-class bug (it would silently
+    /// rewrite committed history without changing the leaf count), so
+    /// this guard rejects any attempt at re-assignment.
     fn set_node(&mut self, pos: u64, hash: Hash256) -> Result<(), DomError> {
         let idx = pos as usize;
         if idx >= self.nodes.len() {
-            // Extend with None placeholders
             let needed = idx
                 .checked_add(1)
                 .ok_or_else(|| DomError::Internal("node index overflow".into()))?;
             self.nodes.resize(needed, None);
+        }
+        if self.nodes[idx].is_some() {
+            return Err(DomError::Internal(format!(
+                "PMMR invariant violated: attempt to overwrite node at position {pos}"
+            )));
         }
         self.nodes[idx] = Some(hash);
         Ok(())
@@ -387,6 +453,23 @@ mod tests {
         }
     }
 
+    /// Postorder heights at positions 1..=15 — pinned against the
+    /// canonical reference table. Catches any regression in the
+    /// Grin-derived `node_height` derivation.
+    #[test]
+    fn node_height_matches_postorder_table() {
+        let expected: [u32; 15] = [0, 0, 1, 0, 0, 1, 2, 0, 0, 1, 0, 0, 1, 2, 3];
+        for (i, &h) in expected.iter().enumerate() {
+            let pos = (i as u64) + 1;
+            assert_eq!(
+                node_height(pos),
+                h,
+                "node_height({pos}) expected {h}, got {}",
+                node_height(pos)
+            );
+        }
+    }
+
     #[test]
     fn peak_positions_single_leaf() {
         let peaks = peak_positions(1);
@@ -423,15 +506,32 @@ mod tests {
         pmmr.push(b"y").unwrap();
         assert_eq!(pmmr.leaf_count(), 2);
     }
+
+    /// `set_node` MUST reject any attempt to overwrite an already-set
+    /// position. The MMR is append-only; silent overwrite is a
+    /// consensus-class corruption primitive (it would rewrite committed
+    /// history without changing the leaf count), so the internal guard
+    /// is exercised here directly via the privileged crate-local view.
+    #[test]
+    fn set_node_overwrite_is_rejected() {
+        let mut pmmr = Pmmr::new();
+        pmmr.push(b"a").unwrap();
+        // Position 1 is now occupied by the first leaf hash.
+        let attempt = pmmr.set_node(1, Hash256::ZERO);
+        assert!(
+            attempt.is_err(),
+            "set_node must refuse to overwrite an already-populated MMR position"
+        );
+
+        // Push a second leaf — that runs merge_peaks which writes
+        // position 3 (the parent). Re-attempting overwrite at 3 must
+        // also be rejected.
+        pmmr.push(b"b").unwrap();
+        let attempt2 = pmmr.set_node(3, Hash256::ZERO);
+        assert!(
+            attempt2.is_err(),
+            "set_node must refuse to overwrite an internal node either"
+        );
+    }
 }
 
-#[test]
-fn debug_three_leaves() {
-    let mut p = Pmmr::new();
-    p.push(b"a").unwrap();
-    println!("after 1 leaf: len={}", p.nodes.len());
-    p.push(b"b").unwrap();
-    println!("after 2 leaves: len={}", p.nodes.len());
-    p.push(b"c").unwrap();
-    println!("after 3 leaves: len={}", p.nodes.len());
-}
