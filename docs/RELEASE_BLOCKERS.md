@@ -575,7 +575,7 @@ Resolved commits:
 |---|---|---|
 | Cross-platform deterministic roots (Linux / Windows / macOS / ARM64) | No CI matrix yet — single-VPS environment. | Phase 1.4 |
 | Interrupted-flush PMMR-specific harness (kill mid `commit_block`, reopen, equivalence) | Phase 3.2 covers store-level partial persistence; a PMMR-level equivalent over `output_root` / `kernel_root` / `rangeproof_root` is not yet wired. | Phase 3.2 extension |
-| `replay_determinism` re-execution on the corrected algorithm | RandomX FULL_MEM dataset init ≈ 150 s per block on the current VPS — 3-block test budget exceeds practical session timeouts. `chain_persistence` (1-block) was rerun and passed (158.75 s, hash = `a987f084bbd3f31a07a2831fa04e146a82030a9423abd26d9470745dc5201bbb`); 2- and 3-block replay scenarios remain to be re-executed on a dedicated mining host. | Phase 6.1 |
+| `replay_determinism` re-execution on the corrected algorithm | RandomX FULL_MEM dataset init ≈ 150 s per block on the current VPS — 3-block test budget exceeds practical session timeouts. **Empirical measurements:** `chain_persistence` (1-block mine + restart) passed in 158.75 s with tip hash `a987f084bbd3f31a07a2831fa04e146a82030a9423abd26d9470745dc5201bbb`. `replay_determinism::replay_same_chain_reopens_to_identical_tip` (2-block mine) **timed out at 900 s** on this VPS — sustained mining beyond one block is not feasible in-session. 3-block `replay_to_two_chains_yields_identical_tip` is correspondingly deferred. Re-execution requires a dedicated mining host with FULL_MEM RandomX throughput ≥ 1 block / 60 s. | Phase 6.1 |
 
 Until those gaps are closed, the Phase F status is "partially validated
 empirically — full closure requires the listed infrastructure".
