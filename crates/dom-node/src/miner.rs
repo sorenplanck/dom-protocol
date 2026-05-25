@@ -356,12 +356,19 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
         mmr.root()
     };
 
-    // Regtest mines with the FLAG_LIGHT-equivalent VM (cache only, no
-    // ~2 GB dataset) — affordable on developer laptops where two miners
-    // otherwise OOM. RandomX hash output is identical to FULL_MEM mode
-    // (only the prover speed differs), so consensus validation does not
-    // care which mode the miner used.
-    let light_vm = node.config.network == dom_config::Network::Regtest;
+    // All networks mine with FLAG_FULL_MEM (~2 GB dataset + ~256 MB cache
+    // per active miner thread) for ~10× hash-rate vs the cache-only VM.
+    // RandomX hash output is identical between modes — only the prover
+    // speed differs — so consensus validation does not care which mode
+    // the miner used. Validators (dom-pow::randomx_pool) intentionally
+    // stay on the cache-only path: validation is occasional and shouldn't
+    // pay the dataset cost.
+    //
+    // Memory budget: ~2.3 GB per active miner thread. Two-node Regtest
+    // integration runs (~4.6 GB miners + node baseline) fit on 8 GB hosts.
+    // On lower-RAM laptops, set light_vm = true here if you hit OOM —
+    // mining will be ~10× slower but functionally identical.
+    let light_vm = false;
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<BlockHeader, String>>();
     std::thread::Builder::new()
         .name(format!("miner-{}", new_height))
