@@ -44,6 +44,7 @@ pub mod backup;
 pub mod coin_selection;
 pub mod hd_wallet;
 pub mod output_index;
+pub mod restore;
 pub mod seed;
 pub mod store;
 pub mod types;
@@ -52,6 +53,10 @@ pub mod wallet;
 pub mod wallet_dir;
 
 pub use hd_wallet::{ExtendedPrivKey, HdError, DOM_COIN_TYPE};
+pub use restore::{
+    restore_from_phrase, ChainScanSource, InMemoryChainScan, RestoreError, RestoredWallet,
+    ScanBlock,
+};
 pub use seed::{
     coinbase_blinding, spend_output_blinding, Bip39Seed, SeedAcceptance, SeedError,
     NEW_WALLET_WORD_COUNT, SEED_BYTES,
