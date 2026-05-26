@@ -738,6 +738,7 @@ dependencies = [
  "dom-serialization",
  "dom-store",
  "dom-wallet",
+ "dom-wire",
  "hex",
  "reqwest",
  "serde_json",
@@ -900,6 +901,7 @@ dependencies = [
  "dom-crypto",
  "dom-serialization",
  "dom-tx",
+ "fs2",
  "hex",
  "hkdf",
  "hmac",
@@ -1053,6 +1055,16 @@ checksum = "8835f84f38484cc86f110a805655697908257fb9a7af005234060891557198e9"
 dependencies = [
  "nonempty",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]
