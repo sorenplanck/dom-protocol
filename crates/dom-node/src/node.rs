@@ -523,11 +523,15 @@ impl DomNode {
                 addrs.extend(self.config.seed_peers.iter().cloned());
 
                 for addr in addrs {
-                    let already_connected = {
-                        let mgr = self.peers.lock().await;
-                        mgr.peers.contains_key(&addr)
+                    let reserved = {
+                        let mut mgr = self.peers.lock().await;
+                        if !mgr.needs_outbound() {
+                            false
+                        } else {
+                            mgr.reserve_outbound(&addr).is_ok()
+                        }
                     };
-                    if already_connected {
+                    if !reserved {
                         continue;
                     }
 
@@ -546,7 +550,10 @@ impl DomNode {
                     let svc_c = svc.clone();
                     tokio::spawn(async move {
                         connect_outbound(&addr, config, privkey, chain, channels, svc_c).await;
-                        peers.lock().await.remove_peer(&cleanup_addr);
+                        let mut mgr = peers.lock().await;
+                        mgr.remove_peer(&cleanup_addr);
+                        mgr.release_outbound_reservation(&cleanup_addr);
+                        drop(mgr);
                         refresh_peer_metrics(&peers, &metrics).await;
                     });
                 }
@@ -2057,5 +2064,32 @@ mod tests {
         assert_eq!(metrics.peer_count.load(Ordering::Relaxed), 2);
         assert_eq!(metrics.inbound_peers.load(Ordering::Relaxed), 1);
         assert_eq!(metrics.outbound_peers.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_peer_metrics_ignores_failed_outbound_reservations() {
+        let peers = Arc::new(Mutex::new(PeerManager::new(125, 1)));
+        let metrics = Arc::new(Metrics::new());
+
+        {
+            let mut mgr = peers.lock().await;
+            mgr.reserve_outbound("203.0.113.44:33369")
+                .expect("reserve outbound");
+        }
+        refresh_peer_metrics(&peers, &metrics).await;
+
+        assert_eq!(metrics.peer_count.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.inbound_peers.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.outbound_peers.load(Ordering::Relaxed), 0);
+
+        {
+            let mut mgr = peers.lock().await;
+            mgr.release_outbound_reservation("203.0.113.44:33369");
+        }
+        refresh_peer_metrics(&peers, &metrics).await;
+
+        assert_eq!(metrics.peer_count.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.inbound_peers.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.outbound_peers.load(Ordering::Relaxed), 0);
     }
 }

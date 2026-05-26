@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 const MAX_PEERS_SAME_SLASH_16: usize = 2;
 /// Reservations older than this are treated as dead handshakes and ignored.
 const STALE_PENDING_INBOUND_SECS: u64 = crate::handshake::HANDSHAKE_TIMEOUT_SECS * 3;
+/// Outbound reservations older than this are treated as dead handshakes.
+const STALE_PENDING_OUTBOUND_SECS: u64 = crate::handshake::HANDSHAKE_TIMEOUT_SECS * 3;
 /// Pre-registration penalties expire after this interval.
 const PENDING_PENALTY_TTL_SECS: u64 = 15 * 60;
 /// Bound memory used by hostile pre-registration address churn.
@@ -27,6 +29,11 @@ const DUPLICATE_BLOCK_RELAY_WINDOW_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Copy)]
 struct PendingInbound {
+    reserved_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingOutbound {
     reserved_at: Instant,
 }
 
@@ -48,6 +55,8 @@ pub struct PeerManager {
     pub peers: HashMap<String, PeerInfo>,
     /// Inbound sockets admitted by the listener but not yet registered.
     pending_inbound: HashMap<String, PendingInbound>,
+    /// Outbound dials started but not yet registered.
+    pending_outbound: HashMap<String, PendingOutbound>,
     /// Penalties accumulated before a peer is fully registered.
     pending_penalties: HashMap<String, PendingPenalty>,
     /// Runtime-only duplicate block relay counters for connected peers.
@@ -64,6 +73,7 @@ impl PeerManager {
         Self {
             peers: HashMap::new(),
             pending_inbound: HashMap::new(),
+            pending_outbound: HashMap::new(),
             pending_penalties: HashMap::new(),
             duplicate_block_relays: HashMap::new(),
             max_inbound,
@@ -76,6 +86,14 @@ impl PeerManager {
         self.peers
             .values()
             .filter(|p| p.outbound && p.state != PeerState::Disconnected)
+            .count()
+    }
+
+    /// Count outbound dials that are still in handshake / Hello exchange.
+    pub fn pending_outbound_count(&self) -> usize {
+        self.pending_outbound
+            .values()
+            .filter(|pending| !outbound_reservation_is_stale(**pending))
             .count()
     }
 
@@ -105,7 +123,7 @@ impl PeerManager {
 
     /// Check if we need more outbound connections.
     pub fn needs_outbound(&self) -> bool {
-        self.outbound_count() < self.min_outbound
+        self.outbound_count() + self.pending_outbound_count() < self.min_outbound
     }
 
     /// Check if we can accept another inbound connection.
@@ -168,6 +186,39 @@ impl PeerManager {
         self.pending_inbound.remove(&addr.to_string());
     }
 
+    /// Reserve an outbound dial slot before spawning handshake work.
+    pub fn reserve_outbound(&mut self, addr: &str) -> Result<(), DomError> {
+        self.prune_stale_state();
+        if self.peers.contains_key(addr) || self.pending_outbound.contains_key(addr) {
+            return Err(DomError::PolicyRejected(
+                "already connected or pending outbound peer".into(),
+            ));
+        }
+        if self.pending_ban_score(addr) >= crate::peer::ban_scores::BAN_THRESHOLD {
+            return Err(DomError::PolicyRejected(
+                "pending outbound peer is banned".into(),
+            ));
+        }
+        if !self.needs_outbound() {
+            return Err(DomError::PolicyRejected(
+                "outbound limit or pending outbound limit reached".into(),
+            ));
+        }
+        self.pending_outbound.insert(
+            addr.to_string(),
+            PendingOutbound {
+                reserved_at: Instant::now(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Release a pending outbound reservation.
+    pub fn release_outbound_reservation(&mut self, addr: &str) {
+        self.prune_stale_state();
+        self.pending_outbound.remove(addr);
+    }
+
     /// Register a new peer connection attempt.
     pub fn register_peer(&mut self, info: PeerInfo) -> Result<(), DomError> {
         self.prune_stale_state();
@@ -191,6 +242,8 @@ impl PeerManager {
                     "inbound limit or subnet limit reached".into(),
                 ));
             }
+        } else {
+            self.pending_outbound.remove(&addr_str);
         }
         self.pending_penalties.remove(&addr_str);
         self.duplicate_block_relays.remove(&addr_str);
@@ -203,6 +256,7 @@ impl PeerManager {
         self.prune_stale_state();
         self.peers.remove(addr);
         self.pending_inbound.remove(addr);
+        self.pending_outbound.remove(addr);
         self.duplicate_block_relays.remove(addr);
     }
 
@@ -320,6 +374,8 @@ impl PeerManager {
     fn prune_stale_state(&mut self) {
         self.pending_inbound
             .retain(|_, pending| !reservation_is_stale(*pending));
+        self.pending_outbound
+            .retain(|_, pending| !outbound_reservation_is_stale(*pending));
         self.pending_penalties
             .retain(|_, penalty| !penalty_is_stale(*penalty));
         self.enforce_pending_penalty_bound();
@@ -349,6 +405,10 @@ impl PeerManager {
 
 fn reservation_is_stale(pending: PendingInbound) -> bool {
     pending.reserved_at.elapsed() >= Duration::from_secs(STALE_PENDING_INBOUND_SECS)
+}
+
+fn outbound_reservation_is_stale(pending: PendingOutbound) -> bool {
+    pending.reserved_at.elapsed() >= Duration::from_secs(STALE_PENDING_OUTBOUND_SECS)
 }
 
 fn penalty_is_stale(pending: PendingPenalty) -> bool {
@@ -410,6 +470,24 @@ mod tests {
     fn needs_outbound_when_below_min() {
         let mgr = PeerManager::new(125, 8);
         assert!(mgr.needs_outbound());
+    }
+
+    #[test]
+    fn reserve_outbound_deduplicates_simultaneous_reconnect_races() {
+        let mut mgr = PeerManager::new(125, 2);
+        assert!(mgr.reserve_outbound("203.0.113.10:33369").is_ok());
+        assert!(mgr.reserve_outbound("203.0.113.10:33369").is_err());
+        assert_eq!(mgr.pending_outbound_count(), 1);
+    }
+
+    #[test]
+    fn outbound_limit_bounds_concurrent_handshakes() {
+        let mut mgr = PeerManager::new(125, 2);
+        assert!(mgr.reserve_outbound("203.0.113.10:33369").is_ok());
+        assert!(mgr.reserve_outbound("203.0.113.11:33369").is_ok());
+        assert!(mgr.reserve_outbound("203.0.113.12:33369").is_err());
+        assert_eq!(mgr.pending_outbound_count(), 2);
+        assert!(!mgr.needs_outbound());
     }
 
     #[test]
@@ -510,6 +588,27 @@ mod tests {
     }
 
     #[test]
+    fn stale_pending_outbound_stops_consuming_capacity() {
+        let mut mgr = PeerManager::new(125, 1);
+        let addr = "203.0.113.20:33369";
+        mgr.reserve_outbound(addr).expect("reserve outbound");
+        mgr.pending_outbound.get_mut(addr).unwrap().reserved_at =
+            Instant::now() - Duration::from_secs(STALE_PENDING_OUTBOUND_SECS + 1);
+
+        assert_eq!(mgr.pending_outbound_count(), 0);
+        mgr.reserve_outbound("203.0.113.21:33369")
+            .expect("stale outbound reservation must not pin outbound capacity");
+    }
+
+    #[test]
+    fn pending_ban_threshold_blocks_new_outbound_reservation() {
+        let mut mgr = PeerManager::new(125, 8);
+        let addr = "203.0.113.22:33369";
+        assert_eq!(mgr.add_pending_ban_score(addr, 100), 100);
+        assert!(mgr.reserve_outbound(addr).is_err());
+    }
+
+    #[test]
     fn pending_penalties_are_bounded_under_address_churn() {
         let mut mgr = PeerManager::new(125, 8);
         for i in 0..(MAX_PENDING_PENALTIES + 128) {
@@ -572,5 +671,48 @@ mod tests {
 
         mgr.remove_peer(&addr);
         assert_eq!(mgr.duplicate_block_relay_count(&addr), 0);
+    }
+
+    #[test]
+    fn disconnect_during_outbound_registration_clears_pending_state() {
+        let mut mgr = PeerManager::new(125, 8);
+        let peer = make_peer([203, 0, 113, 30], 33369, true);
+        let addr = peer.addr.to_string();
+
+        mgr.reserve_outbound(&addr).expect("reserve outbound");
+        mgr.register_peer(peer).expect("register outbound");
+        assert_eq!(mgr.pending_outbound_count(), 0);
+
+        mgr.remove_peer(&addr);
+        assert_eq!(mgr.pending_outbound_count(), 0);
+        assert!(!mgr.peers.contains_key(&addr));
+    }
+
+    #[test]
+    fn repeated_outbound_timeout_storms_converge_without_leaks() {
+        let mut mgr = PeerManager::new(125, 4);
+        for i in 0..1_024usize {
+            let addr = format!("198.51.100.{}:33369", (i % 250) + 1);
+            let _ = mgr.reserve_outbound(&addr);
+            mgr.release_outbound_reservation(&addr);
+        }
+
+        assert_eq!(mgr.pending_outbound_count(), 0);
+        assert!(mgr.needs_outbound());
+    }
+
+    #[test]
+    fn repeated_failed_outbound_handshakes_do_not_create_reconnect_amplification() {
+        let mut mgr = PeerManager::new(125, 1);
+        let addr = "198.51.100.200:33369";
+
+        for _ in 0..16 {
+            assert!(mgr.reserve_outbound(addr).is_ok());
+            assert!(mgr.reserve_outbound(addr).is_err());
+            mgr.release_outbound_reservation(addr);
+        }
+
+        assert_eq!(mgr.pending_outbound_count(), 0);
+        assert!(mgr.reserve_outbound(addr).is_ok());
     }
 }
