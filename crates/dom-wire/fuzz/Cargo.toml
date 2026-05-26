@@ -38,6 +38,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_getheaders_payload"
+path = "fuzz_targets/fuzz_getheaders_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_getblockdata_payload"
+path = "fuzz_targets/fuzz_getblockdata_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_block_payload"
 path = "fuzz_targets/fuzz_block_payload.rs"
 test = false

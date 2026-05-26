@@ -188,4 +188,39 @@ mod tests {
         assert!(removed.is_some());
         assert_eq!(queue.size().await, 0);
     }
+
+    #[tokio::test]
+    async fn duplicate_defer_replaces_without_growing_queue() {
+        let queue = FutureBlockQueue::new();
+        let first = mock_block(1, 1000);
+        let mut replacement = mock_block(1, 1100);
+        replacement.block_bytes = vec![0xAB; 64];
+
+        assert!(queue.defer(first).await);
+        assert!(queue.defer(replacement.clone()).await);
+        assert_eq!(queue.size().await, 1);
+
+        let removed = queue.remove(&replacement.block_hash).await.unwrap();
+        assert_eq!(removed.timestamp, 1100);
+        assert_eq!(removed.block_bytes, vec![0xAB; 64]);
+    }
+
+    #[tokio::test]
+    async fn full_queue_rejects_new_hash_but_keeps_existing_entries() {
+        let queue = FutureBlockQueue {
+            entries: Arc::new(RwLock::new(HashMap::new())),
+            max_size: 2,
+        };
+        let first = mock_block(1, 1000);
+        let second = mock_block(2, 1000);
+        let third = mock_block(3, 1000);
+
+        assert!(queue.defer(first.clone()).await);
+        assert!(queue.defer(second.clone()).await);
+        assert!(!queue.defer(third).await);
+
+        assert_eq!(queue.size().await, 2);
+        assert!(queue.contains(&first.block_hash).await);
+        assert!(queue.contains(&second.block_hash).await);
+    }
 }

@@ -27,7 +27,9 @@
 
 use dom_chain::{ChainState, CHAIN_CORRUPT_SENTINEL};
 use dom_consensus::block::{BlockHeader, ProofOfWork};
-use dom_core::{BlockHeight, Hash256, Timestamp, PROTOCOL_VERSION};
+use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
+use dom_core::{BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, PROTOCOL_VERSION};
+use dom_crypto::pedersen::Commitment;
 use dom_pow::CompactTarget;
 use dom_serialization::DomSerialize;
 use dom_store::utxo::UtxoEntry;
@@ -52,7 +54,25 @@ fn put_raw(store: &DomStore, db_name: &str, key: &[u8], value: &[u8]) {
     txn.commit().expect("commit");
 }
 
-fn synthetic_header(height: u64) -> Vec<u8> {
+fn g_point() -> Commitment {
+    let g = [
+        0x02u8, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87,
+        0x0B, 0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9, 0x59, 0xF2, 0x81, 0x5B, 0x16,
+        0xF8, 0x17, 0x98,
+    ];
+    Commitment::from_compressed_bytes(&g).unwrap()
+}
+
+fn h_point() -> Commitment {
+    let h = [
+        0x02u8, 0xc6, 0x04, 0x7f, 0x94, 0x41, 0xed, 0x7d, 0x6d, 0x30, 0x45, 0x40, 0x6e, 0x95, 0xc0,
+        0x7c, 0xd8, 0x5c, 0x77, 0x8e, 0x4b, 0x8c, 0xef, 0x3c, 0xa7, 0xab, 0xac, 0x09, 0xb9, 0x5c,
+        0x70, 0x9e, 0xe5,
+    ];
+    Commitment::from_compressed_bytes(&h).unwrap()
+}
+
+fn synthetic_header_struct(height: u64, nonce: u64) -> BlockHeader {
     BlockHeader {
         version: PROTOCOL_VERSION,
         height: BlockHeight(height),
@@ -65,12 +85,53 @@ fn synthetic_header(height: u64) -> Vec<u8> {
         target: CompactTarget(0x1f00_ffff),
         total_difficulty: U256::one(),
         pow: ProofOfWork {
-            nonce: 0,
+            nonce,
             randomx_hash: Hash256::ZERO,
         },
     }
-    .to_bytes()
-    .expect("serialize header")
+}
+
+fn synthetic_header(height: u64) -> Vec<u8> {
+    synthetic_header_struct(height, 0)
+        .to_bytes()
+        .expect("serialize header")
+}
+
+fn synthetic_block_bytes(
+    height: u64,
+    nonce: u64,
+    output: Commitment,
+    kernel_excess: Commitment,
+) -> (Vec<u8>, Vec<u8>, [u8; 32], [u8; 33], [u8; 33]) {
+    let header = synthetic_header_struct(height, nonce);
+    let header_bytes = header.to_bytes().expect("serialize header");
+    let block_hash = *dom_crypto::hash::blake2b_256(&header_bytes).as_bytes();
+    let output_bytes = *output.as_bytes();
+    let excess_bytes = *kernel_excess.as_bytes();
+    let block = Block {
+        header,
+        coinbase: CoinbaseTransaction {
+            output: TransactionOutput {
+                commitment: output,
+                proof: vec![0xAA; 8],
+            },
+            kernel: CoinbaseKernel {
+                features: KERNEL_FEAT_COINBASE,
+                explicit_value: 1,
+                excess: kernel_excess,
+                excess_signature: [0u8; 65],
+            },
+            offset: [0u8; 32],
+        },
+        transactions: Vec::new(),
+    };
+    (
+        header_bytes,
+        block.to_bytes().expect("serialize block"),
+        block_hash,
+        output_bytes,
+        excess_bytes,
+    )
 }
 
 fn make_hash(seed: u8) -> [u8; 32] {
@@ -112,8 +173,8 @@ fn empty_store_opens_as_genesis_ready_chain() {
 #[test]
 fn healthy_committed_block_opens_cleanly() {
     let dir = TempDir::new().expect("tempdir");
-    let hash = make_hash(0xAA);
-    let header_bytes = synthetic_header(1);
+    let (header_bytes, body_bytes, hash, output, excess) =
+        synthetic_block_bytes(1, 0xAA, g_point(), h_point());
     {
         let store = DomStore::open(dir.path()).expect("open");
         store
@@ -121,9 +182,9 @@ fn healthy_committed_block_opens_cleanly() {
                 &hash,
                 1,
                 &header_bytes,
-                b"body",
+                &body_bytes,
                 &[(
-                    [0x02u8; 33],
+                    output,
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
@@ -132,13 +193,378 @@ fn healthy_committed_block_opens_cleanly() {
                     .to_bytes(),
                 )],
                 &[],
-                &[([0x03u8; 33], hash)],
+                &[(excess, hash)],
             )
             .expect("commit");
     }
     let chain = open_chain(dir.path()).expect("healthy state must open cleanly");
     assert_eq!(chain.tip_hash, Hash256::from_bytes(hash));
     assert_eq!(chain.tip_height, BlockHeight(1));
+}
+
+/// A side-chain block retained by hash must not become canonical after restart.
+/// This pins the replay/restart invariant without invoking the RandomX mining
+/// path: only `commit_block` may mutate canonical pointers; `store_known_block`
+/// may retain immutable block data by hash.
+#[test]
+fn known_side_block_does_not_resurrect_as_tip_on_restart() {
+    let dir = TempDir::new().expect("tempdir");
+    let (canonical_header, canonical_body, canonical, canonical_output, canonical_excess) =
+        synthetic_block_bytes(1, 0xA1, g_point(), g_point());
+    let (side_header, side_body, side, _, _) = synthetic_block_bytes(1, 0xA2, h_point(), h_point());
+    {
+        let store = DomStore::open(dir.path()).expect("open");
+        store
+            .commit_block(
+                &canonical,
+                1,
+                &canonical_header,
+                &canonical_body,
+                &[(
+                    canonical_output,
+                    UtxoEntry {
+                        block_height: 1,
+                        is_coinbase: true,
+                        proof: vec![0u8; 8],
+                    }
+                    .to_bytes(),
+                )],
+                &[],
+                &[(canonical_excess, canonical)],
+            )
+            .expect("canonical commit");
+        store
+            .store_known_block(&side, &side_header, &side_body)
+            .expect("known side block");
+    }
+
+    let chain = open_chain(dir.path()).expect("side-known state must open cleanly");
+    assert_eq!(chain.tip_hash, Hash256::from_bytes(canonical));
+    assert_eq!(chain.tip_height, BlockHeight(1));
+    assert_eq!(chain.store.get_chain_tip().unwrap().unwrap(), canonical);
+    assert_eq!(
+        chain.store.get_hash_at_height(1).unwrap().unwrap(),
+        canonical
+    );
+    assert_eq!(
+        chain.store.get_block_body(&side).unwrap().unwrap(),
+        side_body,
+        "side block body remains available by hash for duplicate suppression"
+    );
+}
+
+/// Alternating canonical and side-chain arrivals must be restart-equivalent:
+/// canonical height pointers remain the canonical sequence, while side-chain
+/// bodies remain addressable only by hash.
+#[test]
+fn alternating_canonical_and_side_arrivals_reopen_to_canonical_chain() {
+    let dir = TempDir::new().expect("tempdir");
+    let (canonical_1_header, canonical_1_body, canonical_1, canonical_1_output, canonical_1_excess) =
+        synthetic_block_bytes(1, 0xB1, g_point(), g_point());
+    let (side_1_header, side_1_body, side_1, _, _) =
+        synthetic_block_bytes(1, 0xB2, h_point(), h_point());
+    let (canonical_2_header, canonical_2_body, canonical_2, canonical_2_output, canonical_2_excess) =
+        synthetic_block_bytes(2, 0xB3, h_point(), h_point());
+    let (side_2_header, side_2_body, side_2, _, _) =
+        synthetic_block_bytes(2, 0xB4, g_point(), g_point());
+    {
+        let store = DomStore::open(dir.path()).expect("open");
+        store
+            .commit_block(
+                &canonical_1,
+                1,
+                &canonical_1_header,
+                &canonical_1_body,
+                &[(
+                    canonical_1_output,
+                    UtxoEntry {
+                        block_height: 1,
+                        is_coinbase: true,
+                        proof: vec![0u8; 8],
+                    }
+                    .to_bytes(),
+                )],
+                &[],
+                &[(canonical_1_excess, canonical_1)],
+            )
+            .expect("canonical 1");
+        store
+            .store_known_block(&side_1, &side_1_header, &side_1_body)
+            .expect("side 1");
+        store
+            .commit_block(
+                &canonical_2,
+                2,
+                &canonical_2_header,
+                &canonical_2_body,
+                &[(
+                    canonical_2_output,
+                    UtxoEntry {
+                        block_height: 2,
+                        is_coinbase: true,
+                        proof: vec![1u8; 8],
+                    }
+                    .to_bytes(),
+                )],
+                &[],
+                &[(canonical_2_excess, canonical_2)],
+            )
+            .expect("canonical 2");
+        store
+            .store_known_block(&side_2, &side_2_header, &side_2_body)
+            .expect("side 2");
+    }
+
+    let chain = open_chain(dir.path()).expect("alternating state must open cleanly");
+    assert_eq!(chain.tip_hash, Hash256::from_bytes(canonical_2));
+    assert_eq!(chain.tip_height, BlockHeight(2));
+    assert_eq!(
+        chain.store.get_hash_at_height(1).unwrap().unwrap(),
+        canonical_1
+    );
+    assert_eq!(
+        chain.store.get_hash_at_height(2).unwrap().unwrap(),
+        canonical_2
+    );
+    assert_eq!(
+        chain.store.get_block_body(&side_1).unwrap().unwrap(),
+        side_1_body
+    );
+    assert_eq!(
+        chain.store.get_block_body(&side_2).unwrap().unwrap(),
+        side_2_body
+    );
+}
+
+/// Replaying the same side-chain block must hit duplicate suppression and leave
+/// canonical state unchanged.
+#[test]
+fn duplicate_known_side_block_rejected_without_mutating_canonical_state() {
+    let dir = TempDir::new().expect("tempdir");
+    let (canonical_header, canonical_body, canonical, canonical_output, canonical_excess) =
+        synthetic_block_bytes(1, 0xC1, g_point(), g_point());
+    let (side_header, side_body, side, _, _) = synthetic_block_bytes(1, 0xC2, h_point(), h_point());
+    {
+        let store = DomStore::open(dir.path()).expect("open");
+        store
+            .commit_block(
+                &canonical,
+                1,
+                &canonical_header,
+                &canonical_body,
+                &[(
+                    canonical_output,
+                    UtxoEntry {
+                        block_height: 1,
+                        is_coinbase: true,
+                        proof: vec![0u8; 8],
+                    }
+                    .to_bytes(),
+                )],
+                &[],
+                &[(canonical_excess, canonical)],
+            )
+            .expect("canonical commit");
+        store
+            .store_known_block(&side, &side_header, &side_body)
+            .expect("first side write");
+        let err = store
+            .store_known_block(&side, &side_header, &side_body)
+            .expect_err("duplicate side hash must be rejected");
+        assert!(
+            format!("{err}").contains("block header already exists"),
+            "unexpected duplicate error: {err}"
+        );
+        assert_eq!(store.get_chain_tip().unwrap().unwrap(), canonical);
+        assert_eq!(store.get_hash_at_height(1).unwrap().unwrap(), canonical);
+    }
+
+    let chain = open_chain(dir.path()).expect("duplicate side state must open cleanly");
+    assert_eq!(chain.tip_hash, Hash256::from_bytes(canonical));
+    assert_eq!(chain.tip_height, BlockHeight(1));
+}
+
+/// Old stores may have canonical block bodies but an empty kernel index because
+/// early `connect_block` passed no kernel excesses into `commit_block`. Reopen
+/// must deterministically rebuild missing canonical kernel entries so future
+/// validation is equivalent to fresh replay.
+#[test]
+fn reopen_rebuilds_missing_kernel_index_for_canonical_blocks() {
+    let dir = TempDir::new().expect("tempdir");
+    let (header, body, hash, output, excess) = synthetic_block_bytes(1, 0xC3, g_point(), h_point());
+    {
+        let store = DomStore::open(dir.path()).expect("open");
+        store
+            .commit_block(
+                &hash,
+                1,
+                &header,
+                &body,
+                &[(
+                    output,
+                    UtxoEntry {
+                        block_height: 1,
+                        is_coinbase: true,
+                        proof: vec![0u8; 8],
+                    }
+                    .to_bytes(),
+                )],
+                &[],
+                &[],
+            )
+            .expect("legacy canonical commit without kernel index");
+        assert!(
+            store.get_kernel_block(&excess).unwrap().is_none(),
+            "fixture must start with missing kernel index"
+        );
+    }
+
+    let chain = open_chain(dir.path()).expect("reindexable state must open cleanly");
+    assert_eq!(chain.tip_hash, Hash256::from_bytes(hash));
+    assert_eq!(chain.store.get_kernel_block(&excess).unwrap(), Some(hash));
+}
+
+/// Reindexing old canonical history must not silently accept duplicate kernel
+/// excesses. A duplicate across two canonical blocks is exactly the replay
+/// primitive the index exists to catch.
+#[test]
+fn reopen_rejects_duplicate_kernel_excess_in_legacy_canonical_history() {
+    let dir = TempDir::new().expect("tempdir");
+    let duplicated_kernel = g_point();
+    let (header_1, body_1, hash_1, output_1, _) =
+        synthetic_block_bytes(1, 0xC4, g_point(), duplicated_kernel.clone());
+    let (header_2, body_2, hash_2, output_2, _) =
+        synthetic_block_bytes(2, 0xC5, h_point(), duplicated_kernel);
+    {
+        let store = DomStore::open(dir.path()).expect("open");
+        store
+            .commit_block(
+                &hash_1,
+                1,
+                &header_1,
+                &body_1,
+                &[(
+                    output_1,
+                    UtxoEntry {
+                        block_height: 1,
+                        is_coinbase: true,
+                        proof: vec![0u8; 8],
+                    }
+                    .to_bytes(),
+                )],
+                &[],
+                &[],
+            )
+            .expect("legacy block 1");
+        store
+            .commit_block(
+                &hash_2,
+                2,
+                &header_2,
+                &body_2,
+                &[(
+                    output_2,
+                    UtxoEntry {
+                        block_height: 2,
+                        is_coinbase: true,
+                        proof: vec![1u8; 8],
+                    }
+                    .to_bytes(),
+                )],
+                &[],
+                &[],
+            )
+            .expect("legacy block 2");
+    }
+
+    let msg = err_msg(open_chain(dir.path()));
+    assert!(
+        msg.contains("KERNEL REPLAY DETECTED"),
+        "duplicate canonical kernel must fail reopen; got: {msg}"
+    );
+}
+
+/// A delayed side branch may be retained for future reorg work, but until the
+/// reorg engine explicitly promotes it, restart must still load the canonical
+/// direct-extension chain.
+#[test]
+fn delayed_side_branch_candidate_stays_noncanonical_after_restart() {
+    let dir = TempDir::new().expect("tempdir");
+    let (canonical_1_header, canonical_1_body, canonical_1, canonical_1_output, canonical_1_excess) =
+        synthetic_block_bytes(1, 0xD1, g_point(), g_point());
+    let (canonical_2_header, canonical_2_body, canonical_2, canonical_2_output, canonical_2_excess) =
+        synthetic_block_bytes(2, 0xD2, h_point(), h_point());
+    let (side_1_header, side_1_body, side_1, _, _) =
+        synthetic_block_bytes(1, 0xD3, h_point(), h_point());
+    let (side_2_header, side_2_body, side_2, _, _) =
+        synthetic_block_bytes(2, 0xD4, g_point(), g_point());
+    {
+        let store = DomStore::open(dir.path()).expect("open");
+        store
+            .commit_block(
+                &canonical_1,
+                1,
+                &canonical_1_header,
+                &canonical_1_body,
+                &[(
+                    canonical_1_output,
+                    UtxoEntry {
+                        block_height: 1,
+                        is_coinbase: true,
+                        proof: vec![0u8; 8],
+                    }
+                    .to_bytes(),
+                )],
+                &[],
+                &[(canonical_1_excess, canonical_1)],
+            )
+            .expect("canonical 1");
+        store
+            .store_known_block(&side_1, &side_1_header, &side_1_body)
+            .expect("side 1");
+        store
+            .store_known_block(&side_2, &side_2_header, &side_2_body)
+            .expect("side 2");
+        store
+            .commit_block(
+                &canonical_2,
+                2,
+                &canonical_2_header,
+                &canonical_2_body,
+                &[(
+                    canonical_2_output,
+                    UtxoEntry {
+                        block_height: 2,
+                        is_coinbase: true,
+                        proof: vec![1u8; 8],
+                    }
+                    .to_bytes(),
+                )],
+                &[],
+                &[(canonical_2_excess, canonical_2)],
+            )
+            .expect("canonical 2");
+    }
+
+    let chain = open_chain(dir.path()).expect("delayed side branch state must open cleanly");
+    assert_eq!(chain.tip_hash, Hash256::from_bytes(canonical_2));
+    assert_eq!(chain.tip_height, BlockHeight(2));
+    assert_eq!(
+        chain.store.get_hash_at_height(1).unwrap().unwrap(),
+        canonical_1
+    );
+    assert_eq!(
+        chain.store.get_hash_at_height(2).unwrap().unwrap(),
+        canonical_2
+    );
+    assert_eq!(
+        chain.store.get_block_body(&side_1).unwrap().unwrap(),
+        side_1_body
+    );
+    assert_eq!(
+        chain.store.get_block_body(&side_2).unwrap().unwrap(),
+        side_2_body
+    );
 }
 
 /// chain_tip set, but the header DB has nothing at that hash. open

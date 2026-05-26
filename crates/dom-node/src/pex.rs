@@ -239,6 +239,37 @@ mod tests {
     }
 
     #[test]
+    fn addr_decode_rejects_too_short_count() {
+        let err = decode_addr_payload(&[0x01]).expect_err("missing count byte must reject");
+        assert!(
+            format!("{err}").contains("addr payload too short"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn addr_decode_ignores_truncated_tail_without_panicking() {
+        let peer = PeerAddr {
+            addr: "127.0.0.1:33370".to_string(),
+            last_seen: 1_700_000_000,
+            failures: 0,
+        };
+        let mut encoded = encode_addr_payload(&[&peer]);
+        encoded.extend_from_slice(&[0x0f, b'1', b'2', b'7']);
+        encoded[0..2].copy_from_slice(&2u16.to_le_bytes());
+
+        let decoded = decode_addr_payload(&encoded).expect("truncated tail is lenient today");
+        assert_eq!(decoded, vec!["127.0.0.1:33370".to_string()]);
+    }
+
+    #[test]
+    fn addr_decode_bounds_declared_count_to_response_cap() {
+        let encoded = u16::MAX.to_le_bytes();
+        let decoded = decode_addr_payload(&encoded).expect("empty oversized count is bounded");
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
     fn process_addr_filters_invalid() {
         let mut pex = PexManager::new(1000);
         let addrs = vec![

@@ -242,6 +242,63 @@ impl DomStore {
         }
     }
 
+    /// Get the canonical block hash that first indexed a kernel excess.
+    pub fn get_kernel_block(&self, excess: &[u8; 33]) -> Result<Option<[u8; 32]>, DomError> {
+        let txn = self
+            .env
+            .begin_ro_txn()
+            .map_err(|e| DomError::Internal(format!("ro txn: {e}")))?;
+        match txn.get(self.db_kernels, excess) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut h = [0u8; 32];
+                h.copy_from_slice(bytes);
+                Ok(Some(h))
+            }
+            Ok(_) => Err(DomError::Internal("corrupt kernel index".into())),
+            Err(lmdb::Error::NotFound) => Ok(None),
+            Err(e) => Err(DomError::Internal(format!("get kernel: {e}"))),
+        }
+    }
+
+    /// Ensure kernel excess index entries exist and agree with `block_hash`.
+    ///
+    /// Used by recovery/reindex paths over already-committed canonical blocks.
+    /// Missing entries are inserted; matching entries are left untouched; entries
+    /// pointing at another block are treated as corruption or kernel replay.
+    pub fn ensure_kernel_indices(
+        &self,
+        kernel_excesses: &[([u8; 33], [u8; 32])],
+    ) -> Result<(), DomError> {
+        let mut txn = self
+            .env
+            .begin_rw_txn()
+            .map_err(|e| DomError::Internal(format!("rw txn: {e}")))?;
+
+        for (excess, hash) in kernel_excesses {
+            match txn.get(self.db_kernels, excess) {
+                Ok(existing) if existing == hash => {}
+                Ok(existing) if existing.len() == 32 => {
+                    return Err(DomError::Internal(format!(
+                        "KERNEL REPLAY DETECTED — excess already indexed to different block: excess={}, existing={}, new={}",
+                        hex::encode(excess),
+                        hex::encode(existing),
+                        hex::encode(hash)
+                    )));
+                }
+                Ok(_) => return Err(DomError::Internal("corrupt kernel index".into())),
+                Err(lmdb::Error::NotFound) => {
+                    txn.put(self.db_kernels, excess, hash, WriteFlags::NO_OVERWRITE)
+                        .map_err(|e| DomError::Internal(format!("put kernel: {e}")))?;
+                }
+                Err(e) => return Err(DomError::Internal(format!("get kernel: {e}"))),
+            }
+        }
+
+        txn.commit()
+            .map_err(|e| DomError::Internal(format!("commit kernel index rebuild: {e}")))?;
+        Ok(())
+    }
+
     /// Atomically commit a validated block to storage.
     ///
     /// RFC-0007 step 14: ALL writes in ONE transaction.
@@ -361,6 +418,59 @@ impl DomStore {
             )),
             other => DomError::Internal(format!("commit block: {other}")),
         })?;
+
+        Ok(())
+    }
+
+    /// Persist an immutable, non-canonical block body by hash.
+    ///
+    /// This is for valid side-chain blocks that the node should remember for
+    /// duplicate suppression and future reorg work, but that MUST NOT mutate
+    /// canonical pointers (`chain_tip`, `block_height`) or canonical state
+    /// (`utxos`, `kernel_index`). Those mutations are reserved for
+    /// `commit_block` after the chain-selection path has determined the block
+    /// is a canonical direct extension.
+    pub fn store_known_block(
+        &self,
+        block_hash: &[u8; 32],
+        header_bytes: &[u8],
+        block_body_bytes: &[u8],
+    ) -> Result<(), DomError> {
+        let mut txn = self
+            .env
+            .begin_rw_txn()
+            .map_err(|e| DomError::Internal(format!("rw txn: {e}")))?;
+
+        txn.put(
+            self.db_blocks,
+            block_hash,
+            &header_bytes.to_vec(),
+            WriteFlags::NO_OVERWRITE,
+        )
+        .map_err(|e| match e {
+            lmdb::Error::KeyExist => DomError::Internal(format!(
+                "block header already exists — connect_block dedup bypassed? hash={}",
+                hex::encode(block_hash)
+            )),
+            other => DomError::Internal(format!("put known block: {other}")),
+        })?;
+
+        txn.put(
+            self.db_block_bodies,
+            block_hash,
+            &block_body_bytes.to_vec(),
+            WriteFlags::NO_OVERWRITE,
+        )
+        .map_err(|e| match e {
+            lmdb::Error::KeyExist => DomError::Internal(format!(
+                "block body already exists — connect_block dedup bypassed? hash={}",
+                hex::encode(block_hash)
+            )),
+            other => DomError::Internal(format!("put known block body: {other}")),
+        })?;
+
+        txn.commit()
+            .map_err(|e| DomError::Internal(format!("commit known block: {e}")))?;
 
         Ok(())
     }

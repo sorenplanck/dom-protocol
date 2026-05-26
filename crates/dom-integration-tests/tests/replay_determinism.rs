@@ -56,20 +56,34 @@ async fn produce_block_sequence(name: &str, port: u16, count: u64) -> Vec<Vec<u8
             .get_hash_at_height(h)
             .expect("get_hash_at_height")
             .expect("hash present");
-        let mut bytes = chain
-            .store
-            .get_block_header(&hash)
-            .expect("get_block_header")
-            .expect("header present");
-        let body = chain
+        let bytes = chain
             .store
             .get_block_body(&hash)
             .expect("get_block_body")
             .expect("body present");
-        bytes.extend_from_slice(&body);
         out.push(bytes);
     }
     out
+}
+
+async fn produce_single_block(name: &str, port: u16) -> (Vec<u8>, Hash256) {
+    let mut config = test_config(name, port, false);
+    config.wallet_path = Some(format!("/tmp/dom-replay-{}.dom", name));
+    config.wallet_password = Some("replay".into());
+
+    let _ = std::fs::remove_file(config.wallet_path.as_ref().unwrap());
+    let _ = std::fs::remove_dir_all(&config.data_dir);
+
+    let node = spawn_node(config).await;
+    mine_blocks(&node, 1).await.expect("mining failed");
+    let chain = node.chain.lock().await;
+    let hash = chain.tip_hash;
+    let bytes = chain
+        .store
+        .get_block_body(hash.as_bytes())
+        .expect("get block body")
+        .expect("body present");
+    (bytes, hash)
 }
 
 /// Open an empty `ChainState` rooted at `data_dir` (cleaned first).
@@ -105,7 +119,10 @@ async fn replay_two_independent_chains_converge() {
     }
 
     // 4. Equivalence: tips agree on hash, height, difficulty.
-    assert_eq!(chain_a.tip_height, chain_b.tip_height, "tip heights diverged");
+    assert_eq!(
+        chain_a.tip_height, chain_b.tip_height,
+        "tip heights diverged"
+    );
     assert_eq!(chain_a.tip_hash, chain_b.tip_hash, "tip hashes diverged");
     assert_eq!(
         chain_a.tip_difficulty, chain_b.tip_difficulty,
@@ -183,4 +200,97 @@ async fn replay_same_chain_reopens_to_identical_tip() {
         .expect("header")
         .expect("present");
     assert_eq!(reopen_header, header_bytes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "slow RandomX-backed side-chain restart proof; covered by deterministic chain/store tests in dom-chain and dom-store"]
+async fn side_chain_block_does_not_rewrite_canonical_tip_after_restart() {
+    init_tracing();
+
+    let data_dir = "/tmp/dom-sidechain-canonical-restart".to_string();
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    let mut config = test_config("sidechain-canonical-restart", 43402, false);
+    config.wallet_path = Some("/tmp/dom-sidechain-canonical-restart.dom".into());
+    config.wallet_password = Some("replay".into());
+    config.data_dir = data_dir.clone();
+    let _ = std::fs::remove_file(config.wallet_path.as_ref().unwrap());
+
+    let node = spawn_node(config.clone()).await;
+    mine_blocks(&node, 1).await.expect("canonical mining");
+
+    let (canonical_tip, canonical_height, canonical_diff) = {
+        let chain = node.chain.lock().await;
+        (chain.tip_hash, chain.tip_height, chain.tip_difficulty)
+    };
+
+    let (side_bytes, side_hash) = produce_single_block("sidechain-source", 43403).await;
+    assert_ne!(
+        side_hash, canonical_tip,
+        "test requires two distinct height-1 blocks"
+    );
+    let side_block = Block::from_bytes(&side_bytes).expect("decode side block");
+
+    {
+        let mut chain = node.chain.lock().await;
+        let result = chain
+            .connect_block(&side_block, Timestamp(now_secs()))
+            .expect("side block should validate as known side chain");
+        assert_eq!(result, dom_chain::ConnectResult::SideChain);
+        assert_eq!(chain.tip_hash, canonical_tip);
+        assert_eq!(chain.tip_height, canonical_height);
+        assert_eq!(chain.tip_difficulty, canonical_diff);
+        assert_eq!(
+            chain.store.get_chain_tip().unwrap().unwrap(),
+            *canonical_tip.as_bytes(),
+            "side-chain connect must not rewrite persisted chain_tip"
+        );
+        assert_eq!(
+            chain
+                .store
+                .get_hash_at_height(canonical_height.0)
+                .unwrap()
+                .unwrap(),
+            *canonical_tip.as_bytes(),
+            "side-chain connect must not rewrite canonical height index"
+        );
+        assert!(
+            chain
+                .store
+                .get_block_header(side_hash.as_bytes())
+                .unwrap()
+                .is_some(),
+            "side-chain header should be retained for duplicate suppression"
+        );
+        assert!(
+            chain
+                .store
+                .get_block_body(side_hash.as_bytes())
+                .unwrap()
+                .is_some(),
+            "side-chain body should be retained for duplicate suppression"
+        );
+    }
+
+    drop(node);
+
+    let store = DomStore::open(Path::new(&data_dir)).expect("reopen store");
+    let reopened = ChainState::open(
+        store,
+        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+        dom_core::NETWORK_MAGIC_REGTEST,
+    )
+    .expect("reopen chain");
+
+    assert_eq!(reopened.tip_hash, canonical_tip);
+    assert_eq!(reopened.tip_height, canonical_height);
+    assert_eq!(reopened.tip_difficulty, canonical_diff);
+    assert_eq!(
+        reopened
+            .store
+            .get_hash_at_height(canonical_height.0)
+            .unwrap()
+            .unwrap(),
+        *canonical_tip.as_bytes()
+    );
 }
