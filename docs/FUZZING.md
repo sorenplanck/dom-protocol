@@ -11,7 +11,7 @@ Requires nightly Rust toolchain:
 
 ## Targets
 
-11 fuzz targets across 4 critical crates. All targets exercise untrusted
+13 fuzz targets across 4 critical crates. All targets exercise untrusted
 input boundaries — bytes received from the network, peer-supplied
 payloads, attacker-controlled cryptographic material.
 
@@ -20,10 +20,12 @@ payloads, attacker-controlled cryptographic material.
 - fuzz_transaction_deserialize — Transaction::from_bytes
 - fuzz_block_header_deserialize — BlockHeader::from_bytes
 
-### dom-wire (4 targets)
+### dom-wire (6 targets)
 - fuzz_wire_message — WireMessage::from_bytes (P2P framing entry)
 - fuzz_hello_payload — HelloPayload::from_bytes (peer handshake)
 - fuzz_headers_payload — HeadersPayload::from_bytes (IBD)
+- fuzz_getheaders_payload — GetHeadersPayload::from_bytes (IBD locators)
+- fuzz_getblockdata_payload — GetBlockDataPayload::from_bytes (body requests)
 - fuzz_block_payload — BlockPayload::from_bytes (block relay)
 
 ### dom-consensus (1 target)

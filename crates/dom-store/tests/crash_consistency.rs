@@ -117,7 +117,10 @@ fn reopen_observes_identical_committed_state() {
     assert_eq!(store.get_block_body(&b.hash).unwrap().unwrap(), b.body);
     assert_eq!(store.get_hash_at_height(b.height).unwrap().unwrap(), b.hash);
     assert_eq!(store.get_chain_tip().unwrap().unwrap(), b.hash);
-    let utxo = store.get_utxo(&b.commitment).unwrap().expect("utxo present");
+    let utxo = store
+        .get_utxo(&b.commitment)
+        .unwrap()
+        .expect("utxo present");
     assert_eq!(utxo.block_height, b.height);
     assert!(utxo.is_coinbase);
 }
@@ -198,4 +201,53 @@ fn no_orphan_header_without_body_after_commit() {
             "header/body presence diverged at seed {seed}"
         );
     }
+}
+
+#[test]
+fn store_known_block_does_not_mutate_canonical_state() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = DomStore::open(dir.path()).expect("open");
+    let canonical = dummy_block(0x44, 1);
+    let side = dummy_block(0x55, 1);
+
+    store
+        .commit_block(
+            &canonical.hash,
+            canonical.height,
+            &canonical.header,
+            &canonical.body,
+            &[(canonical.commitment, entry_for(canonical.height))],
+            &[],
+            &[(canonical.excess, canonical.hash)],
+        )
+        .expect("canonical commit");
+
+    store
+        .store_known_block(&side.hash, &side.header, &side.body)
+        .expect("known side block");
+
+    assert_eq!(
+        store.get_chain_tip().unwrap().unwrap(),
+        canonical.hash,
+        "known side block must not rewrite chain_tip",
+    );
+    assert_eq!(
+        store.get_hash_at_height(canonical.height).unwrap().unwrap(),
+        canonical.hash,
+        "known side block must not rewrite canonical height index",
+    );
+    assert_eq!(
+        store.get_block_header(&side.hash).unwrap().unwrap(),
+        side.header,
+        "known side block header should be retained by hash",
+    );
+    assert_eq!(
+        store.get_block_body(&side.hash).unwrap().unwrap(),
+        side.body,
+        "known side block body should be retained by hash",
+    );
+    assert!(
+        store.get_utxo(&side.commitment).unwrap().is_none(),
+        "known side block must not mutate canonical UTXO set",
+    );
 }

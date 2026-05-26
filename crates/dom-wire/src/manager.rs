@@ -8,7 +8,7 @@
 
 use crate::peer::{PeerInfo, PeerState};
 use dom_core::DomError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 /// Maximum peers from the same /16 subnet (eclipse protection).
@@ -18,6 +18,8 @@ const MAX_PEERS_SAME_SLASH_16: usize = 2;
 pub struct PeerManager {
     /// Connected peers: addr_string → PeerInfo.
     pub peers: HashMap<String, PeerInfo>,
+    /// Inbound sockets admitted by the listener but not yet registered.
+    pending_inbound: HashSet<String>,
     /// Max inbound connections.
     pub max_inbound: usize,
     /// Min outbound connections.
@@ -29,6 +31,7 @@ impl PeerManager {
     pub fn new(max_inbound: usize, min_outbound: usize) -> Self {
         Self {
             peers: HashMap::new(),
+            pending_inbound: HashSet::new(),
             max_inbound,
             min_outbound,
         }
@@ -50,6 +53,11 @@ impl PeerManager {
             .count()
     }
 
+    /// Count inbound connections that are still in handshake / Hello exchange.
+    pub fn pending_inbound_count(&self) -> usize {
+        self.pending_inbound.len()
+    }
+
     /// Check if we need more outbound connections.
     pub fn needs_outbound(&self) -> bool {
         self.outbound_count() < self.min_outbound
@@ -57,17 +65,49 @@ impl PeerManager {
 
     /// Check if we can accept another inbound connection.
     pub fn can_accept_inbound(&self, new_addr: IpAddr) -> bool {
-        if self.inbound_count() >= self.max_inbound {
+        if self.inbound_count() + self.pending_inbound_count() >= self.max_inbound {
             return false;
         }
         // Eclipse protection: max 2 peers per /16
         let slash16 = to_slash16(new_addr);
-        let same_subnet = self
+        let connected_same_subnet = self
             .peers
             .values()
             .filter(|p| !p.outbound && to_slash16(p.addr.ip()) == slash16)
             .count();
-        same_subnet < MAX_PEERS_SAME_SLASH_16
+        let pending_same_subnet = self
+            .pending_inbound
+            .iter()
+            .filter_map(|addr| addr.parse::<std::net::SocketAddr>().ok())
+            .filter(|addr| to_slash16(addr.ip()) == slash16)
+            .count();
+        connected_same_subnet + pending_same_subnet < MAX_PEERS_SAME_SLASH_16
+    }
+
+    /// Reserve an inbound slot before spawning handshake work.
+    ///
+    /// This closes the pre-registration gap where many concurrent TCP
+    /// connections can all pass `can_accept_inbound` before any of them
+    /// completes Noise + Hello and reaches `register_peer`.
+    pub fn reserve_inbound(&mut self, addr: std::net::SocketAddr) -> Result<(), DomError> {
+        let addr_str = addr.to_string();
+        if self.peers.contains_key(&addr_str) || self.pending_inbound.contains(&addr_str) {
+            return Err(DomError::PolicyRejected(
+                "already connected or pending inbound peer".into(),
+            ));
+        }
+        if !self.can_accept_inbound(addr.ip()) {
+            return Err(DomError::PolicyRejected(
+                "inbound limit or subnet limit reached".into(),
+            ));
+        }
+        self.pending_inbound.insert(addr_str);
+        Ok(())
+    }
+
+    /// Release a pending inbound reservation.
+    pub fn release_inbound_reservation(&mut self, addr: &std::net::SocketAddr) {
+        self.pending_inbound.remove(&addr.to_string());
     }
 
     /// Register a new peer connection attempt.
@@ -77,6 +117,9 @@ impl PeerManager {
             return Err(DomError::PolicyRejected(
                 "already connected to this peer".into(),
             ));
+        }
+        if !info.outbound {
+            self.pending_inbound.remove(&addr_str);
         }
         if !info.outbound && !self.can_accept_inbound(info.addr.ip()) {
             return Err(DomError::PolicyRejected(
@@ -90,6 +133,7 @@ impl PeerManager {
     /// Remove a disconnected peer.
     pub fn remove_peer(&mut self, addr: &str) {
         self.peers.remove(addr);
+        self.pending_inbound.remove(addr);
     }
 
     /// Get all connected peer addresses (for broadcasting).

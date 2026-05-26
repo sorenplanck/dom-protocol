@@ -110,6 +110,7 @@ impl ChainState {
                         )));
                     }
                 }
+                rebuild_kernel_index_from_canonical_chain(&store, header.height)?;
                 (
                     Hash256::from_bytes(hash),
                     header.height,
@@ -292,18 +293,22 @@ impl ChainState {
 
         // Serialize full block body for IBD responses (peers ask for bodies by hash).
         let block_body_bytes = block.to_bytes()?;
+        let kernel_excesses = extract_kernel_excesses(block, block_hash);
 
-        self.store.commit_block(
-            block_hash.as_bytes(),
-            header.height.0,
-            &header_bytes,
-            &block_body_bytes,
-            &new_utxos,
-            &spent_utxos,
-            &[],
-        )?;
+        let is_direct_extension =
+            header.height == BlockHeight::GENESIS || header.prev_hash == self.tip_hash;
+        let extends_best_chain = header.total_difficulty > self.tip_difficulty;
 
-        if header.total_difficulty > self.tip_difficulty {
+        if extends_best_chain && is_direct_extension {
+            self.store.commit_block(
+                block_hash.as_bytes(),
+                header.height.0,
+                &header_bytes,
+                &block_body_bytes,
+                &new_utxos,
+                &spent_utxos,
+                &kernel_excesses,
+            )?;
             self.tip_hash = block_hash;
             self.tip_height = header.height;
             self.tip_difficulty = header.total_difficulty;
@@ -313,6 +318,17 @@ impl ChainState {
             );
             Ok(ConnectResult::BestChain)
         } else {
+            self.store.store_known_block(
+                block_hash.as_bytes(),
+                &header_bytes,
+                &block_body_bytes,
+            )?;
+            if extends_best_chain {
+                debug!(
+                    "Heavier side chain block stored without promotion: height={}, hash={}, parent={} current_tip={}",
+                    header.height, block_hash, header.prev_hash, self.tip_hash,
+                );
+            }
             debug!(
                 "Side chain block: height={}, hash={}",
                 header.height, block_hash
@@ -383,6 +399,63 @@ impl ChainState {
     pub fn is_synced(&self, best_peer_height: u64) -> bool {
         self.tip_height.0 + 10 >= best_peer_height
     }
+}
+
+fn rebuild_kernel_index_from_canonical_chain(
+    store: &DomStore,
+    tip_height: BlockHeight,
+) -> Result<(), DomError> {
+    for h in 1..=tip_height.0 {
+        let hash = store.get_hash_at_height(h)?.ok_or_else(|| {
+            DomError::Internal(format!(
+                "{CHAIN_CORRUPT_SENTINEL}: missing canonical height_index entry at height {h}"
+            ))
+        })?;
+        let body = store.get_block_body(&hash)?.ok_or_else(|| {
+            DomError::Internal(format!(
+                "{CHAIN_CORRUPT_SENTINEL}: canonical block {} has no body",
+                hex::encode(hash)
+            ))
+        })?;
+        let block = Block::from_bytes(&body).map_err(|e| {
+            DomError::Internal(format!(
+                "{CHAIN_CORRUPT_SENTINEL}: canonical block {} body decode failed during kernel-index rebuild: {e}",
+                hex::encode(hash)
+            ))
+        })?;
+        let header_bytes = block.header.to_bytes()?;
+        let computed = compute_block_hash(&header_bytes);
+        if computed.as_bytes() != &hash {
+            return Err(DomError::Internal(format!(
+                "{CHAIN_CORRUPT_SENTINEL}: canonical block body/header hash mismatch at height {h}: height_index={} body_header={}",
+                hex::encode(hash),
+                computed
+            )));
+        }
+        let kernel_excesses = extract_kernel_excesses(&block, computed);
+        store.ensure_kernel_indices(&kernel_excesses)?;
+    }
+    Ok(())
+}
+
+fn extract_kernel_excesses(block: &Block, block_hash: Hash256) -> Vec<([u8; 33], [u8; 32])> {
+    let mut out = Vec::with_capacity(
+        1 + block
+            .transactions
+            .iter()
+            .map(|tx| tx.kernels.len())
+            .sum::<usize>(),
+    );
+    out.push((
+        *block.coinbase.kernel.excess.as_bytes(),
+        *block_hash.as_bytes(),
+    ));
+    for tx in &block.transactions {
+        for kernel in &tx.kernels {
+            out.push((*kernel.excess.as_bytes(), *block_hash.as_bytes()));
+        }
+    }
+    out
 }
 
 /// Outcome of attempting to connect a block to the chain.

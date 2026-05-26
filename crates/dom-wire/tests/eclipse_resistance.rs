@@ -88,29 +88,14 @@ fn slash16_check_uses_first_two_octets_not_three() {
 #[test]
 fn ipv6_subnet_diversity_cap_enforced() {
     let mut mgr = PeerManager::new(125, 8);
-    mgr.register_peer(ipv6_peer(
-        [0x2001, 0xdb8, 0, 0, 0, 0, 0, 1],
-        33369,
-        false,
-    ))
-    .expect("first IPv6 ok");
-    mgr.register_peer(ipv6_peer(
-        [0x2001, 0xdb8, 0, 0, 0, 0, 0, 2],
-        33369,
-        false,
-    ))
-    .expect("second IPv6 ok");
-    let r = mgr.register_peer(ipv6_peer(
-        [0x2001, 0xdb8, 0, 0, 0, 0, 0, 3],
-        33369,
-        false,
-    ));
+    mgr.register_peer(ipv6_peer([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1], 33369, false))
+        .expect("first IPv6 ok");
+    mgr.register_peer(ipv6_peer([0x2001, 0xdb8, 0, 0, 0, 0, 0, 2], 33369, false))
+        .expect("second IPv6 ok");
+    let r = mgr.register_peer(ipv6_peer([0x2001, 0xdb8, 0, 0, 0, 0, 0, 3], 33369, false));
     // /16 is the first two octets; 0x2001 (20:01) → [0x20, 0x01].
     // All three peers have identical [0x20, 0x01] prefix.
-    assert!(
-        r.is_err(),
-        "third IPv6 peer from same /16 must be rejected"
-    );
+    assert!(r.is_err(), "third IPv6 peer from same /16 must be rejected");
 }
 
 // ── (3) Inbound cap ──────────────────────────────────────────────────────────
@@ -131,7 +116,10 @@ fn inbound_cap_rejects_new_subnets_when_full() {
         .unwrap();
     // Slot 5: distinct subnet, but cap is hit.
     let r = mgr.register_peer(ipv4_peer([203, 0, 113, 1], 33369, false));
-    assert!(r.is_err(), "5th inbound must be rejected by max_inbound cap");
+    assert!(
+        r.is_err(),
+        "5th inbound must be rejected by max_inbound cap"
+    );
 }
 
 // ── (4) Disconnected peers free slots ────────────────────────────────────────
@@ -146,10 +134,9 @@ fn disconnected_peer_frees_an_inbound_slot() {
         .unwrap();
     mgr.register_peer(ipv4_peer([172, 16, 0, 1], 33369, false))
         .unwrap();
-    assert!(
-        mgr.register_peer(ipv4_peer([192, 168, 0, 1], 33369, false))
-            .is_err()
-    );
+    assert!(mgr
+        .register_peer(ipv4_peer([192, 168, 0, 1], 33369, false))
+        .is_err());
     // Disconnect one, then try again — slot must be available.
     mgr.remove_peer("10.0.0.1:33369");
     mgr.register_peer(ipv4_peer([192, 168, 0, 1], 33369, false))
@@ -200,4 +187,87 @@ fn duplicate_peer_registration_rejected() {
     assert!(r.is_err(), "duplicate inbound rejected");
     let r = mgr.register_peer(ipv4_peer([10, 0, 0, 1], 33369, true));
     assert!(r.is_err(), "duplicate (outbound flag flip) rejected");
+}
+
+// ── (7) Pending handshakes count against inbound limits ───────────────────────
+
+/// Inbound slots must be consumed before Noise/Hello completes. Otherwise a
+/// Slowloris-style attacker can open many TCP connections that all pass the
+/// pre-spawn capacity check before any peer is registered.
+#[test]
+fn pending_inbound_reservations_count_toward_inbound_cap() {
+    let mut mgr = PeerManager::new(2, 8);
+    let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 33369);
+    let b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)), 33369);
+    let c = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)), 33369);
+
+    mgr.reserve_inbound(a).expect("first pending slot");
+    mgr.reserve_inbound(b).expect("second pending slot");
+    assert_eq!(mgr.pending_inbound_count(), 2);
+    assert!(
+        mgr.reserve_inbound(c).is_err(),
+        "third pending inbound must be rejected by max_inbound"
+    );
+}
+
+/// Pending handshakes must also count toward the per-/16 cap. This prevents an
+/// attacker from occupying all pending work with many sockets from one subnet.
+#[test]
+fn pending_inbound_reservations_count_toward_subnet_cap() {
+    let mut mgr = PeerManager::new(125, 8);
+    let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)), 33369);
+    let b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2)), 33369);
+    let c = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 3)), 33369);
+
+    mgr.reserve_inbound(a).expect("first /16 pending slot");
+    mgr.reserve_inbound(b).expect("second /16 pending slot");
+    assert!(
+        mgr.reserve_inbound(c).is_err(),
+        "third pending inbound from same /16 must be rejected"
+    );
+}
+
+/// Registering a peer consumes its pending reservation exactly once. Releasing
+/// after task shutdown is intentionally idempotent.
+#[test]
+fn registering_peer_releases_pending_reservation() {
+    let mut mgr = PeerManager::new(2, 8);
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 33369);
+    mgr.reserve_inbound(addr).expect("reserve");
+    assert_eq!(mgr.pending_inbound_count(), 1);
+
+    mgr.register_peer(ipv4_peer([10, 0, 0, 1], 33369, false))
+        .expect("register");
+    assert_eq!(mgr.pending_inbound_count(), 0);
+    mgr.release_inbound_reservation(&addr);
+    assert_eq!(mgr.pending_inbound_count(), 0);
+}
+
+/// Failed handshakes release their reservation so honest peers can retry later.
+#[test]
+fn failed_handshake_release_frees_pending_slot() {
+    let mut mgr = PeerManager::new(1, 8);
+    let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 33369);
+    let b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)), 33369);
+
+    mgr.reserve_inbound(a).expect("reserve");
+    assert!(mgr.reserve_inbound(b).is_err());
+    mgr.release_inbound_reservation(&a);
+    mgr.reserve_inbound(b)
+        .expect("slot must be reusable after failed handshake release");
+}
+
+/// The node cleanup path calls `remove_peer` after a connection task exits.
+/// That must clear both registered peers and any pre-registration reservation.
+#[test]
+fn remove_peer_clears_pending_reservation_too() {
+    let mut mgr = PeerManager::new(1, 8);
+    let a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 33369);
+    let b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)), 33369);
+
+    mgr.reserve_inbound(a).expect("reserve");
+    assert!(mgr.reserve_inbound(b).is_err());
+    mgr.remove_peer(&a.to_string());
+    mgr.reserve_inbound(b)
+        .expect("remove_peer must free a pending reservation");
 }

@@ -389,12 +389,12 @@ impl DomNode {
             match listener.accept().await {
                 Ok((stream, peer_addr)) => {
                     info!("Inbound connection from {peer_addr}");
-                    let can_accept = {
-                        let mgr = self.peers.lock().await;
-                        mgr.can_accept_inbound(peer_addr.ip())
+                    let reserved = {
+                        let mut mgr = self.peers.lock().await;
+                        mgr.reserve_inbound(peer_addr)
                     };
-                    if !can_accept {
-                        warn!("Rejecting connection from {peer_addr}: peer limit or subnet limit");
+                    if let Err(e) = reserved {
+                        warn!("Rejecting connection from {peer_addr}: {e}");
                         continue;
                     }
                     // Spawn connection handler
@@ -412,9 +412,14 @@ impl DomNode {
                         peers: self.peers.clone(),
                         wallet: self.wallet.clone(),
                     };
+                    let peers = svc.peers.clone();
                     tokio::spawn(async move {
                         handle_inbound(stream, peer_addr, config, privkey, chain, channels, svc)
                             .await;
+                        let mut peers = peers.lock().await;
+                        let peer_key = peer_addr.to_string();
+                        peers.remove_peer(&peer_key);
+                        peers.release_inbound_reservation(&peer_addr);
                     });
                 }
                 Err(e) => {
@@ -466,9 +471,12 @@ impl DomNode {
                         tx_stem_tx: self.tx_stem_tx.clone(),
                     };
                     info!("Connecting to peer {addr}");
+                    let cleanup_addr = addr.clone();
+                    let peers = self.peers.clone();
                     let svc_c = svc.clone();
                     tokio::spawn(async move {
                         connect_outbound(&addr, config, privkey, chain, channels, svc_c).await;
+                        peers.lock().await.remove_peer(&cleanup_addr);
                     });
                 }
             }
