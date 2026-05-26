@@ -1,6 +1,9 @@
 # DOM Protocol Deployment
 
-Two deployment paths: systemd (recommended for VPS/bare-metal) and Docker Compose (recommended for cloud/orchestration). Pick one.
+Two deployment paths: systemd (recommended for VPS/bare-metal) and
+Docker Compose (recommended for cloud/orchestration). Testnet is the
+current operational path; the Mainnet steps below are retained as the
+planned post-readiness deployment procedure.
 
 ## Path 1 — systemd
 
@@ -19,7 +22,7 @@ Two deployment paths: systemd (recommended for VPS/bare-metal) and Docker Compos
     sudo systemctl status dom-testnet
     sudo journalctl -u dom-testnet -f
 
-### Mainnet
+### Mainnet (post-readiness gate)
 
 Same as testnet but replace every testnet with mainnet:
 

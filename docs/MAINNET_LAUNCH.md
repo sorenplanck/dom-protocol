@@ -1,7 +1,7 @@
 # DOM Protocol Mainnet Launch Checklist
 
 **Last Updated:** 2026-05-24
-**Target Launch:** 12-18 months from 2026-05-24 (revised — see ROADMAP_v2.md)
+**Status:** Historical checklist retained for reference; authoritative readiness gating lives in `ROADMAP_v2.md`
 **Current Phase:** Phase 1 (Consensus Immutability Lock) + Phase 3 (Storage Durability), parallel
 
 > **Roadmap superseded 2026-05-24.** See
@@ -14,9 +14,9 @@
 
 ## Pre-Launch Phases
 
-### PHASE 0: Security Audit ✅ IN PROGRESS
+### PHASE 0: Security Audit in Progress
 
-#### Phase 1: Consensus + Crypto (Week 1-2)
+#### Phase 1: Consensus + Crypto
 
 - [ ] **Consensus Validators (V1-V18)**
   - [ ] Validate transaction structure (10 steps per RFC-0007)
@@ -48,7 +48,7 @@
     - [ ] Cross-context collision resistance
   - [ ] Random number generation (threat model: no weak RNG)
 
-#### Phase 2: Storage + P2P + PoW (Week 3-4)
+#### Phase 2: Storage + P2P + PoW
 
 - [ ] **Storage Layer (LMDB)**
   - [ ] Atomic block commits (all-or-nothing)
@@ -78,7 +78,7 @@
 
 ---
 
-### PHASE 1: Testnet Public (3+ months)
+### PHASE 1: Public Testnet Stabilization
 
 #### Testnet Infrastructure
 
@@ -281,7 +281,7 @@
 | **Lead Dev** (Soren Planck) | Phase 1 Audit Pass | ⏳ |
 | **Security Auditor** | Phase 1 + 2 Complete | ⏳ |
 | **Community Lead** | Testnet Stable 3+ months | ⏳ |
-| **Exchange (Optional)** | Mainnet Ready | ⏳ |
+| **Exchange (Optional)** | Operational readiness confirmed | ⏳ |
 
 ### Launch Criteria (ALL required)
 

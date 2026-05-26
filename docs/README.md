@@ -3,7 +3,9 @@
 ## Roadmap
 
 See [docs/ROADMAP_v2.md](./ROADMAP_v2.md) — adopted 2026-05-24.
-Timeline: 12-18 months to mainnet.
+Deployment progression is milestone-based: adversarial hardening,
+recoverability proofs, public testnet stabilization, external review,
+bug bounty, and genesis ceremony.
 
 The roadmap supersedes any earlier ad-hoc plan implied by Docs 8-11 or
 the initial testnet schedule. It was triggered by the Track A
@@ -20,7 +22,7 @@ blockchain-specialist reviewer, and was accepted under the principle
 
 ## Operations
 
-- [DEPLOYMENT.md](./DEPLOYMENT.md) — Mainnet / Testnet deployment guide
+- [DEPLOYMENT.md](./DEPLOYMENT.md) — Testnet deployment guide + planned mainnet operational path
 - [REGTEST.md](./REGTEST.md) — Local-dev `Network::Regtest` (NEVER for production)
 - [RPC.md](./RPC.md) — RPC endpoints
 - [FUZZING.md](./FUZZING.md) — Fuzzing campaign + how to add fuzz targets
@@ -34,7 +36,7 @@ blockchain-specialist reviewer, and was accepted under the principle
 ## Consensus reference
 
 - [CONSENSUS.md](./CONSENSUS.md) — Consensus rules summary
-- [MAINNET_LAUNCH.md](./MAINNET_LAUNCH.md) — Historical launch checklist (superseded by ROADMAP_v2)
+- [MAINNET_LAUNCH.md](./MAINNET_LAUNCH.md) — Historical launch checklist (superseded by milestone-based readiness gates in ROADMAP_v2)
 
 ## Troubleshooting
 

@@ -3,7 +3,7 @@
 Status: ADOPTED 2026-05-24
 Replaces: ad-hoc roadmap implied by Docs 8-11 + initial testnet schedule.
 Trigger: Track A consolidated audit + hardening checklist from external
-blockchain-specialist AI auditor. Decision made under principle
+blockchain-specialist reviewer. Decision made under principle
 "Security > Stability > Usability".
 
 ## Current state (snapshot)
@@ -24,7 +24,7 @@ crashes).
 
 ## Phases
 
-Phase 1 — Consensus Immutability Lock (CRITICAL, ~3-6 months)
+Phase 1 — Consensus Immutability Lock (CRITICAL)
 - 1.1 Replay determinism proofs
  - deterministic replay suite
  - snapshot/replay equivalence tests
@@ -47,7 +47,7 @@ Phase 1 — Consensus Immutability Lock (CRITICAL, ~3-6 months)
  - root equivalence snapshots
  - serialization equivalence suite
 
-Phase 2 — Cryptographic Hardening (HIGH, ~1-2 months, parallel)
+Phase 2 — Cryptographic Hardening (HIGH, parallel)
 - 2.1 Differential testing (1000+ vectors vs rust-secp256k1-zkp, BIP-340,
       Monero, Grin)
 - 2.2 Explicit infinity rejection (R, P, subgroup correctness)
@@ -55,7 +55,7 @@ Phase 2 — Cryptographic Hardening (HIGH, ~1-2 months, parallel)
 - 2.4 Full Bulletproofs+ adversarial suite
 - 2.5 Secret memory hygiene (zeroize, compiler-resistant wipes)
 
-Phase 3 — Storage Durability (CRITICAL, ~2-3 months, parallel with Phase 1)
+Phase 3 — Storage Durability (CRITICAL, parallel with Phase 1)
 - 3.1 Crash consistency testing
  - SIGKILL during commit
  - SIGKILL during rollback
@@ -73,13 +73,13 @@ Phase 3 — Storage Durability (CRITICAL, ~2-3 months, parallel with Phase 1)
  - ENOSPC handling
 - 3.4 Filesystem adversarial testing (ext4, xfs, btrfs, zfs flush durability)
 
-Phase 4 — Adversarial Network Hardening (HIGH, ~2-3 months)
+Phase 4 — Adversarial Network Hardening (HIGH)
 - 4.1 IBD adversarial replay framework
 - 4.2 Eclipse resistance
 - 4.3 Resource exhaustion defense
 - 4.4 Sybil resistance
 
-Phase 5 — Economic Security (HIGH, ~2-3 months)
+Phase 5 — Economic Security (HIGH)
 - 5.1 ASERT adversarial modeling
 - 5.2 Miner game theory
 - 5.3 Mempool hardening
@@ -101,11 +101,14 @@ Phase 8 — Mainnet Readiness Gate (FINAL)
 - 8.4 Bug bounty 30-90 days minimum
 - 8.5 Genesis ceremony
 
-## Timeline
+## Progression
 
-Realistic: 12-18 months from 2026-05-24 to mainnet.
-Optimistic (parallel execution): 12 months.
-Pessimistic: 18-24 months.
+This roadmap is milestone-based rather than calendar-based.
+
+- Phases 1-3 establish deterministic behavior, cryptographic soundness, and storage durability.
+- Phases 4-6 validate hostile-network behavior, recoverability, and safe continuation.
+- Phase 7 locks specification and implementation together so drift becomes visible.
+- Phase 8 authorizes public mainnet deployment only after adversarial testnet stabilization, external review, bug bounty operation, and genesis ceremony completion.
 
 ## Non-negotiables
 
@@ -122,5 +125,5 @@ Pessimistic: 18-24 months.
 > "Blockchain não é hobby. Erros matam projetos e pessoas perdem fundos."
 
 This roadmap exists because every blockchain that died young died of
-exactly the items listed above. The cost of 12-18 months of hardening
-is trivial compared to the cost of mainnet failure.
+exactly the items listed above. The cost of extended hardening is
+trivial compared to the cost of mainnet failure.
