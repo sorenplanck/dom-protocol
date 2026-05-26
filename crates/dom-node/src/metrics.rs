@@ -26,6 +26,12 @@ pub struct Metrics {
     pub peers_with_high_drift: Arc<AtomicU64>,
     /// Current size of the future block queue.
     pub future_block_queue_size: Arc<AtomicU64>,
+    /// Total duplicate relayed blocks suppressed without rebroadcast.
+    pub suppressed_duplicate_block_relays: Arc<AtomicU64>,
+    /// Total malformed relayed block payloads or block bodies rejected.
+    pub malformed_block_relays: Arc<AtomicU64>,
+    /// Total times a peer exceeded duplicate block relay quota.
+    pub duplicate_block_relay_quota_exceeded: Arc<AtomicU64>,
 }
 
 impl Metrics {
@@ -47,6 +53,9 @@ impl Metrics {
             local_clock_drift_seconds: Arc::new(AtomicI64::new(0)),
             peers_with_high_drift: Arc::new(AtomicU64::new(0)),
             future_block_queue_size: Arc::new(AtomicU64::new(0)),
+            suppressed_duplicate_block_relays: Arc::new(AtomicU64::new(0)),
+            malformed_block_relays: Arc::new(AtomicU64::new(0)),
+            duplicate_block_relay_quota_exceeded: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -143,6 +152,24 @@ impl Metrics {
                 "gauge",
                 &self.future_block_queue_size,
             ),
+            (
+                "dom_suppressed_duplicate_block_relays_total",
+                "Duplicate relayed blocks suppressed without rebroadcast",
+                "counter",
+                &self.suppressed_duplicate_block_relays,
+            ),
+            (
+                "dom_malformed_block_relays_total",
+                "Malformed relayed block payloads or block bodies rejected",
+                "counter",
+                &self.malformed_block_relays,
+            ),
+            (
+                "dom_duplicate_block_relay_quota_exceeded_total",
+                "Times a peer exceeded duplicate block relay quota",
+                "counter",
+                &self.duplicate_block_relay_quota_exceeded,
+            ),
         ];
 
         // Export drift separately (AtomicI64 requires different load)
@@ -206,9 +233,12 @@ mod tests {
         let m = Metrics::new();
         m.chain_height.store(100, Ordering::Relaxed);
         m.peer_count.store(5, Ordering::Relaxed);
+        m.suppressed_duplicate_block_relays
+            .store(2, Ordering::Relaxed);
         let output = m.export_prometheus();
         assert!(output.contains("dom_chain_height 100"));
         assert!(output.contains("dom_peer_count 5"));
+        assert!(output.contains("dom_suppressed_duplicate_block_relays_total 2"));
     }
 
     #[test]

@@ -28,3 +28,4 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde_json = "1"
 hex = { workspace = true }
 dom-crypto = { workspace = true }
+dom-wire = { workspace = true }

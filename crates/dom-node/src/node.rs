@@ -71,6 +71,7 @@ struct NodeServices {
     mempool: Arc<Mutex<dom_mempool::Mempool>>,
     dandelion: Arc<Mutex<dom_wire::dandelion::DandelionRouter>>,
     peers: Arc<Mutex<dom_wire::manager::PeerManager>>,
+    metrics: Arc<Metrics>,
     future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
 }
@@ -284,6 +285,7 @@ impl DomNode {
             let queue = self.future_block_queue.clone();
             let chain = self.chain.clone();
             let relay_tx = self.block_relay_tx.clone();
+            let metrics = self.metrics.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
                     FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS,
@@ -366,6 +368,9 @@ impl DomNode {
                                 // Deferred queue entries are runtime-only and no longer
                                 // attributable to a live peer. Malformed bytes must drop
                                 // deterministically without requeueing or scoring anyone.
+                                metrics
+                                    .malformed_block_relays
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 tracing::warn!("Deferred block decode error: {e}");
                             }
                         }
@@ -466,6 +471,7 @@ impl DomNode {
                         mempool: self.mempool.clone(),
                         dandelion: self.dandelion.clone(),
                         peers: self.peers.clone(),
+                        metrics: self.metrics.clone(),
                         future_block_queue: self.future_block_queue.clone(),
                         wallet: self.wallet.clone(),
                     };
@@ -492,6 +498,7 @@ impl DomNode {
             mempool: self.mempool.clone(),
             dandelion: self.dandelion.clone(),
             peers: self.peers.clone(),
+            metrics: self.metrics.clone(),
             future_block_queue: self.future_block_queue.clone(),
             wallet: self.wallet.clone(),
         };
@@ -1144,6 +1151,27 @@ fn decode_relay_block(msg_payload: &[u8]) -> Result<(Vec<u8>, dom_consensus::Blo
     Ok((payload.block_bytes, block))
 }
 
+async fn record_duplicate_block_relay(
+    peers: &Arc<Mutex<PeerManager>>,
+    metrics: &Arc<Metrics>,
+    peer_addr: std::net::SocketAddr,
+) -> bool {
+    let peer_key = peer_addr.to_string();
+    metrics
+        .suppressed_duplicate_block_relays
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let exceeded = {
+        let mut mgr = peers.lock().await;
+        mgr.record_duplicate_block_relay(&peer_key)
+    };
+    if exceeded {
+        metrics
+            .duplicate_block_relay_quota_exceeded
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    exceeded
+}
+
 /// Persistent message loop after Hello exchange.
 ///
 /// Reads framed messages from the peer in a loop and dispatches by command:
@@ -1548,6 +1576,9 @@ async fn message_loop(
                         let (block_bytes, block) = match decode_relay_block(&msg.payload) {
                             Ok(decoded) => decoded,
                             Err(e) => {
+                                svc.metrics
+                                    .malformed_block_relays
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
                                 return Err(e);
                             }
@@ -1595,6 +1626,17 @@ async fn message_loop(
                                             // canonical-only until the wallet learns explicit reorg
                                             // rollback semantics.
                                         } else if matches!(result, Ok(dom_chain::ConnectResult::AlreadyHave)) {
+                                            if record_duplicate_block_relay(
+                                                &svc.peers,
+                                                &svc.metrics,
+                                                peer_addr,
+                                            )
+                                            .await
+                                            {
+                                                return Err(DomError::PolicyRejected(
+                                                    "duplicate block relay quota exceeded".into(),
+                                                ));
+                                            }
                                             tracing::trace!(
                                                 "Block from {peer_addr} already known — no-op"
                                             );
@@ -1604,6 +1646,11 @@ async fn message_loop(
                                     }
                                     RelayBlockAction::PenalizePeer => {
                                         let e = result.expect_err("penalized relay result must be an error");
+                                        if matches!(e, DomError::Malformed(_)) {
+                                            svc.metrics
+                                                .malformed_block_relays
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
                                         let banned = record_peer_violation(&svc.peers, peer_addr, &e).await;
                                         tracing::warn!("Rejected block from {peer_addr}: {e}");
                                         if banned {

@@ -20,6 +20,10 @@ const STALE_PENDING_INBOUND_SECS: u64 = crate::handshake::HANDSHAKE_TIMEOUT_SECS
 const PENDING_PENALTY_TTL_SECS: u64 = 15 * 60;
 /// Bound memory used by hostile pre-registration address churn.
 const MAX_PENDING_PENALTIES: usize = 4_096;
+/// Duplicate block relays above this rate are treated as abusive.
+const MAX_DUPLICATE_BLOCK_RELAYS_PER_WINDOW: u32 = 32;
+/// Duplicate block relay rate window.
+const DUPLICATE_BLOCK_RELAY_WINDOW_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Copy)]
 struct PendingInbound {
@@ -32,6 +36,12 @@ struct PendingPenalty {
     last_updated: Instant,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DuplicateRelayTracker {
+    count: u32,
+    window_started: Instant,
+}
+
 /// Peer manager state.
 pub struct PeerManager {
     /// Connected peers: addr_string → PeerInfo.
@@ -40,6 +50,8 @@ pub struct PeerManager {
     pending_inbound: HashMap<String, PendingInbound>,
     /// Penalties accumulated before a peer is fully registered.
     pending_penalties: HashMap<String, PendingPenalty>,
+    /// Runtime-only duplicate block relay counters for connected peers.
+    duplicate_block_relays: HashMap<String, DuplicateRelayTracker>,
     /// Max inbound connections.
     pub max_inbound: usize,
     /// Min outbound connections.
@@ -53,6 +65,7 @@ impl PeerManager {
             peers: HashMap::new(),
             pending_inbound: HashMap::new(),
             pending_penalties: HashMap::new(),
+            duplicate_block_relays: HashMap::new(),
             max_inbound,
             min_outbound,
         }
@@ -180,6 +193,7 @@ impl PeerManager {
             }
         }
         self.pending_penalties.remove(&addr_str);
+        self.duplicate_block_relays.remove(&addr_str);
         self.peers.insert(addr_str, info);
         Ok(())
     }
@@ -189,6 +203,7 @@ impl PeerManager {
         self.prune_stale_state();
         self.peers.remove(addr);
         self.pending_inbound.remove(addr);
+        self.duplicate_block_relays.remove(addr);
     }
 
     /// Apply a ban-score increment to a connected peer.
@@ -239,6 +254,49 @@ impl PeerManager {
             .filter(|(_, p)| p.state == PeerState::Connected)
             .map(|(addr, _)| addr.clone())
             .collect()
+    }
+
+    /// Record a duplicate block relay from a connected peer.
+    ///
+    /// Returns true when the current relay exceeds the duplicate quota and
+    /// the caller should disconnect the peer to bound runtime resource use.
+    pub fn record_duplicate_block_relay(&mut self, addr: &str) -> bool {
+        if !matches!(
+            self.peers.get(addr).map(|peer| peer.state),
+            Some(PeerState::Connected)
+        ) {
+            return false;
+        }
+
+        let now = Instant::now();
+        let tracker = self
+            .duplicate_block_relays
+            .entry(addr.to_string())
+            .or_insert(DuplicateRelayTracker {
+                count: 0,
+                window_started: now,
+            });
+        if tracker.window_started.elapsed()
+            >= Duration::from_secs(DUPLICATE_BLOCK_RELAY_WINDOW_SECS)
+        {
+            tracker.count = 0;
+            tracker.window_started = now;
+        }
+        tracker.count = tracker.count.saturating_add(1);
+        if tracker.count <= MAX_DUPLICATE_BLOCK_RELAYS_PER_WINDOW {
+            return false;
+        }
+
+        let _ = self.add_ban_score(addr, crate::peer::ban_scores::PROTOCOL_VIOLATION);
+        true
+    }
+
+    /// Inspect the current duplicate relay counter for a peer.
+    pub fn duplicate_block_relay_count(&self, addr: &str) -> u32 {
+        self.duplicate_block_relays
+            .get(addr)
+            .map(|tracker| tracker.count)
+            .unwrap_or(0)
     }
 
     /// Get connected peers with higher claimed height (for IBD).
@@ -479,5 +537,40 @@ mod tests {
             20,
             "recent churn entries should remain tracked"
         );
+    }
+
+    #[test]
+    fn duplicate_block_relay_quota_disconnects_abusive_peer() {
+        let mut mgr = PeerManager::new(125, 8);
+        let peer = make_peer([10, 0, 0, 42], 33369, false);
+        let addr = peer.addr.to_string();
+        mgr.register_peer(peer).unwrap();
+
+        for _ in 0..MAX_DUPLICATE_BLOCK_RELAYS_PER_WINDOW {
+            assert!(!mgr.record_duplicate_block_relay(&addr));
+        }
+        assert_eq!(
+            mgr.duplicate_block_relay_count(&addr),
+            MAX_DUPLICATE_BLOCK_RELAYS_PER_WINDOW
+        );
+
+        assert!(mgr.record_duplicate_block_relay(&addr));
+        assert_eq!(
+            mgr.ban_score(&addr),
+            Some(crate::peer::ban_scores::PROTOCOL_VIOLATION)
+        );
+    }
+
+    #[test]
+    fn duplicate_block_relay_tracking_is_cleared_on_remove() {
+        let mut mgr = PeerManager::new(125, 8);
+        let peer = make_peer([10, 0, 0, 43], 33369, false);
+        let addr = peer.addr.to_string();
+        mgr.register_peer(peer).unwrap();
+        assert!(!mgr.record_duplicate_block_relay(&addr));
+        assert_eq!(mgr.duplicate_block_relay_count(&addr), 1);
+
+        mgr.remove_peer(&addr);
+        assert_eq!(mgr.duplicate_block_relay_count(&addr), 0);
     }
 }
