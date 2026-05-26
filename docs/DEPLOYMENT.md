@@ -2,7 +2,9 @@
 
 **Version:** 0.1.0
 
-This document covers Mainnet and Testnet deployment. For local
+This document covers current Testnet deployment and the planned
+operational path for Mainnet once readiness gates and genesis freeze
+are satisfied. For local
 development on a laptop / WSL / single CI machine, see
 [`REGTEST.md`](./REGTEST.md) — `Network::Regtest` runs the entire
 consensus stack with a trivial PoW target, 1-block coinbase maturity,

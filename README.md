@@ -1,16 +1,16 @@
-# DOM Protocol — Mainnet Ready
+# DOM Protocol — Decentralized Monetary Protocol
 
 **Version:** v0.1.0 Testnet  
-**Status:** Testnet Operational • Mainnet Preparation  
-**Last Updated:** 2026-05-19
+**Status:** Active hardening • controlled testnet validation  
+**Last Updated:** 2026-05-26
 
 ---
 
 ## Executive Summary
 
-DOM Protocol is a Mimblewimble blockchain with CPU-friendly RandomX proof-of-work. The network is currently running a stable testnet with 156 blocks mined over 18+ hours with **zero consensus failures**. Mainnet launch is targeted for Q3 2026 pending security audit completion and 3+ months of public testnet stability.
+DOM Protocol is a Mimblewimble-based decentralized monetary protocol with CPU-oriented RandomX proof-of-work. It is being engineered for deterministic behavior, bounded failure modes, and long-term operational survivability. Its aim is durable monetary infrastructure for real-world use, approached with conservative deployment discipline. The current repository state includes a functioning implementation across consensus, cryptography, storage, wallet, and node layers, plus controlled testnet burn-in evidence. Public mainnet deployment remains gated on adversarial validation, distributed testnet stabilization, operational hardening, and final genesis freeze.
 
-### Current Testnet Metrics
+### Current Controlled Testnet Snapshot
 
 | Metric | Value |
 |--------|-------|
@@ -21,6 +21,23 @@ DOM Protocol is a Mimblewimble blockchain with CPU-friendly RandomX proof-of-wor
 | **Target Block Time** | 2 minutes (ASERT adjusts) |
 | **Network** | Testnet (easy difficulty) |
 | **Nodes** | 1 (single private node) |
+
+This snapshot is useful as burn-in evidence only. It does not replace multi-node validation, public adversarial testnet operation, or deployment-readiness review.
+
+---
+
+## Design Philosophy
+
+DOM is developed under a conservative protocol philosophy:
+
+- Deterministic consensus: identical inputs must produce identical results across nodes and platforms.
+- Replay safety: signatures, serialization, and domain separation must not admit cross-context acceptance.
+- Recoverability: unsafe partial state must be detected, refused, or rebuilt without ambiguity.
+- Bounded behavior: validation, block structure, and resource use stay inside explicit limits.
+- Conservative engineering: launch gating follows demonstrated behavior, not calendar promises.
+- Adversarial resilience: hardening is driven by malformed input, reorg, crash, and hostile-network scenarios.
+- Operational survivability: nodes should fail closed, restart cleanly, and preserve durable state.
+- Long-term protocol stability: monetary and consensus rules are treated as infrastructure, not marketing surface.
 
 ---
 
@@ -109,17 +126,17 @@ dom-protocol/
 
 ---
 
-## Testnet Burn-In Results
+## Controlled Testnet Burn-In
 
 ### Stability Metrics
 
 | Metric | Status |
 |--------|--------|
-| **Consensus Validation** | ✅ All 238 unit tests passing |
-| **Block Production** | ✅ 156 blocks, 0 reorgs |
-| **Chain Continuity** | ✅ 18h 38m without interruption |
-| **Crash Count** | ✅ 0 critical failures |
-| **Network Sync** | ⏳ IBD phase 3 complete (single node) |
+| **Consensus Validation** | Validator and crypto suites passing during the recorded burn-in window |
+| **Block Production** | 156 recorded blocks, 0 observed reorgs |
+| **Chain Continuity** | 18h 38m of recorded uninterrupted operation |
+| **Crash Count** | 0 critical failures observed |
+| **Network Sync** | IBD phase 3 complete (single-node evidence only) |
 
 ### Block Time Analysis
 
@@ -133,7 +150,7 @@ Block 4 → Block 5:      6m 18s (recovered)
 Block 155 → Block 156:  27m 39s (variance normal at testnet difficulty)
 
 Average Block Time: ~7.2 minutes
-(Target: 2 minutes; ASERT will tighten for mainnet)
+(Target: 2 minutes; variance remains expected under easy-difficulty testnet conditions)
 ```
 
 ### Resource Usage
@@ -153,26 +170,23 @@ Average Block Time: ~7.2 minutes
 
 **Scope:** Consensus layer (validators V1-V18) + Crypto layer (Schnorr, Bulletproofs+, Pedersen, H_DOM)
 
-**Status:** Specification review and adversarial testing underway.
-
-**Expected Completion:** Week of 2026-05-26
+**Status:** Specification review, adversarial testing, and closure of hardening findings are underway.
 
 ### PHASE 2 Audit (Planned)
 
 **Scope:** Storage layer (LMDB) + P2P layer (Noise, message loop) + PoW/ASERT
 
-**Expected Start:** Post-Phase 1 completion
+**Entry Condition:** Phase 1 closure and updated release-blocker review.
 
 ---
 
 ## Mainnet Launch Prerequisites
 
-### ✅ Completed
+### Completed
 
 - [x] Whitepaper v3 finalized
-- [x] All 16 crates implemented + tested
-- [x] 238 unit tests passing (0 failures)
-- [x] Testnet private operational (156 blocks, 18h+)
+- [x] Core workspace implemented across 16 crates
+- [x] Controlled testnet burn-in completed (single private node, 156 recorded blocks)
 - [x] Genesis block deterministic
 - [x] Pedersen/Bulletproof format consistency verified
 - [x] Balance equation proven (multiple test vectors)
@@ -181,14 +195,15 @@ Average Block Time: ~7.2 minutes
 - [x] IBD (Initial Block Download) phases 1-3 complete
 - [x] Serialization codec complete + tested
 
-### ⏳ In Progress
+### In Progress
 
 - [ ] Phase 1 audit (consensus + crypto)
 - [ ] Phase 2 audit (storage + P2P + PoW)
-- [ ] Testnet public (3+ months minimum)
-- [ ] Mainnet genesis preparation (frozen params)
+- [ ] Public adversarial testnet stabilization (90+ days minimum)
+- [ ] Distributed survivability validation
+- [ ] Mainnet genesis preparation (frozen params after readiness gates)
 
-### ❌ Not Started / Deferred
+### Not Started / Deferred
 
 - [ ] Dandelion++ (privacy mixing) — deferred to v1.1
 - [ ] MuSig2 (multisig) — deferred to v1.1
@@ -232,28 +247,29 @@ The miner is integrated into the node. Mining starts automatically on startup.
 
 ---
 
-## Mainnet Launch Timeline
+## Deployment Maturity Sequence
 
-| Phase | Duration | Status |
-|-------|----------|--------|
-| **Phase 1 Audit** | 1-2 weeks | 🔄 In Progress |
-| **Phase 2 Audit** | 1-2 weeks | ⏳ Queued |
-| **Public Testnet** | 3+ months | ⏳ Awaiting Audit |
-| **Genesis Preparation** | 2-4 weeks | ⏳ Pre-Launch |
-| **Mainnet Launch** | TBD | 🎯 Q3 2026 Target |
+| Milestone | Condition | Status |
+|-----------|-----------|--------|
+| **Controlled burn-in** | Single-node operational evidence collected | Observed |
+| **Consensus + crypto hardening** | Adversarial review closure and blocker reduction | In progress |
+| **Storage, network, and PoW hardening** | Durability and hostile-network validation | Planned |
+| **Public adversarial testnet** | Multi-node stabilization without consensus breaks | Pending |
+| **Genesis freeze + operator readiness** | Final parameters, seed operators, and runbooks | Pending |
+| **Public mainnet deployment** | After all readiness gates are satisfied | Not scheduled by date |
 
 ---
 
 ## Security Considerations
 
-### ⚠️ Known Limitations
+### Known Limitations
 
-- **Wallet KDF:** Currently uses Argon2id (OWASP recommended). Do NOT use for real funds on mainnet without professional audit.
-- **Dandelion++:** Not implemented; P2P IP leakage possible. Defer to v1.1.
+- **Wallet KDF:** Currently uses Argon2id. The wallet layer still requires independent review before public mainnet fund custody.
+- **Dandelion++:** Not implemented; peer-level network privacy remains limited in v0.1.0.
 - **MuSig2:** Not implemented; multisig deferred to v1.1.
-- **Ban Policy:** Peer scoring exists but not enforced. Nodes may not ban bad peers aggressively.
+- **Ban Policy:** Peer scoring exists but enforcement remains conservative.
 
-### ✅ Implemented Safeguards
+### Implemented Safeguards
 
 - Schnorr signatures with chain_id (replay protection)
 - Bulletproofs+ range proofs (2^52 max value)
@@ -292,5 +308,5 @@ All commits must:
 
 ---
 
-**Last Updated:** 2026-05-19  
-**Next Review:** Post-Phase 1 Audit
+**Last Updated:** 2026-05-26  
+**Next Review:** After the next hardening-status update
