@@ -52,15 +52,18 @@ async fn expect_outbound_cleanup(node: &std::sync::Arc<dom_node::node::DomNode>)
 #[tokio::test]
 async fn duplicate_seed_outbound_dials_are_deduplicated_live() {
     init_tracing();
-    let (_accepts, listener_task) = spawn_stalling_listener("127.0.0.1:43417").await;
+    let seed_port = free_local_port();
+    let seed_addr = format!("127.0.0.1:{seed_port}");
+    let (accepts, listener_task) = spawn_stalling_listener(&seed_addr).await;
 
-    let mut config = test_config("adversarial-outbound-duplicate-seed", 43418, false);
+    let node_port = free_local_port();
+    let mut config = test_config("adversarial-outbound-duplicate-seed", node_port, false);
     config.min_outbound = 4;
-    config.seed_peers = vec!["127.0.0.1:43417".into(); 32];
+    config.seed_peers = vec![seed_addr; 32];
     let node = spawn_node(config).await;
 
     tokio::spawn(node.clone().run());
-    wait_for_listener_ready("127.0.0.1:43418", 10)
+    wait_for_listener_ready(&format!("127.0.0.1:{node_port}"), 10)
         .await
         .expect("listener ready");
 
@@ -82,7 +85,7 @@ async fn duplicate_seed_outbound_dials_are_deduplicated_live() {
         "duplicate seed entries must not create overlapping outbound reservations"
     );
     assert_eq!(
-        _accepts.load(Ordering::Relaxed),
+        accepts.load(Ordering::Relaxed),
         1,
         "duplicate seed entries must not create duplicate live dials"
     );
@@ -96,23 +99,24 @@ async fn stalled_outbound_dials_are_bounded_by_min_outbound_live() {
     init_tracing();
     let mut accept_counters = Vec::new();
     let mut listener_tasks = Vec::new();
-    let seed_ports = [43419u16, 43420, 43421, 43422];
-    for port in seed_ports {
-        let (accepts, handle) = spawn_stalling_listener(&format!("127.0.0.1:{port}")).await;
+    let mut seed_addrs = Vec::new();
+    for _ in 0..4 {
+        let port = free_local_port();
+        let addr = format!("127.0.0.1:{port}");
+        let (accepts, handle) = spawn_stalling_listener(&addr).await;
         accept_counters.push(accepts);
         listener_tasks.push(handle);
+        seed_addrs.push(addr);
     }
 
-    let mut config = test_config("adversarial-outbound-bounded", 43423, false);
+    let node_port = free_local_port();
+    let mut config = test_config("adversarial-outbound-bounded", node_port, false);
     config.min_outbound = 2;
-    config.seed_peers = seed_ports
-        .into_iter()
-        .map(|port| format!("127.0.0.1:{port}"))
-        .collect();
+    config.seed_peers = seed_addrs;
     let node = spawn_node(config).await;
 
     tokio::spawn(node.clone().run());
-    wait_for_listener_ready("127.0.0.1:43423", 10)
+    wait_for_listener_ready(&format!("127.0.0.1:{node_port}"), 10)
         .await
         .expect("listener ready");
 
