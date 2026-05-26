@@ -87,6 +87,18 @@ struct BroadcastChannels {
     tx_stem_tx: tokio::sync::broadcast::Sender<dom_wire::dandelion::StemEnvelope>,
 }
 
+const FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS: u64 = 30;
+const FUTURE_BLOCK_QUEUE_MAX_AGE_SECS: u64 = dom_core::MAX_FUTURE_BLOCK_TIME
+    + dom_core::FUTURE_BLOCK_SOFT_BUFFER_SECS
+    + FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS * 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeferredReplayAction {
+    RelayBestChain,
+    Requeue,
+    Drop,
+}
+
 impl DomNode {
     /// Initialize the node from configuration.
     pub fn init(config: NodeConfig) -> Result<Self, DomError> {
@@ -265,9 +277,17 @@ impl DomNode {
             let chain = self.chain.clone();
             let relay_tx = self.block_relay_tx.clone();
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+                    FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS,
+                ));
                 loop {
                     interval.tick().await;
+                    let evicted = queue.evict_expired(FUTURE_BLOCK_QUEUE_MAX_AGE_SECS).await;
+                    if evicted > 0 {
+                        tracing::debug!(
+                            "Evicted {evicted} expired deferred block(s) before replay drain"
+                        );
+                    }
                     let now_secs = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -285,28 +305,34 @@ impl DomNode {
                                     let mut c = chain.lock().await;
                                     c.connect_block(&block, now)
                                 };
-                                match result {
-                                    Ok(dom_chain::ConnectResult::BestChain) => {
+                                match deferred_replay_action(&result) {
+                                    DeferredReplayAction::RelayBestChain => {
                                         tracing::info!(
                                             "Accepted deferred block ts={} (new tip)",
                                             deferred.timestamp
                                         );
                                         let _ = relay_tx.send(deferred.block_bytes);
                                     }
-                                    Ok(dom_chain::ConnectResult::SideChain) => {
-                                        tracing::debug!(
-                                            "Accepted deferred block ts={} (side chain — no rebroadcast)",
-                                            deferred.timestamp
-                                        );
+                                    DeferredReplayAction::Drop => {
+                                        if matches!(result, Ok(dom_chain::ConnectResult::SideChain))
+                                        {
+                                            tracing::debug!(
+                                                "Accepted deferred block ts={} (side chain — no rebroadcast)",
+                                                deferred.timestamp
+                                            );
+                                        } else if matches!(
+                                            result,
+                                            Ok(dom_chain::ConnectResult::AlreadyHave)
+                                        ) {
+                                            tracing::trace!(
+                                                "Deferred block ts={} already known — no-op",
+                                                deferred.timestamp
+                                            );
+                                        } else if let Err(ref e) = result {
+                                            tracing::debug!("Deferred block still rejected: {e}");
+                                        }
                                     }
-                                    Ok(dom_chain::ConnectResult::AlreadyHave) => {
-                                        tracing::trace!(
-                                            "Deferred block ts={} already known — no-op",
-                                            deferred.timestamp
-                                        );
-                                    }
-                                    Err(dom_core::DomError::TemporarilyInvalid(_))
-                                    | Err(dom_core::DomError::Orphan(_)) => {
+                                    DeferredReplayAction::Requeue => {
                                         let requeued = queue
                                             .defer(crate::future_block_queue::DeferredBlock {
                                                 block_hash: deferred.block_hash,
@@ -326,9 +352,6 @@ impl DomNode {
                                                 deferred.timestamp
                                             );
                                         }
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!("Deferred block still rejected: {e}");
                                     }
                                 }
                             }
@@ -1069,6 +1092,21 @@ async fn queue_future_block(
     queue.defer(deferred).await
 }
 
+fn deferred_replay_action(
+    result: &Result<dom_chain::ConnectResult, DomError>,
+) -> DeferredReplayAction {
+    match result {
+        Ok(dom_chain::ConnectResult::BestChain) => DeferredReplayAction::RelayBestChain,
+        Ok(dom_chain::ConnectResult::SideChain) | Ok(dom_chain::ConnectResult::AlreadyHave) => {
+            DeferredReplayAction::Drop
+        }
+        Err(DomError::TemporarilyInvalid(_)) | Err(DomError::Orphan(_)) => {
+            DeferredReplayAction::Requeue
+        }
+        Err(_) => DeferredReplayAction::Drop,
+    }
+}
+
 /// Persistent message loop after Hello exchange.
 ///
 /// Reads framed messages from the peer in a loop and dispatches by command:
@@ -1660,7 +1698,11 @@ async fn message_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::{peer_violation_score, pending_peer_violation_score};
+    use super::{
+        deferred_replay_action, peer_violation_score, pending_peer_violation_score,
+        DeferredReplayAction,
+    };
+    use dom_chain::ConnectResult;
     use dom_core::DomError;
     use dom_wire::peer::ban_scores;
 
@@ -1703,6 +1745,50 @@ mod tests {
                 "handshake timeout after 10s".into()
             )),
             Some(ban_scores::PROTOCOL_VIOLATION)
+        );
+    }
+
+    #[test]
+    fn deferred_best_chain_replays_to_relay() {
+        assert_eq!(
+            deferred_replay_action(&Ok(ConnectResult::BestChain)),
+            DeferredReplayAction::RelayBestChain
+        );
+    }
+
+    #[test]
+    fn deferred_retryable_rejections_requeue() {
+        assert_eq!(
+            deferred_replay_action(&Err(DomError::TemporarilyInvalid("future block".into()))),
+            DeferredReplayAction::Requeue
+        );
+        assert_eq!(
+            deferred_replay_action(&Err(DomError::Orphan("missing parent".into()))),
+            DeferredReplayAction::Requeue
+        );
+    }
+
+    #[test]
+    fn deferred_non_retryable_outcomes_drop() {
+        assert_eq!(
+            deferred_replay_action(&Ok(ConnectResult::SideChain)),
+            DeferredReplayAction::Drop
+        );
+        assert_eq!(
+            deferred_replay_action(&Ok(ConnectResult::AlreadyHave)),
+            DeferredReplayAction::Drop
+        );
+        assert_eq!(
+            deferred_replay_action(&Err(DomError::Malformed("bad deferred bytes".into()))),
+            DeferredReplayAction::Drop
+        );
+        assert_eq!(
+            deferred_replay_action(&Err(DomError::Invalid("bad block".into()))),
+            DeferredReplayAction::Drop
+        );
+        assert_eq!(
+            deferred_replay_action(&Err(DomError::Internal("store failure".into()))),
+            DeferredReplayAction::Drop
         );
     }
 }
