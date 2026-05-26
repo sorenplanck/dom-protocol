@@ -271,3 +271,25 @@ fn remove_peer_clears_pending_reservation_too() {
     mgr.reserve_inbound(b)
         .expect("remove_peer must free a pending reservation");
 }
+
+/// A malformed-handshake storm can rotate source addresses forever. The
+/// pre-registration penalty cache must stay bounded under churn so the node
+/// does not trade protocol safety for unbounded RAM growth.
+#[test]
+fn pending_penalty_cache_stays_bounded_under_malformed_address_storm() {
+    let mut mgr = PeerManager::new(125, 8);
+    for i in 0..10_000usize {
+        let addr = format!("198.51.{}.{}:33369", (i / 255) % 255, (i % 255) + 1);
+        mgr.add_pending_ban_score(&addr, 20);
+    }
+
+    assert!(
+        mgr.pending_penalty_count() <= 4_096,
+        "pre-registration penalty churn must remain memory-bounded"
+    );
+    assert_eq!(
+        mgr.pending_ban_score("198.51.0.1:33369"),
+        0,
+        "oldest churn entries should be evicted once the penalty cache is full"
+    );
+}
