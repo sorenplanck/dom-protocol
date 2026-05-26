@@ -148,3 +148,75 @@ jobs:
       - name: Print pinned PMMR vectors (cross-platform audit log)
         run: |
           cargo test -p dom-test-vectors --lib pmmr_vectors::tests::print_pmmr_vectors -- --nocapture
+
+      # Phase 1.4 deterministic snapshot manifest — every host
+      # produces the SAME byte sequence. The compare-snapshots job
+      # (below) downloads every host's artifact and asserts they
+      # are byte-identical. Any divergence is a consensus-class
+      # cross-platform regression.
+      - name: Generate deterministic snapshot manifest
+        shell: bash
+        run: |
+          cargo run -p dom-test-vectors --bin cross_platform_snapshot --quiet \
+            > snapshot.${{ matrix.host }}.txt
+          wc -c snapshot.${{ matrix.host }}.txt
+          head -5 snapshot.${{ matrix.host }}.txt
+
+      - name: Upload snapshot artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-${{ matrix.host }}
+          path: snapshot.${{ matrix.host }}.txt
+          if-no-files-found: error
+
+  compare-snapshots:
+    name: cross-platform snapshot byte-equivalence
+    runs-on: ubuntu-latest
+    needs: pmmr-vectors-cross-platform
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download every host's snapshot
+        uses: actions/download-artifact@v4
+        with:
+          pattern: snapshot-*
+          path: snapshots
+          merge-multiple: true
+
+      # The non-experimental matrix legs (linux-x86_64, linux-arm64,
+      # macos-arm64, macos-x86_64) MUST produce a byte-identical
+      # manifest. Windows is `continue-on-error: true` in the
+      # matrix above and is therefore tolerated here too — its
+      # divergence does NOT fail the gate until the MSVC build
+      # path is green (RB-PMMR-001 deferred-validation list).
+      - name: Diff snapshots across non-experimental hosts
+        run: |
+          set -euo pipefail
+          ls -la snapshots/
+          REFERENCE=snapshots/snapshot.linux-x86_64.txt
+          if [ ! -f "$REFERENCE" ]; then
+            echo "FATAL: reference snapshot ${REFERENCE} missing — linux-x86_64 leg did not upload"
+            exit 1
+          fi
+          REQUIRED_HOSTS="linux-arm64 macos-arm64 macos-x86_64"
+          for host in $REQUIRED_HOSTS; do
+            CANDIDATE="snapshots/snapshot.${host}.txt"
+            if [ ! -f "$CANDIDATE" ]; then
+              echo "FATAL: missing snapshot for required host ${host}"
+              exit 1
+            fi
+            if ! diff -u "$REFERENCE" "$CANDIDATE"; then
+              echo "DIVERGENCE: ${host} differs from linux-x86_64 reference"
+              exit 1
+            fi
+            echo "OK: ${host} byte-identical to linux-x86_64"
+          done
+          # Advisory diff against Windows (continue-on-error).
+          if [ -f snapshots/snapshot.windows-x86_64.txt ]; then
+            if diff -u "$REFERENCE" snapshots/snapshot.windows-x86_64.txt > /dev/null; then
+              echo "BONUS: windows-x86_64 ALSO byte-identical"
+            else
+              echo "ADVISORY: windows-x86_64 diverges (expected until RB-PMMR-001 MSVC pinning):"
+              diff -u "$REFERENCE" snapshots/snapshot.windows-x86_64.txt || true
+            fi
+          fi
