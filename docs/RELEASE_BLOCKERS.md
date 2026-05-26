@@ -666,3 +666,39 @@ likely loss mode (kernel never persisted the dirty page). Filesystem
 journal replay anomalies are tail risk that the bug-bounty / public
 testnet phases (8.1, 8.4) are positioned to surface in the wild
 before mainnet launch.
+
+---
+
+## [MAINNET] RB-EVICTION-POLICY — slot monopolisation defence
+
+**Severity:** IMPORTANT — eclipse-attack residual risk.
+**Status:** 🔴 OPEN — Phase 4.2 follow-up, not in scope this session.
+
+`PeerManager` enforces inbound `MAX_PEERS_SAME_SLASH_16 = 2` plus
+the `max_inbound` cap. Once those slots are full there is no
+eviction; the first peers to connect hold the slots indefinitely.
+An attacker who is fast enough to connect before legitimate peers
+can monopolise the inbound surface despite passing the subnet
+check.
+
+The 7 tests in `dom-wire/tests/eclipse_resistance.rs` pin the
+defensive surface that does exist (subnet flood cap, inbound cap,
+disconnect-frees-slot bookkeeping, IPv4+IPv6 coverage). They are
+the floor; an eviction policy is the next ceiling.
+
+Documented mitigation paths for the follow-up:
+
+* Bitcoin Core "feeler + eviction" model: when full, evict the
+  oldest non-active peer if a new outbound discovery has higher
+  score.
+* Random eviction (Sybil-resistant): on each new inbound that
+  passes subnet check, evict a random existing inbound (probability
+  inversely proportional to score).
+* Per-peer score weighted by service-time and behaviour signal
+  (good block relay, valid headers).
+
+A full implementation requires per-peer scoring and a controlled
+disconnect path through the async event loop. Not blocking for
+mainnet candidate (the existing defences eliminate the most
+obvious attack shape — single-subnet flood), tracked here so the
+limitation does not get forgotten.
