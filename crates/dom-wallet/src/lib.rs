@@ -44,11 +44,16 @@ pub mod backup;
 pub mod coin_selection;
 pub mod hd_wallet;
 pub mod output_index;
+pub mod seed;
 pub mod store;
 pub mod types;
 pub mod wallet;
 
 pub use hd_wallet::{ExtendedPrivKey, HdError, DOM_COIN_TYPE};
+pub use seed::{
+    coinbase_blinding, spend_output_blinding, Bip39Seed, SeedAcceptance, SeedError,
+    NEW_WALLET_WORD_COUNT, SEED_BYTES,
+};
 pub use types::{Network, OwnedOutput, WalletBalance, WalletError};
 pub use wallet::Wallet;
 
