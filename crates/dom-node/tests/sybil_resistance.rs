@@ -27,8 +27,8 @@
 //! is documented under RB-PEX-SUBNET in RELEASE_BLOCKERS.
 
 use dom_node::pex::{
-    decode_addr_payload, encode_addr_payload, PexManager, GETADDR_COOLDOWN_SECS,
-    MAX_ADDR_RESPONSE, MAX_PEER_AGE_SECS,
+    decode_addr_payload, encode_addr_payload, PexManager, GETADDR_COOLDOWN_SECS, MAX_ADDR_RESPONSE,
+    MAX_PEER_AGE_SECS,
 };
 use dom_store::PeerAddr;
 
@@ -120,6 +120,23 @@ fn getaddr_cooldown_blocks_storm() {
             GETADDR_COOLDOWN_SECS
         );
     }
+}
+
+/// A hostile rotating peer set MUST NOT turn GetAddr cooldown tracking into an
+/// unbounded memory sink. The cooldown table is runtime-only state and must
+/// stay bounded independently of the known-peer cap.
+#[test]
+fn rotating_getaddr_storm_does_not_grow_cooldown_state_without_bound() {
+    let mut pex = PexManager::new(1000);
+    for i in 0..50_000usize {
+        pex.record_getaddr(&format!("peer-{i}"));
+    }
+
+    assert!(
+        pex.tracked_getaddr_count() <= 4_000,
+        "GetAddr cooldown state must remain bounded under rotating churn; got {}",
+        pex.tracked_getaddr_count()
+    );
 }
 
 // ── (4) Failure tracking laundering ──────────────────────────────────────────
