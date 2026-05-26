@@ -9,9 +9,13 @@ use dom_consensus::{derive_chain_id, validate_block, Block, ValidationContext};
 use dom_core::{BlockHeight, DomError, Hash256, Timestamp};
 use dom_pow::{randomx_seed_height, target_to_difficulty, AsertAnchor, CompactTarget};
 use dom_serialization::{DomDeserialize, DomSerialize};
+use dom_store::utxo::UtxoEntry;
 use dom_store::DomStore;
 use primitive_types::U256;
+use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, info};
+
+use crate::reorg::{check_reorg_depth, find_common_ancestor};
 
 /// Sentinel substring callers grep for to recognise a chainstate
 /// corruption distinctly from other `DomError::Internal` cases. When
@@ -20,6 +24,11 @@ use tracing::{debug, info};
 /// re-sync from genesis" — continuing on a corrupted state would
 /// fork the local chain from itself.
 pub const CHAIN_CORRUPT_SENTINEL: &str = "CHAIN_CORRUPT";
+
+type UtxoBytes = ([u8; 33], Vec<u8>);
+type SpentCommitment = [u8; 33];
+type UtxoUpdate = ([u8; 33], Option<Vec<u8>>);
+type KernelUpdate = ([u8; 33], Option<[u8; 32]>);
 
 pub struct ChainState {
     pub store: DomStore,
@@ -241,56 +250,6 @@ impl ChainState {
             ))
         })?;
 
-        // Validate every input exists in UTXO set and coinbase outputs are mature.
-        // This protects against double-spend and immature coinbase spend (reorg risk).
-        for tx in &block.transactions {
-            for input in &tx.inputs {
-                let commitment_bytes = input.commitment.as_bytes();
-                let entry = self.store.get_utxo(commitment_bytes)?.ok_or_else(|| {
-                    DomError::Invalid(format!(
-                        "input commitment not found in UTXO set: {}",
-                        hex::encode(commitment_bytes)
-                    ))
-                })?;
-                if entry.is_coinbase
-                    && !entry.is_mature_for(header.height.0, self.coinbase_maturity)
-                {
-                    return Err(DomError::Invalid(format!(
-                        "immature coinbase spend at height {} (created at {}, maturity {})",
-                        header.height.0, entry.block_height, self.coinbase_maturity
-                    )));
-                }
-            }
-        }
-
-        // Build UTXO changeset from block contents.
-        // Coinbase output is marked is_coinbase=true (subject to maturity rule).
-        let mut new_utxos: Vec<([u8; 33], Vec<u8>)> = Vec::new();
-        let coinbase_entry = dom_store::utxo::UtxoEntry {
-            block_height: header.height.0,
-            is_coinbase: true,
-            proof: block.coinbase.output.proof.clone(),
-        };
-        new_utxos.push((
-            *block.coinbase.output.commitment.as_bytes(),
-            coinbase_entry.to_bytes(),
-        ));
-
-        let mut spent_utxos: Vec<[u8; 33]> = Vec::new();
-        for tx in &block.transactions {
-            for input in &tx.inputs {
-                spent_utxos.push(*input.commitment.as_bytes());
-            }
-            for output in &tx.outputs {
-                let entry = dom_store::utxo::UtxoEntry {
-                    block_height: header.height.0,
-                    is_coinbase: false,
-                    proof: output.proof.clone(),
-                };
-                new_utxos.push((*output.commitment.as_bytes(), entry.to_bytes()));
-            }
-        }
-
         // Serialize full block body for IBD responses (peers ask for bodies by hash).
         let block_body_bytes = block.to_bytes()?;
         let kernel_excesses = extract_kernel_excesses(block, block_hash);
@@ -299,7 +258,15 @@ impl ChainState {
             header.height == BlockHeight::GENESIS || header.prev_hash == self.tip_hash;
         let extends_best_chain = header.total_difficulty > self.tip_difficulty;
 
-        if extends_best_chain && is_direct_extension {
+        if is_direct_extension {
+            if !extends_best_chain {
+                return Err(DomError::Invalid(format!(
+                    "direct extension did not increase total_difficulty: new={} current={}",
+                    header.total_difficulty, self.tip_difficulty
+                )));
+            }
+            let (new_utxos, spent_utxos) = build_utxo_changeset(block);
+            self.validate_direct_extension_inputs(block)?;
             self.store.commit_block(
                 block_hash.as_bytes(),
                 header.height.0,
@@ -324,10 +291,8 @@ impl ChainState {
                 &block_body_bytes,
             )?;
             if extends_best_chain {
-                debug!(
-                    "Heavier side chain block stored without promotion: height={}, hash={}, parent={} current_tip={}",
-                    header.height, block_hash, header.prev_hash, self.tip_hash,
-                );
+                self.promote_heavier_known_tip(block_hash)?;
+                return Ok(ConnectResult::BestChain);
             }
             debug!(
                 "Side chain block: height={}, hash={}",
@@ -416,9 +381,7 @@ impl ChainState {
                         .store
                         .get_block_header(header.prev_hash.as_bytes())?
                         .ok_or_else(|| {
-                            DomError::Internal(
-                                "parent missing after IBD parent precheck".into(),
-                            )
+                            DomError::Internal("parent missing after IBD parent precheck".into())
                         })?;
                     BlockHeader::from_bytes(&parent_bytes)?.total_difficulty
                 } else {
@@ -547,6 +510,137 @@ impl ChainState {
     pub fn is_synced(&self, best_peer_height: u64) -> bool {
         self.tip_height.0 + 10 >= best_peer_height
     }
+
+    /// Promote a previously-known heavier side-chain tip into the canonical chain.
+    ///
+    /// The tip and every ancestor block up to the fork point MUST already be
+    /// present in the store via `commit_block` or `store_known_block`.
+    pub fn promote_heavier_known_tip(&mut self, new_tip_hash: Hash256) -> Result<(), DomError> {
+        let new_tip_header = self
+            .store
+            .get_block_header(new_tip_hash.as_bytes())?
+            .ok_or_else(|| {
+                DomError::Internal(format!(
+                    "reorg target header missing: {}",
+                    hex::encode(new_tip_hash.as_bytes())
+                ))
+            })
+            .and_then(|bytes| BlockHeader::from_bytes(&bytes))?;
+
+        if new_tip_header.total_difficulty <= self.tip_difficulty {
+            return Err(DomError::PolicyRejected(format!(
+                "reorg target is not heavier: new={} current={}",
+                new_tip_header.total_difficulty, self.tip_difficulty
+            )));
+        }
+
+        let ancestor = find_common_ancestor(&self.store, self.tip_hash, new_tip_hash)?
+            .filter(|h| *h != Hash256::ZERO)
+            .ok_or_else(|| DomError::Invalid("heavier side chain has no common ancestor".into()))?;
+
+        let ancestor_height = if ancestor == self.tip_hash {
+            self.tip_height.0
+        } else {
+            let ancestor_bytes = self
+                .store
+                .get_block_header(ancestor.as_bytes())?
+                .ok_or_else(|| {
+                    DomError::Internal(format!(
+                        "reorg ancestor header missing: {}",
+                        hex::encode(ancestor.as_bytes())
+                    ))
+                })?;
+            BlockHeader::from_bytes(&ancestor_bytes)?.height.0
+        };
+
+        let disconnect_blocks = collect_branch_blocks(&self.store, self.tip_hash, ancestor)?;
+        check_reorg_depth(disconnect_blocks.len() as u64)?;
+        let mut connect_blocks = collect_branch_blocks(&self.store, new_tip_hash, ancestor)?;
+        connect_blocks.reverse();
+
+        let mut disconnect_output_index = HashMap::new();
+        for (_, block) in &disconnect_blocks {
+            record_block_outputs(block, &mut disconnect_output_index);
+        }
+
+        let mut utxo_overlay: BTreeMap<[u8; 33], Option<UtxoEntry>> = BTreeMap::new();
+        let mut kernel_overlay: BTreeMap<[u8; 33], Option<[u8; 32]>> = BTreeMap::new();
+
+        for (block_hash, block) in &disconnect_blocks {
+            apply_disconnect(
+                &self.store,
+                &mut utxo_overlay,
+                &mut kernel_overlay,
+                *block_hash,
+                block,
+                ancestor_height,
+                &disconnect_output_index,
+            )?;
+        }
+
+        for (block_hash, block) in &connect_blocks {
+            apply_connect(
+                &self.store,
+                &mut utxo_overlay,
+                &mut kernel_overlay,
+                *block_hash,
+                block,
+                self.coinbase_maturity,
+            )?;
+        }
+
+        let mut height_updates = BTreeMap::new();
+        for height in (ancestor_height + 1)..=self.tip_height.0 {
+            height_updates.insert(height, None);
+        }
+        for (block_hash, block) in &connect_blocks {
+            height_updates.insert(block.header.height.0, Some(*block_hash.as_bytes()));
+        }
+        let height_updates: Vec<(u64, Option<[u8; 32]>)> = height_updates.into_iter().collect();
+
+        let utxo_updates = build_utxo_updates(&self.store, &utxo_overlay)?;
+        let kernel_updates = build_kernel_updates(&self.store, &kernel_overlay)?;
+
+        self.store.apply_reorg(
+            new_tip_hash.as_bytes(),
+            &height_updates,
+            &utxo_updates,
+            &kernel_updates,
+        )?;
+
+        self.tip_hash = new_tip_hash;
+        self.tip_height = new_tip_header.height;
+        self.tip_difficulty = new_tip_header.total_difficulty;
+        info!(
+            "Reorg applied: new tip height={}, hash={}, ancestor={}",
+            self.tip_height, self.tip_hash, ancestor
+        );
+        Ok(())
+    }
+
+    fn validate_direct_extension_inputs(&self, block: &Block) -> Result<(), DomError> {
+        let header = &block.header;
+        for tx in &block.transactions {
+            for input in &tx.inputs {
+                let commitment_bytes = input.commitment.as_bytes();
+                let entry = self.store.get_utxo(commitment_bytes)?.ok_or_else(|| {
+                    DomError::Invalid(format!(
+                        "input commitment not found in UTXO set: {}",
+                        hex::encode(commitment_bytes)
+                    ))
+                })?;
+                if entry.is_coinbase
+                    && !entry.is_mature_for(header.height.0, self.coinbase_maturity)
+                {
+                    return Err(DomError::Invalid(format!(
+                        "immature coinbase spend at height {} (created at {}, maturity {})",
+                        header.height.0, entry.block_height, self.coinbase_maturity
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn rebuild_kernel_index_from_canonical_chain(
@@ -604,6 +698,305 @@ fn extract_kernel_excesses(block: &Block, block_hash: Hash256) -> Vec<([u8; 33],
         }
     }
     out
+}
+
+fn build_utxo_changeset(block: &Block) -> (Vec<UtxoBytes>, Vec<SpentCommitment>) {
+    let header = &block.header;
+    let mut new_utxos: Vec<([u8; 33], Vec<u8>)> = Vec::new();
+    let coinbase_entry = UtxoEntry {
+        block_height: header.height.0,
+        is_coinbase: true,
+        proof: block.coinbase.output.proof.clone(),
+    };
+    new_utxos.push((
+        *block.coinbase.output.commitment.as_bytes(),
+        coinbase_entry.to_bytes(),
+    ));
+
+    let mut spent_utxos: Vec<[u8; 33]> = Vec::new();
+    for tx in &block.transactions {
+        for input in &tx.inputs {
+            spent_utxos.push(*input.commitment.as_bytes());
+        }
+        for output in &tx.outputs {
+            let entry = UtxoEntry {
+                block_height: header.height.0,
+                is_coinbase: false,
+                proof: output.proof.clone(),
+            };
+            new_utxos.push((*output.commitment.as_bytes(), entry.to_bytes()));
+        }
+    }
+    (new_utxos, spent_utxos)
+}
+
+fn collect_branch_blocks(
+    store: &DomStore,
+    mut tip: Hash256,
+    ancestor: Hash256,
+) -> Result<Vec<(Hash256, Block)>, DomError> {
+    let mut out = Vec::new();
+    while tip != ancestor {
+        let body = store.get_block_body(tip.as_bytes())?.ok_or_else(|| {
+            DomError::Internal(format!(
+                "reorg block body missing: {}",
+                hex::encode(tip.as_bytes())
+            ))
+        })?;
+        let block = Block::from_bytes(&body).map_err(|e| {
+            DomError::Internal(format!(
+                "reorg block body decode failed for {}: {e}",
+                hex::encode(tip.as_bytes())
+            ))
+        })?;
+        tip = block.header.prev_hash;
+        out.push((compute_block_hash(&block.header.to_bytes()?), block));
+    }
+    Ok(out)
+}
+
+fn record_block_outputs(block: &Block, out: &mut HashMap<[u8; 33], UtxoEntry>) {
+    out.insert(
+        *block.coinbase.output.commitment.as_bytes(),
+        UtxoEntry {
+            block_height: block.header.height.0,
+            is_coinbase: true,
+            proof: block.coinbase.output.proof.clone(),
+        },
+    );
+    for tx in &block.transactions {
+        for output in &tx.outputs {
+            out.insert(
+                *output.commitment.as_bytes(),
+                UtxoEntry {
+                    block_height: block.header.height.0,
+                    is_coinbase: false,
+                    proof: output.proof.clone(),
+                },
+            );
+        }
+    }
+}
+
+fn apply_disconnect(
+    store: &DomStore,
+    utxo_overlay: &mut BTreeMap<[u8; 33], Option<UtxoEntry>>,
+    kernel_overlay: &mut BTreeMap<[u8; 33], Option<[u8; 32]>>,
+    block_hash: Hash256,
+    block: &Block,
+    ancestor_height: u64,
+    disconnect_output_index: &HashMap<[u8; 33], UtxoEntry>,
+) -> Result<(), DomError> {
+    utxo_overlay.insert(*block.coinbase.output.commitment.as_bytes(), None);
+    for tx in &block.transactions {
+        for output in &tx.outputs {
+            utxo_overlay.insert(*output.commitment.as_bytes(), None);
+        }
+    }
+
+    for tx in &block.transactions {
+        for input in &tx.inputs {
+            let commitment = *input.commitment.as_bytes();
+            let resurrected = disconnect_output_index
+                .get(&commitment)
+                .cloned()
+                .or(find_canonical_output_entry(
+                    store,
+                    ancestor_height,
+                    &commitment,
+                )?)
+                .ok_or_else(|| {
+                    DomError::Internal(format!(
+                        "reorg disconnect could not resurrect spent output {}",
+                        hex::encode(commitment)
+                    ))
+                })?;
+            utxo_overlay.insert(commitment, Some(resurrected));
+        }
+    }
+
+    for (excess, _) in extract_kernel_excesses(block, block_hash) {
+        kernel_overlay.insert(excess, None);
+    }
+    Ok(())
+}
+
+fn apply_connect(
+    store: &DomStore,
+    utxo_overlay: &mut BTreeMap<[u8; 33], Option<UtxoEntry>>,
+    kernel_overlay: &mut BTreeMap<[u8; 33], Option<[u8; 32]>>,
+    block_hash: Hash256,
+    block: &Block,
+    coinbase_maturity: u64,
+) -> Result<(), DomError> {
+    for tx in &block.transactions {
+        for input in &tx.inputs {
+            let commitment = *input.commitment.as_bytes();
+            let entry = lookup_utxo(store, utxo_overlay, &commitment)?.ok_or_else(|| {
+                DomError::Invalid(format!(
+                    "reorg connect missing input commitment {}",
+                    hex::encode(commitment)
+                ))
+            })?;
+            if entry.is_coinbase && !entry.is_mature_for(block.header.height.0, coinbase_maturity) {
+                return Err(DomError::Invalid(format!(
+                    "reorg connect spends immature coinbase at height {} (created at {}, maturity {})",
+                    block.header.height.0, entry.block_height, coinbase_maturity
+                )));
+            }
+            utxo_overlay.insert(commitment, None);
+        }
+    }
+
+    let coinbase_commitment = *block.coinbase.output.commitment.as_bytes();
+    if lookup_utxo(store, utxo_overlay, &coinbase_commitment)?.is_some() {
+        return Err(DomError::Invalid(format!(
+            "reorg connect duplicate output commitment {}",
+            hex::encode(coinbase_commitment)
+        )));
+    }
+    utxo_overlay.insert(
+        coinbase_commitment,
+        Some(UtxoEntry {
+            block_height: block.header.height.0,
+            is_coinbase: true,
+            proof: block.coinbase.output.proof.clone(),
+        }),
+    );
+
+    for tx in &block.transactions {
+        for output in &tx.outputs {
+            let commitment = *output.commitment.as_bytes();
+            if lookup_utxo(store, utxo_overlay, &commitment)?.is_some() {
+                return Err(DomError::Invalid(format!(
+                    "reorg connect duplicate output commitment {}",
+                    hex::encode(commitment)
+                )));
+            }
+            utxo_overlay.insert(
+                commitment,
+                Some(UtxoEntry {
+                    block_height: block.header.height.0,
+                    is_coinbase: false,
+                    proof: output.proof.clone(),
+                }),
+            );
+        }
+    }
+
+    for (excess, indexed_block) in extract_kernel_excesses(block, block_hash) {
+        if lookup_kernel(store, kernel_overlay, &excess)?.is_some() {
+            return Err(DomError::Invalid(format!(
+                "reorg connect kernel replay detected: excess={}",
+                hex::encode(excess)
+            )));
+        }
+        kernel_overlay.insert(excess, Some(indexed_block));
+    }
+
+    Ok(())
+}
+
+fn lookup_utxo(
+    store: &DomStore,
+    overlay: &BTreeMap<[u8; 33], Option<UtxoEntry>>,
+    commitment: &[u8; 33],
+) -> Result<Option<UtxoEntry>, DomError> {
+    if let Some(entry) = overlay.get(commitment) {
+        return Ok(entry.clone());
+    }
+    store.get_utxo(commitment)
+}
+
+fn lookup_kernel(
+    store: &DomStore,
+    overlay: &BTreeMap<[u8; 33], Option<[u8; 32]>>,
+    excess: &[u8; 33],
+) -> Result<Option<[u8; 32]>, DomError> {
+    if let Some(entry) = overlay.get(excess) {
+        return Ok(*entry);
+    }
+    store.get_kernel_block(excess)
+}
+
+fn find_canonical_output_entry(
+    store: &DomStore,
+    ancestor_height: u64,
+    commitment: &[u8; 33],
+) -> Result<Option<UtxoEntry>, DomError> {
+    for height in (0..=ancestor_height).rev() {
+        let Some(hash) = store.get_hash_at_height(height)? else {
+            continue;
+        };
+        let Some(body) = store.get_block_body(&hash)? else {
+            continue;
+        };
+        let block = Block::from_bytes(&body).map_err(|e| {
+            DomError::Internal(format!(
+                "decode canonical block {} while resurrecting {}: {e}",
+                hex::encode(hash),
+                hex::encode(commitment)
+            ))
+        })?;
+        if block.coinbase.output.commitment.as_bytes() == commitment {
+            return Ok(Some(UtxoEntry {
+                block_height: block.header.height.0,
+                is_coinbase: true,
+                proof: block.coinbase.output.proof.clone(),
+            }));
+        }
+        for tx in &block.transactions {
+            for output in &tx.outputs {
+                if output.commitment.as_bytes() == commitment {
+                    return Ok(Some(UtxoEntry {
+                        block_height: block.header.height.0,
+                        is_coinbase: false,
+                        proof: output.proof.clone(),
+                    }));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn build_utxo_updates(
+    store: &DomStore,
+    overlay: &BTreeMap<[u8; 33], Option<UtxoEntry>>,
+) -> Result<Vec<UtxoUpdate>, DomError> {
+    let mut out = Vec::new();
+    for (commitment, desired) in overlay {
+        let current = store.get_utxo(commitment)?;
+        match (current, desired) {
+            (Some(current), Some(desired)) if current.to_bytes() == desired.to_bytes() => {}
+            (Some(current), Some(desired)) => {
+                return Err(DomError::Internal(format!(
+                    "reorg utxo mismatch for existing commitment {}: current_height={} desired_height={}",
+                    hex::encode(commitment),
+                    current.block_height,
+                    desired.block_height
+                )));
+            }
+            (None, Some(desired)) => out.push((*commitment, Some(desired.to_bytes()))),
+            (Some(_), None) => out.push((*commitment, None)),
+            (None, None) => {}
+        }
+    }
+    Ok(out)
+}
+
+fn build_kernel_updates(
+    store: &DomStore,
+    overlay: &BTreeMap<[u8; 33], Option<[u8; 32]>>,
+) -> Result<Vec<KernelUpdate>, DomError> {
+    let mut out = Vec::new();
+    for (excess, desired) in overlay {
+        let current = store.get_kernel_block(excess)?;
+        if current != *desired {
+            out.push((*excess, *desired));
+        }
+    }
+    Ok(out)
 }
 
 /// Outcome of attempting to connect a block to the chain.

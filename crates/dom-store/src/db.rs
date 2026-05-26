@@ -474,4 +474,96 @@ impl DomStore {
 
         Ok(())
     }
+
+    /// Atomically rewrite canonical chain pointers and touched state for a reorg.
+    ///
+    /// `height_updates` lists the final canonical occupant (or absence) for every
+    /// touched height. `utxo_updates` and `kernel_updates` likewise describe the
+    /// final desired state for each touched key after the reorg completes.
+    ///
+    /// Block headers / bodies are assumed to have been persisted already via
+    /// `commit_block` (canonical) or `store_known_block` (side-chain retention).
+    #[allow(clippy::type_complexity)]
+    pub fn apply_reorg(
+        &self,
+        new_tip_hash: &[u8; 32],
+        height_updates: &[(u64, Option<[u8; 32]>)],
+        utxo_updates: &[([u8; 33], Option<Vec<u8>>)],
+        kernel_updates: &[([u8; 33], Option<[u8; 32]>)],
+    ) -> Result<(), DomError> {
+        let mut txn = self
+            .env
+            .begin_rw_txn()
+            .map_err(|e| DomError::Internal(format!("rw txn: {e}")))?;
+
+        for (height, maybe_hash) in height_updates {
+            let key = height.to_le_bytes();
+            match maybe_hash {
+                Some(hash) => txn
+                    .put(self.db_height, &key, hash, WriteFlags::empty())
+                    .map_err(|e| DomError::Internal(format!("put reorg height: {e}")))?,
+                None => match txn.del(self.db_height, &key, None) {
+                    Ok(()) | Err(lmdb::Error::NotFound) => {}
+                    Err(e) => {
+                        return Err(DomError::Internal(format!("del reorg height: {e}")));
+                    }
+                },
+            }
+        }
+
+        for (commitment, maybe_entry) in utxo_updates {
+            match maybe_entry {
+                Some(entry) => match txn.get(self.db_utxos, commitment) {
+                    Ok(existing) if existing == entry.as_slice() => {}
+                    Ok(_) => {
+                        return Err(DomError::Internal(format!(
+                            "reorg utxo already exists with different contents: commitment={}",
+                            hex::encode(commitment)
+                        )));
+                    }
+                    Err(lmdb::Error::NotFound) => txn
+                        .put(self.db_utxos, commitment, entry, WriteFlags::NO_OVERWRITE)
+                        .map_err(|e| DomError::Internal(format!("put reorg utxo: {e}")))?,
+                    Err(e) => return Err(DomError::Internal(format!("get reorg utxo: {e}"))),
+                },
+                None => match txn.del(self.db_utxos, commitment, None) {
+                    Ok(()) | Err(lmdb::Error::NotFound) => {}
+                    Err(e) => {
+                        return Err(DomError::Internal(format!("del reorg utxo: {e}")));
+                    }
+                },
+            }
+        }
+
+        for (excess, maybe_hash) in kernel_updates {
+            match maybe_hash {
+                Some(hash) => match txn.get(self.db_kernels, excess) {
+                    Ok(existing) if existing == hash => {}
+                    Ok(_) => {
+                        return Err(DomError::Internal(format!(
+                            "reorg kernel already exists with different block: excess={}",
+                            hex::encode(excess)
+                        )));
+                    }
+                    Err(lmdb::Error::NotFound) => txn
+                        .put(self.db_kernels, excess, hash, WriteFlags::NO_OVERWRITE)
+                        .map_err(|e| DomError::Internal(format!("put reorg kernel: {e}")))?,
+                    Err(e) => return Err(DomError::Internal(format!("get reorg kernel: {e}"))),
+                },
+                None => match txn.del(self.db_kernels, excess, None) {
+                    Ok(()) | Err(lmdb::Error::NotFound) => {}
+                    Err(e) => {
+                        return Err(DomError::Internal(format!("del reorg kernel: {e}")));
+                    }
+                },
+            }
+        }
+
+        txn.put(self.db_tip, b"tip", new_tip_hash, WriteFlags::empty())
+            .map_err(|e| DomError::Internal(format!("put reorg tip: {e}")))?;
+
+        txn.commit()
+            .map_err(|e| DomError::Internal(format!("commit reorg: {e}")))?;
+        Ok(())
+    }
 }

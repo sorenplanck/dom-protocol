@@ -18,30 +18,26 @@
 //! 2. `check_reorg_depth` boundary behaviour against
 //!    `MAX_REORG_DEPTH_POLICY`.
 //!
-//! What is NOT yet covered and why:
-//! - The full reorg pipeline (disconnect blocks back to the ancestor,
-//!   then connect the heavier chain forward) is not wired into
-//!   `ChainState` yet — only chain-tip promotion via
-//!   `ConnectResult::BestChain` is implemented. When that lands, the
-//!   equivalence property documented below in
-//!   `reorg_equivalence_property_placeholder` should grow into a real
-//!   test: applying the heavier chain via `connect_block` must leave
-//!   the UTXO set / kernel index / height index byte-identical to
-//!   building the heavier chain from the fork point in isolation.
-//!   That test requires either real mining (env-blocked) or a
-//!   `cfg(test)`-only validation bypass — neither exists today. The
-//!   placeholder pins the contract so the property is not forgotten.
-
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
 use dom_chain::reorg::{check_reorg_depth, find_common_ancestor};
+use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
-use dom_core::{BlockHeight, Hash256, Timestamp};
+use dom_consensus::{
+    Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionInput, TransactionKernel,
+    TransactionOutput,
+};
+use dom_core::{Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN};
+use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_pow::CompactTarget;
 use dom_serialization::DomSerialize;
+use dom_store::utxo::UtxoEntry;
 use dom_store::DomStore;
 use primitive_types::U256;
 use tempfile::TempDir;
+
+type UtxoBytes = ([u8; 33], Vec<u8>);
+type SpentCommitment = [u8; 33];
 
 /// Build a synthetic header with a controllable `prev_hash` and `height`.
 /// Other fields are zeroed because the helpers exercised here do not
@@ -122,6 +118,161 @@ fn build_chain(
         hashes.push(prev);
     }
     hashes
+}
+
+fn blinding(seed: u8) -> BlindingFactor {
+    let mut bytes = [0u8; 32];
+    bytes[31] = seed.max(1);
+    BlindingFactor::from_bytes(bytes).expect("deterministic blinding")
+}
+
+fn commitment(seed: u8, value: u64) -> Commitment {
+    Commitment::commit(value, &blinding(seed))
+}
+
+fn tx_output(seed: u8, value: u64) -> TransactionOutput {
+    TransactionOutput {
+        commitment: commitment(seed, value),
+        proof: vec![seed; 8],
+    }
+}
+
+fn tx_kernel(seed: u8) -> TransactionKernel {
+    TransactionKernel {
+        features: KERNEL_FEAT_PLAIN,
+        fee: Amount::ZERO,
+        lock_height: 0,
+        excess: commitment(seed, 0),
+        excess_signature: [seed; 65],
+    }
+}
+
+fn spend_tx(input: Commitment, output_seed: u8, kernel_seed: u8) -> Transaction {
+    Transaction {
+        inputs: vec![TransactionInput { commitment: input }],
+        outputs: vec![tx_output(output_seed, u64::from(output_seed) + 1)],
+        kernels: vec![tx_kernel(kernel_seed)],
+        offset: [0u8; 32],
+    }
+}
+
+fn synthetic_block(
+    prev_hash: Hash256,
+    height: u64,
+    total_difficulty: u64,
+    nonce_seed: u64,
+    coinbase_seed: u8,
+    transactions: Vec<Transaction>,
+) -> Block {
+    Block {
+        header: BlockHeader {
+            version: 1,
+            height: BlockHeight(height),
+            prev_hash,
+            timestamp: Timestamp(1_700_100_000 + height),
+            output_root: Hash256::ZERO,
+            kernel_root: Hash256::ZERO,
+            rangeproof_root: Hash256::ZERO,
+            total_kernel_offset: [0u8; 32],
+            target: CompactTarget(0),
+            total_difficulty: U256::from(total_difficulty),
+            pow: ProofOfWork {
+                nonce: nonce_seed,
+                randomx_hash: Hash256::ZERO,
+            },
+        },
+        coinbase: CoinbaseTransaction {
+            output: tx_output(coinbase_seed, 1_000 + height),
+            kernel: CoinbaseKernel {
+                features: KERNEL_FEAT_COINBASE,
+                explicit_value: 1,
+                excess: commitment(coinbase_seed.wrapping_add(100), 0),
+                excess_signature: [coinbase_seed; 65],
+            },
+            offset: [0u8; 32],
+        },
+        transactions,
+    }
+}
+
+fn block_state_changes(block: &Block) -> (Vec<UtxoBytes>, Vec<SpentCommitment>) {
+    let mut new_utxos = vec![(
+        *block.coinbase.output.commitment.as_bytes(),
+        UtxoEntry {
+            block_height: block.header.height.0,
+            is_coinbase: true,
+            proof: block.coinbase.output.proof.clone(),
+        }
+        .to_bytes(),
+    )];
+    let mut spent_utxos = Vec::new();
+    for tx in &block.transactions {
+        for input in &tx.inputs {
+            spent_utxos.push(*input.commitment.as_bytes());
+        }
+        for output in &tx.outputs {
+            new_utxos.push((
+                *output.commitment.as_bytes(),
+                UtxoEntry {
+                    block_height: block.header.height.0,
+                    is_coinbase: false,
+                    proof: output.proof.clone(),
+                }
+                .to_bytes(),
+            ));
+        }
+    }
+    (new_utxos, spent_utxos)
+}
+
+fn kernel_excesses(block: &Block, hash: Hash256) -> Vec<([u8; 33], [u8; 32])> {
+    let mut out = vec![(*block.coinbase.kernel.excess.as_bytes(), *hash.as_bytes())];
+    for tx in &block.transactions {
+        for kernel in &tx.kernels {
+            out.push((*kernel.excess.as_bytes(), *hash.as_bytes()));
+        }
+    }
+    out
+}
+
+fn commit_canonical_block(store: &DomStore, block: &Block) -> Hash256 {
+    let header_bytes = block.header.to_bytes().expect("header serialise");
+    let hash = block_hash(&block.header);
+    let body_bytes = block.to_bytes().expect("block serialise");
+    let (new_utxos, spent_utxos) = block_state_changes(block);
+    let kernels = kernel_excesses(block, hash);
+    store
+        .commit_block(
+            hash.as_bytes(),
+            block.header.height.0,
+            &header_bytes,
+            &body_bytes,
+            &new_utxos,
+            &spent_utxos,
+            &kernels,
+        )
+        .expect("commit canonical block");
+    hash
+}
+
+fn store_side_block(store: &DomStore, block: &Block) -> Hash256 {
+    let header_bytes = block.header.to_bytes().expect("header serialise");
+    let hash = block_hash(&block.header);
+    let body_bytes = block.to_bytes().expect("block serialise");
+    store
+        .store_known_block(hash.as_bytes(), &header_bytes, &body_bytes)
+        .expect("store side block");
+    hash
+}
+
+fn open_chain(dir: &std::path::Path) -> ChainState {
+    let store = DomStore::open(dir).expect("store open");
+    ChainState::open(
+        store,
+        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+        dom_core::NETWORK_MAGIC_REGTEST,
+    )
+    .expect("chain open")
 }
 
 #[test]
@@ -237,8 +388,8 @@ fn find_common_ancestor_unbalanced_depths() {
     let short = build_chain(&store, fork, 2, 2, 100);
     let long = build_chain(&store, fork, 2, 50, 5_000);
 
-    let ancestor = find_common_ancestor(&store, *short.last().unwrap(), *long.last().unwrap())
-        .expect("walk");
+    let ancestor =
+        find_common_ancestor(&store, *short.last().unwrap(), *long.last().unwrap()).expect("walk");
     assert_eq!(ancestor, Some(fork));
 }
 
@@ -251,25 +402,98 @@ fn check_reorg_depth_boundary() {
     check_reorg_depth(0).expect("zero (no disconnect) is always accepted");
 }
 
-/// Placeholder for the full reorg-equivalence property.
-///
-/// Property (informal): given a fork point F and two competing chains
-/// A (currently best) and B (heavier total_difficulty), after applying
-/// B via the chain pipeline the resulting state — UTXO set, kernel
-/// index, height -> hash mapping, chain tip — must be byte-identical to
-/// the state produced by building B in a fresh store from F onward.
-///
-/// Why this is a stub: `ChainState::connect_block` does not yet
-/// disconnect superseded blocks on side-chain promotion. Until
-/// `apply_reorg` (or equivalent) lands, exercising the property would
-/// either (a) need real mining to produce consensus-valid heavier
-/// blocks (env-blocked on WSL2), or (b) require a `cfg(test)` PoW
-/// bypass that we have not introduced. The intentionally empty test
-/// body keeps this file as the single point of truth: when reorg
-/// completion lands, replace the body with the property check.
 #[test]
-fn reorg_equivalence_property_placeholder() {
-    // No assertions yet — see doc comment. The test exists so the
-    // property contract is registered and grep-discoverable from the
-    // reorg implementation PR.
+fn promote_heavier_known_tip_rewrites_canonical_state_and_survives_restart() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = DomStore::open(dir.path()).expect("open");
+
+    let shared = synthetic_block(Hash256::ZERO, 1, 1, 1, 10, vec![]);
+    let shared_hash = commit_canonical_block(&store, &shared);
+
+    let shared_coinbase_commitment = shared.coinbase.output.commitment.clone();
+    let old_spend = spend_tx(shared_coinbase_commitment.clone(), 20, 21);
+    let old_2 = synthetic_block(shared_hash, 2, 2, 2, 11, vec![old_spend.clone()]);
+    let old_2_hash = commit_canonical_block(&store, &old_2);
+    let old_3 = synthetic_block(old_2_hash, 3, 3, 3, 12, vec![]);
+    let old_3_hash = commit_canonical_block(&store, &old_3);
+
+    let alt_2 = synthetic_block(shared_hash, 2, 2, 20, 30, vec![]);
+    let alt_2_hash = store_side_block(&store, &alt_2);
+    let alt_spend = spend_tx(shared_coinbase_commitment, 31, 32);
+    let alt_3 = synthetic_block(alt_2_hash, 3, 3, 21, 33, vec![alt_spend.clone()]);
+    let alt_3_hash = store_side_block(&store, &alt_3);
+    let alt_4 = synthetic_block(alt_3_hash, 4, 4, 22, 34, vec![]);
+    let alt_4_hash = store_side_block(&store, &alt_4);
+
+    let mut chain = open_chain(dir.path());
+    assert_eq!(chain.tip_hash, old_3_hash);
+
+    chain
+        .promote_heavier_known_tip(alt_4_hash)
+        .expect("reorg promotion");
+
+    assert_eq!(chain.tip_hash, alt_4_hash);
+    assert_eq!(chain.tip_height, BlockHeight(4));
+    assert_eq!(
+        chain.store.get_hash_at_height(2).unwrap().unwrap(),
+        *alt_2_hash.as_bytes()
+    );
+    assert_eq!(
+        chain.store.get_hash_at_height(3).unwrap().unwrap(),
+        *alt_3_hash.as_bytes()
+    );
+    assert_eq!(
+        chain.store.get_hash_at_height(4).unwrap().unwrap(),
+        *alt_4_hash.as_bytes()
+    );
+
+    let shared_coinbase = *shared.coinbase.output.commitment.as_bytes();
+    let old_spend_out = *old_spend.outputs[0].commitment.as_bytes();
+    let old_2_coinbase = *old_2.coinbase.output.commitment.as_bytes();
+    let old_3_coinbase = *old_3.coinbase.output.commitment.as_bytes();
+    let alt_spend_out = *alt_spend.outputs[0].commitment.as_bytes();
+    let alt_2_coinbase = *alt_2.coinbase.output.commitment.as_bytes();
+    let alt_3_coinbase = *alt_3.coinbase.output.commitment.as_bytes();
+    let alt_4_coinbase = *alt_4.coinbase.output.commitment.as_bytes();
+
+    assert!(
+        chain.store.get_utxo(&shared_coinbase).unwrap().is_none(),
+        "shared coinbase is spent on the promoted branch"
+    );
+    assert!(
+        chain.store.get_utxo(&old_spend_out).unwrap().is_none(),
+        "old branch spend output must be removed"
+    );
+    assert!(chain.store.get_utxo(&old_2_coinbase).unwrap().is_none());
+    assert!(chain.store.get_utxo(&old_3_coinbase).unwrap().is_none());
+
+    let alt_spend_entry = chain
+        .store
+        .get_utxo(&alt_spend_out)
+        .unwrap()
+        .expect("alt spend output present");
+    assert_eq!(alt_spend_entry.block_height, 3);
+    assert!(!alt_spend_entry.is_coinbase);
+    assert!(chain.store.get_utxo(&alt_2_coinbase).unwrap().is_some());
+    assert!(chain.store.get_utxo(&alt_3_coinbase).unwrap().is_some());
+    assert!(chain.store.get_utxo(&alt_4_coinbase).unwrap().is_some());
+
+    let old_kernel = *old_2.coinbase.kernel.excess.as_bytes();
+    let new_kernel = *alt_4.coinbase.kernel.excess.as_bytes();
+    assert!(chain.store.get_kernel_block(&old_kernel).unwrap().is_none());
+    assert_eq!(
+        chain.store.get_kernel_block(&new_kernel).unwrap().unwrap(),
+        *alt_4_hash.as_bytes()
+    );
+
+    drop(chain);
+    let reopened = open_chain(dir.path());
+    assert_eq!(reopened.tip_hash, alt_4_hash);
+    assert_eq!(reopened.tip_height, BlockHeight(4));
+    assert_eq!(
+        reopened.store.get_hash_at_height(4).unwrap().unwrap(),
+        *alt_4_hash.as_bytes()
+    );
+    assert!(reopened.store.get_utxo(&alt_spend_out).unwrap().is_some());
+    assert!(reopened.store.get_utxo(&old_spend_out).unwrap().is_none());
 }
