@@ -477,13 +477,16 @@ impl DomNode {
                         wallet: self.wallet.clone(),
                     };
                     let peers = svc.peers.clone();
+                    let metrics = svc.metrics.clone();
                     tokio::spawn(async move {
                         handle_inbound(stream, peer_addr, config, privkey, chain, channels, svc)
                             .await;
-                        let mut peers = peers.lock().await;
+                        let mut mgr = peers.lock().await;
                         let peer_key = peer_addr.to_string();
-                        peers.remove_peer(&peer_key);
-                        peers.release_inbound_reservation(&peer_addr);
+                        mgr.remove_peer(&peer_key);
+                        mgr.release_inbound_reservation(&peer_addr);
+                        drop(mgr);
+                        refresh_peer_metrics(&peers, &metrics).await;
                     });
                 }
                 Err(e) => {
@@ -539,10 +542,12 @@ impl DomNode {
                     info!("Connecting to peer {addr}");
                     let cleanup_addr = addr.clone();
                     let peers = self.peers.clone();
+                    let metrics = self.metrics.clone();
                     let svc_c = svc.clone();
                     tokio::spawn(async move {
                         connect_outbound(&addr, config, privkey, chain, channels, svc_c).await;
                         peers.lock().await.remove_peer(&cleanup_addr);
+                        refresh_peer_metrics(&peers, &metrics).await;
                     });
                 }
             }
@@ -702,6 +707,7 @@ async fn handle_inbound(
                     return;
                 }
             }
+            refresh_peer_metrics(&svc.peers, &svc.metrics).await;
             // IBD loop: if the inbound peer claims a higher chain, sync from it.
             // Mirrors connect_outbound logic so inbound-only nodes (behind NAT
             // who can only accept connections) still converge to the network's
@@ -840,6 +846,7 @@ async fn connect_outbound(
                     return;
                 }
             }
+            refresh_peer_metrics(&svc.peers, &svc.metrics).await;
             let peer_addr = match stream.peer_addr() {
                 Ok(a) => a,
                 Err(_) => {
@@ -1193,6 +1200,36 @@ async fn record_duplicate_block_relay(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     exceeded
+}
+
+async fn refresh_peer_metrics(peers: &Arc<Mutex<PeerManager>>, metrics: &Arc<Metrics>) {
+    let (peer_count, inbound_peers, outbound_peers) = {
+        let mgr = peers.lock().await;
+        let mut peer_count = 0u64;
+        let mut inbound_peers = 0u64;
+        let mut outbound_peers = 0u64;
+        for peer in mgr.peers.values() {
+            if peer.state == dom_wire::peer::PeerState::Connected {
+                peer_count += 1;
+                if peer.outbound {
+                    outbound_peers += 1;
+                } else {
+                    inbound_peers += 1;
+                }
+            }
+        }
+        (peer_count, inbound_peers, outbound_peers)
+    };
+
+    metrics
+        .peer_count
+        .store(peer_count, std::sync::atomic::Ordering::Relaxed);
+    metrics
+        .inbound_peers
+        .store(inbound_peers, std::sync::atomic::Ordering::Relaxed);
+    metrics
+        .outbound_peers
+        .store(outbound_peers, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Persistent message loop after Hello exchange.
@@ -1804,12 +1841,19 @@ async fn message_loop(
 mod tests {
     use super::{
         decode_deferred_block_bytes, decode_relay_block, deferred_replay_action,
-        peer_violation_score, pending_peer_violation_score, relay_block_action,
-        DeferredReplayAction, RelayBlockAction,
+        peer_violation_score, pending_peer_violation_score, refresh_peer_metrics,
+        relay_block_action, DeferredReplayAction, RelayBlockAction,
     };
+    use crate::metrics::Metrics;
     use dom_chain::ConnectResult;
     use dom_core::{DomError, MAX_BLOCK_SERIALIZED_SIZE};
+    use dom_wire::manager::PeerManager;
     use dom_wire::peer::ban_scores;
+    use dom_wire::peer::{PeerInfo, PeerState};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     #[test]
     fn malformed_message_maps_to_malformed_score() {
@@ -1982,5 +2026,36 @@ mod tests {
         let err = decode_deferred_block_bytes(&[0x01, 0x02, 0x03])
             .expect_err("malformed deferred bytes must fail");
         assert!(matches!(err, DomError::Malformed(_)));
+    }
+
+    #[tokio::test]
+    async fn refresh_peer_metrics_counts_connected_peer_directions() {
+        let peers = Arc::new(Mutex::new(PeerManager::new(125, 8)));
+        let metrics = Arc::new(Metrics::new());
+
+        let inbound_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 33369);
+        let mut inbound = PeerInfo::new(inbound_addr, false);
+        inbound.state = PeerState::Connected;
+
+        let outbound_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 33369);
+        let mut outbound = PeerInfo::new(outbound_addr, true);
+        outbound.state = PeerState::Connected;
+
+        let banned_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), 33369);
+        let mut banned = PeerInfo::new(banned_addr, false);
+        banned.state = PeerState::Banned;
+
+        {
+            let mut mgr = peers.lock().await;
+            mgr.register_peer(inbound).expect("register inbound");
+            mgr.register_peer(outbound).expect("register outbound");
+            mgr.peers.insert(banned_addr.to_string(), banned);
+        }
+
+        refresh_peer_metrics(&peers, &metrics).await;
+
+        assert_eq!(metrics.peer_count.load(Ordering::Relaxed), 2);
+        assert_eq!(metrics.inbound_peers.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.outbound_peers.load(Ordering::Relaxed), 1);
     }
 }
