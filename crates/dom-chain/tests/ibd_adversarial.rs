@@ -30,10 +30,14 @@
 //! outcome.
 
 use dom_chain::ibd::{IbdAction, IbdPhase, IbdState};
+use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_core::{BlockHeight, Hash256, Timestamp, PROTOCOL_VERSION};
 use dom_pow::CompactTarget;
 use primitive_types::U256;
+use tempfile::TempDir;
+
+use dom_store::DomStore;
 
 fn synth_header(height: u64) -> BlockHeader {
     BlockHeader {
@@ -56,6 +60,30 @@ fn synth_header(height: u64) -> BlockHeader {
 
 fn batch(start: u64, count: u64) -> Vec<BlockHeader> {
     (0..count).map(|i| synth_header(start + i)).collect()
+}
+
+fn block_hash(header: &BlockHeader) -> [u8; 32] {
+    use dom_serialization::DomSerialize;
+    *dom_crypto::hash::blake2b_256(&header.to_bytes().unwrap()).as_bytes()
+}
+
+fn open_chain(dir: &std::path::Path) -> ChainState {
+    let store = DomStore::open(dir).expect("store open");
+    ChainState::open(
+        store,
+        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+        dom_core::NETWORK_MAGIC_REGTEST,
+    )
+    .expect("chain open")
+}
+
+fn store_known_header(store: &DomStore, header: &BlockHeader) {
+    use dom_serialization::DomSerialize;
+    let header_bytes = header.to_bytes().expect("serialize header");
+    let hash = block_hash(header);
+    store
+        .store_known_block(&hash, &header_bytes, &[0u8; 8])
+        .expect("store_known_block");
 }
 
 // ── (1) Replay attack ────────────────────────────────────────────────────────
@@ -263,4 +291,104 @@ fn mark_block_committed_is_monotonic() {
     ibd.mark_block_committed(100);
     assert_eq!(ibd.blocks_height, 100);
     assert!(ibd.is_complete());
+}
+
+// ── (9) Live IBD header-first validation ────────────────────────────────────
+
+/// Malformed serialized headers in the wire payload must be rejected before the
+/// node asks the peer for any block body.
+#[test]
+fn live_ibd_rejects_malformed_header_bytes_before_body_fetch() {
+    let dir = TempDir::new().expect("tempdir");
+    let chain = open_chain(dir.path());
+    let err = chain
+        .validate_ibd_headers_batch(&[vec![0xAA, 0xBB, 0xCC]], Timestamp(0))
+        .expect_err("malformed header must reject");
+    assert!(
+        matches!(err, dom_core::DomError::Malformed(_)),
+        "expected malformed error, got {err}"
+    );
+}
+
+/// An inbound IBD batch must stay contiguous even if the first header is
+/// already known to us. Otherwise a peer can smuggle a height gap past the
+/// duplicate filter and make us request unrelated block bodies.
+#[test]
+fn live_ibd_rejects_gap_after_known_header() {
+    use dom_serialization::DomSerialize;
+
+    let dir = TempDir::new().expect("tempdir");
+    let genesis = synth_header(0);
+    {
+        let store = DomStore::open(dir.path()).expect("store open");
+        store_known_header(&store, &genesis);
+    }
+
+    let chain = open_chain(dir.path());
+    let mut gap = synth_header(2);
+    gap.prev_hash = Hash256::from_bytes(block_hash(&genesis));
+    let err = chain
+        .validate_ibd_headers_batch(
+            &[genesis.to_bytes().unwrap(), gap.to_bytes().unwrap()],
+            Timestamp(0),
+        )
+        .expect_err("height gap must reject");
+    assert!(
+        format!("{err}").contains("IBD header gap"),
+        "expected header gap, got {err}"
+    );
+}
+
+/// The first header in an IBD batch must attach to a known parent before any
+/// body download is attempted.
+#[test]
+fn live_ibd_rejects_unknown_start_parent_before_body_fetch() {
+    use dom_serialization::DomSerialize;
+
+    let dir = TempDir::new().expect("tempdir");
+    let chain = open_chain(dir.path());
+    let mut orphan = synth_header(1);
+    orphan.prev_hash = Hash256::from_bytes([0x44; 32]);
+    let err = chain
+        .validate_ibd_headers_batch(&[orphan.to_bytes().unwrap()], Timestamp(0))
+        .expect_err("unknown parent must reject");
+    assert!(
+        matches!(err, dom_core::DomError::Orphan(_)),
+        "expected orphan error, got {err}"
+    );
+}
+
+/// Duplicate suppression for already-known headers must remain replay- and
+/// restart-equivalent: reopening the store must not change which headers are
+/// considered known by the live IBD prefilter.
+#[test]
+fn live_ibd_known_header_filter_is_restart_equivalent() {
+    use dom_serialization::DomSerialize;
+
+    let dir = TempDir::new().expect("tempdir");
+    let genesis = synth_header(0);
+    let mut h1 = synth_header(1);
+    h1.prev_hash = Hash256::from_bytes(block_hash(&genesis));
+    {
+        let store = DomStore::open(dir.path()).expect("store open");
+        store_known_header(&store, &genesis);
+        store_known_header(&store, &h1);
+    }
+
+    let payload = vec![genesis.to_bytes().unwrap(), h1.to_bytes().unwrap()];
+
+    let chain_before = open_chain(dir.path());
+    let before = chain_before
+        .validate_ibd_headers_batch(&payload, Timestamp(0))
+        .expect("pre-restart validation");
+    assert!(before.is_empty(), "known headers must be filtered");
+
+    let chain_after = open_chain(dir.path());
+    let after = chain_after
+        .validate_ibd_headers_batch(&payload, Timestamp(0))
+        .expect("post-restart validation");
+    assert_eq!(
+        before, after,
+        "known-header filtering must remain identical across restart"
+    );
 }

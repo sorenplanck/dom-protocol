@@ -337,6 +337,117 @@ impl ChainState {
         }
     }
 
+    /// Validate an inbound IBD header batch before requesting any block bodies.
+    ///
+    /// This is a non-mutating prefilter for the live headers-first path:
+    /// every header must decode, link contiguously within the batch, attach to
+    /// a known parent (or genesis), and satisfy the same header-only consensus
+    /// rules `connect_block` will later enforce once the full block body arrives.
+    ///
+    /// Returns only the hashes we do not already know, preserving duplicate
+    /// suppression while ensuring malformed or discontinuous batches are rejected
+    /// before they can trigger body downloads.
+    pub fn validate_ibd_headers_batch(
+        &self,
+        raw_headers: &[Vec<u8>],
+        now: Timestamp,
+    ) -> Result<Vec<[u8; 32]>, DomError> {
+        let mut decoded = Vec::with_capacity(raw_headers.len());
+        for header_bytes in raw_headers {
+            let header = BlockHeader::from_bytes(header_bytes)?;
+            let hash = compute_block_hash(header_bytes);
+            let is_known = self.store.get_block_header(hash.as_bytes())?.is_some();
+            decoded.push((header, hash, is_known));
+        }
+
+        let mut missing_hashes = Vec::with_capacity(decoded.len());
+        let mut prior_headers: Vec<BlockHeader> = Vec::with_capacity(decoded.len());
+
+        for (idx, (header, hash, is_known)) in decoded.iter().enumerate() {
+            if idx == 0 {
+                if header.height != BlockHeight::GENESIS
+                    && self
+                        .store
+                        .get_block_header(header.prev_hash.as_bytes())?
+                        .is_none()
+                {
+                    return Err(DomError::Orphan(format!(
+                        "IBD header batch starts at unknown parent {}",
+                        header.prev_hash
+                    )));
+                }
+            } else {
+                let (prev_header, prev_hash, _) = &decoded[idx - 1];
+                let expected_height = prev_header
+                    .height
+                    .checked_next()
+                    .ok_or_else(|| DomError::Invalid("block height overflow".into()))?;
+                if header.height != expected_height {
+                    return Err(DomError::Invalid(format!(
+                        "IBD header gap: expected height {expected_height}, got {}",
+                        header.height
+                    )));
+                }
+                if header.prev_hash != *prev_hash {
+                    return Err(DomError::Invalid(format!(
+                        "IBD header prev_hash mismatch at height {}: expected {}, got {}",
+                        header.height, prev_hash, header.prev_hash
+                    )));
+                }
+            }
+
+            if !is_known {
+                validate_header_syntax(header)?;
+
+                if header.height != BlockHeight::GENESIS {
+                    let ancestors =
+                        self.collect_ibd_ancestor_timestamps(header.height.0, &prior_headers, 11)?;
+                    validate_median_time_past(header, &ancestors)?;
+                }
+
+                validate_future_timestamp(header, now)?;
+                let seed = self.compute_randomx_seed(header.height.0)?;
+                validate_pow(header, &seed)?;
+
+                let parent_difficulty = if header.height == BlockHeight::GENESIS {
+                    U256::zero()
+                } else if idx == 0 {
+                    let parent_bytes = self
+                        .store
+                        .get_block_header(header.prev_hash.as_bytes())?
+                        .ok_or_else(|| {
+                            DomError::Internal(
+                                "parent missing after IBD parent precheck".into(),
+                            )
+                        })?;
+                    BlockHeader::from_bytes(&parent_bytes)?.total_difficulty
+                } else {
+                    decoded[idx - 1].0.total_difficulty
+                };
+
+                let block_diff = target_to_difficulty(
+                    &header
+                        .target
+                        .to_target()
+                        .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?,
+                );
+                let expected_total = parent_difficulty.saturating_add(U256::from(block_diff));
+                if header.total_difficulty != expected_total {
+                    return Err(DomError::Invalid(format!(
+                        "total_difficulty mismatch: expected {expected_total}, got {}",
+                        header.total_difficulty
+                    )));
+                }
+
+                missing_hashes.push(*hash.as_bytes());
+            }
+
+            prior_headers.push(header.clone());
+        }
+
+        Ok(missing_hashes)
+    }
+
     pub fn validate_header_only(
         &self,
         header: &BlockHeader,
@@ -375,6 +486,43 @@ impl ChainState {
             Some(hash) => Ok(hash),
             None => Ok([0u8; 32]),
         }
+    }
+
+    fn collect_ibd_ancestor_timestamps(
+        &self,
+        current_height: u64,
+        prior_headers: &[BlockHeader],
+        count: usize,
+    ) -> Result<Vec<Timestamp>, DomError> {
+        let mut timestamps = Vec::with_capacity(count);
+
+        for header in prior_headers.iter().rev().take(count) {
+            timestamps.push(header.timestamp);
+        }
+
+        if timestamps.len() == count {
+            return Ok(timestamps);
+        }
+
+        let mut h = current_height.saturating_sub(prior_headers.len() as u64 + 1);
+        loop {
+            if let Some(hash) = self.store.get_hash_at_height(h)? {
+                if let Some(header_bytes) = self.store.get_block_header(&hash)? {
+                    if let Ok(header) = BlockHeader::from_bytes(&header_bytes) {
+                        timestamps.push(header.timestamp);
+                        if timestamps.len() == count {
+                            break;
+                        }
+                    }
+                }
+            }
+            if h == 0 {
+                break;
+            }
+            h -= 1;
+        }
+
+        Ok(timestamps)
     }
 
     fn get_recent_timestamps(
