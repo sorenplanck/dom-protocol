@@ -3,10 +3,13 @@ use dom_consensus::derive_chain_id;
 use dom_core::Hash256;
 use dom_integration_tests::helpers::*;
 use dom_wire::codec::NoiseCodec;
-use dom_wire::handshake::{generate_static_keypair, perform_handshake_initiator};
+use dom_wire::handshake::{
+    generate_static_keypair, perform_handshake_initiator, HANDSHAKE_TIMEOUT_SECS, NOISE_MAX_MSG,
+};
 use dom_wire::message::{Command, HelloPayload, WireMessage};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn chain_id_for(network: Network) -> [u8; 32] {
     let genesis_hash = match network {
@@ -15,6 +18,49 @@ fn chain_id_for(network: Network) -> [u8; 32] {
         Network::Regtest => dom_core::GENESIS_HASH_REGTEST,
     };
     *derive_chain_id(network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes()
+}
+
+async fn connect_noise_peer(
+    node: &std::sync::Arc<dom_node::node::DomNode>,
+    addr: &str,
+) -> (tokio::net::TcpStream, NoiseCodec, std::net::SocketAddr) {
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect peer");
+    let client_addr = stream.local_addr().expect("local addr");
+    let (privkey, _) = generate_static_keypair();
+    let chain_id = chain_id_for(node.config.network);
+    let transport = perform_handshake_initiator(
+        &mut stream,
+        &privkey,
+        node.config.network.magic(),
+        &chain_id,
+    )
+    .await
+    .expect("perform Noise handshake");
+    let codec = NoiseCodec::new(transport, node.config.network.magic());
+    (stream, codec, client_addr)
+}
+
+async fn expect_pending_cleanup(
+    node: &std::sync::Arc<dom_node::node::DomNode>,
+    client_addr: std::net::SocketAddr,
+    expect_penalty: bool,
+) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let peers = node.peers.lock().await;
+            let released = peers.pending_inbound_count() == 0;
+            let penalized = peers.pending_ban_score(&client_addr.to_string()) > 0;
+            drop(peers);
+            if released && (!expect_penalty || penalized) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("pending peer state should converge after hostile Hello");
 }
 
 #[tokio::test]
@@ -28,39 +74,12 @@ async fn hello_stall_is_penalized_and_releases_inbound_slot() {
         .await
         .expect("listener ready");
 
-    let mut stream = tokio::net::TcpStream::connect("127.0.0.1:43412")
-        .await
-        .expect("connect stalled peer");
-    let client_addr = stream.local_addr().expect("local addr");
-    let (privkey, _) = generate_static_keypair();
-    let chain_id = chain_id_for(node.config.network);
-    let transport = perform_handshake_initiator(
-        &mut stream,
-        &privkey,
-        node.config.network.magic(),
-        &chain_id,
-    )
-    .await
-    .expect("perform Noise handshake");
-    let mut codec = NoiseCodec::new(transport, node.config.network.magic());
+    let (mut stream, mut codec, client_addr) = connect_noise_peer(&node, "127.0.0.1:43412").await;
 
     let server_hello = codec.recv(&mut stream).await.expect("receive server hello");
     assert_eq!(server_hello.command, Command::Hello);
 
-    tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            let peers = node.peers.lock().await;
-            let released = peers.pending_inbound_count() == 0;
-            let penalized = peers.pending_ban_score(&client_addr.to_string()) > 0;
-            drop(peers);
-            if released && penalized {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("hello timeout should penalize stalled peer and release reservation");
+    expect_pending_cleanup(&node, client_addr, true).await;
 
     let recv_result = tokio::time::timeout(Duration::from_secs(5), codec.recv(&mut stream))
         .await
@@ -82,20 +101,8 @@ async fn second_hello_after_successful_exchange_is_disconnected_and_cleans_metri
         .await
         .expect("listener ready");
 
-    let mut stream = tokio::net::TcpStream::connect("127.0.0.1:43413")
-        .await
-        .expect("connect peer");
-    let (privkey, _) = generate_static_keypair();
+    let (mut stream, mut codec, _) = connect_noise_peer(&node, "127.0.0.1:43413").await;
     let chain_id = chain_id_for(node.config.network);
-    let transport = perform_handshake_initiator(
-        &mut stream,
-        &privkey,
-        node.config.network.magic(),
-        &chain_id,
-    )
-    .await
-    .expect("perform Noise handshake");
-    let mut codec = NoiseCodec::new(transport, node.config.network.magic());
 
     let server_hello = codec.recv(&mut stream).await.expect("receive server hello");
     assert_eq!(server_hello.command, Command::Hello);
@@ -168,4 +175,112 @@ async fn second_hello_after_successful_exchange_is_disconnected_and_cleans_metri
     })
     .await
     .expect("post-violation cleanup should clear connected peer metrics");
+}
+
+#[tokio::test]
+async fn malformed_hello_after_noise_is_penalized_and_releases_inbound_slot() {
+    init_tracing();
+    let config = test_config("adversarial-handshake-malformed-hello", 43414, false);
+    let node = spawn_node(config).await;
+
+    tokio::spawn(node.clone().run());
+    wait_for_listener_ready("127.0.0.1:43414", 10)
+        .await
+        .expect("listener ready");
+
+    let (mut stream, mut codec, client_addr) = connect_noise_peer(&node, "127.0.0.1:43414").await;
+    let server_hello = codec.recv(&mut stream).await.expect("receive server hello");
+    assert_eq!(server_hello.command, Command::Hello);
+
+    codec
+        .send(
+            &mut stream,
+            &WireMessage {
+                magic: node.config.network.magic(),
+                command: Command::Hello,
+                payload: vec![0u8; 8],
+            },
+        )
+        .await
+        .expect("send malformed hello payload");
+
+    expect_pending_cleanup(&node, client_addr, true).await;
+
+    let recv_result = tokio::time::timeout(Duration::from_secs(5), codec.recv(&mut stream))
+        .await
+        .expect("malformed hello session should close instead of hanging");
+    assert!(
+        recv_result.is_err(),
+        "peer that sends a malformed Hello should be disconnected"
+    );
+}
+
+#[tokio::test]
+async fn oversized_post_noise_frame_is_rejected_and_releases_inbound_slot() {
+    init_tracing();
+    let config = test_config("adversarial-handshake-oversized-frame", 43415, false);
+    let node = spawn_node(config).await;
+
+    tokio::spawn(node.clone().run());
+    wait_for_listener_ready("127.0.0.1:43415", 10)
+        .await
+        .expect("listener ready");
+
+    let (mut stream, mut codec, client_addr) = connect_noise_peer(&node, "127.0.0.1:43415").await;
+    let server_hello = codec.recv(&mut stream).await.expect("receive server hello");
+    assert_eq!(server_hello.command, Command::Hello);
+
+    stream
+        .write_all(&((NOISE_MAX_MSG as u32) + 1).to_le_bytes())
+        .await
+        .expect("write oversized frame length");
+
+    expect_pending_cleanup(&node, client_addr, true).await;
+
+    let mut buf = [0u8; 1];
+    let read_result = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+        .await
+        .expect("oversized frame session should terminate");
+    assert!(
+        matches!(read_result, Ok(0) | Err(_)),
+        "oversized post-Noise frame should force connection teardown"
+    );
+}
+
+#[tokio::test]
+async fn delayed_partial_hello_frame_times_out_and_cleans_pending_state() {
+    init_tracing();
+    let config = test_config("adversarial-handshake-delayed-fragment", 43416, false);
+    let node = spawn_node(config).await;
+
+    tokio::spawn(node.clone().run());
+    wait_for_listener_ready("127.0.0.1:43416", 10)
+        .await
+        .expect("listener ready");
+
+    let (mut stream, mut codec, client_addr) = connect_noise_peer(&node, "127.0.0.1:43416").await;
+    let server_hello = codec.recv(&mut stream).await.expect("receive server hello");
+    assert_eq!(server_hello.command, Command::Hello);
+
+    stream
+        .write_all(&16u32.to_le_bytes())
+        .await
+        .expect("write partial frame length");
+    stream
+        .write_all(&[0u8; 4])
+        .await
+        .expect("write partial frame body");
+
+    tokio::time::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS + 1)).await;
+
+    expect_pending_cleanup(&node, client_addr, true).await;
+
+    let mut buf = [0u8; 1];
+    let read_result = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+        .await
+        .expect("delayed fragment session should terminate");
+    assert!(
+        matches!(read_result, Ok(0) | Err(_)),
+        "partial Hello frame should not keep the session alive after timeout"
+    );
 }
