@@ -41,3 +41,4 @@ blockchain-specialist reviewer, and was accepted under the principle
 ## Troubleshooting
 
 - [troubleshooting/](./troubleshooting/) — Runbooks for common operational issues
+- [troubleshooting/chain-persistence-latency-rca.md](./troubleshooting/chain-persistence-latency-rca.md) — RCA for `chain_persistence` runtime latency vs restart/recovery behavior

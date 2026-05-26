@@ -24,3 +24,7 @@ rm -f *.pid
 ```
 
 See compilation-errors.md and runtime-debugging.md for more.
+
+## Incident Notes
+
+- [chain-persistence-latency-rca.md](./chain-persistence-latency-rca.md) — RCA for the long-running `chain_persistence` integration test
