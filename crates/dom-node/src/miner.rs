@@ -3,9 +3,7 @@
 use crate::node::DomNode;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{compute_block_pmmr_roots, derive_chain_id};
-use dom_consensus::{
-    Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionOutput,
-};
+use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionOutput};
 use dom_core::{
     BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, MAX_BLOCK_WEIGHT,
     WEIGHT_COINBASE_KERNEL, WEIGHT_OUTPUT,
@@ -45,6 +43,10 @@ fn chain_id_for(config: &dom_config::NodeConfig) -> [u8; 32] {
         dom_config::Network::Regtest => dom_core::GENESIS_HASH_REGTEST,
     };
     *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes()
+}
+
+fn use_light_vm(network: dom_config::Network) -> bool {
+    matches!(network, dom_config::Network::Regtest)
 }
 
 /// Build a cryptographically valid coinbase transaction.
@@ -285,8 +287,8 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     let anchor = genesis_anchor();
     // Network-specific target selection:
     //   - Regtest: the defensively-named REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION
-    //     (every RandomX hash satisfies it; mining wins on the first nonce).
-    //   - Testnet: MAX_TARGET_BYTES (every CPU finds blocks in seconds).
+    //     (~2^-16 acceptance against MAX_TARGET_BYTES; low effort, not zero effort).
+    //   - Testnet: MAX_TARGET_BYTES (easy enough for commodity CPUs).
     //   - Mainnet: full ASERT difficulty from the genesis anchor.
     let target = match node.config.network {
         dom_config::Network::Regtest => dom_core::REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION,
@@ -390,11 +392,11 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     // stay on the cache-only path: validation is occasional and shouldn't
     // pay the dataset cost.
     //
-    // Memory budget: ~2.3 GB per active miner thread. Two-node Regtest
-    // integration runs (~4.6 GB miners + node baseline) fit on 8 GB hosts.
-    // On lower-RAM laptops, set light_vm = true here if you hit OOM —
-    // mining will be ~10× slower but functionally identical.
-    let light_vm = false;
+    // Memory budget: ~2.3 GB per active miner thread in full-mem mode.
+    // Regtest always uses the cache-only VM: its dev-only target remains
+    // low effort (~2^-16 acceptance against MAX_TARGET_BYTES) and does not
+    // justify allocating a multi-gigabyte dataset just to mine test blocks.
+    let light_vm = use_light_vm(node.config.network);
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<BlockHeader, String>>();
     std::thread::Builder::new()
         .name(format!("miner-{}", new_height))
@@ -508,9 +510,10 @@ fn mine_blocking(
     use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
     // Mainnet / Testnet mining sets `FLAG_FULL_MEM` for throughput
     // (allocates the ~2 GB RandomX dataset). Regtest opts out via
-    // `light_vm = true` and uses the cache-only VM (~256 MB) — slow per
-    // hash but trivial target means we still find a block on the first
-    // attempt, and two miners fit in a developer laptop's RAM.
+    // `light_vm = true` and uses the cache-only VM (~256 MB). Regtest still
+    // performs real PoW against `REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION`
+    // (~2^-16 acceptance), but that is a much better tradeoff than paying
+    // multi-gigabyte dataset cost in dev/test environments.
     let flags = if light_vm {
         RandomXFlag::get_recommended_flags()
     } else {
@@ -705,8 +708,7 @@ mod genesis_determinism_tests {
     fn genesis_pmmr_roots_are_deterministic_across_runs() {
         let cid = chain_id_regtest();
         let a = build_genesis_coinbase(&cid).expect("build genesis coinbase");
-        let (a_or, a_kr, a_rr) =
-            compute_block_pmmr_roots(&a, &[]).expect("compute genesis roots");
+        let (a_or, a_kr, a_rr) = compute_block_pmmr_roots(&a, &[]).expect("compute genesis roots");
 
         for trial in 0..8 {
             let b = build_genesis_coinbase(&cid).expect("build genesis coinbase #N");
@@ -738,5 +740,12 @@ mod genesis_determinism_tests {
             t.kernel.excess_signature, r.kernel.excess_signature,
             "testnet and regtest genesis signatures must differ"
         );
+    }
+
+    #[test]
+    fn regtest_mining_uses_light_vm_only_on_regtest() {
+        assert!(super::use_light_vm(dom_config::Network::Regtest));
+        assert!(!super::use_light_vm(dom_config::Network::Mainnet));
+        assert!(!super::use_light_vm(dom_config::Network::Testnet));
     }
 }
