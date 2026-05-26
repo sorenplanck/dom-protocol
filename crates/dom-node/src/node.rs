@@ -92,6 +92,7 @@ const FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS: u64 = 30;
 const FUTURE_BLOCK_QUEUE_MAX_AGE_SECS: u64 = dom_core::MAX_FUTURE_BLOCK_TIME
     + dom_core::FUTURE_BLOCK_SOFT_BUFFER_SECS
     + FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS * 2;
+const HELLO_EXCHANGE_TIMEOUT_SECS: u64 = dom_wire::handshake::HANDSHAKE_TIMEOUT_SECS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeferredReplayAction {
@@ -931,6 +932,25 @@ async fn hello_exchange(
     chain_id: &[u8; 32],
     chain: &Arc<Mutex<ChainState>>,
 ) -> Result<dom_wire::message::HelloPayload, DomError> {
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(HELLO_EXCHANGE_TIMEOUT_SECS),
+        hello_exchange_inner(stream, codec, config, chain_id, chain),
+    )
+    .await
+    .map_err(|_| {
+        DomError::PolicyRejected(format!(
+            "hello timeout after {HELLO_EXCHANGE_TIMEOUT_SECS}s"
+        ))
+    })?
+}
+
+async fn hello_exchange_inner(
+    stream: &mut tokio::net::TcpStream,
+    codec: &mut dom_wire::codec::NoiseCodec,
+    config: &NodeConfig,
+    chain_id: &[u8; 32],
+    chain: &Arc<Mutex<ChainState>>,
+) -> Result<dom_wire::message::HelloPayload, DomError> {
     use dom_wire::message::{Command, HelloPayload, WireMessage};
 
     // Snapshot our tip under the lock.
@@ -1033,6 +1053,9 @@ fn peer_violation_score(error: &DomError) -> Option<u32> {
 fn pending_peer_violation_score(error: &DomError) -> Option<u32> {
     match error {
         DomError::TemporarilyInvalid(_) | DomError::Orphan(_) | DomError::Internal(_) => None,
+        DomError::PolicyRejected(msg) if msg.contains("hello timeout") => {
+            Some(dom_wire::peer::ban_scores::PROTOCOL_VIOLATION)
+        }
         other => peer_violation_score(other),
     }
 }
@@ -1825,6 +1848,16 @@ mod tests {
         assert_eq!(
             pending_peer_violation_score(&DomError::PolicyRejected(
                 "handshake timeout after 10s".into()
+            )),
+            Some(ban_scores::PROTOCOL_VIOLATION)
+        );
+    }
+
+    #[test]
+    fn pre_registration_hello_timeout_scores() {
+        assert_eq!(
+            pending_peer_violation_score(&DomError::PolicyRejected(
+                "hello timeout after 10s".into()
             )),
             Some(ban_scores::PROTOCOL_VIOLATION)
         );
