@@ -42,8 +42,10 @@
 //! ## State machine
 //!
 //! ```text
-//!   Built ──► Submitted ──► Confirmed
-//!     │           │             (terminal)
+//!   Built ──► Submitted ──► Confirmed ──► (terminal)
+//!     │           │            ▲    │
+//!     │           │  Reorged   │    └── Reorged ──► Building
+//!     │           │   (only when block_height > reorg_height)
 //!     │           ├──► Failed   (terminal-ish; can be Replaced)
 //!     │           ├──► Replaced (terminal)
 //!     │           ├──► Canceled (terminal)
@@ -52,10 +54,20 @@
 //!  (terminal)      operator aborts before submitting.
 //! ```
 //!
-//! Invalid transitions (e.g., `Confirmed → Submitted`) are logged and
-//! skipped during replay rather than poisoning the in-memory map.
-//! This keeps replay total: a forward-compat unknown event type, or
-//! a misordered log, never panics.
+//! `Reorged` is the only event that may transition out of a status
+//! that would otherwise be terminal: a `Confirmed { block_height }`
+//! record whose `block_height > reorg_height` is rewound back to
+//! `Building`. The semantics intentionally drop "Submitted" rather
+//! than restoring it — after a reorg the wallet cannot prove the tx
+//! is still in the mempool; treating it as `Building` lets the
+//! operator (or auto-resubmit logic) decide what to do next.
+//!
+//! Invalid transitions (e.g., `Confirmed → Submitted`, `Reorged` on
+//! a non-Confirmed record, `Reorged` whose `reorg_height >=
+//! block_height`) are logged and skipped during replay rather than
+//! poisoning the in-memory map. This keeps replay total: a
+//! forward-compat unknown event type, or a misordered log, never
+//! panics.
 
 use crate::types::WalletError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -198,6 +210,22 @@ pub enum TxJournalEvent {
     },
     /// Operator canceled before submission or after a Failed status.
     Canceled,
+    /// A canonical-chain reorg rewinds the chain past this tx's
+    /// confirmation height. Valid only when the current status is
+    /// `Confirmed { block_height }` and `block_height > reorg_height`;
+    /// transitions the record back to `Building` so reservations and
+    /// pending-tx state can be reinstated.
+    ///
+    /// The journal stays append-only — no entries are deleted on a
+    /// reorg. A subsequent confirmation on the alternate canonical
+    /// chain is recorded as a fresh `Confirmed` event whose
+    /// `block_height` reflects the new chain.
+    Reorged {
+        /// Height the chain is rolling back to (inclusive). The
+        /// recorded tx's `block_height` must be strictly greater
+        /// than this value for the transition to apply.
+        reorg_height: u64,
+    },
 }
 
 /// Coarse status of a journaled transaction.
@@ -445,7 +473,57 @@ fn apply_entry(map: &mut HashMap<[u8; 32], TxRecord>, entry: &JournalEntry, line
                 _ => None,
             });
         }
+        TxJournalEvent::Reorged { reorg_height } => {
+            let rh = *reorg_height;
+            apply_reorged(map, &tx_hash, ts, line_no, rh);
+        }
     }
+}
+
+/// Rewind a `Confirmed` record back to `Building` when a reorg has
+/// invalidated its confirmation block. This is the only event that
+/// transitions OUT of an otherwise-terminal status, so it cannot go
+/// through the general [`transition`] helper (which guards against
+/// terminal mutation).
+///
+/// Skipped (logged) if:
+/// - the record is unknown,
+/// - the record is not `Confirmed`,
+/// - `reorg_height >= confirmation_height` (the confirmation block
+///   survives the rollback and the record must stay terminal).
+fn apply_reorged(
+    map: &mut HashMap<[u8; 32], TxRecord>,
+    tx_hash: &[u8; 32],
+    ts: u64,
+    line_no: usize,
+    reorg_height: u64,
+) {
+    let Some(record) = map.get_mut(tx_hash) else {
+        warn!(
+            "journal: Reorged event at line {line_no} for unknown tx {} ignored",
+            hex::encode(*tx_hash)
+        );
+        return;
+    };
+    let TxStatus::Confirmed { block_height } = record.status else {
+        warn!(
+            "journal: Reorged event at line {line_no} ignored; tx {} is not Confirmed (current = {:?})",
+            hex::encode(*tx_hash),
+            record.status
+        );
+        return;
+    };
+    if block_height <= reorg_height {
+        warn!(
+            "journal: Reorged event at line {line_no} ignored; tx {} confirmed at height {} survives rollback to {}",
+            hex::encode(*tx_hash),
+            block_height,
+            reorg_height
+        );
+        return;
+    }
+    record.status = TxStatus::Building;
+    record.last_updated_at = ts;
 }
 
 /// Apply a transition function to the record for `tx_hash` if it
@@ -864,6 +942,129 @@ mod tests {
         assert_eq!(
             map.get(&b).unwrap().status,
             TxStatus::Confirmed { block_height: 1000 }
+        );
+    }
+
+    /// Reorged whose `reorg_height < confirmation_height` rewinds a
+    /// Confirmed record back to Building.
+    #[test]
+    fn reorged_rewinds_confirmed_to_building() {
+        let temp = TempDir::new().unwrap();
+        let j = TxJournal::open(temp.path()).unwrap();
+        let h = hash(0x10);
+        for event in [
+            TxJournalEvent::Built {
+                inputs: vec![input(0x01)],
+                output_count: 1,
+                fee_noms: 5,
+            },
+            TxJournalEvent::Submitted,
+            TxJournalEvent::Confirmed { block_height: 200 },
+            TxJournalEvent::Reorged { reorg_height: 150 },
+        ] {
+            j.append(&JournalEntry {
+                timestamp: 1,
+                tx_hash: h,
+                event,
+            })
+            .unwrap();
+        }
+        let map = j.replay().unwrap();
+        assert_eq!(map.get(&h).unwrap().status, TxStatus::Building);
+    }
+
+    /// Reorged whose `reorg_height >= confirmation_height` keeps the
+    /// confirmation block within the canonical chain — the record
+    /// must remain terminal.
+    #[test]
+    fn reorged_at_or_above_confirmation_height_is_ignored() {
+        let temp = TempDir::new().unwrap();
+        let j = TxJournal::open(temp.path()).unwrap();
+        let h = hash(0x11);
+        for event in [
+            TxJournalEvent::Built {
+                inputs: vec![input(0x02)],
+                output_count: 1,
+                fee_noms: 5,
+            },
+            TxJournalEvent::Confirmed { block_height: 100 },
+            // reorg_height == confirmation_height: confirmation
+            // survives, must be ignored.
+            TxJournalEvent::Reorged { reorg_height: 100 },
+            // reorg_height > confirmation_height: also ignored.
+            TxJournalEvent::Reorged { reorg_height: 150 },
+        ] {
+            j.append(&JournalEntry {
+                timestamp: 1,
+                tx_hash: h,
+                event,
+            })
+            .unwrap();
+        }
+        let map = j.replay().unwrap();
+        assert_eq!(
+            map.get(&h).unwrap().status,
+            TxStatus::Confirmed { block_height: 100 }
+        );
+    }
+
+    /// Reorged on a non-Confirmed record (e.g., still Building, or
+    /// already Canceled) is a no-op — the only legal source state is
+    /// `Confirmed`.
+    #[test]
+    fn reorged_on_non_confirmed_is_ignored() {
+        let temp = TempDir::new().unwrap();
+        let j = TxJournal::open(temp.path()).unwrap();
+        let h = hash(0x12);
+        for event in [
+            TxJournalEvent::Built {
+                inputs: vec![input(0x03)],
+                output_count: 1,
+                fee_noms: 5,
+            },
+            // Building → Reorged is invalid.
+            TxJournalEvent::Reorged { reorg_height: 99 },
+        ] {
+            j.append(&JournalEntry {
+                timestamp: 1,
+                tx_hash: h,
+                event,
+            })
+            .unwrap();
+        }
+        let map = j.replay().unwrap();
+        assert_eq!(map.get(&h).unwrap().status, TxStatus::Building);
+    }
+
+    /// After Reorged the record can transition to Confirmed again
+    /// (re-confirmation on the alternate chain). The state machine
+    /// must not poison the record after a single rewind.
+    #[test]
+    fn confirmed_then_reorged_then_reconfirmed_lands_on_new_height() {
+        let temp = TempDir::new().unwrap();
+        let j = TxJournal::open(temp.path()).unwrap();
+        let h = hash(0x13);
+        for event in [
+            TxJournalEvent::Built {
+                inputs: vec![input(0x04)],
+                output_count: 1,
+                fee_noms: 1,
+            },
+            TxJournalEvent::Confirmed { block_height: 200 },
+            TxJournalEvent::Reorged { reorg_height: 150 },
+            TxJournalEvent::Confirmed { block_height: 205 },
+        ] {
+            j.append(&JournalEntry {
+                timestamp: 1,
+                tx_hash: h,
+                event,
+            })
+            .unwrap();
+        }
+        let map = j.replay().unwrap();
+        assert_eq!(
+            map.get(&h).unwrap().status,
+            TxStatus::Confirmed { block_height: 205 }
         );
     }
 }

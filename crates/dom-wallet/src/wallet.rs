@@ -1,6 +1,6 @@
 //! Main wallet struct and operations.
 
-use crate::journal::{JournalEntry, TxJournal, TxJournalEvent, TxStatus};
+use crate::journal::{JournalEntry, TxJournal, TxJournalEvent, TxRecord, TxStatus};
 use crate::output_index::OutputIndex;
 use crate::store::{
     load_wallet as load_wallet_file, save_wallet as save_wallet_file, PendingTx, WalletState,
@@ -255,45 +255,91 @@ impl Wallet {
                     }
                 }
                 TxStatus::Building | TxStatus::Submitted => {
-                    if self.pending_txs.contains_key(tx_hash) {
-                        continue;
-                    }
-                    // Reinstate: reserve each input the wallet still
-                    // owns. If any input has gone missing from the
-                    // output index, skip reinstatement entirely —
-                    // partial reservation would leave inconsistent
-                    // state.
+                    // The journal says this tx is in-flight. Bring
+                    // in-memory state into agreement: every input
+                    // must be `spent=false` and `reserved_for_tx =
+                    // Some(this tx_hash)`, and the pending entry
+                    // must exist.
+                    //
+                    // This branch heals two distinct crash modes:
+                    //
+                    // - A crash between `build_spend`'s journal
+                    //   append and `save()` — the pending entry
+                    //   never made it to disk, but inputs were
+                    //   reserved fine. Reinstate the pending entry.
+                    // - A crash between `rollback_to`'s journal
+                    //   Reorged append and `save()` — the pending
+                    //   entry never made it back to disk, AND
+                    //   inputs are still flagged `spent` from the
+                    //   prior confirmation. Un-spend + re-reserve.
+                    //
+                    // Both cases collapse to the same idempotent
+                    // mutation, applied per input.
                     let inputs = record.inputs.clone();
                     let any_missing = inputs.iter().any(|c| self.outputs.get(c).is_none());
                     if any_missing {
                         tracing::warn!(
-                            "reconcile: cannot reinstate tx {} — one or more inputs absent from output index; skipping",
+                            "reconcile: cannot heal tx {} — one or more inputs absent from output index; skipping",
                             hex::encode(tx_hash)
                         );
                         continue;
                     }
+
+                    let mut input_state_changed = false;
                     for commitment in &inputs {
-                        if let Err(e) = self.outputs.reserve(commitment, *tx_hash) {
-                            tracing::warn!(
-                                "reconcile: reserve failed for tx {} input {}: {e}; aborting reinstate",
-                                hex::encode(tx_hash),
-                                hex::encode(commitment)
-                            );
+                        let needs_unspend = self
+                            .outputs
+                            .get(commitment)
+                            .map(|o| o.spent)
+                            .unwrap_or(false);
+                        let needs_reserve = self
+                            .outputs
+                            .get(commitment)
+                            .map(|o| o.reserved_for_tx != Some(*tx_hash))
+                            .unwrap_or(false);
+                        if needs_unspend {
+                            input_state_changed = true;
+                            if let Err(e) = self.outputs.mark_unspent(commitment) {
+                                tracing::warn!(
+                                    "reconcile: mark_unspent failed for tx {} input {}: {e}; skipping",
+                                    hex::encode(tx_hash),
+                                    hex::encode(commitment)
+                                );
+                            }
+                        }
+                        if needs_reserve {
+                            input_state_changed = true;
+                            if let Err(e) = self.outputs.reserve(commitment, *tx_hash) {
+                                tracing::warn!(
+                                    "reconcile: reserve failed for tx {} input {}: {e}; aborting heal",
+                                    hex::encode(tx_hash),
+                                    hex::encode(commitment)
+                                );
+                            }
                         }
                     }
-                    self.pending_txs.insert(
-                        *tx_hash,
-                        PendingTx {
-                            tx_hash: *tx_hash,
-                            inputs,
-                        },
-                    );
-                    changed = true;
-                    tracing::info!(
-                        "reconcile: reinstated pending tx {} from journal (status {:?})",
-                        hex::encode(tx_hash),
-                        record.status
-                    );
+
+                    let needs_pending_insert = !self.pending_txs.contains_key(tx_hash);
+                    if needs_pending_insert {
+                        self.pending_txs.insert(
+                            *tx_hash,
+                            PendingTx {
+                                tx_hash: *tx_hash,
+                                inputs,
+                            },
+                        );
+                    }
+
+                    if needs_pending_insert || input_state_changed {
+                        changed = true;
+                        tracing::info!(
+                            "reconcile: healed tx {} from journal (status {:?}; pending_reinstated={}, input_state_changed={})",
+                            hex::encode(tx_hash),
+                            record.status,
+                            needs_pending_insert,
+                            input_state_changed
+                        );
+                    }
                 }
                 TxStatus::Failed { .. } => {
                     // Left as-is. The operator may resubmit, cancel,
@@ -303,6 +349,180 @@ impl Wallet {
         }
 
         Ok(changed)
+    }
+
+    /// Roll the wallet back to a canonical-chain height of
+    /// `target_height` (inclusive). Reverses everything the wallet
+    /// did for confirmations recorded at heights strictly greater
+    /// than `target_height`.
+    ///
+    /// For every journal record with status `Confirmed { block_height
+    /// > target_height }`:
+    ///
+    /// 1. A `Reorged { reorg_height: target_height }` entry is
+    ///    appended to the journal **before** any in-memory mutation
+    ///    (WAL order).
+    /// 2. The tx's input commitments are unmarked spent and
+    ///    re-reserved for the tx. The pending entry is reinserted.
+    /// 3. If any input would itself be removed by step 4 (it
+    ///    originated at a height > `target_height`), the pending
+    ///    entry is **not** restored — the spend is unreachable on
+    ///    the rolled-back chain. The Reorged event still gets
+    ///    journalled so replay reflects the rewind.
+    ///
+    /// After all tx reversals, owned outputs whose `block_height >
+    /// target_height` are removed from the index. Any pending tx
+    /// (rolled-back or pre-existing) whose inputs are no longer
+    /// present is dropped from `pending_txs` — its inputs cannot
+    /// be re-derived on the new chain.
+    ///
+    /// Iteration is sorted by tx_hash so successive replays of the
+    /// same rollback produce a bit-identical journal suffix and
+    /// in-memory state.
+    ///
+    /// Idempotent: a second `rollback_to(target_height)` on
+    /// already-rolled-back state finds no Confirmed records above
+    /// the target and is a no-op (no journal events, no state
+    /// changes).
+    ///
+    /// Requires the wallet to be unlocked (state must be saved at
+    /// the end) and a journal to be attached.
+    pub fn rollback_to(&mut self, target_height: u64) -> Result<(), WalletError> {
+        // Save requires an unlocked session; fail early.
+        let _ = self.session()?;
+        if self.journal.is_none() {
+            return Err(WalletError::Io(
+                "rollback_to requires an attached journal".into(),
+            ));
+        }
+
+        // Snapshot the journal view. We rely on the replayed records
+        // — not the (possibly stale) in-memory pending_txs — to find
+        // which txs to rewind. Records are pulled into a Vec sorted
+        // by tx_hash so the rollback is deterministic across runs.
+        let records = self
+            .journal
+            .as_ref()
+            .expect("journal presence checked above")
+            .replay()?;
+        let mut reorged: Vec<TxRecord> = records
+            .into_values()
+            .filter(|r| {
+                matches!(
+                    r.status,
+                    TxStatus::Confirmed { block_height } if block_height > target_height
+                )
+            })
+            .collect();
+        reorged.sort_by_key(|r| r.tx_hash);
+
+        for record in &reorged {
+            // 1. Journal first (WAL): the rollback is durably
+            //    recorded before any in-memory mutation.
+            self.record_journal(
+                record.tx_hash,
+                TxJournalEvent::Reorged {
+                    reorg_height: target_height,
+                },
+            );
+
+            // Are this tx's inputs themselves about to disappear?
+            // If so, restoring a pending entry with dangling inputs
+            // would mislead callers and trip a reinstate-failure on
+            // the next reopen. Drop it from the in-memory side; the
+            // journal still shows the rewind.
+            let inputs_survive = record.inputs.iter().all(|c| {
+                self.outputs
+                    .get(c)
+                    .map(|o| o.block_height <= target_height)
+                    .unwrap_or(false)
+            });
+            if !inputs_survive {
+                tracing::warn!(
+                    "rollback: tx {} has inputs originating above target {target_height}; not restoring in-memory pending entry",
+                    hex::encode(record.tx_hash)
+                );
+                self.pending_txs.remove(&record.tx_hash);
+                continue;
+            }
+
+            // 2. Un-spend inputs, then reserve them for this tx.
+            //    Best-effort per input: a vanished output logs a
+            //    warning but does not abort the rollback.
+            for commitment in &record.inputs {
+                if let Err(e) = self.outputs.mark_unspent(commitment) {
+                    tracing::warn!(
+                        "rollback: mark_unspent failed for tx {} input {}: {e}; skipping input",
+                        hex::encode(record.tx_hash),
+                        hex::encode(commitment)
+                    );
+                    continue;
+                }
+                if let Err(e) = self.outputs.reserve(commitment, record.tx_hash) {
+                    tracing::warn!(
+                        "rollback: reserve failed for tx {} input {}: {e}",
+                        hex::encode(record.tx_hash),
+                        hex::encode(commitment)
+                    );
+                }
+            }
+
+            // 3. Reinstate the pending entry.
+            self.pending_txs.insert(
+                record.tx_hash,
+                PendingTx {
+                    tx_hash: record.tx_hash,
+                    inputs: record.inputs.clone(),
+                },
+            );
+        }
+
+        // 4. Remove owned outputs whose `block_height > target_height`.
+        //    These cannot exist on the rolled-back chain. Coinbase
+        //    outputs at these heights can be re-derived by replaying
+        //    `scan_block` on the alternate chain; received outputs
+        //    must be re-received via slatepack.
+        let stale_outputs: Vec<[u8; 33]> = self
+            .outputs
+            .iter()
+            .filter(|o| o.block_height > target_height)
+            .map(|o| o.commitment)
+            .collect();
+        for commitment in &stale_outputs {
+            self.outputs.remove(commitment);
+        }
+
+        // 5. Drop any pending tx whose inputs are no longer in the
+        //    output index. Covers two cases:
+        //    - txs we just journalled as Reorged but whose inputs got
+        //      removed in step 4 (already handled above via the
+        //      `inputs_survive` guard, but covered defensively here);
+        //    - pre-existing pending txs (Built but not yet
+        //      Confirmed) whose inputs were rolled away.
+        let stranded: Vec<[u8; 32]> = self
+            .pending_txs
+            .iter()
+            .filter(|(_, pending)| pending.inputs.iter().any(|c| self.outputs.get(c).is_none()))
+            .map(|(tx_hash, _)| *tx_hash)
+            .collect();
+        for tx_hash in &stranded {
+            tracing::warn!(
+                "rollback: dropping pending tx {} — its inputs were rolled back",
+                hex::encode(tx_hash)
+            );
+            self.pending_txs.remove(tx_hash);
+        }
+
+        // 6. Persist.
+        self.save()?;
+
+        info!(
+            "rollback to height {target_height} complete: {} tx(s) reorged, {} output(s) removed, {} stranded pending dropped",
+            reorged.len(),
+            stale_outputs.len(),
+            stranded.len()
+        );
+        Ok(())
     }
 
     /// Current lock state.
