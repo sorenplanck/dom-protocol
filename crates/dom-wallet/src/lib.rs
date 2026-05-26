@@ -47,6 +47,7 @@ pub mod output_index;
 pub mod seed;
 pub mod store;
 pub mod types;
+pub mod unlock;
 pub mod wallet;
 
 pub use hd_wallet::{ExtendedPrivKey, HdError, DOM_COIN_TYPE};
@@ -55,6 +56,7 @@ pub use seed::{
     NEW_WALLET_WORD_COUNT, SEED_BYTES,
 };
 pub use types::{Network, OwnedOutput, WalletBalance, WalletError};
+pub use unlock::{derive_wallet_key, KdfParams, LockState, UnlockedSession, WalletKey};
 pub use wallet::Wallet;
 
 // Re-export for convenience.

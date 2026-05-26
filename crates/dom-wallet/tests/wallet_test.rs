@@ -3,7 +3,7 @@ use dom_core::Hash256;
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::BlindingFactor;
 use dom_tx::InputSource;
-use dom_wallet::{Network, OwnedOutput, Wallet};
+use dom_wallet::{LockState, Network, OwnedOutput, Wallet, WalletError};
 use tempfile::TempDir;
 
 fn test_genesis() -> Hash256 {
@@ -278,4 +278,240 @@ fn test_conflicting_canonical_spend_releases_unconsumed_reservations() {
         !released_b.spent && released_b.reserved_for_tx.is_none(),
         "unconsumed reserved inputs must be released back to the wallet"
     );
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Lock / Unlock state machine — adversarial coverage (Phase 1.2)
+//
+// Invariants under test:
+//   1. Lock zeroes the in-memory session; subsequent save/build_coinbase
+//      operations return WalletError::Locked.
+//   2. scan_block is best-effort: locked wallets skip silently (no panic,
+//      no Err), preserving the relay / IBD code paths.
+//   3. Unlock with wrong password is rejected by the on-disk AEAD tag
+//      and leaves the wallet locked.
+//   4. Unlock with correct password restores normal operation.
+//   5. Lock is idempotent.
+//   6. Lock does NOT mutate on-disk state — pending txs, outputs, and
+//      reservations all survive a lock/unlock cycle (and survive an
+//      explicit reopen, modelling restart-after-lock).
+//   7. In-memory wallets (no file path) accept any password on unlock
+//      because there is no ciphertext to verify against.
+// ════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_new_wallet_starts_unlocked() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("wallet.dat");
+    let w = Wallet::create(&path, "password123", Network::Mainnet, &test_genesis()).unwrap();
+    assert!(w.is_unlocked());
+    assert!(!w.is_locked());
+    assert_eq!(w.lock_state(), LockState::Unlocked);
+}
+
+#[test]
+fn test_opened_wallet_starts_unlocked() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("wallet.dat");
+    Wallet::create(&path, "password123", Network::Mainnet, &test_genesis()).unwrap();
+    let w = Wallet::open(&path, "password123").unwrap();
+    assert!(w.is_unlocked());
+    assert_eq!(w.lock_state(), LockState::Unlocked);
+}
+
+#[test]
+fn test_lock_transitions_to_locked() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("wallet.dat");
+    let mut w = Wallet::create(&path, "password123", Network::Mainnet, &test_genesis()).unwrap();
+    assert!(w.is_unlocked());
+    w.lock();
+    assert!(w.is_locked());
+    assert!(!w.is_unlocked());
+    assert_eq!(w.lock_state(), LockState::Locked);
+}
+
+#[test]
+fn test_lock_is_idempotent() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("wallet.dat");
+    let mut w = Wallet::create(&path, "password123", Network::Mainnet, &test_genesis()).unwrap();
+    w.lock();
+    w.lock(); // must not panic, must not transition anywhere
+    w.lock();
+    assert!(w.is_locked());
+}
+
+#[test]
+fn test_save_while_locked_returns_locked_error() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("wallet.dat");
+    let mut w = Wallet::create(&path, "password123", Network::Mainnet, &test_genesis()).unwrap();
+    w.lock();
+    let err = w.save().expect_err("save must fail when wallet is locked");
+    assert!(
+        matches!(err, WalletError::Locked),
+        "expected WalletError::Locked, got {err:?}"
+    );
+}
+
+#[test]
+fn test_build_coinbase_while_locked_returns_locked_error() {
+    use dom_core::BlockHeight;
+    let mut w = Wallet::new_in_memory(Network::Regtest, &test_genesis());
+    w.lock();
+    let err = w
+        .build_coinbase(BlockHeight(0), 0)
+        .expect_err("build_coinbase must fail when locked");
+    assert!(
+        matches!(err, WalletError::Locked),
+        "expected WalletError::Locked, got {err:?}"
+    );
+}
+
+#[test]
+fn test_scan_block_while_locked_is_noop() {
+    let mut w = Wallet::new_in_memory(Network::Regtest, &test_genesis());
+    w.lock();
+    // No transactions to scan — exercise the locked early-return path.
+    w.scan_block(&[], 0);
+    // Wallet must still be locked and must not have panicked.
+    assert!(w.is_locked());
+}
+
+#[test]
+fn test_unlock_with_wrong_password_is_rejected() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("wallet.dat");
+    let mut w = Wallet::create(&path, "correct_pw", Network::Mainnet, &test_genesis()).unwrap();
+    w.lock();
+    let err = w
+        .unlock("WRONG_PW")
+        .expect_err("unlock with wrong password must fail");
+    assert!(
+        matches!(err, WalletError::Decryption),
+        "expected WalletError::Decryption, got {err:?}"
+    );
+    // The wallet MUST remain locked after a rejected unlock attempt.
+    assert!(
+        w.is_locked(),
+        "rejected unlock must NOT transition to unlocked"
+    );
+}
+
+#[test]
+fn test_unlock_with_correct_password_restores_session() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("wallet.dat");
+    let mut w = Wallet::create(&path, "correct_pw", Network::Mainnet, &test_genesis()).unwrap();
+    w.lock();
+    assert!(w.is_locked());
+    w.unlock("correct_pw")
+        .expect("correct password must unlock");
+    assert!(w.is_unlocked());
+    // Now save() must succeed again (re-encrypts with a fresh salt).
+    w.save().expect("save must succeed after unlock");
+}
+
+#[test]
+fn test_lock_unlock_roundtrip_preserves_disk_state() {
+    // Build a wallet with a pending tx; lock; unlock; verify the
+    // pending tx, the reserved output, and the balance all survived.
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("wallet.dat");
+
+    let mut wallet =
+        Wallet::create(&path, "lock_test_pw", Network::Mainnet, &test_genesis()).unwrap();
+
+    // Add a UTXO and create a pending spend, so we have rich state to preserve.
+    wallet.add_output(make_output(900, 100, false));
+    let recipient_blinding = BlindingFactor::random();
+    let recipient_commitment = Commitment::commit(800, &recipient_blinding);
+    let _tx = wallet
+        .build_spend(recipient_commitment, recipient_blinding, 800, 100, 1000)
+        .unwrap();
+
+    let balance_before = wallet.balance(1000);
+    let outputs_before: Vec<_> = wallet.outputs().cloned().collect();
+
+    // Lock the wallet.
+    wallet.lock();
+    assert!(wallet.is_locked());
+
+    // Unlock with the correct password.
+    wallet
+        .unlock("lock_test_pw")
+        .expect("correct password must unlock");
+    assert!(wallet.is_unlocked());
+
+    // Wallet state in memory is exactly preserved.
+    let balance_after = wallet.balance(1000);
+    let outputs_after: Vec<_> = wallet.outputs().cloned().collect();
+    assert_eq!(balance_before.confirmed, balance_after.confirmed);
+    assert_eq!(balance_before.reserved, balance_after.reserved);
+    assert_eq!(balance_before.immature, balance_after.immature);
+    assert_eq!(outputs_before.len(), outputs_after.len());
+}
+
+#[test]
+fn test_locked_wallet_then_reopen_matches_pre_lock_state() {
+    // Models restart-after-lock: the operator locks the wallet, the
+    // process exits (drop), a new process opens the wallet with the
+    // password. The recovered state must equal the pre-lock state.
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("wallet.dat");
+
+    let mut wallet =
+        Wallet::create(&path, "restart_pw", Network::Mainnet, &test_genesis()).unwrap();
+    wallet.add_output(make_output(1500, 50, false));
+    wallet.save().unwrap();
+    let outputs_before: Vec<_> = wallet.outputs().cloned().collect();
+
+    wallet.lock();
+    // Simulate process exit: drop the wallet while locked. Drop must
+    // not flush state to disk (we already saved above).
+    drop(wallet);
+
+    // New "process" opens the wallet from disk.
+    let reopened = Wallet::open(&path, "restart_pw").unwrap();
+    assert!(reopened.is_unlocked()); // open always produces an unlocked wallet.
+    let outputs_after: Vec<_> = reopened.outputs().cloned().collect();
+    assert_eq!(outputs_before.len(), outputs_after.len());
+    let total_after: u64 = outputs_after.iter().map(|o| o.value).sum();
+    let total_before: u64 = outputs_before.iter().map(|o| o.value).sum();
+    assert_eq!(total_before, total_after);
+}
+
+#[test]
+fn test_in_memory_wallet_lock_cycle() {
+    // In-memory wallets have no on-disk ciphertext, so unlock with
+    // any password is accepted. The state machine still toggles.
+    let mut w = Wallet::new_in_memory(Network::Regtest, &test_genesis());
+    assert!(w.is_unlocked());
+    w.lock();
+    assert!(w.is_locked());
+    w.unlock("arbitrary_password_no_verification").unwrap();
+    assert!(w.is_unlocked());
+}
+
+#[test]
+fn test_multiple_wrong_password_attempts_keep_locked() {
+    // Locking semantics under repeated bad-password attempts: each
+    // attempt is independently rejected; the wallet never accepts a
+    // wrong password "by accident" across attempts.
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("wallet.dat");
+    let mut w = Wallet::create(&path, "right", Network::Mainnet, &test_genesis()).unwrap();
+    w.lock();
+    for wrong in &["", "Right", "RIGHT", "right ", " right", "rright", "rightt"] {
+        let err = w.unlock(wrong).expect_err("must reject");
+        assert!(matches!(err, WalletError::Decryption));
+        assert!(
+            w.is_locked(),
+            "wallet must remain locked after wrong attempt"
+        );
+    }
+    // Correct password still works afterwards.
+    w.unlock("right").expect("correct password still accepted");
+    assert!(w.is_unlocked());
 }
