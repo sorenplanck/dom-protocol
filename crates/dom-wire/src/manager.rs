@@ -20,6 +20,8 @@ pub struct PeerManager {
     pub peers: HashMap<String, PeerInfo>,
     /// Inbound sockets admitted by the listener but not yet registered.
     pending_inbound: HashSet<String>,
+    /// Penalties accumulated before a peer is fully registered.
+    pending_penalties: HashMap<String, u32>,
     /// Max inbound connections.
     pub max_inbound: usize,
     /// Min outbound connections.
@@ -32,6 +34,7 @@ impl PeerManager {
         Self {
             peers: HashMap::new(),
             pending_inbound: HashSet::new(),
+            pending_penalties: HashMap::new(),
             max_inbound,
             min_outbound,
         }
@@ -96,6 +99,11 @@ impl PeerManager {
                 "already connected or pending inbound peer".into(),
             ));
         }
+        if self.pending_ban_score(&addr_str) >= crate::peer::ban_scores::BAN_THRESHOLD {
+            return Err(DomError::PolicyRejected(
+                "pending inbound peer is banned".into(),
+            ));
+        }
         if !self.can_accept_inbound(addr.ip()) {
             return Err(DomError::PolicyRejected(
                 "inbound limit or subnet limit reached".into(),
@@ -118,14 +126,22 @@ impl PeerManager {
                 "already connected to this peer".into(),
             ));
         }
-        if !info.outbound {
-            self.pending_inbound.remove(&addr_str);
-        }
-        if !info.outbound && !self.can_accept_inbound(info.addr.ip()) {
+        let mut info = info;
+        let pending_score = self.pending_penalties.get(&addr_str).copied().unwrap_or(0);
+        if pending_score > 0 && info.add_ban_score(pending_score) {
             return Err(DomError::PolicyRejected(
-                "inbound limit or subnet limit reached".into(),
+                "pending peer penalties exceeded ban threshold".into(),
             ));
         }
+        if !info.outbound {
+            self.pending_inbound.remove(&addr_str);
+            if !self.can_accept_inbound(info.addr.ip()) {
+                return Err(DomError::PolicyRejected(
+                    "inbound limit or subnet limit reached".into(),
+                ));
+            }
+        }
+        self.pending_penalties.remove(&addr_str);
         self.peers.insert(addr_str, info);
         Ok(())
     }
@@ -147,9 +163,21 @@ impl PeerManager {
         }
     }
 
+    /// Add a penalty score for a peer that has not yet been registered.
+    pub fn add_pending_ban_score(&mut self, addr: &str, score: u32) -> u32 {
+        let entry = self.pending_penalties.entry(addr.to_string()).or_insert(0);
+        *entry = entry.saturating_add(score);
+        *entry
+    }
+
     /// Inspect the current ban score for a peer.
     pub fn ban_score(&self, addr: &str) -> Option<u32> {
         self.peers.get(addr).map(|peer| peer.ban_score)
+    }
+
+    /// Inspect the current pre-registration penalty score for a peer.
+    pub fn pending_ban_score(&self, addr: &str) -> u32 {
+        self.pending_penalties.get(addr).copied().unwrap_or(0)
     }
 
     /// Get all connected peer addresses (for broadcasting).
@@ -254,5 +282,41 @@ mod tests {
 
         assert!(mgr.add_ban_score(&addr, 100));
         assert!(mgr.connected_peers().is_empty());
+    }
+
+    #[test]
+    fn pending_ban_score_applies_on_registration() {
+        let mut mgr = PeerManager::new(125, 8);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 1, 1, 1)), 33369).to_string();
+        assert_eq!(mgr.add_pending_ban_score(&addr, 40), 40);
+        assert_eq!(mgr.pending_ban_score(&addr), 40);
+
+        let mut peer = PeerInfo::new(addr.parse().unwrap(), false);
+        peer.state = PeerState::Connected;
+        mgr.register_peer(peer).unwrap();
+
+        assert_eq!(mgr.pending_ban_score(&addr), 0);
+        assert_eq!(mgr.ban_score(&addr), Some(40));
+    }
+
+    #[test]
+    fn pending_ban_threshold_blocks_registration() {
+        let mut mgr = PeerManager::new(125, 8);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 1, 1, 2)), 33369).to_string();
+        assert_eq!(mgr.add_pending_ban_score(&addr, 100), 100);
+
+        let mut peer = PeerInfo::new(addr.parse().unwrap(), false);
+        peer.state = PeerState::Connected;
+        assert!(mgr.register_peer(peer).is_err());
+        assert!(mgr.ban_score(&addr).is_none());
+        assert_eq!(mgr.pending_ban_score(&addr), 100);
+    }
+
+    #[test]
+    fn pending_ban_threshold_blocks_new_reservation() {
+        let mut mgr = PeerManager::new(125, 8);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 1, 1, 3)), 33369);
+        assert_eq!(mgr.add_pending_ban_score(&addr.to_string(), 100), 100);
+        assert!(mgr.reserve_inbound(addr).is_err());
     }
 }

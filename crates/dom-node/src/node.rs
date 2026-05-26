@@ -71,6 +71,7 @@ struct NodeServices {
     mempool: Arc<Mutex<dom_mempool::Mempool>>,
     dandelion: Arc<Mutex<dom_wire::dandelion::DandelionRouter>>,
     peers: Arc<Mutex<dom_wire::manager::PeerManager>>,
+    future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
 }
 
@@ -304,6 +305,28 @@ impl DomNode {
                                             deferred.timestamp
                                         );
                                     }
+                                    Err(dom_core::DomError::TemporarilyInvalid(_))
+                                    | Err(dom_core::DomError::Orphan(_)) => {
+                                        let requeued = queue
+                                            .defer(crate::future_block_queue::DeferredBlock {
+                                                block_hash: deferred.block_hash,
+                                                timestamp: deferred.timestamp,
+                                                queued_at: std::time::Instant::now(),
+                                                block_bytes: deferred.block_bytes.clone(),
+                                            })
+                                            .await;
+                                        if requeued {
+                                            tracing::debug!(
+                                                "Deferred block ts={} requeued after retryable rejection",
+                                                deferred.timestamp
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                "Deferred block ts={} could not be requeued (queue full)",
+                                                deferred.timestamp
+                                            );
+                                        }
+                                    }
                                     Err(e) => {
                                         tracing::debug!("Deferred block still rejected: {e}");
                                     }
@@ -410,6 +433,7 @@ impl DomNode {
                         mempool: self.mempool.clone(),
                         dandelion: self.dandelion.clone(),
                         peers: self.peers.clone(),
+                        future_block_queue: self.future_block_queue.clone(),
                         wallet: self.wallet.clone(),
                     };
                     let peers = svc.peers.clone();
@@ -435,6 +459,7 @@ impl DomNode {
             mempool: self.mempool.clone(),
             dandelion: self.dandelion.clone(),
             peers: self.peers.clone(),
+            future_block_queue: self.future_block_queue.clone(),
             wallet: self.wallet.clone(),
         };
         loop {
@@ -607,6 +632,7 @@ async fn handle_inbound(
     {
         Ok(t) => t,
         Err(e) => {
+            let _ = record_pending_peer_violation(&svc.peers, addr, &e).await;
             warn!("Handshake failed with {addr}: {e}");
             return;
         }
@@ -632,6 +658,7 @@ async fn handle_inbound(
                 info!("register_peer inbound {addr} → {result:?}");
                 if let Err(e) = result {
                     warn!("Failed to register inbound peer {addr}: {e}");
+                    return;
                 }
             }
             // IBD loop: if the inbound peer claims a higher chain, sync from it.
@@ -687,7 +714,10 @@ async fn handle_inbound(
                 info!("Connection to {addr} closed: {e}");
             }
         }
-        Err(e) => warn!("Hello exchange with {addr} failed: {e}"),
+        Err(e) => {
+            let _ = record_pending_peer_violation(&svc.peers, addr, &e).await;
+            warn!("Hello exchange with {addr} failed: {e}")
+        }
     }
 }
 
@@ -728,6 +758,9 @@ async fn connect_outbound(
     {
         Ok(t) => t,
         Err(e) => {
+            if let Ok(peer_addr) = addr.parse() {
+                let _ = record_pending_peer_violation(&svc.peers, peer_addr, &e).await;
+            }
             warn!("Handshake failed with {addr}: {e}");
             return;
         }
@@ -763,6 +796,7 @@ async fn connect_outbound(
                 info!("register_peer outbound {addr} → {result:?}");
                 if let Err(e) = result {
                     warn!("Failed to register outbound peer {addr}: {e}");
+                    return;
                 }
             }
             let peer_addr = match stream.peer_addr() {
@@ -825,7 +859,20 @@ async fn connect_outbound(
                 info!("Connection to {addr} closed: {e}");
             }
         }
-        Err(e) => warn!("Hello exchange with {addr} failed: {e}"),
+        Err(e) => {
+            let peer_addr = match stream.peer_addr() {
+                Ok(a) => a,
+                Err(_) => match addr.parse() {
+                    Ok(a) => a,
+                    Err(_) => {
+                        warn!("Hello exchange with {addr} failed: {e}");
+                        return;
+                    }
+                },
+            };
+            let _ = record_pending_peer_violation(&svc.peers, peer_addr, &e).await;
+            warn!("Hello exchange with {addr} failed: {e}");
+        }
     }
 }
 
@@ -926,6 +973,9 @@ fn peer_violation_score(error: &DomError) -> Option<u32> {
 
     match error {
         DomError::Malformed(_) => Some(ban_scores::MALFORMED_MESSAGE),
+        DomError::PolicyRejected(msg) if msg.contains("handshake timeout") => {
+            Some(ban_scores::PROTOCOL_VIOLATION)
+        }
         DomError::Invalid(msg) if msg.contains("chain_id mismatch") => {
             Some(ban_scores::WRONG_CHAIN_ID)
         }
@@ -937,6 +987,13 @@ fn peer_violation_score(error: &DomError) -> Option<u32> {
         }
         DomError::Invalid(_) => Some(ban_scores::PROTOCOL_VIOLATION),
         _ => None,
+    }
+}
+
+fn pending_peer_violation_score(error: &DomError) -> Option<u32> {
+    match error {
+        DomError::TemporarilyInvalid(_) | DomError::Orphan(_) | DomError::Internal(_) => None,
+        other => peer_violation_score(other),
     }
 }
 
@@ -962,6 +1019,54 @@ async fn record_peer_violation(
     }
 
     banned
+}
+
+async fn record_pending_peer_violation(
+    peers: &Arc<Mutex<PeerManager>>,
+    peer_addr: std::net::SocketAddr,
+    error: &DomError,
+) -> bool {
+    let Some(score) = pending_peer_violation_score(error) else {
+        return false;
+    };
+
+    let peer_key = peer_addr.to_string();
+    let banned = {
+        let mut mgr = peers.lock().await;
+        mgr.add_pending_ban_score(&peer_key, score) >= dom_wire::peer::ban_scores::BAN_THRESHOLD
+    };
+
+    if banned {
+        warn!("Pending peer {peer_addr} banned after pre-registration violation: {error}");
+    } else {
+        warn!("Pending peer {peer_addr} violation (+{score}): {error}");
+    }
+
+    banned
+}
+
+async fn queue_future_block(
+    queue: &Arc<crate::future_block_queue::FutureBlockQueue>,
+    block: &dom_consensus::Block,
+    block_bytes: Vec<u8>,
+) -> bool {
+    use dom_serialization::DomSerialize;
+
+    let header_bytes = match block.header.to_bytes() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!("Could not serialise deferred block header: {e}");
+            return false;
+        }
+    };
+    let hash = *dom_crypto::hash::blake2b_256(&header_bytes).as_bytes();
+    let deferred = crate::future_block_queue::DeferredBlock {
+        block_hash: hash,
+        timestamp: block.header.timestamp.0,
+        queued_at: std::time::Instant::now(),
+        block_bytes,
+    };
+    queue.defer(deferred).await
 }
 
 /// Persistent message loop after Hello exchange.
@@ -1443,18 +1548,17 @@ async fn message_loop(
                             Ok(TimestampDecision::Defer) => {
                                 // Soft buffer: hold for re-evaluation
                                 tracing::debug!("Block from {peer_addr} deferred (future timestamp soft buffer)");
-                                let deferred = crate::future_block_queue::DeferredBlock {
-                                    block_hash: { let mut h = [0u8;32]; h[..8].copy_from_slice(&block.header.height.0.to_le_bytes()); h[8..16].copy_from_slice(&block.header.timestamp.0.to_le_bytes()); h },
-                                    timestamp: block.header.timestamp.0,
-                                    queued_at: std::time::Instant::now(),
-                                    block_bytes: payload.block_bytes,
-                                };
-                                // future_block_queue not in scope here — log and skip
-                                // Full integration requires passing queue into message_loop
-                                tracing::debug!(
-                                    "Deferred block ts={} now={} (queue not yet wired)",
-                                    deferred.timestamp, now_secs
-                                );
+                                if queue_future_block(&svc.future_block_queue, &block, payload.block_bytes).await {
+                                    tracing::debug!(
+                                        "Deferred block ts={} queued for replay",
+                                        block.header.timestamp.0
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "Deferred block ts={} dropped because future queue is full",
+                                        block.header.timestamp.0
+                                    );
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!("Block from {peer_addr} rejected by timestamp: {e}");
@@ -1556,7 +1660,7 @@ async fn message_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::peer_violation_score;
+    use super::{pending_peer_violation_score, peer_violation_score};
     use dom_core::DomError;
     use dom_wire::peer::ban_scores;
 
@@ -1589,6 +1693,16 @@ mod tests {
         assert_eq!(
             peer_violation_score(&DomError::Orphan("missing parent".into())),
             None
+        );
+    }
+
+    #[test]
+    fn pre_registration_handshake_timeout_scores() {
+        assert_eq!(
+            pending_peer_violation_score(&DomError::PolicyRejected(
+                "handshake timeout after 10s".into()
+            )),
+            Some(ban_scores::PROTOCOL_VIOLATION)
         );
     }
 }
