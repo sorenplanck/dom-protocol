@@ -733,3 +733,77 @@ Tracked under `dom-node/tests/sybil_resistance.rs` documentation.
 The 10 sybil_resistance tests pin everything else: flood bound,
 malformed filtering, dedupe, cooldown, failure tracking, addr
 payload caps.
+
+---
+
+## [MAINNET] RB-TESTNET-DEPLOY — Phase 8.1 public adversarial testnet
+
+**Severity:** CRITICAL gate — mainnet launch is blocked on this.
+**Status:** 🔴 OPEN — requires deployment + sustained operation.
+
+Phase 8.1 calls for a public adversarial testnet running ≥ 90 days
+continuous without consensus break. The protocol source is
+testnet-ready (Phase 1.3-7.3 + the Bloco 5 adversarial-resilience
+suites all green), but no actual testnet is currently deployed.
+
+Required to close:
+
+* Deploy ≥ 5 seed nodes in geographically diverse datacentres.
+* Publish testnet seed addresses in
+  `dom-wire/src/dns_seed.rs::TESTNET_SEEDS` (already templated).
+* Operate continuously for 90 d. Any consensus break, unrecoverable
+  state, or peer eclipse during the window resets the clock.
+* Coordinate the bug-bounty rewards (Phase 8.4 policy already
+  authored) in testnet-equivalent fiat units.
+* Run the ceremony rehearsal (per Phase 8.5 final paragraph) at
+  testnet launch.
+
+Tracking note: testnet failure modes that surface protocol bugs
+are the most valuable feedback the project can get pre-launch.
+The 90-day window is a hard minimum; longer is better.
+
+---
+
+## [MAINNET] RB-FUZZ-CAMPAIGN — Phase 8.2 ≥ 10 000 CPU-hour fuzz
+
+**Severity:** CRITICAL gate — mainnet launch is blocked on this.
+**Status:** 🔴 OPEN — requires sustained compute infrastructure.
+
+Phase 8.2 calls for ≥ 10 000 CPU-hours of fuzz coverage across:
+
+* `cargo fuzz` harnesses for: serialization round-trip, PMMR push,
+  range-proof verification, Schnorr verify, Pedersen commit/verify,
+  block decode + validate, wire-message decode, ASERT next_target,
+  IBD header processing, mempool accept_tx, chain corruption
+  detection.
+* Property-based proptest sweeps run with `--ignore-tests=false`
+  for 10 000+ iterations per property (replay determinism,
+  adversarial suite, eclipse-resistance, sybil-resistance,
+  mempool-adversarial, ASERT-adversarial, IBD-adversarial,
+  bulletproof-adversarial, infinity-rejection, differential-crypto).
+* Long-running differential fuzz: DOM ↔ Grin on the secp256k1-zkp
+  surface, DOM ↔ libsecp256k1 on the point-arithmetic surface.
+
+The 10 000-CPU-hour figure is a calibration anchor — the goal is
+not the wall-clock hours but the empirical demonstration that the
+existing test surfaces have been exercised at scale without
+finding new failures.
+
+Required to close:
+
+* Provision a fuzz-cluster (cloud / dedicated farm).
+* Author / dust off `cargo fuzz` harnesses for each surface above.
+  Some already exist in pre-session work; the inventory is in
+  `docs/FUZZING.md` (which will be updated as harnesses are
+  added / refreshed).
+* Archive the per-corpus crash inputs (if any) into
+  `tests/fuzz/corpus/` under git LFS so the regressions are
+  reproducible.
+* Publish the campaign log: total CPU-hours, harnesses run,
+  inputs processed, crashes / non-crash bugs found and fixed,
+  remaining open. The log becomes `docs/FUZZ_CAMPAIGN.md` at
+  mainnet handover.
+
+Tracking note: per the Phase 8.5 ceremony checklist, the fuzz
+campaign MUST be complete and archived before the ceremony
+runs.
