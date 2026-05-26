@@ -921,6 +921,49 @@ async fn hello_exchange(
     Ok(peer_hello)
 }
 
+fn peer_violation_score(error: &DomError) -> Option<u32> {
+    use dom_wire::peer::ban_scores;
+
+    match error {
+        DomError::Malformed(_) => Some(ban_scores::MALFORMED_MESSAGE),
+        DomError::Invalid(msg) if msg.contains("chain_id mismatch") => {
+            Some(ban_scores::WRONG_CHAIN_ID)
+        }
+        DomError::Invalid(msg) if msg.contains("network_magic mismatch") => {
+            Some(ban_scores::WRONG_CHAIN_ID)
+        }
+        DomError::Invalid(msg) if msg.contains("unexpected Hello") => {
+            Some(ban_scores::PROTOCOL_VIOLATION)
+        }
+        DomError::Invalid(_) => Some(ban_scores::PROTOCOL_VIOLATION),
+        _ => None,
+    }
+}
+
+async fn record_peer_violation(
+    peers: &Arc<Mutex<PeerManager>>,
+    peer_addr: std::net::SocketAddr,
+    error: &DomError,
+) -> bool {
+    let Some(score) = peer_violation_score(error) else {
+        return false;
+    };
+
+    let peer_key = peer_addr.to_string();
+    let banned = {
+        let mut mgr = peers.lock().await;
+        mgr.add_ban_score(&peer_key, score)
+    };
+
+    if banned {
+        warn!("Peer {peer_addr} banned after protocol violation: {error}");
+    } else {
+        warn!("Peer {peer_addr} protocol violation (+{score}): {error}");
+    }
+
+    banned
+}
+
 /// Persistent message loop after Hello exchange.
 ///
 /// Reads framed messages from the peer in a loop and dispatches by command:
@@ -1261,7 +1304,13 @@ async fn message_loop(
             }
             // Inbound message
             recv = codec.recv(stream) => {
-                let msg = recv?;
+                let msg = match recv {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
+                        return Err(e);
+                    }
+                };
                 match msg.command {
                     Command::Ping => {
                         // Echo payload as Pong
@@ -1277,12 +1326,20 @@ async fn message_loop(
                     }
                     Command::Hello => {
                         // Second Hello after handshake is a protocol violation
-                        return Err(DomError::Invalid(
+                        let err = DomError::Invalid(
                             "unexpected Hello in message loop [ban+20]".into(),
-                        ));
+                        );
+                        let _ = record_peer_violation(&svc.peers, peer_addr, &err).await;
+                        return Err(err);
                     }
                     Command::GetHeaders => {
-                        let req = GetHeadersPayload::from_bytes(&msg.payload)?;
+                        let req = match GetHeadersPayload::from_bytes(&msg.payload) {
+                            Ok(req) => req,
+                            Err(e) => {
+                                let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
+                                return Err(e);
+                            }
+                        };
                         let headers = build_headers_response(&chain, &req).await?;
                         let resp = HeadersPayload { headers };
                         let wire = WireMessage {
@@ -1295,8 +1352,20 @@ async fn message_loop(
                     Command::Block => {
                         // Peer relayed a block to us. Validate and accept.
                         use dom_serialization::DomDeserialize;
-                        let payload = BlockPayload::from_bytes(&msg.payload)?;
-                        let block = dom_consensus::Block::from_bytes(&payload.block_bytes)?;
+                        let payload = match BlockPayload::from_bytes(&msg.payload) {
+                            Ok(payload) => payload,
+                            Err(e) => {
+                                let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
+                                return Err(e);
+                            }
+                        };
+                        let block = match dom_consensus::Block::from_bytes(&payload.block_bytes) {
+                            Ok(block) => block,
+                            Err(e) => {
+                                let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
+                                return Err(e);
+                            }
+                        };
                         let now_secs = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -1358,8 +1427,13 @@ async fn message_loop(
                                             "Block from {peer_addr} already known — no-op"
                                         );
                                     }
-                                    Err(dom_core::DomError::Invalid(e)) => {
+                                    Err(e @ dom_core::DomError::Invalid(_))
+                                    | Err(e @ dom_core::DomError::Malformed(_)) => {
+                                        let banned = record_peer_violation(&svc.peers, peer_addr, &e).await;
                                         tracing::warn!("Rejected block from {peer_addr}: {e}");
+                                        if banned {
+                                            return Err(e);
+                                        }
                                     }
                                     Err(e) => {
                                         tracing::debug!("Block from {peer_addr} not accepted: {e}");
@@ -1439,12 +1513,22 @@ async fn message_loop(
                                 }
                             }
                             Err(e) => {
+                                let banned = record_peer_violation(&svc.peers, peer_addr, &e).await;
                                 tracing::debug!("Invalid tx from {peer_addr}: {e}");
+                                if banned {
+                                    return Err(e);
+                                }
                             }
                         }
                     }
                     Command::GetBlockData => {
-                        let req = GetBlockDataPayload::from_bytes(&msg.payload)?;
+                        let req = match GetBlockDataPayload::from_bytes(&msg.payload) {
+                            Ok(req) => req,
+                            Err(e) => {
+                                let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
+                                return Err(e);
+                            }
+                        };
                         for hash in &req.hashes {
                             let body = {
                                 let c = chain.lock().await;
@@ -1467,5 +1551,44 @@ async fn message_loop(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::peer_violation_score;
+    use dom_core::DomError;
+    use dom_wire::peer::ban_scores;
+
+    #[test]
+    fn malformed_message_maps_to_malformed_score() {
+        assert_eq!(
+            peer_violation_score(&DomError::Malformed("bad frame".into())),
+            Some(ban_scores::MALFORMED_MESSAGE)
+        );
+    }
+
+    #[test]
+    fn wrong_network_identity_maps_to_immediate_ban_score() {
+        assert_eq!(
+            peer_violation_score(&DomError::Invalid("chain_id mismatch".into())),
+            Some(ban_scores::WRONG_CHAIN_ID)
+        );
+        assert_eq!(
+            peer_violation_score(&DomError::Invalid("network_magic mismatch".into())),
+            Some(ban_scores::WRONG_CHAIN_ID)
+        );
+    }
+
+    #[test]
+    fn temporary_peer_errors_do_not_score() {
+        assert_eq!(
+            peer_violation_score(&DomError::TemporarilyInvalid("future block".into())),
+            None
+        );
+        assert_eq!(
+            peer_violation_score(&DomError::Orphan("missing parent".into())),
+            None
+        );
     }
 }
