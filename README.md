@@ -296,7 +296,7 @@ All commits must:
 
 ## Contact
 
-- **Pseudonym:** Soren Planck
+-  Soren Planck
 - **Email:** sorenplanck@tutamail.com
 - **GitHub:** github.com/sorenplanck/dom-protocol
 
