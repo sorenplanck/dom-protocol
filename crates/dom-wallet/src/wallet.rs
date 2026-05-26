@@ -1,5 +1,6 @@
 //! Main wallet struct and operations.
 
+use crate::journal::{JournalEntry, TxJournal, TxJournalEvent, TxStatus};
 use crate::output_index::OutputIndex;
 use crate::store::{
     load_wallet as load_wallet_file, save_wallet as save_wallet_file, PendingTx, WalletState,
@@ -46,6 +47,18 @@ pub struct Wallet {
     /// it is wiped on `lock()` (which drops the session) or on
     /// `Wallet::drop`.
     session: Option<UnlockedSession>,
+    /// Optional WAL journal. Set by `WalletDir::open` / `create` for
+    /// wallets in a portable directory layout. When `Some`, lifecycle
+    /// events (Built / Confirmed / Canceled) are appended before the
+    /// corresponding in-memory mutation, so a crash between journal
+    /// and state-save is recoverable on reopen.
+    ///
+    /// Raw single-file wallets (constructed via `Wallet::create` /
+    /// `Wallet::open` without going through `WalletDir`) leave this
+    /// at `None` — their lifecycle is recorded only in the encrypted
+    /// `WalletState.pending_txs` blob, preserving Phase 1.2 behaviour
+    /// for callers that have not yet adopted `WalletDir`.
+    journal: Option<TxJournal>,
 }
 
 impl Wallet {
@@ -80,6 +93,7 @@ impl Wallet {
             session: Some(UnlockedSession::from_verified_password(
                 password.to_string(),
             )),
+            journal: None,
         })
     }
 
@@ -103,6 +117,7 @@ impl Wallet {
             session: Some(UnlockedSession::from_verified_password(
                 password.to_string(),
             )),
+            journal: None,
         })
     }
 
@@ -123,7 +138,171 @@ impl Wallet {
             pending_txs: HashMap::new(),
             file_path: None,
             session: Some(UnlockedSession::from_verified_password(String::new())),
+            journal: None,
         }
+    }
+
+    /// Attach a journal to this wallet. Once attached, lifecycle
+    /// events (Built / Confirmed / Canceled) are appended to the
+    /// journal **before** the corresponding in-memory mutation, so
+    /// the journal is a true WAL.
+    ///
+    /// Called by `WalletDir::create` / `WalletDir::open` to wire
+    /// the journal that lives alongside the encrypted wallet inside
+    /// the portable directory.
+    pub fn attach_journal(&mut self, journal: TxJournal) {
+        self.journal = Some(journal);
+    }
+
+    /// Borrow the attached journal, if any.
+    pub fn journal(&self) -> Option<&TxJournal> {
+        self.journal.as_ref()
+    }
+
+    /// Whether the wallet currently tracks a pending tx by this hash.
+    pub fn has_pending_tx(&self, tx_hash: &[u8; 32]) -> bool {
+        self.pending_txs.contains_key(tx_hash)
+    }
+
+    /// Append one event to the journal if one is attached. No-op
+    /// otherwise. Errors are logged but do NOT propagate — the
+    /// journal is best-effort: in-memory state still mutates so the
+    /// wallet remains usable. Operators inspecting the journal will
+    /// see the gap.
+    fn record_journal(&self, tx_hash: [u8; 32], event: TxJournalEvent) {
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let entry = JournalEntry {
+            timestamp: ts,
+            tx_hash,
+            event,
+        };
+        if let Err(e) = journal.append(&entry) {
+            tracing::warn!(
+                "journal append failed for tx {}: {e}; in-memory state still proceeds",
+                hex::encode(tx_hash)
+            );
+        }
+    }
+
+    /// Replay the attached journal and reconcile in-memory
+    /// `pending_txs` + `outputs` state against it.
+    ///
+    /// Two divergences are recovered:
+    ///
+    /// 1. **Stale pending after terminal.** If the journal records a
+    ///    transaction as `Confirmed { block_height }`, `Replaced`, or
+    ///    `Canceled`, but the encrypted `pending_txs` still tracks it,
+    ///    the pending entry is removed. For `Confirmed`, each input
+    ///    is also marked spent; for all three, reservations are
+    ///    released.
+    /// 2. **Lost pending after Built/Submitted.** If the journal
+    ///    records a transaction as `Building` or `Submitted` but the
+    ///    encrypted `pending_txs` has no entry (e.g., a crash between
+    ///    journal append and wallet save), the pending tx is
+    ///    reinstated from the journal's `inputs` list and inputs are
+    ///    re-reserved.
+    ///
+    /// Best-effort: inputs the wallet no longer tracks are logged and
+    /// skipped rather than failing the reconcile. `Failed` records
+    /// are left alone — the operator may still build a replacement.
+    ///
+    /// Returns `true` if anything changed and the caller should
+    /// `save()` to persist the reconciled state. No-op (returns
+    /// `false`) if no journal is attached or there are no
+    /// divergences.
+    pub fn reconcile_with_journal(&mut self) -> Result<bool, WalletError> {
+        let Some(journal) = self.journal.as_ref() else {
+            return Ok(false);
+        };
+        let records = journal.replay()?;
+        let mut changed = false;
+
+        for (tx_hash, record) in &records {
+            match &record.status {
+                TxStatus::Confirmed { .. } | TxStatus::Replaced { .. } | TxStatus::Canceled => {
+                    if let Some(pending) = self.pending_txs.remove(tx_hash) {
+                        let confirmed = matches!(record.status, TxStatus::Confirmed { .. });
+                        for commitment in &pending.inputs {
+                            if confirmed {
+                                if let Err(e) = self.outputs.mark_spent(commitment) {
+                                    tracing::warn!(
+                                        "reconcile: mark_spent failed for tx {} input {}: {e}; skipping",
+                                        hex::encode(tx_hash),
+                                        hex::encode(commitment)
+                                    );
+                                }
+                            }
+                            if let Err(e) = self.outputs.release_reservation(commitment) {
+                                tracing::warn!(
+                                    "reconcile: release_reservation failed for tx {} input {}: {e}; skipping",
+                                    hex::encode(tx_hash),
+                                    hex::encode(commitment)
+                                );
+                            }
+                        }
+                        changed = true;
+                        tracing::info!(
+                            "reconcile: cleaned up pending tx {} (journal status {:?})",
+                            hex::encode(tx_hash),
+                            record.status
+                        );
+                    }
+                }
+                TxStatus::Building | TxStatus::Submitted => {
+                    if self.pending_txs.contains_key(tx_hash) {
+                        continue;
+                    }
+                    // Reinstate: reserve each input the wallet still
+                    // owns. If any input has gone missing from the
+                    // output index, skip reinstatement entirely —
+                    // partial reservation would leave inconsistent
+                    // state.
+                    let inputs = record.inputs.clone();
+                    let any_missing = inputs.iter().any(|c| self.outputs.get(c).is_none());
+                    if any_missing {
+                        tracing::warn!(
+                            "reconcile: cannot reinstate tx {} — one or more inputs absent from output index; skipping",
+                            hex::encode(tx_hash)
+                        );
+                        continue;
+                    }
+                    for commitment in &inputs {
+                        if let Err(e) = self.outputs.reserve(commitment, *tx_hash) {
+                            tracing::warn!(
+                                "reconcile: reserve failed for tx {} input {}: {e}; aborting reinstate",
+                                hex::encode(tx_hash),
+                                hex::encode(commitment)
+                            );
+                        }
+                    }
+                    self.pending_txs.insert(
+                        *tx_hash,
+                        PendingTx {
+                            tx_hash: *tx_hash,
+                            inputs,
+                        },
+                    );
+                    changed = true;
+                    tracing::info!(
+                        "reconcile: reinstated pending tx {} from journal (status {:?})",
+                        hex::encode(tx_hash),
+                        record.status
+                    );
+                }
+                TxStatus::Failed { .. } => {
+                    // Left as-is. The operator may resubmit, cancel,
+                    // or replace; we don't unilaterally rewrite state.
+                }
+            }
+        }
+
+        Ok(changed)
     }
 
     /// Current lock state.
@@ -313,6 +492,20 @@ impl Wallet {
         // Compute tx_hash for tracking.
         let tx_hash = compute_tx_hash(&tx)?;
 
+        // WAL ORDER: write the Built event to the journal FIRST,
+        // before mutating any in-memory state. If we crash between
+        // journal-append and the in-memory mutation below, replay
+        // on reopen will reinstate the pending tx (Phase 1.6
+        // reconcile-on-open in WalletDir::open).
+        self.record_journal(
+            tx_hash,
+            TxJournalEvent::Built {
+                inputs: selected_commitments.clone(),
+                output_count: tx.outputs.len() as u32,
+                fee_noms: fee,
+            },
+        );
+
         // Reserve inputs.
         for commitment in &selected_commitments {
             self.outputs.reserve(commitment, tx_hash)?;
@@ -362,6 +555,9 @@ impl Wallet {
 
         match self.pending_txs.remove(&tx_hash) {
             Some(pending) => {
+                // WAL: record Canceled in the journal before
+                // releasing reservations / saving state.
+                self.record_journal(tx_hash, TxJournalEvent::Canceled);
                 for commitment in pending.inputs {
                     self.outputs.release_reservation(&commitment)?;
                 }
@@ -505,6 +701,11 @@ impl Wallet {
                 .collect();
 
             for tx_hash in resolved {
+                // WAL ORDER: record Confirmed in the journal BEFORE
+                // mutating output state. If we crash after the journal
+                // append but before save, reconcile-on-open replays the
+                // terminal status and cleans up the still-pending entry.
+                self.record_journal(tx_hash, TxJournalEvent::Confirmed { block_height });
                 if let Some(pending) = self.pending_txs.remove(&tx_hash) {
                     for commitment in pending.inputs {
                         if consumed_inputs.contains(&commitment) {
@@ -683,9 +884,22 @@ impl Wallet {
     }
 }
 
-/// Compute a deterministic, domain-separated hash of a transaction.
+/// Compute the canonical transaction hash used for wallet-mempool
+/// cross-lookup.
+///
+/// This is the mempool-aligned hash: `blake2b_256(tx.to_bytes())`
+/// with NO tag prefix. It matches the hash that
+/// `dom-node::node_handle::submit_tx` and the mempool compute on the
+/// same transaction bytes, so a wallet pending tx and its mempool
+/// entry share one identifier.
+///
+/// **Phase 1.7 unification:** prior to this commit the wallet used
+/// `blake2b_256_tagged("DOM:tx-hash:v1", bytes)`, producing a
+/// distinct keyspace from the mempool. That divergence meant the
+/// wallet could not look up its own pending tx by the mempool hash
+/// returned from `submit_tx`. Switching to the un-tagged hash
+/// unifies the keyspaces — same input bytes, same hash, everywhere.
 fn compute_tx_hash(tx: &Transaction) -> Result<[u8; 32], WalletError> {
     let bytes = tx.to_bytes()?;
-    let hash: Hash256 = blake2b_256_tagged("DOM:tx-hash:v1", &bytes);
-    Ok(*hash.as_bytes())
+    Ok(*dom_crypto::blake2b_256(&bytes).as_bytes())
 }

@@ -45,6 +45,7 @@
 //!    I/O. Nothing here reaches out to a node, peer, or remote
 //!    service.
 
+use crate::journal::TxJournal;
 use crate::store::{save_wallet as save_wallet_file, WalletState};
 use crate::types::{Network, WalletError};
 use crate::wallet::Wallet;
@@ -219,7 +220,14 @@ impl WalletDir {
 
         // Re-open via the standard Wallet::open path so we get an
         // unlocked Wallet handle backed by the same on-disk state.
-        let wallet = Wallet::open(&dat_path, password)?;
+        let mut wallet = Wallet::open(&dat_path, password)?;
+
+        // Attach the WAL journal. On `create` the file does not exist
+        // yet — `TxJournal::open` is lazy and the first append will
+        // materialise it inside the wallet directory.
+        let journal =
+            TxJournal::open(path).map_err(|e| WalletError::Io(format!("open journal: {e}")))?;
+        wallet.attach_journal(journal);
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -277,7 +285,7 @@ impl WalletDir {
             ))
         })?;
 
-        let wallet = Wallet::open(&dat_path, password)?;
+        let mut wallet = Wallet::open(&dat_path, password)?;
 
         // Defensive: verify the on-disk wallet's chain_id matches the
         // plaintext config. Mismatch means tampering or a corrupted
@@ -288,6 +296,23 @@ impl WalletDir {
                 "chain_id mismatch between wallet.dat and config.json in {:?}",
                 path
             )));
+        }
+
+        // Attach the WAL journal, then reconcile encrypted state
+        // against it. The journal is the source of truth for tx
+        // lifecycle: a crash between journal append and `save()`
+        // leaves the two stores divergent, and reopen is where we
+        // heal that divergence.
+        let journal =
+            TxJournal::open(path).map_err(|e| WalletError::Io(format!("open journal: {e}")))?;
+        wallet.attach_journal(journal);
+        let reconciled = wallet.reconcile_with_journal()?;
+        if reconciled {
+            debug!(
+                "reconciled wallet state against journal at {:?}; persisting",
+                path
+            );
+            wallet.save()?;
         }
 
         Ok(Self {
