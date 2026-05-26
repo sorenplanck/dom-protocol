@@ -10,6 +10,7 @@ use dom_wire::message::{Command, HelloPayload, WireMessage};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::task::JoinSet;
 
 fn chain_id_for(network: Network) -> [u8; 32] {
     let genesis_hash = match network {
@@ -283,4 +284,78 @@ async fn delayed_partial_hello_frame_times_out_and_cleans_pending_state() {
         matches!(read_result, Ok(0) | Err(_)),
         "partial Hello frame should not keep the session alive after timeout"
     );
+}
+
+#[tokio::test]
+async fn concurrent_malformed_hello_peers_cleanup_converges() {
+    init_tracing();
+    let config = test_config("adversarial-handshake-concurrent-malformed", 43424, false);
+    let node = spawn_node(config).await;
+
+    tokio::spawn(node.clone().run());
+    wait_for_listener_ready("127.0.0.1:43424", 10)
+        .await
+        .expect("listener ready");
+
+    let mut tasks = JoinSet::new();
+    for _ in 0..2 {
+        let node = node.clone();
+        tasks.spawn(async move {
+            let (mut stream, mut codec, client_addr) =
+                connect_noise_peer(&node, "127.0.0.1:43424").await;
+            let server_hello = codec.recv(&mut stream).await.expect("receive server hello");
+            assert_eq!(server_hello.command, Command::Hello);
+
+            codec
+                .send(
+                    &mut stream,
+                    &WireMessage {
+                        magic: node.config.network.magic(),
+                        command: Command::Hello,
+                        payload: vec![0u8; 8],
+                    },
+                )
+                .await
+                .expect("send malformed hello payload");
+
+            let recv_result = tokio::time::timeout(Duration::from_secs(5), codec.recv(&mut stream))
+                .await
+                .expect("malformed hello session should close instead of hanging");
+            assert!(
+                recv_result.is_err(),
+                "peer that sends a malformed Hello should be disconnected"
+            );
+
+            client_addr
+        });
+    }
+
+    let mut client_addrs = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        client_addrs.push(result.expect("task join"));
+    }
+
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let peers = node.peers.lock().await;
+            let all_penalized = client_addrs
+                .iter()
+                .all(|addr| peers.pending_ban_score(&addr.to_string()) > 0);
+            let released = peers.pending_inbound_count() == 0;
+            let connected = peers.connected_peers().is_empty();
+            drop(peers);
+
+            if all_penalized
+                && released
+                && connected
+                && node.metrics.peer_count.load(Ordering::Relaxed) == 0
+                && node.metrics.inbound_peers.load(Ordering::Relaxed) == 0
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("concurrent malformed peers should converge to a clean pending state");
 }
