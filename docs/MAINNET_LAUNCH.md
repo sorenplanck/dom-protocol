@@ -143,7 +143,7 @@
 - [ ] **Network Parameters**
   - [x] NETWORK_MAGIC_MAINNET = 0x444F4D31
   - [x] P2P_PORT_MAINNET = 33,369
-  - [x] PROTOCOL_VERSION = 1
+  - [x] PROTOCOL_VERSION = 2
   - [ ] GENESIS_HASH_MAINNET = [computed deterministically]
 
 - [ ] **Cryptographic Parameters**
