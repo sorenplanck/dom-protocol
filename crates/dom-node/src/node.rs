@@ -1218,10 +1218,14 @@ async fn ibd_sync_round(
             let txs_for_scan = block.transactions.clone();
             {
                 let mut c = chain.lock().await;
-                match c.connect_block(&block, now) {
-                    Ok(dom_chain::ConnectResult::BestChain)
-                    | Ok(dom_chain::ConnectResult::SideChain) => {
+                let best_chain = match c.connect_block(&block, now) {
+                    Ok(dom_chain::ConnectResult::BestChain) => {
                         connected_any = true;
+                        true
+                    }
+                    Ok(dom_chain::ConnectResult::SideChain) => {
+                        connected_any = true;
+                        false
                     }
                     Ok(dom_chain::ConnectResult::AlreadyHave) => {
                         // Peer sent us a block we already have. Unusual during
@@ -1232,18 +1236,28 @@ async fn ibd_sync_round(
                             height
                         );
                         connected_any = true;
+                        false
                     }
                     Err(e) => {
                         return Err(DomError::Invalid(format!(
                             "IBD from {peer_addr}: connect_block rejected: {e}"
                         )));
                     }
+                };
+                if best_chain {
+                    // Wallet state follows canonical history only. Side-chain
+                    // blocks may be retained by the node for future reorg work
+                    // but MUST NOT mutate spend reservations or balances.
+                    if let Some(ref wallet_arc) = wallet {
+                        let mut w = wallet_arc.lock().await;
+                        w.apply_canonical_block(&txs_for_scan, height)
+                            .map_err(|e| {
+                                DomError::Internal(format!(
+                                    "wallet canonical block apply during IBD failed: {e}"
+                                ))
+                            })?;
+                    }
                 }
-            }
-            // Scan block for wallet outputs (IBD path).
-            if let Some(ref wallet_arc) = wallet {
-                let mut w = wallet_arc.lock().await;
-                w.scan_block(&txs_for_scan, height);
             }
         }
     }
@@ -1491,10 +1505,12 @@ async fn message_loop(
                                 match result {
                                     Ok(dom_chain::ConnectResult::BestChain) => {
                                         tracing::info!("Accepted relayed block from {peer_addr} (new tip)");
-                                        // Scan block for wallet outputs (relay path).
+                                        // Wallet state follows canonical blocks only.
                                         if let Some(ref wallet_arc) = svc.wallet {
                                             let mut w = wallet_arc.lock().await;
-                                            w.scan_block(&txs_for_scan, height);
+                                            if let Err(e) = w.apply_canonical_block(&txs_for_scan, height) {
+                                                tracing::warn!("wallet canonical block apply failed at height {height}: {e}");
+                                            }
                                         }
                                         // DOM-SEC-RELAY-LOOP: only rebroadcast when we
                                         // actually extended the best chain. SideChain
@@ -1506,26 +1522,10 @@ async fn message_loop(
                                         tracing::debug!(
                                             "Accepted relayed block from {peer_addr} (side chain — no rebroadcast)"
                                         );
-                                        // Scan side chain for wallet outputs in case the
-                                        // side chain becomes best chain via later reorg.
-                                        //
-                                        // WARNING (audit 2026-05-23, ACHADO 3): wallet.scan_block
-                                        // is currently a no-op placeholder. When real scan logic
-                                        // is implemented, this branch MUST be revisited:
-                                        //   - Naive scan would count side-chain UTXOs as if they
-                                        //     were canonical, inflating balance and risking
-                                        //     double-counting on reorg.
-                                        //   - Proper handling: either (a) defer scan until the
-                                        //     side chain wins via reorg, or (b) tag scanned
-                                        //     outputs with their block hash and only count
-                                        //     those whose ancestor is the canonical tip.
-                                        // Also a DoS vector: peer can flood valid side blocks
-                                        // to force repeated scans (DOM-SCAN-001 — rate-limit
-                                        // planned in follow-up commit).
-                                        if let Some(ref wallet_arc) = svc.wallet {
-                                            let mut w = wallet_arc.lock().await;
-                                            w.scan_block(&txs_for_scan, height);
-                                        }
+                                        // Wallet state intentionally ignores side-chain blocks.
+                                        // Pending-spend reconciliation and output recovery are
+                                        // canonical-only until the wallet learns explicit reorg
+                                        // rollback semantics.
                                     }
                                     Ok(dom_chain::ConnectResult::AlreadyHave) => {
                                         tracing::trace!(
@@ -1660,7 +1660,7 @@ async fn message_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::{pending_peer_violation_score, peer_violation_score};
+    use super::{peer_violation_score, pending_peer_violation_score};
     use dom_core::DomError;
     use dom_wire::peer::ban_scores;
 

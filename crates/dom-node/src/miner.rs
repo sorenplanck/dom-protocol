@@ -424,6 +424,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
         coinbase,
         transactions: selected_txs,
     };
+    let coinbase_commitment = *block.coinbase.output.commitment.as_bytes();
 
     let connect_outcome = {
         let mut chain = node.chain.lock().await;
@@ -447,12 +448,20 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
                 "Miner block at height {} accepted as SideChain (race with relayed block)",
                 new_height
             );
+            if let Some(ref wallet_arc) = node.wallet {
+                let mut wallet = wallet_arc.lock().await;
+                wallet.forget_output(&coinbase_commitment);
+            }
         }
         dom_chain::ConnectResult::AlreadyHave => {
             tracing::debug!(
                 "Miner block at height {} was AlreadyHave (unusual but benign)",
                 new_height
             );
+            if let Some(ref wallet_arc) = node.wallet {
+                let mut wallet = wallet_arc.lock().await;
+                wallet.forget_output(&coinbase_commitment);
+            }
             // Don't relay — peers already have it (somehow).
             return Ok(new_height);
         }
@@ -479,7 +488,9 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     // Scan block for wallet outputs (coinbase reward recovery).
     if let Some(ref wallet_arc) = node.wallet {
         let mut wallet = wallet_arc.lock().await;
-        wallet.scan_block(&block.transactions, new_height);
+        wallet
+            .apply_canonical_block(&block.transactions, new_height)
+            .map_err(|e| DomError::Internal(format!("wallet canonical block apply: {e}")))?;
     }
 
     // Relay newly-mined block to all connected peers via broadcast channel.
