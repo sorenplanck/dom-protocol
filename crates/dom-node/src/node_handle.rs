@@ -11,6 +11,26 @@ use std::sync::Arc;
 /// Newtype so we can impl the foreign NodeHandle trait for Arc<DomNode>.
 pub struct NodeHandleImpl(pub Arc<DomNode>);
 
+fn rollback_failed_wallet_spend(
+    wallet_arc: &tokio::sync::Mutex<dom_wallet::Wallet>,
+    tx_hash: [u8; 32],
+    original: RpcError,
+) -> RpcError {
+    match wallet_arc.try_lock() {
+        Ok(mut wallet) => match wallet.cancel_tx(tx_hash) {
+            Ok(()) => original,
+            Err(e) => RpcError::Internal(format!(
+                "{original}; wallet rollback for {} failed: {e}",
+                hex::encode(tx_hash)
+            )),
+        },
+        Err(_) => RpcError::Internal(format!(
+            "{original}; wallet rollback for {} failed: wallet busy",
+            hex::encode(tx_hash)
+        )),
+    }
+}
+
 impl NodeHandle for NodeHandleImpl {
     fn chain_height(&self) -> u64 {
         match self.0.chain.try_lock() {
@@ -221,6 +241,9 @@ impl NodeHandle for NodeHandleImpl {
                 .map_err(|e| dom_rpc::RpcError::Rejected(format!("build_spend: {e}")))?
         };
 
+        let wallet_tx_hash = dom_wallet::Wallet::tracking_tx_hash(&tx)
+            .map_err(|e| dom_rpc::RpcError::Internal(format!("wallet tx hash: {e}")))?;
+
         // Serialize and submit to mempool
         let tx_bytes = tx
             .to_bytes()
@@ -232,15 +255,21 @@ impl NodeHandle for NodeHandleImpl {
             .unwrap_or_default()
             .as_secs();
 
-        let mut mempool = self
-            .0
-            .mempool
-            .try_lock()
-            .map_err(|_| dom_rpc::RpcError::Overloaded("mempool busy".into()))?;
+        let mut mempool = self.0.mempool.try_lock().map_err(|_| {
+            rollback_failed_wallet_spend(
+                wallet_arc,
+                wallet_tx_hash,
+                dom_rpc::RpcError::Overloaded("mempool busy".into()),
+            )
+        })?;
 
-        mempool
-            .accept_tx(tx, tx_hash, now)
-            .map_err(|e| dom_rpc::RpcError::Rejected(format!("mempool: {e}")))?;
+        mempool.accept_tx(tx, tx_hash, now).map_err(|e| {
+            rollback_failed_wallet_spend(
+                wallet_arc,
+                wallet_tx_hash,
+                dom_rpc::RpcError::Rejected(format!("mempool: {e}")),
+            )
+        })?;
 
         // Route via Dandelion++: decide Stem vs Fluff and dispatch over
         // the corresponding broadcast channel. Same logic as submit_tx above.
@@ -275,5 +304,118 @@ impl NodeHandle for NodeHandleImpl {
         }
 
         Ok(tx_hash)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NodeHandle, NodeHandleImpl};
+    use crate::node::DomNode;
+    use dom_config::NodeConfig;
+    use dom_crypto::{pedersen::Commitment, BlindingFactor};
+    use dom_rpc::SpendRequest;
+    use dom_wallet::{Network, OwnedOutput, Wallet};
+
+    fn make_output(value: u64, height: u64, is_coinbase: bool) -> OwnedOutput {
+        let bf = BlindingFactor::random();
+        let commitment = Commitment::commit(value, &bf);
+        OwnedOutput::new(
+            *commitment.as_bytes(),
+            value,
+            *bf.as_bytes(),
+            height,
+            is_coinbase,
+        )
+    }
+
+    fn test_config(data_dir: &str, wallet_path: &str) -> NodeConfig {
+        NodeConfig {
+            network: dom_config::Network::Regtest,
+            data_dir: data_dir.to_string(),
+            p2p_listen_addr: "127.0.0.1:0".into(),
+            max_inbound: 4,
+            min_outbound: 0,
+            dns_seeds: vec![],
+            seed_peers: vec![],
+            mine: false,
+            miner_address: None,
+            wallet_path: Some(wallet_path.to_string()),
+            wallet_password: Some("password123".into()),
+            log_level: "debug".into(),
+            rpc_listen_addr: None,
+        }
+    }
+
+    #[test]
+    fn wallet_spend_rolls_back_reservation_when_mempool_is_busy() {
+        let unique = format!(
+            "dom-node-handle-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos()
+        );
+        let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
+        let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_file(&wallet_path);
+
+        let node = std::sync::Arc::new(
+            DomNode::init(test_config(
+                data_dir.to_str().expect("utf8 data dir"),
+                wallet_path.to_str().expect("utf8 wallet path"),
+            ))
+            .expect("init node"),
+        );
+        let handle = NodeHandleImpl(node.clone());
+
+        {
+            let wallet_arc = node.wallet.as_ref().expect("wallet configured");
+            let mut wallet = wallet_arc.try_lock().expect("wallet lock");
+            wallet.add_output(make_output(900, 100, false));
+            wallet.save().expect("persist wallet");
+        }
+
+        let recipient_blinding = BlindingFactor::random();
+        let recipient_commitment = Commitment::commit(800, &recipient_blinding);
+        let req = SpendRequest {
+            recipient_commitment: hex::encode(recipient_commitment.as_bytes()),
+            recipient_blinding: hex::encode(recipient_blinding.as_bytes()),
+            amount_noms: 800,
+            fee_noms: 100,
+        };
+
+        let _mempool_guard = node.mempool.try_lock().expect("hold mempool lock");
+        let err = handle
+            .wallet_spend(req)
+            .expect_err("mempool lock should fail");
+        assert!(
+            matches!(err, dom_rpc::RpcError::Overloaded(ref msg) if msg.contains("mempool busy")),
+            "expected mempool busy error, got {err}"
+        );
+
+        {
+            let wallet_arc = node.wallet.as_ref().expect("wallet configured");
+            let wallet = wallet_arc.try_lock().expect("wallet lock");
+            let balance = wallet.balance(1000);
+            assert_eq!(balance.confirmed, 900);
+            assert_eq!(
+                balance.reserved, 0,
+                "failed mempool admission must not leave funds reserved"
+            );
+        }
+
+        let reopened =
+            Wallet::open(&wallet_path, "password123").expect("reopen wallet after rollback");
+        let reopened_balance = reopened.balance(1000);
+        assert_eq!(reopened_balance.confirmed, 900);
+        assert_eq!(
+            reopened_balance.reserved, 0,
+            "rollback must persist across restart"
+        );
+        assert_eq!(reopened.network(), Network::Regtest);
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_file(&wallet_path);
     }
 }
