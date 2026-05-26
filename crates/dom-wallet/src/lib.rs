@@ -49,6 +49,7 @@ pub mod store;
 pub mod types;
 pub mod unlock;
 pub mod wallet;
+pub mod wallet_dir;
 
 pub use hd_wallet::{ExtendedPrivKey, HdError, DOM_COIN_TYPE};
 pub use seed::{
@@ -58,6 +59,10 @@ pub use seed::{
 pub use types::{Network, OwnedOutput, WalletBalance, WalletError};
 pub use unlock::{derive_wallet_key, KdfParams, LockState, UnlockedSession, WalletKey};
 pub use wallet::Wallet;
+pub use wallet_dir::{
+    WalletConfig, WalletDir, WalletVersion, WALLET_BACKUPS_SUBDIR, WALLET_CONFIG_NAME,
+    WALLET_DAT_NAME, WALLET_LOCK_NAME, WALLET_LOGS_SUBDIR,
+};
 
 // Re-export for convenience.
 pub use dom_consensus::transaction::Transaction;
