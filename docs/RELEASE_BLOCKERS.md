@@ -702,3 +702,34 @@ disconnect path through the async event loop. Not blocking for
 mainnet candidate (the existing defences eliminate the most
 obvious attack shape — single-subnet flood), tracked here so the
 limitation does not get forgotten.
+
+---
+
+## [MAINNET] RB-PEX-SUBNET — subnet diversity in PEX known set
+
+**Severity:** LOW — PEX is discovery only; connection-level subnet
+cap (`MAX_PEERS_SAME_SLASH_16 = 2`) already gates the actual peers
+that get connected.
+**Status:** 🔴 OPEN — Phase 4.4 follow-up.
+
+`PexManager` enforces a `max_peers` cap on the known-address set
+but does NOT enforce subnet diversity inside that set. An attacker
+controlling 10_000 IPs across a single /16 could fill the known
+set with their addresses (subject to the `max_peers` cap). The
+attack does NOT translate into actual connections — the
+`PeerManager`'s inbound /16 cap rejects them at handshake time —
+but it wastes outbound-dialer attempts against attacker-controlled
+endpoints.
+
+Mitigation path (low priority):
+
+* When `add_peer` would push the known set over a per-/16
+  threshold, evict the lowest-scoring same-/16 entry instead of
+  rejecting the new one.
+* Track /16 distribution as a metric so operators can detect a
+  Sybil PEX flood in progress.
+
+Tracked under `dom-node/tests/sybil_resistance.rs` documentation.
+The 10 sybil_resistance tests pin everything else: flood bound,
+malformed filtering, dedupe, cooldown, failure tracking, addr
+payload caps.
