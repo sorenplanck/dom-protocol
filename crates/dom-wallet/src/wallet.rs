@@ -103,6 +103,16 @@ impl Wallet {
         }
     }
 
+    /// Compute the wallet's deterministic tracking hash for a transaction.
+    ///
+    /// This is the key used for pending-transaction persistence and internal
+    /// reservation management. It is intentionally domain-separated from the
+    /// mempool's raw-byte hash so wallet-local lifecycle state can evolve
+    /// without coupling to relay internals.
+    pub fn tracking_tx_hash(tx: &Transaction) -> Result<[u8; 32], WalletError> {
+        compute_tx_hash(tx)
+    }
+
     /// Save wallet to disk (if `file_path` is set).
     pub fn save(&self) -> Result<(), WalletError> {
         match &self.file_path {
