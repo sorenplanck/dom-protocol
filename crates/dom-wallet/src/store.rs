@@ -51,10 +51,8 @@ mod serde_commitment_vec {
 use crate::types::{Network, OwnedOutput, WalletError};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
-use hkdf::Hkdf;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -66,7 +64,6 @@ const VERSION: u16 = 1;
 const HEADER_SIZE: usize = 64;
 const SALT_SIZE: usize = 32;
 const NONCE_SIZE: usize = 12;
-const HKDF_INFO: &[u8] = b"DOM:wallet-key:v1";
 
 /// Serializable wallet state (the encrypted payload).
 /// Custom serializer for HashMap<[u8; 32], PendingTx>
@@ -151,46 +148,24 @@ pub struct PendingTx {
     pub inputs: Vec<[u8; 33]>,
 }
 
-/// Derive encryption key from password using HKDF-SHA256.
-/// ⚠️  CRITICAL SECURITY LIMITATION — TESTNET/DEV ONLY
+/// Derive the wallet encryption key from a password and per-wallet salt.
 ///
-/// Uses HKDF-SHA256, which is INADEQUATE for password-based KDF.
-/// HKDF is designed for high-entropy inputs (e.g., ECDH shared secrets),
-/// NOT for low-entropy passwords. It provides NO protection against
-/// GPU brute-force: a consumer GPU can test ~500M passwords/sec.
+/// Single source of truth lives in `unlock::derive_wallet_key`
+/// (Argon2id m=64 MiB / t=3 / p=1, then HKDF-SHA256 with
+/// `info = "DOM:wallet-key:v1"`). This shim adapts the [`WalletKey`]
+/// opaque type back to a `Zeroizing<[u8; 32]>` for the AEAD layer
+/// below.
 ///
-/// An 8-character password is brute-forced in minutes offline.
-/// Any captured .wallet file is effectively cleartext.
-///
-/// DO NOT USE THIS WALLET FOR REAL FUNDS.
-///
-/// Derives the wallet encryption key from a password using Argon2id.
-///
-/// Parameters: m=65536 KiB (64 MiB), t=3, p=1 — OWASP recommended.
-/// The stretched key is then domain-separated via HKDF-SHA256 with
-/// info=`"DOM:wallet-key:v1"`.
-/// The salt is the per-wallet 32-byte random salt from the file header.
+/// Keep this shim — the call sites here predate `unlock.rs` and
+/// changing them in this commit would expand the diff beyond the
+/// lock-state-machine scope.
 pub(crate) fn derive_key(
     password: &str,
     salt: &[u8; 32],
 ) -> Result<Zeroizing<[u8; 32]>, WalletError> {
-    use argon2::{Algorithm, Argon2, Params, Version};
-    // Argon2id — OWASP recommended: m=65536 KiB (64 MiB), t=3, p=1.
-    // Salt is the per-wallet 32-byte random salt from the file header.
-    // Output is tagged with HKDF_INFO for domain separation after stretching.
-    let params = Params::new(65536, 3, 1, Some(32))
-        .map_err(|e| WalletError::Crypto(format!("Argon2 params: {e}")))?;
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut stretched = Zeroizing::new([0u8; 32]);
-    argon2
-        .hash_password_into(password.as_bytes(), salt, &mut stretched[..])
-        .map_err(|e| WalletError::Crypto(format!("Argon2id failed: {e}")))?;
-    // Domain-separate the stretched key with HKDF.
-    let hkdf = Hkdf::<Sha256>::new(Some(&salt[..]), &stretched[..]);
-    let mut key = Zeroizing::new([0u8; 32]);
-    hkdf.expand(HKDF_INFO, &mut key[..])
-        .map_err(|_| WalletError::Crypto("HKDF expansion failed".into()))?;
-    Ok(key)
+    let key =
+        crate::unlock::derive_wallet_key(password, salt, &crate::unlock::KdfParams::OWASP_V1)?;
+    Ok(Zeroizing::new(*key.as_bytes()))
 }
 
 /// Save wallet state to encrypted file with atomic write.

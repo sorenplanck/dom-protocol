@@ -5,6 +5,7 @@ use crate::store::{
     load_wallet as load_wallet_file, save_wallet as save_wallet_file, PendingTx, WalletState,
 };
 use crate::types::{Network, OwnedOutput, WalletBalance, WalletError};
+use crate::unlock::{LockState, UnlockedSession};
 use dom_consensus::transaction::{
     CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionOutput,
 };
@@ -16,22 +17,35 @@ use dom_tx::SpendBuilder;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
-use zeroize::Zeroizing;
 
 /// The DOM Protocol wallet.
 ///
 /// Manages owned outputs, pending transactions, and persistent encrypted storage.
-/// The password is stored in memory as a `Zeroizing<String>` so it can re-derive
-/// the encryption key on every save (a fresh salt is used per save).
+///
+/// The wallet operates as an explicit two-state machine:
+///
+/// - **Unlocked** (`session: Some(...)`) — the wallet password is held
+///   inside an [`UnlockedSession`] (zeroized on drop). Save, spend, and
+///   coinbase derivation are allowed.
+/// - **Locked** (`session: None`) — no password material is in memory.
+///   `save`, `build_spend`, `build_coinbase`, `apply_canonical_block`,
+///   and similar operations return [`WalletError::Locked`].
+///
+/// Use [`Wallet::lock`] to transition Unlocked → Locked (zeroizing the
+/// session) and [`Wallet::unlock`] to transition back, supplying the
+/// password and verifying it against the on-disk ciphertext.
 pub struct Wallet {
     network: Network,
     chain_id: [u8; 32],
     outputs: OutputIndex,
     pending_txs: HashMap<[u8; 32], PendingTx>,
     file_path: Option<PathBuf>,
-    /// Password held in memory for re-encryption on save.
-    /// Zeroized when wallet is dropped.
-    password: Zeroizing<String>,
+    /// In-memory unlocked session. `None` means the wallet is locked
+    /// and no operation requiring the password may proceed. The
+    /// session's inner password buffer is wrapped in `Zeroizing` so
+    /// it is wiped on `lock()` (which drops the session) or on
+    /// `Wallet::drop`.
+    session: Option<UnlockedSession>,
 }
 
 impl Wallet {
@@ -63,7 +77,9 @@ impl Wallet {
             outputs: OutputIndex::new(),
             pending_txs: HashMap::new(),
             file_path: Some(path.to_path_buf()),
-            password: Zeroizing::new(password.to_string()),
+            session: Some(UnlockedSession::from_verified_password(
+                password.to_string(),
+            )),
         })
     }
 
@@ -84,11 +100,18 @@ impl Wallet {
             outputs,
             pending_txs: state.pending_txs,
             file_path: Some(path.to_path_buf()),
-            password: Zeroizing::new(password.to_string()),
+            session: Some(UnlockedSession::from_verified_password(
+                password.to_string(),
+            )),
         })
     }
 
     /// Create a new in-memory wallet (for testing, no disk I/O).
+    ///
+    /// In-memory wallets start unlocked with an empty password. They
+    /// have no on-disk ciphertext to verify against; `lock()` /
+    /// `unlock()` still toggle the in-memory state for state-machine
+    /// testing but `unlock` cannot reject a wrong password.
     pub fn new_in_memory(network: Network, genesis_hash: &Hash256) -> Self {
         let chain_id_hash = dom_consensus::derive_chain_id(network.magic(), genesis_hash);
         let chain_id: [u8; 32] = *chain_id_hash.as_bytes();
@@ -99,8 +122,77 @@ impl Wallet {
             outputs: OutputIndex::new(),
             pending_txs: HashMap::new(),
             file_path: None,
-            password: Zeroizing::new(String::new()),
+            session: Some(UnlockedSession::from_verified_password(String::new())),
         }
+    }
+
+    /// Current lock state.
+    pub fn lock_state(&self) -> LockState {
+        match self.session {
+            Some(_) => LockState::Unlocked,
+            None => LockState::Locked,
+        }
+    }
+
+    /// Whether the wallet is currently locked (no session in memory).
+    pub fn is_locked(&self) -> bool {
+        self.session.is_none()
+    }
+
+    /// Whether the wallet is currently unlocked.
+    pub fn is_unlocked(&self) -> bool {
+        self.session.is_some()
+    }
+
+    /// Lock the wallet. Consumes the in-memory session, zeroizing the
+    /// held password. After this call, operations that require the
+    /// password (save, spend, coinbase, scan_block, apply_canonical_block)
+    /// will return [`WalletError::Locked`].
+    ///
+    /// On-disk state is unaffected: previously persisted pending txs,
+    /// outputs, and the encrypted wallet file remain intact.
+    ///
+    /// Idempotent: locking an already-locked wallet is a no-op.
+    pub fn lock(&mut self) {
+        if let Some(session) = self.session.take() {
+            session.into_locked();
+            debug!("wallet locked");
+        }
+    }
+
+    /// Unlock the wallet by verifying `password` against the on-disk
+    /// ciphertext.
+    ///
+    /// For file-backed wallets, this performs a full
+    /// Argon2id+ChaCha20Poly1305 decrypt of the wallet header to
+    /// confirm the password. On wrong password, returns
+    /// [`WalletError::Decryption`] and the wallet remains locked.
+    ///
+    /// For in-memory wallets (no `file_path`), any password is
+    /// accepted because there is no ciphertext to verify against.
+    /// This is intended for state-machine testing.
+    ///
+    /// Idempotent on success: unlocking an already-unlocked wallet
+    /// with the correct password is allowed (replaces the session).
+    pub fn unlock(&mut self, password: &str) -> Result<(), WalletError> {
+        if let Some(path) = &self.file_path {
+            // Verify by attempting decrypt of the on-disk wallet.
+            // The AEAD tag in ChaCha20Poly1305 catches wrong passwords
+            // — load_wallet_file returns WalletError::Decryption on
+            // failure. We discard the decrypted state because our
+            // in-memory state is authoritative for a live wallet.
+            let _verified = load_wallet_file(path, password)?;
+        }
+        self.session = Some(UnlockedSession::from_verified_password(
+            password.to_string(),
+        ));
+        debug!("wallet unlocked");
+        Ok(())
+    }
+
+    /// Borrow the unlocked session, or return `WalletError::Locked`.
+    fn session(&self) -> Result<&UnlockedSession, WalletError> {
+        self.session.as_ref().ok_or(WalletError::Locked)
     }
 
     /// Compute the wallet's deterministic tracking hash for a transaction.
@@ -114,9 +206,15 @@ impl Wallet {
     }
 
     /// Save wallet to disk (if `file_path` is set).
+    ///
+    /// Returns [`WalletError::Locked`] if the wallet is locked and a
+    /// file path is set — the password is needed to re-encrypt the
+    /// payload. For in-memory wallets (no file path), save is a no-op
+    /// and does not require the wallet to be unlocked.
     pub fn save(&self) -> Result<(), WalletError> {
         match &self.file_path {
             Some(path) => {
+                let session = self.session()?;
                 let outputs: Vec<_> = self.outputs.iter().cloned().collect();
                 let state = WalletState {
                     network: self.network,
@@ -124,7 +222,7 @@ impl Wallet {
                     outputs,
                     pending_txs: self.pending_txs.clone(),
                 };
-                save_wallet_file(path, &state, &self.password)?;
+                save_wallet_file(path, &state, session.password())?;
                 debug!("wallet saved");
                 Ok(())
             }
@@ -291,9 +389,20 @@ impl Wallet {
         use dom_core::{BlockHeight, TAG_COINBASE_BLINDING};
         use dom_crypto::pedersen::Commitment;
 
+        // Locked wallets cannot derive the coinbase seed. Silently
+        // skip — scan_block is best-effort, called from relay/IBD
+        // paths, and must not panic. The operator should unlock the
+        // wallet to resume recovery scans.
+        let Some(session) = self.session.as_ref() else {
+            tracing::debug!(
+                "scan_block: wallet is locked at height {block_height}; skipping recovery scan"
+            );
+            return;
+        };
+
         // Derive the password seed once per scan (same as build_coinbase step 2).
         let password_seed =
-            blake2b_256_tagged("DOM:wallet-coinbase-seed:v1", self.password.as_bytes());
+            blake2b_256_tagged("DOM:wallet-coinbase-seed:v1", session.password().as_bytes());
 
         // Derive the candidate blinding for this height.
         let mut blinding_input = Vec::with_capacity(40);
@@ -480,6 +589,12 @@ impl Wallet {
             height.0, total_tx_fees
         );
 
+        // build_coinbase needs the password to derive the deterministic
+        // blinding factor. Locked wallets cannot mine — return Locked
+        // and let the caller (typically the miner) decide whether to
+        // skip this round or alert the operator.
+        let session = self.session()?;
+
         // Step 1: Compute total value with overflow check.
         let reward = dom_core::block_reward(height).noms();
         let explicit_value = reward.checked_add(total_tx_fees).ok_or_else(|| {
@@ -488,7 +603,7 @@ impl Wallet {
 
         // Step 2: Derive the password seed (domain-separated).
         let password_seed =
-            blake2b_256_tagged("DOM:wallet-coinbase-seed:v1", self.password.as_bytes());
+            blake2b_256_tagged("DOM:wallet-coinbase-seed:v1", session.password().as_bytes());
 
         // Step 3: Derive deterministic blinding factor from (password_seed, height).
         let mut blinding_input = Vec::with_capacity(32 + 8);

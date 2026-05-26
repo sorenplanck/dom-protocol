@@ -261,6 +261,10 @@ pub enum WalletError {
     #[error("invalid password")]
     InvalidPassword,
 
+    /// Operation requires the wallet to be unlocked.
+    #[error("wallet is locked; call unlock(password) before performing this operation")]
+    Locked,
+
     /// Underlying error from dom-core.
     #[error("dom error: {0}")]
     Dom(#[from] DomError),
