@@ -9,6 +9,7 @@ use hmac::{Hmac, Mac};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{elliptic_curve::PrimeField, ProjectivePoint, Scalar};
 use sha2::Sha256;
+use subtle::{Choice, ConstantTimeEq};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -216,23 +217,56 @@ fn scalar_add_mul(a: &[u8; 32], c: &[u8; 32], b: &[u8; 32]) -> Result<[u8; 32], 
     Ok(result.to_repr().into())
 }
 
+/// Constant-time scalar validity check — returns true iff
+/// `bytes ∈ (0, n)` where `n` is the secp256k1 curve order.
+///
+/// Phase 2.3 (constant-time review) hardening: the previous
+/// short-circuit `bytes.iter().all(|&b| b == 0)` and the byte-wise
+/// `bytes_lt` early-return loop both leaked timing information that
+/// is correlated with the input scalar's high bytes. For the
+/// public-input `s` parsed off the wire this leak is moot, but the
+/// same helper gated the RFC6979 nonce rejection sampling — there
+/// the candidate value is derived from the secret key, and timing
+/// the validity check leaks information about the nonce. Over many
+/// signatures this is the classical lattice-attack precursor.
+///
+/// Both predicates are now CT: the zero-check walks all 32 bytes
+/// before reducing, and the order-comparison processes every byte
+/// position without early exit.
 fn is_scalar_valid(bytes: &[u8; 32]) -> bool {
-    if bytes.iter().all(|&b| b == 0) {
-        return false;
-    }
-    bytes_lt(bytes, &SECP256K1_N)
+    let nonzero: Choice = !bytes_eq_zero_ct(bytes);
+    let lt_n: Choice = bytes_lt_ct(bytes, &SECP256K1_N);
+    bool::from(nonzero & lt_n)
 }
 
-fn bytes_lt(a: &[u8; 32], b: &[u8; 32]) -> bool {
+/// Constant-time: returns Choice(1) iff `bytes` is all-zero.
+fn bytes_eq_zero_ct(bytes: &[u8; 32]) -> Choice {
+    bytes.as_ref().ct_eq(&[0u8; 32] as &[u8])
+}
+
+/// Constant-time: returns Choice(1) iff `a < b` interpreted as
+/// big-endian unsigned 256-bit integers. Walks every byte without
+/// short-circuit so the running time is independent of the
+/// comparison result. Catches the BB-style timing-attack
+/// precondition the prior implementation exposed.
+fn bytes_lt_ct(a: &[u8; 32], b: &[u8; 32]) -> Choice {
+    let mut lt = Choice::from(0u8);
+    let mut still_equal = Choice::from(1u8);
     for i in 0..32 {
-        if a[i] < b[i] {
-            return true;
-        }
-        if a[i] > b[i] {
-            return false;
-        }
+        // Strict CT byte compare via subtraction: (256 + b - a) > 255 iff a > b.
+        let ai = a[i] as i16;
+        let bi = b[i] as i16;
+        // Encode (a < b), (a > b), and equality as Choice bits.
+        let a_lt_b = Choice::from(((bi - ai) > 0) as u8);
+        let a_gt_b = Choice::from(((ai - bi) > 0) as u8);
+        // If we were still in the "all equal so far" state, this
+        // byte's verdict fixes the result.
+        lt |= still_equal & a_lt_b;
+        // The "still equal" state survives only if neither lt nor gt
+        // was set at this byte.
+        still_equal &= !(a_lt_b | a_gt_b);
     }
-    false
+    lt
 }
 
 #[cfg(test)]
