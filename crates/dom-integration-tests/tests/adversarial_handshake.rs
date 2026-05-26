@@ -67,15 +67,17 @@ async fn expect_pending_cleanup(
 #[tokio::test]
 async fn hello_stall_is_penalized_and_releases_inbound_slot() {
     init_tracing();
-    let config = test_config("adversarial-handshake-stall", 43412, false);
+    let port = free_local_port();
+    let config = test_config("adversarial-handshake-stall", port, false);
     let node = spawn_node(config).await;
 
     tokio::spawn(node.clone().run());
-    wait_for_listener_ready("127.0.0.1:43412", 10)
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_listener_ready(&addr, 10)
         .await
         .expect("listener ready");
 
-    let (mut stream, mut codec, client_addr) = connect_noise_peer(&node, "127.0.0.1:43412").await;
+    let (mut stream, mut codec, client_addr) = connect_noise_peer(&node, &addr).await;
 
     let server_hello = codec.recv(&mut stream).await.expect("receive server hello");
     assert_eq!(server_hello.command, Command::Hello);
@@ -94,15 +96,17 @@ async fn hello_stall_is_penalized_and_releases_inbound_slot() {
 #[tokio::test]
 async fn second_hello_after_successful_exchange_is_disconnected_and_cleans_metrics() {
     init_tracing();
-    let config = test_config("adversarial-handshake-second-hello", 43413, false);
+    let port = free_local_port();
+    let config = test_config("adversarial-handshake-second-hello", port, false);
     let node = spawn_node(config).await;
 
     tokio::spawn(node.clone().run());
-    wait_for_listener_ready("127.0.0.1:43413", 10)
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_listener_ready(&addr, 10)
         .await
         .expect("listener ready");
 
-    let (mut stream, mut codec, _) = connect_noise_peer(&node, "127.0.0.1:43413").await;
+    let (mut stream, mut codec, _) = connect_noise_peer(&node, &addr).await;
     let chain_id = chain_id_for(node.config.network);
 
     let server_hello = codec.recv(&mut stream).await.expect("receive server hello");
@@ -181,15 +185,17 @@ async fn second_hello_after_successful_exchange_is_disconnected_and_cleans_metri
 #[tokio::test]
 async fn malformed_hello_after_noise_is_penalized_and_releases_inbound_slot() {
     init_tracing();
-    let config = test_config("adversarial-handshake-malformed-hello", 43414, false);
+    let port = free_local_port();
+    let config = test_config("adversarial-handshake-malformed-hello", port, false);
     let node = spawn_node(config).await;
 
     tokio::spawn(node.clone().run());
-    wait_for_listener_ready("127.0.0.1:43414", 10)
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_listener_ready(&addr, 10)
         .await
         .expect("listener ready");
 
-    let (mut stream, mut codec, client_addr) = connect_noise_peer(&node, "127.0.0.1:43414").await;
+    let (mut stream, mut codec, client_addr) = connect_noise_peer(&node, &addr).await;
     let server_hello = codec.recv(&mut stream).await.expect("receive server hello");
     assert_eq!(server_hello.command, Command::Hello);
 
@@ -219,15 +225,17 @@ async fn malformed_hello_after_noise_is_penalized_and_releases_inbound_slot() {
 #[tokio::test]
 async fn oversized_post_noise_frame_is_rejected_and_releases_inbound_slot() {
     init_tracing();
-    let config = test_config("adversarial-handshake-oversized-frame", 43415, false);
+    let port = free_local_port();
+    let config = test_config("adversarial-handshake-oversized-frame", port, false);
     let node = spawn_node(config).await;
 
     tokio::spawn(node.clone().run());
-    wait_for_listener_ready("127.0.0.1:43415", 10)
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_listener_ready(&addr, 10)
         .await
         .expect("listener ready");
 
-    let (mut stream, mut codec, client_addr) = connect_noise_peer(&node, "127.0.0.1:43415").await;
+    let (mut stream, mut codec, client_addr) = connect_noise_peer(&node, &addr).await;
     let server_hello = codec.recv(&mut stream).await.expect("receive server hello");
     assert_eq!(server_hello.command, Command::Hello);
 
@@ -251,15 +259,17 @@ async fn oversized_post_noise_frame_is_rejected_and_releases_inbound_slot() {
 #[tokio::test]
 async fn delayed_partial_hello_frame_times_out_and_cleans_pending_state() {
     init_tracing();
-    let config = test_config("adversarial-handshake-delayed-fragment", 43416, false);
+    let port = free_local_port();
+    let config = test_config("adversarial-handshake-delayed-fragment", port, false);
     let node = spawn_node(config).await;
 
     tokio::spawn(node.clone().run());
-    wait_for_listener_ready("127.0.0.1:43416", 10)
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_listener_ready(&addr, 10)
         .await
         .expect("listener ready");
 
-    let (mut stream, mut codec, client_addr) = connect_noise_peer(&node, "127.0.0.1:43416").await;
+    let (mut stream, mut codec, client_addr) = connect_noise_peer(&node, &addr).await;
     let server_hello = codec.recv(&mut stream).await.expect("receive server hello");
     assert_eq!(server_hello.command, Command::Hello);
 
@@ -289,20 +299,22 @@ async fn delayed_partial_hello_frame_times_out_and_cleans_pending_state() {
 #[tokio::test]
 async fn concurrent_malformed_hello_peers_cleanup_converges() {
     init_tracing();
-    let config = test_config("adversarial-handshake-concurrent-malformed", 43424, false);
+    let port = free_local_port();
+    let config = test_config("adversarial-handshake-concurrent-malformed", port, false);
     let node = spawn_node(config).await;
 
     tokio::spawn(node.clone().run());
-    wait_for_listener_ready("127.0.0.1:43424", 10)
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_listener_ready(&addr, 10)
         .await
         .expect("listener ready");
 
     let mut tasks = JoinSet::new();
     for _ in 0..2 {
         let node = node.clone();
+        let addr = addr.clone();
         tasks.spawn(async move {
-            let (mut stream, mut codec, client_addr) =
-                connect_noise_peer(&node, "127.0.0.1:43424").await;
+            let (mut stream, mut codec, client_addr) = connect_noise_peer(&node, &addr).await;
             let server_hello = codec.recv(&mut stream).await.expect("receive server hello");
             assert_eq!(server_hello.command, Command::Hello);
 

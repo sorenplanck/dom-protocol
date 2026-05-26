@@ -21,6 +21,19 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
 
+/// Pick an ephemeral localhost TCP port for tests.
+///
+/// This reduces port-collision flakes across repeated integration test runs.
+/// The returned port is not reserved after this function returns, so callers
+/// should bind promptly.
+pub fn free_local_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral localhost port")
+        .local_addr()
+        .expect("read ephemeral localhost addr")
+        .port()
+}
+
 /// Spawn a test node with custom config.
 ///
 /// Genesis block is created automatically if the chain is empty. This
