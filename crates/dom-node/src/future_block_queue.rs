@@ -48,7 +48,8 @@ impl FutureBlockQueue {
     /// Returns false if queue is full (block should be rejected).
     pub async fn defer(&self, block: DeferredBlock) -> bool {
         let mut entries = self.entries.write().await;
-        if entries.len() >= self.max_size {
+        let is_existing = entries.contains_key(&block.block_hash);
+        if !is_existing && entries.len() >= self.max_size {
             return false;
         }
         entries.insert(block.block_hash, block);
@@ -65,10 +66,11 @@ impl FutureBlockQueue {
     pub async fn drain_ready(&self, now_secs: u64, hard_limit_secs: u64) -> Vec<DeferredBlock> {
         let mut entries = self.entries.write().await;
         let mut ready = Vec::new();
+        let ready_cutoff = now_secs.saturating_add(hard_limit_secs);
 
         let ready_hashes: Vec<[u8; 32]> = entries
             .iter()
-            .filter(|(_, b)| b.timestamp <= now_secs + hard_limit_secs)
+            .filter(|(_, b)| b.timestamp <= ready_cutoff)
             .map(|(h, _)| *h)
             .collect();
 
@@ -222,5 +224,24 @@ mod tests {
         assert_eq!(queue.size().await, 2);
         assert!(queue.contains(&first.block_hash).await);
         assert!(queue.contains(&second.block_hash).await);
+    }
+
+    #[tokio::test]
+    async fn duplicate_defer_replaces_even_when_queue_is_full() {
+        let queue = FutureBlockQueue {
+            entries: Arc::new(RwLock::new(HashMap::new())),
+            max_size: 1,
+        };
+        let first = mock_block(1, 1000);
+        let mut replacement = mock_block(1, 1100);
+        replacement.block_bytes = vec![0xCD; 32];
+
+        assert!(queue.defer(first).await);
+        assert!(queue.defer(replacement.clone()).await);
+        assert_eq!(queue.size().await, 1);
+
+        let removed = queue.remove(&replacement.block_hash).await.unwrap();
+        assert_eq!(removed.timestamp, 1100);
+        assert_eq!(removed.block_bytes, vec![0xCD; 32]);
     }
 }
