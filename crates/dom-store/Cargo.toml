@@ -20,6 +20,9 @@ hex.workspace               = true
 [dev-dependencies]
 tempfile = "3.10"
 lmdb.workspace = true
+dom-crypto.workspace      = true
+dom-pow.workspace         = true
+primitive-types.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
