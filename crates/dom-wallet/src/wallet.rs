@@ -348,6 +348,77 @@ impl Wallet {
         }
     }
 
+    /// Apply a canonical block to wallet state.
+    ///
+    /// This is the replay-safe wallet hook for blocks that have already been
+    /// accepted onto the best chain. It performs two deterministic actions:
+    ///
+    /// 1. Reconciles any pending spends whose reserved inputs are now consumed
+    ///    by canonical transactions, clearing stale reservations after restart,
+    ///    replay, or relay.
+    /// 2. Scans the block for recoverable wallet outputs (currently deterministic
+    ///    coinbase recovery only).
+    ///
+    /// Side-chain blocks MUST NOT be fed into this method.
+    pub fn apply_canonical_block(
+        &mut self,
+        transactions: &[Transaction],
+        block_height: u64,
+    ) -> Result<(), WalletError> {
+        let mut consumed_inputs = std::collections::HashSet::new();
+        for tx in transactions {
+            for input in &tx.inputs {
+                consumed_inputs.insert(*input.commitment.as_bytes());
+            }
+        }
+
+        if !consumed_inputs.is_empty() {
+            let resolved: Vec<[u8; 32]> = self
+                .pending_txs
+                .iter()
+                .filter_map(|(tx_hash, pending)| {
+                    pending
+                        .inputs
+                        .iter()
+                        .any(|commitment| consumed_inputs.contains(commitment))
+                        .then_some(*tx_hash)
+                })
+                .collect();
+
+            for tx_hash in resolved {
+                if let Some(pending) = self.pending_txs.remove(&tx_hash) {
+                    for commitment in pending.inputs {
+                        if consumed_inputs.contains(&commitment) {
+                            self.outputs.mark_spent(&commitment)?;
+                        }
+                        self.outputs.release_reservation(&commitment)?;
+                    }
+                }
+            }
+        }
+
+        self.scan_block(transactions, block_height);
+        self.save()?;
+        Ok(())
+    }
+
+    /// Remove a previously recorded output by commitment.
+    ///
+    /// Used by runtime recovery paths when a locally constructed tentative
+    /// output never became canonical and must not remain in wallet state.
+    pub fn forget_output(&mut self, commitment: &[u8; 33]) -> bool {
+        let removed = self.outputs.remove(commitment).is_some();
+        if removed {
+            if let Err(e) = self.save() {
+                tracing::warn!(
+                    "wallet save failed after forgetting output {}: {e}",
+                    hex::encode(commitment)
+                );
+            }
+        }
+        removed
+    }
+
     /// Iterate over all wallet-owned outputs.
     pub fn outputs(&self) -> impl Iterator<Item = &OwnedOutput> {
         self.outputs.iter()
@@ -362,7 +433,6 @@ impl Wallet {
     pub fn network(&self) -> Network {
         self.network
     }
-
 
     /// Build a coinbase transaction with a deterministic blinding factor.
     ///

@@ -180,3 +180,102 @@ fn test_wallet_spend_persists_across_reopen() {
     assert_eq!(balance.confirmed, 0, "spent output should not be confirmed");
     assert_eq!(balance.reserved, 900, "spent output should be reserved");
 }
+
+#[test]
+fn test_canonical_block_confirms_pending_spend_after_reopen() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("wallet.dat");
+
+    let mut wallet =
+        Wallet::create(&path, "password123", Network::Mainnet, &test_genesis()).unwrap();
+    let output = make_output(900, 100, false);
+    let spent_commitment = output.commitment;
+    wallet.add_output(output);
+
+    let recipient_blinding = BlindingFactor::random();
+    let recipient_commitment = Commitment::commit(800, &recipient_blinding);
+    let tx = wallet
+        .build_spend(recipient_commitment, recipient_blinding, 800, 100, 1000)
+        .unwrap();
+
+    drop(wallet);
+    let mut reopened = Wallet::open(&path, "password123").unwrap();
+    let before = reopened.balance(1000);
+    assert_eq!(before.reserved, 900);
+
+    reopened.apply_canonical_block(&[tx], 1001).unwrap();
+
+    let after = reopened.balance(1001);
+    assert_eq!(after.confirmed, 0);
+    assert_eq!(after.reserved, 0, "confirmed spend must clear reservation");
+    let spent = reopened
+        .outputs()
+        .find(|output| output.commitment == spent_commitment)
+        .expect("original output must remain tracked");
+    assert!(
+        spent.spent,
+        "canonical confirmation must mark the input spent"
+    );
+
+    drop(reopened);
+    let reopened_again = Wallet::open(&path, "password123").unwrap();
+    let after_restart = reopened_again.balance(1001);
+    assert_eq!(after_restart.reserved, 0);
+    let spent = reopened_again
+        .outputs()
+        .find(|output| output.commitment == spent_commitment)
+        .expect("original output must remain tracked");
+    assert!(spent.spent, "spent marker must persist across restart");
+}
+
+#[test]
+fn test_conflicting_canonical_spend_releases_unconsumed_reservations() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("wallet.dat");
+
+    let mut wallet =
+        Wallet::create(&path, "password123", Network::Mainnet, &test_genesis()).unwrap();
+    let output_a = make_output(500, 100, false);
+    let output_b = make_output(400, 100, false);
+    let commitment_a = output_a.commitment;
+    let commitment_b = output_b.commitment;
+    wallet.add_output(output_a.clone());
+    wallet.add_output(output_b.clone());
+
+    let recipient_blinding = BlindingFactor::random();
+    let recipient_commitment = Commitment::commit(800, &recipient_blinding);
+    let _pending = wallet
+        .build_spend(recipient_commitment, recipient_blinding, 800, 100, 1000)
+        .unwrap();
+
+    let mut conflicting_wallet = Wallet::new_in_memory(Network::Mainnet, &test_genesis());
+    conflicting_wallet.add_output(output_a);
+    let other_blinding = BlindingFactor::random();
+    let other_commitment = Commitment::commit(450, &other_blinding);
+    let conflicting_tx = conflicting_wallet
+        .build_spend(other_commitment, other_blinding, 450, 50, 1000)
+        .unwrap();
+
+    wallet
+        .apply_canonical_block(&[conflicting_tx], 1001)
+        .unwrap();
+
+    let balance = wallet.balance(1001);
+    assert_eq!(
+        balance.reserved, 0,
+        "conflict must clear stale reservations"
+    );
+    let spent_a = wallet
+        .outputs()
+        .find(|output| output.commitment == commitment_a)
+        .expect("output A must remain tracked");
+    assert!(spent_a.spent, "spent canonical input must be marked spent");
+    let released_b = wallet
+        .outputs()
+        .find(|output| output.commitment == commitment_b)
+        .expect("output B must remain tracked");
+    assert!(
+        !released_b.spent && released_b.reserved_for_tx.is_none(),
+        "unconsumed reserved inputs must be released back to the wallet"
+    );
+}
