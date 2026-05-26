@@ -15,3 +15,7 @@ dom-pmmr.workspace          = true
 dom-pow.workspace           = true
 dom-consensus.workspace     = true
 hex.workspace               = true
+
+[dev-dependencies]
+dom-mempool.workspace = true
+dom-wire.workspace    = true
