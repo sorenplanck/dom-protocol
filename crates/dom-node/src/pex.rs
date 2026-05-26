@@ -7,7 +7,7 @@
 //! RFC-0005 §6: Peer Discovery.
 //! Philosophy Section 12: Operational Requirements.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,6 +21,10 @@ pub const MAX_PEER_AGE_SECS: u64 = 7 * 24 * 3600;
 
 /// Minimum interval between GetAddr requests to same peer (10 minutes).
 pub const GETADDR_COOLDOWN_SECS: u64 = 600;
+/// Bound memory used by rotating GetAddr cooldown state under peer churn.
+const GETADDR_TRACKING_MULTIPLIER: usize = 4;
+/// Floor for the cooldown table on very small PEX pools.
+const MIN_GETADDR_TRACKED: usize = 128;
 
 /// PEX manager — tracks known peers and handles discovery.
 pub struct PexManager {
@@ -28,6 +32,12 @@ pub struct PexManager {
     known: HashMap<String, PeerAddr>,
     /// Timestamps of last GetAddr sent to each peer.
     last_getaddr: HashMap<String, u64>,
+    /// Insertion order for GetAddr cooldown tracking.
+    ///
+    /// This lets us prune stale / overflow cooldown entries in O(1)-amortized
+    /// time under rotating peer churn without sorting the whole table on every
+    /// insert. Each queue item is `(peer_id, recorded_at)`.
+    getaddr_order: VecDeque<(String, u64)>,
     /// Maximum peers to track.
     max_peers: usize,
 }
@@ -38,6 +48,7 @@ impl PexManager {
         Self {
             known: HashMap::new(),
             last_getaddr: HashMap::new(),
+            getaddr_order: VecDeque::new(),
             max_peers,
         }
     }
@@ -100,16 +111,12 @@ impl PexManager {
 
     /// Check if we should send GetAddr to this peer.
     pub fn should_getaddr(&self, peer_id: &str) -> bool {
-        let now = unix_now();
-        match self.last_getaddr.get(peer_id) {
-            None => true,
-            Some(last) => now.saturating_sub(*last) > GETADDR_COOLDOWN_SECS,
-        }
+        self.should_getaddr_at(peer_id, unix_now())
     }
 
     /// Record that we sent GetAddr to a peer.
     pub fn record_getaddr(&mut self, peer_id: &str) {
-        self.last_getaddr.insert(peer_id.to_string(), unix_now());
+        self.record_getaddr_at(peer_id, unix_now());
     }
 
     /// Process incoming Addr message — add peers to our known set.
@@ -133,11 +140,63 @@ impl PexManager {
         self.known.len()
     }
 
+    /// Current number of peers tracked in the GetAddr cooldown table.
+    pub fn tracked_getaddr_count(&self) -> usize {
+        self.last_getaddr.len()
+    }
+
     /// Seed initial peers from config.
     pub fn seed_from_config(&mut self, seed_peers: &[String]) {
         for addr in seed_peers {
             self.add_peer(addr.clone());
         }
+    }
+
+    fn should_getaddr_at(&self, peer_id: &str, now: u64) -> bool {
+        match self.last_getaddr.get(peer_id) {
+            None => true,
+            Some(last) => now.saturating_sub(*last) > GETADDR_COOLDOWN_SECS,
+        }
+    }
+
+    fn record_getaddr_at(&mut self, peer_id: &str, now: u64) {
+        self.prune_getaddr_history(now);
+        self.last_getaddr.insert(peer_id.to_string(), now);
+        self.getaddr_order.push_back((peer_id.to_string(), now));
+        self.enforce_getaddr_bound();
+    }
+
+    fn prune_getaddr_history(&mut self, now: u64) {
+        while let Some((peer, recorded_at)) = self.getaddr_order.front().cloned() {
+            let expired = now.saturating_sub(recorded_at) > GETADDR_COOLDOWN_SECS;
+            let superseded = self.last_getaddr.get(&peer).copied() != Some(recorded_at);
+            if !expired && !superseded {
+                break;
+            }
+
+            self.getaddr_order.pop_front();
+            if expired && self.last_getaddr.get(&peer).copied() == Some(recorded_at) {
+                self.last_getaddr.remove(&peer);
+            }
+        }
+    }
+
+    fn enforce_getaddr_bound(&mut self) {
+        let max_tracked = self.max_tracked_getaddr();
+        while self.last_getaddr.len() > max_tracked {
+            let Some((peer, recorded_at)) = self.getaddr_order.pop_front() else {
+                break;
+            };
+            if self.last_getaddr.get(&peer).copied() == Some(recorded_at) {
+                self.last_getaddr.remove(&peer);
+            }
+        }
+    }
+
+    fn max_tracked_getaddr(&self) -> usize {
+        self.max_peers
+            .saturating_mul(GETADDR_TRACKING_MULTIPLIER)
+            .max(MIN_GETADDR_TRACKED)
     }
 }
 
@@ -223,6 +282,36 @@ mod tests {
         assert!(pex.should_getaddr("peer1"));
         pex.record_getaddr("peer1");
         assert!(!pex.should_getaddr("peer1"));
+    }
+
+    #[test]
+    fn stale_getaddr_cooldown_entry_expires_without_sleep() {
+        let mut pex = PexManager::new(1000);
+        pex.record_getaddr_at("peer1", 1_000);
+        assert!(!pex.should_getaddr_at("peer1", 1_000 + GETADDR_COOLDOWN_SECS));
+        assert!(pex.should_getaddr_at("peer1", 1_001 + GETADDR_COOLDOWN_SECS));
+    }
+
+    #[test]
+    fn stale_getaddr_entries_are_pruned_on_new_record() {
+        let mut pex = PexManager::new(1000);
+        pex.record_getaddr_at("peer-a", 1_000);
+        pex.record_getaddr_at("peer-b", 1_000 + GETADDR_COOLDOWN_SECS + 1);
+        assert_eq!(pex.tracked_getaddr_count(), 1);
+        assert!(pex.should_getaddr_at("peer-a", 1_000 + GETADDR_COOLDOWN_SECS + 1));
+        assert!(!pex.should_getaddr_at("peer-b", 1_000 + GETADDR_COOLDOWN_SECS + 1));
+    }
+
+    #[test]
+    fn getaddr_tracking_is_bounded_under_rotating_peer_churn() {
+        let mut pex = PexManager::new(1000);
+        for i in 0..10_000usize {
+            pex.record_getaddr_at(&format!("peer-{i}"), 1_000);
+        }
+
+        assert_eq!(pex.tracked_getaddr_count(), 4_000);
+        assert!(pex.should_getaddr_at("peer-0", 1_601));
+        assert!(!pex.should_getaddr_at("peer-9999", 1_000));
     }
 
     #[test]
