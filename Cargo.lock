@@ -624,6 +624,7 @@ dependencies = [
  "dom-serialization",
  "dom-store",
  "hex",
+ "lmdb",
  "primitive-types",
  "sha2",
  "tempfile",
@@ -866,9 +867,11 @@ dependencies = [
  "dom-consensus",
  "dom-core",
  "dom-crypto",
+ "dom-mempool",
  "dom-pmmr",
  "dom-pow",
  "dom-serialization",
+ "dom-wire",
  "hex",
 ]
 

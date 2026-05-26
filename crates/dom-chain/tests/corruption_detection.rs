@@ -97,6 +97,7 @@ fn synthetic_header(height: u64) -> Vec<u8> {
         .expect("serialize header")
 }
 
+#[allow(clippy::type_complexity)]
 fn synthetic_block_bytes(
     height: u64,
     nonce: u64,
