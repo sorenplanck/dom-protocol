@@ -215,3 +215,113 @@ async fn deferred_block_queue_stays_runtime_only_across_restart_loop() {
         drop(node);
     }
 }
+
+#[tokio::test]
+async fn deferred_queue_churn_does_not_resurrect_across_restart_cycles() {
+    let data_dir = "/tmp/dom-test-deferred-queue-churn-loop".to_string();
+    let _ = std::fs::remove_dir_all(&data_dir);
+
+    let (expected_height, expected_hash) = {
+        let mut config = test_config("deferred-queue-churn-loop-initial", free_local_port(), true);
+        config.data_dir = data_dir.clone();
+
+        let node = tokio::time::timeout(Duration::from_secs(20), spawn_node(config))
+            .await
+            .expect("initial spawn timed out");
+
+        let chain = node.chain.lock().await;
+        let snapshot = (chain.tip_height.0, chain.tip_hash);
+        drop(chain);
+        drop(node);
+        snapshot
+    };
+
+    for round in 0..32u8 {
+        let mut config = test_config(
+            &format!("deferred-queue-churn-loop-{round}"),
+            free_local_port(),
+            false,
+        );
+        config.data_dir = data_dir.clone();
+
+        let node = tokio::time::timeout(Duration::from_secs(20), spawn_node(config))
+            .await
+            .expect("restart spawn timed out");
+
+        assert_eq!(
+            node.future_block_queue.size().await,
+            0,
+            "restart round {round} must begin with an empty runtime queue"
+        );
+
+        for slot in 0..8u8 {
+            assert!(
+                node.future_block_queue
+                    .defer(dom_node::future_block_queue::DeferredBlock {
+                        block_hash: [round ^ slot; 32],
+                        timestamp: u64::MAX - ((round as u64) << 8) - slot as u64,
+                        queued_at: Instant::now(),
+                        block_bytes: vec![round, slot, 0xde, 0xad, 0xbe, 0xef],
+                    })
+                    .await,
+                "restart round {round} slot {slot} must admit bounded deferred churn"
+            );
+        }
+
+        assert_eq!(
+            node.future_block_queue.size().await,
+            8,
+            "restart round {round} must hold all bounded churn entries at runtime"
+        );
+
+        let chain = node.chain.lock().await;
+        assert_eq!(
+            chain.tip_height.0, expected_height,
+            "restart round {round} must preserve canonical height under deferred churn"
+        );
+        assert_eq!(
+            chain.tip_hash, expected_hash,
+            "restart round {round} must preserve canonical tip hash under deferred churn"
+        );
+        drop(chain);
+
+        assert_eq!(
+            node.metrics
+                .peer_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "restart round {round} must not resurrect connected peer metrics"
+        );
+        assert_eq!(
+            node.metrics
+                .inbound_peers
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "restart round {round} must not resurrect inbound metrics"
+        );
+        assert_eq!(
+            node.metrics
+                .outbound_peers
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "restart round {round} must not resurrect outbound metrics"
+        );
+
+        drop(node);
+    }
+
+    let mut config = test_config("deferred-queue-churn-loop-final", free_local_port(), false);
+    config.data_dir = data_dir;
+    let node = tokio::time::timeout(Duration::from_secs(20), spawn_node(config))
+        .await
+        .expect("final reopen spawn timed out");
+    let chain = node.chain.lock().await;
+    assert_eq!(chain.tip_height.0, expected_height);
+    assert_eq!(chain.tip_hash, expected_hash);
+    drop(chain);
+    assert_eq!(
+        node.future_block_queue.size().await,
+        0,
+        "final reopen must not resurrect deferred churn entries"
+    );
+}
