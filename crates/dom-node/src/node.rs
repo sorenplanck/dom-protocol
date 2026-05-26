@@ -99,6 +99,14 @@ enum DeferredReplayAction {
     Drop,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayBlockAction {
+    RelayBestChain,
+    Suppress,
+    PenalizePeer,
+    Drop,
+}
+
 impl DomNode {
     /// Initialize the node from configuration.
     pub fn init(config: NodeConfig) -> Result<Self, DomError> {
@@ -298,8 +306,7 @@ impl DomNode {
                         .await;
                     for deferred in ready {
                         tracing::debug!("Re-evaluating deferred block ts={}", deferred.timestamp);
-                        use dom_serialization::DomDeserialize;
-                        match dom_consensus::Block::from_bytes(&deferred.block_bytes) {
+                        match decode_deferred_block_bytes(&deferred.block_bytes) {
                             Ok(block) => {
                                 let result = {
                                     let mut c = chain.lock().await;
@@ -356,6 +363,9 @@ impl DomNode {
                                 }
                             }
                             Err(e) => {
+                                // Deferred queue entries are runtime-only and no longer
+                                // attributable to a live peer. Malformed bytes must drop
+                                // deterministically without requeueing or scoring anyone.
                                 tracing::warn!("Deferred block decode error: {e}");
                             }
                         }
@@ -1107,6 +1117,33 @@ fn deferred_replay_action(
     }
 }
 
+fn relay_block_action(result: &Result<dom_chain::ConnectResult, DomError>) -> RelayBlockAction {
+    match result {
+        Ok(dom_chain::ConnectResult::BestChain) => RelayBlockAction::RelayBestChain,
+        Ok(dom_chain::ConnectResult::SideChain)
+        | Ok(dom_chain::ConnectResult::AlreadyHave)
+        | Err(DomError::TemporarilyInvalid(_))
+        | Err(DomError::Orphan(_)) => RelayBlockAction::Suppress,
+        Err(DomError::Invalid(_)) | Err(DomError::Malformed(_)) => RelayBlockAction::PenalizePeer,
+        Err(_) => RelayBlockAction::Drop,
+    }
+}
+
+fn decode_deferred_block_bytes(block_bytes: &[u8]) -> Result<dom_consensus::Block, DomError> {
+    use dom_serialization::DomDeserialize;
+
+    dom_consensus::Block::from_bytes(block_bytes)
+}
+
+fn decode_relay_block(msg_payload: &[u8]) -> Result<(Vec<u8>, dom_consensus::Block), DomError> {
+    use dom_serialization::DomDeserialize;
+    use dom_wire::message::BlockPayload;
+
+    let payload = BlockPayload::from_bytes(msg_payload)?;
+    let block = dom_consensus::Block::from_bytes(&payload.block_bytes)?;
+    Ok((payload.block_bytes, block))
+}
+
 /// Persistent message loop after Hello exchange.
 ///
 /// Reads framed messages from the peer in a loop and dispatches by command:
@@ -1508,16 +1545,8 @@ async fn message_loop(
                     }
                     Command::Block => {
                         // Peer relayed a block to us. Validate and accept.
-                        use dom_serialization::DomDeserialize;
-                        let payload = match BlockPayload::from_bytes(&msg.payload) {
-                            Ok(payload) => payload,
-                            Err(e) => {
-                                let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
-                                return Err(e);
-                            }
-                        };
-                        let block = match dom_consensus::Block::from_bytes(&payload.block_bytes) {
-                            Ok(block) => block,
+                        let (block_bytes, block) = match decode_relay_block(&msg.payload) {
+                            Ok(decoded) => decoded,
                             Err(e) => {
                                 let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
                                 return Err(e);
@@ -1540,8 +1569,8 @@ async fn message_loop(
                                     let mut c = chain.lock().await;
                                     c.connect_block(&block, now)
                                 };
-                                match result {
-                                    Ok(dom_chain::ConnectResult::BestChain) => {
+                                match relay_block_action(&result) {
+                                    RelayBlockAction::RelayBestChain => {
                                         tracing::info!("Accepted relayed block from {peer_addr} (new tip)");
                                         // Wallet state follows canonical blocks only.
                                         if let Some(ref wallet_arc) = svc.wallet {
@@ -1554,39 +1583,44 @@ async fn message_loop(
                                         // actually extended the best chain. SideChain
                                         // and AlreadyHave MUST NOT rebroadcast — that
                                         // creates infinite relay loops between peers.
-                                        let _ = block_relay_tx.send(payload.block_bytes);
+                                        let _ = block_relay_tx.send(block_bytes);
                                     }
-                                    Ok(dom_chain::ConnectResult::SideChain) => {
-                                        tracing::debug!(
-                                            "Accepted relayed block from {peer_addr} (side chain — no rebroadcast)"
-                                        );
-                                        // Wallet state intentionally ignores side-chain blocks.
-                                        // Pending-spend reconciliation and output recovery are
-                                        // canonical-only until the wallet learns explicit reorg
-                                        // rollback semantics.
+                                    RelayBlockAction::Suppress => {
+                                        if matches!(result, Ok(dom_chain::ConnectResult::SideChain)) {
+                                            tracing::debug!(
+                                                "Accepted relayed block from {peer_addr} (side chain — no rebroadcast)"
+                                            );
+                                            // Wallet state intentionally ignores side-chain blocks.
+                                            // Pending-spend reconciliation and output recovery are
+                                            // canonical-only until the wallet learns explicit reorg
+                                            // rollback semantics.
+                                        } else if matches!(result, Ok(dom_chain::ConnectResult::AlreadyHave)) {
+                                            tracing::trace!(
+                                                "Block from {peer_addr} already known — no-op"
+                                            );
+                                        } else if let Err(ref e) = result {
+                                            tracing::debug!("Block from {peer_addr} not accepted: {e}");
+                                        }
                                     }
-                                    Ok(dom_chain::ConnectResult::AlreadyHave) => {
-                                        tracing::trace!(
-                                            "Block from {peer_addr} already known — no-op"
-                                        );
-                                    }
-                                    Err(e @ dom_core::DomError::Invalid(_))
-                                    | Err(e @ dom_core::DomError::Malformed(_)) => {
+                                    RelayBlockAction::PenalizePeer => {
+                                        let e = result.expect_err("penalized relay result must be an error");
                                         let banned = record_peer_violation(&svc.peers, peer_addr, &e).await;
                                         tracing::warn!("Rejected block from {peer_addr}: {e}");
                                         if banned {
                                             return Err(e);
                                         }
                                     }
-                                    Err(e) => {
-                                        tracing::debug!("Block from {peer_addr} not accepted: {e}");
+                                    RelayBlockAction::Drop => {
+                                        if let Err(ref e) = result {
+                                            tracing::debug!("Block from {peer_addr} not accepted: {e}");
+                                        }
                                     }
                                 }
                             }
                             Ok(TimestampDecision::Defer) => {
                                 // Soft buffer: hold for re-evaluation
                                 tracing::debug!("Block from {peer_addr} deferred (future timestamp soft buffer)");
-                                if queue_future_block(&svc.future_block_queue, &block, payload.block_bytes).await {
+                                if queue_future_block(&svc.future_block_queue, &block, block_bytes).await {
                                     tracing::debug!(
                                         "Deferred block ts={} queued for replay",
                                         block.header.timestamp.0
@@ -1699,11 +1733,12 @@ async fn message_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        deferred_replay_action, peer_violation_score, pending_peer_violation_score,
-        DeferredReplayAction,
+        decode_deferred_block_bytes, decode_relay_block, deferred_replay_action,
+        peer_violation_score, pending_peer_violation_score, relay_block_action,
+        DeferredReplayAction, RelayBlockAction,
     };
     use dom_chain::ConnectResult;
-    use dom_core::DomError;
+    use dom_core::{DomError, MAX_BLOCK_SERIALIZED_SIZE};
     use dom_wire::peer::ban_scores;
 
     #[test]
@@ -1790,5 +1825,82 @@ mod tests {
             deferred_replay_action(&Err(DomError::Internal("store failure".into()))),
             DeferredReplayAction::Drop
         );
+    }
+
+    #[test]
+    fn relay_best_chain_rebroadcasts() {
+        assert_eq!(
+            relay_block_action(&Ok(ConnectResult::BestChain)),
+            RelayBlockAction::RelayBestChain
+        );
+    }
+
+    #[test]
+    fn relay_duplicates_and_retryable_errors_are_suppressed() {
+        assert_eq!(
+            relay_block_action(&Ok(ConnectResult::SideChain)),
+            RelayBlockAction::Suppress
+        );
+        assert_eq!(
+            relay_block_action(&Ok(ConnectResult::AlreadyHave)),
+            RelayBlockAction::Suppress
+        );
+        assert_eq!(
+            relay_block_action(&Err(DomError::TemporarilyInvalid("future block".into()))),
+            RelayBlockAction::Suppress
+        );
+        assert_eq!(
+            relay_block_action(&Err(DomError::Orphan("missing parent".into()))),
+            RelayBlockAction::Suppress
+        );
+    }
+
+    #[test]
+    fn relay_invalid_or_malformed_errors_penalize_peers() {
+        assert_eq!(
+            relay_block_action(&Err(DomError::Invalid("bad block".into()))),
+            RelayBlockAction::PenalizePeer
+        );
+        assert_eq!(
+            relay_block_action(&Err(DomError::Malformed("bad payload".into()))),
+            RelayBlockAction::PenalizePeer
+        );
+        assert_eq!(
+            relay_block_action(&Err(DomError::Internal("store failure".into()))),
+            RelayBlockAction::Drop
+        );
+    }
+
+    #[test]
+    fn malformed_relay_payload_is_rejected_before_block_decode() {
+        let err = decode_relay_block(&[0xde, 0xad]).expect_err("short payload must fail");
+        assert!(matches!(err, DomError::Malformed(_)));
+    }
+
+    #[test]
+    fn oversized_relay_payload_is_rejected_without_allocating_block_body() {
+        let oversized = ((MAX_BLOCK_SERIALIZED_SIZE + 1) as u32).to_le_bytes();
+        let err = decode_relay_block(&oversized).expect_err("oversized payload must fail");
+        assert!(
+            matches!(err, DomError::Malformed(ref msg) if msg.contains("block too large")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn malformed_relay_block_body_is_rejected() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(3u32).to_le_bytes());
+        payload.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
+
+        let err = decode_relay_block(&payload).expect_err("malformed block body must fail");
+        assert!(matches!(err, DomError::Malformed(_)));
+    }
+
+    #[test]
+    fn malformed_deferred_block_bytes_are_dropped_on_decode() {
+        let err = decode_deferred_block_bytes(&[0x01, 0x02, 0x03])
+            .expect_err("malformed deferred bytes must fail");
+        assert!(matches!(err, DomError::Malformed(_)));
     }
 }
