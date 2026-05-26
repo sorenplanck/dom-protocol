@@ -136,6 +136,22 @@ impl PeerManager {
         self.pending_inbound.remove(addr);
     }
 
+    /// Apply a ban-score increment to a connected peer.
+    ///
+    /// Returns true when the new score crosses the ban threshold and the peer
+    /// transitions into the banned state.
+    pub fn add_ban_score(&mut self, addr: &str, score: u32) -> bool {
+        match self.peers.get_mut(addr) {
+            Some(peer) => peer.add_ban_score(score),
+            None => false,
+        }
+    }
+
+    /// Inspect the current ban score for a peer.
+    pub fn ban_score(&self, addr: &str) -> Option<u32> {
+        self.peers.get(addr).map(|peer| peer.ban_score)
+    }
+
     /// Get all connected peer addresses (for broadcasting).
     pub fn connected_peers(&self) -> Vec<String> {
         self.peers
@@ -210,5 +226,33 @@ mod tests {
     fn needs_outbound_when_below_min() {
         let mgr = PeerManager::new(125, 8);
         assert!(mgr.needs_outbound());
+    }
+
+    #[test]
+    fn ban_score_marks_peer_banned() {
+        let mut mgr = PeerManager::new(125, 8);
+        let peer = make_peer([192, 168, 1, 10], 33369, false);
+        let addr = peer.addr.to_string();
+        mgr.register_peer(peer).unwrap();
+
+        assert!(!mgr.add_ban_score(&addr, 99));
+        assert_eq!(mgr.ban_score(&addr), Some(99));
+        assert!(mgr.add_ban_score(&addr, 1));
+        assert_eq!(
+            mgr.peers.get(&addr).map(|peer| peer.state),
+            Some(PeerState::Banned)
+        );
+    }
+
+    #[test]
+    fn banned_peer_drops_out_of_connected_set() {
+        let mut mgr = PeerManager::new(125, 8);
+        let peer = make_peer([10, 0, 0, 2], 33369, false);
+        let addr = peer.addr.to_string();
+        mgr.register_peer(peer).unwrap();
+        assert_eq!(mgr.connected_peers(), vec![addr.clone()]);
+
+        assert!(mgr.add_ban_score(&addr, 100));
+        assert!(mgr.connected_peers().is_empty());
     }
 }
