@@ -63,13 +63,6 @@ pub fn build_responder(
         .map_err(|e| DomError::Internal(format!("noise responder build: {e}")))
 }
 
-/// Derive the Curve25519 public key from a private key.
-pub fn pubkey_from_privkey(privkey: &[u8; 32]) -> [u8; 32] {
-    let secret = x25519_dalek::StaticSecret::from(*privkey);
-    let public = x25519_dalek::PublicKey::from(&secret);
-    *public.as_bytes()
-}
-
 /// Generate a new Noise static keypair for this node.
 pub fn generate_static_keypair() -> ([u8; 32], [u8; 32]) {
     use rand::RngCore;

@@ -2,7 +2,6 @@
 #![deny(unsafe_code)]
 
 pub mod future_block_queue;
-pub mod identity;
 pub mod metrics;
 pub mod miner;
 pub mod node;
