@@ -23,10 +23,12 @@
 
 use dom_core::{
     BlockHeight, DomError, Timestamp, ASERT_HALF_LIFE, ASERT_RADIX, GENESIS_TARGET_COMPACT,
-    MAX_TARGET_BYTES, MIN_TARGET_BYTES, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST,
-    NETWORK_MAGIC_TESTNET, TARGET_SPACING,
+    DIFFICULTY_ADJUSTMENT_WINDOW, MAX_ALLOWED_TARGET, MAX_DIFFICULTY_ADJUSTMENT_FACTOR_DOWN,
+    MAX_DIFFICULTY_ADJUSTMENT_FACTOR_UP, MAX_TARGET_BYTES, MIN_ALLOWED_TARGET, MIN_TARGET_BYTES,
+    NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET, TARGET_BLOCK_TIME_SECS,
+    TARGET_SPACING,
 };
-use primitive_types::U256;
+use primitive_types::{U256, U512};
 
 #[allow(unsafe_code)]
 pub mod randomx_pool;
@@ -229,6 +231,23 @@ pub struct AsertAnchor {
     pub height: BlockHeight,
     /// Anchor target (32 bytes big-endian).
     pub target: [u8; 32],
+}
+
+/// Deterministic next-target computation derived from canonical chain history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NextTargetAdjustment {
+    /// Previous canonical target.
+    pub previous_target: [u8; 32],
+    /// Next canonical target.
+    pub next_target: [u8; 32],
+    /// Number of observed parent blocks in the adjustment window.
+    pub window_blocks: u64,
+    /// Unclamped wall-clock elapsed time recorded by block headers.
+    pub actual_elapsed_secs: u64,
+    /// Clamped elapsed time used for bounded retargeting.
+    pub bounded_elapsed_secs: u64,
+    /// Expected elapsed time for `window_blocks`.
+    pub expected_elapsed_secs: u64,
 }
 
 // ── ASERT Algorithm ───────────────────────────────────────────────────────────
@@ -595,6 +614,91 @@ pub fn target_to_compact(t: &[u8; 32]) -> u32 {
     (exp << 24) | (m & 0x007f_ffff)
 }
 
+/// Deterministic windowed difficulty retarget.
+///
+/// This uses only accepted block-header timestamps and targets:
+///   next_target = previous_target * bounded_elapsed / expected_elapsed
+///
+/// where `bounded_elapsed` is clamped so a single window cannot harden or
+/// ease difficulty by more than the configured consensus factors.
+pub fn window_next_target(
+    previous_target: &[u8; 32],
+    actual_elapsed_secs: u64,
+    window_blocks: u64,
+) -> Result<NextTargetAdjustment, DomError> {
+    if window_blocks == 0 {
+        return Err(DomError::Invalid(
+            "difficulty adjustment window must be non-zero".into(),
+        ));
+    }
+
+    let expected_elapsed_secs = TARGET_BLOCK_TIME_SECS
+        .checked_mul(window_blocks)
+        .ok_or_else(|| DomError::Invalid("expected elapsed overflow".into()))?;
+
+    let min_elapsed_secs = (expected_elapsed_secs / MAX_DIFFICULTY_ADJUSTMENT_FACTOR_UP).max(1);
+    let max_elapsed_secs = expected_elapsed_secs
+        .checked_mul(MAX_DIFFICULTY_ADJUSTMENT_FACTOR_DOWN)
+        .ok_or_else(|| DomError::Invalid("max elapsed overflow".into()))?;
+    let bounded_elapsed_secs = actual_elapsed_secs.clamp(min_elapsed_secs, max_elapsed_secs);
+
+    let prev = U256::from_big_endian(previous_target);
+    if prev.is_zero() {
+        return Err(DomError::Invalid("previous target must be non-zero".into()));
+    }
+
+    let scaled = prev.full_mul(U256::from(bounded_elapsed_secs));
+    let adjusted = scaled / U512::from(expected_elapsed_secs);
+
+    let min = U256::from_big_endian(&MIN_ALLOWED_TARGET);
+    let max = U256::from_big_endian(&MAX_ALLOWED_TARGET);
+
+    let mut next = if adjusted < U512::from(min) {
+        min
+    } else if adjusted > U512::from(max) {
+        max
+    } else {
+        let mut adjusted_bytes = [0u8; 64];
+        adjusted.to_big_endian(&mut adjusted_bytes);
+        let low = U256::from_big_endian(&adjusted_bytes[32..]);
+        if low.is_zero() {
+            min
+        } else {
+            low
+        }
+    };
+
+    if next < min {
+        next = min;
+    } else if next > max {
+        next = max;
+    }
+
+    let mut next_target = [0u8; 32];
+    next.to_big_endian(&mut next_target);
+    validate_target_bounds(&next_target)?;
+
+    Ok(NextTargetAdjustment {
+        previous_target: *previous_target,
+        next_target,
+        window_blocks,
+        actual_elapsed_secs,
+        bounded_elapsed_secs,
+        expected_elapsed_secs,
+    })
+}
+
+/// `true` when this network intentionally uses the development-only fixed
+/// trivial target instead of production retargeting.
+pub fn uses_dev_fixed_target(network_magic: u32) -> bool {
+    network_magic == dom_core::NETWORK_MAGIC_REGTEST
+}
+
+/// Canonical number of parent blocks contributing to the next retarget step.
+pub fn difficulty_adjustment_window_blocks(parent_height: u64) -> u64 {
+    parent_height.min(DIFFICULTY_ADJUSTMENT_WINDOW).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -822,6 +926,103 @@ mod asert_strict_tests {
 
         let easy_wins = h_easy > h_hard || (h_easy == h_hard && l_easy > l_hard);
         assert!(!easy_wins, "harder target must have HIGHER difficulty pair");
+    }
+}
+
+#[cfg(test)]
+mod window_retarget_tests {
+    use super::*;
+
+    fn mid_target() -> [u8; 32] {
+        let mut t = MAX_TARGET_BYTES;
+        t[2] = 0x7f;
+        t
+    }
+
+    #[test]
+    fn fast_blocks_make_next_target_harder() {
+        let previous = mid_target();
+        let adjustment = window_next_target(
+            &previous,
+            TARGET_BLOCK_TIME_SECS * (DIFFICULTY_ADJUSTMENT_WINDOW / 2),
+            DIFFICULTY_ADJUSTMENT_WINDOW,
+        )
+        .unwrap();
+        assert!(
+            U256::from_big_endian(&adjustment.next_target) < U256::from_big_endian(&previous),
+            "fast blocks must reduce the target"
+        );
+    }
+
+    #[test]
+    fn slow_blocks_make_next_target_easier() {
+        let previous = mid_target();
+        let adjustment = window_next_target(
+            &previous,
+            TARGET_BLOCK_TIME_SECS * DIFFICULTY_ADJUSTMENT_WINDOW * 2,
+            DIFFICULTY_ADJUSTMENT_WINDOW,
+        )
+        .unwrap();
+        assert!(
+            U256::from_big_endian(&adjustment.next_target) > U256::from_big_endian(&previous),
+            "slow blocks must increase the target"
+        );
+    }
+
+    #[test]
+    fn adjustment_is_bounded_by_max_factors() {
+        let previous = mid_target();
+        let fast = window_next_target(&previous, 0, DIFFICULTY_ADJUSTMENT_WINDOW).unwrap();
+        let slow = window_next_target(
+            &previous,
+            TARGET_BLOCK_TIME_SECS * DIFFICULTY_ADJUSTMENT_WINDOW * 100,
+            DIFFICULTY_ADJUSTMENT_WINDOW,
+        )
+        .unwrap();
+        let previous_u256 = U256::from_big_endian(&previous);
+        let fast_u256 = U256::from_big_endian(&fast.next_target);
+        let slow_u256 = U256::from_big_endian(&slow.next_target);
+        assert_eq!(
+            fast.bounded_elapsed_secs,
+            (fast.expected_elapsed_secs / MAX_DIFFICULTY_ADJUSTMENT_FACTOR_UP).max(1)
+        );
+        assert_eq!(
+            slow.bounded_elapsed_secs,
+            slow.expected_elapsed_secs * MAX_DIFFICULTY_ADJUSTMENT_FACTOR_DOWN
+        );
+        assert!(
+            fast_u256 >= previous_u256 / U256::from(MAX_DIFFICULTY_ADJUSTMENT_FACTOR_UP),
+            "hardening must be bounded"
+        );
+        assert!(
+            slow_u256 <= previous_u256 * U256::from(MAX_DIFFICULTY_ADJUSTMENT_FACTOR_DOWN),
+            "easing must be bounded"
+        );
+    }
+
+    #[test]
+    fn same_history_produces_same_next_target() {
+        let previous = mid_target();
+        let a = window_next_target(
+            &previous,
+            TARGET_BLOCK_TIME_SECS * DIFFICULTY_ADJUSTMENT_WINDOW,
+            DIFFICULTY_ADJUSTMENT_WINDOW,
+        )
+        .unwrap();
+        let b = window_next_target(
+            &previous,
+            TARGET_BLOCK_TIME_SECS * DIFFICULTY_ADJUSTMENT_WINDOW,
+            DIFFICULTY_ADJUSTMENT_WINDOW,
+        )
+        .unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn regtest_fixed_target_does_not_leak_into_production_networks() {
+        assert!(uses_dev_fixed_target(dom_core::NETWORK_MAGIC_REGTEST));
+        assert!(!uses_dev_fixed_target(dom_core::NETWORK_MAGIC_MAINNET));
+        assert!(!uses_dev_fixed_target(dom_core::NETWORK_MAGIC_TESTNET));
     }
 }
 

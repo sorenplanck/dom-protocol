@@ -1,6 +1,7 @@
 //! Minerador DOM — loop de mineração com RandomX.
 
 use crate::node::{reconcile_mempool_after_connect, DomNode};
+use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{compute_block_pmmr_roots, derive_chain_id};
 use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionOutput};
@@ -9,9 +10,10 @@ use dom_core::{
     WEIGHT_COINBASE_KERNEL, WEIGHT_OUTPUT,
 };
 use dom_pow::{
-    expected_target_for_network, genesis_anchor, hash_meets_target, randomx_seed_height,
-    target_to_compact, target_to_difficulty, CompactTarget,
+    genesis_anchor, hash_meets_target, randomx_seed_height, target_to_compact,
+    target_to_difficulty, CompactTarget,
 };
+use dom_serialization::DomDeserialize;
 use primitive_types::U256;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -47,6 +49,26 @@ fn chain_id_for(config: &dom_config::NodeConfig) -> [u8; 32] {
 
 fn use_light_vm(network: dom_config::Network) -> bool {
     matches!(network, dom_config::Network::Regtest)
+}
+
+fn uses_dev_trivial_target(network: dom_config::Network) -> bool {
+    network.is_dev_only()
+}
+
+fn current_tip_target(chain: &ChainState) -> Result<[u8; 32], DomError> {
+    if chain.tip_hash == Hash256::ZERO && chain.tip_height == BlockHeight::GENESIS {
+        return CompactTarget(dom_core::GENESIS_TARGET_COMPACT)
+            .to_target()
+            .map_err(|e| DomError::Internal(format!("GENESIS_TARGET_COMPACT: {e}")));
+    }
+    let tip_bytes = chain
+        .store
+        .get_block_header(chain.tip_hash.as_bytes())?
+        .ok_or_else(|| DomError::Internal("tip header missing while mining".into()))?;
+    let tip = BlockHeader::from_bytes(&tip_bytes)?;
+    tip.target
+        .to_target()
+        .map_err(|e| DomError::Internal(format!("tip target decode: {e}")))
 }
 
 /// Build a cryptographically valid coinbase transaction.
@@ -278,24 +300,37 @@ pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
 }
 
 pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
-    let (tip_hash, tip_height, tip_difficulty) = {
+    let (tip_hash, tip_height, tip_difficulty, current_target, next_adjustment) = {
         let chain = node.chain.lock().await;
-        (chain.tip_hash, chain.tip_height, chain.tip_difficulty)
+        (
+            chain.tip_hash,
+            chain.tip_height,
+            chain.tip_difficulty,
+            current_tip_target(&chain)?,
+            chain.next_block_target()?,
+        )
     };
 
     let new_height = tip_height.0 + 1;
-    let target = expected_target_for_network(
-        node.config.network.magic(),
-        Timestamp(now_secs()),
-        BlockHeight(new_height),
-    )?;
+    let target = next_adjustment.next_target;
     let block_diff = target_to_difficulty(&target);
     let new_total_diff = tip_difficulty.saturating_add(U256::from(block_diff));
 
     info!(
-        "Minerando bloco {} | target: {}...",
+        "Mining next block | height={} current_target={} next_target={} window={} actual_elapsed={} expected_elapsed={} adjustment_ratio={}/{} mode={}",
         new_height,
-        hex::encode(&target[0..4])
+        hex::encode(current_target),
+        hex::encode(target),
+        next_adjustment.window_blocks,
+        next_adjustment.actual_elapsed_secs,
+        next_adjustment.expected_elapsed_secs,
+        next_adjustment.bounded_elapsed_secs,
+        next_adjustment.expected_elapsed_secs,
+        if uses_dev_trivial_target(node.config.network) {
+            "dev-fixed"
+        } else {
+            "deterministic-window"
+        }
     );
 
     let seed_h = randomx_seed_height(new_height);
@@ -733,6 +768,17 @@ mod genesis_determinism_tests {
         assert!(super::use_light_vm(dom_config::Network::Regtest));
         assert!(!super::use_light_vm(dom_config::Network::Mainnet));
         assert!(!super::use_light_vm(dom_config::Network::Testnet));
+    }
+
+    #[test]
+    fn dev_trivial_target_is_regtest_only() {
+        assert!(super::uses_dev_trivial_target(dom_config::Network::Regtest));
+        assert!(!super::uses_dev_trivial_target(
+            dom_config::Network::Mainnet
+        ));
+        assert!(!super::uses_dev_trivial_target(
+            dom_config::Network::Testnet
+        ));
     }
 }
 
