@@ -128,6 +128,14 @@ pub(crate) struct TxChainView {
     pub(crate) utxos: HashMap<[u8; 33], Option<UtxoEntry>>,
 }
 
+#[derive(Debug, Clone)]
+struct ReinjectableTx {
+    tx: Transaction,
+    tx_hash: [u8; 32],
+    now_secs: u64,
+    chain_view: TxChainView,
+}
+
 pub(crate) fn snapshot_tx_chain_view(
     chain: &ChainState,
     tx: &Transaction,
@@ -1301,7 +1309,7 @@ fn collect_spent_commitments(transactions: &[Transaction]) -> Vec<[u8; 33]> {
 fn collect_reinjectable_reorg_txs(
     chain: &ChainState,
     delta: &dom_chain::ReorgDelta,
-) -> Result<Vec<(Transaction, [u8; 32], u64)>, DomError> {
+) -> Result<Vec<ReinjectableTx>, DomError> {
     let mut reinject = Vec::new();
     for tx in &delta.disconnected_txs {
         let inputs_are_live = tx.inputs.iter().all(|input| {
@@ -1341,8 +1349,14 @@ fn collect_reinjectable_reorg_txs(
             continue;
         }
 
-        reinject.push((tx.clone(), tx_hash(tx)?, chain.tip_height.0));
+        reinject.push(ReinjectableTx {
+            tx: tx.clone(),
+            tx_hash: tx_hash(tx)?,
+            now_secs: chain.tip_height.0,
+            chain_view: snapshot_tx_chain_view(chain, tx)?,
+        });
     }
+    reinject.sort_unstable_by_key(|entry| entry.tx_hash);
     Ok(reinject)
 }
 
@@ -1373,7 +1387,17 @@ pub(crate) async fn reconcile_mempool_after_connect(
         mempool.remove_confirmed(&spent_commitments);
     }
     if !reinjectable.is_empty() {
-        let _ = mempool.reinject_batch(reinjectable);
+        for tx in reinjectable {
+            let chain_view = tx.chain_view;
+            let _ = mempool.accept_tx_with_chain_view(
+                tx.tx,
+                tx.tx_hash,
+                tx.now_secs,
+                chain_view.current_height,
+                chain_view.coinbase_maturity,
+                |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
+            );
+        }
     }
     Ok(())
 }
@@ -3255,6 +3279,46 @@ mod tests {
     }
 
     #[test]
+    fn mempool_is_empty_by_design_after_restart() {
+        let dir = fresh_test_dir("mempool-restart-empty");
+        let config = regtest_node_config(&dir);
+        let tx = Transaction {
+            inputs: vec![],
+            outputs: vec![TransactionOutput {
+                commitment: commitment(90, 5),
+                proof: vec![0x90; 8],
+            }],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(dom_core::MIN_RELAY_FEE_RATE * 100).expect("fee"),
+                lock_height: 0,
+                excess: commitment(91, 0),
+                excess_signature: [0x91; 65],
+            }],
+            offset: [0u8; 32],
+        };
+        let tx_hash = tx_hash(&tx).expect("tx hash");
+
+        let first = DomNode::init(config.clone()).expect("first init");
+        first
+            .mempool
+            .try_lock()
+            .expect("mempool lock")
+            .accept_tx(tx, tx_hash, 1)
+            .expect("accept runtime tx");
+        assert_eq!(first.mempool.try_lock().expect("mempool lock").len(), 1);
+        drop(first);
+
+        let second = DomNode::init(config).expect("second init");
+        assert_eq!(
+            second.mempool.try_lock().expect("mempool lock").len(),
+            0,
+            "mempool must restart empty instead of reconstructing runtime-only state"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
     fn unclamped_persisted_noise_key_is_rejected() {
         let raw = [0xff; 32];
         let err = parse_persisted_noise_static_key(&raw).expect_err("unclamped key should fail");
@@ -3490,6 +3554,82 @@ mod tests {
         assert!(
             pool.get_tx(&conflicting_live_hash).is_none(),
             "connected-branch input must evict conflicting mempool tx"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[tokio::test]
+    async fn reorg_reinjection_is_canonical_and_chainstate_aware() {
+        let dir = fresh_test_dir("reorg-reinject-canonical");
+        let chain = open_chain(&dir);
+        let mempool_a = Arc::new(Mutex::new(Mempool::new()));
+        let mempool_b = Arc::new(Mutex::new(Mempool::new()));
+
+        let live_output = commitment(70, 55);
+        let base_tx = Transaction {
+            inputs: vec![],
+            outputs: vec![TransactionOutput {
+                commitment: live_output.clone(),
+                proof: vec![0x70; 8],
+            }],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(dom_core::MIN_RELAY_FEE_RATE * 100).expect("fee"),
+                lock_height: 0,
+                excess: commitment(71, 0),
+                excess_signature: [0x71; 65],
+            }],
+            offset: [0u8; 32],
+        };
+        let base_block = synthetic_block_with_transactions(Hash256::ZERO, 1, 17, 72, vec![base_tx]);
+        let immature_coinbase = base_block.coinbase.output.commitment.clone();
+        commit_chain_block(&chain, &base_block).await;
+
+        let conflict_a = synthetic_spend_tx(live_output.clone(), 73, 74);
+        let conflict_b = synthetic_spend_tx(live_output.clone(), 75, 76);
+        let missing_input_tx = synthetic_spend_tx(commitment(77, 88), 78, 79);
+        let immature_coinbase_tx = synthetic_spend_tx(immature_coinbase, 80, 81);
+
+        let delta_a = ReorgDelta {
+            disconnected_txs: vec![
+                conflict_b.clone(),
+                missing_input_tx.clone(),
+                immature_coinbase_tx.clone(),
+                conflict_a.clone(),
+            ],
+            connected_txs: vec![],
+        };
+        let delta_b = ReorgDelta {
+            disconnected_txs: vec![
+                conflict_a.clone(),
+                immature_coinbase_tx,
+                missing_input_tx,
+                conflict_b.clone(),
+            ],
+            connected_txs: vec![],
+        };
+
+        reconcile_mempool_after_connect(&chain, &mempool_a, &ConnectResult::Reorg(delta_a), &[])
+            .await
+            .expect("reconcile canonical order A");
+        reconcile_mempool_after_connect(&chain, &mempool_b, &ConnectResult::Reorg(delta_b), &[])
+            .await
+            .expect("reconcile canonical order B");
+
+        let conflict_a_hash = tx_hash(&conflict_a).expect("hash");
+        let conflict_b_hash = tx_hash(&conflict_b).expect("hash");
+        let winner = conflict_a_hash.min(conflict_b_hash);
+        let loser = conflict_a_hash.max(conflict_b_hash);
+
+        let pool_a = mempool_a.lock().await;
+        let pool_b = mempool_b.lock().await;
+        assert_eq!(pool_a.all_hashes(), vec![winner]);
+        assert_eq!(pool_b.all_hashes(), vec![winner]);
+        assert!(pool_a.get_tx(&winner).is_some());
+        assert!(pool_a.get_tx(&loser).is_none());
+        assert!(
+            pool_b.all_hashes() == pool_a.all_hashes(),
+            "repeated reinjection over the same inputs must converge identically"
         );
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }

@@ -125,3 +125,45 @@ fn chain_view_accepts_present_mature_inputs() {
         .expect("mature canonical input must be accepted");
     assert!(pool.get_tx(&hash).is_some());
 }
+
+#[test]
+fn reinjection_with_chain_view_is_permutation_invariant() {
+    let input = h_commitment();
+    let entry = UtxoEntry {
+        block_height: 10,
+        is_coinbase: false,
+        proof: vec![],
+    };
+    let (tx_a, hash_a) = make_spending_tx(input.clone(), MIN_RELAY_FEE_RATE * 26, 0x01);
+    let (tx_b, hash_b) = make_spending_tx(input, MIN_RELAY_FEE_RATE * 27, 0x02);
+
+    let mut forward = Mempool::new();
+    let forward_results = forward.reinject_batch_with_chain_view(
+        vec![(tx_b.clone(), hash_b, 2), (tx_a.clone(), hash_a, 1)],
+        100,
+        1_000,
+        |_| Ok(Some(entry.clone())),
+    );
+
+    let mut reverse = Mempool::new();
+    let reverse_results = reverse.reinject_batch_with_chain_view(
+        vec![(tx_a, hash_a, 1), (tx_b, hash_b, 2)],
+        100,
+        1_000,
+        |_| Ok(Some(entry.clone())),
+    );
+
+    let winner = hash_a.min(hash_b);
+    assert_eq!(forward.all_hashes(), vec![winner]);
+    assert_eq!(reverse.all_hashes(), vec![winner]);
+    assert_eq!(
+        forward_results
+            .iter()
+            .map(|(hash, _)| *hash)
+            .collect::<Vec<_>>(),
+        reverse_results
+            .iter()
+            .map(|(hash, _)| *hash)
+            .collect::<Vec<_>>(),
+    );
+}

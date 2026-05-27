@@ -1,9 +1,14 @@
 //! # dom-mempool
 //!
-//! Transaction memory pool with fee-rate ordering.
+//! Transaction memory pool with deterministic ordering.
 //!
-//! Transactions are ordered by fee/weight for mining selection.
-//! Dandelion++ routing state is tracked here.
+//! The mempool is intentionally volatile. It is **empty by design after
+//! restart** and reconstructs no runtime-only state implicitly.
+//!
+//! Canonical ordering rules:
+//! - operator/API hash listings are lexicographic `tx_hash ASC`
+//! - block selection is `fee_rate DESC`, then `tx_hash ASC`
+//! - rollback/reorg reinjection sorts candidates by `tx_hash ASC`
 
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
@@ -54,7 +59,7 @@ pub struct Mempool {
     entries: HashMap<[u8; 32], MempoolEntry>,
     /// Input commitments currently reserved by in-pool transactions.
     input_index: HashMap<[u8; 33], [u8; 32]>,
-    /// Fee-ordered index: (fee_rate, tx_hash) → () for selection.
+    /// Fee-ordered index: (fee_rate, tx_hash) → () for low-fee eviction.
     fee_index: BTreeMap<(u64, [u8; 32]), ()>,
     /// Total weight of all transactions in pool.
     total_weight: u64,
@@ -186,21 +191,19 @@ impl Mempool {
 
     /// Select transactions for block mining, ordered by fee rate (highest first).
     ///
-    /// Returns transactions fitting within `max_weight` weight units.
+    /// Returns transactions fitting within `max_weight` weight units, ordered
+    /// canonically by `fee_rate DESC`, then `tx_hash ASC`.
     pub fn select_for_block(&self, max_weight: u32) -> Vec<&MempoolEntry> {
         let mut selected = Vec::new();
         let mut used_weight = 0u32;
 
-        // BTreeMap iterates in ascending order — we want descending fee_rate
-        for ((_fee_rate, hash), _) in self.fee_index.iter().rev() {
-            if let Some(entry) = self.entries.get(hash) {
-                let new_weight = used_weight.saturating_add(entry.weight);
-                if new_weight > max_weight {
-                    continue;
-                }
-                used_weight = new_weight;
-                selected.push(entry);
+        for entry in self.entries_in_block_order() {
+            let new_weight = used_weight.saturating_add(entry.weight);
+            if new_weight > max_weight {
+                continue;
             }
+            used_weight = new_weight;
+            selected.push(entry);
         }
         selected
     }
@@ -255,11 +258,40 @@ impl Mempool {
             .collect()
     }
 
+    /// Deterministically re-accept a batch of transactions after rollback or
+    /// reopen while revalidating each entry against a caller-supplied
+    /// canonical chain snapshot.
+    pub fn reinject_batch_with_chain_view<F>(
+        &mut self,
+        mut txs: Vec<(Transaction, [u8; 32], u64)>,
+        current_height: u64,
+        coinbase_maturity: u64,
+        mut lookup_utxo: F,
+    ) -> Vec<([u8; 32], Result<(), DomError>)>
+    where
+        F: FnMut(&[u8; 33]) -> Result<Option<UtxoEntry>, DomError>,
+    {
+        txs.sort_unstable_by_key(|tx| tx.1);
+        txs.into_iter()
+            .map(|(tx, tx_hash, now_secs)| {
+                let result = self.accept_tx_with_chain_view(
+                    tx,
+                    tx_hash,
+                    now_secs,
+                    current_height,
+                    coinbase_maturity,
+                    &mut lookup_utxo,
+                );
+                (tx_hash, result)
+            })
+            .collect()
+    }
+
     /// Remove all transactions whose inputs are spent by a committed block.
     pub fn remove_confirmed(&mut self, spent_commitments: &[[u8; 33]]) {
         let spent_set: std::collections::HashSet<[u8; 33]> =
             spent_commitments.iter().cloned().collect();
-        let to_remove: Vec<[u8; 32]> = self
+        let mut to_remove: Vec<[u8; 32]> = self
             .entries
             .values()
             .filter(|e| {
@@ -269,6 +301,7 @@ impl Mempool {
             })
             .map(|e| e.tx_hash)
             .collect();
+        to_remove.sort_unstable();
         for hash in to_remove {
             self.remove_tx(&hash);
         }
@@ -282,6 +315,16 @@ impl Mempool {
                 .copied()
                 .filter(|existing| existing != tx_hash)
         })
+    }
+
+    fn entries_in_block_order(&self) -> Vec<&MempoolEntry> {
+        let mut entries: Vec<&MempoolEntry> = self.entries.values().collect();
+        entries.sort_unstable_by(|a, b| {
+            b.fee_rate
+                .cmp(&a.fee_rate)
+                .then_with(|| a.tx_hash.cmp(&b.tx_hash))
+        });
+        entries
     }
 }
 
@@ -336,6 +379,15 @@ mod tests {
         Commitment::from_compressed_bytes(&g).unwrap()
     }
 
+    fn h_commitment() -> Commitment {
+        let h = [
+            0x02u8, 0x0e, 0x2c, 0xfc, 0x9a, 0xba, 0x78, 0x45, 0x5f, 0xfd, 0x39, 0x0c, 0xf5, 0xf1,
+            0xd1, 0x7b, 0x99, 0x82, 0xd0, 0xee, 0x29, 0xb2, 0x66, 0xbb, 0x3e, 0xa6, 0x21, 0x7b,
+            0x07, 0x8f, 0x09, 0xd5, 0x50,
+        ];
+        Commitment::from_compressed_bytes(&h).unwrap()
+    }
+
     fn make_tx(fee: u64) -> (Transaction, [u8; 32]) {
         let tx = Transaction {
             inputs: vec![],
@@ -354,6 +406,34 @@ mod tests {
         };
         let mut hash = [0u8; 32];
         hash[0..8].copy_from_slice(&fee.to_le_bytes());
+        (tx, hash)
+    }
+
+    fn make_spending_tx(
+        input_commitment: Commitment,
+        fee: u64,
+        seed: u8,
+    ) -> (Transaction, [u8; 32]) {
+        let tx = Transaction {
+            inputs: vec![dom_consensus::transaction::TransactionInput {
+                commitment: input_commitment,
+            }],
+            outputs: vec![TransactionOutput {
+                commitment: g_commitment(),
+                proof: vec![seed; 100],
+            }],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(fee).unwrap(),
+                lock_height: 0,
+                excess: g_commitment(),
+                excess_signature: [seed; 65],
+            }],
+            offset: [0u8; 32],
+        };
+        let mut hash = [0u8; 32];
+        hash[0..8].copy_from_slice(&fee.to_le_bytes());
+        hash[8] = seed;
         (tx, hash)
     }
 
@@ -383,6 +463,23 @@ mod tests {
         // Highest fee first
         assert_eq!(selected[0].tx_hash, h_high);
         assert_eq!(selected[1].tx_hash, h_low);
+    }
+
+    #[test]
+    fn select_breaks_fee_rate_ties_by_hash_ascending() {
+        let mut pool = Mempool::new();
+        let fee = MIN_RELAY_FEE_RATE * 100;
+        let (tx_b, mut hash_b) = make_tx(fee);
+        let (tx_a, mut hash_a) = make_tx(fee);
+        hash_b[31] = 0xBB;
+        hash_a[31] = 0x0A;
+        pool.accept_tx(tx_b, hash_b, 1).unwrap();
+        pool.accept_tx(tx_a, hash_a, 2).unwrap();
+
+        let selected = pool.select_for_block(MAX_BLOCK_WEIGHT);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].tx_hash, hash_a);
+        assert_eq!(selected[1].tx_hash, hash_b);
     }
 
     #[test]
@@ -416,6 +513,11 @@ mod tests {
         let mut expected = vec![hash_a, hash_b, hash_c];
         expected.sort_unstable();
         assert_eq!(pool.all_hashes(), expected);
+        assert_eq!(
+            pool.all_hashes(),
+            expected,
+            "repeated calls must remain stable"
+        );
     }
 
     #[test]
@@ -475,5 +577,22 @@ mod tests {
             "high-fee tx must be accepted even after canonical reorder"
         );
         assert_eq!(pool.all_hashes(), vec![hash_high]);
+    }
+
+    #[test]
+    fn remove_confirmed_keeps_non_conflicting_transactions() {
+        let mut pool = Mempool::new();
+        let input_a = g_commitment();
+        let input_b = h_commitment();
+        let (tx_a, hash_a) = make_spending_tx(input_a.clone(), MIN_RELAY_FEE_RATE * 100, 0x01);
+        let (tx_b, hash_b) = make_spending_tx(input_b.clone(), MIN_RELAY_FEE_RATE * 110, 0x02);
+
+        pool.accept_tx(tx_a, hash_a, 1).unwrap();
+        pool.accept_tx(tx_b, hash_b, 2).unwrap();
+        pool.remove_confirmed(&[*input_a.as_bytes()]);
+
+        assert!(pool.get_tx(&hash_a).is_none());
+        assert!(pool.get_tx(&hash_b).is_some());
+        assert_eq!(pool.all_hashes(), vec![hash_b]);
     }
 }
