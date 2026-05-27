@@ -96,7 +96,8 @@ const FUTURE_BLOCK_QUEUE_MAX_AGE_SECS: u64 = dom_core::MAX_FUTURE_BLOCK_TIME
     + dom_core::FUTURE_BLOCK_SOFT_BUFFER_SECS
     + FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS * 2;
 const HELLO_EXCHANGE_TIMEOUT_SECS: u64 = dom_wire::handshake::HANDSHAKE_TIMEOUT_SECS;
-const PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v1";
+const PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v2";
+const LEGACY_PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v1";
 const NOISE_STATIC_KEY_METADATA_KEY: &[u8] = b"dom/noise_static_key/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -589,6 +590,9 @@ impl DomNode {
             };
 
             if needs_more {
+                if let Err(e) = advance_peer_rotation_cooldowns(&self.chain, &self.peers).await {
+                    warn!("Advancing peer rotation cooldowns failed: {e}");
+                }
                 let is_mainnet = self.config.network == dom_config::Network::Mainnet;
                 let port = self.config.network.default_port();
                 let mut addrs =
@@ -1417,9 +1421,11 @@ pub(crate) fn persist_peer_rotation_snapshot(
     use dom_serialization::DomSerialize;
 
     if snapshot.outbound_failures.is_empty() {
-        return store.delete_metadata(PEER_ROTATION_METADATA_KEY);
+        store.delete_metadata(PEER_ROTATION_METADATA_KEY)?;
+        return store.delete_metadata(LEGACY_PEER_ROTATION_METADATA_KEY);
     }
-    store.put_metadata(PEER_ROTATION_METADATA_KEY, &snapshot.to_bytes()?)
+    store.put_metadata(PEER_ROTATION_METADATA_KEY, &snapshot.to_bytes()?)?;
+    store.delete_metadata(LEGACY_PEER_ROTATION_METADATA_KEY)
 }
 
 pub(crate) fn load_peer_rotation_snapshot(
@@ -1435,7 +1441,19 @@ pub(crate) fn load_peer_rotation_snapshot(
                 })?;
             Ok(Some(snapshot))
         }
-        None => Ok(None),
+        None => match store.get_metadata(LEGACY_PEER_ROTATION_METADATA_KEY)? {
+            Some(bytes) => {
+                let snapshot =
+                    dom_wire::manager::PersistedPeerRotationState::from_legacy_bytes(&bytes)
+                        .map_err(|e| {
+                            DomError::Invalid(format!(
+                                "legacy peer rotation snapshot decode failed: {e}"
+                            ))
+                        })?;
+                Ok(Some(snapshot))
+            }
+            None => Ok(None),
+        },
     }
 }
 
@@ -1443,21 +1461,11 @@ pub(crate) fn restore_peer_rotation_state(
     store: &DomStore,
     peers: &mut PeerManager,
 ) -> Result<(), DomError> {
-    match load_peer_rotation_snapshot(store) {
-        Ok(Some(snapshot)) => match peers.restore_outbound_failure_state(&snapshot) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                warn!("Clearing invalid persisted peer rotation state: {e}");
-                store.delete_metadata(PEER_ROTATION_METADATA_KEY)?;
-                Ok(())
-            }
-        },
-        Ok(None) => Ok(()),
-        Err(e) => {
-            warn!("Clearing unreadable persisted peer rotation state: {e}");
-            store.delete_metadata(PEER_ROTATION_METADATA_KEY)?;
-            Ok(())
-        }
+    match load_peer_rotation_snapshot(store)? {
+        Some(snapshot) => peers.restore_outbound_failure_state(&snapshot).map_err(|e| {
+            DomError::Invalid(format!("persisted peer rotation state restore failed: {e}"))
+        }),
+        None => Ok(()),
     }
 }
 
@@ -1471,6 +1479,20 @@ async fn persist_peer_rotation_state(
     };
     let chain = chain.lock().await;
     persist_peer_rotation_snapshot(&chain.store, &snapshot)
+}
+
+async fn advance_peer_rotation_cooldowns(
+    chain: &Arc<Mutex<ChainState>>,
+    peers: &Arc<Mutex<PeerManager>>,
+) -> Result<(), DomError> {
+    let changed = {
+        let mut peers = peers.lock().await;
+        peers.advance_outbound_cooldowns()
+    };
+    if changed {
+        persist_peer_rotation_state(chain, peers).await?;
+    }
+    Ok(())
 }
 
 pub(crate) fn load_or_create_noise_static_key(store: &DomStore) -> Result<[u8; 32], DomError> {
@@ -2836,11 +2858,12 @@ mod tests {
     use super::{
         continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
         decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
-        load_or_create_noise_static_key, parse_persisted_noise_static_key, peer_violation_score,
-        pending_peer_violation_score, purge_mempool_confirmed_inputs,
-        reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action, tx_hash,
-        DeferredReplayAction, DomNode, IbdRoundState, OutboundAttemptOutcome, RelayBlockAction,
-        NOISE_STATIC_KEY_METADATA_KEY,
+        load_or_create_noise_static_key, load_peer_rotation_snapshot,
+        parse_persisted_noise_static_key, peer_violation_score, pending_peer_violation_score,
+        purge_mempool_confirmed_inputs, reconcile_mempool_after_connect, refresh_peer_metrics,
+        relay_block_action, restore_peer_rotation_state, tx_hash, DeferredReplayAction, DomNode,
+        IbdRoundState, OutboundAttemptOutcome, RelayBlockAction,
+        LEGACY_PEER_ROTATION_METADATA_KEY, NOISE_STATIC_KEY_METADATA_KEY, PEER_ROTATION_METADATA_KEY,
     };
     use crate::metrics::Metrics;
     use dom_chain::{
@@ -3240,6 +3263,65 @@ mod tests {
             message.contains("canonical clamped form"),
             "unexpected error message: {message}"
         );
+    }
+
+    #[test]
+    fn legacy_peer_rotation_snapshot_loads_for_restart_compatibility() {
+        use dom_serialization::Writer;
+
+        let dir = fresh_test_dir("peer-rotation-legacy");
+        let store = DomStore::open(&dir).expect("store open");
+        let mut w = Writer::new();
+        w.write_u64(3);
+        w.write_u32(1);
+        w.write_vec(b"198.51.100.30:33369").expect("addr");
+        w.write_u8(3);
+        w.write_u64(3);
+        store
+            .put_metadata(LEGACY_PEER_ROTATION_METADATA_KEY, &w.finish())
+            .expect("persist legacy peer rotation");
+
+        let snapshot = load_peer_rotation_snapshot(&store)
+            .expect("load peer rotation")
+            .expect("snapshot present");
+        assert_eq!(snapshot.next_failure_seq, 3);
+        assert_eq!(snapshot.outbound_failures.len(), 1);
+        assert_eq!(snapshot.outbound_failures[0].cooldown_rounds, 0);
+
+        let mut peers = PeerManager::new(125, 2);
+        restore_peer_rotation_state(&store, &mut peers).expect("restore peer rotation");
+        assert_eq!(peers.outbound_failure_count("198.51.100.30:33369"), 3);
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn invalid_persisted_peer_rotation_aborts_node_init_without_clearing_state() {
+        let dir = fresh_test_dir("peer-rotation-invalid");
+        let store = DomStore::open(&dir).expect("store open");
+        store
+            .put_metadata(PEER_ROTATION_METADATA_KEY, b"invalid")
+            .expect("persist invalid peer rotation");
+        drop(store);
+
+        let err = match DomNode::init(regtest_node_config(&dir)) {
+            Ok(_) => panic!("invalid peer rotation should fail init"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("peer rotation"),
+            "unexpected error message: {message}"
+        );
+
+        let reopened = DomStore::open(&dir).expect("store reopen");
+        assert_eq!(
+            reopened
+                .get_metadata(PEER_ROTATION_METADATA_KEY)
+                .expect("reload metadata")
+                .expect("metadata present"),
+            b"invalid"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
     #[test]

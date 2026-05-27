@@ -30,6 +30,9 @@ const DUPLICATE_BLOCK_RELAY_WINDOW_SECS: u64 = 30;
 /// Bound runtime memory used by outbound failure history.
 const MAX_OUTBOUND_FAILURE_TRACKERS: usize = 4_096;
 const MAX_PEER_ROTATION_ADDR_BYTES: usize = 256;
+const OUTBOUND_FAILURE_COOLDOWN_THRESHOLD: u8 = 3;
+const OUTBOUND_FAILURE_COOLDOWN_ROUNDS: u8 = 2;
+const MAX_OUTBOUND_FAILURE_COOLDOWN_ROUNDS: u8 = 16;
 
 #[derive(Debug, Clone, Copy)]
 struct PendingInbound {
@@ -57,6 +60,7 @@ struct DuplicateRelayTracker {
 struct OutboundFailureTracker {
     failures: u8,
     last_failure_seq: u64,
+    cooldown_rounds: u8,
 }
 
 /// Persisted outbound failure entry used for deterministic restart replay.
@@ -68,6 +72,8 @@ pub struct PersistedOutboundFailure {
     pub failures: u8,
     /// Monotonic sequence of the last recorded failure.
     pub last_failure_seq: u64,
+    /// Remaining deterministic connector passes to skip before retrying.
+    pub cooldown_rounds: u8,
 }
 
 /// Bounded deterministic peer-rotation snapshot.
@@ -92,6 +98,7 @@ impl DomSerialize for PersistedPeerRotationState {
             w.write_vec(entry.addr.as_bytes())?;
             w.write_u8(entry.failures);
             w.write_u64(entry.last_failure_seq);
+            w.write_u8(entry.cooldown_rounds);
         }
         Ok(())
     }
@@ -112,12 +119,46 @@ impl DomDeserialize for PersistedPeerRotationState {
                 .map_err(|e| DomError::Malformed(format!("peer rotation addr utf8: {e}")))?;
             let failures = r.read_u8()?;
             let last_failure_seq = r.read_u64()?;
+            let cooldown_rounds = r.read_u8()?;
             outbound_failures.push(PersistedOutboundFailure {
                 addr,
                 failures,
                 last_failure_seq,
+                cooldown_rounds,
             });
         }
+        Ok(Self {
+            next_failure_seq,
+            outbound_failures,
+        })
+    }
+}
+
+impl PersistedPeerRotationState {
+    /// Decode the pre-cooldown snapshot format for persistence-safe upgrades.
+    pub fn from_legacy_bytes(bytes: &[u8]) -> Result<Self, DomError> {
+        let mut r = Reader::new(bytes);
+        let next_failure_seq = r.read_u64()?;
+        let len = r.read_u32()? as usize;
+        if len > MAX_OUTBOUND_FAILURE_TRACKERS {
+            return Err(DomError::Malformed(format!(
+                "peer rotation entry count {len} exceeds limit {MAX_OUTBOUND_FAILURE_TRACKERS}"
+            )));
+        }
+        let mut outbound_failures = Vec::with_capacity(len);
+        for _ in 0..len {
+            let addr = String::from_utf8(r.read_vec(MAX_PEER_ROTATION_ADDR_BYTES)?)
+                .map_err(|e| DomError::Malformed(format!("peer rotation addr utf8: {e}")))?;
+            let failures = r.read_u8()?;
+            let last_failure_seq = r.read_u64()?;
+            outbound_failures.push(PersistedOutboundFailure {
+                addr,
+                failures,
+                last_failure_seq,
+                cooldown_rounds: 0,
+            });
+        }
+        r.finish()?;
         Ok(Self {
             next_failure_seq,
             outbound_failures,
@@ -313,9 +354,16 @@ impl PeerManager {
                 .or_insert(OutboundFailureTracker {
                     failures: 0,
                     last_failure_seq: seq,
+                    cooldown_rounds: 0,
                 });
         entry.failures = entry.failures.saturating_add(1);
         entry.last_failure_seq = seq;
+        if entry.failures >= OUTBOUND_FAILURE_COOLDOWN_THRESHOLD {
+            // Connector passes advance cooldowns before selection, so add one
+            // extra step here to skip the full configured number of future
+            // retry rounds deterministically.
+            entry.cooldown_rounds = OUTBOUND_FAILURE_COOLDOWN_ROUNDS.saturating_add(1);
+        }
         self.enforce_outbound_failure_bound();
     }
 
@@ -325,6 +373,21 @@ impl PeerManager {
         self.outbound_failures.remove(addr);
     }
 
+    /// Advance deterministic outbound cooldown state by one connector pass.
+    ///
+    /// Returns true when any persisted cooldown state changed.
+    pub fn advance_outbound_cooldowns(&mut self) -> bool {
+        self.prune_stale_state();
+        let mut changed = false;
+        for tracker in self.outbound_failures.values_mut() {
+            if tracker.cooldown_rounds > 0 {
+                tracker.cooldown_rounds -= 1;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Return outbound candidates in canonical retry order.
     ///
     /// Peers with fewer recorded failures come first. Among peers with equal
@@ -332,6 +395,12 @@ impl PeerManager {
     /// order breaks any remaining tie deterministically.
     pub fn outbound_candidates_in_retry_order(&self, candidates: Vec<String>) -> Vec<String> {
         let mut out = candidates;
+        out.retain(|addr| {
+            self.outbound_failures
+                .get(addr)
+                .map(|tracker| tracker.cooldown_rounds == 0)
+                .unwrap_or(true)
+        });
         out.sort_by(|left, right| {
             let left_failure = self.outbound_failures.get(left).copied();
             let right_failure = self.outbound_failures.get(right).copied();
@@ -355,6 +424,14 @@ impl PeerManager {
             .unwrap_or(0)
     }
 
+    /// Inspect the current deterministic cooldown state for a candidate.
+    pub fn outbound_cooldown_rounds(&self, addr: &str) -> u8 {
+        self.outbound_failures
+            .get(addr)
+            .map(|tracker| tracker.cooldown_rounds)
+            .unwrap_or(0)
+    }
+
     /// Snapshot deterministic outbound failure history for replay-equivalent
     /// persistence and comparison.
     pub fn outbound_failure_state(&self) -> PersistedPeerRotationState {
@@ -365,6 +442,7 @@ impl PeerManager {
                 addr: addr.clone(),
                 failures: tracker.failures,
                 last_failure_seq: tracker.last_failure_seq,
+                cooldown_rounds: tracker.cooldown_rounds,
             })
             .collect();
         outbound_failures.sort_by(|left, right| left.addr.cmp(&right.addr));
@@ -408,12 +486,24 @@ impl PeerManager {
                     "peer rotation snapshot contains zero-failure entry".into(),
                 ));
             }
+            if entry.cooldown_rounds > MAX_OUTBOUND_FAILURE_COOLDOWN_ROUNDS {
+                return Err(DomError::Invalid(format!(
+                    "peer rotation snapshot cooldown {} exceeds limit {}",
+                    entry.cooldown_rounds, MAX_OUTBOUND_FAILURE_COOLDOWN_ROUNDS
+                )));
+            }
+            if entry.cooldown_rounds > 0 && entry.failures < OUTBOUND_FAILURE_COOLDOWN_THRESHOLD {
+                return Err(DomError::Invalid(
+                    "peer rotation snapshot contains cooldown below failure threshold".into(),
+                ));
+            }
             max_seq = max_seq.max(entry.last_failure_seq);
             restored.insert(
                 entry.addr.clone(),
                 OutboundFailureTracker {
                     failures: entry.failures,
                     last_failure_seq: entry.last_failure_seq,
+                    cooldown_rounds: entry.cooldown_rounds,
                 },
             );
         }
@@ -1053,10 +1143,43 @@ mod tests {
     }
 
     #[test]
+    fn repeated_failures_enter_and_exit_deterministic_cooldown() {
+        let mut mgr = PeerManager::new(125, 2);
+        let addr = "198.51.100.50:33369";
+
+        mgr.record_outbound_failure(addr);
+        mgr.record_outbound_failure(addr);
+        assert_eq!(mgr.outbound_cooldown_rounds(addr), 0);
+
+        mgr.record_outbound_failure(addr);
+        assert_eq!(mgr.outbound_cooldown_rounds(addr), 3);
+        assert!(
+            mgr.outbound_candidates_in_retry_order(vec![addr.into()]).is_empty(),
+            "cooldown peer should be skipped before any retry pass advances"
+        );
+
+        assert!(mgr.advance_outbound_cooldowns());
+        assert_eq!(mgr.outbound_cooldown_rounds(addr), 2);
+        assert!(mgr.outbound_candidates_in_retry_order(vec![addr.into()]).is_empty());
+
+        assert!(mgr.advance_outbound_cooldowns());
+        assert_eq!(mgr.outbound_cooldown_rounds(addr), 1);
+        assert!(mgr.outbound_candidates_in_retry_order(vec![addr.into()]).is_empty());
+
+        assert!(mgr.advance_outbound_cooldowns());
+        assert_eq!(mgr.outbound_cooldown_rounds(addr), 0);
+        assert_eq!(
+            mgr.outbound_candidates_in_retry_order(vec![addr.into()]),
+            vec![addr.to_string()]
+        );
+    }
+
+    #[test]
     fn persisted_peer_rotation_state_roundtrips() {
         let mut mgr = PeerManager::new(125, 2);
         mgr.record_outbound_failure("198.51.100.30:33369");
         mgr.record_outbound_failure("198.51.100.10:33369");
+        mgr.record_outbound_failure("198.51.100.30:33369");
         mgr.record_outbound_failure("198.51.100.30:33369");
 
         let snapshot = mgr.outbound_failure_state();
@@ -1074,6 +1197,7 @@ mod tests {
         source.record_outbound_failure("198.51.100.30:33369");
         source.record_outbound_failure("198.51.100.30:33369");
         source.record_outbound_failure("198.51.100.20:33369");
+        source.record_outbound_failure("198.51.100.30:33369");
 
         let snapshot = source.outbound_failure_state();
         let expected = source.outbound_candidates_in_retry_order(vec![
@@ -1093,6 +1217,10 @@ mod tests {
             "198.51.100.10:33369".into(),
         ]);
         assert_eq!(actual, expected);
+        assert_eq!(
+            restored.outbound_cooldown_rounds("198.51.100.30:33369"),
+            source.outbound_cooldown_rounds("198.51.100.30:33369")
+        );
     }
 
     #[test]
@@ -1105,6 +1233,7 @@ mod tests {
                     addr: "198.51.100.30:33369".into(),
                     failures: 2,
                     last_failure_seq: 3,
+                    cooldown_rounds: 0,
                 }],
             })
             .expect_err("regressing next_failure_seq must reject");
@@ -1112,5 +1241,44 @@ mod tests {
             matches!(err, DomError::Invalid(ref msg) if msg.contains("next_failure_seq")),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn restoring_peer_rotation_rejects_invalid_cooldown_state() {
+        let mut mgr = PeerManager::new(125, 2);
+        let err = mgr
+            .restore_outbound_failure_state(&PersistedPeerRotationState {
+                next_failure_seq: 3,
+                outbound_failures: vec![PersistedOutboundFailure {
+                    addr: "198.51.100.30:33369".into(),
+                    failures: 1,
+                    last_failure_seq: 3,
+                    cooldown_rounds: 1,
+                }],
+            })
+            .expect_err("cooldown below threshold must reject");
+        assert!(
+            matches!(err, DomError::Invalid(ref msg) if msg.contains("cooldown below failure threshold")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn legacy_peer_rotation_snapshot_decodes_with_zero_cooldown() {
+        use dom_serialization::Writer;
+
+        let mut w = Writer::new();
+        w.write_u64(3);
+        w.write_u32(1);
+        w.write_vec(b"198.51.100.30:33369").expect("addr");
+        w.write_u8(2);
+        w.write_u64(3);
+
+        let decoded = PersistedPeerRotationState::from_legacy_bytes(&w.finish())
+            .expect("legacy snapshot decode");
+        assert_eq!(decoded.next_failure_seq, 3);
+        assert_eq!(decoded.outbound_failures.len(), 1);
+        assert_eq!(decoded.outbound_failures[0].failures, 2);
+        assert_eq!(decoded.outbound_failures[0].cooldown_rounds, 0);
     }
 }
