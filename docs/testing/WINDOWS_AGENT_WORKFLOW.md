@@ -9,6 +9,11 @@
 - Cargo and rustc installed
 
 The runner uses local Codex and Git authentication. It does not store OpenAI keys or GitHub tokens.
+Codex is invoked in non-interactive mode as:
+
+```bash
+codex exec -C <isolated-worktree> --dangerously-bypass-approvals-and-sandbox --color never -
+```
 
 ## Build
 
@@ -44,6 +49,7 @@ After Codex edits the repository, the runner selects tests automatically using t
 - If commit fails, the runner does not push.
 - If `--push` is not provided, the runner does not push.
 - Unrelated files are not staged.
+- If Codex fails before a commit is created, the isolated worktree is preserved and the terminal prints its path.
 
 ## Reports
 
@@ -57,3 +63,11 @@ Every run writes:
 ## Troubleshooting
 
 If Codex, Git, or Cargo are missing, run `doctor` first and verify that the commands are on `PATH`.
+If Codex cannot be launched or returns a non-zero exit code, inspect `target/dom-agent-runner/runs/<timestamp>/codex-output.log`.
+Every run writes `final-report.txt`, including early failures.
+
+To remove stale agent worktrees and reports:
+
+```bash
+target/release/dom-agent-runner.exe clean
+```

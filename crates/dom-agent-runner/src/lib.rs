@@ -39,6 +39,29 @@ pub struct RunPaths {
     pub final_report: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub struct CodexCommand {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+impl CodexCommand {
+    pub fn display(&self) -> String {
+        let mut out = self.program.clone();
+        for arg in &self.args {
+            out.push(' ');
+            if arg.contains(' ') {
+                out.push('"');
+                out.push_str(arg);
+                out.push('"');
+            } else {
+                out.push_str(arg);
+            }
+        }
+        out
+    }
+}
+
 pub fn runner_root(repo_root: &Path) -> PathBuf {
     repo_root.join(RUNNER_ROOT)
 }
@@ -54,10 +77,63 @@ pub fn ensure_runner_dirs(repo_root: &Path) -> Result<(PathBuf, PathBuf, PathBuf
 
 pub fn clean_agent_data(repo_root: &Path) -> Result<()> {
     let root = runner_root(repo_root);
+    remove_registered_agent_worktrees(repo_root, &root)?;
     if root.exists() {
         fs::remove_dir_all(&root)?;
     }
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(repo_root)
+        .status();
     Ok(())
+}
+
+fn remove_registered_agent_worktrees(repo_root: &Path, runner_root: &Path) -> Result<()> {
+    let worktrees_root = runner_root.join(WORKTREES_DIR);
+    let worktrees_root = absolute_path(repo_root, &worktrees_root)?;
+    let output = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo_root)
+        .output()
+        .context("failed to list git worktrees")?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git worktree list failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some(path) = line.strip_prefix("worktree ") else {
+            continue;
+        };
+        let path = PathBuf::from(path);
+        let abs_path = absolute_path(repo_root, &path)?;
+        if abs_path.starts_with(&worktrees_root) {
+            let status = Command::new("git")
+                .args(["worktree", "remove", "--force"])
+                .arg(&abs_path)
+                .current_dir(repo_root)
+                .status()
+                .with_context(|| format!("failed to remove git worktree {}", abs_path.display()))?;
+            if !status.success() {
+                return Err(anyhow!(
+                    "git worktree remove failed for {}",
+                    abs_path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn absolute_path(base: &Path, path: &Path) -> Result<PathBuf> {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    Ok(joined.canonicalize().unwrap_or(joined))
 }
 
 pub fn agent_latest_run(repo_root: &Path) -> Result<String> {
@@ -294,41 +370,60 @@ pub fn run_codex(
     prompt: &PromptInput,
     codex_log: &Path,
 ) -> Result<std::process::Output> {
-    let mut child = Command::new("codex")
-        .args([
-            "exec",
-            "--cd",
-            worktree_root
-                .to_str()
-                .ok_or_else(|| anyhow!("non-utf8 worktree path"))?,
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--color",
-            "never",
-            "-",
-        ])
+    let command = codex_command(worktree_root)?;
+    let header = codex_log_header(prompt, &command);
+    write_text(codex_log, &header)?;
+    let mut child = Command::new(&command.program)
+        .args(&command.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .context("failed to spawn codex")?;
+        .map_err(|err| {
+            let message = format!("failed to spawn codex: {err}");
+            let _ = write_text(codex_log, format!("{header}LAUNCH ERROR: {message}\n"));
+            anyhow!(message)
+        })?;
     if let Some(stdin) = child.stdin.as_mut() {
         stdin.write_all(prompt.content.as_bytes())?;
     }
     let output = child.wait_with_output()?;
     write_text(
         codex_log,
-        format!(
-            "PROMPT SOURCE: {}\nRESOLVED PATH: {}\n{}\n",
-            prompt.source_description,
-            prompt
-                .resolved_path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "<inline>".into()),
-            command_output_text(&output)
-        ),
+        format!("{header}{}\n", command_output_text(&output)),
     )?;
     Ok(output)
+}
+
+pub fn codex_command(worktree_root: &Path) -> Result<CodexCommand> {
+    Ok(CodexCommand {
+        program: "codex".into(),
+        args: vec![
+            "exec".into(),
+            "-C".into(),
+            worktree_root
+                .to_str()
+                .ok_or_else(|| anyhow!("non-utf8 worktree path"))?
+                .into(),
+            "--dangerously-bypass-approvals-and-sandbox".into(),
+            "--color".into(),
+            "never".into(),
+            "-".into(),
+        ],
+    })
+}
+
+fn codex_log_header(prompt: &PromptInput, command: &CodexCommand) -> String {
+    format!(
+        "PROMPT SOURCE: {}\nRESOLVED PATH: {}\nCOMMAND: {}\n\n",
+        prompt.source_description,
+        prompt
+            .resolved_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<inline>".into()),
+        command.display()
+    )
 }
 
 pub fn locate_test_runner(repo_root: &Path) -> Result<PathBuf> {
@@ -426,23 +521,56 @@ pub fn verify_remote_head(repo_root: &Path) -> Result<std::process::Output> {
 pub fn write_final_report(
     paths: &RunPaths,
     prompt: &PromptInput,
+    original_repo_path: &Path,
     initial_head: &str,
     final_local_head: Option<&str>,
     remote_head: Option<&str>,
     changed_files: &[String],
     staged_files: &[String],
     tests_run: &[String],
+    codex_command: Option<&str>,
+    codex_exit_code: Option<i32>,
+    dom_test_runner_executed: bool,
     status: &str,
     commit_hash: Option<&str>,
+    commit_created: bool,
+    push_attempted: bool,
     push_status: Option<&str>,
     error: Option<&str>,
 ) -> Result<()> {
     let mut report = String::new();
+    report.push_str(&format!("run directory: {}\n", paths.run_dir.display()));
     report.push_str(&format!("prompt summary: {}\n", prompt.source_description));
     if let Some(path) = &prompt.resolved_path {
-        report.push_str(&format!("prompt path: {}\n", path.display()));
+        report.push_str(&format!("prompt file path: {}\n", path.display()));
+    } else {
+        report.push_str("prompt file path: <inline prompt>\n");
     }
+    report.push_str(&format!(
+        "original repository path: {}\n",
+        original_repo_path.display()
+    ));
+    report.push_str(&format!(
+        "isolated worktree path: {}\n",
+        paths.worktree_dir.display()
+    ));
     report.push_str(&format!("initial HEAD: {}\n", initial_head));
+    report.push_str(&format!(
+        "Codex command attempted: {}\n",
+        codex_command.unwrap_or("<not attempted>")
+    ));
+    report.push_str(&format!(
+        "Codex exit code: {}\n",
+        codex_exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "<not available>".into())
+    ));
+    report.push_str(&format!(
+        "dom-test-runner executed: {}\n",
+        dom_test_runner_executed
+    ));
+    report.push_str(&format!("commit created: {}\n", commit_created));
+    report.push_str(&format!("push attempted: {}\n", push_attempted));
     if let Some(head) = final_local_head {
         report.push_str(&format!("final local HEAD: {}\n", head));
     }
@@ -471,8 +599,17 @@ pub fn write_final_report(
     if let Some(err) = error {
         report.push_str(&format!("error: {}\n", err));
     }
+    if status == "FAIL" && !commit_created && paths.worktree_dir.exists() {
+        report.push_str(&format!(
+            "Run failed before commit. Worktree preserved for inspection at: {}\n",
+            paths.worktree_dir.display()
+        ));
+    }
     write_text(&paths.final_report, &report)?;
-    write_text(&paths.root.join(LATEST_RUN), paths.run_dir.display().to_string())?;
+    write_text(
+        &paths.root.join(LATEST_RUN),
+        paths.run_dir.display().to_string(),
+    )?;
     Ok(())
 }
 
@@ -556,18 +693,103 @@ mod tests {
         write_final_report(
             &paths,
             &prompt,
+            dir.path(),
             "abc",
             Some("def"),
             Some("remote"),
             &["a.rs".into()],
             &["b.rs".into()],
             &["test".into()],
+            Some("codex exec -C repo -"),
+            Some(0),
+            true,
             "PASS",
             Some("def"),
+            true,
+            true,
             Some("pushed"),
             None,
         )
         .unwrap();
         assert!(paths.final_report.exists());
+    }
+
+    #[test]
+    fn codex_command_uses_documented_exec_cd_form() {
+        let command = codex_command(Path::new("C:/repo/worktree")).unwrap();
+        assert_eq!(command.program, "codex");
+        assert_eq!(command.args[0], "exec");
+        assert!(command.args.contains(&"-C".to_string()));
+        assert!(command.args.contains(&"--color".to_string()));
+        assert_eq!(command.args.last().map(String::as_str), Some("-"));
+    }
+
+    #[test]
+    fn final_report_includes_failure_context() {
+        let dir = TempDir::new().unwrap();
+        let paths = RunPaths {
+            root: dir.path().join("target/dom-agent-runner"),
+            run_dir: dir.path().join("target/dom-agent-runner/runs/2"),
+            worktree_dir: dir.path().join("target/dom-agent-runner/worktrees/2"),
+            prompt_file: dir.path().join("target/dom-agent-runner/runs/2/prompt.txt"),
+            codex_log: dir
+                .path()
+                .join("target/dom-agent-runner/runs/2/codex-output.log"),
+            test_log: dir
+                .path()
+                .join("target/dom-agent-runner/runs/2/test-output.log"),
+            git_status_before: dir
+                .path()
+                .join("target/dom-agent-runner/runs/2/git-status-before.txt"),
+            git_status_after: dir
+                .path()
+                .join("target/dom-agent-runner/runs/2/git-status-after.txt"),
+            changed_files: dir
+                .path()
+                .join("target/dom-agent-runner/runs/2/changed-files.txt"),
+            staged_files: dir
+                .path()
+                .join("target/dom-agent-runner/runs/2/staged-files.txt"),
+            commit_file: dir.path().join("target/dom-agent-runner/runs/2/commit.txt"),
+            remote_head: dir
+                .path()
+                .join("target/dom-agent-runner/runs/2/remote-head.txt"),
+            final_report: dir
+                .path()
+                .join("target/dom-agent-runner/runs/2/final-report.txt"),
+        };
+        fs::create_dir_all(&paths.worktree_dir).unwrap();
+        let prompt = prompt_from_text("hello".into()).unwrap();
+        write_final_report(
+            &paths,
+            &prompt,
+            dir.path(),
+            "abc",
+            None,
+            None,
+            &[],
+            &[],
+            &[],
+            Some("codex exec -C repo -"),
+            Some(1),
+            false,
+            "FAIL",
+            None,
+            false,
+            false,
+            None,
+            Some("codex failed"),
+        )
+        .unwrap();
+        let report = fs::read_to_string(&paths.final_report).unwrap();
+        assert!(report.contains("run directory:"));
+        assert!(report.contains("original repository path:"));
+        assert!(report.contains("isolated worktree path:"));
+        assert!(report.contains("Codex command attempted: codex exec -C repo -"));
+        assert!(report.contains("Codex exit code: 1"));
+        assert!(report.contains("dom-test-runner executed: false"));
+        assert!(report.contains("commit created: false"));
+        assert!(report.contains("push attempted: false"));
+        assert!(report.contains("Run failed before commit. Worktree preserved"));
     }
 }
