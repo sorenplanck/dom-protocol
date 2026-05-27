@@ -18,5 +18,5 @@ primitive-types.workspace   = true
 
 [dev-dependencies]
 secp256k1.workspace = true
-
+k256.workspace = true
 primitive-types.workspace = true

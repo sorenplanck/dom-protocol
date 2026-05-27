@@ -237,14 +237,7 @@ pub fn validate_block_transactions(
 pub fn compute_block_pmmr_roots(
     coinbase: &CoinbaseTransaction,
     transactions: &[Transaction],
-) -> Result<
-    (
-        dom_core::Hash256,
-        dom_core::Hash256,
-        dom_core::Hash256,
-    ),
-    dom_core::DomError,
-> {
+) -> Result<(dom_core::Hash256, dom_core::Hash256, dom_core::Hash256), dom_core::DomError> {
     use dom_pmmr::Pmmr;
 
     let mut output_mmr = Pmmr::new();

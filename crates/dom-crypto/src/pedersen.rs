@@ -255,6 +255,40 @@ fn sum_projective(commits: &[Commitment]) -> Result<ProjectivePoint, DomError> {
     Ok(acc)
 }
 
+/// Verify the aggregate Mimblewimble block balance equation (RFC-0008 block level).
+///
+/// Derivation: summing per-tx balance equations and coinbase cancels fees, leaving:
+///   Sum(all_outputs) - Sum(all_inputs)
+///     = Sum(all_excesses) + kernel_offset * G + block_reward * H
+///
+/// Parameters:
+/// - `all_outputs`: coinbase output + all tx outputs
+/// - `all_inputs`: all tx inputs (coinbase has no inputs)
+/// - `all_excesses`: coinbase excess + all tx kernel excesses
+/// - `kernel_offset`: `block.header.total_kernel_offset` (aggregate of all tx offsets)
+/// - `block_reward`: `block_reward(height).noms()` — base reward only, NOT including fees
+pub fn verify_block_balance_equation(
+    all_outputs: &[Commitment],
+    all_inputs: &[Commitment],
+    all_excesses: &[Commitment],
+    kernel_offset: &[u8; 32],
+    block_reward: u64,
+) -> Result<bool, DomError> {
+    let lhs = sum_projective(all_outputs)? - sum_projective(all_inputs)?;
+
+    let mut rhs = sum_projective(all_excesses)?;
+    if kernel_offset != &[0u8; 32] {
+        let s = scalar_from_bytes(kernel_offset)
+            .ok_or_else(|| DomError::Invalid("invalid block kernel_offset scalar".into()))?;
+        rhs += ProjectivePoint::GENERATOR * s;
+    }
+    if block_reward > 0 {
+        rhs += h_point() * Scalar::from(block_reward);
+    }
+
+    Ok(lhs == rhs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
