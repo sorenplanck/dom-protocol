@@ -43,7 +43,7 @@ enum Commands {
     Help,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct RunOutcome {
     final_status: &'static str,
     commit_hash: Option<String>,
@@ -51,6 +51,21 @@ struct RunOutcome {
     remote_head: Option<String>,
     staged: Vec<String>,
     error: Option<String>,
+    codex_command: Option<String>,
+    codex_exit_code: Option<i32>,
+    dom_test_runner_executed: bool,
+    commit_created: bool,
+    push_attempted: bool,
+    worktree_created: bool,
+}
+
+impl RunOutcome {
+    fn fail() -> Self {
+        Self {
+            final_status: "FAIL",
+            ..Self::default()
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -166,13 +181,68 @@ fn run(
     write_text(&paths.staged_files, git_staged_files(&root)?)?;
     let initial_head = git_head(&root)?;
 
-    let mut outcome = RunOutcome::default();
+    let mut outcome = RunOutcome::fail();
+    write_run_report(
+        &paths,
+        &prompt,
+        &root,
+        &initial_head,
+        &outcome,
+        &[],
+        "STARTED",
+    )?;
     let run_result: Result<(RunOutcome, Vec<String>)> = (|| {
         let worktree = create_isolated_worktree(&root, &paths)?;
+        outcome.worktree_created = true;
+        outcome.codex_command = Some(dom_agent_runner::codex_command(&worktree)?.display());
+        write_run_report(
+            &paths,
+            &prompt,
+            &root,
+            &initial_head,
+            &outcome,
+            &[],
+            "RUNNING",
+        )?;
         let codex_output = run_codex(&worktree, &prompt, &paths.codex_log)?;
+        outcome.codex_exit_code = codex_output.status.code();
         let codex_ok = codex_output.status.success();
+        if !codex_ok {
+            return Ok((
+                RunOutcome {
+                    error: Some(format!(
+                        "codex failed with exit code {}; see {}",
+                        codex_output
+                            .status
+                            .code()
+                            .map(|code| code.to_string())
+                            .unwrap_or_else(|| "unknown".into()),
+                        paths.codex_log.display()
+                    )),
+                    ..outcome.clone()
+                },
+                Vec::new(),
+            ));
+        }
 
         let test_runner = build_or_verify_test_runner(&worktree)?;
+        outcome.dom_test_runner_executed = true;
+        write_text(
+            &paths.test_log,
+            format!(
+                "dom-test-runner: {}\nstatus: started\n",
+                test_runner.display()
+            ),
+        )?;
+        write_run_report(
+            &paths,
+            &prompt,
+            &root,
+            &initial_head,
+            &outcome,
+            &[],
+            "RUNNING_TESTS",
+        )?;
         let test_output = if profile == "pre-push" {
             let selection = selected_profiles_for_changed_files(&changed_files(&worktree)?);
             let steps = perform_pre_push_steps(&worktree, &selection)?;
@@ -215,11 +285,8 @@ fn run(
             .filter(|line| !line.is_empty())
             .collect();
 
-        let mut local_outcome = RunOutcome {
-            final_status: "FAIL",
-            ..RunOutcome::default()
-        };
-        if codex_ok && test_output.final_status == StepStatus::Pass {
+        let mut local_outcome = outcome.clone();
+        if test_output.final_status == StepStatus::Pass {
             local_outcome.staged = stage_files(&worktree, &changed_list)?;
             write_text(&paths.staged_files, local_outcome.staged.join("\n"))?;
             if local_outcome.staged.is_empty() {
@@ -236,7 +303,9 @@ fn run(
                 )?;
                 if commit_output.status.success() {
                     local_outcome.commit_hash = Some(git_head(&worktree)?);
+                    local_outcome.commit_created = true;
                     if push {
+                        local_outcome.push_attempted = true;
                         let push_output = Command::new("git")
                             .args(["push", "origin", "main"])
                             .current_dir(&worktree)
@@ -266,8 +335,6 @@ fn run(
                         Some(dom_agent_runner::command_output_text(&commit_output));
                 }
             }
-        } else if !codex_ok {
-            local_outcome.error = Some("codex failed".into());
         } else {
             local_outcome.error = Some("tests failed".into());
         }
@@ -281,35 +348,52 @@ fn run(
         Ok((local_outcome, tests_run))
     })();
 
-    let mut changed_list: Vec<String> = Vec::new();
     let tests_run = match run_result {
         Ok((outcome_result, tests)) => {
             outcome = outcome_result;
-            changed_list = changed_list_or_empty(&paths.changed_files)?;
             tests
         }
         Err(err) => {
             outcome.error = Some(err.to_string());
+            if paths.worktree_dir.exists() {
+                outcome.worktree_created = true;
+                if outcome.codex_command.is_none() {
+                    if let Ok(command) = dom_agent_runner::codex_command(&paths.worktree_dir) {
+                        outcome.codex_command = Some(command.display());
+                    }
+                }
+            }
             Vec::new()
         }
     };
 
-    write_final_report(
+    write_run_report(
         &paths,
         &prompt,
+        &root,
         &initial_head,
-        outcome.commit_hash.as_deref(),
-        outcome.remote_head.as_deref(),
-        &changed_list,
-        &outcome.staged,
+        &outcome,
         &tests_run,
         outcome.final_status,
-        outcome.commit_hash.as_deref(),
-        outcome.push_status.as_deref(),
-        outcome.error.as_deref(),
     )?;
 
-    println!("Run complete: {}", paths.final_report.display());
+    if outcome.final_status == "PASS" {
+        println!("Run complete: {}", paths.final_report.display());
+    } else {
+        println!("Run failed: {}", paths.final_report.display());
+        if let Some(error) = &outcome.error {
+            println!("Error: {error}");
+        }
+        if outcome.codex_exit_code.is_some() || paths.codex_log.exists() {
+            println!("Codex output: {}", paths.codex_log.display());
+        }
+        if outcome.worktree_created && !outcome.commit_created {
+            println!(
+                "Run failed before commit. Worktree preserved for inspection at: {}",
+                paths.worktree_dir.display()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -323,4 +407,36 @@ fn changed_list_or_empty(path: &PathBuf) -> Result<Vec<String>> {
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
         .collect())
+}
+
+fn write_run_report(
+    paths: &dom_agent_runner::RunPaths,
+    prompt: &PromptInput,
+    root: &std::path::Path,
+    initial_head: &str,
+    outcome: &RunOutcome,
+    tests_run: &[String],
+    status: &str,
+) -> Result<()> {
+    let changed_list = changed_list_or_empty(&paths.changed_files)?;
+    write_final_report(
+        paths,
+        prompt,
+        root,
+        initial_head,
+        outcome.commit_hash.as_deref(),
+        outcome.remote_head.as_deref(),
+        &changed_list,
+        &outcome.staged,
+        tests_run,
+        outcome.codex_command.as_deref(),
+        outcome.codex_exit_code,
+        outcome.dom_test_runner_executed,
+        status,
+        outcome.commit_hash.as_deref(),
+        outcome.commit_created,
+        outcome.push_attempted,
+        outcome.push_status.as_deref(),
+        outcome.error.as_deref(),
+    )
 }
