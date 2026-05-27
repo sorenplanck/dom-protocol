@@ -97,6 +97,7 @@ pub const DB_CHAIN_TIP: &str = "chain_tip";
 pub const DB_UTXOS: &str = "utxos";
 pub const DB_KERNEL_INDEX: &str = "kernel_index";
 pub const DB_PEER_ADDRS: &str = "peer_addrs";
+pub const DB_METADATA: &str = "metadata";
 
 /// The DOM storage engine.
 pub struct DomStore {
@@ -116,6 +117,8 @@ pub struct DomStore {
     pub db_kernels: Database,
     /// peer_addrs: addr_str → last_seen_u64
     pub db_peers: Database,
+    /// metadata: arbitrary bounded node/runtime metadata keyed by stable bytes
+    pub db_metadata: Database,
 }
 
 impl DomStore {
@@ -156,8 +159,50 @@ impl DomStore {
             db_utxos: open_db(DB_UTXOS)?,
             db_kernels: open_db(DB_KERNEL_INDEX)?,
             db_peers: open_db(DB_PEER_ADDRS)?,
+            db_metadata: open_db(DB_METADATA)?,
             env,
         })
+    }
+
+    /// Read a metadata value by stable key.
+    pub fn get_metadata(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DomError> {
+        let txn = self
+            .env
+            .begin_ro_txn()
+            .map_err(|e| DomError::Internal(format!("ro txn: {e}")))?;
+        match txn.get(self.db_metadata, &key) {
+            Ok(bytes) => Ok(Some(bytes.to_vec())),
+            Err(lmdb::Error::NotFound) => Ok(None),
+            Err(e) => Err(DomError::Internal(format!("get metadata: {e}"))),
+        }
+    }
+
+    /// Upsert a metadata value by stable key.
+    pub fn put_metadata(&self, key: &[u8], value: &[u8]) -> Result<(), DomError> {
+        let mut txn = self
+            .env
+            .begin_rw_txn()
+            .map_err(|e| DomError::Internal(format!("rw txn: {e}")))?;
+        txn.put(self.db_metadata, &key, &value, WriteFlags::empty())
+            .map_err(|e| DomError::Internal(format!("put metadata: {e}")))?;
+        txn.commit()
+            .map_err(|e| DomError::Internal(format!("commit metadata: {e}")))?;
+        Ok(())
+    }
+
+    /// Delete a metadata key if present.
+    pub fn delete_metadata(&self, key: &[u8]) -> Result<(), DomError> {
+        let mut txn = self
+            .env
+            .begin_rw_txn()
+            .map_err(|e| DomError::Internal(format!("rw txn: {e}")))?;
+        match txn.del(self.db_metadata, &key, None) {
+            Ok(()) | Err(lmdb::Error::NotFound) => {}
+            Err(e) => return Err(DomError::Internal(format!("delete metadata: {e}"))),
+        }
+        txn.commit()
+            .map_err(|e| DomError::Internal(format!("commit metadata delete: {e}")))?;
+        Ok(())
     }
 
     /// Get the current chain tip hash. Returns None if chain is empty.

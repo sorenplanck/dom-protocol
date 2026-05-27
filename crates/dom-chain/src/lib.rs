@@ -21,4 +21,6 @@ pub mod reorg;
 
 pub use chain_state::{ChainState, ConnectResult, CHAIN_CORRUPT_SENTINEL};
 pub use genesis::{build_genesis, build_mainnet_genesis, build_testnet_genesis, GenesisResult};
-pub use ibd::{IbdControl, IbdInterruption, IbdPhase, IbdState};
+pub use ibd::{
+    IbdControl, IbdInterruption, IbdPhase, IbdState, PersistedIbdState, IBD_SESSION_METADATA_KEY,
+};
