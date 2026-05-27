@@ -129,6 +129,8 @@ impl PersistedIbdState {
     pub fn is_round_resumable(&self) -> bool {
         self.block_cursor as usize <= self.pending_blocks.len()
             && self.header_cursor as usize <= self.pending_headers.len()
+            && (self.pending_blocks.is_empty() || self.header_cursor == 0)
+            && (self.pending_headers.is_empty() || self.block_cursor == 0)
     }
 }
 
@@ -797,6 +799,56 @@ mod tests {
         };
         let err = match IbdState::from_persisted(&snapshot) {
             Ok(_) => panic!("invalid header cursor must reject"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, DomError::PolicyRejected(_)));
+    }
+
+    #[test]
+    fn header_resume_snapshot_rejects_nonzero_block_cursor() {
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::HeaderSync,
+            peer_addr: "127.0.0.1:33369".into(),
+            start_height: 10,
+            best_peer_height: 25,
+            headers_height: 12,
+            blocks_height: 10,
+            last_progress_height: 10,
+            retry_attempts: 1,
+            last_interruption: Some(IbdInterruption::Timeout),
+            pending_blocks: vec![[0x44; 32]],
+            pending_headers: vec![vec![0xAA; 32]],
+            block_cursor: 1,
+            header_cursor: 0,
+            header_cursor_height: 20,
+        };
+        let err = match IbdState::from_persisted(&snapshot) {
+            Ok(_) => panic!("ambiguous mixed cursor state must reject"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, DomError::PolicyRejected(_)));
+    }
+
+    #[test]
+    fn block_resume_snapshot_rejects_nonzero_header_cursor() {
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::BlockSync,
+            peer_addr: "127.0.0.1:33369".into(),
+            start_height: 10,
+            best_peer_height: 25,
+            headers_height: 20,
+            blocks_height: 12,
+            last_progress_height: 12,
+            retry_attempts: 1,
+            last_interruption: Some(IbdInterruption::Timeout),
+            pending_blocks: vec![[0x44; 32]],
+            pending_headers: vec![vec![0xAA; 32]],
+            block_cursor: 0,
+            header_cursor: 1,
+            header_cursor_height: 20,
+        };
+        let err = match IbdState::from_persisted(&snapshot) {
+            Ok(_) => panic!("ambiguous mixed cursor state must reject"),
             Err(err) => err,
         };
         assert!(matches!(err, DomError::PolicyRejected(_)));
