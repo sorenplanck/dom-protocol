@@ -1470,7 +1470,7 @@ async fn persist_peer_rotation_state(
 
 pub(crate) fn load_or_create_noise_static_key(store: &DomStore) -> Result<[u8; 32], DomError> {
     match store.get_metadata(NOISE_STATIC_KEY_METADATA_KEY)? {
-        Some(bytes) => parse_persisted_noise_static_key(store, &bytes),
+        Some(bytes) => parse_persisted_noise_static_key(&bytes),
         None => {
             let (privkey, _) = dom_wire::handshake::generate_static_keypair();
             store.put_metadata(NOISE_STATIC_KEY_METADATA_KEY, &privkey)?;
@@ -1479,16 +1479,12 @@ pub(crate) fn load_or_create_noise_static_key(store: &DomStore) -> Result<[u8; 3
     }
 }
 
-fn parse_persisted_noise_static_key(store: &DomStore, bytes: &[u8]) -> Result<[u8; 32], DomError> {
+fn parse_persisted_noise_static_key(bytes: &[u8]) -> Result<[u8; 32], DomError> {
     if bytes.len() != 32 {
-        warn!(
-            "Clearing invalid persisted Noise static key: expected 32 bytes, got {}",
+        return Err(DomError::Invalid(format!(
+            "persisted Noise static key has invalid length: expected 32 bytes, got {}",
             bytes.len()
-        );
-        store.delete_metadata(NOISE_STATIC_KEY_METADATA_KEY)?;
-        let (privkey, _) = dom_wire::handshake::generate_static_keypair();
-        store.put_metadata(NOISE_STATIC_KEY_METADATA_KEY, &privkey)?;
-        return Ok(privkey);
+        )));
     }
 
     let mut privkey = [0u8; 32];
@@ -1496,10 +1492,11 @@ fn parse_persisted_noise_static_key(store: &DomStore, bytes: &[u8]) -> Result<[u
     let mut normalized = privkey;
     dom_wire::handshake::clamp_static_privkey(&mut normalized);
     if normalized != privkey {
-        warn!("Normalizing persisted Noise static key to canonical clamped form");
-        store.put_metadata(NOISE_STATIC_KEY_METADATA_KEY, &normalized)?;
+        return Err(DomError::Invalid(
+            "persisted Noise static key is not in canonical clamped form".into(),
+        ));
     }
-    Ok(normalized)
+    Ok(privkey)
 }
 
 async fn record_duplicate_block_relay(
@@ -2834,10 +2831,11 @@ mod tests {
     use super::{
         continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
         decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
-        load_or_create_noise_static_key, peer_violation_score, pending_peer_violation_score,
-        purge_mempool_confirmed_inputs, reconcile_mempool_after_connect, refresh_peer_metrics,
-        relay_block_action, tx_hash, DeferredReplayAction, DomNode, IbdRoundState,
-        OutboundAttemptOutcome, RelayBlockAction,
+        load_or_create_noise_static_key, parse_persisted_noise_static_key, peer_violation_score,
+        pending_peer_violation_score, purge_mempool_confirmed_inputs,
+        reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action, tx_hash,
+        DeferredReplayAction, DomNode, IbdRoundState, OutboundAttemptOutcome, RelayBlockAction,
+        NOISE_STATIC_KEY_METADATA_KEY,
     };
     use crate::metrics::Metrics;
     use dom_chain::{
@@ -3172,6 +3170,71 @@ mod tests {
             "derived public identity must survive restart"
         );
         fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn malformed_persisted_noise_key_is_rejected_without_replacement() {
+        let dir = fresh_test_dir("noise-key-corrupt");
+        let store = DomStore::open(&dir).expect("store open");
+        store
+            .put_metadata(NOISE_STATIC_KEY_METADATA_KEY, b"corrupt")
+            .expect("write corrupt metadata");
+
+        let err = load_or_create_noise_static_key(&store).expect_err("corrupt key should fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("invalid length"),
+            "unexpected error message: {message}"
+        );
+        assert_eq!(
+            store
+                .get_metadata(NOISE_STATIC_KEY_METADATA_KEY)
+                .expect("reload metadata")
+                .expect("metadata present"),
+            b"corrupt"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn malformed_persisted_noise_key_aborts_node_init() {
+        let dir = fresh_test_dir("noise-node-corrupt");
+        let store = DomStore::open(&dir).expect("store open");
+        store
+            .put_metadata(NOISE_STATIC_KEY_METADATA_KEY, b"corrupt")
+            .expect("write corrupt metadata");
+        drop(store);
+
+        let err = match DomNode::init(regtest_node_config(&dir)) {
+            Ok(_) => panic!("init should fail"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("persisted Noise static key"),
+            "unexpected error message: {message}"
+        );
+
+        let reopened = DomStore::open(&dir).expect("store reopen");
+        assert_eq!(
+            reopened
+                .get_metadata(NOISE_STATIC_KEY_METADATA_KEY)
+                .expect("reload metadata")
+                .expect("metadata present"),
+            b"corrupt"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn unclamped_persisted_noise_key_is_rejected() {
+        let raw = [0xff; 32];
+        let err = parse_persisted_noise_static_key(&raw).expect_err("unclamped key should fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("canonical clamped form"),
+            "unexpected error message: {message}"
+        );
     }
 
     #[test]
