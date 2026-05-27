@@ -218,6 +218,19 @@ impl Wallet {
         self.pending_txs.contains_key(tx_hash)
     }
 
+    /// Borrow the canonical bytes of a pending transaction, if this
+    /// wallet retained them for rebroadcast/recovery.
+    pub fn pending_tx_bytes(&self, tx_hash: &[u8; 32]) -> Option<&[u8]> {
+        self.pending_txs.get(tx_hash).and_then(|pending| {
+            (!pending.tx_bytes.is_empty()).then_some(pending.tx_bytes.as_slice())
+        })
+    }
+
+    /// Iterate over the hashes of currently pending transactions.
+    pub fn pending_tx_hashes(&self) -> impl Iterator<Item = [u8; 32]> + '_ {
+        self.pending_txs.keys().copied()
+    }
+
     /// Append one event to the journal if one is attached. No-op
     /// otherwise. Errors are logged but do NOT propagate — the
     /// journal is best-effort: in-memory state still mutates so the
@@ -380,6 +393,7 @@ impl Wallet {
                             PendingTx {
                                 tx_hash: *tx_hash,
                                 inputs,
+                                tx_bytes: record.tx_bytes.clone(),
                             },
                         );
                     }
@@ -527,6 +541,7 @@ impl Wallet {
                 PendingTx {
                     tx_hash: record.tx_hash,
                     inputs: record.inputs.clone(),
+                    tx_bytes: record.tx_bytes.clone(),
                 },
             );
         }
@@ -859,6 +874,7 @@ impl Wallet {
             tx_hash,
             TxJournalEvent::Built {
                 inputs: selected_commitments.clone(),
+                tx_hex: Some(hex::encode(tx.to_bytes()?)),
                 output_count: tx.outputs.len() as u32,
                 fee_noms: fee,
             },
@@ -875,6 +891,7 @@ impl Wallet {
             PendingTx {
                 tx_hash,
                 inputs: selected_commitments,
+                tx_bytes: tx.to_bytes()?,
             },
         );
 

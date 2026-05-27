@@ -239,6 +239,10 @@ pub struct PendingTx {
     /// Commitments of inputs being spent by this transaction.
     #[serde(with = "serde_commitment_vec")]
     pub inputs: Vec<[u8; 33]>,
+    /// Canonical transaction bytes for explicit rebroadcast after
+    /// restart. Legacy pending entries may not have this material.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tx_bytes: Vec<u8>,
 }
 
 /// Derive the wallet encryption key from a password and per-wallet salt.

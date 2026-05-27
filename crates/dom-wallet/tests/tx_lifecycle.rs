@@ -169,6 +169,26 @@ fn mark_failed_writes_failed_event() {
     );
 }
 
+#[test]
+fn pending_tx_bytes_persist_across_reopen() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path().join("w");
+    let mut wd = WalletDir::create(&dir, "pw", Network::Mainnet, &test_genesis()).unwrap();
+    wd.wallet_mut().add_output(make_output(900, 100, false));
+
+    let tx = build_test_spend(wd.wallet_mut());
+    let tx_hash = Wallet::tracking_tx_hash(&tx).unwrap();
+    let original_bytes = tx.to_bytes().unwrap();
+    drop(wd);
+
+    let reopened = WalletDir::open(&dir, "pw").unwrap();
+    let recovered = reopened
+        .wallet()
+        .pending_tx_bytes(&tx_hash)
+        .expect("pending tx bytes must survive reopen");
+    assert_eq!(recovered, original_bytes.as_slice());
+}
+
 // ─────────────────────────────────────────────────────────────────
 // 4. Confirming the same tx twice is idempotent.
 //
@@ -313,12 +333,14 @@ fn reconcile_on_open_reinstates_lost_pending() {
     // input. Use a fabricated tx_hash — what matters is that the
     // input commitment matches a wallet-owned output.
     let fake_tx_hash = [0xABu8; 32];
+    let tx_bytes = vec![0xAA, 0xBB, 0xCC];
     let j = TxJournal::open(&dir).unwrap();
     j.append(&JournalEntry {
         timestamp: 1,
         tx_hash: fake_tx_hash,
         event: TxJournalEvent::Built {
             inputs: vec![input_commitment],
+            tx_hex: Some(hex::encode(&tx_bytes)),
             output_count: 1,
             fee_noms: 42,
         },
@@ -341,6 +363,10 @@ fn reconcile_on_open_reinstates_lost_pending() {
         "reinstated tx must re-reserve its inputs"
     );
     assert!(!input.spent);
+    assert_eq!(
+        reopened.wallet().pending_tx_bytes(&fake_tx_hash).unwrap(),
+        tx_bytes.as_slice()
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -365,6 +391,7 @@ fn reconcile_on_open_skips_reinstate_when_inputs_missing() {
         tx_hash: fake_tx_hash,
         event: TxJournalEvent::Built {
             inputs: vec![phantom_input],
+            tx_hex: None,
             output_count: 1,
             fee_noms: 1,
         },

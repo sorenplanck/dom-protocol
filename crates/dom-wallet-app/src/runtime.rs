@@ -4,10 +4,11 @@ use dom_core::Address;
 use dom_core::{Hash256, GENESIS_HASH_MAINNET, GENESIS_HASH_REGTEST, GENESIS_HASH_TESTNET};
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::BlindingFactor;
+use dom_serialization::DomDeserialize;
 use dom_wallet::{
     Bip39Seed, Network, NodeRpc, NodeRpcClient, NodeStatus, ReceiveRequestDescriptor,
-    ReceiveRequestStatus, RpcClientError, SeedAcceptance, TxStatus, Wallet, WalletBalance,
-    WalletDir,
+    ReceiveRequestStatus, RpcClientError, SeedAcceptance, Transaction, TxStatus, Wallet,
+    WalletBalance, WalletDir,
 };
 use std::path::{Path, PathBuf};
 use url::Url;
@@ -32,6 +33,9 @@ pub struct HistoryRow {
     pub timestamp: u64,
     pub tx_hash_hex: String,
     pub status: String,
+    pub warning: Option<String>,
+    pub can_cancel: bool,
+    pub can_rebroadcast: bool,
 }
 
 #[derive(Clone)]
@@ -195,7 +199,12 @@ impl AppRuntime {
             .map(|s| s.chain_height)
             .unwrap_or(0);
         self.wallet_balance = Some(session.wallet_dir.wallet().balance(current_height));
-        self.history = journal_rows(session.wallet_dir.path());
+        let rpc_client = node_client(&self.persisted.node_url).ok();
+        self.history = journal_rows(
+            session.wallet_dir.path(),
+            session.wallet_dir.wallet(),
+            rpc_client.as_ref(),
+        );
         match session.wallet_dir.wallet().receive_descriptors() {
             Ok(rows) => {
                 let network = session.wallet_dir.wallet().network();
@@ -334,9 +343,78 @@ impl AppRuntime {
         self.refresh_wallet_view();
         Ok(tx_hash)
     }
+
+    pub fn cancel_transaction(&mut self, tx_hash_hex: &str) -> anyhow::Result<()> {
+        let tx_hash = parse_hash_hex(tx_hash_hex)?;
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("wallet is not unlocked"))?;
+        session.wallet_dir.wallet_mut().cancel_tx(tx_hash)?;
+        self.refresh_wallet_view();
+        Ok(())
+    }
+
+    pub fn rebroadcast_transaction(&mut self, tx_hash_hex_str: &str) -> anyhow::Result<()> {
+        let tx_hash = parse_hash_hex(tx_hash_hex_str)?;
+        let client = node_client(&self.persisted.node_url)?;
+        let tx = {
+            let session = self
+                .session
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("wallet is not unlocked"))?;
+            let tx_bytes = session
+                .wallet_dir
+                .wallet()
+                .pending_tx_bytes(&tx_hash)
+                .ok_or_else(|| anyhow::anyhow!("pending transaction bytes unavailable"))?;
+            Transaction::from_bytes(tx_bytes)
+                .map_err(|e| anyhow::anyhow!("decode pending transaction bytes: {e}"))?
+        };
+
+        match client.submit_tx(&tx) {
+            Ok(_) | Err(RpcClientError::NodeRejected { status: 409, .. }) => {
+                let session = self
+                    .session
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("wallet is not unlocked"))?;
+                session.wallet_dir.wallet_mut().mark_submitted(tx_hash)?;
+            }
+            Err(RpcClientError::NodeRejected { reason, .. }) => {
+                let session = self
+                    .session
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("wallet is not unlocked"))?;
+                session
+                    .wallet_dir
+                    .wallet_mut()
+                    .mark_failed(tx_hash, reason.clone())?;
+                self.refresh_wallet_view();
+                return Err(anyhow::anyhow!(
+                    "rebroadcast rejected for {}: {}",
+                    tx_hash_hex(tx_hash),
+                    reason
+                ));
+            }
+            Err(err) => {
+                self.refresh_wallet_view();
+                return Err(anyhow::anyhow!(
+                    "rebroadcast outcome for {} is unknown: {err}",
+                    tx_hash_hex(tx_hash)
+                ));
+            }
+        }
+
+        self.refresh_wallet_view();
+        Ok(())
+    }
 }
 
-fn journal_rows(wallet_dir: &Path) -> Vec<HistoryRow> {
+fn journal_rows(
+    wallet_dir: &Path,
+    wallet: &Wallet,
+    rpc: Option<&NodeRpcClient>,
+) -> Vec<HistoryRow> {
     let Ok(journal) = dom_wallet::TxJournal::open(wallet_dir) else {
         return Vec::new();
     };
@@ -346,24 +424,68 @@ fn journal_rows(wallet_dir: &Path) -> Vec<HistoryRow> {
 
     let mut rows: Vec<_> = records
         .into_iter()
-        .map(|(tx_hash, record)| HistoryRow {
-            timestamp: record.last_updated_at,
-            tx_hash_hex: hex::encode(tx_hash),
-            status: format_tx_status(&record.status),
-        })
+        .map(|(tx_hash, record)| history_row(wallet, rpc, tx_hash, record))
         .collect();
     rows.sort_by_key(|row| std::cmp::Reverse(row.timestamp));
     rows
 }
 
-fn format_tx_status(status: &TxStatus) -> String {
-    match status {
-        TxStatus::Building => "building".to_string(),
-        TxStatus::Submitted => "submitted".to_string(),
-        TxStatus::Confirmed { block_height } => format!("confirmed @ {block_height}"),
-        TxStatus::Failed { reason } => format!("failed: {reason}"),
-        TxStatus::Replaced { by_tx_hash } => format!("replaced by {}", hex::encode(by_tx_hash)),
-        TxStatus::Canceled => "canceled".to_string(),
+fn history_row(
+    wallet: &Wallet,
+    rpc: Option<&NodeRpcClient>,
+    tx_hash: [u8; 32],
+    record: dom_wallet::TxRecord,
+) -> HistoryRow {
+    let observed_in_mempool = rpc
+        .and_then(|client| client.mempool_tx(&tx_hash).ok().flatten())
+        .is_some();
+    let can_cancel = wallet.has_pending_tx(&tx_hash)
+        && matches!(
+            record.status,
+            TxStatus::Building | TxStatus::Submitted | TxStatus::Failed { .. }
+        );
+    let can_rebroadcast = wallet.pending_tx_bytes(&tx_hash).is_some()
+        && wallet.has_pending_tx(&tx_hash)
+        && matches!(
+            record.status,
+            TxStatus::Building | TxStatus::Submitted | TxStatus::Failed { .. }
+        );
+
+    let (status, warning) = match &record.status {
+        TxStatus::Building if observed_in_mempool => (
+            "observed".to_string(),
+            Some("journal says building, but node currently sees it in mempool".to_string()),
+        ),
+        TxStatus::Building => (
+            "building".to_string(),
+            Some("transaction not yet observed in mempool".to_string()),
+        ),
+        TxStatus::Submitted if observed_in_mempool => ("observed".to_string(), None),
+        TxStatus::Submitted => (
+            "submitted".to_string(),
+            Some("submitted earlier but not currently observed in mempool".to_string()),
+        ),
+        TxStatus::Confirmed { block_height } => (format!("confirmed @ {block_height}"), None),
+        TxStatus::Failed { reason } => (
+            "failed".to_string(),
+            Some(format!(
+                "{}; transaction remains reserved until explicit cancel or rebroadcast",
+                reason
+            )),
+        ),
+        TxStatus::Replaced { by_tx_hash } => {
+            (format!("replaced by {}", hex::encode(by_tx_hash)), None)
+        }
+        TxStatus::Canceled => ("canceled".to_string(), None),
+    };
+
+    HistoryRow {
+        timestamp: record.last_updated_at,
+        tx_hash_hex: hex::encode(tx_hash),
+        status,
+        warning,
+        can_cancel,
+        can_rebroadcast,
     }
 }
 
@@ -510,6 +632,14 @@ fn parse_blinding_hex(value: &str) -> anyhow::Result<BlindingFactor> {
 
 fn tx_hash_hex(tx_hash: [u8; 32]) -> String {
     hex::encode(tx_hash)
+}
+
+fn parse_hash_hex(value: &str) -> anyhow::Result<[u8; 32]> {
+    let bytes = hex::decode(value)?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| anyhow::anyhow!("tx hash must be 32 bytes, got {}", v.len()))?;
+    Ok(arr)
 }
 
 fn network_name(network: Network) -> &'static str {
