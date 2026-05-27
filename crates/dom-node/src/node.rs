@@ -99,6 +99,7 @@ const FUTURE_BLOCK_QUEUE_MAX_AGE_SECS: u64 = dom_core::MAX_FUTURE_BLOCK_TIME
 const HELLO_EXCHANGE_TIMEOUT_SECS: u64 = dom_wire::handshake::HANDSHAKE_TIMEOUT_SECS;
 const PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v2";
 const LEGACY_PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v1";
+const PEER_REPUTATION_METADATA_KEY: &[u8] = b"dom/peer_reputation_state/v1";
 const MEMPOOL_METADATA_KEY: &[u8] = b"dom/mempool_state/v1";
 const NOISE_STATIC_KEY_METADATA_KEY: &[u8] = b"dom/noise_static_key/v1";
 
@@ -207,6 +208,7 @@ impl DomNode {
 
         let mut peers = PeerManager::new(config.max_inbound, config.min_outbound);
         restore_peer_rotation_state(&chain.store, &mut peers)?;
+        restore_peer_reputation_state(&chain.store, &mut peers)?;
         let mempool = restore_mempool_state(&chain)?;
 
         let (block_relay_tx, _) = tokio::sync::broadcast::channel(64);
@@ -577,6 +579,7 @@ impl DomNode {
                     };
                     let peers = svc.peers.clone();
                     let metrics = svc.metrics.clone();
+                    let chain_for_persist = chain.clone();
                     tokio::spawn(async move {
                         handle_inbound(stream, peer_addr, config, privkey, chain, channels, svc)
                             .await;
@@ -585,6 +588,11 @@ impl DomNode {
                         mgr.remove_peer(&peer_key);
                         mgr.release_inbound_reservation(&peer_addr);
                         drop(mgr);
+                        if let Err(e) =
+                            persist_peer_reputation_state(&chain_for_persist, &peers).await
+                        {
+                            warn!("Persisting peer reputation state failed: {e}");
+                        }
                         refresh_peer_metrics(&peers, &metrics).await;
                     });
                 }
@@ -671,6 +679,11 @@ impl DomNode {
                             persist_peer_rotation_state(&chain_for_persist, &peers).await
                         {
                             warn!("Persisting peer rotation state failed: {e}");
+                        }
+                        if let Err(e) =
+                            persist_peer_reputation_state(&chain_for_persist, &peers).await
+                        {
+                            warn!("Persisting peer reputation state failed: {e}");
                         }
                         refresh_peer_metrics(&peers, &metrics).await;
                     });
@@ -826,7 +839,7 @@ async fn handle_inbound(
     {
         Ok(t) => t,
         Err(e) => {
-            let _ = record_pending_peer_violation(&svc.peers, addr, &e).await;
+            let _ = record_pending_peer_violation(&chain, &svc.peers, addr, &e).await;
             warn!("Handshake failed with {addr}: {e}");
             return;
         }
@@ -858,6 +871,9 @@ async fn handle_inbound(
             if let Err(e) = persist_peer_rotation_state(&chain, &svc.peers).await {
                 warn!("Persisting peer rotation state after inbound registration failed: {e}");
             }
+            if let Err(e) = persist_peer_reputation_state(&chain, &svc.peers).await {
+                warn!("Persisting peer reputation state after inbound registration failed: {e}");
+            }
             refresh_peer_metrics(&svc.peers, &svc.metrics).await;
             // IBD loop: if the inbound peer claims a higher chain, sync from it.
             // Mirrors connect_outbound logic so inbound-only nodes (behind NAT
@@ -879,7 +895,7 @@ async fn handle_inbound(
                 {
                     Ok(()) => {}
                     Err(e) => {
-                        let _ = record_peer_violation(&svc.peers, addr, &e).await;
+                        let _ = record_peer_violation(&chain, &svc.peers, addr, &e).await;
                         warn!("IBD with {addr} failed: {e}");
                         return;
                     }
@@ -906,7 +922,7 @@ async fn handle_inbound(
             }
         }
         Err(e) => {
-            let _ = record_pending_peer_violation(&svc.peers, addr, &e).await;
+            let _ = record_pending_peer_violation(&chain, &svc.peers, addr, &e).await;
             warn!("Hello exchange with {addr} failed: {e}")
         }
     }
@@ -950,7 +966,7 @@ async fn connect_outbound(
         Ok(t) => t,
         Err(e) => {
             if let Ok(peer_addr) = addr.parse() {
-                let _ = record_pending_peer_violation(&svc.peers, peer_addr, &e).await;
+                let _ = record_pending_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
             }
             warn!("Handshake failed with {addr}: {e}");
             return OutboundAttemptOutcome::RetryableFailure;
@@ -993,6 +1009,9 @@ async fn connect_outbound(
             if let Err(e) = persist_peer_rotation_state(&chain, &svc.peers).await {
                 warn!("Persisting peer rotation state after outbound registration failed: {e}");
             }
+            if let Err(e) = persist_peer_reputation_state(&chain, &svc.peers).await {
+                warn!("Persisting peer reputation state after outbound registration failed: {e}");
+            }
             refresh_peer_metrics(&svc.peers, &svc.metrics).await;
             let peer_addr = match stream.peer_addr() {
                 Ok(a) => a,
@@ -1019,7 +1038,7 @@ async fn connect_outbound(
                 {
                     Ok(()) => {}
                     Err(e) => {
-                        let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
+                        let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
                         warn!("IBD with {addr} failed: {e}");
                         return OutboundAttemptOutcome::RetryableFailure;
                     }
@@ -1058,7 +1077,7 @@ async fn connect_outbound(
                     }
                 },
             };
-            let _ = record_pending_peer_violation(&svc.peers, peer_addr, &e).await;
+            let _ = record_pending_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
             warn!("Hello exchange with {addr} failed: {e}");
             OutboundAttemptOutcome::RetryableFailure
         }
@@ -1209,6 +1228,7 @@ fn pending_peer_violation_score(error: &DomError) -> Option<u32> {
 }
 
 async fn record_peer_violation(
+    chain: &Arc<Mutex<ChainState>>,
     peers: &Arc<Mutex<PeerManager>>,
     peer_addr: std::net::SocketAddr,
     error: &DomError,
@@ -1222,6 +1242,9 @@ async fn record_peer_violation(
         let mut mgr = peers.lock().await;
         mgr.add_ban_score(&peer_key, score)
     };
+    if let Err(e) = persist_peer_reputation_state(chain, peers).await {
+        warn!("Persisting peer reputation state failed: {e}");
+    }
 
     if banned {
         warn!("Peer {peer_addr} banned after protocol violation: {error}");
@@ -1233,6 +1256,7 @@ async fn record_peer_violation(
 }
 
 async fn record_pending_peer_violation(
+    chain: &Arc<Mutex<ChainState>>,
     peers: &Arc<Mutex<PeerManager>>,
     peer_addr: std::net::SocketAddr,
     error: &DomError,
@@ -1246,6 +1270,9 @@ async fn record_pending_peer_violation(
         let mut mgr = peers.lock().await;
         mgr.add_pending_ban_score(&peer_key, score) >= dom_wire::peer::ban_scores::BAN_THRESHOLD
     };
+    if let Err(e) = persist_peer_reputation_state(chain, peers).await {
+        warn!("Persisting peer reputation state failed: {e}");
+    }
 
     if banned {
         warn!("Pending peer {peer_addr} banned after pre-registration violation: {error}");
@@ -1479,6 +1506,18 @@ pub(crate) fn persist_peer_rotation_snapshot(
     store.delete_metadata(LEGACY_PEER_ROTATION_METADATA_KEY)
 }
 
+pub(crate) fn persist_peer_reputation_snapshot(
+    store: &DomStore,
+    snapshot: &dom_wire::manager::PersistedPeerReputationState,
+) -> Result<(), DomError> {
+    use dom_serialization::DomSerialize;
+
+    if snapshot.entries.is_empty() {
+        return store.delete_metadata(PEER_REPUTATION_METADATA_KEY);
+    }
+    store.put_metadata(PEER_REPUTATION_METADATA_KEY, &snapshot.to_bytes()?)
+}
+
 pub(crate) fn load_peer_rotation_snapshot(
     store: &DomStore,
 ) -> Result<Option<dom_wire::manager::PersistedPeerRotationState>, DomError> {
@@ -1505,6 +1544,23 @@ pub(crate) fn load_peer_rotation_snapshot(
             }
             None => Ok(None),
         },
+    }
+}
+
+pub(crate) fn load_peer_reputation_snapshot(
+    store: &DomStore,
+) -> Result<Option<dom_wire::manager::PersistedPeerReputationState>, DomError> {
+    use dom_serialization::DomDeserialize;
+
+    match store.get_metadata(PEER_REPUTATION_METADATA_KEY)? {
+        Some(bytes) => {
+            let snapshot = dom_wire::manager::PersistedPeerReputationState::from_bytes(&bytes)
+                .map_err(|e| {
+                    DomError::Invalid(format!("peer reputation snapshot decode failed: {e}"))
+                })?;
+            Ok(Some(snapshot))
+        }
+        None => Ok(None),
     }
 }
 
@@ -1549,6 +1605,20 @@ pub(crate) fn restore_peer_rotation_state(
     }
 }
 
+pub(crate) fn restore_peer_reputation_state(
+    store: &DomStore,
+    peers: &mut PeerManager,
+) -> Result<(), DomError> {
+    match load_peer_reputation_snapshot(store)? {
+        Some(snapshot) => peers.restore_peer_reputation_state(&snapshot).map_err(|e| {
+            DomError::Invalid(format!(
+                "persisted peer reputation state restore failed: {e}"
+            ))
+        }),
+        None => Ok(()),
+    }
+}
+
 async fn persist_peer_rotation_state(
     chain: &Arc<Mutex<ChainState>>,
     peers: &Arc<Mutex<PeerManager>>,
@@ -1559,6 +1629,18 @@ async fn persist_peer_rotation_state(
     };
     let chain = chain.lock().await;
     persist_peer_rotation_snapshot(&chain.store, &snapshot)
+}
+
+async fn persist_peer_reputation_state(
+    chain: &Arc<Mutex<ChainState>>,
+    peers: &Arc<Mutex<PeerManager>>,
+) -> Result<(), DomError> {
+    let snapshot = {
+        let peers = peers.lock().await;
+        peers.peer_reputation_state()
+    };
+    let chain = chain.lock().await;
+    persist_peer_reputation_snapshot(&chain.store, &snapshot)
 }
 
 async fn persist_mempool_state(
@@ -2681,7 +2763,7 @@ async fn message_loop(
                 let msg = match recv {
                     Ok(msg) => msg,
                     Err(e) => {
-                        let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
+                        let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
                         return Err(e);
                     }
                 };
@@ -2703,14 +2785,15 @@ async fn message_loop(
                         let err = DomError::Invalid(
                             "unexpected Hello in message loop [ban+20]".into(),
                         );
-                        let _ = record_peer_violation(&svc.peers, peer_addr, &err).await;
+                        let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &err).await;
                         return Err(err);
                     }
                     Command::GetHeaders => {
                         let req = match GetHeadersPayload::from_bytes(&msg.payload) {
                             Ok(req) => req,
                             Err(e) => {
-                                let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
+                                let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e)
+                                    .await;
                                 return Err(e);
                             }
                         };
@@ -2731,7 +2814,8 @@ async fn message_loop(
                                 svc.metrics
                                     .malformed_block_relays
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
+                                let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e)
+                                    .await;
                                 return Err(e);
                             }
                         };
@@ -2839,7 +2923,9 @@ async fn message_loop(
                                                 .malformed_block_relays
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                         }
-                                        let banned = record_peer_violation(&svc.peers, peer_addr, &e).await;
+                                        let banned =
+                                            record_peer_violation(&chain, &svc.peers, peer_addr, &e)
+                                                .await;
                                         tracing::warn!("Rejected block from {peer_addr}: {e}");
                                         if banned {
                                             return Err(e);
@@ -2947,7 +3033,8 @@ async fn message_loop(
                                     }
                                 } else if let Err(e) = accepted {
                                     let banned =
-                                        record_peer_violation(&svc.peers, peer_addr, &e).await;
+                                        record_peer_violation(&chain, &svc.peers, peer_addr, &e)
+                                            .await;
                                     tracing::debug!(
                                         "Rejected relayed tx {} from {peer_addr}: {e}",
                                         hex::encode(tx_hash)
@@ -2958,7 +3045,9 @@ async fn message_loop(
                                 }
                             }
                             Err(e) => {
-                                let banned = record_peer_violation(&svc.peers, peer_addr, &e).await;
+                                let banned =
+                                    record_peer_violation(&chain, &svc.peers, peer_addr, &e)
+                                        .await;
                                 tracing::debug!("Invalid tx from {peer_addr}: {e}");
                                 if banned {
                                     return Err(e);
@@ -2970,7 +3059,8 @@ async fn message_loop(
                         let req = match GetBlockDataPayload::from_bytes(&msg.payload) {
                             Ok(req) => req,
                             Err(e) => {
-                                let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
+                                let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e)
+                                    .await;
                                 return Err(e);
                             }
                         };
@@ -3004,12 +3094,13 @@ mod tests {
     use super::{
         continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
         decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
-        load_mempool_snapshot, load_or_create_noise_static_key, load_peer_rotation_snapshot,
-        parse_persisted_noise_static_key, peer_violation_score, pending_peer_violation_score,
-        persist_mempool_snapshot, purge_mempool_confirmed_inputs, reconcile_mempool_after_connect,
-        refresh_peer_metrics, relay_block_action, restore_peer_rotation_state, tx_hash,
-        DeferredReplayAction, DomNode, IbdRoundState, OutboundAttemptOutcome, RelayBlockAction,
-        LEGACY_PEER_ROTATION_METADATA_KEY, MEMPOOL_METADATA_KEY, NOISE_STATIC_KEY_METADATA_KEY,
+        load_mempool_snapshot, load_or_create_noise_static_key, load_peer_reputation_snapshot,
+        load_peer_rotation_snapshot, parse_persisted_noise_static_key, peer_violation_score,
+        pending_peer_violation_score, persist_mempool_snapshot, persist_peer_reputation_snapshot,
+        purge_mempool_confirmed_inputs, reconcile_mempool_after_connect, refresh_peer_metrics,
+        relay_block_action, restore_peer_rotation_state, tx_hash, DeferredReplayAction, DomNode,
+        IbdRoundState, OutboundAttemptOutcome, RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY,
+        MEMPOOL_METADATA_KEY, NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY,
         PEER_ROTATION_METADATA_KEY,
     };
     use crate::metrics::Metrics;
@@ -3032,7 +3123,7 @@ mod tests {
     use dom_serialization::DomSerialize;
     use dom_store::utxo::UtxoEntry;
     use dom_store::DomStore;
-    use dom_wire::manager::PeerManager;
+    use dom_wire::manager::{PeerManager, PersistedPeerReputationState};
     use dom_wire::message::BlockPayload;
     use dom_wire::peer::ban_scores;
     use dom_wire::peer::{PeerInfo, PeerState};
@@ -3525,6 +3616,150 @@ mod tests {
                 .expect("reload metadata")
                 .expect("metadata present"),
             b"invalid"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn missing_persisted_peer_reputation_starts_empty() {
+        let dir = fresh_test_dir("peer-reputation-empty");
+        let store = DomStore::open(&dir).expect("store open");
+        assert!(load_peer_reputation_snapshot(&store)
+            .expect("load peer reputation")
+            .is_none());
+
+        let node = DomNode::init(regtest_node_config(&dir)).expect("node init");
+        let peers = node.peers.try_lock().expect("peer lock");
+        assert_eq!(peers.pending_penalty_count(), 0);
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn peer_score_survives_restart_init() {
+        let dir = fresh_test_dir("peer-reputation-restart");
+        let store = DomStore::open(&dir).expect("store open");
+        let mut peers = PeerManager::new(125, 8);
+        let peer = PeerInfo::new("10.0.0.42:33369".parse().expect("peer addr"), false);
+        let addr = peer.addr.to_string();
+        peers.register_peer(peer).expect("register peer");
+        assert!(!peers.add_ban_score(&addr, 35));
+        persist_peer_reputation_snapshot(&store, &peers.peer_reputation_state())
+            .expect("persist peer reputation");
+        drop(store);
+
+        let node = DomNode::init(regtest_node_config(&dir)).expect("node init");
+        let peers = node.peers.try_lock().expect("peer lock");
+        assert_eq!(peers.pending_ban_score(&addr), 35);
+        assert_eq!(peers.ban_score(&addr), None);
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn banned_peer_remains_banned_after_restart() {
+        let dir = fresh_test_dir("peer-reputation-ban-restart");
+        let store = DomStore::open(&dir).expect("store open");
+        let mut peers = PeerManager::new(125, 8);
+        let addr = "10.0.0.43:33369";
+        assert_eq!(
+            peers.add_pending_ban_score(addr, ban_scores::BAN_THRESHOLD),
+            100
+        );
+        persist_peer_reputation_snapshot(&store, &peers.peer_reputation_state())
+            .expect("persist peer reputation");
+        drop(store);
+
+        let node = DomNode::init(regtest_node_config(&dir)).expect("node init");
+        let mut peers = node.peers.try_lock().expect("peer lock");
+        assert_eq!(peers.pending_ban_score(addr), ban_scores::BAN_THRESHOLD);
+        assert!(peers.reserve_outbound(addr).is_err());
+        assert!(
+            peers
+                .reserve_inbound(addr.parse().expect("peer addr"))
+                .is_err(),
+            "persisted ban should block later inbound retry"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn wrong_network_ban_score_survives_restart() {
+        let dir = fresh_test_dir("peer-reputation-wrong-network");
+        let store = DomStore::open(&dir).expect("store open");
+        let snapshot = PersistedPeerReputationState {
+            entries: vec![dom_wire::manager::PersistedPeerReputation {
+                addr: "10.0.0.44:33369".into(),
+                score: ban_scores::WRONG_CHAIN_ID,
+            }],
+        };
+        persist_peer_reputation_snapshot(&store, &snapshot).expect("persist peer reputation");
+        drop(store);
+
+        let node = DomNode::init(regtest_node_config(&dir)).expect("node init");
+        let peers = node.peers.try_lock().expect("peer lock");
+        assert_eq!(
+            peers.pending_ban_score("10.0.0.44:33369"),
+            ban_scores::WRONG_CHAIN_ID
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn invalid_persisted_peer_reputation_aborts_node_init_without_clearing_state() {
+        let dir = fresh_test_dir("peer-reputation-invalid");
+        let store = DomStore::open(&dir).expect("store open");
+        store
+            .put_metadata(PEER_REPUTATION_METADATA_KEY, b"invalid")
+            .expect("persist invalid peer reputation");
+        drop(store);
+
+        let err = match DomNode::init(regtest_node_config(&dir)) {
+            Ok(_) => panic!("invalid peer reputation should fail init"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("peer reputation"),
+            "unexpected error message: {message}"
+        );
+
+        let reopened = DomStore::open(&dir).expect("store reopen");
+        assert_eq!(
+            reopened
+                .get_metadata(PEER_REPUTATION_METADATA_KEY)
+                .expect("reload metadata")
+                .expect("metadata present"),
+            b"invalid"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn peer_reputation_persistence_remains_separate_from_noise_identity() {
+        let dir = fresh_test_dir("peer-reputation-separate-identity");
+        let store = DomStore::open(&dir).expect("store open");
+        let noise = load_or_create_noise_static_key(&store).expect("noise key");
+        let snapshot = PersistedPeerReputationState {
+            entries: vec![dom_wire::manager::PersistedPeerReputation {
+                addr: "10.0.0.45:33369".into(),
+                score: 20,
+            }],
+        };
+        persist_peer_reputation_snapshot(&store, &snapshot).expect("persist peer reputation");
+        drop(store);
+
+        let reopened = DomStore::open(&dir).expect("store reopen");
+        assert_eq!(
+            reopened
+                .get_metadata(NOISE_STATIC_KEY_METADATA_KEY)
+                .expect("noise metadata")
+                .expect("noise key present"),
+            noise.to_vec()
+        );
+        assert_eq!(
+            load_peer_reputation_snapshot(&reopened)
+                .expect("load peer reputation")
+                .expect("peer reputation present"),
+            snapshot
         );
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
