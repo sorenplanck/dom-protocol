@@ -39,18 +39,18 @@ pub struct MempoolEntry {
     pub received_at: u64,
 }
 
-/// Deterministic persisted mempool entry.
+/// Deterministic mempool snapshot entry used for explicit diagnostics/tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedMempoolEntry {
     /// Raw transaction.
     pub tx: Transaction,
     /// Canonical transaction hash.
     pub tx_hash: [u8; 32],
-    /// Original receive timestamp used for deterministic reopen.
+    /// Original receive timestamp carried only for explicit snapshot users.
     pub received_at: u64,
 }
 
-/// Bounded persisted mempool snapshot.
+/// Bounded mempool snapshot used for explicit diagnostics/tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PersistedMempoolState {
     /// Canonical hash-ordered mempool entries.
@@ -59,11 +59,10 @@ pub struct PersistedMempoolState {
 
 impl DomSerialize for PersistedMempoolState {
     fn serialize(&self, w: &mut Writer) -> Result<(), DomError> {
-        let len: u32 = self
-            .entries
-            .len()
-            .try_into()
-            .map_err(|_| DomError::Malformed("persisted mempool entry count exceeds u32".into()))?;
+        let len: u32 =
+            self.entries.len().try_into().map_err(|_| {
+                DomError::Malformed("persisted mempool entry count exceeds u32".into())
+            })?;
         w.write_u32(len);
         for entry in &self.entries {
             w.write_bytes(&entry.tx_hash);
@@ -301,7 +300,7 @@ impl Mempool {
         hashes
     }
 
-    /// Capture a canonical persisted snapshot of the accepted mempool set.
+    /// Capture a canonical snapshot of the accepted mempool set.
     pub fn snapshot(&self) -> PersistedMempoolState {
         let mut entries: Vec<PersistedMempoolEntry> = self
             .entries
@@ -316,7 +315,7 @@ impl Mempool {
         PersistedMempoolState { entries }
     }
 
-    /// Deterministically re-accept a batch of transactions after rollback or reopen.
+    /// Deterministically re-accept a batch of transactions after rollback.
     ///
     /// Transactions are sorted by hash before admission so the same batch
     /// produces the same reinjection order regardless of upstream iteration
@@ -334,8 +333,8 @@ impl Mempool {
             .collect()
     }
 
-    /// Deterministically re-accept a batch of transactions after rollback or
-    /// reopen while revalidating each entry against a caller-supplied
+    /// Deterministically re-accept a batch of transactions after rollback
+    /// while revalidating each entry against a caller-supplied
     /// canonical chain snapshot.
     pub fn reinject_batch_with_chain_view<F>(
         &mut self,
@@ -556,6 +555,14 @@ mod tests {
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0].tx_hash, hash_a);
         assert_eq!(selected[1].tx_hash, hash_b);
+        assert_eq!(
+            pool.select_for_block(MAX_BLOCK_WEIGHT)
+                .iter()
+                .map(|entry| entry.tx_hash)
+                .collect::<Vec<_>>(),
+            vec![hash_a, hash_b],
+            "repeated block selection must remain stable"
+        );
     }
 
     #[test]
@@ -674,7 +681,11 @@ mod tests {
         expected.sort_unstable();
         assert_eq!(decoded, snapshot);
         assert_eq!(
-            decoded.entries.iter().map(|entry| entry.tx_hash).collect::<Vec<_>>(),
+            decoded
+                .entries
+                .iter()
+                .map(|entry| entry.tx_hash)
+                .collect::<Vec<_>>(),
             expected
         );
     }
