@@ -7,12 +7,15 @@ use crate::store::{
     load_wallet as load_wallet_file, save_wallet as save_wallet_file, PendingTx,
     WalletKeychainState, WalletState,
 };
-use crate::types::{Network, OwnedOutput, WalletBalance, WalletError};
+use crate::types::{
+    Network, OwnedOutput, ReceiveRequest, ReceiveRequestDescriptor, ReceiveRequestStatus,
+    WalletBalance, WalletError,
+};
 use crate::unlock::{LockState, UnlockedSession};
 use dom_consensus::transaction::{
     CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionOutput,
 };
-use dom_core::{BlockHeight, KERNEL_FEAT_COINBASE};
+use dom_core::{Address, BlockHeight, KERNEL_FEAT_COINBASE};
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::{blake2b_256_tagged, BlindingFactor, Hash256};
 use dom_serialization::DomSerialize;
@@ -42,6 +45,7 @@ pub struct Wallet {
     chain_id: [u8; 32],
     outputs: OutputIndex,
     pending_txs: HashMap<[u8; 32], PendingTx>,
+    receive_requests: Vec<ReceiveRequest>,
     keychain: WalletKeychainState,
     file_path: Option<PathBuf>,
     /// In-memory unlocked session. `None` means the wallet is locked
@@ -82,6 +86,7 @@ impl Wallet {
             chain_id,
             outputs: Vec::new(),
             pending_txs: HashMap::new(),
+            receive_requests: Vec::new(),
             keychain: WalletKeychainState::legacy(),
         };
 
@@ -93,6 +98,7 @@ impl Wallet {
             chain_id,
             outputs: OutputIndex::new(),
             pending_txs: HashMap::new(),
+            receive_requests: Vec::new(),
             keychain: WalletKeychainState::legacy(),
             file_path: Some(path.to_path_buf()),
             session: Some(UnlockedSession::from_verified_password(
@@ -120,6 +126,7 @@ impl Wallet {
             chain_id,
             outputs: Vec::new(),
             pending_txs: HashMap::new(),
+            receive_requests: Vec::new(),
             keychain: WalletKeychainState::deterministic(*seed.seed_bytes(), seed.word_count()),
         };
 
@@ -130,6 +137,7 @@ impl Wallet {
             chain_id,
             outputs: OutputIndex::new(),
             pending_txs: HashMap::new(),
+            receive_requests: Vec::new(),
             keychain: WalletKeychainState::deterministic(*seed.seed_bytes(), seed.word_count()),
             file_path: Some(path.to_path_buf()),
             session: Some(UnlockedSession::from_verified_password(
@@ -155,6 +163,7 @@ impl Wallet {
             chain_id: state.chain_id,
             outputs,
             pending_txs: state.pending_txs,
+            receive_requests: state.receive_requests,
             keychain: state.keychain,
             file_path: Some(path.to_path_buf()),
             session: Some(UnlockedSession::from_verified_password(
@@ -179,6 +188,7 @@ impl Wallet {
             chain_id,
             outputs: OutputIndex::new(),
             pending_txs: HashMap::new(),
+            receive_requests: Vec::new(),
             keychain: WalletKeychainState::legacy(),
             file_path: None,
             session: Some(UnlockedSession::from_verified_password(String::new())),
@@ -651,6 +661,50 @@ impl Wallet {
         self.session.as_ref().ok_or(WalletError::Locked)
     }
 
+    fn deterministic_root(&self) -> Result<crate::hd_wallet::ExtendedPrivKey, WalletError> {
+        let seed_bytes = self
+            .keychain
+            .seed_bytes
+            .as_ref()
+            .ok_or_else(|| WalletError::Crypto("wallet has no deterministic seed".into()))?;
+        crate::hd_wallet::ExtendedPrivKey::from_seed(&seed_bytes[..])
+            .map_err(|e| WalletError::Crypto(format!("derive HD root: {e}")))
+    }
+
+    fn receive_blinding_for_index(&self, index: u32) -> Result<BlindingFactor, WalletError> {
+        let root = self.deterministic_root()?;
+        let blinding_z = seed::spend_output_blinding(&root, self.keychain.account, index)
+            .map_err(|e| WalletError::Crypto(format!("seed receive blinding: {e}")))?;
+        BlindingFactor::from_bytes(*blinding_z)
+            .map_err(|e| WalletError::Crypto(format!("blinding from bytes: {e}")))
+    }
+
+    fn receive_descriptor_for_request(
+        &self,
+        request: &ReceiveRequest,
+    ) -> Result<ReceiveRequestDescriptor, WalletError> {
+        let blinding = self.receive_blinding_for_index(request.index)?;
+        let commitment = Commitment::commit(request.amount, &blinding);
+        let commitment_bytes = *commitment.as_bytes();
+        if commitment_bytes != request.commitment {
+            return Err(WalletError::Io(format!(
+                "receive request index {} failed deterministic validation",
+                request.index
+            )));
+        }
+
+        let address = Address::new(commitment_bytes, matches!(self.network, Network::Mainnet));
+        Ok(ReceiveRequestDescriptor {
+            index: request.index,
+            amount: request.amount,
+            address: address.encode(),
+            commitment_hex: hex::encode(commitment_bytes),
+            blinding_hex: hex::encode(blinding.as_bytes()),
+            created_at: request.created_at,
+            status: request.status.clone(),
+        })
+    }
+
     fn coinbase_blinding_for_height(
         &self,
         height: BlockHeight,
@@ -702,6 +756,7 @@ impl Wallet {
                     chain_id: self.chain_id,
                     outputs,
                     pending_txs: self.pending_txs.clone(),
+                    receive_requests: self.receive_requests.clone(),
                     keychain: self.keychain.clone(),
                 };
                 save_wallet_file(path, &state, session.password())?;
@@ -1034,6 +1089,77 @@ impl Wallet {
     /// Iterate over all wallet-owned outputs.
     pub fn outputs(&self) -> impl Iterator<Item = &OwnedOutput> {
         self.outputs.iter()
+    }
+
+    /// Borrow the persisted deterministic receive requests.
+    pub fn receive_requests(&self) -> &[ReceiveRequest] {
+        &self.receive_requests
+    }
+
+    /// Reconstruct validated receive descriptors from encrypted seed
+    /// material and persisted request indexes.
+    pub fn receive_descriptors(&self) -> Result<Vec<ReceiveRequestDescriptor>, WalletError> {
+        self.receive_requests
+            .iter()
+            .map(|request| self.receive_descriptor_for_request(request))
+            .collect()
+    }
+
+    /// Create and persist a deterministic fixed-amount receive
+    /// request. This is the conservative V1 receive surface: the
+    /// request is exact-amount and includes a deterministic blinding
+    /// factor that the sender must use when building the output.
+    pub fn create_receive_request(
+        &mut self,
+        amount: u64,
+    ) -> Result<ReceiveRequestDescriptor, WalletError> {
+        let _ = self.session()?;
+        let index = self.keychain.next_receive_index;
+        let blinding = self.receive_blinding_for_index(index)?;
+        let commitment = Commitment::commit(amount, &blinding);
+        let commitment_bytes = *commitment.as_bytes();
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let request = ReceiveRequest {
+            index,
+            amount,
+            commitment: commitment_bytes,
+            created_at,
+            status: ReceiveRequestStatus::Pending,
+        };
+        self.receive_requests.push(request.clone());
+        self.keychain.next_receive_index = self.keychain.next_receive_index.saturating_add(1);
+        self.save()?;
+        self.receive_descriptor_for_request(&request)
+    }
+
+    /// Update one receive request from an explicit canonical-chain
+    /// observation. `None` means the commitment is absent from the
+    /// node's current UTXO set, which may represent "not yet
+    /// received" or a reorg rollback.
+    pub fn update_receive_request_status(
+        &mut self,
+        commitment: &[u8; 33],
+        observation: Option<ReceiveRequestStatus>,
+    ) -> Result<bool, WalletError> {
+        let Some(request) = self
+            .receive_requests
+            .iter_mut()
+            .find(|request| &request.commitment == commitment)
+        else {
+            return Err(WalletError::OutputNotFound(hex::encode(commitment)));
+        };
+
+        let next_status = observation.unwrap_or(ReceiveRequestStatus::Pending);
+        if request.status == next_status {
+            return Ok(false);
+        }
+
+        request.status = next_status;
+        self.save()?;
+        Ok(true)
     }
 
     /// Get the chain id.

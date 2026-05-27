@@ -48,7 +48,7 @@ mod serde_commitment_vec {
     }
 }
 
-use crate::types::{Network, OwnedOutput, WalletError};
+use crate::types::{Network, OwnedOutput, ReceiveRequest, WalletError};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand::RngCore;
@@ -172,6 +172,9 @@ pub struct WalletState {
     /// In-flight transactions awaiting confirmation.
     #[serde(with = "serde_pending_txs_map")]
     pub pending_txs: HashMap<[u8; 32], PendingTx>,
+    /// Deterministic fixed-amount receive requests.
+    #[serde(default)]
+    pub receive_requests: Vec<ReceiveRequest>,
     /// Deterministic wallet keychain metadata and encrypted seed material.
     #[serde(default)]
     pub keychain: WalletKeychainState,

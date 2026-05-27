@@ -64,14 +64,17 @@ pub use restore::{
 };
 pub use rpc_client::{
     BlockHeaderInfo, MempoolTxInfo as RpcMempoolTxInfo, NodeRpc, NodeRpcClient,
-    NodeRpcClientBuilder, NodeStatus, RpcClientError, TxSubmitOutcome, DEFAULT_CONNECT_TIMEOUT,
-    DEFAULT_REQUEST_TIMEOUT,
+    NodeRpcClientBuilder, NodeStatus, RpcClientError, TxSubmitOutcome, UtxoInfo,
+    DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT,
 };
 pub use seed::{
     coinbase_blinding, spend_output_blinding, Bip39Seed, SeedAcceptance, SeedError,
     NEW_WALLET_WORD_COUNT, SEED_BYTES,
 };
-pub use types::{Network, OwnedOutput, WalletBalance, WalletError};
+pub use types::{
+    Network, OwnedOutput, ReceiveRequest, ReceiveRequestDescriptor, ReceiveRequestStatus,
+    WalletBalance, WalletError,
+};
 pub use unlock::{derive_wallet_key, KdfParams, LockState, UnlockedSession, WalletKey};
 pub use wallet::Wallet;
 pub use wallet_dir::{

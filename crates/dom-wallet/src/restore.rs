@@ -338,6 +338,7 @@ pub fn restore_from_phrase<S: ChainScanSource>(
         chain_id,
         outputs: owned_outputs,
         pending_txs: std::collections::HashMap::new(),
+        receive_requests: Vec::new(),
         keychain: WalletKeychainState::deterministic(*seed.seed_bytes(), seed.word_count()),
     };
     let dat_path = target_dir.join(WALLET_DAT_NAME);
