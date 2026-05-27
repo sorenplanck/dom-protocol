@@ -65,6 +65,42 @@ const HEADER_SIZE: usize = 64;
 const SALT_SIZE: usize = 32;
 const NONCE_SIZE: usize = 12;
 
+mod serde_seed64_opt {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use zeroize::Zeroizing;
+
+    pub fn serialize<S>(
+        seed: &Option<Zeroizing<[u8; 64]>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match seed {
+            Some(bytes) => serializer.serialize_some(&bytes[..]),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Zeroizing<[u8; 64]>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: Option<Vec<u8>> = Option::deserialize(deserializer)?;
+        match bytes {
+            Some(bytes) => {
+                if bytes.len() != 64 {
+                    return Err(serde::de::Error::custom("seed bytes must be 64 bytes"));
+                }
+                let mut array = [0u8; 64];
+                array.copy_from_slice(&bytes);
+                Ok(Some(Zeroizing::new(array)))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
 /// Serializable wallet state (the encrypted payload).
 /// Custom serializer for HashMap<[u8; 32], PendingTx>
 /// JSON requires string keys, so we hex-encode the byte arrays.
@@ -136,6 +172,60 @@ pub struct WalletState {
     /// In-flight transactions awaiting confirmation.
     #[serde(with = "serde_pending_txs_map")]
     pub pending_txs: HashMap<[u8; 32], PendingTx>,
+    /// Deterministic wallet keychain metadata and encrypted seed material.
+    #[serde(default)]
+    pub keychain: WalletKeychainState,
+}
+
+/// Seed-backed deterministic keychain state.
+///
+/// The 64-byte BIP-39 seed bytes are only ever persisted inside the
+/// encrypted wallet payload. The normalized mnemonic phrase itself is
+/// never written to disk.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct WalletKeychainState {
+    /// BIP-39 seed bytes (64 bytes) when this is a deterministic wallet.
+    #[serde(
+        default,
+        with = "serde_seed64_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub seed_bytes: Option<Zeroizing<[u8; 64]>>,
+    /// Original mnemonic word count. New wallets MUST be 24.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_word_count: Option<u8>,
+    /// External-chain receive cursor reserved for future `receive`.
+    #[serde(default)]
+    pub next_receive_index: u32,
+    /// Change-chain cursor reserved for future deterministic change outputs.
+    #[serde(default)]
+    pub next_change_index: u32,
+    /// BIP-44 account. V0 pins this to account 0.
+    #[serde(default)]
+    pub account: u32,
+}
+
+impl WalletKeychainState {
+    /// Legacy wallets created before deterministic seed persistence.
+    pub fn legacy() -> Self {
+        Self::default()
+    }
+
+    /// Deterministic keychain metadata to persist for a BIP-39 wallet.
+    pub fn deterministic(seed_bytes: [u8; 64], seed_word_count: usize) -> Self {
+        Self {
+            seed_bytes: Some(Zeroizing::new(seed_bytes)),
+            seed_word_count: Some(seed_word_count as u8),
+            next_receive_index: 0,
+            next_change_index: 0,
+            account: 0,
+        }
+    }
+
+    /// Whether the wallet carries deterministic seed material.
+    pub fn has_seed(&self) -> bool {
+        self.seed_bytes.is_some()
+    }
 }
 
 /// A transaction pending confirmation.

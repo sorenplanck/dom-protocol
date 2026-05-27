@@ -2,8 +2,10 @@
 
 use crate::journal::{JournalEntry, TxJournal, TxJournalEvent, TxRecord, TxStatus};
 use crate::output_index::OutputIndex;
+use crate::seed::{self, Bip39Seed};
 use crate::store::{
-    load_wallet as load_wallet_file, save_wallet as save_wallet_file, PendingTx, WalletState,
+    load_wallet as load_wallet_file, save_wallet as save_wallet_file, PendingTx,
+    WalletKeychainState, WalletState,
 };
 use crate::types::{Network, OwnedOutput, WalletBalance, WalletError};
 use crate::unlock::{LockState, UnlockedSession};
@@ -40,6 +42,7 @@ pub struct Wallet {
     chain_id: [u8; 32],
     outputs: OutputIndex,
     pending_txs: HashMap<[u8; 32], PendingTx>,
+    keychain: WalletKeychainState,
     file_path: Option<PathBuf>,
     /// In-memory unlocked session. `None` means the wallet is locked
     /// and no operation requiring the password may proceed. The
@@ -79,6 +82,7 @@ impl Wallet {
             chain_id,
             outputs: Vec::new(),
             pending_txs: HashMap::new(),
+            keychain: WalletKeychainState::legacy(),
         };
 
         // Save encrypted to disk (generates fresh salt internally).
@@ -89,6 +93,44 @@ impl Wallet {
             chain_id,
             outputs: OutputIndex::new(),
             pending_txs: HashMap::new(),
+            keychain: WalletKeychainState::legacy(),
+            file_path: Some(path.to_path_buf()),
+            session: Some(UnlockedSession::from_verified_password(
+                password.to_string(),
+            )),
+            journal: None,
+        })
+    }
+
+    /// Create a new deterministic wallet from a validated BIP-39 seed.
+    pub fn create_from_seed(
+        path: &Path,
+        password: &str,
+        network: Network,
+        genesis_hash: &Hash256,
+        seed: &Bip39Seed,
+    ) -> Result<Self, WalletError> {
+        debug!("creating deterministic wallet at {:?}", path);
+
+        let chain_id_hash = dom_consensus::derive_chain_id(network.magic(), genesis_hash);
+        let chain_id: [u8; 32] = *chain_id_hash.as_bytes();
+
+        let state = WalletState {
+            network,
+            chain_id,
+            outputs: Vec::new(),
+            pending_txs: HashMap::new(),
+            keychain: WalletKeychainState::deterministic(*seed.seed_bytes(), seed.word_count()),
+        };
+
+        save_wallet_file(path, &state, password)?;
+
+        Ok(Self {
+            network,
+            chain_id,
+            outputs: OutputIndex::new(),
+            pending_txs: HashMap::new(),
+            keychain: WalletKeychainState::deterministic(*seed.seed_bytes(), seed.word_count()),
             file_path: Some(path.to_path_buf()),
             session: Some(UnlockedSession::from_verified_password(
                 password.to_string(),
@@ -113,6 +155,7 @@ impl Wallet {
             chain_id: state.chain_id,
             outputs,
             pending_txs: state.pending_txs,
+            keychain: state.keychain,
             file_path: Some(path.to_path_buf()),
             session: Some(UnlockedSession::from_verified_password(
                 password.to_string(),
@@ -136,6 +179,7 @@ impl Wallet {
             chain_id,
             outputs: OutputIndex::new(),
             pending_txs: HashMap::new(),
+            keychain: WalletKeychainState::legacy(),
             file_path: None,
             session: Some(UnlockedSession::from_verified_password(String::new())),
             journal: None,
@@ -543,6 +587,16 @@ impl Wallet {
         self.session.is_some()
     }
 
+    /// Whether this wallet carries deterministic seed material.
+    pub fn has_deterministic_seed(&self) -> bool {
+        self.keychain.has_seed()
+    }
+
+    /// Original seed phrase word count, if the wallet is deterministic.
+    pub fn seed_word_count(&self) -> Option<u8> {
+        self.keychain.seed_word_count
+    }
+
     /// Lock the wallet. Consumes the in-memory session, zeroizing the
     /// held password. After this call, operations that require the
     /// password (save, spend, coinbase, scan_block, apply_canonical_block)
@@ -555,6 +609,7 @@ impl Wallet {
     pub fn lock(&mut self) {
         if let Some(session) = self.session.take() {
             session.into_locked();
+            self.keychain.seed_bytes = None;
             debug!("wallet locked");
         }
     }
@@ -575,12 +630,14 @@ impl Wallet {
     /// with the correct password is allowed (replaces the session).
     pub fn unlock(&mut self, password: &str) -> Result<(), WalletError> {
         if let Some(path) = &self.file_path {
-            // Verify by attempting decrypt of the on-disk wallet.
-            // The AEAD tag in ChaCha20Poly1305 catches wrong passwords
-            // — load_wallet_file returns WalletError::Decryption on
-            // failure. We discard the decrypted state because our
-            // in-memory state is authoritative for a live wallet.
-            let _verified = load_wallet_file(path, password)?;
+            // Verify by attempting decrypt of the on-disk wallet and
+            // refresh any secret keychain material that was dropped on
+            // the prior `lock()`.
+            let verified = load_wallet_file(path, password)?;
+            self.keychain.seed_bytes = verified.keychain.seed_bytes;
+            if self.keychain.seed_word_count.is_none() {
+                self.keychain.seed_word_count = verified.keychain.seed_word_count;
+            }
         }
         self.session = Some(UnlockedSession::from_verified_password(
             password.to_string(),
@@ -592,6 +649,31 @@ impl Wallet {
     /// Borrow the unlocked session, or return `WalletError::Locked`.
     fn session(&self) -> Result<&UnlockedSession, WalletError> {
         self.session.as_ref().ok_or(WalletError::Locked)
+    }
+
+    fn coinbase_blinding_for_height(
+        &self,
+        height: BlockHeight,
+        session: &UnlockedSession,
+    ) -> Result<BlindingFactor, WalletError> {
+        if let Some(seed_bytes) = &self.keychain.seed_bytes {
+            let root = crate::hd_wallet::ExtendedPrivKey::from_seed(&seed_bytes[..])
+                .map_err(|e| WalletError::Crypto(format!("derive HD root: {e}")))?;
+            let blinding_z = seed::coinbase_blinding(&root, height.0)
+                .map_err(|e| WalletError::Crypto(format!("seed coinbase blinding: {e}")))?;
+            BlindingFactor::from_bytes(*blinding_z)
+                .map_err(|e| WalletError::Crypto(format!("blinding from bytes: {e}")))
+        } else {
+            let password_seed =
+                blake2b_256_tagged("DOM:wallet-coinbase-seed:v1", session.password().as_bytes());
+            let mut blinding_input = Vec::with_capacity(32 + 8);
+            blinding_input.extend_from_slice(password_seed.as_bytes());
+            blinding_input.extend_from_slice(&height.0.to_le_bytes());
+            let blinding_hash =
+                blake2b_256_tagged(dom_core::TAG_COINBASE_BLINDING, &blinding_input);
+            BlindingFactor::from_bytes(*blinding_hash.as_bytes())
+                .map_err(|e| WalletError::Crypto(format!("blinding from bytes: {e}")))
+        }
     }
 
     /// Compute the wallet's deterministic tracking hash for a transaction.
@@ -620,6 +702,7 @@ impl Wallet {
                     chain_id: self.chain_id,
                     outputs,
                     pending_txs: self.pending_txs.clone(),
+                    keychain: self.keychain.clone(),
                 };
                 save_wallet_file(path, &state, session.password())?;
                 debug!("wallet saved");
@@ -802,7 +885,7 @@ impl Wallet {
     /// Non-coinbase outputs (received via Slatepack) are not yet scanned here —
     /// that requires interactive blinding factor exchange (Doc 7).
     pub fn scan_block(&mut self, transactions: &[Transaction], block_height: u64) {
-        use dom_core::{BlockHeight, TAG_COINBASE_BLINDING};
+        use dom_core::BlockHeight;
         use dom_crypto::pedersen::Commitment;
 
         // Locked wallets cannot derive the coinbase seed. Silently
@@ -816,18 +899,7 @@ impl Wallet {
             return;
         };
 
-        // Derive the password seed once per scan (same as build_coinbase step 2).
-        let password_seed =
-            blake2b_256_tagged("DOM:wallet-coinbase-seed:v1", session.password().as_bytes());
-
-        // Derive the candidate blinding for this height.
-        let mut blinding_input = Vec::with_capacity(40);
-        blinding_input.extend_from_slice(password_seed.as_bytes());
-        blinding_input.extend_from_slice(&block_height.to_le_bytes());
-
-        let blinding_hash = blake2b_256_tagged(TAG_COINBASE_BLINDING, &blinding_input);
-
-        let blinding = match dom_crypto::BlindingFactor::from_bytes(*blinding_hash.as_bytes()) {
+        let blinding = match self.coinbase_blinding_for_height(BlockHeight(block_height), session) {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(
@@ -872,7 +944,7 @@ impl Wallet {
                         reward,
                         *blinding.as_bytes(),
                         block_height,
-                        false, // regular tx output — coinbase tracked separately
+                        true,
                     );
                     self.add_output(owned);
                     tracing::info!(
@@ -1022,18 +1094,10 @@ impl Wallet {
             WalletError::Crypto("coinbase value overflow (reward + fees > u64::MAX)".into())
         })?;
 
-        // Step 2: Derive the password seed (domain-separated).
-        let password_seed =
-            blake2b_256_tagged("DOM:wallet-coinbase-seed:v1", session.password().as_bytes());
-
-        // Step 3: Derive deterministic blinding factor from (password_seed, height).
-        let mut blinding_input = Vec::with_capacity(32 + 8);
-        blinding_input.extend_from_slice(password_seed.as_bytes());
-        blinding_input.extend_from_slice(&height.0.to_le_bytes());
-
-        let blinding_hash = blake2b_256_tagged(dom_core::TAG_COINBASE_BLINDING, &blinding_input);
-        let blinding = BlindingFactor::from_bytes(*blinding_hash.as_bytes())
-            .map_err(|e| WalletError::Crypto(format!("blinding from bytes: {e}")))?;
+        // Step 2: Derive deterministic blinding factor from either the
+        // encrypted BIP-39 seed (preferred) or the legacy password-only
+        // scheme for old wallets.
+        let blinding = self.coinbase_blinding_for_height(height, session)?;
 
         // Step 4: Output commitment C = value*H + r*G
         let output_commitment = Commitment::commit(explicit_value, &blinding);

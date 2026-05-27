@@ -26,14 +26,11 @@
 //! ## Layering
 //!
 //! Restore writes the same on-disk format produced by
-//! [`crate::wallet_dir::WalletDir::create`], but tags the
-//! `config.json` as [`WalletVersion::V2`]. The returned handle is a
-//! plain [`Wallet`] (file-backed) — opening the restored wallet via
-//! [`WalletDir::open`] is not yet permitted: that path is gated until
-//! Phase 1.10 wires seed-derived coinbase into `build_coinbase`. For
-//! Phase 1.4, callers can inspect the restored wallet through
-//! [`Wallet::open`] on the underlying `wallet.dat` directly, which
-//! the integration tests in `tests/restore_from_phrase.rs` do.
+//! [`crate::wallet_dir::WalletDir::create_from_seed`], tags
+//! `config.json` as [`WalletVersion::V2`], and persists the 64-byte
+//! BIP-39 seed bytes only inside the encrypted wallet payload.
+//! Reopened wallets therefore retain deterministic recovery material
+//! without ever writing the mnemonic phrase itself to disk.
 //!
 //! ## Determinism invariants
 //!
@@ -52,12 +49,11 @@
 //!   Phase 1.9.
 //! - It does NOT persist the seed phrase. The phrase is the
 //!   operator's responsibility to back up out-of-band.
-//! - It does NOT mutate `WalletDir::open` semantics: V2 wallets
-//!   remain unopenable through the high-level handle until Phase 1.10.
+//! - It does NOT recover non-coinbase interactive receives yet.
 
 use crate::output_index::OutputIndex;
 use crate::seed::{self, Bip39Seed, SeedAcceptance, SeedError};
-use crate::store::{save_wallet as save_wallet_file, WalletState};
+use crate::store::{save_wallet as save_wallet_file, WalletKeychainState, WalletState};
 use crate::types::{Network, OwnedOutput, WalletError};
 use crate::wallet::Wallet;
 use crate::wallet_dir::{
@@ -342,6 +338,7 @@ pub fn restore_from_phrase<S: ChainScanSource>(
         chain_id,
         outputs: owned_outputs,
         pending_txs: std::collections::HashMap::new(),
+        keychain: WalletKeychainState::deterministic(*seed.seed_bytes(), seed.word_count()),
     };
     let dat_path = target_dir.join(WALLET_DAT_NAME);
     save_wallet_file(&dat_path, &state, password)?;

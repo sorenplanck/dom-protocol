@@ -11,13 +11,13 @@
 //!   7. Corrupted wallet.dat is rejected by AEAD.
 //!   8. Missing wallet.dat is rejected.
 //!   9. Missing / malformed config.json is rejected.
-//!  10. Unsupported wallet schema version (V2) is rejected on open.
+//!  10. Deterministic V2 wallets reopen successfully.
 //!  11. Refuse-to-create over a non-empty directory.
 //!  12. Wrong password is rejected (delegates to existing AEAD check).
 
 use dom_core::Hash256;
 use dom_wallet::{
-    Network, WalletConfig, WalletDir, WalletError, WalletVersion, WALLET_CONFIG_NAME,
+    Bip39Seed, Network, SeedAcceptance, WalletDir, WalletError, WalletVersion, WALLET_CONFIG_NAME,
     WALLET_DAT_NAME, WALLET_LOCK_NAME,
 };
 use tempfile::TempDir;
@@ -25,6 +25,11 @@ use tempfile::TempDir;
 fn test_genesis() -> Hash256 {
     Hash256::from_bytes([0x42u8; 32])
 }
+
+const PHRASE_24: &str = "abandon abandon abandon abandon abandon abandon \
+                         abandon abandon abandon abandon abandon abandon \
+                         abandon abandon abandon abandon abandon abandon \
+                         abandon abandon abandon abandon abandon art";
 
 // ─────────────────────────────────────────────────────────────────
 // 1. Layout shape after create.
@@ -265,36 +270,42 @@ fn malformed_config_is_rejected() {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 10. Unsupported wallet schema version (V2) is rejected on open.
+// 10. Deterministic V2 wallets reopen successfully.
 // ─────────────────────────────────────────────────────────────────
 
 #[test]
-fn unsupported_v2_schema_is_rejected() {
+fn seeded_v2_wallet_reopens() {
     let temp = TempDir::new().unwrap();
-    let dir = temp.path().join("future_schema");
-    let wd = WalletDir::create(&dir, "pw", Network::Regtest, &test_genesis()).unwrap();
-    let chain_id_hex = hex::encode(wd.wallet().chain_id());
+    let dir = temp.path().join("seeded_v2");
+    let seed = Bip39Seed::from_phrase(PHRASE_24, SeedAcceptance::NewWallet).unwrap();
+    let wd =
+        WalletDir::create_from_seed(&dir, "pw", Network::Regtest, &test_genesis(), &seed).unwrap();
+    let chain_id = *wd.wallet().chain_id();
+    assert_eq!(wd.config().version, WalletVersion::V2);
+    assert!(wd.wallet().has_deterministic_seed());
     drop(wd);
 
-    // Rewrite config.json to declare V2.
-    let bumped = WalletConfig {
-        version: WalletVersion::V2,
-        network: Network::Regtest,
-        chain_id: chain_id_hex,
-        created_at: 0,
-        config_format: WalletConfig::CONFIG_FORMAT_V1,
-    };
-    let json = serde_json::to_vec_pretty(&bumped).unwrap();
-    std::fs::write(dir.join(WALLET_CONFIG_NAME), json).unwrap();
+    let reopened = WalletDir::open(&dir, "pw").expect("seeded V2 wallet must reopen");
+    assert_eq!(reopened.config().version, WalletVersion::V2);
+    assert_eq!(*reopened.wallet().chain_id(), chain_id);
+    assert!(reopened.wallet().has_deterministic_seed());
+}
 
-    let err = WalletDir::open(&dir, "pw").err().expect("must reject");
-    match err {
-        WalletError::Io(msg) => assert!(
-            msg.contains("unsupported schema version") || msg.contains("V2"),
-            "msg: {msg}"
-        ),
-        other => panic!("expected Io error, got {other:?}"),
-    }
+#[test]
+fn seeded_wallet_dat_never_contains_plaintext_phrase() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path().join("seed_ciphertext");
+    let seed = Bip39Seed::from_phrase(PHRASE_24, SeedAcceptance::NewWallet).unwrap();
+    let wd =
+        WalletDir::create_from_seed(&dir, "pw", Network::Regtest, &test_genesis(), &seed).unwrap();
+    drop(wd);
+
+    let raw = std::fs::read(dir.join(WALLET_DAT_NAME)).unwrap();
+    assert!(
+        !raw.windows(PHRASE_24.len())
+            .any(|window| window == PHRASE_24.as_bytes()),
+        "mnemonic phrase must never appear verbatim in wallet.dat"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────

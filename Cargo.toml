@@ -21,6 +21,7 @@ members = [
     "crates/dom-integration-tests",
     "crates/dom-explorer",
     "crates/dom-faucet",
+    "crates/dom-wallet-app",
 ]
 
 [workspace.package]
