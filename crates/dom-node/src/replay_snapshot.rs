@@ -1,9 +1,9 @@
 //! Deterministic replay-equivalence snapshot tooling.
 
-use crate::node::load_peer_rotation_snapshot;
+use crate::node::{load_mempool_snapshot, load_peer_rotation_snapshot};
 use dom_chain::{ChainState, PersistedIbdState};
 use dom_core::DomError;
-use dom_mempool::Mempool;
+use dom_mempool::{Mempool, PersistedMempoolState};
 use dom_wire::manager::{PeerManager, PersistedPeerRotationState};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -19,6 +19,8 @@ pub struct ReplaySnapshot {
     pub persisted_ibd: Option<PersistedIbdState>,
     /// Persisted peer-rotation state, if present.
     pub persisted_peer_rotation: Option<PersistedPeerRotationState>,
+    /// Persisted mempool snapshot, if present.
+    pub persisted_mempool: Option<PersistedMempoolState>,
     /// Runtime peer-rotation state captured canonically.
     pub runtime_peer_rotation: PersistedPeerRotationState,
     /// Canonical mempool transaction hashes.
@@ -51,6 +53,7 @@ impl ReplaySnapshot {
             chain_tip_hash: *chain.tip_hash.as_bytes(),
             persisted_ibd: PersistedIbdState::load(&chain.store)?,
             persisted_peer_rotation: load_peer_rotation_snapshot(&chain.store)?,
+            persisted_mempool: load_mempool_snapshot(&chain.store)?,
             runtime_peer_rotation: peers.outbound_failure_state(),
             mempool_hashes: mempool.all_hashes(),
         })
@@ -83,6 +86,9 @@ impl ReplaySnapshot {
         if self.persisted_peer_rotation != other.persisted_peer_rotation {
             fields.push("persisted_peer_rotation");
         }
+        if self.persisted_mempool != other.persisted_mempool {
+            fields.push("persisted_mempool");
+        }
         if self.runtime_peer_rotation != other.runtime_peer_rotation {
             fields.push("runtime_peer_rotation");
         }
@@ -108,7 +114,9 @@ impl ReplaySnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::{persist_peer_rotation_snapshot, restore_peer_rotation_state};
+    use crate::node::{
+        persist_mempool_snapshot, persist_peer_rotation_snapshot, restore_peer_rotation_state,
+    };
     use dom_chain::{ChainState, IbdInterruption, IbdPhase, PersistedIbdState};
     use dom_consensus::transaction::{TransactionKernel, TransactionOutput};
     use dom_consensus::Transaction;
@@ -287,6 +295,7 @@ mod tests {
                     cooldown_rounds: 0,
                 }],
             }),
+            persisted_mempool: None,
             runtime_peer_rotation: PersistedPeerRotationState {
                 next_failure_seq: 3,
                 outbound_failures: vec![dom_wire::manager::PersistedOutboundFailure {
@@ -318,6 +327,7 @@ mod tests {
             chain_tip_hash: [0x11; 32],
             persisted_ibd: None,
             persisted_peer_rotation: None,
+            persisted_mempool: None,
             runtime_peer_rotation: PersistedPeerRotationState::default(),
             mempool_hashes: vec![[0xAA; 32]],
         };
@@ -327,5 +337,45 @@ mod tests {
 
         let diff = base.diff(&changed);
         assert_eq!(diff.fields, vec!["chain_tip_hash", "mempool_hashes"]);
+    }
+
+    #[test]
+    fn replay_snapshot_mempool_survives_reopen_and_restore() {
+        let dir = fresh_test_dir("mempool-reopen");
+        let snapshot_before = {
+            let mut chain = open_chain(&dir);
+            chain.tip_height = BlockHeight(5);
+            chain.tip_hash = Hash256::from_bytes([0x77; 32]);
+
+            let (tx_a, hash_a) = make_tx(100, 1);
+            let (tx_b, hash_b) = make_tx(200, 2);
+            let mut mempool = Mempool::new();
+            mempool.accept_tx(tx_b, hash_b, 2).expect("mempool b");
+            mempool.accept_tx(tx_a, hash_a, 1).expect("mempool a");
+            persist_mempool_snapshot(&chain.store, &mempool.snapshot()).expect("persist mempool");
+
+            ReplaySnapshot::capture(&chain, &mempool, &PeerManager::new(125, 2))
+                .expect("capture before")
+        };
+
+        let reopened_chain = open_chain(&dir);
+        let persisted = load_mempool_snapshot(&reopened_chain.store)
+            .expect("load mempool")
+            .expect("persisted mempool");
+        assert_eq!(
+            persisted
+                .entries
+                .iter()
+                .map(|entry| entry.tx_hash)
+                .collect::<Vec<_>>(),
+            snapshot_before.mempool_hashes
+        );
+        assert_eq!(
+            snapshot_before
+                .persisted_mempool
+                .expect("persisted mempool in snapshot"),
+            persisted
+        );
+        fs::remove_dir_all(&dir).expect("cleanup reopen");
     }
 }

@@ -3,7 +3,7 @@
 //! Uses a newtype wrapper (NodeHandleImpl) to satisfy Rust orphan rules:
 //! both Arc<DomNode> and NodeHandle are defined outside dom-node.
 
-use crate::node::{snapshot_tx_chain_view, DomNode};
+use crate::node::{persist_mempool_snapshot, snapshot_tx_chain_view, DomNode};
 use dom_rpc::{MempoolTxInfo, NodeHandle, PeerInfo, RpcError, UtxoInfo};
 use dom_serialization::DomDeserialize;
 use std::sync::Arc;
@@ -101,6 +101,15 @@ impl NodeHandle for NodeHandleImpl {
             |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
         )
         .map_err(|e| RpcError::Rejected(format!("{e}")))?;
+        let snapshot = m.snapshot();
+        drop(m);
+        let chain = self
+            .0
+            .chain
+            .try_lock()
+            .map_err(|_| RpcError::Overloaded("chain busy".into()))?;
+        persist_mempool_snapshot(&chain.store, &snapshot)
+            .map_err(|e| RpcError::Internal(format!("persist mempool: {e}")))?;
 
         // Route via Dandelion++: decide Stem vs Fluff and dispatch over
         // the corresponding broadcast channel. Peer tasks pick up envelopes
