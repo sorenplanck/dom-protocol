@@ -1274,6 +1274,37 @@ async fn build_locator(chain: &Arc<Mutex<ChainState>>) -> Result<Vec<[u8; 32]>, 
     Ok(out)
 }
 
+async fn persist_ibd_state(
+    chain: &Arc<Mutex<ChainState>>,
+    peer_addr: std::net::SocketAddr,
+    ibd: &dom_chain::IbdState,
+    pending_blocks: Vec<[u8; 32]>,
+    block_cursor: u32,
+    header_cursor_height: u64,
+) -> Result<(), DomError> {
+    let snapshot = dom_chain::PersistedIbdState {
+        phase: ibd.phase,
+        peer_addr: peer_addr.to_string(),
+        start_height: ibd.start_height,
+        best_peer_height: ibd.best_peer_height,
+        headers_height: ibd.headers_height,
+        blocks_height: ibd.blocks_height,
+        last_progress_height: ibd.last_progress_height,
+        retry_attempts: ibd.retry_attempts,
+        last_interruption: ibd.last_interruption,
+        pending_blocks,
+        block_cursor,
+        header_cursor_height,
+    };
+    let chain = chain.lock().await;
+    snapshot.save(&chain.store)
+}
+
+async fn clear_persisted_ibd_state(chain: &Arc<Mutex<ChainState>>) -> Result<(), DomError> {
+    let chain = chain.lock().await;
+    dom_chain::PersistedIbdState::clear(&chain.store)
+}
+
 async fn run_ibd_session(
     stream: &mut tokio::net::TcpStream,
     codec: &mut dom_wire::codec::NoiseCodec,
@@ -1287,6 +1318,7 @@ async fn run_ibd_session(
     let mut ibd = dom_chain::IbdState::new(our_height, peer_best_height);
     match ibd.begin_session() {
         dom_chain::IbdControl::Complete => {
+            clear_persisted_ibd_state(chain).await?;
             info!(
                 "IBD with {peer_addr} already complete at height {}",
                 our_height
@@ -1300,6 +1332,7 @@ async fn run_ibd_session(
             ));
         }
     }
+    persist_ibd_state(chain, peer_addr, &ibd, Vec::new(), 0, ibd.headers_height).await?;
 
     info!("Starting IBD from {peer_addr}: our={our_height} peer={peer_best_height}");
 
@@ -1320,10 +1353,22 @@ async fn run_ibd_session(
                 let new_height = chain.lock().await.tip_height.0;
                 match ibd.note_round_progress(new_height) {
                     dom_chain::IbdControl::Complete => {
+                        clear_persisted_ibd_state(chain).await?;
                         info!("IBD with {peer_addr} caught up at height {new_height}");
                         return Ok(());
                     }
-                    dom_chain::IbdControl::Continue => continue,
+                    dom_chain::IbdControl::Continue => {
+                        persist_ibd_state(
+                            chain,
+                            peer_addr,
+                            &ibd,
+                            Vec::new(),
+                            0,
+                            ibd.headers_height,
+                        )
+                        .await?;
+                        continue;
+                    }
                     dom_chain::IbdControl::Retry | dom_chain::IbdControl::Fail => {
                         return Err(DomError::Internal(
                             "IBD progress transition returned invalid control".into(),
@@ -1333,6 +1378,7 @@ async fn run_ibd_session(
             }
             Ok(false) => match ibd.note_empty_response() {
                 dom_chain::IbdControl::Complete => {
+                    clear_persisted_ibd_state(chain).await?;
                     info!(
                         "IBD with {peer_addr} completed after empty response at height {}",
                         ibd.blocks_height
@@ -1340,6 +1386,8 @@ async fn run_ibd_session(
                     return Ok(());
                 }
                 dom_chain::IbdControl::Retry => {
+                    persist_ibd_state(chain, peer_addr, &ibd, Vec::new(), 0, ibd.headers_height)
+                        .await?;
                     warn!(
                         "IBD with {peer_addr} made no progress; retry {}/{} remaining={}",
                         ibd.retry_attempts,
@@ -1349,6 +1397,7 @@ async fn run_ibd_session(
                     continue;
                 }
                 dom_chain::IbdControl::Fail => {
+                    clear_persisted_ibd_state(chain).await?;
                     return Err(DomError::PolicyRejected(format!(
                         "IBD from {peer_addr}: exhausted retry budget after empty response"
                     )));
@@ -1361,6 +1410,8 @@ async fn run_ibd_session(
             },
             Err(e) => match ibd.note_round_error(&e) {
                 dom_chain::IbdControl::Retry => {
+                    persist_ibd_state(chain, peer_addr, &ibd, Vec::new(), 0, ibd.headers_height)
+                        .await?;
                     warn!(
                         "IBD with {peer_addr} interrupted ({e}); retry {}/{} remaining={}",
                         ibd.retry_attempts,
@@ -1369,8 +1420,12 @@ async fn run_ibd_session(
                     );
                     continue;
                 }
-                dom_chain::IbdControl::Fail => return Err(e),
+                dom_chain::IbdControl::Fail => {
+                    clear_persisted_ibd_state(chain).await?;
+                    return Err(e);
+                }
                 dom_chain::IbdControl::Complete => {
+                    clear_persisted_ibd_state(chain).await?;
                     return Ok(());
                 }
                 dom_chain::IbdControl::Continue => {
@@ -1397,6 +1452,8 @@ async fn ibd_sync_round(
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
     ibd: &mut dom_chain::IbdState,
 ) -> Result<bool, DomError> {
+    use dom_consensus::block::BlockHeader;
+    use dom_serialization::DomDeserialize;
     use dom_wire::message::{
         Command, GetBlockDataPayload, GetHeadersPayload, HeadersPayload, WireMessage,
     };
@@ -1452,6 +1509,14 @@ async fn ibd_sync_round(
         let c = chain.lock().await;
         c.validate_ibd_headers_batch(&headers_payload.headers, now)?
     };
+    let header_cursor_height = BlockHeader::from_bytes(
+        headers_payload
+            .headers
+            .last()
+            .ok_or_else(|| DomError::Internal("headers payload unexpectedly empty".into()))?,
+    )?
+    .height
+    .0;
 
     if block_hashes.is_empty() {
         tracing::debug!(
@@ -1463,6 +1528,16 @@ async fn ibd_sync_round(
 
     let mut connected_any = false;
     ibd.begin_block_sync();
+    persist_ibd_state(
+        chain,
+        peer_addr,
+        ibd,
+        block_hashes.clone(),
+        0,
+        header_cursor_height,
+    )
+    .await?;
+    let mut block_cursor = 0u32;
 
     for batch in block_hashes.chunks(dom_core::MAX_GETBLOCKDATA_HASHES) {
         let req = GetBlockDataPayload {
@@ -1509,10 +1584,30 @@ async fn ibd_sync_round(
                 let best_chain = match c.connect_block(&block, now) {
                     Ok(dom_chain::ConnectResult::BestChain) => {
                         connected_any = true;
+                        block_cursor = block_cursor.saturating_add(1);
+                        persist_ibd_state(
+                            chain,
+                            peer_addr,
+                            ibd,
+                            block_hashes.clone(),
+                            block_cursor,
+                            header_cursor_height,
+                        )
+                        .await?;
                         true
                     }
                     Ok(dom_chain::ConnectResult::SideChain) => {
                         connected_any = true;
+                        block_cursor = block_cursor.saturating_add(1);
+                        persist_ibd_state(
+                            chain,
+                            peer_addr,
+                            ibd,
+                            block_hashes.clone(),
+                            block_cursor,
+                            header_cursor_height,
+                        )
+                        .await?;
                         false
                     }
                     Ok(dom_chain::ConnectResult::AlreadyHave) => {
@@ -1524,6 +1619,16 @@ async fn ibd_sync_round(
                             height
                         );
                         connected_any = true;
+                        block_cursor = block_cursor.saturating_add(1);
+                        persist_ibd_state(
+                            chain,
+                            peer_addr,
+                            ibd,
+                            block_hashes.clone(),
+                            block_cursor,
+                            header_cursor_height,
+                        )
+                        .await?;
                         false
                     }
                     Err(e) => {

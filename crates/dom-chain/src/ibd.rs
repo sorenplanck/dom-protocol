@@ -7,6 +7,7 @@
 
 use dom_consensus::block::BlockHeader;
 use dom_core::{DomError, Timestamp};
+use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
 use tracing::{debug, info};
 
 /// Maximum headers per GET_HEADERS request.
@@ -15,6 +16,8 @@ pub const MAX_HEADERS_PER_REQUEST: usize = 2000;
 /// Maximum recoverable retries against one peer before the caller must stop
 /// using that peer for this IBD session.
 pub const MAX_IBD_RETRY_ATTEMPTS: u8 = 3;
+/// Stable metadata key for the persisted IBD session snapshot.
+pub const IBD_SESSION_METADATA_KEY: &[u8] = b"ibd_session";
 
 /// IBD phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +68,59 @@ pub enum IbdControl {
     Complete,
 }
 
+/// Bounded persisted IBD session snapshot.
+///
+/// This is the restart-safe checkpoint written by the live node. It records
+/// only deterministic orchestration state: phase, target, peer identity,
+/// bounded retry accounting, bounded work queue, and explicit cursors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedIbdState {
+    /// Current persisted phase.
+    pub phase: IbdPhase,
+    /// Deterministic peer identifier (socket address string).
+    pub peer_addr: String,
+    /// Height where this peer-sync attempt started.
+    pub start_height: u64,
+    /// Target height claimed by the peer when this session began.
+    pub best_peer_height: u64,
+    /// Highest header height validated so far.
+    pub headers_height: u64,
+    /// Highest block height fully validated and committed.
+    pub blocks_height: u64,
+    /// Highest height that made deterministic progress in this session.
+    pub last_progress_height: u64,
+    /// Recoverable retry attempts consumed against this peer.
+    pub retry_attempts: u8,
+    /// Most recent interruption class, if any.
+    pub last_interruption: Option<IbdInterruption>,
+    /// Pending bounded work queue for the current round.
+    pub pending_blocks: Vec<[u8; 32]>,
+    /// Cursor into `pending_blocks` for partial block-batch resume.
+    pub block_cursor: u32,
+    /// Header cursor for the current round.
+    pub header_cursor_height: u64,
+}
+
+impl PersistedIbdState {
+    /// Persist this session snapshot into the store metadata DB.
+    pub fn save(&self, store: &dom_store::DomStore) -> Result<(), DomError> {
+        store.put_metadata(IBD_SESSION_METADATA_KEY, &self.to_bytes()?)
+    }
+
+    /// Load the persisted IBD session snapshot, if any.
+    pub fn load(store: &dom_store::DomStore) -> Result<Option<Self>, DomError> {
+        match store.get_metadata(IBD_SESSION_METADATA_KEY)? {
+            Some(bytes) => Ok(Some(Self::from_bytes(&bytes)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Clear any persisted IBD session snapshot.
+    pub fn clear(store: &dom_store::DomStore) -> Result<(), DomError> {
+        store.delete_metadata(IBD_SESSION_METADATA_KEY)
+    }
+}
+
 /// IBD state machine.
 pub struct IbdState {
     /// Current phase.
@@ -85,6 +141,163 @@ pub struct IbdState {
     pub last_progress_height: u64,
     /// Most recent interruption class, if any.
     pub last_interruption: Option<IbdInterruption>,
+}
+
+impl DomSerialize for IbdPhase {
+    fn serialize(&self, w: &mut Writer) -> Result<(), DomError> {
+        let tag = match self {
+            Self::Idle => 0,
+            Self::Discovering => 1,
+            Self::HeaderSync => 2,
+            Self::BlockSync => 3,
+            Self::Verifying => 4,
+            Self::Recovering => 5,
+            Self::Interrupted => 6,
+            Self::Completed => 7,
+            Self::Failed => 8,
+        };
+        w.write_u8(tag);
+        Ok(())
+    }
+}
+
+impl DomDeserialize for IbdPhase {
+    fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
+        match r.read_u8()? {
+            0 => Ok(Self::Idle),
+            1 => Ok(Self::Discovering),
+            2 => Ok(Self::HeaderSync),
+            3 => Ok(Self::BlockSync),
+            4 => Ok(Self::Verifying),
+            5 => Ok(Self::Recovering),
+            6 => Ok(Self::Interrupted),
+            7 => Ok(Self::Completed),
+            8 => Ok(Self::Failed),
+            other => Err(DomError::Malformed(format!(
+                "unknown IBD phase tag {other}"
+            ))),
+        }
+    }
+}
+
+impl DomSerialize for IbdInterruption {
+    fn serialize(&self, w: &mut Writer) -> Result<(), DomError> {
+        let tag = match self {
+            Self::EmptyResponse => 0,
+            Self::Timeout => 1,
+            Self::PeerDisconnected => 2,
+            Self::Verification => 3,
+        };
+        w.write_u8(tag);
+        Ok(())
+    }
+}
+
+impl DomDeserialize for IbdInterruption {
+    fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
+        match r.read_u8()? {
+            0 => Ok(Self::EmptyResponse),
+            1 => Ok(Self::Timeout),
+            2 => Ok(Self::PeerDisconnected),
+            3 => Ok(Self::Verification),
+            other => Err(DomError::Malformed(format!(
+                "unknown IBD interruption tag {other}"
+            ))),
+        }
+    }
+}
+
+impl DomSerialize for PersistedIbdState {
+    fn serialize(&self, w: &mut Writer) -> Result<(), DomError> {
+        self.phase.serialize(w)?;
+        w.write_vec(self.peer_addr.as_bytes())?;
+        w.write_u64(self.start_height);
+        w.write_u64(self.best_peer_height);
+        w.write_u64(self.headers_height);
+        w.write_u64(self.blocks_height);
+        w.write_u64(self.last_progress_height);
+        w.write_u8(self.retry_attempts);
+        match self.last_interruption {
+            Some(interruption) => {
+                w.write_u8(1);
+                interruption.serialize(w)?;
+            }
+            None => w.write_u8(0),
+        }
+
+        let pending_len: u32 = self
+            .pending_blocks
+            .len()
+            .try_into()
+            .map_err(|_| DomError::Malformed("pending block count exceeds u32".into()))?;
+        w.write_u32(pending_len);
+        for hash in &self.pending_blocks {
+            w.write_bytes(hash);
+        }
+        w.write_u32(self.block_cursor);
+        w.write_u64(self.header_cursor_height);
+        Ok(())
+    }
+}
+
+impl DomDeserialize for PersistedIbdState {
+    fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
+        let phase = IbdPhase::deserialize(r)?;
+        let peer_addr_bytes = r.read_vec(128)?;
+        let peer_addr = String::from_utf8(peer_addr_bytes)
+            .map_err(|e| DomError::Malformed(format!("invalid persisted peer addr utf8: {e}")))?;
+        let start_height = r.read_u64()?;
+        let best_peer_height = r.read_u64()?;
+        let headers_height = r.read_u64()?;
+        let blocks_height = r.read_u64()?;
+        let last_progress_height = r.read_u64()?;
+        let retry_attempts = r.read_u8()?;
+        let last_interruption = match r.read_u8()? {
+            0 => None,
+            1 => Some(IbdInterruption::deserialize(r)?),
+            other => {
+                return Err(DomError::Malformed(format!(
+                    "invalid persisted interruption presence tag {other}"
+                )))
+            }
+        };
+
+        let pending_len = r.read_u32()? as usize;
+        if pending_len > dom_core::MAX_HEADERS_PER_MSG {
+            return Err(DomError::Malformed(format!(
+                "persisted pending block count {pending_len} exceeds limit {}",
+                dom_core::MAX_HEADERS_PER_MSG
+            )));
+        }
+        let mut pending_blocks = Vec::with_capacity(pending_len);
+        for _ in 0..pending_len {
+            pending_blocks.push(r.read_array::<32>()?);
+        }
+        let block_cursor = r.read_u32()?;
+        if block_cursor as usize > pending_blocks.len() {
+            return Err(DomError::Malformed(format!(
+                "persisted block cursor {} exceeds pending block count {}",
+                block_cursor,
+                pending_blocks.len()
+            )));
+        }
+        let header_cursor_height = r.read_u64()?;
+
+        Ok(Self {
+            phase,
+            peer_addr,
+            start_height,
+            best_peer_height,
+            headers_height,
+            blocks_height,
+            last_progress_height,
+            retry_attempts,
+            last_interruption,
+            pending_blocks,
+            block_cursor,
+            header_cursor_height,
+        })
+    }
 }
 
 impl IbdState {
