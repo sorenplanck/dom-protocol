@@ -119,6 +119,12 @@ impl PersistedIbdState {
     pub fn clear(store: &dom_store::DomStore) -> Result<(), DomError> {
         store.delete_metadata(IBD_SESSION_METADATA_KEY)
     }
+
+    /// Returns true if this snapshot can be resumed without reconstructing
+    /// in-flight round state.
+    pub fn is_round_resumable(&self) -> bool {
+        self.pending_blocks.is_empty() && self.block_cursor == 0
+    }
 }
 
 /// IBD state machine.
@@ -318,6 +324,31 @@ impl IbdState {
             last_progress_height: start_height,
             last_interruption: None,
         }
+    }
+
+    /// Restore an in-memory IBD controller from a persisted snapshot.
+    ///
+    /// This is intentionally strict: only snapshots without partially consumed
+    /// block queues are restorable here. Partial round resume is handled by a
+    /// separate hardening batch so there is no hidden reconstruction logic.
+    pub fn from_persisted(snapshot: &PersistedIbdState) -> Result<Self, DomError> {
+        if !snapshot.is_round_resumable() {
+            return Err(DomError::PolicyRejected(
+                "persisted IBD snapshot requires partial-round resume support".into(),
+            ));
+        }
+
+        Ok(Self {
+            phase: snapshot.phase,
+            start_height: snapshot.start_height,
+            headers_height: snapshot.headers_height,
+            blocks_height: snapshot.blocks_height,
+            best_peer_height: snapshot.best_peer_height,
+            pending_blocks: snapshot.pending_blocks.clone(),
+            retry_attempts: snapshot.retry_attempts,
+            last_progress_height: snapshot.last_progress_height,
+            last_interruption: snapshot.last_interruption,
+        })
     }
 
     /// Begin an IBD session or the next deterministic round.
@@ -635,5 +666,51 @@ mod tests {
         assert_eq!(ibd.retry_attempts, 1);
         assert_eq!(ibd.last_interruption, Some(IbdInterruption::Timeout));
         assert_eq!(ibd.phase, IbdPhase::Recovering);
+    }
+
+    #[test]
+    fn resumable_persisted_state_restores_retry_accounting() {
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::Recovering,
+            peer_addr: "127.0.0.1:33369".into(),
+            start_height: 10,
+            best_peer_height: 25,
+            headers_height: 14,
+            blocks_height: 12,
+            last_progress_height: 12,
+            retry_attempts: 2,
+            last_interruption: Some(IbdInterruption::Timeout),
+            pending_blocks: Vec::new(),
+            block_cursor: 0,
+            header_cursor_height: 14,
+        };
+        let ibd = IbdState::from_persisted(&snapshot).expect("restore");
+        assert_eq!(ibd.phase, IbdPhase::Recovering);
+        assert_eq!(ibd.retry_attempts, 2);
+        assert_eq!(ibd.blocks_height, 12);
+        assert_eq!(ibd.best_peer_height, 25);
+    }
+
+    #[test]
+    fn partial_round_snapshot_is_not_restored_implicitly() {
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::BlockSync,
+            peer_addr: "127.0.0.1:33369".into(),
+            start_height: 10,
+            best_peer_height: 25,
+            headers_height: 20,
+            blocks_height: 12,
+            last_progress_height: 12,
+            retry_attempts: 1,
+            last_interruption: None,
+            pending_blocks: vec![[0x44; 32]],
+            block_cursor: 0,
+            header_cursor_height: 20,
+        };
+        let err = match IbdState::from_persisted(&snapshot) {
+            Ok(_) => panic!("partial round snapshot must reject"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, DomError::PolicyRejected(_)));
     }
 }

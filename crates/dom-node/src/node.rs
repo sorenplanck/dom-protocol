@@ -1305,6 +1305,46 @@ async fn clear_persisted_ibd_state(chain: &Arc<Mutex<ChainState>>) -> Result<(),
     dom_chain::PersistedIbdState::clear(&chain.store)
 }
 
+async fn initialize_ibd_state(
+    chain: &Arc<Mutex<ChainState>>,
+    peer_addr: std::net::SocketAddr,
+    peer_best_height: u64,
+) -> Result<dom_chain::IbdState, DomError> {
+    let peer_key = peer_addr.to_string();
+    let (tip_height, persisted) = {
+        let chain = chain.lock().await;
+        (
+            chain.tip_height.0,
+            dom_chain::PersistedIbdState::load(&chain.store)?,
+        )
+    };
+
+    let Some(snapshot) = persisted else {
+        return Ok(dom_chain::IbdState::new(tip_height, peer_best_height));
+    };
+
+    let resumable = snapshot.peer_addr == peer_key
+        && snapshot.best_peer_height == peer_best_height
+        && snapshot.blocks_height == tip_height
+        && !matches!(
+            snapshot.phase,
+            dom_chain::IbdPhase::Completed | dom_chain::IbdPhase::Failed
+        );
+
+    if !resumable {
+        clear_persisted_ibd_state(chain).await?;
+        return Ok(dom_chain::IbdState::new(tip_height, peer_best_height));
+    }
+
+    match dom_chain::IbdState::from_persisted(&snapshot) {
+        Ok(ibd) => Ok(ibd),
+        Err(_) => {
+            clear_persisted_ibd_state(chain).await?;
+            Ok(dom_chain::IbdState::new(tip_height, peer_best_height))
+        }
+    }
+}
+
 async fn run_ibd_session(
     stream: &mut tokio::net::TcpStream,
     codec: &mut dom_wire::codec::NoiseCodec,
@@ -1315,7 +1355,7 @@ async fn run_ibd_session(
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
 ) -> Result<(), DomError> {
     let our_height = chain.lock().await.tip_height.0;
-    let mut ibd = dom_chain::IbdState::new(our_height, peer_best_height);
+    let mut ibd = initialize_ibd_state(chain, peer_addr, peer_best_height).await?;
     match ibd.begin_session() {
         dom_chain::IbdControl::Complete => {
             clear_persisted_ibd_state(chain).await?;
