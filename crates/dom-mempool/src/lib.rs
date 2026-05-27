@@ -10,6 +10,7 @@
 
 use dom_consensus::transaction::{validate_transaction_structure, Transaction};
 use dom_core::{DomError, MAX_BLOCK_WEIGHT, MIN_RELAY_FEE_RATE};
+use dom_store::utxo::UtxoEntry;
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 
@@ -51,6 +52,8 @@ impl MempoolEntry {
 pub struct Mempool {
     /// Transactions indexed by hash.
     entries: HashMap<[u8; 32], MempoolEntry>,
+    /// Input commitments currently reserved by in-pool transactions.
+    input_index: HashMap<[u8; 33], [u8; 32]>,
     /// Fee-ordered index: (fee_rate, tx_hash) → () for selection.
     fee_index: BTreeMap<(u64, [u8; 32]), ()>,
     /// Total weight of all transactions in pool.
@@ -64,6 +67,7 @@ impl Mempool {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            input_index: HashMap::new(),
             fee_index: BTreeMap::new(),
             total_weight: 0,
             max_weight: MAX_BLOCK_WEIGHT as u64 * 10,
@@ -89,15 +93,52 @@ impl Mempool {
         tx_hash: [u8; 32],
         now_secs: u64,
     ) -> Result<(), DomError> {
-        // Already in pool?
+        validate_transaction_structure(&tx)?;
+        self.accept_validated_tx(tx, tx_hash, now_secs)
+    }
+
+    /// Accept a transaction after validating it against a bounded snapshot of
+    /// canonical chainstate.
+    ///
+    /// This keeps mempool admission deterministic: the caller supplies an
+    /// explicit lookup function over the exact input commitments in the
+    /// candidate transaction, plus the current canonical height and network
+    /// maturity rule.
+    pub fn accept_tx_with_chain_view<F>(
+        &mut self,
+        tx: Transaction,
+        tx_hash: [u8; 32],
+        now_secs: u64,
+        current_height: u64,
+        coinbase_maturity: u64,
+        mut lookup_utxo: F,
+    ) -> Result<(), DomError>
+    where
+        F: FnMut(&[u8; 33]) -> Result<Option<UtxoEntry>, DomError>,
+    {
+        validate_transaction_structure(&tx)?;
+        validate_tx_against_chain_view(&tx, current_height, coinbase_maturity, &mut lookup_utxo)?;
+        self.accept_validated_tx(tx, tx_hash, now_secs)
+    }
+
+    fn accept_validated_tx(
+        &mut self,
+        tx: Transaction,
+        tx_hash: [u8; 32],
+        now_secs: u64,
+    ) -> Result<(), DomError> {
         if self.entries.contains_key(&tx_hash) {
             return Err(DomError::PolicyRejected(
                 "transaction already in mempool".into(),
             ));
         }
 
-        // Structural validation
-        validate_transaction_structure(&tx)?;
+        if let Some(conflict_hash) = self.first_conflicting_tx(&tx, &tx_hash) {
+            return Err(DomError::PolicyRejected(format!(
+                "input already reserved by mempool tx {}",
+                hex::encode(conflict_hash)
+            )));
+        }
 
         let entry = MempoolEntry::new(tx, tx_hash, now_secs)?;
 
@@ -121,6 +162,10 @@ impl Mempool {
         );
         self.total_weight += entry.weight as u64;
         self.fee_index.insert((entry.fee_rate, tx_hash), ());
+        for input in &entry.tx.inputs {
+            self.input_index
+                .insert(*input.commitment.as_bytes(), tx_hash);
+        }
         self.entries.insert(tx_hash, entry);
         Ok(())
     }
@@ -128,6 +173,12 @@ impl Mempool {
     /// Remove a transaction from the mempool (e.g. after it's included in a block).
     pub fn remove_tx(&mut self, tx_hash: &[u8; 32]) {
         if let Some(entry) = self.entries.remove(tx_hash) {
+            for input in &entry.tx.inputs {
+                let commitment = *input.commitment.as_bytes();
+                if self.input_index.get(&commitment) == Some(tx_hash) {
+                    self.input_index.remove(&commitment);
+                }
+            }
             self.fee_index.remove(&(entry.fee_rate, *tx_hash));
             self.total_weight = self.total_weight.saturating_sub(entry.weight as u64);
         }
@@ -202,6 +253,45 @@ impl Mempool {
             self.remove_tx(&hash);
         }
     }
+
+    fn first_conflicting_tx(&self, tx: &Transaction, tx_hash: &[u8; 32]) -> Option<[u8; 32]> {
+        tx.inputs.iter().find_map(|input| {
+            let commitment = input.commitment.as_bytes();
+            self.input_index
+                .get(commitment)
+                .copied()
+                .filter(|existing| existing != tx_hash)
+        })
+    }
+}
+
+/// Validate that every input in `tx` exists in canonical chainstate and obeys
+/// the caller-supplied maturity rule.
+pub fn validate_tx_against_chain_view<F>(
+    tx: &Transaction,
+    current_height: u64,
+    coinbase_maturity: u64,
+    mut lookup_utxo: F,
+) -> Result<(), DomError>
+where
+    F: FnMut(&[u8; 33]) -> Result<Option<UtxoEntry>, DomError>,
+{
+    for input in &tx.inputs {
+        let commitment = input.commitment.as_bytes();
+        let Some(entry) = lookup_utxo(commitment)? else {
+            return Err(DomError::PolicyRejected(format!(
+                "input commitment not found in canonical UTXO set: {}",
+                hex::encode(commitment)
+            )));
+        };
+        if entry.is_coinbase && !entry.is_mature_for(current_height, coinbase_maturity) {
+            return Err(DomError::TemporarilyInvalid(format!(
+                "immature coinbase spend at height {} (created at {}, maturity {})",
+                current_height, entry.block_height, coinbase_maturity
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl Default for Mempool {
