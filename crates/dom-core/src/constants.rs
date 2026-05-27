@@ -12,6 +12,26 @@
 /// [CONSENSUS] Target block spacing in seconds (2 minutes).
 pub const TARGET_SPACING: u64 = 120;
 
+/// [CONSENSUS] Canonical target block interval in seconds.
+///
+/// Alias of `TARGET_SPACING` kept for explicit retargeting codepaths and logs.
+pub const TARGET_BLOCK_TIME_SECS: u64 = TARGET_SPACING;
+
+/// [CONSENSUS] Number of blocks in the deterministic difficulty adjustment window.
+pub const DIFFICULTY_ADJUSTMENT_WINDOW: u64 = 60;
+
+/// [CONSENSUS] Hardest allowed per-window adjustment factor.
+///
+/// Fast blocks can make the next target at most this many times harder
+/// (numerically smaller) in one adjustment step.
+pub const MAX_DIFFICULTY_ADJUSTMENT_FACTOR_UP: u64 = 4;
+
+/// [CONSENSUS] Easiest allowed per-window adjustment factor.
+///
+/// Slow blocks can make the next target at most this many times easier
+/// (numerically larger) in one adjustment step.
+pub const MAX_DIFFICULTY_ADJUSTMENT_FACTOR_DOWN: u64 = 4;
+
 /// [CONSENSUS] ASERT half-life in seconds (2 days).
 pub const ASERT_HALF_LIFE: u64 = 172_800;
 
@@ -256,6 +276,9 @@ pub const MIN_TARGET_BYTES: [u8; 32] = {
     b
 };
 
+/// [CONSENSUS] Alias used by deterministic retargeting codepaths.
+pub const MIN_ALLOWED_TARGET: [u8; 32] = MIN_TARGET_BYTES;
+
 /// [CONSENSUS] Maximum PoW target (easiest difficulty / genesis).
 pub const MAX_TARGET_BYTES: [u8; 32] = {
     let mut b = [0xff_u8; 32];
@@ -263,6 +286,9 @@ pub const MAX_TARGET_BYTES: [u8; 32] = {
     b[1] = 0x00;
     b
 };
+
+/// [CONSENSUS] Alias used by deterministic retargeting codepaths.
+pub const MAX_ALLOWED_TARGET: [u8; 32] = MAX_TARGET_BYTES;
 
 /// Trivial PoW target for future regtest mode — ANY RandomX hash passes.
 ///
