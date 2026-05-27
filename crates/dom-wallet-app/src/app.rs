@@ -97,6 +97,14 @@ impl eframe::App for WalletApp {
                         }
                     });
                 });
+                if self.runtime.session.is_some() {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        runtime_status_strip(ui, &self.runtime);
+                    });
+                }
                 ui.add_space(4.0);
             });
 
@@ -498,17 +506,42 @@ impl WalletApp {
         });
 
         ui.add_space(12.0);
-        card(ui, |ui| {
-            mini_header(ui, "Node Connectivity");
-            if let Some(status) = &self.runtime.node_status {
-                status_badge(ui, "Online", palette().success);
-                labeled_value(ui, "Protocol version", &status.version.to_string());
-                labeled_value(ui, "Height", &status.chain_height.to_string());
-                labeled_value(ui, "Mempool", &status.mempool_size.to_string());
-                labeled_value(ui, "Network", &status.network);
-            } else {
-                status_badge(ui, "Offline or Unverified", palette().warning);
-            }
+        ui.columns(2, |columns| {
+            card(&mut columns[0], |ui| {
+                mini_header(ui, "Node Connectivity");
+                if let Some(status) = &self.runtime.node_status {
+                    status_badge(ui, "Online", palette().success);
+                    labeled_value(ui, "Protocol version", &status.version.to_string());
+                    labeled_value(ui, "Height", &status.chain_height.to_string());
+                    labeled_value(ui, "Mempool", &status.mempool_size.to_string());
+                    labeled_value(ui, "Network", &status.network);
+                } else {
+                    status_badge(ui, "Offline or Unverified", palette().warning);
+                }
+            });
+            card(&mut columns[1], |ui| {
+                mini_header(ui, "Wallet Runtime");
+                status_badge(
+                    ui,
+                    if self.runtime.session.is_some() {
+                        "Unlocked Session"
+                    } else {
+                        "Locked Session"
+                    },
+                    if self.runtime.session.is_some() {
+                        palette().info
+                    } else {
+                        palette().warning
+                    },
+                );
+                labeled_value(ui, "Screen", &format!("{:?}", self.runtime.screen));
+                labeled_value(
+                    ui,
+                    "Receive requests",
+                    &self.runtime.receive_requests.len().to_string(),
+                );
+                labeled_value(ui, "History rows", &self.runtime.history.len().to_string());
+            });
         });
     }
 
@@ -536,6 +569,22 @@ impl WalletApp {
                     self.runtime.set_error(format!("persist settings: {e}"));
                 }
             }
+        });
+        ui.add_space(12.0);
+        card(ui, |ui| {
+            mini_header(ui, "Operator Notes");
+            ui.label(
+                egui::RichText::new(
+                    "Refresh, send recovery, and receive detection remain explicit operator actions.",
+                )
+                .color(palette().muted_text),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "This UI does not imply continuous background synchronization or hidden retries.",
+                )
+                .color(palette().muted_text),
+            );
         });
     }
 }
@@ -771,6 +820,46 @@ fn status_color(status: &str) -> egui::Color32 {
     } else {
         palette().muted_text
     }
+}
+
+fn runtime_status_strip(ui: &mut egui::Ui, runtime: &AppRuntime) {
+    status_badge(
+        ui,
+        if runtime.node_status.is_some() {
+            "RPC reachable"
+        } else {
+            "RPC unverified"
+        },
+        if runtime.node_status.is_some() {
+            palette().success
+        } else {
+            palette().warning
+        },
+    );
+    if let Some(balance) = runtime.wallet_balance {
+        status_badge(
+            ui,
+            &format!("Spendable {} noms", balance.spendable()),
+            palette().accent,
+        );
+    }
+    if let Some(status) = &runtime.node_status {
+        status_badge(
+            ui,
+            &format!("Height {}", status.chain_height),
+            palette().info,
+        );
+        status_badge(
+            ui,
+            &format!("Mempool {}", status.mempool_size),
+            palette().info,
+        );
+    }
+    status_badge(
+        ui,
+        &format!("Tx rows {}", runtime.history.len()),
+        palette().muted_text,
+    );
 }
 
 fn network_selector(ui: &mut egui::Ui, network: &mut Network) {
