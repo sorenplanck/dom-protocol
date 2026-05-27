@@ -97,6 +97,7 @@ const FUTURE_BLOCK_QUEUE_MAX_AGE_SECS: u64 = dom_core::MAX_FUTURE_BLOCK_TIME
     + FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS * 2;
 const HELLO_EXCHANGE_TIMEOUT_SECS: u64 = dom_wire::handshake::HANDSHAKE_TIMEOUT_SECS;
 const PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v1";
+const NOISE_STATIC_KEY_METADATA_KEY: &[u8] = b"dom/noise_static_key/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutboundAttemptOutcome {
@@ -180,16 +181,17 @@ impl DomNode {
             dom_config::Network::Regtest => dom_core::GENESIS_HASH_REGTEST,
         });
 
+        // Generate or load Noise keypair.
+        let noise_privkey = load_or_create_noise_static_key(&store)?;
+        let noise_pubkey = dom_wire::handshake::derive_static_pubkey(&noise_privkey);
+        info!("Node identity: {}", hex::encode(noise_pubkey));
+
         // Initialize chain state
         let chain = ChainState::open(store, genesis_hash, config.network.magic())?;
         info!("Chain tip: height={}", chain.tip_height);
 
         let mut peers = PeerManager::new(config.max_inbound, config.min_outbound);
         restore_peer_rotation_state(&chain.store, &mut peers)?;
-
-        // Generate or load Noise keypair
-        let (noise_privkey, noise_pubkey) = dom_wire::handshake::generate_static_keypair();
-        info!("Node identity: {}", hex::encode(noise_pubkey));
 
         let (block_relay_tx, _) = tokio::sync::broadcast::channel(64);
         let (tx_fluff_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
@@ -1464,6 +1466,40 @@ async fn persist_peer_rotation_state(
     };
     let chain = chain.lock().await;
     persist_peer_rotation_snapshot(&chain.store, &snapshot)
+}
+
+pub(crate) fn load_or_create_noise_static_key(store: &DomStore) -> Result<[u8; 32], DomError> {
+    match store.get_metadata(NOISE_STATIC_KEY_METADATA_KEY)? {
+        Some(bytes) => parse_persisted_noise_static_key(store, &bytes),
+        None => {
+            let (privkey, _) = dom_wire::handshake::generate_static_keypair();
+            store.put_metadata(NOISE_STATIC_KEY_METADATA_KEY, &privkey)?;
+            Ok(privkey)
+        }
+    }
+}
+
+fn parse_persisted_noise_static_key(store: &DomStore, bytes: &[u8]) -> Result<[u8; 32], DomError> {
+    if bytes.len() != 32 {
+        warn!(
+            "Clearing invalid persisted Noise static key: expected 32 bytes, got {}",
+            bytes.len()
+        );
+        store.delete_metadata(NOISE_STATIC_KEY_METADATA_KEY)?;
+        let (privkey, _) = dom_wire::handshake::generate_static_keypair();
+        store.put_metadata(NOISE_STATIC_KEY_METADATA_KEY, &privkey)?;
+        return Ok(privkey);
+    }
+
+    let mut privkey = [0u8; 32];
+    privkey.copy_from_slice(bytes);
+    let mut normalized = privkey;
+    dom_wire::handshake::clamp_static_privkey(&mut normalized);
+    if normalized != privkey {
+        warn!("Normalizing persisted Noise static key to canonical clamped form");
+        store.put_metadata(NOISE_STATIC_KEY_METADATA_KEY, &normalized)?;
+    }
+    Ok(normalized)
 }
 
 async fn record_duplicate_block_relay(
@@ -2798,14 +2834,16 @@ mod tests {
     use super::{
         continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
         decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
-        peer_violation_score, pending_peer_violation_score, purge_mempool_confirmed_inputs,
-        reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action, tx_hash,
-        DeferredReplayAction, IbdRoundState, OutboundAttemptOutcome, RelayBlockAction,
+        load_or_create_noise_static_key, peer_violation_score, pending_peer_violation_score,
+        purge_mempool_confirmed_inputs, reconcile_mempool_after_connect, refresh_peer_metrics,
+        relay_block_action, tx_hash, DeferredReplayAction, DomNode, IbdRoundState,
+        OutboundAttemptOutcome, RelayBlockAction,
     };
     use crate::metrics::Metrics;
     use dom_chain::{
         ChainState, ConnectResult, IbdInterruption, IbdPhase, PersistedIbdState, ReorgDelta,
     };
+    use dom_config::NodeConfig;
     use dom_consensus::block::{BlockHeader, ProofOfWork};
     use dom_consensus::{
         Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionInput,
@@ -3091,6 +3129,49 @@ mod tests {
         let dir = std::env::temp_dir().join(unique);
         fs::create_dir_all(&dir).expect("create test dir");
         dir
+    }
+
+    fn regtest_node_config(data_dir: &std::path::Path) -> NodeConfig {
+        let mut config = NodeConfig::regtest();
+        config.data_dir = data_dir.to_string_lossy().into_owned();
+        config.wallet_path = None;
+        config.wallet_password = None;
+        config.mine = false;
+        config
+    }
+
+    #[test]
+    fn noise_static_key_persists_across_store_reopen() {
+        let dir = fresh_test_dir("noise-key-reopen");
+        let store = DomStore::open(&dir).expect("store open");
+        let first = load_or_create_noise_static_key(&store).expect("first load/create");
+        drop(store);
+
+        let reopened = DomStore::open(&dir).expect("store reopen");
+        let second = load_or_create_noise_static_key(&reopened).expect("second load");
+
+        assert_eq!(first, second, "persisted Noise key must survive reopen");
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn node_identity_survives_restart_init() {
+        let dir = fresh_test_dir("noise-node-restart");
+        let config = regtest_node_config(&dir);
+
+        let first = DomNode::init(config.clone()).expect("first init");
+        let second = DomNode::init(config).expect("second init");
+
+        assert_eq!(
+            first.noise_privkey, second.noise_privkey,
+            "Noise static key must survive restart"
+        );
+        assert_eq!(
+            dom_wire::handshake::derive_static_pubkey(&first.noise_privkey),
+            dom_wire::handshake::derive_static_pubkey(&second.noise_privkey),
+            "derived public identity must survive restart"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
     #[test]
