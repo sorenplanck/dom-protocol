@@ -1,6 +1,6 @@
 //! Minerador DOM — loop de mineração com RandomX.
 
-use crate::node::DomNode;
+use crate::node::{reconcile_mempool_after_connect, DomNode};
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{compute_block_pmmr_roots, derive_chain_id};
 use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionOutput};
@@ -443,6 +443,12 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     // because it pollutes logs under normal pool/solo miner concurrency.
     match connect_outcome {
         dom_chain::ConnectResult::BestChain => { /* normal path */ }
+        dom_chain::ConnectResult::Reorg(_) => {
+            tracing::debug!(
+                "Miner block at height {} triggered a heavier known-tip reorg",
+                new_height
+            );
+        }
         dom_chain::ConnectResult::SideChain => {
             tracing::debug!(
                 "Miner block at height {} accepted as SideChain (race with relayed block)",
@@ -467,30 +473,28 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
         }
     }
 
-    // Drain the mempool of every transaction whose inputs were just
-    // confirmed. `remove_confirmed` evicts by input commitment, so any
-    // descendant that would now double-spend a freshly-consumed UTXO
-    // is also cleaned up, not just the txs we packed into the block.
-    {
-        let mut all_inputs: Vec<[u8; 33]> =
-            Vec::with_capacity(block.transactions.iter().map(|tx| tx.inputs.len()).sum());
-        for tx in &block.transactions {
-            for input in &tx.inputs {
-                all_inputs.push(*input.commitment.as_bytes());
-            }
-        }
-        if !all_inputs.is_empty() {
-            let mut mempool = node.mempool.lock().await;
-            mempool.remove_confirmed(&all_inputs);
-        }
-    }
+    reconcile_mempool_after_connect(
+        &node.chain,
+        &node.mempool,
+        &connect_outcome,
+        &block.transactions,
+    )
+    .await
+    .map_err(|e| DomError::Internal(format!("mempool reconciliation: {e}")))?;
 
     // Scan block for wallet outputs (coinbase reward recovery).
-    if let Some(ref wallet_arc) = node.wallet {
-        let mut wallet = wallet_arc.lock().await;
-        wallet
-            .apply_canonical_block(&block.transactions, new_height)
-            .map_err(|e| DomError::Internal(format!("wallet canonical block apply: {e}")))?;
+    if matches!(connect_outcome, dom_chain::ConnectResult::BestChain) {
+        if let Some(ref wallet_arc) = node.wallet {
+            let mut wallet = wallet_arc.lock().await;
+            wallet
+                .apply_canonical_block(&block.transactions, new_height)
+                .map_err(|e| DomError::Internal(format!("wallet canonical block apply: {e}")))?;
+        }
+    } else if matches!(connect_outcome, dom_chain::ConnectResult::Reorg(_)) {
+        tracing::debug!(
+            "Skipping wallet canonical apply for mined reorg block at height {}; rollback hooks remain explicit follow-up work",
+            new_height
+        );
     }
 
     // Relay newly-mined block to all connected peers via broadcast channel.

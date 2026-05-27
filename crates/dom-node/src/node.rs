@@ -96,6 +96,14 @@ const FUTURE_BLOCK_QUEUE_MAX_AGE_SECS: u64 = dom_core::MAX_FUTURE_BLOCK_TIME
     + dom_core::FUTURE_BLOCK_SOFT_BUFFER_SECS
     + FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS * 2;
 const HELLO_EXCHANGE_TIMEOUT_SECS: u64 = dom_wire::handshake::HANDSHAKE_TIMEOUT_SECS;
+const PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v1";
+const NOISE_STATIC_KEY_METADATA_KEY: &[u8] = b"dom/noise_static_key/v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutboundAttemptOutcome {
+    RetryableFailure,
+    Registered,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeferredReplayAction {
@@ -173,13 +181,17 @@ impl DomNode {
             dom_config::Network::Regtest => dom_core::GENESIS_HASH_REGTEST,
         });
 
+        // Generate or load Noise keypair.
+        let noise_privkey = load_or_create_noise_static_key(&store)?;
+        let noise_pubkey = dom_wire::handshake::derive_static_pubkey(&noise_privkey);
+        info!("Node identity: {}", hex::encode(noise_pubkey));
+
         // Initialize chain state
         let chain = ChainState::open(store, genesis_hash, config.network.magic())?;
         info!("Chain tip: height={}", chain.tip_height);
 
-        // Load or generate Noise static keypair (persisted across restarts)
-        let (noise_privkey, noise_pubkey) = crate::identity::load_or_create_identity(data_path)?;
-        info!("Node identity: {}", hex::encode(noise_pubkey));
+        let mut peers = PeerManager::new(config.max_inbound, config.min_outbound);
+        restore_peer_rotation_state(&chain.store, &mut peers)?;
 
         let (block_relay_tx, _) = tokio::sync::broadcast::channel(64);
         let (tx_fluff_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
@@ -253,10 +265,7 @@ impl DomNode {
             config: config.clone(),
             chain: Arc::new(Mutex::new(chain)),
             mempool: Arc::new(Mutex::new(Mempool::new())),
-            peers: Arc::new(Mutex::new(PeerManager::new(
-                config.max_inbound,
-                config.min_outbound,
-            ))),
+            peers: Arc::new(Mutex::new(peers)),
             dandelion: Arc::new(Mutex::new(DandelionRouter::new())),
             wallet,
             metrics,
@@ -365,6 +374,20 @@ impl DomNode {
                                 };
                                 match deferred_replay_action(&result) {
                                     DeferredReplayAction::RelayBestChain => {
+                                        if let Ok(ref connect_result) = result {
+                                            if let Err(e) = reconcile_mempool_after_connect(
+                                                &chain,
+                                                &mempool,
+                                                connect_result,
+                                                &block.transactions,
+                                            )
+                                            .await
+                                            {
+                                                tracing::warn!(
+                                                    "Deferred block mempool reconciliation failed: {e}"
+                                                );
+                                            }
+                                        }
                                         tracing::info!(
                                             "Accepted deferred block ts={} (new tip)",
                                             deferred.timestamp
@@ -576,6 +599,10 @@ impl DomNode {
                 addrs.extend(self.config.seed_peers.iter().cloned());
                 addrs.sort();
                 addrs.dedup();
+                addrs = {
+                    let mgr = self.peers.lock().await;
+                    mgr.outbound_candidates_in_retry_order(addrs)
+                };
 
                 for addr in addrs {
                     let reserved = {
@@ -603,12 +630,22 @@ impl DomNode {
                     let peers = self.peers.clone();
                     let metrics = self.metrics.clone();
                     let svc_c = svc.clone();
+                    let chain_for_persist = self.chain.clone();
                     tokio::spawn(async move {
-                        connect_outbound(&addr, config, privkey, chain, channels, svc_c).await;
+                        let outcome =
+                            connect_outbound(&addr, config, privkey, chain, channels, svc_c).await;
                         let mut mgr = peers.lock().await;
+                        if outcome == OutboundAttemptOutcome::RetryableFailure {
+                            mgr.record_outbound_failure(&cleanup_addr);
+                        }
                         mgr.remove_peer(&cleanup_addr);
                         mgr.release_outbound_reservation(&cleanup_addr);
                         drop(mgr);
+                        if let Err(e) =
+                            persist_peer_rotation_state(&chain_for_persist, &peers).await
+                        {
+                            warn!("Persisting peer rotation state failed: {e}");
+                        }
                         refresh_peer_metrics(&peers, &metrics).await;
                     });
                 }
@@ -784,6 +821,9 @@ async fn handle_inbound(
                     return;
                 }
             }
+            if let Err(e) = persist_peer_rotation_state(&chain, &svc.peers).await {
+                warn!("Persisting peer rotation state after inbound registration failed: {e}");
+            }
             refresh_peer_metrics(&svc.peers, &svc.metrics).await;
             // IBD loop: if the inbound peer claims a higher chain, sync from it.
             // Mirrors connect_outbound logic so inbound-only nodes (behind NAT
@@ -845,7 +885,7 @@ async fn connect_outbound(
     chain: Arc<Mutex<ChainState>>,
     channels: BroadcastChannels,
     svc: NodeServices,
-) {
+) -> OutboundAttemptOutcome {
     let BroadcastChannels {
         block_relay_tx,
         tx_fluff_tx,
@@ -855,7 +895,7 @@ async fn connect_outbound(
         Ok(s) => s,
         Err(e) => {
             warn!("Connection to {addr} failed: {e}");
-            return;
+            return OutboundAttemptOutcome::RetryableFailure;
         }
     };
     let genesis_hash = match config.network {
@@ -879,7 +919,7 @@ async fn connect_outbound(
                 let _ = record_pending_peer_violation(&svc.peers, peer_addr, &e).await;
             }
             warn!("Handshake failed with {addr}: {e}");
-            return;
+            return OutboundAttemptOutcome::RetryableFailure;
         }
     };
     info!("Connected to {addr}");
@@ -900,7 +940,7 @@ async fn connect_outbound(
                         Ok(a) => a,
                         Err(e) => {
                             warn!("Cannot determine addr for register_peer: {e}");
-                            return;
+                            return OutboundAttemptOutcome::RetryableFailure;
                         }
                     },
                 };
@@ -913,15 +953,18 @@ async fn connect_outbound(
                 info!("register_peer outbound {addr} → {result:?}");
                 if let Err(e) = result {
                     warn!("Failed to register outbound peer {addr}: {e}");
-                    return;
+                    return OutboundAttemptOutcome::RetryableFailure;
                 }
+            }
+            if let Err(e) = persist_peer_rotation_state(&chain, &svc.peers).await {
+                warn!("Persisting peer rotation state after outbound registration failed: {e}");
             }
             refresh_peer_metrics(&svc.peers, &svc.metrics).await;
             let peer_addr = match stream.peer_addr() {
                 Ok(a) => a,
                 Err(_) => {
                     warn!("Could not resolve peer_addr for {addr}");
-                    return;
+                    return OutboundAttemptOutcome::RetryableFailure;
                 }
             };
 
@@ -944,7 +987,7 @@ async fn connect_outbound(
                     Err(e) => {
                         let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
                         warn!("IBD with {addr} failed: {e}");
-                        return;
+                        return OutboundAttemptOutcome::RetryableFailure;
                     }
                 }
             }
@@ -968,6 +1011,7 @@ async fn connect_outbound(
             {
                 info!("Connection to {addr} closed: {e}");
             }
+            OutboundAttemptOutcome::Registered
         }
         Err(e) => {
             let peer_addr = match stream.peer_addr() {
@@ -976,12 +1020,13 @@ async fn connect_outbound(
                     Ok(a) => a,
                     Err(_) => {
                         warn!("Hello exchange with {addr} failed: {e}");
-                        return;
+                        return OutboundAttemptOutcome::RetryableFailure;
                     }
                 },
             };
             let _ = record_pending_peer_violation(&svc.peers, peer_addr, &e).await;
             warn!("Hello exchange with {addr} failed: {e}");
+            OutboundAttemptOutcome::RetryableFailure
         }
     }
 }
@@ -1205,7 +1250,9 @@ fn deferred_replay_action(
     result: &Result<dom_chain::ConnectResult, DomError>,
 ) -> DeferredReplayAction {
     match result {
-        Ok(dom_chain::ConnectResult::BestChain) => DeferredReplayAction::RelayBestChain,
+        Ok(dom_chain::ConnectResult::BestChain) | Ok(dom_chain::ConnectResult::Reorg(_)) => {
+            DeferredReplayAction::RelayBestChain
+        }
         Ok(dom_chain::ConnectResult::SideChain) | Ok(dom_chain::ConnectResult::AlreadyHave) => {
             DeferredReplayAction::Drop
         }
@@ -1218,7 +1265,9 @@ fn deferred_replay_action(
 
 fn relay_block_action(result: &Result<dom_chain::ConnectResult, DomError>) -> RelayBlockAction {
     match result {
-        Ok(dom_chain::ConnectResult::BestChain) => RelayBlockAction::RelayBestChain,
+        Ok(dom_chain::ConnectResult::BestChain) | Ok(dom_chain::ConnectResult::Reorg(_)) => {
+            RelayBlockAction::RelayBestChain
+        }
         Ok(dom_chain::ConnectResult::SideChain)
         | Ok(dom_chain::ConnectResult::AlreadyHave)
         | Err(DomError::TemporarilyInvalid(_))
@@ -1226,6 +1275,103 @@ fn relay_block_action(result: &Result<dom_chain::ConnectResult, DomError>) -> Re
         Err(DomError::Invalid(_)) | Err(DomError::Malformed(_)) => RelayBlockAction::PenalizePeer,
         Err(_) => RelayBlockAction::Drop,
     }
+}
+
+fn tx_hash(tx: &Transaction) -> Result<[u8; 32], DomError> {
+    use dom_serialization::DomSerialize;
+
+    let tx_bytes = tx.to_bytes()?;
+    Ok(*dom_crypto::hash::blake2b_256(&tx_bytes).as_bytes())
+}
+
+fn collect_spent_commitments(transactions: &[Transaction]) -> Vec<[u8; 33]> {
+    let mut spent = Vec::with_capacity(transactions.iter().map(|tx| tx.inputs.len()).sum());
+    for tx in transactions {
+        for input in &tx.inputs {
+            spent.push(*input.commitment.as_bytes());
+        }
+    }
+    spent
+}
+
+fn collect_reinjectable_reorg_txs(
+    chain: &ChainState,
+    delta: &dom_chain::ReorgDelta,
+) -> Result<Vec<(Transaction, [u8; 32], u64)>, DomError> {
+    let mut reinject = Vec::new();
+    for tx in &delta.disconnected_txs {
+        let inputs_are_live = tx.inputs.iter().all(|input| {
+            let commitment = input.commitment.as_bytes();
+            match chain.store.get_utxo(commitment) {
+                Ok(Some(entry)) => {
+                    !entry.is_coinbase
+                        || entry.is_mature_for(chain.tip_height.0, chain.coinbase_maturity)
+                }
+                Ok(None) => false,
+                Err(_) => false,
+            }
+        });
+        if !inputs_are_live {
+            continue;
+        }
+
+        let outputs_are_fresh = tx.outputs.iter().all(|output| {
+            chain
+                .store
+                .get_utxo(output.commitment.as_bytes())
+                .map(|entry| entry.is_none())
+                .unwrap_or(false)
+        });
+        if !outputs_are_fresh {
+            continue;
+        }
+
+        let kernels_are_fresh = tx.kernels.iter().all(|kernel| {
+            chain
+                .store
+                .get_kernel_block(kernel.excess.as_bytes())
+                .map(|entry| entry.is_none())
+                .unwrap_or(false)
+        });
+        if !kernels_are_fresh {
+            continue;
+        }
+
+        reinject.push((tx.clone(), tx_hash(tx)?, chain.tip_height.0));
+    }
+    Ok(reinject)
+}
+
+pub(crate) async fn reconcile_mempool_after_connect(
+    chain: &Arc<Mutex<ChainState>>,
+    mempool: &Arc<Mutex<Mempool>>,
+    connect_result: &dom_chain::ConnectResult,
+    connected_block_txs: &[Transaction],
+) -> Result<(), DomError> {
+    let (spent_commitments, reinjectable) = {
+        let chain = chain.lock().await;
+        match connect_result {
+            dom_chain::ConnectResult::BestChain => {
+                (collect_spent_commitments(connected_block_txs), Vec::new())
+            }
+            dom_chain::ConnectResult::Reorg(delta) => (
+                collect_spent_commitments(&delta.connected_txs),
+                collect_reinjectable_reorg_txs(&chain, delta)?,
+            ),
+            dom_chain::ConnectResult::SideChain | dom_chain::ConnectResult::AlreadyHave => {
+                return Ok(());
+            }
+        }
+    };
+
+    let mut mempool = mempool.lock().await;
+    if !spent_commitments.is_empty() {
+        mempool.remove_confirmed(&spent_commitments);
+    }
+    if !reinjectable.is_empty() {
+        let _ = mempool.reinject_batch(reinjectable);
+    }
+    Ok(())
 }
 
 fn decode_deferred_block_bytes(block_bytes: &[u8]) -> Result<dom_consensus::Block, DomError> {
@@ -1262,6 +1408,100 @@ fn decode_ibd_block_response(
         )));
     }
     Ok((payload.block_bytes, block))
+}
+
+pub(crate) fn persist_peer_rotation_snapshot(
+    store: &DomStore,
+    snapshot: &dom_wire::manager::PersistedPeerRotationState,
+) -> Result<(), DomError> {
+    use dom_serialization::DomSerialize;
+
+    if snapshot.outbound_failures.is_empty() {
+        return store.delete_metadata(PEER_ROTATION_METADATA_KEY);
+    }
+    store.put_metadata(PEER_ROTATION_METADATA_KEY, &snapshot.to_bytes()?)
+}
+
+pub(crate) fn load_peer_rotation_snapshot(
+    store: &DomStore,
+) -> Result<Option<dom_wire::manager::PersistedPeerRotationState>, DomError> {
+    use dom_serialization::DomDeserialize;
+
+    match store.get_metadata(PEER_ROTATION_METADATA_KEY)? {
+        Some(bytes) => {
+            let snapshot = dom_wire::manager::PersistedPeerRotationState::from_bytes(&bytes)
+                .map_err(|e| {
+                    DomError::Invalid(format!("peer rotation snapshot decode failed: {e}"))
+                })?;
+            Ok(Some(snapshot))
+        }
+        None => Ok(None),
+    }
+}
+
+pub(crate) fn restore_peer_rotation_state(
+    store: &DomStore,
+    peers: &mut PeerManager,
+) -> Result<(), DomError> {
+    match load_peer_rotation_snapshot(store) {
+        Ok(Some(snapshot)) => match peers.restore_outbound_failure_state(&snapshot) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                warn!("Clearing invalid persisted peer rotation state: {e}");
+                store.delete_metadata(PEER_ROTATION_METADATA_KEY)?;
+                Ok(())
+            }
+        },
+        Ok(None) => Ok(()),
+        Err(e) => {
+            warn!("Clearing unreadable persisted peer rotation state: {e}");
+            store.delete_metadata(PEER_ROTATION_METADATA_KEY)?;
+            Ok(())
+        }
+    }
+}
+
+async fn persist_peer_rotation_state(
+    chain: &Arc<Mutex<ChainState>>,
+    peers: &Arc<Mutex<PeerManager>>,
+) -> Result<(), DomError> {
+    let snapshot = {
+        let peers = peers.lock().await;
+        peers.outbound_failure_state()
+    };
+    let chain = chain.lock().await;
+    persist_peer_rotation_snapshot(&chain.store, &snapshot)
+}
+
+pub(crate) fn load_or_create_noise_static_key(store: &DomStore) -> Result<[u8; 32], DomError> {
+    match store.get_metadata(NOISE_STATIC_KEY_METADATA_KEY)? {
+        Some(bytes) => parse_persisted_noise_static_key(&bytes),
+        None => {
+            let (privkey, _) = dom_wire::handshake::generate_static_keypair();
+            store.put_metadata(NOISE_STATIC_KEY_METADATA_KEY, &privkey)?;
+            Ok(privkey)
+        }
+    }
+}
+
+fn parse_persisted_noise_static_key(bytes: &[u8]) -> Result<[u8; 32], DomError> {
+    if bytes.len() != 32 {
+        return Err(DomError::Invalid(format!(
+            "persisted Noise static key has invalid length: expected 32 bytes, got {}",
+            bytes.len()
+        )));
+    }
+
+    let mut privkey = [0u8; 32];
+    privkey.copy_from_slice(bytes);
+    let mut normalized = privkey;
+    dom_wire::handshake::clamp_static_privkey(&mut normalized);
+    if normalized != privkey {
+        return Err(DomError::Invalid(
+            "persisted Noise static key is not in canonical clamped form".into(),
+        ));
+    }
+    Ok(privkey)
 }
 
 async fn record_duplicate_block_relay(
@@ -1352,6 +1592,7 @@ async fn persist_ibd_state(
     ibd: &dom_chain::IbdState,
     round: IbdRoundState,
 ) -> Result<(), DomError> {
+    let chain = chain.lock().await;
     let snapshot = dom_chain::PersistedIbdState {
         phase: ibd.phase,
         peer_addr: peer_addr.to_string(),
@@ -1360,6 +1601,7 @@ async fn persist_ibd_state(
         headers_height: ibd.headers_height,
         blocks_height: ibd.blocks_height,
         last_progress_height: ibd.last_progress_height,
+        checkpoint_tip_hash: *chain.tip_hash.as_bytes(),
         retry_attempts: ibd.retry_attempts,
         last_interruption: ibd.last_interruption,
         pending_blocks: round.pending_blocks,
@@ -1368,7 +1610,6 @@ async fn persist_ibd_state(
         header_cursor: round.header_cursor,
         header_cursor_height: round.header_cursor_height,
     };
-    let chain = chain.lock().await;
     snapshot.save(&chain.store)
 }
 
@@ -1399,10 +1640,11 @@ async fn initialize_ibd_state(
     peer_best_height: u64,
 ) -> Result<(dom_chain::IbdState, Option<dom_chain::PersistedIbdState>), DomError> {
     let peer_key = peer_addr.to_string();
-    let (tip_height, persisted) = {
+    let (tip_height, tip_hash, persisted) = {
         let chain = chain.lock().await;
         (
             chain.tip_height.0,
+            *chain.tip_hash.as_bytes(),
             dom_chain::PersistedIbdState::load(&chain.store)?,
         )
     };
@@ -1414,6 +1656,7 @@ async fn initialize_ibd_state(
     let resumable = snapshot.peer_addr == peer_key
         && snapshot.best_peer_height == peer_best_height
         && snapshot.blocks_height == tip_height
+        && snapshot.checkpoint_tip_hash == tip_hash
         && !matches!(
             snapshot.phase,
             dom_chain::IbdPhase::Completed | dom_chain::IbdPhase::Failed
@@ -1505,6 +1748,10 @@ async fn resume_ibd_block_sync(
                     ),
                 ) {
                     Ok(dom_chain::ConnectResult::BestChain) => {
+                        connected_any = true;
+                        true
+                    }
+                    Ok(dom_chain::ConnectResult::Reorg(_)) => {
                         connected_any = true;
                         true
                     }
@@ -2347,17 +2594,48 @@ async fn message_loop(
                                 };
                                 match relay_block_action(&result) {
                                     RelayBlockAction::RelayBestChain => {
-                                        tracing::info!("Accepted relayed block from {peer_addr} (new tip)");
-                                        purge_mempool_confirmed_inputs(
-                                            &svc.mempool,
-                                            &txs_for_scan,
-                                        )
-                                        .await;
+                                        if let Ok(ref connect_result) = result {
+                                            if let Err(e) = reconcile_mempool_after_connect(
+                                                &chain,
+                                                &svc.mempool,
+                                                connect_result,
+                                                &block.transactions,
+                                            )
+                                            .await
+                                            {
+                                                tracing::warn!(
+                                                    "Mempool reconciliation failed after block from {peer_addr}: {e}"
+                                                );
+                                            }
+                                        }
+                                        tracing::info!(
+                                            "Accepted relayed block from {peer_addr} (new tip)"
+                                        );
                                         // Wallet state follows canonical blocks only.
-                                        if let Some(ref wallet_arc) = svc.wallet {
-                                            let mut w = wallet_arc.lock().await;
-                                            if let Err(e) = w.apply_canonical_block(&txs_for_scan, height) {
-                                                tracing::warn!("wallet canonical block apply failed at height {height}: {e}");
+                                        if let Ok(ref connect_result) = result {
+                                            match connect_result {
+                                                dom_chain::ConnectResult::BestChain => {
+                                                    if let Some(ref wallet_arc) = svc.wallet {
+                                                        let mut w = wallet_arc.lock().await;
+                                                        if let Err(e) =
+                                                            w.apply_canonical_block(
+                                                                &txs_for_scan,
+                                                                height,
+                                                            )
+                                                        {
+                                                            tracing::warn!(
+                                                                "wallet canonical block apply failed at height {height}: {e}"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                dom_chain::ConnectResult::Reorg(_) => {
+                                                    tracing::debug!(
+                                                        "Skipping wallet canonical apply for reorg from {peer_addr}; rollback hooks remain explicit follow-up work"
+                                                    );
+                                                }
+                                                dom_chain::ConnectResult::SideChain
+                                                | dom_chain::ConnectResult::AlreadyHave => {}
                                             }
                                         }
                                         // DOM-SEC-RELAY-LOOP: only rebroadcast when we
@@ -2558,12 +2836,17 @@ mod tests {
     use super::{
         continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
         decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
-        peer_violation_score, pending_peer_violation_score, purge_mempool_confirmed_inputs,
-        refresh_peer_metrics, relay_block_action, DeferredReplayAction, IbdRoundState,
-        RelayBlockAction,
+        load_or_create_noise_static_key, parse_persisted_noise_static_key, peer_violation_score,
+        pending_peer_violation_score, purge_mempool_confirmed_inputs,
+        reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action, tx_hash,
+        DeferredReplayAction, DomNode, IbdRoundState, OutboundAttemptOutcome, RelayBlockAction,
+        NOISE_STATIC_KEY_METADATA_KEY,
     };
     use crate::metrics::Metrics;
-    use dom_chain::{ChainState, ConnectResult, IbdPhase, PersistedIbdState};
+    use dom_chain::{
+        ChainState, ConnectResult, IbdInterruption, IbdPhase, PersistedIbdState, ReorgDelta,
+    };
+    use dom_config::NodeConfig;
     use dom_consensus::block::{BlockHeader, ProofOfWork};
     use dom_consensus::{
         Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionInput,
@@ -2577,6 +2860,7 @@ mod tests {
     use dom_mempool::Mempool;
     use dom_pow::CompactTarget;
     use dom_serialization::DomSerialize;
+    use dom_store::utxo::UtxoEntry;
     use dom_store::DomStore;
     use dom_wire::manager::PeerManager;
     use dom_wire::message::BlockPayload;
@@ -2589,6 +2873,8 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use tokio::sync::Mutex;
+
+    type TestUtxoBytes = ([u8; 33], Vec<u8>);
 
     fn commitment(seed: u8, value: u64) -> Commitment {
         let mut bytes = [0u8; 32];
@@ -2632,6 +2918,65 @@ mod tests {
         }
     }
 
+    fn synthetic_block_with_transactions(
+        prev_hash: Hash256,
+        height: u64,
+        nonce: u64,
+        coinbase_seed: u8,
+        transactions: Vec<Transaction>,
+    ) -> Block {
+        Block {
+            header: BlockHeader {
+                version: 1,
+                height: BlockHeight(height),
+                prev_hash,
+                timestamp: Timestamp(1_700_100_000 + height),
+                output_root: Hash256::ZERO,
+                kernel_root: Hash256::ZERO,
+                rangeproof_root: Hash256::ZERO,
+                total_kernel_offset: [0u8; 32],
+                target: CompactTarget(0),
+                total_difficulty: U256::from(height),
+                pow: ProofOfWork {
+                    nonce,
+                    randomx_hash: Hash256::ZERO,
+                },
+            },
+            coinbase: CoinbaseTransaction {
+                output: TransactionOutput {
+                    commitment: commitment(coinbase_seed, 1_000 + height),
+                    proof: vec![coinbase_seed; 8],
+                },
+                kernel: CoinbaseKernel {
+                    features: KERNEL_FEAT_COINBASE,
+                    explicit_value: 1,
+                    excess: commitment(coinbase_seed.wrapping_add(100), 0),
+                    excess_signature: [coinbase_seed; 65],
+                },
+                offset: [0u8; 32],
+            },
+            transactions,
+        }
+    }
+
+    fn synthetic_spend_tx(input: Commitment, output_seed: u8, kernel_seed: u8) -> Transaction {
+        Transaction {
+            inputs: vec![TransactionInput { commitment: input }],
+            outputs: vec![TransactionOutput {
+                commitment: commitment(output_seed, u64::from(output_seed) + 1),
+                proof: vec![output_seed; 8],
+            }],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(MIN_RELAY_FEE_RATE * 100).expect("fee"),
+                lock_height: 0,
+                excess: commitment(kernel_seed, 0),
+                excess_signature: [kernel_seed; 65],
+            }],
+            offset: [0u8; 32],
+        }
+    }
+
     fn spending_tx(input: Commitment, seed: u8) -> Transaction {
         Transaction {
             inputs: vec![TransactionInput { commitment: input }],
@@ -2650,6 +2995,70 @@ mod tests {
         }
     }
 
+    fn block_state_changes(block: &Block) -> (Vec<TestUtxoBytes>, Vec<[u8; 33]>) {
+        let mut new_utxos = vec![(
+            *block.coinbase.output.commitment.as_bytes(),
+            UtxoEntry {
+                block_height: block.header.height.0,
+                is_coinbase: true,
+                proof: block.coinbase.output.proof.clone(),
+            }
+            .to_bytes(),
+        )];
+        let mut spent_utxos = Vec::new();
+        for tx in &block.transactions {
+            for input in &tx.inputs {
+                spent_utxos.push(*input.commitment.as_bytes());
+            }
+            for output in &tx.outputs {
+                new_utxos.push((
+                    *output.commitment.as_bytes(),
+                    UtxoEntry {
+                        block_height: block.header.height.0,
+                        is_coinbase: false,
+                        proof: output.proof.clone(),
+                    }
+                    .to_bytes(),
+                ));
+            }
+        }
+        (new_utxos, spent_utxos)
+    }
+
+    fn kernel_excesses(block: &Block) -> Vec<([u8; 33], [u8; 32])> {
+        let hash = block_hash(block);
+        let mut out = vec![(*block.coinbase.kernel.excess.as_bytes(), hash)];
+        for tx in &block.transactions {
+            for kernel in &tx.kernels {
+                out.push((*kernel.excess.as_bytes(), hash));
+            }
+        }
+        out
+    }
+
+    async fn commit_chain_block(chain: &Arc<Mutex<ChainState>>, block: &Block) {
+        let hash = block_hash(block);
+        let header_bytes = block.header.to_bytes().expect("header bytes");
+        let body_bytes = block.to_bytes().expect("body bytes");
+        let (new_utxos, spent_utxos) = block_state_changes(block);
+        let kernels = kernel_excesses(block);
+        let mut guard = chain.lock().await;
+        guard
+            .store
+            .commit_block(
+                &hash,
+                block.header.height.0,
+                &header_bytes,
+                &body_bytes,
+                &new_utxos,
+                &spent_utxos,
+                &kernels,
+            )
+            .expect("commit block");
+        guard.tip_hash = Hash256::from_bytes(hash);
+        guard.tip_height = block.header.height;
+        guard.tip_difficulty = block.header.total_difficulty;
+    }
     fn ibd_payload(block: &Block) -> Vec<u8> {
         BlockPayload {
             block_bytes: block.to_bytes().expect("serialize block"),
@@ -2725,6 +3134,114 @@ mod tests {
         dir
     }
 
+    fn regtest_node_config(data_dir: &std::path::Path) -> NodeConfig {
+        let mut config = NodeConfig::regtest();
+        config.data_dir = data_dir.to_string_lossy().into_owned();
+        config.wallet_path = None;
+        config.wallet_password = None;
+        config.mine = false;
+        config
+    }
+
+    #[test]
+    fn noise_static_key_persists_across_store_reopen() {
+        let dir = fresh_test_dir("noise-key-reopen");
+        let store = DomStore::open(&dir).expect("store open");
+        let first = load_or_create_noise_static_key(&store).expect("first load/create");
+        drop(store);
+
+        let reopened = DomStore::open(&dir).expect("store reopen");
+        let second = load_or_create_noise_static_key(&reopened).expect("second load");
+
+        assert_eq!(first, second, "persisted Noise key must survive reopen");
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn node_identity_survives_restart_init() {
+        let dir = fresh_test_dir("noise-node-restart");
+        let config = regtest_node_config(&dir);
+
+        let first = DomNode::init(config.clone()).expect("first init");
+        let second = DomNode::init(config).expect("second init");
+
+        assert_eq!(
+            first.noise_privkey, second.noise_privkey,
+            "Noise static key must survive restart"
+        );
+        assert_eq!(
+            dom_wire::handshake::derive_static_pubkey(&first.noise_privkey),
+            dom_wire::handshake::derive_static_pubkey(&second.noise_privkey),
+            "derived public identity must survive restart"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn malformed_persisted_noise_key_is_rejected_without_replacement() {
+        let dir = fresh_test_dir("noise-key-corrupt");
+        let store = DomStore::open(&dir).expect("store open");
+        store
+            .put_metadata(NOISE_STATIC_KEY_METADATA_KEY, b"corrupt")
+            .expect("write corrupt metadata");
+
+        let err = load_or_create_noise_static_key(&store).expect_err("corrupt key should fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("invalid length"),
+            "unexpected error message: {message}"
+        );
+        assert_eq!(
+            store
+                .get_metadata(NOISE_STATIC_KEY_METADATA_KEY)
+                .expect("reload metadata")
+                .expect("metadata present"),
+            b"corrupt"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn malformed_persisted_noise_key_aborts_node_init() {
+        let dir = fresh_test_dir("noise-node-corrupt");
+        let store = DomStore::open(&dir).expect("store open");
+        store
+            .put_metadata(NOISE_STATIC_KEY_METADATA_KEY, b"corrupt")
+            .expect("write corrupt metadata");
+        drop(store);
+
+        let err = match DomNode::init(regtest_node_config(&dir)) {
+            Ok(_) => panic!("init should fail"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("persisted Noise static key"),
+            "unexpected error message: {message}"
+        );
+
+        let reopened = DomStore::open(&dir).expect("store reopen");
+        assert_eq!(
+            reopened
+                .get_metadata(NOISE_STATIC_KEY_METADATA_KEY)
+                .expect("reload metadata")
+                .expect("metadata present"),
+            b"corrupt"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn unclamped_persisted_noise_key_is_rejected() {
+        let raw = [0xff; 32];
+        let err = parse_persisted_noise_static_key(&raw).expect_err("unclamped key should fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("canonical clamped form"),
+            "unexpected error message: {message}"
+        );
+    }
+
     #[test]
     fn malformed_message_maps_to_malformed_score() {
         assert_eq!(
@@ -2783,6 +3300,10 @@ mod tests {
             deferred_replay_action(&Ok(ConnectResult::BestChain)),
             DeferredReplayAction::RelayBestChain
         );
+        assert_eq!(
+            deferred_replay_action(&Ok(ConnectResult::Reorg(ReorgDelta::default()))),
+            DeferredReplayAction::RelayBestChain
+        );
     }
 
     #[test]
@@ -2827,6 +3348,68 @@ mod tests {
             relay_block_action(&Ok(ConnectResult::BestChain)),
             RelayBlockAction::RelayBestChain
         );
+        assert_eq!(
+            relay_block_action(&Ok(ConnectResult::Reorg(ReorgDelta::default()))),
+            RelayBlockAction::RelayBestChain
+        );
+    }
+
+    #[tokio::test]
+    async fn reorg_mempool_reconciliation_reinjects_live_txs_and_evicts_conflicts() {
+        let dir = fresh_test_dir("reorg-mempool-reconcile");
+        let chain = open_chain(&dir);
+        let mempool = Arc::new(Mutex::new(Mempool::new()));
+
+        let base_output = commitment(40, 25);
+        let base_tx = Transaction {
+            inputs: vec![],
+            outputs: vec![TransactionOutput {
+                commitment: base_output.clone(),
+                proof: vec![0x40; 8],
+            }],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(dom_core::MIN_RELAY_FEE_RATE * 100).expect("fee"),
+                lock_height: 0,
+                excess: commitment(41, 0),
+                excess_signature: [0x41; 65],
+            }],
+            offset: [0u8; 32],
+        };
+        let base_block =
+            synthetic_block_with_transactions(Hash256::ZERO, 1, 11, 42, vec![base_tx.clone()]);
+        commit_chain_block(&chain, &base_block).await;
+
+        let disconnected_tx = synthetic_spend_tx(base_output, 50, 51);
+        let conflicting_input = commitment(60, 30);
+        let conflicting_live_tx = synthetic_spend_tx(conflicting_input.clone(), 61, 62);
+        let conflicting_live_hash = tx_hash(&conflicting_live_tx).expect("hash");
+        {
+            let mut pool = mempool.lock().await;
+            pool.accept_tx(conflicting_live_tx, conflicting_live_hash, 1)
+                .expect("accept conflicting tx");
+        }
+        let connected_tx = synthetic_spend_tx(conflicting_input, 63, 64);
+        let reorg = ReorgDelta {
+            disconnected_txs: vec![disconnected_tx.clone()],
+            connected_txs: vec![connected_tx],
+        };
+
+        reconcile_mempool_after_connect(&chain, &mempool, &ConnectResult::Reorg(reorg), &[])
+            .await
+            .expect("reconcile reorg mempool");
+
+        let disconnected_hash = tx_hash(&disconnected_tx).expect("hash");
+        let pool = mempool.lock().await;
+        assert!(
+            pool.get_tx(&disconnected_hash).is_some(),
+            "live disconnected tx must be resurrected deterministically"
+        );
+        assert!(
+            pool.get_tx(&conflicting_live_hash).is_none(),
+            "connected-branch input must evict conflicting mempool tx"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
     #[test]
@@ -2919,6 +3502,18 @@ mod tests {
         assert!(matches!(err, DomError::Malformed(_)));
     }
 
+    #[test]
+    fn outbound_attempt_outcome_marks_retryable_failures_only() {
+        assert_eq!(
+            OutboundAttemptOutcome::RetryableFailure,
+            OutboundAttemptOutcome::RetryableFailure
+        );
+        assert_ne!(
+            OutboundAttemptOutcome::RetryableFailure,
+            OutboundAttemptOutcome::Registered
+        );
+    }
+
     #[tokio::test]
     async fn refresh_peer_metrics_counts_connected_peer_directions() {
         let peers = Arc::new(Mutex::new(PeerManager::new(125, 8)));
@@ -3004,6 +3599,7 @@ mod tests {
         let dir = fresh_test_dir("header-resume-ok");
         let chain = open_chain(&dir);
         let peer_addr: SocketAddr = "127.0.0.1:33369".parse().expect("peer addr");
+        let checkpoint_tip_hash = { *chain.lock().await.tip_hash.as_bytes() };
 
         let header1 = synthetic_known_header(0, Hash256::ZERO, 1);
         let header2 = synthetic_known_header(1, Hash256::from_bytes(header_hash(&header1)), 2);
@@ -3018,6 +3614,7 @@ mod tests {
             headers_height: 0,
             blocks_height: 0,
             last_progress_height: 0,
+            checkpoint_tip_hash,
             retry_attempts: 0,
             last_interruption: None,
             pending_blocks: Vec::new(),
@@ -3073,15 +3670,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persisted_header_resume_rejects_corrupted_prefix_checkpoint() {
+    async fn persisted_header_resume_rejects_corrupted_continuation() {
         let dir = fresh_test_dir("header-resume-bad");
         let chain = open_chain(&dir);
         let peer_addr: SocketAddr = "127.0.0.1:33369".parse().expect("peer addr");
+        let checkpoint_tip_hash = { *chain.lock().await.tip_hash.as_bytes() };
 
         let header1 = synthetic_known_header(0, Hash256::ZERO, 1);
-        let header2 = synthetic_known_header(1, Hash256::from_bytes(header_hash(&header1)), 2);
+        let mut header2 = synthetic_known_header(1, Hash256::from_bytes(header_hash(&header1)), 2);
+        header2.prev_hash = Hash256::from_bytes([0x99; 32]);
         store_known_header(&chain, &header1).await;
-        store_known_header(&chain, &header2).await;
 
         let snapshot = PersistedIbdState {
             phase: IbdPhase::HeaderSync,
@@ -3091,15 +3689,72 @@ mod tests {
             headers_height: 0,
             blocks_height: 0,
             last_progress_height: 0,
+            checkpoint_tip_hash,
             retry_attempts: 0,
             last_interruption: None,
-            pending_blocks: vec![[0x55; 32]],
+            pending_blocks: Vec::new(),
             pending_headers: vec![
                 header1.to_bytes().expect("header1 bytes"),
                 header2.to_bytes().expect("header2 bytes"),
             ],
             block_cursor: 0,
             header_cursor: 1,
+            header_cursor_height: 1,
+        };
+        {
+            let chain = chain.lock().await;
+            snapshot.save(&chain.store).expect("save snapshot");
+        }
+
+        let (mut ibd, restored) = initialize_ibd_state(&chain, peer_addr, 1)
+            .await
+            .expect("initialize");
+        let restored = restored.expect("restored snapshot should remain resumable");
+        let err = continue_ibd_header_sync(
+            &chain,
+            peer_addr,
+            &mut ibd,
+            IbdRoundState {
+                pending_blocks: restored.pending_blocks.clone(),
+                pending_headers: restored.pending_headers.clone(),
+                block_cursor: restored.block_cursor,
+                header_cursor: restored.header_cursor,
+                header_cursor_height: restored.header_cursor_height,
+            },
+            ibd_now(),
+        )
+        .await
+        .expect_err("corrupted continuation must reject");
+
+        assert!(
+            matches!(err, DomError::Invalid(ref msg) if msg.contains("prev_hash mismatch")),
+            "unexpected error: {err}"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[tokio::test]
+    async fn persisted_header_resume_rejects_malformed_header_bytes() {
+        let dir = fresh_test_dir("header-resume-malformed");
+        let chain = open_chain(&dir);
+        let peer_addr: SocketAddr = "127.0.0.1:33369".parse().expect("peer addr");
+        let checkpoint_tip_hash = { *chain.lock().await.tip_hash.as_bytes() };
+
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::HeaderSync,
+            peer_addr: peer_addr.to_string(),
+            start_height: 0,
+            best_peer_height: 1,
+            headers_height: 0,
+            blocks_height: 0,
+            last_progress_height: 0,
+            checkpoint_tip_hash,
+            retry_attempts: 0,
+            last_interruption: None,
+            pending_blocks: Vec::new(),
+            pending_headers: vec![vec![0xAA, 0xBB, 0xCC]],
+            block_cursor: 0,
+            header_cursor: 0,
             header_cursor_height: 1,
         };
         {
@@ -3125,11 +3780,66 @@ mod tests {
             ibd_now(),
         )
         .await
-        .expect_err("corrupted prefix must reject");
+        .expect_err("malformed resumed header bytes must reject");
 
         assert!(
-            matches!(err, DomError::PolicyRejected(ref msg) if msg.contains("prefix mismatch")),
+            matches!(err, DomError::Malformed(_)),
             "unexpected error: {err}"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[tokio::test]
+    async fn persisted_ibd_snapshot_is_rejected_when_tip_hash_changed_at_same_height() {
+        let dir = fresh_test_dir("header-resume-tip-mismatch");
+        let chain = open_chain(&dir);
+        let peer_addr: SocketAddr = "127.0.0.1:33369".parse().expect("peer addr");
+
+        {
+            let mut guard = chain.lock().await;
+            guard.tip_height = BlockHeight(5);
+            guard.tip_hash = Hash256::from_bytes([0x10; 32]);
+        }
+
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::HeaderSync,
+            peer_addr: peer_addr.to_string(),
+            start_height: 0,
+            best_peer_height: 7,
+            headers_height: 5,
+            blocks_height: 5,
+            last_progress_height: 5,
+            checkpoint_tip_hash: [0x20; 32],
+            retry_attempts: 1,
+            last_interruption: Some(IbdInterruption::Timeout),
+            pending_blocks: Vec::new(),
+            pending_headers: vec![
+                synthetic_known_header(5, Hash256::from_bytes([0x10; 32]), 6)
+                    .to_bytes()
+                    .expect("header bytes"),
+            ],
+            block_cursor: 0,
+            header_cursor: 0,
+            header_cursor_height: 6,
+        };
+        {
+            let guard = chain.lock().await;
+            snapshot.save(&guard.store).expect("save snapshot");
+        }
+
+        let (_, restored) = initialize_ibd_state(&chain, peer_addr, 7)
+            .await
+            .expect("initialize");
+
+        assert!(restored.is_none(), "mismatched tip hash must not resume");
+
+        let persisted = {
+            let guard = chain.lock().await;
+            PersistedIbdState::load(&guard.store).expect("load snapshot")
+        };
+        assert!(
+            persisted.is_none(),
+            "mismatched snapshot must be cleared deterministically"
         );
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
