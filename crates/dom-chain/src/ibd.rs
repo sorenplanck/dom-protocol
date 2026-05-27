@@ -123,7 +123,7 @@ impl PersistedIbdState {
     /// Returns true if this snapshot can be resumed without reconstructing
     /// in-flight round state.
     pub fn is_round_resumable(&self) -> bool {
-        self.pending_blocks.is_empty() && self.block_cursor == 0
+        self.block_cursor as usize <= self.pending_blocks.len()
     }
 }
 
@@ -334,7 +334,7 @@ impl IbdState {
     pub fn from_persisted(snapshot: &PersistedIbdState) -> Result<Self, DomError> {
         if !snapshot.is_round_resumable() {
             return Err(DomError::PolicyRejected(
-                "persisted IBD snapshot requires partial-round resume support".into(),
+                "persisted IBD snapshot has invalid block cursor".into(),
             ));
         }
 
@@ -707,8 +707,29 @@ mod tests {
             block_cursor: 0,
             header_cursor_height: 20,
         };
+        let ibd = IbdState::from_persisted(&snapshot).expect("partial round restore");
+        assert_eq!(ibd.pending_blocks, vec![[0x44; 32]]);
+        assert_eq!(ibd.headers_height, 20);
+    }
+
+    #[test]
+    fn invalid_partial_round_cursor_is_rejected() {
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::BlockSync,
+            peer_addr: "127.0.0.1:33369".into(),
+            start_height: 10,
+            best_peer_height: 25,
+            headers_height: 20,
+            blocks_height: 12,
+            last_progress_height: 12,
+            retry_attempts: 1,
+            last_interruption: None,
+            pending_blocks: vec![[0x44; 32]],
+            block_cursor: 2,
+            header_cursor_height: 20,
+        };
         let err = match IbdState::from_persisted(&snapshot) {
-            Ok(_) => panic!("partial round snapshot must reject"),
+            Ok(_) => panic!("invalid cursor must reject"),
             Err(err) => err,
         };
         assert!(matches!(err, DomError::PolicyRejected(_)));
