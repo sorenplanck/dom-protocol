@@ -11,7 +11,6 @@ use dom_core::DomError;
 use dom_core::Hash256;
 use dom_core::Timestamp;
 use dom_mempool::Mempool;
-use dom_serialization::DomSerialize;
 use dom_store::utxo::UtxoEntry;
 use dom_store::DomStore;
 use dom_wallet::Wallet;
@@ -209,7 +208,8 @@ impl DomNode {
         let mut peers = PeerManager::new(config.max_inbound, config.min_outbound);
         restore_peer_rotation_state(&chain.store, &mut peers)?;
         restore_peer_reputation_state(&chain.store, &mut peers)?;
-        let mempool = restore_mempool_state(&chain)?;
+        clear_persisted_mempool_snapshot(&chain.store)?;
+        let mempool = Mempool::new();
 
         let (block_relay_tx, _) = tokio::sync::broadcast::channel(64);
         let (tx_fluff_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
@@ -758,13 +758,12 @@ impl dom_rpc::NodeHandle for DomNode {
             |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
         )
         .map_err(|e| dom_rpc::RpcError::Rejected(e.to_string()))?;
-        let snapshot = pool.snapshot();
         drop(pool);
         let chain = self
             .chain
             .try_lock()
             .map_err(|_| dom_rpc::RpcError::Internal("chain locked".into()))?;
-        persist_mempool_snapshot(&chain.store, &snapshot)
+        clear_persisted_mempool_snapshot(&chain.store)
             .map_err(|e| dom_rpc::RpcError::Internal(format!("persist mempool: {e}")))?;
         Ok(hash)
     }
@@ -1449,11 +1448,10 @@ pub(crate) async fn reconcile_mempool_after_connect(
             );
         }
     }
-    let snapshot = mempool.snapshot();
     drop(mempool);
 
     let chain = chain.lock().await;
-    persist_mempool_snapshot(&chain.store, &snapshot)
+    clear_persisted_mempool_snapshot(&chain.store)
 }
 
 fn decode_deferred_block_bytes(block_bytes: &[u8]) -> Result<dom_consensus::Block, DomError> {
@@ -1564,6 +1562,7 @@ pub(crate) fn load_peer_reputation_snapshot(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn persist_mempool_snapshot(
     store: &DomStore,
     snapshot: &dom_mempool::PersistedMempoolState,
@@ -1574,6 +1573,10 @@ pub(crate) fn persist_mempool_snapshot(
         return store.delete_metadata(MEMPOOL_METADATA_KEY);
     }
     store.put_metadata(MEMPOOL_METADATA_KEY, &snapshot.to_bytes()?)
+}
+
+pub(crate) fn clear_persisted_mempool_snapshot(store: &DomStore) -> Result<(), DomError> {
+    store.delete_metadata(MEMPOOL_METADATA_KEY)
 }
 
 pub(crate) fn load_mempool_snapshot(
@@ -1647,12 +1650,9 @@ async fn persist_mempool_state(
     chain: &Arc<Mutex<ChainState>>,
     mempool: &Arc<Mutex<Mempool>>,
 ) -> Result<(), DomError> {
-    let snapshot = {
-        let mempool = mempool.lock().await;
-        mempool.snapshot()
-    };
     let chain = chain.lock().await;
-    persist_mempool_snapshot(&chain.store, &snapshot)
+    let _ = mempool;
+    clear_persisted_mempool_snapshot(&chain.store)
 }
 
 async fn advance_peer_rotation_cooldowns(
@@ -1667,52 +1667,6 @@ async fn advance_peer_rotation_cooldowns(
         persist_peer_rotation_state(chain, peers).await?;
     }
     Ok(())
-}
-
-fn restore_mempool_state(chain: &ChainState) -> Result<Mempool, DomError> {
-    let Some(snapshot) = load_mempool_snapshot(&chain.store)? else {
-        return Ok(Mempool::new());
-    };
-
-    let mut mempool = Mempool::new();
-    let mut previous_hash: Option<[u8; 32]> = None;
-    for entry in snapshot.entries {
-        if let Some(prev) = previous_hash {
-            if prev >= entry.tx_hash {
-                return Err(DomError::Invalid(
-                    "persisted mempool snapshot hashes are not strictly ordered".into(),
-                ));
-            }
-        }
-        previous_hash = Some(entry.tx_hash);
-        let tx_bytes = entry.tx.to_bytes()?;
-        let computed_hash = *dom_crypto::hash::blake2b_256(&tx_bytes).as_bytes();
-        if computed_hash != entry.tx_hash {
-            return Err(DomError::Invalid(format!(
-                "persisted mempool tx hash mismatch: expected {}, got {}",
-                hex::encode(entry.tx_hash),
-                hex::encode(computed_hash)
-            )));
-        }
-        let chain_view = snapshot_tx_chain_view(chain, &entry.tx)?;
-        mempool
-            .accept_tx_with_chain_view(
-                entry.tx,
-                entry.tx_hash,
-                entry.received_at,
-                chain_view.current_height,
-                chain_view.coinbase_maturity,
-                |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
-            )
-            .map_err(|e| {
-                DomError::Invalid(format!(
-                    "persisted mempool entry {} restore failed: {e}",
-                    hex::encode(entry.tx_hash)
-                ))
-            })?;
-    }
-
-    Ok(mempool)
 }
 
 pub(crate) fn load_or_create_noise_static_key(store: &DomStore) -> Result<[u8; 32], DomError> {
@@ -3006,12 +2960,10 @@ async fn message_loop(
                                                 Ok(view.utxos.get(commitment).cloned().flatten())
                                             },
                                         );
-                                        let snapshot =
-                                            if result.is_ok() { Some(m.snapshot()) } else { None };
                                         drop(m);
-                                        if let Some(snapshot) = snapshot {
+                                        if result.is_ok() {
                                             let chain = chain.lock().await;
-                                            persist_mempool_snapshot(&chain.store, &snapshot)?;
+                                            clear_persisted_mempool_snapshot(&chain.store)?;
                                         }
                                         result
                                     }
@@ -3111,14 +3063,15 @@ async fn message_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
-        decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
-        load_mempool_snapshot, load_or_create_noise_static_key, load_peer_reputation_snapshot,
-        load_peer_rotation_snapshot, parse_persisted_noise_static_key, peer_violation_score,
-        pending_peer_violation_score, persist_mempool_snapshot, persist_peer_reputation_snapshot,
-        purge_mempool_confirmed_inputs, reconcile_mempool_after_connect, refresh_peer_metrics,
-        relay_block_action, restore_peer_rotation_state, tx_hash, DeferredReplayAction, DomNode,
-        IbdRoundState, OutboundAttemptOutcome, RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY,
+        clear_persisted_mempool_snapshot, continue_ibd_header_sync, decode_deferred_block_bytes,
+        decode_ibd_block_response, decode_relay_block, deferred_replay_action, ibd_now,
+        initialize_ibd_state, load_mempool_snapshot, load_or_create_noise_static_key,
+        load_peer_reputation_snapshot, load_peer_rotation_snapshot,
+        parse_persisted_noise_static_key, peer_violation_score, pending_peer_violation_score,
+        persist_mempool_snapshot, persist_peer_reputation_snapshot, purge_mempool_confirmed_inputs,
+        reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action,
+        restore_peer_rotation_state, tx_hash, DeferredReplayAction, DomNode, IbdRoundState,
+        OutboundAttemptOutcome, RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY,
         MEMPOOL_METADATA_KEY, NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY,
         PEER_ROTATION_METADATA_KEY,
     };
@@ -3784,8 +3737,8 @@ mod tests {
     }
 
     #[test]
-    fn persisted_mempool_survives_restart_init() {
-        let dir = fresh_test_dir("mempool-restart");
+    fn persisted_mempool_snapshot_is_cleared_and_not_restored_on_restart_init() {
+        let dir = fresh_test_dir("mempool-restart-legacy-snapshot");
         let store = DomStore::open(&dir).expect("store open");
         let tx_a = mempool_tx(0x21, 100);
         let tx_b = mempool_tx(0x22, 200);
@@ -3802,26 +3755,24 @@ mod tests {
         drop(store);
 
         let node = DomNode::init(regtest_node_config(&dir)).expect("node init");
-        let runtime_hashes = node.mempool.blocking_lock().all_hashes();
-        assert_eq!(runtime_hashes, vec![hash_a, hash_b]);
+        assert_eq!(
+            node.mempool.blocking_lock().len(),
+            0,
+            "legacy mempool snapshot must not be restored into runtime state"
+        );
 
         let reopened = DomStore::open(&dir).expect("store reopen");
-        let persisted = load_mempool_snapshot(&reopened)
-            .expect("load mempool")
-            .expect("snapshot present");
-        assert_eq!(
-            persisted
-                .entries
-                .iter()
-                .map(|entry| entry.tx_hash)
-                .collect::<Vec<_>>(),
-            runtime_hashes
+        assert!(
+            load_mempool_snapshot(&reopened)
+                .expect("load mempool")
+                .is_none(),
+            "legacy mempool snapshot metadata must be cleared on restart"
         );
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
     #[test]
-    fn invalid_persisted_mempool_aborts_node_init_without_clearing_state() {
+    fn invalid_persisted_mempool_is_ignored_and_cleared_on_restart_init() {
         let dir = fresh_test_dir("mempool-invalid");
         let store = DomStore::open(&dir).expect("store open");
         store
@@ -3829,24 +3780,37 @@ mod tests {
             .expect("persist invalid mempool");
         drop(store);
 
-        let err = match DomNode::init(regtest_node_config(&dir)) {
-            Ok(_) => panic!("invalid mempool should fail init"),
-            Err(err) => err,
-        };
-        let message = err.to_string();
-        assert!(
-            message.contains("mempool"),
-            "unexpected error message: {message}"
+        let node = DomNode::init(regtest_node_config(&dir)).expect("node init");
+        assert_eq!(
+            node.mempool.try_lock().expect("mempool lock").len(),
+            0,
+            "invalid legacy mempool metadata must not reconstruct runtime state"
         );
 
         let reopened = DomStore::open(&dir).expect("store reopen");
-        assert_eq!(
+        assert!(
             reopened
                 .get_metadata(MEMPOOL_METADATA_KEY)
                 .expect("reload metadata")
-                .expect("metadata present"),
-            b"invalid"
+                .is_none(),
+            "invalid legacy mempool metadata should be cleared explicitly"
         );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn clear_persisted_mempool_snapshot_removes_legacy_metadata() {
+        let dir = fresh_test_dir("mempool-clear-legacy");
+        let store = DomStore::open(&dir).expect("store open");
+        store
+            .put_metadata(MEMPOOL_METADATA_KEY, b"stale")
+            .expect("persist legacy mempool metadata");
+
+        clear_persisted_mempool_snapshot(&store).expect("clear mempool metadata");
+        assert!(store
+            .get_metadata(MEMPOOL_METADATA_KEY)
+            .expect("reload metadata")
+            .is_none());
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
