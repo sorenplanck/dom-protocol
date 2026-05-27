@@ -19,6 +19,7 @@ fn sample_state() -> PersistedIbdState {
         headers_height: 64,
         blocks_height: 59,
         last_progress_height: 59,
+        checkpoint_tip_hash: [0xAB; 32],
         retry_attempts: 2,
         last_interruption: Some(IbdInterruption::Timeout),
         pending_blocks: vec![[0x11; 32], [0x22; 32], [0x33; 32]],

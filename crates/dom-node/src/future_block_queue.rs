@@ -65,16 +65,21 @@ impl FutureBlockQueue {
     /// Returns blocks ready for normal validation.
     pub async fn drain_ready(&self, now_secs: u64, hard_limit_secs: u64) -> Vec<DeferredBlock> {
         let mut entries = self.entries.write().await;
-        let mut ready = Vec::new();
         let ready_cutoff = now_secs.saturating_add(hard_limit_secs);
 
-        let ready_hashes: Vec<[u8; 32]> = entries
+        let mut ready_hashes: Vec<([u8; 32], u64)> = entries
             .iter()
             .filter(|(_, b)| b.timestamp <= ready_cutoff)
-            .map(|(h, _)| *h)
+            .map(|(h, block)| (*h, block.timestamp))
             .collect();
+        ready_hashes.sort_by(|(left_hash, left_ts), (right_hash, right_ts)| {
+            left_ts
+                .cmp(right_ts)
+                .then_with(|| left_hash.as_slice().cmp(right_hash.as_slice()))
+        });
 
-        for hash in ready_hashes {
+        let mut ready = Vec::with_capacity(ready_hashes.len());
+        for (hash, _) in ready_hashes {
             if let Some(block) = entries.remove(&hash) {
                 ready.push(block);
             }
@@ -151,6 +156,53 @@ mod tests {
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].timestamp, 1500);
         assert_eq!(queue.size().await, 1);
+    }
+
+    #[tokio::test]
+    async fn drain_ready_is_canonical_by_timestamp_then_hash() {
+        let queue = FutureBlockQueue::new();
+        queue.defer(mock_block(9, 1500)).await;
+        queue.defer(mock_block(2, 1490)).await;
+        queue.defer(mock_block(4, 1500)).await;
+
+        let ready = queue.drain_ready(1400, 120).await;
+        let hashes: Vec<[u8; 32]> = ready.into_iter().map(|block| block.block_hash).collect();
+        assert_eq!(hashes, vec![[2u8; 32], [4u8; 32], [9u8; 32]]);
+    }
+
+    #[tokio::test]
+    async fn repeated_runs_with_same_blocks_produce_same_replay_order() {
+        let a = FutureBlockQueue::new();
+        let b = FutureBlockQueue::new();
+        let blocks = vec![
+            mock_block(7, 1502),
+            mock_block(1, 1490),
+            mock_block(3, 1502),
+            mock_block(2, 1490),
+        ];
+
+        for block in &blocks {
+            assert!(a.defer(block.clone()).await);
+        }
+        for block in blocks.into_iter().rev() {
+            assert!(b.defer(block).await);
+        }
+
+        let order_a: Vec<[u8; 32]> = a
+            .drain_ready(1400, 200)
+            .await
+            .into_iter()
+            .map(|block| block.block_hash)
+            .collect();
+        let order_b: Vec<[u8; 32]> = b
+            .drain_ready(1400, 200)
+            .await
+            .into_iter()
+            .map(|block| block.block_hash)
+            .collect();
+
+        assert_eq!(order_a, order_b);
+        assert_eq!(order_a, vec![[1u8; 32], [2u8; 32], [3u8; 32], [7u8; 32]]);
     }
 
     #[tokio::test]

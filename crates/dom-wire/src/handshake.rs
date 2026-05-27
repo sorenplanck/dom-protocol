@@ -75,14 +75,23 @@ pub fn generate_static_keypair() -> ([u8; 32], [u8; 32]) {
     use rand::RngCore;
     let mut privkey = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut privkey);
-    // Curve25519 key clamping
+    clamp_static_privkey(&mut privkey);
+    let public = derive_static_pubkey(&privkey);
+    (privkey, public)
+}
+
+/// Clamp a Noise static private key for X25519 use.
+pub fn clamp_static_privkey(privkey: &mut [u8; 32]) {
     privkey[0] &= 248;
     privkey[31] &= 127;
     privkey[31] |= 64;
-    // Derive public key via x25519-dalek
-    let secret = x25519_dalek::StaticSecret::from(privkey);
+}
+
+/// Derive the public X25519 key for a clamped Noise static private key.
+pub fn derive_static_pubkey(static_privkey: &[u8; 32]) -> [u8; 32] {
+    let secret = x25519_dalek::StaticSecret::from(*static_privkey);
     let public = x25519_dalek::PublicKey::from(&secret);
-    (privkey, *public.as_bytes())
+    *public.as_bytes()
 }
 
 /// Complete the Noise_XX handshake (3 messages: -> e, <- e, ee, s, es, -> s, se).
@@ -260,6 +269,15 @@ mod tests {
         let (priv2, pub2) = generate_static_keypair();
         assert_ne!(priv1, priv2);
         assert_ne!(pub1, pub2);
+    }
+
+    #[test]
+    fn derive_static_pubkey_is_stable_for_same_private_key() {
+        let mut privkey = [7u8; 32];
+        clamp_static_privkey(&mut privkey);
+        let pub1 = derive_static_pubkey(&privkey);
+        let pub2 = derive_static_pubkey(&privkey);
+        assert_eq!(pub1, pub2);
     }
 }
 

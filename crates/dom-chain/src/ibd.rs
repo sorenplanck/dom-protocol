@@ -89,6 +89,8 @@ pub struct PersistedIbdState {
     pub blocks_height: u64,
     /// Highest height that made deterministic progress in this session.
     pub last_progress_height: u64,
+    /// Canonical tip hash that this session snapshot was anchored to.
+    pub checkpoint_tip_hash: [u8; 32],
     /// Recoverable retry attempts consumed against this peer.
     pub retry_attempts: u8,
     /// Most recent interruption class, if any.
@@ -129,6 +131,8 @@ impl PersistedIbdState {
     pub fn is_round_resumable(&self) -> bool {
         self.block_cursor as usize <= self.pending_blocks.len()
             && self.header_cursor as usize <= self.pending_headers.len()
+            && (self.pending_blocks.is_empty() || self.header_cursor == 0)
+            && (self.pending_headers.is_empty() || self.block_cursor == 0)
     }
 }
 
@@ -227,6 +231,7 @@ impl DomSerialize for PersistedIbdState {
         w.write_u64(self.headers_height);
         w.write_u64(self.blocks_height);
         w.write_u64(self.last_progress_height);
+        w.write_bytes(&self.checkpoint_tip_hash);
         w.write_u8(self.retry_attempts);
         match self.last_interruption {
             Some(interruption) => {
@@ -272,6 +277,7 @@ impl DomDeserialize for PersistedIbdState {
         let headers_height = r.read_u64()?;
         let blocks_height = r.read_u64()?;
         let last_progress_height = r.read_u64()?;
+        let checkpoint_tip_hash = r.read_array::<32>()?;
         let retry_attempts = r.read_u8()?;
         let last_interruption = match r.read_u8()? {
             0 => None,
@@ -331,6 +337,7 @@ impl DomDeserialize for PersistedIbdState {
             headers_height,
             blocks_height,
             last_progress_height,
+            checkpoint_tip_hash,
             retry_attempts,
             last_interruption,
             pending_blocks,
@@ -714,6 +721,7 @@ mod tests {
             headers_height: 14,
             blocks_height: 12,
             last_progress_height: 12,
+            checkpoint_tip_hash: [0x12; 32],
             retry_attempts: 2,
             last_interruption: Some(IbdInterruption::Timeout),
             pending_blocks: Vec::new(),
@@ -739,6 +747,7 @@ mod tests {
             headers_height: 20,
             blocks_height: 12,
             last_progress_height: 12,
+            checkpoint_tip_hash: [0x12; 32],
             retry_attempts: 1,
             last_interruption: None,
             pending_blocks: vec![[0x44; 32]],
@@ -762,6 +771,7 @@ mod tests {
             headers_height: 20,
             blocks_height: 12,
             last_progress_height: 12,
+            checkpoint_tip_hash: [0x12; 32],
             retry_attempts: 1,
             last_interruption: None,
             pending_blocks: vec![[0x44; 32]],
@@ -787,6 +797,7 @@ mod tests {
             headers_height: 12,
             blocks_height: 10,
             last_progress_height: 10,
+            checkpoint_tip_hash: [0x12; 32],
             retry_attempts: 1,
             last_interruption: Some(IbdInterruption::Timeout),
             pending_blocks: vec![[0x44; 32]],
@@ -797,6 +808,58 @@ mod tests {
         };
         let err = match IbdState::from_persisted(&snapshot) {
             Ok(_) => panic!("invalid header cursor must reject"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, DomError::PolicyRejected(_)));
+    }
+
+    #[test]
+    fn header_resume_snapshot_rejects_nonzero_block_cursor() {
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::HeaderSync,
+            peer_addr: "127.0.0.1:33369".into(),
+            start_height: 10,
+            best_peer_height: 25,
+            headers_height: 12,
+            blocks_height: 10,
+            last_progress_height: 10,
+            checkpoint_tip_hash: [0x12; 32],
+            retry_attempts: 1,
+            last_interruption: Some(IbdInterruption::Timeout),
+            pending_blocks: vec![[0x44; 32]],
+            pending_headers: vec![vec![0xAA; 32]],
+            block_cursor: 1,
+            header_cursor: 0,
+            header_cursor_height: 20,
+        };
+        let err = match IbdState::from_persisted(&snapshot) {
+            Ok(_) => panic!("ambiguous mixed cursor state must reject"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, DomError::PolicyRejected(_)));
+    }
+
+    #[test]
+    fn block_resume_snapshot_rejects_nonzero_header_cursor() {
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::BlockSync,
+            peer_addr: "127.0.0.1:33369".into(),
+            start_height: 10,
+            best_peer_height: 25,
+            headers_height: 20,
+            blocks_height: 12,
+            last_progress_height: 12,
+            checkpoint_tip_hash: [0x12; 32],
+            retry_attempts: 1,
+            last_interruption: Some(IbdInterruption::Timeout),
+            pending_blocks: vec![[0x44; 32]],
+            pending_headers: vec![vec![0xAA; 32]],
+            block_cursor: 0,
+            header_cursor: 1,
+            header_cursor_height: 20,
+        };
+        let err = match IbdState::from_persisted(&snapshot) {
+            Ok(_) => panic!("ambiguous mixed cursor state must reject"),
             Err(err) => err,
         };
         assert!(matches!(err, DomError::PolicyRejected(_)));

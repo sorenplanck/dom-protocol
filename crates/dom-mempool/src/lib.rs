@@ -232,7 +232,27 @@ impl Mempool {
 
     /// Get all transaction hashes (for INV messages).
     pub fn all_hashes(&self) -> Vec<[u8; 32]> {
-        self.entries.keys().cloned().collect()
+        let mut hashes: Vec<[u8; 32]> = self.entries.keys().cloned().collect();
+        hashes.sort_unstable();
+        hashes
+    }
+
+    /// Deterministically re-accept a batch of transactions after rollback or reopen.
+    ///
+    /// Transactions are sorted by hash before admission so the same batch
+    /// produces the same reinjection order regardless of upstream iteration
+    /// order. The returned outcomes preserve that canonical hash order.
+    pub fn reinject_batch(
+        &mut self,
+        mut txs: Vec<(Transaction, [u8; 32], u64)>,
+    ) -> Vec<([u8; 32], Result<(), DomError>)> {
+        txs.sort_unstable_by_key(|tx| tx.1);
+        txs.into_iter()
+            .map(|(tx, tx_hash, now_secs)| {
+                let result = self.accept_tx(tx, tx_hash, now_secs);
+                (tx_hash, result)
+            })
+            .collect()
     }
 
     /// Remove all transactions whose inputs are spent by a committed block.
@@ -380,5 +400,80 @@ mod tests {
         pool.accept_tx(tx, hash, 0).unwrap();
         pool.remove_tx(&hash);
         assert_eq!(pool.len(), 0);
+    }
+
+    #[test]
+    fn all_hashes_are_sorted_by_hash() {
+        let mut pool = Mempool::new();
+        let (tx_c, hash_c) = make_tx(MIN_RELAY_FEE_RATE * 300);
+        let (tx_a, hash_a) = make_tx(MIN_RELAY_FEE_RATE * 100);
+        let (tx_b, hash_b) = make_tx(MIN_RELAY_FEE_RATE * 200);
+
+        pool.accept_tx(tx_c, hash_c, 3).unwrap();
+        pool.accept_tx(tx_a, hash_a, 1).unwrap();
+        pool.accept_tx(tx_b, hash_b, 2).unwrap();
+
+        let mut expected = vec![hash_a, hash_b, hash_c];
+        expected.sort_unstable();
+        assert_eq!(pool.all_hashes(), expected);
+    }
+
+    #[test]
+    fn reinject_batch_is_permutation_invariant() {
+        let (tx_a, hash_a) = make_tx(MIN_RELAY_FEE_RATE * 100);
+        let (tx_b, hash_b) = make_tx(MIN_RELAY_FEE_RATE * 200);
+        let (tx_c, hash_c) = make_tx(MIN_RELAY_FEE_RATE * 300);
+
+        let mut forward = Mempool::new();
+        let forward_results = forward.reinject_batch(vec![
+            (tx_b.clone(), hash_b, 2),
+            (tx_c.clone(), hash_c, 3),
+            (tx_a.clone(), hash_a, 1),
+        ]);
+
+        let mut reverse = Mempool::new();
+        let reverse_results = reverse.reinject_batch(vec![
+            (tx_a, hash_a, 1),
+            (tx_c, hash_c, 3),
+            (tx_b, hash_b, 2),
+        ]);
+
+        let forward_hashes: Vec<[u8; 32]> = forward_results.iter().map(|(hash, _)| *hash).collect();
+        let reverse_hashes: Vec<[u8; 32]> = reverse_results.iter().map(|(hash, _)| *hash).collect();
+        let mut expected = vec![hash_a, hash_b, hash_c];
+        expected.sort_unstable();
+        assert_eq!(forward_hashes, expected);
+        assert_eq!(forward_hashes, reverse_hashes);
+        assert!(forward_results.iter().all(|(_, result)| result.is_ok()));
+        assert!(reverse_results.iter().all(|(_, result)| result.is_ok()));
+        assert_eq!(forward.all_hashes(), reverse.all_hashes());
+    }
+
+    #[test]
+    fn reinject_batch_reports_outcomes_in_canonical_order() {
+        let (tx_low, hash_low) = make_tx(MIN_RELAY_FEE_RATE - 1);
+        let (tx_high, hash_high) = make_tx(MIN_RELAY_FEE_RATE * 200);
+
+        let mut pool = Mempool::new();
+        let results = pool.reinject_batch(vec![(tx_high, hash_high, 2), (tx_low, hash_low, 1)]);
+
+        assert_eq!(results.len(), 2);
+        let mut expected = [hash_low, hash_high];
+        expected.sort_unstable();
+        assert_eq!(results[0].0, expected[0]);
+        assert_eq!(results[1].0, expected[1]);
+        let by_hash: std::collections::HashMap<[u8; 32], bool> = results
+            .iter()
+            .map(|(hash, result)| (*hash, result.is_ok()))
+            .collect();
+        assert!(
+            !by_hash[&hash_low],
+            "low-fee tx must be rejected even after canonical reorder"
+        );
+        assert!(
+            by_hash[&hash_high],
+            "high-fee tx must be accepted even after canonical reorder"
+        );
+        assert_eq!(pool.all_hashes(), vec![hash_high]);
     }
 }
