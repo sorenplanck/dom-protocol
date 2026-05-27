@@ -281,6 +281,9 @@ impl IbdState {
     pub fn note_round_error(&mut self, error: &DomError) -> IbdControl {
         match error {
             DomError::TemporarilyInvalid(_) => self.note_interruption(IbdInterruption::Timeout),
+            DomError::PolicyRejected(msg) if msg.contains("idle timeout") => {
+                self.note_interruption(IbdInterruption::Timeout)
+            }
             DomError::Orphan(_) | DomError::Internal(_) => {
                 self.note_interruption(IbdInterruption::PeerDisconnected)
             }
@@ -408,5 +411,16 @@ mod tests {
         assert_eq!(action, IbdControl::Fail);
         assert_eq!(ibd.retry_attempts, 0);
         assert!(ibd.is_failed());
+    }
+
+    #[test]
+    fn idle_timeout_round_error_consumes_bounded_retry() {
+        let mut ibd = IbdState::new(0, 50);
+        let action =
+            ibd.note_round_error(&DomError::PolicyRejected("idle timeout after 30s".into()));
+        assert_eq!(action, IbdControl::Retry);
+        assert_eq!(ibd.retry_attempts, 1);
+        assert_eq!(ibd.last_interruption, Some(IbdInterruption::Timeout));
+        assert_eq!(ibd.phase, IbdPhase::Recovering);
     }
 }
