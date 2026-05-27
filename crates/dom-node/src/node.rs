@@ -1280,9 +1280,7 @@ async fn persist_ibd_state(
     chain: &Arc<Mutex<ChainState>>,
     peer_addr: std::net::SocketAddr,
     ibd: &dom_chain::IbdState,
-    pending_blocks: Vec<[u8; 32]>,
-    block_cursor: u32,
-    header_cursor_height: u64,
+    round: IbdRoundState,
 ) -> Result<(), DomError> {
     let snapshot = dom_chain::PersistedIbdState {
         phase: ibd.phase,
@@ -1294,9 +1292,11 @@ async fn persist_ibd_state(
         last_progress_height: ibd.last_progress_height,
         retry_attempts: ibd.retry_attempts,
         last_interruption: ibd.last_interruption,
-        pending_blocks,
-        block_cursor,
-        header_cursor_height,
+        pending_blocks: round.pending_blocks,
+        pending_headers: round.pending_headers,
+        block_cursor: round.block_cursor,
+        header_cursor: round.header_cursor,
+        header_cursor_height: round.header_cursor_height,
     };
     let chain = chain.lock().await;
     snapshot.save(&chain.store)
@@ -1311,6 +1311,15 @@ struct IbdRuntimeContext<'a> {
     config: &'a NodeConfig,
     peer_addr: std::net::SocketAddr,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+}
+
+#[derive(Clone)]
+struct IbdRoundState {
+    pending_blocks: Vec<[u8; 32]>,
+    pending_headers: Vec<Vec<u8>>,
+    block_cursor: u32,
+    header_cursor: u32,
+    header_cursor_height: u64,
 }
 
 async fn initialize_ibd_state(
@@ -1359,21 +1368,21 @@ async fn resume_ibd_block_sync(
     chain: &Arc<Mutex<ChainState>>,
     runtime: &IbdRuntimeContext<'_>,
     ibd: &mut dom_chain::IbdState,
-    snapshot: &dom_chain::PersistedIbdState,
+    round: IbdRoundState,
 ) -> Result<bool, DomError> {
     use dom_wire::message::{Command, GetBlockDataPayload, WireMessage};
 
-    let start = usize::try_from(snapshot.block_cursor)
+    let start = usize::try_from(round.block_cursor)
         .map_err(|_| DomError::Internal("persisted block cursor conversion failed".into()))?;
-    if start >= snapshot.pending_blocks.len() {
+    if start >= round.pending_blocks.len() {
         return Ok(false);
     }
 
     ibd.begin_block_sync();
     let mut connected_any = false;
-    let mut processed = snapshot.block_cursor;
+    let mut processed = round.block_cursor;
 
-    for batch in snapshot.pending_blocks[start..].chunks(dom_core::MAX_GETBLOCKDATA_HASHES) {
+    for batch in round.pending_blocks[start..].chunks(dom_core::MAX_GETBLOCKDATA_HASHES) {
         let req = GetBlockDataPayload {
             hashes: batch.to_vec(),
         };
@@ -1465,15 +1474,98 @@ async fn resume_ibd_block_sync(
                 chain,
                 runtime.peer_addr,
                 ibd,
-                snapshot.pending_blocks.clone(),
-                processed,
-                snapshot.header_cursor_height,
+                IbdRoundState {
+                    pending_blocks: round.pending_blocks.clone(),
+                    pending_headers: Vec::new(),
+                    block_cursor: processed,
+                    header_cursor: 0,
+                    header_cursor_height: round.header_cursor_height,
+                },
             )
             .await?;
         }
     }
 
     Ok(connected_any)
+}
+
+fn ibd_now() -> Timestamp {
+    Timestamp(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+}
+
+async fn continue_ibd_header_sync(
+    chain: &Arc<Mutex<ChainState>>,
+    peer_addr: std::net::SocketAddr,
+    ibd: &mut dom_chain::IbdState,
+    round: IbdRoundState,
+    now: Timestamp,
+) -> Result<Vec<[u8; 32]>, DomError> {
+    let start = usize::try_from(round.header_cursor)
+        .map_err(|_| DomError::Internal("persisted header cursor conversion failed".into()))?;
+    if start > round.pending_headers.len() {
+        return Err(DomError::PolicyRejected(format!(
+            "persisted header cursor {} exceeds pending header count {}",
+            round.header_cursor,
+            round.pending_headers.len()
+        )));
+    }
+
+    if round.pending_headers.is_empty() {
+        return Ok(round.pending_blocks);
+    }
+
+    ibd.begin_header_sync();
+    let pending_headers = round.pending_headers;
+    let mut pending_blocks = round.pending_blocks;
+
+    for cursor in start..pending_headers.len() {
+        let (height, updated_pending_blocks) = {
+            let c = chain.lock().await;
+            c.validate_ibd_header_step(&pending_headers, cursor, &pending_blocks, now)?
+        };
+        pending_blocks = updated_pending_blocks;
+        ibd.headers_height = ibd.headers_height.max(height);
+        ibd.last_progress_height = ibd.last_progress_height.max(height);
+        persist_ibd_state(
+            chain,
+            peer_addr,
+            ibd,
+            IbdRoundState {
+                pending_blocks: pending_blocks.clone(),
+                pending_headers: pending_headers.clone(),
+                block_cursor: 0,
+                header_cursor: u32::try_from(cursor + 1)
+                    .map_err(|_| DomError::Internal("header cursor overflow".into()))?,
+                header_cursor_height: round.header_cursor_height,
+            },
+        )
+        .await?;
+    }
+
+    if pending_blocks.is_empty() {
+        ibd.phase = dom_chain::IbdPhase::Discovering;
+    } else {
+        ibd.begin_block_sync();
+    }
+    persist_ibd_state(
+        chain,
+        peer_addr,
+        ibd,
+        IbdRoundState {
+            pending_blocks: pending_blocks.clone(),
+            pending_headers: Vec::new(),
+            block_cursor: 0,
+            header_cursor: 0,
+            header_cursor_height: round.header_cursor_height,
+        },
+    )
+    .await?;
+    Ok(pending_blocks)
 }
 
 async fn run_ibd_session(
@@ -1509,10 +1601,128 @@ async fn run_ibd_session(
         }
     }
     if let Some(snapshot) = persisted.clone() {
-        if !snapshot.pending_blocks.is_empty()
+        if !snapshot.pending_headers.is_empty()
+            && snapshot.header_cursor < snapshot.pending_headers.len() as u32
+        {
+            let pending_blocks = continue_ibd_header_sync(
+                chain,
+                peer_addr,
+                &mut ibd,
+                IbdRoundState {
+                    pending_blocks: snapshot.pending_blocks.clone(),
+                    pending_headers: snapshot.pending_headers.clone(),
+                    block_cursor: snapshot.block_cursor,
+                    header_cursor: snapshot.header_cursor,
+                    header_cursor_height: snapshot.header_cursor_height,
+                },
+                ibd_now(),
+            )
+            .await?;
+            if !pending_blocks.is_empty() {
+                match resume_ibd_block_sync(
+                    stream,
+                    codec,
+                    chain,
+                    &runtime,
+                    &mut ibd,
+                    IbdRoundState {
+                        pending_blocks,
+                        pending_headers: Vec::new(),
+                        block_cursor: 0,
+                        header_cursor: 0,
+                        header_cursor_height: snapshot.header_cursor_height,
+                    },
+                )
+                .await
+                {
+                    Ok(true) => {
+                        let new_height = chain.lock().await.tip_height.0;
+                        match ibd.note_round_progress(new_height) {
+                            dom_chain::IbdControl::Complete => {
+                                clear_persisted_ibd_state(chain).await?;
+                                info!(
+                                    "IBD with {peer_addr} resumed and caught up at height {new_height}"
+                                );
+                                return Ok(());
+                            }
+                            dom_chain::IbdControl::Continue => {
+                                persist_ibd_state(
+                                    chain,
+                                    peer_addr,
+                                    &ibd,
+                                    IbdRoundState {
+                                        pending_blocks: Vec::new(),
+                                        pending_headers: Vec::new(),
+                                        block_cursor: 0,
+                                        header_cursor: 0,
+                                        header_cursor_height: ibd.headers_height,
+                                    },
+                                )
+                                .await?;
+                            }
+                            dom_chain::IbdControl::Retry | dom_chain::IbdControl::Fail => {
+                                return Err(DomError::Internal(
+                                    "resumed IBD progress transition returned invalid control"
+                                        .into(),
+                                ));
+                            }
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => match ibd.note_round_error(&e) {
+                        dom_chain::IbdControl::Retry => {
+                            warn!(
+                                "IBD with {peer_addr} interrupted ({e}); retry {}/{} remaining={}",
+                                ibd.retry_attempts,
+                                dom_chain::ibd::MAX_IBD_RETRY_ATTEMPTS,
+                                ibd.remaining_retries()
+                            );
+                        }
+                        dom_chain::IbdControl::Fail => {
+                            clear_persisted_ibd_state(chain).await?;
+                            return Err(e);
+                        }
+                        dom_chain::IbdControl::Complete | dom_chain::IbdControl::Continue => {
+                            return Err(DomError::Internal(
+                                "resumed IBD error transition returned invalid control".into(),
+                            ));
+                        }
+                    },
+                }
+            } else {
+                persist_ibd_state(
+                    chain,
+                    peer_addr,
+                    &ibd,
+                    IbdRoundState {
+                        pending_blocks: Vec::new(),
+                        pending_headers: Vec::new(),
+                        block_cursor: 0,
+                        header_cursor: 0,
+                        header_cursor_height: ibd.headers_height,
+                    },
+                )
+                .await?;
+            }
+        } else if !snapshot.pending_blocks.is_empty()
             && snapshot.block_cursor < snapshot.pending_blocks.len() as u32
         {
-            match resume_ibd_block_sync(stream, codec, chain, &runtime, &mut ibd, &snapshot).await {
+            match resume_ibd_block_sync(
+                stream,
+                codec,
+                chain,
+                &runtime,
+                &mut ibd,
+                IbdRoundState {
+                    pending_blocks: snapshot.pending_blocks.clone(),
+                    pending_headers: Vec::new(),
+                    block_cursor: snapshot.block_cursor,
+                    header_cursor: 0,
+                    header_cursor_height: snapshot.header_cursor_height,
+                },
+            )
+            .await
+            {
                 Ok(true) => {
                     let new_height = chain.lock().await.tip_height.0;
                     match ibd.note_round_progress(new_height) {
@@ -1528,9 +1738,13 @@ async fn run_ibd_session(
                                 chain,
                                 peer_addr,
                                 &ibd,
-                                Vec::new(),
-                                0,
-                                ibd.headers_height,
+                                IbdRoundState {
+                                    pending_blocks: Vec::new(),
+                                    pending_headers: Vec::new(),
+                                    block_cursor: 0,
+                                    header_cursor: 0,
+                                    header_cursor_height: ibd.headers_height,
+                                },
                             )
                             .await?;
                         }
@@ -1544,15 +1758,12 @@ async fn run_ibd_session(
                 Ok(false) => {}
                 Err(e) => match ibd.note_round_error(&e) {
                     dom_chain::IbdControl::Retry => {
-                        persist_ibd_state(
-                            chain,
-                            peer_addr,
-                            &ibd,
-                            snapshot.pending_blocks.clone(),
-                            snapshot.block_cursor,
-                            snapshot.header_cursor_height,
-                        )
-                        .await?;
+                        warn!(
+                            "IBD with {peer_addr} interrupted ({e}); retry {}/{} remaining={}",
+                            ibd.retry_attempts,
+                            dom_chain::ibd::MAX_IBD_RETRY_ATTEMPTS,
+                            ibd.remaining_retries()
+                        );
                     }
                     dom_chain::IbdControl::Fail => {
                         clear_persisted_ibd_state(chain).await?;
@@ -1566,10 +1777,34 @@ async fn run_ibd_session(
                 },
             }
         } else {
-            persist_ibd_state(chain, peer_addr, &ibd, Vec::new(), 0, ibd.headers_height).await?;
+            persist_ibd_state(
+                chain,
+                peer_addr,
+                &ibd,
+                IbdRoundState {
+                    pending_blocks: Vec::new(),
+                    pending_headers: Vec::new(),
+                    block_cursor: 0,
+                    header_cursor: 0,
+                    header_cursor_height: ibd.headers_height,
+                },
+            )
+            .await?;
         }
     } else {
-        persist_ibd_state(chain, peer_addr, &ibd, Vec::new(), 0, ibd.headers_height).await?;
+        persist_ibd_state(
+            chain,
+            peer_addr,
+            &ibd,
+            IbdRoundState {
+                pending_blocks: Vec::new(),
+                pending_headers: Vec::new(),
+                block_cursor: 0,
+                header_cursor: 0,
+                header_cursor_height: ibd.headers_height,
+            },
+        )
+        .await?;
     }
 
     info!("Starting IBD from {peer_addr}: our={our_height} peer={peer_best_height}");
@@ -1600,9 +1835,13 @@ async fn run_ibd_session(
                             chain,
                             peer_addr,
                             &ibd,
-                            Vec::new(),
-                            0,
-                            ibd.headers_height,
+                            IbdRoundState {
+                                pending_blocks: Vec::new(),
+                                pending_headers: Vec::new(),
+                                block_cursor: 0,
+                                header_cursor: 0,
+                                header_cursor_height: ibd.headers_height,
+                            },
                         )
                         .await?;
                         continue;
@@ -1624,8 +1863,19 @@ async fn run_ibd_session(
                     return Ok(());
                 }
                 dom_chain::IbdControl::Retry => {
-                    persist_ibd_state(chain, peer_addr, &ibd, Vec::new(), 0, ibd.headers_height)
-                        .await?;
+                    persist_ibd_state(
+                        chain,
+                        peer_addr,
+                        &ibd,
+                        IbdRoundState {
+                            pending_blocks: Vec::new(),
+                            pending_headers: Vec::new(),
+                            block_cursor: 0,
+                            header_cursor: 0,
+                            header_cursor_height: ibd.headers_height,
+                        },
+                    )
+                    .await?;
                     warn!(
                         "IBD with {peer_addr} made no progress; retry {}/{} remaining={}",
                         ibd.retry_attempts,
@@ -1648,8 +1898,6 @@ async fn run_ibd_session(
             },
             Err(e) => match ibd.note_round_error(&e) {
                 dom_chain::IbdControl::Retry => {
-                    persist_ibd_state(chain, peer_addr, &ibd, Vec::new(), 0, ibd.headers_height)
-                        .await?;
                     warn!(
                         "IBD with {peer_addr} interrupted ({e}); retry {}/{} remaining={}",
                         ibd.retry_attempts,
@@ -1692,9 +1940,7 @@ async fn ibd_sync_round(
 ) -> Result<bool, DomError> {
     use dom_consensus::block::BlockHeader;
     use dom_serialization::DomDeserialize;
-    use dom_wire::message::{
-        Command, GetBlockDataPayload, GetHeadersPayload, HeadersPayload, WireMessage,
-    };
+    use dom_wire::message::{Command, GetHeadersPayload, HeadersPayload, WireMessage};
 
     // 1. Request headers from peer using our locator.
     let locator = build_locator(chain).await?;
@@ -1733,20 +1979,7 @@ async fn ibd_sync_round(
         return Ok(false); // peer has nothing new for us
     }
 
-    let now = Timestamp(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-    );
-
-    // 3. Decode and validate the entire header batch before asking for any
-    // block bodies. This closes the malformed-header / discontinuous-header
-    // gap in the live IBD path and keeps duplicate suppression deterministic.
-    let block_hashes = {
-        let c = chain.lock().await;
-        c.validate_ibd_headers_batch(&headers_payload.headers, now)?
-    };
+    let now = ibd_now();
     let header_cursor_height = BlockHeader::from_bytes(
         headers_payload
             .headers
@@ -1756,6 +1989,21 @@ async fn ibd_sync_round(
     .height
     .0;
 
+    let block_hashes = continue_ibd_header_sync(
+        chain,
+        peer_addr,
+        ibd,
+        IbdRoundState {
+            pending_blocks: Vec::new(),
+            pending_headers: headers_payload.headers.clone(),
+            block_cursor: 0,
+            header_cursor: 0,
+            header_cursor_height,
+        },
+        now,
+    )
+    .await?;
+
     if block_hashes.is_empty() {
         tracing::debug!(
             "IBD: peer sent {} headers but all are already in our store — no bodies to fetch",
@@ -1764,136 +2012,26 @@ async fn ibd_sync_round(
         return Ok(false);
     }
 
-    let mut connected_any = false;
-    ibd.begin_block_sync();
-    persist_ibd_state(
-        chain,
+    let runtime = IbdRuntimeContext {
+        config,
         peer_addr,
+        wallet,
+    };
+    resume_ibd_block_sync(
+        stream,
+        codec,
+        chain,
+        &runtime,
         ibd,
-        block_hashes.clone(),
-        0,
-        header_cursor_height,
+        IbdRoundState {
+            pending_blocks: block_hashes,
+            pending_headers: Vec::new(),
+            block_cursor: 0,
+            header_cursor: 0,
+            header_cursor_height,
+        },
     )
-    .await?;
-    let mut block_cursor = 0u32;
-
-    for batch in block_hashes.chunks(dom_core::MAX_GETBLOCKDATA_HASHES) {
-        let req = GetBlockDataPayload {
-            hashes: batch.to_vec(),
-        };
-        let wire = WireMessage {
-            magic: config.network.magic(),
-            command: Command::GetBlockData,
-            payload: req.to_bytes()?,
-        };
-        codec.send(stream, &wire).await?;
-
-        // Receive one Block per requested hash, in order.
-        for expected_hash in batch {
-            let msg = loop {
-                let m = codec.recv(stream).await?;
-                match m.command {
-                    Command::Block => break m,
-                    Command::Ping => {
-                        let pong = WireMessage {
-                            magic: config.network.magic(),
-                            command: Command::Pong,
-                            payload: m.payload,
-                        };
-                        codec.send(stream, &pong).await?;
-                    }
-                    Command::Pong => {}
-                    other => {
-                        tracing::debug!("IBD: ignoring {other:?} while waiting for Block");
-                    }
-                }
-            };
-            let (_, block) =
-                decode_ibd_block_response(&msg.payload, *expected_hash).map_err(|e| {
-                    DomError::Invalid(format!(
-                        "IBD from {peer_addr}: block response for {} rejected: {e}",
-                        hex::encode(expected_hash)
-                    ))
-                })?;
-            let height = block.header.height.0;
-            let txs_for_scan = block.transactions.clone();
-            {
-                let mut c = chain.lock().await;
-                let best_chain = match c.connect_block(&block, now) {
-                    Ok(dom_chain::ConnectResult::BestChain) => {
-                        connected_any = true;
-                        block_cursor = block_cursor.saturating_add(1);
-                        persist_ibd_state(
-                            chain,
-                            peer_addr,
-                            ibd,
-                            block_hashes.clone(),
-                            block_cursor,
-                            header_cursor_height,
-                        )
-                        .await?;
-                        true
-                    }
-                    Ok(dom_chain::ConnectResult::SideChain) => {
-                        connected_any = true;
-                        block_cursor = block_cursor.saturating_add(1);
-                        persist_ibd_state(
-                            chain,
-                            peer_addr,
-                            ibd,
-                            block_hashes.clone(),
-                            block_cursor,
-                            header_cursor_height,
-                        )
-                        .await?;
-                        false
-                    }
-                    Ok(dom_chain::ConnectResult::AlreadyHave) => {
-                        // Peer sent us a block we already have. Unusual during
-                        // IBD but not an error — count as progress to avoid
-                        // stalling the download loop.
-                        tracing::debug!(
-                            "IBD from {peer_addr}: block already known at height {}",
-                            height
-                        );
-                        connected_any = true;
-                        block_cursor = block_cursor.saturating_add(1);
-                        persist_ibd_state(
-                            chain,
-                            peer_addr,
-                            ibd,
-                            block_hashes.clone(),
-                            block_cursor,
-                            header_cursor_height,
-                        )
-                        .await?;
-                        false
-                    }
-                    Err(e) => {
-                        return Err(DomError::Invalid(format!(
-                            "IBD from {peer_addr}: connect_block rejected: {e}"
-                        )));
-                    }
-                };
-                if best_chain {
-                    // Wallet state follows canonical history only. Side-chain
-                    // blocks may be retained by the node for future reorg work
-                    // but MUST NOT mutate spend reservations or balances.
-                    if let Some(ref wallet_arc) = wallet {
-                        let mut w = wallet_arc.lock().await;
-                        w.apply_canonical_block(&txs_for_scan, height)
-                            .map_err(|e| {
-                                DomError::Internal(format!(
-                                    "wallet canonical block apply during IBD failed: {e}"
-                                ))
-                            })?;
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(connected_any)
+    .await
 }
 
 /// Build a Headers response for a GetHeaders request.
@@ -2308,26 +2446,31 @@ async fn message_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_deferred_block_bytes, decode_ibd_block_response, decode_relay_block,
-        deferred_replay_action, peer_violation_score, pending_peer_violation_score,
-        refresh_peer_metrics, relay_block_action, DeferredReplayAction, RelayBlockAction,
+        continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
+        decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
+        peer_violation_score, pending_peer_violation_score, refresh_peer_metrics,
+        relay_block_action, DeferredReplayAction, IbdRoundState, RelayBlockAction,
     };
     use crate::metrics::Metrics;
-    use dom_chain::ConnectResult;
+    use dom_chain::{ChainState, ConnectResult, IbdPhase, PersistedIbdState};
     use dom_consensus::block::{BlockHeader, ProofOfWork};
     use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction};
     use dom_core::{
         BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, MAX_BLOCK_SERIALIZED_SIZE,
+        NETWORK_MAGIC_REGTEST,
     };
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
     use dom_pow::CompactTarget;
     use dom_serialization::DomSerialize;
+    use dom_store::DomStore;
     use dom_wire::manager::PeerManager;
     use dom_wire::message::BlockPayload;
     use dom_wire::peer::ban_scores;
     use dom_wire::peer::{PeerInfo, PeerState};
     use primitive_types::U256;
+    use std::fs;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -2385,6 +2528,68 @@ mod tests {
     fn block_hash(block: &Block) -> [u8; 32] {
         *dom_crypto::hash::blake2b_256(&block.header.to_bytes().expect("serialize header"))
             .as_bytes()
+    }
+
+    fn header_hash(header: &BlockHeader) -> [u8; 32] {
+        *dom_crypto::hash::blake2b_256(&header.to_bytes().expect("serialize header")).as_bytes()
+    }
+
+    fn open_chain(dir: &std::path::Path) -> Arc<Mutex<ChainState>> {
+        let store = DomStore::open(dir).expect("store open");
+        let chain = ChainState::open(
+            store,
+            Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+            NETWORK_MAGIC_REGTEST,
+        )
+        .expect("chain open");
+        Arc::new(Mutex::new(chain))
+    }
+
+    async fn store_known_header(chain: &Arc<Mutex<ChainState>>, header: &BlockHeader) {
+        let header_bytes = header.to_bytes().expect("serialize header");
+        let hash = header_hash(header);
+        let chain = chain.lock().await;
+        chain
+            .store
+            .store_known_block(&hash, &header_bytes, &[0u8; 8])
+            .expect("store known header");
+    }
+
+    fn synthetic_known_header(
+        height: u64,
+        prev_hash: Hash256,
+        total_difficulty: u64,
+    ) -> BlockHeader {
+        BlockHeader {
+            version: 1,
+            height: BlockHeight(height),
+            prev_hash,
+            timestamp: Timestamp(1_700_000_000 + height),
+            output_root: Hash256::ZERO,
+            kernel_root: Hash256::ZERO,
+            rangeproof_root: Hash256::ZERO,
+            total_kernel_offset: [0u8; 32],
+            target: CompactTarget(0),
+            total_difficulty: U256::from(total_difficulty),
+            pow: ProofOfWork {
+                nonce: 0,
+                randomx_hash: Hash256::ZERO,
+            },
+        }
+    }
+
+    fn fresh_test_dir(label: &str) -> PathBuf {
+        let unique = format!(
+            "dom-node-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&dir).expect("create test dir");
+        dir
     }
 
     #[test]
@@ -2637,5 +2842,140 @@ mod tests {
         assert_eq!(metrics.peer_count.load(Ordering::Relaxed), 0);
         assert_eq!(metrics.inbound_peers.load(Ordering::Relaxed), 0);
         assert_eq!(metrics.outbound_peers.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn persisted_header_resume_completes_with_canonical_snapshot_cleanup() {
+        let dir = fresh_test_dir("header-resume-ok");
+        let chain = open_chain(&dir);
+        let peer_addr: SocketAddr = "127.0.0.1:33369".parse().expect("peer addr");
+
+        let header1 = synthetic_known_header(0, Hash256::ZERO, 1);
+        let header2 = synthetic_known_header(1, Hash256::from_bytes(header_hash(&header1)), 2);
+        store_known_header(&chain, &header1).await;
+        store_known_header(&chain, &header2).await;
+
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::HeaderSync,
+            peer_addr: peer_addr.to_string(),
+            start_height: 0,
+            best_peer_height: 1,
+            headers_height: 0,
+            blocks_height: 0,
+            last_progress_height: 0,
+            retry_attempts: 0,
+            last_interruption: None,
+            pending_blocks: Vec::new(),
+            pending_headers: vec![
+                header1.to_bytes().expect("header1 bytes"),
+                header2.to_bytes().expect("header2 bytes"),
+            ],
+            block_cursor: 0,
+            header_cursor: 1,
+            header_cursor_height: 1,
+        };
+        {
+            let chain = chain.lock().await;
+            snapshot.save(&chain.store).expect("save snapshot");
+        }
+
+        let (mut ibd, restored) = initialize_ibd_state(&chain, peer_addr, 1)
+            .await
+            .expect("initialize");
+        let restored = restored.expect("restored snapshot");
+        let pending_blocks = continue_ibd_header_sync(
+            &chain,
+            peer_addr,
+            &mut ibd,
+            IbdRoundState {
+                pending_blocks: restored.pending_blocks.clone(),
+                pending_headers: restored.pending_headers.clone(),
+                block_cursor: restored.block_cursor,
+                header_cursor: restored.header_cursor,
+                header_cursor_height: restored.header_cursor_height,
+            },
+            ibd_now(),
+        )
+        .await
+        .expect("resume header sync");
+
+        assert!(pending_blocks.is_empty());
+        assert_eq!(ibd.headers_height, 1);
+        assert_eq!(ibd.phase, IbdPhase::Discovering);
+
+        let persisted = {
+            let chain = chain.lock().await;
+            PersistedIbdState::load(&chain.store)
+                .expect("load snapshot")
+                .expect("snapshot present")
+        };
+        assert!(persisted.pending_headers.is_empty());
+        assert!(persisted.pending_blocks.is_empty());
+        assert_eq!(persisted.header_cursor, 0);
+        assert_eq!(persisted.headers_height, 1);
+        assert_eq!(persisted.phase, IbdPhase::Discovering);
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[tokio::test]
+    async fn persisted_header_resume_rejects_corrupted_prefix_checkpoint() {
+        let dir = fresh_test_dir("header-resume-bad");
+        let chain = open_chain(&dir);
+        let peer_addr: SocketAddr = "127.0.0.1:33369".parse().expect("peer addr");
+
+        let header1 = synthetic_known_header(0, Hash256::ZERO, 1);
+        let header2 = synthetic_known_header(1, Hash256::from_bytes(header_hash(&header1)), 2);
+        store_known_header(&chain, &header1).await;
+        store_known_header(&chain, &header2).await;
+
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::HeaderSync,
+            peer_addr: peer_addr.to_string(),
+            start_height: 0,
+            best_peer_height: 1,
+            headers_height: 0,
+            blocks_height: 0,
+            last_progress_height: 0,
+            retry_attempts: 0,
+            last_interruption: None,
+            pending_blocks: vec![[0x55; 32]],
+            pending_headers: vec![
+                header1.to_bytes().expect("header1 bytes"),
+                header2.to_bytes().expect("header2 bytes"),
+            ],
+            block_cursor: 0,
+            header_cursor: 1,
+            header_cursor_height: 1,
+        };
+        {
+            let chain = chain.lock().await;
+            snapshot.save(&chain.store).expect("save snapshot");
+        }
+
+        let (mut ibd, restored) = initialize_ibd_state(&chain, peer_addr, 1)
+            .await
+            .expect("initialize");
+        let restored = restored.expect("restored snapshot");
+        let err = continue_ibd_header_sync(
+            &chain,
+            peer_addr,
+            &mut ibd,
+            IbdRoundState {
+                pending_blocks: restored.pending_blocks.clone(),
+                pending_headers: restored.pending_headers.clone(),
+                block_cursor: restored.block_cursor,
+                header_cursor: restored.header_cursor,
+                header_cursor_height: restored.header_cursor_height,
+            },
+            ibd_now(),
+        )
+        .await
+        .expect_err("corrupted prefix must reject");
+
+        assert!(
+            matches!(err, DomError::PolicyRejected(ref msg) if msg.contains("prefix mismatch")),
+            "unexpected error: {err}"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 }
