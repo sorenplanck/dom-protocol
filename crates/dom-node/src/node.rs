@@ -742,6 +742,7 @@ async fn handle_inbound(
                             break;
                         }
                         Err(e) => {
+                            let _ = record_peer_violation(&svc.peers, addr, &e).await;
                             warn!("IBD with {addr} failed: {e}");
                             return;
                         }
@@ -887,6 +888,7 @@ async fn connect_outbound(
                             break;
                         }
                         Err(e) => {
+                            let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
                             warn!("IBD with {addr} failed: {e}");
                             return;
                         }
