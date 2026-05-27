@@ -6,6 +6,7 @@ use crate::time_health::{check_clock_health, DriftStatus};
 use dom_chain::ChainState;
 use dom_config::NodeConfig;
 use dom_consensus::derive_chain_id;
+use dom_consensus::Transaction;
 use dom_core::DomError;
 use dom_core::Hash256;
 use dom_core::Timestamp;
@@ -291,6 +292,7 @@ impl DomNode {
         {
             let queue = self.future_block_queue.clone();
             let chain = self.chain.clone();
+            let mempool = self.mempool.clone();
             let relay_tx = self.block_relay_tx.clone();
             let metrics = self.metrics.clone();
             tokio::spawn(async move {
@@ -323,6 +325,20 @@ impl DomNode {
                                 };
                                 match deferred_replay_action(&result) {
                                     DeferredReplayAction::RelayBestChain => {
+                                        if let Ok(ref connect_result) = result {
+                                            if let Err(e) = reconcile_mempool_after_connect(
+                                                &chain,
+                                                &mempool,
+                                                connect_result,
+                                                &block.transactions,
+                                            )
+                                            .await
+                                            {
+                                                tracing::warn!(
+                                                    "Deferred block mempool reconciliation failed: {e}"
+                                                );
+                                            }
+                                        }
                                         tracing::info!(
                                             "Accepted deferred block ts={} (new tip)",
                                             deferred.timestamp
@@ -1151,7 +1167,9 @@ fn deferred_replay_action(
     result: &Result<dom_chain::ConnectResult, DomError>,
 ) -> DeferredReplayAction {
     match result {
-        Ok(dom_chain::ConnectResult::BestChain) => DeferredReplayAction::RelayBestChain,
+        Ok(dom_chain::ConnectResult::BestChain) | Ok(dom_chain::ConnectResult::Reorg(_)) => {
+            DeferredReplayAction::RelayBestChain
+        }
         Ok(dom_chain::ConnectResult::SideChain) | Ok(dom_chain::ConnectResult::AlreadyHave) => {
             DeferredReplayAction::Drop
         }
@@ -1164,7 +1182,9 @@ fn deferred_replay_action(
 
 fn relay_block_action(result: &Result<dom_chain::ConnectResult, DomError>) -> RelayBlockAction {
     match result {
-        Ok(dom_chain::ConnectResult::BestChain) => RelayBlockAction::RelayBestChain,
+        Ok(dom_chain::ConnectResult::BestChain) | Ok(dom_chain::ConnectResult::Reorg(_)) => {
+            RelayBlockAction::RelayBestChain
+        }
         Ok(dom_chain::ConnectResult::SideChain)
         | Ok(dom_chain::ConnectResult::AlreadyHave)
         | Err(DomError::TemporarilyInvalid(_))
@@ -1172,6 +1192,103 @@ fn relay_block_action(result: &Result<dom_chain::ConnectResult, DomError>) -> Re
         Err(DomError::Invalid(_)) | Err(DomError::Malformed(_)) => RelayBlockAction::PenalizePeer,
         Err(_) => RelayBlockAction::Drop,
     }
+}
+
+fn tx_hash(tx: &Transaction) -> Result<[u8; 32], DomError> {
+    use dom_serialization::DomSerialize;
+
+    let tx_bytes = tx.to_bytes()?;
+    Ok(*dom_crypto::hash::blake2b_256(&tx_bytes).as_bytes())
+}
+
+fn collect_spent_commitments(transactions: &[Transaction]) -> Vec<[u8; 33]> {
+    let mut spent = Vec::with_capacity(transactions.iter().map(|tx| tx.inputs.len()).sum());
+    for tx in transactions {
+        for input in &tx.inputs {
+            spent.push(*input.commitment.as_bytes());
+        }
+    }
+    spent
+}
+
+fn collect_reinjectable_reorg_txs(
+    chain: &ChainState,
+    delta: &dom_chain::ReorgDelta,
+) -> Result<Vec<(Transaction, [u8; 32], u64)>, DomError> {
+    let mut reinject = Vec::new();
+    for tx in &delta.disconnected_txs {
+        let inputs_are_live = tx.inputs.iter().all(|input| {
+            let commitment = input.commitment.as_bytes();
+            match chain.store.get_utxo(commitment) {
+                Ok(Some(entry)) => {
+                    !entry.is_coinbase
+                        || entry.is_mature_for(chain.tip_height.0, chain.coinbase_maturity)
+                }
+                Ok(None) => false,
+                Err(_) => false,
+            }
+        });
+        if !inputs_are_live {
+            continue;
+        }
+
+        let outputs_are_fresh = tx.outputs.iter().all(|output| {
+            chain
+                .store
+                .get_utxo(output.commitment.as_bytes())
+                .map(|entry| entry.is_none())
+                .unwrap_or(false)
+        });
+        if !outputs_are_fresh {
+            continue;
+        }
+
+        let kernels_are_fresh = tx.kernels.iter().all(|kernel| {
+            chain
+                .store
+                .get_kernel_block(kernel.excess.as_bytes())
+                .map(|entry| entry.is_none())
+                .unwrap_or(false)
+        });
+        if !kernels_are_fresh {
+            continue;
+        }
+
+        reinject.push((tx.clone(), tx_hash(tx)?, chain.tip_height.0));
+    }
+    Ok(reinject)
+}
+
+pub(crate) async fn reconcile_mempool_after_connect(
+    chain: &Arc<Mutex<ChainState>>,
+    mempool: &Arc<Mutex<Mempool>>,
+    connect_result: &dom_chain::ConnectResult,
+    connected_block_txs: &[Transaction],
+) -> Result<(), DomError> {
+    let (spent_commitments, reinjectable) = {
+        let chain = chain.lock().await;
+        match connect_result {
+            dom_chain::ConnectResult::BestChain => {
+                (collect_spent_commitments(connected_block_txs), Vec::new())
+            }
+            dom_chain::ConnectResult::Reorg(delta) => (
+                collect_spent_commitments(&delta.connected_txs),
+                collect_reinjectable_reorg_txs(&chain, delta)?,
+            ),
+            dom_chain::ConnectResult::SideChain | dom_chain::ConnectResult::AlreadyHave => {
+                return Ok(());
+            }
+        }
+    };
+
+    let mut mempool = mempool.lock().await;
+    if !spent_commitments.is_empty() {
+        mempool.remove_confirmed(&spent_commitments);
+    }
+    if !reinjectable.is_empty() {
+        let _ = mempool.reinject_batch(reinjectable);
+    }
+    Ok(())
 }
 
 fn decode_deferred_block_bytes(block_bytes: &[u8]) -> Result<dom_consensus::Block, DomError> {
@@ -1453,6 +1570,10 @@ async fn resume_ibd_block_sync(
                     ),
                 ) {
                     Ok(dom_chain::ConnectResult::BestChain) => {
+                        connected_any = true;
+                        true
+                    }
+                    Ok(dom_chain::ConnectResult::Reorg(_)) => {
                         connected_any = true;
                         true
                     }
@@ -2285,17 +2406,48 @@ async fn message_loop(
                                     let mut c = chain.lock().await;
                                     c.connect_block(&block, now)
                                 };
-                                match relay_block_action(&result) {
-                                    RelayBlockAction::RelayBestChain => {
-                                        tracing::info!("Accepted relayed block from {peer_addr} (new tip)");
-                                        // Wallet state follows canonical blocks only.
-                                        if let Some(ref wallet_arc) = svc.wallet {
-                                            let mut w = wallet_arc.lock().await;
-                                            if let Err(e) = w.apply_canonical_block(&txs_for_scan, height) {
-                                                tracing::warn!("wallet canonical block apply failed at height {height}: {e}");
+                        match relay_block_action(&result) {
+                            RelayBlockAction::RelayBestChain => {
+                                if let Ok(ref connect_result) = result {
+                                    if let Err(e) = reconcile_mempool_after_connect(
+                                        &chain,
+                                        &svc.mempool,
+                                        connect_result,
+                                        &block.transactions,
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(
+                                            "Mempool reconciliation failed after block from {peer_addr}: {e}"
+                                        );
+                                    }
+                                }
+                                tracing::info!("Accepted relayed block from {peer_addr} (new tip)");
+                                // Wallet state follows canonical blocks only.
+                                if let Ok(ref connect_result) = result {
+                                    match connect_result {
+                                        dom_chain::ConnectResult::BestChain => {
+                                            if let Some(ref wallet_arc) = svc.wallet {
+                                                let mut w = wallet_arc.lock().await;
+                                                if let Err(e) =
+                                                    w.apply_canonical_block(&txs_for_scan, height)
+                                                {
+                                                    tracing::warn!(
+                                                        "wallet canonical block apply failed at height {height}: {e}"
+                                                    );
+                                                }
                                             }
                                         }
-                                        // DOM-SEC-RELAY-LOOP: only rebroadcast when we
+                                        dom_chain::ConnectResult::Reorg(_) => {
+                                            tracing::debug!(
+                                                "Skipping wallet canonical apply for reorg from {peer_addr}; rollback hooks remain explicit follow-up work"
+                                            );
+                                        }
+                                        dom_chain::ConnectResult::SideChain
+                                        | dom_chain::ConnectResult::AlreadyHave => {}
+                                    }
+                                }
+                                // DOM-SEC-RELAY-LOOP: only rebroadcast when we
                                         // actually extended the best chain. SideChain
                                         // and AlreadyHave MUST NOT rebroadcast — that
                                         // creates infinite relay loops between peers.
@@ -2467,21 +2619,26 @@ mod tests {
     use super::{
         continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
         decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
-        peer_violation_score, pending_peer_violation_score, refresh_peer_metrics,
-        relay_block_action, DeferredReplayAction, IbdRoundState, OutboundAttemptOutcome,
-        RelayBlockAction,
+        peer_violation_score, pending_peer_violation_score, reconcile_mempool_after_connect,
+        refresh_peer_metrics, relay_block_action, tx_hash, DeferredReplayAction, IbdRoundState,
+        OutboundAttemptOutcome, RelayBlockAction,
     };
     use crate::metrics::Metrics;
-    use dom_chain::{ChainState, ConnectResult, IbdInterruption, IbdPhase, PersistedIbdState};
+    use dom_chain::{
+        ChainState, ConnectResult, IbdInterruption, IbdPhase, PersistedIbdState, ReorgDelta,
+    };
     use dom_consensus::block::{BlockHeader, ProofOfWork};
-    use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction};
+    use dom_consensus::transaction::{TransactionInput, TransactionKernel, TransactionOutput};
+    use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, Transaction};
     use dom_core::{
-        BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, MAX_BLOCK_SERIALIZED_SIZE,
-        NETWORK_MAGIC_REGTEST,
+        Amount, BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
+        MAX_BLOCK_SERIALIZED_SIZE, NETWORK_MAGIC_REGTEST,
     };
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
+    use dom_mempool::Mempool;
     use dom_pow::CompactTarget;
     use dom_serialization::DomSerialize;
+    use dom_store::utxo::UtxoEntry;
     use dom_store::DomStore;
     use dom_wire::manager::PeerManager;
     use dom_wire::message::BlockPayload;
@@ -2494,6 +2651,8 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use tokio::sync::Mutex;
+
+    type TestUtxoBytes = ([u8; 33], Vec<u8>);
 
     fn commitment(seed: u8, value: u64) -> Commitment {
         let mut bytes = [0u8; 32];
@@ -2535,6 +2694,130 @@ mod tests {
             },
             transactions: Vec::new(),
         }
+    }
+
+    fn synthetic_block_with_transactions(
+        prev_hash: Hash256,
+        height: u64,
+        nonce: u64,
+        coinbase_seed: u8,
+        transactions: Vec<Transaction>,
+    ) -> Block {
+        Block {
+            header: BlockHeader {
+                version: 1,
+                height: BlockHeight(height),
+                prev_hash,
+                timestamp: Timestamp(1_700_100_000 + height),
+                output_root: Hash256::ZERO,
+                kernel_root: Hash256::ZERO,
+                rangeproof_root: Hash256::ZERO,
+                total_kernel_offset: [0u8; 32],
+                target: CompactTarget(0),
+                total_difficulty: U256::from(height),
+                pow: ProofOfWork {
+                    nonce,
+                    randomx_hash: Hash256::ZERO,
+                },
+            },
+            coinbase: CoinbaseTransaction {
+                output: TransactionOutput {
+                    commitment: commitment(coinbase_seed, 1_000 + height),
+                    proof: vec![coinbase_seed; 8],
+                },
+                kernel: CoinbaseKernel {
+                    features: KERNEL_FEAT_COINBASE,
+                    explicit_value: 1,
+                    excess: commitment(coinbase_seed.wrapping_add(100), 0),
+                    excess_signature: [coinbase_seed; 65],
+                },
+                offset: [0u8; 32],
+            },
+            transactions,
+        }
+    }
+
+    fn synthetic_spend_tx(input: Commitment, output_seed: u8, kernel_seed: u8) -> Transaction {
+        Transaction {
+            inputs: vec![TransactionInput { commitment: input }],
+            outputs: vec![TransactionOutput {
+                commitment: commitment(output_seed, u64::from(output_seed) + 1),
+                proof: vec![output_seed; 8],
+            }],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(dom_core::MIN_RELAY_FEE_RATE * 100).expect("fee"),
+                lock_height: 0,
+                excess: commitment(kernel_seed, 0),
+                excess_signature: [kernel_seed; 65],
+            }],
+            offset: [0u8; 32],
+        }
+    }
+
+    fn block_state_changes(block: &Block) -> (Vec<TestUtxoBytes>, Vec<[u8; 33]>) {
+        let mut new_utxos = vec![(
+            *block.coinbase.output.commitment.as_bytes(),
+            UtxoEntry {
+                block_height: block.header.height.0,
+                is_coinbase: true,
+                proof: block.coinbase.output.proof.clone(),
+            }
+            .to_bytes(),
+        )];
+        let mut spent_utxos = Vec::new();
+        for tx in &block.transactions {
+            for input in &tx.inputs {
+                spent_utxos.push(*input.commitment.as_bytes());
+            }
+            for output in &tx.outputs {
+                new_utxos.push((
+                    *output.commitment.as_bytes(),
+                    UtxoEntry {
+                        block_height: block.header.height.0,
+                        is_coinbase: false,
+                        proof: output.proof.clone(),
+                    }
+                    .to_bytes(),
+                ));
+            }
+        }
+        (new_utxos, spent_utxos)
+    }
+
+    fn kernel_excesses(block: &Block) -> Vec<([u8; 33], [u8; 32])> {
+        let hash = block_hash(block);
+        let mut out = vec![(*block.coinbase.kernel.excess.as_bytes(), hash)];
+        for tx in &block.transactions {
+            for kernel in &tx.kernels {
+                out.push((*kernel.excess.as_bytes(), hash));
+            }
+        }
+        out
+    }
+
+    async fn commit_chain_block(chain: &Arc<Mutex<ChainState>>, block: &Block) {
+        let hash = block_hash(block);
+        let header_bytes = block.header.to_bytes().expect("header bytes");
+        let body_bytes = block.to_bytes().expect("body bytes");
+        let (new_utxos, spent_utxos) = block_state_changes(block);
+        let kernels = kernel_excesses(block);
+        let mut guard = chain.lock().await;
+        guard
+            .store
+            .commit_block(
+                &hash,
+                block.header.height.0,
+                &header_bytes,
+                &body_bytes,
+                &new_utxos,
+                &spent_utxos,
+                &kernels,
+            )
+            .expect("commit block");
+        guard.tip_hash = Hash256::from_bytes(hash);
+        guard.tip_height = block.header.height;
+        guard.tip_difficulty = block.header.total_difficulty;
     }
 
     fn ibd_payload(block: &Block) -> Vec<u8> {
@@ -2670,6 +2953,10 @@ mod tests {
             deferred_replay_action(&Ok(ConnectResult::BestChain)),
             DeferredReplayAction::RelayBestChain
         );
+        assert_eq!(
+            deferred_replay_action(&Ok(ConnectResult::Reorg(ReorgDelta::default()))),
+            DeferredReplayAction::RelayBestChain
+        );
     }
 
     #[test]
@@ -2714,6 +3001,68 @@ mod tests {
             relay_block_action(&Ok(ConnectResult::BestChain)),
             RelayBlockAction::RelayBestChain
         );
+        assert_eq!(
+            relay_block_action(&Ok(ConnectResult::Reorg(ReorgDelta::default()))),
+            RelayBlockAction::RelayBestChain
+        );
+    }
+
+    #[tokio::test]
+    async fn reorg_mempool_reconciliation_reinjects_live_txs_and_evicts_conflicts() {
+        let dir = fresh_test_dir("reorg-mempool-reconcile");
+        let chain = open_chain(&dir);
+        let mempool = Arc::new(Mutex::new(Mempool::new()));
+
+        let base_output = commitment(40, 25);
+        let base_tx = Transaction {
+            inputs: vec![],
+            outputs: vec![TransactionOutput {
+                commitment: base_output.clone(),
+                proof: vec![0x40; 8],
+            }],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(dom_core::MIN_RELAY_FEE_RATE * 100).expect("fee"),
+                lock_height: 0,
+                excess: commitment(41, 0),
+                excess_signature: [0x41; 65],
+            }],
+            offset: [0u8; 32],
+        };
+        let base_block =
+            synthetic_block_with_transactions(Hash256::ZERO, 1, 11, 42, vec![base_tx.clone()]);
+        commit_chain_block(&chain, &base_block).await;
+
+        let disconnected_tx = synthetic_spend_tx(base_output, 50, 51);
+        let conflicting_input = commitment(60, 30);
+        let conflicting_live_tx = synthetic_spend_tx(conflicting_input.clone(), 61, 62);
+        let conflicting_live_hash = tx_hash(&conflicting_live_tx).expect("hash");
+        {
+            let mut pool = mempool.lock().await;
+            pool.accept_tx(conflicting_live_tx, conflicting_live_hash, 1)
+                .expect("accept conflicting tx");
+        }
+        let connected_tx = synthetic_spend_tx(conflicting_input, 63, 64);
+        let reorg = ReorgDelta {
+            disconnected_txs: vec![disconnected_tx.clone()],
+            connected_txs: vec![connected_tx],
+        };
+
+        reconcile_mempool_after_connect(&chain, &mempool, &ConnectResult::Reorg(reorg), &[])
+            .await
+            .expect("reconcile reorg mempool");
+
+        let disconnected_hash = tx_hash(&disconnected_tx).expect("hash");
+        let pool = mempool.lock().await;
+        assert!(
+            pool.get_tx(&disconnected_hash).is_some(),
+            "live disconnected tx must be resurrected deterministically"
+        );
+        assert!(
+            pool.get_tx(&conflicting_live_hash).is_none(),
+            "connected-branch input must evict conflicting mempool tx"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
     #[test]

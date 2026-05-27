@@ -5,7 +5,7 @@ use dom_consensus::block::{
     validate_future_timestamp, validate_header_syntax, validate_median_time_past, validate_pow,
     BlockHeader,
 };
-use dom_consensus::{derive_chain_id, validate_block, Block, ValidationContext};
+use dom_consensus::{derive_chain_id, validate_block, Block, Transaction, ValidationContext};
 use dom_core::{BlockHeight, DomError, Hash256, Timestamp};
 use dom_pow::{randomx_seed_height, target_to_difficulty, AsertAnchor, CompactTarget};
 use dom_serialization::{DomDeserialize, DomSerialize};
@@ -45,6 +45,17 @@ pub struct ChainState {
     /// the network-specific rule without re-deriving on every block —
     /// and without dragging `dom-config` into the consensus crate.
     pub coinbase_maturity: u64,
+}
+
+/// Deterministic transaction delta produced by a canonical reorganization.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReorgDelta {
+    /// Transactions disconnected from the former canonical branch, ordered by
+    /// rollback order (old tip back toward the common ancestor).
+    pub disconnected_txs: Vec<Transaction>,
+    /// Transactions connected on the promoted branch, ordered from the common
+    /// ancestor forward to the new tip.
+    pub connected_txs: Vec<Transaction>,
 }
 
 /// Map a 32-bit network magic to the coinbase maturity rule that applies
@@ -291,8 +302,8 @@ impl ChainState {
                 &block_body_bytes,
             )?;
             if extends_best_chain {
-                self.promote_heavier_known_tip(block_hash)?;
-                return Ok(ConnectResult::BestChain);
+                let reorg = self.promote_heavier_known_tip(block_hash)?;
+                return Ok(ConnectResult::Reorg(reorg));
             }
             debug!(
                 "Side chain block: height={}, hash={}",
@@ -663,7 +674,10 @@ impl ChainState {
     ///
     /// The tip and every ancestor block up to the fork point MUST already be
     /// present in the store via `commit_block` or `store_known_block`.
-    pub fn promote_heavier_known_tip(&mut self, new_tip_hash: Hash256) -> Result<(), DomError> {
+    pub fn promote_heavier_known_tip(
+        &mut self,
+        new_tip_hash: Hash256,
+    ) -> Result<ReorgDelta, DomError> {
         let new_tip_header = self
             .store
             .get_block_header(new_tip_hash.as_bytes())?
@@ -705,6 +719,16 @@ impl ChainState {
         check_reorg_depth(disconnect_blocks.len() as u64)?;
         let mut connect_blocks = collect_branch_blocks(&self.store, new_tip_hash, ancestor)?;
         connect_blocks.reverse();
+        let reorg_delta = ReorgDelta {
+            disconnected_txs: disconnect_blocks
+                .iter()
+                .flat_map(|(_, block)| block.transactions.clone())
+                .collect(),
+            connected_txs: connect_blocks
+                .iter()
+                .flat_map(|(_, block)| block.transactions.clone())
+                .collect(),
+        };
 
         let mut disconnect_output_index = HashMap::new();
         for (_, block) in &disconnect_blocks {
@@ -763,7 +787,7 @@ impl ChainState {
             "Reorg applied: new tip height={}, hash={}, ancestor={}",
             self.tip_height, self.tip_hash, ancestor
         );
-        Ok(())
+        Ok(reorg_delta)
     }
 
     fn validate_direct_extension_inputs(&self, block: &Block) -> Result<(), DomError> {
@@ -1148,10 +1172,12 @@ fn build_kernel_updates(
 }
 
 /// Outcome of attempting to connect a block to the chain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectResult {
     /// Block extended the best chain — new tip. Caller should rebroadcast.
     BestChain,
+    /// Block promoted a heavier known side branch into the canonical chain.
+    Reorg(ReorgDelta),
     /// Block is valid but on a side chain (lower or equal total difficulty).
     /// Caller should NOT rebroadcast — would cause network amplification.
     SideChain,
