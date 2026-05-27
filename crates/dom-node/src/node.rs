@@ -95,6 +95,12 @@ const FUTURE_BLOCK_QUEUE_MAX_AGE_SECS: u64 = dom_core::MAX_FUTURE_BLOCK_TIME
 const HELLO_EXCHANGE_TIMEOUT_SECS: u64 = dom_wire::handshake::HANDSHAKE_TIMEOUT_SECS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutboundAttemptOutcome {
+    RetryableFailure,
+    Registered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeferredReplayAction {
     RelayBestChain,
     Requeue,
@@ -523,6 +529,10 @@ impl DomNode {
                 addrs.extend(self.config.seed_peers.iter().cloned());
                 addrs.sort();
                 addrs.dedup();
+                addrs = {
+                    let mgr = self.peers.lock().await;
+                    mgr.outbound_candidates_in_retry_order(addrs)
+                };
 
                 for addr in addrs {
                     let reserved = {
@@ -551,8 +561,12 @@ impl DomNode {
                     let metrics = self.metrics.clone();
                     let svc_c = svc.clone();
                     tokio::spawn(async move {
-                        connect_outbound(&addr, config, privkey, chain, channels, svc_c).await;
+                        let outcome =
+                            connect_outbound(&addr, config, privkey, chain, channels, svc_c).await;
                         let mut mgr = peers.lock().await;
+                        if outcome == OutboundAttemptOutcome::RetryableFailure {
+                            mgr.record_outbound_failure(&cleanup_addr);
+                        }
                         mgr.remove_peer(&cleanup_addr);
                         mgr.release_outbound_reservation(&cleanup_addr);
                         drop(mgr);
@@ -776,7 +790,7 @@ async fn connect_outbound(
     chain: Arc<Mutex<ChainState>>,
     channels: BroadcastChannels,
     svc: NodeServices,
-) {
+) -> OutboundAttemptOutcome {
     let BroadcastChannels {
         block_relay_tx,
         tx_fluff_tx,
@@ -786,7 +800,7 @@ async fn connect_outbound(
         Ok(s) => s,
         Err(e) => {
             warn!("Connection to {addr} failed: {e}");
-            return;
+            return OutboundAttemptOutcome::RetryableFailure;
         }
     };
     let genesis_hash = match config.network {
@@ -810,7 +824,7 @@ async fn connect_outbound(
                 let _ = record_pending_peer_violation(&svc.peers, peer_addr, &e).await;
             }
             warn!("Handshake failed with {addr}: {e}");
-            return;
+            return OutboundAttemptOutcome::RetryableFailure;
         }
     };
     info!("Connected to {addr}");
@@ -831,7 +845,7 @@ async fn connect_outbound(
                         Ok(a) => a,
                         Err(e) => {
                             warn!("Cannot determine addr for register_peer: {e}");
-                            return;
+                            return OutboundAttemptOutcome::RetryableFailure;
                         }
                     },
                 };
@@ -844,7 +858,7 @@ async fn connect_outbound(
                 info!("register_peer outbound {addr} → {result:?}");
                 if let Err(e) = result {
                     warn!("Failed to register outbound peer {addr}: {e}");
-                    return;
+                    return OutboundAttemptOutcome::RetryableFailure;
                 }
             }
             refresh_peer_metrics(&svc.peers, &svc.metrics).await;
@@ -852,7 +866,7 @@ async fn connect_outbound(
                 Ok(a) => a,
                 Err(_) => {
                     warn!("Could not resolve peer_addr for {addr}");
-                    return;
+                    return OutboundAttemptOutcome::RetryableFailure;
                 }
             };
 
@@ -874,7 +888,7 @@ async fn connect_outbound(
                     Err(e) => {
                         let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
                         warn!("IBD with {addr} failed: {e}");
-                        return;
+                        return OutboundAttemptOutcome::RetryableFailure;
                     }
                 }
             }
@@ -898,6 +912,7 @@ async fn connect_outbound(
             {
                 info!("Connection to {addr} closed: {e}");
             }
+            OutboundAttemptOutcome::Registered
         }
         Err(e) => {
             let peer_addr = match stream.peer_addr() {
@@ -906,12 +921,13 @@ async fn connect_outbound(
                     Ok(a) => a,
                     Err(_) => {
                         warn!("Hello exchange with {addr} failed: {e}");
-                        return;
+                        return OutboundAttemptOutcome::RetryableFailure;
                     }
                 },
             };
             let _ = record_pending_peer_violation(&svc.peers, peer_addr, &e).await;
             warn!("Hello exchange with {addr} failed: {e}");
+            OutboundAttemptOutcome::RetryableFailure
         }
     }
 }
@@ -2449,7 +2465,8 @@ mod tests {
         continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
         decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
         peer_violation_score, pending_peer_violation_score, refresh_peer_metrics,
-        relay_block_action, DeferredReplayAction, IbdRoundState, RelayBlockAction,
+        relay_block_action, DeferredReplayAction, IbdRoundState, OutboundAttemptOutcome,
+        RelayBlockAction,
     };
     use crate::metrics::Metrics;
     use dom_chain::{ChainState, ConnectResult, IbdPhase, PersistedIbdState};
@@ -2784,6 +2801,18 @@ mod tests {
         let err = decode_deferred_block_bytes(&[0x01, 0x02, 0x03])
             .expect_err("malformed deferred bytes must fail");
         assert!(matches!(err, DomError::Malformed(_)));
+    }
+
+    #[test]
+    fn outbound_attempt_outcome_marks_retryable_failures_only() {
+        assert_eq!(
+            OutboundAttemptOutcome::RetryableFailure,
+            OutboundAttemptOutcome::RetryableFailure
+        );
+        assert_ne!(
+            OutboundAttemptOutcome::RetryableFailure,
+            OutboundAttemptOutcome::Registered
+        );
     }
 
     #[tokio::test]

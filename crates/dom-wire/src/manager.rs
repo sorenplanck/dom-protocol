@@ -26,6 +26,8 @@ const MAX_PENDING_PENALTIES: usize = 4_096;
 const MAX_DUPLICATE_BLOCK_RELAYS_PER_WINDOW: u32 = 32;
 /// Duplicate block relay rate window.
 const DUPLICATE_BLOCK_RELAY_WINDOW_SECS: u64 = 30;
+/// Bound runtime memory used by outbound failure history.
+const MAX_OUTBOUND_FAILURE_TRACKERS: usize = 4_096;
 
 #[derive(Debug, Clone, Copy)]
 struct PendingInbound {
@@ -49,6 +51,12 @@ struct DuplicateRelayTracker {
     window_started: Instant,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct OutboundFailureTracker {
+    failures: u8,
+    last_failure_seq: u64,
+}
+
 /// Peer manager state.
 pub struct PeerManager {
     /// Connected peers: addr_string → PeerInfo.
@@ -61,6 +69,10 @@ pub struct PeerManager {
     pending_penalties: HashMap<String, PendingPenalty>,
     /// Runtime-only duplicate block relay counters for connected peers.
     duplicate_block_relays: HashMap<String, DuplicateRelayTracker>,
+    /// Deterministic outbound failure history used to rotate repeated failures.
+    outbound_failures: HashMap<String, OutboundFailureTracker>,
+    /// Monotonic sequence for deterministic failure ordering.
+    outbound_failure_seq: u64,
     /// Max inbound connections.
     pub max_inbound: usize,
     /// Min outbound connections.
@@ -76,6 +88,8 @@ impl PeerManager {
             pending_outbound: HashMap::new(),
             pending_penalties: HashMap::new(),
             duplicate_block_relays: HashMap::new(),
+            outbound_failures: HashMap::new(),
+            outbound_failure_seq: 0,
             max_inbound,
             min_outbound,
         }
@@ -219,6 +233,60 @@ impl PeerManager {
         self.pending_outbound.remove(addr);
     }
 
+    /// Record a failed outbound attempt so future candidate ordering can
+    /// deterministically rotate away from repeatedly failing peers.
+    pub fn record_outbound_failure(&mut self, addr: &str) {
+        self.prune_stale_state();
+        self.outbound_failure_seq = self.outbound_failure_seq.saturating_add(1);
+        let seq = self.outbound_failure_seq;
+        let entry =
+            self.outbound_failures
+                .entry(addr.to_string())
+                .or_insert(OutboundFailureTracker {
+                    failures: 0,
+                    last_failure_seq: seq,
+                });
+        entry.failures = entry.failures.saturating_add(1);
+        entry.last_failure_seq = seq;
+        self.enforce_outbound_failure_bound();
+    }
+
+    /// Clear outbound failure history after a successful registration so a
+    /// previously bad peer does not stay artificially deprioritized forever.
+    pub fn clear_outbound_failure(&mut self, addr: &str) {
+        self.outbound_failures.remove(addr);
+    }
+
+    /// Return outbound candidates in canonical retry order.
+    ///
+    /// Peers with fewer recorded failures come first. Among peers with equal
+    /// failure counts, the least recently failed peer comes first. Address
+    /// order breaks any remaining tie deterministically.
+    pub fn outbound_candidates_in_retry_order(&self, candidates: Vec<String>) -> Vec<String> {
+        let mut out = candidates;
+        out.sort_by(|left, right| {
+            let left_failure = self.outbound_failures.get(left).copied();
+            let right_failure = self.outbound_failures.get(right).copied();
+            let left_failures = left_failure.map(|f| f.failures).unwrap_or(0);
+            let right_failures = right_failure.map(|f| f.failures).unwrap_or(0);
+            let left_seq = left_failure.map(|f| f.last_failure_seq).unwrap_or(0);
+            let right_seq = right_failure.map(|f| f.last_failure_seq).unwrap_or(0);
+            left_failures
+                .cmp(&right_failures)
+                .then_with(|| left_seq.cmp(&right_seq))
+                .then_with(|| left.cmp(right))
+        });
+        out
+    }
+
+    /// Inspect the current outbound failure count for a candidate.
+    pub fn outbound_failure_count(&self, addr: &str) -> u8 {
+        self.outbound_failures
+            .get(addr)
+            .map(|tracker| tracker.failures)
+            .unwrap_or(0)
+    }
+
     /// Register a new peer connection attempt.
     pub fn register_peer(&mut self, info: PeerInfo) -> Result<(), DomError> {
         self.prune_stale_state();
@@ -244,6 +312,7 @@ impl PeerManager {
             }
         } else {
             self.pending_outbound.remove(&addr_str);
+            self.clear_outbound_failure(&addr_str);
         }
         self.pending_penalties.remove(&addr_str);
         self.duplicate_block_relays.remove(&addr_str);
@@ -385,6 +454,7 @@ impl PeerManager {
         self.pending_penalties
             .retain(|_, penalty| !penalty_is_stale(*penalty));
         self.enforce_pending_penalty_bound();
+        self.enforce_outbound_failure_bound();
     }
 
     fn enforce_pending_penalty_bound(&mut self) {
@@ -405,6 +475,27 @@ impl PeerManager {
         });
         for (addr, _) in oldest.into_iter().take(overflow) {
             self.pending_penalties.remove(&addr);
+        }
+    }
+
+    fn enforce_outbound_failure_bound(&mut self) {
+        if self.outbound_failures.len() <= MAX_OUTBOUND_FAILURE_TRACKERS {
+            return;
+        }
+
+        let overflow = self.outbound_failures.len() - MAX_OUTBOUND_FAILURE_TRACKERS;
+        let mut oldest: Vec<(String, u64)> = self
+            .outbound_failures
+            .iter()
+            .map(|(addr, tracker)| (addr.clone(), tracker.last_failure_seq))
+            .collect();
+        oldest.sort_by(|(left_addr, left_seq), (right_addr, right_seq)| {
+            left_seq
+                .cmp(right_seq)
+                .then_with(|| left_addr.cmp(right_addr))
+        });
+        for (addr, _) in oldest.into_iter().take(overflow) {
+            self.outbound_failures.remove(&addr);
         }
     }
 }
@@ -761,5 +852,62 @@ mod tests {
 
         assert_eq!(mgr.pending_outbound_count(), 0);
         assert!(mgr.reserve_outbound(addr).is_ok());
+    }
+
+    #[test]
+    fn outbound_candidates_are_ordered_by_failure_history() {
+        let mut mgr = PeerManager::new(125, 2);
+        mgr.record_outbound_failure("198.51.100.30:33369");
+        mgr.record_outbound_failure("198.51.100.30:33369");
+        mgr.record_outbound_failure("198.51.100.20:33369");
+
+        let ordered = mgr.outbound_candidates_in_retry_order(vec![
+            "198.51.100.30:33369".into(),
+            "198.51.100.10:33369".into(),
+            "198.51.100.20:33369".into(),
+        ]);
+        assert_eq!(
+            ordered,
+            vec![
+                "198.51.100.10:33369".to_string(),
+                "198.51.100.20:33369".to_string(),
+                "198.51.100.30:33369".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn outbound_candidates_with_equal_failures_prefer_oldest_failure() {
+        let mut mgr = PeerManager::new(125, 2);
+        mgr.record_outbound_failure("198.51.100.20:33369");
+        mgr.record_outbound_failure("198.51.100.10:33369");
+
+        let ordered = mgr.outbound_candidates_in_retry_order(vec![
+            "198.51.100.10:33369".into(),
+            "198.51.100.20:33369".into(),
+        ]);
+        assert_eq!(
+            ordered,
+            vec![
+                "198.51.100.20:33369".to_string(),
+                "198.51.100.10:33369".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn successful_outbound_registration_clears_failure_history() {
+        let mut mgr = PeerManager::new(125, 2);
+        let peer = make_peer([198, 51, 100, 40], 33369, true);
+        let addr = peer.addr.to_string();
+
+        mgr.record_outbound_failure(&addr);
+        assert_eq!(mgr.outbound_failure_count(&addr), 1);
+        mgr.reserve_outbound(&addr).expect("reserve outbound");
+        mgr.register_peer(peer).expect("register outbound");
+
+        assert_eq!(mgr.outbound_failure_count(&addr), 0);
+        let ordered = mgr.outbound_candidates_in_retry_order(vec![addr.clone()]);
+        assert_eq!(ordered, vec![addr]);
     }
 }
