@@ -95,9 +95,13 @@ pub struct PersistedIbdState {
     pub last_interruption: Option<IbdInterruption>,
     /// Pending bounded work queue for the current round.
     pub pending_blocks: Vec<[u8; 32]>,
+    /// Pending raw header payloads for the current round.
+    pub pending_headers: Vec<Vec<u8>>,
     /// Cursor into `pending_blocks` for partial block-batch resume.
     pub block_cursor: u32,
-    /// Header cursor for the current round.
+    /// Cursor into `pending_headers` for partial header-batch resume.
+    pub header_cursor: u32,
+    /// Height of the last header in the current round.
     pub header_cursor_height: u64,
 }
 
@@ -124,6 +128,7 @@ impl PersistedIbdState {
     /// in-flight round state.
     pub fn is_round_resumable(&self) -> bool {
         self.block_cursor as usize <= self.pending_blocks.len()
+            && self.header_cursor as usize <= self.pending_headers.len()
     }
 }
 
@@ -240,7 +245,17 @@ impl DomSerialize for PersistedIbdState {
         for hash in &self.pending_blocks {
             w.write_bytes(hash);
         }
+        let pending_headers_len: u32 = self
+            .pending_headers
+            .len()
+            .try_into()
+            .map_err(|_| DomError::Malformed("pending header count exceeds u32".into()))?;
+        w.write_u32(pending_headers_len);
+        for header_bytes in &self.pending_headers {
+            w.write_vec(header_bytes)?;
+        }
         w.write_u32(self.block_cursor);
+        w.write_u32(self.header_cursor);
         w.write_u64(self.header_cursor_height);
         Ok(())
     }
@@ -279,12 +294,31 @@ impl DomDeserialize for PersistedIbdState {
         for _ in 0..pending_len {
             pending_blocks.push(r.read_array::<32>()?);
         }
+        let pending_headers_len = r.read_u32()? as usize;
+        if pending_headers_len > dom_core::MAX_HEADERS_PER_MSG {
+            return Err(DomError::Malformed(format!(
+                "persisted pending header count {pending_headers_len} exceeds limit {}",
+                dom_core::MAX_HEADERS_PER_MSG
+            )));
+        }
+        let mut pending_headers = Vec::with_capacity(pending_headers_len);
+        for _ in 0..pending_headers_len {
+            pending_headers.push(r.read_vec(1024)?);
+        }
         let block_cursor = r.read_u32()?;
         if block_cursor as usize > pending_blocks.len() {
             return Err(DomError::Malformed(format!(
                 "persisted block cursor {} exceeds pending block count {}",
                 block_cursor,
                 pending_blocks.len()
+            )));
+        }
+        let header_cursor = r.read_u32()?;
+        if header_cursor as usize > pending_headers.len() {
+            return Err(DomError::Malformed(format!(
+                "persisted header cursor {} exceeds pending header count {}",
+                header_cursor,
+                pending_headers.len()
             )));
         }
         let header_cursor_height = r.read_u64()?;
@@ -300,7 +334,9 @@ impl DomDeserialize for PersistedIbdState {
             retry_attempts,
             last_interruption,
             pending_blocks,
+            pending_headers,
             block_cursor,
+            header_cursor,
             header_cursor_height,
         })
     }
@@ -328,13 +364,13 @@ impl IbdState {
 
     /// Restore an in-memory IBD controller from a persisted snapshot.
     ///
-    /// This is intentionally strict: only snapshots without partially consumed
-    /// block queues are restorable here. Partial round resume is handled by a
-    /// separate hardening batch so there is no hidden reconstruction logic.
+    /// Queue contents are resumed explicitly by the node using the persisted
+    /// cursors and ordered work lists. This constructor restores only the
+    /// deterministic controller fields after validating those cursors.
     pub fn from_persisted(snapshot: &PersistedIbdState) -> Result<Self, DomError> {
         if !snapshot.is_round_resumable() {
             return Err(DomError::PolicyRejected(
-                "persisted IBD snapshot has invalid block cursor".into(),
+                "persisted IBD snapshot has invalid round cursor".into(),
             ));
         }
 
@@ -681,7 +717,9 @@ mod tests {
             retry_attempts: 2,
             last_interruption: Some(IbdInterruption::Timeout),
             pending_blocks: Vec::new(),
+            pending_headers: Vec::new(),
             block_cursor: 0,
+            header_cursor: 0,
             header_cursor_height: 14,
         };
         let ibd = IbdState::from_persisted(&snapshot).expect("restore");
@@ -692,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_round_snapshot_is_not_restored_implicitly() {
+    fn partial_round_snapshot_restores_pending_work() {
         let snapshot = PersistedIbdState {
             phase: IbdPhase::BlockSync,
             peer_addr: "127.0.0.1:33369".into(),
@@ -704,7 +742,9 @@ mod tests {
             retry_attempts: 1,
             last_interruption: None,
             pending_blocks: vec![[0x44; 32]],
+            pending_headers: vec![vec![0xAA; 32]],
             block_cursor: 0,
+            header_cursor: 0,
             header_cursor_height: 20,
         };
         let ibd = IbdState::from_persisted(&snapshot).expect("partial round restore");
@@ -725,11 +765,38 @@ mod tests {
             retry_attempts: 1,
             last_interruption: None,
             pending_blocks: vec![[0x44; 32]],
+            pending_headers: Vec::new(),
             block_cursor: 2,
+            header_cursor: 0,
             header_cursor_height: 20,
         };
         let err = match IbdState::from_persisted(&snapshot) {
             Ok(_) => panic!("invalid cursor must reject"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, DomError::PolicyRejected(_)));
+    }
+
+    #[test]
+    fn invalid_partial_header_cursor_is_rejected() {
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::HeaderSync,
+            peer_addr: "127.0.0.1:33369".into(),
+            start_height: 10,
+            best_peer_height: 25,
+            headers_height: 12,
+            blocks_height: 10,
+            last_progress_height: 10,
+            retry_attempts: 1,
+            last_interruption: Some(IbdInterruption::Timeout),
+            pending_blocks: vec![[0x44; 32]],
+            pending_headers: vec![vec![0xAA; 32]],
+            block_cursor: 0,
+            header_cursor: 2,
+            header_cursor_height: 20,
+        };
+        let err = match IbdState::from_persisted(&snapshot) {
+            Ok(_) => panic!("invalid header cursor must reject"),
             Err(err) => err,
         };
         assert!(matches!(err, DomError::PolicyRejected(_)));

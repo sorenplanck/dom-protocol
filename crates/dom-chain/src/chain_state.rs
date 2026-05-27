@@ -411,6 +411,154 @@ impl ChainState {
         Ok(missing_hashes)
     }
 
+    /// Validate exactly one persisted IBD header step without re-validating the
+    /// previously verified prefix.
+    ///
+    /// `verified_header_count` is the number of headers in `raw_headers` whose
+    /// ordering and consensus checks have already completed and whose resulting
+    /// missing-block hashes are recorded in `prior_missing_hashes`.
+    ///
+    /// This method re-decodes the ordered prefix only to confirm that the
+    /// persisted queue still matches the saved deterministic checkpoint. It
+    /// then applies the full header-only consensus checks to the next header at
+    /// `verified_header_count`, returning the updated missing-block queue and
+    /// the validated header height.
+    pub fn validate_ibd_header_step(
+        &self,
+        raw_headers: &[Vec<u8>],
+        verified_header_count: usize,
+        prior_missing_hashes: &[[u8; 32]],
+        now: Timestamp,
+    ) -> Result<(u64, Vec<[u8; 32]>), DomError> {
+        if verified_header_count >= raw_headers.len() {
+            return Err(DomError::PolicyRejected(format!(
+                "persisted header cursor {} exceeds pending header count {}",
+                verified_header_count,
+                raw_headers.len()
+            )));
+        }
+
+        let mut decoded_prefix: Vec<(BlockHeader, Hash256, bool)> =
+            Vec::with_capacity(verified_header_count.saturating_add(1));
+        let mut observed_missing = Vec::with_capacity(prior_missing_hashes.len().saturating_add(1));
+
+        for (idx, header_bytes) in raw_headers
+            .iter()
+            .take(verified_header_count.saturating_add(1))
+            .enumerate()
+        {
+            let header = BlockHeader::from_bytes(header_bytes)?;
+            let hash = compute_block_hash(header_bytes);
+            let is_known = self.store.get_block_header(hash.as_bytes())?.is_some();
+
+            if idx == 0 {
+                if header.height != BlockHeight::GENESIS
+                    && self
+                        .store
+                        .get_block_header(header.prev_hash.as_bytes())?
+                        .is_none()
+                {
+                    return Err(DomError::Orphan(format!(
+                        "IBD header batch starts at unknown parent {}",
+                        header.prev_hash
+                    )));
+                }
+            } else {
+                let (prev_header, prev_hash, _) = &decoded_prefix[idx - 1];
+                let expected_height = prev_header
+                    .height
+                    .checked_next()
+                    .ok_or_else(|| DomError::Invalid("block height overflow".into()))?;
+                if header.height != expected_height {
+                    return Err(DomError::Invalid(format!(
+                        "IBD header gap: expected height {expected_height}, got {}",
+                        header.height
+                    )));
+                }
+                if header.prev_hash != *prev_hash {
+                    return Err(DomError::Invalid(format!(
+                        "IBD header prev_hash mismatch at height {}: expected {}, got {}",
+                        header.height, prev_hash, header.prev_hash
+                    )));
+                }
+            }
+
+            if idx < verified_header_count {
+                if !is_known {
+                    observed_missing.push(*hash.as_bytes());
+                }
+                decoded_prefix.push((header, hash, is_known));
+                continue;
+            }
+
+            if observed_missing != prior_missing_hashes {
+                return Err(DomError::PolicyRejected(format!(
+                    "persisted IBD header prefix mismatch: observed {} missing hashes, expected {}",
+                    observed_missing.len(),
+                    prior_missing_hashes.len()
+                )));
+            }
+
+            if !is_known {
+                validate_header_syntax(&header)?;
+
+                if header.height != BlockHeight::GENESIS {
+                    let prior_headers: Vec<BlockHeader> = decoded_prefix
+                        .iter()
+                        .map(|(prior_header, _, _)| prior_header.clone())
+                        .collect();
+                    let ancestors =
+                        self.collect_ibd_ancestor_timestamps(header.height.0, &prior_headers, 11)?;
+                    validate_median_time_past(&header, &ancestors)?;
+                }
+
+                validate_future_timestamp(&header, now)?;
+                let seed = self.compute_randomx_seed(header.height.0)?;
+                validate_pow(&header, &seed)?;
+
+                let parent_difficulty = if header.height == BlockHeight::GENESIS {
+                    U256::zero()
+                } else if decoded_prefix.is_empty() {
+                    let parent_bytes = self
+                        .store
+                        .get_block_header(header.prev_hash.as_bytes())?
+                        .ok_or_else(|| {
+                            DomError::Internal("parent missing after IBD parent precheck".into())
+                        })?;
+                    BlockHeader::from_bytes(&parent_bytes)?.total_difficulty
+                } else {
+                    decoded_prefix
+                        .last()
+                        .expect("decoded prefix not empty")
+                        .0
+                        .total_difficulty
+                };
+
+                let block_diff = target_to_difficulty(
+                    &header
+                        .target
+                        .to_target()
+                        .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?,
+                );
+                let expected_total = parent_difficulty.saturating_add(U256::from(block_diff));
+                if header.total_difficulty != expected_total {
+                    return Err(DomError::Invalid(format!(
+                        "total_difficulty mismatch: expected {expected_total}, got {}",
+                        header.total_difficulty
+                    )));
+                }
+
+                observed_missing.push(*hash.as_bytes());
+            }
+
+            return Ok((header.height.0, observed_missing));
+        }
+
+        Err(DomError::Internal(
+            "IBD header step finished without validating a header".into(),
+        ))
+    }
+
     pub fn validate_header_only(
         &self,
         header: &BlockHeader,
