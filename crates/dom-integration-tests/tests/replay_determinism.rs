@@ -14,14 +14,17 @@
 //! comfortably under 1 GB RAM and the suite finishes in seconds.
 
 use dom_chain::ChainState;
-use dom_consensus::Block;
+use dom_consensus::{
+    block::{BlockHeader, ProofOfWork},
+    Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput,
+};
 use dom_core::{Hash256, Timestamp};
+use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_integration_tests::helpers::*;
-use dom_serialization::DomDeserialize;
+use dom_pow::{target_to_difficulty, CompactTarget, REGTEST_TARGET_COMPACT};
+use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::DomStore;
 use std::path::Path;
-use std::time::Duration;
-
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -95,6 +98,135 @@ fn fresh_chain(data_dir: &str, network_magic: u32) -> ChainState {
     ChainState::open(store, genesis_hash, network_magic).expect("chain open")
 }
 
+fn replay_commitment(seed: u8, value: u64) -> Commitment {
+    let mut blind = [0u8; 32];
+    blind[31] = seed.max(1);
+    Commitment::commit(
+        value,
+        &BlindingFactor::from_bytes(blind).expect("deterministic blinding"),
+    )
+}
+
+fn replay_block_hash(header: &BlockHeader) -> Hash256 {
+    Hash256::from_bytes(
+        *dom_crypto::hash::blake2b_256(&header.to_bytes().expect("header serialize")).as_bytes(),
+    )
+}
+
+fn synthetic_replay_block(
+    prev_hash: Hash256,
+    height: u64,
+    timestamp: u64,
+    total_difficulty: u64,
+    nonce_seed: u64,
+) -> Block {
+    let coinbase_commitment = replay_commitment((height as u8).wrapping_add(1), height + 1);
+    Block {
+        header: BlockHeader {
+            version: dom_core::PROTOCOL_VERSION,
+            height: dom_core::BlockHeight(height),
+            prev_hash,
+            timestamp: Timestamp(timestamp),
+            output_root: Hash256::ZERO,
+            kernel_root: Hash256::ZERO,
+            rangeproof_root: Hash256::ZERO,
+            total_kernel_offset: [0u8; 32],
+            target: CompactTarget(REGTEST_TARGET_COMPACT),
+            total_difficulty: total_difficulty.into(),
+            pow: ProofOfWork {
+                nonce: nonce_seed,
+                randomx_hash: Hash256::ZERO,
+            },
+        },
+        coinbase: CoinbaseTransaction {
+            output: TransactionOutput {
+                commitment: coinbase_commitment,
+                proof: vec![height as u8; 8],
+            },
+            kernel: CoinbaseKernel {
+                features: dom_core::KERNEL_FEAT_COINBASE,
+                explicit_value: 1,
+                excess: replay_commitment((height as u8).wrapping_add(100), 0),
+                excess_signature: [height as u8; 65],
+            },
+            offset: [0u8; 32],
+        },
+        transactions: Vec::new(),
+    }
+}
+
+fn write_replay_fixture_chain(
+    data_dir: &str,
+) -> (
+    Hash256,
+    dom_core::BlockHeight,
+    primitive_types::U256,
+    u32,
+    Vec<u8>,
+) {
+    let _ = std::fs::remove_dir_all(data_dir);
+    std::fs::create_dir_all(data_dir).expect("mkdir replay fixture dir");
+    let store = DomStore::open(Path::new(data_dir)).expect("fixture store open");
+
+    let compact = CompactTarget(REGTEST_TARGET_COMPACT);
+    let target = compact.to_target().expect("regtest target");
+    let diff = target_to_difficulty(&target) as u64;
+    let genesis = synthetic_replay_block(
+        Hash256::ZERO,
+        0,
+        dom_core::GENESIS_TIMESTAMP_PLACEHOLDER,
+        diff,
+        1,
+    );
+    let genesis_hash = replay_block_hash(&genesis.header);
+    store
+        .commit_block(
+            genesis_hash.as_bytes(),
+            0,
+            &genesis.header.to_bytes().expect("genesis header"),
+            &genesis.to_bytes().expect("genesis block"),
+            &[],
+            &[],
+            &[],
+        )
+        .expect("commit genesis fixture");
+
+    let block_1 = synthetic_replay_block(
+        genesis_hash,
+        1,
+        genesis.header.timestamp.0 + 1,
+        diff.saturating_mul(2),
+        2,
+    );
+    let block_1_hash = replay_block_hash(&block_1.header);
+    let header_bytes = block_1.header.to_bytes().expect("tip header");
+    store
+        .commit_block(
+            block_1_hash.as_bytes(),
+            1,
+            &header_bytes,
+            &block_1.to_bytes().expect("tip block"),
+            &[],
+            &[],
+            &[],
+        )
+        .expect("commit tip fixture");
+
+    let reopened = ChainState::open(
+        store,
+        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+        dom_core::NETWORK_MAGIC_REGTEST,
+    )
+    .expect("open fixture chain");
+    (
+        reopened.tip_hash,
+        reopened.tip_height,
+        reopened.tip_difficulty,
+        reopened.network_magic,
+        header_bytes,
+    )
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replay_two_independent_chains_converge() {
     init_tracing();
@@ -150,39 +282,10 @@ async fn replay_two_independent_chains_converge() {
 async fn replay_same_chain_reopens_to_identical_tip() {
     init_tracing();
 
-    // Produce a chain, capture its tip, reopen its data_dir, assert the
-    // tip is unchanged. Catches any non-determinism in store reload.
     let data_dir = "/tmp/dom-replay-reopen".to_string();
-    let _ = std::fs::remove_dir_all(&data_dir);
+    let (tip_hash, tip_height, tip_diff, network_magic, header_bytes) =
+        write_replay_fixture_chain(&data_dir);
 
-    let mut config = test_config("replay-reopen", 43401, false);
-    config.wallet_path = Some("/tmp/dom-replay-reopen.dom".into());
-    config.wallet_password = Some("replay".into());
-    config.data_dir = data_dir.clone();
-    let _ = std::fs::remove_file(config.wallet_path.as_ref().unwrap());
-
-    let (tip_hash, tip_height, tip_diff, header_bytes) = {
-        let node = spawn_node(config.clone()).await;
-        mine_blocks(&node, 2).await.expect("mining");
-        // Let mining settle.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let chain = node.chain.lock().await;
-        let header_bytes = chain
-            .store
-            .get_block_header(chain.tip_hash.as_bytes())
-            .expect("header")
-            .expect("present");
-        (
-            chain.tip_hash,
-            chain.tip_height,
-            chain.tip_difficulty,
-            header_bytes,
-        )
-    };
-    // Drop the first node entirely before reopening — `DomStore::open`
-    // claims an LMDB lock on the data_dir.
-
-    // Reopen ChainState alone against the same directory.
     let store = DomStore::open(Path::new(&data_dir)).expect("reopen store");
     let chain_reopen = ChainState::open(
         store,
@@ -191,6 +294,7 @@ async fn replay_same_chain_reopens_to_identical_tip() {
     )
     .expect("reopen chain");
 
+    assert_eq!(chain_reopen.network_magic, network_magic);
     assert_eq!(chain_reopen.tip_hash, tip_hash);
     assert_eq!(chain_reopen.tip_height, tip_height);
     assert_eq!(chain_reopen.tip_difficulty, tip_diff);
@@ -199,7 +303,27 @@ async fn replay_same_chain_reopens_to_identical_tip() {
         .get_block_header(chain_reopen.tip_hash.as_bytes())
         .expect("header")
         .expect("present");
+    let reopen_decoded = BlockHeader::from_bytes(&reopen_header).expect("decode reopen header");
     assert_eq!(reopen_header, header_bytes);
+    assert_eq!(reopen_decoded.target.0, REGTEST_TARGET_COMPACT);
+    let next_target = chain_reopen
+        .next_block_target()
+        .expect("next target after reopen");
+    assert_eq!(
+        next_target.next_target,
+        dom_core::REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION
+    );
+    assert_eq!(
+        next_target,
+        ChainState::open(
+            DomStore::open(Path::new(&data_dir)).expect("second reopen store"),
+            Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+            dom_core::NETWORK_MAGIC_REGTEST,
+        )
+        .expect("second reopen chain")
+        .next_block_target()
+        .expect("second reopen next target")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
