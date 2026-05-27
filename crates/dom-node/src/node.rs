@@ -11,6 +11,7 @@ use dom_core::DomError;
 use dom_core::Hash256;
 use dom_core::Timestamp;
 use dom_mempool::Mempool;
+use dom_serialization::DomSerialize;
 use dom_store::utxo::UtxoEntry;
 use dom_store::DomStore;
 use dom_wallet::Wallet;
@@ -98,6 +99,7 @@ const FUTURE_BLOCK_QUEUE_MAX_AGE_SECS: u64 = dom_core::MAX_FUTURE_BLOCK_TIME
 const HELLO_EXCHANGE_TIMEOUT_SECS: u64 = dom_wire::handshake::HANDSHAKE_TIMEOUT_SECS;
 const PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v2";
 const LEGACY_PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v1";
+const MEMPOOL_METADATA_KEY: &[u8] = b"dom/mempool_state/v1";
 const NOISE_STATIC_KEY_METADATA_KEY: &[u8] = b"dom/noise_static_key/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,9 +157,10 @@ pub(crate) fn snapshot_tx_chain_view(
 }
 
 async fn purge_mempool_confirmed_inputs(
+    chain: &Arc<Mutex<ChainState>>,
     mempool: &Arc<Mutex<Mempool>>,
     transactions: &[Transaction],
-) {
+) -> Result<(), DomError> {
     let mut spent_inputs: Vec<[u8; 33]> =
         Vec::with_capacity(transactions.iter().map(|tx| tx.inputs.len()).sum());
     for tx in transactions {
@@ -166,11 +169,14 @@ async fn purge_mempool_confirmed_inputs(
         }
     }
     if spent_inputs.is_empty() {
-        return;
+        return Ok(());
     }
 
-    let mut mempool = mempool.lock().await;
-    mempool.remove_confirmed(&spent_inputs);
+    {
+        let mut mempool = mempool.lock().await;
+        mempool.remove_confirmed(&spent_inputs);
+    }
+    persist_mempool_state(chain, mempool).await
 }
 
 impl DomNode {
@@ -201,6 +207,7 @@ impl DomNode {
 
         let mut peers = PeerManager::new(config.max_inbound, config.min_outbound);
         restore_peer_rotation_state(&chain.store, &mut peers)?;
+        let mempool = restore_mempool_state(&chain)?;
 
         let (block_relay_tx, _) = tokio::sync::broadcast::channel(64);
         let (tx_fluff_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
@@ -273,7 +280,7 @@ impl DomNode {
             tx_stem_tx,
             config: config.clone(),
             chain: Arc::new(Mutex::new(chain)),
-            mempool: Arc::new(Mutex::new(Mempool::new())),
+            mempool: Arc::new(Mutex::new(mempool)),
             peers: Arc::new(Mutex::new(peers)),
             dandelion: Arc::new(Mutex::new(DandelionRouter::new())),
             wallet,
@@ -401,11 +408,17 @@ impl DomNode {
                                             "Accepted deferred block ts={} (new tip)",
                                             deferred.timestamp
                                         );
-                                        purge_mempool_confirmed_inputs(
+                                        if let Err(e) = purge_mempool_confirmed_inputs(
+                                            &chain,
                                             &mempool,
                                             &block.transactions,
                                         )
-                                        .await;
+                                        .await
+                                        {
+                                            tracing::warn!(
+                                                "Deferred block confirmed-input purge failed: {e}"
+                                            );
+                                        }
                                         let _ = relay_tx.send(deferred.block_bytes);
                                     }
                                     DeferredReplayAction::Drop => {
@@ -731,6 +744,14 @@ impl dom_rpc::NodeHandle for DomNode {
             |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
         )
         .map_err(|e| dom_rpc::RpcError::Rejected(e.to_string()))?;
+        let snapshot = pool.snapshot();
+        drop(pool);
+        let chain = self
+            .chain
+            .try_lock()
+            .map_err(|_| dom_rpc::RpcError::Internal("chain locked".into()))?;
+        persist_mempool_snapshot(&chain.store, &snapshot)
+            .map_err(|e| dom_rpc::RpcError::Internal(format!("persist mempool: {e}")))?;
         Ok(hash)
     }
 
@@ -1399,7 +1420,11 @@ pub(crate) async fn reconcile_mempool_after_connect(
             );
         }
     }
-    Ok(())
+    let snapshot = mempool.snapshot();
+    drop(mempool);
+
+    let chain = chain.lock().await;
+    persist_mempool_snapshot(&chain.store, &snapshot)
 }
 
 fn decode_deferred_block_bytes(block_bytes: &[u8]) -> Result<dom_consensus::Block, DomError> {
@@ -1481,6 +1506,33 @@ pub(crate) fn load_peer_rotation_snapshot(
     }
 }
 
+pub(crate) fn persist_mempool_snapshot(
+    store: &DomStore,
+    snapshot: &dom_mempool::PersistedMempoolState,
+) -> Result<(), DomError> {
+    use dom_serialization::DomSerialize;
+
+    if snapshot.entries.is_empty() {
+        return store.delete_metadata(MEMPOOL_METADATA_KEY);
+    }
+    store.put_metadata(MEMPOOL_METADATA_KEY, &snapshot.to_bytes()?)
+}
+
+pub(crate) fn load_mempool_snapshot(
+    store: &DomStore,
+) -> Result<Option<dom_mempool::PersistedMempoolState>, DomError> {
+    use dom_serialization::DomDeserialize;
+
+    match store.get_metadata(MEMPOOL_METADATA_KEY)? {
+        Some(bytes) => {
+            let snapshot = dom_mempool::PersistedMempoolState::from_bytes(&bytes)
+                .map_err(|e| DomError::Invalid(format!("mempool snapshot decode failed: {e}")))?;
+            Ok(Some(snapshot))
+        }
+        None => Ok(None),
+    }
+}
+
 pub(crate) fn restore_peer_rotation_state(
     store: &DomStore,
     peers: &mut PeerManager,
@@ -1505,6 +1557,18 @@ async fn persist_peer_rotation_state(
     persist_peer_rotation_snapshot(&chain.store, &snapshot)
 }
 
+async fn persist_mempool_state(
+    chain: &Arc<Mutex<ChainState>>,
+    mempool: &Arc<Mutex<Mempool>>,
+) -> Result<(), DomError> {
+    let snapshot = {
+        let mempool = mempool.lock().await;
+        mempool.snapshot()
+    };
+    let chain = chain.lock().await;
+    persist_mempool_snapshot(&chain.store, &snapshot)
+}
+
 async fn advance_peer_rotation_cooldowns(
     chain: &Arc<Mutex<ChainState>>,
     peers: &Arc<Mutex<PeerManager>>,
@@ -1517,6 +1581,52 @@ async fn advance_peer_rotation_cooldowns(
         persist_peer_rotation_state(chain, peers).await?;
     }
     Ok(())
+}
+
+fn restore_mempool_state(chain: &ChainState) -> Result<Mempool, DomError> {
+    let Some(snapshot) = load_mempool_snapshot(&chain.store)? else {
+        return Ok(Mempool::new());
+    };
+
+    let mut mempool = Mempool::new();
+    let mut previous_hash: Option<[u8; 32]> = None;
+    for entry in snapshot.entries {
+        if let Some(prev) = previous_hash {
+            if prev >= entry.tx_hash {
+                return Err(DomError::Invalid(
+                    "persisted mempool snapshot hashes are not strictly ordered".into(),
+                ));
+            }
+        }
+        previous_hash = Some(entry.tx_hash);
+        let tx_bytes = entry.tx.to_bytes()?;
+        let computed_hash = *dom_crypto::hash::blake2b_256(&tx_bytes).as_bytes();
+        if computed_hash != entry.tx_hash {
+            return Err(DomError::Invalid(format!(
+                "persisted mempool tx hash mismatch: expected {}, got {}",
+                hex::encode(entry.tx_hash),
+                hex::encode(computed_hash)
+            )));
+        }
+        let chain_view = snapshot_tx_chain_view(chain, &entry.tx)?;
+        mempool
+            .accept_tx_with_chain_view(
+                entry.tx,
+                entry.tx_hash,
+                entry.received_at,
+                chain_view.current_height,
+                chain_view.coinbase_maturity,
+                |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
+            )
+            .map_err(|e| {
+                DomError::Invalid(format!(
+                    "persisted mempool entry {} restore failed: {e}",
+                    hex::encode(entry.tx_hash)
+                ))
+            })?;
+    }
+
+    Ok(mempool)
 }
 
 pub(crate) fn load_or_create_noise_static_key(store: &DomStore) -> Result<[u8; 32], DomError> {
@@ -1822,7 +1932,8 @@ async fn resume_ibd_block_sync(
                     }
                 };
                 if best_chain {
-                    purge_mempool_confirmed_inputs(&runtime.mempool, &txs_for_scan).await;
+                    purge_mempool_confirmed_inputs(chain, &runtime.mempool, &txs_for_scan)
+                        .await?;
                     if let Some(ref wallet_arc) = runtime.wallet {
                         let mut w = wallet_arc.lock().await;
                         w.apply_canonical_block(&txs_for_scan, height)
@@ -2776,8 +2887,8 @@ async fn message_loop(
                                     .as_secs();
                                 let accepted = match chain_view {
                                     Ok(view) => {
-                                    let mut m = svc.mempool.lock().await;
-                                        m.accept_tx_with_chain_view(
+                                        let mut m = svc.mempool.lock().await;
+                                        let result = m.accept_tx_with_chain_view(
                                             tx,
                                             tx_hash,
                                             now_secs,
@@ -2786,7 +2897,15 @@ async fn message_loop(
                                             |commitment| {
                                                 Ok(view.utxos.get(commitment).cloned().flatten())
                                             },
-                                        )
+                                        );
+                                        let snapshot =
+                                            if result.is_ok() { Some(m.snapshot()) } else { None };
+                                        drop(m);
+                                        if let Some(snapshot) = snapshot {
+                                            let chain = chain.lock().await;
+                                            persist_mempool_snapshot(&chain.store, &snapshot)?;
+                                        }
+                                        result
                                     }
                                     Err(e) => Err(e),
                                 };
@@ -2882,12 +3001,14 @@ mod tests {
     use super::{
         continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
         decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
-        load_or_create_noise_static_key, load_peer_rotation_snapshot,
+        load_mempool_snapshot, load_or_create_noise_static_key, load_peer_rotation_snapshot,
         parse_persisted_noise_static_key, peer_violation_score, pending_peer_violation_score,
-        purge_mempool_confirmed_inputs, reconcile_mempool_after_connect, refresh_peer_metrics,
-        relay_block_action, restore_peer_rotation_state, tx_hash, DeferredReplayAction, DomNode,
-        IbdRoundState, OutboundAttemptOutcome, RelayBlockAction,
-        LEGACY_PEER_ROTATION_METADATA_KEY, NOISE_STATIC_KEY_METADATA_KEY, PEER_ROTATION_METADATA_KEY,
+        persist_mempool_snapshot, purge_mempool_confirmed_inputs,
+        reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action,
+        restore_peer_rotation_state, tx_hash, DeferredReplayAction, DomNode, IbdRoundState,
+        OutboundAttemptOutcome, RelayBlockAction,
+        LEGACY_PEER_ROTATION_METADATA_KEY, MEMPOOL_METADATA_KEY, NOISE_STATIC_KEY_METADATA_KEY,
+        PEER_ROTATION_METADATA_KEY,
     };
     use crate::metrics::Metrics;
     use dom_chain::{
@@ -3036,6 +3157,24 @@ mod tests {
                 fee: Amount::from_noms(MIN_RELAY_FEE_RATE * 25).unwrap(),
                 lock_height: 0,
                 excess: commitment(seed.wrapping_add(20), 0),
+                excess_signature: [seed; 65],
+            }],
+            offset: [0u8; 32],
+        }
+    }
+
+    fn mempool_tx(seed: u8, fee_multiplier: u64) -> Transaction {
+        Transaction {
+            inputs: vec![],
+            outputs: vec![TransactionOutput {
+                commitment: commitment(seed, 1),
+                proof: vec![seed; 8],
+            }],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(dom_core::MIN_RELAY_FEE_RATE * fee_multiplier).unwrap(),
+                lock_height: 0,
+                excess: commitment(seed.wrapping_add(50), 0),
                 excess_signature: [seed; 65],
             }],
             offset: [0u8; 32],
@@ -3381,6 +3520,65 @@ mod tests {
         assert_eq!(
             reopened
                 .get_metadata(PEER_ROTATION_METADATA_KEY)
+                .expect("reload metadata")
+                .expect("metadata present"),
+            b"invalid"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn persisted_mempool_survives_restart_init() {
+        let dir = fresh_test_dir("mempool-restart");
+        let store = DomStore::open(&dir).expect("store open");
+        let tx_a = mempool_tx(0x21, 100);
+        let tx_b = mempool_tx(0x22, 200);
+        let hash_a = tx_hash(&tx_a).expect("hash a");
+        let hash_b = tx_hash(&tx_b).expect("hash b");
+        let mut mempool = Mempool::new();
+        mempool.accept_tx(tx_b.clone(), hash_b, 2).expect("accept b");
+        mempool.accept_tx(tx_a.clone(), hash_a, 1).expect("accept a");
+        persist_mempool_snapshot(&store, &mempool.snapshot()).expect("persist mempool");
+        drop(store);
+
+        let node = DomNode::init(regtest_node_config(&dir)).expect("node init");
+        let runtime_hashes = node.mempool.blocking_lock().all_hashes();
+        assert_eq!(runtime_hashes, vec![hash_a, hash_b]);
+
+        let reopened = DomStore::open(&dir).expect("store reopen");
+        let persisted = load_mempool_snapshot(&reopened)
+            .expect("load mempool")
+            .expect("snapshot present");
+        assert_eq!(
+            persisted.entries.iter().map(|entry| entry.tx_hash).collect::<Vec<_>>(),
+            runtime_hashes
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn invalid_persisted_mempool_aborts_node_init_without_clearing_state() {
+        let dir = fresh_test_dir("mempool-invalid");
+        let store = DomStore::open(&dir).expect("store open");
+        store
+            .put_metadata(MEMPOOL_METADATA_KEY, b"invalid")
+            .expect("persist invalid mempool");
+        drop(store);
+
+        let err = match DomNode::init(regtest_node_config(&dir)) {
+            Ok(_) => panic!("invalid mempool should fail init"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("mempool"),
+            "unexpected error message: {message}"
+        );
+
+        let reopened = DomStore::open(&dir).expect("store reopen");
+        assert_eq!(
+            reopened
+                .get_metadata(MEMPOOL_METADATA_KEY)
                 .expect("reload metadata")
                 .expect("metadata present"),
             b"invalid"
@@ -3796,6 +3994,8 @@ mod tests {
 
     #[tokio::test]
     async fn best_chain_cleanup_purges_mempool_conflicts_by_input() {
+        let dir = fresh_test_dir("mempool-purge");
+        let chain = open_chain(&dir);
         let mempool = Arc::new(Mutex::new(Mempool::new()));
         let shared_input = commitment(9, 50);
         let tx = spending_tx(shared_input, 0x21);
@@ -3806,7 +4006,9 @@ mod tests {
             assert_eq!(pool.len(), 1);
         }
 
-        purge_mempool_confirmed_inputs(&mempool, &[tx]).await;
+        purge_mempool_confirmed_inputs(&chain, &mempool, &[tx])
+            .await
+            .expect("purge mempool");
 
         let pool = mempool.lock().await;
         assert_eq!(
@@ -3814,6 +4016,7 @@ mod tests {
             0,
             "confirmed inputs must be purged from mempool"
         );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
     #[tokio::test]

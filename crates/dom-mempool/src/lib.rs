@@ -15,9 +15,12 @@
 
 use dom_consensus::transaction::{validate_transaction_structure, Transaction};
 use dom_core::{DomError, MAX_BLOCK_WEIGHT, MIN_RELAY_FEE_RATE};
+use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
 use dom_store::utxo::UtxoEntry;
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
+
+const MAX_PERSISTED_MEMPOOL_ENTRIES: usize = dom_core::MAX_BLOCK_TXS * 10;
 
 /// A mempool entry.
 #[derive(Debug, Clone)]
@@ -34,6 +37,64 @@ pub struct MempoolEntry {
     pub fee_rate: u64,
     /// Unix timestamp when received.
     pub received_at: u64,
+}
+
+/// Deterministic persisted mempool entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedMempoolEntry {
+    /// Raw transaction.
+    pub tx: Transaction,
+    /// Canonical transaction hash.
+    pub tx_hash: [u8; 32],
+    /// Original receive timestamp used for deterministic reopen.
+    pub received_at: u64,
+}
+
+/// Bounded persisted mempool snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PersistedMempoolState {
+    /// Canonical hash-ordered mempool entries.
+    pub entries: Vec<PersistedMempoolEntry>,
+}
+
+impl DomSerialize for PersistedMempoolState {
+    fn serialize(&self, w: &mut Writer) -> Result<(), DomError> {
+        let len: u32 = self
+            .entries
+            .len()
+            .try_into()
+            .map_err(|_| DomError::Malformed("persisted mempool entry count exceeds u32".into()))?;
+        w.write_u32(len);
+        for entry in &self.entries {
+            w.write_bytes(&entry.tx_hash);
+            w.write_u64(entry.received_at);
+            entry.tx.serialize(w)?;
+        }
+        Ok(())
+    }
+}
+
+impl DomDeserialize for PersistedMempoolState {
+    fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
+        let len = r.read_u32()? as usize;
+        if len > MAX_PERSISTED_MEMPOOL_ENTRIES {
+            return Err(DomError::Malformed(format!(
+                "persisted mempool entry count {len} exceeds limit {MAX_PERSISTED_MEMPOOL_ENTRIES}"
+            )));
+        }
+        let mut entries = Vec::with_capacity(len);
+        for _ in 0..len {
+            let tx_hash = r.read_array::<32>()?;
+            let received_at = r.read_u64()?;
+            let tx = Transaction::deserialize(r)?;
+            entries.push(PersistedMempoolEntry {
+                tx,
+                tx_hash,
+                received_at,
+            });
+        }
+        Ok(Self { entries })
+    }
 }
 
 impl MempoolEntry {
@@ -238,6 +299,21 @@ impl Mempool {
         let mut hashes: Vec<[u8; 32]> = self.entries.keys().cloned().collect();
         hashes.sort_unstable();
         hashes
+    }
+
+    /// Capture a canonical persisted snapshot of the accepted mempool set.
+    pub fn snapshot(&self) -> PersistedMempoolState {
+        let mut entries: Vec<PersistedMempoolEntry> = self
+            .entries
+            .values()
+            .map(|entry| PersistedMempoolEntry {
+                tx: entry.tx.clone(),
+                tx_hash: entry.tx_hash,
+                received_at: entry.received_at,
+            })
+            .collect();
+        entries.sort_unstable_by_key(|entry| entry.tx_hash);
+        PersistedMempoolState { entries }
     }
 
     /// Deterministically re-accept a batch of transactions after rollback or reopen.
@@ -577,6 +653,30 @@ mod tests {
             "high-fee tx must be accepted even after canonical reorder"
         );
         assert_eq!(pool.all_hashes(), vec![hash_high]);
+    }
+
+    #[test]
+    fn persisted_snapshot_roundtrips_canonically() {
+        let mut pool = Mempool::new();
+        let (tx_c, hash_c) = make_tx(MIN_RELAY_FEE_RATE * 300);
+        let (tx_a, hash_a) = make_tx(MIN_RELAY_FEE_RATE * 100);
+        let (tx_b, hash_b) = make_tx(MIN_RELAY_FEE_RATE * 200);
+
+        pool.accept_tx(tx_c, hash_c, 3).unwrap();
+        pool.accept_tx(tx_a, hash_a, 1).unwrap();
+        pool.accept_tx(tx_b, hash_b, 2).unwrap();
+
+        let snapshot = pool.snapshot();
+        let decoded = PersistedMempoolState::from_bytes(&snapshot.to_bytes().expect("serialize"))
+            .expect("decode");
+
+        let mut expected = vec![hash_a, hash_b, hash_c];
+        expected.sort_unstable();
+        assert_eq!(decoded, snapshot);
+        assert_eq!(
+            decoded.entries.iter().map(|entry| entry.tx_hash).collect::<Vec<_>>(),
+            expected
+        );
     }
 
     #[test]
