@@ -149,6 +149,16 @@ change.
 The property that recovery paths preserve deterministic correctness or fail
 closed when safe continuation cannot be established.
 
+### Relay Policy
+
+A node's local rules for propagating transactions across the peer-to-peer
+network. Relay policy is distinct from consensus validity: a transaction may
+be consensus-valid (satisfying all protocol rules) while simultaneously being
+relay-policy rejected (for example, a zero-fee transaction). Relay-policy
+rejection does not alter the transaction's consensus status and does not
+affect block acceptance. Operators may configure relay policy independently of
+consensus behavior. See `WHITEPAPER.md` for the zero-fee transaction example.
+
 ### Replay Divergence
 
 A condition in which replay of what should be equivalent canonical inputs
