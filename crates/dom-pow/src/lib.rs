@@ -22,8 +22,8 @@
 #![deny(clippy::float_arithmetic)]
 
 use dom_core::{
-    BlockHeight, DomError, Timestamp, ASERT_HALF_LIFE, ASERT_RADIX, GENESIS_TARGET_COMPACT,
-    DIFFICULTY_ADJUSTMENT_WINDOW, MAX_ALLOWED_TARGET, MAX_DIFFICULTY_ADJUSTMENT_FACTOR_DOWN,
+    BlockHeight, DomError, Timestamp, ASERT_HALF_LIFE, ASERT_RADIX, DIFFICULTY_ADJUSTMENT_WINDOW,
+    GENESIS_TARGET_COMPACT, MAX_ALLOWED_TARGET, MAX_DIFFICULTY_ADJUSTMENT_FACTOR_DOWN,
     MAX_DIFFICULTY_ADJUSTMENT_FACTOR_UP, MAX_TARGET_BYTES, MIN_ALLOWED_TARGET, MIN_TARGET_BYTES,
     NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET, TARGET_BLOCK_TIME_SECS,
     TARGET_SPACING,
@@ -696,7 +696,7 @@ pub fn uses_dev_fixed_target(network_magic: u32) -> bool {
 
 /// Canonical number of parent blocks contributing to the next retarget step.
 pub fn difficulty_adjustment_window_blocks(parent_height: u64) -> u64 {
-    parent_height.min(DIFFICULTY_ADJUSTMENT_WINDOW).max(1)
+    parent_height.clamp(1, DIFFICULTY_ADJUSTMENT_WINDOW)
 }
 
 #[cfg(test)]
