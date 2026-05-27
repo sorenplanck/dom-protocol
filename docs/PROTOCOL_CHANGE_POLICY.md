@@ -12,6 +12,20 @@ semantics, persistence rules, wallet recovery behavior, or network behavior.
 It does not create governance authority, voting rights, or institutional
 control. It formalizes engineering discipline only.
 
+## Document Authority
+
+Consensus-authoritative behavior is defined by:
+
+1. The implementation (`crates/dom-*/`)
+2. The normative RFC set (`docs/DOM_RFC_000*.md`)
+3. Consensus-critical specifications and static assertions in `dom-core`
+
+This document is doctrinal and non-authoritative with respect to consensus
+behavior. Related doctrinal documents — `docs/MONETARY_CONSTITUTION.md`,
+`docs/MONETARY_GLOSSARY.md`, and `docs/MONETARY_ALIGNMENT_REVIEW.md` — are
+likewise non-authoritative. Where any doctrinal document conflicts with the
+implementation or normative RFCs, the implementation and RFCs govern.
+
 ## Core Engineering Principles
 
 DOM evaluates protocol evolution under a conservative systems model. Proposed

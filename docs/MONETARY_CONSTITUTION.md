@@ -10,6 +10,9 @@ It does not alter monetary policy, issuance, consensus rules, validation
 semantics, PMMR behavior, replay semantics, persistence rules, or wallet
 recovery assumptions. It formalizes existing architectural commitments so that
 monetary doctrine remains aligned with deterministic protocol behavior.
+Operational term definitions used throughout this document are stabilized in
+`docs/MONETARY_GLOSSARY.md`. Consensus-authoritative behavior is defined by
+the implementation and normative RFCs, not by this document.
 
 ## Monetary Philosophy
 
