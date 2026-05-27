@@ -14,3 +14,4 @@ thiserror.workspace = true
 primitive-types.workspace = true
 dom-serialization.workspace = true
 randomx-rs.workspace = true
+blake2.workspace = true

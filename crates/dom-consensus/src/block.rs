@@ -343,6 +343,28 @@ pub fn validate_pow(header: &BlockHeader, seed: &[u8; 32]) -> Result<(), DomErro
     Ok(())
 }
 
+/// Validate proof-of-work using the mode selected for the given network.
+pub fn validate_pow_for_network(
+    network_magic: u32,
+    header: &BlockHeader,
+    seed: &[u8; 32],
+) -> Result<(), DomError> {
+    let target = header
+        .target
+        .to_target()
+        .map_err(|e| DomError::Invalid(format!("invalid compact target: {e}")))?;
+    let preimage = header.pow_preimage();
+    let claimed_hash = header.pow.randomx_hash.as_bytes();
+    let ok =
+        dom_pow::validate_pow_for_network(network_magic, &preimage, claimed_hash, seed, &target)?;
+    if !ok {
+        return Err(DomError::Invalid(
+            "proof-of-work invalid: hash mismatch or does not meet target".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

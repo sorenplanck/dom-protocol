@@ -1,0 +1,35 @@
+name: windows-agent-runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build dom-agent-runner
+        shell: pwsh
+        run: cargo build -p dom-agent-runner --release
+
+      - name: Run doctor
+        shell: pwsh
+        run: target/release/dom-agent-runner.exe doctor
+
+      - name: Package portable artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item target/release/dom-agent-runner.exe artifact/
+          if (Test-Path docs/testing/WINDOWS_AGENT_WORKFLOW.md) {
+            Copy-Item docs/testing/WINDOWS_AGENT_WORKFLOW.md artifact/
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DOM-Agent-Runner-Windows-Portable
+          path: artifact/*
+          if-no-files-found: error

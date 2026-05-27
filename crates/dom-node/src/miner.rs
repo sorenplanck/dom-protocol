@@ -10,8 +10,8 @@ use dom_core::{
     WEIGHT_COINBASE_KERNEL, WEIGHT_OUTPUT,
 };
 use dom_pow::{
-    genesis_anchor, hash_meets_target, randomx_seed_height, target_to_compact,
-    target_to_difficulty, CompactTarget,
+    fast_pow_hash, genesis_anchor, hash_meets_target, pow_validation_mode_for_network,
+    randomx_seed_height, target_to_compact, target_to_difficulty, CompactTarget, PowValidationMode,
 };
 use dom_serialization::DomDeserialize;
 use primitive_types::U256;
@@ -315,6 +315,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     let target = next_adjustment.next_target;
     let block_diff = target_to_difficulty(&target);
     let new_total_diff = tip_difficulty.saturating_add(U256::from(block_diff));
+    let pow_mode = pow_validation_mode_for_network(node.config.network.magic())?;
 
     info!(
         "Mining next block | height={} current_target={} next_target={} window={} actual_elapsed={} expected_elapsed={} adjustment_ratio={}/{} mode={}",
@@ -434,6 +435,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
                 kernel_root,
                 rangeproof_root,
                 light_vm,
+                pow_mode,
             );
             let _ = tx.send(result.map_err(|e| e.to_string()));
         })
@@ -544,6 +546,7 @@ fn mine_blocking(
     kernel_root: Hash256,
     rangeproof_root: Hash256,
     light_vm: bool,
+    pow_mode: PowValidationMode,
 ) -> Result<BlockHeader, DomError> {
     use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
     // Mainnet / Testnet mining sets `FLAG_FULL_MEM` for throughput
@@ -552,22 +555,36 @@ fn mine_blocking(
     // performs real PoW against `REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION`
     // (~2^-16 acceptance), but that is a much better tradeoff than paying
     // multi-gigabyte dataset cost in dev/test environments.
+    let fast_mode = matches!(pow_mode, PowValidationMode::FastDevOnly);
     let flags = if light_vm {
         RandomXFlag::get_recommended_flags()
     } else {
         RandomXFlag::get_recommended_flags() | RandomXFlag::FLAG_FULL_MEM
     };
-    let cache = RandomXCache::new(flags, &seed_hash)
-        .map_err(|e| DomError::Internal(format!("cache: {e}")))?;
-    let vm = if light_vm {
-        // Cache-only VM. No dataset is allocated.
-        RandomXVM::new(flags, Some(cache), None)
-            .map_err(|e| DomError::Internal(format!("vm: {e}")))?
+    let cache = if fast_mode {
+        None
     } else {
+        Some(
+            RandomXCache::new(flags, &seed_hash)
+                .map_err(|e| DomError::Internal(format!("cache: {e}")))?,
+        )
+    };
+    let vm = if fast_mode {
+        None
+    } else if light_vm {
+        // Cache-only VM. No dataset is allocated.
+        Some(
+            RandomXVM::new(flags, Some(cache.clone().expect("cache")), None)
+                .map_err(|e| DomError::Internal(format!("vm: {e}")))?,
+        )
+    } else {
+        let cache = cache.clone().expect("cache");
         let dataset = RandomXDataset::new(flags, cache.clone(), 0)
             .map_err(|e| DomError::Internal(format!("dataset: {e}")))?;
-        RandomXVM::new(flags, Some(cache), Some(dataset))
-            .map_err(|e| DomError::Internal(format!("vm: {e}")))?
+        Some(
+            RandomXVM::new(flags, Some(cache), Some(dataset))
+                .map_err(|e| DomError::Internal(format!("vm: {e}")))?,
+        )
     };
 
     // Heartbeat: blocks can take minutes to hours under low-effort targets +
@@ -596,7 +613,11 @@ fn mine_blocking(
             },
         };
         let preimage = header.pow_preimage();
-        let hash = randomx_hash(&vm, &preimage)?;
+        let hash = if fast_mode {
+            fast_pow_hash(&seed_hash, &preimage)
+        } else {
+            randomx_hash(vm.as_ref().expect("vm"), &preimage)?
+        };
         if hash_meets_target(&hash, &target) {
             let mut final_header = header;
             final_header.pow.randomx_hash = Hash256::from_bytes(hash);
@@ -654,7 +675,7 @@ mod genesis_determinism_tests {
     //!   3. Different chain_ids produce different coinbases (sanity:
     //!      Mainnet vs Testnet vs Regtest genesis must NOT collide).
 
-    use super::build_genesis_coinbase;
+    use super::{build_genesis_coinbase, mine_blocking};
     use dom_consensus::compute_block_pmmr_roots;
     use dom_serialization::DomSerialize;
 
@@ -779,6 +800,32 @@ mod genesis_determinism_tests {
         assert!(!super::uses_dev_trivial_target(
             dom_config::Network::Testnet
         ));
+    }
+
+    #[test]
+    fn regtest_fast_mining_returns_a_valid_header_without_searching() {
+        use dom_consensus::block::validate_pow_for_network;
+        use dom_core::NETWORK_MAGIC_REGTEST;
+
+        std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+        let target = dom_core::MAX_TARGET_BYTES;
+
+        let header = mine_blocking(
+            1,
+            dom_core::Hash256::ZERO,
+            target,
+            primitive_types::U256::one(),
+            [0u8; 32],
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            true,
+            dom_pow::PowValidationMode::FastDevOnly,
+        )
+        .expect("fast mining");
+
+        assert_eq!(header.pow.nonce, 0, "fast mining should not search nonces");
+        assert!(validate_pow_for_network(NETWORK_MAGIC_REGTEST, &header, &[0u8; 32]).is_ok());
     }
 }
 
