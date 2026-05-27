@@ -177,8 +177,8 @@ impl DomNode {
         let chain = ChainState::open(store, genesis_hash, config.network.magic())?;
         info!("Chain tip: height={}", chain.tip_height);
 
-        // Generate or load Noise keypair
-        let (noise_privkey, noise_pubkey) = dom_wire::handshake::generate_static_keypair();
+        // Load or generate Noise static keypair (persisted across restarts)
+        let (noise_privkey, noise_pubkey) = crate::identity::load_or_create_identity(data_path)?;
         info!("Node identity: {}", hex::encode(noise_pubkey));
 
         let (block_relay_tx, _) = tokio::sync::broadcast::channel(64);
