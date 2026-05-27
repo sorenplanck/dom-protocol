@@ -428,9 +428,20 @@ fn promote_heavier_known_tip_rewrites_canonical_state_and_survives_restart() {
     let mut chain = open_chain(dir.path());
     assert_eq!(chain.tip_hash, old_3_hash);
 
-    chain
+    let reorg = chain
         .promote_heavier_known_tip(alt_4_hash)
         .expect("reorg promotion");
+
+    assert_eq!(reorg.disconnected_txs.len(), 1);
+    assert_eq!(reorg.connected_txs.len(), 1);
+    assert_eq!(
+        *reorg.disconnected_txs[0].outputs[0].commitment.as_bytes(),
+        *old_spend.outputs[0].commitment.as_bytes()
+    );
+    assert_eq!(
+        *reorg.connected_txs[0].outputs[0].commitment.as_bytes(),
+        *alt_spend.outputs[0].commitment.as_bytes()
+    );
 
     assert_eq!(chain.tip_hash, alt_4_hash);
     assert_eq!(chain.tip_height, BlockHeight(4));
