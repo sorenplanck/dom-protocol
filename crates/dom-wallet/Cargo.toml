@@ -33,10 +33,21 @@ fs2 = "0.4"
 # Error handling & logging
 thiserror.workspace = true
 tracing.workspace   = true
+clap = { version = "4.5", features = ["derive"] }
 
 # Random & encoding
 rand.workspace = true
 hex.workspace  = true
 
+# HTTP client for the wallet ↔ node RPC (Phase 1.9). Blocking variant so
+# dom-wallet remains synchronous; reqwest spawns its own internal
+# runtime for I/O.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+url     = "2.5"
+
 [dev-dependencies]
 tempfile = "3.10"
+# Phase 1.9 RPC adversarial tests stand up minimal raw-socket mock
+# servers to exercise timeout / malformed-response / connection-reset
+# failure modes. Kept dev-only so production builds don't link tokio.
+tokio    = { version = "1", features = ["rt", "macros", "net", "io-util", "time", "sync"] }

@@ -46,6 +46,7 @@ pub mod hd_wallet;
 pub mod journal;
 pub mod output_index;
 pub mod restore;
+pub mod rpc_client;
 pub mod seed;
 pub mod store;
 pub mod types;
@@ -60,6 +61,11 @@ pub use journal::{
 pub use restore::{
     restore_from_phrase, ChainScanSource, InMemoryChainScan, RestoreError, RestoredWallet,
     ScanBlock,
+};
+pub use rpc_client::{
+    BlockHeaderInfo, MempoolTxInfo as RpcMempoolTxInfo, NodeRpc, NodeRpcClient,
+    NodeRpcClientBuilder, NodeStatus, RpcClientError, TxSubmitOutcome, DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_REQUEST_TIMEOUT,
 };
 pub use seed::{
     coinbase_blinding, spend_output_blinding, Bip39Seed, SeedAcceptance, SeedError,

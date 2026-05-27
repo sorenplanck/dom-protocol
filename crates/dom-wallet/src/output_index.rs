@@ -48,7 +48,11 @@ impl OutputIndex {
         amount_needed: u64,
         current_height: u64,
     ) -> Result<Vec<OwnedOutput>, WalletError> {
-        self.select_for_spend_with_maturity(amount_needed, current_height, dom_core::COINBASE_MATURITY)
+        self.select_for_spend_with_maturity(
+            amount_needed,
+            current_height,
+            dom_core::COINBASE_MATURITY,
+        )
     }
 
     /// Like `select_for_spend` but the caller supplies the maturity

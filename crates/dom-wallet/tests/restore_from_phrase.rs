@@ -10,8 +10,8 @@ use dom_crypto::pedersen::Commitment;
 use dom_crypto::BlindingFactor;
 use dom_wallet::{
     coinbase_blinding, restore_from_phrase, Bip39Seed, ChainScanSource, InMemoryChainScan, Network,
-    RestoreError, ScanBlock, SeedAcceptance, Wallet, WalletConfig, WalletVersion,
-    WALLET_CONFIG_NAME, WALLET_DAT_NAME,
+    RestoreError, ScanBlock, SeedAcceptance, WalletConfig, WalletVersion, WALLET_CONFIG_NAME,
+    WALLET_DAT_NAME,
 };
 use tempfile::TempDir;
 
@@ -364,11 +364,11 @@ fn refuses_to_restore_into_non_empty_directory() {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 10. Restored wallet.dat is decryptable via Wallet::open.
+// 10. Restored V2 wallet reopens via WalletDir::open.
 // ─────────────────────────────────────────────────────────────────
 
 #[test]
-fn restored_wallet_dat_opens_via_wallet_open() {
+fn restored_wallet_dir_reopens() {
     let temp = TempDir::new().unwrap();
     let dir = temp.path().join("openable");
     let mut scan = InMemoryChainScan::new();
@@ -385,9 +385,10 @@ fn restored_wallet_dat_opens_via_wallet_open() {
     let recovered_outputs: Vec<_> = r.wallet.outputs().map(|o| o.commitment).collect();
     drop(r); // release file handles cleanly
 
-    // Phase 1.3's WalletDir::open still rejects V2, by design;
-    // Wallet::open on the raw wallet.dat path must work.
-    let reopened = Wallet::open(&dir.join(WALLET_DAT_NAME), "pw").expect("Wallet::open must work");
+    let reopened = dom_wallet::WalletDir::open(&dir, "pw").expect("WalletDir::open must work");
+    assert!(reopened.wallet().has_deterministic_seed());
+    assert_eq!(reopened.config().version, WalletVersion::V2);
+    let reopened = reopened.wallet();
     let after: Vec<_> = reopened.outputs().map(|o| o.commitment).collect();
     assert_eq!(
         recovered_outputs, after,

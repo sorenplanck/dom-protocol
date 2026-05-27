@@ -32,11 +32,9 @@
 //!    returns [`WalletError::Io`] without touching the encrypted
 //!    state. The lock is released on `Drop`.
 //! 3. **Version-tagged.** Every wallet writes a `config.json` whose
-//!    `version` field declares the schema. Phase 1.3 introduces
-//!    [`WalletVersion::V1`] (password-derived coinbase, matching
-//!    legacy behaviour). [`WalletVersion::V2`] is reserved for the
-//!    Phase 1.10 seed-derived migration and is rejected on open
-//!    here until that phase ships.
+//!    `version` field declares the schema. [`WalletVersion::V1`]
+//!    covers legacy password-derived wallets; [`WalletVersion::V2`]
+//!    carries encrypted BIP-39 seed bytes for deterministic recovery.
 //! 4. **Atomic state writes.** The encrypted `wallet.dat` is written
 //!    atomically (temp + rename + fsync of file and parent dir) by
 //!    the existing `store::save_wallet` path; this module does not
@@ -46,7 +44,8 @@
 //!    service.
 
 use crate::journal::TxJournal;
-use crate::store::{save_wallet as save_wallet_file, WalletState};
+use crate::seed::Bip39Seed;
+use crate::store::{save_wallet as save_wallet_file, WalletKeychainState, WalletState};
 use crate::types::{Network, WalletError};
 use crate::wallet::Wallet;
 use dom_crypto::Hash256;
@@ -70,28 +69,24 @@ pub const WALLET_LOGS_SUBDIR: &str = "logs";
 
 /// Wallet schema version.
 ///
-/// - `V1`: legacy / current behaviour — coinbase blinding derived
-///   from the wallet password (see `wallet::Wallet::build_coinbase`).
-///   New wallets created via [`WalletDir::create`] are tagged `V1`
-///   until the seed-derived migration in Phase 1.10.
+/// - `V1`: legacy behaviour — coinbase blinding derived from the
+///   wallet password (see `wallet::Wallet::build_coinbase`).
 /// - `V2`: seed-derived coinbase + spend output blindings via BIP-39
-///   HD derivation (see `seed::coinbase_blinding`). Wired in
-///   Phase 1.10. Recognised but rejected on open in Phase 1.3 so
-///   wallets that haven't been migrated yet cannot accidentally be
-///   opened by code that doesn't understand the new derivation.
+///   HD derivation (see `seed::coinbase_blinding`) with the seed bytes
+///   persisted only inside the encrypted wallet payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WalletVersion {
     /// Password-derived coinbase blinding. Legacy / current.
     V1,
-    /// Seed-derived coinbase blinding. Reserved for Phase 1.10.
+    /// Seed-derived deterministic wallet.
     V2,
 }
 
 impl WalletVersion {
     /// Whether this version is supported for open in the current build.
     pub fn is_supported(self) -> bool {
-        matches!(self, WalletVersion::V1)
+        matches!(self, WalletVersion::V1 | WalletVersion::V2)
     }
 }
 
@@ -122,12 +117,20 @@ impl WalletConfig {
     pub const CONFIG_FORMAT_V1: u32 = 1;
 
     fn new_v1(network: Network, chain_id: [u8; 32]) -> Self {
+        Self::new(WalletVersion::V1, network, chain_id)
+    }
+
+    fn new_v2(network: Network, chain_id: [u8; 32]) -> Self {
+        Self::new(WalletVersion::V2, network, chain_id)
+    }
+
+    fn new(version: WalletVersion, network: Network, chain_id: [u8; 32]) -> Self {
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         Self {
-            version: WalletVersion::V1,
+            version,
             network,
             chain_id: hex::encode(chain_id),
             created_at,
@@ -211,6 +214,7 @@ impl WalletDir {
             chain_id,
             outputs: Vec::new(),
             pending_txs: HashMap::new(),
+            keychain: WalletKeychainState::legacy(),
         };
         save_wallet_file(&dat_path, &initial_state, password)?;
 
@@ -225,6 +229,70 @@ impl WalletDir {
         // Attach the WAL journal. On `create` the file does not exist
         // yet — `TxJournal::open` is lazy and the first append will
         // materialise it inside the wallet directory.
+        let journal =
+            TxJournal::open(path).map_err(|e| WalletError::Io(format!("open journal: {e}")))?;
+        wallet.attach_journal(journal);
+
+        Ok(Self {
+            path: path.to_path_buf(),
+            config,
+            wallet,
+            _lockfile: lockfile,
+        })
+    }
+
+    /// Create a brand-new deterministic V2 wallet directory from a validated
+    /// BIP-39 seed phrase.
+    pub fn create_from_seed(
+        path: &Path,
+        password: &str,
+        network: Network,
+        genesis_hash: &Hash256,
+        seed: &Bip39Seed,
+    ) -> Result<Self, WalletError> {
+        info!("creating deterministic wallet directory at {:?}", path);
+
+        if path.exists() {
+            let mut entries = std::fs::read_dir(path)
+                .map_err(|e| WalletError::Io(format!("read wallet directory: {e}")))?;
+            if entries.next().is_some() {
+                return Err(WalletError::Io(format!(
+                    "wallet directory {:?} is not empty; refusing to overwrite",
+                    path
+                )));
+            }
+        } else {
+            std::fs::create_dir_all(path)
+                .map_err(|e| WalletError::Io(format!("create wallet directory: {e}")))?;
+        }
+
+        let lockfile_path = path.join(WALLET_LOCK_NAME);
+        let lockfile = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .read(true)
+            .open(&lockfile_path)
+            .map_err(|e| WalletError::Io(format!("create lockfile: {e}")))?;
+        lockfile.try_lock_exclusive().map_err(|e| {
+            WalletError::Io(format!(
+                "another process already holds the wallet lock at {:?}: {e}",
+                lockfile_path
+            ))
+        })?;
+
+        let chain_id_hash = dom_consensus::derive_chain_id(network.magic(), genesis_hash);
+        let chain_id: [u8; 32] = *chain_id_hash.as_bytes();
+
+        let dat_path = path.join(WALLET_DAT_NAME);
+        let initial_wallet =
+            Wallet::create_from_seed(&dat_path, password, network, genesis_hash, seed)?;
+        drop(initial_wallet);
+
+        let config = WalletConfig::new_v2(network, chain_id);
+        write_config(path, &config)?;
+
+        let mut wallet = Wallet::open(&dat_path, password)?;
         let journal =
             TxJournal::open(path).map_err(|e| WalletError::Io(format!("open journal: {e}")))?;
         wallet.attach_journal(journal);
@@ -263,8 +331,7 @@ impl WalletDir {
         let config = read_config(path)?;
         if !config.version.is_supported() {
             return Err(WalletError::Io(format!(
-                "wallet directory {:?} declares unsupported schema version {:?}; \
-                 this build only opens v1 wallets",
+                "wallet directory {:?} declares unsupported schema version {:?}",
                 path, config.version
             )));
         }
@@ -413,11 +480,8 @@ mod tests {
     }
 
     #[test]
-    fn wallet_version_v2_not_yet_supported() {
-        // V2 is reserved for Phase 1.10. Recognised in the enum so
-        // serde round-trips, but `is_supported` is false until the
-        // seed-derived coinbase path lands.
-        assert!(!WalletVersion::V2.is_supported());
+    fn wallet_version_v2_is_supported() {
+        assert!(WalletVersion::V2.is_supported());
     }
 
     #[test]
