@@ -2918,15 +2918,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persisted_header_resume_rejects_corrupted_prefix_checkpoint() {
+    async fn persisted_header_resume_rejects_corrupted_continuation() {
         let dir = fresh_test_dir("header-resume-bad");
         let chain = open_chain(&dir);
         let peer_addr: SocketAddr = "127.0.0.1:33369".parse().expect("peer addr");
 
         let header1 = synthetic_known_header(0, Hash256::ZERO, 1);
-        let header2 = synthetic_known_header(1, Hash256::from_bytes(header_hash(&header1)), 2);
+        let mut header2 = synthetic_known_header(1, Hash256::from_bytes(header_hash(&header1)), 2);
+        header2.prev_hash = Hash256::from_bytes([0x99; 32]);
         store_known_header(&chain, &header1).await;
-        store_known_header(&chain, &header2).await;
 
         let snapshot = PersistedIbdState {
             phase: IbdPhase::HeaderSync,
@@ -2938,13 +2938,67 @@ mod tests {
             last_progress_height: 0,
             retry_attempts: 0,
             last_interruption: None,
-            pending_blocks: vec![[0x55; 32]],
+            pending_blocks: Vec::new(),
             pending_headers: vec![
                 header1.to_bytes().expect("header1 bytes"),
                 header2.to_bytes().expect("header2 bytes"),
             ],
             block_cursor: 0,
             header_cursor: 1,
+            header_cursor_height: 1,
+        };
+        {
+            let chain = chain.lock().await;
+            snapshot.save(&chain.store).expect("save snapshot");
+        }
+
+        let (mut ibd, restored) = initialize_ibd_state(&chain, peer_addr, 1)
+            .await
+            .expect("initialize");
+        let restored = restored.expect("restored snapshot should remain resumable");
+        let err = continue_ibd_header_sync(
+            &chain,
+            peer_addr,
+            &mut ibd,
+            IbdRoundState {
+                pending_blocks: restored.pending_blocks.clone(),
+                pending_headers: restored.pending_headers.clone(),
+                block_cursor: restored.block_cursor,
+                header_cursor: restored.header_cursor,
+                header_cursor_height: restored.header_cursor_height,
+            },
+            ibd_now(),
+        )
+        .await
+        .expect_err("corrupted continuation must reject");
+
+        assert!(
+            matches!(err, DomError::Invalid(ref msg) if msg.contains("prev_hash mismatch")),
+            "unexpected error: {err}"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[tokio::test]
+    async fn persisted_header_resume_rejects_malformed_header_bytes() {
+        let dir = fresh_test_dir("header-resume-malformed");
+        let chain = open_chain(&dir);
+        let peer_addr: SocketAddr = "127.0.0.1:33369".parse().expect("peer addr");
+
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::HeaderSync,
+            peer_addr: peer_addr.to_string(),
+            start_height: 0,
+            best_peer_height: 1,
+            headers_height: 0,
+            blocks_height: 0,
+            last_progress_height: 0,
+            retry_attempts: 0,
+            last_interruption: None,
+            pending_blocks: Vec::new(),
+            pending_headers: vec![vec![0xAA, 0xBB, 0xCC]],
+            block_cursor: 0,
+            header_cursor: 0,
             header_cursor_height: 1,
         };
         {
@@ -2970,10 +3024,10 @@ mod tests {
             ibd_now(),
         )
         .await
-        .expect_err("corrupted prefix must reject");
+        .expect_err("malformed resumed header bytes must reject");
 
         assert!(
-            matches!(err, DomError::PolicyRejected(ref msg) if msg.contains("prefix mismatch")),
+            matches!(err, DomError::Malformed(_)),
             "unexpected error: {err}"
         );
         fs::remove_dir_all(&dir).expect("cleanup test dir");
