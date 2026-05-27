@@ -11,10 +11,12 @@ use dom_core::DomError;
 use dom_core::Hash256;
 use dom_core::Timestamp;
 use dom_mempool::Mempool;
+use dom_store::utxo::UtxoEntry;
 use dom_store::DomStore;
 use dom_wallet::Wallet;
 use dom_wire::dandelion::DandelionRouter;
 use dom_wire::manager::PeerManager;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -115,6 +117,50 @@ enum RelayBlockAction {
     Suppress,
     PenalizePeer,
     Drop,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TxChainView {
+    pub(crate) current_height: u64,
+    pub(crate) coinbase_maturity: u64,
+    pub(crate) utxos: HashMap<[u8; 33], Option<UtxoEntry>>,
+}
+
+pub(crate) fn snapshot_tx_chain_view(
+    chain: &ChainState,
+    tx: &Transaction,
+) -> Result<TxChainView, DomError> {
+    let mut utxos = HashMap::with_capacity(tx.inputs.len());
+    for input in &tx.inputs {
+        let commitment = *input.commitment.as_bytes();
+        utxos
+            .entry(commitment)
+            .or_insert(chain.store.get_utxo(&commitment)?);
+    }
+    Ok(TxChainView {
+        current_height: chain.tip_height.0,
+        coinbase_maturity: chain.coinbase_maturity,
+        utxos,
+    })
+}
+
+async fn purge_mempool_confirmed_inputs(
+    mempool: &Arc<Mutex<Mempool>>,
+    transactions: &[Transaction],
+) {
+    let mut spent_inputs: Vec<[u8; 33]> =
+        Vec::with_capacity(transactions.iter().map(|tx| tx.inputs.len()).sum());
+    for tx in transactions {
+        for input in &tx.inputs {
+            spent_inputs.push(*input.commitment.as_bytes());
+        }
+    }
+    if spent_inputs.is_empty() {
+        return;
+    }
+
+    let mut mempool = mempool.lock().await;
+    mempool.remove_confirmed(&spent_inputs);
 }
 
 impl DomNode {
@@ -637,6 +683,14 @@ impl dom_rpc::NodeHandle for DomNode {
         use dom_serialization::DomDeserialize;
         let tx = dom_consensus::Transaction::from_bytes(&tx_bytes)
             .map_err(|e| dom_rpc::RpcError::InvalidHex(format!("invalid tx: {e}")))?;
+        let chain_view = {
+            let chain = self
+                .chain
+                .try_lock()
+                .map_err(|_| dom_rpc::RpcError::Internal("chain locked".into()))?;
+            snapshot_tx_chain_view(&chain, &tx)
+                .map_err(|e| dom_rpc::RpcError::Rejected(e.to_string()))?
+        };
         let hash = {
             let data = tx_bytes.clone();
             *dom_crypto::hash::blake2b_256(&data).as_bytes()
@@ -649,8 +703,15 @@ impl dom_rpc::NodeHandle for DomNode {
             .mempool
             .try_lock()
             .map_err(|_| dom_rpc::RpcError::Internal("mempool locked".into()))?;
-        pool.accept_tx(tx, hash, now)
-            .map_err(|e| dom_rpc::RpcError::Rejected(e.to_string()))?;
+        pool.accept_tx_with_chain_view(
+            tx,
+            hash,
+            now,
+            chain_view.current_height,
+            chain_view.coinbase_maturity,
+            |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
+        )
+        .map_err(|e| dom_rpc::RpcError::Rejected(e.to_string()))?;
         Ok(hash)
     }
 
@@ -768,6 +829,7 @@ async fn handle_inbound(
                     &mut codec,
                     &config,
                     &chain,
+                    &svc.mempool,
                     addr,
                     peer_hello.best_height,
                     svc.wallet.clone(),
@@ -907,6 +969,7 @@ async fn connect_outbound(
                     &mut codec,
                     &config,
                     &chain,
+                    &svc.mempool,
                     peer_addr,
                     peer_hello.best_height,
                     svc.wallet.clone(),
@@ -1520,6 +1583,7 @@ async fn clear_persisted_ibd_state(chain: &Arc<Mutex<ChainState>>) -> Result<(),
 struct IbdRuntimeContext<'a> {
     config: &'a NodeConfig,
     peer_addr: std::net::SocketAddr,
+    mempool: Arc<Mutex<Mempool>>,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
 }
 
@@ -1674,6 +1738,7 @@ async fn resume_ibd_block_sync(
                     }
                 };
                 if best_chain {
+                    purge_mempool_confirmed_inputs(&runtime.mempool, &txs_for_scan).await;
                     if let Some(ref wallet_arc) = runtime.wallet {
                         let mut w = wallet_arc.lock().await;
                         w.apply_canonical_block(&txs_for_scan, height)
@@ -1784,11 +1849,13 @@ async fn continue_ibd_header_sync(
     Ok(pending_blocks)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_ibd_session(
     stream: &mut tokio::net::TcpStream,
     codec: &mut dom_wire::codec::NoiseCodec,
     config: &NodeConfig,
     chain: &Arc<Mutex<ChainState>>,
+    mempool: &Arc<Mutex<Mempool>>,
     peer_addr: std::net::SocketAddr,
     peer_best_height: u64,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
@@ -1798,6 +1865,7 @@ async fn run_ibd_session(
     let runtime = IbdRuntimeContext {
         config,
         peer_addr,
+        mempool: mempool.clone(),
         wallet: wallet.clone(),
     };
     match ibd.begin_session() {
@@ -2032,6 +2100,7 @@ async fn run_ibd_session(
             codec,
             config,
             chain,
+            mempool,
             peer_addr,
             wallet.clone(),
             &mut ibd,
@@ -2145,11 +2214,13 @@ async fn run_ibd_session(
 /// Sends GetHeaders, receives headers, requests bodies in batches, and connects
 /// each block via ChainState::connect_block. Returns Ok(true) if any progress
 /// was made (at least one block accepted), Ok(false) if peer had nothing new.
+#[allow(clippy::too_many_arguments)]
 async fn ibd_sync_round(
     stream: &mut tokio::net::TcpStream,
     codec: &mut dom_wire::codec::NoiseCodec,
     config: &NodeConfig,
     chain: &Arc<Mutex<ChainState>>,
+    mempool: &Arc<Mutex<Mempool>>,
     peer_addr: std::net::SocketAddr,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
     ibd: &mut dom_chain::IbdState,
@@ -2231,6 +2302,7 @@ async fn ibd_sync_round(
     let runtime = IbdRuntimeContext {
         config,
         peer_addr,
+        mempool: mempool.clone(),
         wallet,
     };
     resume_ibd_block_sync(
@@ -2482,48 +2554,53 @@ async fn message_loop(
                                     let mut c = chain.lock().await;
                                     c.connect_block(&block, now)
                                 };
-                        match relay_block_action(&result) {
-                            RelayBlockAction::RelayBestChain => {
-                                if let Ok(ref connect_result) = result {
-                                    if let Err(e) = reconcile_mempool_after_connect(
-                                        &chain,
-                                        &svc.mempool,
-                                        connect_result,
-                                        &block.transactions,
-                                    )
-                                    .await
-                                    {
-                                        tracing::warn!(
-                                            "Mempool reconciliation failed after block from {peer_addr}: {e}"
-                                        );
-                                    }
-                                }
-                                tracing::info!("Accepted relayed block from {peer_addr} (new tip)");
-                                // Wallet state follows canonical blocks only.
-                                if let Ok(ref connect_result) = result {
-                                    match connect_result {
-                                        dom_chain::ConnectResult::BestChain => {
-                                            if let Some(ref wallet_arc) = svc.wallet {
-                                                let mut w = wallet_arc.lock().await;
-                                                if let Err(e) =
-                                                    w.apply_canonical_block(&txs_for_scan, height)
-                                                {
-                                                    tracing::warn!(
-                                                        "wallet canonical block apply failed at height {height}: {e}"
-                                                    );
-                                                }
+                                match relay_block_action(&result) {
+                                    RelayBlockAction::RelayBestChain => {
+                                        if let Ok(ref connect_result) = result {
+                                            if let Err(e) = reconcile_mempool_after_connect(
+                                                &chain,
+                                                &svc.mempool,
+                                                connect_result,
+                                                &block.transactions,
+                                            )
+                                            .await
+                                            {
+                                                tracing::warn!(
+                                                    "Mempool reconciliation failed after block from {peer_addr}: {e}"
+                                                );
                                             }
                                         }
-                                        dom_chain::ConnectResult::Reorg(_) => {
-                                            tracing::debug!(
-                                                "Skipping wallet canonical apply for reorg from {peer_addr}; rollback hooks remain explicit follow-up work"
-                                            );
+                                        tracing::info!(
+                                            "Accepted relayed block from {peer_addr} (new tip)"
+                                        );
+                                        // Wallet state follows canonical blocks only.
+                                        if let Ok(ref connect_result) = result {
+                                            match connect_result {
+                                                dom_chain::ConnectResult::BestChain => {
+                                                    if let Some(ref wallet_arc) = svc.wallet {
+                                                        let mut w = wallet_arc.lock().await;
+                                                        if let Err(e) =
+                                                            w.apply_canonical_block(
+                                                                &txs_for_scan,
+                                                                height,
+                                                            )
+                                                        {
+                                                            tracing::warn!(
+                                                                "wallet canonical block apply failed at height {height}: {e}"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                dom_chain::ConnectResult::Reorg(_) => {
+                                                    tracing::debug!(
+                                                        "Skipping wallet canonical apply for reorg from {peer_addr}; rollback hooks remain explicit follow-up work"
+                                                    );
+                                                }
+                                                dom_chain::ConnectResult::SideChain
+                                                | dom_chain::ConnectResult::AlreadyHave => {}
+                                            }
                                         }
-                                        dom_chain::ConnectResult::SideChain
-                                        | dom_chain::ConnectResult::AlreadyHave => {}
-                                    }
-                                }
-                                // DOM-SEC-RELAY-LOOP: only rebroadcast when we
+                                        // DOM-SEC-RELAY-LOOP: only rebroadcast when we
                                         // actually extended the best chain. SideChain
                                         // and AlreadyHave MUST NOT rebroadcast — that
                                         // creates infinite relay loops between peers.
@@ -2605,15 +2682,31 @@ async fn message_loop(
                         match Transaction::from_bytes(&tx_bytes) {
                             Ok(tx) => {
                                 let tx_hash = *dom_crypto::blake2b_256(&tx_bytes).as_bytes();
+                                let chain_view = {
+                                    let c = chain.lock().await;
+                                    snapshot_tx_chain_view(&c, &tx)
+                                };
                                 let now_secs = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_secs();
-                                let accepted = {
+                                let accepted = match chain_view {
+                                    Ok(view) => {
                                     let mut m = svc.mempool.lock().await;
-                                    m.accept_tx(tx, tx_hash, now_secs).is_ok()
+                                        m.accept_tx_with_chain_view(
+                                            tx,
+                                            tx_hash,
+                                            now_secs,
+                                            view.current_height,
+                                            view.coinbase_maturity,
+                                            |commitment| {
+                                                Ok(view.utxos.get(commitment).cloned().flatten())
+                                            },
+                                        )
+                                    }
+                                    Err(e) => Err(e),
                                 };
-                                if accepted {
+                                if accepted.is_ok() {
                                     tracing::debug!(
                                         "Accepted relayed tx {} from {peer_addr}",
                                         hex::encode(tx_hash)
@@ -2645,6 +2738,16 @@ async fn message_loop(
                                                 });
                                             }
                                         }
+                                    }
+                                } else if let Err(e) = accepted {
+                                    let banned =
+                                        record_peer_violation(&svc.peers, peer_addr, &e).await;
+                                    tracing::debug!(
+                                        "Rejected relayed tx {} from {peer_addr}: {e}",
+                                        hex::encode(tx_hash)
+                                    );
+                                    if banned {
+                                        return Err(e);
                                     }
                                 }
                             }
@@ -2695,20 +2798,22 @@ mod tests {
     use super::{
         continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
         decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
-        peer_violation_score, pending_peer_violation_score, reconcile_mempool_after_connect,
-        refresh_peer_metrics, relay_block_action, tx_hash, DeferredReplayAction, IbdRoundState,
-        OutboundAttemptOutcome, RelayBlockAction,
+        peer_violation_score, pending_peer_violation_score, purge_mempool_confirmed_inputs,
+        reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action, tx_hash,
+        DeferredReplayAction, IbdRoundState, OutboundAttemptOutcome, RelayBlockAction,
     };
     use crate::metrics::Metrics;
     use dom_chain::{
         ChainState, ConnectResult, IbdInterruption, IbdPhase, PersistedIbdState, ReorgDelta,
     };
     use dom_consensus::block::{BlockHeader, ProofOfWork};
-    use dom_consensus::transaction::{TransactionInput, TransactionKernel, TransactionOutput};
-    use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, Transaction};
+    use dom_consensus::{
+        Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionInput,
+        TransactionKernel, TransactionOutput,
+    };
     use dom_core::{
         Amount, BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-        MAX_BLOCK_SERIALIZED_SIZE, NETWORK_MAGIC_REGTEST,
+        MAX_BLOCK_SERIALIZED_SIZE, MIN_RELAY_FEE_RATE, NETWORK_MAGIC_REGTEST,
     };
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
     use dom_mempool::Mempool;
@@ -2822,10 +2927,28 @@ mod tests {
             }],
             kernels: vec![TransactionKernel {
                 features: KERNEL_FEAT_PLAIN,
-                fee: Amount::from_noms(dom_core::MIN_RELAY_FEE_RATE * 100).expect("fee"),
+                fee: Amount::from_noms(MIN_RELAY_FEE_RATE * 100).expect("fee"),
                 lock_height: 0,
                 excess: commitment(kernel_seed, 0),
                 excess_signature: [kernel_seed; 65],
+            }],
+            offset: [0u8; 32],
+        }
+    }
+
+    fn spending_tx(input: Commitment, seed: u8) -> Transaction {
+        Transaction {
+            inputs: vec![TransactionInput { commitment: input }],
+            outputs: vec![TransactionOutput {
+                commitment: commitment(seed.wrapping_add(10), 1),
+                proof: vec![seed; 8],
+            }],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(MIN_RELAY_FEE_RATE * 25).unwrap(),
+                lock_height: 0,
+                excess: commitment(seed.wrapping_add(20), 0),
+                excess_signature: [seed; 65],
             }],
             offset: [0u8; 32],
         }
@@ -2895,7 +3018,6 @@ mod tests {
         guard.tip_height = block.header.height;
         guard.tip_difficulty = block.header.total_difficulty;
     }
-
     fn ibd_payload(block: &Block) -> Vec<u8> {
         BlockPayload {
             block_bytes: block.to_bytes().expect("serialize block"),
@@ -3299,6 +3421,28 @@ mod tests {
         assert_eq!(metrics.peer_count.load(Ordering::Relaxed), 0);
         assert_eq!(metrics.inbound_peers.load(Ordering::Relaxed), 0);
         assert_eq!(metrics.outbound_peers.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn best_chain_cleanup_purges_mempool_conflicts_by_input() {
+        let mempool = Arc::new(Mutex::new(Mempool::new()));
+        let shared_input = commitment(9, 50);
+        let tx = spending_tx(shared_input, 0x21);
+        let tx_hash = [0x21; 32];
+        {
+            let mut pool = mempool.lock().await;
+            pool.accept_tx(tx.clone(), tx_hash, 0).expect("accept tx");
+            assert_eq!(pool.len(), 1);
+        }
+
+        purge_mempool_confirmed_inputs(&mempool, &[tx]).await;
+
+        let pool = mempool.lock().await;
+        assert_eq!(
+            pool.len(),
+            0,
+            "confirmed inputs must be purged from mempool"
+        );
     }
 
     #[tokio::test]

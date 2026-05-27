@@ -3,7 +3,7 @@
 //! Uses a newtype wrapper (NodeHandleImpl) to satisfy Rust orphan rules:
 //! both Arc<DomNode> and NodeHandle are defined outside dom-node.
 
-use crate::node::DomNode;
+use crate::node::{snapshot_tx_chain_view, DomNode};
 use dom_rpc::{MempoolTxInfo, NodeHandle, PeerInfo, RpcError, UtxoInfo};
 use dom_serialization::DomDeserialize;
 use std::sync::Arc;
@@ -69,6 +69,14 @@ impl NodeHandle for NodeHandleImpl {
 
         let tx = Transaction::from_bytes(&tx_bytes)
             .map_err(|e| RpcError::Rejected(format!("invalid tx encoding: {e}")))?;
+        let chain_view = {
+            let chain = self
+                .0
+                .chain
+                .try_lock()
+                .map_err(|_| RpcError::Overloaded("chain busy".into()))?;
+            snapshot_tx_chain_view(&chain, &tx).map_err(|e| RpcError::Rejected(format!("{e}")))?
+        };
 
         // Hash = Blake2b-256 of raw bytes (consistent with mempool internals)
         let tx_hash = *dom_crypto::blake2b_256(&tx_bytes).as_bytes();
@@ -84,8 +92,15 @@ impl NodeHandle for NodeHandleImpl {
             .try_lock()
             .map_err(|_| RpcError::Overloaded("mempool busy".into()))?;
 
-        m.accept_tx(tx, tx_hash, now)
-            .map_err(|e| RpcError::Rejected(format!("{e}")))?;
+        m.accept_tx_with_chain_view(
+            tx,
+            tx_hash,
+            now,
+            chain_view.current_height,
+            chain_view.coinbase_maturity,
+            |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
+        )
+        .map_err(|e| RpcError::Rejected(format!("{e}")))?;
 
         // Route via Dandelion++: decide Stem vs Fluff and dispatch over
         // the corresponding broadcast channel. Peer tasks pick up envelopes
@@ -263,13 +278,39 @@ impl NodeHandle for NodeHandleImpl {
             )
         })?;
 
-        mempool.accept_tx(tx, tx_hash, now).map_err(|e| {
-            rollback_failed_wallet_spend(
-                wallet_arc,
-                wallet_tx_hash,
-                dom_rpc::RpcError::Rejected(format!("mempool: {e}")),
+        let chain_view = {
+            let chain = self.0.chain.try_lock().map_err(|_| {
+                rollback_failed_wallet_spend(
+                    wallet_arc,
+                    wallet_tx_hash,
+                    dom_rpc::RpcError::Overloaded("chain busy".into()),
+                )
+            })?;
+            snapshot_tx_chain_view(&chain, &tx).map_err(|e| {
+                rollback_failed_wallet_spend(
+                    wallet_arc,
+                    wallet_tx_hash,
+                    dom_rpc::RpcError::Rejected(format!("mempool precheck: {e}")),
+                )
+            })?
+        };
+
+        mempool
+            .accept_tx_with_chain_view(
+                tx,
+                tx_hash,
+                now,
+                chain_view.current_height,
+                chain_view.coinbase_maturity,
+                |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
             )
-        })?;
+            .map_err(|e| {
+                rollback_failed_wallet_spend(
+                    wallet_arc,
+                    wallet_tx_hash,
+                    dom_rpc::RpcError::Rejected(format!("mempool: {e}")),
+                )
+            })?;
 
         // Route via Dandelion++: decide Stem vs Fluff and dispatch over
         // the corresponding broadcast channel. Same logic as submit_tx above.
@@ -312,8 +353,13 @@ mod tests {
     use super::{NodeHandle, NodeHandleImpl};
     use crate::node::DomNode;
     use dom_config::NodeConfig;
+    use dom_consensus::transaction::{
+        Transaction, TransactionInput, TransactionKernel, TransactionOutput,
+    };
+    use dom_core::{Amount, KERNEL_FEAT_PLAIN, MIN_RELAY_FEE_RATE};
     use dom_crypto::{pedersen::Commitment, BlindingFactor};
     use dom_rpc::SpendRequest;
+    use dom_serialization::DomSerialize;
     use dom_wallet::{Network, OwnedOutput, Wallet};
 
     fn make_output(value: u64, height: u64, is_coinbase: bool) -> OwnedOutput {
@@ -344,6 +390,28 @@ mod tests {
             log_level: "debug".into(),
             rpc_listen_addr: None,
         }
+    }
+
+    fn raw_spend_tx(input_commitment: Commitment) -> Vec<u8> {
+        Transaction {
+            inputs: vec![TransactionInput {
+                commitment: input_commitment,
+            }],
+            outputs: vec![TransactionOutput {
+                commitment: Commitment::commit(1, &BlindingFactor::random()),
+                proof: vec![0xAB; 100],
+            }],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(MIN_RELAY_FEE_RATE * 25).unwrap(),
+                lock_height: 0,
+                excess: Commitment::commit(0, &BlindingFactor::random()),
+                excess_signature: [0x11; 65],
+            }],
+            offset: [0u8; 32],
+        }
+        .to_bytes()
+        .expect("serialize tx")
     }
 
     #[test]
@@ -414,6 +482,42 @@ mod tests {
             "rollback must persist across restart"
         );
         assert_eq!(reopened.network(), Network::Regtest);
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_file(&wallet_path);
+    }
+
+    #[test]
+    fn submit_tx_rejects_inputs_missing_from_canonical_utxo_set() {
+        let unique = format!(
+            "dom-node-handle-missing-utxo-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos()
+        );
+        let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
+        let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_file(&wallet_path);
+
+        let node = std::sync::Arc::new(
+            DomNode::init(test_config(
+                data_dir.to_str().expect("utf8 data dir"),
+                wallet_path.to_str().expect("utf8 wallet path"),
+            ))
+            .expect("init node"),
+        );
+        let handle = NodeHandleImpl(node);
+
+        let tx_bytes = raw_spend_tx(Commitment::commit(5, &BlindingFactor::random()));
+        let err = handle
+            .submit_tx(tx_bytes)
+            .expect_err("missing utxo must reject");
+        assert!(
+            matches!(err, dom_rpc::RpcError::Rejected(ref msg) if msg.contains("input commitment not found in canonical UTXO set")),
+            "expected canonical-utxo rejection, got {err}"
+        );
 
         let _ = std::fs::remove_dir_all(&data_dir);
         let _ = std::fs::remove_file(&wallet_path);
