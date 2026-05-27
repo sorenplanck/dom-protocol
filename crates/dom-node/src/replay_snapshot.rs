@@ -249,6 +249,7 @@ mod tests {
             let mut peers = PeerManager::new(125, 2);
             peers.record_outbound_failure("198.51.100.30:33369");
             peers.record_outbound_failure("198.51.100.30:33369");
+            peers.record_outbound_failure("198.51.100.30:33369");
             persist_peer_rotation_snapshot(&chain.store, &peers.outbound_failure_state())
                 .expect("persist peer rotation");
             ReplaySnapshot::capture(&chain, &Mempool::new(), &peers).expect("capture before")
@@ -269,6 +270,45 @@ mod tests {
             .assert_equivalent(&snapshot_after)
             .expect("reopen replay equivalence");
         fs::remove_dir_all(&dir).expect("cleanup reopen");
+    }
+
+    #[test]
+    fn replay_snapshot_detects_peer_cooldown_divergence() {
+        let base = ReplaySnapshot {
+            chain_tip_height: 1,
+            chain_tip_hash: [0x11; 32],
+            persisted_ibd: None,
+            persisted_peer_rotation: Some(PersistedPeerRotationState {
+                next_failure_seq: 3,
+                outbound_failures: vec![dom_wire::manager::PersistedOutboundFailure {
+                    addr: "198.51.100.30:33369".into(),
+                    failures: 3,
+                    last_failure_seq: 3,
+                    cooldown_rounds: 0,
+                }],
+            }),
+            runtime_peer_rotation: PersistedPeerRotationState {
+                next_failure_seq: 3,
+                outbound_failures: vec![dom_wire::manager::PersistedOutboundFailure {
+                    addr: "198.51.100.30:33369".into(),
+                    failures: 3,
+                    last_failure_seq: 3,
+                    cooldown_rounds: 0,
+                }],
+            },
+            mempool_hashes: vec![[0xAA; 32]],
+        };
+        let mut changed = base.clone();
+        changed
+            .persisted_peer_rotation
+            .as_mut()
+            .expect("persisted state")
+            .outbound_failures[0]
+            .cooldown_rounds = 2;
+        changed.runtime_peer_rotation.outbound_failures[0].cooldown_rounds = 2;
+
+        let diff = base.diff(&changed);
+        assert_eq!(diff.fields, vec!["persisted_peer_rotation", "runtime_peer_rotation"]);
     }
 
     #[test]
