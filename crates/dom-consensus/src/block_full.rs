@@ -203,6 +203,7 @@ mod tests {
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
     use dom_crypto::schnorr_sign;
     use dom_pow::CompactTarget;
+    use dom_serialization::{DomDeserialize, DomSerialize};
     use primitive_types::U256;
 
     fn g_point() -> Commitment {
@@ -749,6 +750,93 @@ mod tests {
         assert!(
             err.to_string().contains("cut-through"),
             "expected cut-through rejection, got: {err}"
+        );
+    }
+
+    /// A coinbase that claims more fees than the block's transactions actually
+    /// pay is rejected by validate_block_transactions() → validate_explicit_value().
+    /// This covers the value-inflation vector via coinbase overpay: if a miner
+    /// inflates the coinbase explicit_value beyond (block_reward + sum_fees),
+    /// the block is rejected before the aggregate balance equation is even checked.
+    #[test]
+    fn coinbase_explicit_value_overpay_is_rejected() {
+        // tx has fee = 0 (input == output value).
+        let tx = build_valid_spend_tx(100, scalar(5), 100, scalar(6), None);
+        // build_coinbase(7, chain_id) produces explicit_value = block_reward + 7.
+        // The coinbase is cryptographically self-consistent for that value, but
+        // the block's actual transaction fees are 0 — a mismatch by 7 noms.
+        let coinbase = build_coinbase(7, &[0x11; 32]);
+        let (output_root, kernel_root, rangeproof_root) =
+            compute_block_pmmr_roots(&coinbase, std::slice::from_ref(&tx.tx)).expect("pmmr roots");
+        let block = Block {
+            header: BlockHeader {
+                version: PROTOCOL_VERSION,
+                height: BlockHeight(1),
+                prev_hash: Hash256::from_bytes([0x55; 32]),
+                timestamp: Timestamp(1_704_067_260),
+                output_root,
+                kernel_root,
+                rangeproof_root,
+                total_kernel_offset: [0u8; 32],
+                target: CompactTarget(0x1f00_ffff),
+                total_difficulty: U256::from(2u64),
+                pow: crate::block::ProofOfWork {
+                    nonce: 7,
+                    randomx_hash: Hash256::ZERO,
+                },
+            },
+            coinbase,
+            transactions: vec![tx.tx],
+        };
+        let err = validate_block(
+            &block,
+            &ValidationContext {
+                current_height: BlockHeight(1),
+                chain_id: [0x11; 32],
+                now: Timestamp(u64::MAX),
+            },
+        )
+        .expect_err("coinbase that overpays fees must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("explicit_value") || msg.contains("coinbase") || msg.contains("fee"),
+            "expected coinbase overpay rejection, got: {msg}"
+        );
+    }
+
+    /// Calling validate_block() twice with identical bytes (simulating the same
+    /// block arriving at two independent nodes) MUST produce the same outcome.
+    /// This is a hard requirement for distributed consensus: no node may accept
+    /// a block that another node rejects when both received the same bytes.
+    #[test]
+    fn block_validation_result_is_deterministic_across_deserialization() {
+        let ctx = ValidationContext {
+            current_height: BlockHeight(1),
+            chain_id: [0x11; 32],
+            now: Timestamp(u64::MAX),
+        };
+
+        // Valid block: serialise → deserialise independently on two "nodes".
+        let tx = build_valid_spend_tx(100, scalar(5), 85, scalar(6), None);
+        let block = valid_block_with_transactions(vec![tx.tx]);
+        let bytes = block.to_bytes().expect("serialize");
+        let node_a = Block::from_bytes(&bytes).expect("node A deserialize");
+        let node_b = Block::from_bytes(&bytes).expect("node B deserialize");
+        validate_block(&node_a, &ctx).expect("node A must accept the valid block");
+        validate_block(&node_b, &ctx).expect("node B must accept the valid block");
+
+        // Invalid block: same serialised bytes on both nodes must produce the
+        // exact same rejection string.
+        let mut bad = block.clone();
+        bad.header.total_kernel_offset = [0xAAu8; 32];
+        let bad_bytes = bad.to_bytes().expect("serialize invalid");
+        let bad_a = Block::from_bytes(&bad_bytes).expect("node A deserialize invalid");
+        let bad_b = Block::from_bytes(&bad_bytes).expect("node B deserialize invalid");
+        let err_a = validate_block(&bad_a, &ctx).unwrap_err().to_string();
+        let err_b = validate_block(&bad_b, &ctx).unwrap_err().to_string();
+        assert_eq!(
+            err_a, err_b,
+            "all nodes must derive identical rejection from identical bytes"
         );
     }
 }
