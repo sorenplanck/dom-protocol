@@ -359,16 +359,44 @@ impl WalletApp {
 
     fn render_history(&mut self, ui: &mut egui::Ui) {
         ui.heading("Transaction History");
+        if ui.button("Refresh Transaction States").clicked() {
+            self.runtime.refresh_wallet_view();
+        }
         if self.runtime.history.is_empty() {
             ui.label("No wallet transaction journal entries available.");
             return;
         }
+        let mut cancel_tx = None;
+        let mut rebroadcast_tx = None;
         for row in &self.runtime.history {
             ui.group(|ui| {
                 ui.label(format!("Timestamp: {}", row.timestamp));
                 ui.label(format!("Status: {}", row.status));
                 ui.code(&row.tx_hash_hex);
+                if let Some(warning) = &row.warning {
+                    ui.label(format!("Warning: {warning}"));
+                }
+                ui.horizontal(|ui| {
+                    if row.can_cancel && ui.button("Cancel").clicked() {
+                        cancel_tx = Some(row.tx_hash_hex.clone());
+                    }
+                    if row.can_rebroadcast && ui.button("Rebroadcast").clicked() {
+                        rebroadcast_tx = Some(row.tx_hash_hex.clone());
+                    }
+                });
             });
+        }
+        if let Some(tx_hash) = cancel_tx {
+            if let Err(e) = self.runtime.cancel_transaction(&tx_hash) {
+                self.runtime
+                    .set_error(format!("cancel transaction {tx_hash}: {e}"));
+            }
+        }
+        if let Some(tx_hash) = rebroadcast_tx {
+            if let Err(e) = self.runtime.rebroadcast_transaction(&tx_hash) {
+                self.runtime
+                    .set_error(format!("rebroadcast transaction {tx_hash}: {e}"));
+            }
         }
     }
 

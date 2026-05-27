@@ -181,6 +181,10 @@ pub enum TxJournalEvent {
         /// (serialised as hex strings).
         #[serde(with = "hex33_vec")]
         inputs: Vec<[u8; 33]>,
+        /// Canonical transaction bytes as lowercase hex. Optional
+        /// for backward compatibility with older journal entries.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tx_hex: Option<String>,
         /// Number of outputs in the transaction (informational).
         output_count: u32,
         /// Fee in noms (informational).
@@ -290,6 +294,9 @@ pub struct TxRecord {
     /// Inputs reserved by the original `Built` event (empty until
     /// the Built event is observed).
     pub inputs: Vec<[u8; 33]>,
+    /// Canonical transaction bytes from the Built event, if the
+    /// journal entry carried them.
+    pub tx_bytes: Vec<u8>,
     /// Fee in noms from the original Built event.
     pub fee_noms: u64,
     /// Timestamp of the Built event.
@@ -409,6 +416,7 @@ fn apply_entry(map: &mut HashMap<[u8; 32], TxRecord>, entry: &JournalEntry, line
     match &entry.event {
         TxJournalEvent::Built {
             inputs,
+            tx_hex,
             output_count: _,
             fee_noms,
         } => {
@@ -428,6 +436,10 @@ fn apply_entry(map: &mut HashMap<[u8; 32], TxRecord>, entry: &JournalEntry, line
                     tx_hash,
                     status: TxStatus::Building,
                     inputs: inputs.clone(),
+                    tx_bytes: tx_hex
+                        .as_ref()
+                        .and_then(|hex| hex::decode(hex).ok())
+                        .unwrap_or_default(),
                     fee_noms: *fee_noms,
                     created_at: ts,
                     last_updated_at: ts,
@@ -602,6 +614,7 @@ mod tests {
             tx_hash: h,
             event: TxJournalEvent::Built {
                 inputs: vec![input(0xAA), input(0xBB)],
+                tx_hex: None,
                 output_count: 1,
                 fee_noms: 100,
             },
@@ -638,6 +651,7 @@ mod tests {
             tx_hash: h,
             event: TxJournalEvent::Built {
                 inputs: vec![input(0x55)],
+                tx_hex: None,
                 output_count: 1,
                 fee_noms: 50,
             },
@@ -664,6 +678,7 @@ mod tests {
                 tx_hash: h,
                 event: TxJournalEvent::Built {
                     inputs: vec![input(0x11)],
+                    tx_hex: None,
                     output_count: 1,
                     fee_noms: 1,
                 },
@@ -685,6 +700,7 @@ mod tests {
             tx_hash: h,
             event: TxJournalEvent::Built {
                 inputs: vec![input(0x22)],
+                tx_hex: None,
                 output_count: 1,
                 fee_noms: 10,
             },
@@ -737,6 +753,7 @@ mod tests {
                 tx_hash: h,
                 event: TxJournalEvent::Built {
                     inputs: vec![input(i)],
+                    tx_hex: None,
                     output_count: 1,
                     fee_noms: i as u64,
                 },
@@ -773,6 +790,7 @@ mod tests {
             tx_hash: h,
             event: TxJournalEvent::Built {
                 inputs: vec![input(0xDD)],
+                tx_hex: None,
                 output_count: 1,
                 fee_noms: 99,
             },
@@ -797,6 +815,7 @@ mod tests {
             tx_hash: h,
             event: TxJournalEvent::Built {
                 inputs: vec![input(0x77)],
+                tx_hex: None,
                 output_count: 1,
                 fee_noms: 5,
             },
@@ -833,6 +852,7 @@ mod tests {
             tx_hash: h1,
             event: TxJournalEvent::Built {
                 inputs: vec![input(0x10)],
+                tx_hex: None,
                 output_count: 1,
                 fee_noms: 1,
             },
@@ -851,6 +871,7 @@ mod tests {
             tx_hash: h2,
             event: TxJournalEvent::Built {
                 inputs: vec![input(0x20)],
+                tx_hex: None,
                 output_count: 1,
                 fee_noms: 2,
             },
@@ -894,6 +915,7 @@ mod tests {
             tx_hash: a,
             event: TxJournalEvent::Built {
                 inputs: vec![input(0x01)],
+                tx_hex: None,
                 output_count: 1,
                 fee_noms: 10,
             },
@@ -910,6 +932,7 @@ mod tests {
             tx_hash: b,
             event: TxJournalEvent::Built {
                 inputs: vec![input(0x01)],
+                tx_hex: None,
                 output_count: 1,
                 fee_noms: 20,
             },
@@ -955,6 +978,7 @@ mod tests {
         for event in [
             TxJournalEvent::Built {
                 inputs: vec![input(0x01)],
+                tx_hex: None,
                 output_count: 1,
                 fee_noms: 5,
             },
@@ -984,6 +1008,7 @@ mod tests {
         for event in [
             TxJournalEvent::Built {
                 inputs: vec![input(0x02)],
+                tx_hex: None,
                 output_count: 1,
                 fee_noms: 5,
             },
@@ -1019,6 +1044,7 @@ mod tests {
         for event in [
             TxJournalEvent::Built {
                 inputs: vec![input(0x03)],
+                tx_hex: None,
                 output_count: 1,
                 fee_noms: 5,
             },
@@ -1047,6 +1073,7 @@ mod tests {
         for event in [
             TxJournalEvent::Built {
                 inputs: vec![input(0x04)],
+                tx_hex: None,
                 output_count: 1,
                 fee_noms: 1,
             },
