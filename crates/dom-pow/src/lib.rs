@@ -22,8 +22,9 @@
 #![deny(clippy::float_arithmetic)]
 
 use dom_core::{
-    BlockHeight, DomError, Timestamp, ASERT_HALF_LIFE, ASERT_RADIX, MAX_TARGET_BYTES,
-    MIN_TARGET_BYTES, TARGET_SPACING,
+    BlockHeight, DomError, Timestamp, ASERT_HALF_LIFE, ASERT_RADIX, GENESIS_TARGET_COMPACT,
+    MAX_TARGET_BYTES, MIN_TARGET_BYTES, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST,
+    NETWORK_MAGIC_TESTNET, TARGET_SPACING,
 };
 use primitive_types::U256;
 
@@ -73,6 +74,79 @@ pub const ASERT_FRAC_TABLE: [u32; 256] = [
 /// Bitcoin-style compact target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactTarget(pub u32);
+
+/// Easiest compact-representable target accepted by consensus.
+///
+/// `MAX_TARGET_BYTES` itself is not compact-stable: converting it to compact
+/// form and back loses trailing precision. This constant is the canonical
+/// compact form miners and validators can round-trip exactly.
+pub const MAX_COMPACT_TARGET: u32 = 0x1e7f_ffff;
+
+/// Testnet compact target floor.
+///
+/// This expands to a target about 32x harder than `MAX_COMPACT_TARGET` under
+/// DOM's current compact-target byte layout, mapping the observed
+/// ~30–40 blocks/minute profile to roughly ~48–64 seconds/block without any
+/// miner-side throttling.
+pub const TESTNET_TARGET_COMPACT: u32 = 0x1e7f_ff07;
+
+/// Regtest compact target. Dev-only and intentionally easy.
+pub const REGTEST_TARGET_COMPACT: u32 = MAX_COMPACT_TARGET;
+
+/// Network-specific deterministic PoW parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PowParams {
+    /// Target spacing in seconds.
+    pub target_spacing: u64,
+    /// ASERT half-life in seconds.
+    pub half_life: u64,
+    /// Genesis anchor compact target.
+    pub genesis_target_compact: u32,
+    /// Easiest target the network may ever use.
+    pub max_compact_target: u32,
+}
+
+impl PowParams {
+    /// Expand the genesis compact target to 32-byte target bytes.
+    pub fn genesis_target(&self) -> Result<[u8; 32], DomError> {
+        CompactTarget(self.genesis_target_compact).to_target()
+    }
+
+    /// Expand the easiest allowed target to 32-byte target bytes.
+    pub fn max_target(&self) -> Result<[u8; 32], DomError> {
+        CompactTarget(self.max_compact_target).to_target()
+    }
+}
+
+/// Return the canonical PoW parameters for the given network magic.
+pub fn pow_params_for_network(network_magic: u32) -> PowParams {
+    match network_magic {
+        NETWORK_MAGIC_TESTNET => PowParams {
+            target_spacing: 60,
+            half_life: ASERT_HALF_LIFE,
+            genesis_target_compact: TESTNET_TARGET_COMPACT,
+            max_compact_target: TESTNET_TARGET_COMPACT,
+        },
+        NETWORK_MAGIC_REGTEST => PowParams {
+            target_spacing: TARGET_SPACING,
+            half_life: ASERT_HALF_LIFE,
+            genesis_target_compact: REGTEST_TARGET_COMPACT,
+            max_compact_target: REGTEST_TARGET_COMPACT,
+        },
+        NETWORK_MAGIC_MAINNET => PowParams {
+            target_spacing: TARGET_SPACING,
+            half_life: ASERT_HALF_LIFE,
+            genesis_target_compact: GENESIS_TARGET_COMPACT,
+            max_compact_target: GENESIS_TARGET_COMPACT,
+        },
+        _ => PowParams {
+            target_spacing: TARGET_SPACING,
+            half_life: ASERT_HALF_LIFE,
+            genesis_target_compact: GENESIS_TARGET_COMPACT,
+            max_compact_target: GENESIS_TARGET_COMPACT,
+        },
+    }
+}
 
 impl CompactTarget {
     /// Expand to 32-byte big-endian target.
@@ -165,6 +239,26 @@ pub fn asert_next_target(
     block_timestamp: Timestamp,
     block_height: BlockHeight,
 ) -> Result<[u8; 32], DomError> {
+    asert_next_target_with_params(
+        anchor,
+        block_timestamp,
+        block_height,
+        &PowParams {
+            target_spacing: TARGET_SPACING,
+            half_life: ASERT_HALF_LIFE,
+            genesis_target_compact: GENESIS_TARGET_COMPACT,
+            max_compact_target: MAX_COMPACT_TARGET,
+        },
+    )
+}
+
+/// Compute the next target via ASERT using explicit network parameters.
+pub fn asert_next_target_with_params(
+    anchor: &AsertAnchor,
+    block_timestamp: Timestamp,
+    block_height: BlockHeight,
+    params: &PowParams,
+) -> Result<[u8; 32], DomError> {
     let time_diff: i64 = (block_timestamp.0 as i64)
         .checked_sub(anchor.timestamp.0 as i64)
         .ok_or_else(|| DomError::Invalid("time_diff overflow".into()))?;
@@ -174,7 +268,7 @@ pub fn asert_next_target(
         .checked_sub(anchor.height.0)
         .ok_or_else(|| DomError::Invalid("height before anchor".into()))?;
     let ideal_time: i64 = (height_diff as i64)
-        .checked_mul(TARGET_SPACING as i64)
+        .checked_mul(params.target_spacing as i64)
         .ok_or_else(|| DomError::Invalid("ideal_time overflow".into()))?;
 
     let exponent_seconds: i64 = time_diff
@@ -186,7 +280,7 @@ pub fn asert_next_target(
         let num = (exponent_seconds as i128)
             .checked_mul(256)
             .ok_or_else(|| DomError::Invalid("exponent_fp overflow".into()))?;
-        floor_div_i128(num, ASERT_HALF_LIFE as i128)?
+        floor_div_i128(num, params.half_life as i128)?
     };
 
     let integer_part = floor_div_i128(exponent_fp, 256)?;
@@ -202,7 +296,12 @@ pub fn asert_next_target(
     };
 
     let frac_multiplier = ASERT_FRAC_TABLE[frac_index] as u128;
-    apply_exponent(&anchor.target, integer_part, frac_multiplier)
+    apply_exponent(
+        &anchor.target,
+        integer_part,
+        frac_multiplier,
+        &params.max_target()?,
+    )
 }
 
 /// Apply exponent to anchor target using CHECKED 256-bit arithmetic.
@@ -213,6 +312,7 @@ fn apply_exponent(
     anchor_target: &[u8; 32],
     integer_part: i128,
     frac_multiplier: u128,
+    max_target: &[u8; 32],
 ) -> Result<[u8; 32], DomError> {
     let hi = u128::from_be_bytes(anchor_target[0..16].try_into().unwrap());
     let lo = u128::from_be_bytes(anchor_target[16..32].try_into().unwrap());
@@ -236,8 +336,8 @@ fn apply_exponent(
     result[16..32].copy_from_slice(&shifted_lo.to_be_bytes());
 
     // Clamp
-    if target_gt(&result, &MAX_TARGET_BYTES) {
-        return Ok(MAX_TARGET_BYTES);
+    if target_gt(&result, max_target) {
+        return Ok(*max_target);
     }
     if result == [0u8; 32] || target_lt(&result, &MIN_TARGET_BYTES) {
         return Ok(MIN_TARGET_BYTES);
@@ -312,10 +412,12 @@ fn shift_left_256(hi: u128, lo: u128, shift: u32) -> (u128, u128) {
     if shift >= 256 {
         return (u128::MAX, u128::MAX);
     }
-    if shift >= 128 {
-        return (lo << (shift - 128), 0);
+    let value = (U256::from(hi) << 128) | U256::from(lo);
+    if value > (U256::MAX >> shift) {
+        return (u128::MAX, u128::MAX);
     }
-    ((hi << shift) | (lo >> (128 - shift)), lo << shift)
+    let shifted = value << shift;
+    (((shifted >> 128).low_u128()), shifted.low_u128())
 }
 
 fn shift_right_256(hi: u128, lo: u128, shift: u32) -> (u128, u128) {
@@ -325,10 +427,9 @@ fn shift_right_256(hi: u128, lo: u128, shift: u32) -> (u128, u128) {
     if shift >= 256 {
         return (0, 0);
     }
-    if shift >= 128 {
-        return (0, hi >> (shift - 128));
-    }
-    (hi >> shift, (lo >> shift) | (hi << (128 - shift)))
+    let value = (U256::from(hi) << 128) | U256::from(lo);
+    let shifted = value >> shift;
+    (((shifted >> 128).low_u128()), shifted.low_u128())
 }
 
 /// Floor division for i128 — rounds toward negative infinity.
@@ -452,13 +553,46 @@ pub fn target_to_difficulty(target: &[u8; 32]) -> u128 {
 ///   1. Executar: date +%s
 ///   2. Atualizar GENESIS_TIMESTAMP_PLACEHOLDER em dom-core/src/constants.rs
 ///   3. Recompilar e distribuir binarios
-pub fn genesis_anchor() -> AsertAnchor {
+pub fn genesis_anchor(network_magic: u32) -> Result<AsertAnchor, DomError> {
     use dom_core::GENESIS_TIMESTAMP_PLACEHOLDER;
-    AsertAnchor {
+    let params = pow_params_for_network(network_magic);
+    Ok(AsertAnchor {
         timestamp: dom_core::Timestamp(GENESIS_TIMESTAMP_PLACEHOLDER),
         height: dom_core::BlockHeight::GENESIS,
-        target: dom_core::MAX_TARGET_BYTES,
+        target: params.genesis_target()?,
+    })
+}
+
+/// Compute the exact expected target for a block on the given network.
+pub fn expected_target_for_network(
+    network_magic: u32,
+    block_timestamp: Timestamp,
+    block_height: BlockHeight,
+) -> Result<[u8; 32], DomError> {
+    let params = pow_params_for_network(network_magic);
+    let anchor = genesis_anchor(network_magic)?;
+    if block_height == BlockHeight::GENESIS {
+        return params.genesis_target();
     }
+    asert_next_target_with_params(&anchor, block_timestamp, block_height, &params)
+}
+
+/// Convert a canonical 32-byte target to Bitcoin compact form.
+pub fn target_to_compact(t: &[u8; 32]) -> u32 {
+    let mut first = 0usize;
+    for (i, &b) in t.iter().enumerate() {
+        if b != 0 {
+            first = i;
+            break;
+        }
+    }
+    let exp = (32 - first) as u32;
+    let m = if first + 2 < 32 {
+        ((t[first] as u32) << 16) | ((t[first + 1] as u32) << 8) | (t[first + 2] as u32)
+    } else {
+        (t[first] as u32) << 16
+    };
+    (exp << 24) | (m & 0x007f_ffff)
 }
 
 #[cfg(test)]
@@ -561,6 +695,21 @@ mod tests {
         let d = target_to_difficulty(&MAX_TARGET_BYTES);
         assert_eq!(d, 1, "MAX_TARGET must have difficulty 1");
     }
+
+    #[test]
+    fn testnet_floor_is_about_32x_harder_than_easy_compact_target() {
+        let easy = CompactTarget(MAX_COMPACT_TARGET).to_target().unwrap();
+        let testnet = CompactTarget(TESTNET_TARGET_COMPACT).to_target().unwrap();
+        let ratio = U256::from_big_endian(&easy) / U256::from_big_endian(&testnet);
+        assert!(ratio >= U256::from(31u8) && ratio <= U256::from(33u8));
+    }
+
+    #[test]
+    fn testnet_params_use_sixty_second_spacing() {
+        let params = pow_params_for_network(NETWORK_MAGIC_TESTNET);
+        assert_eq!(params.target_spacing, 60);
+        assert_eq!(params.max_compact_target, TESTNET_TARGET_COMPACT);
+    }
 }
 
 // ── Strict ASERT behavioral tests (restored after audit) ─────────────────────
@@ -606,10 +755,11 @@ mod asert_strict_tests {
 
     #[test]
     fn asert_clamps_to_max_target_when_very_slow() {
+        let easiest = CompactTarget(MAX_COMPACT_TARGET).to_target().unwrap();
         let anchor = AsertAnchor {
             timestamp: Timestamp(0),
             height: BlockHeight(0),
-            target: MAX_TARGET_BYTES,
+            target: easiest,
         };
         // Block arrives 100 half-lives late — should clamp to MAX
         let huge_time = TARGET_SPACING
@@ -617,7 +767,7 @@ mod asert_strict_tests {
             .unwrap();
         let result = asert_next_target(&anchor, Timestamp(huge_time), BlockHeight(1)).unwrap();
         assert_eq!(
-            result, MAX_TARGET_BYTES,
+            result, easiest,
             "pathologically slow blocks must clamp to MAX_TARGET"
         );
     }
