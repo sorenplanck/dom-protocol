@@ -2,12 +2,15 @@
 //! Chain state — current tip, validation, block commitment.
 
 use dom_consensus::block::{
-    validate_future_timestamp, validate_header_syntax, validate_median_time_past, validate_pow,
-    BlockHeader,
+    validate_future_timestamp_with_limit, validate_header_syntax, validate_median_time_past,
+    validate_parent_timestamp_progression, validate_pow, BlockHeader,
 };
 use dom_consensus::{derive_chain_id, validate_block, Block, Transaction, ValidationContext};
 use dom_core::{BlockHeight, DomError, Hash256, Timestamp};
-use dom_pow::{randomx_seed_height, target_to_difficulty, AsertAnchor, CompactTarget};
+use dom_pow::{
+    expected_target_for_network, genesis_anchor, randomx_seed_height, target_to_difficulty,
+    AsertAnchor,
+};
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::utxo::UtxoEntry;
 use dom_store::DomStore;
@@ -78,14 +81,8 @@ impl ChainState {
         genesis_hash: Hash256,
         network_magic: u32,
     ) -> Result<Self, DomError> {
-        let genesis_target = CompactTarget(dom_core::GENESIS_TARGET_COMPACT)
-            .to_target()
-            .map_err(|e| DomError::Internal(format!("GENESIS_TARGET_COMPACT: {e}")))?;
-        let asert_anchor = AsertAnchor {
-            timestamp: Timestamp(dom_core::GENESIS_TIMESTAMP_PLACEHOLDER),
-            height: BlockHeight::GENESIS,
-            target: genesis_target,
-        };
+        let asert_anchor = genesis_anchor(network_magic)
+            .map_err(|e| DomError::Internal(format!("genesis anchor: {e}")))?;
 
         let (tip_hash, tip_height, tip_difficulty) = match store.get_chain_tip()? {
             Some(hash) => {
@@ -216,11 +213,13 @@ impl ChainState {
                     header.height
                 )));
             }
+            validate_parent_timestamp_progression(header, &parent)?;
             let ancestors = self.get_recent_timestamps(header.height.0, 11)?;
             validate_median_time_past(header, &ancestors)?;
         }
 
-        validate_future_timestamp(header, now)?;
+        validate_future_timestamp_with_limit(header, now, self.max_future_block_time())?;
+        self.validate_expected_target(header)?;
         let seed = self.compute_randomx_seed(header.height.0)?;
         validate_pow(header, &seed)?;
 
@@ -376,12 +375,27 @@ impl ChainState {
                 validate_header_syntax(header)?;
 
                 if header.height != BlockHeight::GENESIS {
+                    let parent = if idx == 0 {
+                        let parent_bytes = self
+                            .store
+                            .get_block_header(header.prev_hash.as_bytes())?
+                            .ok_or_else(|| {
+                                DomError::Internal(
+                                    "parent missing after IBD parent precheck".into(),
+                                )
+                            })?;
+                        BlockHeader::from_bytes(&parent_bytes)?
+                    } else {
+                        decoded[idx - 1].0.clone()
+                    };
+                    validate_parent_timestamp_progression(header, &parent)?;
                     let ancestors =
                         self.collect_ibd_ancestor_timestamps(header.height.0, &prior_headers, 11)?;
                     validate_median_time_past(header, &ancestors)?;
                 }
 
-                validate_future_timestamp(header, now)?;
+                validate_future_timestamp_with_limit(header, now, self.max_future_block_time())?;
+                self.validate_expected_target(header)?;
                 let seed = self.compute_randomx_seed(header.height.0)?;
                 validate_pow(header, &seed)?;
 
@@ -514,6 +528,24 @@ impl ChainState {
                 validate_header_syntax(&header)?;
 
                 if header.height != BlockHeight::GENESIS {
+                    let parent = if decoded_prefix.is_empty() {
+                        let parent_bytes = self
+                            .store
+                            .get_block_header(header.prev_hash.as_bytes())?
+                            .ok_or_else(|| {
+                                DomError::Internal(
+                                    "parent missing after IBD parent precheck".into(),
+                                )
+                            })?;
+                        BlockHeader::from_bytes(&parent_bytes)?
+                    } else {
+                        decoded_prefix
+                            .last()
+                            .expect("decoded prefix not empty")
+                            .0
+                            .clone()
+                    };
+                    validate_parent_timestamp_progression(&header, &parent)?;
                     let prior_headers: Vec<BlockHeader> = decoded_prefix
                         .iter()
                         .map(|(prior_header, _, _)| prior_header.clone())
@@ -523,7 +555,8 @@ impl ChainState {
                     validate_median_time_past(&header, &ancestors)?;
                 }
 
-                validate_future_timestamp(&header, now)?;
+                validate_future_timestamp_with_limit(&header, now, self.max_future_block_time())?;
+                self.validate_expected_target(&header)?;
                 let seed = self.compute_randomx_seed(header.height.0)?;
                 validate_pow(&header, &seed)?;
 
@@ -591,9 +624,37 @@ impl ChainState {
         }
 
         validate_header_syntax(header)?;
-        validate_future_timestamp(header, now)?;
+        validate_future_timestamp_with_limit(header, now, self.max_future_block_time())?;
+        self.validate_expected_target(header)?;
         let seed = self.compute_randomx_seed(header.height.0)?;
         validate_pow(header, &seed)?;
+        Ok(())
+    }
+
+    fn max_future_block_time(&self) -> u64 {
+        if self.network_magic == dom_core::NETWORK_MAGIC_TESTNET {
+            dom_core::TESTNET_MAX_FUTURE_BLOCK_TIME
+        } else {
+            dom_core::MAX_FUTURE_BLOCK_TIME
+        }
+    }
+
+    fn validate_expected_target(&self, header: &BlockHeader) -> Result<(), DomError> {
+        let expected =
+            expected_target_for_network(self.network_magic, header.timestamp, header.height)
+                .map_err(|e| DomError::Invalid(format!("expected target: {e}")))?;
+        let actual = header
+            .target
+            .to_target()
+            .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?;
+        if actual != expected {
+            return Err(DomError::Invalid(format!(
+                "target mismatch at height {}: expected {:08x}, got {:08x}",
+                header.height.0,
+                dom_pow::target_to_compact(&expected),
+                header.target.0
+            )));
+        }
         Ok(())
     }
 

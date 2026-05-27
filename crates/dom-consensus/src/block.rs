@@ -192,8 +192,18 @@ fn validate_kernel_offset_canonical(offset: &[u8; 32]) -> Result<(), DomError> {
 ///
 /// Returns TemporarilyInvalid if timestamp > now + MAX_FUTURE_BLOCK_TIME.
 pub fn validate_future_timestamp(header: &BlockHeader, now: Timestamp) -> Result<(), DomError> {
+    validate_future_timestamp_with_limit(header, now, MAX_FUTURE_BLOCK_TIME)
+}
+
+/// Check that the block timestamp is not too far in the future with an
+/// explicit network-specific limit.
+pub fn validate_future_timestamp_with_limit(
+    header: &BlockHeader,
+    now: Timestamp,
+    max_future_block_time: u64,
+) -> Result<(), DomError> {
     let limit = now
-        .checked_add_secs(MAX_FUTURE_BLOCK_TIME)
+        .checked_add_secs(max_future_block_time)
         .ok_or_else(|| DomError::Internal("timestamp limit overflow".into()))?;
     if header.timestamp > limit {
         return Err(DomError::TemporarilyInvalid(format!(
@@ -219,12 +229,27 @@ pub fn validate_future_timestamp_with_buffer(
     header: &BlockHeader,
     now: Timestamp,
 ) -> Result<TimestampDecision, DomError> {
+    validate_future_timestamp_with_buffer_limits(
+        header,
+        now,
+        MAX_FUTURE_BLOCK_TIME,
+        FUTURE_BLOCK_SOFT_BUFFER_SECS,
+    )
+}
+
+/// Validate block timestamp with explicit hard and soft limits.
+pub fn validate_future_timestamp_with_buffer_limits(
+    header: &BlockHeader,
+    now: Timestamp,
+    max_future_block_time: u64,
+    future_block_soft_buffer_secs: u64,
+) -> Result<TimestampDecision, DomError> {
     let hard_limit = now
-        .checked_add_secs(MAX_FUTURE_BLOCK_TIME)
+        .checked_add_secs(max_future_block_time)
         .ok_or_else(|| DomError::Invalid("timestamp overflow".into()))?;
 
     let soft_limit = now
-        .checked_add_secs(MAX_FUTURE_BLOCK_TIME + FUTURE_BLOCK_SOFT_BUFFER_SECS)
+        .checked_add_secs(max_future_block_time + future_block_soft_buffer_secs)
         .ok_or_else(|| DomError::Invalid("timestamp overflow".into()))?;
 
     if header.timestamp.0 > soft_limit.0 {
@@ -239,6 +264,20 @@ pub fn validate_future_timestamp_with_buffer(
     }
 
     Ok(TimestampDecision::Accept)
+}
+
+/// Validate strict parent timestamp monotonicity.
+pub fn validate_parent_timestamp_progression(
+    header: &BlockHeader,
+    parent: &BlockHeader,
+) -> Result<(), DomError> {
+    if header.timestamp.0 <= parent.timestamp.0 {
+        return Err(DomError::Invalid(format!(
+            "block timestamp {} not greater than parent timestamp {}",
+            header.timestamp.0, parent.timestamp.0
+        )));
+    }
+    Ok(())
 }
 
 /// Decision returned by `validate_future_timestamp_with_buffer`.
@@ -370,5 +409,23 @@ mod tests {
         // Ancestors all have timestamp 200 → median = 200 > block timestamp 100
         let ancestors = vec![Timestamp(200); MEDIAN_TIME_WINDOW];
         assert!(validate_median_time_past(&h, &ancestors).is_err());
+    }
+
+    #[test]
+    fn parent_timestamp_progression_enforced() {
+        let parent = dummy_header();
+        let mut child = dummy_header();
+        child.height = BlockHeight(1);
+        child.prev_hash = Hash256::from_bytes([1u8; 32]);
+        child.timestamp = parent.timestamp;
+        assert!(validate_parent_timestamp_progression(&child, &parent).is_err());
+    }
+
+    #[test]
+    fn explicit_future_limit_respected() {
+        let mut h = dummy_header();
+        h.timestamp = Timestamp(131);
+        let now = Timestamp(100);
+        assert!(validate_future_timestamp_with_limit(&h, now, 30).is_err());
     }
 }

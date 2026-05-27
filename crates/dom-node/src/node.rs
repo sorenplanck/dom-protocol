@@ -2826,8 +2826,27 @@ async fn message_loop(
                         let now = dom_core::Timestamp(now_secs);
 
                         // Doc 4.5 mitigation 1: soft buffer for future blocks
-                        use dom_consensus::block::{validate_future_timestamp_with_buffer, TimestampDecision};
-                        match validate_future_timestamp_with_buffer(&block.header, now) {
+                        use dom_consensus::block::{
+                            validate_future_timestamp_with_buffer_limits, TimestampDecision,
+                        };
+                        let (max_future, soft_buffer) =
+                            if config.network == dom_config::Network::Testnet {
+                                (
+                                    dom_core::TESTNET_MAX_FUTURE_BLOCK_TIME,
+                                    dom_core::TESTNET_FUTURE_BLOCK_SOFT_BUFFER_SECS,
+                                )
+                            } else {
+                                (
+                                    dom_core::MAX_FUTURE_BLOCK_TIME,
+                                    dom_core::FUTURE_BLOCK_SOFT_BUFFER_SECS,
+                                )
+                            };
+                        match validate_future_timestamp_with_buffer_limits(
+                            &block.header,
+                            now,
+                            max_future,
+                            soft_buffer,
+                        ) {
                             Ok(TimestampDecision::Accept) => {
                                 // Normal path: validate and connect
                                 let height = block.header.height.0;

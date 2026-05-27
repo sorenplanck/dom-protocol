@@ -9,8 +9,8 @@ use dom_core::{
     WEIGHT_COINBASE_KERNEL, WEIGHT_OUTPUT,
 };
 use dom_pow::{
-    asert_next_target, genesis_anchor, hash_meets_target, randomx_seed_height,
-    target_to_difficulty, CompactTarget,
+    expected_target_for_network, genesis_anchor, hash_meets_target, randomx_seed_height,
+    target_to_compact, target_to_difficulty, CompactTarget,
 };
 use primitive_types::U256;
 use std::sync::Arc;
@@ -205,7 +205,7 @@ pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     use dom_core::GENESIS_MESSAGE;
     info!("Criando bloco genesis...");
     info!("Mensagem: {}", GENESIS_MESSAGE);
-    let anchor = genesis_anchor();
+    let anchor = genesis_anchor(node.config.network.magic())?;
 
     // Deterministic genesis coinbase — identical on every node.
     let genesis_coinbase = build_genesis_coinbase(&chain_id_for(&node.config))?;
@@ -226,7 +226,7 @@ pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
         rangeproof_root,
         total_kernel_offset: [0u8; 32],
         target: CompactTarget(target_to_compact(&anchor.target)),
-        total_difficulty: U256::one(),
+        total_difficulty: U256::from(target_to_difficulty(&anchor.target)),
         pow: ProofOfWork {
             nonce: 0,
             randomx_hash: Hash256::ZERO,
@@ -264,7 +264,7 @@ pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     )?;
     chain.tip_hash = Hash256::from_bytes(genesis_hash);
     chain.tip_height = dom_core::BlockHeight::GENESIS;
-    chain.tip_difficulty = primitive_types::U256::one();
+    chain.tip_difficulty = primitive_types::U256::from(target_to_difficulty(&anchor.target));
     // NOTE: do NOT overwrite chain.genesis_hash with the computed hash here.
     // The chain_id used for kernel signatures is derived from the *constant*
     // GENESIS_HASH_{MAINNET,TESTNET,REGTEST} (see chain_id_for() and
@@ -284,23 +284,11 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     };
 
     let new_height = tip_height.0 + 1;
-    let anchor = genesis_anchor();
-    // Network-specific target selection:
-    //   - Regtest: the defensively-named REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION
-    //     (~2^-16 acceptance against MAX_TARGET_BYTES; low effort, not zero effort).
-    //   - Testnet: MAX_TARGET_BYTES (easy enough for commodity CPUs).
-    //   - Mainnet: full ASERT difficulty from the genesis anchor.
-    let target = match node.config.network {
-        dom_config::Network::Regtest => dom_core::REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION,
-        dom_config::Network::Testnet => dom_core::MAX_TARGET_BYTES,
-        dom_config::Network::Mainnet => {
-            if new_height == 1 {
-                anchor.target
-            } else {
-                asert_next_target(&anchor, Timestamp(now_secs()), BlockHeight(new_height))?
-            }
-        }
-    };
+    let target = expected_target_for_network(
+        node.config.network.magic(),
+        Timestamp(now_secs()),
+        BlockHeight(new_height),
+    )?;
     let block_diff = target_to_difficulty(&target);
     let new_total_diff = tip_difficulty.saturating_add(U256::from(block_diff));
 
@@ -612,23 +600,6 @@ fn randomx_hash(vm: &randomx_rs::RandomXVM, preimage: &[u8]) -> Result<[u8; 32],
     Ok(arr)
 }
 
-fn target_to_compact(t: &[u8; 32]) -> u32 {
-    let mut first = 0usize;
-    for (i, &b) in t.iter().enumerate() {
-        if b != 0 {
-            first = i;
-            break;
-        }
-    }
-    let exp = (32 - first) as u32;
-    let m = if first + 2 < 32 {
-        ((t[first] as u32) << 16) | ((t[first + 1] as u32) << 8) | (t[first + 2] as u32)
-    } else {
-        (t[first] as u32) << 16
-    };
-    (exp << 24) | (m & 0x007f_ffff)
-}
-
 #[cfg(test)]
 mod genesis_determinism_tests {
     //! Roadmap v2 Phase 6.3 — Bootstrap recoverability proofs.
@@ -762,5 +733,64 @@ mod genesis_determinism_tests {
         assert!(super::use_light_vm(dom_config::Network::Regtest));
         assert!(!super::use_light_vm(dom_config::Network::Mainnet));
         assert!(!super::use_light_vm(dom_config::Network::Testnet));
+    }
+}
+
+#[cfg(test)]
+mod cadence_probe_tests {
+    use super::*;
+    use dom_pow::{MAX_COMPACT_TARGET, TESTNET_TARGET_COMPACT};
+    use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
+    use std::io::Write;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "manual local cadence probe"]
+    fn manual_testnet_cadence_probe() {
+        let seed_hash = [0u8; 32];
+        let flags = RandomXFlag::get_recommended_flags();
+        let cache = RandomXCache::new(flags, &seed_hash).expect("cache");
+        let vm = RandomXVM::new(flags, Some(cache), None).expect("vm");
+
+        let mine_one = |compact: u32| -> (f64, u64) {
+            let target = CompactTarget(compact).to_target().expect("target");
+            let started = Instant::now();
+            let mut nonce = 0u64;
+            loop {
+                let header = BlockHeader {
+                    version: dom_core::PROTOCOL_VERSION,
+                    prev_hash: Hash256::ZERO,
+                    height: BlockHeight(1),
+                    timestamp: Timestamp(now_secs()),
+                    output_root: Hash256::ZERO,
+                    kernel_root: Hash256::ZERO,
+                    rangeproof_root: Hash256::ZERO,
+                    total_kernel_offset: [0u8; 32],
+                    target: CompactTarget(compact),
+                    total_difficulty: U256::one(),
+                    pow: ProofOfWork {
+                        nonce,
+                        randomx_hash: Hash256::ZERO,
+                    },
+                };
+                let hash = randomx_hash(&vm, &header.pow_preimage()).expect("hash");
+                if hash_meets_target(&hash, &target) {
+                    return (started.elapsed().as_secs_f64(), nonce);
+                }
+                nonce = nonce.wrapping_add(1);
+            }
+        };
+
+        for (label, compact) in [
+            ("before", MAX_COMPACT_TARGET),
+            ("after", TESTNET_TARGET_COMPACT),
+        ] {
+            let (elapsed, nonce) = mine_one(compact);
+            println!(
+                "{} compact=0x{:08x} elapsed_secs={:.3} nonce={}",
+                label, compact, elapsed, nonce
+            );
+            std::io::stdout().flush().expect("flush");
+        }
     }
 }

@@ -10,11 +10,10 @@
 
 use dom_consensus::{block::ProofOfWork, derive_chain_id, BlockHeader};
 use dom_core::{
-    BlockHeight, DomError, Hash256, Timestamp, GENESIS_MESSAGE, GENESIS_TARGET_COMPACT,
-    GENESIS_TIMESTAMP_PLACEHOLDER, INITIAL_BLOCK_REWARD, NETWORK_MAGIC_MAINNET,
-    NETWORK_MAGIC_TESTNET,
+    BlockHeight, DomError, Hash256, Timestamp, GENESIS_MESSAGE, GENESIS_TIMESTAMP_PLACEHOLDER,
+    INITIAL_BLOCK_REWARD, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_TESTNET,
 };
-use dom_pow::CompactTarget;
+use dom_pow::{genesis_anchor, target_to_compact, target_to_difficulty, CompactTarget};
 use primitive_types::U256;
 use sha2::{Digest, Sha256};
 
@@ -48,6 +47,7 @@ impl GenesisResult {
 /// - `network_magic`: NETWORK_MAGIC_MAINNET or NETWORK_MAGIC_TESTNET
 /// - `timestamp`: Unix timestamp for genesis.
 pub fn build_genesis(network_magic: u32, timestamp: u64) -> Result<GenesisResult, DomError> {
+    let anchor = genesis_anchor(network_magic)?;
     let header = BlockHeader {
         version: dom_core::PROTOCOL_VERSION,
         height: BlockHeight::GENESIS,
@@ -57,8 +57,8 @@ pub fn build_genesis(network_magic: u32, timestamp: u64) -> Result<GenesisResult
         kernel_root: Hash256::ZERO,
         rangeproof_root: Hash256::ZERO,
         total_kernel_offset: [0u8; 32],
-        target: CompactTarget(GENESIS_TARGET_COMPACT),
-        total_difficulty: U256::from(1u64),
+        target: CompactTarget(target_to_compact(&anchor.target)),
+        total_difficulty: U256::from(target_to_difficulty(&anchor.target)),
         pow: ProofOfWork {
             nonce: 0,
             randomx_hash: Hash256::ZERO,

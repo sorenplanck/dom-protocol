@@ -179,12 +179,21 @@ pub const MAX_LOCATOR_HASHES: usize = 32;
 /// clock before being rejected as TemporarilyInvalid. Per whitepaper §9 step 3.
 pub const MAX_FUTURE_BLOCK_TIME: u64 = 120;
 
+/// [CONSENSUS] Testnet future timestamp bound.
+///
+/// Tighter than mainnet to prevent fast timestamp-warped testnet mining once
+/// ASERT enforcement is active.
+pub const TESTNET_MAX_FUTURE_BLOCK_TIME: u64 = 30;
+
 /// [POLICY] Soft buffer for blocks slightly beyond MAX_FUTURE_BLOCK_TIME.
 /// Blocks with timestamp in (now+MAX_FUTURE_BLOCK_TIME, now+MAX_FUTURE_BLOCK_TIME+SOFT_BUFFER]
 /// are deferred for re-evaluation rather than immediately rejected.
 /// This reduces orphan rate from transient clock drift without changing
 /// the consensus rule (MAX_FUTURE_BLOCK_TIME remains the hard limit).
 pub const FUTURE_BLOCK_SOFT_BUFFER_SECS: u64 = 60;
+
+/// [POLICY] Testnet soft future timestamp buffer.
+pub const TESTNET_FUTURE_BLOCK_SOFT_BUFFER_SECS: u64 = 15;
 
 /// [CONSENSUS] Median-time-past window size.
 pub const MEDIAN_TIME_WINDOW: usize = 11;
@@ -521,8 +530,7 @@ mod tests {
         // Cheapest invariant: identical to MAX_TARGET_BYTES (equality is the
         // weakest target consensus accepts).
         assert_eq!(
-            REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION,
-            MAX_TARGET_BYTES,
+            REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION, MAX_TARGET_BYTES,
             "REGTEST_TRIVIAL_TARGET must equal MAX_TARGET_BYTES — consensus accepts it"
         );
     }
