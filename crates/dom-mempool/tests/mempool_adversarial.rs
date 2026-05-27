@@ -230,17 +230,20 @@ fn remove_confirmed_drops_double_spend_descendants() {
     let mut pool = Mempool::new();
     let utxo = h_commitment();
 
-    // Submit two txs spending the same UTXO — only the second can
-    // actually be valid on-chain, but the mempool accepts both
-    // since structural validation doesn't see the chainstate.
+    // Submit one tx spending the UTXO, then confirm that a second
+    // conflicting spend is rejected while the first reservation is
+    // still live in the pool.
     let (a, ah) = make_spending_tx(utxo.clone(), MIN_RELAY_FEE_RATE * 25, 0x01);
     let (b, bh) = make_spending_tx(utxo.clone(), MIN_RELAY_FEE_RATE * 26, 0x02);
     pool.accept_tx(a, ah, 0).expect("a");
-    pool.accept_tx(b, bh, 1).expect("b");
-    assert_eq!(pool.len(), 2);
+    let err = pool.accept_tx(b, bh, 1).expect_err("b must conflict");
+    assert!(
+        matches!(err, dom_core::DomError::PolicyRejected(ref msg) if msg.contains("input already reserved by mempool tx")),
+        "unexpected conflict error: {err}"
+    );
+    assert_eq!(pool.len(), 1);
 
-    // Confirm one — both must drop because both spend the same
-    // commitment.
+    // Confirm the live one — the input reservation must be released.
     pool.remove_confirmed(&[*utxo.as_bytes()]);
     assert_eq!(
         pool.len(),
