@@ -16,6 +16,7 @@ pub struct WalletApp {
     restore_network: Network,
     restore_phrase: String,
     unlock_password: String,
+    receive_amount: String,
 }
 
 impl WalletApp {
@@ -33,6 +34,7 @@ impl WalletApp {
             restore_network: Network::Regtest,
             restore_phrase: String::new(),
             unlock_password: String::new(),
+            receive_amount: String::new(),
         })
     }
 }
@@ -258,9 +260,55 @@ impl WalletApp {
 
     fn render_receive(&mut self, ui: &mut egui::Ui) {
         ui.heading("Receive");
-        ui.label("Deterministic receive generation is intentionally not invented in the UI.");
-        ui.label("The current wallet core does not yet expose a finalized public receive descriptor format.");
-        ui.label("Next batch: wire receive generation only after the core receive API is explicit and replay-safe.");
+        ui.label("Conservative receive in DOM Wallet V1 is an exact-amount payment request.");
+        ui.label("This is not a generic open-ended address. The sender must use the exact amount, commitment, and blinding shown below.");
+        ui.label("No hidden state mutation occurs here. Requests are persisted inside the encrypted wallet and re-derived deterministically on reopen.");
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Amount (noms)");
+            ui.text_edit_singleline(&mut self.receive_amount);
+            if ui.button("Create Request").clicked() {
+                match self.receive_amount.trim().parse::<u64>() {
+                    Ok(amount) => {
+                        if let Err(e) = self.runtime.create_receive_request(amount) {
+                            self.runtime
+                                .set_error(format!("create receive request: {e}"));
+                        } else {
+                            self.receive_amount.clear();
+                        }
+                    }
+                    Err(e) => self.runtime.set_error(format!("parse receive amount: {e}")),
+                }
+            }
+            if ui.button("Refresh Detection").clicked() {
+                if let Err(e) = self.runtime.refresh_receive_statuses() {
+                    self.runtime
+                        .set_error(format!("refresh receive detection: {e}"));
+                }
+            }
+        });
+
+        ui.separator();
+        if self.runtime.receive_requests.is_empty() {
+            ui.label("No receive requests have been created yet.");
+            return;
+        }
+
+        for row in &self.runtime.receive_requests {
+            ui.group(|ui| {
+                ui.label(format!("Index: {}", row.index));
+                ui.label(format!("Amount: {} noms", row.amount));
+                ui.label(format!("Created: {}", row.created_at));
+                ui.label(format!("Status: {}", row.status));
+                ui.label("Address payload");
+                ui.code(&row.address);
+                ui.label("Commitment");
+                ui.code(&row.commitment_hex);
+                ui.label("Recipient blinding");
+                ui.code(&row.blinding_hex);
+            });
+        }
     }
 
     fn render_send(&mut self, ui: &mut egui::Ui) {

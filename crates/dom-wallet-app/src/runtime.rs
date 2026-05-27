@@ -1,8 +1,8 @@
 use crate::storage::{self, AppStorageError, PersistedAppState};
 use dom_core::{Hash256, GENESIS_HASH_MAINNET, GENESIS_HASH_REGTEST, GENESIS_HASH_TESTNET};
 use dom_wallet::{
-    Bip39Seed, Network, NodeRpc, NodeRpcClient, NodeStatus, RpcClientError, SeedAcceptance,
-    TxStatus, WalletBalance, WalletDir,
+    Bip39Seed, Network, NodeRpc, NodeRpcClient, NodeStatus, ReceiveRequestDescriptor,
+    ReceiveRequestStatus, RpcClientError, SeedAcceptance, TxStatus, WalletBalance, WalletDir,
 };
 use std::path::{Path, PathBuf};
 use url::Url;
@@ -29,6 +29,17 @@ pub struct HistoryRow {
     pub status: String,
 }
 
+#[derive(Clone)]
+pub struct ReceiveRow {
+    pub index: u32,
+    pub amount: u64,
+    pub address: String,
+    pub commitment_hex: String,
+    pub blinding_hex: String,
+    pub created_at: u64,
+    pub status: String,
+}
+
 pub struct WalletSession {
     pub wallet_dir: WalletDir,
 }
@@ -41,6 +52,7 @@ pub struct AppRuntime {
     pub node_status: Option<NodeStatus>,
     pub wallet_balance: Option<WalletBalance>,
     pub history: Vec<HistoryRow>,
+    pub receive_requests: Vec<ReceiveRow>,
     pub last_error: Option<String>,
 }
 
@@ -55,6 +67,7 @@ impl AppRuntime {
             node_status: None,
             wallet_balance: None,
             history: Vec::new(),
+            receive_requests: Vec::new(),
             last_error: None,
         })
     }
@@ -137,6 +150,7 @@ impl AppRuntime {
         self.session = None;
         self.wallet_balance = None;
         self.history.clear();
+        self.receive_requests.clear();
         self.screen = if self.persisted.wallet_dir.is_some() {
             Screen::Unlock
         } else {
@@ -156,6 +170,7 @@ impl AppRuntime {
         let Some(session) = &self.session else {
             self.wallet_balance = None;
             self.history.clear();
+            self.receive_requests.clear();
             return;
         };
 
@@ -166,6 +181,54 @@ impl AppRuntime {
             .unwrap_or(0);
         self.wallet_balance = Some(session.wallet_dir.wallet().balance(current_height));
         self.history = journal_rows(session.wallet_dir.path());
+        match session.wallet_dir.wallet().receive_descriptors() {
+            Ok(rows) => {
+                self.receive_requests = rows.into_iter().map(receive_row).collect();
+            }
+            Err(e) => {
+                self.receive_requests.clear();
+                self.set_error(format!("receive descriptor validation: {e}"));
+            }
+        }
+    }
+
+    pub fn create_receive_request(&mut self, amount: u64) -> anyhow::Result<()> {
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("wallet is not unlocked"))?;
+        session
+            .wallet_dir
+            .wallet_mut()
+            .create_receive_request(amount)?;
+        self.refresh_wallet_view();
+        Ok(())
+    }
+
+    pub fn refresh_receive_statuses(&mut self) -> anyhow::Result<()> {
+        let Some(session) = self.session.as_mut() else {
+            return Err(anyhow::anyhow!("wallet is not unlocked"));
+        };
+
+        let client = node_client(&self.persisted.node_url)?;
+        let descriptors = session.wallet_dir.wallet().receive_descriptors()?;
+        for descriptor in descriptors {
+            let commitment = parse_commitment_hex(&descriptor.commitment_hex)?;
+            let next_status =
+                client
+                    .utxo(&commitment)?
+                    .map(|utxo| ReceiveRequestStatus::Detected {
+                        block_height: utxo.block_height,
+                        is_coinbase: utxo.is_coinbase,
+                        is_mature: utxo.is_mature,
+                    });
+            session
+                .wallet_dir
+                .wallet_mut()
+                .update_receive_request_status(&commitment, next_status)?;
+        }
+        self.refresh_wallet_view();
+        Ok(())
     }
 }
 
@@ -200,6 +263,32 @@ fn format_tx_status(status: &TxStatus) -> String {
     }
 }
 
+fn receive_row(descriptor: ReceiveRequestDescriptor) -> ReceiveRow {
+    ReceiveRow {
+        index: descriptor.index,
+        amount: descriptor.amount,
+        address: descriptor.address,
+        commitment_hex: descriptor.commitment_hex,
+        blinding_hex: descriptor.blinding_hex,
+        created_at: descriptor.created_at,
+        status: format_receive_status(&descriptor.status),
+    }
+}
+
+fn format_receive_status(status: &ReceiveRequestStatus) -> String {
+    match status {
+        ReceiveRequestStatus::Pending => "pending".to_string(),
+        ReceiveRequestStatus::Detected {
+            block_height,
+            is_coinbase,
+            is_mature,
+        } => format!(
+            "detected @ {block_height} (coinbase={}, mature={})",
+            is_coinbase, is_mature
+        ),
+    }
+}
+
 fn genesis_hash_for(network: Network) -> Hash256 {
     match network {
         Network::Mainnet => Hash256::from_bytes(GENESIS_HASH_MAINNET),
@@ -213,6 +302,14 @@ fn node_client(url: &str) -> Result<NodeRpcClient, RpcClientError> {
         reason: format!("invalid node url: {e}"),
     })?;
     NodeRpcClient::builder(parsed).build()
+}
+
+fn parse_commitment_hex(value: &str) -> anyhow::Result<[u8; 33]> {
+    let bytes = hex::decode(value)?;
+    let arr: [u8; 33] = bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| anyhow::anyhow!("commitment must be 33 bytes, got {}", v.len()))?;
+    Ok(arr)
 }
 
 #[cfg(test)]

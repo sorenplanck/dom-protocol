@@ -222,6 +222,19 @@ pub struct MempoolTxInfo {
     pub weight: u32,
 }
 
+/// Snapshot of a currently unspent output in the node's canonical UTXO set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UtxoInfo {
+    /// Commitment bytes.
+    pub commitment: [u8; 33],
+    /// Block height that created the UTXO.
+    pub block_height: u64,
+    /// Whether the output is coinbase.
+    pub is_coinbase: bool,
+    /// Whether the node reports it as mature.
+    pub is_mature: bool,
+}
+
 /// Read-side RPC surface exposed by [`NodeRpcClient`]. The trait is
 /// object-safe so higher layers can substitute a mock in tests
 /// without depending on `reqwest`.
@@ -257,6 +270,11 @@ pub trait NodeRpc {
     /// mempool, `Ok(None)` if absent. Confirmation status is **not**
     /// exposed by this endpoint — that's a higher-layer concern.
     fn mempool_tx(&self, tx_hash: &[u8; 32]) -> Result<Option<MempoolTxInfo>, RpcClientError>;
+
+    /// `GET /utxo/{commitment}`. Returns `Ok(Some(_))` if the
+    /// commitment currently exists in the canonical UTXO set,
+    /// `Ok(None)` if absent or already spent.
+    fn utxo(&self, commitment: &[u8; 33]) -> Result<Option<UtxoInfo>, RpcClientError>;
 }
 
 /// Blocking HTTP client for the node RPC surface.
@@ -423,6 +441,34 @@ impl NodeRpc for NodeRpcClient {
             }))
         } else {
             Err(classify_response_status(resp, status, &url_s))
+        }
+    }
+
+    fn utxo(&self, commitment: &[u8; 33]) -> Result<Option<UtxoInfo>, RpcClientError> {
+        let url = self.url_for(&format!("utxo/{}", hex::encode(commitment)))?;
+        let url_s = url.to_string();
+        let resp = self.send(self.with_auth(self.http.get(url)), &url_s)?;
+        let status = resp.status();
+        match status {
+            StatusCode::OK => {
+                let parsed: WireUtxo = decode_body(resp, &url_s)?;
+                if !parsed.found {
+                    return Ok(None);
+                }
+                let commitment_hex = parsed.commitment.ok_or_else(|| RpcClientError::Decode {
+                    url: url_s.clone(),
+                    reason: "utxo 200 missing commitment".into(),
+                })?;
+                let commitment = parse_commitment_hex(&commitment_hex, &url_s)?;
+                Ok(Some(UtxoInfo {
+                    commitment,
+                    block_height: parsed.block_height.unwrap_or(0),
+                    is_coinbase: parsed.is_coinbase.unwrap_or(false),
+                    is_mature: parsed.is_mature.unwrap_or(false),
+                }))
+            }
+            StatusCode::NOT_FOUND => Ok(None),
+            _ => Err(classify_response_status(resp, status, &url_s)),
         }
     }
 }
@@ -634,6 +680,19 @@ struct WireBlockHeader {
     target: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct WireUtxo {
+    found: bool,
+    #[serde(default)]
+    commitment: Option<String>,
+    #[serde(default)]
+    block_height: Option<u64>,
+    #[serde(default)]
+    is_coinbase: Option<bool>,
+    #[serde(default)]
+    is_mature: Option<bool>,
+}
+
 /// Server error envelope shared across `RpcError::into_response`. The
 /// submit and block paths produce their own richer shapes; this is the
 /// minimal fallback shape used by `IntoResponse for RpcError`.
@@ -727,6 +786,20 @@ fn parse_hash_hex(s: &str, url: &str) -> Result<[u8; 32], RpcClientError> {
         .map_err(|v: Vec<u8>| RpcClientError::Decode {
             url: url.to_string(),
             reason: format!("hash must be 32 bytes (got {})", v.len()),
+        })?;
+    Ok(arr)
+}
+
+fn parse_commitment_hex(s: &str, url: &str) -> Result<[u8; 33], RpcClientError> {
+    let bytes = hex::decode(s).map_err(|e| RpcClientError::Decode {
+        url: url.to_string(),
+        reason: format!("commitment hex decode: {e}"),
+    })?;
+    let arr: [u8; 33] = bytes
+        .try_into()
+        .map_err(|v: Vec<u8>| RpcClientError::Decode {
+            url: url.to_string(),
+            reason: format!("commitment must be 33 bytes (got {})", v.len()),
         })?;
     Ok(arr)
 }

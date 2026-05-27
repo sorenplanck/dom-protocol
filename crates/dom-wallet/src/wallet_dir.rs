@@ -214,6 +214,7 @@ impl WalletDir {
             chain_id,
             outputs: Vec::new(),
             pending_txs: HashMap::new(),
+            receive_requests: Vec::new(),
             keychain: WalletKeychainState::legacy(),
         };
         save_wallet_file(&dat_path, &initial_state, password)?;

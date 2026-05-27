@@ -214,6 +214,61 @@ impl WalletBalance {
     }
 }
 
+/// Persisted state of a deterministic receive request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReceiveRequestStatus {
+    /// The request has been generated and persisted, but not yet seen
+    /// in the node's canonical UTXO set.
+    Pending,
+    /// The request commitment was observed in the canonical UTXO set.
+    Detected {
+        /// Block height that currently contains the output.
+        block_height: u64,
+        /// Whether the observed output is coinbase.
+        is_coinbase: bool,
+        /// Whether the node reports it as mature.
+        is_mature: bool,
+    },
+}
+
+/// Persisted deterministic receive request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReceiveRequest {
+    /// Deterministic external-chain derivation index.
+    pub index: u32,
+    /// Exact amount this request expects.
+    pub amount: u64,
+    /// Commitment bytes for this amount + deterministic blinding.
+    #[serde(with = "serde_commitment")]
+    pub commitment: [u8; 33],
+    /// Unix timestamp when this request was created.
+    pub created_at: u64,
+    /// Last known on-chain detection status.
+    pub status: ReceiveRequestStatus,
+}
+
+/// UI/export descriptor reconstructed from a persisted receive request.
+///
+/// This is never persisted as plaintext. It is re-derived from the
+/// encrypted seed and the persisted request index on demand.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReceiveRequestDescriptor {
+    /// Deterministic external-chain derivation index.
+    pub index: u32,
+    /// Exact amount this request expects.
+    pub amount: u64,
+    /// DOM address encoding of the commitment payload.
+    pub address: String,
+    /// Commitment bytes as lowercase hex.
+    pub commitment_hex: String,
+    /// Recipient blinding factor as lowercase hex.
+    pub blinding_hex: String,
+    /// Unix timestamp when this request was created.
+    pub created_at: u64,
+    /// Last known on-chain detection status.
+    pub status: ReceiveRequestStatus,
+}
+
 /// Errors that can occur in wallet operations.
 #[derive(Debug, Error)]
 pub enum WalletError {
