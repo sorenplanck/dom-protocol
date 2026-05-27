@@ -1188,6 +1188,27 @@ fn decode_relay_block(msg_payload: &[u8]) -> Result<(Vec<u8>, dom_consensus::Blo
     Ok((payload.block_bytes, block))
 }
 
+fn decode_ibd_block_response(
+    msg_payload: &[u8],
+    expected_hash: [u8; 32],
+) -> Result<(Vec<u8>, dom_consensus::Block), DomError> {
+    use dom_serialization::{DomDeserialize, DomSerialize};
+    use dom_wire::message::BlockPayload;
+
+    let payload = BlockPayload::from_bytes(msg_payload)?;
+    let block = dom_consensus::Block::from_bytes(&payload.block_bytes)?;
+    let header_bytes = block.header.to_bytes()?;
+    let block_hash = *dom_crypto::hash::blake2b_256(&header_bytes).as_bytes();
+    if block_hash != expected_hash {
+        return Err(DomError::Invalid(format!(
+            "IBD block response hash mismatch: expected {}, got {}",
+            hex::encode(expected_hash),
+            hex::encode(block_hash)
+        )));
+    }
+    Ok((payload.block_bytes, block))
+}
+
 async fn record_duplicate_block_relay(
     peers: &Arc<Mutex<PeerManager>>,
     metrics: &Arc<Metrics>,
@@ -1283,10 +1304,8 @@ async fn ibd_sync_round(
     peer_addr: std::net::SocketAddr,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
 ) -> Result<bool, DomError> {
-    use dom_consensus::Block;
-    use dom_serialization::DomDeserialize;
     use dom_wire::message::{
-        BlockPayload, Command, GetBlockDataPayload, GetHeadersPayload, HeadersPayload, WireMessage,
+        Command, GetBlockDataPayload, GetHeadersPayload, HeadersPayload, WireMessage,
     };
 
     // 1. Request headers from peer using our locator.
@@ -1363,7 +1382,7 @@ async fn ibd_sync_round(
         codec.send(stream, &wire).await?;
 
         // Receive one Block per requested hash, in order.
-        for _ in 0..batch.len() {
+        for expected_hash in batch {
             let msg = loop {
                 let m = codec.recv(stream).await?;
                 match m.command {
@@ -1382,8 +1401,13 @@ async fn ibd_sync_round(
                     }
                 }
             };
-            let payload = BlockPayload::from_bytes(&msg.payload)?;
-            let block = Block::from_bytes(&payload.block_bytes)?;
+            let (_, block) =
+                decode_ibd_block_response(&msg.payload, *expected_hash).map_err(|e| {
+                    DomError::Invalid(format!(
+                        "IBD from {peer_addr}: block response for {} rejected: {e}",
+                        hex::encode(expected_hash)
+                    ))
+                })?;
             let height = block.header.height.0;
             let txs_for_scan = block.transactions.clone();
             {
@@ -1847,20 +1871,84 @@ async fn message_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_deferred_block_bytes, decode_relay_block, deferred_replay_action,
-        peer_violation_score, pending_peer_violation_score, refresh_peer_metrics,
-        relay_block_action, DeferredReplayAction, RelayBlockAction,
+        decode_deferred_block_bytes, decode_ibd_block_response, decode_relay_block,
+        deferred_replay_action, peer_violation_score, pending_peer_violation_score,
+        refresh_peer_metrics, relay_block_action, DeferredReplayAction, RelayBlockAction,
     };
     use crate::metrics::Metrics;
     use dom_chain::ConnectResult;
-    use dom_core::{DomError, MAX_BLOCK_SERIALIZED_SIZE};
+    use dom_consensus::block::{BlockHeader, ProofOfWork};
+    use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction};
+    use dom_core::{
+        BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, MAX_BLOCK_SERIALIZED_SIZE,
+    };
+    use dom_crypto::pedersen::{BlindingFactor, Commitment};
+    use dom_pow::CompactTarget;
+    use dom_serialization::DomSerialize;
     use dom_wire::manager::PeerManager;
+    use dom_wire::message::BlockPayload;
     use dom_wire::peer::ban_scores;
     use dom_wire::peer::{PeerInfo, PeerState};
+    use primitive_types::U256;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use tokio::sync::Mutex;
+
+    fn commitment(seed: u8, value: u64) -> Commitment {
+        let mut bytes = [0u8; 32];
+        bytes[31] = seed.max(1);
+        let blind = BlindingFactor::from_bytes(bytes).expect("deterministic blinding");
+        Commitment::commit(value, &blind)
+    }
+
+    fn synthetic_block(height: u64, nonce: u64) -> Block {
+        Block {
+            header: BlockHeader {
+                version: 1,
+                height: BlockHeight(height),
+                prev_hash: Hash256::ZERO,
+                timestamp: Timestamp(1_700_000_000 + height),
+                output_root: Hash256::ZERO,
+                kernel_root: Hash256::ZERO,
+                rangeproof_root: Hash256::ZERO,
+                total_kernel_offset: [0u8; 32],
+                target: CompactTarget(0),
+                total_difficulty: U256::from(height),
+                pow: ProofOfWork {
+                    nonce,
+                    randomx_hash: Hash256::ZERO,
+                },
+            },
+            coinbase: CoinbaseTransaction {
+                output: dom_consensus::TransactionOutput {
+                    commitment: commitment(1, 50),
+                    proof: vec![0x42; 8],
+                },
+                kernel: CoinbaseKernel {
+                    features: KERNEL_FEAT_COINBASE,
+                    explicit_value: 50,
+                    excess: commitment(2, 0),
+                    excess_signature: [0x24; 65],
+                },
+                offset: [0u8; 32],
+            },
+            transactions: Vec::new(),
+        }
+    }
+
+    fn ibd_payload(block: &Block) -> Vec<u8> {
+        BlockPayload {
+            block_bytes: block.to_bytes().expect("serialize block"),
+        }
+        .to_bytes()
+        .expect("serialize block payload")
+    }
+
+    fn block_hash(block: &Block) -> [u8; 32] {
+        *dom_crypto::hash::blake2b_256(&block.header.to_bytes().expect("serialize header"))
+            .as_bytes()
+    }
 
     #[test]
     fn malformed_message_maps_to_malformed_score() {
@@ -2026,6 +2114,27 @@ mod tests {
 
         let err = decode_relay_block(&payload).expect_err("malformed block body must fail");
         assert!(matches!(err, DomError::Malformed(_)));
+    }
+
+    #[test]
+    fn ibd_block_response_rejects_hash_mismatch() {
+        let expected = synthetic_block(1, 11);
+        let wrong = synthetic_block(1, 22);
+        let err = decode_ibd_block_response(&ibd_payload(&wrong), block_hash(&expected))
+            .expect_err("mismatched IBD block must reject");
+        assert!(
+            matches!(err, DomError::Invalid(ref msg) if msg.contains("hash mismatch")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn ibd_block_response_accepts_requested_block() {
+        let block = synthetic_block(2, 33);
+        let decoded = decode_ibd_block_response(&ibd_payload(&block), block_hash(&block))
+            .expect("matching IBD block must decode");
+        assert_eq!(decoded.1.header.height.0, 2);
+        assert_eq!(decoded.1.header.pow.nonce, 33);
     }
 
     #[test]
