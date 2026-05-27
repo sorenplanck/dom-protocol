@@ -1,0 +1,5 @@
+Review and improve the mempool package policy tests.
+
+Focus on deterministic replay, safe restart behavior, and any missing regression coverage around transaction selection, eviction, and reorg handling.
+
+Keep changes test-focused unless a tiny helper is needed.

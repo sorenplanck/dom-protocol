@@ -3,7 +3,7 @@
 
 use dom_consensus::block::{
     validate_future_timestamp_with_limit, validate_header_syntax, validate_median_time_past,
-    validate_parent_timestamp_progression, validate_pow, BlockHeader,
+    validate_parent_timestamp_progression, validate_pow_for_network, BlockHeader,
 };
 use dom_consensus::{derive_chain_id, validate_block, Block, Transaction, ValidationContext};
 use dom_core::{BlockHeight, DomError, Hash256, Timestamp};
@@ -224,7 +224,7 @@ impl ChainState {
 
         validate_future_timestamp_with_limit(header, now, self.max_future_block_time())?;
         let seed = self.compute_randomx_seed(header.height.0)?;
-        validate_pow(header, &seed)?;
+        validate_pow_for_network(self.network_magic, header, &seed)?;
 
         if let Some(parent_header) = parent.as_ref() {
             self.validate_expected_target(header, parent_header, &[])?;
@@ -398,7 +398,7 @@ impl ChainState {
 
                 validate_future_timestamp_with_limit(header, now, self.max_future_block_time())?;
                 let seed = self.compute_randomx_seed(header.height.0)?;
-                validate_pow(header, &seed)?;
+                validate_pow_for_network(self.network_magic, header, &seed)?;
 
                 if let Some(parent_header) =
                     self.batch_parent_for_index(&decoded, idx, &prior_headers)?
@@ -564,7 +564,7 @@ impl ChainState {
 
                 validate_future_timestamp_with_limit(&header, now, self.max_future_block_time())?;
                 let seed = self.compute_randomx_seed(header.height.0)?;
-                validate_pow(&header, &seed)?;
+                validate_pow_for_network(self.network_magic, &header, &seed)?;
 
                 let prior_headers: Vec<BlockHeader> = decoded_prefix
                     .iter()
@@ -652,7 +652,7 @@ impl ChainState {
             self.validate_expected_target(header, &parent, &[])?;
         }
         let seed = self.compute_randomx_seed(header.height.0)?;
-        validate_pow(header, &seed)?;
+        validate_pow_for_network(self.network_magic, header, &seed)?;
         Ok(())
     }
 

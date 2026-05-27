@@ -1,0 +1,39 @@
+name: windows-test-runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build dom-test-runner
+        shell: pwsh
+        run: cargo build -p dom-test-runner --release
+
+      - name: Run doctor
+        shell: pwsh
+        run: target/release/dom-test-runner.exe doctor
+
+      - name: Run fast-check
+        shell: pwsh
+        run: target/release/dom-test-runner.exe fast-check
+
+      - name: Package portable artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item target/release/dom-test-runner.exe artifact/
+          if (Test-Path docs/testing/WINDOWS_TEST_RUNNER.md) {
+            Copy-Item docs/testing/WINDOWS_TEST_RUNNER.md artifact/
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DOM-Test-Runner-Windows-Portable
+          path: artifact/*
+          if-no-files-found: error

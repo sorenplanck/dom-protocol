@@ -21,6 +21,8 @@
 #![allow(clippy::arithmetic_side_effects)] // PoW math: U256 ops audited
 #![deny(clippy::float_arithmetic)]
 
+use blake2::digest::consts::U32;
+use blake2::{Blake2b, Digest};
 use dom_core::{
     BlockHeight, DomError, Timestamp, ASERT_HALF_LIFE, ASERT_RADIX, DIFFICULTY_ADJUSTMENT_WINDOW,
     GENESIS_TARGET_COMPACT, MAX_ALLOWED_TARGET, MAX_DIFFICULTY_ADJUSTMENT_FACTOR_DOWN,
@@ -29,6 +31,7 @@ use dom_core::{
     TARGET_SPACING,
 };
 use primitive_types::{U256, U512};
+use std::env;
 
 #[allow(unsafe_code)]
 pub mod randomx_pool;
@@ -472,6 +475,75 @@ pub fn floor_div_i128(a: i128, b: i128) -> Result<i128, DomError> {
 
 // ── PoW Validation ────────────────────────────────────────────────────────────
 
+/// Validation mode for block proof-of-work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowValidationMode {
+    /// Full RandomX validation used on mainnet and testnet.
+    RandomX,
+    /// Deterministic dev/test-only fast mining and validation path.
+    FastDevOnly,
+}
+
+fn fast_regtest_mining_requested() -> bool {
+    matches!(
+        env::var("DOM_REGTEST_FAST_MINING"),
+        Ok(value) if value == "1" || value.eq_ignore_ascii_case("true")
+    )
+}
+
+fn pow_validation_mode_for_network_inner(
+    network_magic: u32,
+    test_mode: bool,
+    fast_requested: bool,
+) -> Result<PowValidationMode, DomError> {
+    if test_mode {
+        return Ok(PowValidationMode::FastDevOnly);
+    }
+
+    if fast_requested {
+        if network_magic == NETWORK_MAGIC_REGTEST {
+            return Ok(PowValidationMode::FastDevOnly);
+        }
+        return Err(DomError::Invalid(
+            "DOM_REGTEST_FAST_MINING=1 is only allowed on regtest/devtest/test mode".into(),
+        ));
+    }
+
+    Ok(PowValidationMode::RandomX)
+}
+
+/// Determine the validation mode for a network.
+///
+/// Fast mining is only available in test builds or when the explicit
+/// `DOM_REGTEST_FAST_MINING=1` override is set on regtest.
+pub fn pow_validation_mode_for_network(network_magic: u32) -> Result<PowValidationMode, DomError> {
+    pow_validation_mode_for_network_inner(
+        network_magic,
+        cfg!(test),
+        fast_regtest_mining_requested(),
+    )
+}
+
+/// Deterministic dev/test-only PoW hash used by the fast mining path.
+///
+/// The function remains intentionally simple and auditable. It is not
+/// used on mainnet/testnet.
+pub fn fast_pow_hash(seed: &[u8; 32], preimage: &[u8]) -> [u8; 32] {
+    type B2b256 = Blake2b<U32>;
+    let mut hasher = B2b256::new();
+    hasher.update(b"DOM_FAST_POW_V1");
+    hasher.update(seed);
+    hasher.update(preimage);
+    let result = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&result);
+    // Dev/test fast mining must be instantaneous and auditable. Zero the high
+    // half so the resulting hash is always below the regtest/test target while
+    // preserving deterministic variation in the low half.
+    out[..16].fill(0);
+    out
+}
+
 /// Verify a block hash meets the required target (hash ≤ target, big-endian).
 pub fn hash_meets_target(hash: &[u8; 32], target: &[u8; 32]) -> bool {
     !target_gt(hash, target)
@@ -520,6 +592,26 @@ pub fn validate_pow_randomx(
         return Ok(false);
     }
     Ok(hash_meets_target(randomx_hash, target))
+}
+
+/// Validate PoW using the network-appropriate mode.
+pub fn validate_pow_for_network(
+    network_magic: u32,
+    pow_preimage: &[u8],
+    pow_hash: &[u8; 32],
+    seed: &[u8; 32],
+    target: &[u8; 32],
+) -> Result<bool, DomError> {
+    match pow_validation_mode_for_network(network_magic)? {
+        PowValidationMode::RandomX => validate_pow_randomx(pow_preimage, pow_hash, seed, target),
+        PowValidationMode::FastDevOnly => {
+            let computed = fast_pow_hash(seed, pow_preimage);
+            if &computed != pow_hash {
+                return Ok(false);
+            }
+            Ok(hash_meets_target(pow_hash, target))
+        }
+    }
 }
 
 /// Compute difficulty from target using correct 256-bit integer division.
@@ -813,6 +905,39 @@ mod tests {
         let params = pow_params_for_network(NETWORK_MAGIC_TESTNET);
         assert_eq!(params.target_spacing, 60);
         assert_eq!(params.max_compact_target, TESTNET_TARGET_COMPACT);
+    }
+
+    #[test]
+    fn fast_pow_mode_activates_only_for_explicit_regtest_or_test_mode() {
+        assert_eq!(
+            pow_validation_mode_for_network_inner(NETWORK_MAGIC_REGTEST, false, false).unwrap(),
+            PowValidationMode::RandomX
+        );
+        assert_eq!(
+            pow_validation_mode_for_network_inner(NETWORK_MAGIC_REGTEST, false, true).unwrap(),
+            PowValidationMode::FastDevOnly
+        );
+        assert_eq!(
+            pow_validation_mode_for_network_inner(NETWORK_MAGIC_MAINNET, true, false).unwrap(),
+            PowValidationMode::FastDevOnly
+        );
+        assert!(
+            pow_validation_mode_for_network_inner(NETWORK_MAGIC_MAINNET, false, true).is_err(),
+            "DOM_REGTEST_FAST_MINING must fail closed on mainnet"
+        );
+        assert!(
+            pow_validation_mode_for_network_inner(NETWORK_MAGIC_TESTNET, false, true).is_err(),
+            "DOM_REGTEST_FAST_MINING must fail closed on testnet"
+        );
+    }
+
+    #[test]
+    fn fast_pow_hash_is_deterministic() {
+        let seed = [0x11u8; 32];
+        let preimage = b"pow-preimage";
+        let first = fast_pow_hash(&seed, preimage);
+        let second = fast_pow_hash(&seed, preimage);
+        assert_eq!(first, second);
     }
 }
 
