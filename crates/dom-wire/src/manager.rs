@@ -8,6 +8,7 @@
 
 use crate::peer::{PeerInfo, PeerState};
 use dom_core::DomError;
+use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -28,6 +29,7 @@ const MAX_DUPLICATE_BLOCK_RELAYS_PER_WINDOW: u32 = 32;
 const DUPLICATE_BLOCK_RELAY_WINDOW_SECS: u64 = 30;
 /// Bound runtime memory used by outbound failure history.
 const MAX_OUTBOUND_FAILURE_TRACKERS: usize = 4_096;
+const MAX_PEER_ROTATION_ADDR_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Copy)]
 struct PendingInbound {
@@ -55,6 +57,72 @@ struct DuplicateRelayTracker {
 struct OutboundFailureTracker {
     failures: u8,
     last_failure_seq: u64,
+}
+
+/// Persisted outbound failure entry used for deterministic restart replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedOutboundFailure {
+    /// Canonical string form of the peer address.
+    pub addr: String,
+    /// Saturating failure count tracked for retry ordering.
+    pub failures: u8,
+    /// Monotonic sequence of the last recorded failure.
+    pub last_failure_seq: u64,
+}
+
+/// Bounded deterministic peer-rotation snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PersistedPeerRotationState {
+    /// Next monotonic failure sequence to allocate.
+    pub next_failure_seq: u64,
+    /// Outbound failure history sorted canonically by address.
+    pub outbound_failures: Vec<PersistedOutboundFailure>,
+}
+
+impl DomSerialize for PersistedPeerRotationState {
+    fn serialize(&self, w: &mut Writer) -> Result<(), DomError> {
+        w.write_u64(self.next_failure_seq);
+        let len: u32 = self
+            .outbound_failures
+            .len()
+            .try_into()
+            .map_err(|_| DomError::Malformed("peer rotation entry count exceeds u32".into()))?;
+        w.write_u32(len);
+        for entry in &self.outbound_failures {
+            w.write_vec(entry.addr.as_bytes())?;
+            w.write_u8(entry.failures);
+            w.write_u64(entry.last_failure_seq);
+        }
+        Ok(())
+    }
+}
+
+impl DomDeserialize for PersistedPeerRotationState {
+    fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
+        let next_failure_seq = r.read_u64()?;
+        let len = r.read_u32()? as usize;
+        if len > MAX_OUTBOUND_FAILURE_TRACKERS {
+            return Err(DomError::Malformed(format!(
+                "peer rotation entry count {len} exceeds limit {MAX_OUTBOUND_FAILURE_TRACKERS}"
+            )));
+        }
+        let mut outbound_failures = Vec::with_capacity(len);
+        for _ in 0..len {
+            let addr = String::from_utf8(r.read_vec(MAX_PEER_ROTATION_ADDR_BYTES)?)
+                .map_err(|e| DomError::Malformed(format!("peer rotation addr utf8: {e}")))?;
+            let failures = r.read_u8()?;
+            let last_failure_seq = r.read_u64()?;
+            outbound_failures.push(PersistedOutboundFailure {
+                addr,
+                failures,
+                last_failure_seq,
+            });
+        }
+        Ok(Self {
+            next_failure_seq,
+            outbound_failures,
+        })
+    }
 }
 
 /// Peer manager state.
@@ -285,6 +353,79 @@ impl PeerManager {
             .get(addr)
             .map(|tracker| tracker.failures)
             .unwrap_or(0)
+    }
+
+    /// Snapshot deterministic outbound failure history for replay-equivalent
+    /// persistence and comparison.
+    pub fn outbound_failure_state(&self) -> PersistedPeerRotationState {
+        let mut outbound_failures: Vec<PersistedOutboundFailure> = self
+            .outbound_failures
+            .iter()
+            .map(|(addr, tracker)| PersistedOutboundFailure {
+                addr: addr.clone(),
+                failures: tracker.failures,
+                last_failure_seq: tracker.last_failure_seq,
+            })
+            .collect();
+        outbound_failures.sort_by(|left, right| left.addr.cmp(&right.addr));
+        PersistedPeerRotationState {
+            next_failure_seq: self.outbound_failure_seq,
+            outbound_failures,
+        }
+    }
+
+    /// Restore deterministic outbound failure history from a persisted snapshot.
+    pub fn restore_outbound_failure_state(
+        &mut self,
+        snapshot: &PersistedPeerRotationState,
+    ) -> Result<(), DomError> {
+        if snapshot.outbound_failures.len() > MAX_OUTBOUND_FAILURE_TRACKERS {
+            return Err(DomError::Invalid(format!(
+                "peer rotation snapshot exceeds bound {}",
+                MAX_OUTBOUND_FAILURE_TRACKERS
+            )));
+        }
+
+        let mut restored = HashMap::with_capacity(snapshot.outbound_failures.len());
+        let mut previous_addr: Option<&str> = None;
+        let mut max_seq = 0u64;
+        for entry in &snapshot.outbound_failures {
+            if let Some(prev) = previous_addr {
+                if prev >= entry.addr.as_str() {
+                    return Err(DomError::Invalid(
+                        "peer rotation snapshot addresses are not strictly ordered".into(),
+                    ));
+                }
+            }
+            previous_addr = Some(entry.addr.as_str());
+            if restored.contains_key(&entry.addr) {
+                return Err(DomError::Invalid(
+                    "peer rotation snapshot contains duplicate addresses".into(),
+                ));
+            }
+            if entry.failures == 0 {
+                return Err(DomError::Invalid(
+                    "peer rotation snapshot contains zero-failure entry".into(),
+                ));
+            }
+            max_seq = max_seq.max(entry.last_failure_seq);
+            restored.insert(
+                entry.addr.clone(),
+                OutboundFailureTracker {
+                    failures: entry.failures,
+                    last_failure_seq: entry.last_failure_seq,
+                },
+            );
+        }
+        if snapshot.next_failure_seq < max_seq {
+            return Err(DomError::Invalid(
+                "peer rotation snapshot next_failure_seq regresses behind recorded failures".into(),
+            ));
+        }
+
+        self.outbound_failures = restored;
+        self.outbound_failure_seq = snapshot.next_failure_seq;
+        Ok(())
     }
 
     /// Register a new peer connection attempt.
@@ -909,5 +1050,67 @@ mod tests {
         assert_eq!(mgr.outbound_failure_count(&addr), 0);
         let ordered = mgr.outbound_candidates_in_retry_order(vec![addr.clone()]);
         assert_eq!(ordered, vec![addr]);
+    }
+
+    #[test]
+    fn persisted_peer_rotation_state_roundtrips() {
+        let mut mgr = PeerManager::new(125, 2);
+        mgr.record_outbound_failure("198.51.100.30:33369");
+        mgr.record_outbound_failure("198.51.100.10:33369");
+        mgr.record_outbound_failure("198.51.100.30:33369");
+
+        let snapshot = mgr.outbound_failure_state();
+        let decoded = PersistedPeerRotationState::from_bytes(
+            &snapshot.to_bytes().expect("serialize peer rotation"),
+        )
+        .expect("decode peer rotation");
+
+        assert_eq!(decoded, snapshot);
+    }
+
+    #[test]
+    fn restored_peer_rotation_state_preserves_retry_order() {
+        let mut source = PeerManager::new(125, 2);
+        source.record_outbound_failure("198.51.100.30:33369");
+        source.record_outbound_failure("198.51.100.30:33369");
+        source.record_outbound_failure("198.51.100.20:33369");
+
+        let snapshot = source.outbound_failure_state();
+        let expected = source.outbound_candidates_in_retry_order(vec![
+            "198.51.100.30:33369".into(),
+            "198.51.100.20:33369".into(),
+            "198.51.100.10:33369".into(),
+        ]);
+
+        let mut restored = PeerManager::new(125, 2);
+        restored
+            .restore_outbound_failure_state(&snapshot)
+            .expect("restore peer rotation");
+
+        let actual = restored.outbound_candidates_in_retry_order(vec![
+            "198.51.100.30:33369".into(),
+            "198.51.100.20:33369".into(),
+            "198.51.100.10:33369".into(),
+        ]);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn restoring_peer_rotation_rejects_seq_regression() {
+        let mut mgr = PeerManager::new(125, 2);
+        let err = mgr
+            .restore_outbound_failure_state(&PersistedPeerRotationState {
+                next_failure_seq: 1,
+                outbound_failures: vec![PersistedOutboundFailure {
+                    addr: "198.51.100.30:33369".into(),
+                    failures: 2,
+                    last_failure_seq: 3,
+                }],
+            })
+            .expect_err("regressing next_failure_seq must reject");
+        assert!(
+            matches!(err, DomError::Invalid(ref msg) if msg.contains("next_failure_seq")),
+            "unexpected error: {err}"
+        );
     }
 }

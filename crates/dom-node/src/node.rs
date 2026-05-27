@@ -94,6 +94,7 @@ const FUTURE_BLOCK_QUEUE_MAX_AGE_SECS: u64 = dom_core::MAX_FUTURE_BLOCK_TIME
     + dom_core::FUTURE_BLOCK_SOFT_BUFFER_SECS
     + FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS * 2;
 const HELLO_EXCHANGE_TIMEOUT_SECS: u64 = dom_wire::handshake::HANDSHAKE_TIMEOUT_SECS;
+const PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutboundAttemptOutcome {
@@ -136,6 +137,9 @@ impl DomNode {
         // Initialize chain state
         let chain = ChainState::open(store, genesis_hash, config.network.magic())?;
         info!("Chain tip: height={}", chain.tip_height);
+
+        let mut peers = PeerManager::new(config.max_inbound, config.min_outbound);
+        restore_peer_rotation_state(&chain.store, &mut peers)?;
 
         // Generate or load Noise keypair
         let (noise_privkey, noise_pubkey) = dom_wire::handshake::generate_static_keypair();
@@ -213,10 +217,7 @@ impl DomNode {
             config: config.clone(),
             chain: Arc::new(Mutex::new(chain)),
             mempool: Arc::new(Mutex::new(Mempool::new())),
-            peers: Arc::new(Mutex::new(PeerManager::new(
-                config.max_inbound,
-                config.min_outbound,
-            ))),
+            peers: Arc::new(Mutex::new(peers)),
             dandelion: Arc::new(Mutex::new(DandelionRouter::new())),
             wallet,
             metrics,
@@ -576,6 +577,7 @@ impl DomNode {
                     let peers = self.peers.clone();
                     let metrics = self.metrics.clone();
                     let svc_c = svc.clone();
+                    let chain_for_persist = self.chain.clone();
                     tokio::spawn(async move {
                         let outcome =
                             connect_outbound(&addr, config, privkey, chain, channels, svc_c).await;
@@ -586,6 +588,11 @@ impl DomNode {
                         mgr.remove_peer(&cleanup_addr);
                         mgr.release_outbound_reservation(&cleanup_addr);
                         drop(mgr);
+                        if let Err(e) =
+                            persist_peer_rotation_state(&chain_for_persist, &peers).await
+                        {
+                            warn!("Persisting peer rotation state failed: {e}");
+                        }
                         refresh_peer_metrics(&peers, &metrics).await;
                     });
                 }
@@ -746,6 +753,9 @@ async fn handle_inbound(
                     return;
                 }
             }
+            if let Err(e) = persist_peer_rotation_state(&chain, &svc.peers).await {
+                warn!("Persisting peer rotation state after inbound registration failed: {e}");
+            }
             refresh_peer_metrics(&svc.peers, &svc.metrics).await;
             // IBD loop: if the inbound peer claims a higher chain, sync from it.
             // Mirrors connect_outbound logic so inbound-only nodes (behind NAT
@@ -876,6 +886,9 @@ async fn connect_outbound(
                     warn!("Failed to register outbound peer {addr}: {e}");
                     return OutboundAttemptOutcome::RetryableFailure;
                 }
+            }
+            if let Err(e) = persist_peer_rotation_state(&chain, &svc.peers).await {
+                warn!("Persisting peer rotation state after outbound registration failed: {e}");
             }
             refresh_peer_metrics(&svc.peers, &svc.metrics).await;
             let peer_addr = match stream.peer_addr() {
@@ -1325,6 +1338,69 @@ fn decode_ibd_block_response(
         )));
     }
     Ok((payload.block_bytes, block))
+}
+
+pub(crate) fn persist_peer_rotation_snapshot(
+    store: &DomStore,
+    snapshot: &dom_wire::manager::PersistedPeerRotationState,
+) -> Result<(), DomError> {
+    use dom_serialization::DomSerialize;
+
+    if snapshot.outbound_failures.is_empty() {
+        return store.delete_metadata(PEER_ROTATION_METADATA_KEY);
+    }
+    store.put_metadata(PEER_ROTATION_METADATA_KEY, &snapshot.to_bytes()?)
+}
+
+pub(crate) fn load_peer_rotation_snapshot(
+    store: &DomStore,
+) -> Result<Option<dom_wire::manager::PersistedPeerRotationState>, DomError> {
+    use dom_serialization::DomDeserialize;
+
+    match store.get_metadata(PEER_ROTATION_METADATA_KEY)? {
+        Some(bytes) => {
+            let snapshot = dom_wire::manager::PersistedPeerRotationState::from_bytes(&bytes)
+                .map_err(|e| {
+                    DomError::Invalid(format!("peer rotation snapshot decode failed: {e}"))
+                })?;
+            Ok(Some(snapshot))
+        }
+        None => Ok(None),
+    }
+}
+
+pub(crate) fn restore_peer_rotation_state(
+    store: &DomStore,
+    peers: &mut PeerManager,
+) -> Result<(), DomError> {
+    match load_peer_rotation_snapshot(store) {
+        Ok(Some(snapshot)) => match peers.restore_outbound_failure_state(&snapshot) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                warn!("Clearing invalid persisted peer rotation state: {e}");
+                store.delete_metadata(PEER_ROTATION_METADATA_KEY)?;
+                Ok(())
+            }
+        },
+        Ok(None) => Ok(()),
+        Err(e) => {
+            warn!("Clearing unreadable persisted peer rotation state: {e}");
+            store.delete_metadata(PEER_ROTATION_METADATA_KEY)?;
+            Ok(())
+        }
+    }
+}
+
+async fn persist_peer_rotation_state(
+    chain: &Arc<Mutex<ChainState>>,
+    peers: &Arc<Mutex<PeerManager>>,
+) -> Result<(), DomError> {
+    let snapshot = {
+        let peers = peers.lock().await;
+        peers.outbound_failure_state()
+    };
+    let chain = chain.lock().await;
+    persist_peer_rotation_snapshot(&chain.store, &snapshot)
 }
 
 async fn record_duplicate_block_relay(
