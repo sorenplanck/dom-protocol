@@ -1356,6 +1356,7 @@ dependencies = [
  "dom-pmmr",
  "dom-pow",
  "dom-serialization",
+ "k256",
  "primitive-types",
  "secp256k1 0.28.2",
  "thiserror 1.0.69",

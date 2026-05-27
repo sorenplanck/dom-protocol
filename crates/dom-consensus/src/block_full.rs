@@ -108,6 +108,20 @@ pub fn validate_block(block: &Block, ctx: &ValidationContext) -> Result<(), DomE
         }
     }
 
+    // RFC-0010 §3.3: Block must be in canonical cut-through form.
+    // A commitment appearing as both a block output and a block input means
+    // cut-through was not applied — reject unconditionally.
+    for tx in &block.transactions {
+        for input in &tx.inputs {
+            if seen_outputs.contains(input.commitment.as_bytes()) {
+                return Err(DomError::Invalid(
+                    "block-level cut-through violation: input commitment matches a block output"
+                        .into(),
+                ));
+            }
+        }
+    }
+
     let total_fees = block.total_fees()?;
 
     validate_block_transactions(
@@ -118,6 +132,55 @@ pub fn validate_block(block: &Block, ctx: &ValidationContext) -> Result<(), DomE
         total_fees,
     )?;
 
+    // Aggregate block balance equation (RFC-0008 block-level).
+    // Derivation: summing all per-tx balance equations plus coinbase cancels
+    // the fee terms, yielding:
+    //   Sum(all_outputs) − Sum(all_inputs)
+    //     = Sum(all_excesses) + total_kernel_offset·G + block_reward·H
+    //
+    // where block_reward is the base subsidy (not including fees), because
+    // the fee terms cancel between regular transactions and the coinbase.
+    {
+        let all_outputs: Vec<_> = std::iter::once(&block.coinbase.output.commitment)
+            .chain(
+                block
+                    .transactions
+                    .iter()
+                    .flat_map(|tx| tx.outputs.iter().map(|o| &o.commitment)),
+            )
+            .cloned()
+            .collect();
+        let all_inputs: Vec<_> = block
+            .transactions
+            .iter()
+            .flat_map(|tx| tx.inputs.iter().map(|i| &i.commitment))
+            .cloned()
+            .collect();
+        let all_excesses: Vec<_> = std::iter::once(&block.coinbase.kernel.excess)
+            .chain(
+                block
+                    .transactions
+                    .iter()
+                    .flat_map(|tx| tx.kernels.iter().map(|k| &k.excess)),
+            )
+            .cloned()
+            .collect();
+        let base_reward = dom_core::block_reward(block.header.height).noms();
+
+        let valid = dom_crypto::verify_block_balance_equation(
+            &all_outputs,
+            &all_inputs,
+            &all_excesses,
+            &block.header.total_kernel_offset,
+            base_reward,
+        )?;
+        if !valid {
+            return Err(DomError::Invalid(
+                "aggregate block balance equation does not hold".into(),
+            ));
+        }
+    }
+
     // RFC-0007 step 17: validate PMMR roots
     crate::validate_pmmr_roots(block)?;
     Ok(())
@@ -126,6 +189,7 @@ pub fn validate_block(block: &Block, ctx: &ValidationContext) -> Result<(), DomE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compute_block_pmmr_roots;
     use crate::transaction::{
         CoinbaseKernel, TransactionInput, TransactionKernel, TransactionOutput,
     };
@@ -133,7 +197,11 @@ mod tests {
         Amount, BlockHeight, Hash256, Timestamp, INITIAL_BLOCK_REWARD, KERNEL_FEAT_COINBASE,
         KERNEL_FEAT_PLAIN, PROTOCOL_VERSION,
     };
-    use dom_crypto::pedersen::Commitment;
+    use dom_crypto::bulletproof;
+    use dom_crypto::hash::blake2b_256_tagged;
+    use dom_crypto::keys::SecretKey;
+    use dom_crypto::pedersen::{BlindingFactor, Commitment};
+    use dom_crypto::schnorr_sign;
     use dom_pow::CompactTarget;
     use primitive_types::U256;
 
@@ -187,6 +255,152 @@ mod tests {
                 excess_signature: [0u8; 65],
             },
             offset: [0u8; 32],
+        }
+    }
+
+    #[derive(Clone)]
+    struct ValidSpendFixture {
+        tx: Transaction,
+        output_commitment: Commitment,
+        output_value: u64,
+        output_blinding: BlindingFactor,
+    }
+
+    fn scalar(seed: u8) -> BlindingFactor {
+        let mut bytes = [0u8; 32];
+        bytes[31] = seed.max(1);
+        BlindingFactor::from_bytes(bytes).expect("deterministic scalar")
+    }
+
+    fn kernel_message(fee: u64, lock_height: u64) -> [u8; 32] {
+        let mut data = Vec::with_capacity(1 + 8 + 8);
+        data.push(KERNEL_FEAT_PLAIN);
+        data.extend_from_slice(&fee.to_le_bytes());
+        data.extend_from_slice(&lock_height.to_le_bytes());
+        *blake2b_256_tagged(dom_core::TAG_KERNEL_MSG, &data).as_bytes()
+    }
+
+    fn build_coinbase(total_fees: u64, chain_id: &[u8; 32]) -> CoinbaseTransaction {
+        let explicit_value = dom_core::block_reward(BlockHeight(1)).noms() + total_fees;
+        let blinding = scalar(90);
+        let commitment = Commitment::commit(explicit_value, &blinding);
+        let (proof, _) = bulletproof::prove(explicit_value, &blinding).expect("coinbase proof");
+        let excess = Commitment::commit(0, &blinding);
+        let secret = SecretKey::from_bytes(blinding.as_bytes()).expect("coinbase secret");
+        let msg = {
+            let mut data = Vec::with_capacity(1 + 8);
+            data.push(KERNEL_FEAT_COINBASE);
+            data.extend_from_slice(&explicit_value.to_le_bytes());
+            blake2b_256_tagged(dom_core::TAG_KERNEL_MSG_COINBASE, &data)
+        };
+        let sig = schnorr_sign(&secret, msg.as_bytes(), chain_id).expect("coinbase sig");
+        CoinbaseTransaction {
+            output: TransactionOutput {
+                commitment,
+                proof: proof.bytes,
+            },
+            kernel: CoinbaseKernel {
+                features: KERNEL_FEAT_COINBASE,
+                explicit_value,
+                excess,
+                excess_signature: sig.to_bytes(),
+            },
+            offset: [0u8; 32],
+        }
+    }
+
+    fn build_valid_spend_tx(
+        input_value: u64,
+        input_blinding: BlindingFactor,
+        output_value: u64,
+        kernel_blinding: BlindingFactor,
+        offset_blinding: Option<BlindingFactor>,
+    ) -> ValidSpendFixture {
+        let fee = input_value
+            .checked_sub(output_value)
+            .expect("output must be <= input");
+        let mut output_blinding = input_blinding
+            .add(&kernel_blinding)
+            .expect("output blinding add");
+        let offset_bytes = if let Some(offset) = offset_blinding.clone() {
+            output_blinding = output_blinding.add(&offset).expect("offset add");
+            *offset.as_bytes()
+        } else {
+            [0u8; 32]
+        };
+        let input_commitment = Commitment::commit(input_value, &input_blinding);
+        let output_commitment = Commitment::commit(output_value, &output_blinding);
+        let (proof, _) = bulletproof::prove(output_value, &output_blinding).expect("tx proof");
+        let excess = Commitment::commit(0, &kernel_blinding);
+        let secret = SecretKey::from_bytes(kernel_blinding.as_bytes()).expect("kernel secret");
+        let sig = schnorr_sign(&secret, &kernel_message(fee, 0), &[0x11; 32]).expect("kernel sig");
+
+        ValidSpendFixture {
+            tx: Transaction {
+                inputs: vec![TransactionInput {
+                    commitment: input_commitment,
+                }],
+                outputs: vec![TransactionOutput {
+                    commitment: output_commitment.clone(),
+                    proof: proof.bytes,
+                }],
+                kernels: vec![TransactionKernel {
+                    features: KERNEL_FEAT_PLAIN,
+                    fee: Amount::from_noms(fee).expect("fee"),
+                    lock_height: 0,
+                    excess,
+                    excess_signature: sig.to_bytes(),
+                }],
+                offset: offset_bytes,
+            },
+            output_commitment,
+            output_value,
+            output_blinding,
+        }
+    }
+
+    /// Sum all tx offsets as scalars mod n (aggregate block kernel offset).
+    fn aggregate_tx_offsets(transactions: &[Transaction]) -> [u8; 32] {
+        use k256::{elliptic_curve::PrimeField, Scalar};
+        let mut total = Scalar::ZERO;
+        for tx in transactions {
+            let fb = k256::FieldBytes::from(tx.offset);
+            let s_ct = Scalar::from_repr(fb);
+            if s_ct.is_some().into() {
+                total += s_ct.unwrap();
+            }
+        }
+        total.to_repr().into()
+    }
+
+    fn valid_block_with_transactions(transactions: Vec<Transaction>) -> Block {
+        let total_fees = transactions
+            .iter()
+            .map(|tx| tx.total_fee().expect("fee"))
+            .sum();
+        let coinbase = build_coinbase(total_fees, &[0x11; 32]);
+        let (output_root, kernel_root, rangeproof_root) =
+            compute_block_pmmr_roots(&coinbase, &transactions).expect("pmmr roots");
+        let total_kernel_offset = aggregate_tx_offsets(&transactions);
+        Block {
+            header: BlockHeader {
+                version: PROTOCOL_VERSION,
+                height: BlockHeight(1),
+                prev_hash: Hash256::from_bytes([0x55; 32]),
+                timestamp: Timestamp(1_704_067_260),
+                output_root,
+                kernel_root,
+                rangeproof_root,
+                total_kernel_offset,
+                target: CompactTarget(0x1f00_ffff),
+                total_difficulty: U256::from(2u64),
+                pow: crate::block::ProofOfWork {
+                    nonce: 7,
+                    randomx_hash: Hash256::ZERO,
+                },
+            },
+            coinbase,
+            transactions,
         }
     }
 
@@ -295,5 +509,246 @@ mod tests {
             DomError::Invalid(msg) => assert!(msg.contains("duplicate output"), "got: {msg}"),
             other => panic!("expected Invalid(duplicate output), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn block_with_internal_spend_pair_requires_block_level_cut_through() {
+        let tx1 = build_valid_spend_tx(50, scalar(1), 40, scalar(2), None);
+        let tx2 = build_valid_spend_tx(
+            tx1.output_value,
+            tx1.output_blinding.clone(),
+            30,
+            scalar(3),
+            None,
+        );
+        let mut tx2 = tx2.tx;
+        tx2.inputs[0].commitment = tx1.output_commitment.clone();
+
+        let block = valid_block_with_transactions(vec![tx1.tx, tx2]);
+        let err = validate_block(
+            &block,
+            &ValidationContext {
+                current_height: BlockHeight(1),
+                chain_id: [0x11; 32],
+                now: Timestamp(u64::MAX),
+            },
+        )
+        .expect_err("non-cut-through block representation must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cut-through") || msg.contains("aggregate"),
+            "expected block-level cut-through or aggregate rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn block_with_wrong_total_kernel_offset_is_rejected_by_aggregate_balance() {
+        let tx = build_valid_spend_tx(75, scalar(10), 60, scalar(11), Some(scalar(12))).tx;
+        let mut block = valid_block_with_transactions(vec![tx.clone()]);
+        assert!(
+            crate::validate_transaction(
+                &tx,
+                &ValidationContext {
+                    current_height: BlockHeight(1),
+                    chain_id: [0x11; 32],
+                    now: Timestamp(u64::MAX),
+                },
+            )
+            .is_ok(),
+            "fixture must pass per-transaction validation first"
+        );
+        block.header.total_kernel_offset = [0u8; 32];
+
+        let err = validate_block(
+            &block,
+            &ValidationContext {
+                current_height: BlockHeight(1),
+                chain_id: [0x11; 32],
+                now: Timestamp(u64::MAX),
+            },
+        )
+        .expect_err("wrong block aggregate kernel offset must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("offset") || msg.contains("aggregate") || msg.contains("balance"),
+            "expected aggregate block-balance rejection, got: {msg}"
+        );
+    }
+
+    /// A correctly constructed single-tx block (zero offset, no intra-block spends)
+    /// must pass ALL validation steps including the new cut-through and aggregate
+    /// balance checks.
+    #[test]
+    fn valid_single_tx_block_passes_full_validation() {
+        let tx = build_valid_spend_tx(100, scalar(5), 85, scalar(6), None);
+        let block = valid_block_with_transactions(vec![tx.tx]);
+        validate_block(
+            &block,
+            &ValidationContext {
+                current_height: BlockHeight(1),
+                chain_id: [0x11; 32],
+                now: Timestamp(u64::MAX),
+            },
+        )
+        .expect("fully valid block must pass all validation including aggregate balance");
+    }
+
+    /// A chain of three intra-block spends (C1→C2→C3) where no cut-through was
+    /// applied before the block was assembled must be rejected. This is the
+    /// "cut-through ambiguity" adversarial case: each individual transaction is
+    /// valid, but the block representation is not canonical.
+    #[test]
+    fn cut_through_chain_of_internal_spends_rejected() {
+        let tx1 = build_valid_spend_tx(90, scalar(20), 80, scalar(21), None);
+        let tx2 = build_valid_spend_tx(
+            tx1.output_value,
+            tx1.output_blinding.clone(),
+            70,
+            scalar(22),
+            None,
+        );
+        let tx3 = build_valid_spend_tx(
+            tx2.output_value,
+            tx2.output_blinding.clone(),
+            60,
+            scalar(23),
+            None,
+        );
+
+        // Save the intermediate output commitments before shadowing the fixtures.
+        let tx1_output_commit = tx1.output_commitment.clone();
+        let tx2_output_commit = tx2.output_commitment.clone();
+
+        // Wire up intra-block spends: tx2 spends tx1's output, tx3 spends tx2's output.
+        let mut tx2 = tx2.tx;
+        tx2.inputs[0].commitment = tx1_output_commit;
+        let mut tx3 = tx3.tx;
+        tx3.inputs[0].commitment = tx2_output_commit;
+
+        let block = valid_block_with_transactions(vec![tx1.tx, tx2, tx3]);
+        let err = validate_block(
+            &block,
+            &ValidationContext {
+                current_height: BlockHeight(1),
+                chain_id: [0x11; 32],
+                now: Timestamp(u64::MAX),
+            },
+        )
+        .expect_err("block with chain of intra-block spends must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cut-through") || msg.contains("aggregate"),
+            "expected cut-through or aggregate rejection, got: {msg}"
+        );
+    }
+
+    /// A transaction whose input commitment matches the coinbase output of the
+    /// SAME block must be rejected. The coinbase output is in `seen_outputs` so
+    /// the cut-through check catches any attempt to spend it intra-block.
+    #[test]
+    fn coinbase_output_cannot_be_spent_in_same_block() {
+        let coinbase_blinding = scalar(77);
+        let coinbase_output_commit = Commitment::commit(
+            dom_core::block_reward(BlockHeight(1)).noms(),
+            &coinbase_blinding,
+        );
+
+        // Build a tx whose input is the coinbase output commitment.
+        // The tx itself has invalid crypto (zeroed sig/proof) but the cut-through
+        // check fires BEFORE per-tx cryptographic validation.
+        let tx = Transaction {
+            inputs: vec![TransactionInput {
+                commitment: coinbase_output_commit,
+            }],
+            outputs: vec![TransactionOutput {
+                commitment: h_point(),
+                proof: vec![0u8; 100],
+            }],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(0).unwrap(),
+                lock_height: 0,
+                excess: g_point(),
+                excess_signature: [0u8; 65],
+            }],
+            offset: [0u8; 32],
+        };
+
+        // Build a block manually so the coinbase output uses coinbase_blinding.
+        let total_fees = 0u64;
+        let (proof, _) = bulletproof::prove(
+            dom_core::block_reward(BlockHeight(1)).noms(),
+            &coinbase_blinding,
+        )
+        .expect("coinbase proof");
+        let excess = Commitment::commit(0, &coinbase_blinding);
+        let secret = SecretKey::from_bytes(coinbase_blinding.as_bytes()).expect("secret");
+        let msg = {
+            use dom_core::{KERNEL_FEAT_COINBASE, TAG_KERNEL_MSG_COINBASE};
+            let explicit_value = dom_core::block_reward(BlockHeight(1)).noms() + total_fees;
+            let mut data = Vec::with_capacity(1 + 8);
+            data.push(KERNEL_FEAT_COINBASE);
+            data.extend_from_slice(&explicit_value.to_le_bytes());
+            dom_crypto::hash::blake2b_256_tagged(TAG_KERNEL_MSG_COINBASE, &data)
+        };
+        let sig = schnorr_sign(&secret, msg.as_bytes(), &[0x11u8; 32]).expect("sig");
+        let (cb_proof, _) = bulletproof::prove(
+            dom_core::block_reward(BlockHeight(1)).noms(),
+            &coinbase_blinding,
+        )
+        .expect("cb proof");
+        let coinbase = CoinbaseTransaction {
+            output: TransactionOutput {
+                commitment: Commitment::commit(
+                    dom_core::block_reward(BlockHeight(1)).noms(),
+                    &coinbase_blinding,
+                ),
+                proof: cb_proof.bytes,
+            },
+            kernel: CoinbaseKernel {
+                features: dom_core::KERNEL_FEAT_COINBASE,
+                explicit_value: dom_core::block_reward(BlockHeight(1)).noms() + total_fees,
+                excess,
+                excess_signature: sig.to_bytes(),
+            },
+            offset: [0u8; 32],
+        };
+        let (output_root, kernel_root, rangeproof_root) =
+            compute_block_pmmr_roots(&coinbase, std::slice::from_ref(&tx)).expect("pmmr roots");
+        let _ = proof; // used via cb_proof
+        let block = Block {
+            header: BlockHeader {
+                version: dom_core::PROTOCOL_VERSION,
+                height: BlockHeight(1),
+                prev_hash: Hash256::from_bytes([0x55; 32]),
+                timestamp: Timestamp(1_704_067_260),
+                output_root,
+                kernel_root,
+                rangeproof_root,
+                total_kernel_offset: [0u8; 32],
+                target: CompactTarget(0x1f00_ffff),
+                total_difficulty: U256::from(2u64),
+                pow: crate::block::ProofOfWork {
+                    nonce: 7,
+                    randomx_hash: Hash256::ZERO,
+                },
+            },
+            coinbase,
+            transactions: vec![tx],
+        };
+
+        let err = validate_block(
+            &block,
+            &ValidationContext {
+                current_height: BlockHeight(1),
+                chain_id: [0x11; 32],
+                now: Timestamp(u64::MAX),
+            },
+        )
+        .expect_err("spending coinbase output in same block must be rejected");
+        assert!(
+            err.to_string().contains("cut-through"),
+            "expected cut-through rejection, got: {err}"
+        );
     }
 }
