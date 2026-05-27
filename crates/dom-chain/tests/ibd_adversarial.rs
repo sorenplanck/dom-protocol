@@ -223,7 +223,7 @@ fn empty_batch_with_peer_at_our_tip_starts_block_download() {
     let mut ibd = IbdState::new(100, 100);
     // Already complete — but force into Headers phase to exercise
     // the transition.
-    ibd.phase = IbdPhase::Headers;
+    ibd.phase = IbdPhase::HeaderSync;
     ibd.headers_height = 100;
     let action = ibd.process_headers(vec![], Timestamp(0)).unwrap();
     assert!(matches!(action, IbdAction::StartBlockDownload));
@@ -272,7 +272,7 @@ fn catching_up_transitions_to_block_download() {
     let mut ibd = IbdState::new(0, 50);
     let action = ibd.process_headers(batch(1, 50), Timestamp(0)).unwrap();
     assert!(matches!(action, IbdAction::StartBlockDownload));
-    assert_eq!(ibd.phase, IbdPhase::Blocks);
+    assert_eq!(ibd.phase, IbdPhase::BlockSync);
 }
 
 /// `mark_block_committed` advances `blocks_height` monotonically and
