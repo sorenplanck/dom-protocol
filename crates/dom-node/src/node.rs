@@ -444,6 +444,7 @@ impl DomNode {
                                         let requeued = queue
                                             .defer(crate::future_block_queue::DeferredBlock {
                                                 block_hash: deferred.block_hash,
+                                                block_height: deferred.block_height,
                                                 timestamp: deferred.timestamp,
                                                 queued_at: std::time::Instant::now(),
                                                 block_bytes: deferred.block_bytes.clone(),
@@ -1272,6 +1273,7 @@ async fn queue_future_block(
     let hash = *dom_crypto::hash::blake2b_256(&header_bytes).as_bytes();
     let deferred = crate::future_block_queue::DeferredBlock {
         block_hash: hash,
+        block_height: block.header.height.0,
         timestamp: block.header.timestamp.0,
         queued_at: std::time::Instant::now(),
         block_bytes,
@@ -1538,9 +1540,11 @@ pub(crate) fn restore_peer_rotation_state(
     peers: &mut PeerManager,
 ) -> Result<(), DomError> {
     match load_peer_rotation_snapshot(store)? {
-        Some(snapshot) => peers.restore_outbound_failure_state(&snapshot).map_err(|e| {
-            DomError::Invalid(format!("persisted peer rotation state restore failed: {e}"))
-        }),
+        Some(snapshot) => peers
+            .restore_outbound_failure_state(&snapshot)
+            .map_err(|e| {
+                DomError::Invalid(format!("persisted peer rotation state restore failed: {e}"))
+            }),
         None => Ok(()),
     }
 }
@@ -1932,8 +1936,7 @@ async fn resume_ibd_block_sync(
                     }
                 };
                 if best_chain {
-                    purge_mempool_confirmed_inputs(chain, &runtime.mempool, &txs_for_scan)
-                        .await?;
+                    purge_mempool_confirmed_inputs(chain, &runtime.mempool, &txs_for_scan).await?;
                     if let Some(ref wallet_arc) = runtime.wallet {
                         let mut w = wallet_arc.lock().await;
                         w.apply_canonical_block(&txs_for_scan, height)
@@ -3003,10 +3006,9 @@ mod tests {
         decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
         load_mempool_snapshot, load_or_create_noise_static_key, load_peer_rotation_snapshot,
         parse_persisted_noise_static_key, peer_violation_score, pending_peer_violation_score,
-        persist_mempool_snapshot, purge_mempool_confirmed_inputs,
-        reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action,
-        restore_peer_rotation_state, tx_hash, DeferredReplayAction, DomNode, IbdRoundState,
-        OutboundAttemptOutcome, RelayBlockAction,
+        persist_mempool_snapshot, purge_mempool_confirmed_inputs, reconcile_mempool_after_connect,
+        refresh_peer_metrics, relay_block_action, restore_peer_rotation_state, tx_hash,
+        DeferredReplayAction, DomNode, IbdRoundState, OutboundAttemptOutcome, RelayBlockAction,
         LEGACY_PEER_ROTATION_METADATA_KEY, MEMPOOL_METADATA_KEY, NOISE_STATIC_KEY_METADATA_KEY,
         PEER_ROTATION_METADATA_KEY,
     };
@@ -3536,8 +3538,12 @@ mod tests {
         let hash_a = tx_hash(&tx_a).expect("hash a");
         let hash_b = tx_hash(&tx_b).expect("hash b");
         let mut mempool = Mempool::new();
-        mempool.accept_tx(tx_b.clone(), hash_b, 2).expect("accept b");
-        mempool.accept_tx(tx_a.clone(), hash_a, 1).expect("accept a");
+        mempool
+            .accept_tx(tx_b.clone(), hash_b, 2)
+            .expect("accept b");
+        mempool
+            .accept_tx(tx_a.clone(), hash_a, 1)
+            .expect("accept a");
         persist_mempool_snapshot(&store, &mempool.snapshot()).expect("persist mempool");
         drop(store);
 
@@ -3550,7 +3556,11 @@ mod tests {
             .expect("load mempool")
             .expect("snapshot present");
         assert_eq!(
-            persisted.entries.iter().map(|entry| entry.tx_hash).collect::<Vec<_>>(),
+            persisted
+                .entries
+                .iter()
+                .map(|entry| entry.tx_hash)
+                .collect::<Vec<_>>(),
             runtime_hashes
         );
         fs::remove_dir_all(&dir).expect("cleanup test dir");

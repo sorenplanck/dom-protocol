@@ -81,6 +81,7 @@ async fn deferred_block_queue_is_runtime_only_across_restart() {
             node.future_block_queue
                 .defer(dom_node::future_block_queue::DeferredBlock {
                     block_hash: [0x42; 32],
+                    block_height: 1,
                     timestamp: u64::MAX,
                     queued_at: Instant::now(),
                     block_bytes: vec![0xde, 0xad, 0xbe, 0xef],
@@ -199,6 +200,7 @@ async fn deferred_block_queue_stays_runtime_only_across_restart_loop() {
             node.future_block_queue
                 .defer(dom_node::future_block_queue::DeferredBlock {
                     block_hash: [round; 32],
+                    block_height: round as u64,
                     timestamp: u64::MAX - round as u64,
                     queued_at: Instant::now(),
                     block_bytes: vec![round, 0xde, 0xad, 0xbe, 0xef],
@@ -259,6 +261,7 @@ async fn deferred_queue_churn_does_not_resurrect_across_restart_cycles() {
                 node.future_block_queue
                     .defer(dom_node::future_block_queue::DeferredBlock {
                         block_hash: [round ^ slot; 32],
+                        block_height: ((round as u64) << 8) | slot as u64,
                         timestamp: u64::MAX - ((round as u64) << 8) - slot as u64,
                         queued_at: Instant::now(),
                         block_bytes: vec![round, slot, 0xde, 0xad, 0xbe, 0xef],
