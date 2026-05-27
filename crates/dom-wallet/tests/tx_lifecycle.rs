@@ -132,6 +132,43 @@ fn apply_canonical_block_writes_confirmed_event() {
     );
 }
 
+#[test]
+fn mark_submitted_writes_submitted_event() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path().join("w");
+    let mut wd = WalletDir::create(&dir, "pw", Network::Mainnet, &test_genesis()).unwrap();
+    wd.wallet_mut().add_output(make_output(900, 100, false));
+
+    let tx = build_test_spend(wd.wallet_mut());
+    let tx_hash = Wallet::tracking_tx_hash(&tx).unwrap();
+    wd.wallet_mut().mark_submitted(tx_hash).unwrap();
+
+    let records = replay_records(&dir);
+    assert_eq!(records.get(&tx_hash).unwrap().status, TxStatus::Submitted);
+}
+
+#[test]
+fn mark_failed_writes_failed_event() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path().join("w");
+    let mut wd = WalletDir::create(&dir, "pw", Network::Mainnet, &test_genesis()).unwrap();
+    wd.wallet_mut().add_output(make_output(900, 100, false));
+
+    let tx = build_test_spend(wd.wallet_mut());
+    let tx_hash = Wallet::tracking_tx_hash(&tx).unwrap();
+    wd.wallet_mut()
+        .mark_failed(tx_hash, "mempool rejected")
+        .unwrap();
+
+    let records = replay_records(&dir);
+    assert_eq!(
+        records.get(&tx_hash).unwrap().status,
+        TxStatus::Failed {
+            reason: "mempool rejected".to_string()
+        }
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────
 // 4. Confirming the same tx twice is idempotent.
 //

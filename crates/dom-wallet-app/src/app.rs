@@ -17,6 +17,9 @@ pub struct WalletApp {
     restore_phrase: String,
     unlock_password: String,
     receive_amount: String,
+    send_request_text: String,
+    send_fee: String,
+    send_result: Option<String>,
 }
 
 impl WalletApp {
@@ -35,6 +38,9 @@ impl WalletApp {
             restore_phrase: String::new(),
             unlock_password: String::new(),
             receive_amount: String::new(),
+            send_request_text: String::new(),
+            send_fee: "1000".to_string(),
+            send_result: None,
         })
     }
 }
@@ -307,14 +313,48 @@ impl WalletApp {
                 ui.code(&row.commitment_hex);
                 ui.label("Recipient blinding");
                 ui.code(&row.blinding_hex);
+                ui.label("Payment request");
+                ui.code(&row.request_text);
             });
         }
     }
 
     fn render_send(&mut self, ui: &mut egui::Ui) {
         ui.heading("Send");
-        ui.label("Send flow is deferred to the next batch.");
-        ui.label("This application batch does not fabricate recipient semantics before the receive protocol is finalized.");
+        ui.label("Send consumes the exact payment request produced by the Receive screen.");
+        ui.label("The wallet validates network, address, commitment, amount, and blinding before constructing the transaction.");
+        ui.horizontal(|ui| {
+            ui.label("Fee (noms)");
+            ui.text_edit_singleline(&mut self.send_fee);
+        });
+        ui.label("Payment request");
+        ui.add(
+            egui::TextEdit::multiline(&mut self.send_request_text)
+                .desired_rows(8)
+                .desired_width(f32::INFINITY),
+        );
+        if ui.button("Build And Submit").clicked() {
+            match self.send_fee.trim().parse::<u64>() {
+                Ok(fee) => match self
+                    .runtime
+                    .submit_payment_request(&self.send_request_text, fee)
+                {
+                    Ok(tx_hash) => {
+                        self.send_result =
+                            Some(format!("submitted transaction {}", hex::encode(tx_hash)));
+                        self.send_request_text.clear();
+                    }
+                    Err(e) => self
+                        .runtime
+                        .set_error(format!("submit payment request: {e}")),
+                },
+                Err(e) => self.runtime.set_error(format!("parse fee: {e}")),
+            }
+        }
+        if let Some(result) = &self.send_result {
+            ui.separator();
+            ui.label(result);
+        }
     }
 
     fn render_history(&mut self, ui: &mut egui::Ui) {

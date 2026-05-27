@@ -907,6 +907,38 @@ impl Wallet {
         }
     }
 
+    /// Record that a previously built transaction has been handed off
+    /// to a node or mempool. The pending reservation remains intact;
+    /// only the journal state machine advances.
+    pub fn mark_submitted(&mut self, tx_hash: [u8; 32]) -> Result<(), WalletError> {
+        if !self.pending_txs.contains_key(&tx_hash) {
+            return Err(WalletError::Io("pending tx not found".into()));
+        }
+        self.record_journal(tx_hash, TxJournalEvent::Submitted);
+        Ok(())
+    }
+
+    /// Record that submission failed with an explicit operator-visible
+    /// reason. The pending reservation remains in place so the wallet
+    /// can survive restart and the operator can later cancel, replace,
+    /// or resubmit deliberately.
+    pub fn mark_failed(
+        &mut self,
+        tx_hash: [u8; 32],
+        reason: impl Into<String>,
+    ) -> Result<(), WalletError> {
+        if !self.pending_txs.contains_key(&tx_hash) {
+            return Err(WalletError::Io("pending tx not found".into()));
+        }
+        self.record_journal(
+            tx_hash,
+            TxJournalEvent::Failed {
+                reason: reason.into(),
+            },
+        );
+        Ok(())
+    }
+
     /// Cancel a pending transaction (release reservations).
     pub fn cancel_tx(&mut self, tx_hash: [u8; 32]) -> Result<(), WalletError> {
         debug!("canceling tx {}", hex::encode(tx_hash));
