@@ -1298,6 +1298,7 @@ async fn persist_ibd_state(
     ibd: &dom_chain::IbdState,
     round: IbdRoundState,
 ) -> Result<(), DomError> {
+    let chain = chain.lock().await;
     let snapshot = dom_chain::PersistedIbdState {
         phase: ibd.phase,
         peer_addr: peer_addr.to_string(),
@@ -1306,6 +1307,7 @@ async fn persist_ibd_state(
         headers_height: ibd.headers_height,
         blocks_height: ibd.blocks_height,
         last_progress_height: ibd.last_progress_height,
+        checkpoint_tip_hash: *chain.tip_hash.as_bytes(),
         retry_attempts: ibd.retry_attempts,
         last_interruption: ibd.last_interruption,
         pending_blocks: round.pending_blocks,
@@ -1314,7 +1316,6 @@ async fn persist_ibd_state(
         header_cursor: round.header_cursor,
         header_cursor_height: round.header_cursor_height,
     };
-    let chain = chain.lock().await;
     snapshot.save(&chain.store)
 }
 
@@ -1344,10 +1345,11 @@ async fn initialize_ibd_state(
     peer_best_height: u64,
 ) -> Result<(dom_chain::IbdState, Option<dom_chain::PersistedIbdState>), DomError> {
     let peer_key = peer_addr.to_string();
-    let (tip_height, persisted) = {
+    let (tip_height, tip_hash, persisted) = {
         let chain = chain.lock().await;
         (
             chain.tip_height.0,
+            *chain.tip_hash.as_bytes(),
             dom_chain::PersistedIbdState::load(&chain.store)?,
         )
     };
@@ -1359,6 +1361,7 @@ async fn initialize_ibd_state(
     let resumable = snapshot.peer_addr == peer_key
         && snapshot.best_peer_height == peer_best_height
         && snapshot.blocks_height == tip_height
+        && snapshot.checkpoint_tip_hash == tip_hash
         && !matches!(
             snapshot.phase,
             dom_chain::IbdPhase::Completed | dom_chain::IbdPhase::Failed
@@ -2469,7 +2472,7 @@ mod tests {
         RelayBlockAction,
     };
     use crate::metrics::Metrics;
-    use dom_chain::{ChainState, ConnectResult, IbdPhase, PersistedIbdState};
+    use dom_chain::{ChainState, ConnectResult, IbdInterruption, IbdPhase, PersistedIbdState};
     use dom_consensus::block::{BlockHeader, ProofOfWork};
     use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction};
     use dom_core::{
@@ -2878,6 +2881,7 @@ mod tests {
         let dir = fresh_test_dir("header-resume-ok");
         let chain = open_chain(&dir);
         let peer_addr: SocketAddr = "127.0.0.1:33369".parse().expect("peer addr");
+        let checkpoint_tip_hash = { *chain.lock().await.tip_hash.as_bytes() };
 
         let header1 = synthetic_known_header(0, Hash256::ZERO, 1);
         let header2 = synthetic_known_header(1, Hash256::from_bytes(header_hash(&header1)), 2);
@@ -2892,6 +2896,7 @@ mod tests {
             headers_height: 0,
             blocks_height: 0,
             last_progress_height: 0,
+            checkpoint_tip_hash,
             retry_attempts: 0,
             last_interruption: None,
             pending_blocks: Vec::new(),
@@ -2951,6 +2956,7 @@ mod tests {
         let dir = fresh_test_dir("header-resume-bad");
         let chain = open_chain(&dir);
         let peer_addr: SocketAddr = "127.0.0.1:33369".parse().expect("peer addr");
+        let checkpoint_tip_hash = { *chain.lock().await.tip_hash.as_bytes() };
 
         let header1 = synthetic_known_header(0, Hash256::ZERO, 1);
         let mut header2 = synthetic_known_header(1, Hash256::from_bytes(header_hash(&header1)), 2);
@@ -2965,6 +2971,7 @@ mod tests {
             headers_height: 0,
             blocks_height: 0,
             last_progress_height: 0,
+            checkpoint_tip_hash,
             retry_attempts: 0,
             last_interruption: None,
             pending_blocks: Vec::new(),
@@ -3013,6 +3020,7 @@ mod tests {
         let dir = fresh_test_dir("header-resume-malformed");
         let chain = open_chain(&dir);
         let peer_addr: SocketAddr = "127.0.0.1:33369".parse().expect("peer addr");
+        let checkpoint_tip_hash = { *chain.lock().await.tip_hash.as_bytes() };
 
         let snapshot = PersistedIbdState {
             phase: IbdPhase::HeaderSync,
@@ -3022,6 +3030,7 @@ mod tests {
             headers_height: 0,
             blocks_height: 0,
             last_progress_height: 0,
+            checkpoint_tip_hash,
             retry_attempts: 0,
             last_interruption: None,
             pending_blocks: Vec::new(),
@@ -3058,6 +3067,61 @@ mod tests {
         assert!(
             matches!(err, DomError::Malformed(_)),
             "unexpected error: {err}"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[tokio::test]
+    async fn persisted_ibd_snapshot_is_rejected_when_tip_hash_changed_at_same_height() {
+        let dir = fresh_test_dir("header-resume-tip-mismatch");
+        let chain = open_chain(&dir);
+        let peer_addr: SocketAddr = "127.0.0.1:33369".parse().expect("peer addr");
+
+        {
+            let mut guard = chain.lock().await;
+            guard.tip_height = BlockHeight(5);
+            guard.tip_hash = Hash256::from_bytes([0x10; 32]);
+        }
+
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::HeaderSync,
+            peer_addr: peer_addr.to_string(),
+            start_height: 0,
+            best_peer_height: 7,
+            headers_height: 5,
+            blocks_height: 5,
+            last_progress_height: 5,
+            checkpoint_tip_hash: [0x20; 32],
+            retry_attempts: 1,
+            last_interruption: Some(IbdInterruption::Timeout),
+            pending_blocks: Vec::new(),
+            pending_headers: vec![
+                synthetic_known_header(5, Hash256::from_bytes([0x10; 32]), 6)
+                    .to_bytes()
+                    .expect("header bytes"),
+            ],
+            block_cursor: 0,
+            header_cursor: 0,
+            header_cursor_height: 6,
+        };
+        {
+            let guard = chain.lock().await;
+            snapshot.save(&guard.store).expect("save snapshot");
+        }
+
+        let (_, restored) = initialize_ibd_state(&chain, peer_addr, 7)
+            .await
+            .expect("initialize");
+
+        assert!(restored.is_none(), "mismatched tip hash must not resume");
+
+        let persisted = {
+            let guard = chain.lock().await;
+            PersistedIbdState::load(&guard.store).expect("load snapshot")
+        };
+        assert!(
+            persisted.is_none(),
+            "mismatched snapshot must be cleared deterministically"
         );
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
