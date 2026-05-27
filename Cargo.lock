@@ -1609,6 +1609,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dom-core",
+ "dom-crypto",
+ "dom-serialization",
  "dom-wallet",
  "eframe",
  "hex",
