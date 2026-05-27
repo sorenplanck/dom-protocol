@@ -303,11 +303,14 @@ impl PeerManager {
 
     /// Get all connected peer addresses (for broadcasting).
     pub fn connected_peers(&self) -> Vec<String> {
-        self.peers
+        let mut out: Vec<String> = self
+            .peers
             .iter()
             .filter(|(_, p)| p.state == PeerState::Connected)
             .map(|(addr, _)| addr.clone())
-            .collect()
+            .collect();
+        out.sort();
+        out
     }
 
     /// Record a duplicate block relay from a connected peer.
@@ -355,11 +358,14 @@ impl PeerManager {
 
     /// Get connected peers with higher claimed height (for IBD).
     pub fn peers_with_height_above(&self, height: u64) -> Vec<String> {
-        self.peers
+        let mut out: Vec<String> = self
+            .peers
             .iter()
             .filter(|(_, p)| p.state == PeerState::Connected && p.best_height > height)
             .map(|(addr, _)| addr.clone())
-            .collect()
+            .collect();
+        out.sort();
+        out
     }
 
     fn pending_penalty_score(&self, addr: &str) -> u32 {
@@ -516,6 +522,47 @@ mod tests {
 
         assert!(mgr.add_ban_score(&addr, 100));
         assert!(mgr.connected_peers().is_empty());
+    }
+
+    #[test]
+    fn connected_peers_are_returned_in_canonical_order() {
+        let mut mgr = PeerManager::new(125, 8);
+        mgr.register_peer(make_peer([10, 0, 0, 9], 33369, true))
+            .unwrap();
+        mgr.register_peer(make_peer([10, 0, 0, 2], 33369, true))
+            .unwrap();
+        mgr.register_peer(make_peer([10, 0, 0, 20], 33369, true))
+            .unwrap();
+
+        assert_eq!(
+            mgr.connected_peers(),
+            vec![
+                "10.0.0.20:33369".to_string(),
+                "10.0.0.2:33369".to_string(),
+                "10.0.0.9:33369".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn peers_with_height_above_are_returned_in_canonical_order() {
+        let mut mgr = PeerManager::new(125, 8);
+        let mut a = make_peer([10, 0, 0, 9], 33369, true);
+        a.best_height = 120;
+        mgr.register_peer(a).unwrap();
+
+        let mut b = make_peer([10, 0, 0, 2], 33369, true);
+        b.best_height = 110;
+        mgr.register_peer(b).unwrap();
+
+        let mut c = make_peer([10, 0, 0, 20], 33369, true);
+        c.best_height = 90;
+        mgr.register_peer(c).unwrap();
+
+        assert_eq!(
+            mgr.peers_with_height_above(100),
+            vec!["10.0.0.2:33369".to_string(), "10.0.0.9:33369".to_string(),]
+        );
     }
 
     #[test]

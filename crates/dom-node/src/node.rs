@@ -521,6 +521,8 @@ impl DomNode {
 
                 // Also try configured seed peers
                 addrs.extend(self.config.seed_peers.iter().cloned());
+                addrs.sort();
+                addrs.dedup();
 
                 for addr in addrs {
                     let reserved = {
