@@ -22,7 +22,9 @@ fn sample_state() -> PersistedIbdState {
         retry_attempts: 2,
         last_interruption: Some(IbdInterruption::Timeout),
         pending_blocks: vec![[0x11; 32], [0x22; 32], [0x33; 32]],
+        pending_headers: vec![vec![0xAA; 64], vec![0xBB; 64]],
         block_cursor: 2,
+        header_cursor: 1,
         header_cursor_height: 64,
     }
 }
