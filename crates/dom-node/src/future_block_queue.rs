@@ -5,6 +5,12 @@
 //! reduces orphan rates from transient clock drift without weakening the
 //! consensus rule (MAX_FUTURE_BLOCK_TIME remains the hard limit).
 //!
+//! The queue is intentionally runtime-only. After restart it begins empty and
+//! does not reconstruct deferred runtime state implicitly.
+//!
+//! Replay order for ready blocks is canonical at the drain boundary:
+//! `block_height ASC`, then `block_hash ASC`.
+//!
 //! Section 12.2 of the DOM Protocol Design Philosophy.
 
 use std::collections::HashMap;
@@ -21,6 +27,8 @@ const MAX_QUEUE_SIZE: usize = 256;
 pub struct DeferredBlock {
     /// Hash of the block being deferred.
     pub block_hash: [u8; 32],
+    /// Height declared by the block header.
+    pub block_height: u64,
     /// Block timestamp (seconds since epoch).
     pub timestamp: u64,
     /// When this entry was queued (for expiry).
@@ -62,24 +70,26 @@ impl FutureBlockQueue {
     }
 
     /// Drain blocks whose timestamps are now within the hard limit.
-    /// Returns blocks ready for normal validation.
+    ///
+    /// Ready blocks are returned in canonical replay order:
+    /// `block_height ASC`, then `block_hash ASC`.
     pub async fn drain_ready(&self, now_secs: u64, hard_limit_secs: u64) -> Vec<DeferredBlock> {
         let mut entries = self.entries.write().await;
         let ready_cutoff = now_secs.saturating_add(hard_limit_secs);
 
-        let mut ready_hashes: Vec<([u8; 32], u64)> = entries
+        let mut ready_keys: Vec<(u64, [u8; 32])> = entries
             .iter()
             .filter(|(_, b)| b.timestamp <= ready_cutoff)
-            .map(|(h, block)| (*h, block.timestamp))
+            .map(|(h, block)| (block.block_height, *h))
             .collect();
-        ready_hashes.sort_by(|(left_hash, left_ts), (right_hash, right_ts)| {
-            left_ts
-                .cmp(right_ts)
+        ready_keys.sort_by(|(left_height, left_hash), (right_height, right_hash)| {
+            left_height
+                .cmp(right_height)
                 .then_with(|| left_hash.as_slice().cmp(right_hash.as_slice()))
         });
 
-        let mut ready = Vec::with_capacity(ready_hashes.len());
-        for (hash, _) in ready_hashes {
+        let mut ready = Vec::with_capacity(ready_keys.len());
+        for (_, hash) in ready_keys {
             if let Some(block) = entries.remove(&hash) {
                 ready.push(block);
             }
@@ -126,9 +136,10 @@ impl Default for FutureBlockQueue {
 mod tests {
     use super::*;
 
-    fn mock_block(hash_byte: u8, timestamp: u64) -> DeferredBlock {
+    fn mock_block(hash_byte: u8, block_height: u64, timestamp: u64) -> DeferredBlock {
         DeferredBlock {
             block_hash: [hash_byte; 32],
+            block_height,
             timestamp,
             queued_at: Instant::now(),
             block_bytes: vec![0u8; 100],
@@ -138,7 +149,7 @@ mod tests {
     #[tokio::test]
     async fn defer_and_retrieve() {
         let queue = FutureBlockQueue::new();
-        let block = mock_block(1, 1000);
+        let block = mock_block(1, 10, 1000);
         assert!(queue.defer(block.clone()).await);
         assert!(queue.contains(&block.block_hash).await);
         assert_eq!(queue.size().await, 1);
@@ -148,22 +159,23 @@ mod tests {
     async fn drain_ready_works() {
         let queue = FutureBlockQueue::new();
         // Block at timestamp 1500 — should be ready when now=1400, limit=120
-        queue.defer(mock_block(1, 1500)).await;
+        queue.defer(mock_block(1, 11, 1500)).await;
         // Block at timestamp 2000 — should NOT be ready yet
-        queue.defer(mock_block(2, 2000)).await;
+        queue.defer(mock_block(2, 12, 2000)).await;
 
         let ready = queue.drain_ready(1400, 120).await;
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].timestamp, 1500);
+        assert_eq!(ready[0].block_height, 11);
         assert_eq!(queue.size().await, 1);
     }
 
     #[tokio::test]
-    async fn drain_ready_is_canonical_by_timestamp_then_hash() {
+    async fn drain_ready_is_canonical_by_height_then_hash() {
         let queue = FutureBlockQueue::new();
-        queue.defer(mock_block(9, 1500)).await;
-        queue.defer(mock_block(2, 1490)).await;
-        queue.defer(mock_block(4, 1500)).await;
+        queue.defer(mock_block(9, 11, 1490)).await;
+        queue.defer(mock_block(2, 10, 1500)).await;
+        queue.defer(mock_block(4, 10, 1490)).await;
 
         let ready = queue.drain_ready(1400, 120).await;
         let hashes: Vec<[u8; 32]> = ready.into_iter().map(|block| block.block_hash).collect();
@@ -175,10 +187,10 @@ mod tests {
         let a = FutureBlockQueue::new();
         let b = FutureBlockQueue::new();
         let blocks = vec![
-            mock_block(7, 1502),
-            mock_block(1, 1490),
-            mock_block(3, 1502),
-            mock_block(2, 1490),
+            mock_block(7, 12, 1502),
+            mock_block(1, 10, 1490),
+            mock_block(3, 11, 1502),
+            mock_block(2, 10, 1490),
         ];
 
         for block in &blocks {
@@ -206,9 +218,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn not_ready_blocks_remain_queued_after_canonical_drain() {
+        let queue = FutureBlockQueue::new();
+        let ready_low = mock_block(2, 10, 1495);
+        let ready_high = mock_block(1, 11, 1490);
+        let not_ready = mock_block(9, 9, 5000);
+
+        assert!(queue.defer(ready_high.clone()).await);
+        assert!(queue.defer(not_ready.clone()).await);
+        assert!(queue.defer(ready_low.clone()).await);
+
+        let ready = queue.drain_ready(1400, 120).await;
+        let hashes: Vec<[u8; 32]> = ready.into_iter().map(|block| block.block_hash).collect();
+        assert_eq!(hashes, vec![ready_low.block_hash, ready_high.block_hash]);
+        assert!(queue.contains(&not_ready.block_hash).await);
+        assert_eq!(queue.size().await, 1);
+    }
+
+    #[tokio::test]
     async fn evict_expired_works() {
         let queue = FutureBlockQueue::new();
-        let mut block = mock_block(1, 1000);
+        let mut block = mock_block(1, 10, 1000);
         // Pretend it was queued 1 hour ago
         block.queued_at = Instant::now()
             .checked_sub(std::time::Duration::from_secs(3600))
@@ -226,16 +256,16 @@ mod tests {
             entries: Arc::new(RwLock::new(HashMap::new())),
             max_size: 2,
         };
-        assert!(queue.defer(mock_block(1, 1000)).await);
-        assert!(queue.defer(mock_block(2, 1000)).await);
+        assert!(queue.defer(mock_block(1, 10, 1000)).await);
+        assert!(queue.defer(mock_block(2, 11, 1000)).await);
         // Third should be rejected
-        assert!(!queue.defer(mock_block(3, 1000)).await);
+        assert!(!queue.defer(mock_block(3, 12, 1000)).await);
     }
 
     #[tokio::test]
     async fn remove_works() {
         let queue = FutureBlockQueue::new();
-        let block = mock_block(1, 1000);
+        let block = mock_block(1, 10, 1000);
         queue.defer(block.clone()).await;
 
         let removed = queue.remove(&block.block_hash).await;
@@ -246,8 +276,8 @@ mod tests {
     #[tokio::test]
     async fn duplicate_defer_replaces_without_growing_queue() {
         let queue = FutureBlockQueue::new();
-        let first = mock_block(1, 1000);
-        let mut replacement = mock_block(1, 1100);
+        let first = mock_block(1, 10, 1000);
+        let mut replacement = mock_block(1, 11, 1100);
         replacement.block_bytes = vec![0xAB; 64];
 
         assert!(queue.defer(first).await);
@@ -255,6 +285,7 @@ mod tests {
         assert_eq!(queue.size().await, 1);
 
         let removed = queue.remove(&replacement.block_hash).await.unwrap();
+        assert_eq!(removed.block_height, 11);
         assert_eq!(removed.timestamp, 1100);
         assert_eq!(removed.block_bytes, vec![0xAB; 64]);
     }
@@ -265,9 +296,9 @@ mod tests {
             entries: Arc::new(RwLock::new(HashMap::new())),
             max_size: 2,
         };
-        let first = mock_block(1, 1000);
-        let second = mock_block(2, 1000);
-        let third = mock_block(3, 1000);
+        let first = mock_block(1, 10, 1000);
+        let second = mock_block(2, 11, 1000);
+        let third = mock_block(3, 12, 1000);
 
         assert!(queue.defer(first.clone()).await);
         assert!(queue.defer(second.clone()).await);
@@ -284,8 +315,8 @@ mod tests {
             entries: Arc::new(RwLock::new(HashMap::new())),
             max_size: 1,
         };
-        let first = mock_block(1, 1000);
-        let mut replacement = mock_block(1, 1100);
+        let first = mock_block(1, 10, 1000);
+        let mut replacement = mock_block(1, 11, 1100);
         replacement.block_bytes = vec![0xCD; 32];
 
         assert!(queue.defer(first).await);
@@ -293,7 +324,21 @@ mod tests {
         assert_eq!(queue.size().await, 1);
 
         let removed = queue.remove(&replacement.block_hash).await.unwrap();
+        assert_eq!(removed.block_height, 11);
         assert_eq!(removed.timestamp, 1100);
         assert_eq!(removed.block_bytes, vec![0xCD; 32]);
+    }
+
+    #[tokio::test]
+    async fn repeated_empty_drains_are_stable() {
+        let queue = FutureBlockQueue::new();
+        assert!(queue.defer(mock_block(5, 12, 5000)).await);
+
+        let first = queue.drain_ready(1400, 120).await;
+        let second = queue.drain_ready(1400, 120).await;
+
+        assert!(first.is_empty());
+        assert!(second.is_empty());
+        assert_eq!(queue.size().await, 1);
     }
 }
