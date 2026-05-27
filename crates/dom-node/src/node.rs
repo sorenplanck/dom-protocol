@@ -721,31 +721,22 @@ async fn handle_inbound(
             // tip instead of remaining stuck at a stale height.
             let our_height = chain.lock().await.tip_height.0;
             if peer_hello.best_height > our_height {
-                info!(
-                    "Starting IBD from {addr}: our={our_height} peer={}",
-                    peer_hello.best_height
-                );
-                loop {
-                    match ibd_sync_round(
-                        &mut stream,
-                        &mut codec,
-                        &config,
-                        &chain,
-                        addr,
-                        svc.wallet.clone(),
-                    )
-                    .await
-                    {
-                        Ok(true) => continue,
-                        Ok(false) => {
-                            info!("IBD with {addr} caught up");
-                            break;
-                        }
-                        Err(e) => {
-                            let _ = record_peer_violation(&svc.peers, addr, &e).await;
-                            warn!("IBD with {addr} failed: {e}");
-                            return;
-                        }
+                match run_ibd_session(
+                    &mut stream,
+                    &mut codec,
+                    &config,
+                    &chain,
+                    addr,
+                    peer_hello.best_height,
+                    svc.wallet.clone(),
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        let _ = record_peer_violation(&svc.peers, addr, &e).await;
+                        warn!("IBD with {addr} failed: {e}");
+                        return;
                     }
                 }
             }
@@ -864,34 +855,24 @@ async fn connect_outbound(
             };
 
             // IBD loop: keep syncing while peer claims to be ahead.
-            // Each ibd_sync_round returns false when the peer has nothing new.
             let our_height = chain.lock().await.tip_height.0;
             if peer_hello.best_height > our_height {
-                info!(
-                    "Starting IBD from {addr}: our={our_height} peer={}",
-                    peer_hello.best_height
-                );
-                loop {
-                    match ibd_sync_round(
-                        &mut stream,
-                        &mut codec,
-                        &config,
-                        &chain,
-                        peer_addr,
-                        svc.wallet.clone(),
-                    )
-                    .await
-                    {
-                        Ok(true) => continue,
-                        Ok(false) => {
-                            info!("IBD with {addr} caught up");
-                            break;
-                        }
-                        Err(e) => {
-                            let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
-                            warn!("IBD with {addr} failed: {e}");
-                            return;
-                        }
+                match run_ibd_session(
+                    &mut stream,
+                    &mut codec,
+                    &config,
+                    &chain,
+                    peer_addr,
+                    peer_hello.best_height,
+                    svc.wallet.clone(),
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
+                        warn!("IBD with {addr} failed: {e}");
+                        return;
                     }
                 }
             }
@@ -1293,6 +1274,115 @@ async fn build_locator(chain: &Arc<Mutex<ChainState>>) -> Result<Vec<[u8; 32]>, 
     Ok(out)
 }
 
+async fn run_ibd_session(
+    stream: &mut tokio::net::TcpStream,
+    codec: &mut dom_wire::codec::NoiseCodec,
+    config: &NodeConfig,
+    chain: &Arc<Mutex<ChainState>>,
+    peer_addr: std::net::SocketAddr,
+    peer_best_height: u64,
+    wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+) -> Result<(), DomError> {
+    let our_height = chain.lock().await.tip_height.0;
+    let mut ibd = dom_chain::IbdState::new(our_height, peer_best_height);
+    match ibd.begin_session() {
+        dom_chain::IbdControl::Complete => {
+            info!(
+                "IBD with {peer_addr} already complete at height {}",
+                our_height
+            );
+            return Ok(());
+        }
+        dom_chain::IbdControl::Continue => {}
+        dom_chain::IbdControl::Retry | dom_chain::IbdControl::Fail => {
+            return Err(DomError::Internal(
+                "IBD state machine returned invalid initial control".into(),
+            ));
+        }
+    }
+
+    info!("Starting IBD from {peer_addr}: our={our_height} peer={peer_best_height}");
+
+    loop {
+        ibd.begin_header_sync();
+        match ibd_sync_round(
+            stream,
+            codec,
+            config,
+            chain,
+            peer_addr,
+            wallet.clone(),
+            &mut ibd,
+        )
+        .await
+        {
+            Ok(true) => {
+                let new_height = chain.lock().await.tip_height.0;
+                match ibd.note_round_progress(new_height) {
+                    dom_chain::IbdControl::Complete => {
+                        info!("IBD with {peer_addr} caught up at height {new_height}");
+                        return Ok(());
+                    }
+                    dom_chain::IbdControl::Continue => continue,
+                    dom_chain::IbdControl::Retry | dom_chain::IbdControl::Fail => {
+                        return Err(DomError::Internal(
+                            "IBD progress transition returned invalid control".into(),
+                        ));
+                    }
+                }
+            }
+            Ok(false) => match ibd.note_empty_response() {
+                dom_chain::IbdControl::Complete => {
+                    info!(
+                        "IBD with {peer_addr} completed after empty response at height {}",
+                        ibd.blocks_height
+                    );
+                    return Ok(());
+                }
+                dom_chain::IbdControl::Retry => {
+                    warn!(
+                        "IBD with {peer_addr} made no progress; retry {}/{} remaining={}",
+                        ibd.retry_attempts,
+                        dom_chain::ibd::MAX_IBD_RETRY_ATTEMPTS,
+                        ibd.remaining_retries()
+                    );
+                    continue;
+                }
+                dom_chain::IbdControl::Fail => {
+                    return Err(DomError::PolicyRejected(format!(
+                        "IBD from {peer_addr}: exhausted retry budget after empty response"
+                    )));
+                }
+                dom_chain::IbdControl::Continue => {
+                    return Err(DomError::Internal(
+                        "IBD empty-response transition returned invalid control".into(),
+                    ));
+                }
+            },
+            Err(e) => match ibd.note_round_error(&e) {
+                dom_chain::IbdControl::Retry => {
+                    warn!(
+                        "IBD with {peer_addr} interrupted ({e}); retry {}/{} remaining={}",
+                        ibd.retry_attempts,
+                        dom_chain::ibd::MAX_IBD_RETRY_ATTEMPTS,
+                        ibd.remaining_retries()
+                    );
+                    continue;
+                }
+                dom_chain::IbdControl::Fail => return Err(e),
+                dom_chain::IbdControl::Complete => {
+                    return Ok(());
+                }
+                dom_chain::IbdControl::Continue => {
+                    return Err(DomError::Internal(
+                        "IBD error transition returned invalid control".into(),
+                    ));
+                }
+            },
+        }
+    }
+}
+
 /// Run a single IBD sync round against one peer.
 ///
 /// Sends GetHeaders, receives headers, requests bodies in batches, and connects
@@ -1305,6 +1395,7 @@ async fn ibd_sync_round(
     chain: &Arc<Mutex<ChainState>>,
     peer_addr: std::net::SocketAddr,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+    ibd: &mut dom_chain::IbdState,
 ) -> Result<bool, DomError> {
     use dom_wire::message::{
         Command, GetBlockDataPayload, GetHeadersPayload, HeadersPayload, WireMessage,
@@ -1371,6 +1462,7 @@ async fn ibd_sync_round(
     }
 
     let mut connected_any = false;
+    ibd.begin_block_sync();
 
     for batch in block_hashes.chunks(dom_core::MAX_GETBLOCKDATA_HASHES) {
         let req = GetBlockDataPayload {
