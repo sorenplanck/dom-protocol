@@ -38,18 +38,21 @@ const ALLOWED_MARKERS: &[&str] = &[
     // Phase tracking references are not drift — they're an explicit
     // pointer at the roadmap. Examples:
     //   "Phase 3.2 follow-up", "Phase 6.1 deferred"
-    "Phase",
-    // RFC references are explicit spec pointers, not drift.
-    "RFC-",
-    // RELEASE_BLOCKERS short-codes (RB-*) are explicit gap tracking.
-    "RB-",
-    // DOM-XXX-NNN audit IDs are explicit-tracking too.
+    "Phase", // RFC references are explicit spec pointers, not drift.
+    "RFC-",  // RELEASE_BLOCKERS short-codes (RB-*) are explicit gap tracking.
+    "RB-",   // DOM-XXX-NNN audit IDs are explicit-tracking too.
     "DOM-",
 ];
 
 /// Substrings that flag a production-code drift marker.
-const FORBIDDEN_MARKERS: &[&str] =
-    &["TODO", "FIXME", "HACK", "XXX", "todo!()", "unimplemented!()"];
+const FORBIDDEN_MARKERS: &[&str] = &[
+    "TODO",
+    "FIXME",
+    "HACK",
+    "XXX",
+    "todo!()",
+    "unimplemented!()",
+];
 
 /// Substrings that mark stale / dead-code comments.
 const STALE_COMMENT_MARKERS: &[&str] = &[
