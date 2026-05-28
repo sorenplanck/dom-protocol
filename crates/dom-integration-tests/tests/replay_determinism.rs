@@ -23,6 +23,7 @@ use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_integration_tests::helpers::*;
 use dom_pow::{target_to_difficulty, CompactTarget, REGTEST_TARGET_COMPACT};
 use dom_serialization::{DomDeserialize, DomSerialize};
+use dom_store::utxo::UtxoEntry;
 use dom_store::DomStore;
 use std::path::Path;
 fn now_secs() -> u64 {
@@ -32,8 +33,9 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Collect serialised block bytes for heights 1..=count from a freshly
-/// mined Regtest chain.
+/// Collect serialised block bytes for heights 0..=count from a freshly
+/// mined Regtest chain. Height 0 is included so replay into an empty
+/// `ChainState` preserves the parent-known invariant for block 1.
 async fn produce_block_sequence(name: &str, port: u16, count: u64) -> Vec<Vec<u8>> {
     let mut config = test_config(name, port, false);
     config.wallet_path = Some(format!("/tmp/dom-replay-{}.dom", name));
@@ -52,8 +54,8 @@ async fn produce_block_sequence(name: &str, port: u16, count: u64) -> Vec<Vec<u8
     // `header || body` (RFC-0007 §X — `DomSerialize` is concatenative),
     // so we reconstruct the wire bytes by concatenating the two records.
     let chain = node.chain.lock().await;
-    let mut out = Vec::with_capacity(count as usize);
-    for h in 1..=count {
+    let mut out = Vec::with_capacity(count as usize + 1);
+    for h in 0..=count {
         let hash = chain
             .store
             .get_hash_at_height(h)
@@ -96,6 +98,39 @@ fn fresh_chain(data_dir: &str, network_magic: u32) -> ChainState {
     let store = DomStore::open(Path::new(data_dir)).expect("store open");
     let genesis_hash = Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST);
     ChainState::open(store, genesis_hash, network_magic).expect("chain open")
+}
+
+fn seed_genesis_fixture(chain: &mut ChainState, genesis: &Block) {
+    assert_eq!(genesis.header.height, dom_core::BlockHeight::GENESIS);
+    let header_bytes = genesis.header.to_bytes().expect("genesis header bytes");
+    let body_bytes = genesis.to_bytes().expect("genesis body bytes");
+    let hash = *dom_crypto::hash::blake2b_256(&header_bytes).as_bytes();
+    let new_utxos = vec![(
+        *genesis.coinbase.output.commitment.as_bytes(),
+        UtxoEntry {
+            block_height: genesis.header.height.0,
+            is_coinbase: true,
+            proof: genesis.coinbase.output.proof.clone(),
+        }
+        .to_bytes(),
+    )];
+    let kernels = vec![(*genesis.coinbase.kernel.excess.as_bytes(), hash)];
+
+    chain
+        .store
+        .commit_block(
+            &hash,
+            genesis.header.height.0,
+            &header_bytes,
+            &body_bytes,
+            &new_utxos,
+            &[],
+            &kernels,
+        )
+        .expect("seed genesis fixture");
+    chain.tip_hash = Hash256::from_bytes(hash);
+    chain.tip_height = genesis.header.height;
+    chain.tip_difficulty = genesis.header.total_difficulty;
 }
 
 fn replay_commitment(seed: u8, value: u64) -> Commitment {
@@ -231,16 +266,20 @@ fn write_replay_fixture_chain(
 async fn replay_two_independent_chains_converge() {
     init_tracing();
 
-    // 1. Produce a canonical block sequence (3 blocks under Regtest).
+    // 1. Produce a canonical block sequence (genesis + 3 blocks under Regtest).
     let blocks = produce_block_sequence("replay-source", 43400, 3).await;
-    assert_eq!(blocks.len(), 3, "must collect three blocks");
+    assert_eq!(blocks.len(), 4, "must collect genesis plus three blocks");
 
     // 2. Open two independent fresh chains (separate LMDB directories).
     let mut chain_a = fresh_chain("/tmp/dom-replay-a", dom_core::NETWORK_MAGIC_REGTEST);
     let mut chain_b = fresh_chain("/tmp/dom-replay-b", dom_core::NETWORK_MAGIC_REGTEST);
 
-    // 3. Apply the same sequence to both chains.
-    for (i, bytes) in blocks.iter().enumerate() {
+    // 3. Seed the same genesis fixture, then apply the same non-genesis
+    // sequence to both chains.
+    let genesis = Block::from_bytes(&blocks[0]).expect("decode genesis");
+    seed_genesis_fixture(&mut chain_a, &genesis);
+    seed_genesis_fixture(&mut chain_b, &genesis);
+    for (i, bytes) in blocks.iter().enumerate().skip(1) {
         let block = Block::from_bytes(bytes).expect("decode block");
         chain_a
             .connect_block(&block, Timestamp(now_secs()))
