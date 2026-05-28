@@ -1,7 +1,7 @@
 use crate::storage::{self, AppStorageError, PersistedAppState};
 use anyhow::Context;
 use dom_core::Address;
-use dom_core::{Hash256, GENESIS_HASH_MAINNET, GENESIS_HASH_REGTEST, GENESIS_HASH_TESTNET};
+use dom_core::Hash256;
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::BlindingFactor;
 use dom_serialization::DomDeserialize;
@@ -119,7 +119,7 @@ impl AppRuntime {
     ) -> anyhow::Result<String> {
         let seed = Bip39Seed::generate_new()?;
         let phrase = seed.phrase().to_string();
-        let genesis_hash = genesis_hash_for(network);
+        let genesis_hash = genesis_hash_for(network)?;
         let wallet_dir_handle =
             WalletDir::create_from_seed(&wallet_dir, password, network, &genesis_hash, &seed)?;
         drop(wallet_dir_handle);
@@ -139,7 +139,7 @@ impl AppRuntime {
         phrase: &str,
     ) -> anyhow::Result<()> {
         let seed = Bip39Seed::from_phrase(phrase, SeedAcceptance::NewWallet)?;
-        let genesis_hash = genesis_hash_for(network);
+        let genesis_hash = genesis_hash_for(network)?;
         let wallet_dir_handle =
             WalletDir::create_from_seed(&wallet_dir, password, network, &genesis_hash, &seed)?;
         drop(wallet_dir_handle);
@@ -517,12 +517,8 @@ fn format_receive_status(status: &ReceiveRequestStatus) -> String {
     }
 }
 
-fn genesis_hash_for(network: Network) -> Hash256 {
-    match network {
-        Network::Mainnet => Hash256::from_bytes(GENESIS_HASH_MAINNET),
-        Network::Testnet => Hash256::from_bytes(GENESIS_HASH_TESTNET),
-        Network::Regtest => Hash256::from_bytes(GENESIS_HASH_REGTEST),
-    }
+fn genesis_hash_for(network: Network) -> Result<Hash256, dom_core::DomError> {
+    dom_core::startup_genesis_hash_for_network_magic(network.magic())
 }
 
 fn node_client(url: &str) -> Result<NodeRpcClient, RpcClientError> {

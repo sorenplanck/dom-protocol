@@ -7,6 +7,8 @@
 //!
 //! Source of truth: DOM whitepaper (May 2026).
 
+use crate::{DomError, Hash256};
+
 // ── Timing & Difficulty ──────────────────────────────────────────────────────
 
 /// [CONSENSUS] Target block spacing in seconds (2 minutes).
@@ -51,9 +53,26 @@ pub const GENESIS_TARGET_COMPACT: u32 = 0x1e00_ffff;
 /// [CONSENSUS] Initial difficulty (computed from GENESIS_TARGET_COMPACT).
 pub const INITIAL_DIFFICULTY: u64 = 1;
 
-/// [CONSENSUS] Genesis block timestamp placeholder.
-/// REPLACE on launch day with: date +%s
-pub const GENESIS_TIMESTAMP_PLACEHOLDER: u64 = 1778642633;
+/// [CONSENSUS] Frozen testnet genesis timestamp (Unix seconds).
+///
+/// This value is already live on the controlled testnet and must remain stable
+/// for every testnet node forever.
+pub const GENESIS_TIMESTAMP_TESTNET: u64 = 1_778_642_633;
+
+/// [CONSENSUS] Pre-launch mainnet genesis timestamp placeholder (Unix seconds).
+///
+/// This is only the ceremony input placeholder. It is not sufficient to enable
+/// mainnet by itself: `GENESIS_HASH_MAINNET` must be pinned from the canonical
+/// derivation path and `MAINNET_GENESIS_FINALIZED` must be flipped in the same
+/// review set. Until then, any mainnet startup path MUST fail closed.
+pub const GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER: u64 = GENESIS_TIMESTAMP_TESTNET;
+
+/// [CONSENSUS] Backwards-compatible alias used by pre-existing genesis code.
+///
+/// Do not treat this alias as proof that mainnet is finalized; use
+/// `genesis_timestamp_for_network_magic()` plus
+/// `ensure_network_genesis_ready()` instead.
+pub const GENESIS_TIMESTAMP_PLACEHOLDER: u64 = GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER;
 
 /// [CONSENSUS] Immutable message inscribed in the genesis coinbase.
 pub const GENESIS_MESSAGE: &str = "Not a store of value. A means of exchange.";
@@ -379,15 +398,31 @@ pub const TAG_COINBASE_BLINDING: &str = "DOM:coinbase-blinding:v1";
 
 /// Canonical genesis block hash for Testnet.
 ///
-/// Derived deterministically from the canonical genesis coinbase + header.
-/// Must be updated whenever any genesis input changes (tag, timestamp, target,
-/// PMMR construction, coinbase structure).
+/// Derived deterministically from the canonical genesis construction path:
+/// `dom-node::miner::build_genesis_coinbase` ->
+/// `dom-consensus::compute_block_pmmr_roots` ->
+/// `BlockHeader` serialization ->
+/// `dom_crypto::hash::blake2b_256(header_bytes)`.
+///
+/// Any change in the genesis inputs (tag, timestamp, target, PMMR
+/// construction, coinbase structure, or header serialization) changes this
+/// hash and is therefore consensus-breaking.
 ///
 /// Last computed: 2026-05-19 from clean run with TAG_GENESIS_BLINDING:v1.
 pub const GENESIS_HASH_TESTNET: [u8; 32] = [
     0xba, 0x73, 0x16, 0xa5, 0x27, 0x03, 0xbf, 0x78, 0x48, 0x25, 0x8b, 0xbb, 0x43, 0x4e, 0xd5, 0xa7,
     0xd7, 0x96, 0x14, 0x74, 0x6b, 0x66, 0xe9, 0x16, 0x22, 0x7b, 0xe4, 0x41, 0x0a, 0x9d, 0x8e, 0x5b,
 ];
+
+/// Explicit mainnet-launch gate.
+///
+/// Keeping this `false` is the only correct state while the repository still
+/// carries placeholder mainnet genesis data. Flipping it to `true` requires the
+/// same change set to:
+/// 1. pin `GENESIS_HASH_MAINNET` from the canonical derivation path above,
+/// 2. keep `NETWORK_MAGIC_MAINNET` unchanged, and
+/// 3. record the ceremony artefacts described in `docs/GENESIS_CEREMONY.md`.
+pub const MAINNET_GENESIS_FINALIZED: bool = false;
 
 /// Canonical genesis block hash for Mainnet — UNFINALIZED until mainnet launch.
 pub const GENESIS_HASH_MAINNET: [u8; 32] = [0u8; 32];
@@ -400,6 +435,95 @@ pub const GENESIS_HASH_MAINNET: [u8; 32] = [0u8; 32];
 /// byte (`NETWORK_MAGIC_REGTEST`), this value never reaches a non-Regtest
 /// validator and a zero-array placeholder is acceptable.
 pub const GENESIS_HASH_REGTEST: [u8; 32] = [0u8; 32];
+
+/// Returns `true` if a genesis hash is still the all-zero placeholder.
+pub const fn is_placeholder_genesis_hash(hash: &[u8; 32]) -> bool {
+    let mut i = 0;
+    while i < 32 {
+        if hash[i] != 0 {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Validate a would-be mainnet genesis hash before allowing mainnet startup.
+///
+/// This rejects the placeholder hash and the currently pinned non-mainnet
+/// constants so a misconfigured build cannot silently boot a "mainnet" node
+/// bound to testnet or regtest identity.
+pub fn validate_mainnet_genesis_hash(hash: [u8; 32]) -> Result<(), DomError> {
+    if hash == GENESIS_HASH_TESTNET {
+        return Err(DomError::Invalid(
+            "mainnet disabled: GENESIS_HASH_MAINNET must not alias GENESIS_HASH_TESTNET".into(),
+        ));
+    }
+    if hash == GENESIS_HASH_REGTEST {
+        return Err(DomError::Invalid(
+            "mainnet disabled: GENESIS_HASH_MAINNET must not alias GENESIS_HASH_REGTEST".into(),
+        ));
+    }
+    if is_placeholder_genesis_hash(&hash) {
+        return Err(DomError::Invalid(
+            "mainnet disabled: GENESIS_HASH_MAINNET is still the zero placeholder".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Return the configured genesis timestamp for a network magic value.
+pub fn genesis_timestamp_for_network_magic(network_magic: u32) -> Result<u64, DomError> {
+    match network_magic {
+        NETWORK_MAGIC_MAINNET => Ok(GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER),
+        NETWORK_MAGIC_TESTNET | NETWORK_MAGIC_REGTEST => Ok(GENESIS_TIMESTAMP_TESTNET),
+        other => Err(DomError::Invalid(format!(
+            "unknown network magic 0x{other:08x} for genesis timestamp"
+        ))),
+    }
+}
+
+/// Return the configured genesis hash for a network magic value.
+///
+/// This returns the literal configured constant, even if the network is not yet
+/// allowed to start. Startup paths should call
+/// `startup_genesis_hash_for_network_magic()` instead.
+pub fn configured_genesis_hash_for_network_magic(network_magic: u32) -> Result<Hash256, DomError> {
+    let hash = match network_magic {
+        NETWORK_MAGIC_MAINNET => GENESIS_HASH_MAINNET,
+        NETWORK_MAGIC_TESTNET => GENESIS_HASH_TESTNET,
+        NETWORK_MAGIC_REGTEST => GENESIS_HASH_REGTEST,
+        other => {
+            return Err(DomError::Invalid(format!(
+                "unknown network magic 0x{other:08x} for genesis hash"
+            )))
+        }
+    };
+    Ok(Hash256::from_bytes(hash))
+}
+
+/// Fail closed if the requested network is not safe to start from its current
+/// hardcoded genesis constants.
+pub fn ensure_network_genesis_ready(network_magic: u32) -> Result<(), DomError> {
+    if network_magic != NETWORK_MAGIC_MAINNET {
+        return Ok(());
+    }
+    if !MAINNET_GENESIS_FINALIZED {
+        return Err(DomError::Invalid(
+            "mainnet disabled: genesis ceremony not finalized; see docs/GENESIS_CEREMONY.md".into(),
+        ));
+    }
+    validate_mainnet_genesis_hash(GENESIS_HASH_MAINNET)
+}
+
+/// Return the startup-safe genesis hash for a network magic value.
+///
+/// Mainnet callers must pass the explicit readiness gate first; testnet and
+/// regtest use their configured constants directly.
+pub fn startup_genesis_hash_for_network_magic(network_magic: u32) -> Result<Hash256, DomError> {
+    ensure_network_genesis_ready(network_magic)?;
+    configured_genesis_hash_for_network_magic(network_magic)
+}
 pub const TAG_PMMR_EMPTY: &str = "DOM:pmmr-empty:v1";
 pub const TAG_PMMR_BAG: &str = "DOM:pmmr-bag:v1";
 pub const TAG_PMMR_LEAF: &str = "DOM:pmmr-leaf:v1";
@@ -447,6 +571,14 @@ const _: () = {
         "Regtest magic must differ from testnet"
     );
     assert!(
+        !is_placeholder_genesis_hash(&GENESIS_HASH_TESTNET),
+        "Testnet genesis hash must be pinned"
+    );
+    assert!(
+        !MAINNET_GENESIS_FINALIZED || !is_placeholder_genesis_hash(&GENESIS_HASH_MAINNET),
+        "Finalized mainnet must not keep a placeholder genesis hash"
+    );
+    assert!(
         P2P_PORT_REGTEST != P2P_PORT_MAINNET && P2P_PORT_REGTEST != P2P_PORT_TESTNET,
         "Regtest port must not collide with mainnet/testnet"
     );
@@ -468,7 +600,69 @@ const _: () = {
     );
 };
 
-// ── Runtime verification tests ────────────────────────────────────────────────
+#[cfg(test)]
+mod genesis_tests {
+    use super::*;
+
+    #[test]
+    fn testnet_genesis_hash_is_pinned() {
+        assert!(!is_placeholder_genesis_hash(&GENESIS_HASH_TESTNET));
+    }
+
+    #[test]
+    fn genesis_timestamps_are_fixed() {
+        assert_eq!(GENESIS_TIMESTAMP_TESTNET, 1_778_642_633);
+        assert_eq!(
+            GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER, 1_778_642_633,
+            "mainnet must not drift silently before the ceremony pins the final timestamp"
+        );
+    }
+
+    #[test]
+    fn network_magic_ids_are_fixed() {
+        assert_eq!(NETWORK_MAGIC_MAINNET, 0x444F_4D31);
+        assert_eq!(NETWORK_MAGIC_TESTNET, 0x444F_4D54);
+        assert_eq!(NETWORK_MAGIC_REGTEST, 0x444F_4D52);
+    }
+
+    #[test]
+    fn mainnet_guard_rejects_placeholder_hash() {
+        let err = validate_mainnet_genesis_hash(GENESIS_HASH_MAINNET).unwrap_err();
+        assert!(matches!(err, DomError::Invalid(_)));
+        assert!(err.to_string().contains("mainnet disabled"));
+    }
+
+    #[test]
+    fn mainnet_guard_rejects_testnet_and_regtest_hashes() {
+        let testnet_err = validate_mainnet_genesis_hash(GENESIS_HASH_TESTNET).unwrap_err();
+        assert!(testnet_err.to_string().contains("TESTNET"));
+
+        let regtest_err = validate_mainnet_genesis_hash(GENESIS_HASH_REGTEST).unwrap_err();
+        assert!(regtest_err.to_string().contains("REGTEST"));
+    }
+
+    #[test]
+    fn startup_hash_lookup_rejects_disabled_mainnet() {
+        let err = startup_genesis_hash_for_network_magic(NETWORK_MAGIC_MAINNET).unwrap_err();
+        assert!(err.to_string().contains("mainnet disabled"));
+    }
+
+    #[test]
+    fn startup_hash_lookup_preserves_testnet_and_regtest() {
+        assert_eq!(
+            startup_genesis_hash_for_network_magic(NETWORK_MAGIC_TESTNET)
+                .unwrap()
+                .as_bytes(),
+            &GENESIS_HASH_TESTNET
+        );
+        assert_eq!(
+            startup_genesis_hash_for_network_magic(NETWORK_MAGIC_REGTEST)
+                .unwrap()
+                .as_bytes(),
+            &GENESIS_HASH_REGTEST
+        );
+    }
+}
 
 // ── Time Discipline Thresholds ───────────────────────────────────────────────
 

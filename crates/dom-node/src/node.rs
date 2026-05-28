@@ -185,16 +185,14 @@ impl DomNode {
         info!("Initializing DOM node ({:?} network)", config.network);
         info!("Data directory: {}", config.data_dir);
 
+        // Fail closed before touching the data directory if this build still
+        // carries placeholder genesis constants for the requested network.
+        let genesis_hash =
+            dom_core::startup_genesis_hash_for_network_magic(config.network.magic())?;
+
         // Open storage
         let data_path = Path::new(&config.data_dir);
         let store = DomStore::open(data_path)?;
-
-        // Canonical genesis hash for this network.
-        let genesis_hash = Hash256::from_bytes(match config.network {
-            dom_config::Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
-            dom_config::Network::Testnet => dom_core::GENESIS_HASH_TESTNET,
-            dom_config::Network::Regtest => dom_core::GENESIS_HASH_REGTEST,
-        });
 
         // Generate or load Noise keypair.
         let noise_privkey = load_or_create_noise_static_key(&store)?;

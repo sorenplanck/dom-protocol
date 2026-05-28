@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use dom_core::{Hash256, GENESIS_HASH_MAINNET, GENESIS_HASH_REGTEST, GENESIS_HASH_TESTNET};
+use dom_core::Hash256;
 use dom_wallet::{
     restore_from_phrase, Bip39Seed, InMemoryChainScan, Network, SeedAcceptance, WalletDir,
 };
@@ -116,7 +116,7 @@ fn init_wallet(
     network: Network,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let seed = Bip39Seed::generate_new()?;
-    let genesis_hash = genesis_hash_for(network);
+    let genesis_hash = genesis_hash_for(network)?;
     let wallet_dir_handle =
         WalletDir::create_from_seed(wallet_dir, password, network, &genesis_hash, &seed)?;
     drop(wallet_dir_handle);
@@ -141,7 +141,7 @@ fn restore_wallet(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let phrase = read_phrase_file(phrase_file)?;
     let scan = InMemoryChainScan::new();
-    let genesis_hash = genesis_hash_for(network);
+    let genesis_hash = genesis_hash_for(network)?;
     let restored =
         restore_from_phrase(&phrase, password, wallet_dir, network, &genesis_hash, &scan)?;
     drop(restored);
@@ -175,12 +175,8 @@ fn lock_wallet(wallet_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn genesis_hash_for(network: Network) -> Hash256 {
-    match network {
-        Network::Mainnet => Hash256::from_bytes(GENESIS_HASH_MAINNET),
-        Network::Testnet => Hash256::from_bytes(GENESIS_HASH_TESTNET),
-        Network::Regtest => Hash256::from_bytes(GENESIS_HASH_REGTEST),
-    }
+fn genesis_hash_for(network: Network) -> Result<Hash256, dom_core::DomError> {
+    dom_core::startup_genesis_hash_for_network_magic(network.magic())
 }
 
 fn read_phrase_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
