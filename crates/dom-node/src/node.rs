@@ -3164,6 +3164,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mine_fast_header(
         seed_hash: [u8; 32],
         prev_hash: Hash256,
