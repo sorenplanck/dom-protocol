@@ -77,7 +77,10 @@
 //! These guarantees are pinned by `tests/partial_persistence.rs`.
 
 use dom_core::DomError;
-use lmdb::{Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags};
+use lmdb::{
+    Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags,
+};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 const MAP_SIZE: usize = 1 << 34; // 16 GiB — see module doc § "Map size"
@@ -98,6 +101,10 @@ pub const DB_UTXOS: &str = "utxos";
 pub const DB_KERNEL_INDEX: &str = "kernel_index";
 pub const DB_PEER_ADDRS: &str = "peer_addrs";
 pub const DB_METADATA: &str = "metadata";
+/// Stable metadata key holding the canonical UTXO-set digest when the
+/// persisted UTXO database has been verified or rebuilt against canonical
+/// history on reopen.
+pub const METADATA_UTXO_SET_DIGEST_KEY: &[u8] = b"canonical_utxo_digest_v1";
 
 /// The DOM storage engine.
 pub struct DomStore {
@@ -287,6 +294,26 @@ impl DomStore {
         }
     }
 
+    /// Read the full persisted UTXO database as raw key/value bytes.
+    ///
+    /// This is used by chain reopen verification to compare the on-disk UTXO
+    /// database against a canonical reconstruction without trusting the stored
+    /// entry encoding first.
+    pub fn read_all_utxos_raw(&self) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, DomError> {
+        let txn = self
+            .env
+            .begin_ro_txn()
+            .map_err(|e| DomError::Internal(format!("ro txn: {e}")))?;
+        let mut cursor = txn
+            .open_ro_cursor(self.db_utxos)
+            .map_err(|e| DomError::Internal(format!("open utxo cursor: {e}")))?;
+        let mut out = BTreeMap::new();
+        for (key, value) in cursor.iter() {
+            out.insert(key.to_vec(), value.to_vec());
+        }
+        Ok(out)
+    }
+
     /// Get the canonical block hash that first indexed a kernel excess.
     pub fn get_kernel_block(&self, excess: &[u8; 33]) -> Result<Option<[u8; 32]>, DomError> {
         let txn = self
@@ -452,6 +479,11 @@ impl DomStore {
                 })?;
         }
 
+        match txn.del(self.db_metadata, &METADATA_UTXO_SET_DIGEST_KEY, None) {
+            Ok(()) | Err(lmdb::Error::NotFound) => {}
+            Err(e) => return Err(DomError::Internal(format!("delete stale utxo digest: {e}"))),
+        }
+
         // Single atomic commit — if this fails nothing was written.
         // MDB_MAP_FULL is tagged with LMDB_MAP_FULL_SENTINEL so the
         // chain-init layer can recognise it without parsing free-form
@@ -607,8 +639,60 @@ impl DomStore {
         txn.put(self.db_tip, b"tip", new_tip_hash, WriteFlags::empty())
             .map_err(|e| DomError::Internal(format!("put reorg tip: {e}")))?;
 
+        match txn.del(self.db_metadata, &METADATA_UTXO_SET_DIGEST_KEY, None) {
+            Ok(()) | Err(lmdb::Error::NotFound) => {}
+            Err(e) => return Err(DomError::Internal(format!("delete stale utxo digest: {e}"))),
+        }
+
         txn.commit()
             .map_err(|e| DomError::Internal(format!("commit reorg: {e}")))?;
+        Ok(())
+    }
+
+    /// Atomically replace the entire canonical UTXO database and persist the
+    /// digest that corresponds to the replacement contents.
+    pub fn replace_utxo_set(
+        &self,
+        utxos: &BTreeMap<[u8; 33], Vec<u8>>,
+        digest: &[u8; 32],
+    ) -> Result<(), DomError> {
+        let mut txn = self
+            .env
+            .begin_rw_txn()
+            .map_err(|e| DomError::Internal(format!("rw txn: {e}")))?;
+        txn.clear_db(self.db_utxos)
+            .map_err(|e| DomError::Internal(format!("clear utxos: {e}")))?;
+        for (commitment, entry) in utxos {
+            txn.put(self.db_utxos, commitment, entry, WriteFlags::NO_OVERWRITE)
+                .map_err(|e| DomError::Internal(format!("rewrite utxo: {e}")))?;
+        }
+        txn.put(
+            self.db_metadata,
+            &METADATA_UTXO_SET_DIGEST_KEY,
+            digest,
+            WriteFlags::empty(),
+        )
+        .map_err(|e| DomError::Internal(format!("put utxo digest: {e}")))?;
+        txn.commit()
+            .map_err(|e| DomError::Internal(format!("commit utxo rewrite: {e}")))?;
+        Ok(())
+    }
+
+    /// Persist the digest for the currently-verified canonical UTXO set.
+    pub fn persist_utxo_set_digest(&self, digest: &[u8; 32]) -> Result<(), DomError> {
+        let mut txn = self
+            .env
+            .begin_rw_txn()
+            .map_err(|e| DomError::Internal(format!("rw txn: {e}")))?;
+        txn.put(
+            self.db_metadata,
+            &METADATA_UTXO_SET_DIGEST_KEY,
+            digest,
+            WriteFlags::empty(),
+        )
+        .map_err(|e| DomError::Internal(format!("put utxo digest: {e}")))?;
+        txn.commit()
+            .map_err(|e| DomError::Internal(format!("commit utxo digest: {e}")))?;
         Ok(())
     }
 }

@@ -32,7 +32,7 @@ pub mod utxo;
 pub use block_store::BlockStore;
 pub use db::{
     DomStore, DB_BLOCKS, DB_BLOCK_BODIES, DB_BLOCK_HEIGHT, DB_CHAIN_TIP, DB_KERNEL_INDEX,
-    DB_METADATA, DB_PEER_ADDRS, DB_UTXOS, LMDB_MAP_FULL_SENTINEL,
+    DB_METADATA, DB_PEER_ADDRS, DB_UTXOS, LMDB_MAP_FULL_SENTINEL, METADATA_UTXO_SET_DIGEST_KEY,
 };
 pub use peer_store::PeerAddr;
 pub use utxo::{UtxoEntry, UtxoSet};
