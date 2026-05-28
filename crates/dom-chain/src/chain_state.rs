@@ -942,6 +942,20 @@ impl ChainState {
         check_reorg_depth(disconnect_blocks.len() as u64)?;
         let mut connect_blocks = collect_branch_blocks(&self.store, new_tip_hash, ancestor)?;
         connect_blocks.reverse();
+        let chain_id = derive_chain_id(self.network_magic, &self.genesis_hash);
+        for (block_hash, block) in &connect_blocks {
+            let ctx = ValidationContext {
+                current_height: block.header.height,
+                chain_id: *chain_id.as_bytes(),
+                now: Timestamp(u64::MAX),
+            };
+            validate_block(block, &ctx).map_err(|e| {
+                DomError::Invalid(format!(
+                    "reorg candidate block validation failed: hash={}, error={e}",
+                    block_hash
+                ))
+            })?;
+        }
         let reorg_delta = ReorgDelta {
             disconnected_txs: disconnect_blocks
                 .iter()
