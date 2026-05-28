@@ -1,6 +1,8 @@
 #![allow(missing_docs)]
 //! Chain state — current tip, validation, block commitment.
 
+use blake2::digest::consts::U32;
+use blake2::{Blake2b, Digest};
 use dom_consensus::block::{
     validate_future_timestamp_with_limit, validate_header_syntax, validate_median_time_past,
     validate_parent_timestamp_progression, validate_pow_for_network, BlockHeader,
@@ -8,13 +10,12 @@ use dom_consensus::block::{
 use dom_consensus::{derive_chain_id, validate_block, Block, Transaction, ValidationContext};
 use dom_core::{BlockHeight, DomError, Hash256, Timestamp};
 use dom_pow::{
-    difficulty_adjustment_window_blocks, randomx_seed_height, target_to_difficulty,
+    difficulty_adjustment_window_blocks, genesis_anchor, randomx_seed_height, target_to_difficulty,
     uses_dev_fixed_target, window_next_target, AsertAnchor, CompactTarget, NextTargetAdjustment,
-    genesis_anchor,
 };
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::utxo::UtxoEntry;
-use dom_store::DomStore;
+use dom_store::{DomStore, METADATA_UTXO_SET_DIGEST_KEY};
 use primitive_types::U256;
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, info};
@@ -28,6 +29,7 @@ use crate::reorg::{check_reorg_depth, find_common_ancestor};
 /// re-sync from genesis" — continuing on a corrupted state would
 /// fork the local chain from itself.
 pub const CHAIN_CORRUPT_SENTINEL: &str = "CHAIN_CORRUPT";
+const UTXO_SET_DIGEST_DOMAIN: &[u8] = b"DOM_CANONICAL_UTXO_SET_V1";
 
 type UtxoBytes = ([u8; 33], Vec<u8>);
 type SpentCommitment = [u8; 33];
@@ -129,13 +131,17 @@ impl ChainState {
                     }
                 }
                 rebuild_kernel_index_from_canonical_chain(&store, header.height)?;
+                ensure_canonical_utxo_set(&store, header.height)?;
                 (
                     Hash256::from_bytes(hash),
                     header.height,
                     header.total_difficulty,
                 )
             }
-            None => (Hash256::ZERO, BlockHeight::GENESIS, U256::zero()),
+            None => {
+                ensure_canonical_utxo_set(&store, BlockHeight::GENESIS)?;
+                (Hash256::ZERO, BlockHeight::GENESIS, U256::zero())
+            }
         };
 
         Ok(Self {
@@ -1050,6 +1056,126 @@ impl ChainState {
         }
         Ok(())
     }
+}
+
+fn ensure_canonical_utxo_set(store: &DomStore, tip_height: BlockHeight) -> Result<(), DomError> {
+    let canonical = reconstruct_canonical_utxo_set(store, tip_height)?;
+    let canonical_digest = digest_utxo_entries(&canonical);
+    let persisted = store.read_all_utxos_raw()?;
+    let persisted_digest = store.get_metadata(METADATA_UTXO_SET_DIGEST_KEY)?;
+    let canonical_raw: BTreeMap<Vec<u8>, Vec<u8>> = canonical
+        .iter()
+        .map(|(commitment, entry)| (commitment.to_vec(), entry.clone()))
+        .collect();
+
+    if persisted == canonical_raw {
+        if persisted_digest.as_deref() != Some(canonical_digest.as_slice()) {
+            store.persist_utxo_set_digest(&canonical_digest)?;
+        }
+        return Ok(());
+    }
+
+    info!(
+        "Canonical UTXO reconstruction diverged on reopen; replacing persisted set (persisted_entries={}, canonical_entries={})",
+        persisted.len(),
+        canonical.len()
+    );
+    store.replace_utxo_set(&canonical, &canonical_digest)
+}
+
+fn reconstruct_canonical_utxo_set(
+    store: &DomStore,
+    tip_height: BlockHeight,
+) -> Result<BTreeMap<[u8; 33], Vec<u8>>, DomError> {
+    let mut utxos = BTreeMap::new();
+    for h in 1..=tip_height.0 {
+        let hash = store.get_hash_at_height(h)?.ok_or_else(|| {
+            DomError::Internal(format!(
+                "{CHAIN_CORRUPT_SENTINEL}: missing canonical height_index entry at height {h} during UTXO rebuild"
+            ))
+        })?;
+        let body = store.get_block_body(&hash)?.ok_or_else(|| {
+            DomError::Internal(format!(
+                "{CHAIN_CORRUPT_SENTINEL}: canonical block {} has no body during UTXO rebuild",
+                hex::encode(hash)
+            ))
+        })?;
+        let block = Block::from_bytes(&body).map_err(|e| {
+            DomError::Internal(format!(
+                "{CHAIN_CORRUPT_SENTINEL}: canonical block {} body decode failed during UTXO rebuild: {e}",
+                hex::encode(hash)
+            ))
+        })?;
+        let header_bytes = block.header.to_bytes()?;
+        let computed = compute_block_hash(&header_bytes);
+        if computed.as_bytes() != &hash {
+            return Err(DomError::Internal(format!(
+                "{CHAIN_CORRUPT_SENTINEL}: canonical block body/header hash mismatch at height {h} during UTXO rebuild: height_index={} body_header={}",
+                hex::encode(hash),
+                computed
+            )));
+        }
+
+        let coinbase_commitment = *block.coinbase.output.commitment.as_bytes();
+        let coinbase_entry = UtxoEntry {
+            block_height: block.header.height.0,
+            is_coinbase: true,
+            proof: block.coinbase.output.proof.clone(),
+        };
+        if utxos
+            .insert(coinbase_commitment, coinbase_entry.to_bytes())
+            .is_some()
+        {
+            return Err(DomError::Internal(format!(
+                "{CHAIN_CORRUPT_SENTINEL}: duplicate coinbase UTXO commitment {} at height {} during UTXO rebuild",
+                hex::encode(coinbase_commitment),
+                h
+            )));
+        }
+
+        for tx in &block.transactions {
+            for input in &tx.inputs {
+                let commitment = *input.commitment.as_bytes();
+                if utxos.remove(&commitment).is_none() {
+                    return Err(DomError::Internal(format!(
+                        "{CHAIN_CORRUPT_SENTINEL}: canonical spend references missing UTXO {} at height {} during UTXO rebuild",
+                        hex::encode(commitment),
+                        h
+                    )));
+                }
+            }
+            for output in &tx.outputs {
+                let commitment = *output.commitment.as_bytes();
+                let entry = UtxoEntry {
+                    block_height: block.header.height.0,
+                    is_coinbase: false,
+                    proof: output.proof.clone(),
+                };
+                if utxos.insert(commitment, entry.to_bytes()).is_some() {
+                    return Err(DomError::Internal(format!(
+                        "{CHAIN_CORRUPT_SENTINEL}: duplicate output UTXO commitment {} at height {} during UTXO rebuild",
+                        hex::encode(commitment),
+                        h
+                    )));
+                }
+            }
+        }
+    }
+    Ok(utxos)
+}
+
+fn digest_utxo_entries(utxos: &BTreeMap<[u8; 33], Vec<u8>>) -> [u8; 32] {
+    type B2b256 = Blake2b<U32>;
+    let mut hasher = B2b256::new();
+    hasher.update(UTXO_SET_DIGEST_DOMAIN);
+    for (commitment, entry) in utxos {
+        hasher.update(commitment);
+        hasher.update((entry.len() as u32).to_le_bytes());
+        hasher.update(entry);
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&hasher.finalize());
+    out
 }
 
 fn rebuild_kernel_index_from_canonical_chain(
