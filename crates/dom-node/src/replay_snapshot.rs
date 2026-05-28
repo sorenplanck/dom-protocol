@@ -317,7 +317,10 @@ mod tests {
         changed.runtime_peer_rotation.outbound_failures[0].cooldown_rounds = 2;
 
         let diff = base.diff(&changed);
-        assert_eq!(diff.fields, vec!["persisted_peer_rotation", "runtime_peer_rotation"]);
+        assert_eq!(
+            diff.fields,
+            vec!["persisted_peer_rotation", "runtime_peer_rotation"]
+        );
     }
 
     #[test]

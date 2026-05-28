@@ -32,7 +32,7 @@
 //!   5. Verify the test still passes.
 
 use dom_core::{
-    ASERT_HALF_LIFE, ASERT_RADIX_BITS, COIN_UNIT, COINBASE_MATURITY, HALVING_EPOCHS,
+    ASERT_HALF_LIFE, ASERT_RADIX_BITS, COINBASE_MATURITY, COIN_UNIT, HALVING_EPOCHS,
     HALVING_INTERVAL, INITIAL_BLOCK_REWARD, MAX_BLOCK_WEIGHT, MAX_FUTURE_BLOCK_TIME,
     MAX_SUPPLY_NOMS, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_TESTNET, P2P_PORT_MAINNET,
     PROTOCOL_VERSION, TARGET_SPACING,
@@ -125,8 +125,8 @@ fn doc_corpus() -> String {
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
-        let content = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+        let content =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
         buf.push_str(&content);
         buf.push_str("\n\n");
     }
