@@ -456,17 +456,18 @@ pub const fn is_placeholder_genesis_hash(hash: &[u8; 32]) -> bool {
 pub fn validate_mainnet_genesis_hash(hash: [u8; 32]) -> Result<(), DomError> {
     if hash == GENESIS_HASH_TESTNET {
         return Err(DomError::Invalid(
-            "mainnet disabled: GENESIS_HASH_MAINNET must not alias GENESIS_HASH_TESTNET".into(),
+            "mainnet genesis is not finalized: GENESIS_HASH_MAINNET must not alias GENESIS_HASH_TESTNET".into(),
         ));
     }
     if hash == GENESIS_HASH_REGTEST {
         return Err(DomError::Invalid(
-            "mainnet disabled: GENESIS_HASH_MAINNET must not alias GENESIS_HASH_REGTEST".into(),
+            "mainnet genesis is not finalized: GENESIS_HASH_MAINNET must not alias GENESIS_HASH_REGTEST".into(),
         ));
     }
     if is_placeholder_genesis_hash(&hash) {
         return Err(DomError::Invalid(
-            "mainnet disabled: GENESIS_HASH_MAINNET is still the zero placeholder".into(),
+            "mainnet genesis is not finalized: GENESIS_HASH_MAINNET is still the zero placeholder"
+                .into(),
         ));
     }
     Ok(())
@@ -505,15 +506,27 @@ pub fn configured_genesis_hash_for_network_magic(network_magic: u32) -> Result<H
 /// Fail closed if the requested network is not safe to start from its current
 /// hardcoded genesis constants.
 pub fn ensure_network_genesis_ready(network_magic: u32) -> Result<(), DomError> {
+    if network_magic == 0 {
+        return Err(DomError::Invalid(
+            "mainnet genesis is not finalized: NETWORK_MAGIC_MAINNET is still the placeholder value".into(),
+        ));
+    }
     if network_magic != NETWORK_MAGIC_MAINNET {
         return Ok(());
     }
     if !MAINNET_GENESIS_FINALIZED {
         return Err(DomError::Invalid(
-            "mainnet disabled: genesis ceremony not finalized; see docs/GENESIS_CEREMONY.md".into(),
+            "mainnet genesis is not finalized: genesis ceremony not finalized; see docs/GENESIS_CEREMONY.md".into(),
         ));
     }
-    validate_mainnet_genesis_hash(GENESIS_HASH_MAINNET)
+    validate_mainnet_genesis_hash(GENESIS_HASH_MAINNET)?;
+    let mainnet_timestamp = genesis_timestamp_for_network_magic(network_magic)?;
+    if mainnet_timestamp == GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER {
+        return Err(DomError::Invalid(
+            "mainnet genesis is not finalized: GENESIS_TIMESTAMP_MAINNET is still the placeholder value".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Return the startup-safe genesis hash for a network magic value.
@@ -629,7 +642,7 @@ mod genesis_tests {
     fn mainnet_guard_rejects_placeholder_hash() {
         let err = validate_mainnet_genesis_hash(GENESIS_HASH_MAINNET).unwrap_err();
         assert!(matches!(err, DomError::Invalid(_)));
-        assert!(err.to_string().contains("mainnet disabled"));
+        assert!(err.to_string().contains("mainnet genesis is not finalized"));
     }
 
     #[test]
@@ -642,9 +655,17 @@ mod genesis_tests {
     }
 
     #[test]
+    fn startup_guard_rejects_placeholder_network_magic() {
+        let err = ensure_network_genesis_ready(0).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("NETWORK_MAGIC_MAINNET is still the placeholder value"));
+    }
+
+    #[test]
     fn startup_hash_lookup_rejects_disabled_mainnet() {
         let err = startup_genesis_hash_for_network_magic(NETWORK_MAGIC_MAINNET).unwrap_err();
-        assert!(err.to_string().contains("mainnet disabled"));
+        assert!(err.to_string().contains("mainnet genesis is not finalized"));
     }
 
     #[test]
