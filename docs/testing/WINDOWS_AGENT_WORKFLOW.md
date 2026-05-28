@@ -15,6 +15,28 @@ Codex is invoked in non-interactive mode as:
 codex exec -C <isolated-worktree> --dangerously-bypass-approvals-and-sandbox --color never -
 ```
 
+The default `run` mode creates an isolated git worktree under
+`target/dom-agent-runner/worktrees/<timestamp>`. For faster local Windows
+iteration, pass `--in-place` to run Codex in the current repository root and
+reuse the existing `target/` directory:
+
+```bash
+target/release/dom-agent-runner.exe run --prompt-file prompts/example-mempool-package-policy.txt --in-place
+target/release/dom-agent-runner.exe run --prompt "Update the mempool policy tests." --in-place
+```
+
+In-place mode refuses to start unless `git status --short` is empty:
+
+```text
+Refusing --in-place run because the worktree is not clean. Commit, stash, or use isolated mode.
+```
+
+When in-place mode is accepted, the runner still writes the normal run report
+files, invokes Codex non-interactively, runs the affected validation followed by
+pre-push validation for the default `affected` profile, commits only after tests
+pass, and pushes only when `--push` is provided. The final report records either
+`execution mode: in-place` or `execution mode: isolated-worktree`.
+
 ## Build
 
 ```bash
@@ -27,6 +49,7 @@ cargo build -p dom-agent-runner --release
 target/release/dom-agent-runner.exe doctor
 target/release/dom-agent-runner.exe list-prompts
 target/release/dom-agent-runner.exe run --prompt-file prompts/example-mempool-package-policy.txt --push
+target/release/dom-agent-runner.exe run --prompt-file prompts/example-mempool-package-policy.txt --in-place
 ```
 
 You can also pass an inline prompt:
@@ -45,6 +68,7 @@ After Codex edits the repository, the runner selects tests automatically using t
 
 ## Commit and Push Safety
 
+- `--in-place` fails before Codex is called if the repository is not clean.
 - If tests fail, the runner does not commit or push.
 - If commit fails, the runner does not push.
 - If `--push` is not provided, the runner does not push.
