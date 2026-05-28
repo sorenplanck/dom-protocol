@@ -2,7 +2,6 @@
 
 use crate::lock_order::{assert_canonical_order, RuntimeLock};
 use crate::metrics::Metrics;
-use crate::miner::mining_loop;
 use crate::time_health::{check_clock_health, DriftStatus};
 use dom_chain::ChainState;
 use dom_config::NodeConfig;
@@ -22,6 +21,7 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -128,13 +128,26 @@ const TASK_FUTURE_QUEUE: &str = "future_block_queue";
 const TASK_DANDELION: &str = "dandelion_stem_timeout";
 const TASK_MISSING_RETRY: &str = "missing_block_retries";
 
+const SHUTDOWN_GRACE_PERIOD_SECS: u64 = 20;
+const NODE_IO_TIMEOUT_SECS: u64 = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NodeLifecycleState {
+    #[default]
+    Starting,
+    Running,
+    ShuttingDown,
+    Stopped,
+    Failed,
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeTaskStatus {
     pub running_tasks: Vec<String>,
     pub running_relay_workers: Vec<String>,
     pub failure_task: Option<String>,
     pub failure_reason: Option<String>,
-    pub shutdown_requested: bool,
+    pub state: NodeLifecycleState,
 }
 
 impl Default for NodeTaskStatus {
@@ -144,7 +157,7 @@ impl Default for NodeTaskStatus {
             running_relay_workers: Vec::new(),
             failure_task: None,
             failure_reason: None,
-            shutdown_requested: false,
+            state: NodeLifecycleState::Starting,
         }
     }
 }
@@ -165,7 +178,6 @@ impl NodeTaskHandle {
 
     pub async fn shutdown(&self) {
         self.supervisor.request_shutdown().await;
-        self.supervisor.terminate_tasks().await;
     }
 
     pub async fn join(&self) -> Result<(), DomError> {
@@ -178,7 +190,7 @@ impl NodeTaskHandle {
         F: Future<Output = Result<(), DomError>> + Send + 'static,
     {
         self.supervisor
-            .spawn_critical_task(name.to_string(), fut)
+            .spawn_accept_task(name.to_string(), fut)
             .await;
     }
 }
@@ -188,13 +200,30 @@ struct SupervisorFailure {
     reason: String,
 }
 
+/// Canonical shutdown order for runtime tasks:
+/// 1) accept inbound work (listener)
+/// 2) miner
+/// 3) relay/connectors
+/// 4) persistence-critical tasks
+/// 5) rpc/ui tasks
 #[derive(Default)]
 struct NodeTaskSupervisor {
+    lifecycle_state: RwLock<NodeLifecycleState>,
     shutdown_requested: AtomicBool,
-    shutdown_token: CancellationToken,
-    critical_join_set: tokio::sync::Mutex<JoinSet<(String, Result<(), DomError>)>>,
+    accept_shutdown_token: CancellationToken,
+    miner_shutdown_token: CancellationToken,
+    relay_shutdown_token: CancellationToken,
+    persistence_shutdown_token: CancellationToken,
+    rpc_shutdown_token: CancellationToken,
+    accept_join_set: tokio::sync::Mutex<JoinSet<(String, Result<(), DomError>)>>,
+    miner_join_set: tokio::sync::Mutex<JoinSet<(String, Result<(), DomError>)>>,
+    connector_join_set: tokio::sync::Mutex<JoinSet<(String, Result<(), DomError>)>>,
+    persistence_join_set: tokio::sync::Mutex<JoinSet<(String, Result<(), DomError>)>>,
     relay_join_set: tokio::sync::Mutex<JoinSet<(String, Result<(), DomError>)>>,
-    critical_tasks: Arc<RwLock<BTreeSet<String>>>,
+    rpc_join_set: tokio::sync::Mutex<JoinSet<(String, Result<(), DomError>)>>,
+    task_names: Arc<RwLock<BTreeSet<String>>>,
+    // Non-persistent relay workers are all network peers and are considered critical
+    // for correctness but not for shutdown correctness reporting.
     relay_tasks: Arc<RwLock<BTreeSet<String>>>,
     failure: RwLock<Option<SupervisorFailure>>,
 }
@@ -203,39 +232,43 @@ impl NodeTaskSupervisor {
     fn new() -> Self {
         Self {
             shutdown_requested: AtomicBool::new(false),
-            shutdown_token: CancellationToken::new(),
-            critical_join_set: tokio::sync::Mutex::new(JoinSet::new()),
+            lifecycle_state: RwLock::new(NodeLifecycleState::Starting),
+            accept_shutdown_token: CancellationToken::new(),
+            miner_shutdown_token: CancellationToken::new(),
+            relay_shutdown_token: CancellationToken::new(),
+            persistence_shutdown_token: CancellationToken::new(),
+            rpc_shutdown_token: CancellationToken::new(),
+            accept_join_set: tokio::sync::Mutex::new(JoinSet::new()),
+            miner_join_set: tokio::sync::Mutex::new(JoinSet::new()),
+            connector_join_set: tokio::sync::Mutex::new(JoinSet::new()),
+            persistence_join_set: tokio::sync::Mutex::new(JoinSet::new()),
             relay_join_set: tokio::sync::Mutex::new(JoinSet::new()),
-            critical_tasks: Arc::new(RwLock::new(BTreeSet::new())),
+            rpc_join_set: tokio::sync::Mutex::new(JoinSet::new()),
+            task_names: Arc::new(RwLock::new(BTreeSet::new())),
             relay_tasks: Arc::new(RwLock::new(BTreeSet::new())),
             failure: RwLock::new(None),
         }
     }
 
     async fn status(&self) -> NodeTaskStatus {
-        let critical = self.critical_tasks.read().await;
+        let tasks = self.task_names.read().await;
         let relay = self.relay_tasks.read().await;
         let failure = self.failure.read().await;
         NodeTaskStatus {
-            running_tasks: critical.iter().cloned().collect(),
+            running_tasks: tasks.iter().cloned().collect(),
             running_relay_workers: relay.iter().cloned().collect(),
             failure_task: failure.as_ref().map(|f| f.task.clone()),
             failure_reason: failure.as_ref().map(|f| f.reason.clone()),
-            shutdown_requested: self.shutdown_requested.load(AtomicOrdering::Acquire),
+            state: *self.lifecycle_state.read().await,
         }
     }
 
     async fn request_shutdown(&self) {
         self.shutdown_requested.store(true, AtomicOrdering::Release);
-        self.shutdown_token.cancel();
-    }
-
-    async fn terminate_tasks(&self) {
-        let mut critical = self.critical_join_set.lock().await;
-        critical.abort_all();
-
-        let mut relay = self.relay_join_set.lock().await;
-        relay.abort_all();
+        let mut state = self.lifecycle_state.write().await;
+        if *state == NodeLifecycleState::Running {
+            *state = NodeLifecycleState::ShuttingDown;
+        }
     }
 
     async fn mark_failure(&self, task: impl Into<String>, reason: impl Into<String>) {
@@ -248,21 +281,78 @@ impl NodeTaskSupervisor {
         }
     }
 
-    async fn spawn_critical_task<F>(&self, name: String, fut: F)
+    fn accept_token(&self) -> CancellationToken {
+        self.accept_shutdown_token.clone()
+    }
+
+    fn miner_token(&self) -> CancellationToken {
+        self.miner_shutdown_token.clone()
+    }
+
+    fn relay_token(&self) -> CancellationToken {
+        self.relay_shutdown_token.clone()
+    }
+
+    fn persistence_token(&self) -> CancellationToken {
+        self.persistence_shutdown_token.clone()
+    }
+
+    fn rpc_token(&self) -> CancellationToken {
+        self.rpc_shutdown_token.clone()
+    }
+
+    async fn spawn_accept_task<F>(&self, name: String, fut: F)
     where
         F: Future<Output = Result<(), DomError>> + Send + 'static,
     {
-        let mut critical = self.critical_tasks.write().await;
-        critical.insert(name.clone());
-        drop(critical);
+        self.spawn_task(name, fut, &self.accept_join_set).await;
+    }
 
-        let active = self.critical_tasks.clone();
-        let name = name.clone();
-        self.critical_join_set.lock().await.spawn(async move {
+    async fn spawn_miner_task<F>(&self, name: String, fut: F)
+    where
+        F: Future<Output = Result<(), DomError>> + Send + 'static,
+    {
+        self.spawn_task(name, fut, &self.miner_join_set).await;
+    }
+
+    async fn spawn_connector_task<F>(&self, name: String, fut: F)
+    where
+        F: Future<Output = Result<(), DomError>> + Send + 'static,
+    {
+        self.spawn_task(name, fut, &self.connector_join_set).await;
+    }
+
+    async fn spawn_persistence_task<F>(&self, name: String, fut: F)
+    where
+        F: Future<Output = Result<(), DomError>> + Send + 'static,
+    {
+        self.spawn_task(name, fut, &self.persistence_join_set).await;
+    }
+
+    async fn spawn_rpc_task<F>(&self, name: String, fut: F)
+    where
+        F: Future<Output = Result<(), DomError>> + Send + 'static,
+    {
+        self.spawn_task(name, fut, &self.rpc_join_set).await;
+    }
+
+    async fn spawn_task(
+        &self,
+        name: String,
+        fut: impl Future<Output = Result<(), DomError>> + Send + 'static,
+        join_set: &tokio::sync::Mutex<JoinSet<(String, Result<(), DomError>)>>,
+    ) {
+        let mut active = self.task_names.write().await;
+        active.insert(name.clone());
+        drop(active);
+
+        let active = self.task_names.clone();
+        let task_name = name.clone();
+        join_set.lock().await.spawn(async move {
             let result = fut.await;
             let mut active = active.write().await;
-            active.remove(&name);
-            (name, result)
+            active.remove(&task_name);
+            (task_name, result)
         });
     }
 
@@ -287,84 +377,255 @@ impl NodeTaskSupervisor {
         });
     }
 
-    async fn join(&self) -> Result<(), DomError> {
-        let mut unexpected = None::<DomError>;
-        loop {
-            let critical_result = { self.critical_join_set.lock().await.join_next().await };
+    async fn observe_task_exit(
+        &self,
+        group: &str,
+        result: Result<(String, Result<(), DomError>), tokio::task::JoinError>,
+    ) -> Option<DomError> {
+        match result {
+            Ok((task, Ok(()))) => {
+                if self.shutdown_requested.load(AtomicOrdering::Acquire) {
+                    None
+                } else {
+                    let reason = format!("{group} task '{task}' exited without shutdown");
+                    self.mark_failure(task.clone(), reason).await;
+                    self.request_shutdown().await;
+                    Some(DomError::Internal(format!("{task}: exited unexpectedly")))
+                }
+            }
+            Ok((task, Err(e))) => {
+                self.mark_failure(task, e.to_string()).await;
+                self.request_shutdown().await;
+                Some(e)
+            }
+            Err(join_err) => {
+                if self.shutdown_requested.load(AtomicOrdering::Acquire) && join_err.is_cancelled()
+                {
+                    None
+                } else {
+                    self.mark_failure(group, join_err.to_string()).await;
+                    self.request_shutdown().await;
+                    Some(DomError::Internal(format!(
+                        "{group} task join failed: {join_err}"
+                    )))
+                }
+            }
+        }
+    }
 
-            match critical_result {
-                Some(Ok((task, result))) => match result {
+    async fn wait_for_critical_exit(&self) -> Option<DomError> {
+        loop {
+            let accept_active = !self.accept_join_set.lock().await.is_empty();
+            let miner_active = !self.miner_join_set.lock().await.is_empty();
+            let connector_active = !self.connector_join_set.lock().await.is_empty();
+            let persistence_active = !self.persistence_join_set.lock().await.is_empty();
+            let rpc_active = !self.rpc_join_set.lock().await.is_empty();
+
+            if !(accept_active
+                || miner_active
+                || connector_active
+                || persistence_active
+                || rpc_active)
+            {
+                return None;
+            }
+
+            tokio::select! {
+                result = async {
+                    self.accept_join_set.lock().await.join_next().await
+                }, if accept_active => {
+                    if let Some(result) = result {
+                        return self.observe_task_exit("accept", result).await;
+                    }
+                }
+                result = async {
+                    self.miner_join_set.lock().await.join_next().await
+                }, if miner_active => {
+                    if let Some(result) = result {
+                        return self.observe_task_exit("miner", result).await;
+                    }
+                }
+                result = async {
+                    self.connector_join_set.lock().await.join_next().await
+                }, if connector_active => {
+                    if let Some(result) = result {
+                        return self.observe_task_exit("connector", result).await;
+                    }
+                }
+                result = async {
+                    self.persistence_join_set.lock().await.join_next().await
+                }, if persistence_active => {
+                    if let Some(result) = result {
+                        return self.observe_task_exit("persistence", result).await;
+                    }
+                }
+                result = async {
+                    self.rpc_join_set.lock().await.join_next().await
+                }, if rpc_active => {
+                    if let Some(result) = result {
+                        return self.observe_task_exit("rpc", result).await;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn drain_task_set(
+        &self,
+        join_set: &tokio::sync::Mutex<JoinSet<(String, Result<(), DomError>)>>,
+        name: &str,
+    ) -> Option<DomError> {
+        let mut failure = None::<DomError>;
+
+        loop {
+            let result = {
+                let mut set = join_set.lock().await;
+                tokio::time::timeout(
+                    Duration::from_secs(SHUTDOWN_GRACE_PERIOD_SECS),
+                    set.join_next(),
+                )
+                .await
+            };
+
+            match result {
+                Ok(Some(Ok((task, result)))) => match result {
                     Ok(()) => {
                         if !self.shutdown_requested.load(AtomicOrdering::Acquire) {
-                            let reason = format!("critical task '{task}' exited without shutdown");
+                            let reason = format!("{name} task '{task}' exited without shutdown");
                             self.mark_failure(task.clone(), reason).await;
-                            unexpected =
-                                Some(DomError::Internal(format!("{task}: exited unexpectedly")));
+                            if failure.is_none() {
+                                failure = Some(DomError::Internal(format!(
+                                    "{task}: exited unexpectedly"
+                                )));
+                            }
                             self.request_shutdown().await;
-                            self.terminate_tasks().await;
-                            break;
                         }
                     }
                     Err(e) => {
                         self.mark_failure(task.clone(), e.to_string()).await;
-                        unexpected = Some(e);
+                        if failure.is_none() {
+                            failure = Some(e);
+                        }
                         self.request_shutdown().await;
-                        self.terminate_tasks().await;
-                        break;
                     }
                 },
-                Some(Err(join_err)) => {
-                    if self.shutdown_requested.load(AtomicOrdering::Acquire)
-                        && join_err.is_cancelled()
+                Ok(Some(Err(join_err))) => {
+                    if !(self.shutdown_requested.load(AtomicOrdering::Acquire)
+                        && join_err.is_cancelled())
                     {
-                        // expected while shutting down
-                    } else {
-                        self.mark_failure("critical", join_err.to_string()).await;
-                        unexpected = Some(DomError::Internal(format!(
-                            "critical task join failed: {join_err}"
-                        )));
+                        self.mark_failure(name, join_err.to_string()).await;
+                        if failure.is_none() {
+                            failure = Some(DomError::Internal(format!(
+                                "{name} task join failed: {join_err}"
+                            )));
+                        }
                         self.request_shutdown().await;
-                        self.terminate_tasks().await;
-                        break;
                     }
                 }
-                None => {
+                Ok(None) => {
+                    break;
+                }
+                Err(_elapsed) => {
+                    let mut set = join_set.lock().await;
+                    set.abort_all();
+                    self.mark_failure(
+                        name,
+                        format!("{name} shutdown timed out after {SHUTDOWN_GRACE_PERIOD_SECS}s"),
+                    )
+                    .await;
+                    if failure.is_none() {
+                        failure = Some(DomError::Internal(format!(
+                            "{name} shutdown timed out after {SHUTDOWN_GRACE_PERIOD_SECS}s"
+                        )));
+                    }
+                    self.request_shutdown().await;
                     break;
                 }
             }
         }
 
-        {
-            let mut critical = self.critical_tasks.write().await;
-            critical.clear();
+        failure
+    }
+
+    async fn finish_after_join(&self, had_failure: bool) {
+        if had_failure {
+            let mut state = self.lifecycle_state.write().await;
+            *state = NodeLifecycleState::Failed;
+        } else {
+            let mut state = self.lifecycle_state.write().await;
+            *state = NodeLifecycleState::Stopped;
         }
+        self.shutdown_requested.store(true, AtomicOrdering::Release);
+    }
+
+    async fn flush_critical_persistence(&self) -> Result<(), DomError> {
+        Ok(())
+    }
+
+    async fn join(&self) -> Result<(), DomError> {
+        let mut unexpected = None::<DomError>;
+        if !self.shutdown_requested.load(AtomicOrdering::Acquire) {
+            unexpected = self.wait_for_critical_exit().await;
+        }
+        self.request_shutdown().await;
+
+        self.accept_shutdown_token.cancel();
+        if let Some(err) = self.drain_task_set(&self.accept_join_set, "accept").await {
+            unexpected = unexpected.or(Some(err));
+        }
+
+        self.miner_shutdown_token.cancel();
+        if let Some(err) = self.drain_task_set(&self.miner_join_set, "miner").await {
+            unexpected = unexpected.or(Some(err));
+        }
+
+        self.relay_shutdown_token.cancel();
+        if let Some(err) = self
+            .drain_task_set(&self.connector_join_set, "connector")
+            .await
+        {
+            unexpected = unexpected.or(Some(err));
+        }
+        if let Some(err) = self.drain_task_set(&self.relay_join_set, "relay").await {
+            unexpected = unexpected.or(Some(err));
+        }
+
+        self.persistence_shutdown_token.cancel();
+        if let Some(err) = self
+            .drain_task_set(&self.persistence_join_set, "persistence")
+            .await
+        {
+            unexpected = unexpected.or(Some(err));
+        }
+
+        if let Some(err) = self.flush_critical_persistence().await.err() {
+            if unexpected.is_none() {
+                unexpected = Some(err);
+            }
+        }
+
+        self.rpc_shutdown_token.cancel();
+        if let Some(err) = self.drain_task_set(&self.rpc_join_set, "rpc").await {
+            unexpected = unexpected.or(Some(err));
+        }
+
+        self.task_names.write().await.clear();
         {
             let mut relay = self.relay_tasks.write().await;
             relay.clear();
         }
 
-        while let Some(result) = self.critical_join_set.lock().await.join_next().await {
-            if let Err(e) = result {
-                if !self.shutdown_requested.load(AtomicOrdering::Acquire) || !e.is_cancelled() {
-                    self.mark_failure("critical", e.to_string()).await;
-                    if unexpected.is_none() {
-                        unexpected = Some(DomError::Internal(format!(
-                            "critical task join failed during shutdown: {e}"
-                        )));
-                    }
-                }
-            }
-        }
-
-        while let Some(_ignored) = self.relay_join_set.lock().await.join_next().await {
-            // relay tasks are non-critical: we only log in spawn_relay_task if they fail
-        }
-
+        self.finish_after_join(unexpected.is_some()).await;
         if let Some(error) = unexpected {
             return Err(error);
         }
 
         Ok(())
+    }
+
+    async fn set_running(&self) {
+        let mut state = self.lifecycle_state.write().await;
+        *state = NodeLifecycleState::Running;
     }
 }
 
@@ -597,10 +858,10 @@ impl DomNode {
         };
 
         let node_listener = self.clone();
-        let listener_shutdown = supervisor.shutdown_token.clone();
+        let listener_shutdown = supervisor.accept_token();
         let listener_supervisor = supervisor.clone();
         supervisor
-            .spawn_critical_task(TASK_LISTENER.to_string(), async move {
+            .spawn_accept_task(TASK_LISTENER.to_string(), async move {
                 node_listener
                     .run_p2p_listener_on(p2p_listener, listener_supervisor, listener_shutdown)
                     .await
@@ -609,10 +870,10 @@ impl DomNode {
 
         // Start outbound peer connector
         let node_connector = self.clone();
-        let connector_shutdown = supervisor.shutdown_token.clone();
+        let connector_shutdown = supervisor.relay_token();
         let connector_supervisor = supervisor.clone();
         supervisor
-            .spawn_critical_task(TASK_CONNECTOR.to_string(), async move {
+            .spawn_connector_task(TASK_CONNECTOR.to_string(), async move {
                 node_connector
                     .run_peer_connector(connector_supervisor, connector_shutdown)
                     .await
@@ -622,21 +883,21 @@ impl DomNode {
         // Start miner if enabled
         if self.config.mine {
             let node_miner = self.clone();
-            let miner_shutdown = supervisor.shutdown_token.clone();
+            let miner_shutdown = supervisor.miner_token();
             supervisor
-                .spawn_critical_task(TASK_MINER.to_string(), async move {
+                .spawn_miner_task(TASK_MINER.to_string(), async move {
                     tokio::select! {
                         _ = miner_shutdown.cancelled() => Ok(()),
-                        result = mining_loop(node_miner) => result,
+                        result = crate::miner::mining_loop(node_miner) => result,
                     }
                 })
                 .await;
         }
 
         if let Some((handle, listener)) = rpc_pair {
-            let rpc_shutdown = supervisor.shutdown_token.clone();
+            let rpc_shutdown = supervisor.rpc_token();
             supervisor
-                .spawn_critical_task(
+                .spawn_rpc_task(
                     TASK_RPC.to_string(),
                     async move {
                         tokio::select! {
@@ -657,9 +918,9 @@ impl DomNode {
             let mempool = self.mempool.clone();
             let relay_tx = self.block_relay_tx.clone();
             let metrics = self.metrics.clone();
-            let future_shutdown = supervisor.shutdown_token.clone();
+            let future_shutdown = supervisor.persistence_token();
             supervisor
-                .spawn_critical_task(
+                .spawn_persistence_task(
                     TASK_FUTURE_QUEUE.to_string(),
                     async move {
                         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
@@ -809,9 +1070,9 @@ impl DomNode {
             let dandelion = self.dandelion.clone();
             let mempool = self.mempool.clone();
             let tx_fluff_tx = self.tx_fluff_tx.clone();
-            let stem_shutdown = supervisor.shutdown_token.clone();
+            let stem_shutdown = supervisor.relay_token();
             supervisor
-                .spawn_critical_task(TASK_DANDELION.to_string(), async move {
+                .spawn_connector_task(TASK_DANDELION.to_string(), async move {
                     const STEM_CHECK_INTERVAL_SECS: u64 = 5;
                     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
                         STEM_CHECK_INTERVAL_SECS,
@@ -861,9 +1122,9 @@ impl DomNode {
             let peers = self.peers.clone();
             let missing_blocks = self.missing_blocks.clone();
             let block_request_tx = self.block_request_tx.clone();
-            let missing_shutdown = supervisor.shutdown_token.clone();
+            let missing_shutdown = supervisor.relay_token();
             supervisor
-                .spawn_critical_task(
+                .spawn_connector_task(
                     TASK_MISSING_RETRY.to_string(),
                     async move {
                         let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(
@@ -957,6 +1218,8 @@ impl DomNode {
                 .await;
         }
 
+        supervisor.set_running().await;
+
         Ok(NodeTaskHandle::new(supervisor))
     }
 
@@ -1010,35 +1273,36 @@ impl DomNode {
                             missing_blocks: self.missing_blocks.clone(),
                             wallet: self.wallet.clone(),
                         };
-                            let peers = svc.peers.clone();
-                            let metrics = svc.metrics.clone();
-                            let chain_for_persist = chain.clone();
-                            relay_supervisor
-                                .spawn_relay_task(format!("listener:{peer_addr}"), async move {
-                                    handle_inbound(
-                                        stream,
-                                        peer_addr,
+                        let peers = svc.peers.clone();
+                        let metrics = svc.metrics.clone();
+                        let chain_for_persist = chain.clone();
+                        let peer_shutdown = shutdown_token.clone();
+                        relay_supervisor
+                            .spawn_relay_task(format!("listener:{peer_addr}"), async move {
+                                handle_inbound(
+                                    stream,
+                                    peer_addr,
                                     config,
                                     privkey,
                                     chain,
                                     channels,
                                     svc,
+                                    peer_shutdown.clone(),
                                 )
                                 .await;
                                 let mut mgr = peers.lock().await;
                                 let peer_key = peer_addr.to_string();
-                                    mgr.remove_peer(&peer_key);
-                                    mgr.release_inbound_reservation(&peer_addr);
-                                    drop(mgr);
-                                    if let Err(e) =
-                                        persist_peer_reputation_state(&chain_for_persist, &peers).await
-                                    {
-                                        warn!("Persisting peer reputation state failed: {e}");
-                                    }
-                                    refresh_peer_metrics(&peers, &metrics).await;
-                                    Ok(())
-                                })
-                                .await;
+                                mgr.remove_peer(&peer_key);
+                                mgr.release_inbound_reservation(&peer_addr);
+                                drop(mgr);
+                                if let Err(e) = persist_peer_reputation_state(&chain_for_persist, &peers).await
+                                {
+                                    warn!("Persisting peer reputation state failed: {e}");
+                                }
+                                refresh_peer_metrics(&peers, &metrics).await;
+                                Ok(())
+                            })
+                            .await;
                     }
                     Err(e) => {
                         warn!("Accept error: {e}");
@@ -1121,12 +1385,20 @@ impl DomNode {
                     let peers = self.peers.clone();
                     let metrics = self.metrics.clone();
                     let svc_c = svc.clone();
+                    let peer_shutdown = shutdown_token.clone();
                     let chain_for_persist = self.chain.clone();
                     relay_supervisor
                         .spawn_relay_task(format!("outbound:{cleanup_addr}"), async move {
-                            let outcome =
-                                connect_outbound(&addr, config, privkey, chain, channels, svc_c)
-                                    .await;
+                            let outcome = connect_outbound(
+                                &addr,
+                                config,
+                                privkey,
+                                chain,
+                                channels,
+                                svc_c,
+                                peer_shutdown.clone(),
+                            )
+                            .await;
                             let mut mgr = peers.lock().await;
                             if outcome == OutboundAttemptOutcome::RetryableFailure {
                                 mgr.record_outbound_failure(&cleanup_addr);
@@ -1272,6 +1544,7 @@ async fn handle_inbound(
     chain: Arc<Mutex<ChainState>>,
     channels: BroadcastChannels,
     svc: NodeServices,
+    shutdown_token: CancellationToken,
 ) {
     let BroadcastChannels {
         block_relay_tx,
@@ -1348,6 +1621,7 @@ async fn handle_inbound(
                     addr,
                     peer_hello.best_height,
                     svc.wallet.clone(),
+                    shutdown_token.clone(),
                 )
                 .await
                 {
@@ -1374,6 +1648,7 @@ async fn handle_inbound(
                     block_request_tx: block_request_tx.clone(),
                 },
                 svc.clone(),
+                shutdown_token.clone(),
             )
             .await
             {
@@ -1394,6 +1669,7 @@ async fn connect_outbound(
     chain: Arc<Mutex<ChainState>>,
     channels: BroadcastChannels,
     svc: NodeServices,
+    shutdown_token: CancellationToken,
 ) -> OutboundAttemptOutcome {
     let BroadcastChannels {
         block_relay_tx,
@@ -1493,6 +1769,7 @@ async fn connect_outbound(
                     peer_addr,
                     peer_hello.best_height,
                     svc.wallet.clone(),
+                    shutdown_token.clone(),
                 )
                 .await
                 {
@@ -1520,6 +1797,7 @@ async fn connect_outbound(
                     block_request_tx: block_request_tx.clone(),
                 },
                 svc.clone(),
+                shutdown_token.clone(),
             )
             .await
             {
@@ -2418,6 +2696,7 @@ async fn resume_ibd_block_sync(
     runtime: &IbdRuntimeContext<'_>,
     ibd: &mut dom_chain::IbdState,
     round: IbdRoundState,
+    shutdown_token: &CancellationToken,
 ) -> Result<bool, DomError> {
     use dom_wire::message::{Command, GetBlockDataPayload, WireMessage};
 
@@ -2440,11 +2719,12 @@ async fn resume_ibd_block_sync(
             command: Command::GetBlockData,
             payload: req.to_bytes()?,
         };
-        codec.send(stream, &wire).await?;
+        codec_send_with_timeout(stream, codec, runtime.peer_addr, &wire, shutdown_token).await?;
 
         for expected_hash in batch {
             let msg = loop {
-                let m = codec.recv(stream).await?;
+                let m = codec_recv_with_timeout(stream, codec, runtime.peer_addr, shutdown_token)
+                    .await?;
                 match m.command {
                     Command::Block => break m,
                     Command::Ping => {
@@ -2453,7 +2733,14 @@ async fn resume_ibd_block_sync(
                             command: Command::Pong,
                             payload: m.payload,
                         };
-                        codec.send(stream, &pong).await?;
+                        codec_send_with_timeout(
+                            stream,
+                            codec,
+                            runtime.peer_addr,
+                            &pong,
+                            shutdown_token,
+                        )
+                        .await?;
                     }
                     Command::Pong => {}
                     other => {
@@ -2552,6 +2839,67 @@ fn ibd_now() -> Timestamp {
     )
 }
 
+async fn codec_send_with_timeout(
+    stream: &mut tokio::net::TcpStream,
+    codec: &mut dom_wire::codec::NoiseCodec,
+    peer_addr: std::net::SocketAddr,
+    msg: &dom_wire::message::WireMessage,
+    shutdown_token: &CancellationToken,
+) -> Result<(), DomError> {
+    tokio::select! {
+        _ = shutdown_token.cancelled() => {
+            Err(DomError::PolicyRejected(format!(
+                "I/O to {peer_addr} aborted during shutdown"
+            )))
+        }
+        result = tokio::time::timeout(
+            Duration::from_secs(NODE_IO_TIMEOUT_SECS),
+            codec.send(stream, msg),
+        ) => {
+            match result {
+                Ok(inner) => inner,
+                Err(_elapsed) => Err(DomError::PolicyRejected(format!(
+                    "I/O send to {peer_addr} timed out after {NODE_IO_TIMEOUT_SECS}s"
+                ))),
+            }
+        }
+    }
+}
+
+async fn codec_recv_with_timeout(
+    stream: &mut tokio::net::TcpStream,
+    codec: &mut dom_wire::codec::NoiseCodec,
+    peer_addr: std::net::SocketAddr,
+    shutdown_token: &CancellationToken,
+) -> Result<dom_wire::message::WireMessage, DomError> {
+    tokio::select! {
+        _ = shutdown_token.cancelled() => {
+            Err(DomError::PolicyRejected(format!(
+                "I/O from {peer_addr} aborted during shutdown"
+            )))
+        }
+        result = tokio::time::timeout(
+            Duration::from_secs(NODE_IO_TIMEOUT_SECS),
+            codec.recv(stream),
+        ) => {
+            match result {
+                Ok(inner) => inner,
+                Err(_elapsed) => Err(DomError::PolicyRejected(format!(
+                    "I/O receive from {peer_addr} timed out after {NODE_IO_TIMEOUT_SECS}s"
+                ))),
+            }
+        }
+    }
+}
+
+fn is_shutdown_cancel_error(error: &DomError) -> bool {
+    matches!(
+        error,
+        DomError::PolicyRejected(message)
+            if message.contains("aborted during shutdown") || message.contains("shutdown")
+    )
+}
+
 async fn continue_ibd_header_sync(
     chain: &Arc<Mutex<ChainState>>,
     peer_addr: std::net::SocketAddr,
@@ -2632,6 +2980,7 @@ async fn run_ibd_session(
     peer_addr: std::net::SocketAddr,
     peer_best_height: u64,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+    shutdown_token: CancellationToken,
 ) -> Result<(), DomError> {
     let our_height = chain.lock().await.tip_height.0;
     let (mut ibd, persisted) = initialize_ibd_state(chain, peer_addr, peer_best_height).await?;
@@ -2658,6 +3007,9 @@ async fn run_ibd_session(
         }
     }
     if let Some(snapshot) = persisted.clone() {
+        if shutdown_token.is_cancelled() {
+            return Ok(());
+        }
         if !snapshot.pending_headers.is_empty()
             && snapshot.header_cursor < snapshot.pending_headers.len() as u32
         {
@@ -2689,6 +3041,7 @@ async fn run_ibd_session(
                         header_cursor: 0,
                         header_cursor_height: snapshot.header_cursor_height,
                     },
+                    &shutdown_token,
                 )
                 .await
                 {
@@ -2726,25 +3079,30 @@ async fn run_ibd_session(
                         }
                     }
                     Ok(false) => {}
-                    Err(e) => match ibd.note_round_error(&e) {
-                        dom_chain::IbdControl::Retry => {
-                            warn!(
-                                "IBD with {peer_addr} interrupted ({e}); retry {}/{} remaining={}",
-                                ibd.retry_attempts,
-                                dom_chain::ibd::MAX_IBD_RETRY_ATTEMPTS,
-                                ibd.remaining_retries()
-                            );
+                    Err(e) => {
+                        if is_shutdown_cancel_error(&e) {
+                            return Ok(());
                         }
-                        dom_chain::IbdControl::Fail => {
-                            clear_persisted_ibd_state(chain).await?;
-                            return Err(e);
+                        match ibd.note_round_error(&e) {
+                            dom_chain::IbdControl::Retry => {
+                                warn!(
+                                    "IBD with {peer_addr} interrupted ({e}); retry {}/{} remaining={}",
+                                    ibd.retry_attempts,
+                                    dom_chain::ibd::MAX_IBD_RETRY_ATTEMPTS,
+                                    ibd.remaining_retries()
+                                );
+                            }
+                            dom_chain::IbdControl::Fail => {
+                                clear_persisted_ibd_state(chain).await?;
+                                return Err(e);
+                            }
+                            dom_chain::IbdControl::Complete | dom_chain::IbdControl::Continue => {
+                                return Err(DomError::Internal(
+                                    "resumed IBD error transition returned invalid control".into(),
+                                ));
+                            }
                         }
-                        dom_chain::IbdControl::Complete | dom_chain::IbdControl::Continue => {
-                            return Err(DomError::Internal(
-                                "resumed IBD error transition returned invalid control".into(),
-                            ));
-                        }
-                    },
+                    }
                 }
             } else {
                 persist_ibd_state(
@@ -2777,6 +3135,7 @@ async fn run_ibd_session(
                     header_cursor: 0,
                     header_cursor_height: snapshot.header_cursor_height,
                 },
+                &shutdown_token,
             )
             .await
             {
@@ -2813,25 +3172,30 @@ async fn run_ibd_session(
                     }
                 }
                 Ok(false) => {}
-                Err(e) => match ibd.note_round_error(&e) {
-                    dom_chain::IbdControl::Retry => {
-                        warn!(
-                            "IBD with {peer_addr} interrupted ({e}); retry {}/{} remaining={}",
-                            ibd.retry_attempts,
-                            dom_chain::ibd::MAX_IBD_RETRY_ATTEMPTS,
-                            ibd.remaining_retries()
-                        );
+                Err(e) => {
+                    if is_shutdown_cancel_error(&e) {
+                        return Ok(());
                     }
-                    dom_chain::IbdControl::Fail => {
-                        clear_persisted_ibd_state(chain).await?;
-                        return Err(e);
+                    match ibd.note_round_error(&e) {
+                        dom_chain::IbdControl::Retry => {
+                            warn!(
+                                "IBD with {peer_addr} interrupted ({e}); retry {}/{} remaining={}",
+                                ibd.retry_attempts,
+                                dom_chain::ibd::MAX_IBD_RETRY_ATTEMPTS,
+                                ibd.remaining_retries()
+                            );
+                        }
+                        dom_chain::IbdControl::Fail => {
+                            clear_persisted_ibd_state(chain).await?;
+                            return Err(e);
+                        }
+                        dom_chain::IbdControl::Complete | dom_chain::IbdControl::Continue => {
+                            return Err(DomError::Internal(
+                                "resumed IBD error transition returned invalid control".into(),
+                            ));
+                        }
                     }
-                    dom_chain::IbdControl::Complete | dom_chain::IbdControl::Continue => {
-                        return Err(DomError::Internal(
-                            "resumed IBD error transition returned invalid control".into(),
-                        ));
-                    }
-                },
+                }
             }
         } else {
             persist_ibd_state(
@@ -2867,6 +3231,9 @@ async fn run_ibd_session(
     info!("Starting IBD from {peer_addr}: our={our_height} peer={peer_best_height}");
 
     loop {
+        if shutdown_token.is_cancelled() {
+            return Ok(());
+        }
         ibd.begin_header_sync();
         match ibd_sync_round(
             stream,
@@ -2877,6 +3244,7 @@ async fn run_ibd_session(
             peer_addr,
             wallet.clone(),
             &mut ibd,
+            &shutdown_token,
         )
         .await
         {
@@ -2954,30 +3322,36 @@ async fn run_ibd_session(
                     ));
                 }
             },
-            Err(e) => match ibd.note_round_error(&e) {
-                dom_chain::IbdControl::Retry => {
-                    warn!(
-                        "IBD with {peer_addr} interrupted ({e}); retry {}/{} remaining={}",
-                        ibd.retry_attempts,
-                        dom_chain::ibd::MAX_IBD_RETRY_ATTEMPTS,
-                        ibd.remaining_retries()
-                    );
-                    continue;
-                }
-                dom_chain::IbdControl::Fail => {
-                    clear_persisted_ibd_state(chain).await?;
-                    return Err(e);
-                }
-                dom_chain::IbdControl::Complete => {
+            Err(e) => {
+                if is_shutdown_cancel_error(&e) {
                     clear_persisted_ibd_state(chain).await?;
                     return Ok(());
                 }
-                dom_chain::IbdControl::Continue => {
-                    return Err(DomError::Internal(
-                        "IBD error transition returned invalid control".into(),
-                    ));
+                match ibd.note_round_error(&e) {
+                    dom_chain::IbdControl::Retry => {
+                        warn!(
+                            "IBD with {peer_addr} interrupted ({e}); retry {}/{} remaining={}",
+                            ibd.retry_attempts,
+                            dom_chain::ibd::MAX_IBD_RETRY_ATTEMPTS,
+                            ibd.remaining_retries()
+                        );
+                        continue;
+                    }
+                    dom_chain::IbdControl::Fail => {
+                        clear_persisted_ibd_state(chain).await?;
+                        return Err(e);
+                    }
+                    dom_chain::IbdControl::Complete => {
+                        clear_persisted_ibd_state(chain).await?;
+                        return Ok(());
+                    }
+                    dom_chain::IbdControl::Continue => {
+                        return Err(DomError::Internal(
+                            "IBD error transition returned invalid control".into(),
+                        ));
+                    }
                 }
-            },
+            }
         }
     }
 }
@@ -2997,6 +3371,7 @@ async fn ibd_sync_round(
     peer_addr: std::net::SocketAddr,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
     ibd: &mut dom_chain::IbdState,
+    shutdown_token: &CancellationToken,
 ) -> Result<bool, DomError> {
     use dom_consensus::block::BlockHeader;
     use dom_serialization::DomDeserialize;
@@ -3013,11 +3388,11 @@ async fn ibd_sync_round(
         command: Command::GetHeaders,
         payload: req.to_bytes()?,
     };
-    codec.send(stream, &wire).await?;
+    codec_send_with_timeout(stream, codec, peer_addr, &wire, shutdown_token).await?;
 
     // 2. Receive Headers (skip non-Headers messages).
     let headers_msg = loop {
-        let msg = codec.recv(stream).await?;
+        let msg = codec_recv_with_timeout(stream, codec, peer_addr, shutdown_token).await?;
         match msg.command {
             Command::Headers => break msg,
             Command::Ping => {
@@ -3026,7 +3401,7 @@ async fn ibd_sync_round(
                     command: Command::Pong,
                     payload: msg.payload,
                 };
-                codec.send(stream, &pong).await?;
+                codec_send_with_timeout(stream, codec, peer_addr, &pong, shutdown_token).await?;
             }
             Command::Pong => {}
             other => {
@@ -3091,6 +3466,7 @@ async fn ibd_sync_round(
             header_cursor: 0,
             header_cursor_height,
         },
+        shutdown_token,
     )
     .await
 }
@@ -3147,6 +3523,7 @@ async fn message_loop(
     chain: Arc<Mutex<ChainState>>,
     channels: BroadcastChannels,
     svc: NodeServices,
+    shutdown_token: CancellationToken,
 ) -> Result<(), DomError> {
     // Subscribe to all broadcast channels for this peer connection.
     let mut block_relay_rx = channels.block_relay_tx.subscribe();
@@ -3169,6 +3546,7 @@ async fn message_loop(
 
     loop {
         tokio::select! {
+            _ = shutdown_token.cancelled() => return Ok(()),
             // Relay broadcast: someone (miner or another peer task) wants to send a Block
             relay = block_relay_rx.recv() => {
                 match relay {

@@ -247,12 +247,8 @@ fn write_replay_fixture_chain(
         )
         .expect("commit tip fixture");
 
-    let reopened = ChainState::open(
-        store,
-        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-        dom_core::NETWORK_MAGIC_REGTEST,
-    )
-    .expect("open fixture chain");
+    let reopened = ChainState::open(store, genesis_hash, dom_core::NETWORK_MAGIC_REGTEST)
+        .expect("open fixture chain");
     (
         reopened.tip_hash,
         reopened.tip_height,
