@@ -13,6 +13,8 @@ name = "dom-agent-runner"
 path = "src/main.rs"
 
 [dependencies]
-# Same philosophy as dom-test-runner: std-only, no external runtime deps.
+anyhow = { workspace = true }
+dom-test-runner = { path = "../dom-test-runner" }
 
 [dev-dependencies]
+
