@@ -9,9 +9,8 @@ use dom_core::{
     WEIGHT_COINBASE_KERNEL, WEIGHT_OUTPUT,
 };
 use dom_pow::{
-    expected_target_for_network, fast_pow_hash, genesis_anchor, hash_meets_target,
-    pow_validation_mode_for_network, randomx_seed_height, target_to_compact, target_to_difficulty,
-    CompactTarget, PowValidationMode,
+    fast_pow_hash, genesis_anchor, hash_meets_target, pow_validation_mode_for_network,
+    randomx_seed_height, target_to_compact, target_to_difficulty, CompactTarget, PowValidationMode,
 };
 use primitive_types::U256;
 use std::sync::Arc;
@@ -158,7 +157,7 @@ fn build_coinbase_with_blinding(
     })
 }
 
-pub async fn mining_loop(node: Arc<DomNode>) {
+pub async fn mining_loop(node: Arc<DomNode>) -> Result<(), DomError> {
     info!("Minerador iniciado");
     {
         let chain = node.chain.lock().await;
@@ -166,7 +165,7 @@ pub async fn mining_loop(node: Arc<DomNode>) {
             drop(chain);
             if let Err(e) = create_genesis_block(node.clone()).await {
                 warn!("Genesis falhou: {e}");
-                return;
+                return Err(DomError::Internal(format!("genesis failed: {e}")));
             }
         }
     }
@@ -364,18 +363,18 @@ pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
 }
 
 pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
-    let (tip_hash, tip_height, tip_difficulty) = {
+    let (tip_hash, tip_height, tip_difficulty, target) = {
         let chain = node.chain.lock().await;
-        (chain.tip_hash, chain.tip_height, chain.tip_difficulty)
+        (
+            chain.tip_hash,
+            chain.tip_height,
+            chain.tip_difficulty,
+            chain.next_block_target()?.next_target,
+        )
     };
 
     let new_height = tip_height.0 + 1;
     let block_timestamp = Timestamp(now_secs());
-    let target = expected_target_for_network(
-        node.config.network.magic(),
-        block_timestamp,
-        BlockHeight(new_height),
-    )?;
     let block_diff = target_to_difficulty(&target);
     let new_total_diff = tip_difficulty.saturating_add(U256::from(block_diff));
     let pow_mode = pow_validation_mode_for_network(node.config.network.magic())?;

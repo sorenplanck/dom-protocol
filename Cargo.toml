@@ -70,6 +70,7 @@ tracing          = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Async
 futures          = { version = "0.3" }
+tokio-util       = { version = "0.7" }
 primitive-types  = { version = "0.12" }
 # Internal crates
 dom-core           = { path = "crates/dom-core" }
