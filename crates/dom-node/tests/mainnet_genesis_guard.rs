@@ -15,7 +15,7 @@ fn init_refuses_mainnet_when_genesis_is_unfinalized() {
     };
     assert!(matches!(err, DomError::Invalid(_)));
     assert!(
-        err.to_string().contains("mainnet disabled"),
+        err.to_string().contains("mainnet genesis is not finalized"),
         "unexpected error: {err}"
     );
 }
