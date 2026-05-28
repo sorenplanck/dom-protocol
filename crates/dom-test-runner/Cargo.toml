@@ -1,19 +1,20 @@
 [package]
 name = "dom-test-runner"
-description = "DOM Protocol portable test orchestration runner"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Portable Windows-first test runner for the DOM Protocol workspace."
 
 [[bin]]
 name = "dom-test-runner"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = { version = "1.0" }
-clap = { version = "4.5", features = ["derive"] }
+# Intentionally zero external runtime dependencies.
+# Keeps the portable .exe small, audit-friendly, and fast to build on CI.
 
 [dev-dependencies]
-tempfile = "3"
+# Tests use only std as well.

@@ -1,97 +1,114 @@
-# Windows Agent Runner
+# DOM Agent Runner — Windows portable .exe
 
-`dom-agent-runner.exe` orchestrates development work by calling the installed Codex CLI, running DOM validation, and then committing and pushing if validation passes.
+`dom-agent-runner.exe` is a portable Rust binary that orchestrates a single
+development task end-to-end:
 
-## Requirements
+1. **Codex** edits the DOM repository (via the locally installed Codex CLI).
+2. **dom-test-runner** validates the change (`affected` profile by default,
+   then `pre-push`).
+3. **git** stages only the files changed by this task, commits, and (with
+   `--push`) pushes to `origin`.
+4. The agent verifies remote `HEAD` (`git ls-remote origin refs/heads/<branch>`).
+5. A full audit report lands under `target/dom-agent-runner/runs/<timestamp>/`.
 
-- Codex CLI installed locally and available as `codex`
-- Git installed and authenticated
-- Cargo and rustc installed
+## Important properties
 
-The runner uses local Codex and Git authentication. It does not store OpenAI keys or GitHub tokens.
-Codex is invoked in non-interactive mode as:
+- **No secrets stored.** It uses your local Codex auth and your local Git
+  credentials (helper, ssh-agent, `gh`). It never reads `OPENAI_API_KEY` or
+  similar from a config file it owns.
+- **Codex is an external process**, called via `codex --version` /
+  `codex` (stdin). The agent does not embed Codex as a library.
+- **Commit/push safety:** no commit if tests fail; no push if commit fails;
+  no push if remote HEAD is not retrievable afterward; `Cargo.lock` is
+  never staged unless you stage it manually first.
+- **`clean` is scoped** — it can only delete `target/dom-agent-runner/`.
 
-```bash
-codex exec -C <isolated-worktree> --dangerously-bypass-approvals-and-sandbox --color never -
+## Build locally
+
 ```
-
-The default `run` mode creates an isolated git worktree under
-`target/dom-agent-runner/worktrees/<timestamp>`. For faster local Windows
-iteration, pass `--in-place` to run Codex in the current repository root and
-reuse the existing `target/` directory:
-
-```bash
-target/release/dom-agent-runner.exe run --prompt-file prompts/example-mempool-package-policy.txt --in-place
-target/release/dom-agent-runner.exe run --prompt "Update the mempool policy tests." --in-place
-```
-
-In-place mode refuses to start unless `git status --short` is empty:
-
-```text
-Refusing --in-place run because the worktree is not clean. Commit, stash, or use isolated mode.
-```
-
-When in-place mode is accepted, the runner still writes the normal run report
-files, invokes Codex non-interactively, runs the affected validation followed by
-pre-push validation for the default `affected` profile, commits only after tests
-pass, and pushes only when `--push` is provided. The final report records either
-`execution mode: in-place` or `execution mode: isolated-worktree`.
-
-## Build
-
-```bash
 cargo build -p dom-agent-runner --release
 ```
 
-## Run
+Binary: `target/release/dom-agent-runner.exe` (or `dom-agent-runner` on
+Linux/macOS).
 
-```bash
-target/release/dom-agent-runner.exe doctor
-target/release/dom-agent-runner.exe list-prompts
-target/release/dom-agent-runner.exe run --prompt-file prompts/example-mempool-package-policy.txt --push
-target/release/dom-agent-runner.exe run --prompt-file prompts/example-mempool-package-policy.txt --in-place
+You will also want `dom-test-runner.exe` built — the agent shells out to it:
+
+```
+cargo build -p dom-test-runner --release
 ```
 
-You can also pass an inline prompt:
+## Use
 
-```bash
-target/release/dom-agent-runner.exe run --prompt "Update the mempool policy tests."
+```
+target\release\dom-agent-runner.exe doctor
+
+target\release\dom-agent-runner.exe list-prompts
+target\release\dom-agent-runner.exe show-prompt prompts/example-mempool-package-policy.txt
+
+target\release\dom-agent-runner.exe run --prompt-file prompts/example-mempool-package-policy.txt
+target\release\dom-agent-runner.exe run --prompt-file prompts/example-mempool-package-policy.txt --push
+target\release\dom-agent-runner.exe run --prompt "small inline task"
+target\release\dom-agent-runner.exe run --prompt-file prompts/x.txt --profile pre-push --push
+
+target\release\dom-agent-runner.exe report
+target\release\dom-agent-runner.exe clean
 ```
 
-## Prompt Files
+`--profile` accepts: `affected` (default), `full`, `all`, `pre-push`.
 
-Prompts live under `prompts/*.txt`. The runner copies the prompt into each run report directory for auditability.
+## How tests are selected automatically
 
-## Test Selection
+The agent calls `dom-test-runner.exe <profile>`. With the default
+`affected`, the runner inspects `git diff` after Codex finishes and picks
+profiles by changed paths (see `WINDOWS_TEST_RUNNER.md`). Then it runs
+`pre-push` as a final guard.
 
-After Codex edits the repository, the runner selects tests automatically using the affected-file mapping and then runs `dom-test-runner.exe` with the appropriate profile.
+If anything fails, the agent stops before any commit or push.
 
-## Commit and Push Safety
+## How GitHub authentication works
 
-- `--in-place` fails before Codex is called if the repository is not clean.
-- If tests fail, the runner does not commit or push.
-- If commit fails, the runner does not push.
-- If `--push` is not provided, the runner does not push.
-- Unrelated files are not staged.
-- If Codex fails before a commit is created, the isolated worktree is preserved and the terminal prints its path.
+The agent never asks for a token. `git push` uses whatever credentials you
+already have configured on the machine:
 
-## Reports
+- HTTPS with a credential helper (recommended on Windows)
+- SSH key in your ssh-agent
+- `gh auth login` (works because `gh` registers a credential helper)
 
-Every run writes:
+If `git ls-remote origin` fails during `doctor`, fix your local Git/GitHub
+auth before running with `--push`.
 
-- `target/dom-agent-runner/runs/<timestamp>/prompt.txt`
-- `target/dom-agent-runner/runs/<timestamp>/codex-output.log`
-- `target/dom-agent-runner/runs/<timestamp>/test-output.log`
-- `target/dom-agent-runner/runs/<timestamp>/final-report.txt`
+## Report layout
+
+```
+target/dom-agent-runner/runs/<timestamp>/
+  prompt.txt              — the exact prompt sent to Codex
+  prompt-source.txt       — path of the prompt file (if any)
+  codex-output.log        — stdout/stderr from the Codex run
+  test-output.log         — stdout/stderr from dom-test-runner
+  git-status-before.txt   — git status --short before Codex
+  git-status-after.txt    — git status --short after commit
+  changed-files.txt       — files Codex modified
+  staged-files.txt        — files actually staged (Cargo.lock filtered)
+  commit.txt              — commit hash, if any
+  remote-head.txt         — remote HEAD after push, if pushed
+  final-report.txt        — human summary
+```
 
 ## Troubleshooting
 
-If Codex, Git, or Cargo are missing, run `doctor` first and verify that the commands are on `PATH`.
-If Codex cannot be launched or returns a non-zero exit code, inspect `target/dom-agent-runner/runs/<timestamp>/codex-output.log`.
-Every run writes `final-report.txt`, including early failures.
+- **`codex` not found.** Install Codex CLI and reopen your terminal so PATH
+  picks it up. `codex --version` must work.
+- **`git push` fails with auth error.** Fix your credential helper or
+  ssh-agent. The agent does not handle credentials itself.
+- **Tests fail in `pre-push`.** Read `test-output.log`. The corresponding
+  per-step log is under `target/dom-test-runner/logs/`.
+- **Worktree was dirty before the run.** The agent warns but proceeds; for
+  a strictly clean run, commit/stash your local changes first, or run from
+  a fresh worktree of `origin/main`.
 
-To remove stale agent worktrees and reports:
+## CI
 
-```bash
-target/release/dom-agent-runner.exe clean
-```
+`.github/workflows/windows-agent-runner.yml` builds and tests the binary on
+`windows-latest` and uploads `DOM-Agent-Runner-Windows-Portable`.
+**Real Codex never runs in CI** — only the build and a safe `doctor` call.
