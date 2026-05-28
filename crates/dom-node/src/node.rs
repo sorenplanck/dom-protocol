@@ -3087,11 +3087,19 @@ mod tests {
     };
     use dom_core::{
         Amount, BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-        MAX_BLOCK_SERIALIZED_SIZE, MIN_RELAY_FEE_RATE, NETWORK_MAGIC_REGTEST,
+        MAX_BLOCK_SERIALIZED_SIZE, MIN_RELAY_FEE_RATE, NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION,
+        TAG_KERNEL_MSG_COINBASE,
     };
+    use dom_crypto::bulletproof;
+    use dom_crypto::hash::blake2b_256_tagged;
+    use dom_crypto::keys::SecretKey;
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
+    use dom_crypto::schnorr_sign;
     use dom_mempool::Mempool;
-    use dom_pow::CompactTarget;
+    use dom_pow::{
+        expected_target_for_network, fast_pow_hash, genesis_anchor, hash_meets_target,
+        target_to_compact, target_to_difficulty, CompactTarget,
+    };
     use dom_serialization::DomSerialize;
     use dom_store::utxo::UtxoEntry;
     use dom_store::DomStore;
@@ -3114,6 +3122,127 @@ mod tests {
         bytes[31] = seed.max(1);
         let blind = BlindingFactor::from_bytes(bytes).expect("deterministic blinding");
         Commitment::commit(value, &blind)
+    }
+
+    fn scalar(seed: u8) -> BlindingFactor {
+        let mut bytes = [0u8; 32];
+        bytes[31] = seed.max(1);
+        BlindingFactor::from_bytes(bytes).expect("deterministic blinding")
+    }
+
+    fn build_coinbase(
+        height: BlockHeight,
+        claimed_fees: u64,
+        chain_id: &[u8; 32],
+    ) -> CoinbaseTransaction {
+        let reward = dom_core::block_reward(height).noms();
+        let explicit_value = reward + claimed_fees;
+        let blinding = scalar(height.0 as u8 + 1);
+        let commitment = Commitment::commit(explicit_value, &blinding);
+        let (proof, _) = bulletproof::prove(explicit_value, &blinding).expect("coinbase proof");
+        let excess = Commitment::commit(0, &blinding);
+        let secret = SecretKey::from_bytes(blinding.as_bytes()).expect("coinbase secret");
+        let msg = {
+            let mut data = Vec::with_capacity(1 + 8);
+            data.push(KERNEL_FEAT_COINBASE);
+            data.extend_from_slice(&explicit_value.to_le_bytes());
+            blake2b_256_tagged(TAG_KERNEL_MSG_COINBASE, &data)
+        };
+        let sig = schnorr_sign(&secret, msg.as_bytes(), chain_id).expect("coinbase sig");
+        CoinbaseTransaction {
+            output: TransactionOutput {
+                commitment,
+                proof: proof.bytes,
+            },
+            kernel: CoinbaseKernel {
+                features: KERNEL_FEAT_COINBASE,
+                explicit_value,
+                excess,
+                excess_signature: sig.to_bytes(),
+            },
+            offset: [0u8; 32],
+        }
+    }
+
+    fn mine_fast_header(
+        seed_hash: [u8; 32],
+        prev_hash: Hash256,
+        height: BlockHeight,
+        timestamp: Timestamp,
+        output_root: Hash256,
+        kernel_root: Hash256,
+        rangeproof_root: Hash256,
+        total_kernel_offset: [u8; 32],
+        total_difficulty: U256,
+    ) -> BlockHeader {
+        let target =
+            expected_target_for_network(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
+        let mut nonce = 0u64;
+        loop {
+            let mut header = BlockHeader {
+                version: PROTOCOL_VERSION,
+                height,
+                prev_hash,
+                timestamp,
+                output_root,
+                kernel_root,
+                rangeproof_root,
+                total_kernel_offset,
+                target: CompactTarget(target_to_compact(&target)),
+                total_difficulty,
+                pow: ProofOfWork {
+                    nonce,
+                    randomx_hash: Hash256::ZERO,
+                },
+            };
+            let hash = fast_pow_hash(&seed_hash, &header.pow_preimage());
+            if hash_meets_target(&hash, &target) {
+                header.pow.randomx_hash = Hash256::from_bytes(hash);
+                return header;
+            }
+            nonce = nonce.wrapping_add(1);
+        }
+    }
+
+    fn build_coinbase_only_block(
+        seed_hash: [u8; 32],
+        prev_hash: Hash256,
+        height: BlockHeight,
+        parent_total_difficulty: U256,
+        total_kernel_offset: [u8; 32],
+        chain_id: &[u8; 32],
+    ) -> Block {
+        let coinbase = build_coinbase(height, 0, chain_id);
+        let (output_root, kernel_root, rangeproof_root) =
+            dom_consensus::compute_block_pmmr_roots(&coinbase, &[]).expect("roots");
+        let timestamp = genesis_anchor(NETWORK_MAGIC_REGTEST)
+            .expect("anchor")
+            .timestamp
+            .checked_add_secs(height.0 * dom_core::TARGET_SPACING)
+            .expect("timestamp");
+        let target =
+            expected_target_for_network(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
+        let total_difficulty = parent_total_difficulty + U256::from(target_to_difficulty(&target));
+        let header = mine_fast_header(
+            seed_hash,
+            prev_hash,
+            height,
+            timestamp,
+            output_root,
+            kernel_root,
+            rangeproof_root,
+            total_kernel_offset,
+            total_difficulty,
+        );
+        Block {
+            header,
+            coinbase,
+            transactions: vec![],
+        }
+    }
+
+    fn safe_now() -> Timestamp {
+        Timestamp(2_000_000_000)
     }
 
     fn synthetic_block(height: u64, nonce: u64) -> Block {
@@ -4141,6 +4270,65 @@ mod tests {
             .expect("matching IBD block must decode");
         assert_eq!(decoded.1.header.height.0, 2);
         assert_eq!(decoded.1.header.pow.nonce, 33);
+    }
+
+    #[tokio::test]
+    async fn invariant_ibd_import_rejects_header_and_pmmr_valid_but_economically_unbalanced_block()
+    {
+        std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+        let dir = fresh_test_dir("ibd-invalid-economic-balance");
+        let chain = open_chain(&dir);
+        let chain_id = {
+            use dom_consensus::derive_chain_id;
+            *derive_chain_id(
+                NETWORK_MAGIC_REGTEST,
+                &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+            )
+            .as_bytes()
+        };
+
+        let genesis = build_coinbase_only_block(
+            [0u8; 32],
+            Hash256::ZERO,
+            BlockHeight::GENESIS,
+            U256::zero(),
+            [0u8; 32],
+            &chain_id,
+        );
+        {
+            let mut guard = chain.lock().await;
+            guard
+                .connect_block(&genesis, safe_now())
+                .expect("connect genesis");
+        }
+
+        let mut invalid_offset = [0u8; 32];
+        invalid_offset[31] = 1;
+        let invalid = build_coinbase_only_block(
+            block_hash(&genesis),
+            Hash256::from_bytes(block_hash(&genesis)),
+            BlockHeight(1),
+            genesis.header.total_difficulty,
+            invalid_offset,
+            &chain_id,
+        );
+        let payload = ibd_payload(&invalid);
+        let (_, decoded) = decode_ibd_block_response(&payload, block_hash(&invalid))
+            .expect("IBD payload itself must decode and hash-match");
+
+        let err = {
+            let mut guard = chain.lock().await;
+            guard
+                .connect_block(&decoded, safe_now())
+                .expect_err("IBD import must reject economic imbalance")
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("aggregate") || msg.contains("balance"),
+            "expected economic-balance rejection, got: {msg}"
+        );
+
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
     #[test]

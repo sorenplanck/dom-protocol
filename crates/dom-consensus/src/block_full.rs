@@ -543,6 +543,36 @@ mod tests {
     }
 
     #[test]
+    fn invariant_each_transaction_can_validate_while_block_level_cut_through_still_must_reject() {
+        let tx1 = build_valid_spend_tx(50, scalar(31), 40, scalar(32), None);
+        let tx2_fixture = build_valid_spend_tx(
+            tx1.output_value,
+            tx1.output_blinding.clone(),
+            30,
+            scalar(33),
+            None,
+        );
+        let mut tx2 = tx2_fixture.tx.clone();
+        tx2.inputs[0].commitment = tx1.output_commitment.clone();
+
+        let ctx = ValidationContext {
+            current_height: BlockHeight(1),
+            chain_id: [0x11; 32],
+            now: Timestamp(u64::MAX),
+        };
+        crate::validate_transaction(&tx1.tx, &ctx).expect("tx1 must be individually valid");
+        crate::validate_transaction(&tx2, &ctx).expect("tx2 must be individually valid");
+
+        let block = valid_block_with_transactions(vec![tx1.tx, tx2]);
+        let err = validate_block(&block, &ctx)
+            .expect_err("non-canonical block-level cut-through must still reject");
+        assert!(
+            err.to_string().contains("cut-through"),
+            "expected cut-through rejection, got: {err}"
+        );
+    }
+
+    #[test]
     fn block_with_wrong_total_kernel_offset_is_rejected_by_aggregate_balance() {
         let tx = build_valid_spend_tx(75, scalar(10), 60, scalar(11), Some(scalar(12))).tx;
         let mut block = valid_block_with_transactions(vec![tx.clone()]);
@@ -573,6 +603,73 @@ mod tests {
         assert!(
             msg.contains("offset") || msg.contains("aggregate") || msg.contains("balance"),
             "expected aggregate block-balance rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn invariant_each_transaction_can_validate_while_block_aggregate_offset_equation_still_must_reject(
+    ) {
+        let tx = build_valid_spend_tx(75, scalar(41), 60, scalar(42), Some(scalar(43))).tx;
+        let ctx = ValidationContext {
+            current_height: BlockHeight(1),
+            chain_id: [0x11; 32],
+            now: Timestamp(u64::MAX),
+        };
+        crate::validate_transaction(&tx, &ctx).expect("transaction must be individually valid");
+
+        let mut block = valid_block_with_transactions(vec![tx]);
+        block.header.total_kernel_offset = [0u8; 32];
+        let err = validate_block(&block, &ctx)
+            .expect_err("aggregate block balance must reject wrong total_kernel_offset");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("aggregate") || msg.contains("balance"),
+            "expected aggregate-balance rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn invariant_pmmr_and_header_fields_cannot_mask_invalid_block_economic_balance() {
+        let chain_id = [0x11; 32];
+        let coinbase = build_coinbase(0, &chain_id);
+        let mut invalid_offset = [0u8; 32];
+        invalid_offset[31] = 1;
+        let (output_root, kernel_root, rangeproof_root) =
+            compute_block_pmmr_roots(&coinbase, &[]).expect("pmmr roots");
+        let block = Block {
+            header: BlockHeader {
+                version: PROTOCOL_VERSION,
+                height: BlockHeight(1),
+                prev_hash: Hash256::from_bytes([0x55; 32]),
+                timestamp: Timestamp(1_704_067_260),
+                output_root,
+                kernel_root,
+                rangeproof_root,
+                total_kernel_offset: invalid_offset,
+                target: CompactTarget(0x1f00_ffff),
+                total_difficulty: U256::from(2u64),
+                pow: crate::block::ProofOfWork {
+                    nonce: 7,
+                    randomx_hash: Hash256::ZERO,
+                },
+            },
+            coinbase,
+            transactions: vec![],
+        };
+
+        let err = validate_block(
+            &block,
+            &ValidationContext {
+                current_height: BlockHeight(1),
+                chain_id,
+                now: Timestamp(u64::MAX),
+            },
+        )
+        .expect_err("economically invalid block must reject even when PMMR roots match bytes");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("aggregate") || msg.contains("balance"),
+            "expected aggregate-balance rejection, got: {msg}"
         );
     }
 
