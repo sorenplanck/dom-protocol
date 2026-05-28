@@ -27,6 +27,9 @@ jobs:
           if (Test-Path docs/testing/WINDOWS_AGENT_WORKFLOW.md) {
             Copy-Item docs/testing/WINDOWS_AGENT_WORKFLOW.md artifact/
           }
+          if (Test-Path install-dom-runners.bat) {
+            Copy-Item install-dom-runners.bat artifact/
+          }
 
       - uses: actions/upload-artifact@v4
         with:

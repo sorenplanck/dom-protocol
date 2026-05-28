@@ -720,6 +720,7 @@ mod genesis_determinism_tests {
         config
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mine_fast_test_header(
         seed_hash: [u8; 32],
         prev_hash: Hash256,

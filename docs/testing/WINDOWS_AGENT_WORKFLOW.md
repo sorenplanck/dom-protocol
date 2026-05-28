@@ -37,6 +37,24 @@ pre-push validation for the default `affected` profile, commits only after tests
 pass, and pushes only when `--push` is provided. The final report records either
 `execution mode: in-place` or `execution mode: isolated-worktree`.
 
+
+## One-Click Install (Double Click)
+
+If you downloaded the portable executables and want a double-click installer:
+
+1. Put these files in the same folder:
+   - `dom-test-runner.exe`
+   - `dom-agent-runner.exe`
+   - `install-dom-runners.bat`
+2. Double-click `install-dom-runners.bat`.
+3. The installer copies binaries to `%LOCALAPPDATA%\DomProtocol\bin` and adds that folder to your user `PATH`.
+4. Open a new terminal and run:
+
+```bash
+dom-test-runner.exe doctor
+dom-agent-runner.exe doctor
+```
+
 ## Build
 
 ```bash
