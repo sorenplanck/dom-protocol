@@ -525,6 +525,7 @@ pub fn write_final_report(
     initial_head: &str,
     final_local_head: Option<&str>,
     remote_head: Option<&str>,
+    execution_mode: &str,
     changed_files: &[String],
     staged_files: &[String],
     tests_run: &[String],
@@ -550,6 +551,7 @@ pub fn write_final_report(
         "original repository path: {}\n",
         original_repo_path.display()
     ));
+    report.push_str(&format!("execution mode: {}\n", execution_mode));
     report.push_str(&format!(
         "isolated worktree path: {}\n",
         paths.worktree_dir.display()
@@ -697,6 +699,7 @@ mod tests {
             "abc",
             Some("def"),
             Some("remote"),
+            "isolated-worktree",
             &["a.rs".into()],
             &["b.rs".into()],
             &["test".into()],
@@ -767,6 +770,7 @@ mod tests {
             "abc",
             None,
             None,
+            "isolated-worktree",
             &[],
             &[],
             &[],
@@ -784,6 +788,7 @@ mod tests {
         let report = fs::read_to_string(&paths.final_report).unwrap();
         assert!(report.contains("run directory:"));
         assert!(report.contains("original repository path:"));
+        assert!(report.contains("execution mode: isolated-worktree"));
         assert!(report.contains("isolated worktree path:"));
         assert!(report.contains("Codex command attempted: codex exec -C repo -"));
         assert!(report.contains("Codex exit code: 1"));

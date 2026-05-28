@@ -13,6 +13,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+const IN_PLACE_DIRTY_ERROR: &str = "Refusing --in-place run because the worktree is not clean. Commit, stash, or use isolated mode.";
+
 #[derive(Parser)]
 #[command(name = "dom-agent-runner")]
 #[command(about = "Portable DOM Protocol Codex automation runner", long_about = None)]
@@ -33,6 +35,8 @@ enum Commands {
         push: bool,
         #[arg(long, default_value = "affected")]
         profile: String,
+        #[arg(long)]
+        in_place: bool,
     },
     ListPrompts,
     ShowPrompt {
@@ -57,6 +61,7 @@ struct RunOutcome {
     commit_created: bool,
     push_attempted: bool,
     worktree_created: bool,
+    execution_mode: ExecutionMode,
 }
 
 impl RunOutcome {
@@ -64,6 +69,22 @@ impl RunOutcome {
         Self {
             final_status: "FAIL",
             ..Self::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ExecutionMode {
+    #[default]
+    IsolatedWorktree,
+    InPlace,
+}
+
+impl ExecutionMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::IsolatedWorktree => "isolated-worktree",
+            Self::InPlace => "in-place",
         }
     }
 }
@@ -77,7 +98,8 @@ fn main() -> Result<()> {
             prompt,
             push,
             profile,
-        } => run(prompt_file, prompt, push, profile),
+            in_place,
+        } => run(prompt_file, prompt, push, profile, in_place),
         Commands::ListPrompts => list_prompt_files(),
         Commands::ShowPrompt { file } => show_prompt_file(file),
         Commands::Report => report(),
@@ -169,19 +191,29 @@ fn run(
     prompt: Option<String>,
     push: bool,
     profile: String,
+    in_place: bool,
 ) -> Result<()> {
     let root = current_repo_root()?;
     let prompt = resolve_prompt(prompt_file, prompt)?;
+    let execution_mode = if in_place {
+        ExecutionMode::InPlace
+    } else {
+        ExecutionMode::IsolatedWorktree
+    };
 
+    let initial_git_status = git_status_short(&root)?;
     let timestamp = timestamp_label();
     let paths = create_run_paths(&root, &timestamp)?;
     write_text(&paths.prompt_file, &prompt.content)?;
-    write_text(&paths.git_status_before, git_status_short(&root)?)?;
+    write_text(&paths.git_status_before, &initial_git_status)?;
     write_text(&paths.changed_files, git_changed_files(&root)?)?;
     write_text(&paths.staged_files, git_staged_files(&root)?)?;
     let initial_head = git_head(&root)?;
 
-    let mut outcome = RunOutcome::fail();
+    let mut outcome = RunOutcome {
+        execution_mode,
+        ..RunOutcome::fail()
+    };
     write_run_report(
         &paths,
         &prompt,
@@ -191,10 +223,33 @@ fn run(
         &[],
         "STARTED",
     )?;
+    if execution_mode == ExecutionMode::InPlace && !initial_git_status.trim().is_empty() {
+        outcome.error = Some(IN_PLACE_DIRTY_ERROR.into());
+        write_text(&paths.git_status_after, &initial_git_status)?;
+        write_run_report(
+            &paths,
+            &prompt,
+            &root,
+            &initial_head,
+            &outcome,
+            &[],
+            outcome.final_status,
+        )?;
+        println!("{IN_PLACE_DIRTY_ERROR}");
+        println!("Run failed: {}", paths.final_report.display());
+        return Ok(());
+    }
+
     let run_result: Result<(RunOutcome, Vec<String>)> = (|| {
-        let worktree = create_isolated_worktree(&root, &paths)?;
-        outcome.worktree_created = true;
-        outcome.codex_command = Some(dom_agent_runner::codex_command(&worktree)?.display());
+        let execution_root = match execution_mode {
+            ExecutionMode::InPlace => root.clone(),
+            ExecutionMode::IsolatedWorktree => {
+                let worktree = create_isolated_worktree(&root, &paths)?;
+                outcome.worktree_created = true;
+                worktree
+            }
+        };
+        outcome.codex_command = Some(dom_agent_runner::codex_command(&execution_root)?.display());
         write_run_report(
             &paths,
             &prompt,
@@ -204,7 +259,7 @@ fn run(
             &[],
             "RUNNING",
         )?;
-        let codex_output = run_codex(&worktree, &prompt, &paths.codex_log)?;
+        let codex_output = run_codex(&execution_root, &prompt, &paths.codex_log)?;
         outcome.codex_exit_code = codex_output.status.code();
         let codex_ok = codex_output.status.success();
         if !codex_ok {
@@ -225,7 +280,7 @@ fn run(
             ));
         }
 
-        let test_runner = build_or_verify_test_runner(&worktree)?;
+        let test_runner = build_or_verify_test_runner(&execution_root)?;
         outcome.dom_test_runner_executed = true;
         write_text(
             &paths.test_log,
@@ -243,30 +298,11 @@ fn run(
             &[],
             "RUNNING_TESTS",
         )?;
-        let test_output = if profile == "pre-push" {
-            let selection = selected_profiles_for_changed_files(&changed_files(&worktree)?);
-            let steps = perform_pre_push_steps(&worktree, &selection)?;
-            run_steps(&worktree, "pre-push", "pre-push", steps)?
-        } else if profile == "affected" {
-            let selection = selected_profiles_for_changed_files(&changed_files(&worktree)?);
-            let mut steps = Vec::new();
-            for selected in &selection.profiles {
-                steps.extend(profile_commands(selected.profile, &worktree)?);
-            }
-            run_steps(&worktree, "affected", "affected", steps)?
-        } else {
-            let profile_enum = match profile.as_str() {
-                "full" => Profile::Full,
-                "all" => Profile::All,
-                other => {
-                    return Err(anyhow!(
-                        "unsupported profile {other}; use affected, full, all, or pre-push"
-                    ))
-                }
-            };
-            let steps = profile_commands(profile_enum, &worktree)?;
-            run_steps(&worktree, &profile, &profile, steps)?
-        };
+        let test_output = run_validation_profile(
+            &execution_root,
+            &profile,
+            execution_mode == ExecutionMode::InPlace,
+        )?;
 
         write_text(
             &paths.test_log,
@@ -277,7 +313,7 @@ fn run(
             ),
         )?;
 
-        let changed = git_changed_files(&worktree)?;
+        let changed = git_changed_files(&execution_root)?;
         write_text(&paths.changed_files, &changed)?;
         let changed_list: Vec<String> = changed
             .lines()
@@ -287,7 +323,7 @@ fn run(
 
         let mut local_outcome = outcome.clone();
         if test_output.final_status == StepStatus::Pass {
-            local_outcome.staged = stage_files(&worktree, &changed_list)?;
+            local_outcome.staged = stage_files(&execution_root, &changed_list)?;
             write_text(&paths.staged_files, local_outcome.staged.join("\n"))?;
             if local_outcome.staged.is_empty() {
                 local_outcome.error = Some("no files were staged".into());
@@ -295,27 +331,27 @@ fn run(
                 let commit_msg = format!("feat: codex automation run {timestamp}");
                 let commit_output = Command::new("git")
                     .args(["commit", "-m", &commit_msg])
-                    .current_dir(&worktree)
+                    .current_dir(&execution_root)
                     .output()?;
                 write_text(
                     &paths.commit_file,
                     dom_agent_runner::command_output_text(&commit_output),
                 )?;
                 if commit_output.status.success() {
-                    local_outcome.commit_hash = Some(git_head(&worktree)?);
+                    local_outcome.commit_hash = Some(git_head(&execution_root)?);
                     local_outcome.commit_created = true;
                     if push {
                         local_outcome.push_attempted = true;
                         let push_output = Command::new("git")
                             .args(["push", "origin", "main"])
-                            .current_dir(&worktree)
+                            .current_dir(&execution_root)
                             .output()?;
                         local_outcome.push_status =
                             Some(dom_agent_runner::command_output_text(&push_output));
                         if push_output.status.success() {
                             let remote_output = Command::new("git")
                                 .args(["ls-remote", "origin", "refs/heads/main"])
-                                .current_dir(&worktree)
+                                .current_dir(&execution_root)
                                 .output()?;
                             local_outcome.remote_head =
                                 Some(dom_agent_runner::command_output_text(&remote_output));
@@ -339,13 +375,8 @@ fn run(
             local_outcome.error = Some("tests failed".into());
         }
 
-        write_text(&paths.git_status_after, git_status_short(&worktree)?)?;
-        let tests_run: Vec<String> = test_output
-            .steps
-            .iter()
-            .map(|step| step.command.clone())
-            .collect();
-        Ok((local_outcome, tests_run))
+        write_text(&paths.git_status_after, git_status_short(&execution_root)?)?;
+        Ok((local_outcome, test_output.steps))
     })();
 
     let tests_run = match run_result {
@@ -409,6 +440,79 @@ fn changed_list_or_empty(path: &PathBuf) -> Result<Vec<String>> {
         .collect())
 }
 
+struct ValidationOutput {
+    final_status: StepStatus,
+    steps: Vec<String>,
+}
+
+fn run_validation_profile(
+    repo_root: &std::path::Path,
+    profile: &str,
+    run_pre_push_after_affected: bool,
+) -> Result<ValidationOutput> {
+    if profile == "pre-push" {
+        let selection = selected_profiles_for_changed_files(&changed_files(repo_root)?);
+        let steps = perform_pre_push_steps(repo_root, &selection)?;
+        let output = run_steps(repo_root, "pre-push", "pre-push", steps)?;
+        return Ok(ValidationOutput {
+            final_status: output.final_status,
+            steps: output
+                .steps
+                .iter()
+                .map(|step| step.command.clone())
+                .collect(),
+        });
+    }
+
+    if profile == "affected" {
+        let selection = selected_profiles_for_changed_files(&changed_files(repo_root)?);
+        let mut steps = Vec::new();
+        for selected in &selection.profiles {
+            steps.extend(profile_commands(selected.profile, repo_root)?);
+        }
+        let affected = run_steps(repo_root, "affected", "affected", steps)?;
+        let mut commands: Vec<String> = affected
+            .steps
+            .iter()
+            .map(|step| step.command.clone())
+            .collect();
+        if affected.final_status != StepStatus::Pass || !run_pre_push_after_affected {
+            return Ok(ValidationOutput {
+                final_status: affected.final_status,
+                steps: commands,
+            });
+        }
+
+        let steps = perform_pre_push_steps(repo_root, &selection)?;
+        let pre_push = run_steps(repo_root, "pre-push", "pre-push", steps)?;
+        commands.extend(pre_push.steps.iter().map(|step| step.command.clone()));
+        return Ok(ValidationOutput {
+            final_status: pre_push.final_status,
+            steps: commands,
+        });
+    }
+
+    let profile_enum = match profile {
+        "full" => Profile::Full,
+        "all" => Profile::All,
+        other => {
+            return Err(anyhow!(
+                "unsupported profile {other}; use affected, full, all, or pre-push"
+            ))
+        }
+    };
+    let steps = profile_commands(profile_enum, repo_root)?;
+    let output = run_steps(repo_root, profile, profile, steps)?;
+    Ok(ValidationOutput {
+        final_status: output.final_status,
+        steps: output
+            .steps
+            .iter()
+            .map(|step| step.command.clone())
+            .collect(),
+    })
+}
+
 fn write_run_report(
     paths: &dom_agent_runner::RunPaths,
     prompt: &PromptInput,
@@ -426,6 +530,7 @@ fn write_run_report(
         initial_head,
         outcome.commit_hash.as_deref(),
         outcome.remote_head.as_deref(),
+        outcome.execution_mode.as_str(),
         &changed_list,
         &outcome.staged,
         tests_run,
