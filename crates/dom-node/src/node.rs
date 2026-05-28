@@ -758,6 +758,7 @@ impl DomNode {
                                                             .defer(
                                                                 crate::future_block_queue::DeferredBlock {
                                                                     block_hash: deferred.block_hash,
+                                                                    block_height: deferred.block_height,
                                                                     timestamp: deferred.timestamp,
                                                                     queued_at: std::time::Instant::now(),
                                                                     block_bytes:
@@ -1304,7 +1305,6 @@ async fn handle_inbound(
     info!("Noise handshake complete with {addr}");
 
     let mut codec = dom_wire::codec::NoiseCodec::new(transport, config.network.magic());
-    let remote_noise_pubkey = codec.remote_noise_pubkey();
     match hello_exchange(&mut stream, &mut codec, &config, &chain_id, &chain).await {
         Ok(peer_hello) => {
             info!(
@@ -1319,7 +1319,6 @@ async fn handle_inbound(
                 peer_info.best_height = peer_hello.best_height;
                 peer_info.best_hash = peer_hello.best_hash;
                 peer_info.user_agent = peer_hello.user_agent.clone();
-                peer_info.noise_pubkey = remote_noise_pubkey;
                 let result = svc.peers.lock().await.register_peer(peer_info);
                 info!("register_peer inbound {addr} → {result:?}");
                 if let Err(e) = result {
@@ -1436,7 +1435,6 @@ async fn connect_outbound(
     info!("Connected to {addr}");
 
     let mut codec = dom_wire::codec::NoiseCodec::new(transport, config.network.magic());
-    let remote_noise_pubkey_outbound = codec.remote_noise_pubkey();
     match hello_exchange(&mut stream, &mut codec, &config, &chain_id, &chain).await {
         Ok(peer_hello) => {
             info!(
@@ -1461,7 +1459,6 @@ async fn connect_outbound(
                 peer_info.best_height = peer_hello.best_height;
                 peer_info.best_hash = peer_hello.best_hash;
                 peer_info.user_agent = peer_hello.user_agent.clone();
-                peer_info.noise_pubkey = remote_noise_pubkey_outbound;
                 let result = svc.peers.lock().await.register_peer(peer_info);
                 info!("register_peer outbound {addr} → {result:?}");
                 if let Err(e) = result {
@@ -3345,7 +3342,7 @@ async fn message_loop(
                                 svc.metrics
                                     .malformed_block_relays
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                let _ = record_peer_violation(&svc.peers, peer_addr, &e).await;
+                                let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
                                 return Err(e);
                             }
                         };
@@ -3383,7 +3380,7 @@ async fn message_loop(
                                 let txs_for_scan = block.transactions.clone();
                                 let result = {
                                     let mut c = chain.lock().await;
-                                    c.connect_block_from_peer(&block, now, peer_addr.to_string())
+                                    c.connect_block(&block, now)
                                 };
                                 record_missing_block_delivery_outcome(
                                     &svc.missing_blocks,
@@ -4164,6 +4161,7 @@ mod tests {
         assert!(running.contains(&TASK_DANDELION.to_string()));
         assert!(running.contains(&TASK_MISSING_RETRY.to_string()));
         assert!(status.failure_task.is_none());
+        assert!(status.running_relay_workers.is_empty());
 
         handle.shutdown().await;
         handle.join().await.expect("shutdown");
