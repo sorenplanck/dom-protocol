@@ -37,13 +37,9 @@ pub fn block_reward(height: u64) -> u64 {
 }
 
 /// Compute the canonical chain_id from the node's network configuration.
-fn chain_id_for(config: &dom_config::NodeConfig) -> [u8; 32] {
-    let genesis_hash = match config.network {
-        dom_config::Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
-        dom_config::Network::Testnet => dom_core::GENESIS_HASH_TESTNET,
-        dom_config::Network::Regtest => dom_core::GENESIS_HASH_REGTEST,
-    };
-    *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes()
+fn chain_id_for(config: &dom_config::NodeConfig) -> Result<[u8; 32], DomError> {
+    let genesis_hash = dom_core::startup_genesis_hash_for_network_magic(config.network.magic())?;
+    Ok(*derive_chain_id(config.network.magic(), &genesis_hash).as_bytes())
 }
 
 fn use_light_vm(network: dom_config::Network) -> bool {
@@ -297,7 +293,8 @@ pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     let anchor = genesis_anchor(node.config.network.magic())?;
 
     // Deterministic genesis coinbase — identical on every node.
-    let genesis_coinbase = build_genesis_coinbase(&chain_id_for(&node.config))?;
+    let genesis_chain_id = chain_id_for(&node.config)?;
+    let genesis_coinbase = build_genesis_coinbase(&genesis_chain_id)?;
 
     // Compute PMMR roots from the coinbase via the shared helper so the
     // genesis header is byte-identical to what every validator will
@@ -452,7 +449,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
         build_real_coinbase(
             BlockHeight(new_height),
             total_tx_fees,
-            &chain_id_for(&node.config),
+            &chain_id_for(&node.config)?,
         )?
     };
 

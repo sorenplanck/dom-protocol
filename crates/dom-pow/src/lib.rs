@@ -660,15 +660,14 @@ pub fn target_to_difficulty(target: &[u8; 32]) -> u128 {
 /// Usado por todos os nos para calcular dificuldade a partir do bloco 1.
 /// Qualquer alteracao aqui e um hard fork imediato.
 ///
-/// Para substituir o timestamp no dia do lancamento:
-///   1. Executar: date +%s
-///   2. Atualizar GENESIS_TIMESTAMP_PLACEHOLDER em dom-core/src/constants.rs
-///   3. Recompilar e distribuir binarios
+/// The timestamp source is centralized in
+/// `dom_core::genesis_timestamp_for_network_magic()` so all networks consume
+/// one audited mapping from network identity to genesis anchor time.
 pub fn genesis_anchor(network_magic: u32) -> Result<AsertAnchor, DomError> {
-    use dom_core::GENESIS_TIMESTAMP_PLACEHOLDER;
     let params = pow_params_for_network(network_magic);
+    let timestamp = dom_core::genesis_timestamp_for_network_magic(network_magic)?;
     Ok(AsertAnchor {
-        timestamp: dom_core::Timestamp(GENESIS_TIMESTAMP_PLACEHOLDER),
+        timestamp: dom_core::Timestamp(timestamp),
         height: dom_core::BlockHeight::GENESIS,
         target: params.genesis_target()?,
     })
