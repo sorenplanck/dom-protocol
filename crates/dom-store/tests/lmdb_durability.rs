@@ -90,7 +90,10 @@ fn commit_survives_clean_env_drop_and_reopen() {
     let reopen = DomStore::open(&path).expect("reopen");
     assert_eq!(reopen.get_block_header(&b.hash).unwrap().unwrap(), b.header);
     assert_eq!(reopen.get_block_body(&b.hash).unwrap().unwrap(), b.body);
-    assert_eq!(reopen.get_hash_at_height(b.height).unwrap().unwrap(), b.hash);
+    assert_eq!(
+        reopen.get_hash_at_height(b.height).unwrap().unwrap(),
+        b.hash
+    );
     assert_eq!(reopen.get_chain_tip().unwrap().unwrap(), b.hash);
     let utxo = reopen
         .get_utxo(&b.commitment)
