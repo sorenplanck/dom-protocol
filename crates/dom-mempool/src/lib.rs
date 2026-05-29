@@ -676,6 +676,41 @@ mod tests {
         assert!(forward_results.iter().all(|(_, result)| result.is_ok()));
         assert!(reverse_results.iter().all(|(_, result)| result.is_ok()));
         assert_eq!(forward.all_hashes(), reverse.all_hashes());
+        // RFC-0012 §3.4: convergence is byte-level, not merely order-level.
+        assert_eq!(
+            forward.digest(),
+            reverse.digest(),
+            "permutation-invariant admission must yield an identical mempool digest"
+        );
+    }
+
+    #[test]
+    fn digest_is_permutation_invariant_and_distinguishes_contents() {
+        let (tx_a, hash_a) = make_tx(MIN_RELAY_FEE_RATE * 100);
+        let (tx_b, hash_b) = make_tx(MIN_RELAY_FEE_RATE * 200);
+
+        let mut forward = Mempool::new();
+        forward.accept_tx(tx_a.clone(), hash_a, 1).expect("a");
+        forward.accept_tx(tx_b.clone(), hash_b, 2).expect("b");
+
+        let mut reverse = Mempool::new();
+        reverse.accept_tx(tx_b, hash_b, 2).expect("b");
+        reverse.accept_tx(tx_a, hash_a, 1).expect("a");
+
+        assert_eq!(
+            forward.digest(),
+            reverse.digest(),
+            "same admitted set in different orders → identical digest"
+        );
+
+        // A different set must produce a different digest, and the empty mempool
+        // is distinct from any populated one.
+        let empty = Mempool::new();
+        assert_ne!(forward.digest(), empty.digest());
+        let (tx_c, hash_c) = make_tx(MIN_RELAY_FEE_RATE * 300);
+        let mut other = Mempool::new();
+        other.accept_tx(tx_c, hash_c, 3).expect("c");
+        assert_ne!(forward.digest(), other.digest());
     }
 
     #[test]
