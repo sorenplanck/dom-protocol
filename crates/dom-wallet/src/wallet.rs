@@ -989,6 +989,16 @@ impl Wallet {
     /// Non-coinbase outputs (received via Slatepack) are not yet scanned here —
     /// that requires interactive blinding factor exchange (Doc 7).
     pub fn scan_block(&mut self, transactions: &[Transaction], block_height: u64) {
+        self.scan_block_with_hash(transactions, block_height, None);
+    }
+
+    /// Scan a canonical block with optional block-hash attribution.
+    pub fn scan_block_with_hash(
+        &mut self,
+        transactions: &[Transaction],
+        block_height: u64,
+        block_hash: Option<[u8; 32]>,
+    ) {
         use dom_core::BlockHeight;
         use dom_crypto::pedersen::Commitment;
 
@@ -1043,13 +1053,16 @@ impl Wallet {
                 // Conservative: try the base reward.
                 let candidate = Commitment::commit(reward, &blinding);
                 if *candidate.as_bytes() == commitment_bytes {
-                    let owned = OwnedOutput::new(
+                    let mut owned = OwnedOutput::new(
                         commitment_bytes,
                         reward,
                         *blinding.as_bytes(),
                         block_height,
                         true,
                     );
+                    if let Some(hash) = block_hash {
+                        owned = owned.with_block_hash(hash);
+                    }
                     self.add_output(owned);
                     tracing::info!(
                         "scan_block: found output at height {block_height} value={reward} noms"
@@ -1075,6 +1088,16 @@ impl Wallet {
         &mut self,
         transactions: &[Transaction],
         block_height: u64,
+    ) -> Result<(), WalletError> {
+        self.apply_canonical_block_with_hash(transactions, block_height, None)
+    }
+
+    /// Apply a canonical block to wallet state with block-hash attribution.
+    pub fn apply_canonical_block_with_hash(
+        &mut self,
+        transactions: &[Transaction],
+        block_height: u64,
+        block_hash: Option<[u8; 32]>,
     ) -> Result<(), WalletError> {
         let mut consumed_inputs = std::collections::HashSet::new();
         for tx in transactions {
@@ -1113,7 +1136,7 @@ impl Wallet {
             }
         }
 
-        self.scan_block(transactions, block_height);
+        self.scan_block_with_hash(transactions, block_height, block_hash);
         self.save()?;
         Ok(())
     }
