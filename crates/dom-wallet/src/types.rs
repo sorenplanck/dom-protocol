@@ -45,6 +45,10 @@ pub struct OwnedOutput {
     pub blinding: Zeroizing<[u8; 32]>,
     /// Block height where output was created.
     pub block_height: u64,
+    /// Block hash where output was created. Legacy wallet files and
+    /// non-canonical/manual insertions may not have this attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_hash: Option<[u8; 32]>,
     /// Whether this is a coinbase output (subject to maturity).
     pub is_coinbase: bool,
     /// Whether this output has been spent.
@@ -93,10 +97,17 @@ impl OwnedOutput {
             value,
             blinding: Zeroizing::new(blinding),
             block_height,
+            block_hash: None,
             is_coinbase,
             spent: false,
             reserved_for_tx: None,
         }
+    }
+
+    /// Attach canonical block-hash attribution to this owned output.
+    pub fn with_block_hash(mut self, block_hash: [u8; 32]) -> Self {
+        self.block_hash = Some(block_hash);
+        self
     }
 
     /// Check if this output is mature under the canonical

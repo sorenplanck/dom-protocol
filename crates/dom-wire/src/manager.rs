@@ -31,9 +31,75 @@ const DUPLICATE_BLOCK_RELAY_WINDOW_SECS: u64 = 30;
 const MAX_OUTBOUND_FAILURE_TRACKERS: usize = 4_096;
 const MAX_PEER_ROTATION_ADDR_BYTES: usize = 256;
 const MAX_PERSISTED_PEER_REPUTATION_ENTRIES: usize = MAX_PENDING_PENALTIES;
-const OUTBOUND_FAILURE_COOLDOWN_THRESHOLD: u8 = 3;
-const OUTBOUND_FAILURE_COOLDOWN_ROUNDS: u8 = 2;
 const MAX_OUTBOUND_FAILURE_COOLDOWN_ROUNDS: u8 = 16;
+
+/// Shared outbound reconnect policy for discovered, backbone, and configured
+/// bootstrap peers. This is operational scheduling state only; consensus
+/// validity remains decided by chain and message validation.
+pub const OUTBOUND_RECONNECT_POLICY: RetryBackoffPolicy = RetryBackoffPolicy {
+    initial_delay_secs: 5,
+    max_delay_secs: 5 * 60,
+    jitter: RetryJitterPolicy::DeterministicAddress { max_jitter_secs: 5 },
+    reset_after_stable_session_secs: 2 * 60,
+    max_in_flight_attempts: 8,
+};
+
+/// Backoff jitter policy. Network reconnect jitter must be deterministic per
+/// peer so replay snapshots do not depend on process-local RNG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryJitterPolicy {
+    /// No jitter.
+    None,
+    /// Add `hash(addr) % (max_jitter_secs + 1)` seconds.
+    DeterministicAddress {
+        /// Inclusive maximum jitter in seconds.
+        max_jitter_secs: u64,
+    },
+}
+
+/// Bounded retry/backoff configuration shared by outbound reconnect paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryBackoffPolicy {
+    /// Delay after the first retryable failure.
+    pub initial_delay_secs: u64,
+    /// Maximum backoff delay after repeated retryable failures.
+    pub max_delay_secs: u64,
+    /// Jitter policy applied to the computed delay.
+    pub jitter: RetryJitterPolicy,
+    /// Connected sessions at least this old clear retry history.
+    pub reset_after_stable_session_secs: u64,
+    /// Maximum concurrent outbound attempts across peers.
+    pub max_in_flight_attempts: usize,
+}
+
+impl RetryBackoffPolicy {
+    /// Compute the bounded backoff delay after `failures` retryable failures.
+    pub fn delay_after_failures(self, addr: &str, failures: u8) -> Duration {
+        if failures == 0 {
+            return Duration::ZERO;
+        }
+
+        let exponent = failures.saturating_sub(1).min(31) as u32;
+        let base = self
+            .initial_delay_secs
+            .saturating_mul(1u64.checked_shl(exponent).unwrap_or(u64::MAX))
+            .min(self.max_delay_secs);
+        let jitter = match self.jitter {
+            RetryJitterPolicy::None => 0,
+            RetryJitterPolicy::DeterministicAddress { max_jitter_secs } => {
+                deterministic_addr_jitter(addr, max_jitter_secs)
+            }
+        };
+        Duration::from_secs(base.saturating_add(jitter).min(self.max_delay_secs))
+    }
+
+    fn cooldown_rounds_after_failure(self, addr: &str, failures: u8, pass_secs: u64) -> u8 {
+        let pass_secs = pass_secs.max(1);
+        let delay_secs = self.delay_after_failures(addr, failures).as_secs();
+        let rounds = delay_secs.div_ceil(pass_secs).saturating_add(1);
+        rounds.min(MAX_OUTBOUND_FAILURE_COOLDOWN_ROUNDS as u64) as u8
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct PendingInbound {
@@ -297,7 +363,12 @@ impl PeerManager {
 
     /// Check if we need more outbound connections.
     pub fn needs_outbound(&self) -> bool {
-        self.outbound_count() + self.pending_outbound_count() < self.min_outbound
+        self.outbound_count() + self.pending_outbound_count() < self.target_outbound_count()
+    }
+
+    fn target_outbound_count(&self) -> usize {
+        self.min_outbound
+            .min(OUTBOUND_RECONNECT_POLICY.max_in_flight_attempts)
     }
 
     /// Check if we can accept another inbound connection.
@@ -373,7 +444,9 @@ impl PeerManager {
                 "pending outbound peer is banned".into(),
             ));
         }
-        if !self.needs_outbound() {
+        if !self.needs_outbound()
+            || self.pending_outbound_count() >= OUTBOUND_RECONNECT_POLICY.max_in_flight_attempts
+        {
             return Err(DomError::PolicyRejected(
                 "outbound limit or pending outbound limit reached".into(),
             ));
@@ -409,12 +482,11 @@ impl PeerManager {
                 });
         entry.failures = entry.failures.saturating_add(1);
         entry.last_failure_seq = seq;
-        if entry.failures >= OUTBOUND_FAILURE_COOLDOWN_THRESHOLD {
-            // Connector passes advance cooldowns before selection, so add one
-            // extra step here to skip the full configured number of future
-            // retry rounds deterministically.
-            entry.cooldown_rounds = OUTBOUND_FAILURE_COOLDOWN_ROUNDS.saturating_add(1);
-        }
+        entry.cooldown_rounds = OUTBOUND_RECONNECT_POLICY.cooldown_rounds_after_failure(
+            addr,
+            entry.failures,
+            OUTBOUND_RECONNECT_POLICY.initial_delay_secs,
+        );
         self.enforce_outbound_failure_bound();
     }
 
@@ -542,11 +614,6 @@ impl PeerManager {
                     "peer rotation snapshot cooldown {} exceeds limit {}",
                     entry.cooldown_rounds, MAX_OUTBOUND_FAILURE_COOLDOWN_ROUNDS
                 )));
-            }
-            if entry.cooldown_rounds > 0 && entry.failures < OUTBOUND_FAILURE_COOLDOWN_THRESHOLD {
-                return Err(DomError::Invalid(
-                    "peer rotation snapshot contains cooldown below failure threshold".into(),
-                ));
             }
             max_seq = max_seq.max(entry.last_failure_seq);
             restored.insert(
@@ -679,7 +746,6 @@ impl PeerManager {
             }
         } else {
             self.pending_outbound.remove(&addr_str);
-            self.clear_outbound_failure(&addr_str);
         }
         self.pending_penalties.remove(&addr_str);
         self.duplicate_block_relays.remove(&addr_str);
@@ -691,6 +757,11 @@ impl PeerManager {
     pub fn remove_peer(&mut self, addr: &str) {
         self.prune_stale_state();
         if let Some(peer) = self.peers.remove(addr) {
+            if peer.outbound
+                && peer.uptime_secs() >= OUTBOUND_RECONNECT_POLICY.reset_after_stable_session_secs
+            {
+                self.clear_outbound_failure(addr);
+            }
             if peer.ban_score > 0 {
                 let _ = self.add_pending_ban_score(addr, peer.ban_score);
             }
@@ -883,6 +954,18 @@ fn penalty_is_stale(pending: PendingPenalty) -> bool {
     pending.last_updated.elapsed() >= Duration::from_secs(PENDING_PENALTY_TTL_SECS)
 }
 
+fn deterministic_addr_jitter(addr: &str, max_jitter_secs: u64) -> u64 {
+    if max_jitter_secs == 0 {
+        return 0;
+    }
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in addr.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash % (max_jitter_secs + 1)
+}
+
 /// Extract /16 prefix from an IP for subnet diversity check.
 fn to_slash16(ip: IpAddr) -> [u8; 2] {
     match ip {
@@ -950,11 +1033,16 @@ mod tests {
 
     #[test]
     fn outbound_limit_bounds_concurrent_handshakes() {
-        let mut mgr = PeerManager::new(125, 2);
-        assert!(mgr.reserve_outbound("203.0.113.10:33369").is_ok());
-        assert!(mgr.reserve_outbound("203.0.113.11:33369").is_ok());
-        assert!(mgr.reserve_outbound("203.0.113.12:33369").is_err());
-        assert_eq!(mgr.pending_outbound_count(), 2);
+        let mut mgr = PeerManager::new(125, OUTBOUND_RECONNECT_POLICY.max_in_flight_attempts + 2);
+        for i in 0..OUTBOUND_RECONNECT_POLICY.max_in_flight_attempts {
+            let addr = format!("203.0.113.{}:33369", i + 10);
+            assert!(mgr.reserve_outbound(&addr).is_ok());
+        }
+        assert!(mgr.reserve_outbound("203.0.113.250:33369").is_err());
+        assert_eq!(
+            mgr.pending_outbound_count(),
+            OUTBOUND_RECONNECT_POLICY.max_in_flight_attempts
+        );
         assert!(!mgr.needs_outbound());
     }
 
@@ -1231,6 +1319,11 @@ mod tests {
         mgr.record_outbound_failure("198.51.100.30:33369");
         mgr.record_outbound_failure("198.51.100.30:33369");
         mgr.record_outbound_failure("198.51.100.20:33369");
+        while mgr.outbound_cooldown_rounds("198.51.100.30:33369") > 0
+            || mgr.outbound_cooldown_rounds("198.51.100.20:33369") > 0
+        {
+            mgr.advance_outbound_cooldowns();
+        }
 
         let ordered = mgr.outbound_candidates_in_retry_order(vec![
             "198.51.100.30:33369".into(),
@@ -1252,6 +1345,11 @@ mod tests {
         let mut mgr = PeerManager::new(125, 2);
         mgr.record_outbound_failure("198.51.100.20:33369");
         mgr.record_outbound_failure("198.51.100.10:33369");
+        while mgr.outbound_cooldown_rounds("198.51.100.20:33369") > 0
+            || mgr.outbound_cooldown_rounds("198.51.100.10:33369") > 0
+        {
+            mgr.advance_outbound_cooldowns();
+        }
 
         let ordered = mgr.outbound_candidates_in_retry_order(vec![
             "198.51.100.10:33369".into(),
@@ -1267,15 +1365,23 @@ mod tests {
     }
 
     #[test]
-    fn successful_outbound_registration_clears_failure_history() {
+    fn stable_outbound_session_clears_failure_history() {
         let mut mgr = PeerManager::new(125, 2);
-        let peer = make_peer([198, 51, 100, 40], 33369, true);
+        let mut peer = make_peer([198, 51, 100, 40], 33369, true);
         let addr = peer.addr.to_string();
 
         mgr.record_outbound_failure(&addr);
         assert_eq!(mgr.outbound_failure_count(&addr), 1);
         mgr.reserve_outbound(&addr).expect("reserve outbound");
+        peer.connected_at = Instant::now()
+            - Duration::from_secs(OUTBOUND_RECONNECT_POLICY.reset_after_stable_session_secs + 1);
         mgr.register_peer(peer).expect("register outbound");
+        assert_eq!(
+            mgr.outbound_failure_count(&addr),
+            1,
+            "registration alone must not erase retry history"
+        );
+        mgr.remove_peer(&addr);
 
         assert_eq!(mgr.outbound_failure_count(&addr), 0);
         let ordered = mgr.outbound_candidates_in_retry_order(vec![addr.clone()]);
@@ -1283,35 +1389,76 @@ mod tests {
     }
 
     #[test]
-    fn repeated_failures_enter_and_exit_deterministic_cooldown() {
+    fn short_outbound_session_does_not_reset_backoff() {
+        let mut mgr = PeerManager::new(125, 2);
+        let peer = make_peer([198, 51, 100, 41], 33369, true);
+        let addr = peer.addr.to_string();
+
+        mgr.record_outbound_failure(&addr);
+        mgr.reserve_outbound(&addr).expect("reserve outbound");
+        mgr.register_peer(peer).expect("register outbound");
+        mgr.remove_peer(&addr);
+
+        assert_eq!(mgr.outbound_failure_count(&addr), 1);
+    }
+
+    #[test]
+    fn backoff_increases_and_caps_with_deterministic_jitter() {
+        let policy = RetryBackoffPolicy {
+            initial_delay_secs: 5,
+            max_delay_secs: 40,
+            jitter: RetryJitterPolicy::None,
+            reset_after_stable_session_secs: 120,
+            max_in_flight_attempts: 8,
+        };
+        let addr = "198.51.100.50:33369";
+
+        assert_eq!(policy.delay_after_failures(addr, 1), Duration::from_secs(5));
+        assert_eq!(
+            policy.delay_after_failures(addr, 2),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            policy.delay_after_failures(addr, 3),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            policy.delay_after_failures(addr, 4),
+            Duration::from_secs(40)
+        );
+        assert_eq!(
+            policy.delay_after_failures(addr, 8),
+            Duration::from_secs(40)
+        );
+    }
+
+    #[test]
+    fn retry_jitter_is_stable_for_peer_address() {
+        let policy = OUTBOUND_RECONNECT_POLICY;
+        let addr = "198.51.100.51:33369";
+
+        assert_eq!(
+            policy.delay_after_failures(addr, 2),
+            policy.delay_after_failures(addr, 2)
+        );
+        assert!(policy.delay_after_failures(addr, 2) <= Duration::from_secs(policy.max_delay_secs));
+    }
+
+    #[test]
+    fn failed_configured_peer_remains_eligible_after_bounded_backoff() {
         let mut mgr = PeerManager::new(125, 2);
         let addr = "198.51.100.50:33369";
 
         mgr.record_outbound_failure(addr);
-        mgr.record_outbound_failure(addr);
-        assert_eq!(mgr.outbound_cooldown_rounds(addr), 0);
-
-        mgr.record_outbound_failure(addr);
-        assert_eq!(mgr.outbound_cooldown_rounds(addr), 3);
         assert!(
             mgr.outbound_candidates_in_retry_order(vec![addr.into()])
                 .is_empty(),
-            "cooldown peer should be skipped before any retry pass advances"
+            "retryable failure should delay, not poison, a configured peer"
         );
 
-        assert!(mgr.advance_outbound_cooldowns());
-        assert_eq!(mgr.outbound_cooldown_rounds(addr), 2);
-        assert!(mgr
-            .outbound_candidates_in_retry_order(vec![addr.into()])
-            .is_empty());
-
-        assert!(mgr.advance_outbound_cooldowns());
-        assert_eq!(mgr.outbound_cooldown_rounds(addr), 1);
-        assert!(mgr
-            .outbound_candidates_in_retry_order(vec![addr.into()])
-            .is_empty());
-
-        assert!(mgr.advance_outbound_cooldowns());
+        while mgr.outbound_cooldown_rounds(addr) > 0 {
+            assert!(mgr.advance_outbound_cooldowns());
+        }
         assert_eq!(mgr.outbound_cooldown_rounds(addr), 0);
         assert_eq!(
             mgr.outbound_candidates_in_retry_order(vec![addr.into()]),
@@ -1510,7 +1657,7 @@ mod tests {
     }
 
     #[test]
-    fn restoring_peer_rotation_rejects_invalid_cooldown_state() {
+    fn restoring_peer_rotation_rejects_oversized_cooldown_state() {
         let mut mgr = PeerManager::new(125, 2);
         let err = mgr
             .restore_outbound_failure_state(&PersistedPeerRotationState {
@@ -1519,12 +1666,12 @@ mod tests {
                     addr: "198.51.100.30:33369".into(),
                     failures: 1,
                     last_failure_seq: 3,
-                    cooldown_rounds: 1,
+                    cooldown_rounds: MAX_OUTBOUND_FAILURE_COOLDOWN_ROUNDS + 1,
                 }],
             })
-            .expect_err("cooldown below threshold must reject");
+            .expect_err("oversized cooldown must reject");
         assert!(
-            matches!(err, DomError::Invalid(ref msg) if msg.contains("cooldown below failure threshold")),
+            matches!(err, DomError::Invalid(ref msg) if msg.contains("cooldown") && msg.contains("exceeds")),
             "unexpected error: {err}"
         );
     }
