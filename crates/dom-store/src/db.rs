@@ -80,7 +80,7 @@ use dom_core::DomError;
 use lmdb::{
     Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, Transaction, WriteFlags,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const MAP_SIZE: usize = 1 << 34; // 16 GiB — see module doc § "Map size"
@@ -310,6 +310,30 @@ impl DomStore {
         let mut out = BTreeMap::new();
         for (key, value) in cursor.iter() {
             out.insert(key.to_vec(), value.to_vec());
+        }
+        Ok(out)
+    }
+
+    /// Read every persisted block header by hash.
+    ///
+    /// Includes canonical and retained non-canonical blocks. Used by
+    /// deterministic side-chain retention on reopen / block ingest.
+    pub fn read_all_block_headers_raw(&self) -> Result<BTreeMap<[u8; 32], Vec<u8>>, DomError> {
+        let txn = self
+            .env
+            .begin_ro_txn()
+            .map_err(|e| DomError::Internal(format!("ro txn: {e}")))?;
+        let mut cursor = txn
+            .open_ro_cursor(self.db_blocks)
+            .map_err(|e| DomError::Internal(format!("open block cursor: {e}")))?;
+        let mut out = BTreeMap::new();
+        for (key, value) in cursor.iter() {
+            if key.len() != 32 {
+                return Err(DomError::Internal("corrupt block hash key".into()));
+            }
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(key);
+            out.insert(hash, value.to_vec());
         }
         Ok(out)
     }
@@ -693,6 +717,39 @@ impl DomStore {
         .map_err(|e| DomError::Internal(format!("put utxo digest: {e}")))?;
         txn.commit()
             .map_err(|e| DomError::Internal(format!("commit utxo digest: {e}")))?;
+        Ok(())
+    }
+
+    /// Delete retained non-canonical blocks by hash.
+    ///
+    /// Canonical callers must never pass hashes that remain referenced by
+    /// `chain_tip` / `block_height`. This deletes both the header and body so
+    /// retained side-chain storage stays bounded.
+    pub fn prune_known_blocks(&self, prune_hashes: &BTreeSet<[u8; 32]>) -> Result<(), DomError> {
+        if prune_hashes.is_empty() {
+            return Ok(());
+        }
+
+        let mut txn = self
+            .env
+            .begin_rw_txn()
+            .map_err(|e| DomError::Internal(format!("rw txn: {e}")))?;
+
+        for hash in prune_hashes {
+            match txn.del(self.db_blocks, hash, None) {
+                Ok(()) | Err(lmdb::Error::NotFound) => {}
+                Err(e) => return Err(DomError::Internal(format!("delete pruned block: {e}"))),
+            }
+            match txn.del(self.db_block_bodies, hash, None) {
+                Ok(()) | Err(lmdb::Error::NotFound) => {}
+                Err(e) => {
+                    return Err(DomError::Internal(format!("delete pruned block body: {e}")));
+                }
+            }
+        }
+
+        txn.commit()
+            .map_err(|e| DomError::Internal(format!("commit pruned blocks: {e}")))?;
         Ok(())
     }
 }

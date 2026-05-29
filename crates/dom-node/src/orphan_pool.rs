@@ -7,6 +7,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+/// Default runtime-wide orphan retention bound.
+pub const DEFAULT_MAX_ORPHAN_BLOCKS: usize = 1024;
+/// Default per-missing-parent orphan retention bound.
+pub const DEFAULT_MAX_ORPHANS_PER_PARENT: usize = 32;
+
 /// Block retained because its parent was missing at first delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrphanBlock {

@@ -3,7 +3,9 @@
 use crate::metrics::Metrics;
 use crate::miner::mining_loop;
 use crate::missing_block_tracker::MissingBlockTracker;
-use crate::orphan_pool::{OrphanBlock, RuntimeOrphanPool};
+use crate::orphan_pool::{
+    OrphanBlock, RuntimeOrphanPool, DEFAULT_MAX_ORPHANS_PER_PARENT, DEFAULT_MAX_ORPHAN_BLOCKS,
+};
 use crate::task_supervisor::{NodeTaskSupervisor, ShutdownToken, TaskKind};
 use crate::time_health::{check_clock_health, DriftStatus};
 use dom_chain::ChainState;
@@ -373,7 +375,10 @@ impl DomNode {
             metrics,
             future_block_queue: Arc::new(crate::future_block_queue::FutureBlockQueue::new()),
             missing_blocks: Arc::new(Mutex::new(MissingBlockTracker::new(8, 2, 16))),
-            orphan_pool: Arc::new(Mutex::new(RuntimeOrphanPool::new(1024, 32))),
+            orphan_pool: Arc::new(Mutex::new(RuntimeOrphanPool::new(
+                DEFAULT_MAX_ORPHAN_BLOCKS,
+                DEFAULT_MAX_ORPHANS_PER_PARENT,
+            ))),
             task_supervisor: NodeTaskSupervisor::new(),
         })
     }
