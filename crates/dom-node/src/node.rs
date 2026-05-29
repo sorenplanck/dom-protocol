@@ -688,8 +688,10 @@ impl DomNode {
                 }
             }
 
-            // Check every 30 seconds
-            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(
+                dom_wire::manager::OUTBOUND_RECONNECT_POLICY.initial_delay_secs,
+            ))
+            .await;
         }
     }
 }
