@@ -17,8 +17,11 @@ use dom_wallet::Wallet;
 use dom_wire::dandelion::DandelionRouter;
 use dom_wire::manager::PeerManager;
 use std::collections::HashMap;
+use std::future::Future;
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -89,6 +92,67 @@ struct BroadcastChannels {
     block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
     tx_fluff_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
     tx_stem_tx: tokio::sync::broadcast::Sender<dom_wire::dandelion::StemEnvelope>,
+}
+
+struct TracedMutexGuard<'a, T> {
+    lock_name: &'static str,
+    acquired_at: Instant,
+    guard: tokio::sync::MutexGuard<'a, T>,
+}
+
+impl<T> Deref for TracedMutexGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl<T> DerefMut for TracedMutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl<T> Drop for TracedMutexGuard<'_, T> {
+    fn drop(&mut self) {
+        tracing::debug!(
+            event = "lock_held_ms",
+            lock_name = self.lock_name,
+            held_ms = self.acquired_at.elapsed().as_millis() as u64,
+            "lock released"
+        );
+    }
+}
+
+async fn trace_lock<'a, T>(
+    lock_name: &'static str,
+    mutex: &'a Arc<Mutex<T>>,
+) -> TracedMutexGuard<'a, T> {
+    let started = Instant::now();
+    let guard = mutex.lock().await;
+    tracing::debug!(
+        event = "lock_wait_ms",
+        lock_name,
+        wait_ms = started.elapsed().as_millis() as u64,
+        "lock acquired"
+    );
+    TracedMutexGuard {
+        lock_name,
+        acquired_at: Instant::now(),
+        guard,
+    }
+}
+
+fn spawn_traced<F>(task_name: &'static str, future: F) -> tokio::task::JoinHandle<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        tracing::info!(event = "task_started", task_name, "task started");
+        future.await;
+        tracing::info!(event = "task_stopped", task_name, "task stopped");
+    })
 }
 
 const FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS: u64 = 30;
@@ -327,27 +391,34 @@ impl DomNode {
         // Binds already succeeded; from here on only per-connection /
         // per-request errors are possible, which are logged in-place.
         let node_listener = self.clone();
-        let listener_task = tokio::spawn(async move {
+        let listener_task = spawn_traced("p2p_listener", async move {
             node_listener.run_p2p_listener_on(p2p_listener).await;
         });
 
         // Start outbound peer connector
         let node_connector = self.clone();
-        let connector_task = tokio::spawn(async move {
+        let connector_task = spawn_traced("peer_connector", async move {
             node_connector.run_peer_connector().await;
         });
 
         // Start miner if enabled
         if self.config.mine {
             let node_miner = self.clone();
-            tokio::spawn(async move {
+            spawn_traced("miner", async move {
                 mining_loop(node_miner).await;
             });
         }
 
         if let Some((handle, listener)) = rpc_pair {
-            tokio::spawn(async move {
+            spawn_traced("rpc_server", async move {
                 if let Err(e) = dom_rpc::serve(handle, listener).await {
+                    tracing::error!(
+                        event = "task_failed",
+                        task_name = "rpc_server",
+                        error = %e,
+                        failure_class = "runtime",
+                        "rpc server failed"
+                    );
                     warn!("RPC server error: {e}");
                 }
             });
@@ -360,7 +431,7 @@ impl DomNode {
             let mempool = self.mempool.clone();
             let relay_tx = self.block_relay_tx.clone();
             let metrics = self.metrics.clone();
-            tokio::spawn(async move {
+            spawn_traced("future_block_queue_drain", async move {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
                     FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS,
                 ));
@@ -385,11 +456,19 @@ impl DomNode {
                         match decode_deferred_block_bytes(&deferred.block_bytes) {
                             Ok(block) => {
                                 let result = {
-                                    let mut c = chain.lock().await;
+                                    let mut c = trace_lock("chain", &chain).await;
                                     c.connect_block(&block, now)
                                 };
                                 match deferred_replay_action(&result) {
                                     DeferredReplayAction::RelayBestChain => {
+                                        tracing::info!(
+                                            event = "orphan_reprocessed",
+                                            block_height = block.header.height.0,
+                                            block_hash = %hex::encode(deferred.block_hash),
+                                            action = "accepted_best_chain",
+                                            failure_class = "runtime_deferred_replay",
+                                            "deferred block reprocessed"
+                                        );
                                         if let Ok(ref connect_result) = result {
                                             if let Err(e) = reconcile_mempool_after_connect(
                                                 &chain,
@@ -424,6 +503,14 @@ impl DomNode {
                                     DeferredReplayAction::Drop => {
                                         if matches!(result, Ok(dom_chain::ConnectResult::SideChain))
                                         {
+                                            tracing::info!(
+                                                event = "orphan_reprocessed",
+                                                block_height = block.header.height.0,
+                                                block_hash = %hex::encode(deferred.block_hash),
+                                                action = "accepted_side_chain_drop",
+                                                failure_class = "runtime_deferred_replay",
+                                                "deferred block reprocessed"
+                                            );
                                             tracing::debug!(
                                                 "Accepted deferred block ts={} (side chain — no rebroadcast)",
                                                 deferred.timestamp
@@ -441,6 +528,14 @@ impl DomNode {
                                         }
                                     }
                                     DeferredReplayAction::Requeue => {
+                                        tracing::info!(
+                                            event = "orphan_reprocessed",
+                                            block_height = block.header.height.0,
+                                            block_hash = %hex::encode(deferred.block_hash),
+                                            action = "requeue",
+                                            failure_class = "runtime_deferred_replay",
+                                            "deferred block reprocessed"
+                                        );
                                         let requeued = queue
                                             .defer(crate::future_block_queue::DeferredBlock {
                                                 block_hash: deferred.block_hash,
@@ -493,7 +588,7 @@ impl DomNode {
             let dandelion = self.dandelion.clone();
             let mempool = self.mempool.clone();
             let tx_fluff_tx = self.tx_fluff_tx.clone();
-            tokio::spawn(async move {
+            spawn_traced("dandelion_stem_timeout", async move {
                 const STEM_CHECK_INTERVAL_SECS: u64 = 5;
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
                     STEM_CHECK_INTERVAL_SECS,
@@ -533,9 +628,48 @@ impl DomNode {
 
         // Wait for tasks
         tokio::select! {
-            _ = listener_task => warn!("P2P listener exited"),
-            _ = connector_task => warn!("Peer connector exited"),
+            result = listener_task => {
+                match result {
+                    Ok(()) => warn!("P2P listener exited"),
+                    Err(e) => tracing::error!(
+                        event = "task_failed",
+                        task_name = "p2p_listener",
+                        error = %e,
+                        failure_class = "runtime",
+                        "task failed"
+                    ),
+                }
+                tracing::info!(
+                    event = "shutdown_requested",
+                    reason = "p2p_listener_exited",
+                    failure_class = "runtime_shutdown",
+                    "shutdown requested"
+                );
+            }
+            result = connector_task => {
+                match result {
+                    Ok(()) => warn!("Peer connector exited"),
+                    Err(e) => tracing::error!(
+                        event = "task_failed",
+                        task_name = "peer_connector",
+                        error = %e,
+                        failure_class = "runtime",
+                        "task failed"
+                    ),
+                }
+                tracing::info!(
+                    event = "shutdown_requested",
+                    reason = "peer_connector_exited",
+                    failure_class = "runtime_shutdown",
+                    "shutdown requested"
+                );
+            }
         }
+        tracing::info!(
+            event = "shutdown_completed",
+            failure_class = "runtime_shutdown",
+            "shutdown completed"
+        );
 
         Ok(())
     }
@@ -551,7 +685,7 @@ impl DomNode {
                 Ok((stream, peer_addr)) => {
                     info!("Inbound connection from {peer_addr}");
                     let reserved = {
-                        let mut mgr = self.peers.lock().await;
+                        let mut mgr = trace_lock("peers", &self.peers).await;
                         mgr.reserve_inbound(peer_addr)
                     };
                     if let Err(e) = reserved {
@@ -578,10 +712,10 @@ impl DomNode {
                     let peers = svc.peers.clone();
                     let metrics = svc.metrics.clone();
                     let chain_for_persist = chain.clone();
-                    tokio::spawn(async move {
+                    spawn_traced("p2p_inbound_session", async move {
                         handle_inbound(stream, peer_addr, config, privkey, chain, channels, svc)
                             .await;
-                        let mut mgr = peers.lock().await;
+                        let mut mgr = trace_lock("peers", &peers).await;
                         let peer_key = peer_addr.to_string();
                         mgr.remove_peer(&peer_key);
                         mgr.release_inbound_reservation(&peer_addr);
@@ -613,7 +747,7 @@ impl DomNode {
         };
         loop {
             let needs_more = {
-                let mgr = self.peers.lock().await;
+                let mgr = trace_lock("peers", &self.peers).await;
                 mgr.needs_outbound()
             };
 
@@ -632,22 +766,40 @@ impl DomNode {
                 addrs.sort();
                 addrs.dedup();
                 addrs = {
-                    let mgr = self.peers.lock().await;
+                    let mgr = trace_lock("peers", &self.peers).await;
                     mgr.outbound_candidates_in_retry_order(addrs)
                 };
 
                 for addr in addrs {
-                    let reserved = {
-                        let mut mgr = self.peers.lock().await;
+                    let (reserved, failure_count, cooldown_rounds) = {
+                        let mut mgr = trace_lock("peers", &self.peers).await;
                         if !mgr.needs_outbound() {
-                            false
+                            (
+                                false,
+                                mgr.outbound_failure_count(&addr),
+                                mgr.outbound_cooldown_rounds(&addr),
+                            )
                         } else {
-                            mgr.reserve_outbound(&addr).is_ok()
+                            let failure_count = mgr.outbound_failure_count(&addr);
+                            let cooldown_rounds = mgr.outbound_cooldown_rounds(&addr);
+                            (
+                                mgr.reserve_outbound(&addr).is_ok(),
+                                failure_count,
+                                cooldown_rounds,
+                            )
                         }
                     };
                     if !reserved {
                         continue;
                     }
+                    tracing::info!(
+                        event = "reconnect_attempt",
+                        peer_addr = %addr,
+                        failure_count,
+                        cooldown_rounds,
+                        failure_class = "operational_network",
+                        "outbound reconnect attempt scheduled"
+                    );
 
                     let config = self.config.clone();
                     let privkey = self.noise_privkey;
@@ -663,10 +815,10 @@ impl DomNode {
                     let metrics = self.metrics.clone();
                     let svc_c = svc.clone();
                     let chain_for_persist = self.chain.clone();
-                    tokio::spawn(async move {
+                    spawn_traced("p2p_outbound_session", async move {
                         let outcome =
                             connect_outbound(&addr, config, privkey, chain, channels, svc_c).await;
-                        let mut mgr = peers.lock().await;
+                        let mut mgr = trace_lock("peers", &peers).await;
                         if outcome == OutboundAttemptOutcome::RetryableFailure {
                             mgr.record_outbound_failure(&cleanup_addr);
                         }
@@ -917,6 +1069,14 @@ async fn handle_inbound(
             )
             .await
             {
+                tracing::info!(
+                    event = "session_closed_reason",
+                    peer_addr = %addr,
+                    direction = "inbound",
+                    reason = %e,
+                    failure_class = "operational_network",
+                    "peer session closed"
+                );
                 info!("Connection to {addr} closed: {e}");
             }
         }
@@ -943,6 +1103,14 @@ async fn connect_outbound(
     let mut stream = match tokio::net::TcpStream::connect(addr).await {
         Ok(s) => s,
         Err(e) => {
+            tracing::warn!(
+                event = "session_closed_reason",
+                peer_addr = %addr,
+                direction = "outbound",
+                reason = %e,
+                failure_class = "operational_network",
+                "outbound connection failed"
+            );
             warn!("Connection to {addr} failed: {e}");
             return OutboundAttemptOutcome::RetryableFailure;
         }
@@ -1061,6 +1229,14 @@ async fn connect_outbound(
             )
             .await
             {
+                tracing::info!(
+                    event = "session_closed_reason",
+                    peer_addr = %addr,
+                    direction = "outbound",
+                    reason = %e,
+                    failure_class = "operational_network",
+                    "peer session closed"
+                );
                 info!("Connection to {addr} closed: {e}");
             }
             OutboundAttemptOutcome::Registered
@@ -1238,7 +1414,7 @@ async fn record_peer_violation(
 
     let peer_key = peer_addr.to_string();
     let banned = {
-        let mut mgr = peers.lock().await;
+        let mut mgr = trace_lock("peers", peers).await;
         mgr.add_ban_score(&peer_key, score)
     };
     if let Err(e) = persist_peer_reputation_state(chain, peers).await {
@@ -1266,7 +1442,7 @@ async fn record_pending_peer_violation(
 
     let peer_key = peer_addr.to_string();
     let banned = {
-        let mut mgr = peers.lock().await;
+        let mut mgr = trace_lock("peers", peers).await;
         mgr.add_pending_ban_score(&peer_key, score) >= dom_wire::peer::ban_scores::BAN_THRESHOLD
     };
     if let Err(e) = persist_peer_reputation_state(chain, peers).await {
@@ -1304,7 +1480,16 @@ async fn queue_future_block(
         queued_at: std::time::Instant::now(),
         block_bytes,
     };
-    queue.defer(deferred).await
+    let admitted = queue.defer(deferred).await;
+    tracing::info!(
+        event = "orphan_admitted",
+        block_height = block.header.height.0,
+        block_hash = %hex::encode(hash),
+        action = if admitted { "queued" } else { "rejected_queue_full" },
+        failure_class = "runtime_future_block",
+        "future block queue admission decided"
+    );
+    admitted
 }
 
 fn deferred_replay_action(
@@ -1723,7 +1908,7 @@ async fn record_duplicate_block_relay(
 
 async fn refresh_peer_metrics(peers: &Arc<Mutex<PeerManager>>, metrics: &Arc<Metrics>) {
     let (peer_count, inbound_peers, outbound_peers) = {
-        let mgr = peers.lock().await;
+        let mgr = trace_lock("peers", peers).await;
         let mut peer_count = 0u64;
         let mut inbound_peers = 0u64;
         let mut outbound_peers = 0u64;
@@ -2896,6 +3081,14 @@ async fn message_loop(
                                                 .malformed_block_relays
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                         }
+                                        tracing::warn!(
+                                            event = "consensus_rejection",
+                                            peer_addr = %peer_addr,
+                                            block_height = block.header.height.0,
+                                            reason = %e,
+                                            failure_class = "consensus_rejection",
+                                            "relayed block rejected"
+                                        );
                                         let banned =
                                             record_peer_violation(&chain, &svc.peers, peer_addr, &e)
                                                 .await;
@@ -2913,6 +3106,15 @@ async fn message_loop(
                             }
                             Ok(TimestampDecision::Defer) => {
                                 // Soft buffer: hold for re-evaluation
+                                tracing::info!(
+                                    event = "future_block_policy_action",
+                                    peer_addr = %peer_addr,
+                                    block_height = block.header.height.0,
+                                    block_timestamp = block.header.timestamp.0,
+                                    action = "defer",
+                                    failure_class = "runtime_future_block",
+                                    "future block deferred by soft buffer"
+                                );
                                 tracing::debug!("Block from {peer_addr} deferred (future timestamp soft buffer)");
                                 if queue_future_block(&svc.future_block_queue, &block, block_bytes).await {
                                     tracing::debug!(
@@ -2927,6 +3129,16 @@ async fn message_loop(
                                 }
                             }
                             Err(e) => {
+                                tracing::info!(
+                                    event = "future_block_policy_action",
+                                    peer_addr = %peer_addr,
+                                    block_height = block.header.height.0,
+                                    block_timestamp = block.header.timestamp.0,
+                                    action = "reject",
+                                    reason = %e,
+                                    failure_class = "consensus_rejection",
+                                    "future block rejected by timestamp policy"
+                                );
                                 tracing::warn!("Block from {peer_addr} rejected by timestamp: {e}");
                             }
                         }
@@ -3003,6 +3215,14 @@ async fn message_loop(
                                         }
                                     }
                                 } else if let Err(e) = accepted {
+                                    tracing::debug!(
+                                        event = "consensus_rejection",
+                                        peer_addr = %peer_addr,
+                                        tx_hash = %hex::encode(tx_hash),
+                                        reason = %e,
+                                        failure_class = "consensus_rejection",
+                                        "relayed transaction rejected"
+                                    );
                                     let banned =
                                         record_peer_violation(&chain, &svc.peers, peer_addr, &e)
                                             .await;
@@ -3070,8 +3290,8 @@ mod tests {
         parse_persisted_noise_static_key, peer_violation_score, pending_peer_violation_score,
         persist_mempool_snapshot, persist_peer_reputation_snapshot, purge_mempool_confirmed_inputs,
         reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action,
-        restore_peer_rotation_state, tx_hash, DeferredReplayAction, DomNode, IbdRoundState,
-        OutboundAttemptOutcome, RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY,
+        restore_peer_rotation_state, trace_lock, tx_hash, DeferredReplayAction, DomNode,
+        IbdRoundState, OutboundAttemptOutcome, RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY,
         MEMPOOL_METADATA_KEY, NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY,
         PEER_ROTATION_METADATA_KEY,
     };
@@ -3116,6 +3336,16 @@ mod tests {
     use tokio::sync::Mutex;
 
     type TestUtxoBytes = ([u8; 33], Vec<u8>);
+
+    #[tokio::test]
+    async fn traced_lock_guard_preserves_state_transition() {
+        let state = Arc::new(Mutex::new(0u8));
+        {
+            let mut guard = trace_lock("test_state", &state).await;
+            *guard = 1;
+        }
+        assert_eq!(*state.lock().await, 1);
+    }
 
     fn commitment(seed: u8, value: u64) -> Commitment {
         let mut bytes = [0u8; 32];
