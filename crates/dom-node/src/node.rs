@@ -1543,12 +1543,38 @@ fn collect_spent_commitments(transactions: &[Transaction]) -> Vec<[u8; 33]> {
     spent
 }
 
+/// Collect, in canonical order, the transactions from disconnected blocks that
+/// remain valid under the **new** canonical chain and may be reinjected into the
+/// live mempool (RFC-0012 §3).
+///
+/// Reinjection affects transaction *availability* only; it never affects block
+/// validity (RFC-0012 invariant I-1). A candidate is excluded if it is a
+/// coinbase/system transaction (§3.2), spends an input that is no longer a live
+/// (and, for coinbase, mature) UTXO, or whose outputs/kernels already exist on the
+/// surviving branch. Survivors are sorted by `tx_hash` ascending so the
+/// reinjection batch — and therefore the resulting mempool — is independent of the
+/// order in which the disconnected transactions were originally delivered.
+/// Double-spends among survivors are then resolved deterministically by the
+/// mempool's input-reservation check (first in hash order wins).
 fn collect_reinjectable_reorg_txs(
     chain: &ChainState,
     delta: &dom_chain::ReorgDelta,
 ) -> Result<Vec<ReinjectableTx>, DomError> {
     let mut reinject = Vec::new();
     for tx in &delta.disconnected_txs {
+        // RFC-0012 §3.2: exclude coinbase/system transactions. The canonical
+        // coinbase is already structurally excluded (`disconnected_txs` is built
+        // from `block.transactions`, never `block.coinbase`); this guard also
+        // drops any regular transaction carrying a coinbase kernel feature, which
+        // is a system output that must never re-enter the relay mempool.
+        let is_coinbase_or_system = tx
+            .kernels
+            .iter()
+            .any(|kernel| kernel.features & dom_core::KERNEL_FEAT_COINBASE != 0);
+        if is_coinbase_or_system {
+            continue;
+        }
+
         let inputs_are_live = tx.inputs.iter().all(|input| {
             let commitment = input.commitment.as_bytes();
             match chain.store.get_utxo(commitment) {
@@ -4580,6 +4606,150 @@ mod tests {
             pool_b.all_hashes() == pool_a.all_hashes(),
             "repeated reinjection over the same inputs must converge identically"
         );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    /// RFC-0012 §3.2: a disconnected transaction carrying a coinbase/system kernel
+    /// feature must never be reinjected into the relay mempool, even when its
+    /// inputs are live under the new canonical chain. A sibling plain transaction
+    /// over a different live output is reinjected, proving the exclusion is
+    /// specific to the coinbase feature and not a blanket drop.
+    #[tokio::test]
+    async fn reorg_reinjection_excludes_coinbase_feature_transactions() {
+        let dir = fresh_test_dir("reorg-reinject-coinbase-excluded");
+        let chain = open_chain(&dir);
+        let mempool = Arc::new(Mutex::new(Mempool::new()));
+
+        // Two live outputs created by a base block.
+        let live_a = commitment(110, 41);
+        let live_b = commitment(112, 43);
+        let base_tx = Transaction {
+            inputs: vec![],
+            outputs: vec![
+                TransactionOutput {
+                    commitment: live_a.clone(),
+                    proof: vec![0xA0; 8],
+                },
+                TransactionOutput {
+                    commitment: live_b.clone(),
+                    proof: vec![0xB0; 8],
+                },
+            ],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(MIN_RELAY_FEE_RATE * 100).expect("fee"),
+                lock_height: 0,
+                excess: commitment(114, 0),
+                excess_signature: [0xC0; 65],
+            }],
+            offset: [0u8; 32],
+        };
+        let base_block =
+            synthetic_block_with_transactions(Hash256::ZERO, 1, 23, 120, vec![base_tx]);
+        commit_chain_block(&chain, &base_block).await;
+
+        // Plain tx over live_a — eligible. Coinbase-feature tx over live_b —
+        // forbidden for relay despite a live input.
+        let plain_tx = synthetic_spend_tx(live_a, 130, 131);
+        let mut coinbase_feature_tx = synthetic_spend_tx(live_b, 132, 133);
+        coinbase_feature_tx.kernels[0].features = dom_core::KERNEL_FEAT_COINBASE;
+
+        let reorg = ReorgDelta {
+            disconnected_txs: vec![coinbase_feature_tx.clone(), plain_tx.clone()],
+            connected_txs: vec![],
+            ..Default::default()
+        };
+        reconcile_mempool_after_connect(&chain, &mempool, &ConnectResult::Reorg(reorg), &[])
+            .await
+            .expect("reconcile reorg mempool");
+
+        let pool = mempool.lock().await;
+        assert!(
+            pool.get_tx(&tx_hash(&plain_tx).expect("hash")).is_some(),
+            "plain tx over a live output must be reinjected"
+        );
+        assert!(
+            pool.get_tx(&tx_hash(&coinbase_feature_tx).expect("hash"))
+                .is_none(),
+            "coinbase/system-feature tx must be excluded from reinjection"
+        );
+        assert_eq!(pool.len(), 1, "exactly the eligible plain tx is reinjected");
+        drop(pool);
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    /// RFC-0012 §3.4: two nodes that experience the same reorg but originally
+    /// received the disconnected transactions in different orders converge to the
+    /// same canonical mempool **digest**. This pins the convergence guarantee to
+    /// the byte-level digest, not just the hash listing.
+    #[tokio::test]
+    async fn reorg_reinjection_converges_to_same_digest_across_delivery_order() {
+        let dir = fresh_test_dir("reorg-reinject-digest-converge");
+        let chain = open_chain(&dir);
+        let mempool_a = Arc::new(Mutex::new(Mempool::new()));
+        let mempool_b = Arc::new(Mutex::new(Mempool::new()));
+
+        // Three independent live outputs → three non-conflicting eligible txs.
+        let live = [
+            commitment(140, 51),
+            commitment(142, 53),
+            commitment(144, 55),
+        ];
+        let base_tx = Transaction {
+            inputs: vec![],
+            outputs: live
+                .iter()
+                .enumerate()
+                .map(|(i, c)| TransactionOutput {
+                    commitment: c.clone(),
+                    proof: vec![0xD0 + i as u8; 8],
+                })
+                .collect(),
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(MIN_RELAY_FEE_RATE * 100).expect("fee"),
+                lock_height: 0,
+                excess: commitment(146, 0),
+                excess_signature: [0xE0; 65],
+            }],
+            offset: [0u8; 32],
+        };
+        let base_block =
+            synthetic_block_with_transactions(Hash256::ZERO, 1, 29, 150, vec![base_tx]);
+        commit_chain_block(&chain, &base_block).await;
+
+        let t0 = synthetic_spend_tx(live[0].clone(), 160, 161);
+        let t1 = synthetic_spend_tx(live[1].clone(), 162, 163);
+        let t2 = synthetic_spend_tx(live[2].clone(), 164, 165);
+
+        // Different delivery orders into A and B.
+        let delta_a = ReorgDelta {
+            disconnected_txs: vec![t2.clone(), t0.clone(), t1.clone()],
+            connected_txs: vec![],
+            ..Default::default()
+        };
+        let delta_b = ReorgDelta {
+            disconnected_txs: vec![t1.clone(), t2.clone(), t0.clone()],
+            connected_txs: vec![],
+            ..Default::default()
+        };
+        reconcile_mempool_after_connect(&chain, &mempool_a, &ConnectResult::Reorg(delta_a), &[])
+            .await
+            .expect("reconcile A");
+        reconcile_mempool_after_connect(&chain, &mempool_b, &ConnectResult::Reorg(delta_b), &[])
+            .await
+            .expect("reconcile B");
+
+        let pool_a = mempool_a.lock().await;
+        let pool_b = mempool_b.lock().await;
+        assert_eq!(pool_a.len(), 3, "all three eligible txs reinjected");
+        assert_eq!(
+            pool_a.digest(),
+            pool_b.digest(),
+            "reorg reinjection converges to the same mempool digest regardless of delivery order"
+        );
+        drop(pool_a);
+        drop(pool_b);
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
