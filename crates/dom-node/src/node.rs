@@ -2335,7 +2335,7 @@ async fn resume_ibd_block_sync(
             let txs_for_scan = block.transactions.clone();
             {
                 let mut c = chain.lock().await;
-                let best_chain = match c.connect_block(
+                let connect_result = match c.connect_block(
                     &block,
                     Timestamp(
                         std::time::SystemTime::now()
@@ -2344,19 +2344,28 @@ async fn resume_ibd_block_sync(
                             .as_secs(),
                     ),
                 ) {
-                    Ok(dom_chain::ConnectResult::BestChain) => {
+                    Ok(result) => result,
+                    Err(e) => {
+                        return Err(DomError::Invalid(format!(
+                            "IBD resume from {}: connect_block rejected: {e}",
+                            runtime.peer_addr,
+                        )));
+                    }
+                };
+                let best_chain = match &connect_result {
+                    dom_chain::ConnectResult::BestChain => {
                         connected_any = true;
                         true
                     }
-                    Ok(dom_chain::ConnectResult::Reorg(_)) => {
+                    dom_chain::ConnectResult::Reorg(_) => {
                         connected_any = true;
                         true
                     }
-                    Ok(dom_chain::ConnectResult::SideChain) => {
+                    dom_chain::ConnectResult::SideChain => {
                         connected_any = true;
                         false
                     }
-                    Ok(dom_chain::ConnectResult::AlreadyHave) => {
+                    dom_chain::ConnectResult::AlreadyHave => {
                         tracing::debug!(
                             "IBD resume from {}: block already known at height {}",
                             runtime.peer_addr,
@@ -2365,23 +2374,46 @@ async fn resume_ibd_block_sync(
                         connected_any = true;
                         false
                     }
-                    Err(e) => {
-                        return Err(DomError::Invalid(format!(
-                            "IBD resume from {}: connect_block rejected: {e}",
-                            runtime.peer_addr,
-                        )));
-                    }
                 };
                 if best_chain {
                     purge_mempool_confirmed_inputs(chain, &runtime.mempool, &txs_for_scan).await?;
                     if let Some(ref wallet_arc) = runtime.wallet {
                         let mut w = wallet_arc.lock().await;
-                        w.apply_canonical_block(&txs_for_scan, height)
-                            .map_err(|e| {
-                                DomError::Internal(format!(
-                                    "wallet canonical block apply during resumed IBD failed: {e}"
-                                ))
-                            })?;
+                        match connect_result {
+                            dom_chain::ConnectResult::BestChain => {
+                                w.apply_canonical_block_with_hash(
+                                    &txs_for_scan,
+                                    height,
+                                    Some(*expected_hash),
+                                )
+                                .map_err(|e| {
+                                    DomError::Internal(format!(
+                                        "wallet canonical block apply during resumed IBD failed: {e}"
+                                    ))
+                                })?;
+                            }
+                            dom_chain::ConnectResult::Reorg(delta) => {
+                                w.rollback_to(delta.common_ancestor_height).map_err(|e| {
+                                    DomError::Internal(format!(
+                                        "wallet rollback during resumed IBD reorg failed: {e}"
+                                    ))
+                                })?;
+                                for block in &delta.connected_blocks {
+                                    w.apply_canonical_block_with_hash(
+                                        &block.transactions,
+                                        block.block_height,
+                                        Some(block.block_hash),
+                                    )
+                                    .map_err(|e| {
+                                        DomError::Internal(format!(
+                                            "wallet canonical reorg block apply during resumed IBD failed: {e}"
+                                        ))
+                                    })?;
+                                }
+                            }
+                            dom_chain::ConnectResult::SideChain
+                            | dom_chain::ConnectResult::AlreadyHave => {}
+                        }
                     }
                 }
             }
@@ -3178,6 +3210,10 @@ async fn message_loop(
                                 return Err(e);
                             }
                         };
+                        let relay_block_hash = {
+                            use dom_serialization::DomSerialize;
+                            *dom_crypto::hash::blake2b_256(&block.header.to_bytes()?).as_bytes()
+                        };
                         let now_secs = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -3241,9 +3277,10 @@ async fn message_loop(
                                                     if let Some(ref wallet_arc) = svc.wallet {
                                                         let mut w = wallet_arc.lock().await;
                                                         if let Err(e) =
-                                                            w.apply_canonical_block(
+                                                            w.apply_canonical_block_with_hash(
                                                                 &txs_for_scan,
                                                                 height,
+                                                                Some(relay_block_hash),
                                                             )
                                                         {
                                                             tracing::warn!(
@@ -3252,10 +3289,35 @@ async fn message_loop(
                                                         }
                                                     }
                                                 }
-                                                dom_chain::ConnectResult::Reorg(_) => {
-                                                    tracing::debug!(
-                                                        "Skipping wallet canonical apply for reorg from {peer_addr}; rollback hooks remain explicit follow-up work"
-                                                    );
+                                                dom_chain::ConnectResult::Reorg(delta) => {
+                                                    if let Some(ref wallet_arc) = svc.wallet {
+                                                        let mut w = wallet_arc.lock().await;
+                                                        if let Err(e) = w.rollback_to(
+                                                            delta.common_ancestor_height,
+                                                        ) {
+                                                            tracing::warn!(
+                                                                "wallet rollback failed at reorg ancestor height {}: {e}",
+                                                                delta.common_ancestor_height
+                                                            );
+                                                        } else {
+                                                            for block in &delta.connected_blocks {
+                                                                if let Err(e) = w
+                                                                    .apply_canonical_block_with_hash(
+                                                                        &block.transactions,
+                                                                        block.block_height,
+                                                                        Some(block.block_hash),
+                                                                    )
+                                                                {
+                                                                    tracing::warn!(
+                                                                        "wallet canonical reorg block apply failed at height {} hash {}: {e}",
+                                                                        block.block_height,
+                                                                        hex::encode(block.block_hash)
+                                                                    );
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                                 dom_chain::ConnectResult::SideChain
                                                 | dom_chain::ConnectResult::AlreadyHave => {}
@@ -4611,6 +4673,7 @@ mod tests {
         let reorg = ReorgDelta {
             disconnected_txs: vec![disconnected_tx.clone()],
             connected_txs: vec![connected_tx],
+            ..Default::default()
         };
 
         reconcile_mempool_after_connect(&chain, &mempool, &ConnectResult::Reorg(reorg), &[])
@@ -4670,6 +4733,7 @@ mod tests {
                 conflict_a.clone(),
             ],
             connected_txs: vec![],
+            ..Default::default()
         };
         let delta_b = ReorgDelta {
             disconnected_txs: vec![
@@ -4679,6 +4743,7 @@ mod tests {
                 conflict_b.clone(),
             ],
             connected_txs: vec![],
+            ..Default::default()
         };
 
         reconcile_mempool_after_connect(&chain, &mempool_a, &ConnectResult::Reorg(delta_a), &[])
