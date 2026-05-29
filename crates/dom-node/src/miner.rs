@@ -867,7 +867,7 @@ mod genesis_determinism_tests {
     }
 
     #[test]
-    fn miner_selected_target_matches_validator_expected_target() {
+    fn miner_validator_still_share_compute_expected_target() {
         use dom_core::NETWORK_MAGIC_MAINNET;
 
         let timestamp = Timestamp(1_778_642_753);
