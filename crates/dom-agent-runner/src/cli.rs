@@ -32,9 +32,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
         "doctor" => Ok(Cmd::Doctor),
         "list-prompts" => Ok(Cmd::ListPrompts),
         "show-prompt" => {
-            let p = args
-                .get(1)
-                .ok_or("show-prompt requires a path argument")?;
+            let p = args.get(1).ok_or("show-prompt requires a path argument")?;
             Ok(Cmd::ShowPrompt(PathBuf::from(p)))
         }
         "report" => Ok(Cmd::Report),
@@ -92,9 +90,7 @@ fn parse_run(args: &[String]) -> Result<RunOptions, String> {
     }
     match (&opts.prompt, &opts.prompt_file) {
         (None, None) => Err("run requires --prompt or --prompt-file".to_string()),
-        (Some(_), Some(_)) => {
-            Err("--prompt and --prompt-file are mutually exclusive".to_string())
-        }
+        (Some(_), Some(_)) => Err("--prompt and --prompt-file are mutually exclusive".to_string()),
         _ => Ok(opts),
     }
 }
@@ -165,12 +161,14 @@ mod tests {
 
     #[test]
     fn parses_run_with_file_and_push() {
-        let cmd =
-            parse(&s(&["run", "--prompt-file", "prompts/x.txt", "--push"])).unwrap();
+        let cmd = parse(&s(&["run", "--prompt-file", "prompts/x.txt", "--push"])).unwrap();
         match cmd {
             Cmd::Run(o) => {
                 assert!(o.push);
-                assert_eq!(o.prompt_file.as_ref().unwrap().to_string_lossy(), "prompts/x.txt");
+                assert_eq!(
+                    o.prompt_file.as_ref().unwrap().to_string_lossy(),
+                    "prompts/x.txt"
+                );
             }
             _ => panic!("expected Run"),
         }
@@ -184,8 +182,7 @@ mod tests {
 
     #[test]
     fn rejects_run_with_both_prompts() {
-        let err =
-            parse(&s(&["run", "--prompt", "a", "--prompt-file", "b.txt"])).unwrap_err();
+        let err = parse(&s(&["run", "--prompt", "a", "--prompt-file", "b.txt"])).unwrap_err();
         assert!(err.contains("mutually exclusive"));
     }
 
