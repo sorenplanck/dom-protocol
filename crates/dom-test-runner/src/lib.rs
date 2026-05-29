@@ -999,7 +999,7 @@ pub fn run_steps(
         duration,
         env,
         steps: results,
-        log_dir: logs_dir,
+        log_dir: logs_dir.to_path_buf(),
         report_dir: reports_dir.clone(),
         final_status,
         reason: None,

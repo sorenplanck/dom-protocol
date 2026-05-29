@@ -24,11 +24,20 @@ use dom_chain::reorg::{check_reorg_depth, find_common_ancestor};
 use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{
-    Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionInput, TransactionKernel,
-    TransactionOutput,
+    compute_block_pmmr_roots, derive_chain_id, Block, CoinbaseKernel, CoinbaseTransaction,
+    Transaction, TransactionInput, TransactionKernel, TransactionOutput,
 };
-use dom_core::{Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN};
-use dom_crypto::pedersen::{BlindingFactor, Commitment};
+use dom_core::{
+    Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
+    PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+};
+use dom_crypto::{
+    bulletproof,
+    hash::blake2b_256_tagged,
+    keys::SecretKey,
+    pedersen::{BlindingFactor, Commitment},
+    schnorr_sign,
+};
 use dom_pow::CompactTarget;
 use dom_serialization::DomSerialize;
 use dom_store::utxo::UtxoEntry;
@@ -44,7 +53,7 @@ type SpentCommitment = [u8; 33];
 /// read them.
 fn synthetic_header(prev_hash: Hash256, height: u64, nonce_seed: u64) -> BlockHeader {
     BlockHeader {
-        version: 1,
+        version: PROTOCOL_VERSION,
         height: BlockHeight(height),
         prev_hash,
         timestamp: Timestamp(1_700_000_000 + height),
@@ -126,37 +135,92 @@ fn blinding(seed: u8) -> BlindingFactor {
     BlindingFactor::from_bytes(bytes).expect("deterministic blinding")
 }
 
-fn commitment(seed: u8, value: u64) -> Commitment {
-    Commitment::commit(value, &blinding(seed))
+fn test_chain_id() -> [u8; 32] {
+    *derive_chain_id(
+        dom_core::NETWORK_MAGIC_REGTEST,
+        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+    )
+    .as_bytes()
 }
 
-fn tx_output(seed: u8, value: u64) -> TransactionOutput {
-    TransactionOutput {
-        commitment: commitment(seed, value),
-        proof: vec![seed; 8],
-    }
+fn kernel_message(fee: u64, lock_height: u64) -> [u8; 32] {
+    let mut data = Vec::with_capacity(1 + 8 + 8);
+    data.push(KERNEL_FEAT_PLAIN);
+    data.extend_from_slice(&fee.to_le_bytes());
+    data.extend_from_slice(&lock_height.to_le_bytes());
+    *blake2b_256_tagged(TAG_KERNEL_MSG, &data).as_bytes()
 }
 
-fn tx_kernel(seed: u8) -> TransactionKernel {
-    TransactionKernel {
-        features: KERNEL_FEAT_PLAIN,
-        fee: Amount::ZERO,
-        lock_height: 0,
-        excess: commitment(seed, 0),
-        excess_signature: [seed; 65],
-    }
-}
+fn valid_coinbase(height: BlockHeight, total_fees: u64, seed: u8) -> CoinbaseTransaction {
+    let explicit_value = dom_core::block_reward(height).noms() + total_fees;
+    let blinding = blinding(seed);
+    let commitment = Commitment::commit(explicit_value, &blinding);
+    let (proof, _) = bulletproof::prove(explicit_value, &blinding).expect("coinbase proof");
+    let excess = Commitment::commit(0, &blinding);
+    let secret = SecretKey::from_bytes(blinding.as_bytes()).expect("coinbase secret");
+    let msg = {
+        let mut data = Vec::with_capacity(1 + 8);
+        data.push(KERNEL_FEAT_COINBASE);
+        data.extend_from_slice(&explicit_value.to_le_bytes());
+        blake2b_256_tagged(TAG_KERNEL_MSG_COINBASE, &data)
+    };
+    let sig = schnorr_sign(&secret, msg.as_bytes(), &test_chain_id()).expect("coinbase sig");
 
-fn spend_tx(input: Commitment, output_seed: u8, kernel_seed: u8) -> Transaction {
-    Transaction {
-        inputs: vec![TransactionInput { commitment: input }],
-        outputs: vec![tx_output(output_seed, u64::from(output_seed) + 1)],
-        kernels: vec![tx_kernel(kernel_seed)],
+    CoinbaseTransaction {
+        output: TransactionOutput {
+            commitment,
+            proof: proof.bytes,
+        },
+        kernel: CoinbaseKernel {
+            features: KERNEL_FEAT_COINBASE,
+            explicit_value,
+            excess,
+            excess_signature: sig.to_bytes(),
+        },
         offset: [0u8; 32],
     }
 }
 
-fn synthetic_block(
+fn valid_spend_tx(
+    input_value: u64,
+    input_blinding: BlindingFactor,
+    output_value: u64,
+    kernel_seed: u8,
+) -> Transaction {
+    let fee = input_value
+        .checked_sub(output_value)
+        .expect("spend output must not exceed input");
+    let kernel_blinding = blinding(kernel_seed);
+    let output_blinding = input_blinding
+        .add(&kernel_blinding)
+        .expect("output blinding add");
+    let input_commitment = Commitment::commit(input_value, &input_blinding);
+    let output_commitment = Commitment::commit(output_value, &output_blinding);
+    let (proof, _) = bulletproof::prove(output_value, &output_blinding).expect("tx proof");
+    let excess = Commitment::commit(0, &kernel_blinding);
+    let secret = SecretKey::from_bytes(kernel_blinding.as_bytes()).expect("kernel secret");
+    let sig = schnorr_sign(&secret, &kernel_message(fee, 0), &test_chain_id()).expect("kernel sig");
+
+    Transaction {
+        inputs: vec![TransactionInput {
+            commitment: input_commitment,
+        }],
+        outputs: vec![TransactionOutput {
+            commitment: output_commitment,
+            proof: proof.bytes,
+        }],
+        kernels: vec![TransactionKernel {
+            features: KERNEL_FEAT_PLAIN,
+            fee: Amount::from_noms(fee).expect("fee"),
+            lock_height: 0,
+            excess,
+            excess_signature: sig.to_bytes(),
+        }],
+        offset: [0u8; 32],
+    }
+}
+
+fn valid_reorg_block(
     prev_hash: Hash256,
     height: u64,
     total_difficulty: u64,
@@ -164,15 +228,20 @@ fn synthetic_block(
     coinbase_seed: u8,
     transactions: Vec<Transaction>,
 ) -> Block {
+    let total_fees = transactions.iter().map(|tx| tx.total_fee().unwrap()).sum();
+    let coinbase = valid_coinbase(BlockHeight(height), total_fees, coinbase_seed);
+    let (output_root, kernel_root, rangeproof_root) =
+        compute_block_pmmr_roots(&coinbase, &transactions).expect("pmmr roots");
+
     Block {
         header: BlockHeader {
-            version: 1,
+            version: PROTOCOL_VERSION,
             height: BlockHeight(height),
             prev_hash,
             timestamp: Timestamp(1_700_100_000 + height),
-            output_root: Hash256::ZERO,
-            kernel_root: Hash256::ZERO,
-            rangeproof_root: Hash256::ZERO,
+            output_root,
+            kernel_root,
+            rangeproof_root,
             total_kernel_offset: [0u8; 32],
             target: CompactTarget(0),
             total_difficulty: U256::from(total_difficulty),
@@ -181,16 +250,7 @@ fn synthetic_block(
                 randomx_hash: Hash256::ZERO,
             },
         },
-        coinbase: CoinbaseTransaction {
-            output: tx_output(coinbase_seed, 1_000 + height),
-            kernel: CoinbaseKernel {
-                features: KERNEL_FEAT_COINBASE,
-                explicit_value: 1,
-                excess: commitment(coinbase_seed.wrapping_add(100), 0),
-                excess_signature: [coinbase_seed; 65],
-            },
-            offset: [0u8; 32],
-        },
+        coinbase,
         transactions,
     }
 }
@@ -407,22 +467,33 @@ fn promote_heavier_known_tip_rewrites_canonical_state_and_survives_restart() {
     let dir = TempDir::new().expect("tempdir");
     let store = DomStore::open(dir.path()).expect("open");
 
-    let shared = synthetic_block(Hash256::ZERO, 1, 1, 1, 10, vec![]);
+    let shared = valid_reorg_block(Hash256::ZERO, 1, 1, 1, 10, vec![]);
     let shared_hash = commit_canonical_block(&store, &shared);
 
-    let shared_coinbase_commitment = shared.coinbase.output.commitment.clone();
-    let old_spend = spend_tx(shared_coinbase_commitment.clone(), 20, 21);
-    let old_2 = synthetic_block(shared_hash, 2, 2, 2, 11, vec![old_spend.clone()]);
+    let shared_coinbase_value = dom_core::block_reward(BlockHeight(1)).noms();
+    let shared_coinbase_blinding = blinding(10);
+    let old_spend = valid_spend_tx(
+        shared_coinbase_value,
+        shared_coinbase_blinding.clone(),
+        shared_coinbase_value - 1,
+        21,
+    );
+    let old_2 = valid_reorg_block(shared_hash, 2, 2, 2, 11, vec![old_spend.clone()]);
     let old_2_hash = commit_canonical_block(&store, &old_2);
-    let old_3 = synthetic_block(old_2_hash, 3, 3, 3, 12, vec![]);
+    let old_3 = valid_reorg_block(old_2_hash, 3, 3, 3, 12, vec![]);
     let old_3_hash = commit_canonical_block(&store, &old_3);
 
-    let alt_2 = synthetic_block(shared_hash, 2, 2, 20, 30, vec![]);
+    let alt_2 = valid_reorg_block(shared_hash, 2, 2, 20, 30, vec![]);
     let alt_2_hash = store_side_block(&store, &alt_2);
-    let alt_spend = spend_tx(shared_coinbase_commitment, 31, 32);
-    let alt_3 = synthetic_block(alt_2_hash, 3, 3, 21, 33, vec![alt_spend.clone()]);
+    let alt_spend = valid_spend_tx(
+        shared_coinbase_value,
+        shared_coinbase_blinding,
+        shared_coinbase_value - 2,
+        32,
+    );
+    let alt_3 = valid_reorg_block(alt_2_hash, 3, 3, 21, 33, vec![alt_spend.clone()]);
     let alt_3_hash = store_side_block(&store, &alt_3);
-    let alt_4 = synthetic_block(alt_3_hash, 4, 4, 22, 34, vec![]);
+    let alt_4 = valid_reorg_block(alt_3_hash, 4, 4, 22, 34, vec![]);
     let alt_4_hash = store_side_block(&store, &alt_4);
 
     let mut chain = open_chain(dir.path());

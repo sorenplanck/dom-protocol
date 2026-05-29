@@ -9,7 +9,7 @@ use dom_core::{
     WEIGHT_COINBASE_KERNEL, WEIGHT_OUTPUT,
 };
 use dom_pow::{
-    expected_target_for_network, fast_pow_hash, genesis_anchor, hash_meets_target,
+    compute_expected_target, fast_pow_hash, genesis_anchor, hash_meets_target,
     pow_validation_mode_for_network, randomx_seed_height, target_to_compact, target_to_difficulty,
     CompactTarget, PowValidationMode,
 };
@@ -371,7 +371,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
 
     let new_height = tip_height.0 + 1;
     let block_timestamp = Timestamp(now_secs());
-    let target = expected_target_for_network(
+    let target = compute_expected_target(
         node.config.network.magic(),
         block_timestamp,
         BlockHeight(new_height),
@@ -655,7 +655,7 @@ mod genesis_determinism_tests {
     use dom_consensus::Block;
     use dom_core::{BlockHeight, Hash256, Timestamp, NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION};
     use dom_pow::{
-        expected_target_for_network, fast_pow_hash, genesis_anchor, hash_meets_target,
+        compute_expected_target, fast_pow_hash, genesis_anchor, hash_meets_target,
         target_to_compact, target_to_difficulty,
     };
     use dom_serialization::DomSerialize;
@@ -717,6 +717,7 @@ mod genesis_determinism_tests {
         config
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mine_fast_test_header(
         seed_hash: [u8; 32],
         prev_hash: Hash256,
@@ -729,7 +730,7 @@ mod genesis_determinism_tests {
         total_difficulty: U256,
     ) -> BlockHeader {
         let target =
-            expected_target_for_network(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
+            compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
         let mut nonce = 0u64;
         loop {
             let mut header = BlockHeader {
@@ -871,7 +872,7 @@ mod genesis_determinism_tests {
 
         let timestamp = Timestamp(1_778_642_753);
         let target =
-            expected_target_for_network(NETWORK_MAGIC_MAINNET, timestamp, BlockHeight(1)).unwrap();
+            compute_expected_target(NETWORK_MAGIC_MAINNET, timestamp, BlockHeight(1)).unwrap();
         let total_difficulty = U256::from(target_to_difficulty(&target));
         let header = mine_blocking(
             1,
@@ -891,7 +892,7 @@ mod genesis_determinism_tests {
         assert_eq!(header.timestamp, timestamp);
         assert_eq!(
             header.target.to_target().unwrap(),
-            expected_target_for_network(NETWORK_MAGIC_MAINNET, header.timestamp, header.height)
+            compute_expected_target(NETWORK_MAGIC_MAINNET, header.timestamp, header.height)
                 .unwrap()
         );
     }
@@ -921,7 +922,7 @@ mod genesis_determinism_tests {
             .timestamp
             .checked_add_secs(dom_core::TARGET_SPACING)
             .expect("timestamp");
-        let target = expected_target_for_network(NETWORK_MAGIC_REGTEST, timestamp, BlockHeight(1))
+        let target = compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, BlockHeight(1))
             .expect("target");
         let header = mine_fast_test_header(
             *tip_hash.as_bytes(),

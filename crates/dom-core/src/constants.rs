@@ -443,7 +443,7 @@ pub const fn is_placeholder_genesis_hash(hash: &[u8; 32]) -> bool {
         if hash[i] != 0 {
             return false;
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
     true
 }

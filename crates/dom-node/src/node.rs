@@ -3095,7 +3095,7 @@ mod tests {
     use dom_crypto::schnorr_sign;
     use dom_mempool::Mempool;
     use dom_pow::{
-        expected_target_for_network, fast_pow_hash, genesis_anchor, hash_meets_target,
+        compute_expected_target, fast_pow_hash, genesis_anchor, hash_meets_target,
         target_to_compact, target_to_difficulty, CompactTarget,
     };
     use dom_serialization::DomSerialize;
@@ -3162,6 +3162,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mine_fast_header(
         seed_hash: [u8; 32],
         prev_hash: Hash256,
@@ -3174,7 +3175,7 @@ mod tests {
         total_difficulty: U256,
     ) -> BlockHeader {
         let target =
-            expected_target_for_network(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
+            compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
         let mut nonce = 0u64;
         loop {
             let mut header = BlockHeader {
@@ -3219,7 +3220,7 @@ mod tests {
             .checked_add_secs(height.0 * dom_core::TARGET_SPACING)
             .expect("timestamp");
         let target =
-            expected_target_for_network(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
+            compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
         let total_difficulty = parent_total_difficulty + U256::from(target_to_difficulty(&target));
         let header = mine_fast_header(
             seed_hash,

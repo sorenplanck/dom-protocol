@@ -315,11 +315,6 @@ pub fn get(name: &str) -> Option<&'static Profile> {
     PROFILES.iter().find(|p| p.name == name)
 }
 
-/// Names of all known profiles, in declaration order.
-pub fn names() -> Vec<&'static str> {
-    PROFILES.iter().map(|p| p.name).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
