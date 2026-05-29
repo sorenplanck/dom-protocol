@@ -182,12 +182,16 @@ fn invariant_direct_chain_extension_rejects_header_and_pmmr_valid_but_economical
 ) {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let dir = TempDir::new().expect("tempdir");
+    // Keep the TempDir alive for the test, but open LMDB in a child directory.
+    // Windows can reject opening the TempDir-managed root while its cleanup
+    // handle is still live, so each ChainState gets an isolated store path.
+    let store_dir = dir.path().join("chain");
     let chain_id = *derive_chain_id(
         NETWORK_MAGIC_REGTEST,
         &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
     )
     .as_bytes();
-    let mut chain = open_chain(dir.path());
+    let mut chain = open_chain(&store_dir);
 
     let genesis = build_coinbase_only_block(
         [0u8; 32],
@@ -226,12 +230,14 @@ fn invariant_direct_chain_extension_rejects_header_and_pmmr_valid_but_economical
 fn invariant_reorg_candidate_promotion_revalidates_economic_balance_before_state_rewrite() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let dir = TempDir::new().expect("tempdir");
+    // Use a child store directory for Windows LMDB/file-lock isolation.
+    let store_dir = dir.path().join("chain");
     let chain_id = *derive_chain_id(
         NETWORK_MAGIC_REGTEST,
         &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
     )
     .as_bytes();
-    let mut chain = open_chain(dir.path());
+    let mut chain = open_chain(&store_dir);
 
     let genesis = build_coinbase_only_block(
         [0u8; 32],
