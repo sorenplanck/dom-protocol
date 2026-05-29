@@ -212,8 +212,7 @@ fn schnorr_rejects_identity_r() {
     // R = identity (all zero), s = 1 (well-formed scalar).
     sig_bytes[33] = 0u8; // s bytes 0..31 stay zero
     sig_bytes[64] = 1u8; // s last byte = 1 → scalar value 1, valid
-    let err =
-        SchnorrSignature::from_bytes(&sig_bytes).expect_err("identity R must be rejected");
+    let err = SchnorrSignature::from_bytes(&sig_bytes).expect_err("identity R must be rejected");
     let msg = format!("{err}");
     assert!(
         msg.contains("0x02 or 0x03") || msg.contains("invalid"),

@@ -15,9 +15,7 @@
 
 use dom_pmmr::Pmmr;
 use dom_serialization::{DomDeserialize, DomSerialize};
-use dom_test_vectors::{
-    hash_vectors::generate_hash_vectors, pmmr_vectors::required_pmmr_vectors,
-};
+use dom_test_vectors::{hash_vectors::generate_hash_vectors, pmmr_vectors::required_pmmr_vectors};
 
 /// Manifest magic + version. Bump the version when a deliberate
 /// change to the snapshot format is made; doing so REQUIRES every
@@ -38,8 +36,14 @@ fn main() {
     println!("MAX_SUPPLY_NOMS={}", dom_core::MAX_SUPPLY_NOMS);
     println!("COINBASE_MATURITY={}", dom_core::COINBASE_MATURITY);
     println!("MAX_FUTURE_BLOCK_TIME={}", dom_core::MAX_FUTURE_BLOCK_TIME);
-    println!("NETWORK_MAGIC_MAINNET={:#010x}", dom_core::NETWORK_MAGIC_MAINNET);
-    println!("NETWORK_MAGIC_TESTNET={:#010x}", dom_core::NETWORK_MAGIC_TESTNET);
+    println!(
+        "NETWORK_MAGIC_MAINNET={:#010x}",
+        dom_core::NETWORK_MAGIC_MAINNET
+    );
+    println!(
+        "NETWORK_MAGIC_TESTNET={:#010x}",
+        dom_core::NETWORK_MAGIC_TESTNET
+    );
     println!("P2P_PORT_MAINNET={}", dom_core::P2P_PORT_MAINNET);
     println!("PROTOCOL_VERSION={}", dom_core::PROTOCOL_VERSION);
     println!("ASERT_HALF_LIFE={}", dom_core::ASERT_HALF_LIFE);
@@ -100,12 +104,12 @@ fn main() {
     // exercise the tagged Blake2b domain and the leaf-hash path
     // independently of the multi-leaf MMR layout.
     println!("[crypto_identities]");
-    println!(
-        "empty_pmmr_root={}",
-        Pmmr::new().root().to_hex()
-    );
+    println!("empty_pmmr_root={}", Pmmr::new().root().to_hex());
     let one_leaf_hash = dom_pmmr::leaf_hash(1, b"DOM/cross_platform/v1");
-    println!("leaf_hash(1, DOM/cross_platform/v1)={}", one_leaf_hash.to_hex());
+    println!(
+        "leaf_hash(1, DOM/cross_platform/v1)={}",
+        one_leaf_hash.to_hex()
+    );
     let g_left = dom_core::Hash256::from_bytes([0x11u8; 32]);
     let g_right = dom_core::Hash256::from_bytes([0x22u8; 32]);
     let node = dom_pmmr::node_hash(3, &g_left, &g_right);

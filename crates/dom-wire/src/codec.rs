@@ -23,6 +23,13 @@ impl NoiseCodec {
         }
     }
 
+    /// Remote static Noise public key learned during Noise_XX, if present.
+    pub fn remote_noise_pubkey(&self) -> Option<[u8; 32]> {
+        self.transport
+            .get_remote_static()
+            .and_then(|key| key.try_into().ok())
+    }
+
     /// Encrypt and send a message.
     pub async fn send(
         &mut self,

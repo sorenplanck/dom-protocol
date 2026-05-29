@@ -19,8 +19,7 @@ fn make_fake_repo() -> PathBuf {
         .unwrap()
         .as_nanos();
     let root = std::env::temp_dir().join(format!("dar-it-{pid}-{nanos}"));
-    fs::create_dir_all(root.join("crates").join("dom-agent-runner").join("src"))
-        .unwrap();
+    fs::create_dir_all(root.join("crates").join("dom-agent-runner").join("src")).unwrap();
     fs::write(
         root.join("Cargo.toml"),
         "[workspace]\nmembers = [\"crates/dom-agent-runner\"]\n",
@@ -69,8 +68,7 @@ fn clean_only_removes_agent_dir() {
     let bin = binary_path();
     let root = make_fake_repo();
 
-    fs::create_dir_all(root.join("target").join("dom-agent-runner").join("runs"))
-        .unwrap();
+    fs::create_dir_all(root.join("target").join("dom-agent-runner").join("runs")).unwrap();
     fs::write(
         root.join("target")
             .join("dom-agent-runner")
