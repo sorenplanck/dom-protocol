@@ -519,3 +519,62 @@ Sequence progress:
 Open items:
 - Amend WORKLOG into the Task 31 commit, push `task21-ready-base`, and verify remote HEAD.
 - Do not start Task 32 until the user explicitly asks.
+
+## 2026-05-31 Task 32 — UTXO Corruption Reopen Tests
+
+Timestamp: 2026-05-31T04:18:00Z
+
+Objective:
+- Bring Task 32 from existing history via cherry-pick of `a3b0c8f 32 utxo corruption reopen tests`; do not reimplement from scratch.
+
+Branch:
+- `task21-ready-base`
+
+Implementation notes:
+- `git cherry-pick a3b0c8f` conflicted only in `crates/dom-chain/tests/corruption_detection.rs` imports.
+- Resolved the conflict by keeping both sides:
+  - `mod common;`
+  - `use common::{open_test_chain, open_test_store};`
+  - `use blake2::digest::consts::U32;`
+  - `use blake2::{Blake2b, Digest};`
+- Did not use `checkout --theirs` and did not replace the file.
+- The body remained auto-merged: existing branch tests were preserved, the renamed interrupted-reopen test remained present, and four new exact-canonical-UTXO rebuild tests were added.
+- Original author preserved: `Soren Planck <sorenplanck@tutamail.com>`.
+
+Changed files:
+- `crates/dom-chain/tests/corruption_detection.rs`
+- `WORKLOG.md`
+
+Commands and results:
+- `git cherry-pick a3b0c8f` (CONFLICT in imports only)
+- `git cherry-pick --continue` (PASS)
+- `cargo fmt` (PASS; reordered imports)
+- `cargo check` (PASS)
+- `cargo test -p dom-chain reopen_rebuilds_exact_canonical_utxo_after_missing_entry_corruption` (PASS)
+- `cargo test -p dom-chain reopen_rebuilds_exact_canonical_utxo_after_fake_entry_corruption` (PASS)
+- `cargo test -p dom-chain reopen_rebuilds_exact_canonical_utxo_after_altered_persisted_utxo` (PASS)
+- `cargo test -p dom-chain reopen_rebuilds_exact_canonical_utxo_after_digest_metadata_corruption` (PASS)
+- `cargo test -p dom-chain interrupted_reopen_does_not_leave_partial_repair_state` (PASS)
+- `cargo test -p dom-chain --test corruption_detection` (PASS; 21 tests passed)
+
+Tests added/validated:
+- `reopen_rebuilds_exact_canonical_utxo_after_missing_entry_corruption`
+- `reopen_rebuilds_exact_canonical_utxo_after_fake_entry_corruption`
+- `reopen_rebuilds_exact_canonical_utxo_after_altered_persisted_utxo`
+- `reopen_rebuilds_exact_canonical_utxo_after_digest_metadata_corruption`
+- `interrupted_reopen_does_not_leave_partial_repair_state`
+- Full `corruption_detection` test file: 21 passed, confirming existing corruption tests stayed present and passing.
+
+Commit status:
+- Commit before WORKLOG/fmt amend: `5fda339c030cdd6acb8b1193d82cfa300bad176d`
+- Final hash after WORKLOG amend and remote verification to be recorded in final report.
+
+Sequence progress:
+- DONE: Task 31 `bf02c02b13919ce244dfe0454228a0b2c165ad3a`
+- DONE: Task 32 pending final amended hash/push verification
+- CURRENT: none
+- REMAINING: Task 33
+
+Open items:
+- Amend WORKLOG and fmt changes into the Task 32 commit, push `task21-ready-base`, and verify remote HEAD.
+- Do not start Task 33 until the user explicitly asks.
