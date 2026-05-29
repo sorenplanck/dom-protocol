@@ -20,6 +20,8 @@ use dom_wallet::Wallet;
 use dom_wire::dandelion::DandelionRouter;
 use dom_wire::manager::PeerManager;
 use std::collections::HashMap;
+use std::future::Future;
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -101,6 +103,67 @@ struct BroadcastChannels {
     block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
     tx_fluff_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
     tx_stem_tx: tokio::sync::broadcast::Sender<dom_wire::dandelion::StemEnvelope>,
+}
+
+struct TracedMutexGuard<'a, T> {
+    lock_name: &'static str,
+    acquired_at: Instant,
+    guard: tokio::sync::MutexGuard<'a, T>,
+}
+
+impl<T> Deref for TracedMutexGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl<T> DerefMut for TracedMutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl<T> Drop for TracedMutexGuard<'_, T> {
+    fn drop(&mut self) {
+        tracing::debug!(
+            event = "lock_held_ms",
+            lock_name = self.lock_name,
+            held_ms = self.acquired_at.elapsed().as_millis() as u64,
+            "lock released"
+        );
+    }
+}
+
+async fn trace_lock<'a, T>(
+    lock_name: &'static str,
+    mutex: &'a Arc<Mutex<T>>,
+) -> TracedMutexGuard<'a, T> {
+    let started = Instant::now();
+    let guard = mutex.lock().await;
+    tracing::debug!(
+        event = "lock_wait_ms",
+        lock_name,
+        wait_ms = started.elapsed().as_millis() as u64,
+        "lock acquired"
+    );
+    TracedMutexGuard {
+        lock_name,
+        acquired_at: Instant::now(),
+        guard,
+    }
+}
+
+fn spawn_traced<F>(task_name: &'static str, future: F) -> tokio::task::JoinHandle<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        tracing::info!(event = "task_started", task_name, "task started");
+        future.await;
+        tracing::info!(event = "task_stopped", task_name, "task stopped");
+    })
 }
 
 const FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS: u64 = 30;
@@ -218,6 +281,9 @@ impl DomNode {
         let mut peers = PeerManager::new(config.max_inbound, config.min_outbound);
         restore_peer_rotation_state(&chain.store, &mut peers)?;
         restore_peer_reputation_state(&chain.store, &mut peers)?;
+        // Volatile mempool policy (RFC-0012 §1): start empty and clear any legacy
+        // on-disk mempool bytes from older builds. The mempool is never loaded
+        // from disk; a restarted node re-acquires pending txs from peers.
         clear_persisted_mempool_snapshot(&chain.store)?;
         let mempool = Mempool::new();
 
@@ -441,11 +507,19 @@ impl DomNode {
                         match decode_deferred_block_bytes(&deferred.block_bytes) {
                             Ok(block) => {
                                 let result = {
-                                    let mut c = chain.lock().await;
+                                    let mut c = trace_lock("chain", &chain).await;
                                     c.connect_block(&block, now)
                                 };
                                 match deferred_replay_action(&result) {
                                     DeferredReplayAction::RelayBestChain => {
+                                        tracing::info!(
+                                            event = "orphan_reprocessed",
+                                            block_height = block.header.height.0,
+                                            block_hash = %hex::encode(deferred.block_hash),
+                                            action = "accepted_best_chain",
+                                            failure_class = "runtime_deferred_replay",
+                                            "deferred block reprocessed"
+                                        );
                                         if let Ok(ref connect_result) = result {
                                             if let Err(e) = reconcile_mempool_after_connect(
                                                 &chain,
@@ -480,6 +554,14 @@ impl DomNode {
                                     DeferredReplayAction::Drop => {
                                         if matches!(result, Ok(dom_chain::ConnectResult::SideChain))
                                         {
+                                            tracing::info!(
+                                                event = "orphan_reprocessed",
+                                                block_height = block.header.height.0,
+                                                block_hash = %hex::encode(deferred.block_hash),
+                                                action = "accepted_side_chain_drop",
+                                                failure_class = "runtime_deferred_replay",
+                                                "deferred block reprocessed"
+                                            );
                                             tracing::debug!(
                                                 "Accepted deferred block ts={} (side chain — no rebroadcast)",
                                                 deferred.timestamp
@@ -497,6 +579,14 @@ impl DomNode {
                                         }
                                     }
                                     DeferredReplayAction::Requeue => {
+                                        tracing::info!(
+                                            event = "orphan_reprocessed",
+                                            block_height = block.header.height.0,
+                                            block_hash = %hex::encode(deferred.block_hash),
+                                            action = "requeue",
+                                            failure_class = "runtime_deferred_replay",
+                                            "deferred block reprocessed"
+                                        );
                                         let requeued = queue
                                             .defer(crate::future_block_queue::DeferredBlock {
                                                 block_hash: deferred.block_hash,
@@ -629,6 +719,8 @@ impl DomNode {
         supervisor: NodeTaskSupervisor,
         shutdown: ShutdownToken,
     ) -> Result<(), String> {
+        spawner: NodeTaskSpawner,
+    ) -> Result<(), DomError> {
         loop {
             let accepted = tokio::select! {
                 _ = shutdown.wait() => return Ok(()),
@@ -638,7 +730,7 @@ impl DomNode {
                 Ok((stream, peer_addr)) => {
                     info!("Inbound connection from {peer_addr}");
                     let reserved = {
-                        let mut mgr = self.peers.lock().await;
+                        let mut mgr = trace_lock("peers", &self.peers).await;
                         mgr.reserve_inbound(peer_addr)
                     };
                     if let Err(e) = reserved {
@@ -725,7 +817,7 @@ impl DomNode {
                 return Ok(());
             }
             let needs_more = {
-                let mgr = self.peers.lock().await;
+                let mgr = trace_lock("peers", &self.peers).await;
                 mgr.needs_outbound()
             };
 
@@ -744,22 +836,40 @@ impl DomNode {
                 addrs.sort();
                 addrs.dedup();
                 addrs = {
-                    let mgr = self.peers.lock().await;
+                    let mgr = trace_lock("peers", &self.peers).await;
                     mgr.outbound_candidates_in_retry_order(addrs)
                 };
 
                 for addr in addrs {
-                    let reserved = {
-                        let mut mgr = self.peers.lock().await;
+                    let (reserved, failure_count, cooldown_rounds) = {
+                        let mut mgr = trace_lock("peers", &self.peers).await;
                         if !mgr.needs_outbound() {
-                            false
+                            (
+                                false,
+                                mgr.outbound_failure_count(&addr),
+                                mgr.outbound_cooldown_rounds(&addr),
+                            )
                         } else {
-                            mgr.reserve_outbound(&addr).is_ok()
+                            let failure_count = mgr.outbound_failure_count(&addr);
+                            let cooldown_rounds = mgr.outbound_cooldown_rounds(&addr);
+                            (
+                                mgr.reserve_outbound(&addr).is_ok(),
+                                failure_count,
+                                cooldown_rounds,
+                            )
                         }
                     };
                     if !reserved {
                         continue;
                     }
+                    tracing::info!(
+                        event = "reconnect_attempt",
+                        peer_addr = %addr,
+                        failure_count,
+                        cooldown_rounds,
+                        failure_class = "operational_network",
+                        "outbound reconnect attempt scheduled"
+                    );
 
                     let config = self.config.clone();
                     let privkey = self.noise_privkey;
@@ -1046,6 +1156,14 @@ async fn handle_inbound(
             )
             .await
             {
+                tracing::info!(
+                    event = "session_closed_reason",
+                    peer_addr = %addr,
+                    direction = "inbound",
+                    reason = %e,
+                    failure_class = "operational_network",
+                    "peer session closed"
+                );
                 info!("Connection to {addr} closed: {e}");
             }
         }
@@ -1073,6 +1191,14 @@ async fn connect_outbound(
     let mut stream = match tokio::net::TcpStream::connect(addr).await {
         Ok(s) => s,
         Err(e) => {
+            tracing::warn!(
+                event = "session_closed_reason",
+                peer_addr = %addr,
+                direction = "outbound",
+                reason = %e,
+                failure_class = "operational_network",
+                "outbound connection failed"
+            );
             warn!("Connection to {addr} failed: {e}");
             return OutboundAttemptOutcome::RetryableFailure;
         }
@@ -1192,6 +1318,14 @@ async fn connect_outbound(
             )
             .await
             {
+                tracing::info!(
+                    event = "session_closed_reason",
+                    peer_addr = %addr,
+                    direction = "outbound",
+                    reason = %e,
+                    failure_class = "operational_network",
+                    "peer session closed"
+                );
                 info!("Connection to {addr} closed: {e}");
             }
             OutboundAttemptOutcome::Registered
@@ -1369,7 +1503,7 @@ async fn record_peer_violation(
 
     let peer_key = peer_addr.to_string();
     let banned = {
-        let mut mgr = peers.lock().await;
+        let mut mgr = trace_lock("peers", peers).await;
         mgr.add_ban_score(&peer_key, score)
     };
     if let Err(e) = persist_peer_reputation_state(chain, peers).await {
@@ -1397,7 +1531,7 @@ async fn record_pending_peer_violation(
 
     let peer_key = peer_addr.to_string();
     let banned = {
-        let mut mgr = peers.lock().await;
+        let mut mgr = trace_lock("peers", peers).await;
         mgr.add_pending_ban_score(&peer_key, score) >= dom_wire::peer::ban_scores::BAN_THRESHOLD
     };
     if let Err(e) = persist_peer_reputation_state(chain, peers).await {
@@ -1435,7 +1569,16 @@ async fn queue_future_block(
         queued_at: std::time::Instant::now(),
         block_bytes,
     };
-    queue.defer(deferred).await
+    let admitted = queue.defer(deferred).await;
+    tracing::info!(
+        event = "orphan_admitted",
+        block_height = block.header.height.0,
+        block_hash = %hex::encode(hash),
+        action = if admitted { "queued" } else { "rejected_queue_full" },
+        failure_class = "runtime_future_block",
+        "future block queue admission decided"
+    );
+    admitted
 }
 
 fn deferred_replay_action(
@@ -1493,12 +1636,38 @@ fn collect_spent_commitments(transactions: &[Transaction]) -> Vec<[u8; 33]> {
     spent
 }
 
+/// Collect, in canonical order, the transactions from disconnected blocks that
+/// remain valid under the **new** canonical chain and may be reinjected into the
+/// live mempool (RFC-0012 §3).
+///
+/// Reinjection affects transaction *availability* only; it never affects block
+/// validity (RFC-0012 invariant I-1). A candidate is excluded if it is a
+/// coinbase/system transaction (§3.2), spends an input that is no longer a live
+/// (and, for coinbase, mature) UTXO, or whose outputs/kernels already exist on the
+/// surviving branch. Survivors are sorted by `tx_hash` ascending so the
+/// reinjection batch — and therefore the resulting mempool — is independent of the
+/// order in which the disconnected transactions were originally delivered.
+/// Double-spends among survivors are then resolved deterministically by the
+/// mempool's input-reservation check (first in hash order wins).
 fn collect_reinjectable_reorg_txs(
     chain: &ChainState,
     delta: &dom_chain::ReorgDelta,
 ) -> Result<Vec<ReinjectableTx>, DomError> {
     let mut reinject = Vec::new();
     for tx in &delta.disconnected_txs {
+        // RFC-0012 §3.2: exclude coinbase/system transactions. The canonical
+        // coinbase is already structurally excluded (`disconnected_txs` is built
+        // from `block.transactions`, never `block.coinbase`); this guard also
+        // drops any regular transaction carrying a coinbase kernel feature, which
+        // is a system output that must never re-enter the relay mempool.
+        let is_coinbase_or_system = tx
+            .kernels
+            .iter()
+            .any(|kernel| kernel.features & dom_core::KERNEL_FEAT_COINBASE != 0);
+        if is_coinbase_or_system {
+            continue;
+        }
+
         let inputs_are_live = tx.inputs.iter().all(|input| {
             let commitment = input.commitment.as_bytes();
             match chain.store.get_utxo(commitment) {
@@ -1798,10 +1967,20 @@ pub(crate) fn persist_mempool_snapshot(
     store.put_metadata(MEMPOOL_METADATA_KEY, &snapshot.to_bytes()?)
 }
 
+/// Clear any on-disk mempool bytes (RFC-0012 §1).
+///
+/// The mempool is volatile: it is never loaded from disk into runtime state.
+/// Older builds may have left `MEMPOOL_METADATA_KEY` bytes; this removes them so
+/// the on-disk view stays consistent with the empty-on-restart policy. It is
+/// called on init, on every block connect, and on tx admission.
 pub(crate) fn clear_persisted_mempool_snapshot(store: &DomStore) -> Result<(), DomError> {
     store.delete_metadata(MEMPOOL_METADATA_KEY)
 }
 
+// Test-only: under the volatile mempool policy (RFC-0012 §1) no runtime path
+// reads on-disk mempool bytes into state. This decoder exists solely so tests can
+// assert that legacy/adversarial on-disk mempool metadata has been cleared.
+#[cfg(test)]
 pub(crate) fn load_mempool_snapshot(
     store: &DomStore,
 ) -> Result<Option<dom_mempool::PersistedMempoolState>, DomError> {
@@ -1869,6 +2048,12 @@ async fn persist_peer_reputation_state(
     persist_peer_reputation_snapshot(&chain.store, &snapshot)
 }
 
+/// Persist mempool lifecycle state.
+///
+/// Under the volatile mempool policy (RFC-0012 §1) the mempool is **never**
+/// written to disk: "persisting" it means ensuring no on-disk mempool bytes
+/// remain, so a restart deterministically starts empty. The live `mempool` is
+/// intentionally unused here.
 async fn persist_mempool_state(
     chain: &Arc<Mutex<ChainState>>,
     mempool: &Arc<Mutex<Mempool>>,
@@ -1946,7 +2131,7 @@ async fn record_duplicate_block_relay(
 
 async fn refresh_peer_metrics(peers: &Arc<Mutex<PeerManager>>, metrics: &Arc<Metrics>) {
     let (peer_count, inbound_peers, outbound_peers) = {
-        let mgr = peers.lock().await;
+        let mgr = trace_lock("peers", peers).await;
         let mut peer_count = 0u64;
         let mut inbound_peers = 0u64;
         let mut outbound_peers = 0u64;
@@ -2157,7 +2342,7 @@ async fn resume_ibd_block_sync(
             let txs_for_scan = block.transactions.clone();
             {
                 let mut c = chain.lock().await;
-                let best_chain = match c.connect_block(
+                let connect_result = match c.connect_block(
                     &block,
                     Timestamp(
                         std::time::SystemTime::now()
@@ -2166,19 +2351,28 @@ async fn resume_ibd_block_sync(
                             .as_secs(),
                     ),
                 ) {
-                    Ok(dom_chain::ConnectResult::BestChain) => {
+                    Ok(result) => result,
+                    Err(e) => {
+                        return Err(DomError::Invalid(format!(
+                            "IBD resume from {}: connect_block rejected: {e}",
+                            runtime.peer_addr,
+                        )));
+                    }
+                };
+                let best_chain = match &connect_result {
+                    dom_chain::ConnectResult::BestChain => {
                         connected_any = true;
                         true
                     }
-                    Ok(dom_chain::ConnectResult::Reorg(_)) => {
+                    dom_chain::ConnectResult::Reorg(_) => {
                         connected_any = true;
                         true
                     }
-                    Ok(dom_chain::ConnectResult::SideChain) => {
+                    dom_chain::ConnectResult::SideChain => {
                         connected_any = true;
                         false
                     }
-                    Ok(dom_chain::ConnectResult::AlreadyHave) => {
+                    dom_chain::ConnectResult::AlreadyHave => {
                         tracing::debug!(
                             "IBD resume from {}: block already known at height {}",
                             runtime.peer_addr,
@@ -2187,23 +2381,46 @@ async fn resume_ibd_block_sync(
                         connected_any = true;
                         false
                     }
-                    Err(e) => {
-                        return Err(DomError::Invalid(format!(
-                            "IBD resume from {}: connect_block rejected: {e}",
-                            runtime.peer_addr,
-                        )));
-                    }
                 };
                 if best_chain {
                     purge_mempool_confirmed_inputs(chain, &runtime.mempool, &txs_for_scan).await?;
                     if let Some(ref wallet_arc) = runtime.wallet {
                         let mut w = wallet_arc.lock().await;
-                        w.apply_canonical_block(&txs_for_scan, height)
-                            .map_err(|e| {
-                                DomError::Internal(format!(
-                                    "wallet canonical block apply during resumed IBD failed: {e}"
-                                ))
-                            })?;
+                        match connect_result {
+                            dom_chain::ConnectResult::BestChain => {
+                                w.apply_canonical_block_with_hash(
+                                    &txs_for_scan,
+                                    height,
+                                    Some(*expected_hash),
+                                )
+                                .map_err(|e| {
+                                    DomError::Internal(format!(
+                                        "wallet canonical block apply during resumed IBD failed: {e}"
+                                    ))
+                                })?;
+                            }
+                            dom_chain::ConnectResult::Reorg(delta) => {
+                                w.rollback_to(delta.common_ancestor_height).map_err(|e| {
+                                    DomError::Internal(format!(
+                                        "wallet rollback during resumed IBD reorg failed: {e}"
+                                    ))
+                                })?;
+                                for block in &delta.connected_blocks {
+                                    w.apply_canonical_block_with_hash(
+                                        &block.transactions,
+                                        block.block_height,
+                                        Some(block.block_hash),
+                                    )
+                                    .map_err(|e| {
+                                        DomError::Internal(format!(
+                                            "wallet canonical reorg block apply during resumed IBD failed: {e}"
+                                        ))
+                                    })?;
+                                }
+                            }
+                            dom_chain::ConnectResult::SideChain
+                            | dom_chain::ConnectResult::AlreadyHave => {}
+                        }
                     }
                 }
             }
@@ -3000,6 +3217,10 @@ async fn message_loop(
                                 return Err(e);
                             }
                         };
+                        let block_hash = {
+                            use dom_serialization::DomSerialize;
+                            *dom_crypto::hash::blake2b_256(&block.header.to_bytes()?).as_bytes()
+                        };
                         let now_secs = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -3063,9 +3284,10 @@ async fn message_loop(
                                                     if let Some(ref wallet_arc) = svc.wallet {
                                                         let mut w = wallet_arc.lock().await;
                                                         if let Err(e) =
-                                                            w.apply_canonical_block(
+                                                            w.apply_canonical_block_with_hash(
                                                                 &txs_for_scan,
                                                                 height,
+                                                                Some(block_hash),
                                                             )
                                                         {
                                                             tracing::warn!(
@@ -3074,10 +3296,35 @@ async fn message_loop(
                                                         }
                                                     }
                                                 }
-                                                dom_chain::ConnectResult::Reorg(_) => {
-                                                    tracing::debug!(
-                                                        "Skipping wallet canonical apply for reorg from {peer_addr}; rollback hooks remain explicit follow-up work"
-                                                    );
+                                                dom_chain::ConnectResult::Reorg(delta) => {
+                                                    if let Some(ref wallet_arc) = svc.wallet {
+                                                        let mut w = wallet_arc.lock().await;
+                                                        if let Err(e) = w.rollback_to(
+                                                            delta.common_ancestor_height,
+                                                        ) {
+                                                            tracing::warn!(
+                                                                "wallet rollback failed at reorg ancestor height {}: {e}",
+                                                                delta.common_ancestor_height
+                                                            );
+                                                        } else {
+                                                            for block in &delta.connected_blocks {
+                                                                if let Err(e) = w
+                                                                    .apply_canonical_block_with_hash(
+                                                                        &block.transactions,
+                                                                        block.block_height,
+                                                                        Some(block.block_hash),
+                                                                    )
+                                                                {
+                                                                    tracing::warn!(
+                                                                        "wallet canonical reorg block apply failed at height {} hash {}: {e}",
+                                                                        block.block_height,
+                                                                        hex::encode(block.block_hash)
+                                                                    );
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                                 dom_chain::ConnectResult::SideChain
                                                 | dom_chain::ConnectResult::AlreadyHave => {}
@@ -3187,6 +3434,14 @@ async fn message_loop(
                                                 .malformed_block_relays
                                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                         }
+                                        tracing::warn!(
+                                            event = "consensus_rejection",
+                                            peer_addr = %peer_addr,
+                                            block_height = block.header.height.0,
+                                            reason = %e,
+                                            failure_class = "consensus_rejection",
+                                            "relayed block rejected"
+                                        );
                                         let banned =
                                             record_peer_violation(&chain, &svc.peers, peer_addr, &e)
                                                 .await;
@@ -3204,6 +3459,15 @@ async fn message_loop(
                             }
                             Ok(TimestampDecision::Defer) => {
                                 // Soft buffer: hold for re-evaluation
+                                tracing::info!(
+                                    event = "future_block_policy_action",
+                                    peer_addr = %peer_addr,
+                                    block_height = block.header.height.0,
+                                    block_timestamp = block.header.timestamp.0,
+                                    action = "defer",
+                                    failure_class = "runtime_future_block",
+                                    "future block deferred by soft buffer"
+                                );
                                 tracing::debug!("Block from {peer_addr} deferred (future timestamp soft buffer)");
                                 if queue_future_block(&svc.future_block_queue, &block, block_bytes).await {
                                     tracing::debug!(
@@ -3218,6 +3482,16 @@ async fn message_loop(
                                 }
                             }
                             Err(e) => {
+                                tracing::info!(
+                                    event = "future_block_policy_action",
+                                    peer_addr = %peer_addr,
+                                    block_height = block.header.height.0,
+                                    block_timestamp = block.header.timestamp.0,
+                                    action = "reject",
+                                    reason = %e,
+                                    failure_class = "consensus_rejection",
+                                    "future block rejected by timestamp policy"
+                                );
                                 tracing::warn!("Block from {peer_addr} rejected by timestamp: {e}");
                             }
                         }
@@ -3294,6 +3568,14 @@ async fn message_loop(
                                         }
                                     }
                                 } else if let Err(e) = accepted {
+                                    tracing::debug!(
+                                        event = "consensus_rejection",
+                                        peer_addr = %peer_addr,
+                                        tx_hash = %hex::encode(tx_hash),
+                                        reason = %e,
+                                        failure_class = "consensus_rejection",
+                                        "relayed transaction rejected"
+                                    );
                                     let banned =
                                         record_peer_violation(&chain, &svc.peers, peer_addr, &e)
                                             .await;
@@ -3361,8 +3643,8 @@ mod tests {
         parse_persisted_noise_static_key, peer_violation_score, pending_peer_violation_score,
         persist_mempool_snapshot, persist_peer_reputation_snapshot, purge_mempool_confirmed_inputs,
         reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action,
-        restore_peer_rotation_state, tx_hash, DeferredReplayAction, DomNode, IbdRoundState,
-        OutboundAttemptOutcome, RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY,
+        restore_peer_rotation_state, trace_lock, tx_hash, DeferredReplayAction, DomNode,
+        IbdRoundState, OutboundAttemptOutcome, RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY,
         MEMPOOL_METADATA_KEY, NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY,
         PEER_ROTATION_METADATA_KEY,
     };
@@ -3409,6 +3691,16 @@ mod tests {
     use tokio::sync::Mutex;
 
     type TestUtxoBytes = ([u8; 33], Vec<u8>);
+
+    #[tokio::test]
+    async fn traced_lock_guard_preserves_state_transition() {
+        let state = Arc::new(Mutex::new(0u8));
+        {
+            let mut guard = trace_lock("test_state", &state).await;
+            *guard = 1;
+        }
+        assert_eq!(*state.lock().await, 1);
+    }
 
     fn commitment(seed: u8, value: u64) -> Commitment {
         let mut bytes = [0u8; 32];
@@ -3945,6 +4237,86 @@ mod tests {
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
+    /// TASK 27 / RFC-0012 §2: under the volatile policy there is no persisted
+    /// mempool to revalidate on reopen. This proves the two properties that make
+    /// that safe: restart is **deterministic** (always empty) and
+    /// **consensus-neutral** (the canonical chain tip after restart is identical
+    /// regardless of what the mempool held — runtime txs and even a structurally
+    /// valid on-disk legacy snapshot — and identical to a node that never had any
+    /// mempool activity at all).
+    #[test]
+    fn chain_validity_is_unaffected_by_mempool_restart_state() {
+        // Node A: accept a runtime tx AND plant a structurally valid legacy
+        // on-disk mempool snapshot, then capture the canonical chain tip.
+        let dir_a = fresh_test_dir("mempool-neutral-a");
+        let tip_a_before = {
+            let node = DomNode::init(regtest_node_config(&dir_a)).expect("init a");
+            let tx = mempool_tx(0x31, 100);
+            let hash = tx_hash(&tx).expect("hash a");
+            node.mempool
+                .try_lock()
+                .expect("mempool lock")
+                .accept_tx(tx.clone(), hash, 1)
+                .expect("accept runtime tx");
+            let chain = node.chain.try_lock().expect("chain lock");
+            let mut planted = Mempool::new();
+            planted.accept_tx(tx, hash, 1).expect("plant accept");
+            persist_mempool_snapshot(&chain.store, &planted.snapshot())
+                .expect("plant legacy snapshot");
+            (chain.tip_height.0, *chain.tip_hash.as_bytes())
+        };
+
+        // Node B (control): never touches the mempool.
+        let dir_b = fresh_test_dir("mempool-neutral-b");
+        let node_b = DomNode::init(regtest_node_config(&dir_b)).expect("init b");
+        let tip_b = {
+            let chain = node_b.chain.try_lock().expect("chain lock b");
+            (chain.tip_height.0, *chain.tip_hash.as_bytes())
+        };
+        assert!(
+            node_b
+                .mempool
+                .try_lock()
+                .expect("mempool lock b")
+                .is_empty(),
+            "control node starts with an empty mempool"
+        );
+        drop(node_b);
+
+        // Restart A. The chain tip must be byte-identical to before the restart
+        // (mempool state did not perturb consensus) and to the control node
+        // (chain validity is independent of mempool history). The mempool must be
+        // empty and the legacy on-disk snapshot must be gone.
+        let restarted = DomNode::init(regtest_node_config(&dir_a)).expect("restart a");
+        let tip_a_after = {
+            let chain = restarted.chain.try_lock().expect("chain lock a2");
+            (chain.tip_height.0, *chain.tip_hash.as_bytes())
+        };
+        assert_eq!(
+            tip_a_after, tip_a_before,
+            "chain tip is unchanged by mempool restart state (consensus-neutral)"
+        );
+        assert_eq!(
+            tip_a_after, tip_b,
+            "chain validity is identical regardless of mempool history (deterministic)"
+        );
+        assert_eq!(
+            restarted.mempool.try_lock().expect("mempool lock a2").len(),
+            0,
+            "restart is deterministic: mempool is always empty"
+        );
+        let reopened = DomStore::open(&dir_a).expect("store reopen a");
+        assert!(
+            load_mempool_snapshot(&reopened)
+                .expect("load mempool a")
+                .is_none(),
+            "no persisted mempool is trusted or loaded on reopen"
+        );
+
+        fs::remove_dir_all(&dir_a).expect("cleanup a");
+        fs::remove_dir_all(&dir_b).expect("cleanup b");
+    }
+
     #[test]
     fn unclamped_persisted_noise_key_is_rejected() {
         let raw = [0xff; 32];
@@ -4388,6 +4760,7 @@ mod tests {
         let reorg = ReorgDelta {
             disconnected_txs: vec![disconnected_tx.clone()],
             connected_txs: vec![connected_tx],
+            ..Default::default()
         };
 
         reconcile_mempool_after_connect(&chain, &mempool, &ConnectResult::Reorg(reorg), &[])
@@ -4447,6 +4820,7 @@ mod tests {
                 conflict_a.clone(),
             ],
             connected_txs: vec![],
+            ..Default::default()
         };
         let delta_b = ReorgDelta {
             disconnected_txs: vec![
@@ -4456,6 +4830,7 @@ mod tests {
                 conflict_b.clone(),
             ],
             connected_txs: vec![],
+            ..Default::default()
         };
 
         reconcile_mempool_after_connect(&chain, &mempool_a, &ConnectResult::Reorg(delta_a), &[])
@@ -4480,6 +4855,150 @@ mod tests {
             pool_b.all_hashes() == pool_a.all_hashes(),
             "repeated reinjection over the same inputs must converge identically"
         );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    /// RFC-0012 §3.2: a disconnected transaction carrying a coinbase/system kernel
+    /// feature must never be reinjected into the relay mempool, even when its
+    /// inputs are live under the new canonical chain. A sibling plain transaction
+    /// over a different live output is reinjected, proving the exclusion is
+    /// specific to the coinbase feature and not a blanket drop.
+    #[tokio::test]
+    async fn reorg_reinjection_excludes_coinbase_feature_transactions() {
+        let dir = fresh_test_dir("reorg-reinject-coinbase-excluded");
+        let chain = open_chain(&dir);
+        let mempool = Arc::new(Mutex::new(Mempool::new()));
+
+        // Two live outputs created by a base block.
+        let live_a = commitment(110, 41);
+        let live_b = commitment(112, 43);
+        let base_tx = Transaction {
+            inputs: vec![],
+            outputs: vec![
+                TransactionOutput {
+                    commitment: live_a.clone(),
+                    proof: vec![0xA0; 8],
+                },
+                TransactionOutput {
+                    commitment: live_b.clone(),
+                    proof: vec![0xB0; 8],
+                },
+            ],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(MIN_RELAY_FEE_RATE * 100).expect("fee"),
+                lock_height: 0,
+                excess: commitment(114, 0),
+                excess_signature: [0xC0; 65],
+            }],
+            offset: [0u8; 32],
+        };
+        let base_block =
+            synthetic_block_with_transactions(Hash256::ZERO, 1, 23, 120, vec![base_tx]);
+        commit_chain_block(&chain, &base_block).await;
+
+        // Plain tx over live_a — eligible. Coinbase-feature tx over live_b —
+        // forbidden for relay despite a live input.
+        let plain_tx = synthetic_spend_tx(live_a, 130, 131);
+        let mut coinbase_feature_tx = synthetic_spend_tx(live_b, 132, 133);
+        coinbase_feature_tx.kernels[0].features = dom_core::KERNEL_FEAT_COINBASE;
+
+        let reorg = ReorgDelta {
+            disconnected_txs: vec![coinbase_feature_tx.clone(), plain_tx.clone()],
+            connected_txs: vec![],
+            ..Default::default()
+        };
+        reconcile_mempool_after_connect(&chain, &mempool, &ConnectResult::Reorg(reorg), &[])
+            .await
+            .expect("reconcile reorg mempool");
+
+        let pool = mempool.lock().await;
+        assert!(
+            pool.get_tx(&tx_hash(&plain_tx).expect("hash")).is_some(),
+            "plain tx over a live output must be reinjected"
+        );
+        assert!(
+            pool.get_tx(&tx_hash(&coinbase_feature_tx).expect("hash"))
+                .is_none(),
+            "coinbase/system-feature tx must be excluded from reinjection"
+        );
+        assert_eq!(pool.len(), 1, "exactly the eligible plain tx is reinjected");
+        drop(pool);
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    /// RFC-0012 §3.4: two nodes that experience the same reorg but originally
+    /// received the disconnected transactions in different orders converge to the
+    /// same canonical mempool **digest**. This pins the convergence guarantee to
+    /// the byte-level digest, not just the hash listing.
+    #[tokio::test]
+    async fn reorg_reinjection_converges_to_same_digest_across_delivery_order() {
+        let dir = fresh_test_dir("reorg-reinject-digest-converge");
+        let chain = open_chain(&dir);
+        let mempool_a = Arc::new(Mutex::new(Mempool::new()));
+        let mempool_b = Arc::new(Mutex::new(Mempool::new()));
+
+        // Three independent live outputs → three non-conflicting eligible txs.
+        let live = [
+            commitment(140, 51),
+            commitment(142, 53),
+            commitment(144, 55),
+        ];
+        let base_tx = Transaction {
+            inputs: vec![],
+            outputs: live
+                .iter()
+                .enumerate()
+                .map(|(i, c)| TransactionOutput {
+                    commitment: c.clone(),
+                    proof: vec![0xD0 + i as u8; 8],
+                })
+                .collect(),
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(MIN_RELAY_FEE_RATE * 100).expect("fee"),
+                lock_height: 0,
+                excess: commitment(146, 0),
+                excess_signature: [0xE0; 65],
+            }],
+            offset: [0u8; 32],
+        };
+        let base_block =
+            synthetic_block_with_transactions(Hash256::ZERO, 1, 29, 150, vec![base_tx]);
+        commit_chain_block(&chain, &base_block).await;
+
+        let t0 = synthetic_spend_tx(live[0].clone(), 160, 161);
+        let t1 = synthetic_spend_tx(live[1].clone(), 162, 163);
+        let t2 = synthetic_spend_tx(live[2].clone(), 164, 165);
+
+        // Different delivery orders into A and B.
+        let delta_a = ReorgDelta {
+            disconnected_txs: vec![t2.clone(), t0.clone(), t1.clone()],
+            connected_txs: vec![],
+            ..Default::default()
+        };
+        let delta_b = ReorgDelta {
+            disconnected_txs: vec![t1.clone(), t2.clone(), t0.clone()],
+            connected_txs: vec![],
+            ..Default::default()
+        };
+        reconcile_mempool_after_connect(&chain, &mempool_a, &ConnectResult::Reorg(delta_a), &[])
+            .await
+            .expect("reconcile A");
+        reconcile_mempool_after_connect(&chain, &mempool_b, &ConnectResult::Reorg(delta_b), &[])
+            .await
+            .expect("reconcile B");
+
+        let pool_a = mempool_a.lock().await;
+        let pool_b = mempool_b.lock().await;
+        assert_eq!(pool_a.len(), 3, "all three eligible txs reinjected");
+        assert_eq!(
+            pool_a.digest(),
+            pool_b.digest(),
+            "reorg reinjection converges to the same mempool digest regardless of delivery order"
+        );
+        drop(pool_a);
+        drop(pool_b);
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 

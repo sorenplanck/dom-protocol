@@ -2,6 +2,7 @@
 
 use crate::journal::{JournalEntry, TxJournal, TxJournalEvent, TxRecord, TxStatus};
 use crate::output_index::OutputIndex;
+use crate::restore::{ChainScanSource, RestoreError};
 use crate::seed::{self, Bip39Seed};
 use crate::store::{
     load_wallet as load_wallet_file, save_wallet as save_wallet_file, PendingTx,
@@ -20,9 +21,43 @@ use dom_crypto::pedersen::Commitment;
 use dom_crypto::{blake2b_256_tagged, BlindingFactor, Hash256};
 use dom_serialization::DomSerialize;
 use dom_tx::SpendBuilder;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
+
+/// Canonical wallet rescan execution mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalletRescanMode {
+    /// Rebuild canonical wallet state and return the comparison result
+    /// without mutating persisted wallet state.
+    CompareOnly,
+    /// Replace persisted wallet state with the deterministic rebuild.
+    Repair,
+}
+
+/// Result summary returned by a canonical wallet rescan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalletRescanSummary {
+    /// Tip height covered by the scan.
+    pub scanned_tip: u64,
+    /// Number of owned outputs reconstructed from canonical history.
+    pub rebuilt_outputs: usize,
+    /// Number of reconstructed outputs marked spent by later canonical inputs.
+    pub spent_outputs: usize,
+    /// Number of pending transactions preserved because all inputs remain live.
+    pub pending_retained: usize,
+    /// Number of pending transactions dropped because canonical history spent
+    /// or removed at least one input.
+    pub pending_dropped: usize,
+    /// Deterministic digest of wallet state before the rebuild was applied.
+    pub persisted_digest: [u8; 32],
+    /// Deterministic digest of the rebuilt canonical wallet state.
+    pub rebuilt_digest: [u8; 32],
+    /// Whether the persisted digest already matched the rebuilt digest.
+    pub matched_persisted: bool,
+    /// Whether the rebuilt state was written back to disk.
+    pub repaired: bool,
+}
 
 /// The DOM Protocol wallet.
 ///
@@ -817,6 +852,189 @@ impl Wallet {
         }
     }
 
+    /// Deterministic digest of the wallet state relevant to canonical
+    /// chain reconstruction.
+    ///
+    /// The digest deliberately excludes private blinding factors and seed
+    /// material. It includes commitments, values, block attribution,
+    /// spent/reserved flags, receive-request status, and pending transaction
+    /// input references in sorted order.
+    pub fn canonical_digest(&self) -> [u8; 32] {
+        Self::digest_parts(
+            self.outputs.iter(),
+            &self.pending_txs,
+            &self.receive_requests,
+        )
+    }
+
+    /// Rebuild recoverable wallet state from canonical chain history.
+    ///
+    /// The scan walks `0..=scan.tip_height()` through the supplied
+    /// [`ChainScanSource`]. It reconstructs deterministic coinbase outputs,
+    /// deterministic receive-request outputs, spent/unspent state from
+    /// canonical input commitments, receive-request confirmation status, and
+    /// pending reservations that remain valid after the rebuild.
+    ///
+    /// `CompareOnly` returns the rebuilt digest without mutating the wallet.
+    /// `Repair` replaces the persisted output index, receive statuses, and
+    /// surviving pending reservations, then saves the wallet.
+    pub fn rescan_canonical_chain<S: ChainScanSource>(
+        &mut self,
+        scan: &S,
+        mode: WalletRescanMode,
+    ) -> Result<WalletRescanSummary, WalletError> {
+        let session = self.session()?;
+        let persisted_digest = self.canonical_digest();
+        let scanned_tip = scan.tip_height();
+        let maturity = self.network.coinbase_maturity();
+
+        let mut rebuilt_outputs = OutputIndex::new();
+        let mut canonical_inputs = HashSet::new();
+        let mut detected_receives: BTreeMap<[u8; 33], ReceiveRequestStatus> = BTreeMap::new();
+
+        for height in 0..=scanned_tip {
+            let block = scan.block_at(height).map_err(scan_error_to_wallet)?;
+            let Some(block) = block else {
+                continue;
+            };
+            if block.height != height {
+                return Err(WalletError::Io(format!(
+                    "canonical rescan source returned height {} for requested {}",
+                    block.height, height
+                )));
+            }
+
+            canonical_inputs.extend(block.input_commitments.iter().copied());
+
+            let coinbase_blinding =
+                self.coinbase_blinding_for_height(BlockHeight(height), session)?;
+            let reward = dom_core::block_reward(BlockHeight(height)).noms();
+            let reward_with_fees = reward
+                .checked_add(block.total_fees_noms)
+                .ok_or_else(|| WalletError::Crypto("coinbase value overflow".into()))?;
+            for &commitment in &block.output_commitments {
+                for &value in &[reward, reward_with_fees] {
+                    if value == 0 {
+                        continue;
+                    }
+                    let candidate = Commitment::commit(value, &coinbase_blinding);
+                    if *candidate.as_bytes() == commitment {
+                        let mut owned = OwnedOutput::new(
+                            commitment,
+                            value,
+                            *coinbase_blinding.as_bytes(),
+                            height,
+                            true,
+                        );
+                        if let Some(hash) = block.block_hash {
+                            owned = owned.with_block_hash(hash);
+                        }
+                        rebuilt_outputs.insert(owned);
+                        break;
+                    }
+                }
+            }
+
+            for request in &self.receive_requests {
+                if block.output_commitments.contains(&request.commitment) {
+                    let blinding = self.receive_blinding_for_index(request.index)?;
+                    let mut owned = OwnedOutput::new(
+                        request.commitment,
+                        request.amount,
+                        *blinding.as_bytes(),
+                        height,
+                        false,
+                    );
+                    if let Some(hash) = block.block_hash {
+                        owned = owned.with_block_hash(hash);
+                    }
+                    rebuilt_outputs.insert(owned);
+                    detected_receives.insert(
+                        request.commitment,
+                        ReceiveRequestStatus::Detected {
+                            block_height: height,
+                            is_coinbase: false,
+                            is_mature: true,
+                        },
+                    );
+                }
+            }
+        }
+
+        for commitment in &canonical_inputs {
+            if let Some(output) = rebuilt_outputs.get_mut(commitment) {
+                output.spent = true;
+                output.reserved_for_tx = None;
+            }
+        }
+
+        let mut rebuilt_pending = HashMap::new();
+        let mut pending_dropped = 0usize;
+        for (tx_hash, pending) in &self.pending_txs {
+            let survives = pending.inputs.iter().all(|commitment| {
+                rebuilt_outputs
+                    .get(commitment)
+                    .map(|output| !output.spent)
+                    .unwrap_or(false)
+            });
+            if survives {
+                for commitment in &pending.inputs {
+                    rebuilt_outputs.reserve(commitment, *tx_hash)?;
+                }
+                rebuilt_pending.insert(*tx_hash, pending.clone());
+            } else {
+                pending_dropped = pending_dropped.saturating_add(1);
+            }
+        }
+
+        let mut rebuilt_receive_requests = self.receive_requests.clone();
+        for request in &mut rebuilt_receive_requests {
+            request.status = detected_receives
+                .get(&request.commitment)
+                .cloned()
+                .unwrap_or(ReceiveRequestStatus::Pending);
+            if let ReceiveRequestStatus::Detected {
+                block_height,
+                is_coinbase,
+                is_mature,
+            } = &mut request.status
+            {
+                *is_mature = if *is_coinbase {
+                    block_height.saturating_add(maturity) <= scanned_tip
+                } else {
+                    true
+                };
+            }
+        }
+
+        let rebuilt_digest = Self::digest_parts(
+            rebuilt_outputs.iter(),
+            &rebuilt_pending,
+            &rebuilt_receive_requests,
+        );
+        let spent_outputs = rebuilt_outputs.iter().filter(|output| output.spent).count();
+        let summary = WalletRescanSummary {
+            scanned_tip,
+            rebuilt_outputs: rebuilt_outputs.iter().count(),
+            spent_outputs,
+            pending_retained: rebuilt_pending.len(),
+            pending_dropped,
+            persisted_digest,
+            rebuilt_digest,
+            matched_persisted: persisted_digest == rebuilt_digest,
+            repaired: matches!(mode, WalletRescanMode::Repair),
+        };
+
+        if matches!(mode, WalletRescanMode::Repair) {
+            self.outputs = rebuilt_outputs;
+            self.pending_txs = rebuilt_pending;
+            self.receive_requests = rebuilt_receive_requests;
+            self.save()?;
+        }
+
+        Ok(summary)
+    }
+
     /// Add a received output to the wallet.
     pub fn add_output(&mut self, output: OwnedOutput) {
         debug!(
@@ -989,6 +1207,16 @@ impl Wallet {
     /// Non-coinbase outputs (received via Slatepack) are not yet scanned here —
     /// that requires interactive blinding factor exchange (Doc 7).
     pub fn scan_block(&mut self, transactions: &[Transaction], block_height: u64) {
+        self.scan_block_with_hash(transactions, block_height, None);
+    }
+
+    /// Scan a canonical block with optional block-hash attribution.
+    pub fn scan_block_with_hash(
+        &mut self,
+        transactions: &[Transaction],
+        block_height: u64,
+        block_hash: Option<[u8; 32]>,
+    ) {
         use dom_core::BlockHeight;
         use dom_crypto::pedersen::Commitment;
 
@@ -1043,13 +1271,16 @@ impl Wallet {
                 // Conservative: try the base reward.
                 let candidate = Commitment::commit(reward, &blinding);
                 if *candidate.as_bytes() == commitment_bytes {
-                    let owned = OwnedOutput::new(
+                    let mut owned = OwnedOutput::new(
                         commitment_bytes,
                         reward,
                         *blinding.as_bytes(),
                         block_height,
                         true,
                     );
+                    if let Some(hash) = block_hash {
+                        owned = owned.with_block_hash(hash);
+                    }
                     self.add_output(owned);
                     tracing::info!(
                         "scan_block: found output at height {block_height} value={reward} noms"
@@ -1075,6 +1306,16 @@ impl Wallet {
         &mut self,
         transactions: &[Transaction],
         block_height: u64,
+    ) -> Result<(), WalletError> {
+        self.apply_canonical_block_with_hash(transactions, block_height, None)
+    }
+
+    /// Apply a canonical block to wallet state with block-hash attribution.
+    pub fn apply_canonical_block_with_hash(
+        &mut self,
+        transactions: &[Transaction],
+        block_height: u64,
+        block_hash: Option<[u8; 32]>,
     ) -> Result<(), WalletError> {
         let mut consumed_inputs = std::collections::HashSet::new();
         for tx in transactions {
@@ -1113,7 +1354,7 @@ impl Wallet {
             }
         }
 
-        self.scan_block(transactions, block_height);
+        self.scan_block_with_hash(transactions, block_height, block_hash);
         self.save()?;
         Ok(())
     }
@@ -1340,6 +1581,89 @@ impl Wallet {
         );
 
         Ok(coinbase_tx)
+    }
+
+    fn digest_parts<'a, I>(
+        outputs: I,
+        pending_txs: &HashMap<[u8; 32], PendingTx>,
+        receive_requests: &[ReceiveRequest],
+    ) -> [u8; 32]
+    where
+        I: IntoIterator<Item = &'a OwnedOutput>,
+    {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"wallet-canonical-digest-v1");
+
+        let mut outputs_sorted: Vec<&OwnedOutput> = outputs.into_iter().collect();
+        outputs_sorted.sort_by_key(|output| output.commitment);
+        bytes.extend_from_slice(&(outputs_sorted.len() as u64).to_le_bytes());
+        for output in outputs_sorted {
+            bytes.extend_from_slice(&output.commitment);
+            bytes.extend_from_slice(&output.value.to_le_bytes());
+            bytes.extend_from_slice(&output.block_height.to_le_bytes());
+            match output.block_hash {
+                Some(hash) => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&hash);
+                }
+                None => bytes.push(0),
+            }
+            bytes.push(u8::from(output.is_coinbase));
+            bytes.push(u8::from(output.spent));
+            match output.reserved_for_tx {
+                Some(tx_hash) => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&tx_hash);
+                }
+                None => bytes.push(0),
+            }
+        }
+
+        let mut pending_sorted: Vec<(&[u8; 32], &PendingTx)> = pending_txs.iter().collect();
+        pending_sorted.sort_by_key(|(tx_hash, _)| **tx_hash);
+        bytes.extend_from_slice(&(pending_sorted.len() as u64).to_le_bytes());
+        for (tx_hash, pending) in pending_sorted {
+            bytes.extend_from_slice(tx_hash);
+            let mut inputs = pending.inputs.clone();
+            inputs.sort();
+            bytes.extend_from_slice(&(inputs.len() as u64).to_le_bytes());
+            for input in inputs {
+                bytes.extend_from_slice(&input);
+            }
+        }
+
+        let mut receives_sorted: Vec<&ReceiveRequest> = receive_requests.iter().collect();
+        receives_sorted.sort_by_key(|request| request.commitment);
+        bytes.extend_from_slice(&(receives_sorted.len() as u64).to_le_bytes());
+        for request in receives_sorted {
+            bytes.extend_from_slice(&request.index.to_le_bytes());
+            bytes.extend_from_slice(&request.amount.to_le_bytes());
+            bytes.extend_from_slice(&request.commitment);
+            match &request.status {
+                ReceiveRequestStatus::Pending => bytes.push(0),
+                ReceiveRequestStatus::Detected {
+                    block_height,
+                    is_coinbase,
+                    is_mature,
+                } => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&block_height.to_le_bytes());
+                    bytes.push(u8::from(*is_coinbase));
+                    bytes.push(u8::from(*is_mature));
+                }
+            }
+        }
+
+        *blake2b_256_tagged("DOM:wallet-canonical-digest:v1", &bytes).as_bytes()
+    }
+}
+
+fn scan_error_to_wallet(err: RestoreError) -> WalletError {
+    match err {
+        RestoreError::ScanError { height, message } => WalletError::Io(format!(
+            "canonical rescan failed at height {height}: {message}"
+        )),
+        other => WalletError::Io(format!("canonical rescan failed: {other}")),
     }
 }
 

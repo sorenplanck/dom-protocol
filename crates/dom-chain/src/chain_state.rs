@@ -113,6 +113,16 @@ pub struct ExpectedTarget {
 /// Deterministic transaction delta produced by a canonical reorganization.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReorgDelta {
+    /// Common ancestor height that remains canonical after disconnecting the
+    /// old branch. Wallet and mempool rollback must rewind effects strictly
+    /// above this height before applying the promoted branch.
+    pub common_ancestor_height: u64,
+    /// Blocks disconnected from the former canonical branch, ordered by
+    /// rollback order (old tip back toward the common ancestor).
+    pub disconnected_blocks: Vec<ReorgBlockDelta>,
+    /// Blocks connected on the promoted branch, ordered from the common
+    /// ancestor forward to the new tip.
+    pub connected_blocks: Vec<ReorgBlockDelta>,
     /// Transactions disconnected from the former canonical branch, ordered by
     /// rollback order (old tip back toward the common ancestor).
     pub disconnected_txs: Vec<Transaction>,
@@ -1185,6 +1195,23 @@ impl ChainState {
             })?;
         }
         let reorg_delta = ReorgDelta {
+            common_ancestor_height: ancestor_height,
+            disconnected_blocks: disconnect_blocks
+                .iter()
+                .map(|(block_hash, block)| ReorgBlockDelta {
+                    block_hash: *block_hash.as_bytes(),
+                    block_height: block.header.height.0,
+                    transactions: block.transactions.clone(),
+                })
+                .collect(),
+            connected_blocks: connect_blocks
+                .iter()
+                .map(|(block_hash, block)| ReorgBlockDelta {
+                    block_hash: *block_hash.as_bytes(),
+                    block_height: block.header.height.0,
+                    transactions: block.transactions.clone(),
+                })
+                .collect(),
             disconnected_txs: disconnect_blocks
                 .iter()
                 .flat_map(|(_, block)| block.transactions.clone())
