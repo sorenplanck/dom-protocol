@@ -29,15 +29,13 @@ use dom_consensus::{
 };
 use dom_core::{
     Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+    PROTOCOL_VERSION, TAG_KERNEL_MSG_COINBASE,
 };
-use dom_crypto::{
-    bulletproof,
-    hash::blake2b_256_tagged,
-    keys::SecretKey,
-    pedersen::{BlindingFactor, Commitment},
-    schnorr_sign,
-};
+use dom_crypto::bulletproof;
+use dom_crypto::hash::blake2b_256_tagged;
+use dom_crypto::keys::SecretKey;
+use dom_crypto::pedersen::{BlindingFactor, Commitment};
+use dom_crypto::schnorr_sign;
 use dom_pow::CompactTarget;
 use dom_serialization::DomSerialize;
 use dom_store::utxo::UtxoEntry;
@@ -220,7 +218,72 @@ fn valid_spend_tx(
     }
 }
 
-fn valid_reorg_block(
+fn signed_coinbase(height: BlockHeight, seed: u8) -> CoinbaseTransaction {
+    let reward = dom_core::block_reward(height).noms();
+    let blinding = blinding(seed);
+    let commitment = Commitment::commit(reward, &blinding);
+    let (proof, _) = bulletproof::prove(reward, &blinding).expect("coinbase proof");
+    let excess = Commitment::commit(0, &blinding);
+    let secret = SecretKey::from_bytes(blinding.as_bytes()).expect("coinbase secret");
+    let chain_id = derive_chain_id(
+        dom_core::NETWORK_MAGIC_REGTEST,
+        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+    );
+    let msg = {
+        let mut data = Vec::with_capacity(1 + 8);
+        data.push(KERNEL_FEAT_COINBASE);
+        data.extend_from_slice(&reward.to_le_bytes());
+        blake2b_256_tagged(TAG_KERNEL_MSG_COINBASE, &data)
+    };
+    let sig = schnorr_sign(&secret, msg.as_bytes(), chain_id.as_bytes()).expect("coinbase sig");
+    CoinbaseTransaction {
+        output: TransactionOutput {
+            commitment,
+            proof: proof.bytes,
+        },
+        kernel: CoinbaseKernel {
+            features: KERNEL_FEAT_COINBASE,
+            explicit_value: reward,
+            excess,
+            excess_signature: sig.to_bytes(),
+        },
+        offset: [0u8; 32],
+    }
+}
+
+fn valid_coinbase_only_block(
+    prev_hash: Hash256,
+    height: u64,
+    total_difficulty: u64,
+    nonce_seed: u64,
+    coinbase_seed: u8,
+) -> Block {
+    let coinbase = signed_coinbase(BlockHeight(height), coinbase_seed);
+    let (output_root, kernel_root, rangeproof_root) =
+        compute_block_pmmr_roots(&coinbase, &[]).expect("pmmr roots");
+    Block {
+        header: BlockHeader {
+            version: PROTOCOL_VERSION,
+            height: BlockHeight(height),
+            prev_hash,
+            timestamp: Timestamp(1_700_200_000 + height),
+            output_root,
+            kernel_root,
+            rangeproof_root,
+            total_kernel_offset: [0u8; 32],
+            target: CompactTarget(0),
+            total_difficulty: U256::from(total_difficulty),
+            pow: ProofOfWork {
+                nonce: nonce_seed,
+                randomx_hash: Hash256::ZERO,
+            },
+        },
+        coinbase,
+        transactions: vec![],
+    }
+}
+
+fn synthetic_block(
     prev_hash: Hash256,
     height: u64,
     total_difficulty: u64,
