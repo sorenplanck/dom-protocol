@@ -20,7 +20,8 @@ pub mod ibd;
 pub mod reorg;
 
 pub use chain_state::{
-    ChainState, ConnectResult, ReorgBlockDelta, ReorgDelta, CHAIN_CORRUPT_SENTINEL,
+    ChainState, ConnectResult, ReorgBlockDelta, ReorgDelta, SideChainRetentionPolicy,
+    SideChainRetentionReport, CHAIN_CORRUPT_SENTINEL,
 };
 pub use genesis::{build_genesis, build_mainnet_genesis, build_testnet_genesis, GenesisResult};
 pub use ibd::{

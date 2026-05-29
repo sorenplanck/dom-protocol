@@ -305,6 +305,33 @@ impl DomStore {
         }
     }
 
+    /// Read every persisted block header keyed by block hash.
+    ///
+    /// This is used by the chain layer to classify non-canonical side-chain
+    /// blocks for bounded retention. The store does not interpret canonicality.
+    pub fn read_all_block_headers_raw(&self) -> Result<BTreeMap<[u8; 32], Vec<u8>>, DomError> {
+        let txn = self
+            .env
+            .begin_ro_txn()
+            .map_err(|e| DomError::Internal(format!("ro txn: {e}")))?;
+        let mut cursor = txn
+            .open_ro_cursor(self.db_blocks)
+            .map_err(|e| DomError::Internal(format!("open block cursor: {e}")))?;
+        let mut out = BTreeMap::new();
+        for (key, value) in cursor.iter() {
+            if key.len() != 32 {
+                return Err(DomError::Internal(format!(
+                    "corrupt block hash key length: {}",
+                    key.len()
+                )));
+            }
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(key);
+            out.insert(hash, value.to_vec());
+        }
+        Ok(out)
+    }
+
     /// Read the full persisted UTXO database as raw key/value bytes.
     ///
     /// This is used by chain reopen verification to compare the on-disk UTXO
@@ -561,6 +588,30 @@ impl DomStore {
         txn.commit()
             .map_err(|e| DomError::Internal(format!("commit known block: {e}")))?;
 
+        Ok(())
+    }
+
+    /// Delete a non-canonical retained block by hash.
+    ///
+    /// Callers must only pass side-chain hashes. This method deliberately does
+    /// not touch canonical height pointers, UTXOs, or kernel indexes.
+    pub fn delete_known_block(&self, block_hash: &[u8; 32]) -> Result<(), DomError> {
+        let mut txn = self
+            .env
+            .begin_rw_txn()
+            .map_err(|e| DomError::Internal(format!("rw txn: {e}")))?;
+
+        match txn.del(self.db_blocks, block_hash, None) {
+            Ok(()) | Err(lmdb::Error::NotFound) => {}
+            Err(e) => return Err(DomError::Internal(format!("delete known header: {e}"))),
+        }
+        match txn.del(self.db_block_bodies, block_hash, None) {
+            Ok(()) | Err(lmdb::Error::NotFound) => {}
+            Err(e) => return Err(DomError::Internal(format!("delete known body: {e}"))),
+        }
+
+        txn.commit()
+            .map_err(|e| DomError::Internal(format!("commit known block delete: {e}")))?;
         Ok(())
     }
 
