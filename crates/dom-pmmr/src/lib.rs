@@ -89,7 +89,6 @@ fn node_height(pos: u64) -> u32 {
     most_significant_pos(h) - 1
 }
 
-
 /// Given a leaf count `n`, return the list of peak positions (1-indexed).
 ///
 /// Peaks are ordered left-to-right by MMR position, which is the
@@ -534,4 +533,3 @@ mod tests {
         );
     }
 }
-

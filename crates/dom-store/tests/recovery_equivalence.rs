@@ -26,8 +26,7 @@
 
 use dom_store::utxo::UtxoEntry;
 use dom_store::{
-    DomStore, DB_BLOCKS, DB_BLOCK_BODIES, DB_BLOCK_HEIGHT, DB_CHAIN_TIP, DB_KERNEL_INDEX,
-    DB_UTXOS,
+    DomStore, DB_BLOCKS, DB_BLOCK_BODIES, DB_BLOCK_HEIGHT, DB_CHAIN_TIP, DB_KERNEL_INDEX, DB_UTXOS,
 };
 use lmdb::{Cursor, Database, Transaction};
 use std::collections::BTreeMap;
@@ -276,10 +275,7 @@ fn cross_instance_equivalence_holds_for_long_sequence() {
                     b.height,
                     &b.header,
                     &b.body,
-                    &[
-                        (b.commit, utxo_entry(b.height)),
-                        (c2, utxo_entry(b.height)),
-                    ],
+                    &[(b.commit, utxo_entry(b.height)), (c2, utxo_entry(b.height))],
                     &spent,
                     &[(b.excess, b.hash)],
                 )

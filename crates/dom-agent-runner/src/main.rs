@@ -17,8 +17,8 @@ mod cli;
 mod doctor;
 mod git;
 mod prompt;
-mod report;
 mod repo;
+mod report;
 mod run;
 
 fn main() -> ExitCode {

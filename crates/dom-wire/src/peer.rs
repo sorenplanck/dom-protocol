@@ -55,6 +55,8 @@ pub struct PeerInfo {
     pub best_hash: [u8; 32],
     /// User agent string.
     pub user_agent: String,
+    /// Remote static Noise public key, if the handshake exposed one.
+    pub noise_pubkey: Option<[u8; 32]>,
     /// Cumulative ban score (> 100 → ban).
     pub ban_score: u32,
     /// Bytes sent.
@@ -74,6 +76,7 @@ impl PeerInfo {
             best_height: 0,
             best_hash: [0u8; 32],
             user_agent: String::new(),
+            noise_pubkey: None,
             ban_score: 0,
             bytes_sent: 0,
             bytes_recv: 0,

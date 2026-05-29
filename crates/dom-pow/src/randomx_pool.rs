@@ -181,9 +181,7 @@ mod tests {
     #[test]
     fn pool_evicts_oldest_when_full() {
         clear_pool_for_test();
-        let seeds: Vec<[u8; 32]> = (0..(MAX_POOL_ENTRIES as u8 + 1))
-            .map(|i| [i; 32])
-            .collect();
+        let seeds: Vec<[u8; 32]> = (0..(MAX_POOL_ENTRIES as u8 + 1)).map(|i| [i; 32]).collect();
         for s in &seeds {
             get_or_init_cache(s).unwrap();
         }

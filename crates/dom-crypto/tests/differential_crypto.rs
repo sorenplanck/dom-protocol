@@ -122,7 +122,8 @@ fn secp256k1_and_k256_agree_on_bip340_pubkeys() {
             .to_compressed_bytes();
         let k256_pk = k256_pubkey_compressed(sk_hex);
         assert_eq!(
-            dom_pk, k256_pk,
+            dom_pk,
+            k256_pk,
             "secp256k1/k256 disagree on pubkey for sk={sk_hex}: \
              dom={} k256={}",
             hex::encode(dom_pk),
@@ -217,16 +218,13 @@ fn pedersen_commit_matches_independent_k256_recompute() {
         (dom_core::MAX_SUPPLY_NOMS, [0x44u8; 32]),
         (33, [0x55u8; 32]),
         // Deterministic ramp blinding.
-        (
-            42,
-            {
-                let mut b = [0u8; 32];
-                for (i, v) in b.iter_mut().enumerate() {
-                    *v = (i as u8) ^ 0x5A;
-                }
-                b
-            },
-        ),
+        (42, {
+            let mut b = [0u8; 32];
+            for (i, v) in b.iter_mut().enumerate() {
+                *v = (i as u8) ^ 0x5A;
+            }
+            b
+        }),
     ];
 
     for (value, blinding_raw) in fixtures {
@@ -314,10 +312,10 @@ fn commitment_add_matches_k256_projective_add() {
     // Independent recompute.
     let enc_a = EncodedPoint::from_bytes(c_a.as_bytes() as &[u8]).expect("enc a");
     let enc_b = EncodedPoint::from_bytes(c_b.as_bytes() as &[u8]).expect("enc b");
-    let aff_a = Option::<AffinePoint>::from(AffinePoint::from_encoded_point(&enc_a))
-        .expect("a on curve");
-    let aff_b = Option::<AffinePoint>::from(AffinePoint::from_encoded_point(&enc_b))
-        .expect("b on curve");
+    let aff_a =
+        Option::<AffinePoint>::from(AffinePoint::from_encoded_point(&enc_a)).expect("a on curve");
+    let aff_b =
+        Option::<AffinePoint>::from(AffinePoint::from_encoded_point(&enc_b)).expect("b on curve");
     let p_a = ProjectivePoint::from(aff_a);
     let p_b = ProjectivePoint::from(aff_b);
     let oracle: AffinePoint = (p_a + p_b).into();

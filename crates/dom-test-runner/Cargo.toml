@@ -13,8 +13,7 @@ name = "dom-test-runner"
 path = "src/main.rs"
 
 [dependencies]
-# Intentionally zero external runtime dependencies.
-# Keeps the portable .exe small, audit-friendly, and fast to build on CI.
+anyhow.workspace = true
 
 [dev-dependencies]
-# Tests use only std as well.
+tempfile = "3.10"

@@ -10,8 +10,9 @@ use dom_consensus::block::{
 use dom_consensus::{derive_chain_id, validate_block, Block, Transaction, ValidationContext};
 use dom_core::{BlockHeight, DomError, Hash256, Timestamp};
 use dom_pow::{
-    difficulty_adjustment_window_blocks, genesis_anchor, randomx_seed_height, target_to_difficulty,
-    uses_dev_fixed_target, window_next_target, AsertAnchor, CompactTarget, NextTargetAdjustment,
+    difficulty_adjustment_window_blocks, genesis_anchor, randomx_seed_height, target_to_compact,
+    target_to_difficulty, uses_dev_fixed_target, window_next_target, AsertAnchor, CompactTarget,
+    NextTargetAdjustment,
 };
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::utxo::UtxoEntry;
@@ -713,15 +714,19 @@ impl ChainState {
         prior_headers: &[BlockHeader],
     ) -> Result<(), DomError> {
         let expected = self.next_target_after_parent_from_prior(parent, prior_headers)?;
+        let expected_compact = target_to_compact(&expected.next_target);
+        let expected_target = CompactTarget(expected_compact)
+            .to_target()
+            .map_err(|e| DomError::Internal(format!("canonical expected target: {e}")))?;
         let actual_target = header
             .target
             .to_target()
             .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?;
-        if actual_target != expected.next_target {
+        if header.target.0 != expected_compact {
             return Err(DomError::Invalid(format!(
                 "target mismatch at height {}: expected={} got={} window={} actual_elapsed={} expected_elapsed={} bounded_elapsed={}",
                 header.height.0,
-                hex::encode(expected.next_target),
+                hex::encode(expected_target),
                 hex::encode(actual_target),
                 expected.window_blocks,
                 expected.actual_elapsed_secs,
