@@ -4682,4 +4682,68 @@ mod tests {
         );
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
+
+    /// TASK 17 — chain-lock-across-await regression guard.
+    ///
+    /// The block-connect reconciliation path must acquire the chain lock,
+    /// extract what it needs, DROP it, and only then await the mempool lock —
+    /// it must never hold the chain guard across the mempool `.await`
+    /// (`reconcile_mempool_after_connect`, node.rs: the `{ let chain =
+    /// chain.lock().await; ... }` block drops the guard before
+    /// `mempool.lock().await`).
+    ///
+    /// This is proven deterministically — no timing sleeps. On a current-thread
+    /// runtime the test holds the mempool lock so `reconcile` is forced to park
+    /// on it; once parked, the chain lock MUST be free. `try_lock` succeeding is
+    /// only possible if `reconcile` already released the chain guard before the
+    /// mempool await. Were the guard held across the await, `try_lock` returns
+    /// `Err` and the test fails with a clear message rather than deadlocking.
+    #[tokio::test(flavor = "current_thread")]
+    async fn task17_reconcile_does_not_hold_chain_lock_across_mempool_await() {
+        let dir = fresh_test_dir("task17-reconcile-lock-across-await");
+        let chain = open_chain(&dir);
+        let mempool = Arc::new(Mutex::new(Mempool::new()));
+
+        // Hold the mempool lock so reconcile is forced to park on it.
+        let mempool_guard = mempool.lock().await;
+
+        let chain_task = chain.clone();
+        let mempool_task = mempool.clone();
+        // `BestChain` reaches the unconditional mempool acquisition after the
+        // chain guard is dropped, even with no connected transactions.
+        let handle = tokio::spawn(async move {
+            reconcile_mempool_after_connect(
+                &chain_task,
+                &mempool_task,
+                &ConnectResult::BestChain,
+                &[],
+            )
+            .await
+        });
+
+        // Cooperatively schedule the spawned task until it parks on the held
+        // mempool lock. On a current-thread runtime each poll runs it to its
+        // next await; it must pass the chain acquire+drop first.
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+
+        // Proof: while reconcile is parked on the mempool await, the chain lock
+        // must be free. This is the assertion that would fail (deterministically)
+        // if the chain guard were held across the mempool await.
+        {
+            let _chain_guard = chain
+                .try_lock()
+                .expect("chain lock must be released before reconcile awaits the mempool");
+        }
+
+        // Let reconcile finish.
+        drop(mempool_guard);
+        handle
+            .await
+            .expect("reconcile task join")
+            .expect("reconcile must succeed");
+
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
 }
