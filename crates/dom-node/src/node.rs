@@ -18,7 +18,6 @@ use dom_wallet::Wallet;
 use dom_wire::dandelion::DandelionRouter;
 use dom_wire::manager::PeerManager;
 use std::collections::HashMap;
-use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::Arc;
@@ -143,17 +142,6 @@ async fn trace_lock<'a, T>(
         acquired_at: Instant::now(),
         guard,
     }
-}
-
-fn spawn_traced<F>(task_name: &'static str, future: F) -> tokio::task::JoinHandle<()>
-where
-    F: Future<Output = ()> + Send + 'static,
-{
-    tokio::spawn(async move {
-        tracing::info!(event = "task_started", task_name, "task started");
-        future.await;
-        tracing::info!(event = "task_stopped", task_name, "task stopped");
-    })
 }
 
 const FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS: u64 = 30;
@@ -399,15 +387,6 @@ impl DomNode {
         let (supervisor, spawner) = NodeTaskSupervisor::new();
 
         let node_listener = self.clone();
-        let listener_task = spawn_traced("p2p_listener", async move {
-            node_listener.run_p2p_listener_on(p2p_listener).await;
-        });
-
-        // Start outbound peer connector
-        let node_connector = self.clone();
-        let connector_task = spawn_traced("peer_connector", async move {
-            node_connector.run_peer_connector().await;
-        });
         let listener_spawner = spawner.clone();
         spawner.spawn_critical("p2p-listener", async move {
             node_listener
@@ -425,13 +404,11 @@ impl DomNode {
         // Start miner if enabled
         if self.config.mine {
             let node_miner = self.clone();
-            spawn_traced("miner", async move {
-                mining_loop(node_miner).await;
-            });
+            spawner.spawn_critical("miner", async move { mining_loop(node_miner).await })?;
         }
 
         if let Some((handle, listener)) = rpc_pair {
-            spawn_traced("rpc_server", async move {
+            spawner.spawn_critical("rpc-server", async move {
                 if let Err(e) = dom_rpc::serve(handle, listener).await {
                     tracing::error!(
                         event = "task_failed",
@@ -442,7 +419,8 @@ impl DomNode {
                     );
                     warn!("RPC server error: {e}");
                 }
-            });
+                Ok(())
+            })?;
         }
 
         // future_block_queue drain loop — re-evaluate deferred blocks every 30s
@@ -452,7 +430,7 @@ impl DomNode {
             let mempool = self.mempool.clone();
             let relay_tx = self.block_relay_tx.clone();
             let metrics = self.metrics.clone();
-            spawn_traced("future_block_queue_drain", async move {
+            spawner.spawn_critical("future-block-drain", async move {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
                     FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS,
                 ));
@@ -609,7 +587,7 @@ impl DomNode {
             let dandelion = self.dandelion.clone();
             let mempool = self.mempool.clone();
             let tx_fluff_tx = self.tx_fluff_tx.clone();
-            spawn_traced("dandelion_stem_timeout", async move {
+            spawner.spawn_critical("dandelion-stem-timeout", async move {
                 const STEM_CHECK_INTERVAL_SECS: u64 = 5;
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
                     STEM_CHECK_INTERVAL_SECS,
@@ -644,53 +622,8 @@ impl DomNode {
                         }
                     }
                 }
-            });
+            })?;
         }
-
-        // Wait for tasks
-        tokio::select! {
-            result = listener_task => {
-                match result {
-                    Ok(()) => warn!("P2P listener exited"),
-                    Err(e) => tracing::error!(
-                        event = "task_failed",
-                        task_name = "p2p_listener",
-                        error = %e,
-                        failure_class = "runtime",
-                        "task failed"
-                    ),
-                }
-                tracing::info!(
-                    event = "shutdown_requested",
-                    reason = "p2p_listener_exited",
-                    failure_class = "runtime_shutdown",
-                    "shutdown requested"
-                );
-            }
-            result = connector_task => {
-                match result {
-                    Ok(()) => warn!("Peer connector exited"),
-                    Err(e) => tracing::error!(
-                        event = "task_failed",
-                        task_name = "peer_connector",
-                        error = %e,
-                        failure_class = "runtime",
-                        "task failed"
-                    ),
-                }
-                tracing::info!(
-                    event = "shutdown_requested",
-                    reason = "peer_connector_exited",
-                    failure_class = "runtime_shutdown",
-                    "shutdown requested"
-                );
-            }
-        }
-        tracing::info!(
-            event = "shutdown_completed",
-            failure_class = "runtime_shutdown",
-            "shutdown completed"
-        );
 
         supervisor.run_until_failure().await
     }
@@ -737,10 +670,25 @@ impl DomNode {
                     let peers = svc.peers.clone();
                     let metrics = svc.metrics.clone();
                     let chain_for_persist = chain.clone();
-                    spawn_traced("p2p_inbound_session", async move {
-                        handle_inbound(stream, peer_addr, config, privkey, chain, channels, svc)
+                    let spawn_result = spawner.spawn_operational(
+                        format!("inbound-peer-{peer_addr}"),
+                        async move {
+                            handle_inbound(
+                                stream, peer_addr, config, privkey, chain, channels, svc,
+                            )
                             .await;
-                        let mut mgr = trace_lock("peers", &peers).await;
+                            let mut mgr = peers.lock().await;
+                            let peer_key = peer_addr.to_string();
+                            mgr.remove_peer(&peer_key);
+                            mgr.release_inbound_reservation(&peer_addr);
+                            drop(mgr);
+                            persist_peer_reputation_state(&chain_for_persist, &peers).await?;
+                            refresh_peer_metrics(&peers, &metrics).await;
+                            Ok(())
+                        },
+                    );
+                    if let Err(e) = spawn_result {
+                        let mut mgr = self.peers.lock().await;
                         let peer_key = peer_addr.to_string();
                         mgr.remove_peer(&peer_key);
                         mgr.release_inbound_reservation(&peer_addr);
@@ -834,13 +782,28 @@ impl DomNode {
                     let metrics = self.metrics.clone();
                     let svc_c = svc.clone();
                     let chain_for_persist = self.chain.clone();
-                    spawn_traced("p2p_outbound_session", async move {
-                        let outcome =
-                            connect_outbound(&addr, config, privkey, chain, channels, svc_c).await;
-                        let mut mgr = trace_lock("peers", &peers).await;
-                        if outcome == OutboundAttemptOutcome::RetryableFailure {
-                            mgr.record_outbound_failure(&cleanup_addr);
-                        }
+                    let task_addr = cleanup_addr.clone();
+                    let spawn_result = spawner.spawn_operational(
+                        format!("outbound-peer-{cleanup_addr}"),
+                        async move {
+                            let outcome =
+                                connect_outbound(&addr, config, privkey, chain, channels, svc_c)
+                                    .await;
+                            let mut mgr = peers.lock().await;
+                            if outcome == OutboundAttemptOutcome::RetryableFailure {
+                                mgr.record_outbound_failure(&task_addr);
+                            }
+                            mgr.remove_peer(&task_addr);
+                            mgr.release_outbound_reservation(&task_addr);
+                            drop(mgr);
+                            persist_peer_rotation_state(&chain_for_persist, &peers).await?;
+                            persist_peer_reputation_state(&chain_for_persist, &peers).await?;
+                            refresh_peer_metrics(&peers, &metrics).await;
+                            Ok(())
+                        },
+                    );
+                    if let Err(e) = spawn_result {
+                        let mut mgr = self.peers.lock().await;
                         mgr.remove_peer(&cleanup_addr);
                         mgr.release_outbound_reservation(&cleanup_addr);
                         return Err(e);

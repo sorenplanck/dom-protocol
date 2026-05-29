@@ -178,8 +178,7 @@ fn pushed_leaves_have_canonical_mmr_postorder_positions() {
     // first 16 leaves. Equivalently: i-th leaf position is
     //     2*i - popcount(i-1)            (1-indexed i)
     // which matches the MMR postorder traversal.
-    let expected_positions: [u64; 16] =
-        [1, 2, 4, 5, 8, 9, 11, 12, 16, 17, 19, 20, 23, 24, 26, 27];
+    let expected_positions: [u64; 16] = [1, 2, 4, 5, 8, 9, 11, 12, 16, 17, 19, 20, 23, 24, 26, 27];
 
     let mut pmmr = Pmmr::new();
     for (i, &expected) in expected_positions.iter().enumerate() {

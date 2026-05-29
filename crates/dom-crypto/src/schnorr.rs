@@ -352,7 +352,11 @@ mod tests {
             r[0]
         );
         let total = sig.to_bytes();
-        assert_eq!(total.len(), 65, "signature must be 33 (R) + 32 (s) = 65 bytes");
+        assert_eq!(
+            total.len(),
+            65,
+            "signature must be 33 (R) + 32 (s) = 65 bytes"
+        );
     }
 
     #[test]

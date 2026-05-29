@@ -64,7 +64,10 @@ pub fn cmd_list() -> R<()> {
     let root = find_dom_repo_root(&cwd)?;
     let dir = root.path.join("prompts");
     if !dir.is_dir() {
-        println!("[dom-agent-runner] no prompts/ directory at {}", dir.display());
+        println!(
+            "[dom-agent-runner] no prompts/ directory at {}",
+            dir.display()
+        );
         return Ok(());
     }
     let mut entries: Vec<_> = fs::read_dir(&dir)?
