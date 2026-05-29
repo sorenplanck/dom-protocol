@@ -12,5 +12,6 @@ pub mod peer_scoring;
 pub mod pex;
 pub mod relay;
 pub mod replay_snapshot;
+pub mod task_supervisor;
 pub mod time_health;
 pub mod wallet_helpers;
