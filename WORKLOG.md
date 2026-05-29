@@ -459,7 +459,7 @@ Commands and results:
 
 Commit status:
 - Commit before WORKLOG amend: `66fc2f8a96cc1c195b86794662f1ca95762eee71`
-- Final hash after WORKLOG amend and remote verification to be recorded in final report.
+- Final hash after WORKLOG amend and remote verification: `1e0dd6dc612ecb5a4eff51e260f1d96f2ff8da84`
 
 Sequence progress:
 - DONE: Task 26 `6c5ef52`
@@ -471,4 +471,51 @@ Sequence progress:
 - REMAINING: none for Tasks 26-30
 
 Open items:
-- Amend WORKLOG into the Task 30 commit, push `task21-ready-base`, and verify remote HEAD.
+- Task 30 is complete and pushed. Do not start Task 31 unless explicitly requested.
+
+## 2026-05-31 Task 31 — Consensus Adversarial Tests
+
+Timestamp: 2026-05-31T04:02:00Z
+
+Objective:
+- Bring Task 31 from existing history via cherry-pick of `3e54339 31 consensus adversarial tests`; do not reimplement from scratch.
+
+Branch:
+- `task21-ready-base`
+
+Implementation notes:
+- `git cherry-pick 3e54339` applied cleanly.
+- Original author preserved: `Soren Planck <sorenplanck@tutamail.com>`.
+- The cherry-pick adds adversarial consensus validation coverage only.
+
+Changed files:
+- `crates/dom-consensus/tests/adversarial_block_validation.rs`
+- `WORKLOG.md`
+
+Commands and results:
+- `git cherry-pick 3e54339` (PASS)
+- `cargo fmt` (PASS)
+- `cargo check` (PASS)
+- `cargo test -p dom-consensus adversarial` (PASS, but 0 tests matched; not counted as the effective narrow validation)
+- `cargo test -p dom-consensus --test adversarial_block_validation` (PASS; 6 tests passed)
+
+Tests added/validated:
+- `consensus_rejects_invalid_aggregate_balance`
+- `consensus_rejects_invalid_cut_through`
+- `consensus_rejects_invalid_reward_fee_equation`
+- `consensus_rejects_invalid_kernel_excess_relation`
+- `consensus_rejects_valid_transactions_composing_invalid_block`
+- `consensus_rejects_tampered_body_with_plausible_header`
+
+Commit status:
+- Commit before WORKLOG amend: `58c5f94f8a693a5a8f6fb03d7f1ce678b699eb0f`
+- Final hash after WORKLOG amend and remote verification to be recorded in final report.
+
+Sequence progress:
+- DONE: Task 31 pending final amended hash/push verification
+- CURRENT: none
+- REMAINING: Task 32, Task 33
+
+Open items:
+- Amend WORKLOG into the Task 31 commit, push `task21-ready-base`, and verify remote HEAD.
+- Do not start Task 32 until the user explicitly asks.
