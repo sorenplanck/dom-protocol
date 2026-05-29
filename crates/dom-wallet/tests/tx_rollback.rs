@@ -56,6 +56,15 @@ fn make_output(value: u64, height: u64, is_coinbase: bool) -> OwnedOutput {
     )
 }
 
+fn make_attributed_output(
+    value: u64,
+    height: u64,
+    is_coinbase: bool,
+    block_hash: [u8; 32],
+) -> OwnedOutput {
+    make_output(value, height, is_coinbase).with_block_hash(block_hash)
+}
+
 fn build_test_spend(wallet: &mut Wallet) -> Transaction {
     let recipient_blinding = BlindingFactor::random();
     let recipient_commitment = Commitment::commit(800, &recipient_blinding);
@@ -496,4 +505,49 @@ fn interrupted_persistence_during_rollback_heals_on_reopen() {
     assert!(!spent);
     assert_eq!(reserved, Some(tx_hash));
     assert!(reopened_again.wallet().has_pending_tx(&tx_hash));
+}
+
+#[test]
+fn block_hash_attribution_survives_restart_and_rollback() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path().join("w");
+    let mut wd = WalletDir::create(&dir, "pw", Network::Mainnet, &test_genesis()).unwrap();
+
+    let stable_hash = [0x11; 32];
+    let stale_hash = [0x22; 32];
+    let stable = make_attributed_output(700, 100, false, stable_hash);
+    let stable_commitment = stable.commitment;
+    let stale = make_attributed_output(500, 205, true, stale_hash);
+    let stale_commitment = stale.commitment;
+    wd.wallet_mut().add_output(stable);
+    wd.wallet_mut().add_output(stale);
+    wd.wallet_mut().save().unwrap();
+
+    drop(wd);
+    let mut reopened = WalletDir::open(&dir, "pw").unwrap();
+    assert_eq!(
+        reopened
+            .wallet()
+            .outputs()
+            .find(|o| o.commitment == stable_commitment)
+            .and_then(|o| o.block_hash),
+        Some(stable_hash),
+        "block hash attribution must persist through restart"
+    );
+
+    reopened.wallet_mut().rollback_to(199).unwrap();
+
+    let outputs = reopened.wallet().outputs().collect::<Vec<_>>();
+    assert!(
+        outputs.iter().all(|o| o.commitment != stale_commitment),
+        "rollback must remove outputs from disconnected heights"
+    );
+    assert_eq!(
+        outputs
+            .iter()
+            .find(|o| o.commitment == stable_commitment)
+            .and_then(|o| o.block_hash),
+        Some(stable_hash),
+        "rollback must preserve canonical output block attribution"
+    );
 }

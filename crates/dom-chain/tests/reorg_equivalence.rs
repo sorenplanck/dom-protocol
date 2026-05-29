@@ -29,15 +29,13 @@ use dom_consensus::{
 };
 use dom_core::{
     Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+    PROTOCOL_VERSION, TAG_KERNEL_MSG_COINBASE,
 };
-use dom_crypto::{
-    bulletproof,
-    hash::blake2b_256_tagged,
-    keys::SecretKey,
-    pedersen::{BlindingFactor, Commitment},
-    schnorr_sign,
-};
+use dom_crypto::bulletproof;
+use dom_crypto::hash::blake2b_256_tagged;
+use dom_crypto::keys::SecretKey;
+use dom_crypto::pedersen::{BlindingFactor, Commitment};
+use dom_crypto::schnorr_sign;
 use dom_pow::CompactTarget;
 use dom_serialization::DomSerialize;
 use dom_store::utxo::UtxoEntry;
@@ -220,7 +218,72 @@ fn valid_spend_tx(
     }
 }
 
-fn valid_reorg_block(
+fn signed_coinbase(height: BlockHeight, seed: u8) -> CoinbaseTransaction {
+    let reward = dom_core::block_reward(height).noms();
+    let blinding = blinding(seed);
+    let commitment = Commitment::commit(reward, &blinding);
+    let (proof, _) = bulletproof::prove(reward, &blinding).expect("coinbase proof");
+    let excess = Commitment::commit(0, &blinding);
+    let secret = SecretKey::from_bytes(blinding.as_bytes()).expect("coinbase secret");
+    let chain_id = derive_chain_id(
+        dom_core::NETWORK_MAGIC_REGTEST,
+        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+    );
+    let msg = {
+        let mut data = Vec::with_capacity(1 + 8);
+        data.push(KERNEL_FEAT_COINBASE);
+        data.extend_from_slice(&reward.to_le_bytes());
+        blake2b_256_tagged(TAG_KERNEL_MSG_COINBASE, &data)
+    };
+    let sig = schnorr_sign(&secret, msg.as_bytes(), chain_id.as_bytes()).expect("coinbase sig");
+    CoinbaseTransaction {
+        output: TransactionOutput {
+            commitment,
+            proof: proof.bytes,
+        },
+        kernel: CoinbaseKernel {
+            features: KERNEL_FEAT_COINBASE,
+            explicit_value: reward,
+            excess,
+            excess_signature: sig.to_bytes(),
+        },
+        offset: [0u8; 32],
+    }
+}
+
+fn valid_coinbase_only_block(
+    prev_hash: Hash256,
+    height: u64,
+    total_difficulty: u64,
+    nonce_seed: u64,
+    coinbase_seed: u8,
+) -> Block {
+    let coinbase = signed_coinbase(BlockHeight(height), coinbase_seed);
+    let (output_root, kernel_root, rangeproof_root) =
+        compute_block_pmmr_roots(&coinbase, &[]).expect("pmmr roots");
+    Block {
+        header: BlockHeader {
+            version: PROTOCOL_VERSION,
+            height: BlockHeight(height),
+            prev_hash,
+            timestamp: Timestamp(1_700_200_000 + height),
+            output_root,
+            kernel_root,
+            rangeproof_root,
+            total_kernel_offset: [0u8; 32],
+            target: CompactTarget(0),
+            total_difficulty: U256::from(total_difficulty),
+            pow: ProofOfWork {
+                nonce: nonce_seed,
+                randomx_hash: Hash256::ZERO,
+            },
+        },
+        coinbase,
+        transactions: vec![],
+    }
+}
+
+fn synthetic_block(
     prev_hash: Hash256,
     height: u64,
     total_difficulty: u64,
@@ -460,6 +523,58 @@ fn check_reorg_depth_boundary() {
     check_reorg_depth(dom_core::MAX_REORG_DEPTH_POLICY + 1)
         .expect_err("over-limit must be rejected");
     check_reorg_depth(0).expect("zero (no disconnect) is always accepted");
+}
+
+#[test]
+fn promote_heavier_known_tip_emits_block_level_reorg_metadata() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = DomStore::open(dir.path()).expect("open");
+
+    let shared = valid_coinbase_only_block(Hash256::ZERO, 1, 1, 1, 10);
+    let shared_hash = commit_canonical_block(&store, &shared);
+    let old_2 = valid_coinbase_only_block(shared_hash, 2, 2, 2, 11);
+    let old_2_hash = commit_canonical_block(&store, &old_2);
+    let old_3 = valid_coinbase_only_block(old_2_hash, 3, 3, 3, 12);
+    let old_3_hash = commit_canonical_block(&store, &old_3);
+
+    let alt_2 = valid_coinbase_only_block(shared_hash, 2, 2, 20, 30);
+    let alt_2_hash = store_side_block(&store, &alt_2);
+    let alt_3 = valid_coinbase_only_block(alt_2_hash, 3, 3, 21, 33);
+    let alt_3_hash = store_side_block(&store, &alt_3);
+    let alt_4 = valid_coinbase_only_block(alt_3_hash, 4, 4, 22, 34);
+    let alt_4_hash = store_side_block(&store, &alt_4);
+
+    let mut chain = open_chain(dir.path());
+    let reorg = chain
+        .promote_heavier_known_tip(alt_4_hash)
+        .expect("reorg promotion");
+
+    assert_eq!(reorg.common_ancestor_height, 1);
+    assert!(reorg.disconnected_txs.is_empty());
+    assert!(reorg.connected_txs.is_empty());
+    assert_eq!(
+        reorg
+            .disconnected_blocks
+            .iter()
+            .map(|b| (b.block_height, b.block_hash, b.transactions.len()))
+            .collect::<Vec<_>>(),
+        vec![
+            (3, *old_3_hash.as_bytes(), 0),
+            (2, *old_2_hash.as_bytes(), 0)
+        ]
+    );
+    assert_eq!(
+        reorg
+            .connected_blocks
+            .iter()
+            .map(|b| (b.block_height, b.block_hash, b.transactions.len()))
+            .collect::<Vec<_>>(),
+        vec![
+            (2, *alt_2_hash.as_bytes(), 0),
+            (3, *alt_3_hash.as_bytes(), 0),
+            (4, *alt_4_hash.as_bytes(), 0)
+        ]
+    );
 }
 
 #[test]
