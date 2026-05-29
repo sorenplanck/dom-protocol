@@ -88,9 +88,8 @@ pub const MAX_COMPACT_TARGET: u32 = 0x1e7f_ffff;
 /// Testnet compact target floor.
 ///
 /// This expands to a target about 32x harder than `MAX_COMPACT_TARGET` under
-/// DOM's current compact-target byte layout, mapping the observed
-/// ~30–40 blocks/minute profile to roughly ~48–64 seconds/block without any
-/// miner-side throttling.
+/// DOM's current compact-target byte layout while retaining the public
+/// DOM-ASERT-288 spacing and half-life parameters.
 pub const TESTNET_TARGET_COMPACT: u32 = 0x1e7f_ff07;
 
 /// Regtest compact target. Dev-only and intentionally easy.
@@ -125,7 +124,7 @@ impl PowParams {
 pub fn pow_params_for_network(network_magic: u32) -> PowParams {
     match network_magic {
         NETWORK_MAGIC_TESTNET => PowParams {
-            target_spacing: 60,
+            target_spacing: TARGET_SPACING,
             half_life: ASERT_HALF_LIFE,
             genesis_target_compact: TESTNET_TARGET_COMPACT,
             max_compact_target: TESTNET_TARGET_COMPACT,
@@ -840,6 +839,7 @@ pub fn uses_dev_fixed_target(network_magic: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dom_core::ASERT_HALF_LIFE_BLOCKS;
 
     #[test]
     fn table_monotone_and_bounds() {
@@ -969,9 +969,29 @@ mod tests {
     }
 
     #[test]
-    fn testnet_params_use_sixty_second_spacing() {
+    fn public_asert_half_life_is_288_blocks() {
+        assert_eq!(ASERT_HALF_LIFE_BLOCKS, 288);
+        for network_magic in [NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_TESTNET] {
+            let params = pow_params_for_network(network_magic);
+            assert_eq!(params.target_spacing, TARGET_SPACING);
+            assert_eq!(params.half_life / params.target_spacing, 288);
+        }
+    }
+
+    #[test]
+    fn public_asert_half_life_seconds_is_34560() {
+        assert_eq!(ASERT_HALF_LIFE, 34_560);
+        assert_eq!(ASERT_HALF_LIFE, TARGET_SPACING * ASERT_HALF_LIFE_BLOCKS);
+        for network_magic in [NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_TESTNET] {
+            let params = pow_params_for_network(network_magic);
+            assert_eq!(params.half_life, 34_560);
+        }
+    }
+
+    #[test]
+    fn testnet_params_keep_dedicated_compact_floor() {
         let params = pow_params_for_network(NETWORK_MAGIC_TESTNET);
-        assert_eq!(params.target_spacing, 60);
+        assert_eq!(params.target_spacing, TARGET_SPACING);
         assert_eq!(params.max_compact_target, TESTNET_TARGET_COMPACT);
     }
 
@@ -1031,6 +1051,44 @@ mod tests {
         .unwrap();
 
         assert!(U256::from_big_endian(&target) < U256::from_big_endian(&anchor.target));
+    }
+
+    #[test]
+    fn fast_blocks_harden_difficulty_under_asert_288() {
+        let params = pow_params_for_network(NETWORK_MAGIC_MAINNET);
+        let anchor = genesis_anchor(NETWORK_MAGIC_MAINNET).unwrap();
+        let height = BlockHeight(ASERT_HALF_LIFE_BLOCKS);
+        let target = compute_expected_target(
+            NETWORK_MAGIC_MAINNET,
+            Timestamp(anchor.timestamp.0 + params.target_spacing),
+            height,
+        )
+        .unwrap();
+
+        assert_eq!(params.half_life, 34_560);
+        assert!(U256::from_big_endian(&target) < U256::from_big_endian(&anchor.target));
+    }
+
+    #[test]
+    fn slow_blocks_ease_difficulty_under_asert_288() {
+        let params = pow_params_for_network(NETWORK_MAGIC_MAINNET);
+        let anchor = genesis_anchor(NETWORK_MAGIC_MAINNET).unwrap();
+        let height = BlockHeight(ASERT_HALF_LIFE_BLOCKS);
+        let fast_target = compute_expected_target(
+            NETWORK_MAGIC_MAINNET,
+            Timestamp(anchor.timestamp.0 + params.target_spacing),
+            height,
+        )
+        .unwrap();
+        let slow_target = compute_expected_target(
+            NETWORK_MAGIC_MAINNET,
+            Timestamp(anchor.timestamp.0 + params.target_spacing * ASERT_HALF_LIFE_BLOCKS * 2),
+            height,
+        )
+        .unwrap();
+
+        assert_eq!(params.half_life, 34_560);
+        assert!(U256::from_big_endian(&slow_target) > U256::from_big_endian(&fast_target));
     }
 
     #[test]

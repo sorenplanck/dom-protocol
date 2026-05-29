@@ -4,9 +4,9 @@ use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
 use dom_core::{
-    BlockHeight, Hash256, Timestamp, GENESIS_HASH_REGTEST, GENESIS_HASH_TESTNET,
-    GENESIS_TARGET_COMPACT, KERNEL_FEAT_COINBASE, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST,
-    NETWORK_MAGIC_TESTNET,
+    BlockHeight, Hash256, Timestamp, GENESIS_HASH_MAINNET, GENESIS_HASH_REGTEST,
+    GENESIS_HASH_TESTNET, GENESIS_TARGET_COMPACT, KERNEL_FEAT_COINBASE, NETWORK_MAGIC_MAINNET,
+    NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET,
 };
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_pow::{
@@ -208,13 +208,45 @@ fn public_networks_do_not_share_regtest_target() {
     .expect("mainnet target");
     let testnet_target = compute_expected_target(
         NETWORK_MAGIC_TESTNET,
-        Timestamp(dom_core::GENESIS_TIMESTAMP_TESTNET + 60),
+        Timestamp(dom_core::GENESIS_TIMESTAMP_TESTNET + dom_core::TARGET_SPACING),
         BlockHeight(1),
     )
     .expect("testnet target");
 
     assert_ne!(mainnet_target, regtest_target);
     assert_ne!(testnet_target, regtest_target);
+}
+
+#[test]
+fn window_retarget_still_unreachable_from_mainnet_testnet() {
+    for (genesis_hash, network_magic) in [
+        (GENESIS_HASH_MAINNET, NETWORK_MAGIC_MAINNET),
+        (GENESIS_HASH_TESTNET, NETWORK_MAGIC_TESTNET),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let chain = populate_history(&dir, genesis_hash, network_magic, 1, 4);
+        let tip_bytes = chain
+            .store
+            .get_block_header(chain.tip_hash.as_bytes())
+            .expect("tip lookup")
+            .expect("tip header");
+        let tip = BlockHeader::from_bytes(&tip_bytes).expect("tip decode");
+        let params = pow_params_for_network(network_magic);
+        let child_height = tip.height.checked_next().expect("next height");
+        let child_timestamp = tip
+            .timestamp
+            .checked_add_secs(params.target_spacing)
+            .expect("next timestamp");
+
+        let preview = chain.next_block_target().expect("next block target");
+        let canonical = compute_expected_target(network_magic, child_timestamp, child_height)
+            .expect("canonical ASERT target");
+
+        assert_eq!(
+            preview.next_target, canonical,
+            "public next target must come from compute_expected_target"
+        );
+    }
 }
 
 #[test]

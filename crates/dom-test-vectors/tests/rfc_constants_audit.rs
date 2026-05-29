@@ -32,10 +32,10 @@
 //!   5. Verify the test still passes.
 
 use dom_core::{
-    ASERT_HALF_LIFE, ASERT_RADIX_BITS, COIN_UNIT, COINBASE_MATURITY, HALVING_EPOCHS,
-    HALVING_INTERVAL, INITIAL_BLOCK_REWARD, MAX_BLOCK_WEIGHT, MAX_FUTURE_BLOCK_TIME,
-    MAX_SUPPLY_NOMS, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_TESTNET, P2P_PORT_MAINNET,
-    PROTOCOL_VERSION, TARGET_SPACING,
+    ASERT_HALF_LIFE, ASERT_HALF_LIFE_BLOCKS, ASERT_RADIX_BITS, COINBASE_MATURITY, COIN_UNIT,
+    HALVING_EPOCHS, HALVING_INTERVAL, INITIAL_BLOCK_REWARD, MAX_BLOCK_WEIGHT,
+    MAX_FUTURE_BLOCK_TIME, MAX_SUPPLY_NOMS, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_TESTNET,
+    P2P_PORT_MAINNET, PROTOCOL_VERSION, TARGET_SPACING,
 };
 use std::path::PathBuf;
 
@@ -97,9 +97,14 @@ fn rows() -> Vec<AuditRow> {
             documented_form: "PROTOCOL_VERSION = 2",
         },
         AuditRow {
+            name: "ASERT_HALF_LIFE_BLOCKS",
+            runtime: ASERT_HALF_LIFE_BLOCKS as u128,
+            documented_form: "ASERT_HALF_LIFE_BLOCKS = 288",
+        },
+        AuditRow {
             name: "ASERT_HALF_LIFE",
             runtime: ASERT_HALF_LIFE as u128,
-            documented_form: "ASERT_HALF_LIFE = 172,800 seconds",
+            documented_form: "ASERT_HALF_LIFE = 34,560 seconds",
         },
         AuditRow {
             name: "ASERT_RADIX_BITS",
@@ -125,8 +130,8 @@ fn doc_corpus() -> String {
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
-        let content = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+        let content =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
         buf.push_str(&content);
         buf.push_str("\n\n");
     }
@@ -156,7 +161,8 @@ fn audit_runtime_constants_match_published_literals() {
     assert_eq!(NETWORK_MAGIC_TESTNET, 0x444F_4D54, "TESTNET magic drift");
     assert_eq!(P2P_PORT_MAINNET, 33_369, "P2P_PORT_MAINNET drift");
     assert_eq!(PROTOCOL_VERSION, 2, "PROTOCOL_VERSION drift");
-    assert_eq!(ASERT_HALF_LIFE, 172_800, "ASERT_HALF_LIFE drift");
+    assert_eq!(ASERT_HALF_LIFE_BLOCKS, 288, "ASERT_HALF_LIFE_BLOCKS drift");
+    assert_eq!(ASERT_HALF_LIFE, 34_560, "ASERT_HALF_LIFE drift");
     assert_eq!(ASERT_RADIX_BITS, 16, "ASERT_RADIX_BITS drift");
     assert_eq!(HALVING_EPOCHS, 55, "HALVING_EPOCHS drift");
     assert_eq!(MAX_BLOCK_WEIGHT, 40_000, "MAX_BLOCK_WEIGHT drift");

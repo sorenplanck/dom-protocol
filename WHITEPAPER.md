@@ -77,7 +77,7 @@ T(h, t) = T_anchor * 2^((t - t_anchor - TARGET_SPACING * (h - h_anchor)) / HALF_
 
 where:
 - `TARGET_SPACING = 120 seconds` (2 minutes)
-- `HALF_LIFE = 172,800 seconds` (2 days)
+- `HALF_LIFE = TARGET_SPACING * 288 = 34,560 seconds` (288 blocks)
 
 `HALF_LIFE` is the time it takes difficulty to halve or double in response to sustained hashrate change.
 

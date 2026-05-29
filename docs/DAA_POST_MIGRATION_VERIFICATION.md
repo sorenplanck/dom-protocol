@@ -170,5 +170,5 @@ No production consensus fallback was added for any validation issue above.
 - Mainnet and testnet cannot reach window retarget.
 - Miner and validator are byte-for-byte aligned on
   `compute_expected_target(network_magic, block_timestamp, block_height)`.
-- The repository is ready for ASERT half-life tuning as a separate consensus
-  change.
+- The repository has been tuned to DOM-ASERT-288:
+  `ASERT_HALF_LIFE_BLOCKS = 288` and `ASERT_HALF_LIFE = 34,560 seconds`.
