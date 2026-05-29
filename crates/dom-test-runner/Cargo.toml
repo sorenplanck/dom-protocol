@@ -13,7 +13,7 @@ name = "dom-test-runner"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = { workspace = true }
+anyhow.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }
