@@ -1564,6 +1564,9 @@ dependencies = [
 [[package]]
 name = "dom-test-runner"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
 
 [[package]]
 name = "dom-test-vectors"
