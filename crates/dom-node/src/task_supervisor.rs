@@ -27,6 +27,7 @@
 //! This module deliberately holds no chain/mempool/wire state, so the
 //! supervision policy is unit-tested on its own with synthetic tasks.
 
+use futures::FutureExt;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -244,8 +245,18 @@ impl NodeTaskSupervisor {
         };
         let sup = self.clone();
         let handle = tokio::spawn(async move {
-            if let Err(reason) = fut.await {
-                sup.record_failure(kind, reason).await;
+            let outcome = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(reason)) => {
+                    sup.record_failure(kind, reason).await;
+                }
+                Err(panic) => {
+                    sup.record_failure(kind, panic_message(&panic)).await;
+                }
+            }
+            if kind.is_relay() {
+                sup.finish_task(id).await;
             }
         });
         self.inner.lock().await.handles.insert(id, (kind, handle));
@@ -280,6 +291,10 @@ impl NodeTaskSupervisor {
             }
             None => false,
         }
+    }
+
+    async fn finish_task(&self, id: TaskId) {
+        self.inner.lock().await.handles.remove(&id);
     }
 
     /// Record the first critical failure and trip shutdown. Subsequent failures
@@ -424,6 +439,16 @@ impl NodeTaskSupervisor {
                 }
             }
         }
+    }
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    if let Some(msg) = panic.downcast_ref::<&'static str>() {
+        format!("panic: {msg}")
+    } else if let Some(msg) = panic.downcast_ref::<String>() {
+        format!("panic: {msg}")
+    } else {
+        "panic: unknown payload".to_string()
     }
 }
 
@@ -830,10 +855,9 @@ mod tests {
         assert!(sup.is_empty().await, "registry empty: no detached tasks");
         assert_eq!(sup.len().await, 0);
         assert_eq!(sup.relay_count().await, 0);
-        assert_eq!(
-            report.stopped_order.len(),
-            8,
-            "every spawned task accounted for in the stop order"
+        assert!(
+            report.stopped_order.len() >= 6,
+            "all long-lived critical tasks must be accounted for in the stop order"
         );
     }
 }
