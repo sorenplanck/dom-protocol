@@ -402,3 +402,73 @@ Open items:
   - CURRENT: none
   - REMAINING: none for Tasks 21-25
 - Left to finish prompt: no Task 21-25 implementation remains. Do not open PR or merge to main automatically.
+
+## 2026-05-31 Authorship Reconciliation For Tasks 26-30
+
+Timestamp: 2026-05-31T03:29:13Z
+
+User clarification:
+- Existing commits authored as `Soren Planck <sorenplanck@tutamail.com>` are legitimate and accepted.
+- Current accepted authorship rule for this session: `soren planck` in any capitalization, with or without email.
+- Do not rewrite history, do not force-push, and do not alter existing commit authors.
+
+Git-history reconciliation:
+- Task 26 is DONE in history: `6c5ef52 26 define mempool restart policy`.
+- Task 27 is DONE in history: `e47aa8b 27 mempool revalidate on reopen`.
+- Task 28 is DONE in history: `0c782d4 28 mempool reinjection after reorg`.
+- Task 29 is DONE in history: `6f67aa7 29 same block spends cutthrough`.
+- Task 30 is not present in current branch history from `git log --oneline | grep -iE '^[a-f0-9]+ (2[6-9]|30) '`.
+
+Open item:
+- Await user confirmation before coding. The next real pending task is Task 30.
+
+## 2026-05-31 Task 30 — Side Chain Retention
+
+Timestamp: 2026-05-31T03:48:00Z
+
+Objective:
+- Complete Task 30 by cherry-picking existing implementation `b100700 30 side chain retention` onto `task21-ready-base`.
+
+Branch:
+- `task21-ready-base`
+
+Implementation notes:
+- Task 30 came from cherry-pick of `b100700`, not a reimplementation.
+- Cherry-pick conflict was disjoint and mechanical:
+  - `crates/dom-chain/src/chain_state.rs` kept both HEAD `ReorgBlockDelta` and Task 30 `SideChainRetentionReport` / `SideBlockInfo` / `SideBranch`.
+  - `crates/dom-chain/src/lib.rs` kept both HEAD reorg exports and Task 30 side-chain retention exports, without duplicate exports.
+- Added a local test compatibility wrapper `valid_reorg_block` that delegates to the existing `synthetic_block` helper on this branch; the retention policy logic from `b100700` was preserved.
+
+Changed files:
+- `crates/dom-chain/src/chain_state.rs`
+- `crates/dom-chain/src/lib.rs`
+- `crates/dom-chain/tests/reorg_equivalence.rs`
+- `crates/dom-store/src/db.rs`
+- `WORKLOG.md`
+
+Commands and results:
+- `git cherry-pick b100700` (CONFLICT in `chain_state.rs` and `lib.rs`; resolved by keeping both disjoint additions)
+- `git cherry-pick --continue` (PASS; author preserved as `Soren Planck <sorenplanck@tutamail.com>`)
+- `cargo fmt` (PASS)
+- `cargo check` (PASS)
+- `cargo test -p dom-chain side_chain_retention_keeps_competing_plausible_branches` (PASS)
+- `cargo test -p dom-chain retained_side_branch_can_still_promote_after_policy_pass` (PASS)
+- `cargo test -p dom-chain side_chain_retention_depth_keeps_near_candidate_and_prunes_old_branch` (PASS)
+- `cargo test -p dom-chain side_chain_retention_byte_cap_prunes_lower_priority_branch` (PASS)
+- `cargo test -p dom-chain side_chain_retention_survives_restart_explicitly_for_retained_only` (PASS)
+
+Commit status:
+- Commit before WORKLOG amend: `66fc2f8a96cc1c195b86794662f1ca95762eee71`
+- Final hash after WORKLOG amend and remote verification to be recorded in final report.
+
+Sequence progress:
+- DONE: Task 26 `6c5ef52`
+- DONE: Task 27 `e47aa8b`
+- DONE: Task 28 `0c782d4`
+- DONE: Task 29 `6f67aa7`
+- DONE: Task 30 pending final amended hash/push verification
+- CURRENT: none
+- REMAINING: none for Tasks 26-30
+
+Open items:
+- Amend WORKLOG into the Task 30 commit, push `task21-ready-base`, and verify remote HEAD.
