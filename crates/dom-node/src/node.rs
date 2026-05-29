@@ -3962,6 +3962,86 @@ mod tests {
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
+    /// TASK 27 / RFC-0012 §2: under the volatile policy there is no persisted
+    /// mempool to revalidate on reopen. This proves the two properties that make
+    /// that safe: restart is **deterministic** (always empty) and
+    /// **consensus-neutral** (the canonical chain tip after restart is identical
+    /// regardless of what the mempool held — runtime txs and even a structurally
+    /// valid on-disk legacy snapshot — and identical to a node that never had any
+    /// mempool activity at all).
+    #[test]
+    fn chain_validity_is_unaffected_by_mempool_restart_state() {
+        // Node A: accept a runtime tx AND plant a structurally valid legacy
+        // on-disk mempool snapshot, then capture the canonical chain tip.
+        let dir_a = fresh_test_dir("mempool-neutral-a");
+        let tip_a_before = {
+            let node = DomNode::init(regtest_node_config(&dir_a)).expect("init a");
+            let tx = mempool_tx(0x31, 100);
+            let hash = tx_hash(&tx).expect("hash a");
+            node.mempool
+                .try_lock()
+                .expect("mempool lock")
+                .accept_tx(tx.clone(), hash, 1)
+                .expect("accept runtime tx");
+            let chain = node.chain.try_lock().expect("chain lock");
+            let mut planted = Mempool::new();
+            planted.accept_tx(tx, hash, 1).expect("plant accept");
+            persist_mempool_snapshot(&chain.store, &planted.snapshot())
+                .expect("plant legacy snapshot");
+            (chain.tip_height.0, *chain.tip_hash.as_bytes())
+        };
+
+        // Node B (control): never touches the mempool.
+        let dir_b = fresh_test_dir("mempool-neutral-b");
+        let node_b = DomNode::init(regtest_node_config(&dir_b)).expect("init b");
+        let tip_b = {
+            let chain = node_b.chain.try_lock().expect("chain lock b");
+            (chain.tip_height.0, *chain.tip_hash.as_bytes())
+        };
+        assert!(
+            node_b
+                .mempool
+                .try_lock()
+                .expect("mempool lock b")
+                .is_empty(),
+            "control node starts with an empty mempool"
+        );
+        drop(node_b);
+
+        // Restart A. The chain tip must be byte-identical to before the restart
+        // (mempool state did not perturb consensus) and to the control node
+        // (chain validity is independent of mempool history). The mempool must be
+        // empty and the legacy on-disk snapshot must be gone.
+        let restarted = DomNode::init(regtest_node_config(&dir_a)).expect("restart a");
+        let tip_a_after = {
+            let chain = restarted.chain.try_lock().expect("chain lock a2");
+            (chain.tip_height.0, *chain.tip_hash.as_bytes())
+        };
+        assert_eq!(
+            tip_a_after, tip_a_before,
+            "chain tip is unchanged by mempool restart state (consensus-neutral)"
+        );
+        assert_eq!(
+            tip_a_after, tip_b,
+            "chain validity is identical regardless of mempool history (deterministic)"
+        );
+        assert_eq!(
+            restarted.mempool.try_lock().expect("mempool lock a2").len(),
+            0,
+            "restart is deterministic: mempool is always empty"
+        );
+        let reopened = DomStore::open(&dir_a).expect("store reopen a");
+        assert!(
+            load_mempool_snapshot(&reopened)
+                .expect("load mempool a")
+                .is_none(),
+            "no persisted mempool is trusted or loaded on reopen"
+        );
+
+        fs::remove_dir_all(&dir_a).expect("cleanup a");
+        fs::remove_dir_all(&dir_b).expect("cleanup b");
+    }
+
     #[test]
     fn unclamped_persisted_noise_key_is_rejected() {
         let raw = [0xff; 32];
