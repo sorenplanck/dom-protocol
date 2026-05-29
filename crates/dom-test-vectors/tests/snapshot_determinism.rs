@@ -78,7 +78,8 @@ fn snapshot_includes_phase_b_pmmr_root_for_n16() {
     // changes, either the snapshot bin dropped a section or the
     // PMMR layout drifted.
     assert!(
-        output.contains("n=16 root=70660b13b900c86b443a72b7d5f29519de53350b7bd02484ee85bebaab414094"),
+        output
+            .contains("n=16 root=70660b13b900c86b443a72b7d5f29519de53350b7bd02484ee85bebaab414094"),
         "snapshot missing pinned n=16 PMMR root — RFC-0004 drift?\n{output}"
     );
 }

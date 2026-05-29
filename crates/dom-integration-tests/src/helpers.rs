@@ -183,7 +183,17 @@ pub async fn mine_blocks(node: &Arc<DomNode>, count: u64) -> Result<(), String> 
 /// manual mining via `mine_blocks()` instead — the helper now bootstraps genesis
 /// automatically on first call.
 pub fn test_config(name: &str, port: u16, _mine: bool) -> NodeConfig {
-    let data_dir = format!("/tmp/dom-test-{}", name);
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let data_dir = format!(
+        "/tmp/dom-test-{}-{}-{}-{}",
+        name,
+        std::process::id(),
+        port,
+        unique
+    );
     NodeConfig {
         network: dom_config::Network::Regtest,
         data_dir,

@@ -255,6 +255,23 @@ fn valid_reorg_block(
     }
 }
 
+fn valid_coinbase_only_block(
+    prev_hash: Hash256,
+    height: u64,
+    total_difficulty: u64,
+    nonce_seed: u64,
+    coinbase_seed: u8,
+) -> Block {
+    valid_reorg_block(
+        prev_hash,
+        height,
+        total_difficulty,
+        nonce_seed,
+        coinbase_seed,
+        vec![],
+    )
+}
+
 fn block_state_changes(block: &Block) -> (Vec<UtxoBytes>, Vec<SpentCommitment>) {
     let mut new_utxos = vec![(
         *block.coinbase.output.commitment.as_bytes(),
@@ -460,6 +477,58 @@ fn check_reorg_depth_boundary() {
     check_reorg_depth(dom_core::MAX_REORG_DEPTH_POLICY + 1)
         .expect_err("over-limit must be rejected");
     check_reorg_depth(0).expect("zero (no disconnect) is always accepted");
+}
+
+#[test]
+fn promote_heavier_known_tip_emits_block_level_reorg_metadata() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = DomStore::open(dir.path()).expect("open");
+
+    let shared = valid_coinbase_only_block(Hash256::ZERO, 1, 1, 1, 10);
+    let shared_hash = commit_canonical_block(&store, &shared);
+    let old_2 = valid_coinbase_only_block(shared_hash, 2, 2, 2, 11);
+    let old_2_hash = commit_canonical_block(&store, &old_2);
+    let old_3 = valid_coinbase_only_block(old_2_hash, 3, 3, 3, 12);
+    let old_3_hash = commit_canonical_block(&store, &old_3);
+
+    let alt_2 = valid_coinbase_only_block(shared_hash, 2, 2, 20, 30);
+    let alt_2_hash = store_side_block(&store, &alt_2);
+    let alt_3 = valid_coinbase_only_block(alt_2_hash, 3, 3, 21, 33);
+    let alt_3_hash = store_side_block(&store, &alt_3);
+    let alt_4 = valid_coinbase_only_block(alt_3_hash, 4, 4, 22, 34);
+    let alt_4_hash = store_side_block(&store, &alt_4);
+
+    let mut chain = open_chain(dir.path());
+    let reorg = chain
+        .promote_heavier_known_tip(alt_4_hash)
+        .expect("reorg promotion");
+
+    assert_eq!(reorg.common_ancestor_height, 1);
+    assert!(reorg.disconnected_txs.is_empty());
+    assert!(reorg.connected_txs.is_empty());
+    assert_eq!(
+        reorg
+            .disconnected_blocks
+            .iter()
+            .map(|b| (b.block_height, b.block_hash, b.transactions.len()))
+            .collect::<Vec<_>>(),
+        vec![
+            (3, *old_3_hash.as_bytes(), 0),
+            (2, *old_2_hash.as_bytes(), 0)
+        ]
+    );
+    assert_eq!(
+        reorg
+            .connected_blocks
+            .iter()
+            .map(|b| (b.block_height, b.block_hash, b.transactions.len()))
+            .collect::<Vec<_>>(),
+        vec![
+            (2, *alt_2_hash.as_bytes(), 0),
+            (3, *alt_3_hash.as_bytes(), 0),
+            (4, *alt_4_hash.as_bytes(), 0)
+        ]
+    );
 }
 
 #[test]
