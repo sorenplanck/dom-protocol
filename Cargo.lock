@@ -1301,7 +1301,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dom-test-runner",
- "tempfile",
 ]
 
 [[package]]
@@ -1567,7 +1566,6 @@ name = "dom-test-runner"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "tempfile",
 ]
 
 [[package]]
