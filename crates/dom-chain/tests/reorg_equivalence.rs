@@ -29,7 +29,7 @@ use dom_consensus::{
 };
 use dom_core::{
     Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    PROTOCOL_VERSION, TAG_KERNEL_MSG_COINBASE,
+    PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::bulletproof;
 use dom_crypto::hash::blake2b_256_tagged;
@@ -582,7 +582,7 @@ fn promote_heavier_known_tip_rewrites_canonical_state_and_survives_restart() {
     let dir = TempDir::new().expect("tempdir");
     let store = DomStore::open(dir.path()).expect("open");
 
-    let shared = valid_reorg_block(Hash256::ZERO, 1, 1, 1, 10, vec![]);
+    let shared = synthetic_block(Hash256::ZERO, 1, 1, 1, 10, vec![]);
     let shared_hash = commit_canonical_block(&store, &shared);
 
     let shared_coinbase_value = dom_core::block_reward(BlockHeight(1)).noms();
@@ -593,12 +593,12 @@ fn promote_heavier_known_tip_rewrites_canonical_state_and_survives_restart() {
         shared_coinbase_value - 1,
         21,
     );
-    let old_2 = valid_reorg_block(shared_hash, 2, 2, 2, 11, vec![old_spend.clone()]);
+    let old_2 = synthetic_block(shared_hash, 2, 2, 2, 11, vec![old_spend.clone()]);
     let old_2_hash = commit_canonical_block(&store, &old_2);
-    let old_3 = valid_reorg_block(old_2_hash, 3, 3, 3, 12, vec![]);
+    let old_3 = synthetic_block(old_2_hash, 3, 3, 3, 12, vec![]);
     let old_3_hash = commit_canonical_block(&store, &old_3);
 
-    let alt_2 = valid_reorg_block(shared_hash, 2, 2, 20, 30, vec![]);
+    let alt_2 = synthetic_block(shared_hash, 2, 2, 20, 30, vec![]);
     let alt_2_hash = store_side_block(&store, &alt_2);
     let alt_spend = valid_spend_tx(
         shared_coinbase_value,
@@ -606,9 +606,9 @@ fn promote_heavier_known_tip_rewrites_canonical_state_and_survives_restart() {
         shared_coinbase_value - 2,
         32,
     );
-    let alt_3 = valid_reorg_block(alt_2_hash, 3, 3, 21, 33, vec![alt_spend.clone()]);
+    let alt_3 = synthetic_block(alt_2_hash, 3, 3, 21, 33, vec![alt_spend.clone()]);
     let alt_3_hash = store_side_block(&store, &alt_3);
-    let alt_4 = valid_reorg_block(alt_3_hash, 4, 4, 22, 34, vec![]);
+    let alt_4 = synthetic_block(alt_3_hash, 4, 4, 22, 34, vec![]);
     let alt_4_hash = store_side_block(&store, &alt_4);
 
     let mut chain = open_chain(dir.path());

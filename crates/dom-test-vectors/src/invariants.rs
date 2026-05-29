@@ -231,14 +231,7 @@ mod tests {
         let fee: u64 = 1_000;
         let canonical = block_reward(h).noms() + fee;
 
-        for delta in [
-            i64::from(-1_000_000_i32),
-            -1_000,
-            -1,
-            1,
-            1_000,
-            1_000_000,
-        ] {
+        for delta in [i64::from(-1_000_000_i32), -1_000, -1, 1, 1_000, 1_000_000] {
             let deviated = if delta < 0 {
                 canonical.saturating_sub((-delta) as u64)
             } else {

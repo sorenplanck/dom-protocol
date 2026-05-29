@@ -15,8 +15,8 @@ use std::process::ExitCode;
 mod affected;
 mod env;
 mod profiles;
-mod report;
 mod repo;
+mod report;
 mod runner;
 
 fn main() -> ExitCode {

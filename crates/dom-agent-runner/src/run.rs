@@ -20,8 +20,8 @@ use std::time::SystemTime;
 use crate::cli::RunOptions;
 use crate::git;
 use crate::prompt::{self, PromptSource};
-use crate::report;
 use crate::repo::find_dom_repo_root;
+use crate::report;
 
 type R<T> = Result<T, Box<dyn Error>>;
 
@@ -79,10 +79,7 @@ pub fn cmd_run(opts: RunOptions) -> R<()> {
 
     // --- Collect changes after Codex -------------------------------------
     let changed_after = git::changed_files(&root.path).unwrap_or_default();
-    fs::write(
-        run_dir.join("changed-files.txt"),
-        changed_after.join("\n"),
-    )?;
+    fs::write(run_dir.join("changed-files.txt"), changed_after.join("\n"))?;
 
     // --- Run tests --------------------------------------------------------
     let profile = &opts.profile;
@@ -156,11 +153,7 @@ pub fn cmd_run(opts: RunOptions) -> R<()> {
     }
     let o = git::run(&root.path, &add_args)?;
     if !o.status.success() {
-        return Err(format!(
-            "git add failed: {}",
-            String::from_utf8_lossy(&o.stderr)
-        )
-        .into());
+        return Err(format!("git add failed: {}", String::from_utf8_lossy(&o.stderr)).into());
     }
 
     let commit_msg = compose_commit_message(&loaded.text);
@@ -336,7 +329,11 @@ fn run_codex(repo: &Path, prompt_text: &str, run_dir: &Path) -> R<PathBuf> {
     let log_path = run_dir.join("codex-output.log");
     let mut log = fs::File::create(&log_path)?;
     use std::io::Write;
-    writeln!(log, "[dom-agent-runner] launching codex from: {}", repo.display())?;
+    writeln!(
+        log,
+        "[dom-agent-runner] launching codex from: {}",
+        repo.display()
+    )?;
 
     // Pass the prompt via stdin to support multiline reliably across shells.
     let mut child = Command::new("codex")
@@ -365,12 +362,7 @@ fn run_codex(repo: &Path, prompt_text: &str, run_dir: &Path) -> R<PathBuf> {
     Ok(log_path)
 }
 
-fn run_test_runner(
-    exe: &Path,
-    repo: &Path,
-    profile: &str,
-    log: &mut fs::File,
-) -> R<bool> {
+fn run_test_runner(exe: &Path, repo: &Path, profile: &str, log: &mut fs::File) -> R<bool> {
     use std::io::Write;
     writeln!(log, "[dom-agent-runner] dom-test-runner {profile}")?;
 
@@ -397,11 +389,7 @@ fn run_test_runner(
 /// Filter the changed-files list to remove paths we never want to stage
 /// (Cargo.lock is conservative; only re-include if absolutely necessary).
 pub fn filter_safe_files_to_stage(files: &[String]) -> Vec<String> {
-    files
-        .iter()
-        .filter(|f| !is_lockfile(f))
-        .cloned()
-        .collect()
+    files.iter().filter(|f| !is_lockfile(f)).cloned().collect()
 }
 
 fn is_lockfile(path: &str) -> bool {
@@ -451,7 +439,10 @@ fn write_final_report(
         "remote HEAD:   {}\n",
         remote_head.unwrap_or("(not pushed / not verified)")
     ));
-    s.push_str(&format!("primary tests: {}\n", if primary_ok { "PASS" } else { "FAIL" }));
+    s.push_str(&format!(
+        "primary tests: {}\n",
+        if primary_ok { "PASS" } else { "FAIL" }
+    ));
     s.push_str(&format!(
         "pre-push:      {}\n",
         if pre_push_ok { "PASS" } else { "FAIL" }
