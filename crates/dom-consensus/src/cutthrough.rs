@@ -21,6 +21,13 @@ use std::collections::HashSet;
 ///
 /// Returns (remaining_inputs, remaining_outputs) after removing matched pairs.
 /// Kernels from all transactions must be preserved by the caller.
+///
+/// SCOPE (RFC-0012 §4, Policy B): this is an *aggregation* utility for relay /
+/// transaction merging. It is **not** part of the consensus block-validation
+/// path. DOM forbids same-block spends in published blocks: `validate_block`
+/// requires a block to already be in canonical cut-through form (no commitment
+/// appearing as both a block input and output) and rejects it otherwise —
+/// consensus never silently rewrites a submitted block via this function.
 pub fn apply_cut_through(
     transactions: &[Transaction],
 ) -> Result<(Vec<TransactionInput>, Vec<TransactionOutput>), DomError> {
