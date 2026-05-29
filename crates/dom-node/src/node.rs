@@ -1086,6 +1086,7 @@ impl dom_rpc::NodeHandle for DomNode {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_inbound(
     mut stream: tokio::net::TcpStream,
     addr: std::net::SocketAddr,
@@ -3331,7 +3332,6 @@ async fn message_loop(
                                                                 &txs_for_scan,
                                                                 height,
                                                                 Some(relay_block_hash),
-                                                                Some(block_hash),
                                                             )
                                                         {
                                                             tracing::warn!(

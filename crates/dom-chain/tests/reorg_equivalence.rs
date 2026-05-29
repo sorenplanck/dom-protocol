@@ -29,7 +29,7 @@ use dom_consensus::{
 };
 use dom_core::{
     Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    PROTOCOL_VERSION, TAG_KERNEL_MSG_COINBASE,
+    PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::bulletproof;
 use dom_crypto::hash::blake2b_256_tagged;
@@ -251,39 +251,7 @@ fn signed_coinbase(height: BlockHeight, seed: u8) -> CoinbaseTransaction {
     }
 }
 
-fn valid_coinbase_only_block(
-    prev_hash: Hash256,
-    height: u64,
-    total_difficulty: u64,
-    nonce_seed: u64,
-    coinbase_seed: u8,
-) -> Block {
-    let coinbase = signed_coinbase(BlockHeight(height), coinbase_seed);
-    let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &[]).expect("pmmr roots");
-    Block {
-        header: BlockHeader {
-            version: PROTOCOL_VERSION,
-            height: BlockHeight(height),
-            prev_hash,
-            timestamp: Timestamp(1_700_200_000 + height),
-            output_root,
-            kernel_root,
-            rangeproof_root,
-            total_kernel_offset: [0u8; 32],
-            target: CompactTarget(0),
-            total_difficulty: U256::from(total_difficulty),
-            pow: ProofOfWork {
-                nonce: nonce_seed,
-                randomx_hash: Hash256::ZERO,
-            },
-        },
-        coinbase,
-        transactions: vec![],
-    }
-}
-
-fn synthetic_block(
+fn valid_reorg_block(
     prev_hash: Hash256,
     height: u64,
     total_difficulty: u64,
@@ -325,14 +293,29 @@ fn valid_coinbase_only_block(
     nonce_seed: u64,
     coinbase_seed: u8,
 ) -> Block {
-    valid_reorg_block(
-        prev_hash,
-        height,
-        total_difficulty,
-        nonce_seed,
-        coinbase_seed,
-        vec![],
-    )
+    let coinbase = signed_coinbase(BlockHeight(height), coinbase_seed);
+    let (output_root, kernel_root, rangeproof_root) =
+        compute_block_pmmr_roots(&coinbase, &[]).expect("pmmr roots");
+    Block {
+        header: BlockHeader {
+            version: PROTOCOL_VERSION,
+            height: BlockHeight(height),
+            prev_hash,
+            timestamp: Timestamp(1_700_200_000 + height),
+            output_root,
+            kernel_root,
+            rangeproof_root,
+            total_kernel_offset: [0u8; 32],
+            target: CompactTarget(0),
+            total_difficulty: U256::from(total_difficulty),
+            pow: ProofOfWork {
+                nonce: nonce_seed,
+                randomx_hash: Hash256::ZERO,
+            },
+        },
+        coinbase,
+        transactions: vec![],
+    }
 }
 
 fn block_state_changes(block: &Block) -> (Vec<UtxoBytes>, Vec<SpentCommitment>) {
