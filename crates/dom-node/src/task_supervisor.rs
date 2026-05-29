@@ -317,11 +317,132 @@ impl NodeTaskSupervisor {
             let _ = handle.await;
         }
     }
+
+    /// Canonical shutdown phase for a task class (lower phases stop first):
+    ///
+    /// * 1 — stop accepting inbound work: `Listener`, `FutureQueue`
+    /// * 2 — stop the miner: `Miner`
+    /// * 3 — stop relay / connectors: `Connector`, `DandelionStem`, `Relay`
+    /// * (4 — caller's persistence-critical drain runs here)
+    /// * 5 — stop RPC / UI-facing last: `Rpc`
+    pub fn shutdown_phase(kind: TaskKind) -> u8 {
+        match kind {
+            TaskKind::Listener | TaskKind::FutureQueue => 1,
+            TaskKind::Miner => 2,
+            TaskKind::Connector | TaskKind::DandelionStem | TaskKind::Relay(_) => 3,
+            TaskKind::Rpc => 5,
+        }
+    }
+
+    /// Coordinated, ordered shutdown of every supervised task.
+    ///
+    /// Trips the shutdown signal (so every cooperative loop begins winding down),
+    /// then *confirms* tasks stopped in canonical phase order — inbound, miner,
+    /// relay/connectors — runs the caller's `persistence_drain` to flush
+    /// persistence-critical work, and finally stops RPC and joins any stragglers.
+    /// Each task is awaited up to `grace`; one that does not observe cancellation
+    /// in time (e.g. parked in blocking I/O) is force-aborted, so no detached
+    /// task survives. The registry is empty when this returns.
+    ///
+    /// This only acts when called: merely constructing or holding the supervisor
+    /// never shuts the node down, so `DomNode::run()` stays long-lived.
+    pub async fn shutdown_ordered<F>(
+        &self,
+        grace: std::time::Duration,
+        persistence_drain: F,
+    ) -> ShutdownReport
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        self.request_shutdown().await;
+        let mut report = ShutdownReport::default();
+        // Phase 1: stop accepting inbound work.
+        self.join_phase(1, grace, &mut report).await;
+        // Phase 2: stop the miner.
+        self.join_phase(2, grace, &mut report).await;
+        // Phase 3: stop relay workers and connectors.
+        self.join_phase(3, grace, &mut report).await;
+        // Phase 4: drain / flush persistence-critical work, now that nothing
+        // is producing new chain mutations.
+        persistence_drain.await;
+        report.persistence_drained = true;
+        // Phase 5: stop RPC / UI-facing tasks.
+        self.join_phase(5, grace, &mut report).await;
+        // Defensive: join anything not covered above (no detached tasks remain).
+        self.join_remaining(grace, &mut report).await;
+        report
+    }
+
+    /// Remove and join every registered task whose [`shutdown_phase`] equals
+    /// `phase`, in id order, recording the outcome in `report`.
+    ///
+    /// [`shutdown_phase`]: Self::shutdown_phase
+    async fn join_phase(&self, phase: u8, grace: std::time::Duration, report: &mut ShutdownReport) {
+        let handles = {
+            let mut g = self.inner.lock().await;
+            let ids: Vec<TaskId> = g
+                .handles
+                .iter()
+                .filter(|(_, (kind, _))| Self::shutdown_phase(*kind) == phase)
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| g.handles.remove(&id))
+                .collect::<Vec<_>>()
+        };
+        self.drain_and_join(handles, grace, report).await;
+    }
+
+    /// Remove and join all still-registered tasks (defensive final sweep).
+    async fn join_remaining(&self, grace: std::time::Duration, report: &mut ShutdownReport) {
+        let handles = {
+            let mut g = self.inner.lock().await;
+            std::mem::take(&mut g.handles)
+                .into_values()
+                .collect::<Vec<_>>()
+        };
+        self.drain_and_join(handles, grace, report).await;
+    }
+
+    /// Await each `(kind, handle)` up to `grace`; force-abort on timeout so the
+    /// task is cancelled rather than detached. The inner registry lock is never
+    /// held across these awaits (handles are extracted first).
+    async fn drain_and_join(
+        &self,
+        handles: Vec<(TaskKind, JoinHandle<()>)>,
+        grace: std::time::Duration,
+        report: &mut ShutdownReport,
+    ) {
+        for (kind, handle) in handles {
+            let abort = handle.abort_handle();
+            match tokio::time::timeout(grace, handle).await {
+                Ok(_) => report.stopped_order.push(kind),
+                Err(_) => {
+                    abort.abort();
+                    report.stopped_order.push(kind);
+                    report.aborted.push(kind);
+                }
+            }
+        }
+    }
+}
+
+/// Outcome of [`NodeTaskSupervisor::shutdown_ordered`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ShutdownReport {
+    /// Task classes stopped, in the order the ordered shutdown confirmed them.
+    pub stopped_order: Vec<TaskKind>,
+    /// Task classes that had to be force-aborted (did not exit within `grace`).
+    pub aborted: Vec<TaskKind>,
+    /// Whether the persistence-critical drain ran.
+    pub persistence_drained: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::oneshot;
 
@@ -484,5 +605,235 @@ mod tests {
                 "join_all must drain every handle — no leak across cycles"
             );
         }
+    }
+
+    // ---- TASK 20: coordinated shutdown / cancellation ----
+
+    /// A task that runs until shutdown is observed, recording that it saw it.
+    async fn observing_worker(
+        token: ShutdownToken,
+        observed: Arc<AtomicBool>,
+    ) -> Result<(), String> {
+        token.wait().await;
+        observed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_ordered_stops_tasks_in_canonical_phase_order() {
+        let sup = NodeTaskSupervisor::new();
+        // Register in a deliberately non-canonical order.
+        for kind in [
+            TaskKind::Rpc,
+            TaskKind::Listener,
+            TaskKind::Miner,
+            TaskKind::Connector,
+            TaskKind::DandelionStem,
+            TaskKind::FutureQueue,
+        ] {
+            sup.spawn(kind, until_shutdown(sup.shutdown_token())).await;
+        }
+        sup.spawn_relay(until_shutdown(sup.shutdown_token())).await;
+
+        let drain_sup = sup.clone();
+        let report = sup
+            .shutdown_ordered(Duration::from_secs(5), async move {
+                // Persistence drain runs after relay/connectors stop, before RPC.
+                assert_eq!(
+                    drain_sup.relay_count().await,
+                    0,
+                    "relays stopped before drain"
+                );
+                assert!(!drain_sup.contains(TaskKind::Connector).await);
+                assert!(!drain_sup.contains(TaskKind::DandelionStem).await);
+                assert!(
+                    drain_sup.contains(TaskKind::Rpc).await,
+                    "RPC still up during persistence drain"
+                );
+            })
+            .await;
+
+        assert!(report.persistence_drained);
+        assert!(report.aborted.is_empty(), "cooperative tasks need no abort");
+        let phases: Vec<u8> = report
+            .stopped_order
+            .iter()
+            .copied()
+            .map(NodeTaskSupervisor::shutdown_phase)
+            .collect();
+        let mut sorted = phases.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            phases, sorted,
+            "tasks confirmed stopped in canonical phase order: {:?}",
+            report.stopped_order
+        );
+        assert!(sup.is_empty().await, "no detached tasks remain");
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_ibd_cancels_inbound_tasks() {
+        let sup = NodeTaskSupervisor::new();
+        let (l, f, c) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        sup.spawn(
+            TaskKind::Listener,
+            observing_worker(sup.shutdown_token(), l.clone()),
+        )
+        .await;
+        sup.spawn(
+            TaskKind::FutureQueue,
+            observing_worker(sup.shutdown_token(), f.clone()),
+        )
+        .await;
+        sup.spawn(
+            TaskKind::Connector,
+            observing_worker(sup.shutdown_token(), c.clone()),
+        )
+        .await;
+        let report = sup.shutdown_ordered(Duration::from_secs(5), async {}).await;
+        assert!(
+            l.load(Ordering::SeqCst) && f.load(Ordering::SeqCst) && c.load(Ordering::SeqCst),
+            "inbound/IBD tasks observed cancellation"
+        );
+        assert!(report.aborted.is_empty());
+        assert!(sup.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_relay_cancels_relay_workers() {
+        let sup = NodeTaskSupervisor::new();
+        let flags: Vec<Arc<AtomicBool>> =
+            (0..3).map(|_| Arc::new(AtomicBool::new(false))).collect();
+        for fl in &flags {
+            sup.spawn_relay(observing_worker(sup.shutdown_token(), fl.clone()))
+                .await;
+        }
+        assert_eq!(sup.relay_count().await, 3);
+        sup.shutdown_ordered(Duration::from_secs(5), async {}).await;
+        assert!(
+            flags.iter().all(|f| f.load(Ordering::SeqCst)),
+            "relay workers observed cancellation"
+        );
+        assert_eq!(sup.relay_count().await, 0);
+        assert!(sup.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_mining_cancels_miner() {
+        let sup = NodeTaskSupervisor::new();
+        let m = Arc::new(AtomicBool::new(false));
+        sup.spawn(
+            TaskKind::Miner,
+            observing_worker(sup.shutdown_token(), m.clone()),
+        )
+        .await;
+        let report = sup.shutdown_ordered(Duration::from_secs(5), async {}).await;
+        assert!(m.load(Ordering::SeqCst), "miner observed cancellation");
+        assert!(report.stopped_order.contains(&TaskKind::Miner));
+        assert!(sup.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_reorg_flushes_persistence_before_rpc() {
+        // The reorg / chain-state flush is the persistence-critical drain step:
+        // it must complete while RPC is still up (before the RPC phase) so no
+        // UI-facing read races the flush.
+        let sup = NodeTaskSupervisor::new();
+        sup.spawn(TaskKind::Rpc, until_shutdown(sup.shutdown_token()))
+            .await;
+        let flushed = Arc::new(AtomicBool::new(false));
+        let flushed_c = flushed.clone();
+        let drain_sup = sup.clone();
+        let report = sup
+            .shutdown_ordered(Duration::from_secs(5), async move {
+                assert!(
+                    drain_sup.contains(TaskKind::Rpc).await,
+                    "RPC still registered during persistence/reorg flush"
+                );
+                flushed_c.store(true, Ordering::SeqCst);
+            })
+            .await;
+        assert!(flushed.load(Ordering::SeqCst));
+        assert!(report.persistence_drained);
+        assert!(report.stopped_order.contains(&TaskKind::Rpc));
+        assert!(sup.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn shutdown_aborts_uncancellable_blocking_task() {
+        let sup = NodeTaskSupervisor::new();
+        // Models a task parked in blocking I/O that ignores the shutdown flag.
+        sup.spawn(TaskKind::Listener, async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let report = sup
+            .shutdown_ordered(Duration::from_millis(100), async {})
+            .await;
+        assert!(
+            report.aborted.contains(&TaskKind::Listener),
+            "uncancellable task force-aborted within grace"
+        );
+        assert!(sup.is_empty().await, "no detached task remains after abort");
+    }
+
+    #[tokio::test]
+    async fn restart_after_shutdown_starts_clean() {
+        let old = NodeTaskSupervisor::new();
+        old.spawn(TaskKind::Listener, until_shutdown(old.shutdown_token()))
+            .await;
+        old.shutdown_ordered(Duration::from_secs(5), async {}).await;
+        assert!(old.is_shutdown());
+        assert!(old.is_empty().await);
+
+        // Restart: a fresh supervisor (as a restarted process constructs) is clean.
+        let fresh = NodeTaskSupervisor::new();
+        assert!(!fresh.is_shutdown());
+        assert_eq!(fresh.status().await, SupervisorStatus::Running);
+        let obs = Arc::new(AtomicBool::new(false));
+        fresh
+            .spawn(
+                TaskKind::Miner,
+                observing_worker(fresh.shutdown_token(), obs.clone()),
+            )
+            .await;
+        assert!(fresh.contains(TaskKind::Miner).await);
+        fresh
+            .shutdown_ordered(Duration::from_secs(5), async {})
+            .await;
+        assert!(obs.load(Ordering::SeqCst));
+        assert!(fresh.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn no_detached_tasks_remain_after_shutdown() {
+        let sup = NodeTaskSupervisor::new();
+        for kind in [
+            TaskKind::Listener,
+            TaskKind::Miner,
+            TaskKind::Connector,
+            TaskKind::Rpc,
+            TaskKind::FutureQueue,
+            TaskKind::DandelionStem,
+        ] {
+            sup.spawn(kind, until_shutdown(sup.shutdown_token())).await;
+        }
+        sup.spawn_relay(until_shutdown(sup.shutdown_token())).await;
+        sup.spawn_relay(until_shutdown(sup.shutdown_token())).await;
+        let report = sup.shutdown_ordered(Duration::from_secs(5), async {}).await;
+        assert!(sup.is_empty().await, "registry empty: no detached tasks");
+        assert_eq!(sup.len().await, 0);
+        assert_eq!(sup.relay_count().await, 0);
+        assert_eq!(
+            report.stopped_order.len(),
+            8,
+            "every spawned task accounted for in the stop order"
+        );
     }
 }
