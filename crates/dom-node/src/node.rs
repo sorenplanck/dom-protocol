@@ -814,10 +814,11 @@ impl DomNode {
                 }
             }
 
-            // Check every 30 seconds
             tokio::select! {
                 _ = shutdown.wait() => return Ok(()),
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {}
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(
+                    dom_wire::manager::OUTBOUND_RECONNECT_POLICY.initial_delay_secs,
+                )) => {}
             }
         }
     }
