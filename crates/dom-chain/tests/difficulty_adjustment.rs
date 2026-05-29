@@ -4,12 +4,15 @@ use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
 use dom_core::{
-    BlockHeight, Hash256, Timestamp, GENESIS_HASH_REGTEST, GENESIS_HASH_TESTNET,
-    GENESIS_TARGET_COMPACT, KERNEL_FEAT_COINBASE, NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET,
+    BlockHeight, Hash256, Timestamp, GENESIS_HASH_MAINNET, GENESIS_HASH_REGTEST,
+    GENESIS_HASH_TESTNET, GENESIS_TARGET_COMPACT, KERNEL_FEAT_COINBASE, NETWORK_MAGIC_MAINNET,
+    NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET,
 };
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
-use dom_pow::CompactTarget;
-use dom_serialization::DomSerialize;
+use dom_pow::{
+    compute_expected_target, pow_params_for_network, CompactTarget, REGTEST_TARGET_COMPACT,
+};
+use dom_serialization::{DomDeserialize, DomSerialize};
 use primitive_types::U256;
 use tempfile::TempDir;
 
@@ -152,12 +155,167 @@ fn regtest_keeps_dev_target_while_testnet_retargets() {
 
     let reg_next = reg_chain.next_block_target().expect("regtest target");
     let test_next = test_chain.next_block_target().expect("testnet target");
+    let regtest_target = CompactTarget(REGTEST_TARGET_COMPACT)
+        .to_target()
+        .expect("regtest compact target");
     assert_eq!(
-        reg_next.next_target,
-        dom_core::REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION
+        reg_next.next_target, regtest_target,
+        "regtest keeps its fixed compact-stable easy target"
     );
     assert_ne!(
-        test_next.next_target,
-        dom_core::REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION
+        test_next.next_target, regtest_target,
+        "testnet must not use the regtest fixed target"
+    );
+}
+
+#[test]
+fn public_next_block_target_matches_canonical_asert_helper() {
+    let dir = TempDir::new().unwrap();
+    let chain = populate_history(&dir, GENESIS_HASH_TESTNET, NETWORK_MAGIC_TESTNET, 60, 8);
+    let tip_bytes = chain
+        .store
+        .get_block_header(chain.tip_hash.as_bytes())
+        .expect("tip lookup")
+        .expect("tip header");
+    let tip = BlockHeader::from_bytes(&tip_bytes).expect("tip decode");
+    let params = pow_params_for_network(NETWORK_MAGIC_TESTNET);
+    let child_height = tip.height.checked_next().expect("next height");
+    let child_timestamp = tip
+        .timestamp
+        .checked_add_secs(params.target_spacing)
+        .expect("next timestamp");
+
+    let preview = chain.next_block_target().expect("next block target");
+    let canonical = compute_expected_target(NETWORK_MAGIC_TESTNET, child_timestamp, child_height)
+        .expect("canonical target");
+
+    assert_eq!(preview.next_target, canonical);
+}
+
+#[test]
+fn public_networks_do_not_share_regtest_target() {
+    let regtest_target = compute_expected_target(
+        NETWORK_MAGIC_REGTEST,
+        Timestamp(dom_core::GENESIS_TIMESTAMP_TESTNET + dom_core::TARGET_SPACING),
+        BlockHeight(1),
+    )
+    .expect("regtest target");
+    let mainnet_target = compute_expected_target(
+        NETWORK_MAGIC_MAINNET,
+        Timestamp(dom_core::GENESIS_TIMESTAMP_PLACEHOLDER + dom_core::TARGET_SPACING),
+        BlockHeight(1),
+    )
+    .expect("mainnet target");
+    let testnet_target = compute_expected_target(
+        NETWORK_MAGIC_TESTNET,
+        Timestamp(dom_core::GENESIS_TIMESTAMP_TESTNET + dom_core::TARGET_SPACING),
+        BlockHeight(1),
+    )
+    .expect("testnet target");
+
+    assert_ne!(mainnet_target, regtest_target);
+    assert_ne!(testnet_target, regtest_target);
+}
+
+#[test]
+fn window_retarget_still_unreachable_from_mainnet_testnet() {
+    for (genesis_hash, network_magic) in [
+        (GENESIS_HASH_MAINNET, NETWORK_MAGIC_MAINNET),
+        (GENESIS_HASH_TESTNET, NETWORK_MAGIC_TESTNET),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let chain = populate_history(&dir, genesis_hash, network_magic, 1, 4);
+        let tip_bytes = chain
+            .store
+            .get_block_header(chain.tip_hash.as_bytes())
+            .expect("tip lookup")
+            .expect("tip header");
+        let tip = BlockHeader::from_bytes(&tip_bytes).expect("tip decode");
+        let params = pow_params_for_network(network_magic);
+        let child_height = tip.height.checked_next().expect("next height");
+        let child_timestamp = tip
+            .timestamp
+            .checked_add_secs(params.target_spacing)
+            .expect("next timestamp");
+
+        let preview = chain.next_block_target().expect("next block target");
+        let canonical = compute_expected_target(network_magic, child_timestamp, child_height)
+            .expect("canonical ASERT target");
+
+        assert_eq!(
+            preview.next_target, canonical,
+            "public next target must come from compute_expected_target"
+        );
+    }
+}
+
+#[test]
+fn first_public_block_after_genesis_uses_asert_anchor_target() {
+    for (network_magic, anchor_ts) in [
+        (
+            NETWORK_MAGIC_MAINNET,
+            dom_core::GENESIS_TIMESTAMP_PLACEHOLDER,
+        ),
+        (NETWORK_MAGIC_TESTNET, dom_core::GENESIS_TIMESTAMP_TESTNET),
+    ] {
+        let params = pow_params_for_network(network_magic);
+        let timestamp = Timestamp(anchor_ts + params.target_spacing);
+        let first_target =
+            compute_expected_target(network_magic, timestamp, BlockHeight(1)).expect("target");
+        let anchor_target = params.genesis_target().expect("anchor target");
+        let canonical_anchor = CompactTarget(dom_pow::target_to_compact(&anchor_target))
+            .to_target()
+            .expect("canonical anchor target");
+
+        assert_eq!(first_target, canonical_anchor);
+    }
+}
+
+#[test]
+fn public_validator_rejects_wrong_asert_target() {
+    let dir = TempDir::new().unwrap();
+    let chain = populate_history(&dir, GENESIS_HASH_TESTNET, NETWORK_MAGIC_TESTNET, 60, 1);
+    let parent = chain
+        .store
+        .get_block_header(chain.tip_hash.as_bytes())
+        .expect("parent lookup")
+        .expect("parent header");
+    let parent = BlockHeader::from_bytes(&parent).expect("parent decode");
+    let child_height = parent.height.checked_next().expect("next height");
+    let params = pow_params_for_network(NETWORK_MAGIC_TESTNET);
+    let child_timestamp = parent
+        .timestamp
+        .checked_add_secs(params.target_spacing)
+        .expect("next timestamp");
+    let expected = compute_expected_target(NETWORK_MAGIC_TESTNET, child_timestamp, child_height)
+        .expect("expected target");
+    let wrong_target = CompactTarget(GENESIS_TARGET_COMPACT)
+        .to_target()
+        .expect("wrong target");
+    assert_ne!(wrong_target, expected);
+
+    let header = BlockHeader {
+        version: dom_core::PROTOCOL_VERSION,
+        height: child_height,
+        prev_hash: chain.tip_hash,
+        timestamp: child_timestamp,
+        output_root: Hash256::ZERO,
+        kernel_root: Hash256::ZERO,
+        rangeproof_root: Hash256::ZERO,
+        total_kernel_offset: [0u8; 32],
+        target: CompactTarget(GENESIS_TARGET_COMPACT),
+        total_difficulty: U256::zero(),
+        pow: ProofOfWork {
+            nonce: 0,
+            randomx_hash: Hash256::ZERO,
+        },
+    };
+
+    let err = chain
+        .validate_header_only(&header, Timestamp(child_timestamp.0 + 1))
+        .expect_err("wrong ASERT target must be rejected");
+    assert!(
+        err.to_string().contains("target mismatch"),
+        "unexpected error: {err}"
     );
 }

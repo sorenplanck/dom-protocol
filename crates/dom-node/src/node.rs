@@ -2,6 +2,7 @@
 
 use crate::metrics::Metrics;
 use crate::miner::mining_loop;
+use crate::node_tasks::{NodeTaskSpawner, NodeTaskSupervisor};
 use crate::time_health::{check_clock_health, DriftStatus};
 use dom_chain::ChainState;
 use dom_config::NodeConfig;
@@ -390,9 +391,13 @@ impl DomNode {
             None
         };
 
-        // ── Accept loops + background tasks ─────────────────────────────
+        // ── Supervised accept loops + background tasks ──────────────────
         // Binds already succeeded; from here on only per-connection /
-        // per-request errors are possible, which are logged in-place.
+        // per-request errors are possible. Long-lived node services are
+        // critical tasks: if one exits, panics, or returns an error, run()
+        // returns that failure instead of silently degrading service.
+        let (supervisor, spawner) = NodeTaskSupervisor::new();
+
         let node_listener = self.clone();
         let listener_task = spawn_traced("p2p_listener", async move {
             node_listener.run_p2p_listener_on(p2p_listener).await;
@@ -403,6 +408,19 @@ impl DomNode {
         let connector_task = spawn_traced("peer_connector", async move {
             node_connector.run_peer_connector().await;
         });
+        let listener_spawner = spawner.clone();
+        spawner.spawn_critical("p2p-listener", async move {
+            node_listener
+                .run_p2p_listener_on(p2p_listener, listener_spawner)
+                .await
+        })?;
+
+        // Start outbound peer connector
+        let node_connector = self.clone();
+        let connector_spawner = spawner.clone();
+        spawner.spawn_critical("peer-connector", async move {
+            node_connector.run_peer_connector(connector_spawner).await
+        })?;
 
         // Start miner if enabled
         if self.config.mine {
@@ -574,7 +592,7 @@ impl DomNode {
                         }
                     }
                 }
-            });
+            })?;
         }
         // Dandelion++ Stem-timeout promoter.
         //
@@ -674,7 +692,7 @@ impl DomNode {
             "shutdown completed"
         );
 
-        Ok(())
+        supervisor.run_until_failure().await
     }
 
     /// Accept incoming P2P connections on an already-bound listener.
@@ -682,7 +700,11 @@ impl DomNode {
     /// Called by `run()` after `tokio::net::TcpListener::bind` has
     /// succeeded synchronously, so this loop never observes bind errors —
     /// only per-connection accept errors, which are logged and skipped.
-    async fn run_p2p_listener_on(&self, listener: tokio::net::TcpListener) {
+    async fn run_p2p_listener_on(
+        &self,
+        listener: tokio::net::TcpListener,
+        spawner: NodeTaskSpawner,
+    ) -> Result<(), DomError> {
         loop {
             match listener.accept().await {
                 Ok((stream, peer_addr)) => {
@@ -722,14 +744,8 @@ impl DomNode {
                         let peer_key = peer_addr.to_string();
                         mgr.remove_peer(&peer_key);
                         mgr.release_inbound_reservation(&peer_addr);
-                        drop(mgr);
-                        if let Err(e) =
-                            persist_peer_reputation_state(&chain_for_persist, &peers).await
-                        {
-                            warn!("Persisting peer reputation state failed: {e}");
-                        }
-                        refresh_peer_metrics(&peers, &metrics).await;
-                    });
+                        return Err(e);
+                    }
                 }
                 Err(e) => {
                     warn!("Accept error: {e}");
@@ -739,7 +755,7 @@ impl DomNode {
     }
 
     /// Connect to peers (DNS seeds + configured peers).
-    async fn run_peer_connector(&self) {
+    async fn run_peer_connector(&self, spawner: NodeTaskSpawner) -> Result<(), DomError> {
         let svc = NodeServices {
             mempool: self.mempool.clone(),
             dandelion: self.dandelion.clone(),
@@ -827,19 +843,8 @@ impl DomNode {
                         }
                         mgr.remove_peer(&cleanup_addr);
                         mgr.release_outbound_reservation(&cleanup_addr);
-                        drop(mgr);
-                        if let Err(e) =
-                            persist_peer_rotation_state(&chain_for_persist, &peers).await
-                        {
-                            warn!("Persisting peer rotation state failed: {e}");
-                        }
-                        if let Err(e) =
-                            persist_peer_reputation_state(&chain_for_persist, &peers).await
-                        {
-                            warn!("Persisting peer reputation state failed: {e}");
-                        }
-                        refresh_peer_metrics(&peers, &metrics).await;
-                    });
+                        return Err(e);
+                    }
                 }
             }
 
@@ -3424,7 +3429,7 @@ mod tests {
     use dom_crypto::schnorr_sign;
     use dom_mempool::Mempool;
     use dom_pow::{
-        expected_target_for_network, fast_pow_hash, genesis_anchor, hash_meets_target,
+        compute_expected_target, fast_pow_hash, genesis_anchor, hash_meets_target,
         target_to_compact, target_to_difficulty, CompactTarget,
     };
     use dom_serialization::DomSerialize;
@@ -3501,6 +3506,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mine_fast_header(
         seed_hash: [u8; 32],
         prev_hash: Hash256,
@@ -3513,7 +3519,7 @@ mod tests {
         total_difficulty: U256,
     ) -> BlockHeader {
         let target =
-            expected_target_for_network(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
+            compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
         let mut nonce = 0u64;
         loop {
             let mut header = BlockHeader {
@@ -3558,7 +3564,7 @@ mod tests {
             .checked_add_secs(height.0 * dom_core::TARGET_SPACING)
             .expect("timestamp");
         let target =
-            expected_target_for_network(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
+            compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
         let total_difficulty = parent_total_difficulty + U256::from(target_to_difficulty(&target));
         let header = mine_fast_header(
             seed_hash,

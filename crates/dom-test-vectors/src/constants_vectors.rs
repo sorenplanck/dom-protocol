@@ -13,8 +13,14 @@ mod tests {
     }
 
     #[test]
-    fn half_life_is_172800_seconds() {
-        assert_eq!(ASERT_HALF_LIFE, 172_800);
+    fn public_asert_half_life_is_288_blocks() {
+        assert_eq!(ASERT_HALF_LIFE_BLOCKS, 288);
+    }
+
+    #[test]
+    fn public_asert_half_life_seconds_is_34560() {
+        assert_eq!(ASERT_HALF_LIFE, 34_560);
+        assert_eq!(ASERT_HALF_LIFE, TARGET_SPACING * ASERT_HALF_LIFE_BLOCKS);
     }
 
     #[test]

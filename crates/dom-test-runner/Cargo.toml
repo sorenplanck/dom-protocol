@@ -16,4 +16,4 @@ path = "src/main.rs"
 anyhow.workspace = true
 
 [dev-dependencies]
-# Tests use only std as well.
+tempfile = { workspace = true }

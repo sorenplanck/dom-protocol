@@ -23,8 +23,8 @@ use dom_crypto::{
     schnorr_sign,
 };
 use dom_pow::{
-    expected_target_for_network, fast_pow_hash, genesis_anchor, hash_meets_target,
-    target_to_compact, target_to_difficulty, CompactTarget,
+    compute_expected_target, fast_pow_hash, genesis_anchor, hash_meets_target, target_to_compact,
+    target_to_difficulty, CompactTarget,
 };
 use dom_serialization::DomSerialize;
 use dom_store::DomStore;
@@ -72,6 +72,7 @@ fn build_coinbase(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mine_fast_header(
     seed_hash: [u8; 32],
     prev_hash: Hash256,
@@ -83,8 +84,7 @@ fn mine_fast_header(
     total_kernel_offset: [u8; 32],
     total_difficulty: U256,
 ) -> BlockHeader {
-    let target =
-        expected_target_for_network(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
+    let target = compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
     let mut nonce = 0u64;
     loop {
         let mut header = BlockHeader {
@@ -129,9 +129,16 @@ fn build_coinbase_only_block(
         .timestamp
         .checked_add_secs(height.0 * dom_core::TARGET_SPACING)
         .expect("timestamp");
-    let target =
-        expected_target_for_network(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
-    let total_difficulty = parent_total_difficulty + U256::from(target_to_difficulty(&target));
+    let target = compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
+    // The header stores the *compact-encoded* target, and consensus derives the
+    // block's difficulty from that compact-rounded value (see ChainState::connect_block).
+    // Compute total_difficulty from the same round-tripped target so the fixture's
+    // total_difficulty matches what consensus expects.
+    let canonical_target = CompactTarget(target_to_compact(&target))
+        .to_target()
+        .expect("compact target round-trip");
+    let total_difficulty =
+        parent_total_difficulty + U256::from(target_to_difficulty(&canonical_target));
     let header = mine_fast_header(
         seed_hash,
         prev_hash,

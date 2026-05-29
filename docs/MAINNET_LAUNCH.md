@@ -148,7 +148,8 @@
 
 - [ ] **Cryptographic Parameters**
   - [x] H_DOM_COMPRESSED (RFC9380 derived)
-  - [x] ASERT_HALF_LIFE = 172,800 seconds
+  - [x] ASERT_HALF_LIFE_BLOCKS = 288
+  - [x] ASERT_HALF_LIFE = 34,560 seconds
   - [x] ASERT_RADIX_BITS = 16
   - [ ] All domain tags frozen and documented
 

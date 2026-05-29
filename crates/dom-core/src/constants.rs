@@ -34,8 +34,11 @@ pub const MAX_DIFFICULTY_ADJUSTMENT_FACTOR_UP: u64 = 4;
 /// (numerically larger) in one adjustment step.
 pub const MAX_DIFFICULTY_ADJUSTMENT_FACTOR_DOWN: u64 = 4;
 
-/// [CONSENSUS] ASERT half-life in seconds (2 days).
-pub const ASERT_HALF_LIFE: u64 = 172_800;
+/// [CONSENSUS] ASERT half-life in target-spacing blocks.
+pub const ASERT_HALF_LIFE_BLOCKS: u64 = 288;
+
+/// [CONSENSUS] ASERT half-life in seconds.
+pub const ASERT_HALF_LIFE: u64 = TARGET_SPACING * ASERT_HALF_LIFE_BLOCKS;
 
 /// [CONSENSUS] Fixed-point radix bits for ASERT exponent arithmetic.
 pub const ASERT_RADIX_BITS: u32 = 16;
@@ -443,7 +446,7 @@ pub const fn is_placeholder_genesis_hash(hash: &[u8; 32]) -> bool {
         if hash[i] != 0 {
             return false;
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
     true
 }
@@ -547,9 +550,10 @@ pub const TAG_PMMR_NODE: &str = "DOM:pmmr-node:v1";
 const _: () = {
     assert!(TARGET_SPACING == 120, "TARGET_SPACING must be 120s");
     assert!(
-        ASERT_HALF_LIFE == 172_800,
-        "ASERT_HALF_LIFE must be 172800s"
+        ASERT_HALF_LIFE_BLOCKS == 288,
+        "ASERT_HALF_LIFE_BLOCKS must be 288"
     );
+    assert!(ASERT_HALF_LIFE == 34_560, "ASERT_HALF_LIFE must be 34560s");
     assert!(
         HALVING_INTERVAL == 330_000,
         "HALVING_INTERVAL must be 330000"

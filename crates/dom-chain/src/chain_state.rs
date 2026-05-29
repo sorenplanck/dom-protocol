@@ -10,8 +10,8 @@ use dom_consensus::block::{
 use dom_consensus::{derive_chain_id, validate_block, Block, Transaction, ValidationContext};
 use dom_core::{BlockHeight, DomError, Hash256, Timestamp};
 use dom_pow::{
-    difficulty_adjustment_window_blocks, genesis_anchor, randomx_seed_height, target_to_difficulty,
-    uses_dev_fixed_target, window_next_target, AsertAnchor, CompactTarget, NextTargetAdjustment,
+    compute_expected_target, genesis_anchor, pow_params_for_network, randomx_seed_height,
+    target_to_difficulty, AsertAnchor,
 };
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::utxo::UtxoEntry;
@@ -51,6 +51,21 @@ pub struct ChainState {
     /// the network-specific rule without re-deriving on every block —
     /// and without dragging `dom-config` into the consensus crate.
     pub coinbase_maturity: u64,
+}
+
+/// Deterministic expected-target metadata for the next or validated block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedTarget {
+    /// Previous canonical target expanded from the parent header.
+    pub previous_target: [u8; 32],
+    /// Canonical target expected for the child header.
+    pub next_target: [u8; 32],
+    /// Child height minus ASERT anchor height.
+    pub height_delta: u64,
+    /// Child timestamp minus ASERT anchor timestamp.
+    pub actual_elapsed_secs: u64,
+    /// Ideal elapsed time for `height_delta` under network ASERT params.
+    pub expected_elapsed_secs: u64,
 }
 
 /// Deterministic transaction delta produced by a canonical reorganization.
@@ -254,7 +269,7 @@ impl ChainState {
         validate_pow_for_network(self.network_magic, header, &seed)?;
 
         if let Some(parent_header) = parent.as_ref() {
-            self.validate_expected_target(header, parent_header, &[])?;
+            self.validate_expected_target(header, parent_header)?;
         }
 
         let parent_difficulty = parent
@@ -430,7 +445,7 @@ impl ChainState {
                 if let Some(parent_header) =
                     self.batch_parent_for_index(&decoded, idx, &prior_headers)?
                 {
-                    self.validate_expected_target(header, &parent_header, &prior_headers)?;
+                    self.validate_expected_target(header, &parent_header)?;
                 }
 
                 let parent_difficulty = if header.height == BlockHeight::GENESIS {
@@ -593,14 +608,10 @@ impl ChainState {
                 let seed = self.compute_randomx_seed(header.height.0)?;
                 validate_pow_for_network(self.network_magic, &header, &seed)?;
 
-                let prior_headers: Vec<BlockHeader> = decoded_prefix
-                    .iter()
-                    .map(|(prior_header, _, _)| prior_header.clone())
-                    .collect();
                 if let Some(parent_header) =
                     self.batch_parent_for_decoded_prefix(&header, &decoded_prefix)?
                 {
-                    self.validate_expected_target(&header, &parent_header, &prior_headers)?;
+                    self.validate_expected_target(&header, &parent_header)?;
                 }
 
                 let parent_difficulty = if header.height == BlockHeight::GENESIS {
@@ -676,7 +687,7 @@ impl ChainState {
                     DomError::Orphan(format!("parent {} not found", header.prev_hash))
                 })?;
             let parent = BlockHeader::from_bytes(&parent_bytes)?;
-            self.validate_expected_target(header, &parent, &[])?;
+            self.validate_expected_target(header, &parent)?;
         }
         let seed = self.compute_randomx_seed(header.height.0)?;
         validate_pow_for_network(self.network_magic, header, &seed)?;
@@ -691,18 +702,19 @@ impl ChainState {
         }
     }
 
-    pub fn next_block_target(&self) -> Result<NextTargetAdjustment, DomError> {
+    pub fn next_block_target(&self) -> Result<ExpectedTarget, DomError> {
         if self.tip_hash == Hash256::ZERO && self.tip_height == BlockHeight::GENESIS {
-            let genesis_target = CompactTarget(dom_core::GENESIS_TARGET_COMPACT)
-                .to_target()
-                .map_err(|e| DomError::Internal(format!("GENESIS_TARGET_COMPACT: {e}")))?;
-            return Ok(NextTargetAdjustment {
-                previous_target: genesis_target,
-                next_target: genesis_target,
-                window_blocks: 1,
-                actual_elapsed_secs: dom_core::TARGET_BLOCK_TIME_SECS,
-                bounded_elapsed_secs: dom_core::TARGET_BLOCK_TIME_SECS,
-                expected_elapsed_secs: dom_core::TARGET_BLOCK_TIME_SECS,
+            let target = compute_expected_target(
+                self.network_magic,
+                self.asert_anchor.timestamp,
+                BlockHeight::GENESIS,
+            )?;
+            return Ok(ExpectedTarget {
+                previous_target: target,
+                next_target: target,
+                height_delta: 0,
+                actual_elapsed_secs: 0,
+                expected_elapsed_secs: 0,
             });
         }
 
@@ -711,7 +723,16 @@ impl ChainState {
             .get_block_header(self.tip_hash.as_bytes())?
             .ok_or_else(|| DomError::Internal("chain tip header missing".into()))?;
         let tip = BlockHeader::from_bytes(&tip_bytes)?;
-        self.next_target_after_parent_from_prior(&tip, &[])
+        let params = pow_params_for_network(self.network_magic);
+        let next_height = tip
+            .height
+            .checked_next()
+            .ok_or_else(|| DomError::Invalid("block height overflow".into()))?;
+        let next_timestamp = tip
+            .timestamp
+            .checked_add_secs(params.target_spacing)
+            .ok_or_else(|| DomError::Invalid("next block timestamp overflow".into()))?;
+        self.expected_target_for_child(&tip, next_timestamp, next_height)
     }
 
     /// Compute the RandomX seed for a block at `height`.
@@ -731,94 +752,59 @@ impl ChainState {
         &self,
         header: &BlockHeader,
         parent: &BlockHeader,
-        prior_headers: &[BlockHeader],
     ) -> Result<(), DomError> {
-        let expected = self.next_target_after_parent_from_prior(parent, prior_headers)?;
+        let expected = self.expected_target_for_child(parent, header.timestamp, header.height)?;
         let actual_target = header
             .target
             .to_target()
             .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?;
         if actual_target != expected.next_target {
             return Err(DomError::Invalid(format!(
-                "target mismatch at height {}: expected={} got={} window={} actual_elapsed={} expected_elapsed={} bounded_elapsed={}",
+                "target mismatch at height {}: expected={} got={} height_delta={} actual_elapsed={} expected_elapsed={}",
                 header.height.0,
                 hex::encode(expected.next_target),
                 hex::encode(actual_target),
-                expected.window_blocks,
+                expected.height_delta,
                 expected.actual_elapsed_secs,
                 expected.expected_elapsed_secs,
-                expected.bounded_elapsed_secs,
             )));
         }
         Ok(())
     }
 
-    fn next_target_after_parent_from_prior(
+    fn expected_target_for_child(
         &self,
         parent: &BlockHeader,
-        prior_headers: &[BlockHeader],
-    ) -> Result<NextTargetAdjustment, DomError> {
+        child_timestamp: Timestamp,
+        child_height: BlockHeight,
+    ) -> Result<ExpectedTarget, DomError> {
         let previous_target = parent
             .target
             .to_target()
             .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?;
+        let next_target =
+            compute_expected_target(self.network_magic, child_timestamp, child_height)?;
+        let params = pow_params_for_network(self.network_magic);
+        let height_delta = child_height
+            .0
+            .checked_sub(self.asert_anchor.height.0)
+            .ok_or_else(|| DomError::Invalid("height before ASERT anchor".into()))?;
+        let actual_elapsed_secs = child_timestamp
+            .0
+            .checked_sub(self.asert_anchor.timestamp.0)
+            .ok_or_else(|| DomError::Invalid("timestamp before ASERT anchor".into()))?;
+        let expected_elapsed_secs = params
+            .target_spacing
+            .checked_mul(height_delta)
+            .ok_or_else(|| DomError::Invalid("ASERT expected elapsed overflow".into()))?;
 
-        if uses_dev_fixed_target(self.network_magic) {
-            return Ok(NextTargetAdjustment {
-                previous_target,
-                next_target: dom_core::REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION,
-                window_blocks: 1,
-                actual_elapsed_secs: dom_core::TARGET_BLOCK_TIME_SECS,
-                bounded_elapsed_secs: dom_core::TARGET_BLOCK_TIME_SECS,
-                expected_elapsed_secs: dom_core::TARGET_BLOCK_TIME_SECS,
-            });
-        }
-
-        if parent.height == BlockHeight::GENESIS {
-            return Ok(NextTargetAdjustment {
-                previous_target,
-                next_target: previous_target,
-                window_blocks: 1,
-                actual_elapsed_secs: dom_core::TARGET_BLOCK_TIME_SECS,
-                bounded_elapsed_secs: dom_core::TARGET_BLOCK_TIME_SECS,
-                expected_elapsed_secs: dom_core::TARGET_BLOCK_TIME_SECS,
-            });
-        }
-
-        let window_blocks = difficulty_adjustment_window_blocks(parent.height.0);
-        let window_start_height = parent.height.0.saturating_sub(window_blocks);
-        let window_start = self
-            .header_at_height_from_prior_or_store(window_start_height, prior_headers)?
-            .ok_or_else(|| {
-                DomError::Internal(format!(
-                    "difficulty window start missing at height {}",
-                    window_start_height
-                ))
-            })?;
-        let actual_elapsed_secs = parent.timestamp.0.saturating_sub(window_start.timestamp.0);
-
-        window_next_target(&previous_target, actual_elapsed_secs, window_blocks)
-    }
-
-    fn header_at_height_from_prior_or_store(
-        &self,
-        height: u64,
-        prior_headers: &[BlockHeader],
-    ) -> Result<Option<BlockHeader>, DomError> {
-        if let Some(header) = prior_headers
-            .iter()
-            .rev()
-            .find(|header| header.height.0 == height)
-        {
-            return Ok(Some(header.clone()));
-        }
-        let Some(hash) = self.store.get_hash_at_height(height)? else {
-            return Ok(None);
-        };
-        let Some(bytes) = self.store.get_block_header(&hash)? else {
-            return Ok(None);
-        };
-        Ok(Some(BlockHeader::from_bytes(&bytes)?))
+        Ok(ExpectedTarget {
+            previous_target,
+            next_target,
+            height_delta,
+            actual_elapsed_secs,
+            expected_elapsed_secs,
+        })
     }
 
     fn batch_parent_for_index(

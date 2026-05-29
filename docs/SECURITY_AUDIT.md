@@ -343,44 +343,29 @@ QUALQUER definição é aceitável, mas DEVE existir uma definição única.
 
 ---
 
-### [CRÍTICO] — RFC-0000 — ASERT HALF_LIFE = 172800 inconsistente com TARGET_SPACING = 1800
+### [RESOLVIDO] — RFC-0000 — DOM-ASERT-288 half-life definido por blocos
 
-**Problema técnico:**
-`HALF_LIFE = 172800 segundos = 48 horas`.
-`TARGET_SPACING = 1800 segundos = 30 minutos`.
-`Blocos por half-life = 172800 / 1800 = 96 blocos`.
+**Estado atual:**
+`TARGET_SPACING = 120 seconds`.
+`ASERT_HALF_LIFE_BLOCKS = 288`.
+`ASERT_HALF_LIFE = 34,560 seconds`.
 
-Em Bitcoin Cash (onde ASERT foi criado):
-- TARGET_SPACING = 600s, HALF_LIFE = 172800s → 288 blocos por half-life
+O parâmetro ativo agora é derivado por blocos, não por uma duração herdada.
+Isso mantém a regra pública DOM-ASERT-288 explícita: 288 blocos de 120 segundos
+por half-life. O anchor ASERT também é determinístico:
+- `anchor_height = 0`
+- `anchor_timestamp = GENESIS_TIMESTAMP` da rede
+- `anchor_target = GENESIS_TARGET` da rede
 
-Para DOM com blocos de 30 minutos, 96 blocos = 2 dias. Isso é intencionalmente mais
-responsivo que BCH (4 dias). Matematicamente correto, mas há um problema: a especificação
-afirma em RFC-0003 que o HALF_LIFE é consensus-critical, mas nunca explica **por que**
-172800 foi escolhido para blocos de 30 minutos.
+**Risco residual:** mudanças futuras em `TARGET_SPACING` devem revisar
+`ASERT_HALF_LIFE_BLOCKS` e o valor derivado em segundos no mesmo conjunto de
+mudanças, porque ambos são consenso crítico.
 
-O problema real: com HALF_LIFE tão curto relativo ao TARGET_SPACING, a dificuldade pode
-oscilar significativamente se um grande pool conectar/desconectar. Para uma moeda nova com
-pouco hashrate, isso pode criar instabilidade severa.
-
-Mais grave: a especificação não define o **anchor ASERT** — o ponto de referência para
-o algoritmo. RFC-0003 diz "Static genesis anchor" mas não define:
-- Qual é o target no anchor? (placeholder 0x1f00ffff)
-- Qual é o timestamp do anchor? (placeholder 1704067200)
-
-Sem o anchor definido, o ASERT não pode ser implementado de forma determinística.
-
-**Risco:** Instabilidade de dificuldade severa na rede inicial + impossibilidade de
-implementação determinística antes da finalização do genesis.
-
-**Correção:**
+**Correção aplicada:**
 ```
-1. Documentar que HALF_LIFE = 172800 foi escolhido para ~96 blocks responsiveness
-2. Definir anchor explicitamente no RFC-0006:
-   anchor_height = 0
-   anchor_timestamp = GENESIS_TIMESTAMP (a ser finalizado)
-   anchor_target = GENESIS_TARGET (a ser finalizado)
-3. Considerar aumentar HALF_LIFE para 604800 (7 dias) para maior estabilidade
-   em fase de adoção inicial
+1. Publicar ASERT_HALF_LIFE_BLOCKS = 288.
+2. Derivar ASERT_HALF_LIFE = TARGET_SPACING * ASERT_HALF_LIFE_BLOCKS.
+3. Validar que o valor final é ASERT_HALF_LIFE = 34,560 seconds.
 ```
 
 ---

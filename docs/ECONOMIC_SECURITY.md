@@ -66,13 +66,14 @@ honest tx-fee rewards for as long as they hold blocks private,
 making the strategy progressively unprofitable as mempool fees
 grow.
 
-### 4. ASERT half-life = 172 800 s (2 days)
+### 4. ASERT half-life = 34 560 s (288 blocks)
 
 A withholding attacker who succeeds for a sustained period would
 cause the difficulty to drop (fewer blocks → adjustment raises
-target). The half-life is short enough that the difficulty
-correction punishes the attacker within ~10 honest blocks of
-public chain growth — see Phase 5.1 oscillation test
+target). DOM-ASERT-288 sets `ASERT_HALF_LIFE_BLOCKS = 288` and
+`ASERT_HALF_LIFE = 34,560 seconds`, derived from the 120-second
+target spacing. The half-life is short enough that the difficulty
+correction responds within the intended 288-block horizon — see Phase 5.1 oscillation test
 (`oscillating_arrivals_do_not_diverge`).
 
 ### 5. Coinbase maturity (1 000 blocks)
@@ -123,7 +124,7 @@ DOM's parameter regime for any realistic mempool fee floor.
 | Total-difficulty chain selection | ✅ active | `dom-chain/src/chain_state.rs` |
 | RandomX PoW (memory-hard) | ✅ active | RFC-0011 |
 | Coinbase maturity 1 000 blocks | ✅ active | `dom-core/src/constants.rs::COINBASE_MATURITY` |
-| ASERT difficulty correction half-life 2 days | ✅ active | `dom-core/src/constants.rs::ASERT_HALF_LIFE` |
+| ASERT difficulty correction half-life 288 blocks / 34 560 s | ✅ active | `dom-core/src/constants.rs::ASERT_HALF_LIFE` |
 | Tx-fee re-inclusion after orphan | ✅ active | `dom-mempool` (txs remain on orphan) |
 | Selfish-mining simulator (statistical) | 🔴 deferred | Phase 8.2 fuzz campaign |
 | Multi-strategy game-theoretic simulator | 🔴 deferred | external audit |
