@@ -105,8 +105,8 @@ fn build_consistent_block(height: u64, include_tx: bool) -> Block {
     };
 
     let txs = if include_tx {
-        use dom_consensus::Transaction;
         use dom_consensus::transaction::TransactionKernel;
+        use dom_consensus::Transaction;
         vec![Transaction {
             inputs: vec![],
             outputs: vec![TransactionOutput {
@@ -184,8 +184,8 @@ fn assert_recomputed_roots_match_stored_header(store: &DomStore, hash: &[u8; 32]
         .expect("get body")
         .expect("body present");
     let block = Block::from_bytes(&body_bytes).expect("body decodes");
-    let (or, kr, rr) = compute_block_pmmr_roots(&block.coinbase, &block.transactions)
-        .expect("recompute roots");
+    let (or, kr, rr) =
+        compute_block_pmmr_roots(&block.coinbase, &block.transactions).expect("recompute roots");
     assert_eq!(
         block.header.output_root, or,
         "h={height}: output_root drift on reopen — header={} recomputed={}",
@@ -306,8 +306,8 @@ fn body_mutation_post_persist_breaks_recomputed_pmmr_roots() {
         .expect("get body")
         .expect("body present");
     let block = Block::from_bytes(&body).expect("decode");
-    let (or, _, _) = compute_block_pmmr_roots(&block.coinbase, &block.transactions)
-        .expect("recompute");
+    let (or, _, _) =
+        compute_block_pmmr_roots(&block.coinbase, &block.transactions).expect("recompute");
     // The body's output commitment was tampered with → output_root
     // recomputed from the body MUST differ from the header's
     // stored output_root (which was committed when output =

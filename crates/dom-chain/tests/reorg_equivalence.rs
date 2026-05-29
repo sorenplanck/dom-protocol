@@ -27,7 +27,10 @@ use dom_consensus::{
     Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionInput, TransactionKernel,
     TransactionOutput,
 };
-use dom_core::{Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN};
+use dom_core::{
+    Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
+    PROTOCOL_VERSION,
+};
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_pow::CompactTarget;
 use dom_serialization::DomSerialize;
@@ -44,7 +47,7 @@ type SpentCommitment = [u8; 33];
 /// read them.
 fn synthetic_header(prev_hash: Hash256, height: u64, nonce_seed: u64) -> BlockHeader {
     BlockHeader {
-        version: 1,
+        version: PROTOCOL_VERSION,
         height: BlockHeight(height),
         prev_hash,
         timestamp: Timestamp(1_700_000_000 + height),
@@ -166,7 +169,7 @@ fn synthetic_block(
 ) -> Block {
     Block {
         header: BlockHeader {
-            version: 1,
+            version: PROTOCOL_VERSION,
             height: BlockHeight(height),
             prev_hash,
             timestamp: Timestamp(1_700_100_000 + height),

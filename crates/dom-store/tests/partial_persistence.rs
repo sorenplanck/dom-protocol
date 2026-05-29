@@ -35,7 +35,7 @@
 
 use dom_store::utxo::UtxoEntry;
 use dom_store::{
-    DomStore, DB_BLOCK_BODIES, DB_BLOCK_HEIGHT, DB_BLOCKS, DB_CHAIN_TIP, DB_KERNEL_INDEX,
+    DomStore, DB_BLOCKS, DB_BLOCK_BODIES, DB_BLOCK_HEIGHT, DB_CHAIN_TIP, DB_KERNEL_INDEX,
 };
 use lmdb::{Transaction, WriteFlags};
 use tempfile::TempDir;
@@ -187,7 +187,12 @@ fn store_does_not_panic_when_reopened_with_arbitrary_partial_state() {
 
         put_raw(&store, DB_BLOCKS, &make_hash(0x60), &[0u8; 32]);
         put_raw(&store, DB_BLOCK_BODIES, &make_hash(0x61), &[0u8; 16]);
-        put_raw(&store, DB_BLOCK_HEIGHT, &42u64.to_le_bytes(), &make_hash(0x62));
+        put_raw(
+            &store,
+            DB_BLOCK_HEIGHT,
+            &42u64.to_le_bytes(),
+            &make_hash(0x62),
+        );
         put_raw(&store, DB_CHAIN_TIP, b"tip", &make_hash(0x63));
         let mut excess = [0u8; 33];
         excess[0] = 0x03;
@@ -246,16 +251,12 @@ fn commit_block_on_clean_store_still_works_after_unrelated_partial_state() {
         )
         .expect("commit_block on clean hash must succeed despite unrelated partial state");
 
-    assert!(
-        store
-            .get_block_header(&clean_hash)
-            .expect("get header")
-            .is_some(),
-    );
-    assert!(
-        store
-            .get_block_body(&clean_hash)
-            .expect("get body")
-            .is_some(),
-    );
+    assert!(store
+        .get_block_header(&clean_hash)
+        .expect("get header")
+        .is_some(),);
+    assert!(store
+        .get_block_body(&clean_hash)
+        .expect("get body")
+        .is_some(),);
 }

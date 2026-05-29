@@ -1300,9 +1300,7 @@ name = "dom-agent-runner"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "clap",
  "dom-test-runner",
- "tempfile",
 ]
 
 [[package]]
@@ -1566,11 +1564,6 @@ dependencies = [
 [[package]]
 name = "dom-test-runner"
 version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "tempfile",
-]
 
 [[package]]
 name = "dom-test-vectors"
