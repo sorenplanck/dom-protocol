@@ -4,6 +4,7 @@
 pub mod future_block_queue;
 pub mod metrics;
 pub mod miner;
+pub mod missing_block_tracker;
 pub mod node;
 pub mod node_handle;
 pub mod peer_scoring;
