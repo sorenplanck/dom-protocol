@@ -270,6 +270,9 @@ impl DomNode {
         let mut peers = PeerManager::new(config.max_inbound, config.min_outbound);
         restore_peer_rotation_state(&chain.store, &mut peers)?;
         restore_peer_reputation_state(&chain.store, &mut peers)?;
+        // Volatile mempool policy (RFC-0012 §1): start empty and clear any legacy
+        // on-disk mempool bytes from older builds. The mempool is never loaded
+        // from disk; a restarted node re-acquires pending txs from peers.
         clear_persisted_mempool_snapshot(&chain.store)?;
         let mempool = Mempool::new();
 
@@ -1760,10 +1763,20 @@ pub(crate) fn persist_mempool_snapshot(
     store.put_metadata(MEMPOOL_METADATA_KEY, &snapshot.to_bytes()?)
 }
 
+/// Clear any on-disk mempool bytes (RFC-0012 §1).
+///
+/// The mempool is volatile: it is never loaded from disk into runtime state.
+/// Older builds may have left `MEMPOOL_METADATA_KEY` bytes; this removes them so
+/// the on-disk view stays consistent with the empty-on-restart policy. It is
+/// called on init, on every block connect, and on tx admission.
 pub(crate) fn clear_persisted_mempool_snapshot(store: &DomStore) -> Result<(), DomError> {
     store.delete_metadata(MEMPOOL_METADATA_KEY)
 }
 
+// Test-only: under the volatile mempool policy (RFC-0012 §1) no runtime path
+// reads on-disk mempool bytes into state. This decoder exists solely so tests can
+// assert that legacy/adversarial on-disk mempool metadata has been cleared.
+#[cfg(test)]
 pub(crate) fn load_mempool_snapshot(
     store: &DomStore,
 ) -> Result<Option<dom_mempool::PersistedMempoolState>, DomError> {
@@ -1831,6 +1844,12 @@ async fn persist_peer_reputation_state(
     persist_peer_reputation_snapshot(&chain.store, &snapshot)
 }
 
+/// Persist mempool lifecycle state.
+///
+/// Under the volatile mempool policy (RFC-0012 §1) the mempool is **never**
+/// written to disk: "persisting" it means ensuring no on-disk mempool bytes
+/// remain, so a restart deterministically starts empty. The live `mempool` is
+/// intentionally unused here.
 async fn persist_mempool_state(
     chain: &Arc<Mutex<ChainState>>,
     mempool: &Arc<Mutex<Mempool>>,

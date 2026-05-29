@@ -2,10 +2,38 @@
 //!
 //! Transaction memory pool with deterministic ordering.
 //!
-//! The mempool is intentionally volatile. It is **empty by design after
-//! restart** and reconstructs no runtime-only state implicitly.
+//! ## Restart policy (RFC-0012 §1) — VOLATILE
 //!
-//! Canonical ordering rules:
+//! The mempool is **volatile by protocol rule**. It is **empty by construction
+//! after restart**, is **never persisted** as canonical or replayable state, and
+//! reconstructs no runtime-only state implicitly. Any on-disk mempool bytes left
+//! by an older build are *legacy state*: they are cleared, never loaded.
+//!
+//! ## Consensus-neutrality (RFC-0012 §1.3) — INVARIANT
+//!
+//! The mempool is a local relay/liveness cache and is **never consensus state**.
+//! Block/chain validation takes no mempool argument; admission here validates a
+//! candidate against a *snapshot of canonical chain state*
+//! ([`validate_tx_against_chain_view`]), never against another node's mempool.
+//! Mempool state — present, absent, or restarted — cannot change which blocks are
+//! valid or which chain is canonical.
+//!
+//! ## Same-block spends (RFC-0012 §4) — FORBIDDEN
+//!
+//! A candidate that spends an output not present in the canonical UTXO set (e.g.
+//! an output created by another still-unconfirmed transaction) is rejected at
+//! admission. This is the mempool-side half of the protocol rule that a published
+//! block must never spend a same-block output.
+//!
+//! ## [`PersistedMempoolState`]
+//!
+//! [`PersistedMempoolState`] / [`Mempool::snapshot`] produce a canonical,
+//! hash-ordered, *in-memory* view used for diagnostics, INV listings, and
+//! replay-convergence checks. Per the volatile policy this view is **not written
+//! to disk by any runtime path**; it is also the wire form recognised when
+//! clearing legacy on-disk state from older builds.
+//!
+//! ## Canonical ordering rules
 //! - operator/API hash listings are lexicographic `tx_hash ASC`
 //! - block selection is `fee_rate DESC`, then `tx_hash ASC`
 //! - rollback/reorg reinjection sorts candidates by `tx_hash ASC`
@@ -313,6 +341,22 @@ impl Mempool {
             .collect();
         entries.sort_unstable_by_key(|entry| entry.tx_hash);
         PersistedMempoolState { entries }
+    }
+
+    /// Canonical 32-byte digest of the accepted mempool set.
+    ///
+    /// Computed over the canonical hash-ordered [`snapshot`](Self::snapshot), so
+    /// two mempools that have admitted the same transaction set produce the same
+    /// digest regardless of admission/delivery order. Used to assert reorg/relay
+    /// convergence (RFC-0012 §3.4); it is a diagnostic, never consensus state.
+    pub fn digest(&self) -> [u8; 32] {
+        use dom_serialization::DomSerialize;
+
+        let bytes = self
+            .snapshot()
+            .to_bytes()
+            .expect("canonical mempool snapshot serialization is infallible");
+        *dom_crypto::hash::blake2b_256(&bytes).as_bytes()
     }
 
     /// Deterministically re-accept a batch of transactions after rollback.
