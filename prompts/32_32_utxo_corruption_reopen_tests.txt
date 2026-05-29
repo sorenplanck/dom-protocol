@@ -1,0 +1,45 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 32/50 — CREATE UTXO CORRUPTION/REOPEN TESTS
+
+Problem:
+The audit identifies UTXO reopen integrity as a critical gap. Tests must prove fail-closed or deterministic rebuild behavior.
+
+Objective:
+Add corruption/reopen regression tests.
+
+Tasks:
+1. Build a chain with several blocks and known UTXO set.
+2. Corrupt persisted UTXO state:
+   - remove valid UTXO;
+   - add fake UTXO;
+   - alter amount/commitment;
+   - corrupt spent state if modeled.
+3. Reopen store/chain.
+4. Assert one of:
+   - explicit corruption error; or
+   - deterministic rebuild to exact canonical UTXO.
+5. Compare UTXO digest before and after.
+6. Add interrupted reopen/partial repair test if repair exists.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+32 utxo corruption reopen tests.

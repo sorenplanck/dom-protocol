@@ -1,0 +1,43 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 29/50 — RESOLVE SAME-BLOCK SPENDS AND LIVE CUT-THROUGH BEHAVIOR
+
+Problem:
+The audit notes direct-extension input validation may consult only the pre-block UTXO set, rejecting same-block spends from outputs created earlier in the same block. This interacts with cut-through semantics.
+
+Objective:
+Define and implement the protocol rule for same-block spends and cut-through.
+
+Tasks:
+1. Decide formal rule:
+   - same-block spends allowed and validated at aggregate block level; or
+   - same-block spends forbidden and explicitly rejected.
+2. Align the decision with cut-through.
+3. Ensure mempool, miner, block validation, IBD, and reorg all enforce the same rule.
+4. Add tests:
+   - same-block spend allowed/forbidden per policy;
+   - cut-through removes internal spends if allowed;
+   - inconsistent behavior between live and IBD is impossible.
+5. Document the rule clearly.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+29 same block spends cutthrough.

@@ -1,0 +1,51 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 48/50 — CREATE ROBUST SYSTEMD SERVICE FOR BACKBONE
+
+Problem:
+A VPS backbone needs stable service management, restart policy, logs, and health checks.
+
+Objective:
+Add production-quality devnet/backbone service packaging.
+
+Tasks:
+1. Create systemd unit template for dom-node/backbone.
+2. Include:
+   - WorkingDirectory;
+   - EnvironmentFile;
+   - Restart policy;
+   - RestartSec;
+   - LimitNOFILE if needed;
+   - logs via journalctl.
+3. Add install/update script if appropriate.
+4. Add healthcheck command or status instructions.
+5. Document:
+   - start;
+   - stop;
+   - restart;
+   - logs;
+   - update binary;
+   - open port/firewall.
+6. Do not put secrets in unit file.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+48 systemd backbone service.

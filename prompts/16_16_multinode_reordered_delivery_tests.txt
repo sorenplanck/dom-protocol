@@ -1,0 +1,49 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 16/50 — ADD MULTI-NODE DELAYED/REORDERED DELIVERY TESTS
+
+Problem:
+Distributed networks deliver messages out of order. The audit identifies insufficient proof under delayed/reordered delivery.
+
+Objective:
+Add deterministic multi-node tests that prove convergence under hostile delivery ordering.
+
+Tasks:
+1. Build or extend a simulated network/test harness that can delay, reorder, and drop messages deterministically.
+2. Test scenarios:
+   - child block before parent;
+   - header before body;
+   - body delayed;
+   - duplicated block relay;
+   - peer reconnect during delivery;
+   - competing branch delivery in different orders to different nodes.
+3. Assert all honest nodes converge to same:
+   - tip;
+   - height;
+   - UTXO digest;
+   - PMMR digest;
+   - kernel index digest.
+4. Use deterministic seeds and no unbounded sleeps.
+5. Add detailed failure diagnostics.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+16 multinode reordered delivery tests.

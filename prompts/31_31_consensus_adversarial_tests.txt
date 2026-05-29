@@ -1,0 +1,44 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 31/50 — CREATE ADVERSARIAL CONSENSUS BLOCK VALIDATION TESTS
+
+Problem:
+Consensus correctness cannot rely on normal-case tests. The audit demands adversarial validation coverage.
+
+Objective:
+Add high-value adversarial tests for consensus block validation.
+
+Tasks:
+1. Create tests for:
+   - invalid aggregate block balance;
+   - invalid cut-through;
+   - invalid reward/fee equation;
+   - invalid kernel/excess relation;
+   - valid txs composing invalid block;
+   - tampered block body with plausible header.
+2. Test rejection in dom-consensus and through dom-chain acceptance if possible.
+3. Ensure error reasons are specific.
+4. Do not modify production code unless small test helpers are unavoidable.
+5. If tests expose failures, leave them failing only if the user explicitly requested test-only; otherwise implement minimal fix in a separate commit if directed.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+31 consensus adversarial tests.

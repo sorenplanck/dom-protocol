@@ -1,0 +1,45 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 10/50 — RESOLVE FUTURE-BLOCK QUEUE RUNTIME-ONLY BEHAVIOR
+
+Problem:
+The audit flags the future-block queue as runtime-only and restart-sensitive. It disappears on restart and can make convergence depend on local timing.
+
+Objective:
+Choose and implement a formal future-block policy: persist deterministically or reject/re-request deterministically.
+
+Tasks:
+1. Audit current FutureBlockQueue semantics.
+2. Decide policy:
+   Option A: persistent future-block queue.
+   Option B: explicit drop plus deterministic re-request.
+3. Implement the chosen policy fully.
+4. Remove ambiguity from docs and comments.
+5. Ensure ready-block draining order is canonical: height ASC, hash ASC or another explicit rule.
+6. Add tests:
+   - same inputs in different insertion order produce same drain order;
+   - restart during future-block holding does not create divergent final state;
+   - expired/dropped future blocks are recovered by deterministic re-request if policy B.
+7. Do not rely on local wall-clock timing for consensus outcome.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+10 future block policy.

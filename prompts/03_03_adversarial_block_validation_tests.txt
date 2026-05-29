@@ -1,0 +1,45 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 03/50 — ADD ADVERSARIAL TESTS FOR BLOCK-LEVEL CONSENSUS VALIDATION
+
+Problem:
+The audit shows consensus validation has high-impact gaps. Before broad fixes, the repository needs tests that make these risks executable and impossible to ignore.
+
+Objective:
+Write aggressive regression tests for block-level consensus completeness.
+
+Tasks:
+1. Add tests for blocks where every transaction validates individually but the aggregate block is invalid.
+2. Add tests for invalid cut-through behavior.
+3. Add tests for invalid aggregate value equation.
+4. Add tests where PMMR/header-like data appears valid but economic block balance is invalid.
+5. Add tests for consistent rejection across:
+   - direct chain extension;
+   - IBD import;
+   - reorg candidate promotion if accessible;
+   - mined block pre-broadcast validation.
+6. Tests must fail on vulnerable behavior or protect a fixed invariant.
+7. Do not weaken tests to match current implementation.
+8. Name every test after the invariant it proves.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+03 adversarial block validation tests.

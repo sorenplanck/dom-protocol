@@ -1,0 +1,47 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 38/50 — RUN CARGO TEST BY CRATE AND INTEGRATION TESTS IN CI
+
+Problem:
+Critical proof coverage must run automatically. Passing local selective tests is not enough.
+
+Objective:
+Ensure CI runs the important crate-level and integration test matrix.
+
+Tasks:
+1. Inspect current CI workflow.
+2. Add/verify:
+   - cargo fmt --check;
+   - cargo check --workspace;
+   - cargo test -p dom-consensus;
+   - cargo test -p dom-chain;
+   - cargo test -p dom-store;
+   - cargo test -p dom-node;
+   - cargo test -p dom-mempool;
+   - cargo test -p dom-integration-tests -- --test-threads=1.
+3. Split slow tests if needed but do not omit critical tests silently.
+4. Add caching only if safe.
+5. Ensure ignored tests are either justified or replaced.
+6. Commit CI changes separately if practical.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+38 ci cargo tests by crate.

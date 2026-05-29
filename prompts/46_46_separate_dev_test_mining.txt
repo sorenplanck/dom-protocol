@@ -1,0 +1,44 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 46/50 — SEPARATE DEV/TEST MINING FROM NORMAL MINING
+
+Problem:
+Fast/easy mining behavior must not leak into normal/devnet/mainnet-like operation.
+
+Objective:
+Create explicit mining modes and guard against accidental test difficulty in normal mode.
+
+Tasks:
+1. Identify all mining difficulty configuration sources.
+2. Separate:
+   - regtest/dev fast mining;
+   - testnet/devnet configured mining;
+   - mainnet-like consensus mining.
+3. Add guards preventing production-like mode from using trivial target unless explicitly configured.
+4. Ensure miner uses consensus target, not fixed dev target.
+5. Add tests:
+   - dev mode can mine fast;
+   - normal mode cannot use dev target accidentally;
+   - config parsing does not silently fall back to easy mining.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+46 separate dev test mining.

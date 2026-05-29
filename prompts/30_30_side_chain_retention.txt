@@ -1,0 +1,46 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 30/50 — IMPROVE SIDE-CHAIN RETENTION FOR RICHER REORG PROOFS
+
+Problem:
+Minimal side-chain retention simplifies implementation but limits robust reorg handling and proof coverage.
+
+Objective:
+Define and implement a clearer side-chain retention policy.
+
+Tasks:
+1. Audit current side-chain/orphan retention.
+2. Define retention bounds:
+   - max depth;
+   - max branches;
+   - max memory/disk;
+   - pruning policy.
+3. Ensure candidate branches required for plausible reorg are retained long enough.
+4. Add tests:
+   - competing branches retained;
+   - branch promotion works;
+   - pruning does not remove needed candidate too early;
+   - restart behavior is explicit.
+5. Avoid unbounded memory growth.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+30 side chain retention.

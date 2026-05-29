@@ -1,0 +1,48 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 04/50 — IMPLEMENT CANONICAL UTXO VERIFICATION/REBUILD ON REOPEN
+
+Problem:
+The audit identified a critical restart-safety risk: reopening chain state validates tip/header/body/height-index but may continue with a corrupted or divergent persisted UTXO set.
+
+Objective:
+On reopen, the node must either prove the persisted UTXO set matches canonical history or rebuild it deterministically from canonical blocks.
+
+Tasks:
+1. Audit current reopen flow in dom-chain/dom-store.
+2. Identify which indices are rebuilt and which are trusted.
+3. Implement canonical UTXO verification/rebuild from block history.
+4. Define a state digest/root/checksum for the UTXO set if absent.
+5. On reopen:
+   - verify persisted UTXO against canonical reconstruction; or
+   - rebuild deterministically and atomically replace; or
+   - fail closed with an explicit corruption error.
+6. Never silently continue from inconsistent UTXO state.
+7. Add tests:
+   - corrupt UTXO entry then reopen;
+   - missing UTXO entry then reopen;
+   - extra UTXO entry then reopen;
+   - before/after restart UTXO equivalence;
+   - failed repair must not partially mutate store.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+04 canonical utxo reopen.
