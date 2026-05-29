@@ -4,7 +4,7 @@
 //! All path matching is pure-function and unit-tested — the runner only
 //! supplies the list of changed paths.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 /// A reason why a profile was selected, paired with the offending path.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -18,7 +18,7 @@ pub struct Selection {
 ///
 /// Returns a sorted, de-duplicated list of `Selection`s.
 pub fn select_profiles(changed: &[String]) -> Vec<Selection> {
-    let mut out: BTreeSet<Selection> = BTreeSet::new();
+    let mut out: BTreeMap<&'static str, Selection> = BTreeMap::new();
 
     if changed.is_empty() {
         return Vec::new();
@@ -27,20 +27,23 @@ pub fn select_profiles(changed: &[String]) -> Vec<Selection> {
     // Quick check: if only docs/** changed, fast-check is enough.
     let only_docs = changed.iter().all(|p| p.starts_with("docs/"));
     if only_docs {
-        out.insert(Selection {
-            profile: "fast-check",
-            reason: "only docs/** changed".to_string(),
-        });
-        return out.into_iter().collect();
+        out.insert(
+            "fast-check",
+            Selection {
+                profile: "fast-check",
+                reason: "only docs/** changed".to_string(),
+            },
+        );
+        return out.into_values().collect();
     }
 
     for path in changed {
         for sel in selections_for_path(path) {
-            out.insert(sel);
+            out.entry(sel.profile).or_insert(sel);
         }
     }
 
-    out.into_iter().collect()
+    out.into_values().collect()
 }
 
 /// All selections triggered by a single changed file.

@@ -34,7 +34,7 @@ fn now_secs() -> u64 {
 
 /// Collect serialised block bytes for heights 1..=count from a freshly
 /// mined Regtest chain.
-async fn produce_block_sequence(name: &str, port: u16, count: u64) -> Vec<Vec<u8>> {
+async fn produce_block_sequence(name: &str, port: u16, count: u64) -> (Vec<u8>, Vec<Vec<u8>>) {
     let mut config = test_config(name, port, false);
     config.wallet_path = Some(format!("/tmp/dom-replay-{}.dom", name));
     config.wallet_password = Some("replay".into());
@@ -52,6 +52,16 @@ async fn produce_block_sequence(name: &str, port: u16, count: u64) -> Vec<Vec<u8
     // `header || body` (RFC-0007 §X — `DomSerialize` is concatenative),
     // so we reconstruct the wire bytes by concatenating the two records.
     let chain = node.chain.lock().await;
+    let genesis_hash = chain
+        .store
+        .get_hash_at_height(0)
+        .expect("get genesis hash")
+        .expect("genesis hash present");
+    let genesis_bytes = chain
+        .store
+        .get_block_body(&genesis_hash)
+        .expect("get genesis body")
+        .expect("genesis body present");
     let mut out = Vec::with_capacity(count as usize);
     for h in 1..=count {
         let hash = chain
@@ -66,7 +76,7 @@ async fn produce_block_sequence(name: &str, port: u16, count: u64) -> Vec<Vec<u8
             .expect("body present");
         out.push(bytes);
     }
-    out
+    (genesis_bytes, out)
 }
 
 async fn produce_single_block(name: &str, port: u16) -> (Vec<u8>, Hash256) {
@@ -90,10 +100,27 @@ async fn produce_single_block(name: &str, port: u16) -> (Vec<u8>, Hash256) {
 }
 
 /// Open an empty `ChainState` rooted at `data_dir` (cleaned first).
-fn fresh_chain(data_dir: &str, network_magic: u32) -> ChainState {
+fn fresh_chain(data_dir: &str, genesis_bytes: &[u8], network_magic: u32) -> ChainState {
     let _ = std::fs::remove_dir_all(data_dir);
     std::fs::create_dir_all(data_dir).expect("mkdir data_dir");
     let store = DomStore::open(Path::new(data_dir)).expect("store open");
+    let genesis_block = Block::from_bytes(genesis_bytes).expect("decode genesis block");
+    let genesis_header_bytes = genesis_block
+        .header
+        .to_bytes()
+        .expect("genesis header serialize");
+    let genesis_hash = replay_block_hash(&genesis_block.header);
+    store
+        .commit_block(
+            genesis_hash.as_bytes(),
+            0,
+            &genesis_header_bytes,
+            genesis_bytes,
+            &[],
+            &[],
+            &[],
+        )
+        .expect("commit replay genesis");
     let genesis_hash = Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST);
     ChainState::open(store, genesis_hash, network_magic).expect("chain open")
 }
@@ -232,12 +259,21 @@ async fn replay_two_independent_chains_converge() {
     init_tracing();
 
     // 1. Produce a canonical block sequence (3 blocks under Regtest).
-    let blocks = produce_block_sequence("replay-source", 43400, 3).await;
+    let (genesis_bytes, blocks) = produce_block_sequence("replay-source", 43400, 3).await;
     assert_eq!(blocks.len(), 3, "must collect three blocks");
 
-    // 2. Open two independent fresh chains (separate LMDB directories).
-    let mut chain_a = fresh_chain("/tmp/dom-replay-a", dom_core::NETWORK_MAGIC_REGTEST);
-    let mut chain_b = fresh_chain("/tmp/dom-replay-b", dom_core::NETWORK_MAGIC_REGTEST);
+    // 2. Open two independent fresh chains (separate LMDB directories)
+    // bootstrapped with the exact genesis block produced by the source node.
+    let mut chain_a = fresh_chain(
+        "/tmp/dom-replay-a",
+        &genesis_bytes,
+        dom_core::NETWORK_MAGIC_REGTEST,
+    );
+    let mut chain_b = fresh_chain(
+        "/tmp/dom-replay-b",
+        &genesis_bytes,
+        dom_core::NETWORK_MAGIC_REGTEST,
+    );
 
     // 3. Apply the same sequence to both chains.
     for (i, bytes) in blocks.iter().enumerate() {
@@ -309,10 +345,10 @@ async fn replay_same_chain_reopens_to_identical_tip() {
     let next_target = chain_reopen
         .next_block_target()
         .expect("next target after reopen");
-    assert_eq!(
-        next_target.next_target,
-        dom_core::REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION
-    );
+    let regtest_target = CompactTarget(REGTEST_TARGET_COMPACT)
+        .to_target()
+        .expect("regtest target");
+    assert_eq!(next_target.next_target, regtest_target);
     assert_eq!(
         next_target,
         ChainState::open(

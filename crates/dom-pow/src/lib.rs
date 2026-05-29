@@ -24,13 +24,11 @@
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
 use dom_core::{
-    BlockHeight, DomError, Timestamp, ASERT_HALF_LIFE, ASERT_RADIX, DIFFICULTY_ADJUSTMENT_WINDOW,
-    GENESIS_TARGET_COMPACT, MAX_ALLOWED_TARGET, MAX_DIFFICULTY_ADJUSTMENT_FACTOR_DOWN,
-    MAX_DIFFICULTY_ADJUSTMENT_FACTOR_UP, MAX_TARGET_BYTES, MIN_ALLOWED_TARGET, MIN_TARGET_BYTES,
-    NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET, TARGET_BLOCK_TIME_SECS,
-    TARGET_SPACING,
+    BlockHeight, DomError, Timestamp, ASERT_HALF_LIFE, ASERT_RADIX, GENESIS_TARGET_COMPACT,
+    MAX_TARGET_BYTES, MIN_TARGET_BYTES, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST,
+    NETWORK_MAGIC_TESTNET, TARGET_SPACING,
 };
-use primitive_types::{U256, U512};
+use primitive_types::U256;
 use std::env;
 
 #[allow(unsafe_code)]
@@ -234,23 +232,6 @@ pub struct AsertAnchor {
     pub height: BlockHeight,
     /// Anchor target (32 bytes big-endian).
     pub target: [u8; 32],
-}
-
-/// Deterministic next-target computation derived from canonical chain history.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NextTargetAdjustment {
-    /// Previous canonical target.
-    pub previous_target: [u8; 32],
-    /// Next canonical target.
-    pub next_target: [u8; 32],
-    /// Number of observed parent blocks in the adjustment window.
-    pub window_blocks: u64,
-    /// Unclamped wall-clock elapsed time recorded by block headers.
-    pub actual_elapsed_secs: u64,
-    /// Clamped elapsed time used for bounded retargeting.
-    pub bounded_elapsed_secs: u64,
-    /// Expected elapsed time for `window_blocks`.
-    pub expected_elapsed_secs: u64,
 }
 
 // ── ASERT Algorithm ───────────────────────────────────────────────────────────
@@ -673,18 +654,38 @@ pub fn genesis_anchor(network_magic: u32) -> Result<AsertAnchor, DomError> {
     })
 }
 
-/// Compute the exact expected target for a block on the given network.
-pub fn expected_target_for_network(
+/// Compute the canonical expected target bytes for a block on the given network.
+///
+/// Consensus headers store targets in compact form. ASERT itself produces a
+/// 256-bit integer target, so the canonical consensus value is the ASERT result
+/// rounded through the same compact representation that miners serialize and
+/// validators expand.
+pub fn compute_expected_target(
     network_magic: u32,
     block_timestamp: Timestamp,
     block_height: BlockHeight,
 ) -> Result<[u8; 32], DomError> {
     let params = pow_params_for_network(network_magic);
-    let anchor = genesis_anchor(network_magic)?;
-    if block_height == BlockHeight::GENESIS {
-        return params.genesis_target();
+    if uses_dev_fixed_target(network_magic) {
+        return params.max_target();
     }
-    asert_next_target_with_params(&anchor, block_timestamp, block_height, &params)
+
+    let anchor = genesis_anchor(network_magic)?;
+    let raw_target = if block_height == BlockHeight::GENESIS {
+        params.genesis_target()?
+    } else {
+        asert_next_target_with_params(&anchor, block_timestamp, block_height, &params)?
+    };
+    canonicalize_compact_target(&raw_target)
+}
+
+/// Backwards-compatible name for the canonical expected target helper.
+pub fn expected_target_for_network(
+    network_magic: u32,
+    block_timestamp: Timestamp,
+    block_height: BlockHeight,
+) -> Result<[u8; 32], DomError> {
+    compute_expected_target(network_magic, block_timestamp, block_height)
 }
 
 /// Convert a canonical 32-byte target to Bitcoin compact form.
@@ -696,27 +697,78 @@ pub fn target_to_compact(t: &[u8; 32]) -> u32 {
             break;
         }
     }
-    let exp = (32 - first) as u32;
-    let m = if first + 2 < 32 {
-        ((t[first] as u32) << 16) | ((t[first + 1] as u32) << 8) | (t[first + 2] as u32)
-    } else {
-        (t[first] as u32) << 16
-    };
-    (exp << 24) | (m & 0x007f_ffff)
+    if t[first] == 0 {
+        return 0;
+    }
+
+    while first < 32 {
+        let exp = (32 - first) as u32;
+        let m = if first + 2 < 32 {
+            (t[first] as u32) | ((t[first + 1] as u32) << 8) | ((t[first + 2] as u32) << 16)
+        } else {
+            t[first] as u32
+        };
+        let compact = (exp << 24) | m.min(0x007f_ffff);
+        let expanded = compact_to_target_unchecked(compact);
+        if !target_gt(&expanded, t) {
+            return compact;
+        }
+        first += 1;
+    }
+
+    0
 }
 
-/// Deterministic windowed difficulty retarget.
-///
-/// This uses only accepted block-header timestamps and targets:
-///   next_target = previous_target * bounded_elapsed / expected_elapsed
-///
-/// where `bounded_elapsed` is clamped so a single window cannot harden or
-/// ease difficulty by more than the configured consensus factors.
-pub fn window_next_target(
+fn compact_to_target_unchecked(bits: u32) -> [u8; 32] {
+    let exponent = (bits >> 24) as usize;
+    let mantissa = bits & 0x007f_ffff;
+    let mut target = [0u8; 32];
+    let w = |t: &mut [u8; 32], pos: usize, v: u8| {
+        if pos < 32 {
+            t[31 - pos] = v;
+        }
+    };
+    if exponent >= 1 {
+        w(&mut target, exponent - 1, (mantissa & 0xff) as u8);
+    }
+    if exponent >= 2 {
+        w(&mut target, exponent - 2, ((mantissa >> 8) & 0xff) as u8);
+    }
+    if exponent >= 3 {
+        w(&mut target, exponent - 3, ((mantissa >> 16) & 0xff) as u8);
+    }
+    target
+}
+
+fn canonicalize_compact_target(target: &[u8; 32]) -> Result<[u8; 32], DomError> {
+    CompactTarget(target_to_compact(target)).to_target()
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LegacyWindowRetarget {
+    previous_target: [u8; 32],
+    next_target: [u8; 32],
+    window_blocks: u64,
+    actual_elapsed_secs: u64,
+    bounded_elapsed_secs: u64,
+    expected_elapsed_secs: u64,
+}
+
+/// Legacy deterministic windowed difficulty retarget kept only for regression
+/// tests proving the old path is no longer the public consensus DAA.
+#[cfg(test)]
+fn legacy_window_retarget_for_tests_only(
     previous_target: &[u8; 32],
     actual_elapsed_secs: u64,
     window_blocks: u64,
-) -> Result<NextTargetAdjustment, DomError> {
+) -> Result<LegacyWindowRetarget, DomError> {
+    use dom_core::{
+        MAX_ALLOWED_TARGET, MAX_DIFFICULTY_ADJUSTMENT_FACTOR_DOWN,
+        MAX_DIFFICULTY_ADJUSTMENT_FACTOR_UP, MIN_ALLOWED_TARGET, TARGET_BLOCK_TIME_SECS,
+    };
+    use primitive_types::U512;
+
     if window_blocks == 0 {
         return Err(DomError::Invalid(
             "difficulty adjustment window must be non-zero".into(),
@@ -769,7 +821,7 @@ pub fn window_next_target(
     next.to_big_endian(&mut next_target);
     validate_target_bounds(&next_target)?;
 
-    Ok(NextTargetAdjustment {
+    Ok(LegacyWindowRetarget {
         previous_target: *previous_target,
         next_target,
         window_blocks,
@@ -783,11 +835,6 @@ pub fn window_next_target(
 /// trivial target instead of production retargeting.
 pub fn uses_dev_fixed_target(network_magic: u32) -> bool {
     network_magic == dom_core::NETWORK_MAGIC_REGTEST
-}
-
-/// Canonical number of parent blocks contributing to the next retarget step.
-pub fn difficulty_adjustment_window_blocks(parent_height: u64) -> u64 {
-    parent_height.clamp(1, DIFFICULTY_ADJUSTMENT_WINDOW)
 }
 
 #[cfg(test)]
@@ -900,10 +947,104 @@ mod tests {
     }
 
     #[test]
+    fn target_to_compact_round_trips_consensus_compacts() {
+        for compact in [
+            GENESIS_TARGET_COMPACT,
+            TESTNET_TARGET_COMPACT,
+            REGTEST_TARGET_COMPACT,
+            MAX_COMPACT_TARGET,
+        ] {
+            let target = CompactTarget(compact).to_target().unwrap();
+            assert_eq!(target_to_compact(&target), compact);
+        }
+    }
+
+    #[test]
+    fn min_target_canonicalizes_to_valid_compact_target() {
+        let compact = target_to_compact(&MIN_TARGET_BYTES);
+        let expanded = CompactTarget(compact).to_target().unwrap();
+
+        assert!(!target_lt(&expanded, &MIN_TARGET_BYTES));
+        assert!(!target_gt(&expanded, &MAX_TARGET_BYTES));
+    }
+
+    #[test]
     fn testnet_params_use_sixty_second_spacing() {
         let params = pow_params_for_network(NETWORK_MAGIC_TESTNET);
         assert_eq!(params.target_spacing, 60);
         assert_eq!(params.max_compact_target, TESTNET_TARGET_COMPACT);
+    }
+
+    #[test]
+    fn public_expected_target_is_asert_compact_canonicalized() {
+        let params = pow_params_for_network(NETWORK_MAGIC_MAINNET);
+        let anchor = genesis_anchor(NETWORK_MAGIC_MAINNET).unwrap();
+        let height = BlockHeight(17);
+        let timestamp = Timestamp(anchor.timestamp.0 + params.target_spacing * height.0 + 37);
+        let raw = asert_next_target_with_params(&anchor, timestamp, height, &params).unwrap();
+        let canonical = CompactTarget(target_to_compact(&raw)).to_target().unwrap();
+
+        assert_eq!(
+            compute_expected_target(NETWORK_MAGIC_MAINNET, timestamp, height).unwrap(),
+            canonical
+        );
+    }
+
+    #[test]
+    fn regtest_expected_target_is_fixed_easy_target() {
+        let anchor = genesis_anchor(NETWORK_MAGIC_REGTEST).unwrap();
+        let target = compute_expected_target(
+            NETWORK_MAGIC_REGTEST,
+            Timestamp(anchor.timestamp.0 + 1),
+            BlockHeight(25),
+        )
+        .unwrap();
+        let fixed = CompactTarget(REGTEST_TARGET_COMPACT).to_target().unwrap();
+
+        assert_eq!(target, fixed);
+    }
+
+    #[test]
+    fn expected_target_large_positive_delta_clamps_to_public_max() {
+        let params = pow_params_for_network(NETWORK_MAGIC_MAINNET);
+        let anchor = genesis_anchor(NETWORK_MAGIC_MAINNET).unwrap();
+        let target = compute_expected_target(
+            NETWORK_MAGIC_MAINNET,
+            Timestamp(anchor.timestamp.0 + ASERT_HALF_LIFE * 100),
+            BlockHeight(1),
+        )
+        .unwrap();
+
+        assert_eq!(target, params.max_target().unwrap());
+    }
+
+    #[test]
+    fn expected_target_large_negative_delta_gets_harder() {
+        let params = pow_params_for_network(NETWORK_MAGIC_MAINNET);
+        let anchor = genesis_anchor(NETWORK_MAGIC_MAINNET).unwrap();
+        let height = BlockHeight((ASERT_HALF_LIFE / TARGET_SPACING) * 4);
+        let target = compute_expected_target(
+            NETWORK_MAGIC_MAINNET,
+            Timestamp(anchor.timestamp.0 + params.target_spacing),
+            height,
+        )
+        .unwrap();
+
+        assert!(U256::from_big_endian(&target) < U256::from_big_endian(&anchor.target));
+    }
+
+    #[test]
+    fn expected_target_extreme_negative_delta_clamps_to_min() {
+        let anchor = genesis_anchor(NETWORK_MAGIC_MAINNET).unwrap();
+        let height = BlockHeight((ASERT_HALF_LIFE / TARGET_SPACING) * 300);
+        let target = compute_expected_target(
+            NETWORK_MAGIC_MAINNET,
+            Timestamp(anchor.timestamp.0 + 1),
+            height,
+        )
+        .unwrap();
+
+        assert_eq!(target, MIN_TARGET_BYTES);
     }
 
     #[test]
@@ -1056,6 +1197,10 @@ mod asert_strict_tests {
 #[cfg(test)]
 mod window_retarget_tests {
     use super::*;
+    use dom_core::{
+        DIFFICULTY_ADJUSTMENT_WINDOW, MAX_DIFFICULTY_ADJUSTMENT_FACTOR_DOWN,
+        MAX_DIFFICULTY_ADJUSTMENT_FACTOR_UP, TARGET_BLOCK_TIME_SECS,
+    };
 
     fn mid_target() -> [u8; 32] {
         let mut t = MAX_TARGET_BYTES;
@@ -1066,7 +1211,7 @@ mod window_retarget_tests {
     #[test]
     fn fast_blocks_make_next_target_harder() {
         let previous = mid_target();
-        let adjustment = window_next_target(
+        let adjustment = legacy_window_retarget_for_tests_only(
             &previous,
             TARGET_BLOCK_TIME_SECS * (DIFFICULTY_ADJUSTMENT_WINDOW / 2),
             DIFFICULTY_ADJUSTMENT_WINDOW,
@@ -1081,7 +1226,7 @@ mod window_retarget_tests {
     #[test]
     fn slow_blocks_make_next_target_easier() {
         let previous = mid_target();
-        let adjustment = window_next_target(
+        let adjustment = legacy_window_retarget_for_tests_only(
             &previous,
             TARGET_BLOCK_TIME_SECS * DIFFICULTY_ADJUSTMENT_WINDOW * 2,
             DIFFICULTY_ADJUSTMENT_WINDOW,
@@ -1096,8 +1241,10 @@ mod window_retarget_tests {
     #[test]
     fn adjustment_is_bounded_by_max_factors() {
         let previous = mid_target();
-        let fast = window_next_target(&previous, 0, DIFFICULTY_ADJUSTMENT_WINDOW).unwrap();
-        let slow = window_next_target(
+        let fast =
+            legacy_window_retarget_for_tests_only(&previous, 0, DIFFICULTY_ADJUSTMENT_WINDOW)
+                .unwrap();
+        let slow = legacy_window_retarget_for_tests_only(
             &previous,
             TARGET_BLOCK_TIME_SECS * DIFFICULTY_ADJUSTMENT_WINDOW * 100,
             DIFFICULTY_ADJUSTMENT_WINDOW,
@@ -1127,13 +1274,13 @@ mod window_retarget_tests {
     #[test]
     fn same_history_produces_same_next_target() {
         let previous = mid_target();
-        let a = window_next_target(
+        let a = legacy_window_retarget_for_tests_only(
             &previous,
             TARGET_BLOCK_TIME_SECS * DIFFICULTY_ADJUSTMENT_WINDOW,
             DIFFICULTY_ADJUSTMENT_WINDOW,
         )
         .unwrap();
-        let b = window_next_target(
+        let b = legacy_window_retarget_for_tests_only(
             &previous,
             TARGET_BLOCK_TIME_SECS * DIFFICULTY_ADJUSTMENT_WINDOW,
             DIFFICULTY_ADJUSTMENT_WINDOW,
