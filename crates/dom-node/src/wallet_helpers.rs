@@ -38,16 +38,36 @@ mod tests {
 
     #[test]
     fn magics_are_distinct_across_networks() {
-        assert_ne!(ConfigNetwork::Mainnet.magic(), ConfigNetwork::Testnet.magic());
-        assert_ne!(ConfigNetwork::Mainnet.magic(), ConfigNetwork::Regtest.magic());
-        assert_ne!(ConfigNetwork::Testnet.magic(), ConfigNetwork::Regtest.magic());
+        assert_ne!(
+            ConfigNetwork::Mainnet.magic(),
+            ConfigNetwork::Testnet.magic()
+        );
+        assert_ne!(
+            ConfigNetwork::Mainnet.magic(),
+            ConfigNetwork::Regtest.magic()
+        );
+        assert_ne!(
+            ConfigNetwork::Testnet.magic(),
+            ConfigNetwork::Regtest.magic()
+        );
     }
 
     #[test]
     fn regtest_has_smaller_maturity_than_canon() {
-        assert!(ConfigNetwork::Regtest.coinbase_maturity() < ConfigNetwork::Mainnet.coinbase_maturity());
-        assert_eq!(ConfigNetwork::Mainnet.coinbase_maturity(), dom_core::COINBASE_MATURITY);
-        assert_eq!(ConfigNetwork::Testnet.coinbase_maturity(), dom_core::COINBASE_MATURITY);
-        assert_eq!(ConfigNetwork::Regtest.coinbase_maturity(), dom_core::REGTEST_COINBASE_MATURITY);
+        assert!(
+            ConfigNetwork::Regtest.coinbase_maturity() < ConfigNetwork::Mainnet.coinbase_maturity()
+        );
+        assert_eq!(
+            ConfigNetwork::Mainnet.coinbase_maturity(),
+            dom_core::COINBASE_MATURITY
+        );
+        assert_eq!(
+            ConfigNetwork::Testnet.coinbase_maturity(),
+            dom_core::COINBASE_MATURITY
+        );
+        assert_eq!(
+            ConfigNetwork::Regtest.coinbase_maturity(),
+            dom_core::REGTEST_COINBASE_MATURITY
+        );
     }
 }

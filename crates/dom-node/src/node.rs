@@ -2,6 +2,7 @@
 
 use crate::metrics::Metrics;
 use crate::miner::mining_loop;
+use crate::node_tasks::{NodeTaskSpawner, NodeTaskSupervisor};
 use crate::time_health::{check_clock_health, DriftStatus};
 use dom_chain::ChainState;
 use dom_config::NodeConfig;
@@ -323,34 +324,40 @@ impl DomNode {
             None
         };
 
-        // ── Accept loops + background tasks ─────────────────────────────
+        // ── Supervised accept loops + background tasks ──────────────────
         // Binds already succeeded; from here on only per-connection /
-        // per-request errors are possible, which are logged in-place.
+        // per-request errors are possible. Long-lived node services are
+        // critical tasks: if one exits, panics, or returns an error, run()
+        // returns that failure instead of silently degrading service.
+        let (supervisor, spawner) = NodeTaskSupervisor::new();
+
         let node_listener = self.clone();
-        let listener_task = tokio::spawn(async move {
-            node_listener.run_p2p_listener_on(p2p_listener).await;
-        });
+        let listener_spawner = spawner.clone();
+        spawner.spawn_critical("p2p-listener", async move {
+            node_listener
+                .run_p2p_listener_on(p2p_listener, listener_spawner)
+                .await
+        })?;
 
         // Start outbound peer connector
         let node_connector = self.clone();
-        let connector_task = tokio::spawn(async move {
-            node_connector.run_peer_connector().await;
-        });
+        let connector_spawner = spawner.clone();
+        spawner.spawn_critical("peer-connector", async move {
+            node_connector.run_peer_connector(connector_spawner).await
+        })?;
 
         // Start miner if enabled
         if self.config.mine {
             let node_miner = self.clone();
-            tokio::spawn(async move {
-                mining_loop(node_miner).await;
-            });
+            spawner.spawn_critical("miner", async move { mining_loop(node_miner).await })?;
         }
 
         if let Some((handle, listener)) = rpc_pair {
-            tokio::spawn(async move {
-                if let Err(e) = dom_rpc::serve(handle, listener).await {
-                    warn!("RPC server error: {e}");
-                }
-            });
+            spawner.spawn_critical("rpc-server", async move {
+                dom_rpc::serve(handle, listener)
+                    .await
+                    .map_err(|e| DomError::Internal(format!("RPC server error: {e}")))
+            })?;
         }
 
         // future_block_queue drain loop — re-evaluate deferred blocks every 30s
@@ -360,7 +367,7 @@ impl DomNode {
             let mempool = self.mempool.clone();
             let relay_tx = self.block_relay_tx.clone();
             let metrics = self.metrics.clone();
-            tokio::spawn(async move {
+            spawner.spawn_critical("future-block-drain", async move {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
                     FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS,
                 ));
@@ -476,7 +483,7 @@ impl DomNode {
                         }
                     }
                 }
-            });
+            })?;
         }
         // Dandelion++ Stem-timeout promoter.
         //
@@ -493,7 +500,7 @@ impl DomNode {
             let dandelion = self.dandelion.clone();
             let mempool = self.mempool.clone();
             let tx_fluff_tx = self.tx_fluff_tx.clone();
-            tokio::spawn(async move {
+            spawner.spawn_critical("dandelion-stem-timeout", async move {
                 const STEM_CHECK_INTERVAL_SECS: u64 = 5;
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
                     STEM_CHECK_INTERVAL_SECS,
@@ -528,16 +535,10 @@ impl DomNode {
                         }
                     }
                 }
-            });
+            })?;
         }
 
-        // Wait for tasks
-        tokio::select! {
-            _ = listener_task => warn!("P2P listener exited"),
-            _ = connector_task => warn!("Peer connector exited"),
-        }
-
-        Ok(())
+        supervisor.run_until_failure().await
     }
 
     /// Accept incoming P2P connections on an already-bound listener.
@@ -545,7 +546,11 @@ impl DomNode {
     /// Called by `run()` after `tokio::net::TcpListener::bind` has
     /// succeeded synchronously, so this loop never observes bind errors —
     /// only per-connection accept errors, which are logged and skipped.
-    async fn run_p2p_listener_on(&self, listener: tokio::net::TcpListener) {
+    async fn run_p2p_listener_on(
+        &self,
+        listener: tokio::net::TcpListener,
+        spawner: NodeTaskSpawner,
+    ) -> Result<(), DomError> {
         loop {
             match listener.accept().await {
                 Ok((stream, peer_addr)) => {
@@ -578,21 +583,34 @@ impl DomNode {
                     let peers = svc.peers.clone();
                     let metrics = svc.metrics.clone();
                     let chain_for_persist = chain.clone();
-                    tokio::spawn(async move {
-                        handle_inbound(stream, peer_addr, config, privkey, chain, channels, svc)
+                    let spawn_result = spawner.spawn_operational(
+                        format!("inbound-peer-{peer_addr}"),
+                        async move {
+                            handle_inbound(
+                                stream, peer_addr, config, privkey, chain, channels, svc,
+                            )
                             .await;
-                        let mut mgr = peers.lock().await;
+                            let mut mgr = peers.lock().await;
+                            let peer_key = peer_addr.to_string();
+                            mgr.remove_peer(&peer_key);
+                            mgr.release_inbound_reservation(&peer_addr);
+                            drop(mgr);
+                            if let Err(e) =
+                                persist_peer_reputation_state(&chain_for_persist, &peers).await
+                            {
+                                return Err(e);
+                            }
+                            refresh_peer_metrics(&peers, &metrics).await;
+                            Ok(())
+                        },
+                    );
+                    if let Err(e) = spawn_result {
+                        let mut mgr = self.peers.lock().await;
                         let peer_key = peer_addr.to_string();
                         mgr.remove_peer(&peer_key);
                         mgr.release_inbound_reservation(&peer_addr);
-                        drop(mgr);
-                        if let Err(e) =
-                            persist_peer_reputation_state(&chain_for_persist, &peers).await
-                        {
-                            warn!("Persisting peer reputation state failed: {e}");
-                        }
-                        refresh_peer_metrics(&peers, &metrics).await;
-                    });
+                        return Err(e);
+                    }
                 }
                 Err(e) => {
                     warn!("Accept error: {e}");
@@ -602,7 +620,7 @@ impl DomNode {
     }
 
     /// Connect to peers (DNS seeds + configured peers).
-    async fn run_peer_connector(&self) {
+    async fn run_peer_connector(&self, spawner: NodeTaskSpawner) -> Result<(), DomError> {
         let svc = NodeServices {
             mempool: self.mempool.clone(),
             dandelion: self.dandelion.clone(),
@@ -663,28 +681,40 @@ impl DomNode {
                     let metrics = self.metrics.clone();
                     let svc_c = svc.clone();
                     let chain_for_persist = self.chain.clone();
-                    tokio::spawn(async move {
-                        let outcome =
-                            connect_outbound(&addr, config, privkey, chain, channels, svc_c).await;
-                        let mut mgr = peers.lock().await;
-                        if outcome == OutboundAttemptOutcome::RetryableFailure {
-                            mgr.record_outbound_failure(&cleanup_addr);
-                        }
+                    let task_addr = cleanup_addr.clone();
+                    let spawn_result = spawner.spawn_operational(
+                        format!("outbound-peer-{cleanup_addr}"),
+                        async move {
+                            let outcome =
+                                connect_outbound(&addr, config, privkey, chain, channels, svc_c)
+                                    .await;
+                            let mut mgr = peers.lock().await;
+                            if outcome == OutboundAttemptOutcome::RetryableFailure {
+                                mgr.record_outbound_failure(&task_addr);
+                            }
+                            mgr.remove_peer(&task_addr);
+                            mgr.release_outbound_reservation(&task_addr);
+                            drop(mgr);
+                            if let Err(e) =
+                                persist_peer_rotation_state(&chain_for_persist, &peers).await
+                            {
+                                return Err(e);
+                            }
+                            if let Err(e) =
+                                persist_peer_reputation_state(&chain_for_persist, &peers).await
+                            {
+                                return Err(e);
+                            }
+                            refresh_peer_metrics(&peers, &metrics).await;
+                            Ok(())
+                        },
+                    );
+                    if let Err(e) = spawn_result {
+                        let mut mgr = self.peers.lock().await;
                         mgr.remove_peer(&cleanup_addr);
                         mgr.release_outbound_reservation(&cleanup_addr);
-                        drop(mgr);
-                        if let Err(e) =
-                            persist_peer_rotation_state(&chain_for_persist, &peers).await
-                        {
-                            warn!("Persisting peer rotation state failed: {e}");
-                        }
-                        if let Err(e) =
-                            persist_peer_reputation_state(&chain_for_persist, &peers).await
-                        {
-                            warn!("Persisting peer reputation state failed: {e}");
-                        }
-                        refresh_peer_metrics(&peers, &metrics).await;
-                    });
+                        return Err(e);
+                    }
                 }
             }
 

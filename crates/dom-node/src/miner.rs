@@ -158,16 +158,13 @@ fn build_coinbase_with_blinding(
     })
 }
 
-pub async fn mining_loop(node: Arc<DomNode>) {
+pub async fn mining_loop(node: Arc<DomNode>) -> Result<(), DomError> {
     info!("Minerador iniciado");
     {
         let chain = node.chain.lock().await;
         if chain.tip_height.0 == 0 && chain.tip_hash == dom_core::Hash256::ZERO {
             drop(chain);
-            if let Err(e) = create_genesis_block(node.clone()).await {
-                warn!("Genesis falhou: {e}");
-                return;
-            }
+            create_genesis_block(node.clone()).await?;
         }
     }
     loop {
@@ -175,7 +172,7 @@ pub async fn mining_loop(node: Arc<DomNode>) {
             Ok(h) => info!("✅ Bloco {} minerado!", h),
             Err(e) => {
                 warn!("Mineracao falhou: {e}");
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                return Err(e);
             }
         }
     }
