@@ -55,7 +55,9 @@ fn block_with_coinbase_for(
     }
     ScanBlock {
         height,
+        block_hash: None,
         output_commitments: outputs,
+        input_commitments: vec![],
         total_fees_noms: 0,
     }
 }
@@ -69,7 +71,9 @@ fn block_with_coinbase_and_fees(phrase: &str, height: u64, fees: u64) -> ScanBlo
     let commitment = Commitment::commit(value, &blinding);
     ScanBlock {
         height,
+        block_hash: None,
         output_commitments: vec![*commitment.as_bytes()],
+        input_commitments: vec![],
         total_fees_noms: fees,
     }
 }
@@ -487,7 +491,9 @@ impl ChainScanSource for MisbehavingScan {
         // pollute the wallet.
         Ok(Some(ScanBlock {
             height: 999,
+            block_hash: None,
             output_commitments: vec![],
+            input_commitments: vec![],
             total_fees_noms: 0,
         }))
     }
