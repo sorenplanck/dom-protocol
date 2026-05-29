@@ -120,10 +120,16 @@ pub enum RestoreError {
 pub struct ScanBlock {
     /// Height of the block in the canonical chain.
     pub height: u64,
+    /// Canonical block hash, if the source can provide it.
+    pub block_hash: Option<[u8; 32]>,
     /// All 33-byte compressed output commitments in this block.
     /// Includes coinbase and non-coinbase outputs; restore tries each
     /// against the height's candidate blinding.
     pub output_commitments: Vec<[u8; 33]>,
+    /// All input commitments consumed by this block's canonical
+    /// transactions. Used by wallet rescan to rebuild spent/unspent
+    /// state without trusting persisted wallet flags.
+    pub input_commitments: Vec<[u8; 33]>,
     /// Total transaction fees in this block (noms). Used to compute
     /// the `reward + fees` candidate value for the coinbase.
     pub total_fees_noms: u64,
@@ -428,17 +434,23 @@ mod tests {
         let mut s = InMemoryChainScan::new();
         s.insert(ScanBlock {
             height: 5,
+            block_hash: None,
             output_commitments: vec![[0u8; 33]],
+            input_commitments: vec![],
             total_fees_noms: 0,
         });
         s.insert(ScanBlock {
             height: 42,
+            block_hash: None,
             output_commitments: vec![[1u8; 33]],
+            input_commitments: vec![],
             total_fees_noms: 0,
         });
         s.insert(ScanBlock {
             height: 17,
+            block_hash: None,
             output_commitments: vec![[2u8; 33]],
+            input_commitments: vec![],
             total_fees_noms: 0,
         });
         assert_eq!(s.tip_height(), 42);
@@ -450,7 +462,9 @@ mod tests {
         let mut s = InMemoryChainScan::new();
         s.insert(ScanBlock {
             height: 10,
+            block_hash: None,
             output_commitments: vec![],
+            input_commitments: vec![],
             total_fees_noms: 0,
         });
         assert!(s.block_at(10).unwrap().is_some());
