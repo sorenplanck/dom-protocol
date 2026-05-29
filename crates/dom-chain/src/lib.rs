@@ -21,6 +21,8 @@ pub mod reorg;
 
 pub use chain_state::{
     ChainState, ConnectResult, ReorgBlockDelta, ReorgDelta, CHAIN_CORRUPT_SENTINEL,
+    MAX_RETAINED_SIDE_BRANCH_LENGTH, MAX_RETAINED_SIDE_BRANCH_REORG_DEPTH,
+    MAX_RETAINED_SIDE_BRANCH_TIPS,
 };
 pub use genesis::{build_genesis, build_mainnet_genesis, build_testnet_genesis, GenesisResult};
 pub use ibd::{
