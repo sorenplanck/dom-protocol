@@ -6,6 +6,7 @@ pub mod metrics;
 pub mod miner;
 pub mod node;
 pub mod node_handle;
+pub(crate) mod node_tasks;
 pub mod peer_scoring;
 pub mod pex;
 pub mod relay;
