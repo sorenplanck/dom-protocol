@@ -21,7 +21,7 @@
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
 use dom_chain::reorg::{check_reorg_depth, find_common_ancestor};
-use dom_chain::ChainState;
+use dom_chain::{ChainState, SideChainRetentionPolicy};
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{
     compute_block_pmmr_roots, derive_chain_id, Block, CoinbaseKernel, CoinbaseTransaction,
@@ -325,6 +325,18 @@ fn store_side_block(store: &DomStore, block: &Block) -> Hash256 {
     hash
 }
 
+fn persisted_block_bytes(store: &DomStore, hash: Hash256) -> usize {
+    let header = store
+        .get_block_header(hash.as_bytes())
+        .expect("header read")
+        .expect("header present");
+    let body = store
+        .get_block_body(hash.as_bytes())
+        .expect("body read")
+        .expect("body present");
+    header.len() + body.len()
+}
+
 fn open_chain(dir: &std::path::Path) -> ChainState {
     let store = DomStore::open(dir).expect("store open");
     ChainState::open(
@@ -578,4 +590,171 @@ fn promote_heavier_known_tip_rewrites_canonical_state_and_survives_restart() {
     );
     assert!(reopened.store.get_utxo(&alt_spend_out).unwrap().is_some());
     assert!(reopened.store.get_utxo(&old_spend_out).unwrap().is_none());
+}
+
+#[test]
+fn side_chain_retention_keeps_competing_plausible_branches() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = DomStore::open(dir.path()).expect("open");
+
+    let shared = valid_reorg_block(Hash256::ZERO, 1, 1, 1, 10, vec![]);
+    let shared_hash = commit_canonical_block(&store, &shared);
+    let canonical = valid_reorg_block(shared_hash, 2, 2, 2, 11, vec![]);
+    commit_canonical_block(&store, &canonical);
+
+    let branch_a = valid_reorg_block(shared_hash, 2, 20, 20, 20, vec![]);
+    let branch_a_hash = store_side_block(&store, &branch_a);
+    let branch_b = valid_reorg_block(shared_hash, 2, 19, 21, 21, vec![]);
+    let branch_b_hash = store_side_block(&store, &branch_b);
+
+    let mut chain = open_chain(dir.path());
+    chain.set_side_chain_retention_policy(SideChainRetentionPolicy::new(10, 2, usize::MAX));
+    let report = chain.enforce_side_chain_retention().expect("retention");
+
+    assert_eq!(report.retained_branches, 2);
+    assert!(report.retained.contains(branch_a_hash.as_bytes()));
+    assert!(report.retained.contains(branch_b_hash.as_bytes()));
+    assert!(chain
+        .store
+        .get_block_body(branch_a_hash.as_bytes())
+        .unwrap()
+        .is_some());
+    assert!(chain
+        .store
+        .get_block_body(branch_b_hash.as_bytes())
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn side_chain_retention_byte_cap_prunes_lower_priority_branch() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = DomStore::open(dir.path()).expect("open");
+
+    let shared = valid_reorg_block(Hash256::ZERO, 1, 1, 1, 10, vec![]);
+    let shared_hash = commit_canonical_block(&store, &shared);
+    let canonical = valid_reorg_block(shared_hash, 2, 2, 2, 11, vec![]);
+    commit_canonical_block(&store, &canonical);
+
+    let stronger = valid_reorg_block(shared_hash, 2, 30, 30, 30, vec![]);
+    let stronger_hash = store_side_block(&store, &stronger);
+    let weaker = valid_reorg_block(shared_hash, 2, 20, 31, 31, vec![]);
+    let weaker_hash = store_side_block(&store, &weaker);
+    let byte_cap = persisted_block_bytes(&store, stronger_hash);
+
+    let mut chain = open_chain(dir.path());
+    chain.set_side_chain_retention_policy(SideChainRetentionPolicy::new(10, 8, byte_cap));
+    let report = chain.enforce_side_chain_retention().expect("retention");
+
+    assert!(report.retained.contains(stronger_hash.as_bytes()));
+    assert!(report.pruned.contains(weaker_hash.as_bytes()));
+    assert!(chain
+        .store
+        .get_block_body(stronger_hash.as_bytes())
+        .unwrap()
+        .is_some());
+    assert!(chain
+        .store
+        .get_block_body(weaker_hash.as_bytes())
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn side_chain_retention_depth_keeps_near_candidate_and_prunes_old_branch() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = DomStore::open(dir.path()).expect("open");
+
+    let block_1 = valid_reorg_block(Hash256::ZERO, 1, 1, 1, 10, vec![]);
+    let block_1_hash = commit_canonical_block(&store, &block_1);
+    let block_2 = valid_reorg_block(block_1_hash, 2, 2, 2, 11, vec![]);
+    let block_2_hash = commit_canonical_block(&store, &block_2);
+    let block_3 = valid_reorg_block(block_2_hash, 3, 3, 3, 12, vec![]);
+    commit_canonical_block(&store, &block_3);
+
+    let near = valid_reorg_block(block_2_hash, 3, 40, 40, 40, vec![]);
+    let near_hash = store_side_block(&store, &near);
+    let too_deep = valid_reorg_block(block_1_hash, 2, 50, 50, 50, vec![]);
+    let too_deep_hash = store_side_block(&store, &too_deep);
+
+    let mut chain = open_chain(dir.path());
+    chain.set_side_chain_retention_policy(SideChainRetentionPolicy::new(1, 8, usize::MAX));
+    let report = chain.enforce_side_chain_retention().expect("retention");
+
+    assert!(
+        report.retained.contains(near_hash.as_bytes()),
+        "fork one block behind the tip is still a plausible reorg candidate"
+    );
+    assert!(
+        report.pruned.contains(too_deep_hash.as_bytes()),
+        "branch deeper than policy is pruned even if it has higher work"
+    );
+}
+
+#[test]
+fn side_chain_retention_survives_restart_explicitly_for_retained_only() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = DomStore::open(dir.path()).expect("open");
+
+    let shared = valid_reorg_block(Hash256::ZERO, 1, 1, 1, 10, vec![]);
+    let shared_hash = commit_canonical_block(&store, &shared);
+    let canonical = valid_reorg_block(shared_hash, 2, 2, 2, 11, vec![]);
+    commit_canonical_block(&store, &canonical);
+
+    let retained = valid_reorg_block(shared_hash, 2, 30, 30, 30, vec![]);
+    let retained_hash = store_side_block(&store, &retained);
+    let pruned = valid_reorg_block(shared_hash, 2, 20, 31, 31, vec![]);
+    let pruned_hash = store_side_block(&store, &pruned);
+    let byte_cap = persisted_block_bytes(&store, retained_hash);
+
+    {
+        let mut chain = open_chain(dir.path());
+        chain.set_side_chain_retention_policy(SideChainRetentionPolicy::new(10, 8, byte_cap));
+        chain.enforce_side_chain_retention().expect("retention");
+    }
+
+    let reopened = open_chain(dir.path());
+    assert!(reopened
+        .store
+        .get_block_body(retained_hash.as_bytes())
+        .unwrap()
+        .is_some());
+    assert!(reopened
+        .store
+        .get_block_body(pruned_hash.as_bytes())
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn retained_side_branch_can_still_promote_after_policy_pass() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = DomStore::open(dir.path()).expect("open");
+
+    let shared = valid_reorg_block(Hash256::ZERO, 1, 1, 1, 10, vec![]);
+    let shared_hash = commit_canonical_block(&store, &shared);
+    let old_2 = valid_reorg_block(shared_hash, 2, 2, 2, 11, vec![]);
+    let old_2_hash = commit_canonical_block(&store, &old_2);
+    let old_3 = valid_reorg_block(old_2_hash, 3, 3, 3, 12, vec![]);
+    commit_canonical_block(&store, &old_3);
+
+    let alt_2 = valid_reorg_block(shared_hash, 2, 20, 20, 20, vec![]);
+    let alt_2_hash = store_side_block(&store, &alt_2);
+    let alt_3 = valid_reorg_block(alt_2_hash, 3, 21, 21, 21, vec![]);
+    let alt_3_hash = store_side_block(&store, &alt_3);
+    let alt_4 = valid_reorg_block(alt_3_hash, 4, 22, 22, 22, vec![]);
+    let alt_4_hash = store_side_block(&store, &alt_4);
+
+    let mut chain = open_chain(dir.path());
+    chain.set_side_chain_retention_policy(SideChainRetentionPolicy::new(10, 1, usize::MAX));
+    let report = chain.enforce_side_chain_retention().expect("retention");
+    assert!(report.retained.contains(alt_2_hash.as_bytes()));
+    assert!(report.retained.contains(alt_3_hash.as_bytes()));
+    assert!(report.retained.contains(alt_4_hash.as_bytes()));
+
+    chain
+        .promote_heavier_known_tip(alt_4_hash)
+        .expect("retained branch promotes");
+    assert_eq!(chain.tip_hash, alt_4_hash);
+    assert_eq!(chain.tip_height, BlockHeight(4));
 }
