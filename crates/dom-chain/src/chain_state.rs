@@ -17,7 +17,7 @@ use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::utxo::UtxoEntry;
 use dom_store::{DomStore, METADATA_UTXO_SET_DIGEST_KEY};
 use primitive_types::U256;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, info};
 
 use crate::reorg::{check_reorg_depth, find_common_ancestor};
@@ -36,6 +36,46 @@ type SpentCommitment = [u8; 33];
 type UtxoUpdate = ([u8; 33], Option<Vec<u8>>);
 type KernelUpdate = ([u8; 33], Option<[u8; 32]>);
 
+const DEFAULT_SIDE_CHAIN_MAX_BYTES: usize = 512 * 1024 * 1024;
+const DEFAULT_SIDE_CHAIN_MAX_BRANCHES: usize = 16;
+
+/// Policy for retaining non-canonical side-chain blocks for future reorgs.
+///
+/// This is chain-selection policy, not consensus. A pruned side branch may be
+/// re-delivered and revalidated later; pruning must never make an invalid block
+/// valid or mutate canonical state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SideChainRetentionPolicy {
+    /// Maximum accepted fork depth from the current canonical tip.
+    pub max_depth: u64,
+    /// Maximum competing side branches retained.
+    pub max_branches: usize,
+    /// Maximum retained side-chain header/body bytes.
+    pub max_bytes: usize,
+}
+
+impl Default for SideChainRetentionPolicy {
+    fn default() -> Self {
+        Self {
+            max_depth: dom_core::MAX_REORG_DEPTH_POLICY,
+            max_branches: DEFAULT_SIDE_CHAIN_MAX_BRANCHES,
+            max_bytes: DEFAULT_SIDE_CHAIN_MAX_BYTES,
+        }
+    }
+}
+
+impl SideChainRetentionPolicy {
+    /// Construct a retention policy. Zero values mean "retain none" for that
+    /// dimension, which is useful for tests and constrained nodes.
+    pub fn new(max_depth: u64, max_branches: usize, max_bytes: usize) -> Self {
+        Self {
+            max_depth,
+            max_branches,
+            max_bytes,
+        }
+    }
+}
+
 pub struct ChainState {
     pub store: DomStore,
     pub tip_hash: Hash256,
@@ -44,6 +84,8 @@ pub struct ChainState {
     pub genesis_hash: Hash256,
     pub asert_anchor: AsertAnchor,
     pub network_magic: u32,
+    /// Bounded retention policy for valid non-canonical side branches.
+    pub side_chain_retention: SideChainRetentionPolicy,
     /// Coinbase maturity threshold derived from `network_magic`.
     ///
     /// `COINBASE_MATURITY` for Mainnet/Testnet, `REGTEST_COINBASE_MATURITY`
@@ -79,6 +121,34 @@ pub struct ReorgDelta {
     pub connected_txs: Vec<Transaction>,
 }
 
+/// Result of one side-chain retention pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SideChainRetentionReport {
+    /// Non-canonical blocks kept for possible future reorg work.
+    pub retained: Vec<[u8; 32]>,
+    /// Non-canonical blocks pruned from header/body storage.
+    pub pruned: Vec<[u8; 32]>,
+    /// Number of side-branch tips selected by policy.
+    pub retained_branches: usize,
+    /// Total retained side-chain header/body bytes after shared ancestors are
+    /// counted once.
+    pub retained_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+struct SideBlockInfo {
+    header: BlockHeader,
+    bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+struct SideBranch {
+    tip_hash: [u8; 32],
+    tip_height: u64,
+    total_difficulty: U256,
+    blocks: Vec<[u8; 32]>,
+}
+
 /// Map a 32-bit network magic to the coinbase maturity rule that applies
 /// to that network. Mainnet/Testnet/unknown all use the canonical
 /// `COINBASE_MATURITY`; Regtest uses `REGTEST_COINBASE_MATURITY`.
@@ -91,6 +161,160 @@ fn coinbase_maturity_for_magic(magic: u32) -> u64 {
     } else {
         dom_core::COINBASE_MATURITY
     }
+}
+
+fn compute_side_chain_retention(
+    store: &DomStore,
+    tip_height: u64,
+    policy: SideChainRetentionPolicy,
+) -> Result<SideChainRetentionReport, DomError> {
+    let mut canonical_hashes = BTreeSet::new();
+    for height in 0..=tip_height {
+        if let Some(hash) = store.get_hash_at_height(height)? {
+            canonical_hashes.insert(hash);
+        }
+    }
+
+    let raw_headers = store.read_all_block_headers_raw()?;
+    let mut side_blocks = BTreeMap::new();
+    let mut pruned: BTreeSet<[u8; 32]> = BTreeSet::new();
+
+    for (hash, header_bytes) in raw_headers {
+        if canonical_hashes.contains(&hash) {
+            continue;
+        }
+        let Ok(header) = BlockHeader::from_bytes(&header_bytes) else {
+            pruned.insert(hash);
+            continue;
+        };
+        let Some(body) = store.get_block_body(&hash)? else {
+            pruned.insert(hash);
+            continue;
+        };
+        side_blocks.insert(
+            hash,
+            SideBlockInfo {
+                header,
+                bytes: header_bytes.len().saturating_add(body.len()),
+            },
+        );
+    }
+
+    let mut side_parents = BTreeSet::new();
+    for info in side_blocks.values() {
+        let parent = *info.header.prev_hash.as_bytes();
+        if side_blocks.contains_key(&parent) {
+            side_parents.insert(parent);
+        }
+    }
+
+    let mut branches = Vec::new();
+    for hash in side_blocks.keys() {
+        if side_parents.contains(hash) {
+            continue;
+        }
+        if let Some(branch) = collect_side_branch(
+            *hash,
+            &side_blocks,
+            &canonical_hashes,
+            tip_height,
+            policy.max_depth,
+        )? {
+            branches.push(branch);
+        } else {
+            pruned.insert(*hash);
+        }
+    }
+
+    branches.sort_by(|a, b| {
+        b.total_difficulty
+            .cmp(&a.total_difficulty)
+            .then_with(|| b.tip_height.cmp(&a.tip_height))
+            .then_with(|| a.tip_hash.cmp(&b.tip_hash))
+    });
+
+    let mut retained = BTreeSet::new();
+    let mut retained_bytes = 0usize;
+    let mut retained_branches = 0usize;
+
+    for branch in branches {
+        if retained_branches >= policy.max_branches {
+            continue;
+        }
+        let incremental_bytes = branch
+            .blocks
+            .iter()
+            .filter(|hash| !retained.contains(*hash))
+            .map(|hash| side_blocks.get(hash).map(|info| info.bytes).unwrap_or(0))
+            .sum::<usize>();
+        if retained_bytes.saturating_add(incremental_bytes) > policy.max_bytes {
+            continue;
+        }
+        for hash in branch.blocks {
+            retained.insert(hash);
+        }
+        retained_bytes = retained_bytes.saturating_add(incremental_bytes);
+        retained_branches += 1;
+    }
+
+    for hash in side_blocks.keys() {
+        if !retained.contains(hash) {
+            pruned.insert(*hash);
+        }
+    }
+
+    Ok(SideChainRetentionReport {
+        retained: retained.into_iter().collect(),
+        pruned: pruned.into_iter().collect(),
+        retained_branches,
+        retained_bytes,
+    })
+}
+
+fn collect_side_branch(
+    tip_hash: [u8; 32],
+    side_blocks: &BTreeMap<[u8; 32], SideBlockInfo>,
+    canonical_hashes: &BTreeSet<[u8; 32]>,
+    canonical_tip_height: u64,
+    max_depth: u64,
+) -> Result<Option<SideBranch>, DomError> {
+    let mut blocks = Vec::new();
+    let mut cursor = tip_hash;
+    let mut seen = BTreeSet::new();
+
+    let ancestor_height = loop {
+        if !seen.insert(cursor) {
+            return Err(DomError::Internal(
+                "side-chain retention cycle detected".into(),
+            ));
+        }
+        let Some(info) = side_blocks.get(&cursor) else {
+            return Ok(None);
+        };
+        blocks.push(cursor);
+        let parent = *info.header.prev_hash.as_bytes();
+        if canonical_hashes.contains(&parent) {
+            // Parent is canonical, so the child's height proves the fork
+            // point height without trusting any side-chain index.
+            break info.header.height.0.saturating_sub(1);
+        }
+        cursor = parent;
+    };
+
+    let Some(tip) = side_blocks.get(&tip_hash) else {
+        return Ok(None);
+    };
+    let fork_depth = canonical_tip_height.saturating_sub(ancestor_height);
+    if fork_depth > max_depth {
+        return Ok(None);
+    }
+    blocks.reverse();
+    Ok(Some(SideBranch {
+        tip_hash,
+        tip_height: tip.header.height.0,
+        total_difficulty: tip.header.total_difficulty,
+        blocks,
+    }))
 }
 
 impl ChainState {
@@ -168,7 +392,17 @@ impl ChainState {
             asert_anchor,
             network_magic,
             coinbase_maturity: coinbase_maturity_for_magic(network_magic),
+            side_chain_retention: SideChainRetentionPolicy::default(),
         })
+    }
+
+    /// Override side-chain retention bounds.
+    ///
+    /// Primarily used by tests and constrained deployments. Changing this does
+    /// not change consensus validity; it only controls how many valid
+    /// non-canonical candidates are kept locally for future reorg promotion.
+    pub fn set_side_chain_retention_policy(&mut self, policy: SideChainRetentionPolicy) {
+        self.side_chain_retention = policy;
     }
 
     pub fn connect_block(
@@ -325,8 +559,10 @@ impl ChainState {
             )?;
             if extends_best_chain {
                 let reorg = self.promote_heavier_known_tip(block_hash)?;
+                self.enforce_side_chain_retention()?;
                 return Ok(ConnectResult::Reorg(reorg));
             }
+            self.enforce_side_chain_retention()?;
             debug!(
                 "Side chain block: height={}, hash={}",
                 header.height, block_hash
@@ -1017,6 +1253,26 @@ impl ChainState {
             self.tip_height, self.tip_hash, ancestor
         );
         Ok(reorg_delta)
+    }
+
+    /// Enforce bounded side-chain retention.
+    ///
+    /// Canonical blocks are never deleted. Non-canonical branches are ranked by
+    /// cumulative difficulty, then height, then hash. For each retained branch,
+    /// the full side-chain path back to the canonical fork point is retained so
+    /// promotion has every required body. Branches deeper than policy, beyond
+    /// the branch cap, or beyond the byte cap are pruned by deleting their
+    /// retained header/body pairs only.
+    pub fn enforce_side_chain_retention(&mut self) -> Result<SideChainRetentionReport, DomError> {
+        let report = compute_side_chain_retention(
+            &self.store,
+            self.tip_height.0,
+            self.side_chain_retention,
+        )?;
+        for hash in &report.pruned {
+            self.store.delete_known_block(hash)?;
+        }
+        Ok(report)
     }
 
     fn validate_direct_extension_inputs(&self, block: &Block) -> Result<(), DomError> {
