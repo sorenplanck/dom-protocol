@@ -193,6 +193,16 @@ impl NodeTaskHandle {
             .spawn_accept_task(name.to_string(), fut)
             .await;
     }
+
+    #[cfg(test)]
+    pub(crate) async fn spawn_relay_task<F>(&self, name: &str, fut: F)
+    where
+        F: Future<Output = Result<(), DomError>> + Send + 'static,
+    {
+        self.supervisor
+            .spawn_relay_task(name.to_string(), fut)
+            .await;
+    }
 }
 
 struct SupervisorFailure {
@@ -4044,10 +4054,10 @@ mod tests {
         persist_mempool_snapshot, persist_peer_reputation_snapshot, purge_mempool_confirmed_inputs,
         reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action,
         restore_peer_rotation_state, tx_hash, DeferredReplayAction, DomNode, IbdRoundState,
-        OutboundAttemptOutcome, RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY,
-        MEMPOOL_METADATA_KEY, NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY,
-        PEER_ROTATION_METADATA_KEY, TASK_CONNECTOR, TASK_DANDELION, TASK_FUTURE_QUEUE,
-        TASK_LISTENER, TASK_MINER, TASK_MISSING_RETRY, TASK_RPC,
+        NodeLifecycleState, OutboundAttemptOutcome, RelayBlockAction,
+        LEGACY_PEER_ROTATION_METADATA_KEY, MEMPOOL_METADATA_KEY, NOISE_STATIC_KEY_METADATA_KEY,
+        PEER_REPUTATION_METADATA_KEY, PEER_ROTATION_METADATA_KEY, TASK_CONNECTOR, TASK_DANDELION,
+        TASK_FUTURE_QUEUE, TASK_LISTENER, TASK_MINER, TASK_MISSING_RETRY, TASK_RPC,
     };
     use crate::metrics::Metrics;
     use dom_chain::{
@@ -4088,6 +4098,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::Mutex;
 
     type TestUtxoBytes = ([u8; 33], Vec<u8>);
@@ -4635,6 +4646,95 @@ mod tests {
             assert!(status.running_tasks.is_empty());
             assert!(status.running_relay_workers.is_empty());
         }
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn relay_worker_registry_is_cleaned_up_after_worker_exit() {
+        use tokio::sync::oneshot;
+
+        if !local_tcp_bind_permitted() {
+            return;
+        }
+
+        let dir = fresh_test_dir("supervisor-relay-cleanup");
+        let node = Arc::new(DomNode::init(test_supervised_config(&dir, false)).expect("init"));
+        let handle = node.start().await.expect("start");
+        let (started_tx, started_rx) = oneshot::channel();
+        let (finish_tx, finish_rx) = oneshot::channel();
+        handle
+            .spawn_relay_task("test-relay-worker", async move {
+                let _ = started_tx.send(());
+                let _ = finish_rx.await;
+                Ok(())
+            })
+            .await;
+        started_rx.await.expect("relay worker started");
+
+        let status = handle.status().await;
+        assert!(status
+            .running_relay_workers
+            .contains(&"test-relay-worker".to_string()));
+
+        let _ = finish_tx.send(());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let status = handle.status().await;
+                if !status
+                    .running_relay_workers
+                    .contains(&"test-relay-worker".to_string())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("relay worker cleanup");
+
+        handle.shutdown().await;
+        handle.join().await.expect("join");
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn node_run_semantics_do_not_shutdown_immediately_after_startup() {
+        if !local_tcp_bind_permitted() {
+            return;
+        }
+
+        let dir = fresh_test_dir("supervisor-run-semantics");
+        let node = Arc::new(DomNode::init(test_supervised_config(&dir, false)).expect("init"));
+        let handle = node.start().await.expect("start");
+        let join_handle = {
+            let handle = handle.clone();
+            tokio::spawn(async move { handle.join().await })
+        };
+
+        let mut join_handle = join_handle;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let status = handle.status().await;
+                if status.state == NodeLifecycleState::Running {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("node should reach running state");
+
+        let pending = tokio::time::timeout(Duration::from_millis(100), &mut join_handle).await;
+        assert!(
+            pending.is_err(),
+            "join must stay pending while the node is still running"
+        );
+
+        handle.shutdown().await;
+        join_handle
+            .await
+            .expect("join task")
+            .expect("clean shutdown");
         fs::remove_dir_all(&dir).expect("cleanup");
     }
 
