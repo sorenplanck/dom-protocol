@@ -134,7 +134,11 @@ pub fn write_report(reports_dir: &Path, report: &RunReport) -> std::io::Result<P
     body.push_str(&format!(
         "\nsummary: {passes} pass, {fails} fail, {skips} skipped, {blocks} blocked\n"
     ));
-    let final_status = if fails > 0 || blocks > 0 { "FAIL" } else { "PASS" };
+    let final_status = if fails > 0 || blocks > 0 {
+        "FAIL"
+    } else {
+        "PASS"
+    };
     body.push_str(&format!("final:   {final_status}\n"));
 
     fs::write(&path, &body)?;

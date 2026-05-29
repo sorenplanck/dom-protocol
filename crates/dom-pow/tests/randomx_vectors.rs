@@ -43,7 +43,8 @@ fn vector_height_4096_second_rotation() {
 fn vector_frozen_hash_genesis_preimage() {
     let seed = [0u8; 32];
     let preimage = b"DOM/randomx/v1/vector/genesis";
-    let expected: [u8; 32] = hex32("5fb8aaf461cbbaf36d5e702afd2ecdda110777bf5b8481739f4dd07764401c9f");
+    let expected: [u8; 32] =
+        hex32("5fb8aaf461cbbaf36d5e702afd2ecdda110777bf5b8481739f4dd07764401c9f");
 
     let got = randomx_hash(&seed, preimage).expect("randomx hash");
     assert_eq!(

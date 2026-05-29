@@ -74,7 +74,10 @@ fn boundary_values_prove_and_verify() {
     for v in values {
         let (proof, commit) = prove(v, &bf).expect("prove in-range");
         let ok = verify(&commit, &proof.bytes).expect("verify must run");
-        assert!(ok, "valid proof at boundary v={v} unexpectedly failed verify");
+        assert!(
+            ok,
+            "valid proof at boundary v={v} unexpectedly failed verify"
+        );
     }
 }
 
@@ -123,7 +126,10 @@ fn proof_does_not_verify_when_value_changes_with_same_blinding() {
 
     let (proof_a, commit_a) = prove_with_nonce(100, &bf, &nonce).expect("prove A");
     let (_proof_b, commit_b) = prove_with_nonce(101, &bf, &nonce).expect("prove B");
-    assert_ne!(commit_a, commit_b, "different value MUST give different commit");
+    assert_ne!(
+        commit_a, commit_b,
+        "different value MUST give different commit"
+    );
     assert!(
         !verify(&commit_b, &proof_a.bytes).unwrap_or(false),
         "proof for v=100 verified against commit of v=101 — soundness break"
@@ -187,9 +193,9 @@ fn garbage_proof_bytes_rejected() {
 
     // Variety of plausible garbage shapes.
     let cases: Vec<Vec<u8>> = vec![
-        vec![0u8; 10],         // all zero, short
-        vec![0u8; 700],        // all zero, near typical proof length
-        vec![0xFFu8; 700],     // all 0xFF
+        vec![0u8; 10],                          // all zero, short
+        vec![0u8; 700],                         // all zero, near typical proof length
+        vec![0xFFu8; 700],                      // all 0xFF
         (0u8..255).cycle().take(700).collect(), // patterned ramp
         vec![0xAAu8, 0x55].into_iter().cycle().take(700).collect(),
     ];

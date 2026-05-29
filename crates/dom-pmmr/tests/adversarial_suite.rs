@@ -53,7 +53,11 @@ fn leaf_pos(i: u64) -> u64 {
 /// arithmetic.
 fn perfect_subtree(leaves: &[Hash256], first_leaf_pos: u64, height: u32) -> (u64, Hash256) {
     if height == 0 {
-        assert_eq!(leaves.len(), 1, "height-0 subtree must hold exactly one leaf");
+        assert_eq!(
+            leaves.len(),
+            1,
+            "height-0 subtree must hold exactly one leaf"
+        );
         return (first_leaf_pos, leaves[0]);
     }
     let half = leaves.len() / 2;
@@ -354,10 +358,7 @@ fn first_34_roots_are_pairwise_distinct() {
         .collect();
     for i in 0..roots.len() {
         for j in (i + 1)..roots.len() {
-            assert_ne!(
-                roots[i], roots[j],
-                "roots for n={i} and n={j} collided"
-            );
+            assert_ne!(roots[i], roots[j], "roots for n={i} and n={j} collided");
         }
     }
 }
