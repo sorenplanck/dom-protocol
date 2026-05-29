@@ -1,0 +1,50 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 02/50 — IMPLEMENT AGGREGATE BLOCK-BALANCE VALIDATION
+
+Problem:
+The audit identified a critical consensus gap: full block validation does not sufficiently enforce aggregate economic balance across inputs, outputs, fees, reward, and kernels.
+
+Objective:
+Make aggregate block-balance validation mandatory for every accepted block.
+
+Tasks:
+1. Locate the canonical block validation function(s) and all acceptance paths.
+2. Implement or wire aggregate balance validation at block level.
+3. Validate the equation across the whole block, not merely per transaction.
+4. Reject blocks that:
+   - inflate value;
+   - underpay/overpay coinbase reward;
+   - mismatch fees;
+   - contain kernels inconsistent with aggregate excess;
+   - pass tx-level validation but fail block-level aggregate balance.
+5. Ensure validation runs during:
+   - live block relay;
+   - IBD;
+   - chain extension;
+   - reorg promotion;
+   - local mining before broadcast.
+6. Add adversarial tests in dom-consensus/dom-chain proving invalid aggregate blocks are rejected.
+7. Add a test proving all nodes derive the same validation result from the same block bytes.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+02 aggregate block balance.

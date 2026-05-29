@@ -1,0 +1,43 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 27/50 — REVALIDATE PERSISTENT MEMPOOL ON REOPEN
+
+Problem:
+If mempool persistence is adopted, persisted txs cannot be trusted blindly after restart because UTXO and chain tip may have changed.
+
+Objective:
+Revalidate every persisted mempool transaction against canonical chain state on reopen.
+
+Tasks:
+1. Implement persisted mempool loading if not present.
+2. On reopen, validate each tx against current canonical UTXO.
+3. Drop invalid/conflicting txs deterministically.
+4. Apply canonical ordering.
+5. Add tests:
+   - valid persisted tx survives restart;
+   - tx spending now-spent output is dropped;
+   - conflicting txs resolved deterministically;
+   - corrupted persisted tx fails closed or is dropped with clear reason.
+6. Update replay snapshots to include mempool digest if persistent.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+27 mempool revalidate on reopen.

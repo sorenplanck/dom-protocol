@@ -1,0 +1,50 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 13/50 — PROVE RESTART EQUIVALENCE WITH DEEP SNAPSHOTS
+
+Problem:
+A node can appear synced by tip hash while internal canonical state differs. The audit flags this as a dangerous long-term failure mode.
+
+Objective:
+Use deep snapshots to prove restart equivalence.
+
+Tasks:
+1. Build a test harness that captures deep snapshot before shutdown.
+2. Restart/reopen the node/store.
+3. Capture deep snapshot after restart.
+4. Assert equality for:
+   - tip;
+   - height;
+   - UTXO digest;
+   - kernel index digest;
+   - PMMR digest;
+   - canonical block-body digest;
+   - mempool digest if policy claims persistence.
+5. Repeat across:
+   - normal chain extension;
+   - after IBD;
+   - after reorg;
+   - after orphan/future block handling.
+6. Fail loudly with diff output when divergence occurs.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+13 restart equivalence snapshots.

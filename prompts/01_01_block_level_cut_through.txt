@@ -1,0 +1,45 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 01/50 — IMPLEMENT REAL BLOCK-LEVEL CUT-THROUGH VALIDATION
+
+Problem:
+The audit identified a critical consensus gap: block-level cut-through exists conceptually but is not enforced as a production validation rule. A block may pass per-transaction validation while violating aggregate block-level semantics.
+
+Objective:
+Make block-level cut-through a mandatory part of full block validation, or explicitly remove the rule from the protocol if it is not intended. Prefer implementation.
+
+Tasks:
+1. Trace every production block acceptance path: live relay, local mining, IBD, reorg promotion, replay/reopen, and tests.
+2. Identify where full block validation is called and where it is bypassed.
+3. Integrate cut-through validation into the canonical full-block validation path.
+4. Ensure no block can be accepted into canonical chain state without this rule.
+5. Ensure the validation result is deterministic and independent of transaction ordering except where the protocol defines canonical ordering.
+6. Add adversarial tests:
+   - block with individually valid transactions but invalid aggregate cut-through;
+   - block with cut-through ambiguity;
+   - block accepted through IBD must enforce the same rule as live relay;
+   - mined block must satisfy the same rule before broadcast.
+7. Add regression coverage in the most appropriate crates, likely dom-consensus and dom-chain.
+8. Do not paper over failures by adjusting fixtures unless the fixtures are provably wrong.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+01 block level cut through.

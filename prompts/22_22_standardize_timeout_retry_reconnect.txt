@@ -1,0 +1,48 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 22/50 — STANDARDIZE TIMEOUT/RETRY/RECONNECT POLICY
+
+Problem:
+Inconsistent retry and reconnect behavior can cause unstable P2P, duplicate loops, and scheduler-sensitive convergence.
+
+Objective:
+Implement a clear bounded retry/reconnect policy.
+
+Tasks:
+1. Define shared retry/backoff configuration:
+   - initial delay;
+   - max delay;
+   - jitter policy;
+   - reset after stable session;
+   - max in-flight attempts.
+2. Apply to P2P outbound connections and backbone/bootstrap peers.
+3. Prevent duplicate reconnect loops for the same peer.
+4. Ensure configured bootstrap peers are not permanently poisoned by temporary failures.
+5. Separate operational retry from consensus decisions.
+6. Add tests:
+   - backoff increases;
+   - stable session resets backoff;
+   - duplicate reconnect loop is prevented;
+   - configured peer remains eligible after failure.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+22 standardize timeout retry reconnect.

@@ -1,0 +1,45 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 45/50 — IMPROVE EXPORTABLE LOGS
+
+Problem:
+Debugging devnet/wallet/backbone issues requires structured logs that can be exported and shared.
+
+Objective:
+Add robust log export and diagnostic metadata.
+
+Tasks:
+1. Ensure logs include:
+   - app version;
+   - git commit/build hash if available;
+   - network mode;
+   - configured backbone peers;
+   - connection lifecycle events;
+   - errors;
+   - chain height/tip changes.
+2. Add export mechanism if app/UI supports it.
+3. Redact secrets, private keys, seeds, tokens, and wallet passwords.
+4. Add log rotation/bounds.
+5. Add README section explaining how to collect diagnostics.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+45 exportable logs.

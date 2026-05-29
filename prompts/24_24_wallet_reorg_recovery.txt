@@ -1,0 +1,47 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 24/50 — IMPLEMENT WALLET ROLLBACK/REORG RECOVERY
+
+Problem:
+The audit says wallet reorg semantics are incomplete and canonical wallet apply may be skipped on reorg.
+
+Objective:
+Make wallet balances and owned outputs correct after reorg.
+
+Tasks:
+1. Audit wallet state model:
+   - owned outputs;
+   - spent outputs;
+   - pending txs;
+   - coinbase maturity if applicable.
+2. Implement rollback of wallet effects from disconnected blocks.
+3. Implement apply of wallet effects from newly connected canonical blocks.
+4. Ensure wallet state is keyed by block hash/height, not just linear assumption.
+5. Add tests:
+   - receive output then reorg removes block;
+   - spend output then reorg restores it;
+   - coinbase reorg;
+   - restart after wallet reorg;
+   - wallet rescan matches incremental state.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+24 wallet reorg recovery.

@@ -1,0 +1,43 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 11/50 — REMOVE INSTANT/LOCAL ELAPSED FROM CONVERGENCE-CRITICAL DECISIONS
+
+Problem:
+The audit identifies local wall-clock/runtime timing as a replay hazard, especially around future block handling.
+
+Objective:
+Ensure convergence-critical decisions are derived from chain data, message content, and deterministic policy, not local elapsed time.
+
+Tasks:
+1. Search for Instant::now, SystemTime::now, sleep, elapsed, timeout usage in consensus/replay/runtime paths.
+2. Classify each usage:
+   - consensus-critical;
+   - replay-critical;
+   - operational only;
+   - test only.
+3. Remove or isolate timing from replay-critical decisions.
+4. Where timeouts remain, ensure they only affect retry scheduling, not canonical acceptance.
+5. Add tests proving final chain state is the same under different timing/order conditions.
+6. Document every remaining time-based behavior as operational, not consensus.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+11 remove instant convergence dependence.

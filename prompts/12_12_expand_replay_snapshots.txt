@@ -1,0 +1,46 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 12/50 — EXPAND REPLAY SNAPSHOTS WITH DEEP CANONICAL STATE DIGESTS
+
+Problem:
+The audit says replay snapshots are shallow. They do not capture UTXO, kernel index, PMMR commitments, or canonical block-body equivalence.
+
+Objective:
+Make replay snapshots strong enough to detect silent divergence.
+
+Tasks:
+1. Extend replay snapshot structure to include:
+   - tip hash and height;
+   - UTXO digest/root;
+   - kernel index digest/root;
+   - PMMR root/commitment digest;
+   - canonical block-body digest;
+   - mempool digest if included in replay claims;
+   - peer/retry state digest where relevant.
+2. Ensure digests are canonical and deterministic.
+3. Add comparison utilities with clear diff output.
+4. Add before/after restart tests.
+5. Add multi-node final-state comparison tests.
+6. Do not include nondeterministic runtime data unless intentionally normalized.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+12 expand replay snapshots.

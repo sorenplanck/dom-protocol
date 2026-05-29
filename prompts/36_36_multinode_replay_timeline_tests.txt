@@ -1,0 +1,49 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 36/50 — CREATE MULTI-NODE REPLAY TIMELINE EQUIVALENCE TESTS
+
+Problem:
+The hardest gap is proving that different live delivery timelines converge to the same final state.
+
+Objective:
+Add tests comparing final canonical state after equivalent logical events delivered in different orders.
+
+Tasks:
+1. Create two or more nodes.
+2. Feed equivalent blocks/transactions under different delivery schedules:
+   - ordered;
+   - reversed where valid;
+   - delayed parent;
+   - duplicated relay;
+   - reconnect mid-delivery.
+3. Capture deep snapshots at the end.
+4. Assert equality across nodes:
+   - tip;
+   - UTXO digest;
+   - PMMR digest;
+   - kernel index digest;
+   - mempool digest where applicable.
+5. Use deterministic simulated timing/seeds.
+6. Fail with detailed diff.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+36 multinode replay timeline tests.

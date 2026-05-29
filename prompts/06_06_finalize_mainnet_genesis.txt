@@ -1,0 +1,43 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 06/50 — FINALIZE MAINNET GENESIS CONSTANTS
+
+Problem:
+The audit flags GENESIS_HASH_MAINNET as placeholder/zero, which is a launch blocker. A protocol cannot claim mainnet readiness with placeholder genesis constants.
+
+Objective:
+Finalize, pin, validate, and test mainnet genesis constants.
+
+Tasks:
+1. Locate all mainnet/testnet/regtest genesis constants.
+2. Replace placeholder mainnet values only if the project is ready to define mainnet. If not ready, keep mainnet disabled explicitly.
+3. Add guards preventing mainnet mode from starting with placeholder genesis.
+4. Add tests:
+   - mainnet genesis hash is not zero;
+   - mainnet genesis timestamp is fixed;
+   - mainnet chain/network ID is fixed;
+   - testnet/regtest constants cannot accidentally be used for mainnet.
+5. Document the genesis derivation path in code comments or docs.
+6. Ensure all hardcoded constants are deterministic and covered by tests.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+06 finalize mainnet genesis.

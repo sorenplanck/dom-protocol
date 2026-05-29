@@ -1,0 +1,41 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 47/50 — IMPLEMENT CPU THROTTLING WITHOUT AFFECTING CONSENSUS
+
+Problem:
+Sleep/throttle can reduce CPU usage but must never be the mechanism controlling coin emission or block interval.
+
+Objective:
+Add optional miner CPU throttling while keeping difficulty as the consensus control.
+
+Tasks:
+1. Add optional throttle/yield config for miner loop.
+2. Ensure throttle affects only local resource usage.
+3. Do not change block validity or target calculation.
+4. Add logs clarifying hash rate and throttle state.
+5. Add tests:
+   - target calculation unchanged by throttle;
+   - mined block validity independent of throttle;
+   - throttle config does not enter consensus serialization.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+47 cpu throttle not consensus.

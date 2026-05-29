@@ -1,0 +1,47 @@
+You are operating inside the real DOM Protocol repository.
+
+This is a consensus/distributed-systems hardening task. Treat this as protocol-critical engineering, not a cosmetic refactor.
+
+Hard rules:
+- Do not weaken consensus, replay, persistence, or convergence invariants to make tests pass.
+- Do not hide failures behind logs, sleeps, retries, or best-effort behavior.
+- Do not delete existing tests unless replacing them with stronger coverage.
+- Do not mark critical tests as ignored.
+- Prefer deterministic event-driven tests over sleep-based tests.
+- Run cargo fmt, cargo check, and the narrow relevant tests before committing.
+- After successful validation, commit with a precise message and push to GitHub automatically unless authentication blocks it.
+- Final response must include: files changed, tests added/changed, commands run, pass/fail result, commit hash, and remote HEAD verification.
+
+
+TASK 40/50 — GENERATE CRITICAL-DOMAIN COVERAGE REPORT
+
+Problem:
+The repository needs visibility into which domains are proven and which are not.
+
+Objective:
+Create a coverage/proof report grouped by protocol-critical domain.
+
+Tasks:
+1. Add a script or documented command that lists tests by domain:
+   - consensus;
+   - persistence;
+   - replay;
+   - convergence;
+   - runtime;
+   - P2P;
+   - mempool;
+   - wallet.
+2. Identify ignored tests and why.
+3. Identify untested critical invariants.
+4. Output markdown or text report.
+5. Do not claim line coverage equals proof coverage; focus on invariant coverage.
+6. Add the report to CI artifacts if feasible.
+
+Validation commands:
+- cargo fmt
+- cargo check
+- Run the narrow relevant cargo test commands for the touched crates.
+- If this touches integration behavior, run cargo test -p dom-integration-tests -- --test-threads=1.
+
+Commit message suggestion:
+40 critical domain coverage report.
