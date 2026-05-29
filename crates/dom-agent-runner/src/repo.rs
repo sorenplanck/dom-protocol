@@ -13,9 +13,7 @@ pub struct RepoRoot {
 }
 
 pub fn find_dom_repo_root(start: &Path) -> io::Result<RepoRoot> {
-    let mut current = start
-        .canonicalize()
-        .unwrap_or_else(|_| start.to_path_buf());
+    let mut current = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
     loop {
         let candidate = current.join("Cargo.toml");
         if candidate.is_file() {
@@ -50,18 +48,14 @@ mod tests {
     #[test]
     fn finds_root() {
         let tmp = std::env::temp_dir().join(format!("dar-root-{}", std::process::id()));
-        fs::create_dir_all(tmp.join("crates").join("dom-agent-runner").join("src"))
-            .unwrap();
+        fs::create_dir_all(tmp.join("crates").join("dom-agent-runner").join("src")).unwrap();
         fs::write(
             tmp.join("Cargo.toml"),
             "[workspace]\nmembers = [\"crates/dom-agent-runner\"]\n",
         )
         .unwrap();
         let r = find_dom_repo_root(&tmp).unwrap();
-        assert_eq!(
-            r.path.canonicalize().unwrap(),
-            tmp.canonicalize().unwrap()
-        );
+        assert_eq!(r.path.canonicalize().unwrap(), tmp.canonicalize().unwrap());
         let _ = fs::remove_dir_all(&tmp);
     }
 

@@ -108,9 +108,7 @@ async fn test_spend_e2e_cross_node_propagation() {
         "fee_noms": fee,
     });
 
-    let client = reqwest::Client::builder()
-        .build()
-        .expect("reqwest client");
+    let client = reqwest::Client::builder().build().expect("reqwest client");
     let resp = client
         .post("http://127.0.0.1:43480/wallet/spend")
         .bearer_auth("spend-e2e-token")
@@ -124,8 +122,7 @@ async fn test_spend_e2e_cross_node_propagation() {
         status.is_success(),
         "POST /wallet/spend returned {status}: {body_text}"
     );
-    let json: serde_json::Value =
-        serde_json::from_str(&body_text).expect("response must be JSON");
+    let json: serde_json::Value = serde_json::from_str(&body_text).expect("response must be JSON");
     let tx_hash_hex = json["tx_hash"]
         .as_str()
         .expect("response should include tx_hash field");
