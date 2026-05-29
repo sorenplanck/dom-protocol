@@ -1,14 +1,19 @@
 //! Deterministic replay-equivalence snapshot tooling.
 
-use crate::node::{load_mempool_snapshot, load_peer_rotation_snapshot};
+use crate::node::load_peer_rotation_snapshot;
 use dom_chain::{ChainState, PersistedIbdState};
 use dom_core::DomError;
-use dom_mempool::{Mempool, PersistedMempoolState};
+use dom_mempool::Mempool;
 use dom_wire::manager::{PeerManager, PersistedPeerRotationState};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Canonical replay-equivalence snapshot for focused convergence checks.
+///
+/// Per the volatile mempool policy (RFC-0012 §1.5) the mempool is **not** part of
+/// persisted, restart-surviving state and is therefore not a field of this
+/// snapshot. The only mempool data captured is [`mempool_hashes`], an explicitly
+/// non-persisted *runtime convergence diagnostic* (see its doc comment).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplaySnapshot {
     /// Canonical chain tip height.
@@ -19,11 +24,15 @@ pub struct ReplaySnapshot {
     pub persisted_ibd: Option<PersistedIbdState>,
     /// Persisted peer-rotation state, if present.
     pub persisted_peer_rotation: Option<PersistedPeerRotationState>,
-    /// Persisted mempool snapshot, if present.
-    pub persisted_mempool: Option<PersistedMempoolState>,
     /// Runtime peer-rotation state captured canonically.
     pub runtime_peer_rotation: PersistedPeerRotationState,
-    /// Canonical mempool transaction hashes.
+    /// Canonical, hash-ordered listing of the **live** mempool (RFC-0012 §1.5).
+    ///
+    /// This is a runtime convergence diagnostic — two peers that have admitted
+    /// the same transaction set produce the same listing regardless of delivery
+    /// order. It is **not** persisted and is **not** expected to survive a
+    /// restart (a restarted node starts empty and re-acquires txs from peers).
+    /// It is never consensus state.
     pub mempool_hashes: Vec<[u8; 32]>,
 }
 
@@ -53,7 +62,6 @@ impl ReplaySnapshot {
             chain_tip_hash: *chain.tip_hash.as_bytes(),
             persisted_ibd: PersistedIbdState::load(&chain.store)?,
             persisted_peer_rotation: load_peer_rotation_snapshot(&chain.store)?,
-            persisted_mempool: load_mempool_snapshot(&chain.store)?,
             runtime_peer_rotation: peers.outbound_failure_state(),
             mempool_hashes: mempool.all_hashes(),
         })
@@ -86,9 +94,6 @@ impl ReplaySnapshot {
         if self.persisted_peer_rotation != other.persisted_peer_rotation {
             fields.push("persisted_peer_rotation");
         }
-        if self.persisted_mempool != other.persisted_mempool {
-            fields.push("persisted_mempool");
-        }
         if self.runtime_peer_rotation != other.runtime_peer_rotation {
             fields.push("runtime_peer_rotation");
         }
@@ -114,9 +119,7 @@ impl ReplaySnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::{
-        persist_mempool_snapshot, persist_peer_rotation_snapshot, restore_peer_rotation_state,
-    };
+    use crate::node::{persist_peer_rotation_snapshot, restore_peer_rotation_state};
     use dom_chain::{ChainState, IbdInterruption, IbdPhase, PersistedIbdState};
     use dom_consensus::transaction::{TransactionKernel, TransactionOutput};
     use dom_consensus::Transaction;
@@ -295,7 +298,6 @@ mod tests {
                     cooldown_rounds: 0,
                 }],
             }),
-            persisted_mempool: None,
             runtime_peer_rotation: PersistedPeerRotationState {
                 next_failure_seq: 3,
                 outbound_failures: vec![dom_wire::manager::PersistedOutboundFailure {
@@ -330,7 +332,6 @@ mod tests {
             chain_tip_hash: [0x11; 32],
             persisted_ibd: None,
             persisted_peer_rotation: None,
-            persisted_mempool: None,
             runtime_peer_rotation: PersistedPeerRotationState::default(),
             mempool_hashes: vec![[0xAA; 32]],
         };
@@ -342,9 +343,16 @@ mod tests {
         assert_eq!(diff.fields, vec!["chain_tip_hash", "mempool_hashes"]);
     }
 
+    /// RFC-0012 §1.5: the mempool is volatile and is **not** part of persisted,
+    /// restart-surviving snapshot state. A node restart yields an empty live
+    /// mempool, so the only mempool data the replay snapshot carries
+    /// (`mempool_hashes`) is empty after reopen — regardless of what the live
+    /// mempool held before the restart. This is the inverse of the old
+    /// "survives reopen" expectation and pins the volatile policy at the
+    /// replay-snapshot layer.
     #[test]
-    fn replay_snapshot_mempool_survives_reopen_and_restore() {
-        let dir = fresh_test_dir("mempool-reopen");
+    fn replay_snapshot_mempool_is_volatile_and_not_persisted_across_reopen() {
+        let dir = fresh_test_dir("mempool-volatile-reopen");
         let snapshot_before = {
             let mut chain = open_chain(&dir);
             chain.tip_height = BlockHeight(5);
@@ -355,29 +363,38 @@ mod tests {
             let mut mempool = Mempool::new();
             mempool.accept_tx(tx_b, hash_b, 2).expect("mempool b");
             mempool.accept_tx(tx_a, hash_a, 1).expect("mempool a");
-            persist_mempool_snapshot(&chain.store, &mempool.snapshot()).expect("persist mempool");
+            assert_eq!(mempool.len(), 2, "precondition: live mempool is populated");
 
             ReplaySnapshot::capture(&chain, &mempool, &PeerManager::new(125, 2))
                 .expect("capture before")
         };
-
-        let reopened_chain = open_chain(&dir);
-        let persisted = load_mempool_snapshot(&reopened_chain.store)
-            .expect("load mempool")
-            .expect("persisted mempool");
         assert_eq!(
-            persisted
-                .entries
-                .iter()
-                .map(|entry| entry.tx_hash)
-                .collect::<Vec<_>>(),
-            snapshot_before.mempool_hashes
+            snapshot_before.mempool_hashes.len(),
+            2,
+            "the live (pre-restart) snapshot reflects the populated mempool"
         );
+
+        // Reopen with a fresh (volatile) mempool, as `DomNode::init` does. The
+        // chain tip is restart-surviving state, so we restore it to the same
+        // value; only the mempool is expected to differ.
+        let mut reopened_chain = open_chain(&dir);
+        reopened_chain.tip_height = BlockHeight(5);
+        reopened_chain.tip_hash = Hash256::from_bytes([0x77; 32]);
+        let snapshot_after =
+            ReplaySnapshot::capture(&reopened_chain, &Mempool::new(), &PeerManager::new(125, 2))
+                .expect("capture after");
+        assert!(
+            snapshot_after.mempool_hashes.is_empty(),
+            "restart yields an empty mempool: mempool is volatile, never persisted"
+        );
+
+        // The chain-tip / persisted fields are restart-surviving state and must
+        // match across reopen; only the volatile mempool listing differs.
+        let diff = snapshot_before.diff(&snapshot_after);
         assert_eq!(
-            snapshot_before
-                .persisted_mempool
-                .expect("persisted mempool in snapshot"),
-            persisted
+            diff.fields,
+            vec!["mempool_hashes"],
+            "only the volatile mempool listing may diverge across a restart"
         );
         fs::remove_dir_all(&dir).expect("cleanup reopen");
     }
