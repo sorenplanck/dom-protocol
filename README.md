@@ -60,7 +60,7 @@ DOM is developed under a conservative protocol philosophy:
 |-----------|-------|-----|
 | **Target Block Time** | 2 minutes (120s) | RFC-0000 §2 |
 | **Difficulty Algorithm** | ASERT (Absolutely Scheduled Exponential Rise Targets) | RFC-0011 |
-| **ASERT Half-Life** | 2 days (172,800s) | RFC-0011 |
+| **ASERT Half-Life** | 288 blocks (34,560s) | RFC-0011 |
 | **PoW Algorithm** | RandomX (CPU-optimized) | RFC-0005 |
 | **Hash Function** | Blake2b-256 (tagged) | RFC-0001 |
 | **Signature Scheme** | Schnorr (secp256k1, BIP-340) | RFC-0009 |

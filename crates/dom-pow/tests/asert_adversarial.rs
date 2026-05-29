@@ -126,12 +126,11 @@ fn forward_time_warp_within_tolerance_is_bounded() {
     // Block at height 1 with timestamp = anchor + TARGET_SPACING + 120 (max
     // future tolerance).
     let warp_ts = anchor.timestamp.0 + TARGET_SPACING + 120;
-    let warped =
-        asert_next_target(&anchor, Timestamp(warp_ts), BlockHeight(1)).expect("ok");
+    let warped = asert_next_target(&anchor, Timestamp(warp_ts), BlockHeight(1)).expect("ok");
     let anchor_diff = target_to_difficulty(&anchor.target);
     let warped_diff = target_to_difficulty(&warped);
     let delta_ratio = (anchor_diff as f64 - warped_diff as f64).abs() / anchor_diff.max(1) as f64;
-    // 120 s out of ASERT_HALF_LIFE (172_800 s) → frac ≈ 0.07%.
+    // 120 s out of ASERT_HALF_LIFE (34_560 s) -> frac ~= 0.35%.
     // The fixed-point rounding floor expands this slightly; allow
     // up to 2% to be safe across the table granularity.
     assert!(
@@ -224,9 +223,12 @@ fn oscillating_arrivals_do_not_diverge() {
     // After 100 blocks where odd blocks arrive at 1.5× spacing and
     // even at 0.5× — average is 1× — total time = 100 × spacing.
     let actual_total = 100 * TARGET_SPACING;
-    let result =
-        asert_next_target(&anchor, Timestamp(anchor.timestamp.0 + actual_total), BlockHeight(100))
-            .expect("ok");
+    let result = asert_next_target(
+        &anchor,
+        Timestamp(anchor.timestamp.0 + actual_total),
+        BlockHeight(100),
+    )
+    .expect("ok");
     let anchor_diff = target_to_difficulty(&anchor.target);
     let result_diff = target_to_difficulty(&result);
     // Average arrival rate ≈ ideal, so the new target should be
@@ -250,8 +252,5 @@ fn height_below_anchor_rejected() {
         target: MAX_TARGET_BYTES,
     };
     let result = asert_next_target(&anchor, Timestamp(1_704_080_000), BlockHeight(50));
-    assert!(
-        result.is_err(),
-        "height below anchor must be rejected"
-    );
+    assert!(result.is_err(), "height below anchor must be rejected");
 }

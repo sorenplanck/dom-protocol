@@ -58,7 +58,7 @@ enum Action {
 
 struct MockServer {
     addr: SocketAddr,
-    _shutdown: oneshot::Sender<()>,
+    shutdown: Option<oneshot::Sender<()>>,
     /// Counter of requests the server has accepted from a client.
     requests_seen: Arc<AtomicU64>,
     /// Joined by Drop to make sure the runtime thread exits cleanly.
@@ -67,9 +67,10 @@ struct MockServer {
 
 impl Drop for MockServer {
     fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
         if let Some(h) = self.handle.take() {
-            // Signal shutdown; if the receiver is already dropped
-            // because the runtime exited, that's fine.
             let _ = h.join();
         }
     }
@@ -192,7 +193,7 @@ where
     let addr = addr_rx.recv().expect("mock server didn't report its addr");
     MockServer {
         addr,
-        _shutdown: shutdown_tx,
+        shutdown: Some(shutdown_tx),
         requests_seen,
         handle: Some(handle),
     }

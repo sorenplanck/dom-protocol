@@ -17,4 +17,4 @@ anyhow = { workspace = true }
 dom-test-runner = { path = "../dom-test-runner" }
 
 [dev-dependencies]
-
+tempfile = { workspace = true }
