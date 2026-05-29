@@ -41,7 +41,10 @@ use dom_core::{
 #[test]
 fn wire_caps_match_rfc_table() {
     assert_eq!(MAX_HEADERS_PER_MSG, 2_000, "MAX_HEADERS_PER_MSG drift");
-    assert_eq!(MAX_GETBLOCKDATA_HASHES, 128, "MAX_GETBLOCKDATA_HASHES drift");
+    assert_eq!(
+        MAX_GETBLOCKDATA_HASHES, 128,
+        "MAX_GETBLOCKDATA_HASHES drift"
+    );
     assert_eq!(MAX_LOCATOR_HASHES, 32, "MAX_LOCATOR_HASHES drift");
     assert_eq!(MAX_USER_AGENT_BYTES, 256, "MAX_USER_AGENT_BYTES drift");
     assert_eq!(
