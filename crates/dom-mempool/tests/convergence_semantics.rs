@@ -79,6 +79,46 @@ fn conflicting_spend_can_be_reaccepted_after_confirmed_cleanup() {
     assert!(pool.get_tx(&conflict_hash).is_some());
 }
 
+/// TASK 29 / RFC-0012 §4 (mempool half of Policy B): a transaction that spends an
+/// output created by an as-yet-unconfirmed sibling (a same-block / parent-child
+/// spend) is rejected at admission, because that output is not in the canonical
+/// UTXO set. Only once the parent's output is confirmed does the child become
+/// admissible. This is why the miner — which templates only admitted mempool
+/// transactions — can never assemble a same-block spend.
+#[test]
+fn same_block_child_spend_rejected_until_parent_output_is_confirmed() {
+    // `parent_output` stands in for an output created by an unconfirmed sibling
+    // transaction in the (would-be) same block.
+    let parent_output = h_commitment();
+    let (child, child_hash) = make_spending_tx(parent_output, MIN_RELAY_FEE_RATE * 25, 0x07);
+
+    // Parent output is NOT in the canonical UTXO set (unconfirmed) → reject.
+    let mut pool = Mempool::new();
+    let err = pool
+        .accept_tx_with_chain_view(child.clone(), child_hash, 0, 100, 10, |_| Ok(None))
+        .expect_err("same-block child spend must be rejected while the parent is unconfirmed");
+    assert!(
+        matches!(err, DomError::PolicyRejected(ref msg) if msg.contains("not found in canonical UTXO set")),
+        "expected unconfirmed-parent rejection, got {err}"
+    );
+    assert!(
+        pool.get_tx(&child_hash).is_none(),
+        "rejected child must not enter the pool"
+    );
+
+    // Once the parent's output is a confirmed, mature UTXO, the child admits.
+    let confirmed_parent = UtxoEntry {
+        block_height: 1,
+        is_coinbase: false,
+        proof: vec![],
+    };
+    pool.accept_tx_with_chain_view(child, child_hash, 0, 100, 10, |_| {
+        Ok(Some(confirmed_parent.clone()))
+    })
+    .expect("child admits once its parent output is confirmed");
+    assert!(pool.get_tx(&child_hash).is_some());
+}
+
 #[test]
 fn chain_view_rejects_missing_input() {
     let input = h_commitment();
