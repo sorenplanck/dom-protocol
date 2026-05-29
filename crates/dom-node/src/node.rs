@@ -2,6 +2,9 @@
 
 use crate::metrics::Metrics;
 use crate::miner::mining_loop;
+use crate::missing_block_tracker::MissingBlockTracker;
+use crate::orphan_pool::{OrphanBlock, RuntimeOrphanPool};
+use crate::task_supervisor::{NodeTaskSupervisor, ShutdownToken, TaskKind};
 use crate::time_health::{check_clock_health, DriftStatus};
 use dom_chain::ChainState;
 use dom_config::NodeConfig;
@@ -19,6 +22,7 @@ use dom_wire::manager::PeerManager;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -58,6 +62,12 @@ pub struct DomNode {
     pub metrics: Arc<Metrics>,
     /// Future block queue for soft buffer (Doc 4.5 mitigation 1).
     pub future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
+    /// Runtime-only orphan/missing-parent tracker for deterministic re-requests.
+    pub missing_blocks: Arc<Mutex<MissingBlockTracker>>,
+    /// Bounded runtime orphan bytes retained for parent-arrival reprocessing.
+    pub orphan_pool: Arc<Mutex<RuntimeOrphanPool>>,
+    /// Live runtime task supervisor and shutdown coordinator.
+    pub task_supervisor: NodeTaskSupervisor,
 }
 
 /// Per-connection I/O context passed into message_loop.
@@ -76,6 +86,8 @@ struct NodeServices {
     peers: Arc<Mutex<dom_wire::manager::PeerManager>>,
     metrics: Arc<Metrics>,
     future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
+    missing_blocks: Arc<Mutex<MissingBlockTracker>>,
+    orphan_pool: Arc<Mutex<RuntimeOrphanPool>>,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
 }
 
@@ -286,7 +298,21 @@ impl DomNode {
             wallet,
             metrics,
             future_block_queue: Arc::new(crate::future_block_queue::FutureBlockQueue::new()),
+            missing_blocks: Arc::new(Mutex::new(MissingBlockTracker::new(8, 2, 16))),
+            orphan_pool: Arc::new(Mutex::new(RuntimeOrphanPool::new(1024, 32))),
+            task_supervisor: NodeTaskSupervisor::new(),
         })
+    }
+
+    /// Request coordinated shutdown of live node tasks.
+    pub async fn request_shutdown(&self) {
+        tracing::info!("shutdown_requested");
+        self.task_supervisor.request_shutdown().await;
+    }
+
+    /// Observe the node's live shutdown signal.
+    pub fn shutdown_token(&self) -> ShutdownToken {
+        self.task_supervisor.shutdown_token()
     }
 
     /// Start all node services.
@@ -323,34 +349,59 @@ impl DomNode {
             None
         };
 
-        // ── Accept loops + background tasks ─────────────────────────────
-        // Binds already succeeded; from here on only per-connection /
-        // per-request errors are possible, which are logged in-place.
+        // ── Supervised runtime tasks ────────────────────────────────────
+        // Binds already succeeded; from here on long-lived services are
+        // supervised so failures are observable and shutdown is coordinated.
+        let supervisor = self.task_supervisor.clone();
+        let shutdown = supervisor.shutdown_token();
         let node_listener = self.clone();
-        let listener_task = tokio::spawn(async move {
-            node_listener.run_p2p_listener_on(p2p_listener).await;
-        });
+        let listener_supervisor = supervisor.clone();
+        let listener_shutdown = shutdown.clone();
+        supervisor
+            .spawn_critical(TaskKind::Listener, async move {
+                node_listener
+                    .run_p2p_listener_on(p2p_listener, listener_supervisor, listener_shutdown)
+                    .await
+            })
+            .await;
 
         // Start outbound peer connector
         let node_connector = self.clone();
-        let connector_task = tokio::spawn(async move {
-            node_connector.run_peer_connector().await;
-        });
+        let connector_supervisor = supervisor.clone();
+        let connector_shutdown = shutdown.clone();
+        supervisor
+            .spawn_critical(TaskKind::Connector, async move {
+                node_connector
+                    .run_peer_connector(connector_supervisor, connector_shutdown)
+                    .await
+            })
+            .await;
 
         // Start miner if enabled
         if self.config.mine {
             let node_miner = self.clone();
-            tokio::spawn(async move {
-                mining_loop(node_miner).await;
-            });
+            let miner_shutdown = shutdown.clone();
+            supervisor
+                .spawn_critical(TaskKind::Miner, async move {
+                    mining_loop(node_miner, miner_shutdown)
+                        .await
+                        .map_err(|e| e.to_string())
+                })
+                .await;
         }
 
         if let Some((handle, listener)) = rpc_pair {
-            tokio::spawn(async move {
-                if let Err(e) = dom_rpc::serve(handle, listener).await {
-                    warn!("RPC server error: {e}");
-                }
-            });
+            let rpc_shutdown = shutdown.clone();
+            supervisor
+                .spawn_critical(TaskKind::Rpc, async move {
+                    tokio::select! {
+                        _ = rpc_shutdown.wait() => Ok(()),
+                        result = dom_rpc::serve(handle, listener) => {
+                            result.map_err(|e| format!("RPC server error: {e}"))
+                        }
+                    }
+                })
+                .await;
         }
 
         // future_block_queue drain loop — re-evaluate deferred blocks every 30s
@@ -360,12 +411,17 @@ impl DomNode {
             let mempool = self.mempool.clone();
             let relay_tx = self.block_relay_tx.clone();
             let metrics = self.metrics.clone();
-            tokio::spawn(async move {
+            let future_shutdown = shutdown.clone();
+            supervisor
+                .spawn_critical(TaskKind::FutureQueue, async move {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
                     FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS,
                 ));
                 loop {
-                    interval.tick().await;
+                    tokio::select! {
+                        _ = future_shutdown.wait() => return Ok(()),
+                        _ = interval.tick() => {}
+                    }
                     let evicted = queue.evict_expired(FUTURE_BLOCK_QUEUE_MAX_AGE_SECS).await;
                     if evicted > 0 {
                         tracing::debug!(
@@ -476,7 +532,8 @@ impl DomNode {
                         }
                     }
                 }
-            });
+            })
+                .await;
         }
         // Dandelion++ Stem-timeout promoter.
         //
@@ -493,51 +550,72 @@ impl DomNode {
             let dandelion = self.dandelion.clone();
             let mempool = self.mempool.clone();
             let tx_fluff_tx = self.tx_fluff_tx.clone();
-            tokio::spawn(async move {
-                const STEM_CHECK_INTERVAL_SECS: u64 = 5;
-                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
-                    STEM_CHECK_INTERVAL_SECS,
-                ));
-                interval.tick().await; // skip first immediate tick
-                loop {
-                    interval.tick().await;
-                    let timed_out: Vec<[u8; 32]> = {
-                        let mut d = dandelion.lock().await;
-                        d.collect_timed_out()
-                    };
-                    if timed_out.is_empty() {
-                        continue;
-                    }
-                    tracing::debug!(
-                        "Dandelion: promoting {} stem-timed-out tx(s) to fluff",
-                        timed_out.len()
-                    );
-                    use dom_serialization::DomSerialize;
-                    for tx_hash in timed_out {
-                        let tx_bytes_opt = {
-                            let m = mempool.lock().await;
-                            m.get_tx(&tx_hash).and_then(|e| e.tx.to_bytes().ok())
+            let dandelion_shutdown = shutdown.clone();
+            supervisor
+                .spawn_critical(TaskKind::DandelionStem, async move {
+                    const STEM_CHECK_INTERVAL_SECS: u64 = 5;
+                    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+                        STEM_CHECK_INTERVAL_SECS,
+                    ));
+                    interval.tick().await; // skip first immediate tick
+                    loop {
+                        tokio::select! {
+                            _ = dandelion_shutdown.wait() => return Ok(()),
+                            _ = interval.tick() => {}
+                        }
+                        let timed_out: Vec<[u8; 32]> = {
+                            let mut d = dandelion.lock().await;
+                            d.collect_timed_out()
                         };
-                        if let Some(tx_bytes) = tx_bytes_opt {
-                            let _ = tx_fluff_tx.send(tx_bytes);
-                        } else {
-                            tracing::debug!(
-                                "Stem-timed-out tx {} not in mempool; dropping",
-                                hex::encode(tx_hash)
-                            );
+                        if timed_out.is_empty() {
+                            continue;
+                        }
+                        tracing::debug!(
+                            "Dandelion: promoting {} stem-timed-out tx(s) to fluff",
+                            timed_out.len()
+                        );
+                        use dom_serialization::DomSerialize;
+                        for tx_hash in timed_out {
+                            let tx_bytes_opt = {
+                                let m = mempool.lock().await;
+                                m.get_tx(&tx_hash).and_then(|e| e.tx.to_bytes().ok())
+                            };
+                            if let Some(tx_bytes) = tx_bytes_opt {
+                                let _ = tx_fluff_tx.send(tx_bytes);
+                            } else {
+                                tracing::debug!(
+                                    "Stem-timed-out tx {} not in mempool; dropping",
+                                    hex::encode(tx_hash)
+                                );
+                            }
                         }
                     }
-                }
-            });
+                })
+                .await;
         }
 
-        // Wait for tasks
-        tokio::select! {
-            _ = listener_task => warn!("P2P listener exited"),
-            _ = connector_task => warn!("Peer connector exited"),
-        }
+        shutdown.wait().await;
+        tracing::info!("shutdown_started");
+        let failure = supervisor.failure().await;
+        let report = supervisor
+            .shutdown_ordered(Duration::from_secs(5), async {
+                tracing::debug!("shutdown_persistence_drain");
+            })
+            .await;
+        tracing::info!(
+            aborted_tasks = report.aborted.len(),
+            stopped_tasks = report.stopped_order.len(),
+            "shutdown_completed"
+        );
 
-        Ok(())
+        if let Some(failure) = failure {
+            Err(DomError::Internal(format!(
+                "critical task {:?} failed: {}",
+                failure.failure_task, failure.failure_reason
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     /// Accept incoming P2P connections on an already-bound listener.
@@ -545,9 +623,18 @@ impl DomNode {
     /// Called by `run()` after `tokio::net::TcpListener::bind` has
     /// succeeded synchronously, so this loop never observes bind errors —
     /// only per-connection accept errors, which are logged and skipped.
-    async fn run_p2p_listener_on(&self, listener: tokio::net::TcpListener) {
+    async fn run_p2p_listener_on(
+        &self,
+        listener: tokio::net::TcpListener,
+        supervisor: NodeTaskSupervisor,
+        shutdown: ShutdownToken,
+    ) -> Result<(), String> {
         loop {
-            match listener.accept().await {
+            let accepted = tokio::select! {
+                _ = shutdown.wait() => return Ok(()),
+                accepted = listener.accept() => accepted,
+            };
+            match accepted {
                 Ok((stream, peer_addr)) => {
                     info!("Inbound connection from {peer_addr}");
                     let reserved = {
@@ -573,26 +660,42 @@ impl DomNode {
                         peers: self.peers.clone(),
                         metrics: self.metrics.clone(),
                         future_block_queue: self.future_block_queue.clone(),
+                        missing_blocks: self.missing_blocks.clone(),
+                        orphan_pool: self.orphan_pool.clone(),
                         wallet: self.wallet.clone(),
                     };
                     let peers = svc.peers.clone();
                     let metrics = svc.metrics.clone();
                     let chain_for_persist = chain.clone();
-                    tokio::spawn(async move {
-                        handle_inbound(stream, peer_addr, config, privkey, chain, channels, svc)
+                    let peer_shutdown = shutdown.clone();
+                    let task_id = supervisor
+                        .spawn_relay(async move {
+                            handle_inbound(
+                                stream,
+                                peer_addr,
+                                config,
+                                privkey,
+                                chain,
+                                channels,
+                                svc,
+                                peer_shutdown,
+                            )
                             .await;
-                        let mut mgr = peers.lock().await;
-                        let peer_key = peer_addr.to_string();
-                        mgr.remove_peer(&peer_key);
-                        mgr.release_inbound_reservation(&peer_addr);
-                        drop(mgr);
-                        if let Err(e) =
-                            persist_peer_reputation_state(&chain_for_persist, &peers).await
-                        {
-                            warn!("Persisting peer reputation state failed: {e}");
-                        }
-                        refresh_peer_metrics(&peers, &metrics).await;
-                    });
+                            let mut mgr = peers.lock().await;
+                            let peer_key = peer_addr.to_string();
+                            mgr.remove_peer(&peer_key);
+                            mgr.release_inbound_reservation(&peer_addr);
+                            drop(mgr);
+                            if let Err(e) =
+                                persist_peer_reputation_state(&chain_for_persist, &peers).await
+                            {
+                                warn!("Persisting peer reputation state failed: {e}");
+                            }
+                            refresh_peer_metrics(&peers, &metrics).await;
+                            Ok(())
+                        })
+                        .await;
+                    tracing::debug!(?task_id, peer = %peer_addr, "inbound_peer_task_registered");
                 }
                 Err(e) => {
                     warn!("Accept error: {e}");
@@ -602,16 +705,25 @@ impl DomNode {
     }
 
     /// Connect to peers (DNS seeds + configured peers).
-    async fn run_peer_connector(&self) {
+    async fn run_peer_connector(
+        &self,
+        supervisor: NodeTaskSupervisor,
+        shutdown: ShutdownToken,
+    ) -> Result<(), String> {
         let svc = NodeServices {
             mempool: self.mempool.clone(),
             dandelion: self.dandelion.clone(),
             peers: self.peers.clone(),
             metrics: self.metrics.clone(),
             future_block_queue: self.future_block_queue.clone(),
+            missing_blocks: self.missing_blocks.clone(),
+            orphan_pool: self.orphan_pool.clone(),
             wallet: self.wallet.clone(),
         };
         loop {
+            if shutdown.is_shutdown() {
+                return Ok(());
+            }
             let needs_more = {
                 let mgr = self.peers.lock().await;
                 mgr.needs_outbound()
@@ -659,37 +771,54 @@ impl DomNode {
                     };
                     info!("Connecting to peer {addr}");
                     let cleanup_addr = addr.clone();
+                    let log_addr = cleanup_addr.clone();
                     let peers = self.peers.clone();
                     let metrics = self.metrics.clone();
                     let svc_c = svc.clone();
                     let chain_for_persist = self.chain.clone();
-                    tokio::spawn(async move {
-                        let outcome =
-                            connect_outbound(&addr, config, privkey, chain, channels, svc_c).await;
-                        let mut mgr = peers.lock().await;
-                        if outcome == OutboundAttemptOutcome::RetryableFailure {
-                            mgr.record_outbound_failure(&cleanup_addr);
-                        }
-                        mgr.remove_peer(&cleanup_addr);
-                        mgr.release_outbound_reservation(&cleanup_addr);
-                        drop(mgr);
-                        if let Err(e) =
-                            persist_peer_rotation_state(&chain_for_persist, &peers).await
-                        {
-                            warn!("Persisting peer rotation state failed: {e}");
-                        }
-                        if let Err(e) =
-                            persist_peer_reputation_state(&chain_for_persist, &peers).await
-                        {
-                            warn!("Persisting peer reputation state failed: {e}");
-                        }
-                        refresh_peer_metrics(&peers, &metrics).await;
-                    });
+                    let peer_shutdown = shutdown.clone();
+                    let task_id = supervisor
+                        .spawn_relay(async move {
+                            let outcome = connect_outbound(
+                                &addr,
+                                config,
+                                privkey,
+                                chain,
+                                channels,
+                                svc_c,
+                                peer_shutdown,
+                            )
+                            .await;
+                            let mut mgr = peers.lock().await;
+                            if outcome == OutboundAttemptOutcome::RetryableFailure {
+                                mgr.record_outbound_failure(&cleanup_addr);
+                            }
+                            mgr.remove_peer(&cleanup_addr);
+                            mgr.release_outbound_reservation(&cleanup_addr);
+                            drop(mgr);
+                            if let Err(e) =
+                                persist_peer_rotation_state(&chain_for_persist, &peers).await
+                            {
+                                warn!("Persisting peer rotation state failed: {e}");
+                            }
+                            if let Err(e) =
+                                persist_peer_reputation_state(&chain_for_persist, &peers).await
+                            {
+                                warn!("Persisting peer reputation state failed: {e}");
+                            }
+                            refresh_peer_metrics(&peers, &metrics).await;
+                            Ok(())
+                        })
+                        .await;
+                    tracing::debug!(?task_id, peer = %log_addr, "outbound_peer_task_registered");
                 }
             }
 
             // Check every 30 seconds
-            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            tokio::select! {
+                _ = shutdown.wait() => return Ok(()),
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {}
+            }
         }
     }
 }
@@ -812,6 +941,7 @@ async fn handle_inbound(
     chain: Arc<Mutex<ChainState>>,
     channels: BroadcastChannels,
     svc: NodeServices,
+    shutdown: ShutdownToken,
 ) {
     let BroadcastChannels {
         block_relay_tx,
@@ -912,6 +1042,7 @@ async fn handle_inbound(
                     tx_stem_tx: tx_stem_tx.clone(),
                 },
                 svc.clone(),
+                shutdown.clone(),
             )
             .await
             {
@@ -932,6 +1063,7 @@ async fn connect_outbound(
     chain: Arc<Mutex<ChainState>>,
     channels: BroadcastChannels,
     svc: NodeServices,
+    shutdown: ShutdownToken,
 ) -> OutboundAttemptOutcome {
     let BroadcastChannels {
         block_relay_tx,
@@ -1056,6 +1188,7 @@ async fn connect_outbound(
                     tx_stem_tx: tx_stem_tx.clone(),
                 },
                 svc.clone(),
+                shutdown.clone(),
             )
             .await
             {
@@ -1343,6 +1476,13 @@ fn tx_hash(tx: &Transaction) -> Result<[u8; 32], DomError> {
     Ok(*dom_crypto::hash::blake2b_256(&tx_bytes).as_bytes())
 }
 
+fn block_hash(block: &dom_consensus::Block) -> Result<[u8; 32], DomError> {
+    use dom_serialization::DomSerialize;
+
+    let header_bytes = block.header.to_bytes()?;
+    Ok(*dom_crypto::hash::blake2b_256(&header_bytes).as_bytes())
+}
+
 fn collect_spent_commitments(transactions: &[Transaction]) -> Vec<[u8; 33]> {
     let mut spent = Vec::with_capacity(transactions.iter().map(|tx| tx.inputs.len()).sum());
     for tx in transactions {
@@ -1465,6 +1605,91 @@ fn decode_relay_block(msg_payload: &[u8]) -> Result<(Vec<u8>, dom_consensus::Blo
     let payload = BlockPayload::from_bytes(msg_payload)?;
     let block = dom_consensus::Block::from_bytes(&payload.block_bytes)?;
     Ok((payload.block_bytes, block))
+}
+
+async fn reprocess_orphan_children(
+    parent_hash: [u8; 32],
+    chain: &Arc<Mutex<ChainState>>,
+    mempool: &Arc<Mutex<Mempool>>,
+    relay_tx: &tokio::sync::broadcast::Sender<Vec<u8>>,
+    orphan_pool: &Arc<Mutex<RuntimeOrphanPool>>,
+    missing_blocks: &Arc<Mutex<MissingBlockTracker>>,
+    metrics: &Arc<Metrics>,
+) -> Result<(), DomError> {
+    let mut ready_parents = vec![parent_hash];
+    while let Some(available_parent) = ready_parents.pop() {
+        missing_blocks.lock().await.resolve(&available_parent);
+        let children = orphan_pool.lock().await.take_children(&available_parent);
+        for orphan in children {
+            let child = match decode_deferred_block_bytes(&orphan.block_bytes) {
+                Ok(block) => block,
+                Err(e) => {
+                    metrics
+                        .malformed_block_relays
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(
+                        child = %hex::encode(orphan.block_hash),
+                        "Dropping malformed orphan during parent replay: {e}"
+                    );
+                    continue;
+                }
+            };
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let result = {
+                let mut c = chain.lock().await;
+                c.connect_block(&child, dom_core::Timestamp(now_secs))
+            };
+            match relay_block_action(&result) {
+                RelayBlockAction::RelayBestChain => {
+                    if let Ok(ref connect_result) = result {
+                        reconcile_mempool_after_connect(
+                            chain,
+                            mempool,
+                            connect_result,
+                            &child.transactions,
+                        )
+                        .await?;
+                    }
+                    let _ = relay_tx.send(orphan.block_bytes.clone());
+                    ready_parents.push(orphan.block_hash);
+                }
+                RelayBlockAction::Suppress => {
+                    if matches!(
+                        result,
+                        Ok(dom_chain::ConnectResult::SideChain)
+                            | Ok(dom_chain::ConnectResult::AlreadyHave)
+                    ) {
+                        ready_parents.push(orphan.block_hash);
+                    } else if matches!(result, Err(DomError::Orphan(_))) {
+                        let new_parent = *child.header.prev_hash.as_bytes();
+                        missing_blocks.lock().await.note_orphan(
+                            orphan.block_hash,
+                            new_parent,
+                            child.header.height.0.checked_sub(1),
+                        );
+                        let _ = orphan_pool.lock().await.insert(OrphanBlock {
+                            block_hash: orphan.block_hash,
+                            parent_hash: new_parent,
+                            height: child.header.height.0,
+                            block_bytes: orphan.block_bytes,
+                        });
+                    }
+                }
+                RelayBlockAction::PenalizePeer | RelayBlockAction::Drop => {
+                    if let Err(e) = result {
+                        tracing::debug!(
+                            child = %hex::encode(orphan.block_hash),
+                            "Dropping orphan after parent replay: {e}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn decode_ibd_block_response(
@@ -2606,6 +2831,7 @@ async fn message_loop(
     chain: Arc<Mutex<ChainState>>,
     channels: BroadcastChannels,
     svc: NodeServices,
+    shutdown: ShutdownToken,
 ) -> Result<(), DomError> {
     // Subscribe to all broadcast channels for this peer connection.
     let mut block_relay_rx = channels.block_relay_tx.subscribe();
@@ -2627,6 +2853,9 @@ async fn message_loop(
 
     loop {
         tokio::select! {
+            _ = shutdown.wait() => {
+                return Ok(());
+            }
             // Relay broadcast: someone (miner or another peer task) wants to send a Block
             relay = block_relay_rx.recv() => {
                 match relay {
@@ -2776,6 +3005,7 @@ async fn message_loop(
                             .unwrap_or_default()
                             .as_secs();
                         let now = dom_core::Timestamp(now_secs);
+                        let current_block_hash = block_hash(&block)?;
 
                         // Doc 4.5 mitigation 1: soft buffer for future blocks
                         use dom_consensus::block::{
@@ -2858,6 +3088,21 @@ async fn message_loop(
                                         // and AlreadyHave MUST NOT rebroadcast — that
                                         // creates infinite relay loops between peers.
                                         let _ = block_relay_tx.send(block_bytes);
+                                        if let Err(e) = reprocess_orphan_children(
+                                            current_block_hash,
+                                            &chain,
+                                            &svc.mempool,
+                                            &block_relay_tx,
+                                            &svc.orphan_pool,
+                                            &svc.missing_blocks,
+                                            &svc.metrics,
+                                        )
+                                        .await
+                                        {
+                                            tracing::warn!(
+                                                "Orphan replay after block from {peer_addr} failed: {e}"
+                                            );
+                                        }
                                     }
                                     RelayBlockAction::Suppress => {
                                         if matches!(result, Ok(dom_chain::ConnectResult::SideChain)) {
@@ -2868,6 +3113,21 @@ async fn message_loop(
                                             // Pending-spend reconciliation and output recovery are
                                             // canonical-only until the wallet learns explicit reorg
                                             // rollback semantics.
+                                            if let Err(e) = reprocess_orphan_children(
+                                                current_block_hash,
+                                                &chain,
+                                                &svc.mempool,
+                                                &block_relay_tx,
+                                                &svc.orphan_pool,
+                                                &svc.missing_blocks,
+                                                &svc.metrics,
+                                            )
+                                            .await
+                                            {
+                                                tracing::warn!(
+                                                    "Side-chain orphan replay after block from {peer_addr} failed: {e}"
+                                                );
+                                            }
                                         } else if matches!(result, Ok(dom_chain::ConnectResult::AlreadyHave)) {
                                             if record_duplicate_block_relay(
                                                 &svc.peers,
@@ -2883,6 +3143,39 @@ async fn message_loop(
                                             tracing::trace!(
                                                 "Block from {peer_addr} already known — no-op"
                                             );
+                                        } else if matches!(result, Err(DomError::Orphan(_))) {
+                                            let parent_hash = *block.header.prev_hash.as_bytes();
+                                            let insert_outcome = svc.orphan_pool.lock().await.insert(OrphanBlock {
+                                                block_hash: current_block_hash,
+                                                parent_hash,
+                                                height: block.header.height.0,
+                                                block_bytes: block_bytes.clone(),
+                                            });
+                                            let requests = {
+                                                let mut tracker = svc.missing_blocks.lock().await;
+                                                tracker.note_orphan(
+                                                    current_block_hash,
+                                                    parent_hash,
+                                                    block.header.height.0.checked_sub(1),
+                                                );
+                                                tracker.next_request_batch(block.header.height.0)
+                                            };
+                                            tracing::debug!(
+                                                peer = %peer_addr,
+                                                child = %hex::encode(current_block_hash),
+                                                parent = %hex::encode(parent_hash),
+                                                ?insert_outcome,
+                                                "Recorded orphan block and scheduled missing-parent request"
+                                            );
+                                            if !requests.is_empty() {
+                                                let req = GetBlockDataPayload { hashes: requests };
+                                                let wire = WireMessage {
+                                                    magic: config.network.magic(),
+                                                    command: Command::GetBlockData,
+                                                    payload: req.to_bytes()?,
+                                                };
+                                                codec.send(stream, &wire).await?;
+                                            }
                                         } else if let Err(ref e) = result {
                                             tracing::debug!("Block from {peer_addr} not accepted: {e}");
                                         }
@@ -3074,6 +3367,7 @@ mod tests {
         PEER_ROTATION_METADATA_KEY,
     };
     use crate::metrics::Metrics;
+    use crate::task_supervisor::TaskKind;
     use dom_chain::{
         ChainState, ConnectResult, IbdInterruption, IbdPhase, PersistedIbdState, ReorgDelta,
     };
@@ -3111,6 +3405,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::Mutex;
 
     type TestUtxoBytes = ([u8; 33], Vec<u8>);
@@ -4744,6 +5039,44 @@ mod tests {
             .await
             .expect("reconcile task join")
             .expect("reconcile must succeed");
+
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[tokio::test]
+    async fn live_node_run_observes_shutdown_and_drains_supervisor() {
+        let dir = fresh_test_dir("live-node-shutdown");
+        let mut config = regtest_node_config(&dir);
+        config.p2p_listen_addr = "127.0.0.1:0".into();
+        config.rpc_listen_addr = None;
+        config.mine = false;
+        let node = Arc::new(DomNode::init(config).expect("node init"));
+        let running = node.clone();
+        let handle = tokio::spawn(async move { running.run().await });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if node.task_supervisor.contains(TaskKind::Listener).await
+                    && node.task_supervisor.contains(TaskKind::Connector).await
+                    && node.task_supervisor.contains(TaskKind::FutureQueue).await
+                    && node.task_supervisor.contains(TaskKind::DandelionStem).await
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("live node tasks registered");
+
+        node.request_shutdown().await;
+        tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("run returns after shutdown")
+            .expect("join")
+            .expect("clean shutdown");
+        assert!(node.task_supervisor.is_empty().await);
+        assert!(node.task_supervisor.failure().await.is_none());
 
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }

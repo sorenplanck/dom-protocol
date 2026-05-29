@@ -27,8 +27,10 @@
 //! This module deliberately holds no chain/mempool/wire state, so the
 //! supervision policy is unit-tested on its own with synthetic tasks.
 
+use futures::FutureExt;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
@@ -244,8 +246,50 @@ impl NodeTaskSupervisor {
         };
         let sup = self.clone();
         let handle = tokio::spawn(async move {
-            if let Err(reason) = fut.await {
-                sup.record_failure(kind, reason).await;
+            match AssertUnwindSafe(fut).catch_unwind().await {
+                Ok(Ok(())) => {}
+                Ok(Err(reason)) => {
+                    sup.record_failure(kind, reason).await;
+                }
+                Err(panic) => {
+                    sup.record_failure(kind, panic_reason(panic)).await;
+                }
+            }
+        });
+        self.inner.lock().await.handles.insert(id, (kind, handle));
+        id
+    }
+
+    /// Spawn a critical long-lived service.
+    ///
+    /// A clean `Ok(())` is only acceptable after shutdown has already been
+    /// requested. If the task exits while the node should still be running, the
+    /// supervisor records that as a critical failure and coordinates shutdown.
+    pub async fn spawn_critical<F>(&self, kind: TaskKind, fut: F) -> TaskId
+    where
+        F: Future<Output = Result<(), String>> + Send + 'static,
+    {
+        let id = {
+            let mut g = self.inner.lock().await;
+            let id = TaskId(g.next_id);
+            g.next_id += 1;
+            id
+        };
+        let sup = self.clone();
+        let handle = tokio::spawn(async move {
+            match AssertUnwindSafe(fut).catch_unwind().await {
+                Ok(Ok(())) => {
+                    if !sup.is_shutdown() {
+                        sup.record_failure(kind, "critical task exited unexpectedly".into())
+                            .await;
+                    }
+                }
+                Ok(Err(reason)) => {
+                    sup.record_failure(kind, reason).await;
+                }
+                Err(panic) => {
+                    sup.record_failure(kind, panic_reason(panic)).await;
+                }
             }
         });
         self.inner.lock().await.handles.insert(id, (kind, handle));
@@ -416,14 +460,34 @@ impl NodeTaskSupervisor {
         for (kind, handle) in handles {
             let abort = handle.abort_handle();
             match tokio::time::timeout(grace, handle).await {
-                Ok(_) => report.stopped_order.push(kind),
+                Ok(Ok(())) => {
+                    tracing::debug!(?kind, "task_joined");
+                    report.stopped_order.push(kind);
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(?kind, error = %e, "task_join_failed");
+                    self.record_failure(kind, format!("join failure: {e}"))
+                        .await;
+                    report.stopped_order.push(kind);
+                }
                 Err(_) => {
+                    tracing::warn!(?kind, "task_aborted_after_timeout");
                     abort.abort();
                     report.stopped_order.push(kind);
                     report.aborted.push(kind);
                 }
             }
         }
+    }
+}
+
+fn panic_reason(panic: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(msg) = panic.downcast_ref::<&'static str>() {
+        format!("task panicked: {msg}")
+    } else if let Some(msg) = panic.downcast_ref::<String>() {
+        format!("task panicked: {msg}")
+    } else {
+        "task panicked".into()
     }
 }
 
@@ -563,6 +627,56 @@ mod tests {
         assert_eq!(failure.failure_task, TaskKind::Miner);
         assert_eq!(failure.failure_reason, "miner exploded");
         assert!(sup.is_shutdown(), "failure must trip shutdown");
+        sup.join_all().await;
+    }
+
+    #[tokio::test]
+    async fn critical_clean_exit_before_shutdown_is_failure() {
+        let sup = NodeTaskSupervisor::new();
+        sup.spawn_critical(TaskKind::FutureQueue, async { Ok(()) })
+            .await;
+
+        let failure = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(f) = sup.failure().await {
+                    break f;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unexpected critical clean exit must be recorded");
+
+        assert_eq!(failure.failure_task, TaskKind::FutureQueue);
+        assert!(failure.failure_reason.contains("exited unexpectedly"));
+        assert!(sup.is_shutdown());
+        sup.join_all().await;
+    }
+
+    #[tokio::test]
+    async fn critical_task_panic_is_observed() {
+        let sup = NodeTaskSupervisor::new();
+        sup.spawn_critical(TaskKind::Rpc, async {
+            panic!("rpc task panic");
+            #[allow(unreachable_code)]
+            Ok(())
+        })
+        .await;
+
+        let failure = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(f) = sup.failure().await {
+                    break f;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("panic must be recorded promptly");
+
+        assert_eq!(failure.failure_task, TaskKind::Rpc);
+        assert!(failure.failure_reason.contains("rpc task panic"));
+        assert!(sup.is_shutdown());
         sup.join_all().await;
     }
 
@@ -834,6 +948,35 @@ mod tests {
             report.stopped_order.len(),
             8,
             "every spawned task accounted for in the stop order"
+        );
+    }
+
+    #[test]
+    fn production_tokio_spawn_is_confined_to_task_supervisor() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let src = manifest.join("src");
+        let mut violations = Vec::new();
+        for entry in std::fs::read_dir(&src).expect("read src dir") {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            if path.file_name().and_then(|s| s.to_str()) == Some("task_supervisor.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read source");
+            let production = text
+                .split("#[cfg(test)]")
+                .next()
+                .expect("split always yields a prefix");
+            if production.contains("tokio::spawn(") {
+                violations.push(path.display().to_string());
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "production tokio::spawn must go through NodeTaskSupervisor: {violations:?}"
         );
     }
 }
