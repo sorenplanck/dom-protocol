@@ -2007,6 +2007,7 @@ pub(crate) fn clear_persisted_mempool_snapshot(store: &DomStore) -> Result<(), D
     store.delete_metadata(MEMPOOL_METADATA_KEY)
 }
 
+#[cfg(test)]
 pub(crate) fn load_mempool_snapshot(
     store: &DomStore,
 ) -> Result<Option<dom_mempool::PersistedMempoolState>, DomError> {
@@ -4730,6 +4731,9 @@ mod tests {
         }
         let connected_tx = synthetic_spend_tx(conflicting_input, 63, 64);
         let reorg = ReorgDelta {
+            common_ancestor_height: 0,
+            disconnected_blocks: vec![],
+            connected_blocks: vec![],
             disconnected_txs: vec![disconnected_tx.clone()],
             connected_txs: vec![connected_tx],
         };
@@ -4784,6 +4788,9 @@ mod tests {
         let immature_coinbase_tx = synthetic_spend_tx(immature_coinbase, 80, 81);
 
         let delta_a = ReorgDelta {
+            common_ancestor_height: 0,
+            disconnected_blocks: vec![],
+            connected_blocks: vec![],
             disconnected_txs: vec![
                 conflict_b.clone(),
                 missing_input_tx.clone(),
@@ -4793,6 +4800,9 @@ mod tests {
             connected_txs: vec![],
         };
         let delta_b = ReorgDelta {
+            common_ancestor_height: 0,
+            disconnected_blocks: vec![],
+            connected_blocks: vec![],
             disconnected_txs: vec![
                 conflict_a.clone(),
                 immature_coinbase_tx,

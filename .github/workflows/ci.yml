@@ -50,7 +50,7 @@ jobs:
             runner: macos-latest
             experimental: false
           - host: macos-x86_64
-            runner: macos-13
+            runner: macos-15-intel
             experimental: false
           - host: windows-x86_64
             runner: windows-latest
@@ -113,7 +113,7 @@ jobs:
             runner: macos-latest
             experimental: false
           - host: macos-x86_64
-            runner: macos-13
+            runner: macos-15-intel
             experimental: false
           - host: windows-x86_64
             runner: windows-latest
