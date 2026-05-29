@@ -19,9 +19,7 @@ pub struct RepoRoot {
 /// Looks for a `Cargo.toml` containing both `[workspace]` and `dom-test-runner`.
 /// This avoids matching arbitrary cargo workspaces that happen to be ancestors.
 pub fn find_dom_repo_root(start: &Path) -> io::Result<RepoRoot> {
-    let mut current = start
-        .canonicalize()
-        .unwrap_or_else(|_| start.to_path_buf());
+    let mut current = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
 
     loop {
         let candidate = current.join("Cargo.toml");

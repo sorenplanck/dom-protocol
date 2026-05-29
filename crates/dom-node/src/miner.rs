@@ -1,6 +1,7 @@
 //! Minerador DOM — loop de mineração com RandomX.
 
 use crate::node::{reconcile_mempool_after_connect, DomNode};
+use crate::task_supervisor::ShutdownToken;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{compute_block_pmmr_roots, derive_chain_id};
 use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionOutput};
@@ -158,21 +159,33 @@ fn build_coinbase_with_blinding(
     })
 }
 
-pub async fn mining_loop(node: Arc<DomNode>) -> Result<(), DomError> {
+pub async fn mining_loop(node: Arc<DomNode>, shutdown: ShutdownToken) -> Result<(), DomError> {
     info!("Minerador iniciado");
     {
+        if shutdown.is_shutdown() {
+            return Ok(());
+        }
         let chain = node.chain.lock().await;
         if chain.tip_height.0 == 0 && chain.tip_hash == dom_core::Hash256::ZERO {
             drop(chain);
-            create_genesis_block(node.clone()).await?;
+            if let Err(e) = create_genesis_block(node.clone()).await {
+                warn!("Genesis falhou: {e}");
+                return Err(e);
+            }
         }
     }
     loop {
+        if shutdown.is_shutdown() {
+            return Ok(());
+        }
         match mine_one_block(node.clone()).await {
             Ok(h) => info!("✅ Bloco {} minerado!", h),
             Err(e) => {
                 warn!("Mineracao falhou: {e}");
-                return Err(e);
+                tokio::select! {
+                    _ = shutdown.wait() => return Ok(()),
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {}
+                }
             }
         }
     }

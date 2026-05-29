@@ -69,11 +69,7 @@ fn clean_only_removes_its_own_directory() {
     assert!(!root.join("target").join("dom-test-runner").exists());
 
     // Everything else under target/ is untouched.
-    assert!(root
-        .join("target")
-        .join("debug")
-        .join("dummy.txt")
-        .exists());
+    assert!(root.join("target").join("debug").join("dummy.txt").exists());
     assert!(root
         .join("target")
         .join("release")
@@ -99,7 +95,10 @@ fn doctor_fails_outside_dom_repo() {
         .current_dir(&outside)
         .output()
         .expect("failed to execute dom-test-runner");
-    assert!(!out.status.success(), "doctor must fail outside the DOM repo");
+    assert!(
+        !out.status.success(),
+        "doctor must fail outside the DOM repo"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("DOM Protocol") || stderr.contains("dom-test-runner"),

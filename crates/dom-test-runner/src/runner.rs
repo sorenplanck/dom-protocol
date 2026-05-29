@@ -13,8 +13,8 @@ use std::time::{Instant, SystemTime};
 use crate::affected::{pre_push_baseline, select_profiles, Selection};
 use crate::env::{check_fast_mining, safe_test_env, FastMiningCheck};
 use crate::profiles;
-use crate::report::{self, RunReport, Status, StepResult};
 use crate::repo::find_dom_repo_root;
+use crate::report::{self, RunReport, Status, StepResult};
 
 type R<T> = Result<T, Box<dyn Error>>;
 
@@ -116,18 +116,14 @@ pub fn run_profile(name: &str) -> R<()> {
 
                 if exit.success() {
                     (Status::Pass, None)
-                } else if step.tolerate_missing_target
-                    && looks_like_missing_test_target(&combined)
+                } else if step.tolerate_missing_target && looks_like_missing_test_target(&combined)
                 {
                     (
                         Status::Skipped,
                         Some("test target not present in this repo".to_string()),
                     )
                 } else {
-                    (
-                        Status::Fail,
-                        Some(format!("cargo exited with {exit}")),
-                    )
+                    (Status::Fail, Some(format!("cargo exited with {exit}")))
                 }
             }
             Err(e) => {
@@ -144,10 +140,7 @@ pub fn run_profile(name: &str) -> R<()> {
             step_start.elapsed().as_millis()
         );
         if status == Status::Fail {
-            println!(
-                "[dom-test-runner]   -> see log: {}",
-                log_path.display()
-            );
+            println!("[dom-test-runner]   -> see log: {}", log_path.display());
         }
 
         steps_out.push(StepResult {
@@ -184,7 +177,8 @@ pub fn run_profile(name: &str) -> R<()> {
 fn looks_like_missing_test_target(s: &str) -> bool {
     // Cargo's exact wording varies; match a few stable substrings.
     let s = s.to_ascii_lowercase();
-    s.contains("no test target") || s.contains("does not exist") && s.contains("--test")
+    s.contains("no test target")
+        || s.contains("does not exist") && s.contains("--test")
         || s.contains("no such test")
         || s.contains("could not find a test target")
 }
@@ -316,11 +310,7 @@ pub fn cmd_clean() -> R<()> {
         // Defense in depth: never delete anything that isn't strictly under
         // <repo>/target/dom-test-runner.
         if !canon.starts_with(&root_canon) || !canon.ends_with("dom-test-runner") {
-            return Err(format!(
-                "refusing to delete unexpected path: {}",
-                canon.display()
-            )
-            .into());
+            return Err(format!("refusing to delete unexpected path: {}", canon.display()).into());
         }
         fs::remove_dir_all(&target)?;
         println!("[dom-test-runner] removed: {}", target.display());

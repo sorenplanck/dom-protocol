@@ -37,15 +37,20 @@ pub fn cmd_doctor() -> R<()> {
     }
 
     // dom-test-runner — built or buildable from this workspace.
-    let exe_release = root.path.join("target").join("release").join(
-        if cfg!(target_os = "windows") {
-            "dom-test-runner.exe"
-        } else {
-            "dom-test-runner"
-        },
-    );
+    let exe_release =
+        root.path
+            .join("target")
+            .join("release")
+            .join(if cfg!(target_os = "windows") {
+                "dom-test-runner.exe"
+            } else {
+                "dom-test-runner"
+            });
     if exe_release.is_file() {
-        println!("[dom-agent-runner] dom-test-runner: {}", exe_release.display());
+        println!(
+            "[dom-agent-runner] dom-test-runner: {}",
+            exe_release.display()
+        );
     } else {
         println!(
             "[dom-agent-runner] dom-test-runner: not built yet ({} missing). \
@@ -94,9 +99,8 @@ fn require(bin: &str, args: &[&str]) -> R<()> {
             println!("[dom-agent-runner] {bin}: {v}");
             Ok(())
         }
-        Ok(_) | Err(_) => Err(format!(
-            "required tool `{bin}` is missing or unusable on PATH"
-        )
-        .into()),
+        Ok(_) | Err(_) => {
+            Err(format!("required tool `{bin}` is missing or unusable on PATH").into())
+        }
     }
 }
