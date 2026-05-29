@@ -289,6 +289,9 @@ impl DomNode {
         let mut peers = PeerManager::new(config.max_inbound, config.min_outbound);
         restore_peer_rotation_state(&chain.store, &mut peers)?;
         restore_peer_reputation_state(&chain.store, &mut peers)?;
+        // Volatile mempool policy (RFC-0012 §1): start empty and clear any legacy
+        // on-disk mempool bytes from older builds. The mempool is never loaded
+        // from disk; a restarted node re-acquires pending txs from peers.
         clear_persisted_mempool_snapshot(&chain.store)?;
         let mempool = Mempool::new();
 
@@ -706,6 +709,11 @@ impl DomNode {
                 })
                 .await;
         }
+        tracing::info!(
+            event = "shutdown_completed",
+            failure_class = "runtime_shutdown",
+            "shutdown completed"
+        );
 
         shutdown.wait().await;
         tracing::info!(
@@ -1671,12 +1679,38 @@ fn collect_spent_commitments(transactions: &[Transaction]) -> Vec<[u8; 33]> {
     spent
 }
 
+/// Collect, in canonical order, the transactions from disconnected blocks that
+/// remain valid under the **new** canonical chain and may be reinjected into the
+/// live mempool (RFC-0012 §3).
+///
+/// Reinjection affects transaction *availability* only; it never affects block
+/// validity (RFC-0012 invariant I-1). A candidate is excluded if it is a
+/// coinbase/system transaction (§3.2), spends an input that is no longer a live
+/// (and, for coinbase, mature) UTXO, or whose outputs/kernels already exist on the
+/// surviving branch. Survivors are sorted by `tx_hash` ascending so the
+/// reinjection batch — and therefore the resulting mempool — is independent of the
+/// order in which the disconnected transactions were originally delivered.
+/// Double-spends among survivors are then resolved deterministically by the
+/// mempool's input-reservation check (first in hash order wins).
 fn collect_reinjectable_reorg_txs(
     chain: &ChainState,
     delta: &dom_chain::ReorgDelta,
 ) -> Result<Vec<ReinjectableTx>, DomError> {
     let mut reinject = Vec::new();
     for tx in &delta.disconnected_txs {
+        // RFC-0012 §3.2: exclude coinbase/system transactions. The canonical
+        // coinbase is already structurally excluded (`disconnected_txs` is built
+        // from `block.transactions`, never `block.coinbase`); this guard also
+        // drops any regular transaction carrying a coinbase kernel feature, which
+        // is a system output that must never re-enter the relay mempool.
+        let is_coinbase_or_system = tx
+            .kernels
+            .iter()
+            .any(|kernel| kernel.features & dom_core::KERNEL_FEAT_COINBASE != 0);
+        if is_coinbase_or_system {
+            continue;
+        }
+
         let inputs_are_live = tx.inputs.iter().all(|input| {
             let commitment = input.commitment.as_bytes();
             match chain.store.get_utxo(commitment) {
@@ -1976,10 +2010,20 @@ pub(crate) fn persist_mempool_snapshot(
     store.put_metadata(MEMPOOL_METADATA_KEY, &snapshot.to_bytes()?)
 }
 
+/// Clear any on-disk mempool bytes (RFC-0012 §1).
+///
+/// The mempool is volatile: it is never loaded from disk into runtime state.
+/// Older builds may have left `MEMPOOL_METADATA_KEY` bytes; this removes them so
+/// the on-disk view stays consistent with the empty-on-restart policy. It is
+/// called on init, on every block connect, and on tx admission.
 pub(crate) fn clear_persisted_mempool_snapshot(store: &DomStore) -> Result<(), DomError> {
     store.delete_metadata(MEMPOOL_METADATA_KEY)
 }
 
+// Test-only: under the volatile mempool policy (RFC-0012 §1) no runtime path
+// reads on-disk mempool bytes into state. This decoder exists solely so tests can
+// assert that legacy/adversarial on-disk mempool metadata has been cleared.
+#[cfg(test)]
 pub(crate) fn load_mempool_snapshot(
     store: &DomStore,
 ) -> Result<Option<dom_mempool::PersistedMempoolState>, DomError> {
@@ -2047,6 +2091,12 @@ async fn persist_peer_reputation_state(
     persist_peer_reputation_snapshot(&chain.store, &snapshot)
 }
 
+/// Persist mempool lifecycle state.
+///
+/// Under the volatile mempool policy (RFC-0012 §1) the mempool is **never**
+/// written to disk: "persisting" it means ensuring no on-disk mempool bytes
+/// remain, so a restart deterministically starts empty. The live `mempool` is
+/// intentionally unused here.
 async fn persist_mempool_state(
     chain: &Arc<Mutex<ChainState>>,
     mempool: &Arc<Mutex<Mempool>>,
@@ -3281,6 +3331,7 @@ async fn message_loop(
                                                                 &txs_for_scan,
                                                                 height,
                                                                 Some(relay_block_hash),
+                                                                Some(block_hash),
                                                             )
                                                         {
                                                             tracing::warn!(
@@ -4230,6 +4281,86 @@ mod tests {
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
+    /// TASK 27 / RFC-0012 §2: under the volatile policy there is no persisted
+    /// mempool to revalidate on reopen. This proves the two properties that make
+    /// that safe: restart is **deterministic** (always empty) and
+    /// **consensus-neutral** (the canonical chain tip after restart is identical
+    /// regardless of what the mempool held — runtime txs and even a structurally
+    /// valid on-disk legacy snapshot — and identical to a node that never had any
+    /// mempool activity at all).
+    #[test]
+    fn chain_validity_is_unaffected_by_mempool_restart_state() {
+        // Node A: accept a runtime tx AND plant a structurally valid legacy
+        // on-disk mempool snapshot, then capture the canonical chain tip.
+        let dir_a = fresh_test_dir("mempool-neutral-a");
+        let tip_a_before = {
+            let node = DomNode::init(regtest_node_config(&dir_a)).expect("init a");
+            let tx = mempool_tx(0x31, 100);
+            let hash = tx_hash(&tx).expect("hash a");
+            node.mempool
+                .try_lock()
+                .expect("mempool lock")
+                .accept_tx(tx.clone(), hash, 1)
+                .expect("accept runtime tx");
+            let chain = node.chain.try_lock().expect("chain lock");
+            let mut planted = Mempool::new();
+            planted.accept_tx(tx, hash, 1).expect("plant accept");
+            persist_mempool_snapshot(&chain.store, &planted.snapshot())
+                .expect("plant legacy snapshot");
+            (chain.tip_height.0, *chain.tip_hash.as_bytes())
+        };
+
+        // Node B (control): never touches the mempool.
+        let dir_b = fresh_test_dir("mempool-neutral-b");
+        let node_b = DomNode::init(regtest_node_config(&dir_b)).expect("init b");
+        let tip_b = {
+            let chain = node_b.chain.try_lock().expect("chain lock b");
+            (chain.tip_height.0, *chain.tip_hash.as_bytes())
+        };
+        assert!(
+            node_b
+                .mempool
+                .try_lock()
+                .expect("mempool lock b")
+                .is_empty(),
+            "control node starts with an empty mempool"
+        );
+        drop(node_b);
+
+        // Restart A. The chain tip must be byte-identical to before the restart
+        // (mempool state did not perturb consensus) and to the control node
+        // (chain validity is independent of mempool history). The mempool must be
+        // empty and the legacy on-disk snapshot must be gone.
+        let restarted = DomNode::init(regtest_node_config(&dir_a)).expect("restart a");
+        let tip_a_after = {
+            let chain = restarted.chain.try_lock().expect("chain lock a2");
+            (chain.tip_height.0, *chain.tip_hash.as_bytes())
+        };
+        assert_eq!(
+            tip_a_after, tip_a_before,
+            "chain tip is unchanged by mempool restart state (consensus-neutral)"
+        );
+        assert_eq!(
+            tip_a_after, tip_b,
+            "chain validity is identical regardless of mempool history (deterministic)"
+        );
+        assert_eq!(
+            restarted.mempool.try_lock().expect("mempool lock a2").len(),
+            0,
+            "restart is deterministic: mempool is always empty"
+        );
+        let reopened = DomStore::open(&dir_a).expect("store reopen a");
+        assert!(
+            load_mempool_snapshot(&reopened)
+                .expect("load mempool a")
+                .is_none(),
+            "no persisted mempool is trusted or loaded on reopen"
+        );
+
+        fs::remove_dir_all(&dir_a).expect("cleanup a");
+        fs::remove_dir_all(&dir_b).expect("cleanup b");
+    }
+
     #[test]
     fn unclamped_persisted_noise_key_is_rejected() {
         let raw = [0xff; 32];
@@ -4768,6 +4899,150 @@ mod tests {
             pool_b.all_hashes() == pool_a.all_hashes(),
             "repeated reinjection over the same inputs must converge identically"
         );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    /// RFC-0012 §3.2: a disconnected transaction carrying a coinbase/system kernel
+    /// feature must never be reinjected into the relay mempool, even when its
+    /// inputs are live under the new canonical chain. A sibling plain transaction
+    /// over a different live output is reinjected, proving the exclusion is
+    /// specific to the coinbase feature and not a blanket drop.
+    #[tokio::test]
+    async fn reorg_reinjection_excludes_coinbase_feature_transactions() {
+        let dir = fresh_test_dir("reorg-reinject-coinbase-excluded");
+        let chain = open_chain(&dir);
+        let mempool = Arc::new(Mutex::new(Mempool::new()));
+
+        // Two live outputs created by a base block.
+        let live_a = commitment(110, 41);
+        let live_b = commitment(112, 43);
+        let base_tx = Transaction {
+            inputs: vec![],
+            outputs: vec![
+                TransactionOutput {
+                    commitment: live_a.clone(),
+                    proof: vec![0xA0; 8],
+                },
+                TransactionOutput {
+                    commitment: live_b.clone(),
+                    proof: vec![0xB0; 8],
+                },
+            ],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(MIN_RELAY_FEE_RATE * 100).expect("fee"),
+                lock_height: 0,
+                excess: commitment(114, 0),
+                excess_signature: [0xC0; 65],
+            }],
+            offset: [0u8; 32],
+        };
+        let base_block =
+            synthetic_block_with_transactions(Hash256::ZERO, 1, 23, 120, vec![base_tx]);
+        commit_chain_block(&chain, &base_block).await;
+
+        // Plain tx over live_a — eligible. Coinbase-feature tx over live_b —
+        // forbidden for relay despite a live input.
+        let plain_tx = synthetic_spend_tx(live_a, 130, 131);
+        let mut coinbase_feature_tx = synthetic_spend_tx(live_b, 132, 133);
+        coinbase_feature_tx.kernels[0].features = dom_core::KERNEL_FEAT_COINBASE;
+
+        let reorg = ReorgDelta {
+            disconnected_txs: vec![coinbase_feature_tx.clone(), plain_tx.clone()],
+            connected_txs: vec![],
+            ..Default::default()
+        };
+        reconcile_mempool_after_connect(&chain, &mempool, &ConnectResult::Reorg(reorg), &[])
+            .await
+            .expect("reconcile reorg mempool");
+
+        let pool = mempool.lock().await;
+        assert!(
+            pool.get_tx(&tx_hash(&plain_tx).expect("hash")).is_some(),
+            "plain tx over a live output must be reinjected"
+        );
+        assert!(
+            pool.get_tx(&tx_hash(&coinbase_feature_tx).expect("hash"))
+                .is_none(),
+            "coinbase/system-feature tx must be excluded from reinjection"
+        );
+        assert_eq!(pool.len(), 1, "exactly the eligible plain tx is reinjected");
+        drop(pool);
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    /// RFC-0012 §3.4: two nodes that experience the same reorg but originally
+    /// received the disconnected transactions in different orders converge to the
+    /// same canonical mempool **digest**. This pins the convergence guarantee to
+    /// the byte-level digest, not just the hash listing.
+    #[tokio::test]
+    async fn reorg_reinjection_converges_to_same_digest_across_delivery_order() {
+        let dir = fresh_test_dir("reorg-reinject-digest-converge");
+        let chain = open_chain(&dir);
+        let mempool_a = Arc::new(Mutex::new(Mempool::new()));
+        let mempool_b = Arc::new(Mutex::new(Mempool::new()));
+
+        // Three independent live outputs → three non-conflicting eligible txs.
+        let live = [
+            commitment(140, 51),
+            commitment(142, 53),
+            commitment(144, 55),
+        ];
+        let base_tx = Transaction {
+            inputs: vec![],
+            outputs: live
+                .iter()
+                .enumerate()
+                .map(|(i, c)| TransactionOutput {
+                    commitment: c.clone(),
+                    proof: vec![0xD0 + i as u8; 8],
+                })
+                .collect(),
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(MIN_RELAY_FEE_RATE * 100).expect("fee"),
+                lock_height: 0,
+                excess: commitment(146, 0),
+                excess_signature: [0xE0; 65],
+            }],
+            offset: [0u8; 32],
+        };
+        let base_block =
+            synthetic_block_with_transactions(Hash256::ZERO, 1, 29, 150, vec![base_tx]);
+        commit_chain_block(&chain, &base_block).await;
+
+        let t0 = synthetic_spend_tx(live[0].clone(), 160, 161);
+        let t1 = synthetic_spend_tx(live[1].clone(), 162, 163);
+        let t2 = synthetic_spend_tx(live[2].clone(), 164, 165);
+
+        // Different delivery orders into A and B.
+        let delta_a = ReorgDelta {
+            disconnected_txs: vec![t2.clone(), t0.clone(), t1.clone()],
+            connected_txs: vec![],
+            ..Default::default()
+        };
+        let delta_b = ReorgDelta {
+            disconnected_txs: vec![t1.clone(), t2.clone(), t0.clone()],
+            connected_txs: vec![],
+            ..Default::default()
+        };
+        reconcile_mempool_after_connect(&chain, &mempool_a, &ConnectResult::Reorg(delta_a), &[])
+            .await
+            .expect("reconcile A");
+        reconcile_mempool_after_connect(&chain, &mempool_b, &ConnectResult::Reorg(delta_b), &[])
+            .await
+            .expect("reconcile B");
+
+        let pool_a = mempool_a.lock().await;
+        let pool_b = mempool_b.lock().await;
+        assert_eq!(pool_a.len(), 3, "all three eligible txs reinjected");
+        assert_eq!(
+            pool_a.digest(),
+            pool_b.digest(),
+            "reorg reinjection converges to the same mempool digest regardless of delivery order"
+        );
+        drop(pool_a);
+        drop(pool_b);
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
