@@ -22,8 +22,10 @@
 //! restarted node will never observe a partially-persisted block on
 //! the next start, even before the upcoming SIGKILL harness.
 
+mod common;
+
+use common::open_test_store;
 use dom_store::utxo::UtxoEntry;
-use dom_store::DomStore;
 use tempfile::TempDir;
 
 /// Synthetic block components for commit_block — opaque bytes are fine
@@ -68,7 +70,7 @@ fn entry_for(height: u64) -> Vec<u8> {
 #[test]
 fn commit_block_persists_all_five_relations() {
     let dir = TempDir::new().expect("tempdir");
-    let store = DomStore::open(dir.path()).expect("open");
+    let store = open_test_store(dir.path());
     let b = dummy_block(0x11, 1);
 
     store
@@ -97,7 +99,7 @@ fn reopen_observes_identical_committed_state() {
     let b = dummy_block(0x22, 1);
 
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         store
             .commit_block(
                 &b.hash,
@@ -112,7 +114,7 @@ fn reopen_observes_identical_committed_state() {
     }
     // env dropped here — LMDB file holds the persisted state.
 
-    let store = DomStore::open(dir.path()).expect("reopen");
+    let store = open_test_store(dir.path());
     assert_eq!(store.get_block_header(&b.hash).unwrap().unwrap(), b.header);
     assert_eq!(store.get_block_body(&b.hash).unwrap().unwrap(), b.body);
     assert_eq!(store.get_hash_at_height(b.height).unwrap().unwrap(), b.hash);
@@ -128,7 +130,7 @@ fn reopen_observes_identical_committed_state() {
 #[test]
 fn committing_same_hash_twice_is_rejected() {
     let dir = TempDir::new().expect("tempdir");
-    let store = DomStore::open(dir.path()).expect("open");
+    let store = open_test_store(dir.path());
     let b = dummy_block(0x33, 1);
 
     store
@@ -174,7 +176,7 @@ fn no_orphan_header_without_body_after_commit() {
     // both writes via the public API: if either failed without the
     // other rolling back, the assertion below would catch it.
     let dir = TempDir::new().expect("tempdir");
-    let store = DomStore::open(dir.path()).expect("open");
+    let store = open_test_store(dir.path());
     for seed in 0..8u8 {
         let b = dummy_block(seed, seed as u64 + 1);
         store
@@ -206,7 +208,7 @@ fn no_orphan_header_without_body_after_commit() {
 #[test]
 fn store_known_block_does_not_mutate_canonical_state() {
     let dir = TempDir::new().expect("tempdir");
-    let store = DomStore::open(dir.path()).expect("open");
+    let store = open_test_store(dir.path());
     let canonical = dummy_block(0x44, 1);
     let side = dummy_block(0x55, 1);
 

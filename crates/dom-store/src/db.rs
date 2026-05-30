@@ -83,7 +83,7 @@ use lmdb::{
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const MAP_SIZE: usize = 1 << 34; // 16 GiB — see module doc § "Map size"
+const DEFAULT_MAP_SIZE: usize = 1 << 34; // 16 GiB — see module doc § "Map size"
 const MAX_DBS: u32 = 16;
 
 /// Sentinel substring callers can grep for in `DomError::Internal`
@@ -110,6 +110,8 @@ pub const METADATA_UTXO_SET_DIGEST_KEY: &[u8] = b"canonical_utxo_digest_v1";
 pub struct DomStore {
     /// LMDB environment.
     pub env: Environment,
+    /// Configured LMDB map size for this environment.
+    pub map_size: usize,
     /// blocks: hash → header bytes
     pub db_blocks: Database,
     /// block_bodies: hash → serialized Block body (full block bytes minus header)
@@ -131,6 +133,14 @@ pub struct DomStore {
 impl DomStore {
     /// Open (or create) the store at the given directory.
     pub fn open(data_dir: &Path) -> Result<Self, DomError> {
+        Self::open_with_map_size(data_dir, DEFAULT_MAP_SIZE)
+    }
+
+    /// Open (or create) the store at the given directory with an explicit
+    /// LMDB map size. Production callers should use [`Self::open`]; this is
+    /// primarily for tiny test fixtures where reserving the full production
+    /// map would be wasteful on constrained CI hosts.
+    pub fn open_with_map_size(data_dir: &Path, map_size: usize) -> Result<Self, DomError> {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| DomError::Internal(format!("create data dir: {e}")))?;
 
@@ -140,7 +150,7 @@ impl DomStore {
         let env = Environment::new()
             .set_flags(EnvironmentFlags::NO_TLS)
             .set_max_dbs(MAX_DBS)
-            .set_map_size(MAP_SIZE)
+            .set_map_size(map_size)
             .open(data_dir)
             .map_err(|e| DomError::Internal(format!("lmdb open: {e}")))?;
 
@@ -159,6 +169,7 @@ impl DomStore {
         };
 
         Ok(Self {
+            map_size,
             db_blocks: open_db(DB_BLOCKS)?,
             db_block_bodies: open_db(DB_BLOCK_BODIES)?,
             db_height: open_db(DB_BLOCK_HEIGHT)?,
@@ -490,7 +501,8 @@ impl DomStore {
         // error text.
         txn.commit().map_err(|e| match e {
             lmdb::Error::MapFull => DomError::Internal(format!(
-                "{LMDB_MAP_FULL_SENTINEL}: map_size={MAP_SIZE} exhausted while committing block {} at height {block_height}",
+                "{LMDB_MAP_FULL_SENTINEL}: map_size={} exhausted while committing block {} at height {block_height}",
+                self.map_size,
                 hex::encode(block_hash)
             )),
             other => DomError::Internal(format!("commit block: {other}")),

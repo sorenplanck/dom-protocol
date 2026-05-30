@@ -25,6 +25,9 @@
 //! mirroring the corruption fixtures used in
 //! `dom-store/tests/partial_persistence.rs`.
 
+mod common;
+
+use common::{open_test_chain, open_test_store};
 use dom_chain::{ChainState, CHAIN_CORRUPT_SENTINEL};
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
@@ -180,9 +183,8 @@ fn make_hash(seed: u8) -> [u8; 32] {
 }
 
 fn open_chain(dir: &std::path::Path) -> Result<ChainState, dom_core::DomError> {
-    let store = DomStore::open(dir).expect("store open");
-    ChainState::open(
-        store,
+    open_test_chain(
+        dir,
         Hash256::from_bytes(REGTEST_GENESIS),
         dom_core::NETWORK_MAGIC_REGTEST,
     )
@@ -215,7 +217,7 @@ fn healthy_committed_block_opens_cleanly() {
     let (header_bytes, body_bytes, hash, output, excess) =
         synthetic_block_bytes(1, 0xAA, g_point(), h_point());
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         store
             .commit_block(
                 &hash,
@@ -247,7 +249,7 @@ fn corrupt_utxo_entry_is_rebuilt_from_canonical_history_on_reopen() {
     let (header_bytes, body_bytes, hash, output, excess) =
         synthetic_block_bytes(1, 0xAB, g_point(), h_point());
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         let canonical_entry = UtxoEntry {
             block_height: 1,
             is_coinbase: true,
@@ -293,7 +295,7 @@ fn missing_utxo_entry_is_rebuilt_from_canonical_history_on_reopen() {
     let (header_bytes, body_bytes, hash, output, excess) =
         synthetic_block_bytes(1, 0xAC, g_point(), h_point());
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         store
             .commit_block(
                 &hash,
@@ -337,7 +339,7 @@ fn extra_utxo_entry_is_removed_by_canonical_rebuild_on_reopen() {
     extra_commitment[0] = 0x02;
     extra_commitment[32] = 0xFE;
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         store
             .commit_block(
                 &hash,
@@ -394,7 +396,7 @@ fn canonical_utxo_set_is_equivalent_before_and_after_restart() {
     let (header_2, body_2, hash_2, output_2, excess_2) =
         synthetic_block_bytes(2, 0xAF, h_point(), g_point());
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         store
             .commit_block(
                 &hash_1,
@@ -461,7 +463,7 @@ fn failed_utxo_repair_does_not_partially_mutate_store() {
     let (header_bytes, body_bytes, hash, output, excess) =
         synthetic_block_bytes(1, 0xB0, g_point(), h_point());
     let utxo_before_failed_open = {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         store
             .commit_block(
                 &hash,
@@ -494,7 +496,7 @@ fn failed_utxo_repair_does_not_partially_mutate_store() {
         "failed canonical reopen repair must fail closed; got: {msg}"
     );
 
-    let reopened_store = DomStore::open(dir.path()).expect("reopen raw store");
+    let reopened_store = open_test_store(dir.path());
     assert_eq!(
         utxo_before_failed_open,
         dump_utxo_db(&reopened_store),
@@ -520,7 +522,7 @@ fn known_side_block_does_not_resurrect_as_tip_on_restart() {
         synthetic_block_bytes(1, 0xA1, g_point(), g_point());
     let (side_header, side_body, side, _, _) = synthetic_block_bytes(1, 0xA2, h_point(), h_point());
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         store
             .commit_block(
                 &canonical,
@@ -575,7 +577,7 @@ fn alternating_canonical_and_side_arrivals_reopen_to_canonical_chain() {
     let (side_2_header, side_2_body, side_2, _, _) =
         synthetic_block_bytes(2, 0xB4, g_point(), g_point());
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         store
             .commit_block(
                 &canonical_1,
@@ -652,7 +654,7 @@ fn duplicate_known_side_block_rejected_without_mutating_canonical_state() {
         synthetic_block_bytes(1, 0xC1, g_point(), g_point());
     let (side_header, side_body, side, _, _) = synthetic_block_bytes(1, 0xC2, h_point(), h_point());
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         store
             .commit_block(
                 &canonical,
@@ -700,7 +702,7 @@ fn reopen_rebuilds_missing_kernel_index_for_canonical_blocks() {
     let dir = TempDir::new().expect("tempdir");
     let (header, body, hash, output, excess) = synthetic_block_bytes(1, 0xC3, g_point(), h_point());
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         store
             .commit_block(
                 &hash,
@@ -743,7 +745,7 @@ fn reopen_rejects_duplicate_kernel_excess_in_legacy_canonical_history() {
     let (header_2, body_2, hash_2, output_2, _) =
         synthetic_block_bytes(2, 0xC5, h_point(), duplicated_kernel);
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         store
             .commit_block(
                 &hash_1,
@@ -806,7 +808,7 @@ fn delayed_side_branch_candidate_stays_noncanonical_after_restart() {
     let (side_2_header, side_2_body, side_2, _, _) =
         synthetic_block_bytes(2, 0xD4, g_point(), g_point());
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         store
             .commit_block(
                 &canonical_1,
@@ -880,7 +882,7 @@ fn delayed_side_branch_candidate_stays_noncanonical_after_restart() {
 fn tip_with_missing_header_rejected() {
     let dir = TempDir::new().expect("tempdir");
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         let dangling = make_hash(0xBB);
         put_raw(&store, DB_CHAIN_TIP, b"tip", &dangling);
     }
@@ -898,7 +900,7 @@ fn tip_with_missing_header_rejected() {
 fn tip_with_missing_body_rejected() {
     let dir = TempDir::new().expect("tempdir");
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         let hash = make_hash(0xCC);
         put_raw(&store, DB_BLOCKS, &hash, &synthetic_header(1));
         // height_index entry agrees with the header
@@ -922,7 +924,7 @@ fn tip_with_missing_body_rejected() {
 fn tip_with_diverging_height_index_rejected() {
     let dir = TempDir::new().expect("tempdir");
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         let hash = make_hash(0xDD);
         let other = make_hash(0xEE);
         put_raw(&store, DB_BLOCKS, &hash, &synthetic_header(1));
@@ -944,7 +946,7 @@ fn tip_with_diverging_height_index_rejected() {
 fn tip_with_no_height_index_entry_rejected() {
     let dir = TempDir::new().expect("tempdir");
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         let hash = make_hash(0xFF);
         put_raw(&store, DB_BLOCKS, &hash, &synthetic_header(1));
         put_raw(&store, DB_BLOCK_BODIES, &hash, b"body");

@@ -19,8 +19,11 @@
 //!    pins the constant value so a typo-introducing edit fails CI
 //!    before reaching the chain-init layer.
 
+mod common;
+
+use common::open_test_store;
 use dom_store::utxo::UtxoEntry;
-use dom_store::{DomStore, LMDB_MAP_FULL_SENTINEL};
+use dom_store::LMDB_MAP_FULL_SENTINEL;
 use tempfile::TempDir;
 
 fn entry_for(height: u64) -> Vec<u8> {
@@ -72,7 +75,7 @@ fn commit_survives_clean_env_drop_and_reopen() {
     let b = dummy_block(0xAB, 7);
 
     {
-        let store = DomStore::open(&path).expect("open");
+        let store = open_test_store(&path);
         store
             .commit_block(
                 &b.hash,
@@ -87,7 +90,7 @@ fn commit_survives_clean_env_drop_and_reopen() {
         // env Drop here — must not lose the write.
     }
 
-    let reopen = DomStore::open(&path).expect("reopen");
+    let reopen = open_test_store(&path);
     assert_eq!(reopen.get_block_header(&b.hash).unwrap().unwrap(), b.header);
     assert_eq!(reopen.get_block_body(&b.hash).unwrap().unwrap(), b.body);
     assert_eq!(
@@ -112,7 +115,7 @@ fn each_commit_is_independently_durable() {
     let blocks: Vec<Synthetic> = (1u64..=5).map(|i| dummy_block(0x10 + i as u8, i)).collect();
 
     for (i, b) in blocks.iter().enumerate() {
-        let store = DomStore::open(&path).expect("open");
+        let store = open_test_store(&path);
         store
             .commit_block(
                 &b.hash,
@@ -127,7 +130,7 @@ fn each_commit_is_independently_durable() {
         // Drop to force flush + close. Reopen below MUST find the tip.
         drop(store);
 
-        let reopen = DomStore::open(&path).expect("reopen");
+        let reopen = open_test_store(&path);
         assert_eq!(
             reopen.get_chain_tip().unwrap().unwrap(),
             b.hash,

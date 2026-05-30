@@ -370,6 +370,8 @@ mod tests {
     use dom_serialization::DomSerialize;
     use dom_wallet::{Network, OwnedOutput, Wallet};
 
+    const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
+
     fn make_output(value: u64, height: u64, is_coinbase: bool) -> OwnedOutput {
         let bf = BlindingFactor::random();
         let commitment = Commitment::commit(value, &bf);
@@ -437,10 +439,16 @@ mod tests {
         let _ = std::fs::remove_file(&wallet_path);
 
         let node = std::sync::Arc::new(
-            DomNode::init(test_config(
-                data_dir.to_str().expect("utf8 data dir"),
-                wallet_path.to_str().expect("utf8 wallet path"),
-            ))
+            DomNode::init_with_map_size(
+                test_config(
+                    data_dir.to_str().expect("utf8 data dir"),
+                    wallet_path.to_str().expect("utf8 wallet path"),
+                ),
+                // Windows CI reserves LMDB map size more strictly than Linux/macOS.
+                // These wallet/node-handle fixtures are tiny, so tests use a small
+                // explicit map size while production `DomNode::init` stays at 16 GiB.
+                TEST_LMDB_MAP_SIZE,
+            )
             .expect("init node"),
         );
         let handle = NodeHandleImpl(node.clone());
@@ -510,10 +518,13 @@ mod tests {
         let _ = std::fs::remove_file(&wallet_path);
 
         let node = std::sync::Arc::new(
-            DomNode::init(test_config(
-                data_dir.to_str().expect("utf8 data dir"),
-                wallet_path.to_str().expect("utf8 wallet path"),
-            ))
+            DomNode::init_with_map_size(
+                test_config(
+                    data_dir.to_str().expect("utf8 data dir"),
+                    wallet_path.to_str().expect("utf8 wallet path"),
+                ),
+                TEST_LMDB_MAP_SIZE,
+            )
             .expect("init node"),
         );
         let handle = NodeHandleImpl(node);
