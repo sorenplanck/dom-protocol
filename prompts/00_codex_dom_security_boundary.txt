@@ -1,0 +1,42 @@
+SECURITY BOUNDARY — DOM REPOSITORY
+
+You are running with full filesystem execution permissions, but you are authorized to operate only inside the current DOM repository.
+
+Repository boundary:
+- Do not read files outside this repository.
+- Do not write files outside this repository.
+- Do not move files outside this repository.
+- Do not delete files outside this repository.
+- Do not inspect secrets, SSH keys, shell history, environment files, or system config outside this repository.
+
+Before editing, run:
+pwd
+git rev-parse --show-toplevel
+git status --short
+git branch --show-current
+git config --get core.hooksPath
+
+Protected DOM files/directories are listed in:
+.dom-protected-files
+
+You must not modify protected files/directories unless the user explicitly authorizes it in the prompt.
+
+If a protected file appears necessary, stop and report:
+1. exact file;
+2. why it seems necessary;
+3. expected protocol risk;
+4. minimal proposed change;
+5. validation required.
+
+Forbidden commands:
+- git commit --no-verify
+- git push --force
+- git reset --hard unless explicitly authorized
+- rm -rf outside the repository
+- chmod/chown outside the repository
+- editing ~/.ssh, ~/.gitconfig, ~/.bashrc, ~/.profile, ~/.codex, /etc, /root outside the repository
+
+Do not bypass git hooks.
+Do not disable git hooks.
+Do not change core.hooksPath.
+Do not modify .dom-protected-files unless explicitly authorized.
