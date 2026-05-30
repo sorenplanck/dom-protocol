@@ -29,6 +29,8 @@
 //! pins one of the adversarial patterns and asserts the expected
 //! outcome.
 
+mod common;
+
 use dom_chain::ibd::{IbdAction, IbdPhase, IbdState};
 use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
@@ -37,6 +39,7 @@ use dom_pow::CompactTarget;
 use primitive_types::U256;
 use tempfile::TempDir;
 
+use common::{open_test_chain, open_test_store};
 use dom_store::DomStore;
 
 fn synth_header(height: u64) -> BlockHeader {
@@ -68,9 +71,8 @@ fn block_hash(header: &BlockHeader) -> [u8; 32] {
 }
 
 fn open_chain(dir: &std::path::Path) -> ChainState {
-    let store = DomStore::open(dir).expect("store open");
-    ChainState::open(
-        store,
+    open_test_chain(
+        dir,
         Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
         dom_core::NETWORK_MAGIC_REGTEST,
     )
@@ -320,7 +322,7 @@ fn live_ibd_rejects_gap_after_known_header() {
     let dir = TempDir::new().expect("tempdir");
     let genesis = synth_header(0);
     {
-        let store = DomStore::open(dir.path()).expect("store open");
+        let store = open_test_store(dir.path());
         store_known_header(&store, &genesis);
     }
 
@@ -370,7 +372,7 @@ fn live_ibd_known_header_filter_is_restart_equivalent() {
     let mut h1 = synth_header(1);
     h1.prev_hash = Hash256::from_bytes(block_hash(&genesis));
     {
-        let store = DomStore::open(dir.path()).expect("store open");
+        let store = open_test_store(dir.path());
         store_known_header(&store, &genesis);
         store_known_header(&store, &h1);
     }

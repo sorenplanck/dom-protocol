@@ -32,6 +32,9 @@
 //! `replay_determinism` integration test (env-blocked per
 //! RB-PMMR-001).
 
+mod common;
+
+use common::open_test_store;
 use dom_consensus::{
     block::{BlockHeader, ProofOfWork},
     compute_block_pmmr_roots, Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput,
@@ -210,11 +213,11 @@ fn coinbase_only_block_pmmr_roots_recompute_after_reopen() {
     let block = build_consistent_block(1, false);
     let hash;
     {
-        let store = DomStore::open(&path).expect("open");
+        let store = open_test_store(&path);
         hash = commit_synthetic(&store, &block);
     } // env dropped — body must survive to disk
 
-    let store = DomStore::open(&path).expect("reopen");
+    let store = open_test_store(&path);
     assert_recomputed_roots_match_stored_header(&store, &hash, 1);
 }
 
@@ -227,10 +230,10 @@ fn block_with_transactions_pmmr_roots_recompute_after_reopen() {
     let block = build_consistent_block(1, true);
     let hash;
     {
-        let store = DomStore::open(&path).expect("open");
+        let store = open_test_store(&path);
         hash = commit_synthetic(&store, &block);
     }
-    let store = DomStore::open(&path).expect("reopen");
+    let store = open_test_store(&path);
     assert_recomputed_roots_match_stored_header(&store, &hash, 1);
 }
 
@@ -252,12 +255,12 @@ fn chain_of_8_blocks_pmmr_roots_recompute_after_reopen() {
         .collect();
     let mut hashes = Vec::new();
     {
-        let store = DomStore::open(&path).expect("open");
+        let store = open_test_store(&path);
         for b in &blocks {
             hashes.push(commit_synthetic(&store, b));
         }
     }
-    let store = DomStore::open(&path).expect("reopen");
+    let store = open_test_store(&path);
     for (i, hash) in hashes.iter().enumerate() {
         assert_recomputed_roots_match_stored_header(&store, hash, (i + 1) as u64);
     }
@@ -284,7 +287,7 @@ fn body_mutation_post_persist_breaks_recomputed_pmmr_roots() {
     let mutated_body_bytes = mutated.to_bytes().expect("ser body");
 
     {
-        let store = DomStore::open(&path).expect("open");
+        let store = open_test_store(&path);
         // Direct store write — we want the stored body to NOT
         // match the stored header's PMMR roots.
         store
@@ -300,7 +303,7 @@ fn body_mutation_post_persist_breaks_recomputed_pmmr_roots() {
             .expect("commit_block under original header");
     }
 
-    let store = DomStore::open(&path).expect("reopen");
+    let store = open_test_store(&path);
     let body = store
         .get_block_body(&original_hash)
         .expect("get body")
@@ -336,7 +339,7 @@ fn chain_consistency_holds_with_utxo_bookkeeping_after_reopen() {
     let body_bytes = block.to_bytes().expect("ser");
     let new_utxo_commit = *block.coinbase.output.commitment.as_bytes();
     {
-        let store = DomStore::open(&path).expect("open");
+        let store = open_test_store(&path);
         store
             .commit_block(
                 &block_hash,
@@ -357,7 +360,7 @@ fn chain_consistency_holds_with_utxo_bookkeeping_after_reopen() {
             )
             .expect("commit_block");
     }
-    let store = DomStore::open(&path).expect("reopen");
+    let store = open_test_store(&path);
     assert_recomputed_roots_match_stored_header(&store, &block_hash, 1);
     // UTXO survived too.
     let utxo = store
