@@ -1,5 +1,8 @@
+mod common;
+
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
+use common::open_test_store;
 use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
@@ -85,7 +88,7 @@ fn populate_history(
     spacing_secs: u64,
     count: u64,
 ) -> ChainState {
-    let store = dom_store::DomStore::open(dir.path()).expect("store open");
+    let store = open_test_store(dir.path());
     let target = CompactTarget(GENESIS_TARGET_COMPACT);
     let mut prev_hash = Hash256::ZERO;
     let mut total_difficulty = 0u64;
