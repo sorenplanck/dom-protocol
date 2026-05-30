@@ -661,6 +661,8 @@ mod genesis_determinism_tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
+
     fn chain_id_mainnet() -> [u8; 32] {
         use dom_consensus::derive_chain_id;
         use dom_core::Hash256;
@@ -712,6 +714,13 @@ mod genesis_determinism_tests {
         config.wallet_password = None;
         config.mine = false;
         config
+    }
+
+    fn init_test_node(config: NodeConfig) -> DomNode {
+        // Windows CI reserves LMDB map size more strictly than Linux/macOS.
+        // These miner fixtures are tiny, so tests use a small explicit map
+        // size while production `DomNode::init` keeps the 16 GiB default.
+        DomNode::init_with_map_size(config, TEST_LMDB_MAP_SIZE).expect("node init")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -898,7 +907,7 @@ mod genesis_determinism_tests {
     async fn invariant_mined_block_is_rejected_before_broadcast_when_economic_balance_is_invalid() {
         std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
         let dir = fresh_test_dir("pre-broadcast-invalid-balance");
-        let node = Arc::new(DomNode::init(regtest_config(&dir)).expect("node init"));
+        let node = Arc::new(init_test_node(regtest_config(&dir)));
         super::create_genesis_block(node.clone())
             .await
             .expect("create genesis");

@@ -33,6 +33,9 @@
 //!   That property is covered by the SIGKILL harness.
 //! - The chain-init layer's recovery policy is owned by `dom-chain`.
 
+mod common;
+
+use common::open_test_store;
 use dom_store::utxo::UtxoEntry;
 use dom_store::{
     DomStore, DB_BLOCKS, DB_BLOCK_BODIES, DB_BLOCK_HEIGHT, DB_CHAIN_TIP, DB_KERNEL_INDEX,
@@ -65,7 +68,7 @@ fn make_hash(seed: u8) -> [u8; 32] {
 fn orphan_header_without_body_is_observable_after_reopen() {
     let dir = TempDir::new().expect("tempdir");
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         // Header written, body never written — simulates a future buggy
         // commit_block that split its writes across transactions, or a
         // manual recovery that restored a header backup but lost bodies.
@@ -73,7 +76,7 @@ fn orphan_header_without_body_is_observable_after_reopen() {
         put_raw(&store, DB_BLOCKS, &hash, &[0xAAu8; 64]);
     }
     // env dropped — re-open from disk.
-    let store = DomStore::open(dir.path()).expect("reopen");
+    let store = open_test_store(dir.path());
     let hash = make_hash(0x11);
     assert!(
         store.get_block_header(&hash).expect("get header").is_some(),
@@ -89,11 +92,11 @@ fn orphan_header_without_body_is_observable_after_reopen() {
 fn orphan_body_without_header_is_observable_after_reopen() {
     let dir = TempDir::new().expect("tempdir");
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         let hash = make_hash(0x22);
         put_raw(&store, DB_BLOCK_BODIES, &hash, &[0xBBu8; 32]);
     }
-    let store = DomStore::open(dir.path()).expect("reopen");
+    let store = open_test_store(dir.path());
     let hash = make_hash(0x22);
     assert!(
         store.get_block_header(&hash).expect("get header").is_none(),
@@ -109,13 +112,13 @@ fn orphan_body_without_header_is_observable_after_reopen() {
 fn dangling_height_pointer_to_unknown_hash_is_observable() {
     let dir = TempDir::new().expect("tempdir");
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         let height_key = 7u64.to_le_bytes();
         let dangling_hash = make_hash(0x33);
         put_raw(&store, DB_BLOCK_HEIGHT, &height_key, &dangling_hash);
         // intentionally do NOT write the block at this hash
     }
-    let store = DomStore::open(dir.path()).expect("reopen");
+    let store = open_test_store(dir.path());
     let mapped = store.get_hash_at_height(7).expect("get_hash_at_height");
     assert!(
         mapped.is_some(),
@@ -132,11 +135,11 @@ fn dangling_height_pointer_to_unknown_hash_is_observable() {
 fn dangling_chain_tip_pointer_is_observable() {
     let dir = TempDir::new().expect("tempdir");
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         let tip_hash = make_hash(0x44);
         put_raw(&store, DB_CHAIN_TIP, b"tip", &tip_hash);
     }
-    let store = DomStore::open(dir.path()).expect("reopen");
+    let store = open_test_store(dir.path());
     let tip = store.get_chain_tip().expect("get_chain_tip");
     assert_eq!(
         tip,
@@ -156,14 +159,14 @@ fn dangling_chain_tip_pointer_is_observable() {
 fn dangling_kernel_index_entry_is_observable_via_block_lookup() {
     let dir = TempDir::new().expect("tempdir");
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         let mut excess = [0u8; 33];
         excess[0] = 0x03;
         excess[1] = 0x55;
         let block_hash = make_hash(0x55);
         put_raw(&store, DB_KERNEL_INDEX, &excess, &block_hash);
     }
-    let store = DomStore::open(dir.path()).expect("reopen");
+    let store = open_test_store(dir.path());
     // The kernel index keeps pointing at the (missing) block.
     assert!(
         store
@@ -183,7 +186,7 @@ fn store_does_not_panic_when_reopened_with_arbitrary_partial_state() {
     // without having to enumerate cases.
     let dir = TempDir::new().expect("tempdir");
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
 
         put_raw(&store, DB_BLOCKS, &make_hash(0x60), &[0u8; 32]);
         put_raw(&store, DB_BLOCK_BODIES, &make_hash(0x61), &[0u8; 16]);
@@ -198,7 +201,7 @@ fn store_does_not_panic_when_reopened_with_arbitrary_partial_state() {
         excess[0] = 0x03;
         put_raw(&store, DB_KERNEL_INDEX, &excess, &make_hash(0x64));
     }
-    let store = DomStore::open(dir.path()).expect("reopen");
+    let store = open_test_store(dir.path());
 
     // Every read method must complete without panic and return its
     // documented Option/Result type, regardless of the on-disk mess.
@@ -219,10 +222,10 @@ fn commit_block_on_clean_store_still_works_after_unrelated_partial_state() {
     // poison the path for callers who supply fresh, complete inputs.
     let dir = TempDir::new().expect("tempdir");
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         put_raw(&store, DB_BLOCKS, &make_hash(0x70), &[0xCCu8; 16]);
     }
-    let store = DomStore::open(dir.path()).expect("reopen");
+    let store = open_test_store(dir.path());
 
     let clean_hash = make_hash(0x71);
     let mut commitment = [0u8; 33];
