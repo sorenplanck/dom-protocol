@@ -29,11 +29,13 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::open_test_store;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use dom_store::DomStore;
 use tempfile::TempDir;
 
 /// Locate the `crash_writer` binary built alongside the test crate.
@@ -93,7 +95,7 @@ fn run_one_scenario(blocks: u64, pause_micros: u64, kill_after: Duration) {
     let _ = child.wait();
 
     // Re-open the env in this process and check the invariants.
-    let store = DomStore::open(dir.path()).expect("reopen after SIGKILL");
+    let store = open_test_store(dir.path());
 
     let mut highest_with_header: Option<u64> = None;
     for height in 1..=blocks {
