@@ -290,6 +290,20 @@ async fn purge_mempool_confirmed_inputs(
 impl DomNode {
     /// Initialize the node from configuration.
     pub fn init(config: NodeConfig) -> Result<Self, DomError> {
+        Self::init_inner(config, None)
+    }
+
+    /// Initialize the node with an explicit LMDB map size override.
+    ///
+    /// Production callers should keep using [`Self::init`], which preserves the
+    /// 16 GiB default. This override exists for tiny test fixtures so Windows
+    /// CI does not reserve a full production-sized LMDB map for each temporary
+    /// node/store instance.
+    pub fn init_with_map_size(config: NodeConfig, map_size: usize) -> Result<Self, DomError> {
+        Self::init_inner(config, Some(map_size))
+    }
+
+    fn init_inner(config: NodeConfig, map_size_override: Option<usize>) -> Result<Self, DomError> {
         info!("Initializing DOM node ({:?} network)", config.network);
         info!("Data directory: {}", config.data_dir);
 
@@ -300,7 +314,10 @@ impl DomNode {
 
         // Open storage
         let data_path = Path::new(&config.data_dir);
-        let store = DomStore::open(data_path)?;
+        let store = match map_size_override {
+            Some(map_size) => DomStore::open_with_map_size(data_path, map_size)?,
+            None => DomStore::open(data_path)?,
+        };
 
         // Generate or load Noise keypair.
         let noise_privkey = load_or_create_noise_static_key(&store)?;
@@ -3606,6 +3623,8 @@ mod tests {
     use tokio::net::TcpStream;
     use tokio::sync::Mutex;
 
+    const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
+
     type TestUtxoBytes = ([u8; 33], Vec<u8>);
 
     fn commitment(seed: u8, value: u64) -> Commitment {
@@ -3949,7 +3968,10 @@ mod tests {
     }
 
     fn open_chain(dir: &std::path::Path) -> Arc<Mutex<ChainState>> {
-        let store = DomStore::open(dir).expect("store open");
+        // Windows CI reserves LMDB map size more strictly than Linux/macOS.
+        // These runtime fixtures are tiny, so tests use a small explicit map
+        // size while production `DomNode::init` / `DomStore::open` stay at 16 GiB.
+        let store = DomStore::open_with_map_size(dir, TEST_LMDB_MAP_SIZE).expect("store open");
         let chain = ChainState::open(
             store,
             Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
@@ -4015,6 +4037,14 @@ mod tests {
         config
     }
 
+    fn init_test_node(config: NodeConfig) -> DomNode {
+        DomNode::init_with_map_size(config, TEST_LMDB_MAP_SIZE).expect("node init")
+    }
+
+    fn open_test_store(dir: &std::path::Path) -> DomStore {
+        DomStore::open_with_map_size(dir, TEST_LMDB_MAP_SIZE).expect("store open")
+    }
+
     fn free_local_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0")
             .expect("bind ephemeral localhost port")
@@ -4046,7 +4076,7 @@ mod tests {
         let dir = fresh_test_dir("runtime-registers-core-tasks");
         let mut config = regtest_node_config(&dir);
         config.p2p_listen_addr = format!("127.0.0.1:{}", free_local_port());
-        let node = Arc::new(DomNode::init(config).expect("node init"));
+        let node = Arc::new(init_test_node(config));
         let run = tokio::spawn(node.clone().run());
 
         wait_for_runtime_status(&node, |status| {
@@ -4072,7 +4102,7 @@ mod tests {
         let dir_off = fresh_test_dir("runtime-miner-disabled");
         let mut config_off = regtest_node_config(&dir_off);
         config_off.p2p_listen_addr = format!("127.0.0.1:{}", free_local_port());
-        let node_off = Arc::new(DomNode::init(config_off).expect("node init"));
+        let node_off = Arc::new(init_test_node(config_off));
         let run_off = tokio::spawn(node_off.clone().run());
         wait_for_runtime_status(&node_off, |status| {
             !status.running_tasks.contains(&TaskKind::Miner)
@@ -4091,7 +4121,7 @@ mod tests {
         let mut config_on = regtest_node_config(&dir_on);
         config_on.p2p_listen_addr = format!("127.0.0.1:{}", free_local_port());
         config_on.mine = true;
-        let node_on = Arc::new(DomNode::init(config_on).expect("node init"));
+        let node_on = Arc::new(init_test_node(config_on));
         let run_on = tokio::spawn(node_on.clone().run());
         wait_for_runtime_status(&node_on, |status| {
             status.running_tasks.contains(&TaskKind::Miner)
@@ -4111,7 +4141,7 @@ mod tests {
         let dir = fresh_test_dir("runtime-long-lived");
         let mut config = regtest_node_config(&dir);
         config.p2p_listen_addr = format!("127.0.0.1:{}", free_local_port());
-        let node = Arc::new(DomNode::init(config).expect("node init"));
+        let node = Arc::new(init_test_node(config));
         let run = tokio::spawn(node.clone().run());
 
         wait_for_runtime_status(&node, |status| {
@@ -4138,7 +4168,7 @@ mod tests {
         let mut config = regtest_node_config(&dir);
         config.p2p_listen_addr = format!("127.0.0.1:{}", free_local_port());
         let listen_addr = config.p2p_listen_addr.clone();
-        let node = Arc::new(DomNode::init(config).expect("node init"));
+        let node = Arc::new(init_test_node(config));
         let run = tokio::spawn(node.clone().run());
 
         wait_for_runtime_status(&node, |status| {
@@ -4165,11 +4195,11 @@ mod tests {
     #[test]
     fn noise_static_key_persists_across_store_reopen() {
         let dir = fresh_test_dir("noise-key-reopen");
-        let store = DomStore::open(&dir).expect("store open");
+        let store = open_test_store(&dir);
         let first = load_or_create_noise_static_key(&store).expect("first load/create");
         drop(store);
 
-        let reopened = DomStore::open(&dir).expect("store reopen");
+        let reopened = open_test_store(&dir);
         let second = load_or_create_noise_static_key(&reopened).expect("second load");
 
         assert_eq!(first, second, "persisted Noise key must survive reopen");
@@ -4181,8 +4211,8 @@ mod tests {
         let dir = fresh_test_dir("noise-node-restart");
         let config = regtest_node_config(&dir);
 
-        let first = DomNode::init(config.clone()).expect("first init");
-        let second = DomNode::init(config).expect("second init");
+        let first = init_test_node(config.clone());
+        let second = init_test_node(config);
 
         assert_eq!(
             first.noise_privkey, second.noise_privkey,
@@ -4199,7 +4229,7 @@ mod tests {
     #[test]
     fn malformed_persisted_noise_key_is_rejected_without_replacement() {
         let dir = fresh_test_dir("noise-key-corrupt");
-        let store = DomStore::open(&dir).expect("store open");
+        let store = open_test_store(&dir);
         store
             .put_metadata(NOISE_STATIC_KEY_METADATA_KEY, b"corrupt")
             .expect("write corrupt metadata");
@@ -4223,13 +4253,13 @@ mod tests {
     #[test]
     fn malformed_persisted_noise_key_aborts_node_init() {
         let dir = fresh_test_dir("noise-node-corrupt");
-        let store = DomStore::open(&dir).expect("store open");
+        let store = open_test_store(&dir);
         store
             .put_metadata(NOISE_STATIC_KEY_METADATA_KEY, b"corrupt")
             .expect("write corrupt metadata");
         drop(store);
 
-        let err = match DomNode::init(regtest_node_config(&dir)) {
+        let err = match DomNode::init_with_map_size(regtest_node_config(&dir), TEST_LMDB_MAP_SIZE) {
             Ok(_) => panic!("init should fail"),
             Err(err) => err,
         };
@@ -4239,7 +4269,7 @@ mod tests {
             "unexpected error message: {message}"
         );
 
-        let reopened = DomStore::open(&dir).expect("store reopen");
+        let reopened = open_test_store(&dir);
         assert_eq!(
             reopened
                 .get_metadata(NOISE_STATIC_KEY_METADATA_KEY)
@@ -4271,7 +4301,7 @@ mod tests {
         };
         let tx_hash = tx_hash(&tx).expect("tx hash");
 
-        let first = DomNode::init(config.clone()).expect("first init");
+        let first = init_test_node(config.clone());
         first
             .mempool
             .try_lock()
@@ -4281,7 +4311,7 @@ mod tests {
         assert_eq!(first.mempool.try_lock().expect("mempool lock").len(), 1);
         drop(first);
 
-        let second = DomNode::init(config).expect("second init");
+        let second = init_test_node(config);
         assert_eq!(
             second.mempool.try_lock().expect("mempool lock").len(),
             0,
@@ -4306,7 +4336,7 @@ mod tests {
         use dom_serialization::Writer;
 
         let dir = fresh_test_dir("peer-rotation-legacy");
-        let store = DomStore::open(&dir).expect("store open");
+        let store = open_test_store(&dir);
         let mut w = Writer::new();
         w.write_u64(3);
         w.write_u32(1);
@@ -4333,13 +4363,13 @@ mod tests {
     #[test]
     fn invalid_persisted_peer_rotation_aborts_node_init_without_clearing_state() {
         let dir = fresh_test_dir("peer-rotation-invalid");
-        let store = DomStore::open(&dir).expect("store open");
+        let store = open_test_store(&dir);
         store
             .put_metadata(PEER_ROTATION_METADATA_KEY, b"invalid")
             .expect("persist invalid peer rotation");
         drop(store);
 
-        let err = match DomNode::init(regtest_node_config(&dir)) {
+        let err = match DomNode::init_with_map_size(regtest_node_config(&dir), TEST_LMDB_MAP_SIZE) {
             Ok(_) => panic!("invalid peer rotation should fail init"),
             Err(err) => err,
         };
@@ -4349,7 +4379,7 @@ mod tests {
             "unexpected error message: {message}"
         );
 
-        let reopened = DomStore::open(&dir).expect("store reopen");
+        let reopened = open_test_store(&dir);
         assert_eq!(
             reopened
                 .get_metadata(PEER_ROTATION_METADATA_KEY)
@@ -4363,12 +4393,12 @@ mod tests {
     #[test]
     fn missing_persisted_peer_reputation_starts_empty() {
         let dir = fresh_test_dir("peer-reputation-empty");
-        let store = DomStore::open(&dir).expect("store open");
+        let store = open_test_store(&dir);
         assert!(load_peer_reputation_snapshot(&store)
             .expect("load peer reputation")
             .is_none());
 
-        let node = DomNode::init(regtest_node_config(&dir)).expect("node init");
+        let node = init_test_node(regtest_node_config(&dir));
         let peers = node.peers.try_lock().expect("peer lock");
         assert_eq!(peers.pending_penalty_count(), 0);
         fs::remove_dir_all(&dir).expect("cleanup test dir");
@@ -4377,7 +4407,7 @@ mod tests {
     #[test]
     fn peer_score_survives_restart_init() {
         let dir = fresh_test_dir("peer-reputation-restart");
-        let store = DomStore::open(&dir).expect("store open");
+        let store = open_test_store(&dir);
         let mut peers = PeerManager::new(125, 8);
         let peer = PeerInfo::new("10.0.0.42:33369".parse().expect("peer addr"), false);
         let addr = peer.addr.to_string();
@@ -4387,7 +4417,7 @@ mod tests {
             .expect("persist peer reputation");
         drop(store);
 
-        let node = DomNode::init(regtest_node_config(&dir)).expect("node init");
+        let node = init_test_node(regtest_node_config(&dir));
         let peers = node.peers.try_lock().expect("peer lock");
         assert_eq!(peers.pending_ban_score(&addr), 35);
         assert_eq!(peers.ban_score(&addr), None);
@@ -4397,7 +4427,7 @@ mod tests {
     #[test]
     fn banned_peer_remains_banned_after_restart() {
         let dir = fresh_test_dir("peer-reputation-ban-restart");
-        let store = DomStore::open(&dir).expect("store open");
+        let store = open_test_store(&dir);
         let mut peers = PeerManager::new(125, 8);
         let addr = "10.0.0.43:33369";
         assert_eq!(
@@ -4408,7 +4438,7 @@ mod tests {
             .expect("persist peer reputation");
         drop(store);
 
-        let node = DomNode::init(regtest_node_config(&dir)).expect("node init");
+        let node = init_test_node(regtest_node_config(&dir));
         let mut peers = node.peers.try_lock().expect("peer lock");
         assert_eq!(peers.pending_ban_score(addr), ban_scores::BAN_THRESHOLD);
         assert!(peers.reserve_outbound(addr).is_err());
@@ -4424,7 +4454,7 @@ mod tests {
     #[test]
     fn wrong_network_ban_score_survives_restart() {
         let dir = fresh_test_dir("peer-reputation-wrong-network");
-        let store = DomStore::open(&dir).expect("store open");
+        let store = open_test_store(&dir);
         let snapshot = PersistedPeerReputationState {
             entries: vec![dom_wire::manager::PersistedPeerReputation {
                 addr: "10.0.0.44:33369".into(),
@@ -4434,7 +4464,7 @@ mod tests {
         persist_peer_reputation_snapshot(&store, &snapshot).expect("persist peer reputation");
         drop(store);
 
-        let node = DomNode::init(regtest_node_config(&dir)).expect("node init");
+        let node = init_test_node(regtest_node_config(&dir));
         let peers = node.peers.try_lock().expect("peer lock");
         assert_eq!(
             peers.pending_ban_score("10.0.0.44:33369"),
@@ -4446,13 +4476,13 @@ mod tests {
     #[test]
     fn invalid_persisted_peer_reputation_aborts_node_init_without_clearing_state() {
         let dir = fresh_test_dir("peer-reputation-invalid");
-        let store = DomStore::open(&dir).expect("store open");
+        let store = open_test_store(&dir);
         store
             .put_metadata(PEER_REPUTATION_METADATA_KEY, b"invalid")
             .expect("persist invalid peer reputation");
         drop(store);
 
-        let err = match DomNode::init(regtest_node_config(&dir)) {
+        let err = match DomNode::init_with_map_size(regtest_node_config(&dir), TEST_LMDB_MAP_SIZE) {
             Ok(_) => panic!("invalid peer reputation should fail init"),
             Err(err) => err,
         };
@@ -4462,7 +4492,7 @@ mod tests {
             "unexpected error message: {message}"
         );
 
-        let reopened = DomStore::open(&dir).expect("store reopen");
+        let reopened = open_test_store(&dir);
         assert_eq!(
             reopened
                 .get_metadata(PEER_REPUTATION_METADATA_KEY)
@@ -4476,7 +4506,7 @@ mod tests {
     #[test]
     fn peer_reputation_persistence_remains_separate_from_noise_identity() {
         let dir = fresh_test_dir("peer-reputation-separate-identity");
-        let store = DomStore::open(&dir).expect("store open");
+        let store = open_test_store(&dir);
         let noise = load_or_create_noise_static_key(&store).expect("noise key");
         let snapshot = PersistedPeerReputationState {
             entries: vec![dom_wire::manager::PersistedPeerReputation {
@@ -4487,7 +4517,7 @@ mod tests {
         persist_peer_reputation_snapshot(&store, &snapshot).expect("persist peer reputation");
         drop(store);
 
-        let reopened = DomStore::open(&dir).expect("store reopen");
+        let reopened = open_test_store(&dir);
         assert_eq!(
             reopened
                 .get_metadata(NOISE_STATIC_KEY_METADATA_KEY)
@@ -4507,7 +4537,7 @@ mod tests {
     #[test]
     fn persisted_mempool_snapshot_is_cleared_and_not_restored_on_restart_init() {
         let dir = fresh_test_dir("mempool-restart-legacy-snapshot");
-        let store = DomStore::open(&dir).expect("store open");
+        let store = open_test_store(&dir);
         let tx_a = mempool_tx(0x21, 100);
         let tx_b = mempool_tx(0x22, 200);
         let hash_a = tx_hash(&tx_a).expect("hash a");
@@ -4522,14 +4552,14 @@ mod tests {
         persist_mempool_snapshot(&store, &mempool.snapshot()).expect("persist mempool");
         drop(store);
 
-        let node = DomNode::init(regtest_node_config(&dir)).expect("node init");
+        let node = init_test_node(regtest_node_config(&dir));
         assert_eq!(
             node.mempool.blocking_lock().len(),
             0,
             "legacy mempool snapshot must not be restored into runtime state"
         );
 
-        let reopened = DomStore::open(&dir).expect("store reopen");
+        let reopened = open_test_store(&dir);
         assert!(
             load_mempool_snapshot(&reopened)
                 .expect("load mempool")
@@ -4542,20 +4572,20 @@ mod tests {
     #[test]
     fn invalid_persisted_mempool_is_ignored_and_cleared_on_restart_init() {
         let dir = fresh_test_dir("mempool-invalid");
-        let store = DomStore::open(&dir).expect("store open");
+        let store = open_test_store(&dir);
         store
             .put_metadata(MEMPOOL_METADATA_KEY, b"invalid")
             .expect("persist invalid mempool");
         drop(store);
 
-        let node = DomNode::init(regtest_node_config(&dir)).expect("node init");
+        let node = init_test_node(regtest_node_config(&dir));
         assert_eq!(
             node.mempool.try_lock().expect("mempool lock").len(),
             0,
             "invalid legacy mempool metadata must not reconstruct runtime state"
         );
 
-        let reopened = DomStore::open(&dir).expect("store reopen");
+        let reopened = open_test_store(&dir);
         assert!(
             reopened
                 .get_metadata(MEMPOOL_METADATA_KEY)
@@ -4569,7 +4599,7 @@ mod tests {
     #[test]
     fn clear_persisted_mempool_snapshot_removes_legacy_metadata() {
         let dir = fresh_test_dir("mempool-clear-legacy");
-        let store = DomStore::open(&dir).expect("store open");
+        let store = open_test_store(&dir);
         store
             .put_metadata(MEMPOOL_METADATA_KEY, b"stale")
             .expect("persist legacy mempool metadata");

@@ -129,8 +129,13 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
+
     fn open_chain(dir: &std::path::Path) -> ChainState {
-        let store = DomStore::open(dir).expect("open store");
+        // Windows CI reserves LMDB map size more strictly than Linux/macOS.
+        // These replay fixtures are tiny, so tests use a small explicit map
+        // size while production callers keep the 16 GiB default.
+        let store = DomStore::open_with_map_size(dir, TEST_LMDB_MAP_SIZE).expect("open store");
         ChainState::open(
             store,
             Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
