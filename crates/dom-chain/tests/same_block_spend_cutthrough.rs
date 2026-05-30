@@ -15,6 +15,9 @@
 //!     live-style and an IBD-style validation context, so the paths cannot
 //!     disagree.
 
+mod common;
+
+use common::open_test_chain;
 use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{
@@ -38,7 +41,6 @@ use dom_pow::{
     target_to_compact, target_to_difficulty, CompactTarget,
 };
 use dom_serialization::DomSerialize;
-use dom_store::DomStore;
 use primitive_types::U256;
 use tempfile::TempDir;
 
@@ -244,9 +246,8 @@ fn block_hash(block: &Block) -> Hash256 {
 }
 
 fn open_chain(dir: &std::path::Path) -> ChainState {
-    let store = DomStore::open(dir).expect("store open");
-    ChainState::open(
-        store,
+    open_test_chain(
+        dir,
         Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
         NETWORK_MAGIC_REGTEST,
     )

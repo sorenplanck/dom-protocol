@@ -5,6 +5,9 @@
 //! economic balance is invalid. The same malformed bytes must not slip through
 //! direct extension, IBD-style body import, or known-tip promotion.
 
+mod common;
+
+use common::open_test_chain;
 use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{
@@ -27,7 +30,6 @@ use dom_pow::{
     target_to_difficulty, CompactTarget,
 };
 use dom_serialization::DomSerialize;
-use dom_store::DomStore;
 use primitive_types::U256;
 use tempfile::TempDir;
 
@@ -164,9 +166,8 @@ fn block_hash(block: &Block) -> Hash256 {
 }
 
 fn open_chain(dir: &std::path::Path) -> ChainState {
-    let store = DomStore::open(dir).expect("store open");
-    ChainState::open(
-        store,
+    open_test_chain(
+        dir,
         Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
         NETWORK_MAGIC_REGTEST,
     )
@@ -182,12 +183,17 @@ fn invariant_direct_chain_extension_rejects_header_and_pmmr_valid_but_economical
 ) {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let dir = TempDir::new().expect("tempdir");
+    // Keep the TempDir alive for the test, but open LMDB in a child directory.
+    // Windows CI does not tolerate reserving the full 16 GiB production map
+    // for these tiny adversarial fixtures, so the test uses a small map size
+    // only for fixture storage. Consensus behavior is unchanged.
+    let store_dir = dir.path().join("chain");
     let chain_id = *derive_chain_id(
         NETWORK_MAGIC_REGTEST,
         &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
     )
     .as_bytes();
-    let mut chain = open_chain(dir.path());
+    let mut chain = open_chain(&store_dir);
 
     let genesis = build_coinbase_only_block(
         [0u8; 32],
@@ -226,12 +232,15 @@ fn invariant_direct_chain_extension_rejects_header_and_pmmr_valid_but_economical
 fn invariant_reorg_candidate_promotion_revalidates_economic_balance_before_state_rewrite() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let dir = TempDir::new().expect("tempdir");
+    // Use a child store directory and the small test-only LMDB map size for
+    // Windows CI fixture isolation; production map sizing remains unchanged.
+    let store_dir = dir.path().join("chain");
     let chain_id = *derive_chain_id(
         NETWORK_MAGIC_REGTEST,
         &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
     )
     .as_bytes();
-    let mut chain = open_chain(dir.path());
+    let mut chain = open_chain(&store_dir);
 
     let genesis = build_coinbase_only_block(
         [0u8; 32],
