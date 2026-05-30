@@ -15,7 +15,7 @@ use std::time::Duration;
 async fn test_ibd_full_sync() {
     let config_a = test_config("ibd-a", 43382, true);
     let node_a = spawn_node(config_a).await;
-    tokio::spawn(node_a.clone().run());
+    let _node_a_runtime = spawn_node_runtime(node_a.clone());
     wait_for_listener_ready("127.0.0.1:43382", 10)
         .await
         .expect("A listener");
@@ -33,7 +33,7 @@ async fn test_ibd_full_sync() {
     let mut config_b = test_config("ibd-b", 43383, false);
     config_b.seed_peers = vec!["127.0.0.1:43382".into()];
     let node_b = spawn_node(config_b).await;
-    tokio::spawn(node_b.clone().run());
+    let _node_b_runtime = spawn_node_runtime(node_b.clone());
 
     wait_for_peer_count(&node_b, 1, Duration::from_secs(35))
         .await

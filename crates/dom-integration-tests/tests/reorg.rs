@@ -20,11 +20,11 @@ async fn test_sync_convergence() {
     let node_a = spawn_node(config_a).await;
     let node_b = spawn_node(config_b).await;
 
-    tokio::spawn(node_a.clone().run());
+    let _node_a_runtime = spawn_node_runtime(node_a.clone());
     wait_for_listener_ready("127.0.0.1:43380", 10)
         .await
         .expect("A listener");
-    tokio::spawn(node_b.clone().run());
+    let _node_b_runtime = spawn_node_runtime(node_b.clone());
 
     wait_for_peer_count(&node_b, 1, Duration::from_secs(35))
         .await

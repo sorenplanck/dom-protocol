@@ -22,7 +22,7 @@ async fn test_wallet_coinbase_reward() {
     let _ = std::fs::remove_file("/tmp/dom-test-wallet-a.dom");
 
     let node_a = spawn_node(config_a).await;
-    tokio::spawn(node_a.clone().run());
+    let _node_a_runtime = spawn_node_runtime(node_a.clone());
 
     // Mine 2 blocks
     mine_blocks(&node_a, 2).await.expect("A mining failed");
@@ -72,7 +72,7 @@ async fn test_wallet_persists_across_restart() {
         config.data_dir = data_dir.clone();
 
         let node = spawn_node(config).await;
-        tokio::spawn(node.clone().run());
+        let _node_runtime = spawn_node_runtime(node.clone());
 
         mine_blocks(&node, 1).await.expect("mining failed");
         tokio::time::sleep(Duration::from_millis(500)).await;

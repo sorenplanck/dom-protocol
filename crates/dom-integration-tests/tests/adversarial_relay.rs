@@ -62,7 +62,7 @@ async fn malformed_block_relay_over_live_noise_session_is_counted_and_disconnect
     let config = test_config("adversarial-relay-malformed", 43410, false);
     let node = spawn_node(config).await;
 
-    tokio::spawn(node.clone().run());
+    let _node_runtime = spawn_node_runtime(node.clone());
     wait_for_listener_ready("127.0.0.1:43410", 10)
         .await
         .expect("listener ready");
@@ -104,7 +104,7 @@ async fn duplicate_block_relay_spam_hits_quota_over_live_noise_session() {
     let config = test_config("adversarial-relay-duplicate", 43411, false);
     let node = spawn_node(config).await;
 
-    tokio::spawn(node.clone().run());
+    let _node_runtime = spawn_node_runtime(node.clone());
     wait_for_listener_ready("127.0.0.1:43411", 10)
         .await
         .expect("listener ready");
