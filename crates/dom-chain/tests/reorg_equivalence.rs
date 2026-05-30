@@ -18,8 +18,11 @@
 //! 2. `check_reorg_depth` boundary behaviour against
 //!    `MAX_REORG_DEPTH_POLICY`.
 //!
+mod common;
+
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
+use common::{open_test_chain, open_test_store};
 use dom_chain::reorg::{check_reorg_depth, find_common_ancestor};
 use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
@@ -389,9 +392,8 @@ fn store_side_block(store: &DomStore, block: &Block) -> Hash256 {
 }
 
 fn open_chain(dir: &std::path::Path) -> ChainState {
-    let store = DomStore::open(dir).expect("store open");
-    ChainState::open(
-        store,
+    open_test_chain(
+        dir,
         Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
         dom_core::NETWORK_MAGIC_REGTEST,
     )
@@ -401,7 +403,7 @@ fn open_chain(dir: &std::path::Path) -> ChainState {
 #[test]
 fn find_common_ancestor_same_tip_is_self() {
     let dir = TempDir::new().expect("tempdir");
-    let store = DomStore::open(dir.path()).expect("open");
+    let store = open_test_store(dir.path());
     let chain = build_chain(&store, Hash256::ZERO, 1, 5, 0);
     let tip = *chain.last().unwrap();
 
@@ -412,7 +414,7 @@ fn find_common_ancestor_same_tip_is_self() {
 #[test]
 fn find_common_ancestor_linear_chain_to_genesis() {
     let dir = TempDir::new().expect("tempdir");
-    let store = DomStore::open(dir.path()).expect("open");
+    let store = open_test_store(dir.path());
     // One single chain, two cursors at different depths along it.
     let chain = build_chain(&store, Hash256::ZERO, 1, 10, 0);
     let near = chain[3];
@@ -429,7 +431,7 @@ fn find_common_ancestor_linear_chain_to_genesis() {
 #[test]
 fn find_common_ancestor_two_forks_at_known_depth() {
     let dir = TempDir::new().expect("tempdir");
-    let store = DomStore::open(dir.path()).expect("open");
+    let store = open_test_store(dir.path());
 
     // Shared prefix: genesis → A1 → A2 → A3.
     let prefix = build_chain(&store, Hash256::ZERO, 1, 3, 0);
@@ -455,7 +457,7 @@ fn find_common_ancestor_two_forks_at_known_depth() {
 #[test]
 fn find_common_ancestor_separate_genesis_chains_share_zero() {
     let dir = TempDir::new().expect("tempdir");
-    let store = DomStore::open(dir.path()).expect("open");
+    let store = open_test_store(dir.path());
 
     // Two chains, each rooted at its own real genesis block whose
     // prev_hash terminates at Hash256::ZERO. The walks therefore both
@@ -478,7 +480,7 @@ fn find_common_ancestor_separate_genesis_chains_share_zero() {
 #[test]
 fn find_common_ancestor_returns_none_when_their_chain_unknown() {
     let dir = TempDir::new().expect("tempdir");
-    let store = DomStore::open(dir.path()).expect("open");
+    let store = open_test_store(dir.path());
 
     // Our chain is fully populated.
     let ours = build_chain(&store, Hash256::ZERO, 1, 5, 0);
@@ -503,7 +505,7 @@ fn find_common_ancestor_returns_none_when_their_chain_unknown() {
 #[test]
 fn find_common_ancestor_unbalanced_depths() {
     let dir = TempDir::new().expect("tempdir");
-    let store = DomStore::open(dir.path()).expect("open");
+    let store = open_test_store(dir.path());
 
     // Shared prefix is tiny (1 block), branches are very different lengths.
     let prefix = build_chain(&store, Hash256::ZERO, 1, 1, 0);
@@ -528,7 +530,7 @@ fn check_reorg_depth_boundary() {
 #[test]
 fn promote_heavier_known_tip_emits_block_level_reorg_metadata() {
     let dir = TempDir::new().expect("tempdir");
-    let store = DomStore::open(dir.path()).expect("open");
+    let store = open_test_store(dir.path());
 
     let shared = valid_coinbase_only_block(Hash256::ZERO, 1, 1, 1, 10);
     let shared_hash = commit_canonical_block(&store, &shared);
@@ -580,7 +582,7 @@ fn promote_heavier_known_tip_emits_block_level_reorg_metadata() {
 #[test]
 fn promote_heavier_known_tip_rewrites_canonical_state_and_survives_restart() {
     let dir = TempDir::new().expect("tempdir");
-    let store = DomStore::open(dir.path()).expect("open");
+    let store = open_test_store(dir.path());
 
     let shared = synthetic_block(Hash256::ZERO, 1, 1, 1, 10, vec![]);
     let shared_hash = commit_canonical_block(&store, &shared);

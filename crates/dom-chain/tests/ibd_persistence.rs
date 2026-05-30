@@ -5,9 +5,11 @@
 //! 2. the LMDB metadata record survives reopen unchanged;
 //! 3. clearing the persisted session is durable across reopen.
 
+mod common;
+
+use common::open_test_store;
 use dom_chain::{IbdInterruption, IbdPhase, PersistedIbdState};
 use dom_serialization::{DomDeserialize, DomSerialize};
-use dom_store::DomStore;
 use tempfile::TempDir;
 
 fn sample_state() -> PersistedIbdState {
@@ -45,11 +47,11 @@ fn persisted_ibd_state_survives_reopen() {
     let expected = sample_state();
 
     {
-        let store = DomStore::open(&path).expect("open");
+        let store = open_test_store(&path);
         expected.save(&store).expect("save");
     }
 
-    let reopened = DomStore::open(&path).expect("reopen");
+    let reopened = open_test_store(&path);
     let restored = PersistedIbdState::load(&reopened)
         .expect("load")
         .expect("state must exist");
@@ -62,12 +64,12 @@ fn cleared_ibd_state_stays_cleared_after_reopen() {
     let path = dir.path().to_path_buf();
 
     {
-        let store = DomStore::open(&path).expect("open");
+        let store = open_test_store(&path);
         sample_state().save(&store).expect("save");
         PersistedIbdState::clear(&store).expect("clear");
     }
 
-    let reopened = DomStore::open(&path).expect("reopen");
+    let reopened = open_test_store(&path);
     assert!(PersistedIbdState::load(&reopened)
         .expect("load after clear")
         .is_none());
