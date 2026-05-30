@@ -2,7 +2,7 @@
 # One path per line, relative to repository root.
 # Empty lines and comments are ignored.
 
-Cargo.lock
+# Cargo.lock
 
 # Genesis / mainnet / supply / emission
 crates/dom-chain/src/genesis.rs
