@@ -284,7 +284,7 @@ async fn purge_mempool_confirmed_inputs(
         let mut mempool = mempool.lock().await;
         mempool.remove_confirmed(&spent_inputs);
     }
-    persist_mempool_state(chain, mempool).await
+    enforce_volatile_mempool_restart_policy(chain, mempool).await
 }
 
 impl DomNode {
@@ -958,8 +958,10 @@ impl DomNode {
             if let Err(e) = persist_peer_reputation_state(&node.chain, &node.peers).await {
                 warn!("Persisting peer reputation state during shutdown failed: {e}");
             }
-            if let Err(e) = persist_mempool_state(&node.chain, &node.mempool).await {
-                warn!("Persisting mempool state during shutdown failed: {e}");
+            if let Err(e) =
+                enforce_volatile_mempool_restart_policy(&node.chain, &node.mempool).await
+            {
+                warn!("Enforcing volatile mempool restart policy during shutdown failed: {e}");
             }
         }
     }
@@ -1054,7 +1056,7 @@ impl dom_rpc::NodeHandle for DomNode {
             .try_lock()
             .map_err(|_| dom_rpc::RpcError::Internal("chain locked".into()))?;
         clear_persisted_mempool_snapshot(&chain.store)
-            .map_err(|e| dom_rpc::RpcError::Internal(format!("persist mempool: {e}")))?;
+            .map_err(|e| dom_rpc::RpcError::Internal(format!("clear legacy mempool: {e}")))?;
         Ok(hash)
     }
 
@@ -2092,12 +2094,15 @@ async fn persist_peer_reputation_state(
     persist_peer_reputation_snapshot(&chain.store, &snapshot)
 }
 
-async fn persist_mempool_state(
+async fn enforce_volatile_mempool_restart_policy(
     chain: &Arc<Mutex<ChainState>>,
     mempool: &Arc<Mutex<Mempool>>,
 ) -> Result<(), DomError> {
     let chain = chain.lock().await;
     let _ = mempool;
+    // RFC-0012 / Task 26: the mempool is volatile by protocol rule. Runtime
+    // paths that formerly implied persistence now only clear stale legacy
+    // metadata; they never serialize live mempool transactions to disk.
     clear_persisted_mempool_snapshot(&chain.store)
 }
 
@@ -4609,6 +4614,52 @@ mod tests {
             .get_metadata(MEMPOOL_METADATA_KEY)
             .expect("reload metadata")
             .is_none());
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[tokio::test]
+    async fn volatile_mempool_policy_clears_legacy_metadata_without_persisting_runtime_pool() {
+        let dir = fresh_test_dir("mempool-volatile-enforcement");
+        let chain = open_chain(&dir);
+        let tx = mempool_tx(0x31, 100);
+        let tx_hash = tx_hash(&tx).expect("hash");
+        let mempool = Arc::new(Mutex::new(Mempool::new()));
+        {
+            let mut pool = mempool.lock().await;
+            pool.accept_tx(tx, tx_hash, 1).expect("accept runtime tx");
+            assert_eq!(pool.len(), 1, "precondition: runtime mempool populated");
+        }
+        {
+            let chain = chain.lock().await;
+            chain
+                .store
+                .put_metadata(MEMPOOL_METADATA_KEY, b"legacy")
+                .expect("write stale legacy mempool metadata");
+        }
+
+        enforce_volatile_mempool_restart_policy(&chain, &mempool)
+            .await
+            .expect("enforce volatile mempool policy");
+
+        {
+            let pool = mempool.lock().await;
+            assert_eq!(
+                pool.len(),
+                1,
+                "policy enforcement must not mutate the live runtime mempool"
+            );
+        }
+        {
+            let chain = chain.lock().await;
+            assert!(
+                chain
+                    .store
+                    .get_metadata(MEMPOOL_METADATA_KEY)
+                    .expect("reload metadata")
+                    .is_none(),
+                "volatile policy must clear legacy metadata and never persist runtime txs"
+            );
+        }
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 

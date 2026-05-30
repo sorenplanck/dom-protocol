@@ -61,3 +61,48 @@ Task 21 local commit:
 Push status:
 - BLOCKED: `git push origin task21-ready-base` failed with `fatal: could not read Username for 'https://github.com': No such device or address`.
 - Remote HEAD remains a92f2297f281b89b9bd8c539cf4e4cb578466418 for `refs/heads/task21-ready-base`.
+
+## 2026-05-30 Task Sequence 26-30
+
+Current objective: Execute tasks 26 through 30 strictly in order, validating,
+committing, and pushing each task before starting the next.
+
+Branch: task21-ready-base
+
+Repository state at session start:
+- `git status --short`: clean
+- Recent HEAD: e76634c 21 no untracked critical spawn, later amended locally to correct authorship.
+- Remote `refs/heads/task21-ready-base`: a92f2297f281b89b9bd8c539cf4e4cb578466418
+- Git identity verified: `soren planck <>`
+
+Changed files:
+- WORKLOG.md
+- crates/dom-node/src/node.rs
+- crates/dom-node/src/node_handle.rs
+
+Important commands:
+- `pwd`
+- `git branch --show-current`
+- `git status --short`
+- `git log --oneline -5`
+- `git diff --stat`
+- `git config user.name "soren planck"`
+- `git config user.email ""`
+- `git log -1 --pretty='%H %an <%ae>'`
+- `rg -n "mempool|MEMPOOL|persist_mempool|load_mempool|restart|snapshot|rebroadcast|re-request|rerequest" crates/dom-node crates/dom-mempool crates/dom-chain crates/dom-store docs -g '*.rs' -g '*.md'`
+- `rg -n "persist_mempool_state|persist mempool" crates/dom-node/src`
+
+Tests run:
+- Pending: `cargo fmt`
+- Pending: `cargo check`
+- Pending: narrow Task 26 tests
+
+Test results:
+- Not completed yet for Task 26.
+
+Open items:
+- Task 26 validation, commit, push, and report.
+- Tasks 27 through 30 remain blocked until Task 26 is complete.
+
+Next step:
+- Run Task 26 validation commands.
