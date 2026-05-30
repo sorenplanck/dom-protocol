@@ -24,6 +24,9 @@
 //! BTreeMap. Two snapshots are byte-identical iff every database
 //! contains the same set of entries with byte-identical values.
 
+mod common;
+
+use common::open_test_store;
 use dom_store::utxo::UtxoEntry;
 use dom_store::{
     DomStore, DB_BLOCKS, DB_BLOCK_BODIES, DB_BLOCK_HEIGHT, DB_CHAIN_TIP, DB_KERNEL_INDEX, DB_UTXOS,
@@ -110,7 +113,7 @@ fn utxo_entry(height: u64) -> Vec<u8> {
 /// fresh `DomStore` at `path`. Returns the populated store so the
 /// caller can snapshot before drop.
 fn apply_sequence(path: &std::path::Path, n: u64) -> DomStore {
-    let store = DomStore::open(path).expect("open");
+    let store = open_test_store(path);
     for h in 1..=n {
         let b = synth(0x42, h);
         store
@@ -212,7 +215,7 @@ fn drop_and_reopen_observes_identical_state() {
         snapshot(&store)
     }; // env dropped here
 
-    let store_reopened = DomStore::open(&path).expect("reopen");
+    let store_reopened = open_test_store(&path);
     let post_snapshot = snapshot(&store_reopened);
 
     snapshots_equal(&pre_snapshot, &post_snapshot).unwrap_or_else(|e| {
@@ -235,11 +238,11 @@ fn n_successive_reopens_yield_identical_snapshots() {
     }
 
     let baseline = {
-        let store = DomStore::open(&path).expect("first reopen");
+        let store = open_test_store(&path);
         snapshot(&store)
     };
     for round in 0..8 {
-        let store = DomStore::open(&path).expect("round reopen");
+        let store = open_test_store(&path);
         let snap = snapshot(&store);
         snapshots_equal(&baseline, &snap).unwrap_or_else(|e| {
             panic!("reopen round {round} diverged: {e}");
@@ -256,7 +259,7 @@ fn n_successive_reopens_yield_identical_snapshots() {
 #[test]
 fn cross_instance_equivalence_holds_for_long_sequence() {
     fn apply_long(path: &std::path::Path, n: u64) -> DomStore {
-        let store = DomStore::open(path).expect("open");
+        let store = open_test_store(path);
         for h in 1..=n {
             let b = synth(0xA5, h);
             // Create 2 new UTXOs every block.
@@ -303,8 +306,8 @@ fn cross_instance_equivalence_holds_for_long_sequence() {
 fn two_empty_stores_snapshot_identically() {
     let dir_a = TempDir::new().expect("a");
     let dir_b = TempDir::new().expect("b");
-    let store_a = DomStore::open(dir_a.path()).expect("a");
-    let store_b = DomStore::open(dir_b.path()).expect("b");
+    let store_a = open_test_store(dir_a.path());
+    let store_b = open_test_store(dir_b.path());
     snapshots_equal(&snapshot(&store_a), &snapshot(&store_b)).unwrap_or_else(|e| {
         panic!("empty-store equivalence failed: {e}");
     });
@@ -321,8 +324,8 @@ fn diverging_sequences_yield_diverging_snapshots() {
     let dir_b = TempDir::new().expect("b");
     let _ = apply_sequence(dir_a.path(), 5);
     let _ = apply_sequence(dir_b.path(), 7); // different length
-    let store_a = DomStore::open(dir_a.path()).expect("a reopen");
-    let store_b = DomStore::open(dir_b.path()).expect("b reopen");
+    let store_a = open_test_store(dir_a.path());
+    let store_b = open_test_store(dir_b.path());
     let result = snapshots_equal(&snapshot(&store_a), &snapshot(&store_b));
     assert!(
         result.is_err(),
