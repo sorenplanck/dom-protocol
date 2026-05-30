@@ -108,7 +108,7 @@ impl NodeHandle for NodeHandleImpl {
             .try_lock()
             .map_err(|_| RpcError::Overloaded("chain busy".into()))?;
         clear_persisted_mempool_snapshot(&chain.store)
-            .map_err(|e| RpcError::Internal(format!("persist mempool: {e}")))?;
+            .map_err(|e| RpcError::Internal(format!("clear legacy mempool: {e}")))?;
 
         // Route via Dandelion++: decide Stem vs Fluff and dispatch over
         // the corresponding broadcast channel. Peer tasks pick up envelopes
