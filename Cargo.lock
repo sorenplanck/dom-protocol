@@ -1475,6 +1475,7 @@ dependencies = [
  "dom-store",
  "dom-wallet",
  "dom-wire",
+ "futures",
  "hex",
  "primitive-types",
  "rand 0.8.6",
