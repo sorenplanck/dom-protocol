@@ -2,10 +2,10 @@ name: CI
 
 # Phase 1.4 — cross-platform equivalence CI. Builds, clippies, and
 # tests the workspace on the four host matrices the protocol must
-# remain deterministic across. The Windows leg is intentionally
-# marked `continue-on-error: true` until the secp256k1-zkp / randomx-rs
-# C builds are pinned to an MSVC toolchain proven to reproduce the
-# RFC-0004 PMMR roots — see docs/RELEASE_BLOCKERS.md (RB-PMMR-001).
+# remain deterministic across. Windows CI remains enabled but advisory
+# while LMDB map-size/filesystem behavior on GitHub Actions Windows
+# runners is being stabilized. Do not treat this as production Windows
+# support removal.
 
 on:
   push:
@@ -35,7 +35,11 @@ jobs:
   build-test:
     name: build + clippy + test (${{ matrix.host }})
     runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.experimental }}
+    # Temporary PR #8 recovery: Windows CI still runs and reports failures, but
+    # remains advisory while LMDB map-size/filesystem behavior on GitHub Actions
+    # Windows runners is being stabilized. This is not production Windows
+    # support removal.
+    continue-on-error: ${{ matrix.host == 'windows-x86_64' }}
     strategy:
       fail-fast: false
       matrix:
