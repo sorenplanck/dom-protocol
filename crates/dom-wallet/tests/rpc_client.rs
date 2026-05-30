@@ -120,6 +120,9 @@ where
                     };
                     let route_fn = route_fn.clone();
                     let requests_seen = requests_seen.clone();
+                    // TASK21: wallet RPC test-only connection task. It owns
+                    // only the accepted socket and per-request mock response;
+                    // no consensus/runtime node state is detached here.
                     tokio::spawn(async move {
                         requests_seen.fetch_add(1, Ordering::SeqCst);
                         // Read up to 64 KiB of the request — enough for

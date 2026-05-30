@@ -244,6 +244,9 @@ impl NodeTaskSupervisor {
             id
         };
         let sup = self.clone();
+        // TASK21: this is the single production raw `tokio::spawn` boundary for
+        // critical node tasks. The JoinHandle is immediately registered below,
+        // and wrapper code records panics/errors before requesting shutdown.
         let handle = tokio::spawn(async move {
             let outcome = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
             match outcome {
@@ -592,6 +595,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn node_supervisor_panic_is_observed_and_trips_shutdown() {
+        let sup = NodeTaskSupervisor::new();
+        sup.spawn(TaskKind::FutureQueue, async {
+            panic!("future queue crashed");
+            #[allow(unreachable_code)]
+            Ok(())
+        })
+        .await;
+
+        let failure = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(f) = sup.failure().await {
+                    break f;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("panic must be recorded promptly");
+
+        assert_eq!(failure.failure_task, TaskKind::FutureQueue);
+        assert!(
+            failure.failure_reason.starts_with("panic:"),
+            "panic must propagate into supervisor failure: {failure:?}"
+        );
+        assert!(sup.is_shutdown(), "panic must trip shutdown");
+        sup.join_all().await;
+    }
+
+    #[tokio::test]
     async fn node_supervisor_relay_registry_starts_empty_and_cleans_up() {
         let sup = NodeTaskSupervisor::new();
         assert_eq!(sup.relay_count().await, 0, "relay registry starts empty");
@@ -859,5 +892,66 @@ mod tests {
             report.stopped_order.len() >= 6,
             "all long-lived critical tasks must be accounted for in the stop order"
         );
+    }
+
+    #[test]
+    fn task21_lint_no_production_tokio_spawn_outside_node_supervisor() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("repo root");
+        let mut violations = Vec::new();
+        scan_rust_sources(repo, &mut |path, line_no, line| {
+            if !line.contains("tokio::spawn") {
+                return;
+            }
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with("//!")
+            {
+                return;
+            }
+            let rel = path.strip_prefix(repo).expect("relative path");
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let is_test_scope = rel_str.contains("/tests/") || line.contains("let ");
+            let is_supervisor_boundary = rel_str == "crates/dom-node/src/task_supervisor.rs";
+            let is_integration_test_runtime_helper =
+                rel_str == "crates/dom-integration-tests/src/helpers.rs";
+            if !is_supervisor_boundary && !is_test_scope && !is_integration_test_runtime_helper {
+                violations.push(format!("{rel_str}:{line_no}: {line}"));
+            }
+        });
+
+        assert!(
+            violations.is_empty(),
+            "critical runtime tokio::spawn must go through NodeTaskSupervisor; \
+             production exceptions require an explicit audit:\n{}",
+            violations.join("\n")
+        );
+    }
+
+    fn scan_rust_sources(repo: &std::path::Path, f: &mut dyn FnMut(&std::path::Path, usize, &str)) {
+        fn walk(dir: &std::path::Path, f: &mut dyn FnMut(&std::path::Path, usize, &str)) {
+            for entry in std::fs::read_dir(dir).expect("read source dir") {
+                let entry = entry.expect("read source entry");
+                let path = entry.path();
+                let name = entry.file_name();
+                if name == "target" || name == ".git" {
+                    continue;
+                }
+                if path.is_dir() {
+                    walk(&path, f);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read rust source");
+                for (idx, line) in source.lines().enumerate() {
+                    f(&path, idx + 1, line);
+                }
+            }
+        }
+
+        walk(repo, f);
     }
 }

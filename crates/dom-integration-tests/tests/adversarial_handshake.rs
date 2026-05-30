@@ -71,7 +71,7 @@ async fn hello_stall_is_penalized_and_releases_inbound_slot() {
     let config = test_config("adversarial-handshake-stall", port, false);
     let node = spawn_node(config).await;
 
-    tokio::spawn(node.clone().run());
+    let _node_runtime = spawn_node_runtime(node.clone());
     let addr = format!("127.0.0.1:{port}");
     wait_for_listener_ready(&addr, 10)
         .await
@@ -100,7 +100,7 @@ async fn second_hello_after_successful_exchange_is_disconnected_and_cleans_metri
     let config = test_config("adversarial-handshake-second-hello", port, false);
     let node = spawn_node(config).await;
 
-    tokio::spawn(node.clone().run());
+    let _node_runtime = spawn_node_runtime(node.clone());
     let addr = format!("127.0.0.1:{port}");
     wait_for_listener_ready(&addr, 10)
         .await
@@ -189,7 +189,7 @@ async fn malformed_hello_after_noise_is_penalized_and_releases_inbound_slot() {
     let config = test_config("adversarial-handshake-malformed-hello", port, false);
     let node = spawn_node(config).await;
 
-    tokio::spawn(node.clone().run());
+    let _node_runtime = spawn_node_runtime(node.clone());
     let addr = format!("127.0.0.1:{port}");
     wait_for_listener_ready(&addr, 10)
         .await
@@ -229,7 +229,7 @@ async fn oversized_post_noise_frame_is_rejected_and_releases_inbound_slot() {
     let config = test_config("adversarial-handshake-oversized-frame", port, false);
     let node = spawn_node(config).await;
 
-    tokio::spawn(node.clone().run());
+    let _node_runtime = spawn_node_runtime(node.clone());
     let addr = format!("127.0.0.1:{port}");
     wait_for_listener_ready(&addr, 10)
         .await
@@ -263,7 +263,7 @@ async fn delayed_partial_hello_frame_times_out_and_cleans_pending_state() {
     let config = test_config("adversarial-handshake-delayed-fragment", port, false);
     let node = spawn_node(config).await;
 
-    tokio::spawn(node.clone().run());
+    let _node_runtime = spawn_node_runtime(node.clone());
     let addr = format!("127.0.0.1:{port}");
     wait_for_listener_ready(&addr, 10)
         .await
@@ -303,7 +303,7 @@ async fn concurrent_malformed_hello_peers_cleanup_converges() {
     let config = test_config("adversarial-handshake-concurrent-malformed", port, false);
     let node = spawn_node(config).await;
 
-    tokio::spawn(node.clone().run());
+    let _node_runtime = spawn_node_runtime(node.clone());
     let addr = format!("127.0.0.1:{port}");
     wait_for_listener_ready(&addr, 10)
         .await

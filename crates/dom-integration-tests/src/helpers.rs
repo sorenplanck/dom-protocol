@@ -1,6 +1,7 @@
 //! Test helpers for integration tests.
 
 use dom_config::NodeConfig;
+use dom_core::DomError;
 use std::sync::Once;
 
 static TRACING_INIT: Once = Once::new();
@@ -19,6 +20,7 @@ pub fn init_tracing() {
 use dom_node::node::DomNode;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 /// Pick an ephemeral localhost TCP port for tests.
@@ -55,6 +57,20 @@ pub async fn spawn_node(config: NodeConfig) -> Arc<DomNode> {
         }
     }
     node
+}
+
+/// Start a node runtime in an integration test and keep its join handle visible.
+///
+/// These are test-scoped long-lived runtimes: production node tasks are
+/// supervised inside `DomNode::run` by `NodeTaskSupervisor`, while integration
+/// tests hold this handle so a node runtime is never an unaccounted detached
+/// critical spawn.
+#[must_use = "integration tests must hold the node runtime JoinHandle for the test scope"]
+pub fn spawn_node_runtime(node: Arc<DomNode>) -> JoinHandle<Result<(), DomError>> {
+    // TASK21: integration-test-only spawn. The node's critical internal tasks
+    // are still supervised by NodeTaskSupervisor; tests keep this outer
+    // DomNode::run JoinHandle in scope so it is not an untracked runtime.
+    tokio::spawn(node.run())
 }
 
 /// Wait for a node's P2P listener to be ready (port accepting connections).

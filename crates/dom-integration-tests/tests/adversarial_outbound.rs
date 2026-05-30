@@ -18,6 +18,8 @@ async fn spawn_stalling_listener(addr: &str) -> (Arc<AtomicUsize>, tokio::task::
                 Err(_) => break,
             };
             accepts_task.fetch_add(1, Ordering::Relaxed);
+            // TASK21: adversarial-test-only fire-and-forget peer that owns no
+            // consensus state; the enclosing listener JoinHandle is tracked.
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS * 3)).await;
                 drop(stream);
@@ -62,7 +64,7 @@ async fn duplicate_seed_outbound_dials_are_deduplicated_live() {
     config.seed_peers = vec![seed_addr; 32];
     let node = spawn_node(config).await;
 
-    tokio::spawn(node.clone().run());
+    let _node_runtime = spawn_node_runtime(node.clone());
     wait_for_listener_ready(&format!("127.0.0.1:{node_port}"), 10)
         .await
         .expect("listener ready");
@@ -115,7 +117,7 @@ async fn stalled_outbound_dials_are_bounded_by_min_outbound_live() {
     config.seed_peers = seed_addrs;
     let node = spawn_node(config).await;
 
-    tokio::spawn(node.clone().run());
+    let _node_runtime = spawn_node_runtime(node.clone());
     wait_for_listener_ready(&format!("127.0.0.1:{node_port}"), 10)
         .await
         .expect("listener ready");
