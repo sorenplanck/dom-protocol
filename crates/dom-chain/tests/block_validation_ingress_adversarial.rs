@@ -31,6 +31,8 @@ use dom_store::DomStore;
 use primitive_types::U256;
 use tempfile::TempDir;
 
+const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
+
 fn scalar(seed: u8) -> BlindingFactor {
     let mut bytes = [0u8; 32];
     bytes[31] = seed.max(1);
@@ -164,7 +166,7 @@ fn block_hash(block: &Block) -> Hash256 {
 }
 
 fn open_chain(dir: &std::path::Path) -> ChainState {
-    let store = DomStore::open(dir).expect("store open");
+    let store = DomStore::open_with_map_size(dir, TEST_LMDB_MAP_SIZE).expect("store open");
     ChainState::open(
         store,
         Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
@@ -183,8 +185,9 @@ fn invariant_direct_chain_extension_rejects_header_and_pmmr_valid_but_economical
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let dir = TempDir::new().expect("tempdir");
     // Keep the TempDir alive for the test, but open LMDB in a child directory.
-    // Windows can reject opening the TempDir-managed root while its cleanup
-    // handle is still live, so each ChainState gets an isolated store path.
+    // Windows CI does not tolerate reserving the full 16 GiB production map
+    // for these tiny adversarial fixtures, so the test uses a small map size
+    // only for fixture storage. Consensus behavior is unchanged.
     let store_dir = dir.path().join("chain");
     let chain_id = *derive_chain_id(
         NETWORK_MAGIC_REGTEST,
@@ -230,7 +233,8 @@ fn invariant_direct_chain_extension_rejects_header_and_pmmr_valid_but_economical
 fn invariant_reorg_candidate_promotion_revalidates_economic_balance_before_state_rewrite() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let dir = TempDir::new().expect("tempdir");
-    // Use a child store directory for Windows LMDB/file-lock isolation.
+    // Use a child store directory and the small test-only LMDB map size for
+    // Windows CI fixture isolation; production map sizing remains unchanged.
     let store_dir = dir.path().join("chain");
     let chain_id = *derive_chain_id(
         NETWORK_MAGIC_REGTEST,
