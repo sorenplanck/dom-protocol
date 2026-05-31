@@ -60,7 +60,7 @@ pub use journal::{
 };
 pub use restore::{
     restore_from_phrase, ChainScanSource, InMemoryChainScan, RestoreError, RestoredWallet,
-    ScanBlock,
+    ScanBlock, ScanTransactionEffect,
 };
 pub use rpc_client::{
     BlockHeaderInfo, MempoolTxInfo as RpcMempoolTxInfo, NodeRpc, NodeRpcClient,
@@ -76,7 +76,10 @@ pub use types::{
     WalletBalance, WalletError,
 };
 pub use unlock::{derive_wallet_key, KdfParams, LockState, UnlockedSession, WalletKey};
-pub use wallet::{Wallet, WalletReorgBlock, WalletRescanMode, WalletRescanSummary};
+pub use wallet::{
+    Wallet, WalletReorgBlock, WalletRescanMode, WalletRescanStart, WalletRescanSummary,
+    WalletRescanTxHistoryEntry,
+};
 pub use wallet_dir::{
     WalletConfig, WalletDir, WalletVersion, WALLET_BACKUPS_SUBDIR, WALLET_CONFIG_NAME,
     WALLET_DAT_NAME, WALLET_LOCK_NAME, WALLET_LOGS_SUBDIR,

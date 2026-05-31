@@ -327,3 +327,78 @@ Open items:
   - CURRENT: none until user requests Task 25
   - REMAINING: Task 25
 - Left to finish prompt: Task 25 only; do not start until explicitly requested after this Task 24 report.
+
+## 2026-05-31 Task 25 In Progress
+
+Current objective: Implement canonical wallet rescan.
+
+Repository state at Task 25 start:
+- `pwd`: /root/dom
+- `git branch --show-current`: task21-ready-base
+- `git status --short`: clean at start
+- Recent HEAD: e51e8f6 `24 wallet reorg recovery`
+- `git diff --stat`: empty at start
+
+Reconciliation note:
+- Git history is authoritative: Task 24 final commit is `e51e8f655774a8c6a0787e65f2d32ce95b02bf11`, replacing the pre-amend hash recorded earlier in this WORKLOG.
+- Task 25 is CURRENT. Tasks 21-24 are DONE in git history and pushed. Task 25 is the only REMAINING task in this batch.
+
+Implementation checkpoint 2026-05-31T03:15:39Z:
+- Audited existing wallet rescan in `crates/dom-wallet/src/wallet.rs`, scan source in `restore.rs`, CLI in `main.rs`, and existing canonical rescan tests.
+- Existing full rescan already rebuilt owned outputs and spent/unspent state from canonical commitments.
+- Added in-progress changes for checkpoint rescan, public rescan transaction-history summary, CLI offline rescan hook, and stronger canonical rescan tests.
+
+Open items:
+- Run `cargo fmt` and resolve compile/test issues.
+- Run `cargo check` and narrow relevant tests, one filter per command.
+- Commit as `25 wallet canonical rescan`, verify author, push, verify remote HEAD.
+
+### 2026-05-31T03:20:04Z — Task 25 validation checkpoint
+- Changed files:
+  - `crates/dom-wallet/src/wallet.rs`
+  - `crates/dom-wallet/src/restore.rs`
+  - `crates/dom-wallet/src/lib.rs`
+  - `crates/dom-wallet/src/main.rs`
+  - `crates/dom-wallet/tests/canonical_rescan.rs`
+  - `crates/dom-wallet/tests/restore_from_phrase.rs`
+  - `crates/dom-wallet/tests/wallet_reorg_recovery.rs`
+  - `WORKLOG.md`
+- Commands run:
+  - `cargo fmt` (PASS)
+  - `cargo check` (PASS)
+  - `cargo test -p dom-wallet compare_only_rescan_reports_corruption_without_mutating_state` (PASS)
+  - `cargo test -p dom-wallet corrupted_wallet_state_is_repaired_by_canonical_rescan` (PASS)
+  - `cargo test -p dom-wallet canonical_rescan_after_reorg_removes_disconnected_output` (PASS)
+  - `cargo test -p dom-wallet canonical_rescan_survives_restart_and_repeated_full_rescan_matches_digest` (PASS)
+  - `cargo test -p dom-wallet checkpoint_rescan_and_full_rescan_produce_identical_digest` (PASS)
+  - `cargo test -p dom-wallet canonical_rescan_marks_spent_outputs_and_drops_consumed_pending` (PASS)
+  - `cargo test -p dom-wallet canonical_rescan` (PASS)
+  - `cargo test -p dom-wallet restore_from_phrase` (PASS, 0 tests matched; compatibility covered by next command)
+  - `cargo test -p dom-wallet recovers_coinbases_matching_seed_across_heights` (PASS)
+  - `cargo test -p dom-wallet wallet_rescan_matches_incremental_reorg_state` (PASS)
+  - `cargo test -p dom-wallet --bin dom-wallet` (PASS)
+  - final `cargo fmt && cargo check && git diff --check` (PASS)
+- Implementation notes:
+  - Added `WalletRescanStart::{Genesis, Checkpoint}` and `rescan_canonical_chain_from`.
+  - Added public canonical rescan transaction-history summary entries containing only public hashes/commitments.
+  - Added CLI `dom-wallet rescan` hook that reads offline canonical scan JSON with hex-encoded public commitments and prints only public digests/counts.
+  - Existing full rescan remains the default path and still derives wallet outputs from secret material in memory without logging secrets.
+- Open items:
+  - Stage, commit as `25 wallet canonical rescan`, verify author, push, verify remote HEAD.
+
+### 2026-05-31T03:21:04Z — Task 25 committed and pushed
+- Commit message: `25 wallet canonical rescan`.
+- Commit hash before final WORKLOG amend: `b76d8dfd4495619347770b52d4e3ca8ceed2091f`.
+- Commit author verified: `soren planck <>`.
+- Push result: `origin/task21-ready-base` updated from `e51e8f6` to `b76d8df`.
+- Remote HEAD verification before final WORKLOG amend: `b76d8dfd4495619347770b52d4e3ca8ceed2091f refs/heads/task21-ready-base`.
+- Note: this final WORKLOG record will be amended into the Task 25 commit so Task 25 remains one commit.
+- Sequence progress:
+  - DONE: Task 21 `fd26056d7c8f6d08c20d8a030291ec066f1e048d`
+  - DONE: Task 22 `c4ad95f6f1a278d239ec0486f937449dd9e74c6d`
+  - DONE: Task 23 `cae0e5b74837807fe2c7746825631759211c694e`
+  - DONE: Task 24 `e51e8f655774a8c6a0787e65f2d32ce95b02bf11`
+  - DONE: Task 25 (final hash after amend/push to be verified)
+  - CURRENT: none
+  - REMAINING: none for Tasks 21-25
+- Left to finish prompt: no Task 21-25 implementation remains. Do not open PR or merge to main automatically.

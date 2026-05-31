@@ -1,6 +1,9 @@
 use dom_core::BlockHeight;
 use dom_crypto::Hash256;
-use dom_wallet::{InMemoryChainScan, Network, ScanBlock, WalletDir, WalletRescanMode};
+use dom_wallet::{
+    InMemoryChainScan, Network, ScanBlock, ScanTransactionEffect, WalletDir, WalletRescanMode,
+    WalletRescanStart,
+};
 use tempfile::TempDir;
 
 fn test_genesis() -> Hash256 {
@@ -26,6 +29,11 @@ fn coinbase_scan_block(height: u64, commitment: [u8; 33]) -> ScanBlock {
         output_commitments: vec![commitment],
         input_commitments: vec![],
         total_fees_noms: 0,
+        tx_effects: vec![ScanTransactionEffect {
+            tx_hash: [height as u8; 32],
+            input_commitments: vec![],
+            output_commitments: vec![commitment],
+        }],
     }
 }
 
@@ -63,6 +71,31 @@ fn corrupted_wallet_state_is_repaired_by_canonical_rescan() {
 }
 
 #[test]
+fn compare_only_rescan_reports_corruption_without_mutating_state() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path().join("w");
+    let mut wd = WalletDir::create(&dir, "pw", Network::Regtest, &test_genesis()).unwrap();
+
+    let coinbase = wd
+        .wallet_mut()
+        .build_coinbase(BlockHeight(1), 0)
+        .expect("coinbase");
+    let commitment = *coinbase.output.commitment.as_bytes();
+    let scan = scan_with_blocks(vec![coinbase_scan_block(1, commitment)]);
+
+    assert!(wd.wallet_mut().forget_output(&commitment));
+    let summary = wd
+        .wallet_mut()
+        .rescan_canonical_chain(&scan, WalletRescanMode::CompareOnly)
+        .expect("compare rescan");
+
+    assert!(!summary.matched_persisted);
+    assert!(!summary.repaired);
+    assert_eq!(summary.rebuilt_outputs, 1);
+    assert!(wd.wallet().outputs().all(|o| o.commitment != commitment));
+}
+
+#[test]
 fn canonical_rescan_after_reorg_removes_disconnected_output() {
     let temp = TempDir::new().unwrap();
     let dir = temp.path().join("w");
@@ -85,6 +118,7 @@ fn canonical_rescan_after_reorg_removes_disconnected_output() {
         output_commitments: vec![[0x55; 33]],
         input_commitments: vec![],
         total_fees_noms: 0,
+        tx_effects: vec![],
     }]);
     let summary = wd
         .wallet_mut()
@@ -128,6 +162,15 @@ fn canonical_rescan_marks_spent_outputs_and_drops_consumed_pending() {
                 .collect(),
             input_commitments: tx.inputs.iter().map(|i| *i.commitment.as_bytes()).collect(),
             total_fees_noms: 100,
+            tx_effects: vec![ScanTransactionEffect {
+                tx_hash,
+                input_commitments: tx.inputs.iter().map(|i| *i.commitment.as_bytes()).collect(),
+                output_commitments: tx
+                    .outputs
+                    .iter()
+                    .map(|o| *o.commitment.as_bytes())
+                    .collect(),
+            }],
         },
     ]);
     let summary = wd
@@ -145,6 +188,13 @@ fn canonical_rescan_marks_spent_outputs_and_drops_consumed_pending() {
             .expect("coinbase output")
             .spent
     );
+    assert_eq!(summary.tx_history.len(), 2);
+    assert!(summary
+        .tx_history
+        .iter()
+        .any(|entry| entry.tx_hash == tx_hash
+            && entry.wallet_inputs == vec![commitment]
+            && entry.wallet_outputs.is_empty()));
 }
 
 #[test]
@@ -184,4 +234,59 @@ fn canonical_rescan_survives_restart_and_repeated_full_rescan_matches_digest() {
         .expect("second rescan");
     assert!(second.matched_persisted);
     assert_eq!(second.rebuilt_digest, digest_after_first);
+}
+
+#[test]
+fn checkpoint_rescan_and_full_rescan_produce_identical_digest() {
+    let temp = TempDir::new().unwrap();
+    let full_dir = temp.path().join("full");
+    let incremental_dir = temp.path().join("incremental");
+    let mut full = WalletDir::create(&full_dir, "pw", Network::Regtest, &test_genesis()).unwrap();
+    let mut incremental =
+        WalletDir::create(&incremental_dir, "pw", Network::Regtest, &test_genesis()).unwrap();
+
+    let coinbase_1 = full
+        .wallet_mut()
+        .build_coinbase(BlockHeight(1), 0)
+        .expect("coinbase 1");
+    let commitment_1 = *coinbase_1.output.commitment.as_bytes();
+    let coinbase_2 = full
+        .wallet_mut()
+        .build_coinbase(BlockHeight(2), 0)
+        .expect("coinbase 2");
+    let commitment_2 = *coinbase_2.output.commitment.as_bytes();
+
+    let scan_height_1 = scan_with_blocks(vec![coinbase_scan_block(1, commitment_1)]);
+    incremental
+        .wallet_mut()
+        .rescan_canonical_chain(&scan_height_1, WalletRescanMode::Repair)
+        .expect("checkpoint base rescan");
+
+    let full_scan = scan_with_blocks(vec![
+        coinbase_scan_block(1, commitment_1),
+        coinbase_scan_block(2, commitment_2),
+    ]);
+    let full_summary = full
+        .wallet_mut()
+        .rescan_canonical_chain(&full_scan, WalletRescanMode::Repair)
+        .expect("full rescan");
+    let incremental_summary = incremental
+        .wallet_mut()
+        .rescan_canonical_chain_from(
+            &full_scan,
+            WalletRescanStart::Checkpoint(1),
+            WalletRescanMode::Repair,
+        )
+        .expect("checkpoint rescan");
+
+    assert_eq!(incremental_summary.scanned_from, 2);
+    assert_eq!(incremental_summary.checkpoint_height, Some(1));
+    assert_eq!(
+        full_summary.rebuilt_digest,
+        incremental_summary.rebuilt_digest
+    );
+    assert_eq!(
+        full.wallet().canonical_digest(),
+        incremental.wallet().canonical_digest()
+    );
 }

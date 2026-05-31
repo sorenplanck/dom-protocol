@@ -108,6 +108,17 @@ pub enum RestoreError {
     Crypto(String),
 }
 
+/// Transaction-level canonical effects for wallet history rebuild.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanTransactionEffect {
+    /// Deterministic transaction hash.
+    pub tx_hash: [u8; 32],
+    /// Input commitments consumed by this transaction.
+    pub input_commitments: Vec<[u8; 33]>,
+    /// Output commitments created by this transaction.
+    pub output_commitments: Vec<[u8; 33]>,
+}
+
 /// A minimal projection of an on-chain block, exposing only what the
 /// restore code needs to match outputs against the seed-derived
 /// coinbase blinding.
@@ -133,6 +144,10 @@ pub struct ScanBlock {
     /// Total transaction fees in this block (noms). Used to compute
     /// the `reward + fees` candidate value for the coinbase.
     pub total_fees_noms: u64,
+    /// Optional transaction-level effects. Canonical wallet rescan
+    /// uses this to rebuild transaction history without requiring
+    /// private proofs, kernels, or transaction bytes.
+    pub tx_effects: Vec<ScanTransactionEffect>,
 }
 
 /// Read-only access to canonical blocks for the restore walk.
@@ -438,6 +453,7 @@ mod tests {
             output_commitments: vec![[0u8; 33]],
             input_commitments: vec![],
             total_fees_noms: 0,
+            tx_effects: vec![],
         });
         s.insert(ScanBlock {
             height: 42,
@@ -445,6 +461,7 @@ mod tests {
             output_commitments: vec![[1u8; 33]],
             input_commitments: vec![],
             total_fees_noms: 0,
+            tx_effects: vec![],
         });
         s.insert(ScanBlock {
             height: 17,
@@ -452,6 +469,7 @@ mod tests {
             output_commitments: vec![[2u8; 33]],
             input_commitments: vec![],
             total_fees_noms: 0,
+            tx_effects: vec![],
         });
         assert_eq!(s.tip_height(), 42);
         assert_eq!(s.len(), 3);
@@ -466,6 +484,7 @@ mod tests {
             output_commitments: vec![],
             input_commitments: vec![],
             total_fees_noms: 0,
+            tx_effects: vec![],
         });
         assert!(s.block_at(10).unwrap().is_some());
         assert!(s.block_at(11).unwrap().is_none());
