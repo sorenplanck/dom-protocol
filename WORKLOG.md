@@ -39,11 +39,53 @@ Sequence state:
 - DONE: Task 42 `42 networkstatus not peerregistry`.
 - DONE: Task 43 `43 wallet ping pong`.
 - DONE: Task 44 `44 wallet ui network diagnostics`.
-- CURRENT: Task 45 pending.
-- REMAINING: Tasks 45-50.
+- DONE: Task 45 `45 exportable logs`.
+- CURRENT: Task 46 pending.
+- REMAINING: Tasks 46-50.
 
 Open items:
-- Do not start Task 45 until Task 44 is committed, pushed, and reviewed.
+- Do not start Task 46 until Task 45 is committed, pushed, and reviewed.
+
+## 2026-05-31 — Task 45 Exportable Logs
+
+Objective:
+- Add bounded, exportable wallet diagnostics with real secret redaction.
+
+Changed files:
+- `crates/dom-wallet-app/src/runtime.rs`
+- `crates/dom-wallet-app/src/app.rs`
+- `docs/README.md`
+- `WORKLOG.md`
+
+Implementation notes:
+- Added `DiagnosticLog` with bounded in-memory rotation by entry count and bounded export size.
+- Added `BuildDiagnostics` metadata with app version and build/git hash when available through compile-time environment.
+- Diagnostic log entries include network mode, configured backbone/node endpoint, connection lifecycle events, errors, heartbeat Pong observations, and observed chain-height changes.
+- Added `AppRuntime::export_diagnostics()` to write `dom-wallet-diagnostics-*.log` into the wallet app data directory.
+- Added an `Export Logs` action in the wallet Diagnostics panel.
+- Added central `redact_secret_text()` and apply it before storing log entries and before export text is generated.
+- Redaction covers password, wallet_password, seed, seed_phrase, private_key, secret_key, token, bearer, and authorization-shaped fields.
+- Added docs section `Wallet Diagnostics` explaining collection steps and redaction expectations.
+
+Tests added:
+- `runtime::tests::diagnostic_log_redacts_secrets_on_append_and_export`
+- `runtime::tests::diagnostic_log_rotation_bounds_entries`
+- `runtime::tests::diagnostic_export_writes_redacted_file`
+
+Validation:
+- `cargo fmt` (PASS)
+- `cargo check -p dom-wallet-app` (PASS)
+- `cargo test -p dom-wallet-app diagnostic_log_redacts_secrets_on_append_and_export` (PASS)
+- `cargo test -p dom-wallet-app diagnostic_log_rotation_bounds_entries` (PASS)
+- `cargo test -p dom-wallet-app diagnostic_export_writes_redacted_file` (PASS)
+- `cargo check --workspace` (PASS)
+- `git diff --check` (PASS)
+
+Security note:
+- Redaction is tested against cleartext wallet password, seed phrase, token, private key, and bearer authorization values. The export-file test verifies those secrets do not appear in the generated diagnostic file.
+
+Integration test note:
+- No `dom-integration-tests` command was run for Task 45 because the change is confined to wallet app diagnostic logging/export and documentation, not node integration behavior.
 
 ## 2026-05-31 — Task 44 Wallet UI Network Diagnostics
 

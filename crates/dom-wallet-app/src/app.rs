@@ -512,6 +512,14 @@ impl WalletApp {
                         self.runtime.set_error(format!("refresh diagnostics: {e}"));
                     }
                 }
+                if ui.button("Export Logs").clicked() {
+                    match self.runtime.export_diagnostics() {
+                        Ok(path) => self
+                            .runtime
+                            .set_error(format!("diagnostics exported to {}", path.display())),
+                        Err(e) => self.runtime.set_error(format!("export diagnostics: {e}")),
+                    }
+                }
             });
         });
 
@@ -566,6 +574,11 @@ impl WalletApp {
                     &self.runtime.receive_requests.len().to_string(),
                 );
                 labeled_value(ui, "History rows", &self.runtime.history.len().to_string());
+                labeled_value(
+                    ui,
+                    "Diagnostic log rows",
+                    &self.runtime.diagnostic_log.len().to_string(),
+                );
             });
         });
     }
