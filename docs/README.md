@@ -23,9 +23,13 @@ blockchain-specialist reviewer, and was accepted under the principle
 ## Operations
 
 - [DEPLOYMENT.md](./DEPLOYMENT.md) — Testnet deployment guide + planned mainnet operational path
+- [NETWORK_MODES.md](./NETWORK_MODES.md) — Devnet, testnet, regtest, and mainnet mode reference
+- [BACKBONE_SYSTEMD.md](./BACKBONE_SYSTEMD.md) — VPS backbone systemd service runbook
 - [REGTEST.md](./REGTEST.md) — Local-dev `Network::Regtest` (NEVER for production)
 - [RPC.md](./RPC.md) — RPC endpoints
 - [FUZZING.md](./FUZZING.md) — Fuzzing campaign + how to add fuzz targets
+- [testing/WINDOWS_AGENT_WORKFLOW.md](./testing/WINDOWS_AGENT_WORKFLOW.md) and
+  [testing/WINDOWS_TEST_RUNNER.md](./testing/WINDOWS_TEST_RUNNER.md) — Windows portable test/agent runners
 
 ## Audit & status
 
@@ -42,3 +46,25 @@ blockchain-specialist reviewer, and was accepted under the principle
 
 - [troubleshooting/](./troubleshooting/) — Runbooks for common operational issues
 - [troubleshooting/chain-persistence-latency-rca.md](./troubleshooting/chain-persistence-latency-rca.md) — RCA for `chain_persistence` runtime latency vs restart/recovery behavior
+
+## Wallet Diagnostics
+
+The desktop wallet diagnostics panel can export a bounded diagnostic log with
+application version, build hash when available, configured network mode,
+configured backbone/node endpoint, connection lifecycle events, errors,
+heartbeat observations, and chain-height changes observed through node status.
+
+To collect wallet diagnostics:
+
+1. Open the wallet app.
+2. Unlock the wallet if diagnostics are needed for an active session.
+3. Open `Diagnostics`.
+4. Click `Export Logs`.
+5. Share the generated `dom-wallet-diagnostics-*.log` file from the wallet app
+   data directory.
+
+Diagnostic export applies redaction before entries are stored and exported.
+Wallet passwords, seed phrases, private/secret keys, bearer tokens,
+authorization values, and similarly named secret fields are replaced with
+`<redacted>`. Do not paste wallet seed phrases, private keys, or passwords into
+issue descriptions or chat even when sharing a diagnostic export.

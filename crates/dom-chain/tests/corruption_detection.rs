@@ -27,12 +27,14 @@
 
 mod common;
 
+use blake2::digest::consts::U32;
+use blake2::{Blake2b, Digest};
 use common::{open_test_chain, open_test_store};
 use dom_chain::{ChainState, CHAIN_CORRUPT_SENTINEL};
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
 use dom_core::{BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, PROTOCOL_VERSION};
-use dom_crypto::pedersen::Commitment;
+use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_pow::CompactTarget;
 use dom_serialization::DomSerialize;
 use dom_store::utxo::UtxoEntry;
@@ -95,6 +97,21 @@ fn dump_utxo_db(store: &DomStore) -> BTreeMap<Vec<u8>, Vec<u8>> {
     dump_db(store, store.db_utxos)
 }
 
+fn utxo_digest(entries: &BTreeMap<Vec<u8>, Vec<u8>>) -> [u8; 32] {
+    type B2b256 = Blake2b<U32>;
+    let mut hasher = B2b256::new();
+    hasher.update(b"TEST_CANONICAL_UTXO_DIGEST_V1");
+    for (commitment, entry) in entries {
+        hasher.update((commitment.len() as u64).to_le_bytes());
+        hasher.update(commitment);
+        hasher.update((entry.len() as u64).to_le_bytes());
+        hasher.update(entry);
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&hasher.finalize());
+    out
+}
+
 fn g_point() -> Commitment {
     let g = [
         0x02u8, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87,
@@ -111,6 +128,15 @@ fn h_point() -> Commitment {
         0x70, 0x9e, 0xe5,
     ];
     Commitment::from_compressed_bytes(&h).unwrap()
+}
+
+fn deterministic_commitment(seed: u8, value: u64) -> Commitment {
+    let mut blind = [0u8; 32];
+    blind[31] = seed.max(1);
+    Commitment::commit(
+        value,
+        &BlindingFactor::from_bytes(blind).expect("deterministic blinding"),
+    )
 }
 
 fn synthetic_header_struct(height: u64, nonce: u64) -> BlockHeader {
@@ -176,6 +202,39 @@ fn synthetic_block_bytes(
     )
 }
 
+#[allow(clippy::type_complexity)]
+fn synthetic_genesis_block_bytes() -> (Vec<u8>, Vec<u8>, [u8; 32], [u8; 33], [u8; 33]) {
+    synthetic_block_bytes(
+        0,
+        0xA0,
+        deterministic_commitment(0xE0, 50),
+        deterministic_commitment(0xE1, 0),
+    )
+}
+
+fn commit_synthetic_genesis(store: &DomStore) {
+    let (header, body, hash, output, excess) = synthetic_genesis_block_bytes();
+    store
+        .commit_block(
+            &hash,
+            0,
+            &header,
+            &body,
+            &[(
+                output,
+                UtxoEntry {
+                    block_height: 0,
+                    is_coinbase: true,
+                    proof: vec![0xAA; 8],
+                }
+                .to_bytes(),
+            )],
+            &[],
+            &[(excess, hash)],
+        )
+        .expect("commit synthetic genesis");
+}
+
 fn make_hash(seed: u8) -> [u8; 32] {
     let mut h = [0u8; 32];
     h[0] = seed;
@@ -218,6 +277,7 @@ fn healthy_committed_block_opens_cleanly() {
         synthetic_block_bytes(1, 0xAA, g_point(), h_point());
     {
         let store = open_test_store(dir.path());
+        commit_synthetic_genesis(&store);
         store
             .commit_block(
                 &hash,
@@ -250,6 +310,7 @@ fn corrupt_utxo_entry_is_rebuilt_from_canonical_history_on_reopen() {
         synthetic_block_bytes(1, 0xAB, g_point(), h_point());
     {
         let store = open_test_store(dir.path());
+        commit_synthetic_genesis(&store);
         let canonical_entry = UtxoEntry {
             block_height: 1,
             is_coinbase: true,
@@ -296,6 +357,7 @@ fn missing_utxo_entry_is_rebuilt_from_canonical_history_on_reopen() {
         synthetic_block_bytes(1, 0xAC, g_point(), h_point());
     {
         let store = open_test_store(dir.path());
+        commit_synthetic_genesis(&store);
         store
             .commit_block(
                 &hash,
@@ -340,6 +402,7 @@ fn extra_utxo_entry_is_removed_by_canonical_rebuild_on_reopen() {
     extra_commitment[32] = 0xFE;
     {
         let store = open_test_store(dir.path());
+        commit_synthetic_genesis(&store);
         store
             .commit_block(
                 &hash,
@@ -389,6 +452,213 @@ fn extra_utxo_entry_is_removed_by_canonical_rebuild_on_reopen() {
 }
 
 #[test]
+fn reopen_rebuilds_exact_canonical_utxo_after_missing_entry_corruption() {
+    let dir = TempDir::new().expect("tempdir");
+    let (header_bytes, body_bytes, hash, output, excess) =
+        synthetic_block_bytes(1, 0xB1, g_point(), h_point());
+    {
+        let store = DomStore::open(dir.path()).expect("open");
+        commit_synthetic_genesis(&store);
+        store
+            .commit_block(
+                &hash,
+                1,
+                &header_bytes,
+                &body_bytes,
+                &[(
+                    output,
+                    UtxoEntry {
+                        block_height: 1,
+                        is_coinbase: true,
+                        proof: vec![6u8; 8],
+                    }
+                    .to_bytes(),
+                )],
+                &[],
+                &[(excess, hash)],
+            )
+            .expect("commit");
+    }
+    let canonical_digest = {
+        let normalized = open_chain(dir.path()).expect("normalize canonical utxo");
+        utxo_digest(&dump_utxo_db(&normalized.store))
+    };
+    {
+        let store = DomStore::open(dir.path()).expect("reopen raw store");
+        delete_raw(&store, DB_UTXOS, &output);
+        delete_raw(&store, DB_METADATA, METADATA_UTXO_SET_DIGEST_KEY);
+    }
+
+    let reopened = open_chain(dir.path()).expect("reopen must rebuild missing utxo");
+    assert_eq!(
+        utxo_digest(&dump_utxo_db(&reopened.store)),
+        canonical_digest
+    );
+}
+
+#[test]
+fn reopen_rebuilds_exact_canonical_utxo_after_fake_entry_corruption() {
+    let dir = TempDir::new().expect("tempdir");
+    let (header_bytes, body_bytes, hash, output, excess) =
+        synthetic_block_bytes(1, 0xB2, g_point(), h_point());
+    let mut fake_commitment = [0u8; 33];
+    fake_commitment[0] = 0x02;
+    fake_commitment[32] = 0xFD;
+    {
+        let store = DomStore::open(dir.path()).expect("open");
+        commit_synthetic_genesis(&store);
+        store
+            .commit_block(
+                &hash,
+                1,
+                &header_bytes,
+                &body_bytes,
+                &[(
+                    output,
+                    UtxoEntry {
+                        block_height: 1,
+                        is_coinbase: true,
+                        proof: vec![7u8; 8],
+                    }
+                    .to_bytes(),
+                )],
+                &[],
+                &[(excess, hash)],
+            )
+            .expect("commit");
+    }
+    let canonical_digest = {
+        let normalized = open_chain(dir.path()).expect("normalize canonical utxo");
+        utxo_digest(&dump_utxo_db(&normalized.store))
+    };
+    {
+        let store = DomStore::open(dir.path()).expect("reopen raw store");
+        put_raw(
+            &store,
+            DB_UTXOS,
+            &fake_commitment,
+            &UtxoEntry {
+                block_height: 77,
+                is_coinbase: false,
+                proof: vec![0xFE; 8],
+            }
+            .to_bytes(),
+        );
+        delete_raw(&store, DB_METADATA, METADATA_UTXO_SET_DIGEST_KEY);
+    }
+
+    let reopened = open_chain(dir.path()).expect("reopen must drop fake utxo");
+    assert_eq!(
+        utxo_digest(&dump_utxo_db(&reopened.store)),
+        canonical_digest
+    );
+}
+
+#[test]
+fn reopen_rebuilds_exact_canonical_utxo_after_altered_persisted_utxo() {
+    let dir = TempDir::new().expect("tempdir");
+    let (header_bytes, body_bytes, hash, output, excess) =
+        synthetic_block_bytes(1, 0xB3, g_point(), h_point());
+    {
+        let store = DomStore::open(dir.path()).expect("open");
+        commit_synthetic_genesis(&store);
+        store
+            .commit_block(
+                &hash,
+                1,
+                &header_bytes,
+                &body_bytes,
+                &[(
+                    output,
+                    UtxoEntry {
+                        block_height: 1,
+                        is_coinbase: true,
+                        proof: vec![8u8; 8],
+                    }
+                    .to_bytes(),
+                )],
+                &[],
+                &[(excess, hash)],
+            )
+            .expect("commit");
+    }
+    let canonical_digest = {
+        let normalized = open_chain(dir.path()).expect("normalize canonical utxo");
+        utxo_digest(&dump_utxo_db(&normalized.store))
+    };
+    {
+        let store = DomStore::open(dir.path()).expect("reopen raw store");
+        put_raw(
+            &store,
+            DB_UTXOS,
+            &output,
+            &UtxoEntry {
+                block_height: 999,
+                is_coinbase: false,
+                proof: vec![0xAB; 8],
+            }
+            .to_bytes(),
+        );
+        delete_raw(&store, DB_METADATA, METADATA_UTXO_SET_DIGEST_KEY);
+    }
+
+    let reopened = open_chain(dir.path()).expect("reopen must repair altered utxo entry");
+    assert_eq!(
+        utxo_digest(&dump_utxo_db(&reopened.store)),
+        canonical_digest
+    );
+}
+
+#[test]
+fn reopen_rebuilds_exact_canonical_utxo_after_digest_metadata_corruption() {
+    let dir = TempDir::new().expect("tempdir");
+    let (header_bytes, body_bytes, hash, output, excess) =
+        synthetic_block_bytes(1, 0xB4, g_point(), h_point());
+    {
+        let store = DomStore::open(dir.path()).expect("open");
+        commit_synthetic_genesis(&store);
+        store
+            .commit_block(
+                &hash,
+                1,
+                &header_bytes,
+                &body_bytes,
+                &[(
+                    output,
+                    UtxoEntry {
+                        block_height: 1,
+                        is_coinbase: true,
+                        proof: vec![9u8; 8],
+                    }
+                    .to_bytes(),
+                )],
+                &[],
+                &[(excess, hash)],
+            )
+            .expect("commit");
+    }
+    let canonical_digest = {
+        let normalized = open_chain(dir.path()).expect("normalize canonical utxo");
+        utxo_digest(&dump_utxo_db(&normalized.store))
+    };
+    {
+        let store = DomStore::open(dir.path()).expect("reopen raw store");
+        put_raw(
+            &store,
+            DB_METADATA,
+            METADATA_UTXO_SET_DIGEST_KEY,
+            &[0x13; 32],
+        );
+    }
+
+    let reopened = open_chain(dir.path()).expect("reopen must repair digest metadata");
+    assert_eq!(
+        utxo_digest(&dump_utxo_db(&reopened.store)),
+        canonical_digest
+    );
+}
+
+#[test]
 fn canonical_utxo_set_is_equivalent_before_and_after_restart() {
     let dir = TempDir::new().expect("tempdir");
     let (header_1, body_1, hash_1, output_1, excess_1) =
@@ -397,6 +667,7 @@ fn canonical_utxo_set_is_equivalent_before_and_after_restart() {
         synthetic_block_bytes(2, 0xAF, h_point(), g_point());
     {
         let store = open_test_store(dir.path());
+        commit_synthetic_genesis(&store);
         store
             .commit_block(
                 &hash_1,
@@ -458,12 +729,13 @@ fn canonical_utxo_set_is_equivalent_before_and_after_restart() {
 }
 
 #[test]
-fn failed_utxo_repair_does_not_partially_mutate_store() {
+fn interrupted_reopen_does_not_leave_partial_repair_state() {
     let dir = TempDir::new().expect("tempdir");
     let (header_bytes, body_bytes, hash, output, excess) =
         synthetic_block_bytes(1, 0xB0, g_point(), h_point());
     let utxo_before_failed_open = {
         let store = open_test_store(dir.path());
+        commit_synthetic_genesis(&store);
         store
             .commit_block(
                 &hash,
@@ -523,6 +795,7 @@ fn known_side_block_does_not_resurrect_as_tip_on_restart() {
     let (side_header, side_body, side, _, _) = synthetic_block_bytes(1, 0xA2, h_point(), h_point());
     {
         let store = open_test_store(dir.path());
+        commit_synthetic_genesis(&store);
         store
             .commit_block(
                 &canonical,
@@ -578,6 +851,7 @@ fn alternating_canonical_and_side_arrivals_reopen_to_canonical_chain() {
         synthetic_block_bytes(2, 0xB4, g_point(), g_point());
     {
         let store = open_test_store(dir.path());
+        commit_synthetic_genesis(&store);
         store
             .commit_block(
                 &canonical_1,
@@ -655,6 +929,7 @@ fn duplicate_known_side_block_rejected_without_mutating_canonical_state() {
     let (side_header, side_body, side, _, _) = synthetic_block_bytes(1, 0xC2, h_point(), h_point());
     {
         let store = open_test_store(dir.path());
+        commit_synthetic_genesis(&store);
         store
             .commit_block(
                 &canonical,
@@ -703,6 +978,7 @@ fn reopen_rebuilds_missing_kernel_index_for_canonical_blocks() {
     let (header, body, hash, output, excess) = synthetic_block_bytes(1, 0xC3, g_point(), h_point());
     {
         let store = open_test_store(dir.path());
+        commit_synthetic_genesis(&store);
         store
             .commit_block(
                 &hash,
@@ -746,6 +1022,7 @@ fn reopen_rejects_duplicate_kernel_excess_in_legacy_canonical_history() {
         synthetic_block_bytes(2, 0xC5, h_point(), duplicated_kernel);
     {
         let store = open_test_store(dir.path());
+        commit_synthetic_genesis(&store);
         store
             .commit_block(
                 &hash_1,
@@ -809,6 +1086,7 @@ fn delayed_side_branch_candidate_stays_noncanonical_after_restart() {
         synthetic_block_bytes(2, 0xD4, g_point(), g_point());
     {
         let store = open_test_store(dir.path());
+        commit_synthetic_genesis(&store);
         store
             .commit_block(
                 &canonical_1,

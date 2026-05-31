@@ -98,6 +98,121 @@ jobs:
       - name: cargo test --workspace (excluding integration)
         run: cargo test --workspace --exclude dom-integration-tests --all-targets
 
+  release-blocker-crate-tests:
+    name: "release blockers: crate tests (linux)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-linux-crate-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-linux-crate-tests-
+
+      - name: Install Linux build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: cargo check --workspace
+        run: cargo check --workspace
+
+      - name: cargo test -p dom-consensus
+        run: cargo test -p dom-consensus
+
+      - name: cargo test -p dom-chain
+        run: cargo test -p dom-chain
+
+      - name: cargo test -p dom-store
+        run: cargo test -p dom-store
+
+      - name: cargo test -p dom-node
+        run: cargo test -p dom-node
+
+      - name: cargo test -p dom-mempool
+        run: cargo test -p dom-mempool
+
+  release-blocker-integration-tests:
+    name: "release blockers: dom-integration-tests (linux fast mining)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DOM_NETWORK: regtest
+      DOM_REGTEST_FAST_MINING: "1"
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-linux-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-linux-integration-
+
+      - name: Install Linux build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: cargo test -p dom-integration-tests
+        run: cargo test -p dom-integration-tests -- --test-threads=1
+
+      - name: cargo test -p dom-integration-tests --ignored
+        run: cargo test -p dom-integration-tests -- --ignored --test-threads=1
+
+  release-blocker-gate:
+    name: release blocker gate
+    runs-on: ubuntu-latest
+    needs:
+      - fmt
+      - build-test
+      - release-blocker-crate-tests
+      - release-blocker-integration-tests
+    if: always()
+    steps:
+      - name: Require every release-blocker job to pass
+        run: |
+          test "${{ needs.fmt.result }}" = "success"
+          test "${{ needs.build-test.result }}" = "success"
+          test "${{ needs.release-blocker-crate-tests.result }}" = "success"
+          test "${{ needs.release-blocker-integration-tests.result }}" = "success"
+
+  critical-domain-coverage-report:
+    name: critical domain coverage report
+    runs-on: ubuntu-latest
+    needs: release-blocker-gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate critical domain coverage report
+        run: scripts/critical_domain_coverage_report.sh > critical-domain-coverage.md
+
+      - name: Upload critical domain coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: critical-domain-coverage
+          path: critical-domain-coverage.md
+
   pmmr-vectors-cross-platform:
     name: pinned PMMR vectors must reproduce on ${{ matrix.host }}
     runs-on: ${{ matrix.runner }}
