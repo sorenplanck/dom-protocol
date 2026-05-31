@@ -4,7 +4,7 @@ use crate::{
     block::validate_header_syntax, validate_block_transactions, BlockHeader, CoinbaseTransaction,
     Transaction, ValidationContext,
 };
-use dom_core::{DomError, MAX_BLOCK_TXS, MAX_BLOCK_WEIGHT, WEIGHT_COINBASE_KERNEL, WEIGHT_OUTPUT};
+use dom_core::{DomError, MAX_BLOCK_TXS, MAX_BLOCK_WEIGHT, WEIGHT_OUTPUT};
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
 use std::collections::HashSet;
 
@@ -40,9 +40,6 @@ impl Block {
         let mut total: u32 = 0;
         total = total
             .checked_add(self.coinbase.kernel.weight())
-            .ok_or_else(overflow)?;
-        total = total
-            .checked_add(WEIGHT_COINBASE_KERNEL)
             .ok_or_else(overflow)?;
         total = total.checked_add(WEIGHT_OUTPUT).ok_or_else(overflow)?;
         for tx in &self.transactions {
@@ -195,7 +192,7 @@ mod tests {
     };
     use dom_core::{
         Amount, BlockHeight, Hash256, Timestamp, INITIAL_BLOCK_REWARD, KERNEL_FEAT_COINBASE,
-        KERNEL_FEAT_PLAIN, PROTOCOL_VERSION,
+        KERNEL_FEAT_PLAIN, PROTOCOL_VERSION, WEIGHT_COINBASE_KERNEL,
     };
     use dom_crypto::bulletproof;
     use dom_crypto::hash::blake2b_256_tagged;
@@ -424,7 +421,7 @@ mod tests {
             coinbase: dummy_coinbase(),
             transactions: vec![],
         };
-        let expected = dummy_coinbase().kernel.weight() + WEIGHT_COINBASE_KERNEL + WEIGHT_OUTPUT;
+        let expected = dummy_coinbase().kernel.weight() + WEIGHT_OUTPUT;
         assert_eq!(block.weight().unwrap(), expected);
     }
 
@@ -436,6 +433,60 @@ mod tests {
             transactions: vec![],
         };
         assert!(block.weight().unwrap() < MAX_BLOCK_WEIGHT);
+    }
+
+    /// The coinbase contributes exactly one kernel + one output to block weight.
+    /// Counting the coinbase kernel twice was a spec-drift bug: the validator
+    /// over-counted by `WEIGHT_COINBASE_KERNEL` relative to the miner's budget
+    /// reservation, so a full block could exceed `MAX_BLOCK_WEIGHT`.
+    #[test]
+    fn empty_block_weight_counts_coinbase_kernel_once() {
+        let block = Block {
+            header: dummy_header(),
+            coinbase: dummy_coinbase(),
+            transactions: vec![],
+        };
+        // The canonical coinbase kernel weight is WEIGHT_COINBASE_KERNEL; an
+        // empty block is exactly that kernel plus the single coinbase output.
+        assert_eq!(
+            dummy_coinbase().kernel.weight(),
+            WEIGHT_COINBASE_KERNEL,
+            "coinbase kernel weight must be the canonical constant"
+        );
+        assert_eq!(
+            block.weight().unwrap(),
+            WEIGHT_COINBASE_KERNEL + WEIGHT_OUTPUT,
+            "empty block must count the coinbase kernel exactly once"
+        );
+    }
+
+    /// Consensus/miner consistency: the weight the validator charges for the
+    /// coinbase (an empty block) must equal the weight the miner reserves before
+    /// selecting transactions. The miner computes its reservation as
+    /// `WEIGHT_COINBASE_KERNEL + WEIGHT_OUTPUT` (see dom-node/src/miner.rs:560),
+    /// leaving `MAX_BLOCK_WEIGHT - that` as the tx budget. If these diverge, the
+    /// miner can pack txs that push a block over MAX_BLOCK_WEIGHT (spec-drift).
+    #[test]
+    fn empty_block_weight_matches_miner_coinbase_reservation() {
+        let block = Block {
+            header: dummy_header(),
+            coinbase: dummy_coinbase(),
+            transactions: vec![],
+        };
+        // Replicated from dom-node::miner (dom-consensus cannot depend on dom-node).
+        let miner_coinbase_reservation = WEIGHT_COINBASE_KERNEL + WEIGHT_OUTPUT;
+        let miner_tx_budget = MAX_BLOCK_WEIGHT - miner_coinbase_reservation;
+
+        let empty_block_weight = block.weight().unwrap();
+        assert_eq!(
+            empty_block_weight, miner_coinbase_reservation,
+            "validator coinbase weight must equal miner coinbase reservation"
+        );
+        assert_eq!(
+            MAX_BLOCK_WEIGHT - empty_block_weight,
+            miner_tx_budget,
+            "tx budget left after an empty block must match the miner's tx budget"
+        );
     }
 
     #[test]
