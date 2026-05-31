@@ -619,14 +619,28 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
         wallet
             .build_coinbase(BlockHeight(new_height), total_tx_fees)
             .map_err(|e| DomError::Internal(format!("wallet coinbase: {e}")))?
-    } else {
-        // Fallback: random blinding, output NOT recorded (DOM-SEC-004 unresolved)
-        warn!("Mining without wallet — rewards will NOT be spendable (DOM-SEC-004)");
+    } else if node.config.network == dom_config::Network::Regtest {
+        // Regtest only: dev/test mining without a wallet. The blinding is
+        // discarded so the reward is NOT spendable — acceptable for the
+        // ephemeral, throwaway chains regtest is used for (DOM-SEC-004).
+        warn!(
+            "Regtest mining without wallet — rewards will NOT be spendable (dev only, DOM-SEC-004)"
+        );
         build_real_coinbase(
             BlockHeight(new_height),
             total_tx_fees,
             &chain_id_for(&node.config)?,
         )?
+    } else {
+        // Public networks (testnet/mainnet): fail closed before mining. Mining
+        // here without a wallet would burn the reward into a permanently
+        // unspendable coinbase (the blinding factor is discarded), so refuse
+        // rather than silently destroy an honest operator's rewards.
+        return Err(DomError::Invalid(
+            "mining on a public network (testnet/mainnet) requires a configured wallet; \
+             refusing to mine and burn unspendable coinbase rewards (DOM-SEC-004)"
+                .into(),
+        ));
     };
 
     // PMMR roots over coinbase + selected mempool txs. Single source
