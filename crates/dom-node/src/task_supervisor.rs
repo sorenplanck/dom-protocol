@@ -35,6 +35,12 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
+const EVENT_TASK_STARTED: &str = "task_started";
+const EVENT_TASK_STOPPED: &str = "task_stopped";
+const EVENT_TASK_FAILED: &str = "task_failed";
+const EVENT_SHUTDOWN_REQUESTED: &str = "shutdown_requested";
+const EVENT_SHUTDOWN_COMPLETED: &str = "shutdown_completed";
+
 /// A supervised runtime task class.
 ///
 /// The fixed singletons each appear at most once; [`TaskKind::Relay`] is a
@@ -177,6 +183,10 @@ impl NodeTaskSupervisor {
     pub async fn request_shutdown(&self) {
         self.flag.store(true, Ordering::SeqCst);
         self.inner.lock().await.shutting_down = true;
+        tracing::info!(
+            event = EVENT_SHUTDOWN_REQUESTED,
+            "runtime shutdown requested"
+        );
         self.notify.notify_waiters();
     }
 
@@ -248,14 +258,45 @@ impl NodeTaskSupervisor {
         // critical node tasks. The JoinHandle is immediately registered below,
         // and wrapper code records panics/errors before requesting shutdown.
         let handle = tokio::spawn(async move {
+            tracing::info!(
+                event = EVENT_TASK_STARTED,
+                task_kind = ?kind,
+                task_id = id.0,
+                "supervised task started"
+            );
             let outcome = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
             match outcome {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => {
+                    tracing::info!(
+                        event = EVENT_TASK_STOPPED,
+                        task_kind = ?kind,
+                        task_id = id.0,
+                        task_outcome = "ok",
+                        "supervised task stopped"
+                    );
+                }
                 Ok(Err(reason)) => {
+                    tracing::error!(
+                        event = EVENT_TASK_FAILED,
+                        task_kind = ?kind,
+                        task_id = id.0,
+                        failure_reason = %reason,
+                        task_outcome = "error",
+                        "supervised task failed"
+                    );
                     sup.record_failure(kind, reason).await;
                 }
                 Err(panic) => {
-                    sup.record_failure(kind, panic_message(&panic)).await;
+                    let reason = panic_message(&panic);
+                    tracing::error!(
+                        event = EVENT_TASK_FAILED,
+                        task_kind = ?kind,
+                        task_id = id.0,
+                        failure_reason = %reason,
+                        task_outcome = "panic",
+                        "supervised task panicked"
+                    );
+                    sup.record_failure(kind, reason).await;
                 }
             }
             if kind.is_relay() {
@@ -388,6 +429,13 @@ impl NodeTaskSupervisor {
         self.join_phase(5, grace, &mut report).await;
         // Defensive: join anything not covered above (no detached tasks remain).
         self.join_remaining(grace, &mut report).await;
+        tracing::info!(
+            event = EVENT_SHUTDOWN_COMPLETED,
+            stopped_count = report.stopped_order.len(),
+            aborted_count = report.aborted.len(),
+            persistence_drained = report.persistence_drained,
+            "runtime shutdown completed"
+        );
         report
     }
 
@@ -953,5 +1001,14 @@ mod tests {
         }
 
         walk(repo, f);
+    }
+
+    #[test]
+    fn runtime_lifecycle_event_names_are_stable() {
+        assert_eq!(EVENT_TASK_STARTED, "task_started");
+        assert_eq!(EVENT_TASK_STOPPED, "task_stopped");
+        assert_eq!(EVENT_TASK_FAILED, "task_failed");
+        assert_eq!(EVENT_SHUTDOWN_REQUESTED, "shutdown_requested");
+        assert_eq!(EVENT_SHUTDOWN_COMPLETED, "shutdown_completed");
     }
 }

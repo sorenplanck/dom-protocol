@@ -124,7 +124,9 @@ Repository state at session start:
 
 Dirty-state reconciliation before Task 22:
 - `crates/dom-node/src/node.rs` diff was exactly a test-module import change: it added `enforce_volatile_mempool_restart_policy` to `use super::{...}` and reordered/wrapped the surrounding imports.
-- That `node.rs` diff does not belong to Task 21 and is not needed for Task 22; it is leftover Task 26/mempool-policy work.
+- Rechecked on 2026-05-31: this rename aligns with RFC-0012 / Task 26, which is already normative and ancestral (`6c5ef52 26 define mempool restart policy`). It is not a new Task 21/22 policy decision.
+- RFC-0012 marks the mempool lifecycle as `Status: Normative` and defines Task 26 restart behavior as VOLATILE.
+- `git show fd26056 -- crates/dom-node/src/node.rs` confirms `enforce_volatile_mempool_restart_policy` only does `let _ = mempool;` and `clear_persisted_mempool_snapshot(&chain.store)`; it does not persist mempool contents.
 - Stashed all dirty pre-Task-22 state with `git stash push -u -m "pre-task22 dirty state: task26 node import and interrupted task22 draft"`.
 - Confirmed clean base before starting Task 22: `git status --short` returned empty.
 - Confirmed local HEAD and remote branch both at fd26056d7c8f6d08c20d8a030291ec066f1e048d.
@@ -198,3 +200,55 @@ Sequence progress:
 - CURRENT: Task 23
 - REMAINING: Task 23, Task 24, Task 25
 - Left to finish prompt: complete, validate, commit, push, and report Tasks 23 through 25 in order.
+
+## 2026-05-31 Task 23 In Progress
+
+Current objective: Add structured tracing for runtime lifecycle and locks.
+
+Repository state at Task 23 start:
+- `pwd`: /root/dom
+- `git branch --show-current`: task21-ready-base
+- `git status --short`: clean before applying Task 23 code; dirty after applying only Task 23 code and this WORKLOG update
+- Recent HEAD: c4ad95f `22 standardize timeout retry reconnect`
+- Remote `refs/heads/task21-ready-base`: c4ad95f6f1a278d239ec0486f937449dd9e74c6d
+
+Reconciliation note:
+- The mempool rename `persist_mempool_state` -> `enforce_volatile_mempool_restart_policy` is retained. It is aligned with RFC-0012 / Task 26, which is already normative and ancestral.
+- Task 23 diff does not alter mempool persistence behavior. The only mempool-related diff is tracing around the existing `clear_persisted_mempool_snapshot` call and a test-module import required for clean `dom-node` test compilation; the volatile policy body and call sites are unchanged.
+
+Changed files:
+- WORKLOG.md
+- crates/dom-node/src/task_supervisor.rs
+- crates/dom-node/src/node.rs
+
+Tests added/changed:
+- Added stable event-name assertions for runtime lifecycle events.
+- Added stable event-name and failure-domain assertions for node runtime structured trace events.
+
+Important commands:
+- `git log --oneline | grep -i "26 define mempool"`
+- `git merge-base --is-ancestor $(git log --oneline | grep -i "26 define mempool" | awk '{print $1}') HEAD && echo task26-ancestral`
+- `sed -n '1,60p' docs/DOM_RFC_0012_Mempool_Lifecycle.md`
+- `git show fd26056 -- crates/dom-node/src/node.rs`
+- `cargo fmt`
+- `cargo check`
+- `cargo test -p dom-node event_names_are_stable`
+- `cargo test -p dom-node task_supervisor`
+- `cargo test -p dom-node deferred`
+- `cargo test -p dom-node relay`
+- `cargo test -p dom-node outbound_attempt_outcome_marks_retryable_failures_only`
+- `cargo test -p dom-node lock_order`
+
+Test results:
+- PASS: `cargo fmt`
+- PASS: `cargo check`
+- PASS: `cargo test -p dom-node event_names_are_stable` (2 passed)
+- PASS: `cargo test -p dom-node task_supervisor` (18 passed)
+- PASS: `cargo test -p dom-node deferred` (4 passed)
+- PASS: `cargo test -p dom-node relay` (18 passed)
+- PASS: `cargo test -p dom-node outbound_attempt_outcome_marks_retryable_failures_only` (1 passed)
+- PASS: `cargo test -p dom-node lock_order` (9 passed)
+
+Open items:
+- Commit with `23 structured tracing runtime`.
+- Push and verify remote HEAD before Task 24.
