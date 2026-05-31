@@ -41,12 +41,55 @@ Sequence state:
 - DONE: Task 44 `67ca932e828e2a99b93a10986184c193c28cac3d`.
 - DONE: Task 45 `27a89db8b5965621747fbb10fae6c064a51b6bdf`.
 - DONE: Task 46 `a89a36160e73e57fa45f4887797e0c8e611c4787`.
-- DONE: Task 47 committed locally; authoritative hash is in git history/final report.
-- CURRENT: Task 48 pending.
-- REMAINING: Tasks 48-50.
+- DONE: Task 47 `bc8bbd630e3f1763e132e98cf37ce9f8379e6927`.
+- DONE: Task 48 committed locally; authoritative hash is in git history/final report.
+- CURRENT: Task 49 pending.
+- REMAINING: Tasks 49-50.
 
 Open items:
-- Do not start Task 48 until Task 47 is pushed, verified, and reviewed.
+- Do not start Task 49 until Task 48 is pushed, verified, and reviewed.
+
+## 2026-05-31 — Task 48 Systemd Backbone Service
+
+Objective:
+- Add production-quality devnet/testnet VPS backbone service packaging without changing consensus or node runtime logic.
+
+Changed files:
+- `deploy/dom-backbone.service`
+- `deploy/dom-backbone.env.example`
+- `scripts/install_dom_backbone_systemd.sh`
+- `docs/BACKBONE_SYSTEMD.md`
+- `docs/DEPLOYMENT.md`
+- `docs/README.md`
+- `WORKLOG.md`
+
+Implementation notes:
+- Added `dom-backbone.service` systemd unit with:
+  - `WorkingDirectory=/var/lib/dom-backbone`
+  - optional `EnvironmentFile=-/etc/dom/backbone.env`
+  - restart policy `Restart=always`, `RestartSec=10`
+  - `LimitNOFILE=65536`
+  - journald logging via `StandardOutput=journal`, `StandardError=journal`
+  - basic security hardening and `ReadWritePaths=/var/lib/dom-backbone`
+  - executable preflight check for `/usr/local/bin/dom-node`
+- Added `dom-backbone.env.example` with non-secret local env values.
+- Added install/update helper script that creates the `dom` user, data/doc/config directories, installs service/docs/env example, reloads systemd, and enables the service.
+- Added `docs/BACKBONE_SYSTEMD.md` covering install, start, stop, restart, logs, health/status, binary update, and firewall.
+- Linked the runbook from `docs/DEPLOYMENT.md` and `docs/README.md`.
+- No wallet password, seed phrase, private key, token, or bearer value was added to unit, env, script, or docs.
+
+Validation:
+- `bash -n scripts/install_dom_backbone_systemd.sh` (PASS)
+- `systemd-analyze verify deploy/dom-backbone.service` (PASS for DOM unit; host emitted unrelated `/lib/systemd/system/snapd.service` warning)
+- `cargo fmt` (PASS)
+- `cargo check` (PASS)
+- `git diff --check` (PASS)
+
+Test note:
+- No narrow Rust tests were run for Task 48 because the change is limited to service packaging scripts and markdown docs; no Rust crate behavior changed.
+
+Integration test note:
+- No `dom-integration-tests` command was run for Task 48 because no integration behavior changed.
 
 ## 2026-05-31 — Task 47 CPU Throttle Not Consensus
 
