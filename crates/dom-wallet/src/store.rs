@@ -272,7 +272,7 @@ mod serde_blinding32 {
 /// therefore cannot recover it. We persist the blinding here, attached to
 /// the pending tx, and register the change as a spendable [`OwnedOutput`]
 /// only when the tx confirms on-chain — mirroring the chain's reality.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct PendingChange {
     /// Compressed 33-byte Pedersen commitment of the change output
     /// (`commit(value, blinding)` — matches the on-chain output exactly).
