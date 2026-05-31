@@ -31,12 +31,46 @@ Sequence state:
 - DONE: Task 34 `ad3528b3d38d727b015ae40427d9af85e3f72400`.
 - DONE: Task 35 `f9af1c08b3170c542a310390a69409745b3813f8`.
 - DONE: Task 36 `c986c6f50179726b68740fc40f0712e0e3527f81`.
-- CURRENT: Task 37 in validation/commit.
-- REMAINING: Tasks 38-50.
+- DONE: Task 37 `08a2a410bd6bc228c140529686e570ddc9f5f254`.
+- CURRENT: Task 38 in validation/commit.
+- REMAINING: Tasks 39-50.
 
 Open items:
-- Commit Task 37 as `37 event based waiters`, push, verify remote HEAD, and report.
-- Do not start Task 38 until the Task 37 commit and push are verified and the replay mining hang is triaged.
+- Commit Task 38 as `38 ci cargo tests by crate`, push, verify remote HEAD, and report.
+- Do not start Task 39 until Task 38 is committed, pushed, and reviewed.
+
+## 2026-05-31 — Task 38 CI Cargo Tests By Crate
+
+Objective:
+- Make CI run explicit cargo test gates by crate and run integration tests through the viable Regtest fast-mining path.
+
+Changed files:
+- `.github/workflows/ci.yml`
+- `WORKLOG.md`
+
+Implementation notes:
+- Kept the existing cross-platform `build-test` matrix and its `cargo test --workspace --exclude dom-integration-tests --all-targets` step.
+- Added mandatory Linux `cargo-tests-by-crate` job with named steps:
+  - `cargo check --workspace`
+  - `cargo test -p dom-consensus`
+  - `cargo test -p dom-chain`
+  - `cargo test -p dom-store`
+  - `cargo test -p dom-node`
+  - `cargo test -p dom-mempool`
+- Added mandatory Linux `integration-tests` job with `DOM_NETWORK=regtest`, `DOM_REGTEST_FAST_MINING=1`, and `RUST_BACKTRACE=1`.
+- Integration job runs both non-ignored and ignored integration tests explicitly:
+  - `cargo test -p dom-integration-tests -- --test-threads=1`
+  - `cargo test -p dom-integration-tests -- --ignored --test-threads=1`
+- No `continue-on-error` was added to either new job; failures fail the CI gate.
+- Added job-level timeouts to prevent indefinite hangs without masking failures.
+- The workflow still triggers on PRs to `main` and pushes to `main`.
+
+Validation:
+- `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml')); print('yaml ok')"` (PASS)
+
+Critical-test coverage note:
+- `dom-integration-tests` remains excluded from the cross-platform matrix, but is no longer silently omitted from CI. It now has a dedicated Linux fast-mining job that runs both default and ignored tests.
+- The ignored env-blocked integration tests are explicitly included with `--ignored`; no test was marked ignored or skipped as part of Task 38.
 
 ## 2026-05-31 — Task 37 Event Based Waiters
 
@@ -76,8 +110,18 @@ Tests added:
 - `helpers::tests::wait_for_height_wakes_on_node_state_event`
 - `helpers::tests::wait_for_peer_count_wakes_on_node_state_event`
 
-Open pendencies:
-- PRIORITY HIGH: `replay_two_independent_chains_converge` hangs while mining real block 1. Evidence: isolated `timeout 60s cargo test -p dom-integration-tests replay_two_independent_chains_converge -- --nocapture --test-threads=1` stopped at `Minerando bloco 1 | target: 0000ffff...`; `mine_blocking` has an unbounded nonce loop. This test/file were last touched by `62ea90b consensus: unify public DAA on ASERT`, not by Task 37. Suspect a target/mining/DAA interaction after ASERT unification; investigate separately before Task 38.
+Post-commit status:
+- Commit: `08a2a410bd6bc228c140529686e570ddc9f5f254`.
+- Author verified: `Soren Planck <sorenplanck@tutamail.com>`.
+- Pushed to `origin/work-from-merge`.
+- Remote HEAD verified: `08a2a410bd6bc228c140529686e570ddc9f5f254 refs/heads/work-from-merge`.
+
+Resolved diagnostic:
+- `replay_two_independent_chains_converge` is not a DAA/ASERT or protocol bug. Temporary logging showed the miner uses the expected Regtest target: `effective_compact=0x1e7fffff`, `regtest_compact=0x1e7fffff`, `matches_regtest=true`.
+- The hang occurs because raw `cargo test -p dom-integration-tests` does not set `DOM_REGTEST_FAST_MINING=1`, so this non-ignored replay test mines RandomX cache-only with an unbounded nonce loop. The current CI already excludes `dom-integration-tests` from raw workspace tests, while `dom-test-runner` injects `DOM_REGTEST_FAST_MINING=1`.
+- Correct treatment belongs to Task 38: run integration tests in CI through a fast-mining configuration and explicitly decide how to include today ignored env-blocked integration tests.
+
+Open robustness pendency:
 - `stalled_outbound_dials_are_bounded_by_min_outbound_live` is flaky due to a timing race between the short cleanup-zero observation window and legitimate reconnect scheduling from Task 22. It passed isolated and on repeat file-level run. Task 37 did not touch this local test helper; future work should migrate its cleanup condition to a deterministic waiter.
 
 ## 2026-05-31 — Task 34 Future Block Restart Tests
