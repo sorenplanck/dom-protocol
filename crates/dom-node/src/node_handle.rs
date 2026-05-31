@@ -392,6 +392,7 @@ mod tests {
             dns_seeds: vec![],
             seed_peers: vec![],
             mine: false,
+            miner_throttle: Default::default(),
             miner_address: None,
             wallet_path: Some(wallet_path.to_string()),
             wallet_password: Some("password123".into()),

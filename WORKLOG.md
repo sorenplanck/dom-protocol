@@ -40,12 +40,57 @@ Sequence state:
 - DONE: Task 43 `435021bdcf7af4501a7bba03bf2231338f271d65`.
 - DONE: Task 44 `67ca932e828e2a99b93a10986184c193c28cac3d`.
 - DONE: Task 45 `27a89db8b5965621747fbb10fae6c064a51b6bdf`.
-- DONE: Task 46 committed locally; authoritative hash is in git history/final report.
-- CURRENT: Task 47 pending.
-- REMAINING: Tasks 47-50.
+- DONE: Task 46 `a89a36160e73e57fa45f4887797e0c8e611c4787`.
+- DONE: Task 47 committed locally; authoritative hash is in git history/final report.
+- CURRENT: Task 48 pending.
+- REMAINING: Tasks 48-50.
 
 Open items:
-- Do not start Task 47 until Task 46 is pushed, verified, and reviewed.
+- Do not start Task 48 until Task 47 is pushed, verified, and reviewed.
+
+## 2026-05-31 — Task 47 CPU Throttle Not Consensus
+
+Objective:
+- Add optional local miner CPU throttling without changing consensus target calculation, block validity, PoW hashing, or emission rules.
+
+Changed files:
+- `crates/dom-config/src/lib.rs`
+- `crates/dom-node/src/miner.rs`
+- `crates/dom-node/src/node_handle.rs`
+- `crates/dom-integration-tests/src/helpers.rs`
+- `WORKLOG.md`
+
+Implementation notes:
+- Added `MinerThrottleConfig` to `NodeConfig` with `#[serde(default)]`.
+- Default throttle config is disabled with zero cadence and zero sleep.
+- Added local `MinerThrottle` helper in `dom-node::miner`.
+- `mine_one_block` reads throttle only from the local `NodeConfig`.
+- `mine_blocking` applies throttle only after `nonce = nonce.wrapping_add(1)`.
+- Throttle performs `std::thread::yield_now()` when sleep is zero, otherwise `std::thread::sleep(Duration::from_micros(...))`.
+- Throttle state is included in miner start and heartbeat hash-rate logs.
+- `compute_expected_target`, `target_to_compact`, `hash_meets_target`, RandomX, FastDevOnly, and ASERT were not changed.
+- Throttle config is not included in `BlockHeader`, `Block`, PoW preimage, wire protocol messages, or validation by other nodes.
+- Integration helper/test NodeConfig literals were updated only to satisfy the new local config field with the disabled default.
+
+Tests added/changed:
+- `miner::genesis_determinism_tests::target_calculation_unchanged_by_throttle`
+- `miner::genesis_determinism_tests::mined_block_validity_independent_of_throttle`
+- `miner::genesis_determinism_tests::throttle_config_does_not_enter_consensus_serialization`
+- `miner::genesis_determinism_tests::throttle_config_defaults_to_disabled_when_missing`
+
+Validation:
+- `cargo fmt` (PASS)
+- `cargo check` (PASS)
+- `cargo test -p dom-node target_calculation_unchanged_by_throttle` (PASS)
+- `cargo test -p dom-node mined_block_validity_independent_of_throttle` (PASS)
+- `cargo test -p dom-node throttle_config_does_not_enter_consensus_serialization` (PASS)
+- `cargo test -p dom-node throttle_config_defaults_to_disabled_when_missing` (PASS)
+- `cargo test -p dom-node miner_validator_still_share_compute_expected_target` (PASS)
+- `cargo test -p dom-config` (PASS)
+- `git diff --check` (PASS)
+
+Integration test note:
+- No `dom-integration-tests` command was run for Task 47 because the only integration-test change is adding the disabled local throttle default to a `NodeConfig` literal; no integration behavior, network behavior, target computation, or validation path changed.
 
 ## 2026-05-31 — Task 46 Separate Dev/Test Mining
 
