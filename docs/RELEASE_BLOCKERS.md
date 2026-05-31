@@ -13,6 +13,40 @@ Testnet launch FORBIDDEN until items marked [TESTNET] resolved.
 
 ---
 
+## CI Release-Blocker Gates
+
+The CI workflow on pull requests and pushes to `main` has an explicit
+`release-blocker-gate` job. The gate does not run tests itself; it fails unless
+all release-blocker jobs finish successfully:
+
+- `fmt`
+- `build-test`
+- `release-blocker-crate-tests`
+- `release-blocker-integration-tests`
+
+The release-blocker jobs are mandatory. They do not use `continue-on-error`.
+Any failure in these jobs fails the release gate.
+
+Critical groups covered by the gate:
+
+| Critical group | CI job / command coverage | Why it blocks release |
+| --- | --- | --- |
+| Consensus validation | `release-blocker-crate-tests`: `cargo test -p dom-consensus`, `cargo test -p dom-chain`, `cargo test -p dom-node`; `build-test`: `cargo test --workspace --exclude dom-integration-tests --all-targets` | Consensus validation failures can admit invalid blocks, reject valid blocks, or fork nodes. |
+| UTXO reopen integrity | `release-blocker-crate-tests`: `cargo test -p dom-chain`, including `crates/dom-chain/tests/corruption_detection.rs` reopen/corruption tests | Reopen must rebuild the exact canonical UTXO/kernel-index state after restart or repair; divergence is a consensus and funds-safety blocker. |
+| Orphan/reordered delivery | `release-blocker-crate-tests`: `cargo test -p dom-node`, including `crates/dom-node/tests/multinode_reordered_delivery.rs` | Nodes must converge under out-of-order, duplicate, delayed-parent, and reconnect delivery timelines. |
+| Future-block restart equivalence | `release-blocker-crate-tests`: `cargo test -p dom-node`, including `future_block_queue` restart/drop-policy tests | Runtime-only future-block state must converge after restart through deterministic redelivery rather than persisted local timing. |
+| IBD/reorg multi-node | `release-blocker-integration-tests`: `cargo test -p dom-integration-tests -- --test-threads=1` and `cargo test -p dom-integration-tests -- --ignored --test-threads=1` with `DOM_REGTEST_FAST_MINING=1` | Multi-node IBD and reorg convergence protect network catch-up and canonical-chain agreement. |
+| Runtime shutdown | `release-blocker-crate-tests`: `cargo test -p dom-node`, including shutdown and task-supervisor tests | Shutdown must cancel runtime work, drain persistence safely, and allow clean restart without detached tasks or partial state. |
+
+Integration tests that are marked `#[ignore]` for local environment limits are
+not skipped by the release gate. The integration release-blocker job runs them
+explicitly with `--ignored` and sets `DOM_REGTEST_FAST_MINING=1` plus
+`DOM_NETWORK=regtest`. This uses the project test configuration for viable
+Regtest mining in CI instead of omitting mining-heavy IBD/reorg tests or
+weakening their assertions.
+
+---
+
 ## STATUS LEGEND
 ✅ RESOLVED — fixed in codebase
 🔴 OPEN — not yet resolved
