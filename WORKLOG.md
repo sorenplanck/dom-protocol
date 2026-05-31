@@ -33,12 +33,51 @@ Sequence state:
 - DONE: Task 36 `c986c6f50179726b68740fc40f0712e0e3527f81`.
 - DONE: Task 37 `08a2a410bd6bc228c140529686e570ddc9f5f254`.
 - DONE: Task 38 `89aca4a04bed5a4864e8df64509d18b5e9e82dbf`.
-- DONE: Task 39 `39 ci gate critical tests`.
-- CURRENT: Task 40 pending approval/review.
-- REMAINING: Tasks 40-50.
+- DONE: Task 39 `96072a85b55b52d757573f954410e7f849dd773a`.
+- DONE: Task 40 `40 critical domain coverage report`.
+- CURRENT: Task 41 pending.
+- REMAINING: Tasks 41-50.
 
 Open items:
-- Do not start Task 40 until Task 39 is committed, pushed, and reviewed.
+- Do not start Task 41 until Task 40 is committed, pushed, and reviewed.
+
+## 2026-05-31 — Task 40 Critical Domain Coverage Report
+
+Objective:
+- Add a generated report that groups tests by critical invariant domain and identifies environment-gated tests plus remaining proof gaps.
+
+Changed files:
+- `.github/workflows/ci.yml`
+- `docs/CRITICAL_DOMAIN_COVERAGE.md`
+- `scripts/critical_domain_coverage_report.sh`
+- `WORKLOG.md`
+
+Implementation notes:
+- Added `scripts/critical_domain_coverage_report.sh`.
+- The script scans Rust test attributes and maps test files/modules into these critical domains:
+  - consensus
+  - persistence
+  - replay
+  - convergence
+  - runtime
+  - P2P
+  - mempool
+  - wallet
+- The report lists each discovered test as active or ignored with the ignored reason.
+- The report includes an explicit `known invariant coverage gaps` section.
+- The report states that it is not line coverage and does not claim that line coverage is proof coverage.
+- Added `docs/CRITICAL_DOMAIN_COVERAGE.md` generated from the script.
+- Added a lightweight CI artifact job `critical-domain-coverage-report` that runs after `release-blocker-gate` and uploads the generated Markdown report. This job does not run tests and does not alter the release-blocker gate.
+
+Validation:
+- `bash -n scripts/critical_domain_coverage_report.sh` (PASS)
+- `scripts/critical_domain_coverage_report.sh > /tmp/dom-critical-domain-coverage.md` (PASS)
+- Verified generated report is non-empty and contains all required domain headings plus ignored-test and gap sections (PASS)
+- `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml')); print('yaml ok')"` (PASS)
+- `git diff --check` (PASS)
+
+Coverage report note:
+- The generated report is invariant-oriented. It intentionally does not equate line coverage with proof coverage.
 
 ## 2026-05-31 — Task 39 CI Gate Critical Tests
 
