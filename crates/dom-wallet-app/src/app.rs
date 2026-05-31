@@ -301,7 +301,7 @@ impl WalletApp {
                 status_badge(
                     ui,
                     self.runtime.node_connection.state_label(),
-                    network_state_color(self.runtime.node_connection.state),
+                    network_state_color(self.runtime.node_connection.status.state),
                 );
                 if let Some(status) = &self.runtime.node_status {
                     labeled_value(ui, "Network", &status.network);
@@ -518,7 +518,7 @@ impl WalletApp {
                 status_badge(
                     ui,
                     self.runtime.node_connection.state_label(),
-                    network_state_color(self.runtime.node_connection.state),
+                    network_state_color(self.runtime.node_connection.status.state),
                 );
                 labeled_value(
                     ui,
@@ -528,7 +528,7 @@ impl WalletApp {
                 if let Some(next) = self.runtime.node_connection.next_reconnect_at() {
                     labeled_value(ui, "Next attempt", &next.to_string());
                 }
-                if let Some(error) = &self.runtime.node_connection.last_error {
+                if let Some(error) = &self.runtime.node_connection.status.last_error {
                     labeled_value(ui, "Last error", error);
                 }
                 if let Some(status) = &self.runtime.node_status {
@@ -843,11 +843,15 @@ fn status_color(status: &str) -> egui::Color32 {
     }
 }
 
-fn network_state_color(state: crate::runtime::WalletNetworkState) -> egui::Color32 {
+fn network_state_color(state: crate::runtime::NetworkStatusState) -> egui::Color32 {
     match state {
-        crate::runtime::WalletNetworkState::Connected => palette().success,
-        crate::runtime::WalletNetworkState::Reconnecting => palette().warning,
-        crate::runtime::WalletNetworkState::Disconnected => palette().danger,
+        crate::runtime::NetworkStatusState::Connected => palette().success,
+        crate::runtime::NetworkStatusState::TcpConnecting
+        | crate::runtime::NetworkStatusState::TcpConnected
+        | crate::runtime::NetworkStatusState::Handshaking
+        | crate::runtime::NetworkStatusState::Reconnecting => palette().warning,
+        crate::runtime::NetworkStatusState::Disconnected
+        | crate::runtime::NetworkStatusState::Failed => palette().danger,
     }
 }
 
@@ -855,7 +859,7 @@ fn runtime_status_strip(ui: &mut egui::Ui, runtime: &AppRuntime) {
     status_badge(
         ui,
         runtime.node_connection.state_label(),
-        network_state_color(runtime.node_connection.state),
+        network_state_color(runtime.node_connection.status.state),
     );
     if let Some(balance) = runtime.wallet_balance {
         status_badge(
