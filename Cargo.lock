@@ -1477,6 +1477,7 @@ dependencies = [
  "dom-wire",
  "futures",
  "hex",
+ "k256",
  "primitive-types",
  "rand 0.8.6",
  "randomx-rs",

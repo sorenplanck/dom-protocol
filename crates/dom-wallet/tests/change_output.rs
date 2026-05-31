@@ -129,7 +129,11 @@ fn change_is_registered_and_spendable_after_confirmation() {
         .expect("second spend MUST be fundable by the change — else funds are lost");
 
     // The second spend's sole input must be the change commitment.
-    assert_eq!(tx2.inputs.len(), 1, "second spend selects exactly the change");
+    assert_eq!(
+        tx2.inputs.len(),
+        1,
+        "second spend selects exactly the change"
+    );
     assert_eq!(
         *tx2.inputs[0].commitment.as_bytes(),
         change_commitment,
