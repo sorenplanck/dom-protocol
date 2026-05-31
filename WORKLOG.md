@@ -43,12 +43,47 @@ Sequence state:
 - DONE: Task 46 `a89a36160e73e57fa45f4887797e0c8e611c4787`.
 - DONE: Task 47 `bc8bbd630e3f1763e132e98cf37ce9f8379e6927`.
 - DONE: Task 48 `6a3fb9cc8bcd6162bf8f5352a84fb237b441ef56`.
-- DONE: Task 49 committed locally; authoritative hash is in git history/final report.
-- CURRENT: Task 50 pending.
-- REMAINING: Task 50.
+- DONE: Task 49 `c4e1e37b090150e180df8244fedfaf6d17e625f2`.
+- DONE: Task 50 committed locally; authoritative hash is in git history/final report.
+- CURRENT: none.
+- REMAINING: none for Tasks 21-50.
 
 Open items:
-- Do not start Task 50 until Task 49 is pushed, verified, and reviewed.
+- Tasks 21-50 complete after Task 50 push verification.
+
+## 2026-05-31 — Task 50 Document Devnet Testnet Mainnet
+
+Objective:
+- Document operational and consensus differences between devnet, testnet, regtest, and mainnet using the actual code names/defaults.
+
+Changed files:
+- `docs/NETWORK_MODES.md`
+- `docs/DEPLOYMENT.md`
+- `docs/README.md`
+- `WORKLOG.md`
+
+Implementation notes:
+- Added `docs/NETWORK_MODES.md`.
+- Documented actual `dom_config::Network` variants: `Mainnet`, `Testnet`, `Regtest`.
+- Documented that there is no separate `Devnet` enum/network magic today; devnet is an operational profile over `Testnet` or `Regtest`.
+- Documented network magic values, default ports, default listeners, genesis status, difficulty policy, bootstrap peer defaults, mining modes, persistence paths, and safety expectations.
+- Documented that mainnet is not finalized: `GENESIS_HASH_MAINNET` remains the zero placeholder and startup is guarded.
+- Added JSON `NodeConfig` examples using actual field names, including `miner_throttle`.
+- Documented backbone node operation through the systemd runbook.
+- Documented wallet connection guidance for devnet/testnet without secrets.
+- Linked the new mode reference from `docs/DEPLOYMENT.md` and `docs/README.md`.
+
+Validation:
+- `python3` JSON-example validation for all fenced JSON configs in `docs/NETWORK_MODES.md` (PASS)
+- `cargo fmt` (PASS)
+- `cargo check` (PASS)
+- `git diff --check` (PASS)
+
+Test note:
+- No narrow Rust tests were run for Task 50 because the change is documentation only; no Rust crate behavior changed.
+
+Integration test note:
+- No `dom-integration-tests` command was run for Task 50 because no integration behavior changed.
 
 ## 2026-05-31 — Task 49 Windows Portable Packaging
 
