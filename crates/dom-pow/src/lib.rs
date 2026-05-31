@@ -617,12 +617,29 @@ pub fn target_to_difficulty_u256(target: &[u8; 32]) -> (u128, u128) {
     (hi, lo)
 }
 
-/// Scalar difficulty for BlockHeader.total_difficulty (u128).
+/// Scalar per-block difficulty increment used by chain selection.
 ///
-/// Uses the full U256 result for correctness, then takes the top 128 bits.
-/// Two targets that differ only in the bottom 128 bits may map to the same u128 —
-/// but this only affects precision beyond the resolution of u128 (>2^128 difficulty),
-/// which no real network will reach for centuries.
+/// DOM-FINAL-008: the mathematically complete quotient is available from
+/// [`target_to_difficulty_u256`], while this legacy scalar wrapper intentionally
+/// preserves the current consensus representation for the per-block increment.
+/// The exact boundary is `difficulty > 2^128`: above that point the increment is
+/// represented by the high 128-bit limb and the low limb is ignored, so distinct
+/// U256 quotients in that range may map to the same `u128`.
+///
+/// This is a consistency-over-precision rule, not a node-divergence risk: every
+/// node applies the same deterministic projection before extending it back to
+/// `U256` for `BlockHeader.total_difficulty`. If the boundary were ever crossed,
+/// the single-block work increment would be underestimated, but the accumulated
+/// header field remains a valid `U256` sum of those consensus-defined increments
+/// and all nodes still agree on chain selection. The hash rate required for a
+/// single block to exceed `2^128` difficulty is astronomical; this only affects
+/// precision beyond the resolution of u128 (>2^128 difficulty), which no real
+/// network will reach for centuries.
+///
+/// The plan decision for DOM-FINAL-008 is to document and test this boundary
+/// rather than migrate chain-selection arithmetic now. Changing this function to
+/// return `U256` would be a consensus arithmetic migration with much higher risk
+/// than the theoretical precision limit it addresses.
 pub fn target_to_difficulty(target: &[u8; 32]) -> u128 {
     let (hi, lo) = target_to_difficulty_u256(target);
     // Use hi if non-zero, otherwise lo — preserves ordering correctly
@@ -936,6 +953,55 @@ mod tests {
     fn max_target_gives_min_difficulty() {
         let d = target_to_difficulty(&MAX_TARGET_BYTES);
         assert_eq!(d, 1, "MAX_TARGET must have difficulty 1");
+    }
+
+    #[test]
+    fn scalar_difficulty_boundary_is_deterministic_and_u256_complete() {
+        let max = U256::from_big_endian(&MAX_TARGET_BYTES);
+        let boundary_increment = U256::from(1u8) << 127;
+        let boundary_target_u256 = max / boundary_increment;
+        let mut boundary_target = [0u8; 32];
+        boundary_target_u256.to_big_endian(&mut boundary_target);
+
+        let (boundary_hi, boundary_lo) = target_to_difficulty_u256(&boundary_target);
+        assert_eq!(
+            boundary_hi, 0,
+            "chosen boundary target must stay within the scalar u128 limb"
+        );
+        assert!(
+            boundary_lo >= (1u128 << 127),
+            "boundary difficulty should be near the top half of u128"
+        );
+        assert_eq!(
+            target_to_difficulty(&boundary_target),
+            boundary_lo,
+            "scalar path must return the exact low limb while hi == 0"
+        );
+
+        let mut hardest_target = [0u8; 32];
+        hardest_target[31] = 1;
+        let (hard_hi, hard_lo) = target_to_difficulty_u256(&hardest_target);
+        assert!(
+            hard_hi > 0,
+            "target=1 must produce a quotient above the u128 scalar range"
+        );
+        assert!(
+            hard_lo > 0,
+            "U256 path retains the lower limb ignored by the scalar projection"
+        );
+        let scalar = target_to_difficulty(&hardest_target);
+        assert_eq!(
+            scalar, hard_hi,
+            "above 2^128 the scalar path deterministically uses the high limb"
+        );
+
+        for _ in 0..8 {
+            assert_eq!(target_to_difficulty(&hardest_target), scalar);
+            assert_eq!(
+                target_to_difficulty_u256(&hardest_target),
+                (hard_hi, hard_lo)
+            );
+        }
     }
 
     #[test]
