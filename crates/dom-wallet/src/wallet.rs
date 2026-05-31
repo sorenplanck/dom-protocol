@@ -437,11 +437,7 @@ impl Wallet {
                                 tx_hash: *tx_hash,
                                 inputs,
                                 tx_bytes: record.tx_bytes.clone(),
-                                // The journal's Built event carries no
-                                // change material; a tx reinstated purely
-                                // from the journal has no recoverable
-                                // change. See known-gap note in build_spend.
-                                change: None,
+                                change: record.change.clone(),
                             },
                         );
                     }
@@ -590,9 +586,7 @@ impl Wallet {
                     tx_hash: record.tx_hash,
                     inputs: record.inputs.clone(),
                     tx_bytes: record.tx_bytes.clone(),
-                    // Reinstated from the journal, which carries no change
-                    // material. See known-gap note in build_spend.
-                    change: None,
+                    change: record.change.clone(),
                 },
             );
         }
@@ -1112,12 +1106,9 @@ impl Wallet {
     /// crash-recovery mirror in `reconcile_with_journal`), since
     /// `scan_block` cannot recover its random blinding.
     ///
-    /// KNOWN GAP: a crash in the narrow window between `build_spend`'s
-    /// `Built` journal append and its `save()` loses the in-memory
-    /// PendingChange; a tx later reinstated *purely* from the journal
-    /// (whose `Built` event carries no change material) would, if it then
-    /// confirmed, leave the change unspendable. Closing this requires
-    /// extending the `Built` journal event — deferred pending review.
+    /// The `Built` journal event also carries the pending change material,
+    /// so a crash between journal append and `save()` can still recover the
+    /// future change output before the transaction confirms.
     pub fn build_spend(
         &mut self,
         _recipient_commitment: Commitment,
@@ -1193,6 +1184,7 @@ impl Wallet {
                 tx_hex: Some(hex::encode(tx.to_bytes()?)),
                 output_count: tx.outputs.len() as u32,
                 fee_noms: fee,
+                change: pending_change.clone(),
             },
         )?;
 
