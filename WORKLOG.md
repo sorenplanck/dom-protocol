@@ -36,15 +36,66 @@ Sequence state:
 - DONE: Task 39 `96072a85b55b52d757573f954410e7f849dd773a`.
 - DONE: Task 40 `beabf20e636736415a12f8892bd89dc047020a35`.
 - DONE: Task 41 `861f24faf3aaf1b59d93bee174e657b4287106cc`.
-- DONE: Task 42 `42 networkstatus not peerregistry`.
-- DONE: Task 43 `43 wallet ping pong`.
-- DONE: Task 44 `44 wallet ui network diagnostics`.
-- DONE: Task 45 `45 exportable logs`.
-- CURRENT: Task 46 pending.
-- REMAINING: Tasks 46-50.
+- DONE: Task 42 `e84f42c50c2af9ac32f925e565b1b8e2ea30cb3b`.
+- DONE: Task 43 `435021bdcf7af4501a7bba03bf2231338f271d65`.
+- DONE: Task 44 `67ca932e828e2a99b93a10986184c193c28cac3d`.
+- DONE: Task 45 `27a89db8b5965621747fbb10fae6c064a51b6bdf`.
+- DONE: Task 46 committed locally; authoritative hash is in git history/final report.
+- CURRENT: Task 47 pending.
+- REMAINING: Tasks 47-50.
 
 Open items:
-- Do not start Task 46 until Task 45 is committed, pushed, and reviewed.
+- Do not start Task 47 until Task 46 is pushed, verified, and reviewed.
+
+## 2026-05-31 — Task 46 Separate Dev/Test Mining
+
+Objective:
+- Make mining mode explicit so fast/easy dev mining cannot leak into normal, testnet, or mainnet-like operation.
+
+Changed files:
+- `crates/dom-node/src/miner.rs`
+- `crates/dom-config/src/lib.rs`
+- `docs/REGTEST.md`
+- `WORKLOG.md`
+
+Implementation notes:
+- Added explicit `MiningMode` classification:
+  - `MainnetLikeRandomX`
+  - `TestnetConfiguredRandomX`
+  - `RegtestRandomXLight`
+  - `RegtestFastDevOnly`
+- `MiningMode` is derived from `NodeConfig.network` plus `pow_validation_mode_for_network(network.magic())`.
+- `mine_one_block` still computes the block target through `compute_expected_target`; no fixed target path was added.
+- `FastDevOnly` is accepted only for `Network::Regtest` at the miner classification layer. Mainnet/Testnet plus `FastDevOnly` now fails hard.
+- Existing `DOM_REGTEST_FAST_MINING` fail-closed guard in `dom-pow` was preserved.
+- `REGTEST_TARGET_COMPACT`, `TESTNET_TARGET_COMPACT`, `GENESIS_TARGET_COMPACT`, ASERT, and RandomX behavior were not changed.
+- Updated obsolete Regtest docs/comments that referenced the removed `REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION` name.
+
+Tests added/changed:
+- `miner::genesis_determinism_tests::dev_mode_can_mine_fast_with_consensus_target`
+- `miner::genesis_determinism_tests::normal_mode_cannot_use_dev_target_accidentally`
+- `miner::genesis_determinism_tests::fast_mining_fails_closed_on_production_like_networks`
+- `miner::genesis_determinism_tests::config_parsing_does_not_silently_fall_back_to_easy_mining`
+- `miner::genesis_determinism_tests::miner_uses_consensus_target_not_fixed_dev_target`
+- Updated `regtest_mining_uses_light_vm_only_on_regtest` to assert through `MiningMode`.
+- Preserved `miner_validator_still_share_compute_expected_target`.
+
+Validation:
+- `cargo fmt` (PASS)
+- `cargo check` (PASS)
+- `cargo test -p dom-node dev_mode_can_mine_fast_with_consensus_target` (PASS)
+- `cargo test -p dom-node normal_mode_cannot_use_dev_target_accidentally` (PASS)
+- `cargo test -p dom-node fast_mining_fails_closed_on_production_like_networks` (PASS)
+- `cargo test -p dom-node config_parsing_does_not_silently_fall_back_to_easy_mining` (PASS)
+- `cargo test -p dom-node miner_uses_consensus_target_not_fixed_dev_target` (PASS)
+- `cargo test -p dom-node miner_validator_still_share_compute_expected_target` (PASS)
+- `cargo test -p dom-node regtest_mining_uses_light_vm_only_on_regtest` (PASS)
+- `cargo test -p dom-pow fast_pow_mode_activates_only_for_explicit_regtest_or_test_mode` (PASS)
+- `cargo test -p dom-config` (PASS)
+- `git diff --check` (PASS)
+
+Integration test note:
+- No `dom-integration-tests` command was run for Task 46 because the implementation changes miner mode classification and guards only; it does not change integration behavior, target computation, ASERT, RandomX, or wire/node convergence behavior.
 
 ## 2026-05-31 — Task 45 Exportable Logs
 
