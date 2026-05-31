@@ -16,8 +16,8 @@ pub enum Network {
     /// (`NETWORK_MAGIC_REGTEST`) prevents peering with Mainnet/Testnet.
     /// Consensus logic is identical to the real networks; only the PoW
     /// target, coinbase maturity, and RandomX VM flags differ — see
-    /// `REGTEST_COINBASE_MATURITY` and
-    /// `REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION` in `dom-core`.
+    /// `REGTEST_COINBASE_MATURITY` in `dom-core` and
+    /// `REGTEST_TARGET_COMPACT` in `dom-pow`.
     Regtest,
 }
 
@@ -79,6 +79,11 @@ pub struct NodeConfig {
     pub seed_peers: Vec<String>,
     /// Enable mining.
     pub mine: bool,
+    /// Local miner CPU throttling. This only affects the node process' CPU
+    /// usage and is not serialized into blocks, headers, PoW preimages, or
+    /// network messages.
+    #[serde(default)]
+    pub miner_throttle: MinerThrottleConfig,
     /// Miner reward address.
     pub miner_address: Option<String>,
     /// Path to the wallet file (.dom). Required if mining and using wallet-integrated mining.
@@ -96,6 +101,20 @@ pub struct NodeConfig {
     pub rpc_listen_addr: Option<String>,
 }
 
+/// Local miner CPU throttle configuration.
+///
+/// This is an operator resource-control setting only. It is not consensus
+/// data and must never affect target calculation, block validity, or emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MinerThrottleConfig {
+    /// Enable local throttling.
+    pub enabled: bool,
+    /// Apply a local yield/sleep after this many nonce attempts.
+    pub yield_every_nonces: u64,
+    /// Sleep duration in microseconds when throttling. Zero means yield only.
+    pub sleep_micros: u64,
+}
+
 impl NodeConfig {
     /// Default mainnet config.
     pub fn mainnet() -> Self {
@@ -111,6 +130,7 @@ impl NodeConfig {
             ],
             seed_peers: vec![],
             mine: false,
+            miner_throttle: MinerThrottleConfig::default(),
             miner_address: None,
             wallet_path: None,
             wallet_password: None,
@@ -129,6 +149,7 @@ impl NodeConfig {
             dns_seeds: vec!["testnet-seed1.dom-protocol.org".into()],
             seed_peers: vec![],
             mine: true,
+            miner_throttle: MinerThrottleConfig::default(),
             miner_address: None,
             wallet_path: None,
             wallet_password: None,
@@ -150,6 +171,7 @@ impl NodeConfig {
             dns_seeds: vec![],
             seed_peers: vec![],
             mine: false,
+            miner_throttle: MinerThrottleConfig::default(),
             miner_address: None,
             wallet_path: None,
             wallet_password: None,

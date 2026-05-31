@@ -1,0 +1,43 @@
+[Unit]
+Description=DOM Protocol Backbone Node
+Documentation=file:/usr/local/share/doc/dom/BACKBONE_SYSTEMD.md
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=dom
+Group=dom
+WorkingDirectory=/var/lib/dom-backbone
+EnvironmentFile=-/etc/dom/backbone.env
+ExecStartPre=/usr/bin/test -x /usr/local/bin/dom-node
+ExecStart=/usr/bin/env /usr/local/bin/dom-node
+
+# Restart policy for unattended VPS backbone operation.
+Restart=always
+RestartSec=10
+
+# P2P, LMDB, and journal-backed operation can use many descriptors.
+LimitNOFILE=65536
+
+# Logs are emitted to the systemd journal.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dom-backbone
+
+# Security hardening. The service writes only its data directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+ReadWritePaths=/var/lib/dom-backbone
+
+[Install]
+WantedBy=multi-user.target

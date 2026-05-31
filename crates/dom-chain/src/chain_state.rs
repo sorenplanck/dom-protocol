@@ -17,7 +17,7 @@ use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::utxo::UtxoEntry;
 use dom_store::{DomStore, METADATA_UTXO_SET_DIGEST_KEY};
 use primitive_types::U256;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, info};
 
 use crate::reorg::{check_reorg_depth, find_common_ancestor};
@@ -30,6 +30,9 @@ use crate::reorg::{check_reorg_depth, find_common_ancestor};
 /// fork the local chain from itself.
 pub const CHAIN_CORRUPT_SENTINEL: &str = "CHAIN_CORRUPT";
 const UTXO_SET_DIGEST_DOMAIN: &[u8] = b"DOM_CANONICAL_UTXO_SET_V1";
+pub const MAX_RETAINED_SIDE_BRANCH_TIPS: usize = 8;
+pub const MAX_RETAINED_SIDE_BRANCH_REORG_DEPTH: u64 = dom_core::MAX_REORG_DEPTH_POLICY;
+pub const MAX_RETAINED_SIDE_BRANCH_LENGTH: u64 = dom_core::MAX_REORG_DEPTH_POLICY;
 
 type UtxoBytes = ([u8; 33], Vec<u8>);
 type SpentCommitment = [u8; 33];
@@ -168,6 +171,7 @@ impl ChainState {
                 }
                 rebuild_kernel_index_from_canonical_chain(&store, header.height)?;
                 ensure_canonical_utxo_set(&store, header.height)?;
+                prune_retained_side_chains(&store, header.height, hash)?;
                 (
                     Hash256::from_bytes(hash),
                     header.height,
@@ -175,7 +179,7 @@ impl ChainState {
                 )
             }
             None => {
-                ensure_canonical_utxo_set(&store, BlockHeight::GENESIS)?;
+                prune_retained_side_chains(&store, BlockHeight::GENESIS, [0u8; 32])?;
                 (Hash256::ZERO, BlockHeight::GENESIS, U256::zero())
             }
         };
@@ -333,6 +337,7 @@ impl ChainState {
             self.tip_hash = block_hash;
             self.tip_height = header.height;
             self.tip_difficulty = header.total_difficulty;
+            prune_retained_side_chains(&self.store, self.tip_height, *self.tip_hash.as_bytes())?;
             info!(
                 "New chain tip: height={}, hash={}",
                 header.height, block_hash
@@ -344,6 +349,7 @@ impl ChainState {
                 &header_bytes,
                 &block_body_bytes,
             )?;
+            prune_retained_side_chains(&self.store, self.tip_height, *self.tip_hash.as_bytes())?;
             if extends_best_chain {
                 let reorg = self.promote_heavier_known_tip(block_hash)?;
                 return Ok(ConnectResult::Reorg(reorg));
@@ -1050,6 +1056,7 @@ impl ChainState {
         self.tip_hash = new_tip_hash;
         self.tip_height = new_tip_header.height;
         self.tip_difficulty = new_tip_header.total_difficulty;
+        prune_retained_side_chains(&self.store, self.tip_height, *self.tip_hash.as_bytes())?;
         info!(
             "Reorg applied: new tip height={}, hash={}, ancestor={}",
             self.tip_height, self.tip_hash, ancestor
@@ -1112,7 +1119,7 @@ fn reconstruct_canonical_utxo_set(
     tip_height: BlockHeight,
 ) -> Result<BTreeMap<[u8; 33], Vec<u8>>, DomError> {
     let mut utxos = BTreeMap::new();
-    for h in 1..=tip_height.0 {
+    for h in 0..=tip_height.0 {
         let hash = store.get_hash_at_height(h)?.ok_or_else(|| {
             DomError::Internal(format!(
                 "{CHAIN_CORRUPT_SENTINEL}: missing canonical height_index entry at height {h} during UTXO rebuild"
@@ -1206,7 +1213,7 @@ fn rebuild_kernel_index_from_canonical_chain(
     store: &DomStore,
     tip_height: BlockHeight,
 ) -> Result<(), DomError> {
-    for h in 1..=tip_height.0 {
+    for h in 0..=tip_height.0 {
         let hash = store.get_hash_at_height(h)?.ok_or_else(|| {
             DomError::Internal(format!(
                 "{CHAIN_CORRUPT_SENTINEL}: missing canonical height_index entry at height {h}"
@@ -1556,6 +1563,152 @@ fn build_kernel_updates(
         }
     }
     Ok(out)
+}
+
+#[derive(Debug, Clone)]
+struct RetainedSideTip {
+    hash: [u8; 32],
+    height: u64,
+    total_difficulty: U256,
+}
+
+fn prune_retained_side_chains(
+    store: &DomStore,
+    canonical_tip_height: BlockHeight,
+    canonical_tip_hash: [u8; 32],
+) -> Result<(), DomError> {
+    let headers = store.read_all_block_headers_raw()?;
+    if headers.is_empty() {
+        return Ok(());
+    }
+
+    let canonical_hashes = canonical_hashes(store, canonical_tip_height)?;
+    let noncanonical: BTreeMap<[u8; 32], BlockHeader> = headers
+        .iter()
+        .filter_map(|(hash, bytes)| {
+            if canonical_hashes.contains(hash) {
+                return None;
+            }
+            Some((hash, bytes))
+        })
+        .map(|(hash, bytes)| Ok((*hash, BlockHeader::from_bytes(bytes)?)))
+        .collect::<Result<_, DomError>>()?;
+
+    if noncanonical.is_empty() {
+        return Ok(());
+    }
+
+    let mut child_parents = BTreeSet::new();
+    for header in noncanonical.values() {
+        child_parents.insert(*header.prev_hash.as_bytes());
+    }
+
+    let mut candidate_tips = Vec::new();
+    for (hash, header) in &noncanonical {
+        if child_parents.contains(hash) {
+            continue;
+        }
+        let Some(common_ancestor) = find_common_ancestor(
+            store,
+            Hash256::from_bytes(canonical_tip_hash),
+            Hash256::from_bytes(*hash),
+        )?
+        else {
+            continue;
+        };
+        if common_ancestor == Hash256::from_bytes(*hash) {
+            continue;
+        }
+        let ancestor_height = if common_ancestor == Hash256::ZERO {
+            0
+        } else {
+            let Some(ancestor_header) =
+                load_retention_header(store, &headers, common_ancestor.as_bytes())?
+            else {
+                continue;
+            };
+            ancestor_header.height.0
+        };
+        let disconnect_depth = canonical_tip_height.0.saturating_sub(ancestor_height);
+        let branch_length = header.height.0.saturating_sub(ancestor_height);
+        if disconnect_depth > MAX_RETAINED_SIDE_BRANCH_REORG_DEPTH
+            || branch_length > MAX_RETAINED_SIDE_BRANCH_LENGTH
+        {
+            continue;
+        }
+        candidate_tips.push(RetainedSideTip {
+            hash: *hash,
+            height: header.height.0,
+            total_difficulty: header.total_difficulty,
+        });
+    }
+
+    candidate_tips.sort_by(|left, right| {
+        right
+            .total_difficulty
+            .cmp(&left.total_difficulty)
+            .then_with(|| right.height.cmp(&left.height))
+            .then_with(|| left.hash.as_slice().cmp(right.hash.as_slice()))
+    });
+    candidate_tips.truncate(MAX_RETAINED_SIDE_BRANCH_TIPS);
+
+    let mut keep_hashes = canonical_hashes;
+    for tip in candidate_tips {
+        let mut cursor = Hash256::from_bytes(tip.hash);
+        let mut walked = 0u64;
+        loop {
+            if keep_hashes.contains(cursor.as_bytes()) {
+                break;
+            }
+            keep_hashes.insert(*cursor.as_bytes());
+            walked = walked.saturating_add(1);
+            if walked > MAX_RETAINED_SIDE_BRANCH_LENGTH {
+                break;
+            }
+            let Some(header) = load_retention_header(store, &headers, cursor.as_bytes())? else {
+                break;
+            };
+            if header.prev_hash == Hash256::ZERO {
+                break;
+            }
+            cursor = header.prev_hash;
+        }
+    }
+
+    let prune_hashes: BTreeSet<[u8; 32]> = noncanonical
+        .keys()
+        .filter(|hash| !keep_hashes.contains(*hash))
+        .copied()
+        .collect();
+    store.prune_known_blocks(&prune_hashes)
+}
+
+fn canonical_hashes(
+    store: &DomStore,
+    canonical_tip_height: BlockHeight,
+) -> Result<BTreeSet<[u8; 32]>, DomError> {
+    let mut out = BTreeSet::new();
+    for height in 0..=canonical_tip_height.0 {
+        let Some(hash) = store.get_hash_at_height(height)? else {
+            continue;
+        };
+        out.insert(hash);
+    }
+    Ok(out)
+}
+
+fn load_retention_header(
+    store: &DomStore,
+    cached_headers: &BTreeMap<[u8; 32], Vec<u8>>,
+    hash: &[u8; 32],
+) -> Result<Option<BlockHeader>, DomError> {
+    if let Some(bytes) = cached_headers.get(hash) {
+        return Ok(Some(BlockHeader::from_bytes(bytes)?));
+    }
+    match store.get_block_header(hash)? {
+        Some(bytes) => Ok(Some(BlockHeader::from_bytes(&bytes)?)),
+        None => Ok(None),
+    }
 }
 
 /// Outcome of attempting to connect a block to the chain.
