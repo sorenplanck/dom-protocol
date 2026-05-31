@@ -13,7 +13,8 @@ use dom_core::{
 };
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_pow::{
-    compute_expected_target, pow_params_for_network, CompactTarget, REGTEST_TARGET_COMPACT,
+    compute_expected_target, fast_pow_hash, hash_meets_target, pow_params_for_network,
+    randomx_seed_height, target_to_difficulty, CompactTarget, REGTEST_TARGET_COMPACT,
 };
 use dom_serialization::{DomDeserialize, DomSerialize};
 use primitive_types::U256;
@@ -123,6 +124,77 @@ fn populate_history(
     }
 
     ChainState::open(store, Hash256::from_bytes(genesis_hash), network_magic).expect("chain open")
+}
+
+fn populate_history_with_timestamps(
+    dir: &TempDir,
+    genesis_hash: [u8; 32],
+    network_magic: u32,
+    timestamps: &[u64],
+) -> ChainState {
+    let store = open_test_store(dir.path());
+    let target = CompactTarget(REGTEST_TARGET_COMPACT);
+    let target_bytes = target.to_target().expect("target bytes");
+    let block_diff = target_to_difficulty(&target_bytes);
+    let mut prev_hash = Hash256::ZERO;
+    let mut total_difficulty = U256::zero();
+
+    for (height, timestamp) in timestamps.iter().copied().enumerate() {
+        total_difficulty = total_difficulty.saturating_add(U256::from(block_diff));
+        let block = synthetic_block(
+            prev_hash,
+            height as u64,
+            timestamp,
+            target,
+            total_difficulty.low_u64(),
+            height as u64 + 1,
+        );
+        let header_bytes = block.header.to_bytes().expect("header serialize");
+        let body_bytes = block.to_bytes().expect("block serialize");
+        let hash = block_hash(&block.header);
+        store
+            .commit_block(
+                hash.as_bytes(),
+                height as u64,
+                &header_bytes,
+                &body_bytes,
+                &[],
+                &[],
+                &[],
+            )
+            .expect("commit synthetic block");
+        prev_hash = hash;
+    }
+
+    ChainState::open(store, Hash256::from_bytes(genesis_hash), network_magic).expect("chain open")
+}
+
+fn finish_pow_for_header(chain: &ChainState, mut header: BlockHeader) -> BlockHeader {
+    let seed_height = randomx_seed_height(header.height.0);
+    let seed_hash = chain
+        .store
+        .get_hash_at_height(seed_height)
+        .expect("seed height lookup")
+        .unwrap_or([0u8; 32]);
+    let target = header.target.to_target().expect("target bytes");
+    let mut nonce = 0u64;
+    loop {
+        header.pow.nonce = nonce;
+        header.pow.randomx_hash = Hash256::ZERO;
+        let hash = fast_pow_hash(&seed_hash, &header.pow_preimage());
+        if hash_meets_target(&hash, &target) {
+            header.pow.randomx_hash = Hash256::from_bytes(hash);
+            return header;
+        }
+        nonce = nonce.wrapping_add(1);
+    }
+}
+
+fn expected_child_total_difficulty(parent: &BlockHeader, target: CompactTarget) -> U256 {
+    let block_diff = target_to_difficulty(&target.to_target().expect("target bytes"));
+    parent
+        .total_difficulty
+        .saturating_add(U256::from(block_diff))
 }
 
 #[test]
@@ -307,7 +379,97 @@ fn public_validator_rejects_wrong_asert_target() {
         rangeproof_root: Hash256::ZERO,
         total_kernel_offset: [0u8; 32],
         target: CompactTarget(GENESIS_TARGET_COMPACT),
-        total_difficulty: U256::zero(),
+        total_difficulty: expected_child_total_difficulty(
+            &parent,
+            CompactTarget(GENESIS_TARGET_COMPACT),
+        ),
+        pow: ProofOfWork {
+            nonce: 0,
+            randomx_hash: Hash256::ZERO,
+        },
+    };
+    let header = finish_pow_for_header(&chain, header);
+
+    let err = chain
+        .validate_header_only(&header, Timestamp(child_timestamp.0 + 1))
+        .expect_err("wrong ASERT target must be rejected");
+    assert!(
+        err.to_string().contains("target mismatch"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn validate_header_only_rejects_non_increasing_parent_timestamp() {
+    let dir = TempDir::new().unwrap();
+    let chain = populate_history(&dir, GENESIS_HASH_REGTEST, NETWORK_MAGIC_REGTEST, 1, 1);
+    let parent_bytes = chain
+        .store
+        .get_block_header(chain.tip_hash.as_bytes())
+        .expect("parent lookup")
+        .expect("parent header");
+    let parent = BlockHeader::from_bytes(&parent_bytes).expect("parent decode");
+    let child_height = parent.height.checked_next().expect("next height");
+    let target = CompactTarget(REGTEST_TARGET_COMPACT);
+    let header = BlockHeader {
+        version: dom_core::PROTOCOL_VERSION,
+        height: child_height,
+        prev_hash: chain.tip_hash,
+        timestamp: parent.timestamp,
+        output_root: Hash256::ZERO,
+        kernel_root: Hash256::ZERO,
+        rangeproof_root: Hash256::ZERO,
+        total_kernel_offset: [0u8; 32],
+        target,
+        total_difficulty: expected_child_total_difficulty(&parent, target),
+        pow: ProofOfWork {
+            nonce: 0,
+            randomx_hash: Hash256::ZERO,
+        },
+    };
+
+    let err = chain
+        .validate_header_only(&header, Timestamp(parent.timestamp.0 + 1))
+        .expect_err("non-increasing timestamp must be rejected");
+    assert!(
+        err.to_string()
+            .contains("not greater than parent timestamp"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn validate_header_only_rejects_median_time_past_violation() {
+    let dir = TempDir::new().unwrap();
+    let base = dom_core::GENESIS_TIMESTAMP_TESTNET;
+    let mut timestamps = vec![base + 1_000; 11];
+    timestamps.push(base + 100);
+    let chain = populate_history_with_timestamps(
+        &dir,
+        GENESIS_HASH_REGTEST,
+        NETWORK_MAGIC_REGTEST,
+        &timestamps,
+    );
+    let parent_bytes = chain
+        .store
+        .get_block_header(chain.tip_hash.as_bytes())
+        .expect("parent lookup")
+        .expect("parent header");
+    let parent = BlockHeader::from_bytes(&parent_bytes).expect("parent decode");
+    let child_height = parent.height.checked_next().expect("next height");
+    let child_timestamp = Timestamp(parent.timestamp.0 + 1);
+    let target = CompactTarget(REGTEST_TARGET_COMPACT);
+    let header = BlockHeader {
+        version: dom_core::PROTOCOL_VERSION,
+        height: child_height,
+        prev_hash: chain.tip_hash,
+        timestamp: child_timestamp,
+        output_root: Hash256::ZERO,
+        kernel_root: Hash256::ZERO,
+        rangeproof_root: Hash256::ZERO,
+        total_kernel_offset: [0u8; 32],
+        target,
+        total_difficulty: expected_child_total_difficulty(&parent, target),
         pow: ProofOfWork {
             nonce: 0,
             randomx_hash: Hash256::ZERO,
@@ -316,9 +478,52 @@ fn public_validator_rejects_wrong_asert_target() {
 
     let err = chain
         .validate_header_only(&header, Timestamp(child_timestamp.0 + 1))
-        .expect_err("wrong ASERT target must be rejected");
+        .expect_err("MTP violation must be rejected");
     assert!(
-        err.to_string().contains("target mismatch"),
+        err.to_string().contains("median-time-past"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn validate_header_only_rejects_total_difficulty_mismatch() {
+    let dir = TempDir::new().unwrap();
+    let chain = populate_history(&dir, GENESIS_HASH_REGTEST, NETWORK_MAGIC_REGTEST, 1, 1);
+    let parent_bytes = chain
+        .store
+        .get_block_header(chain.tip_hash.as_bytes())
+        .expect("parent lookup")
+        .expect("parent header");
+    let parent = BlockHeader::from_bytes(&parent_bytes).expect("parent decode");
+    let child_height = parent.height.checked_next().expect("next height");
+    let child_timestamp = parent
+        .timestamp
+        .checked_add_secs(1)
+        .expect("next timestamp");
+    let target = CompactTarget(REGTEST_TARGET_COMPACT);
+    let header = BlockHeader {
+        version: dom_core::PROTOCOL_VERSION,
+        height: child_height,
+        prev_hash: chain.tip_hash,
+        timestamp: child_timestamp,
+        output_root: Hash256::ZERO,
+        kernel_root: Hash256::ZERO,
+        rangeproof_root: Hash256::ZERO,
+        total_kernel_offset: [0u8; 32],
+        target,
+        total_difficulty: parent.total_difficulty,
+        pow: ProofOfWork {
+            nonce: 0,
+            randomx_hash: Hash256::ZERO,
+        },
+    };
+    let header = finish_pow_for_header(&chain, header);
+
+    let err = chain
+        .validate_header_only(&header, Timestamp(child_timestamp.0 + 1))
+        .expect_err("total difficulty mismatch must be rejected");
+    assert!(
+        err.to_string().contains("total_difficulty mismatch"),
         "unexpected error: {err}"
     );
 }
