@@ -89,6 +89,35 @@ fn block_hash(header: &BlockHeader) -> Hash256 {
     Hash256::from_bytes(arr)
 }
 
+fn commit_genesis(store: &DomStore) {
+    let block = valid_coinbase_only_block(Hash256::ZERO, 0, 1, 0xA0, 0xE0);
+    let header_bytes = block.header.to_bytes().expect("header serialise");
+    let body_bytes = block.to_bytes().expect("block serialise");
+    let hash = block_hash(&block.header);
+    let output = *block.coinbase.output.commitment.as_bytes();
+    let excess = *block.coinbase.kernel.excess.as_bytes();
+
+    store
+        .commit_block(
+            hash.as_bytes(),
+            0,
+            &header_bytes,
+            &body_bytes,
+            &[(
+                output,
+                UtxoEntry {
+                    block_height: 0,
+                    is_coinbase: true,
+                    proof: block.coinbase.output.proof.clone(),
+                }
+                .to_bytes(),
+            )],
+            &[],
+            &[(excess, *hash.as_bytes())],
+        )
+        .expect("commit genesis");
+}
+
 /// Push a synthetic block by writing only its header + body. The
 /// store's `commit_block` requires a full block body and a UTXO / kernel
 /// changeset, none of which are relevant to the chain-DAG walk — using
@@ -258,7 +287,7 @@ fn signed_coinbase(height: BlockHeight, seed: u8) -> CoinbaseTransaction {
     }
 }
 
-fn valid_reorg_block(
+fn synthetic_block(
     prev_hash: Hash256,
     height: u64,
     total_difficulty: u64,
@@ -548,6 +577,7 @@ fn check_reorg_depth_boundary() {
 fn promote_heavier_known_tip_emits_block_level_reorg_metadata() {
     let dir = TempDir::new().expect("tempdir");
     let store = open_test_store(dir.path());
+    commit_genesis(&store);
 
     let shared = valid_coinbase_only_block(Hash256::ZERO, 1, 1, 1, 10);
     let shared_hash = commit_canonical_block(&store, &shared);
@@ -600,6 +630,7 @@ fn promote_heavier_known_tip_emits_block_level_reorg_metadata() {
 fn promote_heavier_known_tip_rewrites_canonical_state_and_survives_restart() {
     let dir = TempDir::new().expect("tempdir");
     let store = open_test_store(dir.path());
+    commit_genesis(&store);
 
     let shared = synthetic_block(Hash256::ZERO, 1, 1, 1, 10, vec![]);
     let shared_hash = commit_canonical_block(&store, &shared);
@@ -718,6 +749,7 @@ fn promote_heavier_known_tip_rewrites_canonical_state_and_survives_restart() {
 fn side_chain_retention_prunes_to_deterministic_tip_bound_and_survives_restart() {
     let dir = TempDir::new().expect("tempdir");
     let store = DomStore::open(dir.path()).expect("open");
+    commit_genesis(&store);
 
     let canonical_1 = valid_coinbase_only_block(Hash256::ZERO, 1, 100, 1, 60);
     let canonical_1_hash = commit_canonical_block(&store, &canonical_1);
@@ -766,6 +798,7 @@ fn side_chain_retention_prunes_to_deterministic_tip_bound_and_survives_restart()
 fn retained_reorg_candidate_is_not_pruned_before_promotion() {
     let dir = TempDir::new().expect("tempdir");
     let store = DomStore::open(dir.path()).expect("open");
+    commit_genesis(&store);
 
     let shared = valid_coinbase_only_block(Hash256::ZERO, 1, 100, 1, 80);
     let shared_hash = commit_canonical_block(&store, &shared);
