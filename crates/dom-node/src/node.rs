@@ -27,7 +27,7 @@ use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tracing::{info, warn};
 
 /// The full DOM node.
@@ -72,6 +72,8 @@ pub struct DomNode {
     pub orphan_pool: Arc<Mutex<RuntimeOrphanPool>>,
     /// Live runtime task supervisor and shutdown coordinator.
     pub task_supervisor: NodeTaskSupervisor,
+    /// Test/runtime observers wait here for chain, mempool, or peer-state changes.
+    pub state_events: Arc<Notify>,
 }
 
 /// Per-connection I/O context passed into message_loop.
@@ -93,6 +95,7 @@ struct NodeServices {
     missing_blocks: Arc<Mutex<MissingBlockTracker>>,
     orphan_pool: Arc<Mutex<RuntimeOrphanPool>>,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+    state_events: Arc<Notify>,
 }
 
 /// Broadcast channels shared across connection tasks.
@@ -380,7 +383,12 @@ impl DomNode {
                 DEFAULT_MAX_ORPHANS_PER_PARENT,
             ))),
             task_supervisor: NodeTaskSupervisor::new(),
+            state_events: Arc::new(Notify::new()),
         })
+    }
+
+    pub fn notify_state_changed(&self) {
+        self.state_events.notify_waiters();
     }
 
     /// Request coordinated shutdown of live node tasks.
@@ -502,6 +510,7 @@ impl DomNode {
             let mempool = self.mempool.clone();
             let relay_tx = self.block_relay_tx.clone();
             let metrics = self.metrics.clone();
+            let state_events = self.state_events.clone();
             let future_shutdown = shutdown.clone();
             supervisor
                 .spawn_critical(TaskKind::FutureQueue, async move {
@@ -576,6 +585,7 @@ impl DomNode {
                                             );
                                         }
                                         let _ = relay_tx.send(deferred.block_bytes);
+                                        state_events.notify_waiters();
                                     }
                                     DeferredReplayAction::Drop => {
                                         if matches!(result, Ok(dom_chain::ConnectResult::SideChain))
@@ -796,6 +806,7 @@ impl DomNode {
                         missing_blocks: self.missing_blocks.clone(),
                         orphan_pool: self.orphan_pool.clone(),
                         wallet: self.wallet.clone(),
+                        state_events: self.state_events.clone(),
                     };
                     let peers = svc.peers.clone();
                     let metrics = svc.metrics.clone();
@@ -825,7 +836,7 @@ impl DomNode {
                                 {
                                     warn!("Persisting peer reputation state failed: {e}");
                                 }
-                                refresh_peer_metrics(&peers, &metrics).await;
+                                refresh_peer_metrics(&peers, &metrics, None).await;
                                 Ok(())
                             })
                             .await
@@ -855,6 +866,7 @@ impl DomNode {
             missing_blocks: self.missing_blocks.clone(),
             orphan_pool: self.orphan_pool.clone(),
             wallet: self.wallet.clone(),
+            state_events: self.state_events.clone(),
         };
         loop {
             if shutdown.is_shutdown() {
@@ -961,7 +973,7 @@ impl DomNode {
                                 {
                                     warn!("Persisting peer reputation state failed: {e}");
                                 }
-                                refresh_peer_metrics(&peers, &metrics).await;
+                                refresh_peer_metrics(&peers, &metrics, None).await;
                                 Ok(())
                             })
                             .await
@@ -1044,6 +1056,7 @@ impl dom_rpc::NodeHandle for DomNode {
         )
         .map_err(|e| dom_rpc::RpcError::Rejected(e.to_string()))?;
         drop(pool);
+        self.notify_state_changed();
         let chain = self
             .chain
             .try_lock()
@@ -1160,7 +1173,7 @@ async fn handle_inbound(
             if let Err(e) = persist_peer_reputation_state(&chain, &svc.peers).await {
                 warn!("Persisting peer reputation state after inbound registration failed: {e}");
             }
-            refresh_peer_metrics(&svc.peers, &svc.metrics).await;
+            refresh_peer_metrics(&svc.peers, &svc.metrics, Some(&svc.state_events)).await;
             // IBD loop: if the inbound peer claims a higher chain, sync from it.
             // Mirrors connect_outbound logic so inbound-only nodes (behind NAT
             // who can only accept connections) still converge to the network's
@@ -1176,6 +1189,7 @@ async fn handle_inbound(
                     addr,
                     peer_hello.best_height,
                     svc.wallet.clone(),
+                    svc.state_events.clone(),
                 )
                 .await
                 {
@@ -1316,7 +1330,7 @@ async fn connect_outbound(
             if let Err(e) = persist_peer_reputation_state(&chain, &svc.peers).await {
                 warn!("Persisting peer reputation state after outbound registration failed: {e}");
             }
-            refresh_peer_metrics(&svc.peers, &svc.metrics).await;
+            refresh_peer_metrics(&svc.peers, &svc.metrics, Some(&svc.state_events)).await;
             let peer_addr = match stream.peer_addr() {
                 Ok(a) => a,
                 Err(_) => {
@@ -1337,6 +1351,7 @@ async fn connect_outbound(
                     peer_addr,
                     peer_hello.best_height,
                     svc.wallet.clone(),
+                    svc.state_events.clone(),
                 )
                 .await
                 {
@@ -2178,7 +2193,11 @@ async fn record_duplicate_block_relay(
     exceeded
 }
 
-async fn refresh_peer_metrics(peers: &Arc<Mutex<PeerManager>>, metrics: &Arc<Metrics>) {
+async fn refresh_peer_metrics(
+    peers: &Arc<Mutex<PeerManager>>,
+    metrics: &Arc<Metrics>,
+    state_events: Option<&Arc<Notify>>,
+) {
     let (peer_count, inbound_peers, outbound_peers) = {
         let mgr = trace_lock("peers", peers).await;
         let mut peer_count = 0u64;
@@ -2206,6 +2225,9 @@ async fn refresh_peer_metrics(peers: &Arc<Mutex<PeerManager>>, metrics: &Arc<Met
     metrics
         .outbound_peers
         .store(outbound_peers, std::sync::atomic::Ordering::Relaxed);
+    if let Some(state_events) = state_events {
+        state_events.notify_waiters();
+    }
 }
 
 /// Persistent message loop after Hello exchange.
@@ -2276,6 +2298,7 @@ struct IbdRuntimeContext<'a> {
     peer_addr: std::net::SocketAddr,
     mempool: Arc<Mutex<Mempool>>,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+    state_events: Arc<Notify>,
 }
 
 #[derive(Clone)]
@@ -2472,6 +2495,7 @@ async fn resume_ibd_block_sync(
                         }
                     }
                 }
+                runtime.state_events.notify_waiters();
             }
             processed = processed.saturating_add(1);
             persist_ibd_state(
@@ -2582,6 +2606,7 @@ async fn run_ibd_session(
     peer_addr: std::net::SocketAddr,
     peer_best_height: u64,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+    state_events: Arc<Notify>,
 ) -> Result<(), DomError> {
     let our_height = chain.lock().await.tip_height.0;
     let (mut ibd, persisted) = initialize_ibd_state(chain, peer_addr, peer_best_height).await?;
@@ -2590,6 +2615,7 @@ async fn run_ibd_session(
         peer_addr,
         mempool: mempool.clone(),
         wallet: wallet.clone(),
+        state_events: state_events.clone(),
     };
     match ibd.begin_session() {
         dom_chain::IbdControl::Complete => {
@@ -2826,6 +2852,7 @@ async fn run_ibd_session(
             mempool,
             peer_addr,
             wallet.clone(),
+            state_events.clone(),
             &mut ibd,
         )
         .await
@@ -2946,6 +2973,7 @@ async fn ibd_sync_round(
     mempool: &Arc<Mutex<Mempool>>,
     peer_addr: std::net::SocketAddr,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+    state_events: Arc<Notify>,
     ibd: &mut dom_chain::IbdState,
 ) -> Result<bool, DomError> {
     use dom_consensus::block::BlockHeader;
@@ -3027,6 +3055,7 @@ async fn ibd_sync_round(
         peer_addr,
         mempool: mempool.clone(),
         wallet,
+        state_events,
     };
     resume_ibd_block_sync(
         stream,
@@ -3384,6 +3413,7 @@ async fn message_loop(
                                         // and AlreadyHave MUST NOT rebroadcast — that
                                         // creates infinite relay loops between peers.
                                         let _ = block_relay_tx.send(block_bytes);
+                                        svc.state_events.notify_waiters();
                                         if let Err(e) = reprocess_orphan_children(
                                             current_block_hash,
                                             &chain,
@@ -3584,6 +3614,7 @@ async fn message_loop(
                                     Err(e) => Err(e),
                                 };
                                 if accepted.is_ok() {
+                                    svc.state_events.notify_waiters();
                                     tracing::debug!(
                                         "Accepted relayed tx {} from {peer_addr}",
                                         hex::encode(tx_hash)
@@ -5239,7 +5270,7 @@ mod tests {
             mgr.peers.insert(banned_addr.to_string(), banned);
         }
 
-        refresh_peer_metrics(&peers, &metrics).await;
+        refresh_peer_metrics(&peers, &metrics, None).await;
 
         assert_eq!(metrics.peer_count.load(Ordering::Relaxed), 2);
         assert_eq!(metrics.inbound_peers.load(Ordering::Relaxed), 1);
@@ -5256,7 +5287,7 @@ mod tests {
             mgr.reserve_outbound("203.0.113.44:33369")
                 .expect("reserve outbound");
         }
-        refresh_peer_metrics(&peers, &metrics).await;
+        refresh_peer_metrics(&peers, &metrics, None).await;
 
         assert_eq!(metrics.peer_count.load(Ordering::Relaxed), 0);
         assert_eq!(metrics.inbound_peers.load(Ordering::Relaxed), 0);
@@ -5266,7 +5297,7 @@ mod tests {
             let mut mgr = peers.lock().await;
             mgr.release_outbound_reservation("203.0.113.44:33369");
         }
-        refresh_peer_metrics(&peers, &metrics).await;
+        refresh_peer_metrics(&peers, &metrics, None).await;
 
         assert_eq!(metrics.peer_count.load(Ordering::Relaxed), 0);
         assert_eq!(metrics.inbound_peers.load(Ordering::Relaxed), 0);

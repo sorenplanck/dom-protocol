@@ -275,6 +275,7 @@ async fn finalize_mined_block(node: &Arc<DomNode>, block: Block) -> Result<u64, 
             .map_err(|e| DomError::Internal(format!("serialize block for relay: {e}")))?
     };
     let _ = node.block_relay_tx.send(block_bytes);
+    node.notify_state_changed();
 
     Ok(new_height)
 }
