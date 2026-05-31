@@ -178,6 +178,10 @@ impl DiagnosticLog {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 fn redact_secret_text(input: &str) -> String {
@@ -481,24 +485,13 @@ impl NetworkStatus {
     }
 }
 
+#[derive(Default)]
 pub struct NodeConnectionSession {
     client: Option<NodeRpcClient>,
     pub status: NetworkStatus,
     pub heartbeat: HeartbeatSession,
     next_reconnect_at: Option<u64>,
     consecutive_failures: u32,
-}
-
-impl Default for NodeConnectionSession {
-    fn default() -> Self {
-        Self {
-            client: None,
-            status: NetworkStatus::default(),
-            heartbeat: HeartbeatSession::default(),
-            next_reconnect_at: None,
-            consecutive_failures: 0,
-        }
-    }
 }
 
 impl NodeConnectionSession {
