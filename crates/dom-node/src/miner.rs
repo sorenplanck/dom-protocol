@@ -439,14 +439,21 @@ pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
             .to_bytes()
             .map_err(|e| DomError::Internal(format!("genesis body serialize: {e}")))?
     };
+    // DOM-AUDIT-001: persist the genesis coinbase into the UTXO/kernel index
+    // here, identically to what the reopen path reconstructs. The genesis
+    // coinbase is spendable by design, so a create that leaves these empty
+    // diverges from a reopened node (which rebuilds them) → chain-split risk.
+    // Reuse the canonical changeset builder so create == reopen by construction.
+    let (new_utxos, spent_utxos, kernel_excesses) =
+        dom_chain::genesis_canonical_changeset(&genesis_block, Hash256::from_bytes(genesis_hash));
     chain.store.commit_block(
         &genesis_hash,
         0,
         &header_bytes,
         &genesis_body,
-        &[],
-        &[],
-        &[],
+        &new_utxos,
+        &spent_utxos,
+        &kernel_excesses,
     )?;
     chain.tip_hash = Hash256::from_bytes(genesis_hash);
     chain.tip_height = dom_core::BlockHeight::GENESIS;
@@ -1501,6 +1508,88 @@ mod genesis_determinism_tests {
             "invalid mined block must not be broadcast before local validation"
         );
 
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    /// DOM-AUDIT-001 regression: a freshly *created* genesis node and a node
+    /// that *reopened* the same data_dir must hold byte-identical UTXO and
+    /// kernel-index databases.
+    ///
+    /// The reopen path (`ChainState::open` → `ensure_canonical_utxo_set` +
+    /// `rebuild_kernel_index_from_canonical_chain`) reconstructs the spendable
+    /// genesis coinbase from the stored block body. If `create_genesis_block`
+    /// persists a different changeset (e.g. an empty one), the created node and
+    /// the reopened node diverge on the genesis coinbase — a latent chain split
+    /// the instant that coinbase is spent. This test pins `create == reopen`.
+    #[tokio::test]
+    async fn genesis_create_persists_same_utxo_and_kernel_state_as_reopen_reconstruct() {
+        use dom_serialization::DomDeserialize;
+
+        std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+        let dir = fresh_test_dir("genesis-create-equals-reopen");
+
+        // --- Create path: build genesis via the miner into a temp data_dir. ---
+        let node = Arc::new(init_test_node(regtest_config(&dir)));
+        super::create_genesis_block(node.clone())
+            .await
+            .expect("create genesis");
+
+        // Snapshot A: raw UTXO + kernel-index dumps right after create, plus the
+        // genesis coinbase commitment read straight from the persisted body (the
+        // unimpeachable source of truth for what the UTXO key must be).
+        let (utxos_a, kernels_a, coinbase_commitment) = {
+            let chain = node.chain.lock().await;
+            let utxos_a = chain.store.read_all_utxos_raw().expect("utxo dump A");
+            let kernels_a = chain
+                .store
+                .read_all_kernel_index_raw()
+                .expect("kernel dump A");
+            let body = chain
+                .store
+                .get_block_body(chain.tip_hash.as_bytes())
+                .expect("genesis body lookup")
+                .expect("genesis body present after create");
+            let genesis_block = Block::from_bytes(&body).expect("decode persisted genesis block");
+            let coinbase_commitment = genesis_block.coinbase.output.commitment.as_bytes().to_vec();
+            (utxos_a, kernels_a, coinbase_commitment)
+        };
+
+        // Release the LMDB environment before reopening the same data_dir.
+        drop(node);
+
+        // --- Reopen path: ChainState::open re-runs the canonical reconstruct. ---
+        let reopened = Arc::new(init_test_node(regtest_config(&dir)));
+        let (utxos_b, kernels_b) = {
+            let chain = reopened.chain.lock().await;
+            let utxos_b = chain.store.read_all_utxos_raw().expect("utxo dump B");
+            let kernels_b = chain
+                .store
+                .read_all_kernel_index_raw()
+                .expect("kernel dump B");
+            (utxos_b, kernels_b)
+        };
+
+        // Byte-for-byte equivalence across the full key/value space of both DBs.
+        assert_eq!(
+            utxos_a, utxos_b,
+            "UTXO database diverged between create and reopen (create != reopen)"
+        );
+        assert_eq!(
+            kernels_a, kernels_b,
+            "kernel index diverged between create and reopen (create != reopen)"
+        );
+
+        // And specifically: the spendable genesis coinbase UTXO is present in BOTH.
+        assert!(
+            utxos_a.contains_key(&coinbase_commitment),
+            "genesis coinbase UTXO missing from the freshly-created UTXO set"
+        );
+        assert!(
+            utxos_b.contains_key(&coinbase_commitment),
+            "genesis coinbase UTXO missing from the reopened/reconstructed UTXO set"
+        );
+
+        drop(reopened);
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 }
