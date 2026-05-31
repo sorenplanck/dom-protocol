@@ -464,13 +464,52 @@ pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
 }
 
 pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
-    let (tip_hash, tip_height, tip_difficulty) = {
+    let (tip_hash, tip_height, tip_difficulty, parent_ts) = {
+        use dom_serialization::DomDeserialize;
         let chain = node.chain.lock().await;
-        (chain.tip_hash, chain.tip_height, chain.tip_difficulty)
+        // Parent timestamp for the strict-progression invariant: consensus
+        // (validate_parent_timestamp_progression in dom-consensus/src/block.rs)
+        // requires child.timestamp > parent.timestamp STRICTLY, on every
+        // network. now_secs() has second resolution, so two blocks mined within
+        // the same wall-clock second would receive equal timestamps and the
+        // second would be rejected by connect_block. Read the parent timestamp
+        // here so the mined block can be forced strictly past it (see
+        // block_timestamp below).
+        //
+        // Genesis / empty chain edge case: when the tip is the genesis sentinel
+        // (height 0 && Hash256::ZERO) or the parent header is absent from the
+        // store, there is no real parent — fall back to 0 and preserve the
+        // existing now_secs() behaviour for the first block.
+        let parent_ts = if chain.tip_height.0 == 0 && chain.tip_hash == Hash256::ZERO {
+            0
+        } else {
+            chain
+                .store
+                .get_block_header(chain.tip_hash.as_bytes())
+                .ok()
+                .flatten()
+                .and_then(|bytes| BlockHeader::from_bytes(&bytes).ok())
+                .map(|header| header.timestamp.0)
+                .unwrap_or(0)
+        };
+        (
+            chain.tip_hash,
+            chain.tip_height,
+            chain.tip_difficulty,
+            parent_ts,
+        )
     };
 
     let new_height = tip_height.0 + 1;
-    let block_timestamp = Timestamp(now_secs());
+    // Force the timestamp strictly past the parent's so the consensus
+    // invariant child.timestamp > parent.timestamp always holds, even when
+    // several blocks are mined within the same wall-clock second (regtest fast
+    // mining). For genesis / empty chain parent_ts == 0, so this collapses back
+    // to now_secs(). Computed BEFORE compute_expected_target so the target is
+    // derived from the exact timestamp that ends up in the block — every later
+    // use (mine_blocking, the BlockHeader below) reuses this one value rather
+    // than re-reading now_secs().
+    let block_timestamp = Timestamp(now_secs().max(parent_ts + 1));
     let target = compute_expected_target(
         node.config.network.magic(),
         block_timestamp,
