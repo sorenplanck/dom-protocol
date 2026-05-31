@@ -463,6 +463,33 @@ pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     Ok(())
 }
 
+/// Aggregate the kernel offsets of a block's transactions into the
+/// header's `total_kernel_offset`.
+///
+/// The block-level balance equation (`verify_block_balance_equation`)
+/// expects `total_kernel_offset` to be the sum of every transaction's
+/// `offset` as a secp256k1 scalar mod n. The coinbase contributes no
+/// offset (its excess is `r·G` only), so it is excluded.
+///
+/// This MUST use the same scalar arithmetic the consensus validator
+/// uses — it mirrors the reference `aggregate_tx_offsets` exactly:
+/// start at `Scalar::ZERO`, add each canonical `tx.offset`, skip any
+/// non-canonical bytes. The result is a `Scalar` reduced mod n, so it
+/// is always `< n` and satisfies `validate_kernel_offset_canonical` by
+/// construction. An empty tx set (coinbase-only block) yields `[0u8; 32]`.
+fn aggregate_block_kernel_offset(transactions: &[Transaction]) -> [u8; 32] {
+    use k256::{elliptic_curve::PrimeField, Scalar};
+    let mut total = Scalar::ZERO;
+    for tx in transactions {
+        let fb = k256::FieldBytes::from(tx.offset);
+        let s_ct = Scalar::from_repr(fb);
+        if s_ct.is_some().into() {
+            total += s_ct.unwrap();
+        }
+    }
+    total.to_repr().into()
+}
+
 pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     let (tip_hash, tip_height, tip_difficulty, parent_ts) = {
         use dom_serialization::DomDeserialize;
@@ -602,6 +629,12 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     let (output_root, kernel_root, rangeproof_root) =
         compute_block_pmmr_roots(&coinbase, &selected_txs)?;
 
+    // Aggregate kernel offset over the included transactions (coinbase
+    // contributes none). The consensus balance equation requires the
+    // header's total_kernel_offset to equal this sum; a coinbase-only
+    // block yields [0u8; 32], preserving prior behaviour.
+    let total_kernel_offset = aggregate_block_kernel_offset(&selected_txs);
+
     // Production-like networks mine with FLAG_FULL_MEM (~2 GB dataset +
     // ~256 MB cache per active miner thread) for ~10× hash-rate vs the
     // cache-only VM.
@@ -632,6 +665,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
                 output_root,
                 kernel_root,
                 rangeproof_root,
+                total_kernel_offset,
                 light_vm,
                 pow_mode,
                 throttle,
@@ -662,6 +696,7 @@ fn mine_blocking(
     output_root: Hash256,
     kernel_root: Hash256,
     rangeproof_root: Hash256,
+    total_kernel_offset: [u8; 32],
     light_vm: bool,
     pow_mode: PowValidationMode,
     throttle: MinerThrottle,
@@ -722,7 +757,7 @@ fn mine_blocking(
             output_root,
             kernel_root,
             rangeproof_root,
-            total_kernel_offset: [0u8; 32],
+            total_kernel_offset,
             target: CompactTarget(target_to_compact(&target)),
             total_difficulty: new_total_diff,
             pow: ProofOfWork {
@@ -774,6 +809,51 @@ fn randomx_hash(vm: &randomx_rs::RandomXVM, preimage: &[u8]) -> Result<[u8; 32],
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&v);
     Ok(arr)
+}
+
+#[cfg(test)]
+mod kernel_offset_tests {
+    //! Block-level kernel-offset aggregation (DOM block-assembly).
+    //!
+    //! `aggregate_block_kernel_offset` must reproduce the consensus
+    //! validator's scalar arithmetic exactly: sum of each tx offset as a
+    //! secp256k1 scalar mod n, coinbase excluded.
+
+    use super::aggregate_block_kernel_offset;
+    use dom_consensus::Transaction;
+
+    /// A bare transaction carrying only an offset — the aggregator reads
+    /// nothing else.
+    fn tx_with_offset(offset: [u8; 32]) -> Transaction {
+        Transaction {
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            kernels: Vec::new(),
+            offset,
+        }
+    }
+
+    /// A big-endian 32-byte scalar repr of a small integer `v`.
+    fn scalar_repr(v: u8) -> [u8; 32] {
+        let mut b = [0u8; 32];
+        b[31] = v;
+        b
+    }
+
+    #[test]
+    fn empty_block_offset_is_zero() {
+        assert_eq!(aggregate_block_kernel_offset(&[]), [0u8; 32]);
+    }
+
+    #[test]
+    fn sum_of_two_known_offsets_matches_expected() {
+        // scalar(2) + scalar(3) == scalar(5), in big-endian repr.
+        let txs = vec![
+            tx_with_offset(scalar_repr(2)),
+            tx_with_offset(scalar_repr(3)),
+        ];
+        assert_eq!(aggregate_block_kernel_offset(&txs), scalar_repr(5));
+    }
 }
 
 #[cfg(test)]
@@ -1050,6 +1130,7 @@ mod genesis_determinism_tests {
             dom_core::Hash256::ZERO,
             dom_core::Hash256::ZERO,
             dom_core::Hash256::ZERO,
+            [0u8; 32],
             mode.light_vm(),
             mode.pow_mode(),
             disabled_throttle(),
@@ -1214,6 +1295,7 @@ mod genesis_determinism_tests {
                 dom_core::Hash256::ZERO,
                 dom_core::Hash256::ZERO,
                 dom_core::Hash256::ZERO,
+                [0u8; 32],
                 true,
                 PowValidationMode::FastDevOnly,
                 throttle,
@@ -1287,6 +1369,7 @@ mod genesis_determinism_tests {
                 dom_core::Hash256::ZERO,
                 dom_core::Hash256::ZERO,
                 dom_core::Hash256::ZERO,
+                [0u8; 32],
                 true,
                 PowValidationMode::FastDevOnly,
                 disabled_throttle(),
@@ -1317,6 +1400,7 @@ mod genesis_determinism_tests {
             dom_core::Hash256::ZERO,
             dom_core::Hash256::ZERO,
             dom_core::Hash256::ZERO,
+            [0u8; 32],
             true,
             dom_pow::PowValidationMode::FastDevOnly,
             disabled_throttle(),
@@ -1345,6 +1429,7 @@ mod genesis_determinism_tests {
             dom_core::Hash256::ZERO,
             dom_core::Hash256::ZERO,
             dom_core::Hash256::ZERO,
+            [0u8; 32],
             true,
             dom_pow::PowValidationMode::FastDevOnly,
             disabled_throttle(),
