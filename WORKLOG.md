@@ -28,13 +28,14 @@ Validated base:
 
 Sequence state:
 - DONE: Tasks 21-33 are complete and validated on this branch.
-- DONE: Task 34 pending final commit/push verification.
+- DONE: Task 34 `ad3528b3d38d727b015ae40427d9af85e3f72400`.
+- DONE: Task 35 pending final commit/push verification.
 - CURRENT: none.
-- REMAINING: Tasks 35-50.
+- REMAINING: Tasks 36-50.
 
 Open items:
-- Commit Task 34 as `34 future block restart tests`, push, verify remote HEAD, and report.
-- Do not start Task 35 until Task 34 is validated, committed, pushed, and reported.
+- Commit Task 35 as `35 runtime interruption tests`, push, verify remote HEAD, and report.
+- Do not start Task 36 until explicitly requested.
 
 ## 2026-05-31 — Task 34 Future Block Restart Tests
 
@@ -63,6 +64,41 @@ Commands and results:
 Tests added:
 - `future_block_queue::tests::restart_drop_policy_converges_after_deterministic_redelivery`
 - `future_block_queue::tests::local_elapsed_time_does_not_change_ready_drain_result`
+
+Open items:
+- Stage, commit, verify author, push, verify remote HEAD.
+
+## 2026-05-31 — Task 35 Runtime Interruption Tests
+
+Objective:
+- Add deterministic interruption tests for runtime-critical flows.
+
+Changed files:
+- `crates/dom-node/src/node.rs`
+- `WORKLOG.md`
+
+Implementation notes:
+- Added an orphan/future runtime interruption test that seeds runtime-only future queue, orphan pool, and missing-parent tracker state, requests shutdown, reopens the store, restarts the node, and compares deep replay snapshots.
+- Added a mempool reconciliation interruption test that parks reconciliation on a held mempool lock, aborts it deterministically, verifies the chain lock is not leaked, checks no partial mempool mutation was accepted, reopens the store, restarts the node, and compares deep replay snapshots.
+- Existing supervisor tests cover shutdown during IBD, block relay, mining, and reorg/persistence-drain ordering; these were re-run as narrow validation.
+- Existing supervisor tests also verify no task leaks and clean restart after shutdown.
+- No sleep-driven assertions were added; tests use explicit cancellation and cooperative scheduling.
+
+Commands and results:
+- `cargo fmt` (PASS)
+- `cargo check` (PASS)
+- `cargo test -p dom-node shutdown_during_orphan_future_processing_restarts_cleanly` (PASS)
+- `cargo test -p dom-node interruption_during_mempool_reconciliation_leaves_store_restartable` (PASS)
+- `cargo test -p dom-node shutdown_during_ibd_cancels_inbound_tasks` (PASS)
+- `cargo test -p dom-node shutdown_during_relay_cancels_relay_workers` (PASS)
+- `cargo test -p dom-node shutdown_during_mining_cancels_miner` (PASS)
+- `cargo test -p dom-node shutdown_during_reorg_flushes_persistence_before_rpc` (PASS)
+- `cargo test -p dom-node no_detached_tasks_remain_after_shutdown` (PASS)
+- `cargo test -p dom-node restart_after_shutdown_starts_clean` (PASS)
+
+Tests added:
+- `node::tests::shutdown_during_orphan_future_processing_restarts_cleanly`
+- `node::tests::interruption_during_mempool_reconciliation_leaves_store_restartable`
 
 Open items:
 - Stage, commit, verify author, push, verify remote HEAD.

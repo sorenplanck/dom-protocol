@@ -3697,7 +3697,10 @@ mod tests {
         MEMPOOL_METADATA_KEY, NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY,
         PEER_ROTATION_METADATA_KEY,
     };
+    use crate::future_block_queue::DeferredBlock;
     use crate::metrics::Metrics;
+    use crate::orphan_pool::OrphanBlock;
+    use crate::replay_snapshot::ReplaySnapshot;
     use crate::task_supervisor::TaskKind;
     use dom_chain::{
         ChainState, ConnectResult, IbdInterruption, IbdPhase, PersistedIbdState, ReorgDelta,
@@ -3736,7 +3739,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio::sync::Mutex;
 
     type TestUtxoBytes = ([u8; 33], Vec<u8>);
@@ -5607,6 +5610,147 @@ mod tests {
             .await
             .expect("reconcile task join")
             .expect("reconcile must succeed");
+
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_during_orphan_future_processing_restarts_cleanly() {
+        let dir = fresh_test_dir("runtime-orphan-future-shutdown");
+        let node = DomNode::init(regtest_node_config(&dir)).expect("node init");
+        let before = ReplaySnapshot::capture_runtime(&node.chain, &node.mempool, &node.peers)
+            .await
+            .expect("capture before");
+
+        let future_hash = [0xA1; 32];
+        assert!(
+            node.future_block_queue
+                .defer(DeferredBlock {
+                    block_hash: future_hash,
+                    block_height: before.chain_tip_height + 1,
+                    timestamp: 1_700_100_000,
+                    queued_at: Instant::now(),
+                    block_bytes: vec![0xA1; 32],
+                })
+                .await
+        );
+        {
+            let mut orphans = node.orphan_pool.lock().await;
+            assert_eq!(
+                orphans.insert(OrphanBlock {
+                    block_hash: [0xB2; 32],
+                    parent_hash: [0xB1; 32],
+                    height: before.chain_tip_height + 2,
+                    block_bytes: vec![0xB2; 64],
+                }),
+                crate::orphan_pool::OrphanInsertOutcome::Inserted
+            );
+        }
+        {
+            let mut missing = node.missing_blocks.lock().await;
+            missing.note_orphan([0xB2; 32], [0xB1; 32], Some(before.chain_tip_height + 1));
+            assert_eq!(missing.missing_len(), 1);
+        }
+        assert_eq!(node.future_block_queue.size().await, 1);
+        assert_eq!(node.orphan_pool.lock().await.len(), 1);
+
+        node.request_shutdown().await;
+        assert!(node.task_supervisor.is_empty().await);
+        drop(node);
+
+        let reopened_store = DomStore::open(&dir).expect("store reopens after shutdown");
+        drop(reopened_store);
+        let restarted = DomNode::init(regtest_node_config(&dir)).expect("node restarts");
+        let after =
+            ReplaySnapshot::capture_runtime(&restarted.chain, &restarted.mempool, &restarted.peers)
+                .await
+                .expect("capture after");
+
+        before
+            .assert_equivalent(&after)
+            .expect("deep replay snapshot remains valid after runtime-only interruption");
+        assert_eq!(
+            restarted.future_block_queue.size().await,
+            0,
+            "future queue is runtime-only and restarts empty"
+        );
+        assert!(
+            restarted.orphan_pool.lock().await.is_empty(),
+            "orphan pool is runtime-only and restarts empty"
+        );
+        assert_eq!(
+            restarted.missing_blocks.lock().await.missing_len(),
+            0,
+            "missing-parent tracker is runtime-only and restarts empty"
+        );
+
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn interruption_during_mempool_reconciliation_leaves_store_restartable() {
+        let dir = fresh_test_dir("runtime-mempool-reconcile-interrupt");
+        let node = DomNode::init(regtest_node_config(&dir)).expect("node init");
+        let before = ReplaySnapshot::capture_runtime(&node.chain, &node.mempool, &node.peers)
+            .await
+            .expect("capture before");
+
+        let mempool_guard = node.mempool.lock().await;
+        let chain_task = node.chain.clone();
+        let mempool_task = node.mempool.clone();
+        let handle = tokio::spawn(async move {
+            reconcile_mempool_after_connect(
+                &chain_task,
+                &mempool_task,
+                &ConnectResult::BestChain,
+                &[],
+            )
+            .await
+        });
+
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        {
+            let _chain_guard = node
+                .chain
+                .try_lock()
+                .expect("chain lock must not be held while reconcile awaits mempool");
+        }
+
+        handle.abort();
+        let join = handle
+            .await
+            .expect_err("interrupted reconcile task is cancelled");
+        assert!(join.is_cancelled(), "reconcile task cancelled explicitly");
+        drop(mempool_guard);
+
+        assert_eq!(
+            node.mempool.lock().await.len(),
+            0,
+            "interrupted reconciliation did not silently mutate mempool"
+        );
+        let after_interrupt =
+            ReplaySnapshot::capture_runtime(&node.chain, &node.mempool, &node.peers)
+                .await
+                .expect("capture after interrupt");
+        before
+            .assert_equivalent(&after_interrupt)
+            .expect("no partial mutation accepted after interrupted reconciliation");
+
+        node.request_shutdown().await;
+        drop(node);
+
+        let reopened_store = DomStore::open(&dir).expect("store reopens after interruption");
+        drop(reopened_store);
+        let restarted = DomNode::init(regtest_node_config(&dir)).expect("node restarts");
+        let after_restart =
+            ReplaySnapshot::capture_runtime(&restarted.chain, &restarted.mempool, &restarted.peers)
+                .await
+                .expect("capture after restart");
+        before
+            .assert_equivalent(&after_restart)
+            .expect("deep replay snapshot remains valid after restart");
 
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
