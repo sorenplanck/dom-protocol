@@ -34,12 +34,50 @@ Sequence state:
 - DONE: Task 37 `08a2a410bd6bc228c140529686e570ddc9f5f254`.
 - DONE: Task 38 `89aca4a04bed5a4864e8df64509d18b5e9e82dbf`.
 - DONE: Task 39 `96072a85b55b52d757573f954410e7f849dd773a`.
-- DONE: Task 40 `40 critical domain coverage report`.
-- CURRENT: Task 41 pending.
-- REMAINING: Tasks 41-50.
+- DONE: Task 40 `beabf20e636736415a12f8892bd89dc047020a35`.
+- DONE: Task 41 `41 wallet auto reconnect`.
+- CURRENT: Task 42 pending.
+- REMAINING: Tasks 42-50.
 
 Open items:
-- Do not start Task 41 until Task 40 is committed, pushed, and reviewed.
+- Do not start Task 42 until Task 41 is committed, pushed, and reviewed.
+
+## 2026-05-31 — Task 41 Wallet Auto Reconnect
+
+Objective:
+- Make the wallet app recover node RPC connectivity without requiring a wallet lock/unlock or app restart.
+
+Changed files:
+- `crates/dom-wallet-app/src/runtime.rs`
+- `crates/dom-wallet-app/src/app.rs`
+- `WORKLOG.md`
+
+Implementation notes:
+- Added `NodeConnectionSession` and `WalletNetworkState` to track the wallet app's live node connection lifecycle separately from wallet unlock state.
+- On node session failure, the runtime drops the cached RPC client, clears `node_status`, records the error, transitions to `Reconnecting`, and schedules a fresh attempt.
+- Reconnect scheduling uses bounded exponential backoff from 1s up to 60s.
+- Stable connection success resets the backoff to 1s and clears reconnect error state.
+- The configured node URL/backbone peer is not mutated or poisoned by reconnect failures.
+- The app update loop polls due reconnect attempts while a wallet session is unlocked.
+- Dashboard, diagnostics, and top status strip now show the reconnect state and diagnostics instead of deriving connectivity solely from stale `node_status`.
+
+Tests added:
+- `runtime::tests::session_drop_schedules_fresh_reconnect_without_poisoning_peer`
+- `runtime::tests::repeated_failures_apply_bounded_exponential_backoff_without_duplicate_loops`
+- `runtime::tests::stable_connection_resets_backoff`
+- `runtime::tests::reconnect_does_not_require_wallet_close_reopen`
+
+Validation:
+- `cargo fmt` (PASS)
+- `cargo check -p dom-wallet-app` (PASS)
+- `cargo test -p dom-wallet-app session_drop_schedules_fresh_reconnect_without_poisoning_peer` (PASS)
+- `cargo test -p dom-wallet-app repeated_failures_apply_bounded_exponential_backoff_without_duplicate_loops` (PASS)
+- `cargo test -p dom-wallet-app stable_connection_resets_backoff` (PASS)
+- `cargo test -p dom-wallet-app reconnect_does_not_require_wallet_close_reopen` (PASS)
+- `cargo check --workspace` (PASS)
+
+Integration test note:
+- No `dom-integration-tests` command was run for Task 41 because the change is confined to the wallet desktop app's RPC/session state and does not alter integration behavior or protocol/node runtime behavior.
 
 ## 2026-05-31 — Task 40 Critical Domain Coverage Report
 
