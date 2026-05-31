@@ -32,12 +32,61 @@ Sequence state:
 - DONE: Task 35 `f9af1c08b3170c542a310390a69409745b3813f8`.
 - DONE: Task 36 `c986c6f50179726b68740fc40f0712e0e3527f81`.
 - DONE: Task 37 `08a2a410bd6bc228c140529686e570ddc9f5f254`.
-- CURRENT: Task 38 in validation/commit.
-- REMAINING: Tasks 39-50.
+- DONE: Task 38 `89aca4a04bed5a4864e8df64509d18b5e9e82dbf`.
+- DONE: Task 39 `39 ci gate critical tests`.
+- CURRENT: Task 40 pending approval/review.
+- REMAINING: Tasks 40-50.
 
 Open items:
-- Commit Task 38 as `38 ci cargo tests by crate`, push, verify remote HEAD, and report.
-- Do not start Task 39 until Task 38 is committed, pushed, and reviewed.
+- Do not start Task 40 until Task 39 is committed, pushed, and reviewed.
+
+## 2026-05-31 — Task 39 CI Gate Critical Tests
+
+Objective:
+- Make the release-blocking CI contract explicit without duplicating the Task 38 test runs.
+
+Changed files:
+- `.github/workflows/ci.yml`
+- `docs/RELEASE_BLOCKERS.md`
+- `WORKLOG.md`
+
+Implementation notes:
+- Renamed the Task 38 Linux crate-test job to `release-blocker-crate-tests`.
+- Renamed the Task 38 Linux integration job to `release-blocker-integration-tests`.
+- Preserved the exact Task 38 test commands:
+  - `cargo check --workspace`
+  - `cargo test -p dom-consensus`
+  - `cargo test -p dom-chain`
+  - `cargo test -p dom-store`
+  - `cargo test -p dom-node`
+  - `cargo test -p dom-mempool`
+  - `cargo test -p dom-integration-tests -- --test-threads=1`
+  - `cargo test -p dom-integration-tests -- --ignored --test-threads=1`
+- Kept `DOM_NETWORK=regtest`, `DOM_REGTEST_FAST_MINING=1`, and `RUST_BACKTRACE=1` on the integration release-blocker job.
+- Added `release-blocker-gate` with `needs: [fmt, build-test, release-blocker-crate-tests, release-blocker-integration-tests]`.
+- The gate runs no tests itself; it fails if any required release-blocker job result is not `success`.
+- No `continue-on-error` was added to any critical job.
+
+Critical group mapping:
+- Consensus validation: `cargo test -p dom-consensus`, `cargo test -p dom-chain`, `cargo test -p dom-node`, plus the workspace non-integration test matrix.
+- UTXO reopen integrity: `cargo test -p dom-chain`, including `crates/dom-chain/tests/corruption_detection.rs`.
+- Orphan/reordered delivery: `cargo test -p dom-node`, including `crates/dom-node/tests/multinode_reordered_delivery.rs`.
+- Future-block restart equivalence: `cargo test -p dom-node`, including `future_block_queue` restart/drop-policy tests.
+- IBD/reorg multi-node: `cargo test -p dom-integration-tests -- --test-threads=1` and `cargo test -p dom-integration-tests -- --ignored --test-threads=1` under fast Regtest mining.
+- Runtime shutdown: `cargo test -p dom-node`, including shutdown/task-supervisor tests.
+
+Documentation:
+- Added `docs/RELEASE_BLOCKERS.md` section `CI Release-Blocker Gates`.
+- Documented every critical group, the jobs/commands covering it, and why each group blocks release.
+- Documented that env-blocked integration tests are not skipped; they run via `--ignored` with `DOM_REGTEST_FAST_MINING=1`.
+
+Validation:
+- `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml')); print('yaml ok')"` (PASS)
+- `git diff --check` (PASS)
+- Local YAML inspection confirmed no `continue-on-error` key exists on:
+  - `release-blocker-crate-tests`
+  - `release-blocker-integration-tests`
+  - `release-blocker-gate`
 
 ## 2026-05-31 — Task 38 CI Cargo Tests By Crate
 

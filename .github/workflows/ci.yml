@@ -94,8 +94,8 @@ jobs:
       - name: cargo test --workspace (excluding integration)
         run: cargo test --workspace --exclude dom-integration-tests --all-targets
 
-  cargo-tests-by-crate:
-    name: cargo tests by crate (linux)
+  release-blocker-crate-tests:
+    name: "release blockers: crate tests (linux)"
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -139,8 +139,8 @@ jobs:
       - name: cargo test -p dom-mempool
         run: cargo test -p dom-mempool
 
-  integration-tests:
-    name: dom-integration-tests (linux fast mining)
+  release-blocker-integration-tests:
+    name: "release blockers: dom-integration-tests (linux fast mining)"
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -175,6 +175,23 @@ jobs:
 
       - name: cargo test -p dom-integration-tests --ignored
         run: cargo test -p dom-integration-tests -- --ignored --test-threads=1
+
+  release-blocker-gate:
+    name: release blocker gate
+    runs-on: ubuntu-latest
+    needs:
+      - fmt
+      - build-test
+      - release-blocker-crate-tests
+      - release-blocker-integration-tests
+    if: always()
+    steps:
+      - name: Require every release-blocker job to pass
+        run: |
+          test "${{ needs.fmt.result }}" = "success"
+          test "${{ needs.build-test.result }}" = "success"
+          test "${{ needs.release-blocker-crate-tests.result }}" = "success"
+          test "${{ needs.release-blocker-integration-tests.result }}" = "success"
 
   pmmr-vectors-cross-platform:
     name: pinned PMMR vectors must reproduce on ${{ matrix.host }}
