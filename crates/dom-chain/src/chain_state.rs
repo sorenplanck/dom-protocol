@@ -36,6 +36,7 @@ pub const MAX_RETAINED_SIDE_BRANCH_LENGTH: u64 = dom_core::MAX_REORG_DEPTH_POLIC
 
 type UtxoBytes = ([u8; 33], Vec<u8>);
 type SpentCommitment = [u8; 33];
+type KernelExcess = ([u8; 33], [u8; 32]);
 type UtxoUpdate = ([u8; 33], Option<Vec<u8>>);
 type KernelUpdate = ([u8; 33], Option<[u8; 32]>);
 
@@ -1246,7 +1247,7 @@ fn rebuild_kernel_index_from_canonical_chain(
     Ok(())
 }
 
-fn extract_kernel_excesses(block: &Block, block_hash: Hash256) -> Vec<([u8; 33], [u8; 32])> {
+fn extract_kernel_excesses(block: &Block, block_hash: Hash256) -> Vec<KernelExcess> {
     let mut out = Vec::with_capacity(
         1 + block
             .transactions
@@ -1264,6 +1265,32 @@ fn extract_kernel_excesses(block: &Block, block_hash: Hash256) -> Vec<([u8; 33],
         }
     }
     out
+}
+
+/// Canonical persistence changeset for the genesis block.
+///
+/// DOM-AUDIT-001: `create_genesis_block` (dom-node) MUST persist exactly the
+/// changeset that the reopen path reconstructs — `reconstruct_canonical_utxo_set`
+/// (UTXO) and `rebuild_kernel_index_from_canonical_chain` (kernel index). If the
+/// two diverge for the spendable genesis coinbase, a freshly-created node and a
+/// reopened node hold different UTXO sets, risking a chain split when the genesis
+/// coinbase is spent.
+///
+/// This wrapper routes the create path through the *same* helpers the
+/// connect/reopen paths use (`build_utxo_changeset` + `extract_kernel_excesses`),
+/// so `create == reopen` holds by construction rather than by a hand-maintained
+/// duplicate. Returns `(new_utxos, spent_utxos, kernel_excesses)` in the exact
+/// shape `DomStore::commit_block` expects.
+///
+/// `block_hash` must be the genesis block hash (Blake2b-256 of the serialized
+/// header) — the same value the reopen path recomputes via `compute_block_hash`.
+pub fn genesis_canonical_changeset(
+    block: &Block,
+    block_hash: Hash256,
+) -> (Vec<UtxoBytes>, Vec<SpentCommitment>, Vec<KernelExcess>) {
+    let (new_utxos, spent_utxos) = build_utxo_changeset(block);
+    let kernel_excesses = extract_kernel_excesses(block, block_hash);
+    (new_utxos, spent_utxos, kernel_excesses)
 }
 
 fn build_utxo_changeset(block: &Block) -> (Vec<UtxoBytes>, Vec<SpentCommitment>) {
