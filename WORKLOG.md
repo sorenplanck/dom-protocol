@@ -28,9 +28,41 @@ Validated base:
 
 Sequence state:
 - DONE: Tasks 21-33 are complete and validated on this branch.
-- CURRENT: Task 34.
-- REMAINING: Tasks 34-50.
+- DONE: Task 34 pending final commit/push verification.
+- CURRENT: none.
+- REMAINING: Tasks 35-50.
 
 Open items:
-- Implement Task 34, validate, commit as `34 future block restart tests`, push, verify remote HEAD.
+- Commit Task 34 as `34 future block restart tests`, push, verify remote HEAD, and report.
 - Do not start Task 35 until Task 34 is validated, committed, pushed, and reported.
+
+## 2026-05-31 — Task 34 Future Block Restart Tests
+
+Objective:
+- Add restart-equivalence tests for the runtime-only future block queue policy.
+
+Changed files:
+- `crates/dom-node/src/future_block_queue.rs`
+- `WORKLOG.md`
+
+Implementation notes:
+- Added deterministic test snapshot for future queue convergence checks.
+- Covered different insertion/redelivery orders producing the same ready drain order.
+- Simulated restart with a fresh empty runtime-only queue while pending future blocks existed before restart.
+- Covered drop-on-restart policy by redelivering/re-requesting the same future blocks from peers and asserting convergence.
+- Compared final modeled tip hash/height plus pending/applied deep snapshot.
+- Varied `queued_at` explicitly to prove local elapsed runtime age does not affect ready-drain results.
+- No sleep-driven assertions were added.
+
+Commands and results:
+- `cargo fmt` (PASS)
+- `cargo check` (PASS)
+- `cargo test -p dom-node restart_drop_policy_converges_after_deterministic_redelivery` (PASS)
+- `cargo test -p dom-node local_elapsed_time_does_not_change_ready_drain_result` (PASS)
+
+Tests added:
+- `future_block_queue::tests::restart_drop_policy_converges_after_deterministic_redelivery`
+- `future_block_queue::tests::local_elapsed_time_does_not_change_ready_drain_result`
+
+Open items:
+- Stage, commit, verify author, push, verify remote HEAD.
