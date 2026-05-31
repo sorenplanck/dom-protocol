@@ -1,0 +1,35 @@
+DOM Windows portable package layout
+
+DOM-Portable/
+  README.md
+  VERSION.txt
+  bin/
+    dom-wallet-app.exe
+    dom-node.exe
+    dom-test-runner.exe
+  config/
+    app_state.example.json
+    node.env.example
+  data/
+    wallets/
+    chain/
+  logs/
+  backups/
+  cache/
+
+Directory roles:
+- bin: executable files only.
+- config: editable local config examples; installers must not overwrite local
+  config files during update.
+- data/wallets: wallet directories and encrypted wallet files.
+- data/chain: local node chain/store data.
+- logs: exported logs and runtime diagnostics.
+- backups: update-time backups, especially wallet data.
+- cache: disposable runtime cache.
+
+Safety rules:
+- Never store wallet passwords, seed phrases, private keys, bearer tokens, or
+  API tokens in package files.
+- Updates replace bin files only after backing up data/wallets.
+- Existing config, wallet data, chain data, logs, backups, and cache are
+  preserved by update scripts.

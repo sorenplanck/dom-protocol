@@ -136,6 +136,14 @@ impl Default for FutureBlockQueue {
 mod tests {
     use super::*;
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct FutureQueueSnapshot {
+        final_tip_height: u64,
+        final_tip_hash: [u8; 32],
+        applied_hashes: Vec<[u8; 32]>,
+        pending_hashes: Vec<[u8; 32]>,
+    }
+
     fn mock_block(hash_byte: u8, block_height: u64, timestamp: u64) -> DeferredBlock {
         DeferredBlock {
             block_hash: [hash_byte; 32],
@@ -143,6 +151,36 @@ mod tests {
             timestamp,
             queued_at: Instant::now(),
             block_bytes: vec![0u8; 100],
+        }
+    }
+
+    async fn pending_hashes(queue: &FutureBlockQueue) -> Vec<[u8; 32]> {
+        let entries = queue.entries.read().await;
+        let mut hashes: Vec<[u8; 32]> = entries.keys().copied().collect();
+        hashes.sort();
+        hashes
+    }
+
+    async fn capture_future_snapshot(
+        queue: &FutureBlockQueue,
+        applied: Vec<DeferredBlock>,
+    ) -> FutureQueueSnapshot {
+        let final_tip_height = applied
+            .iter()
+            .map(|block| block.block_height)
+            .max()
+            .unwrap_or_default();
+        let final_tip_hash = applied
+            .iter()
+            .filter(|block| block.block_height == final_tip_height)
+            .map(|block| block.block_hash)
+            .max()
+            .unwrap_or([0u8; 32]);
+        FutureQueueSnapshot {
+            final_tip_height,
+            final_tip_hash,
+            applied_hashes: applied.into_iter().map(|block| block.block_hash).collect(),
+            pending_hashes: pending_hashes(queue).await,
         }
     }
 
@@ -340,5 +378,85 @@ mod tests {
         assert!(first.is_empty());
         assert!(second.is_empty());
         assert_eq!(queue.size().await, 1);
+    }
+
+    #[tokio::test]
+    async fn restart_drop_policy_converges_after_deterministic_redelivery() {
+        let blocks = vec![
+            mock_block(7, 12, 2_000),
+            mock_block(1, 10, 2_000),
+            mock_block(4, 11, 2_000),
+            mock_block(2, 10, 2_000),
+        ];
+
+        let uninterrupted = FutureBlockQueue::new();
+        for block in &blocks {
+            assert!(uninterrupted.defer(block.clone()).await);
+        }
+        let uninterrupted_ready = uninterrupted.drain_ready(1_900, 200).await;
+        let uninterrupted_snapshot =
+            capture_future_snapshot(&uninterrupted, uninterrupted_ready.clone()).await;
+
+        let before_restart = FutureBlockQueue::new();
+        for block in blocks.iter().rev() {
+            assert!(before_restart.defer(block.clone()).await);
+        }
+        assert_eq!(before_restart.size().await, blocks.len());
+
+        // Runtime-only policy: restart creates a fresh empty queue. Pending
+        // future blocks are not implicit consensus or replay state.
+        let after_restart = FutureBlockQueue::new();
+        assert_eq!(after_restart.size().await, 0);
+
+        // Convergence depends on deterministic redelivery/re-request from peers:
+        // even if redelivered in a different order, drain order and final
+        // snapshot match the uninterrupted run.
+        for index in [2usize, 0, 3, 1] {
+            assert!(after_restart.defer(blocks[index].clone()).await);
+        }
+        let restarted_ready = after_restart.drain_ready(1_900, 200).await;
+        let restarted_snapshot = capture_future_snapshot(&after_restart, restarted_ready).await;
+
+        assert_eq!(
+            uninterrupted_snapshot.applied_hashes,
+            vec![[1u8; 32], [2u8; 32], [4u8; 32], [7u8; 32]]
+        );
+        assert_eq!(uninterrupted_snapshot, restarted_snapshot);
+    }
+
+    #[tokio::test]
+    async fn local_elapsed_time_does_not_change_ready_drain_result() {
+        let mut fast_clock = vec![
+            mock_block(9, 12, 2_001),
+            mock_block(3, 10, 2_000),
+            mock_block(5, 11, 2_000),
+        ];
+        let mut slow_clock = fast_clock.clone();
+        for (idx, block) in slow_clock.iter_mut().enumerate() {
+            block.queued_at = Instant::now()
+                .checked_sub(std::time::Duration::from_secs(60 + idx as u64))
+                .unwrap_or_else(Instant::now);
+        }
+
+        let fast_queue = FutureBlockQueue::new();
+        let slow_queue = FutureBlockQueue::new();
+        for block in fast_clock.drain(..) {
+            assert!(fast_queue.defer(block).await);
+        }
+        for block in slow_clock.drain(..).rev() {
+            assert!(slow_queue.defer(block).await);
+        }
+
+        let fast_snapshot =
+            capture_future_snapshot(&fast_queue, fast_queue.drain_ready(1_900, 200).await).await;
+        let slow_snapshot =
+            capture_future_snapshot(&slow_queue, slow_queue.drain_ready(1_900, 200).await).await;
+
+        assert_eq!(fast_snapshot, slow_snapshot);
+        assert_eq!(
+            fast_snapshot.applied_hashes,
+            vec![[3u8; 32], [5u8; 32], [9u8; 32]]
+        );
+        assert!(fast_snapshot.pending_hashes.is_empty());
     }
 }
