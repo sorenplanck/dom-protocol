@@ -59,6 +59,7 @@ fn block_with_coinbase_for(
         output_commitments: outputs,
         input_commitments: vec![],
         total_fees_noms: 0,
+        tx_effects: vec![],
     }
 }
 
@@ -75,6 +76,7 @@ fn block_with_coinbase_and_fees(phrase: &str, height: u64, fees: u64) -> ScanBlo
         output_commitments: vec![*commitment.as_bytes()],
         input_commitments: vec![],
         total_fees_noms: fees,
+        tx_effects: vec![],
     }
 }
 
@@ -495,6 +497,7 @@ impl ChainScanSource for MisbehavingScan {
             output_commitments: vec![],
             input_commitments: vec![],
             total_fees_noms: 0,
+            tx_effects: vec![],
         }))
     }
 }

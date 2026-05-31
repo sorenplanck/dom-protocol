@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dom_core::Hash256;
 use dom_wallet::{
-    restore_from_phrase, Bip39Seed, InMemoryChainScan, Network, SeedAcceptance, WalletDir,
+    restore_from_phrase, Bip39Seed, InMemoryChainScan, Network, ScanBlock, ScanTransactionEffect,
+    SeedAcceptance, WalletDir, WalletRescanMode, WalletRescanStart,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -55,6 +56,19 @@ enum Commands {
         #[arg(long)]
         wallet_dir: PathBuf,
     },
+    /// Rescan canonical wallet state from an offline canonical scan file.
+    Rescan {
+        #[arg(long)]
+        wallet_dir: PathBuf,
+        #[arg(long)]
+        password: String,
+        #[arg(long)]
+        scan_file: PathBuf,
+        #[arg(long, value_enum, default_value = "compare")]
+        mode: RescanModeArg,
+        #[arg(long)]
+        from_height: Option<u64>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -62,6 +76,21 @@ enum NetworkArg {
     Mainnet,
     Testnet,
     Regtest,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RescanModeArg {
+    Compare,
+    Repair,
+}
+
+impl From<RescanModeArg> for WalletRescanMode {
+    fn from(value: RescanModeArg) -> Self {
+        match value {
+            RescanModeArg::Compare => WalletRescanMode::CompareOnly,
+            RescanModeArg::Repair => WalletRescanMode::Repair,
+        }
+    }
 }
 
 impl From<NetworkArg> for Network {
@@ -106,6 +135,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             password,
         } => unlock_wallet(&wallet_dir, &password)?,
         Commands::Lock { wallet_dir } => lock_wallet(&wallet_dir)?,
+        Commands::Rescan {
+            wallet_dir,
+            password,
+            scan_file,
+            mode,
+            from_height,
+        } => rescan_wallet(&wallet_dir, &password, &scan_file, mode, from_height)?,
     }
     Ok(())
 }
@@ -173,6 +209,120 @@ fn lock_wallet(wallet_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     println!("wallet_dir: {}", wallet_dir.display());
     println!("state: locked");
     Ok(())
+}
+
+fn rescan_wallet(
+    wallet_dir: &Path,
+    password: &str,
+    scan_file: &Path,
+    mode: RescanModeArg,
+    from_height: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let scan = read_scan_file(scan_file)?;
+    let mut wallet_dir_handle = WalletDir::open(wallet_dir, password)?;
+    let start = from_height
+        .map(WalletRescanStart::Checkpoint)
+        .unwrap_or(WalletRescanStart::Genesis);
+    let summary =
+        wallet_dir_handle
+            .wallet_mut()
+            .rescan_canonical_chain_from(&scan, start, mode.into())?;
+
+    println!("wallet_dir: {}", wallet_dir.display());
+    println!("scan_from: {}", summary.scanned_from);
+    println!("scan_tip: {}", summary.scanned_tip);
+    if let Some(checkpoint) = summary.checkpoint_height {
+        println!("checkpoint_height: {checkpoint}");
+    }
+    println!("mode: {:?}", mode);
+    println!("matched_persisted: {}", summary.matched_persisted);
+    println!("repaired: {}", summary.repaired);
+    println!("rebuilt_outputs: {}", summary.rebuilt_outputs);
+    println!("spent_outputs: {}", summary.spent_outputs);
+    println!("pending_retained: {}", summary.pending_retained);
+    println!("pending_dropped: {}", summary.pending_dropped);
+    println!("tx_history_entries: {}", summary.tx_history.len());
+    println!(
+        "persisted_digest: {}",
+        hex::encode(summary.persisted_digest)
+    );
+    println!("rebuilt_digest: {}", hex::encode(summary.rebuilt_digest));
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct CliScanBlock {
+    height: u64,
+    block_hash: Option<String>,
+    output_commitments: Vec<String>,
+    input_commitments: Vec<String>,
+    total_fees_noms: u64,
+    #[serde(default)]
+    tx_effects: Vec<CliScanTransactionEffect>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CliScanTransactionEffect {
+    tx_hash: String,
+    input_commitments: Vec<String>,
+    output_commitments: Vec<String>,
+}
+
+fn read_scan_file(path: &Path) -> Result<InMemoryChainScan, Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(path)?;
+    let raw_blocks: Vec<CliScanBlock> = serde_json::from_slice(&bytes)?;
+    let mut scan = InMemoryChainScan::new();
+    for raw in raw_blocks {
+        scan.insert(ScanBlock {
+            height: raw.height,
+            block_hash: raw.block_hash.as_deref().map(parse_hex32).transpose()?,
+            output_commitments: raw
+                .output_commitments
+                .iter()
+                .map(|value| parse_hex33(value))
+                .collect::<Result<Vec<_>, _>>()?,
+            input_commitments: raw
+                .input_commitments
+                .iter()
+                .map(|value| parse_hex33(value))
+                .collect::<Result<Vec<_>, _>>()?,
+            total_fees_noms: raw.total_fees_noms,
+            tx_effects: raw
+                .tx_effects
+                .iter()
+                .map(|effect| {
+                    Ok(ScanTransactionEffect {
+                        tx_hash: parse_hex32(&effect.tx_hash)?,
+                        input_commitments: effect
+                            .input_commitments
+                            .iter()
+                            .map(|value| parse_hex33(value))
+                            .collect::<Result<Vec<_>, String>>()?,
+                        output_commitments: effect
+                            .output_commitments
+                            .iter()
+                            .map(|value| parse_hex33(value))
+                            .collect::<Result<Vec<_>, String>>()?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        });
+    }
+    Ok(scan)
+}
+
+fn parse_hex32(value: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(value).map_err(|e| format!("invalid 32-byte hex: {e}"))?;
+    bytes
+        .try_into()
+        .map_err(|bytes: Vec<u8>| format!("expected 32 bytes, got {}", bytes.len()))
+}
+
+fn parse_hex33(value: &str) -> Result<[u8; 33], String> {
+    let bytes = hex::decode(value).map_err(|e| format!("invalid 33-byte hex: {e}"))?;
+    bytes
+        .try_into()
+        .map_err(|bytes: Vec<u8>| format!("expected 33 bytes, got {}", bytes.len()))
 }
 
 fn genesis_hash_for(network: Network) -> Result<Hash256, dom_core::DomError> {

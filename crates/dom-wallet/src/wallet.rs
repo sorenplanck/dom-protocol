@@ -2,7 +2,7 @@
 
 use crate::journal::{JournalEntry, TxJournal, TxJournalEvent, TxRecord, TxStatus};
 use crate::output_index::OutputIndex;
-use crate::restore::{ChainScanSource, RestoreError};
+use crate::restore::{ChainScanSource, RestoreError, ScanTransactionEffect};
 use crate::seed::{self, Bip39Seed};
 use crate::store::{
     load_wallet as load_wallet_file, save_wallet as save_wallet_file, PendingTx,
@@ -35,11 +35,59 @@ pub enum WalletRescanMode {
     Repair,
 }
 
+/// Starting point for canonical wallet rescan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalletRescanStart {
+    /// Rebuild from genesis height 0 through the current canonical tip.
+    Genesis,
+    /// Preserve the persisted state at and below this checkpoint and
+    /// rebuild canonical effects strictly above it.
+    Checkpoint(u64),
+}
+
+impl WalletRescanStart {
+    fn first_scan_height(self) -> u64 {
+        match self {
+            WalletRescanStart::Genesis => 0,
+            WalletRescanStart::Checkpoint(height) => height.saturating_add(1),
+        }
+    }
+
+    fn checkpoint_height(self) -> Option<u64> {
+        match self {
+            WalletRescanStart::Genesis => None,
+            WalletRescanStart::Checkpoint(height) => Some(height),
+        }
+    }
+}
+
+/// Canonical wallet transaction-history row reconstructed from chain
+/// scan metadata. Contains only public identifiers and effect
+/// commitments; it deliberately excludes blinding factors, seed
+/// material, and transaction bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalletRescanTxHistoryEntry {
+    /// Canonical transaction hash.
+    pub tx_hash: [u8; 32],
+    /// Canonical block height containing the transaction.
+    pub block_height: u64,
+    /// Canonical block hash, if provided by the scan source.
+    pub block_hash: Option<[u8; 32]>,
+    /// Wallet-owned inputs spent by this transaction.
+    pub wallet_inputs: Vec<[u8; 33]>,
+    /// Wallet-owned outputs created by this transaction.
+    pub wallet_outputs: Vec<[u8; 33]>,
+}
+
 /// Result summary returned by a canonical wallet rescan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalletRescanSummary {
+    /// First height requested from the scan source.
+    pub scanned_from: u64,
     /// Tip height covered by the scan.
     pub scanned_tip: u64,
+    /// Checkpoint height preserved from persisted state, if any.
+    pub checkpoint_height: Option<u64>,
     /// Number of owned outputs reconstructed from canonical history.
     pub rebuilt_outputs: usize,
     /// Number of reconstructed outputs marked spent by later canonical inputs.
@@ -57,6 +105,9 @@ pub struct WalletRescanSummary {
     pub matched_persisted: bool,
     /// Whether the rebuilt state was written back to disk.
     pub repaired: bool,
+    /// Public canonical transaction history reconstructed from
+    /// transaction-level scan effects.
+    pub tx_history: Vec<WalletRescanTxHistoryEntry>,
 }
 
 /// Canonical block data needed by the wallet to apply or roll back
@@ -1039,80 +1090,121 @@ impl Wallet {
         scan: &S,
         mode: WalletRescanMode,
     ) -> Result<WalletRescanSummary, WalletError> {
+        self.rescan_canonical_chain_from(scan, WalletRescanStart::Genesis, mode)
+    }
+
+    /// Rebuild recoverable wallet state from a checkpoint or genesis.
+    ///
+    /// `Genesis` scans `0..=tip`. `Checkpoint(h)` trusts and preserves
+    /// already-persisted wallet state at heights `<= h`, then rebuilds
+    /// wallet effects from `h + 1..=tip`. The checkpoint form is for
+    /// deterministic incremental rescans after a known-good wallet
+    /// checkpoint; use `Genesis` when repairing corruption of unknown
+    /// scope.
+    pub fn rescan_canonical_chain_from<S: ChainScanSource>(
+        &mut self,
+        scan: &S,
+        start: WalletRescanStart,
+        mode: WalletRescanMode,
+    ) -> Result<WalletRescanSummary, WalletError> {
         let session = self.session()?;
         let persisted_digest = self.canonical_digest();
         let scanned_tip = scan.tip_height();
+        let scanned_from = start.first_scan_height();
         let maturity = self.network.coinbase_maturity();
 
         let mut rebuilt_outputs = OutputIndex::new();
         let mut canonical_inputs = HashSet::new();
         let mut detected_receives: BTreeMap<[u8; 33], ReceiveRequestStatus> = BTreeMap::new();
+        let mut tx_effects_by_height: Vec<(u64, Option<[u8; 32]>, Vec<ScanTransactionEffect>)> =
+            Vec::new();
 
-        for height in 0..=scanned_tip {
-            let block = scan.block_at(height).map_err(scan_error_to_wallet)?;
-            let Some(block) = block else {
-                continue;
-            };
-            if block.height != height {
-                return Err(WalletError::Io(format!(
-                    "canonical rescan source returned height {} for requested {}",
-                    block.height, height
-                )));
+        if let Some(checkpoint_height) = start.checkpoint_height() {
+            for output in self
+                .outputs
+                .iter()
+                .filter(|output| output.block_height <= checkpoint_height)
+                .cloned()
+            {
+                rebuilt_outputs.insert(output);
             }
-
-            canonical_inputs.extend(block.input_commitments.iter().copied());
-
-            let coinbase_blinding =
-                self.coinbase_blinding_for_height(BlockHeight(height), session)?;
-            let reward = dom_core::block_reward(BlockHeight(height)).noms();
-            let reward_with_fees = reward
-                .checked_add(block.total_fees_noms)
-                .ok_or_else(|| WalletError::Crypto("coinbase value overflow".into()))?;
-            for &commitment in &block.output_commitments {
-                for &value in &[reward, reward_with_fees] {
-                    if value == 0 {
-                        continue;
+            for request in &self.receive_requests {
+                if let ReceiveRequestStatus::Detected { block_height, .. } = request.status {
+                    if block_height <= checkpoint_height {
+                        detected_receives.insert(request.commitment, request.status.clone());
                     }
-                    let candidate = Commitment::commit(value, &coinbase_blinding);
-                    if *candidate.as_bytes() == commitment {
+                }
+            }
+        }
+
+        if scanned_from <= scanned_tip {
+            for height in scanned_from..=scanned_tip {
+                let block = scan.block_at(height).map_err(scan_error_to_wallet)?;
+                let Some(block) = block else {
+                    continue;
+                };
+                if block.height != height {
+                    return Err(WalletError::Io(format!(
+                        "canonical rescan source returned height {} for requested {}",
+                        block.height, height
+                    )));
+                }
+
+                canonical_inputs.extend(block.input_commitments.iter().copied());
+                tx_effects_by_height.push((height, block.block_hash, block.tx_effects.clone()));
+
+                let coinbase_blinding =
+                    self.coinbase_blinding_for_height(BlockHeight(height), session)?;
+                let reward = dom_core::block_reward(BlockHeight(height)).noms();
+                let reward_with_fees = reward
+                    .checked_add(block.total_fees_noms)
+                    .ok_or_else(|| WalletError::Crypto("coinbase value overflow".into()))?;
+                for &commitment in &block.output_commitments {
+                    for &value in &[reward, reward_with_fees] {
+                        if value == 0 {
+                            continue;
+                        }
+                        let candidate = Commitment::commit(value, &coinbase_blinding);
+                        if *candidate.as_bytes() == commitment {
+                            let mut owned = OwnedOutput::new(
+                                commitment,
+                                value,
+                                *coinbase_blinding.as_bytes(),
+                                height,
+                                true,
+                            );
+                            if let Some(hash) = block.block_hash {
+                                owned = owned.with_block_hash(hash);
+                            }
+                            rebuilt_outputs.insert(owned);
+                            break;
+                        }
+                    }
+                }
+
+                for request in &self.receive_requests {
+                    if block.output_commitments.contains(&request.commitment) {
+                        let blinding = self.receive_blinding_for_index(request.index)?;
                         let mut owned = OwnedOutput::new(
-                            commitment,
-                            value,
-                            *coinbase_blinding.as_bytes(),
+                            request.commitment,
+                            request.amount,
+                            *blinding.as_bytes(),
                             height,
-                            true,
+                            false,
                         );
                         if let Some(hash) = block.block_hash {
                             owned = owned.with_block_hash(hash);
                         }
                         rebuilt_outputs.insert(owned);
-                        break;
+                        detected_receives.insert(
+                            request.commitment,
+                            ReceiveRequestStatus::Detected {
+                                block_height: height,
+                                is_coinbase: false,
+                                is_mature: true,
+                            },
+                        );
                     }
-                }
-            }
-
-            for request in &self.receive_requests {
-                if block.output_commitments.contains(&request.commitment) {
-                    let blinding = self.receive_blinding_for_index(request.index)?;
-                    let mut owned = OwnedOutput::new(
-                        request.commitment,
-                        request.amount,
-                        *blinding.as_bytes(),
-                        height,
-                        false,
-                    );
-                    if let Some(hash) = block.block_hash {
-                        owned = owned.with_block_hash(hash);
-                    }
-                    rebuilt_outputs.insert(owned);
-                    detected_receives.insert(
-                        request.commitment,
-                        ReceiveRequestStatus::Detected {
-                            block_height: height,
-                            is_coinbase: false,
-                            is_mature: true,
-                        },
-                    );
                 }
             }
         }
@@ -1143,6 +1235,8 @@ impl Wallet {
             }
         }
 
+        let tx_history = rebuild_rescan_tx_history(&rebuilt_outputs, tx_effects_by_height);
+
         let mut rebuilt_receive_requests = self.receive_requests.clone();
         for request in &mut rebuilt_receive_requests {
             request.status = detected_receives
@@ -1170,7 +1264,9 @@ impl Wallet {
         );
         let spent_outputs = rebuilt_outputs.iter().filter(|output| output.spent).count();
         let summary = WalletRescanSummary {
+            scanned_from,
             scanned_tip,
+            checkpoint_height: start.checkpoint_height(),
             rebuilt_outputs: rebuilt_outputs.iter().count(),
             spent_outputs,
             pending_retained: rebuilt_pending.len(),
@@ -1179,6 +1275,7 @@ impl Wallet {
             rebuilt_digest,
             matched_persisted: persisted_digest == rebuilt_digest,
             repaired: matches!(mode, WalletRescanMode::Repair),
+            tx_history,
         };
 
         if matches!(mode, WalletRescanMode::Repair) {
@@ -1871,6 +1968,43 @@ fn output_is_disconnected(
         Some(hash) => disconnected.contains(&(output.block_height, hash)),
         None => output.block_height > common_ancestor_height,
     }
+}
+
+fn rebuild_rescan_tx_history(
+    rebuilt_outputs: &OutputIndex,
+    tx_effects_by_height: Vec<(u64, Option<[u8; 32]>, Vec<ScanTransactionEffect>)>,
+) -> Vec<WalletRescanTxHistoryEntry> {
+    let mut history = Vec::new();
+    for (block_height, block_hash, effects) in tx_effects_by_height {
+        for effect in effects {
+            let mut wallet_inputs: Vec<[u8; 33]> = effect
+                .input_commitments
+                .iter()
+                .copied()
+                .filter(|commitment| rebuilt_outputs.get(commitment).is_some())
+                .collect();
+            let mut wallet_outputs: Vec<[u8; 33]> = effect
+                .output_commitments
+                .iter()
+                .copied()
+                .filter(|commitment| rebuilt_outputs.get(commitment).is_some())
+                .collect();
+            if wallet_inputs.is_empty() && wallet_outputs.is_empty() {
+                continue;
+            }
+            wallet_inputs.sort();
+            wallet_outputs.sort();
+            history.push(WalletRescanTxHistoryEntry {
+                tx_hash: effect.tx_hash,
+                block_height,
+                block_hash,
+                wallet_inputs,
+                wallet_outputs,
+            });
+        }
+    }
+    history.sort_by_key(|entry| (entry.block_height, entry.tx_hash));
+    history
 }
 
 fn scan_error_to_wallet(err: RestoreError) -> WalletError {

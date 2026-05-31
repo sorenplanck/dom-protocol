@@ -235,6 +235,7 @@ fn wallet_rescan_matches_incremental_reorg_state() {
         output_commitments: vec![branch_b_commitment],
         input_commitments: vec![],
         total_fees_noms: 0,
+        tx_effects: vec![],
     });
 
     let summary = wd
