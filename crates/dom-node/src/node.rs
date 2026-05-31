@@ -214,6 +214,7 @@ enum RelayBlockAction {
 #[derive(Debug, Clone)]
 pub(crate) struct TxChainView {
     pub(crate) current_height: u64,
+    pub(crate) chain_id: [u8; 32],
     pub(crate) coinbase_maturity: u64,
     pub(crate) utxos: HashMap<[u8; 33], Option<UtxoEntry>>,
 }
@@ -239,6 +240,7 @@ pub(crate) fn snapshot_tx_chain_view(
     }
     Ok(TxChainView {
         current_height: chain.tip_height.0,
+        chain_id: *derive_chain_id(chain.network_magic, &chain.genesis_hash).as_bytes(),
         coinbase_maturity: chain.coinbase_maturity,
         utxos,
     })
@@ -1068,6 +1070,7 @@ impl dom_rpc::NodeHandle for DomNode {
             hash,
             now,
             chain_view.current_height,
+            chain_view.chain_id,
             chain_view.coinbase_maturity,
             |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
         )
@@ -1831,6 +1834,7 @@ pub(crate) async fn reconcile_mempool_after_connect(
                 tx.tx_hash,
                 tx.now_secs,
                 chain_view.current_height,
+                chain_view.chain_id,
                 chain_view.coinbase_maturity,
                 |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
             );
@@ -3616,6 +3620,7 @@ async fn message_loop(
                                             tx_hash,
                                             now_secs,
                                             view.current_height,
+                                            view.chain_id,
                                             view.coinbase_maturity,
                                             |commitment| {
                                                 Ok(view.utxos.get(commitment).cloned().flatten())
@@ -3762,7 +3767,7 @@ mod tests {
     use dom_core::{
         Amount, BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
         MAX_BLOCK_SERIALIZED_SIZE, MIN_RELAY_FEE_RATE, NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION,
-        TAG_KERNEL_MSG_COINBASE,
+        TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
     };
     use dom_crypto::bulletproof;
     use dom_crypto::hash::blake2b_256_tagged;
@@ -3995,7 +4000,7 @@ mod tests {
             },
             coinbase: CoinbaseTransaction {
                 output: TransactionOutput {
-                    commitment: commitment(coinbase_seed, 1_000 + height),
+                    commitment: commitment(coinbase_seed, 1_000_000 + height),
                     proof: vec![coinbase_seed; 8],
                 },
                 kernel: CoinbaseKernel {
@@ -4023,6 +4028,50 @@ mod tests {
                 lock_height: 0,
                 excess: commitment(kernel_seed, 0),
                 excess_signature: [kernel_seed; 65],
+            }],
+            offset: [0u8; 32],
+        }
+    }
+
+    fn signed_spend_tx(
+        input_value: u64,
+        input_blinding: BlindingFactor,
+        fee: u64,
+        _output_seed: u8,
+        kernel_seed: u8,
+        chain_id: &[u8; 32],
+    ) -> Transaction {
+        let output_value = input_value.checked_sub(fee).expect("fee below input");
+        let kernel_blinding = scalar(kernel_seed);
+        let output_blinding = input_blinding
+            .add(&kernel_blinding)
+            .expect("output blinding");
+        let input = Commitment::commit(input_value, &input_blinding);
+        let output = Commitment::commit(output_value, &output_blinding);
+        let (proof, _) = bulletproof::prove(output_value, &output_blinding).expect("tx proof");
+        let excess = Commitment::commit(0, &kernel_blinding);
+        let secret = SecretKey::from_bytes(kernel_blinding.as_bytes()).expect("kernel secret");
+        let msg = {
+            let mut data = Vec::with_capacity(1 + 8 + 8);
+            data.push(KERNEL_FEAT_PLAIN);
+            data.extend_from_slice(&fee.to_le_bytes());
+            data.extend_from_slice(&0u64.to_le_bytes());
+            blake2b_256_tagged(TAG_KERNEL_MSG, &data)
+        };
+        let sig = schnorr_sign(&secret, msg.as_bytes(), chain_id).expect("kernel sig");
+
+        Transaction {
+            inputs: vec![TransactionInput { commitment: input }],
+            outputs: vec![TransactionOutput {
+                commitment: output,
+                proof: proof.bytes,
+            }],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(fee).expect("fee"),
+                lock_height: 0,
+                excess,
+                excess_signature: sig.to_bytes(),
             }],
             offset: [0u8; 32],
         }
@@ -4980,8 +5029,14 @@ mod tests {
         let dir = fresh_test_dir("reorg-mempool-reconcile");
         let chain = open_chain(&dir);
         let mempool = Arc::new(Mutex::new(Mempool::new()));
+        let chain_id = {
+            let c = chain.lock().await;
+            *dom_consensus::derive_chain_id(c.network_magic, &c.genesis_hash).as_bytes()
+        };
 
-        let base_output = commitment(40, 25);
+        let base_value = 500_000;
+        let base_blinding = scalar(40);
+        let base_output = Commitment::commit(base_value, &base_blinding);
         let base_tx = Transaction {
             inputs: vec![],
             outputs: vec![TransactionOutput {
@@ -5001,7 +5056,14 @@ mod tests {
             synthetic_block_with_transactions(Hash256::ZERO, 1, 11, 42, vec![base_tx.clone()]);
         commit_chain_block(&chain, &base_block).await;
 
-        let disconnected_tx = synthetic_spend_tx(base_output, 50, 51);
+        let disconnected_tx = signed_spend_tx(
+            base_value,
+            base_blinding,
+            MIN_RELAY_FEE_RATE * 100,
+            50,
+            51,
+            &chain_id,
+        );
         let conflicting_input = commitment(60, 30);
         let conflicting_live_tx = synthetic_spend_tx(conflicting_input.clone(), 61, 62);
         let conflicting_live_hash = tx_hash(&conflicting_live_tx).expect("hash");
@@ -5040,8 +5102,14 @@ mod tests {
         let chain = open_chain(&dir);
         let mempool_a = Arc::new(Mutex::new(Mempool::new()));
         let mempool_b = Arc::new(Mutex::new(Mempool::new()));
+        let chain_id = {
+            let c = chain.lock().await;
+            *dom_consensus::derive_chain_id(c.network_magic, &c.genesis_hash).as_bytes()
+        };
 
-        let live_output = commitment(70, 55);
+        let live_value = 500_000;
+        let live_blinding = scalar(70);
+        let live_output = Commitment::commit(live_value, &live_blinding);
         let base_tx = Transaction {
             inputs: vec![],
             outputs: vec![TransactionOutput {
@@ -5058,13 +5126,40 @@ mod tests {
             offset: [0u8; 32],
         };
         let base_block = synthetic_block_with_transactions(Hash256::ZERO, 1, 17, 72, vec![base_tx]);
-        let immature_coinbase = base_block.coinbase.output.commitment.clone();
         commit_chain_block(&chain, &base_block).await;
 
-        let conflict_a = synthetic_spend_tx(live_output.clone(), 73, 74);
-        let conflict_b = synthetic_spend_tx(live_output.clone(), 75, 76);
-        let missing_input_tx = synthetic_spend_tx(commitment(77, 88), 78, 79);
-        let immature_coinbase_tx = synthetic_spend_tx(immature_coinbase, 80, 81);
+        let conflict_a = signed_spend_tx(
+            live_value,
+            live_blinding.clone(),
+            MIN_RELAY_FEE_RATE * 100,
+            73,
+            74,
+            &chain_id,
+        );
+        let conflict_b = signed_spend_tx(
+            live_value,
+            live_blinding,
+            MIN_RELAY_FEE_RATE * 100,
+            75,
+            76,
+            &chain_id,
+        );
+        let missing_input_tx = signed_spend_tx(
+            500_000,
+            scalar(77),
+            MIN_RELAY_FEE_RATE * 100,
+            78,
+            79,
+            &chain_id,
+        );
+        let immature_coinbase_tx = signed_spend_tx(
+            1_000_001,
+            scalar(72),
+            MIN_RELAY_FEE_RATE * 100,
+            80,
+            81,
+            &chain_id,
+        );
 
         let delta_a = ReorgDelta {
             disconnected_txs: vec![
@@ -5122,10 +5217,18 @@ mod tests {
         let dir = fresh_test_dir("reorg-reinject-coinbase-excluded");
         let chain = open_chain(&dir);
         let mempool = Arc::new(Mutex::new(Mempool::new()));
+        let chain_id = {
+            let c = chain.lock().await;
+            *dom_consensus::derive_chain_id(c.network_magic, &c.genesis_hash).as_bytes()
+        };
 
         // Two live outputs created by a base block.
-        let live_a = commitment(110, 41);
-        let live_b = commitment(112, 43);
+        let live_a_value = 500_000;
+        let live_b_value = 600_000;
+        let live_a_blinding = scalar(110);
+        let live_b_blinding = scalar(112);
+        let live_a = Commitment::commit(live_a_value, &live_a_blinding);
+        let live_b = Commitment::commit(live_b_value, &live_b_blinding);
         let base_tx = Transaction {
             inputs: vec![],
             outputs: vec![
@@ -5153,8 +5256,22 @@ mod tests {
 
         // Plain tx over live_a — eligible. Coinbase-feature tx over live_b —
         // forbidden for relay despite a live input.
-        let plain_tx = synthetic_spend_tx(live_a, 130, 131);
-        let mut coinbase_feature_tx = synthetic_spend_tx(live_b, 132, 133);
+        let plain_tx = signed_spend_tx(
+            live_a_value,
+            live_a_blinding,
+            MIN_RELAY_FEE_RATE * 100,
+            130,
+            131,
+            &chain_id,
+        );
+        let mut coinbase_feature_tx = signed_spend_tx(
+            live_b_value,
+            live_b_blinding,
+            MIN_RELAY_FEE_RATE * 100,
+            132,
+            133,
+            &chain_id,
+        );
         coinbase_feature_tx.kernels[0].features = dom_core::KERNEL_FEAT_COINBASE;
 
         let reorg = ReorgDelta {
@@ -5191,12 +5308,18 @@ mod tests {
         let chain = open_chain(&dir);
         let mempool_a = Arc::new(Mutex::new(Mempool::new()));
         let mempool_b = Arc::new(Mutex::new(Mempool::new()));
+        let chain_id = {
+            let c = chain.lock().await;
+            *dom_consensus::derive_chain_id(c.network_magic, &c.genesis_hash).as_bytes()
+        };
 
         // Three independent live outputs → three non-conflicting eligible txs.
+        let live_values = [500_000, 600_000, 700_000];
+        let live_blindings = [scalar(140), scalar(142), scalar(144)];
         let live = [
-            commitment(140, 51),
-            commitment(142, 53),
-            commitment(144, 55),
+            Commitment::commit(live_values[0], &live_blindings[0]),
+            Commitment::commit(live_values[1], &live_blindings[1]),
+            Commitment::commit(live_values[2], &live_blindings[2]),
         ];
         let base_tx = Transaction {
             inputs: vec![],
@@ -5221,9 +5344,30 @@ mod tests {
             synthetic_block_with_transactions(Hash256::ZERO, 1, 29, 150, vec![base_tx]);
         commit_chain_block(&chain, &base_block).await;
 
-        let t0 = synthetic_spend_tx(live[0].clone(), 160, 161);
-        let t1 = synthetic_spend_tx(live[1].clone(), 162, 163);
-        let t2 = synthetic_spend_tx(live[2].clone(), 164, 165);
+        let t0 = signed_spend_tx(
+            live_values[0],
+            live_blindings[0].clone(),
+            MIN_RELAY_FEE_RATE * 100,
+            160,
+            161,
+            &chain_id,
+        );
+        let t1 = signed_spend_tx(
+            live_values[1],
+            live_blindings[1].clone(),
+            MIN_RELAY_FEE_RATE * 100,
+            162,
+            163,
+            &chain_id,
+        );
+        let t2 = signed_spend_tx(
+            live_values[2],
+            live_blindings[2].clone(),
+            MIN_RELAY_FEE_RATE * 100,
+            164,
+            165,
+            &chain_id,
+        );
 
         // Different delivery orders into A and B.
         let delta_a = ReorgDelta {
