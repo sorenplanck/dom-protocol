@@ -252,3 +252,78 @@ Test results:
 Open items:
 - Commit with `23 structured tracing runtime`.
 - Push and verify remote HEAD before Task 24.
+
+## 2026-05-31 Task 24 In Progress
+
+Current objective: Implement wallet rollback/reorg recovery.
+
+Repository state at Task 24 implementation checkpoint:
+- Branch: `task21-ready-base`.
+- Base HEAD: cae0e5b `23 structured tracing runtime`.
+- Working tree: dirty with Task 24 wallet/node/test changes only.
+
+Changed files:
+- crates/dom-wallet/src/wallet.rs
+- crates/dom-wallet/src/lib.rs
+- crates/dom-node/src/node.rs
+- crates/dom-wallet/tests/wallet_reorg_recovery.rs
+
+Implementation notes:
+- Added explicit wallet canonical reorg hook keyed by disconnected block hash + height, with legacy height fallback for unattributed outputs.
+- Reorg rollback restores disconnected wallet spends as pending reservations when inputs survive, removes disconnected receive/coinbase outputs, and resets receive request status to Pending.
+- Incremental canonical block apply now detects deterministic receive-request outputs and attributes existing outputs to block hash/height.
+- Node relay and resumed IBD paths now apply wallet reorg deltas instead of skipping wallet handling on `ConnectResult::Reorg`.
+
+Important commands:
+- `cargo fmt` (PASS)
+- `git diff --stat`
+- `git status --short`
+
+Tests added:
+- `receive_output_reorg_removes_disconnected_block`
+- `spend_output_reorg_restores_unspent_pending_state`
+- `coinbase_reorg_removes_disconnected_reward`
+- `restart_after_wallet_reorg_preserves_rollback_state`
+- `wallet_rescan_matches_incremental_reorg_state`
+
+Open items:
+- Run `cargo check`.
+- Run narrow relevant tests, one filter per command.
+- Commit as `24 wallet reorg recovery`, push, and verify remote HEAD.
+
+### 2026-05-31T03:07:18Z — Task 24 validation checkpoint
+- Commands run:
+  - `cargo fmt` (PASS)
+  - `cargo check` (PASS)
+  - `cargo test -p dom-wallet receive_output_reorg_removes_disconnected_block` (PASS)
+  - `cargo test -p dom-wallet spend_output_reorg_restores_unspent_pending_state` (PASS)
+  - `cargo test -p dom-wallet coinbase_reorg_removes_disconnected_reward` (PASS)
+  - `cargo test -p dom-wallet restart_after_wallet_reorg_preserves_rollback_state` (PASS)
+  - `cargo test -p dom-wallet wallet_rescan_matches_incremental_reorg_state` (PASS)
+  - `cargo test -p dom-wallet rollback` (PASS)
+  - `cargo test -p dom-wallet canonical_rescan` (PASS)
+  - `cargo test -p dom-node relay` (PASS)
+  - `cargo test -p dom-node ibd` (PASS)
+  - final `cargo fmt && cargo check` (PASS)
+- Test results:
+  - PASS: Task 24 narrow wallet reorg tests.
+  - PASS: existing wallet rollback and canonical rescan coverage.
+  - PASS: narrow node relay/IBD coverage for reorg apply call sites.
+- Open items:
+  - Stage, commit as `24 wallet reorg recovery`, verify author, push, verify remote HEAD.
+
+### 2026-05-31T03:08:15Z — Task 24 committed and pushed
+- Commit message: `24 wallet reorg recovery`.
+- Commit hash before final WORKLOG amend: `73f8cef9839d0c76322a63d8c1c390b67afaf7ec`.
+- Commit author verified: `soren planck <>`.
+- Push result: `origin/task21-ready-base` updated from `cae0e5b` to `73f8cef`.
+- Remote HEAD verification before final WORKLOG amend: `73f8cef9839d0c76322a63d8c1c390b67afaf7ec refs/heads/task21-ready-base`.
+- Note: this final WORKLOG record will be amended into the Task 24 commit so Task 24 remains one commit.
+- Sequence progress:
+  - DONE: Task 21 `fd26056d7c8f6d08c20d8a030291ec066f1e048d`
+  - DONE: Task 22 `c4ad95f6f1a278d239ec0486f937449dd9e74c6d`
+  - DONE: Task 23 `cae0e5b74837807fe2c7746825631759211c694e`
+  - DONE: Task 24 (final hash after amend/push to be verified)
+  - CURRENT: none until user requests Task 25
+  - REMAINING: Task 25
+- Left to finish prompt: Task 25 only; do not start until explicitly requested after this Task 24 report.
