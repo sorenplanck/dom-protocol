@@ -694,7 +694,26 @@ impl ChainState {
                     DomError::Orphan(format!("parent {} not found", header.prev_hash))
                 })?;
             let parent = BlockHeader::from_bytes(&parent_bytes)?;
+            validate_parent_timestamp_progression(header, &parent)?;
+            let ancestors = self.get_recent_timestamps(header.height.0, 11)?;
+            validate_median_time_past(header, &ancestors)?;
             self.validate_expected_target(header, &parent)?;
+
+            let block_diff = target_to_difficulty(
+                &header
+                    .target
+                    .to_target()
+                    .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?,
+            );
+            let expected_total = parent
+                .total_difficulty
+                .saturating_add(U256::from(block_diff));
+            if header.total_difficulty != expected_total {
+                return Err(DomError::Invalid(format!(
+                    "total_difficulty mismatch: expected {expected_total}, got {}",
+                    header.total_difficulty
+                )));
+            }
         }
         let seed = self.compute_randomx_seed(header.height.0)?;
         validate_pow_for_network(self.network_magic, header, &seed)?;
