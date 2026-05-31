@@ -267,13 +267,11 @@ impl Wallet {
     }
 
     /// Append one event to the journal if one is attached. No-op
-    /// otherwise. Errors are logged but do NOT propagate — the
-    /// journal is best-effort: in-memory state still mutates so the
-    /// wallet remains usable. Operators inspecting the journal will
-    /// see the gap.
-    fn record_journal(&self, tx_hash: [u8; 32], event: TxJournalEvent) {
+    /// otherwise. Journal append errors propagate so callers do not
+    /// mutate in-memory state unless the WAL is durable.
+    fn record_journal(&self, tx_hash: [u8; 32], event: TxJournalEvent) -> Result<(), WalletError> {
         let Some(journal) = &self.journal else {
-            return;
+            return Ok(());
         };
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -284,12 +282,8 @@ impl Wallet {
             tx_hash,
             event,
         };
-        if let Err(e) = journal.append(&entry) {
-            tracing::warn!(
-                "journal append failed for tx {}: {e}; in-memory state still proceeds",
-                hex::encode(tx_hash)
-            );
-        }
+        journal.append(&entry)?;
+        Ok(())
     }
 
     /// Replay the attached journal and reconcile in-memory
@@ -546,7 +540,7 @@ impl Wallet {
                 TxJournalEvent::Reorged {
                     reorg_height: target_height,
                 },
-            );
+            )?;
 
             // Are this tx's inputs themselves about to disappear?
             // If so, restoring a pending entry with dangling inputs
@@ -1200,7 +1194,7 @@ impl Wallet {
                 output_count: tx.outputs.len() as u32,
                 fee_noms: fee,
             },
-        );
+        )?;
 
         // Reserve inputs.
         for commitment in &selected_commitments {
@@ -1254,7 +1248,7 @@ impl Wallet {
         if !self.pending_txs.contains_key(&tx_hash) {
             return Err(WalletError::Io("pending tx not found".into()));
         }
-        self.record_journal(tx_hash, TxJournalEvent::Submitted);
+        self.record_journal(tx_hash, TxJournalEvent::Submitted)?;
         Ok(())
     }
 
@@ -1275,7 +1269,7 @@ impl Wallet {
             TxJournalEvent::Failed {
                 reason: reason.into(),
             },
-        );
+        )?;
         Ok(())
     }
 
@@ -1283,14 +1277,15 @@ impl Wallet {
     pub fn cancel_tx(&mut self, tx_hash: [u8; 32]) -> Result<(), WalletError> {
         debug!("canceling tx {}", hex::encode(tx_hash));
 
-        match self.pending_txs.remove(&tx_hash) {
+        match self.pending_txs.get(&tx_hash).cloned() {
             Some(pending) => {
                 // WAL: record Canceled in the journal before
                 // releasing reservations / saving state.
-                self.record_journal(tx_hash, TxJournalEvent::Canceled);
-                for commitment in pending.inputs {
-                    self.outputs.release_reservation(&commitment)?;
+                self.record_journal(tx_hash, TxJournalEvent::Canceled)?;
+                for commitment in &pending.inputs {
+                    self.outputs.release_reservation(commitment)?;
                 }
+                self.pending_txs.remove(&tx_hash);
                 self.save()?;
                 info!("tx canceled: {}", hex::encode(tx_hash));
                 Ok(())
@@ -1447,7 +1442,7 @@ impl Wallet {
                 // mutating output state. If we crash after the journal
                 // append but before save, reconcile-on-open replays the
                 // terminal status and cleans up the still-pending entry.
-                self.record_journal(tx_hash, TxJournalEvent::Confirmed { block_height });
+                self.record_journal(tx_hash, TxJournalEvent::Confirmed { block_height })?;
                 if let Some(pending) = self.pending_txs.remove(&tx_hash) {
                     for commitment in &pending.inputs {
                         if consumed_inputs.contains(commitment) {
@@ -1798,4 +1793,82 @@ fn scan_error_to_wallet(err: RestoreError) -> WalletError {
 fn compute_tx_hash(tx: &Transaction) -> Result<[u8; 32], WalletError> {
     let bytes = tx.to_bytes()?;
     Ok(*dom_crypto::blake2b_256(&bytes).as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn wallet_with_pending_cancel(journal_root: &Path) -> (Wallet, [u8; 32], [u8; 33]) {
+        let tx_hash = [3u8; 32];
+        let blinding = BlindingFactor::random();
+        let commitment = *Commitment::commit(20, &blinding).as_bytes();
+        let mut output = OwnedOutput::new(commitment, 20, *blinding.as_bytes(), 0, false);
+        output.reserved_for_tx = Some(tx_hash);
+
+        let mut outputs = OutputIndex::new();
+        outputs.insert(output);
+
+        let mut pending_txs = HashMap::new();
+        pending_txs.insert(
+            tx_hash,
+            PendingTx {
+                tx_hash,
+                inputs: vec![commitment],
+                tx_bytes: vec![0xab],
+                change: None,
+            },
+        );
+
+        let mut wallet = Wallet {
+            network: Network::Regtest,
+            chain_id: [1u8; 32],
+            outputs,
+            pending_txs,
+            receive_requests: Vec::new(),
+            keychain: WalletKeychainState::legacy(),
+            file_path: None,
+            session: None,
+            journal: None,
+        };
+        wallet.attach_journal(TxJournal::open(journal_root).unwrap());
+        (wallet, tx_hash, commitment)
+    }
+
+    #[test]
+    fn cancel_tx_keeps_memory_state_when_journal_append_fails() {
+        let dir = tempdir().unwrap();
+        let not_a_dir = dir.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, b"not a directory").unwrap();
+        let (mut wallet, tx_hash, commitment) = wallet_with_pending_cancel(&not_a_dir);
+
+        let result = wallet.cancel_tx(tx_hash);
+
+        assert!(result.is_err());
+        assert!(wallet.pending_txs.contains_key(&tx_hash));
+        assert_eq!(
+            wallet.outputs.get(&commitment).unwrap().reserved_for_tx,
+            Some(tx_hash)
+        );
+    }
+
+    #[test]
+    fn cancel_tx_updates_memory_state_when_journal_append_succeeds() {
+        let dir = tempdir().unwrap();
+        let (mut wallet, tx_hash, commitment) = wallet_with_pending_cancel(dir.path());
+
+        wallet.cancel_tx(tx_hash).unwrap();
+
+        assert!(!wallet.pending_txs.contains_key(&tx_hash));
+        assert_eq!(
+            wallet.outputs.get(&commitment).unwrap().reserved_for_tx,
+            None
+        );
+        let journal_bytes = std::fs::read(wallet.journal().unwrap().path()).unwrap();
+        assert!(!journal_bytes.is_empty());
+        assert!(String::from_utf8(journal_bytes)
+            .unwrap()
+            .contains("canceled"));
+    }
 }
