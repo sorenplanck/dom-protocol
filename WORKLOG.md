@@ -38,11 +38,56 @@ Sequence state:
 - DONE: Task 41 `861f24faf3aaf1b59d93bee174e657b4287106cc`.
 - DONE: Task 42 `42 networkstatus not peerregistry`.
 - DONE: Task 43 `43 wallet ping pong`.
-- CURRENT: Task 44 pending.
-- REMAINING: Tasks 44-50.
+- DONE: Task 44 `44 wallet ui network diagnostics`.
+- CURRENT: Task 45 pending.
+- REMAINING: Tasks 45-50.
 
 Open items:
-- Do not start Task 44 until Task 43 is committed, pushed, and reviewed.
+- Do not start Task 45 until Task 44 is committed, pushed, and reviewed.
+
+## 2026-05-31 — Task 44 Wallet UI Network Diagnostics
+
+Objective:
+- Expose actionable wallet network diagnostics in the UI using `NetworkStatus` as the source of truth.
+
+Changed files:
+- `crates/dom-wallet-app/src/runtime.rs`
+- `crates/dom-wallet-app/src/app.rs`
+- `WORKLOG.md`
+
+Implementation notes:
+- Added `NetworkDiagnosticsRows`, derived exclusively from `NetworkStatus`.
+- Dashboard node state now shows:
+  - network state
+  - connected peer
+  - peer count
+  - last Pong
+- Diagnostics node connectivity panel now shows:
+  - network state
+  - connected peer
+  - last error
+  - last TCP connect
+  - last handshake
+  - last Pong
+  - reconnect delay
+  - peer count
+  - next reconnect attempt, if scheduled
+- Peer count remains a separate field and does not imply connected.
+- Diagnostics rows do not read from PeerRegistry/last_seen and do not expose wallet secrets, keys, seeds, tokens, or passwords.
+
+Tests added:
+- `runtime::tests::network_diagnostics_rows_come_from_network_status`
+- `runtime::tests::network_diagnostics_rows_do_not_infer_connected_from_peer_count`
+
+Validation:
+- `cargo fmt` (PASS)
+- `cargo check -p dom-wallet-app` (PASS)
+- `cargo test -p dom-wallet-app network_diagnostics_rows_come_from_network_status` (PASS)
+- `cargo test -p dom-wallet-app network_diagnostics_rows_do_not_infer_connected_from_peer_count` (PASS)
+- `cargo check --workspace` (PASS)
+
+Integration test note:
+- No `dom-integration-tests` command was run for Task 44 because the change is confined to wallet desktop app UI formatting/state display and does not alter node integration behavior.
 
 ## 2026-05-31 — Task 43 Wallet Ping Pong
 

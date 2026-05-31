@@ -108,6 +108,39 @@ pub struct NetworkStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkDiagnosticsRows {
+    pub state: String,
+    pub connected_peer: String,
+    pub last_error: String,
+    pub last_tcp_connect: String,
+    pub last_handshake: String,
+    pub last_pong: String,
+    pub reconnect_delay: String,
+    pub peer_count: String,
+}
+
+impl NetworkStatus {
+    pub fn diagnostics_rows(&self) -> NetworkDiagnosticsRows {
+        NetworkDiagnosticsRows {
+            state: self.state.label().to_string(),
+            connected_peer: self
+                .connected_peer
+                .clone()
+                .unwrap_or_else(|| "none".to_string()),
+            last_error: self
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "none".to_string()),
+            last_tcp_connect: format_optional_timestamp(self.last_tcp_connect_at),
+            last_handshake: format_optional_timestamp(self.last_handshake_at),
+            last_pong: format_optional_timestamp(self.last_pong_at),
+            reconnect_delay: format!("{}s", self.reconnect_delay.as_secs()),
+            peer_count: self.peer_count.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeartbeatError {
     NoPingInFlight,
     MalformedPong { len: usize },
@@ -227,6 +260,12 @@ fn decode_pong_nonce(payload: &[u8]) -> Result<u64, HeartbeatError> {
         .try_into()
         .map_err(|_| HeartbeatError::MalformedPong { len: payload.len() })?;
     Ok(u64::from_le_bytes(bytes))
+}
+
+fn format_optional_timestamp(timestamp: Option<u64>) -> String {
+    timestamp
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "never".to_string())
 }
 
 impl Default for NetworkStatus {
@@ -1333,5 +1372,41 @@ mod tests {
         assert_eq!(event, HeartbeatEvent::None);
         assert_eq!(status.state, NetworkStatusState::Connected);
         assert_eq!(status.last_pong_at, None);
+    }
+
+    #[test]
+    fn network_diagnostics_rows_come_from_network_status() {
+        let mut status = NetworkStatus::default();
+        status.observe_peer_registry_count(8);
+        status.mark_connected(70, "127.0.0.1:33369");
+        status.last_pong_at = Some(71);
+        status.last_error = Some("redacted transport error".to_string());
+        status.reconnect_delay = Duration::from_secs(13);
+
+        let rows = status.diagnostics_rows();
+
+        assert_eq!(rows.state, "Connected");
+        assert_eq!(rows.connected_peer, "127.0.0.1:33369");
+        assert_eq!(rows.last_error, "redacted transport error");
+        assert_eq!(rows.last_tcp_connect, "70");
+        assert_eq!(rows.last_handshake, "70");
+        assert_eq!(rows.last_pong, "71");
+        assert_eq!(rows.reconnect_delay, "13s");
+        assert_eq!(rows.peer_count, "8");
+    }
+
+    #[test]
+    fn network_diagnostics_rows_do_not_infer_connected_from_peer_count() {
+        let mut status = NetworkStatus::default();
+        status.observe_peer_registry_count(8);
+
+        let rows = status.diagnostics_rows();
+
+        assert_eq!(rows.state, "Disconnected");
+        assert_eq!(rows.connected_peer, "none");
+        assert_eq!(rows.last_tcp_connect, "never");
+        assert_eq!(rows.last_handshake, "never");
+        assert_eq!(rows.last_pong, "never");
+        assert_eq!(rows.peer_count, "8");
     }
 }
