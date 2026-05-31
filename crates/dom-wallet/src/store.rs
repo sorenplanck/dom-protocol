@@ -231,6 +231,60 @@ impl WalletKeychainState {
     }
 }
 
+// Custom serde for a single [u8; 33] commitment (PendingChange).
+mod serde_commitment33 {
+    use serde::{Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(b: &[u8; 33], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(&b[..])
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 33], D::Error> {
+        let v: Vec<u8> = serde::Deserialize::deserialize(d)?;
+        if v.len() != 33 {
+            return Err(serde::de::Error::custom("commitment must be 33 bytes"));
+        }
+        let mut a = [0u8; 33];
+        a.copy_from_slice(&v);
+        Ok(a)
+    }
+}
+
+// Custom serde for a single [u8; 32] blinding factor (PendingChange).
+mod serde_blinding32 {
+    use serde::{Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(b: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(&b[..])
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
+        let v: Vec<u8> = serde::Deserialize::deserialize(d)?;
+        if v.len() != 32 {
+            return Err(serde::de::Error::custom("blinding factor must be 32 bytes"));
+        }
+        let mut a = [0u8; 32];
+        a.copy_from_slice(&v);
+        Ok(a)
+    }
+}
+
+/// Self-spend change produced by a pending transaction.
+///
+/// The change output uses a **random** blinding factor (unlike coinbase
+/// outputs, whose blindings are re-derivable from the seed). `scan_block`
+/// therefore cannot recover it. We persist the blinding here, attached to
+/// the pending tx, and register the change as a spendable [`OwnedOutput`]
+/// only when the tx confirms on-chain — mirroring the chain's reality.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PendingChange {
+    /// Compressed 33-byte Pedersen commitment of the change output
+    /// (`commit(value, blinding)` — matches the on-chain output exactly).
+    #[serde(with = "serde_commitment33")]
+    pub commitment: [u8; 33],
+    /// Change value in noms.
+    pub value: u64,
+    /// 32-byte blinding factor for the change output.
+    #[serde(with = "serde_blinding32")]
+    pub blinding: [u8; 32],
+}
+
 /// A transaction pending confirmation.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PendingTx {
@@ -243,6 +297,11 @@ pub struct PendingTx {
     /// restart. Legacy pending entries may not have this material.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tx_bytes: Vec<u8>,
+    /// Self-spend change to register as spendable once this tx
+    /// confirms. `None` for exact spends (no change) and for legacy
+    /// pending entries written before change tracking existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<PendingChange>,
 }
 
 /// Derive the wallet encryption key from a password and per-wallet salt.
