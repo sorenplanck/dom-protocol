@@ -1,5 +1,6 @@
 //! Full node orchestration.
 
+use crate::lock_order::LockClass;
 use crate::metrics::Metrics;
 use crate::missing_block_tracker::MissingBlockTracker;
 use crate::task_supervisor::{NodeTaskSupervisor, ShutdownToken, SupervisorStatus, TaskKind};
@@ -18,10 +19,12 @@ use dom_wallet::Wallet;
 use dom_wire::dandelion::DandelionRouter;
 use dom_wire::manager::PeerManager;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::time::Instant;
+use tokio::sync::{Mutex, MutexGuard};
 use tracing::{info, warn};
 
 /// The full DOM node.
@@ -121,6 +124,14 @@ const ORPHAN_BUFFER_MAX_BLOCKS: usize = 256;
 const ORPHAN_BUFFER_MAX_PER_PEER: usize = 32;
 const SHUTDOWN_GRACE_SECS: u64 = 5;
 
+const EVENT_LOCK_WAIT_MS: &str = "lock_wait_ms";
+const EVENT_LOCK_HELD_MS: &str = "lock_held_ms";
+const EVENT_RECONNECT_ATTEMPT: &str = "reconnect_attempt";
+const EVENT_SESSION_CLOSED_REASON: &str = "session_closed_reason";
+const EVENT_ORPHAN_ADMITTED: &str = "orphan_admitted";
+const EVENT_ORPHAN_REPROCESSED: &str = "orphan_reprocessed";
+const EVENT_FUTURE_BLOCK_POLICY_ACTION: &str = "future_block_policy_action";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutboundAttemptOutcome {
     RetryableFailure,
@@ -140,6 +151,90 @@ enum RelayBlockAction {
     Suppress,
     PenalizePeer,
     Drop,
+}
+
+struct TracedMutexGuard<'a, T> {
+    guard: MutexGuard<'a, T>,
+    lock_class: &'static str,
+    context: &'static str,
+    acquired_at: Instant,
+}
+
+impl<T> Deref for TracedMutexGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl<T> DerefMut for TracedMutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl<T> Drop for TracedMutexGuard<'_, T> {
+    fn drop(&mut self) {
+        tracing::debug!(
+            event = EVENT_LOCK_HELD_MS,
+            lock_class = self.lock_class,
+            lock_context = self.context,
+            lock_held_ms = self.acquired_at.elapsed().as_millis() as u64,
+            "runtime lock released"
+        );
+    }
+}
+
+async fn traced_lock<'a, T>(
+    mutex: &'a Mutex<T>,
+    lock_class: &'static str,
+    context: &'static str,
+) -> TracedMutexGuard<'a, T> {
+    let waiting_since = Instant::now();
+    let guard = mutex.lock().await;
+    let acquired_at = Instant::now();
+    tracing::debug!(
+        event = EVENT_LOCK_WAIT_MS,
+        lock_class,
+        lock_context = context,
+        lock_wait_ms = acquired_at.duration_since(waiting_since).as_millis() as u64,
+        "runtime lock acquired"
+    );
+    TracedMutexGuard {
+        guard,
+        lock_class,
+        context,
+        acquired_at,
+    }
+}
+
+fn lock_class_name(class: LockClass) -> &'static str {
+    match class {
+        LockClass::Peers => "peers",
+        LockClass::Chain => "chain",
+        LockClass::Mempool => "mempool",
+        LockClass::Dandelion => "dandelion",
+        LockClass::Wallet => "wallet",
+    }
+}
+
+fn error_domain(error: &DomError) -> &'static str {
+    match error {
+        DomError::Invalid(_) | DomError::Malformed(_) | DomError::Orphan(_) => "consensus",
+        DomError::TemporarilyInvalid(_) => "consensus_temporary",
+        DomError::PolicyRejected(_) => "policy",
+        DomError::Internal(_) => "operational",
+    }
+}
+
+fn connect_result_name(result: &dom_chain::ConnectResult) -> &'static str {
+    match result {
+        dom_chain::ConnectResult::BestChain => "best_chain",
+        dom_chain::ConnectResult::SideChain => "side_chain",
+        dom_chain::ConnectResult::AlreadyHave => "already_have",
+        dom_chain::ConnectResult::Reorg(_) => "reorg",
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -628,7 +723,12 @@ impl DomNode {
                                 stream, peer_addr, config, privkey, chain, channels, svc,
                             )
                             .await;
-                            let mut mgr = peers.lock().await;
+                            let mut mgr = traced_lock(
+                                &peers,
+                                lock_class_name(LockClass::Peers),
+                                "inbound_cleanup_peer",
+                            )
+                            .await;
                             let peer_key = peer_addr.to_string();
                             mgr.remove_peer(&peer_key);
                             mgr.release_inbound_reservation(&peer_addr);
@@ -669,7 +769,12 @@ impl DomNode {
                 return Ok(());
             }
             let needs_more = {
-                let mgr = self.peers.lock().await;
+                let mgr = traced_lock(
+                    &self.peers,
+                    lock_class_name(LockClass::Peers),
+                    "connector_needs_outbound",
+                )
+                .await;
                 mgr.needs_outbound()
             };
 
@@ -694,7 +799,12 @@ impl DomNode {
 
                 for addr in addrs {
                     let reserved = {
-                        let mut mgr = self.peers.lock().await;
+                        let mut mgr = traced_lock(
+                            &self.peers,
+                            lock_class_name(LockClass::Peers),
+                            "connector_reserve_outbound",
+                        )
+                        .await;
                         if !mgr.needs_outbound() {
                             false
                         } else {
@@ -705,6 +815,15 @@ impl DomNode {
                         continue;
                     }
 
+                    let configured_peer = self.config.seed_peers.iter().any(|peer| peer == &addr);
+                    tracing::info!(
+                        event = EVENT_RECONNECT_ATTEMPT,
+                        peer_addr = %addr,
+                        peer_direction = "outbound",
+                        configured_peer,
+                        failure_domain = "operational",
+                        "outbound reconnect attempt started"
+                    );
                     let config = self.config.clone();
                     let privkey = self.noise_privkey;
                     let chain = self.chain.clone();
@@ -724,7 +843,12 @@ impl DomNode {
                             let outcome =
                                 connect_outbound(&addr, config, privkey, chain, channels, svc_c)
                                     .await;
-                            let mut mgr = peers.lock().await;
+                            let mut mgr = traced_lock(
+                                &peers,
+                                lock_class_name(LockClass::Peers),
+                                "connector_cleanup_peer",
+                            )
+                            .await;
                             if outcome == OutboundAttemptOutcome::RetryableFailure {
                                 mgr.record_outbound_failure(&cleanup_addr);
                             }
@@ -801,7 +925,12 @@ impl DomNode {
             }
             let evicted = queue.evict_expired(FUTURE_BLOCK_QUEUE_MAX_AGE_SECS).await;
             if evicted > 0 {
-                tracing::debug!("Evicted {evicted} expired deferred block(s) before replay drain");
+                tracing::debug!(
+                    event = EVENT_FUTURE_BLOCK_POLICY_ACTION,
+                    future_block_policy_action = "evict_expired",
+                    evicted_count = evicted,
+                    "expired deferred blocks evicted before replay drain"
+                );
             }
             let now_secs = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -812,11 +941,22 @@ impl DomNode {
                 .drain_ready(now_secs, dom_core::FUTURE_BLOCK_SOFT_BUFFER_SECS)
                 .await;
             for deferred in ready {
-                tracing::debug!("Re-evaluating deferred block ts={}", deferred.timestamp);
+                tracing::debug!(
+                    event = EVENT_FUTURE_BLOCK_POLICY_ACTION,
+                    future_block_policy_action = "reprocess_ready",
+                    block_height = deferred.block_height,
+                    block_timestamp = deferred.timestamp,
+                    "deferred block ready for re-evaluation"
+                );
                 match decode_deferred_block_bytes(&deferred.block_bytes) {
                     Ok(block) => {
                         let result = {
-                            let mut c = chain.lock().await;
+                            let mut c = traced_lock(
+                                &chain,
+                                lock_class_name(LockClass::Chain),
+                                "future_queue_connect_block",
+                            )
+                            .await;
                             c.connect_block(&block, now)
                         };
                         match deferred_replay_action(&result) {
@@ -836,8 +976,11 @@ impl DomNode {
                                     }
                                 }
                                 tracing::info!(
-                                    "Accepted deferred block ts={} (new tip)",
-                                    deferred.timestamp
+                                    event = EVENT_FUTURE_BLOCK_POLICY_ACTION,
+                                    future_block_policy_action = "relay_best_chain",
+                                    block_height = deferred.block_height,
+                                    block_timestamp = deferred.timestamp,
+                                    "accepted deferred block on best chain"
                                 );
                                 if let Err(e) = purge_mempool_confirmed_inputs(
                                     &chain,
@@ -855,19 +998,31 @@ impl DomNode {
                             DeferredReplayAction::Drop => {
                                 if matches!(result, Ok(dom_chain::ConnectResult::SideChain)) {
                                     tracing::debug!(
-                                        "Accepted deferred block ts={} (side chain — no rebroadcast)",
-                                        deferred.timestamp
+                                        event = EVENT_FUTURE_BLOCK_POLICY_ACTION,
+                                        future_block_policy_action = "drop_side_chain",
+                                        block_height = deferred.block_height,
+                                        block_timestamp = deferred.timestamp,
+                                        "accepted deferred side-chain block without rebroadcast"
                                     );
                                 } else if matches!(
                                     result,
                                     Ok(dom_chain::ConnectResult::AlreadyHave)
                                 ) {
                                     tracing::trace!(
-                                        "Deferred block ts={} already known — no-op",
-                                        deferred.timestamp
+                                        event = EVENT_FUTURE_BLOCK_POLICY_ACTION,
+                                        future_block_policy_action = "drop_already_have",
+                                        block_height = deferred.block_height,
+                                        block_timestamp = deferred.timestamp,
+                                        "deferred block already known"
                                     );
                                 } else if let Err(ref e) = result {
-                                    tracing::debug!("Deferred block still rejected: {e}");
+                                    tracing::debug!(
+                                        event = EVENT_FUTURE_BLOCK_POLICY_ACTION,
+                                        future_block_policy_action = "drop_rejected",
+                                        failure_domain = error_domain(e),
+                                        error = %e,
+                                        "deferred block still rejected"
+                                    );
                                 }
                             }
                             DeferredReplayAction::Requeue => {
@@ -882,13 +1037,19 @@ impl DomNode {
                                     .await;
                                 if requeued {
                                     tracing::debug!(
-                                        "Deferred block ts={} requeued after retryable rejection",
-                                        deferred.timestamp
+                                        event = EVENT_FUTURE_BLOCK_POLICY_ACTION,
+                                        future_block_policy_action = "requeue_retryable",
+                                        block_height = deferred.block_height,
+                                        block_timestamp = deferred.timestamp,
+                                        "deferred block requeued after retryable rejection"
                                     );
                                 } else {
                                     tracing::warn!(
-                                        "Deferred block ts={} could not be requeued (queue full)",
-                                        deferred.timestamp
+                                        event = EVENT_FUTURE_BLOCK_POLICY_ACTION,
+                                        future_block_policy_action = "drop_queue_full",
+                                        block_height = deferred.block_height,
+                                        block_timestamp = deferred.timestamp,
+                                        "deferred block could not be requeued because queue is full"
                                     );
                                 }
                             }
@@ -898,7 +1059,13 @@ impl DomNode {
                         metrics
                             .malformed_block_relays
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        tracing::warn!("Deferred block decode error: {e}");
+                        tracing::warn!(
+                            event = EVENT_FUTURE_BLOCK_POLICY_ACTION,
+                            future_block_policy_action = "drop_malformed",
+                            failure_domain = error_domain(&e),
+                            error = %e,
+                            "deferred block decode failed"
+                        );
                     }
                 }
             }
@@ -1131,6 +1298,15 @@ async fn handle_inbound(
         Ok(t) => t,
         Err(e) => {
             let _ = record_pending_peer_violation(&chain, &svc.peers, addr, &e).await;
+            tracing::warn!(
+                event = EVENT_SESSION_CLOSED_REASON,
+                peer_addr = %addr,
+                peer_direction = "inbound",
+                session_closed_reason = "handshake_failed",
+                failure_domain = error_domain(&e),
+                error = %e,
+                "inbound session closed during handshake"
+            );
             warn!("Handshake failed with {addr}: {e}");
             return;
         }
@@ -1187,6 +1363,15 @@ async fn handle_inbound(
                     Ok(()) => {}
                     Err(e) => {
                         let _ = record_peer_violation(&chain, &svc.peers, addr, &e).await;
+                        tracing::warn!(
+                            event = EVENT_SESSION_CLOSED_REASON,
+                            peer_addr = %addr,
+                            peer_direction = "inbound",
+                            session_closed_reason = "ibd_failed",
+                            failure_domain = error_domain(&e),
+                            error = %e,
+                            "inbound session closed during ibd"
+                        );
                         warn!("IBD with {addr} failed: {e}");
                         return;
                     }
@@ -1210,11 +1395,29 @@ async fn handle_inbound(
             )
             .await
             {
+                tracing::info!(
+                    event = EVENT_SESSION_CLOSED_REASON,
+                    peer_addr = %addr,
+                    peer_direction = "inbound",
+                    session_closed_reason = "message_loop_error",
+                    failure_domain = error_domain(&e),
+                    error = %e,
+                    "inbound session closed after message loop error"
+                );
                 info!("Connection to {addr} closed: {e}");
             }
         }
         Err(e) => {
             let _ = record_pending_peer_violation(&chain, &svc.peers, addr, &e).await;
+            tracing::warn!(
+                event = EVENT_SESSION_CLOSED_REASON,
+                peer_addr = %addr,
+                peer_direction = "inbound",
+                session_closed_reason = "hello_exchange_failed",
+                failure_domain = error_domain(&e),
+                error = %e,
+                "inbound session closed during hello exchange"
+            );
             warn!("Hello exchange with {addr} failed: {e}")
         }
     }
@@ -1236,6 +1439,15 @@ async fn connect_outbound(
     let mut stream = match tokio::net::TcpStream::connect(addr).await {
         Ok(s) => s,
         Err(e) => {
+            tracing::warn!(
+                event = EVENT_SESSION_CLOSED_REASON,
+                peer_addr = %addr,
+                peer_direction = "outbound",
+                session_closed_reason = "tcp_connect_failed",
+                failure_domain = "network",
+                error = %e,
+                "outbound session failed before handshake"
+            );
             warn!("Connection to {addr} failed: {e}");
             return OutboundAttemptOutcome::RetryableFailure;
         }
@@ -1260,6 +1472,15 @@ async fn connect_outbound(
             if let Ok(peer_addr) = addr.parse() {
                 let _ = record_pending_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
             }
+            tracing::warn!(
+                event = EVENT_SESSION_CLOSED_REASON,
+                peer_addr = %addr,
+                peer_direction = "outbound",
+                session_closed_reason = "handshake_failed",
+                failure_domain = error_domain(&e),
+                error = %e,
+                "outbound session closed during handshake"
+            );
             warn!("Handshake failed with {addr}: {e}");
             return OutboundAttemptOutcome::RetryableFailure;
         }
@@ -1294,6 +1515,15 @@ async fn connect_outbound(
                 let result = svc.peers.lock().await.register_peer(peer_info);
                 info!("register_peer outbound {addr} → {result:?}");
                 if let Err(e) = result {
+                    tracing::warn!(
+                        event = EVENT_SESSION_CLOSED_REASON,
+                        peer_addr = %addr,
+                        peer_direction = "outbound",
+                        session_closed_reason = "peer_registration_failed",
+                        failure_domain = error_domain(&e),
+                        error = %e,
+                        "outbound session closed during peer registration"
+                    );
                     warn!("Failed to register outbound peer {addr}: {e}");
                     return OutboundAttemptOutcome::RetryableFailure;
                 }
@@ -1331,6 +1561,15 @@ async fn connect_outbound(
                     Ok(()) => {}
                     Err(e) => {
                         let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
+                        tracing::warn!(
+                            event = EVENT_SESSION_CLOSED_REASON,
+                            peer_addr = %addr,
+                            peer_direction = "outbound",
+                            session_closed_reason = "ibd_failed",
+                            failure_domain = error_domain(&e),
+                            error = %e,
+                            "outbound session closed during ibd"
+                        );
                         warn!("IBD with {addr} failed: {e}");
                         return OutboundAttemptOutcome::RetryableFailure;
                     }
@@ -1355,6 +1594,15 @@ async fn connect_outbound(
             )
             .await
             {
+                tracing::info!(
+                    event = EVENT_SESSION_CLOSED_REASON,
+                    peer_addr = %peer_addr,
+                    peer_direction = "outbound",
+                    session_closed_reason = "message_loop_error",
+                    failure_domain = error_domain(&e),
+                    error = %e,
+                    "outbound session closed after message loop error"
+                );
                 info!("Connection to {addr} closed: {e}");
             }
             OutboundAttemptOutcome::Registered
@@ -1371,6 +1619,15 @@ async fn connect_outbound(
                 },
             };
             let _ = record_pending_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
+            tracing::warn!(
+                event = EVENT_SESSION_CLOSED_REASON,
+                peer_addr = %peer_addr,
+                peer_direction = "outbound",
+                session_closed_reason = "hello_exchange_failed",
+                failure_domain = error_domain(&e),
+                error = %e,
+                "outbound session closed during hello exchange"
+            );
             warn!("Hello exchange with {addr} failed: {e}");
             OutboundAttemptOutcome::RetryableFailure
         }
@@ -1598,7 +1855,21 @@ async fn queue_future_block(
         queued_at: std::time::Instant::now(),
         block_bytes,
     };
-    queue.defer(deferred).await
+    let block_height = deferred.block_height;
+    let block_timestamp = deferred.timestamp;
+    let admitted = queue.defer(deferred).await;
+    tracing::debug!(
+        event = EVENT_FUTURE_BLOCK_POLICY_ACTION,
+        future_block_policy_action = if admitted {
+            "defer_admitted"
+        } else {
+            "defer_rejected"
+        },
+        block_height,
+        block_timestamp,
+        "future block policy evaluated relay block"
+    );
+    admitted
 }
 
 fn deferred_replay_action(
@@ -1684,7 +1955,12 @@ async fn register_orphan_block(
     };
     let parent_height = block.header.height.0.checked_sub(1);
     {
-        let mut tracker = svc.missing_block_tracker.lock().await;
+        let mut tracker = traced_lock(
+            &svc.missing_block_tracker,
+            "missing_block_tracker",
+            "orphan_note_missing_parent",
+        )
+        .await;
         tracker.note_orphan(block_hash, *parent_hash, parent_height);
     }
     let buffered = BufferedOrphan {
@@ -1694,7 +1970,17 @@ async fn register_orphan_block(
         peer_key: peer_addr.to_string(),
         block_bytes,
     };
-    let accepted = svc.orphan_buffer.lock().await.insert(buffered);
+    let accepted = traced_lock(&svc.orphan_buffer, "orphan_buffer", "orphan_buffer_insert")
+        .await
+        .insert(buffered);
+    tracing::info!(
+        event = EVENT_ORPHAN_ADMITTED,
+        orphan_admitted = accepted,
+        peer_addr = %peer_addr,
+        block_height = block.header.height.0,
+        parent_height = parent_height.unwrap_or_default(),
+        "orphan block admission evaluated"
+    );
     if !accepted {
         tracing::warn!(
             "Dropping orphan block {} from {} because the runtime orphan buffer is full/bounded",
@@ -1712,11 +1998,21 @@ async fn replay_buffered_orphans_for_parent(
     peer_addr: std::net::SocketAddr,
 ) {
     {
-        let mut tracker = svc.missing_block_tracker.lock().await;
+        let mut tracker = traced_lock(
+            &svc.missing_block_tracker,
+            "missing_block_tracker",
+            "orphan_resolve_parent",
+        )
+        .await;
         tracker.resolve(&parent_hash);
     }
     let mut queue: VecDeque<BufferedOrphan> = {
-        let mut buffer = svc.orphan_buffer.lock().await;
+        let mut buffer = traced_lock(
+            &svc.orphan_buffer,
+            "orphan_buffer",
+            "orphan_take_dependents",
+        )
+        .await;
         buffer.take_dependents(&parent_hash).into()
     };
     while let Some(buffered) = queue.pop_front() {
@@ -1733,9 +2029,38 @@ async fn replay_buffered_orphans_for_parent(
             .as_secs();
         let now = Timestamp(now_secs);
         let result = {
-            let mut c = chain.lock().await;
+            let mut c = traced_lock(
+                chain,
+                lock_class_name(LockClass::Chain),
+                "orphan_reprocess_connect_block",
+            )
+            .await;
             c.connect_block(&block, now)
         };
+        match &result {
+            Ok(connect_result) => {
+                tracing::info!(
+                    event = EVENT_ORPHAN_REPROCESSED,
+                    orphan_reprocessed = true,
+                    peer_addr = %peer_addr,
+                    block_height = buffered.block_height,
+                    connect_result = connect_result_name(connect_result),
+                    failure_domain = "none",
+                    "buffered orphan reprocessed"
+                );
+            }
+            Err(e) => {
+                tracing::info!(
+                    event = EVENT_ORPHAN_REPROCESSED,
+                    orphan_reprocessed = true,
+                    peer_addr = %peer_addr,
+                    block_height = buffered.block_height,
+                    failure_domain = error_domain(e),
+                    error = %e,
+                    "buffered orphan reprocess rejected"
+                );
+            }
+        }
         match result {
             Ok(
                 connect_result @ (dom_chain::ConnectResult::BestChain
@@ -1753,10 +2078,16 @@ async fn replay_buffered_orphans_for_parent(
                 }
                 let _ = block_relay_tx.send(buffered.block_bytes.clone());
                 let dependents = {
-                    let mut tracker = svc.missing_block_tracker.lock().await;
+                    let mut tracker = traced_lock(
+                        &svc.missing_block_tracker,
+                        "missing_block_tracker",
+                        "orphan_resolve_connected",
+                    )
+                    .await;
                     tracker.resolve(&buffered.block_hash)
                 };
-                let mut buffer = svc.orphan_buffer.lock().await;
+                let mut buffer =
+                    traced_lock(&svc.orphan_buffer, "orphan_buffer", "orphan_take_children").await;
                 for dependent in dependents {
                     for orphan in buffer.take_dependents(&dependent) {
                         queue.push_back(orphan);
@@ -1765,10 +2096,20 @@ async fn replay_buffered_orphans_for_parent(
             }
             Ok(dom_chain::ConnectResult::SideChain | dom_chain::ConnectResult::AlreadyHave) => {
                 let dependents = {
-                    let mut tracker = svc.missing_block_tracker.lock().await;
+                    let mut tracker = traced_lock(
+                        &svc.missing_block_tracker,
+                        "missing_block_tracker",
+                        "orphan_resolve_suppressed",
+                    )
+                    .await;
                     tracker.resolve(&buffered.block_hash)
                 };
-                let mut buffer = svc.orphan_buffer.lock().await;
+                let mut buffer = traced_lock(
+                    &svc.orphan_buffer,
+                    "orphan_buffer",
+                    "orphan_take_suppressed_children",
+                )
+                .await;
                 for dependent in dependents {
                     for orphan in buffer.take_dependents(&dependent) {
                         queue.push_back(orphan);
@@ -3184,6 +3525,14 @@ async fn message_loop(
                     Ok(msg) => msg,
                     Err(e) => {
                         let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
+                        tracing::info!(
+                            event = EVENT_SESSION_CLOSED_REASON,
+                            peer_addr = %peer_addr,
+                            session_closed_reason = "codec_recv_failed",
+                            failure_domain = error_domain(&e),
+                            error = %e,
+                            "peer session closed while receiving message"
+                        );
                         return Err(e);
                     }
                 };
@@ -3274,7 +3623,12 @@ async fn message_loop(
                                 let parent_hash = *block.header.prev_hash.as_bytes();
                                 let txs_for_scan = block.transactions.clone();
                                 let result = {
-                                    let mut c = chain.lock().await;
+                                    let mut c = traced_lock(
+                                        &chain,
+                                        lock_class_name(LockClass::Chain),
+                                        "relay_connect_block",
+                                    )
+                                    .await;
                                     c.connect_block(&block, now)
                                 };
                                 match relay_block_action(&result) {
@@ -3301,7 +3655,12 @@ async fn message_loop(
                                             match connect_result {
                                                 dom_chain::ConnectResult::BestChain => {
                                                     if let Some(ref wallet_arc) = svc.wallet {
-                                                        let mut w = wallet_arc.lock().await;
+                                                        let mut w = traced_lock(
+                                                            wallet_arc,
+                                                            lock_class_name(LockClass::Wallet),
+                                                            "wallet_apply_canonical_block",
+                                                        )
+                                                        .await;
                                                         if let Err(e) =
                                                             w.apply_canonical_block(
                                                                 &txs_for_scan,
@@ -3396,7 +3755,14 @@ async fn message_loop(
                                                 )
                                                 .await?;
                                             }
-                                            tracing::debug!("Block from {peer_addr} not accepted: {e}");
+                                            tracing::debug!(
+                                                event = "block_rejected",
+                                                peer_addr = %peer_addr,
+                                                failure_domain = error_domain(e),
+                                                relay_action = "suppress",
+                                                error = %e,
+                                                "relayed block not accepted"
+                                            );
                                         }
                                     }
                                     RelayBlockAction::PenalizePeer => {
@@ -3409,14 +3775,28 @@ async fn message_loop(
                                         let banned =
                                             record_peer_violation(&chain, &svc.peers, peer_addr, &e)
                                                 .await;
-                                        tracing::warn!("Rejected block from {peer_addr}: {e}");
+                                        tracing::warn!(
+                                            event = "block_rejected",
+                                            peer_addr = %peer_addr,
+                                            failure_domain = error_domain(&e),
+                                            relay_action = "penalize_peer",
+                                            error = %e,
+                                            "relayed block rejected by consensus validation"
+                                        );
                                         if banned {
                                             return Err(e);
                                         }
                                     }
                                     RelayBlockAction::Drop => {
                                         if let Err(ref e) = result {
-                                            tracing::debug!("Block from {peer_addr} not accepted: {e}");
+                                            tracing::debug!(
+                                                event = "block_rejected",
+                                                peer_addr = %peer_addr,
+                                                failure_domain = error_domain(e),
+                                                relay_action = "drop",
+                                                error = %e,
+                                                "relayed block not accepted"
+                                            );
                                         }
                                     }
                                 }
@@ -3437,7 +3817,14 @@ async fn message_loop(
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!("Block from {peer_addr} rejected by timestamp: {e}");
+                                tracing::warn!(
+                                    event = EVENT_FUTURE_BLOCK_POLICY_ACTION,
+                                    future_block_policy_action = "reject_timestamp",
+                                    peer_addr = %peer_addr,
+                                    failure_domain = error_domain(&e),
+                                    error = %e,
+                                    "block rejected by future timestamp policy"
+                                );
                             }
                         }
                     }
@@ -3450,7 +3837,12 @@ async fn message_loop(
                             Ok(tx) => {
                                 let tx_hash = *dom_crypto::blake2b_256(&tx_bytes).as_bytes();
                                 let chain_view = {
-                                    let c = chain.lock().await;
+                                    let c = traced_lock(
+                                        &chain,
+                                        lock_class_name(LockClass::Chain),
+                                        "tx_snapshot_chain_view",
+                                    )
+                                    .await;
                                     snapshot_tx_chain_view(&c, &tx)
                                 };
                                 let now_secs = std::time::SystemTime::now()
@@ -3459,7 +3851,12 @@ async fn message_loop(
                                     .as_secs();
                                 let accepted = match chain_view {
                                     Ok(view) => {
-                                        let mut m = svc.mempool.lock().await;
+                                        let mut m = traced_lock(
+                                            &svc.mempool,
+                                            lock_class_name(LockClass::Mempool),
+                                            "mempool_accept_relayed_tx",
+                                        )
+                                        .await;
                                         let result = m.accept_tx_with_chain_view(
                                             tx,
                                             tx_hash,
@@ -3472,7 +3869,12 @@ async fn message_loop(
                                         );
                                         drop(m);
                                         if result.is_ok() {
-                                            let chain = chain.lock().await;
+                                            let chain = traced_lock(
+                                                &chain,
+                                                lock_class_name(LockClass::Chain),
+                                                "clear_mempool_legacy_snapshot",
+                                            )
+                                            .await;
                                             clear_persisted_mempool_snapshot(&chain.store)?;
                                         }
                                         result
@@ -3495,7 +3897,12 @@ async fn message_loop(
                                         Vec::new()
                                     };
                                     let phase = {
-                                        let mut d = svc.dandelion.lock().await;
+                                        let mut d = traced_lock(
+                                            &svc.dandelion,
+                                            lock_class_name(LockClass::Dandelion),
+                                            "dandelion_process_stem_tx",
+                                        )
+                                        .await;
                                         d.process_stem_tx(tx_hash, &peer_list, peer_addr)
                                     };
                                     use dom_wire::dandelion::{DandelionPhase, StemEnvelope};
@@ -3504,7 +3911,14 @@ async fn message_loop(
                                             let _ = tx_fluff_tx.send(tx_bytes.clone());
                                         }
                                         DandelionPhase::Stem => {
-                                            if let Some(target) = svc.dandelion.lock().await.get_stem_peer(&tx_hash) {
+                                            if let Some(target) = traced_lock(
+                                                &svc.dandelion,
+                                                lock_class_name(LockClass::Dandelion),
+                                                "dandelion_get_stem_peer",
+                                            )
+                                            .await
+                                            .get_stem_peer(&tx_hash)
+                                            {
                                                 let _ = tx_stem_tx.send(StemEnvelope {
                                                     target_peer: target,
                                                     tx_bytes: tx_bytes.clone(),
@@ -3574,16 +3988,16 @@ async fn message_loop(
 mod tests {
     use super::{
         clear_persisted_mempool_snapshot, continue_ibd_header_sync, decode_deferred_block_bytes,
-        decode_ibd_block_response, decode_relay_block, deferred_replay_action, ibd_now,
-        initialize_ibd_state, load_mempool_snapshot, load_or_create_noise_static_key,
-        load_peer_reputation_snapshot, load_peer_rotation_snapshot,
-        parse_persisted_noise_static_key, peer_violation_score, pending_peer_violation_score,
-        persist_mempool_snapshot, persist_peer_reputation_snapshot, purge_mempool_confirmed_inputs,
-        reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action,
-        restore_peer_rotation_state, tx_hash, DeferredReplayAction, DomNode, DomNodeRuntimeStatus,
-        IbdRoundState, OutboundAttemptOutcome, RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY,
-        MEMPOOL_METADATA_KEY, NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY,
-        PEER_ROTATION_METADATA_KEY,
+        decode_ibd_block_response, decode_relay_block, deferred_replay_action,
+        enforce_volatile_mempool_restart_policy, ibd_now, initialize_ibd_state,
+        load_mempool_snapshot, load_or_create_noise_static_key, load_peer_reputation_snapshot,
+        load_peer_rotation_snapshot, parse_persisted_noise_static_key, peer_violation_score,
+        pending_peer_violation_score, persist_mempool_snapshot, persist_peer_reputation_snapshot,
+        purge_mempool_confirmed_inputs, reconcile_mempool_after_connect, refresh_peer_metrics,
+        relay_block_action, restore_peer_rotation_state, tx_hash, DeferredReplayAction, DomNode,
+        DomNodeRuntimeStatus, IbdRoundState, OutboundAttemptOutcome, RelayBlockAction,
+        LEGACY_PEER_ROTATION_METADATA_KEY, MEMPOOL_METADATA_KEY, NOISE_STATIC_KEY_METADATA_KEY,
+        PEER_REPUTATION_METADATA_KEY, PEER_ROTATION_METADATA_KEY,
     };
     use crate::metrics::Metrics;
     use crate::task_supervisor::{SupervisorStatus, TaskKind};
@@ -5076,6 +5490,28 @@ mod tests {
         assert_ne!(
             OutboundAttemptOutcome::RetryableFailure,
             OutboundAttemptOutcome::Registered
+        );
+    }
+
+    #[test]
+    fn runtime_structured_trace_event_names_are_stable() {
+        assert_eq!(super::EVENT_LOCK_WAIT_MS, "lock_wait_ms");
+        assert_eq!(super::EVENT_LOCK_HELD_MS, "lock_held_ms");
+        assert_eq!(super::EVENT_RECONNECT_ATTEMPT, "reconnect_attempt");
+        assert_eq!(super::EVENT_SESSION_CLOSED_REASON, "session_closed_reason");
+        assert_eq!(super::EVENT_ORPHAN_ADMITTED, "orphan_admitted");
+        assert_eq!(super::EVENT_ORPHAN_REPROCESSED, "orphan_reprocessed");
+        assert_eq!(
+            super::EVENT_FUTURE_BLOCK_POLICY_ACTION,
+            "future_block_policy_action"
+        );
+        assert_eq!(
+            super::error_domain(&DomError::Invalid("bad".into())),
+            "consensus"
+        );
+        assert_eq!(
+            super::error_domain(&DomError::Internal("io".into())),
+            "operational"
         );
     }
 
