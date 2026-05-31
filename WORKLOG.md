@@ -35,12 +35,61 @@ Sequence state:
 - DONE: Task 38 `89aca4a04bed5a4864e8df64509d18b5e9e82dbf`.
 - DONE: Task 39 `96072a85b55b52d757573f954410e7f849dd773a`.
 - DONE: Task 40 `beabf20e636736415a12f8892bd89dc047020a35`.
-- DONE: Task 41 `41 wallet auto reconnect`.
-- CURRENT: Task 42 pending.
-- REMAINING: Tasks 42-50.
+- DONE: Task 41 `861f24faf3aaf1b59d93bee174e657b4287106cc`.
+- DONE: Task 42 `42 networkstatus not peerregistry`.
+- CURRENT: Task 43 pending.
+- REMAINING: Tasks 43-50.
 
 Open items:
-- Do not start Task 42 until Task 41 is committed, pushed, and reviewed.
+- Do not start Task 43 until Task 42 is committed, pushed, and reviewed.
+
+## 2026-05-31 — Task 42 NetworkStatus Not PeerRegistry
+
+Objective:
+- Separate wallet app network connection truth from peer registry/known-peer metadata.
+
+Changed files:
+- `crates/dom-wallet-app/src/runtime.rs`
+- `crates/dom-wallet-app/src/app.rs`
+- `WORKLOG.md`
+
+Implementation notes:
+- Replaced the three-state wallet connection flag with explicit `NetworkStatus`.
+- Added `NetworkStatusState` states:
+  - `Disconnected`
+  - `TcpConnecting`
+  - `TcpConnected`
+  - `Handshaking`
+  - `Connected`
+  - `Reconnecting`
+  - `Failed`
+- `NetworkStatus` tracks:
+  - `last_error`
+  - `last_tcp_connect_at`
+  - `last_handshake_at`
+  - `last_pong_at`
+  - `reconnect_delay`
+  - `connected_peer`
+  - `peer_count`
+- Peer count is a separate field and does not imply `Connected`.
+- The wallet app marks `Connected` only after the node protocol status request succeeds. TCP/connectivity progress can enter `TcpConnecting`, `TcpConnected`, or `Handshaking`, but those states are not shown as protocol connected.
+- UI status badges now read from `NetworkStatusState`.
+
+Tests added:
+- `runtime::tests::last_seen_peer_registry_alone_does_not_imply_connected`
+- `runtime::tests::tcp_reachability_alone_does_not_imply_connected`
+- `runtime::tests::handshake_success_updates_network_status`
+
+Validation:
+- `cargo fmt` (PASS)
+- `cargo check -p dom-wallet-app` (PASS)
+- `cargo test -p dom-wallet-app last_seen_peer_registry_alone_does_not_imply_connected` (PASS)
+- `cargo test -p dom-wallet-app tcp_reachability_alone_does_not_imply_connected` (PASS)
+- `cargo test -p dom-wallet-app handshake_success_updates_network_status` (PASS)
+- `cargo check --workspace` (PASS)
+
+Integration test note:
+- No `dom-integration-tests` command was run for Task 42 because the change is confined to wallet desktop app network-status modeling and UI state, not protocol/node integration behavior.
 
 ## 2026-05-31 — Task 41 Wallet Auto Reconnect
 
