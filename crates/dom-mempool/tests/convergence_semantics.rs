@@ -1,10 +1,14 @@
 use dom_consensus::transaction::{
     Transaction, TransactionInput, TransactionKernel, TransactionOutput,
 };
-use dom_core::{Amount, DomError, KERNEL_FEAT_PLAIN, MIN_RELAY_FEE_RATE};
-use dom_crypto::pedersen::Commitment;
+use dom_core::{Amount, DomError, KERNEL_FEAT_PLAIN, MIN_RELAY_FEE_RATE, TAG_KERNEL_MSG};
+use dom_crypto::hash::blake2b_256_tagged;
+use dom_crypto::pedersen::{BlindingFactor, Commitment};
+use dom_crypto::{bp_prove, schnorr_sign, SecretKey};
 use dom_mempool::{validate_tx_against_chain_view, Mempool};
 use dom_store::utxo::UtxoEntry;
+
+const TEST_CHAIN_ID: [u8; 32] = [0x42; 32];
 
 fn g_commitment() -> Commitment {
     let g = [
@@ -48,6 +52,71 @@ fn make_spending_tx(input_commitment: Commitment, fee: u64, seed: u8) -> (Transa
     (tx, hash)
 }
 
+fn scalar(seed: u8) -> BlindingFactor {
+    let mut bytes = [0u8; 32];
+    bytes[31] = seed.max(1);
+    BlindingFactor::from_bytes(bytes).expect("deterministic scalar")
+}
+
+fn kernel_message(fee: u64, lock_height: u64) -> [u8; 32] {
+    let mut data = Vec::with_capacity(1 + 8 + 8);
+    data.push(KERNEL_FEAT_PLAIN);
+    data.extend_from_slice(&fee.to_le_bytes());
+    data.extend_from_slice(&lock_height.to_le_bytes());
+    *blake2b_256_tagged(TAG_KERNEL_MSG, &data).as_bytes()
+}
+
+fn make_valid_spending_tx_from_input(
+    input_value: u64,
+    input_blinding: BlindingFactor,
+    fee: u64,
+    seed: u8,
+) -> (Transaction, [u8; 32], UtxoEntry) {
+    let output_value = input_value.checked_sub(fee).expect("fee below input");
+    let kernel_blinding = scalar(seed.wrapping_add(80));
+    let output_blinding = input_blinding
+        .add(&kernel_blinding)
+        .expect("output blinding");
+    let input_commitment = Commitment::commit(input_value, &input_blinding);
+    let output_commitment = Commitment::commit(output_value, &output_blinding);
+    let (proof, _) = bp_prove(output_value, &output_blinding).expect("range proof");
+    let excess = Commitment::commit(0, &kernel_blinding);
+    let secret = SecretKey::from_bytes(kernel_blinding.as_bytes()).expect("kernel secret");
+    let sig =
+        schnorr_sign(&secret, &kernel_message(fee, 0), &TEST_CHAIN_ID).expect("kernel signature");
+
+    let tx = Transaction {
+        inputs: vec![TransactionInput {
+            commitment: input_commitment,
+        }],
+        outputs: vec![TransactionOutput {
+            commitment: output_commitment,
+            proof: proof.bytes,
+        }],
+        kernels: vec![TransactionKernel {
+            features: KERNEL_FEAT_PLAIN,
+            fee: Amount::from_noms(fee).unwrap(),
+            lock_height: 0,
+            excess,
+            excess_signature: sig.to_bytes(),
+        }],
+        offset: [0u8; 32],
+    };
+    let mut hash = [0u8; 32];
+    hash[0..8].copy_from_slice(&fee.to_le_bytes());
+    hash[8] = seed;
+    let entry = UtxoEntry {
+        block_height: 1,
+        is_coinbase: false,
+        proof: vec![],
+    };
+    (tx, hash, entry)
+}
+
+fn make_valid_spending_tx(fee: u64, seed: u8) -> (Transaction, [u8; 32], UtxoEntry) {
+    make_valid_spending_tx_from_input(10_000 + fee, scalar(seed), fee, seed)
+}
+
 #[test]
 fn conflicting_spend_is_rejected_while_original_is_in_pool() {
     let mut pool = Mempool::new();
@@ -89,13 +158,15 @@ fn conflicting_spend_can_be_reaccepted_after_confirmed_cleanup() {
 fn same_block_child_spend_rejected_until_parent_output_is_confirmed() {
     // `parent_output` stands in for an output created by an unconfirmed sibling
     // transaction in the (would-be) same block.
-    let parent_output = h_commitment();
-    let (child, child_hash) = make_spending_tx(parent_output, MIN_RELAY_FEE_RATE * 25, 0x07);
+    let (child, child_hash, confirmed_parent) =
+        make_valid_spending_tx(MIN_RELAY_FEE_RATE * 25, 0x07);
 
     // Parent output is NOT in the canonical UTXO set (unconfirmed) → reject.
     let mut pool = Mempool::new();
     let err = pool
-        .accept_tx_with_chain_view(child.clone(), child_hash, 0, 100, 10, |_| Ok(None))
+        .accept_tx_with_chain_view(child.clone(), child_hash, 0, 100, TEST_CHAIN_ID, 10, |_| {
+            Ok(None)
+        })
         .expect_err("same-block child spend must be rejected while the parent is unconfirmed");
     assert!(
         matches!(err, DomError::PolicyRejected(ref msg) if msg.contains("not found in canonical UTXO set")),
@@ -107,12 +178,7 @@ fn same_block_child_spend_rejected_until_parent_output_is_confirmed() {
     );
 
     // Once the parent's output is a confirmed, mature UTXO, the child admits.
-    let confirmed_parent = UtxoEntry {
-        block_height: 1,
-        is_coinbase: false,
-        proof: vec![],
-    };
-    pool.accept_tx_with_chain_view(child, child_hash, 0, 100, 10, |_| {
+    pool.accept_tx_with_chain_view(child, child_hash, 0, 100, TEST_CHAIN_ID, 10, |_| {
         Ok(Some(confirmed_parent.clone()))
     })
     .expect("child admits once its parent output is confirmed");
@@ -152,35 +218,45 @@ fn chain_view_rejects_immature_coinbase() {
 
 #[test]
 fn chain_view_accepts_present_mature_inputs() {
-    let input = h_commitment();
-    let (tx, hash) = make_spending_tx(input, MIN_RELAY_FEE_RATE * 25, 0x01);
-    let entry = UtxoEntry {
-        block_height: 10,
-        is_coinbase: true,
-        proof: vec![],
-    };
+    let (tx, hash, mut entry) = make_valid_spending_tx(MIN_RELAY_FEE_RATE * 25, 0x01);
+    entry.block_height = 10;
+    entry.is_coinbase = true;
     let mut pool = Mempool::new();
 
-    pool.accept_tx_with_chain_view(tx, hash, 0, 25, 10, |_| Ok(Some(entry.clone())))
-        .expect("mature canonical input must be accepted");
+    pool.accept_tx_with_chain_view(tx, hash, 0, 25, TEST_CHAIN_ID, 10, |_| {
+        Ok(Some(entry.clone()))
+    })
+    .expect("mature canonical input must be accepted");
     assert!(pool.get_tx(&hash).is_some());
 }
 
 #[test]
 fn reinjection_with_chain_view_is_permutation_invariant() {
-    let input = h_commitment();
     let entry = UtxoEntry {
         block_height: 10,
         is_coinbase: false,
         proof: vec![],
     };
-    let (tx_a, hash_a) = make_spending_tx(input.clone(), MIN_RELAY_FEE_RATE * 26, 0x01);
-    let (tx_b, hash_b) = make_spending_tx(input, MIN_RELAY_FEE_RATE * 27, 0x02);
+    let input_value = 100_000;
+    let input_blinding = scalar(0x31);
+    let (tx_a, hash_a, _) = make_valid_spending_tx_from_input(
+        input_value,
+        input_blinding.clone(),
+        MIN_RELAY_FEE_RATE * 26,
+        0x01,
+    );
+    let (tx_b, hash_b, _) = make_valid_spending_tx_from_input(
+        input_value,
+        input_blinding,
+        MIN_RELAY_FEE_RATE * 27,
+        0x02,
+    );
 
     let mut forward = Mempool::new();
     let forward_results = forward.reinject_batch_with_chain_view(
         vec![(tx_b.clone(), hash_b, 2), (tx_a.clone(), hash_a, 1)],
         100,
+        TEST_CHAIN_ID,
         1_000,
         |_| Ok(Some(entry.clone())),
     );
@@ -189,6 +265,7 @@ fn reinjection_with_chain_view_is_permutation_invariant() {
     let reverse_results = reverse.reinject_batch_with_chain_view(
         vec![(tx_a, hash_a, 1), (tx_b, hash_b, 2)],
         100,
+        TEST_CHAIN_ID,
         1_000,
         |_| Ok(Some(entry.clone())),
     );
