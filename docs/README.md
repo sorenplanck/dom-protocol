@@ -27,6 +27,8 @@ blockchain-specialist reviewer, and was accepted under the principle
 - [REGTEST.md](./REGTEST.md) — Local-dev `Network::Regtest` (NEVER for production)
 - [RPC.md](./RPC.md) — RPC endpoints
 - [FUZZING.md](./FUZZING.md) — Fuzzing campaign + how to add fuzz targets
+- [testing/WINDOWS_AGENT_WORKFLOW.md](./testing/WINDOWS_AGENT_WORKFLOW.md) and
+  [testing/WINDOWS_TEST_RUNNER.md](./testing/WINDOWS_TEST_RUNNER.md) — Windows portable test/agent runners
 
 ## Audit & status
 
