@@ -506,7 +506,13 @@ impl DomStore {
         // Remove spent UTXOs
         for commitment in spent_utxos {
             match txn.del(self.db_utxos, commitment, None) {
-                Ok(()) | Err(lmdb::Error::NotFound) => {}
+                Ok(()) => {}
+                Err(lmdb::Error::NotFound) => {
+                    return Err(DomError::Internal(format!(
+                        "spent UTXO not found in canonical store — double-spend or missing input: commitment={}",
+                        hex::encode(commitment)
+                    )));
+                }
                 Err(e) => return Err(DomError::Internal(format!("del utxo: {e}"))),
             }
         }
