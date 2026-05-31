@@ -16,9 +16,11 @@ tracing.workspace = true
 dom-core.workspace = true
 dom-crypto.workspace = true
 dom-serialization.workspace = true
+dom-wire.workspace = true
 dom-wallet.workspace = true
 hex.workspace = true
 eframe = { version = "0.29", default-features = true, features = ["default_fonts", "glow"] }
+rand.workspace = true
 url = "2.5"
 
 [dev-dependencies]
