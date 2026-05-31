@@ -12,11 +12,11 @@ use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{
     compute_block_pmmr_roots, derive_chain_id, Block, CoinbaseKernel, CoinbaseTransaction,
-    TransactionOutput,
+    Transaction, TransactionInput, TransactionKernel, TransactionOutput,
 };
 use dom_core::{
-    BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION,
-    TAG_KERNEL_MSG_COINBASE,
+    Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
+    NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::{
     bulletproof,
@@ -156,6 +156,101 @@ fn build_coinbase_only_block(
         header,
         coinbase,
         transactions: vec![],
+    }
+}
+
+fn kernel_message(fee: u64, lock_height: u64) -> [u8; 32] {
+    let mut data = Vec::with_capacity(1 + 8 + 8);
+    data.push(KERNEL_FEAT_PLAIN);
+    data.extend_from_slice(&fee.to_le_bytes());
+    data.extend_from_slice(&lock_height.to_le_bytes());
+    *blake2b_256_tagged(TAG_KERNEL_MSG, &data).as_bytes()
+}
+
+fn valid_spend_tx(
+    input_value: u64,
+    input_blinding: BlindingFactor,
+    output_value: u64,
+    kernel_seed: u8,
+    chain_id: &[u8; 32],
+) -> Transaction {
+    let fee = input_value
+        .checked_sub(output_value)
+        .expect("output must not exceed input");
+    let kernel_blinding = scalar(kernel_seed);
+    let output_blinding = input_blinding
+        .add(&kernel_blinding)
+        .expect("output blinding");
+    let input_commitment = Commitment::commit(input_value, &input_blinding);
+    let output_commitment = Commitment::commit(output_value, &output_blinding);
+    let (proof, _) = bulletproof::prove(output_value, &output_blinding).expect("tx proof");
+    let excess = Commitment::commit(0, &kernel_blinding);
+    let secret = SecretKey::from_bytes(kernel_blinding.as_bytes()).expect("kernel secret");
+    let sig = schnorr_sign(&secret, &kernel_message(fee, 0), chain_id).expect("kernel signature");
+
+    Transaction {
+        inputs: vec![TransactionInput {
+            commitment: input_commitment,
+        }],
+        outputs: vec![TransactionOutput {
+            commitment: output_commitment,
+            proof: proof.bytes,
+        }],
+        kernels: vec![TransactionKernel {
+            features: KERNEL_FEAT_PLAIN,
+            fee: Amount::from_noms(fee).expect("fee"),
+            lock_height: 0,
+            excess,
+            excess_signature: sig.to_bytes(),
+        }],
+        offset: [0u8; 32],
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_block_with_transactions(
+    seed_hash: [u8; 32],
+    prev_hash: Hash256,
+    height: BlockHeight,
+    parent_total_difficulty: U256,
+    total_kernel_offset: [u8; 32],
+    coinbase_seed: u8,
+    transactions: Vec<Transaction>,
+    chain_id: &[u8; 32],
+) -> Block {
+    let total_fees = transactions
+        .iter()
+        .map(|tx| tx.total_fee().expect("fee"))
+        .sum();
+    let coinbase = build_coinbase(height, total_fees, coinbase_seed, chain_id);
+    let (output_root, kernel_root, rangeproof_root) =
+        compute_block_pmmr_roots(&coinbase, &transactions).expect("roots");
+    let timestamp = genesis_anchor(NETWORK_MAGIC_REGTEST)
+        .expect("anchor")
+        .timestamp
+        .checked_add_secs(height.0 * dom_core::TARGET_SPACING)
+        .expect("timestamp");
+    let target = compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, height).expect("target");
+    let canonical_target = CompactTarget(target_to_compact(&target))
+        .to_target()
+        .expect("compact target round-trip");
+    let total_difficulty =
+        parent_total_difficulty + U256::from(target_to_difficulty(&canonical_target));
+    let header = mine_fast_header(
+        seed_hash,
+        prev_hash,
+        height,
+        timestamp,
+        output_root,
+        kernel_root,
+        rangeproof_root,
+        total_kernel_offset,
+        total_difficulty,
+    );
+    Block {
+        header,
+        coinbase,
+        transactions,
     }
 }
 
@@ -311,5 +406,138 @@ fn invariant_reorg_candidate_promotion_revalidates_economic_balance_before_state
     assert!(
         msg.contains("aggregate") || msg.contains("balance") || msg.contains("validation"),
         "expected validation rejection during reorg promotion, got: {msg}"
+    );
+}
+
+#[test]
+fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotion() {
+    std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+    let dir = TempDir::new().expect("tempdir");
+    let store_dir = dir.path().join("chain");
+    let chain_id = *derive_chain_id(
+        NETWORK_MAGIC_REGTEST,
+        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+    )
+    .as_bytes();
+    let mut chain = open_chain(&store_dir);
+
+    let genesis = build_coinbase_only_block(
+        [0u8; 32],
+        Hash256::ZERO,
+        BlockHeight::GENESIS,
+        U256::zero(),
+        [0u8; 32],
+        30,
+        &chain_id,
+    );
+    chain.connect_block(&genesis, safe_now()).expect("genesis");
+
+    let canonical_1 = build_coinbase_only_block(
+        *block_hash(&genesis).as_bytes(),
+        block_hash(&genesis),
+        BlockHeight(1),
+        genesis.header.total_difficulty,
+        [0u8; 32],
+        31,
+        &chain_id,
+    );
+    chain
+        .connect_block(&canonical_1, safe_now())
+        .expect("canonical 1");
+
+    let canonical_2 = build_coinbase_only_block(
+        *block_hash(&genesis).as_bytes(),
+        block_hash(&canonical_1),
+        BlockHeight(2),
+        canonical_1.header.total_difficulty,
+        [0u8; 32],
+        32,
+        &chain_id,
+    );
+    chain
+        .connect_block(&canonical_2, safe_now())
+        .expect("canonical 2");
+
+    let side_1 = build_coinbase_only_block(
+        *block_hash(&genesis).as_bytes(),
+        block_hash(&genesis),
+        BlockHeight(1),
+        genesis.header.total_difficulty,
+        [0u8; 32],
+        33,
+        &chain_id,
+    );
+    let side_1_result = chain.connect_block(&side_1, safe_now()).expect("side 1");
+    assert!(
+        matches!(side_1_result, dom_chain::ConnectResult::SideChain),
+        "side_1 should be retained, not promoted"
+    );
+
+    let canonical_1_coinbase_value = dom_core::block_reward(BlockHeight(1)).noms();
+    let invalid_against_side_branch = valid_spend_tx(
+        canonical_1_coinbase_value,
+        scalar(31),
+        canonical_1_coinbase_value - dom_core::MIN_RELAY_FEE_RATE * 100,
+        40,
+        &chain_id,
+    );
+    let side_2_invalid = build_block_with_transactions(
+        *block_hash(&genesis).as_bytes(),
+        block_hash(&side_1),
+        BlockHeight(2),
+        side_1.header.total_difficulty,
+        [0u8; 32],
+        34,
+        vec![invalid_against_side_branch],
+        &chain_id,
+    );
+    let side_2_invalid_hash = block_hash(&side_2_invalid);
+    let side_2_result = chain
+        .connect_block(&side_2_invalid, safe_now())
+        .expect("invalid-context side block is quarantined");
+    assert!(
+        matches!(side_2_result, dom_chain::ConnectResult::SideChain),
+        "side_2 should be retained before branch-context input validation"
+    );
+    assert!(
+        chain
+            .store
+            .get_block_body(side_2_invalid_hash.as_bytes())
+            .expect("read retained side body")
+            .is_some(),
+        "side-chain block should be persisted in quarantine"
+    );
+
+    let side_3_heavier = build_coinbase_only_block(
+        *block_hash(&genesis).as_bytes(),
+        block_hash(&side_2_invalid),
+        BlockHeight(3),
+        side_2_invalid.header.total_difficulty,
+        [0u8; 32],
+        35,
+        &chain_id,
+    );
+    let side_3_heavier_hash = block_hash(&side_3_heavier);
+    chain
+        .store
+        .store_known_block(
+            side_3_heavier_hash.as_bytes(),
+            &side_3_heavier.header.to_bytes().expect("header bytes"),
+            &side_3_heavier.to_bytes().expect("block bytes"),
+        )
+        .expect("store heavier side tip");
+
+    let err = chain
+        .promote_heavier_known_tip(side_3_heavier_hash)
+        .expect_err("promotion must reject branch-invalid input");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("missing input") || msg.contains("reorg connect"),
+        "expected branch-context input rejection, got: {msg}"
+    );
+    assert_eq!(
+        chain.tip_hash,
+        block_hash(&canonical_2),
+        "failed promotion must leave canonical tip unchanged"
     );
 }
