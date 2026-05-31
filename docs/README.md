@@ -42,3 +42,25 @@ blockchain-specialist reviewer, and was accepted under the principle
 
 - [troubleshooting/](./troubleshooting/) — Runbooks for common operational issues
 - [troubleshooting/chain-persistence-latency-rca.md](./troubleshooting/chain-persistence-latency-rca.md) — RCA for `chain_persistence` runtime latency vs restart/recovery behavior
+
+## Wallet Diagnostics
+
+The desktop wallet diagnostics panel can export a bounded diagnostic log with
+application version, build hash when available, configured network mode,
+configured backbone/node endpoint, connection lifecycle events, errors,
+heartbeat observations, and chain-height changes observed through node status.
+
+To collect wallet diagnostics:
+
+1. Open the wallet app.
+2. Unlock the wallet if diagnostics are needed for an active session.
+3. Open `Diagnostics`.
+4. Click `Export Logs`.
+5. Share the generated `dom-wallet-diagnostics-*.log` file from the wallet app
+   data directory.
+
+Diagnostic export applies redaction before entries are stored and exported.
+Wallet passwords, seed phrases, private/secret keys, bearer tokens,
+authorization values, and similarly named secret fields are replaced with
+`<redacted>`. Do not paste wallet seed phrases, private keys, or passwords into
+issue descriptions or chat even when sharing a diagnostic export.
