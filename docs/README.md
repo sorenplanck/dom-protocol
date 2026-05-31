@@ -23,6 +23,7 @@ blockchain-specialist reviewer, and was accepted under the principle
 ## Operations
 
 - [DEPLOYMENT.md](./DEPLOYMENT.md) — Testnet deployment guide + planned mainnet operational path
+- [NETWORK_MODES.md](./NETWORK_MODES.md) — Devnet, testnet, regtest, and mainnet mode reference
 - [BACKBONE_SYSTEMD.md](./BACKBONE_SYSTEMD.md) — VPS backbone systemd service runbook
 - [REGTEST.md](./REGTEST.md) — Local-dev `Network::Regtest` (NEVER for production)
 - [RPC.md](./RPC.md) — RPC endpoints

@@ -13,6 +13,10 @@ production: its magic byte (`DOMR`) and port (33371) are mutually
 disjoint from Mainnet (`DOM1` / 33369) and Testnet (`DOMT` / 33370),
 so a Regtest node cannot peer with a real network.
 
+For the authoritative operational differences between devnet, testnet,
+regtest, and the not-yet-finalized mainnet mode, see
+[`NETWORK_MODES.md`](./NETWORK_MODES.md).
+
 ---
 
 ## Hardware Requirements
