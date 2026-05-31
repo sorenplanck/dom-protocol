@@ -139,6 +139,70 @@ fn each_commit_is_independently_durable() {
     }
 }
 
+#[test]
+fn commit_block_rejects_missing_spent_utxo() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = open_test_store(dir.path());
+    let b = dummy_block(0x51, 1);
+    let mut missing_spent = [0u8; 33];
+    missing_spent[0] = 0x02;
+    missing_spent[1] = 0xFE;
+
+    let err = store
+        .commit_block(
+            &b.hash,
+            b.height,
+            &b.header,
+            &b.body,
+            &[(b.commitment, entry_for(b.height))],
+            &[missing_spent],
+            &[(b.excess, b.hash)],
+        )
+        .expect_err("missing spent UTXO must fail canonical commit");
+
+    let message = err.to_string();
+    assert!(message.contains("spent UTXO not found in canonical store"));
+    assert!(message.contains(&hex::encode(missing_spent)));
+    assert!(store.get_block_header(&b.hash).unwrap().is_none());
+    assert!(store.get_utxo(&b.commitment).unwrap().is_none());
+}
+
+#[test]
+fn commit_block_removes_existing_spent_utxo() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = open_test_store(dir.path());
+    let first = dummy_block(0x61, 1);
+    let second = dummy_block(0x62, 2);
+
+    store
+        .commit_block(
+            &first.hash,
+            first.height,
+            &first.header,
+            &first.body,
+            &[(first.commitment, entry_for(first.height))],
+            &[],
+            &[(first.excess, first.hash)],
+        )
+        .expect("seed UTXO commit");
+
+    store
+        .commit_block(
+            &second.hash,
+            second.height,
+            &second.header,
+            &second.body,
+            &[(second.commitment, entry_for(second.height))],
+            &[first.commitment],
+            &[(second.excess, second.hash)],
+        )
+        .expect("spending existing UTXO must succeed");
+
+    assert!(store.get_utxo(&first.commitment).unwrap().is_none());
+    assert!(store.get_utxo(&second.commitment).unwrap().is_some());
+    assert_eq!(store.get_chain_tip().unwrap().expect("tip"), second.hash,);
+}
+
 /// The map-full sentinel is part of the public surface that the
 /// chain-init layer matches against. Pinning the literal value here
 /// guarantees a typo will fail CI rather than silently producing a
