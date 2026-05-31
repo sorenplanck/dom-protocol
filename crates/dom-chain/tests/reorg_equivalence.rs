@@ -835,10 +835,12 @@ fn retained_reorg_candidate_is_not_pruned_before_promotion() {
         chain.tip_height.0 <= MAX_RETAINED_SIDE_BRANCH_REORG_DEPTH,
         "fixture must stay within configured reorg retention depth"
     );
-    assert!(
-        3 <= MAX_RETAINED_SIDE_BRANCH_LENGTH,
-        "fixture branch length must stay within configured branch limit"
-    );
+    const {
+        assert!(
+            3 <= MAX_RETAINED_SIDE_BRANCH_LENGTH,
+            "fixture branch length must stay within configured branch limit"
+        );
+    }
 
     chain
         .promote_heavier_known_tip(candidate_4_hash)
