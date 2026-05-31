@@ -24,7 +24,10 @@ use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
 use common::{open_test_chain, open_test_store};
 use dom_chain::reorg::{check_reorg_depth, find_common_ancestor};
-use dom_chain::ChainState;
+use dom_chain::{
+    ChainState, MAX_RETAINED_SIDE_BRANCH_LENGTH, MAX_RETAINED_SIDE_BRANCH_REORG_DEPTH,
+    MAX_RETAINED_SIDE_BRANCH_TIPS,
+};
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{
     compute_block_pmmr_roots, derive_chain_id, Block, CoinbaseKernel, CoinbaseTransaction,
@@ -44,6 +47,7 @@ use dom_serialization::DomSerialize;
 use dom_store::utxo::UtxoEntry;
 use dom_store::DomStore;
 use primitive_types::U256;
+use std::collections::BTreeSet;
 use tempfile::TempDir;
 
 type UtxoBytes = ([u8; 33], Vec<u8>);
@@ -83,6 +87,35 @@ fn block_hash(header: &BlockHeader) -> Hash256 {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&h.finalize());
     Hash256::from_bytes(arr)
+}
+
+fn commit_genesis(store: &DomStore) {
+    let block = valid_coinbase_only_block(Hash256::ZERO, 0, 1, 0xA0, 0xE0);
+    let header_bytes = block.header.to_bytes().expect("header serialise");
+    let body_bytes = block.to_bytes().expect("block serialise");
+    let hash = block_hash(&block.header);
+    let output = *block.coinbase.output.commitment.as_bytes();
+    let excess = *block.coinbase.kernel.excess.as_bytes();
+
+    store
+        .commit_block(
+            hash.as_bytes(),
+            0,
+            &header_bytes,
+            &body_bytes,
+            &[(
+                output,
+                UtxoEntry {
+                    block_height: 0,
+                    is_coinbase: true,
+                    proof: block.coinbase.output.proof.clone(),
+                }
+                .to_bytes(),
+            )],
+            &[],
+            &[(excess, *hash.as_bytes())],
+        )
+        .expect("commit genesis");
 }
 
 /// Push a synthetic block by writing only its header + body. The
@@ -254,38 +287,6 @@ fn signed_coinbase(height: BlockHeight, seed: u8) -> CoinbaseTransaction {
     }
 }
 
-fn valid_coinbase_only_block(
-    prev_hash: Hash256,
-    height: u64,
-    total_difficulty: u64,
-    nonce_seed: u64,
-    coinbase_seed: u8,
-) -> Block {
-    let coinbase = signed_coinbase(BlockHeight(height), coinbase_seed);
-    let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &[]).expect("pmmr roots");
-    Block {
-        header: BlockHeader {
-            version: PROTOCOL_VERSION,
-            height: BlockHeight(height),
-            prev_hash,
-            timestamp: Timestamp(1_700_200_000 + height),
-            output_root,
-            kernel_root,
-            rangeproof_root,
-            total_kernel_offset: [0u8; 32],
-            target: CompactTarget(0),
-            total_difficulty: U256::from(total_difficulty),
-            pow: ProofOfWork {
-                nonce: nonce_seed,
-                randomx_hash: Hash256::ZERO,
-            },
-        },
-        coinbase,
-        transactions: vec![],
-    }
-}
-
 fn synthetic_block(
     prev_hash: Hash256,
     height: u64,
@@ -318,6 +319,38 @@ fn synthetic_block(
         },
         coinbase,
         transactions,
+    }
+}
+
+fn valid_coinbase_only_block(
+    prev_hash: Hash256,
+    height: u64,
+    total_difficulty: u64,
+    nonce_seed: u64,
+    coinbase_seed: u8,
+) -> Block {
+    let coinbase = signed_coinbase(BlockHeight(height), coinbase_seed);
+    let (output_root, kernel_root, rangeproof_root) =
+        compute_block_pmmr_roots(&coinbase, &[]).expect("pmmr roots");
+    Block {
+        header: BlockHeader {
+            version: PROTOCOL_VERSION,
+            height: BlockHeight(height),
+            prev_hash,
+            timestamp: Timestamp(1_700_200_000 + height),
+            output_root,
+            kernel_root,
+            rangeproof_root,
+            total_kernel_offset: [0u8; 32],
+            target: CompactTarget(0),
+            total_difficulty: U256::from(total_difficulty),
+            pow: ProofOfWork {
+                nonce: nonce_seed,
+                randomx_hash: Hash256::ZERO,
+            },
+        },
+        coinbase,
+        transactions: vec![],
     }
 }
 
@@ -398,6 +431,19 @@ fn open_chain(dir: &std::path::Path) -> ChainState {
         dom_core::NETWORK_MAGIC_REGTEST,
     )
     .expect("chain open")
+}
+
+fn retained_noncanonical_hashes(chain: &ChainState) -> BTreeSet<[u8; 32]> {
+    let canonical: BTreeSet<[u8; 32]> = (0..=chain.tip_height.0)
+        .filter_map(|height| chain.store.get_hash_at_height(height).unwrap())
+        .collect();
+    chain
+        .store
+        .read_all_block_headers_raw()
+        .expect("read all headers")
+        .into_keys()
+        .filter(|hash| !canonical.contains(hash))
+        .collect()
 }
 
 #[test]
@@ -531,6 +577,7 @@ fn check_reorg_depth_boundary() {
 fn promote_heavier_known_tip_emits_block_level_reorg_metadata() {
     let dir = TempDir::new().expect("tempdir");
     let store = open_test_store(dir.path());
+    commit_genesis(&store);
 
     let shared = valid_coinbase_only_block(Hash256::ZERO, 1, 1, 1, 10);
     let shared_hash = commit_canonical_block(&store, &shared);
@@ -583,6 +630,7 @@ fn promote_heavier_known_tip_emits_block_level_reorg_metadata() {
 fn promote_heavier_known_tip_rewrites_canonical_state_and_survives_restart() {
     let dir = TempDir::new().expect("tempdir");
     let store = open_test_store(dir.path());
+    commit_genesis(&store);
 
     let shared = synthetic_block(Hash256::ZERO, 1, 1, 1, 10, vec![]);
     let shared_hash = commit_canonical_block(&store, &shared);
@@ -695,4 +743,108 @@ fn promote_heavier_known_tip_rewrites_canonical_state_and_survives_restart() {
     );
     assert!(reopened.store.get_utxo(&alt_spend_out).unwrap().is_some());
     assert!(reopened.store.get_utxo(&old_spend_out).unwrap().is_none());
+}
+
+#[test]
+fn side_chain_retention_prunes_to_deterministic_tip_bound_and_survives_restart() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = DomStore::open(dir.path()).expect("open");
+    commit_genesis(&store);
+
+    let canonical_1 = valid_coinbase_only_block(Hash256::ZERO, 1, 100, 1, 60);
+    let canonical_1_hash = commit_canonical_block(&store, &canonical_1);
+    let canonical_2 = valid_coinbase_only_block(canonical_1_hash, 2, 200, 2, 61);
+    commit_canonical_block(&store, &canonical_2);
+
+    let mut all_side_tips = Vec::new();
+    for i in 0..(MAX_RETAINED_SIDE_BRANCH_TIPS + 2) {
+        let block = valid_coinbase_only_block(
+            canonical_1_hash,
+            2,
+            10 + i as u64,
+            100 + i as u64,
+            70 + i as u8,
+        );
+        let hash = store_side_block(&store, &block);
+        all_side_tips.push(hash);
+    }
+
+    let expected_retained: BTreeSet<[u8; 32]> = all_side_tips
+        .iter()
+        .rev()
+        .take(MAX_RETAINED_SIDE_BRANCH_TIPS)
+        .map(|hash| *hash.as_bytes())
+        .collect();
+
+    let reopened = open_chain(dir.path());
+    let retained = retained_noncanonical_hashes(&reopened);
+    assert_eq!(retained.len(), MAX_RETAINED_SIDE_BRANCH_TIPS);
+    assert_eq!(retained, expected_retained);
+    assert_eq!(
+        reopened.tip_height,
+        BlockHeight(2),
+        "side retention must not rewrite canonical tip on reopen"
+    );
+
+    drop(reopened);
+    let reopened_again = open_chain(dir.path());
+    assert_eq!(
+        retained_noncanonical_hashes(&reopened_again),
+        expected_retained
+    );
+}
+
+#[test]
+fn retained_reorg_candidate_is_not_pruned_before_promotion() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = DomStore::open(dir.path()).expect("open");
+    commit_genesis(&store);
+
+    let shared = valid_coinbase_only_block(Hash256::ZERO, 1, 100, 1, 80);
+    let shared_hash = commit_canonical_block(&store, &shared);
+    let canonical_2 = valid_coinbase_only_block(shared_hash, 2, 200, 2, 81);
+    let canonical_2_hash = commit_canonical_block(&store, &canonical_2);
+    let canonical_3 = valid_coinbase_only_block(canonical_2_hash, 3, 300, 3, 82);
+    commit_canonical_block(&store, &canonical_3);
+
+    let candidate_2 = valid_coinbase_only_block(shared_hash, 2, 190, 20, 90);
+    let candidate_2_hash = store_side_block(&store, &candidate_2);
+    let candidate_3 = valid_coinbase_only_block(candidate_2_hash, 3, 280, 21, 91);
+    let candidate_3_hash = store_side_block(&store, &candidate_3);
+    let candidate_4 = valid_coinbase_only_block(candidate_3_hash, 4, 310, 22, 92);
+    let candidate_4_hash = store_side_block(&store, &candidate_4);
+
+    for i in 0..(MAX_RETAINED_SIDE_BRANCH_TIPS - 1) {
+        let spam =
+            valid_coinbase_only_block(shared_hash, 2, 50 + i as u64, 40 + i as u64, 100 + i as u8);
+        store_side_block(&store, &spam);
+    }
+    let pruned = valid_coinbase_only_block(shared_hash, 2, 1, 99, 120);
+    let pruned_hash = store_side_block(&store, &pruned);
+
+    let mut chain = open_chain(dir.path());
+    let retained = retained_noncanonical_hashes(&chain);
+    assert!(retained.contains(candidate_4_hash.as_bytes()));
+    assert!(retained.contains(candidate_3_hash.as_bytes()));
+    assert!(retained.contains(candidate_2_hash.as_bytes()));
+    assert!(
+        !retained.contains(pruned_hash.as_bytes()),
+        "lowest-ranked side tip must be pruned deterministically"
+    );
+    assert!(
+        chain.tip_height.0 <= MAX_RETAINED_SIDE_BRANCH_REORG_DEPTH,
+        "fixture must stay within configured reorg retention depth"
+    );
+    const {
+        assert!(
+            3 <= MAX_RETAINED_SIDE_BRANCH_LENGTH,
+            "fixture branch length must stay within configured branch limit"
+        );
+    }
+
+    chain
+        .promote_heavier_known_tip(candidate_4_hash)
+        .expect("retained heavier branch must remain promotable");
+    assert_eq!(chain.tip_hash, candidate_4_hash);
+    assert_eq!(chain.tip_height, BlockHeight(4));
 }

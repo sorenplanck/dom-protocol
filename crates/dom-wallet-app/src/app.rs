@@ -58,6 +58,7 @@ impl eframe::App for WalletApp {
             ctx.request_repaint();
             return;
         }
+        self.runtime.poll_node_reconnect();
 
         egui::TopBottomPanel::top("top_bar")
             .frame(panel_frame())
@@ -297,6 +298,15 @@ impl WalletApp {
 
             card(&mut columns[1], |ui| {
                 mini_header(ui, "Node State");
+                let network_rows = self.runtime.node_connection.status.diagnostics_rows();
+                status_badge(
+                    ui,
+                    &network_rows.state,
+                    network_state_color(self.runtime.node_connection.status.state),
+                );
+                labeled_value(ui, "Connected peer", &network_rows.connected_peer);
+                labeled_value(ui, "Peer count", &network_rows.peer_count);
+                labeled_value(ui, "Last Pong", &network_rows.last_pong);
                 if let Some(status) = &self.runtime.node_status {
                     labeled_value(ui, "Network", &status.network);
                     labeled_value(ui, "Chain height", &status.chain_height.to_string());
@@ -502,6 +512,14 @@ impl WalletApp {
                         self.runtime.set_error(format!("refresh diagnostics: {e}"));
                     }
                 }
+                if ui.button("Export Logs").clicked() {
+                    match self.runtime.export_diagnostics() {
+                        Ok(path) => self
+                            .runtime
+                            .set_error(format!("diagnostics exported to {}", path.display())),
+                        Err(e) => self.runtime.set_error(format!("export diagnostics: {e}")),
+                    }
+                }
             });
         });
 
@@ -509,14 +527,29 @@ impl WalletApp {
         ui.columns(2, |columns| {
             card(&mut columns[0], |ui| {
                 mini_header(ui, "Node Connectivity");
+                let network_rows = self.runtime.node_connection.status.diagnostics_rows();
+                status_badge(
+                    ui,
+                    &network_rows.state,
+                    network_state_color(self.runtime.node_connection.status.state),
+                );
+                labeled_value(ui, "Connected peer", &network_rows.connected_peer);
+                labeled_value(ui, "Last error", &network_rows.last_error);
+                labeled_value(ui, "Last TCP connect", &network_rows.last_tcp_connect);
+                labeled_value(ui, "Last handshake", &network_rows.last_handshake);
+                labeled_value(ui, "Last Pong", &network_rows.last_pong);
+                labeled_value(ui, "Reconnect delay", &network_rows.reconnect_delay);
+                labeled_value(ui, "Peer count", &network_rows.peer_count);
+                if let Some(next) = self.runtime.node_connection.next_reconnect_at() {
+                    labeled_value(ui, "Next attempt", &next.to_string());
+                }
                 if let Some(status) = &self.runtime.node_status {
-                    status_badge(ui, "Online", palette().success);
                     labeled_value(ui, "Protocol version", &status.version.to_string());
                     labeled_value(ui, "Height", &status.chain_height.to_string());
                     labeled_value(ui, "Mempool", &status.mempool_size.to_string());
                     labeled_value(ui, "Network", &status.network);
                 } else {
-                    status_badge(ui, "Offline or Unverified", palette().warning);
+                    ui.label("Node status unavailable.");
                 }
             });
             card(&mut columns[1], |ui| {
@@ -541,6 +574,11 @@ impl WalletApp {
                     &self.runtime.receive_requests.len().to_string(),
                 );
                 labeled_value(ui, "History rows", &self.runtime.history.len().to_string());
+                labeled_value(
+                    ui,
+                    "Diagnostic log rows",
+                    &self.runtime.diagnostic_log.len().to_string(),
+                );
             });
         });
     }
@@ -822,19 +860,23 @@ fn status_color(status: &str) -> egui::Color32 {
     }
 }
 
+fn network_state_color(state: crate::runtime::NetworkStatusState) -> egui::Color32 {
+    match state {
+        crate::runtime::NetworkStatusState::Connected => palette().success,
+        crate::runtime::NetworkStatusState::TcpConnecting
+        | crate::runtime::NetworkStatusState::TcpConnected
+        | crate::runtime::NetworkStatusState::Handshaking
+        | crate::runtime::NetworkStatusState::Reconnecting => palette().warning,
+        crate::runtime::NetworkStatusState::Disconnected
+        | crate::runtime::NetworkStatusState::Failed => palette().danger,
+    }
+}
+
 fn runtime_status_strip(ui: &mut egui::Ui, runtime: &AppRuntime) {
     status_badge(
         ui,
-        if runtime.node_status.is_some() {
-            "RPC reachable"
-        } else {
-            "RPC unverified"
-        },
-        if runtime.node_status.is_some() {
-            palette().success
-        } else {
-            palette().warning
-        },
+        runtime.node_connection.state_label(),
+        network_state_color(runtime.node_connection.status.state),
     );
     if let Some(balance) = runtime.wallet_balance {
         status_badge(

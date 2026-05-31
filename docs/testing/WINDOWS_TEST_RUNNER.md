@@ -118,6 +118,35 @@ The workflow `.github/workflows/windows-test-runner.yml` builds
 3. Open the run → scroll to *Artifacts* → download
    `DOM-Test-Runner-Windows-Portable`.
 
+## Portable wallet package layout
+
+The wallet/node portable package layout is defined under
+`packaging/windows/portable/`.
+
+Required directories:
+
+- `bin/` — executable files only
+- `config/` — editable local config examples
+- `data/wallets/` — wallet directories and encrypted wallet files
+- `data/chain/` — local node chain/store data
+- `logs/` — exported logs and runtime diagnostics
+- `backups/` — update-time backups
+- `cache/` — disposable runtime cache
+
+Use `packaging/windows/portable/build_portable.ps1` to create a fresh staging
+package and `packaging/windows/portable/update_portable.ps1` to update an
+existing install. The update script backs up `data\wallets` before replacing
+binaries and preserves config, chain data, logs, backups, and cache.
+
+Validate the packaging metadata from the repository root:
+
+```
+scripts/validate_windows_portable_package.sh
+```
+
+Package files and examples must not contain wallet passwords, seed phrases,
+private keys, bearer tokens, API tokens, or other secrets.
+
 ## Honest reporting
 
 If a profile contains integration tests that don't yet exist in the

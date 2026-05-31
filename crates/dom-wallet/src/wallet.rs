@@ -5,7 +5,7 @@ use crate::output_index::OutputIndex;
 use crate::restore::{ChainScanSource, RestoreError};
 use crate::seed::{self, Bip39Seed};
 use crate::store::{
-    load_wallet as load_wallet_file, save_wallet as save_wallet_file, PendingTx,
+    load_wallet as load_wallet_file, save_wallet as save_wallet_file, PendingChange, PendingTx,
     WalletKeychainState, WalletState,
 };
 use crate::types::{
@@ -348,6 +348,20 @@ impl Wallet {
                                 );
                             }
                         }
+                        // Crash-recovery for the change output: if we
+                        // crashed between the Confirmed journal append and
+                        // `apply_canonical_block`'s save, the live path
+                        // never registered the change. Reconstruct it from
+                        // the persisted PendingChange + the journalled
+                        // confirmation height so funds are not lost. No
+                        // block hash is available here (None).
+                        if confirmed {
+                            if let (Some(c), TxStatus::Confirmed { block_height }) =
+                                (pending.change, &record.status)
+                            {
+                                self.register_pending_change(c, *block_height, None);
+                            }
+                        }
                         changed = true;
                         tracing::info!(
                             "reconcile: cleaned up pending tx {} (journal status {:?})",
@@ -429,6 +443,11 @@ impl Wallet {
                                 tx_hash: *tx_hash,
                                 inputs,
                                 tx_bytes: record.tx_bytes.clone(),
+                                // The journal's Built event carries no
+                                // change material; a tx reinstated purely
+                                // from the journal has no recoverable
+                                // change. See known-gap note in build_spend.
+                                change: None,
                             },
                         );
                     }
@@ -577,6 +596,9 @@ impl Wallet {
                     tx_hash: record.tx_hash,
                     inputs: record.inputs.clone(),
                     tx_bytes: record.tx_bytes.clone(),
+                    // Reinstated from the journal, which carries no change
+                    // material. See known-gap note in build_spend.
+                    change: None,
                 },
             );
         }
@@ -1044,14 +1066,64 @@ impl Wallet {
         self.outputs.insert(output);
     }
 
+    /// Register a confirmed self-spend change output as a spendable
+    /// [`OwnedOutput`].
+    ///
+    /// Change carries a random blinding (not re-derivable by
+    /// `scan_block`), so it is registered explicitly from the persisted
+    /// [`PendingChange`] at confirmation time. Idempotent: keyed by
+    /// commitment in the output index, so the live confirmation path and
+    /// a later crash-recovery `reconcile` cannot double-register it.
+    /// Change is never coinbase, so it is immediately mature/spendable.
+    fn register_pending_change(
+        &mut self,
+        change: PendingChange,
+        block_height: u64,
+        block_hash: Option<[u8; 32]>,
+    ) {
+        if self.outputs.get(&change.commitment).is_some() {
+            return;
+        }
+        debug!(
+            "registering spendable change output: {} noms at height {}",
+            change.value, block_height
+        );
+        let mut owned = OwnedOutput::new(
+            change.commitment,
+            change.value,
+            change.blinding,
+            block_height,
+            false,
+        );
+        if let Some(hash) = block_hash {
+            owned = owned.with_block_hash(hash);
+        }
+        self.outputs.insert(owned);
+    }
+
     /// Build a spend transaction.
     ///
     /// This:
     /// 1. Selects coins via greedy coin selection.
-    /// 2. Builds the transaction using `dom_tx::SpendBuilder`.
+    /// 2. Builds the transaction using `dom_tx::SpendBuilder`, returning
+    ///    any surplus over `amount + fee` to ourselves as a change output
+    ///    so the tx balances (`inputs == outputs + fee`).
     /// 3. Reserves inputs in the output index.
-    /// 4. Records the pending transaction.
+    /// 4. Records the pending transaction, including the change material
+    ///    (commitment, value, random blinding) in [`PendingChange`].
     /// 5. Saves wallet state.
+    ///
+    /// The change is registered as a spendable [`OwnedOutput`] only when
+    /// the tx confirms on-chain (`apply_canonical_block_with_hash`, with a
+    /// crash-recovery mirror in `reconcile_with_journal`), since
+    /// `scan_block` cannot recover its random blinding.
+    ///
+    /// KNOWN GAP: a crash in the narrow window between `build_spend`'s
+    /// `Built` journal append and its `save()` loses the in-memory
+    /// PendingChange; a tx later reinstated *purely* from the journal
+    /// (whose `Built` event carries no change material) would, if it then
+    /// confirmed, leave the change unspendable. Closing this requires
+    /// extending the `Built` journal event — deferred pending review.
     pub fn build_spend(
         &mut self,
         _recipient_commitment: Commitment,
@@ -1072,11 +1144,43 @@ impl Wallet {
         )?;
         let selected_commitments: Vec<[u8; 33]> = selected.iter().map(|o| o.commitment).collect();
 
+        // Capture the total selected value BEFORE moving `selected` into
+        // the builder. Greedy selection may overshoot `required`; the
+        // surplus must be returned to ourselves as a change output, or
+        // `SpendBuilder::build` rejects the tx as unbalanced
+        // (inputs > outputs + fee).
+        let total_selected: u64 = selected.iter().map(|o| o.value).sum();
+
         // Build transaction using dom_tx::SpendBuilder.
         let mut builder = SpendBuilder::new(&self.chain_id);
         builder.add_inputs(selected)?;
         builder.add_output(amount, recipient_blinding)?;
         builder.fee(fee);
+
+        // Change = total_selected - amount - fee = total_selected - required.
+        // Selection guarantees total_selected >= required, but use
+        // checked_sub defensively. change == 0 means an exact spend: no
+        // change output (and no PendingChange to register on confirm).
+        let change_value = total_selected.saturating_sub(required);
+        let pending_change = if change_value > 0 {
+            // Change uses a fresh RANDOM blinding — it is NOT re-derivable
+            // by scan_block (which only knows deterministic coinbase
+            // blindings), so we persist it on the PendingTx and register
+            // the output as spendable only at confirmation time.
+            let change_blinding = BlindingFactor::random();
+            // Commitment matches the on-chain output exactly: build()
+            // commits each output as commit(value, blinding).
+            let change_commitment = *Commitment::commit(change_value, &change_blinding).as_bytes();
+            let change_blinding_bytes = *change_blinding.as_bytes();
+            builder.add_output(change_value, change_blinding)?;
+            Some(PendingChange {
+                commitment: change_commitment,
+                value: change_value,
+                blinding: change_blinding_bytes,
+            })
+        } else {
+            None
+        };
 
         let tx = builder.build()?;
 
@@ -1110,6 +1214,7 @@ impl Wallet {
                 tx_hash,
                 inputs: selected_commitments,
                 tx_bytes: tx.to_bytes()?,
+                change: pending_change,
             },
         );
 
@@ -1344,11 +1449,19 @@ impl Wallet {
                 // terminal status and cleans up the still-pending entry.
                 self.record_journal(tx_hash, TxJournalEvent::Confirmed { block_height });
                 if let Some(pending) = self.pending_txs.remove(&tx_hash) {
-                    for commitment in pending.inputs {
-                        if consumed_inputs.contains(&commitment) {
-                            self.outputs.mark_spent(&commitment)?;
+                    for commitment in &pending.inputs {
+                        if consumed_inputs.contains(commitment) {
+                            self.outputs.mark_spent(commitment)?;
                         }
-                        self.outputs.release_reservation(&commitment)?;
+                        self.outputs.release_reservation(commitment)?;
+                    }
+                    // The spend's self-change becomes spendable now that
+                    // the tx is canonical. It carries a random blinding
+                    // scan_block cannot recover, so register it explicitly
+                    // from the persisted PendingChange. WAL order: this
+                    // runs AFTER the Confirmed journal event above.
+                    if let Some(c) = pending.change {
+                        self.register_pending_change(c, block_height, block_hash);
                     }
                 }
             }
