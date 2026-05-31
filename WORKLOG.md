@@ -37,11 +37,52 @@ Sequence state:
 - DONE: Task 40 `beabf20e636736415a12f8892bd89dc047020a35`.
 - DONE: Task 41 `861f24faf3aaf1b59d93bee174e657b4287106cc`.
 - DONE: Task 42 `42 networkstatus not peerregistry`.
-- CURRENT: Task 43 pending.
-- REMAINING: Tasks 43-50.
+- DONE: Task 43 `43 wallet ping pong`.
+- CURRENT: Task 44 pending.
+- REMAINING: Tasks 44-50.
 
 Open items:
-- Do not start Task 43 until Task 42 is committed, pushed, and reviewed.
+- Do not start Task 44 until Task 43 is committed, pushed, and reviewed.
+
+## 2026-05-31 — Task 43 Wallet Ping Pong
+
+Objective:
+- Add wallet-side protocol heartbeat semantics using Ping nonce and matching Pong validation.
+
+Changed files:
+- `crates/dom-wallet-app/Cargo.toml`
+- `crates/dom-wallet-app/src/runtime.rs`
+- `WORKLOG.md`
+
+Implementation notes:
+- Added `dom-wire` dependency to the wallet app so heartbeat messages use the protocol `WireMessage` and `Command::Ping`/`Command::Pong` types.
+- Added `HeartbeatSession` to `NodeConnectionSession`.
+- `HeartbeatSession::begin_ping` sends an 8-byte nonce payload.
+- `HeartbeatSession::observe_message` accepts only a matching Pong nonce and updates `NetworkStatus.last_pong_at`.
+- Wrong nonce and malformed Pong payloads are rejected and do not update health.
+- Missing Pong is handled by deterministic timeout evaluation with an injected `now_secs`, not real sleeps.
+- Timeout transitions network status to reconnecting and clears the in-flight heartbeat.
+- Non-heartbeat messages return `HeartbeatEvent::None` so the normal message dispatcher can continue; heartbeat handling does not perform a blocking read loop.
+
+Tests added:
+- `runtime::tests::valid_pong_keeps_connection_healthy_and_updates_status`
+- `runtime::tests::missing_pong_causes_reconnect_without_sleep`
+- `runtime::tests::wrong_nonce_does_not_count_as_pong`
+- `runtime::tests::malformed_pong_is_rejected`
+- `runtime::tests::heartbeat_message_handling_does_not_starve_non_heartbeat_messages`
+
+Validation:
+- `cargo fmt` (PASS)
+- `cargo check -p dom-wallet-app` (PASS)
+- `cargo test -p dom-wallet-app valid_pong_keeps_connection_healthy_and_updates_status` (PASS)
+- `cargo test -p dom-wallet-app missing_pong_causes_reconnect_without_sleep` (PASS)
+- `cargo test -p dom-wallet-app wrong_nonce_does_not_count_as_pong` (PASS)
+- `cargo test -p dom-wallet-app malformed_pong_is_rejected` (PASS)
+- `cargo test -p dom-wallet-app heartbeat_message_handling_does_not_starve_non_heartbeat_messages` (PASS)
+- `cargo check --workspace` (PASS)
+
+Integration test note:
+- No `dom-integration-tests` command was run for Task 43 because the change is confined to wallet app heartbeat state/message handling and does not alter node integration behavior.
 
 ## 2026-05-31 — Task 42 NetworkStatus Not PeerRegistry
 
