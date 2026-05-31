@@ -345,6 +345,15 @@ impl ChainState {
             );
             Ok(ConnectResult::BestChain)
         } else {
+            // DOM-FINAL-006: side-chain quarantine is intentionally persisted
+            // after full block validation but before contextual input checks.
+            // `validate_block` above already verified cryptography, balance,
+            // range proofs, kernel signatures, cut-through, and weight. Input
+            // existence/maturity must be checked against the candidate branch
+            // UTXO set, which is reconstructed during promotion; doing that for
+            // every retained side block would turn branch spam into CPU work.
+            // Retention is bounded by `prune_retained_side_chains`, and invalid
+            // branch inputs still fail closed in `promote_heavier_known_tip`.
             self.store.store_known_block(
                 block_hash.as_bytes(),
                 &header_bytes,
