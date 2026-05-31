@@ -30,12 +30,55 @@ Sequence state:
 - DONE: Tasks 21-33 are complete and validated on this branch.
 - DONE: Task 34 `ad3528b3d38d727b015ae40427d9af85e3f72400`.
 - DONE: Task 35 `f9af1c08b3170c542a310390a69409745b3813f8`.
-- CURRENT: Task 36 in validation/commit.
-- REMAINING: Tasks 37-50.
+- DONE: Task 36 `c986c6f50179726b68740fc40f0712e0e3527f81`.
+- CURRENT: Task 37 in validation/commit.
+- REMAINING: Tasks 38-50.
 
 Open items:
-- Commit Task 36 as `36 multinode replay timeline tests + fix genesis utxo rebuild off-by-one`, push, verify remote HEAD, and report.
-- Do not start Task 37 until Task 36 is committed and pushed.
+- Commit Task 37 as `37 event based waiters`, push, verify remote HEAD, and report.
+- Do not start Task 38 until the Task 37 commit and push are verified and the replay mining hang is triaged.
+
+## 2026-05-31 — Task 37 Event Based Waiters
+
+Objective:
+- Replace sleep-driven shared integration waiters with event-based waits.
+
+Changed files:
+- `crates/dom-node/src/node.rs`
+- `crates/dom-node/src/miner.rs`
+- `crates/dom-integration-tests/src/helpers.rs`
+- `WORKLOG.md`
+
+Implementation notes:
+- Added `DomNode::state_events` backed by `tokio::sync::Notify`.
+- Added `DomNode::notify_state_changed()` for direct runtime/test notifications.
+- Wired state notifications into mined blocks, accepted relayed blocks, IBD progress, accepted relayed transactions, future-queue replay acceptance, RPC/local tx submit, and peer metric refresh after successful inbound/outbound registration.
+- Migrated shared integration waiters `wait_for_height`, `wait_for_mempool_count`, and `wait_for_peer_count` from sleep polling to `state_events.notified()`.
+- Added focused tests proving height and peer-count waiters wake from node state events.
+- No consensus invariants were weakened; no tests were marked ignored.
+
+Commands and results:
+- `cargo fmt --check` (PASS)
+- `cargo check --workspace` (PASS)
+- `cargo test -p dom-integration-tests wait_for_height_wakes_on_node_state_event` (PASS)
+- `cargo test -p dom-integration-tests wait_for_peer_count_wakes_on_node_state_event` (PASS)
+- `cargo test -p dom-node refresh_peer_metrics_counts_connected_peer_directions` (PASS)
+- `cargo test -p dom-integration-tests --lib -- --test-threads=1` (PASS: 2/2)
+- `cargo test -p dom-integration-tests --test adversarial_handshake -- --test-threads=1` (PASS: 6/6)
+- `cargo test -p dom-integration-tests stalled_outbound_dials_are_bounded_by_min_outbound_live -- --nocapture --test-threads=1` (PASS)
+- `cargo test -p dom-integration-tests --test adversarial_outbound -- --nocapture --test-threads=1` (PASS: 2/2)
+
+Validation notes:
+- Full `cargo test -p dom-integration-tests -- --test-threads=1` was intentionally not reported as PASS because pre-existing `replay_two_independent_chains_converge` did not complete; see open pendency below.
+- An earlier run of `cargo test -p dom-integration-tests --test adversarial_outbound -- --test-threads=1` observed `stalled_outbound_dials_are_bounded_by_min_outbound_live` timing out in `expect_outbound_cleanup`; repeat isolated and file-level runs passed, and the test/helper were not modified by Task 37.
+
+Tests added:
+- `helpers::tests::wait_for_height_wakes_on_node_state_event`
+- `helpers::tests::wait_for_peer_count_wakes_on_node_state_event`
+
+Open pendencies:
+- PRIORITY HIGH: `replay_two_independent_chains_converge` hangs while mining real block 1. Evidence: isolated `timeout 60s cargo test -p dom-integration-tests replay_two_independent_chains_converge -- --nocapture --test-threads=1` stopped at `Minerando bloco 1 | target: 0000ffff...`; `mine_blocking` has an unbounded nonce loop. This test/file were last touched by `62ea90b consensus: unify public DAA on ASERT`, not by Task 37. Suspect a target/mining/DAA interaction after ASERT unification; investigate separately before Task 38.
+- `stalled_outbound_dials_are_bounded_by_min_outbound_live` is flaky due to a timing race between the short cleanup-zero observation window and legitimate reconnect scheduling from Task 22. It passed isolated and on repeat file-level run. Task 37 did not touch this local test helper; future work should migrate its cleanup condition to a deterministic waiter.
 
 ## 2026-05-31 — Task 34 Future Block Restart Tests
 
