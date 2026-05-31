@@ -1467,6 +1467,28 @@ mod tests {
     }
 
     #[test]
+    fn retryable_outbound_failure_does_not_poison_peer_reputation() {
+        let mut mgr = PeerManager::new(125, 2);
+        let addr = "198.51.100.52:33369";
+
+        mgr.record_outbound_failure(addr);
+        mgr.record_outbound_failure(addr);
+
+        assert_eq!(mgr.outbound_failure_count(addr), 2);
+        assert_eq!(
+            mgr.pending_ban_score(addr),
+            0,
+            "operational reconnect backoff must not become a consensus or reputation penalty"
+        );
+
+        while mgr.outbound_cooldown_rounds(addr) > 0 {
+            assert!(mgr.advance_outbound_cooldowns());
+        }
+        mgr.reserve_outbound(addr)
+            .expect("configured peer remains eligible after operational backoff");
+    }
+
+    #[test]
     fn persisted_peer_rotation_state_roundtrips() {
         let mut mgr = PeerManager::new(125, 2);
         mgr.record_outbound_failure("198.51.100.30:33369");
