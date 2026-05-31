@@ -42,7 +42,8 @@
 #![deny(missing_docs)]
 
 use dom_consensus::transaction::{validate_transaction_structure, Transaction};
-use dom_core::{DomError, MAX_BLOCK_WEIGHT, MIN_RELAY_FEE_RATE};
+use dom_consensus::{validate_transaction, ValidationContext};
+use dom_core::{BlockHeight, DomError, Timestamp, MAX_BLOCK_WEIGHT, MIN_RELAY_FEE_RATE};
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
 use dom_store::utxo::UtxoEntry;
 use std::collections::{BTreeMap, HashMap};
@@ -179,7 +180,9 @@ impl Mempool {
 
     /// Accept a transaction into the mempool.
     ///
-    /// Validates structure, checks fee rate, and adds to pool.
+    /// Legacy/test-only admission path. It validates structure, checks fee
+    /// rate, and adds to the pool without chain-context cryptographic checks.
+    /// Production callers must use [`Mempool::accept_tx_with_chain_view`].
     pub fn accept_tx(
         &mut self,
         tx: Transaction,
@@ -197,19 +200,26 @@ impl Mempool {
     /// explicit lookup function over the exact input commitments in the
     /// candidate transaction, plus the current canonical height and network
     /// maturity rule.
+    #[allow(clippy::too_many_arguments)]
     pub fn accept_tx_with_chain_view<F>(
         &mut self,
         tx: Transaction,
         tx_hash: [u8; 32],
         now_secs: u64,
         current_height: u64,
+        chain_id: [u8; 32],
         coinbase_maturity: u64,
         mut lookup_utxo: F,
     ) -> Result<(), DomError>
     where
         F: FnMut(&[u8; 33]) -> Result<Option<UtxoEntry>, DomError>,
     {
-        validate_transaction_structure(&tx)?;
+        let ctx = ValidationContext {
+            current_height: BlockHeight(current_height),
+            chain_id,
+            now: Timestamp(now_secs),
+        };
+        validate_transaction(&tx, &ctx)?;
         validate_tx_against_chain_view(&tx, current_height, coinbase_maturity, &mut lookup_utxo)?;
         self.accept_validated_tx(tx, tx_hash, now_secs)
     }
@@ -384,6 +394,7 @@ impl Mempool {
         &mut self,
         mut txs: Vec<(Transaction, [u8; 32], u64)>,
         current_height: u64,
+        chain_id: [u8; 32],
         coinbase_maturity: u64,
         mut lookup_utxo: F,
     ) -> Vec<([u8; 32], Result<(), DomError>)>
@@ -398,6 +409,7 @@ impl Mempool {
                     tx_hash,
                     now_secs,
                     current_height,
+                    chain_id,
                     coinbase_maturity,
                     &mut lookup_utxo,
                 );
@@ -485,9 +497,13 @@ impl Default for Mempool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dom_consensus::transaction::{TransactionKernel, TransactionOutput};
-    use dom_core::{Amount, KERNEL_FEAT_PLAIN};
-    use dom_crypto::pedersen::Commitment;
+    use dom_consensus::transaction::{TransactionInput, TransactionKernel, TransactionOutput};
+    use dom_core::{Amount, KERNEL_FEAT_PLAIN, TAG_KERNEL_MSG};
+    use dom_crypto::hash::blake2b_256_tagged;
+    use dom_crypto::pedersen::{BlindingFactor, Commitment};
+    use dom_crypto::{bp_prove, schnorr_sign, SecretKey};
+
+    const TEST_CHAIN_ID: [u8; 32] = [0x42; 32];
 
     fn g_commitment() -> Commitment {
         let g = [
@@ -556,6 +572,64 @@ mod tests {
         (tx, hash)
     }
 
+    fn scalar(seed: u8) -> BlindingFactor {
+        let mut bytes = [0u8; 32];
+        bytes[31] = seed.max(1);
+        BlindingFactor::from_bytes(bytes).expect("deterministic scalar")
+    }
+
+    fn kernel_message(fee: u64, lock_height: u64) -> [u8; 32] {
+        let mut data = Vec::with_capacity(1 + 8 + 8);
+        data.push(KERNEL_FEAT_PLAIN);
+        data.extend_from_slice(&fee.to_le_bytes());
+        data.extend_from_slice(&lock_height.to_le_bytes());
+        *blake2b_256_tagged(TAG_KERNEL_MSG, &data).as_bytes()
+    }
+
+    fn make_valid_chain_view_tx(fee: u64, seed: u8) -> (Transaction, [u8; 32], UtxoEntry) {
+        let output_value = 10_000;
+        let input_value = output_value + fee;
+        let input_blinding = scalar(seed);
+        let kernel_blinding = scalar(seed.wrapping_add(80));
+        let output_blinding = input_blinding
+            .add(&kernel_blinding)
+            .expect("output blinding");
+        let input_commitment = Commitment::commit(input_value, &input_blinding);
+        let output_commitment = Commitment::commit(output_value, &output_blinding);
+        let (proof, _) = bp_prove(output_value, &output_blinding).expect("range proof");
+        let excess = Commitment::commit(0, &kernel_blinding);
+        let secret = SecretKey::from_bytes(kernel_blinding.as_bytes()).expect("kernel secret");
+        let sig = schnorr_sign(&secret, &kernel_message(fee, 0), &TEST_CHAIN_ID)
+            .expect("kernel signature");
+
+        let tx = Transaction {
+            inputs: vec![TransactionInput {
+                commitment: input_commitment,
+            }],
+            outputs: vec![TransactionOutput {
+                commitment: output_commitment,
+                proof: proof.bytes,
+            }],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(fee).unwrap(),
+                lock_height: 0,
+                excess,
+                excess_signature: sig.to_bytes(),
+            }],
+            offset: [0u8; 32],
+        };
+        let mut hash = [0u8; 32];
+        hash[0..8].copy_from_slice(&fee.to_le_bytes());
+        hash[8] = seed;
+        let entry = UtxoEntry {
+            block_height: 1,
+            is_coinbase: false,
+            proof: vec![],
+        };
+        (tx, hash, entry)
+    }
+
     #[test]
     fn accept_tx_basic() {
         let mut pool = Mempool::new();
@@ -615,6 +689,57 @@ mod tests {
         let (tx, hash) = make_tx(MIN_RELAY_FEE_RATE * 100);
         pool.accept_tx(tx.clone(), hash, 0).unwrap();
         assert!(pool.accept_tx(tx, hash, 1).is_err());
+    }
+
+    #[test]
+    fn accept_tx_with_chain_view_rejects_invalid_range_proof() {
+        let fee = MIN_RELAY_FEE_RATE * 100;
+        let (mut tx, hash, entry) = make_valid_chain_view_tx(fee, 0x11);
+        tx.outputs[0].proof = vec![0xAB; 100];
+        let mut pool = Mempool::new();
+
+        let err = pool
+            .accept_tx_with_chain_view(tx, hash, 0, 100, TEST_CHAIN_ID, 10, |_| {
+                Ok(Some(entry.clone()))
+            })
+            .expect_err("invalid range proof must reject");
+        assert!(
+            matches!(err, DomError::Invalid(ref msg) if msg.contains("range proof")),
+            "expected range proof rejection, got {err}"
+        );
+        assert!(pool.get_tx(&hash).is_none());
+    }
+
+    #[test]
+    fn accept_tx_with_chain_view_rejects_invalid_kernel_signature() {
+        let fee = MIN_RELAY_FEE_RATE * 100;
+        let (mut tx, hash, entry) = make_valid_chain_view_tx(fee, 0x12);
+        tx.kernels[0].excess_signature = [0u8; 65];
+        let mut pool = Mempool::new();
+
+        let err = pool
+            .accept_tx_with_chain_view(tx, hash, 0, 100, TEST_CHAIN_ID, 10, |_| {
+                Ok(Some(entry.clone()))
+            })
+            .expect_err("invalid kernel signature must reject");
+        assert!(
+            matches!(err, DomError::Invalid(ref msg) if msg.contains("signature")),
+            "expected signature rejection, got {err}"
+        );
+        assert!(pool.get_tx(&hash).is_none());
+    }
+
+    #[test]
+    fn accept_tx_with_chain_view_accepts_valid_transaction() {
+        let fee = MIN_RELAY_FEE_RATE * 100;
+        let (tx, hash, entry) = make_valid_chain_view_tx(fee, 0x13);
+        let mut pool = Mempool::new();
+
+        pool.accept_tx_with_chain_view(tx, hash, 0, 100, TEST_CHAIN_ID, 10, |_| {
+            Ok(Some(entry.clone()))
+        })
+        .expect("valid tx must admit");
+        assert!(pool.get_tx(&hash).is_some());
     }
 
     #[test]

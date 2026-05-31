@@ -97,6 +97,7 @@ impl NodeHandle for NodeHandleImpl {
             tx_hash,
             now,
             chain_view.current_height,
+            chain_view.chain_id,
             chain_view.coinbase_maturity,
             |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
         )
@@ -309,6 +310,7 @@ impl NodeHandle for NodeHandleImpl {
                 tx_hash,
                 now,
                 chain_view.current_height,
+                chain_view.chain_id,
                 chain_view.coinbase_maturity,
                 |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
             )
@@ -364,8 +366,9 @@ mod tests {
     use dom_consensus::transaction::{
         Transaction, TransactionInput, TransactionKernel, TransactionOutput,
     };
-    use dom_core::{Amount, KERNEL_FEAT_PLAIN, MIN_RELAY_FEE_RATE};
-    use dom_crypto::{pedersen::Commitment, BlindingFactor};
+    use dom_core::{Amount, KERNEL_FEAT_PLAIN, MIN_RELAY_FEE_RATE, TAG_KERNEL_MSG};
+    use dom_crypto::hash::blake2b_256_tagged;
+    use dom_crypto::{bp_prove, pedersen::Commitment, schnorr_sign, BlindingFactor, SecretKey};
     use dom_rpc::SpendRequest;
     use dom_serialization::DomSerialize;
     use dom_wallet::{Network, OwnedOutput, Wallet};
@@ -403,21 +406,45 @@ mod tests {
         }
     }
 
-    fn raw_spend_tx(input_commitment: Commitment) -> Vec<u8> {
+    fn raw_spend_tx(
+        input_value: u64,
+        input_blinding: &BlindingFactor,
+        chain_id: &[u8; 32],
+    ) -> Vec<u8> {
+        let fee = MIN_RELAY_FEE_RATE * 25;
+        let output_value = input_value.checked_sub(fee).expect("fee below input");
+        let kernel_blinding = BlindingFactor::random();
+        let output_blinding = input_blinding
+            .add(&kernel_blinding)
+            .expect("output blinding");
+        let input_commitment = Commitment::commit(input_value, input_blinding);
+        let output_commitment = Commitment::commit(output_value, &output_blinding);
+        let (proof, _) = bp_prove(output_value, &output_blinding).expect("range proof");
+        let excess = Commitment::commit(0, &kernel_blinding);
+        let secret = SecretKey::from_bytes(kernel_blinding.as_bytes()).expect("kernel secret");
+        let msg = {
+            let mut data = Vec::with_capacity(1 + 8 + 8);
+            data.push(KERNEL_FEAT_PLAIN);
+            data.extend_from_slice(&fee.to_le_bytes());
+            data.extend_from_slice(&0u64.to_le_bytes());
+            blake2b_256_tagged(TAG_KERNEL_MSG, &data)
+        };
+        let sig = schnorr_sign(&secret, msg.as_bytes(), chain_id).expect("kernel sig");
+
         Transaction {
             inputs: vec![TransactionInput {
                 commitment: input_commitment,
             }],
             outputs: vec![TransactionOutput {
-                commitment: Commitment::commit(1, &BlindingFactor::random()),
-                proof: vec![0xAB; 100],
+                commitment: output_commitment,
+                proof: proof.bytes,
             }],
             kernels: vec![TransactionKernel {
                 features: KERNEL_FEAT_PLAIN,
-                fee: Amount::from_noms(MIN_RELAY_FEE_RATE * 25).unwrap(),
+                fee: Amount::from_noms(fee).unwrap(),
                 lock_height: 0,
-                excess: Commitment::commit(0, &BlindingFactor::random()),
-                excess_signature: [0x11; 65],
+                excess,
+                excess_signature: sig.to_bytes(),
             }],
             offset: [0u8; 32],
         }
@@ -528,9 +555,14 @@ mod tests {
             )
             .expect("init node"),
         );
+        let chain_id = {
+            let chain = node.chain.try_lock().expect("chain lock");
+            *dom_consensus::derive_chain_id(chain.network_magic, &chain.genesis_hash).as_bytes()
+        };
         let handle = NodeHandleImpl(node);
 
-        let tx_bytes = raw_spend_tx(Commitment::commit(5, &BlindingFactor::random()));
+        let input_blinding = BlindingFactor::random();
+        let tx_bytes = raw_spend_tx(500_000, &input_blinding, &chain_id);
         let err = handle
             .submit_tx(tx_bytes)
             .expect_err("missing utxo must reject");
