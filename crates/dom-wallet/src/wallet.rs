@@ -59,6 +59,18 @@ pub struct WalletRescanSummary {
     pub repaired: bool,
 }
 
+/// Canonical block data needed by the wallet to apply or roll back
+/// chain effects during a reorganization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalletReorgBlock {
+    /// Canonical block hash.
+    pub block_hash: [u8; 32],
+    /// Canonical block height.
+    pub block_height: u64,
+    /// Transactions carried by this block.
+    pub transactions: Vec<Transaction>,
+}
+
 /// The DOM Protocol wallet.
 ///
 /// Manages owned outputs, pending transactions, and persistent encrypted storage.
@@ -626,6 +638,150 @@ impl Wallet {
             stale_outputs.len(),
             stranded.len()
         );
+        Ok(())
+    }
+
+    /// Apply a canonical reorganization to wallet state.
+    ///
+    /// The rollback is keyed by both block hash and height for
+    /// attributed outputs. Legacy outputs without block-hash attribution
+    /// fall back to the conservative height rule and are removed when
+    /// they sit above the common ancestor.
+    ///
+    /// Disconnected wallet spends are restored as pending reservations
+    /// when their inputs survive the rollback. Connected blocks are then
+    /// applied in promoted-chain order with block-hash attribution.
+    pub fn apply_canonical_reorg(
+        &mut self,
+        common_ancestor_height: u64,
+        disconnected_blocks: &[WalletReorgBlock],
+        connected_blocks: &[WalletReorgBlock],
+    ) -> Result<(), WalletError> {
+        self.rollback_disconnected_blocks(common_ancestor_height, disconnected_blocks)?;
+        for block in connected_blocks {
+            self.apply_canonical_block_with_hash(
+                &block.transactions,
+                block.block_height,
+                Some(block.block_hash),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn rollback_disconnected_blocks(
+        &mut self,
+        common_ancestor_height: u64,
+        disconnected_blocks: &[WalletReorgBlock],
+    ) -> Result<(), WalletError> {
+        let _ = self.session()?;
+
+        let disconnected: HashSet<(u64, [u8; 32])> = disconnected_blocks
+            .iter()
+            .map(|block| (block.block_height, block.block_hash))
+            .collect();
+
+        let journal_records = match self.journal.as_ref() {
+            Some(journal) => Some(journal.replay()?),
+            None => None,
+        };
+
+        let mut disconnected_spends: Vec<([u8; 32], Vec<[u8; 33]>, Vec<u8>)> = Vec::new();
+        for block in disconnected_blocks {
+            for tx in &block.transactions {
+                let tx_hash = Self::tracking_tx_hash(tx)?;
+                let input_commitments: Vec<[u8; 33]> = tx
+                    .inputs
+                    .iter()
+                    .map(|input| *input.commitment.as_bytes())
+                    .collect();
+                let wallet_inputs: Vec<[u8; 33]> = input_commitments
+                    .into_iter()
+                    .filter(|commitment| self.outputs.get(commitment).is_some())
+                    .collect();
+                if wallet_inputs.is_empty() {
+                    continue;
+                }
+
+                let tx_bytes = tx.to_bytes()?;
+                disconnected_spends.push((tx_hash, wallet_inputs, tx_bytes));
+            }
+        }
+        disconnected_spends.sort_by_key(|(tx_hash, _, _)| *tx_hash);
+
+        for (tx_hash, inputs, tx_bytes) in disconnected_spends {
+            if let Some(records) = &journal_records {
+                if matches!(
+                    records.get(&tx_hash).map(|record| &record.status),
+                    Some(TxStatus::Confirmed { block_height }) if *block_height > common_ancestor_height
+                ) {
+                    self.record_journal(
+                        tx_hash,
+                        TxJournalEvent::Reorged {
+                            reorg_height: common_ancestor_height,
+                        },
+                    );
+                }
+            }
+
+            let surviving_inputs: Vec<[u8; 33]> = inputs
+                .into_iter()
+                .filter(|commitment| {
+                    self.outputs
+                        .get(commitment)
+                        .map(|output| {
+                            !output_is_disconnected(output, common_ancestor_height, &disconnected)
+                        })
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            if surviving_inputs.is_empty() {
+                self.pending_txs.remove(&tx_hash);
+                continue;
+            }
+
+            for commitment in &surviving_inputs {
+                self.outputs.mark_unspent(commitment)?;
+                self.outputs.reserve(commitment, tx_hash)?;
+            }
+            self.pending_txs.insert(
+                tx_hash,
+                PendingTx {
+                    tx_hash,
+                    inputs: surviving_inputs,
+                    tx_bytes: tx_bytes.clone(),
+                },
+            );
+        }
+
+        let stale_outputs: Vec<[u8; 33]> = self
+            .outputs
+            .iter()
+            .filter(|output| output_is_disconnected(output, common_ancestor_height, &disconnected))
+            .map(|output| output.commitment)
+            .collect();
+        let stale_set: HashSet<[u8; 33]> = stale_outputs.iter().copied().collect();
+        for commitment in &stale_outputs {
+            self.outputs.remove(commitment);
+        }
+
+        for request in &mut self.receive_requests {
+            if stale_set.contains(&request.commitment) {
+                request.status = ReceiveRequestStatus::Pending;
+            }
+        }
+
+        let stranded: Vec<[u8; 32]> = self
+            .pending_txs
+            .iter()
+            .filter(|(_, pending)| pending.inputs.iter().any(|c| self.outputs.get(c).is_none()))
+            .map(|(tx_hash, _)| *tx_hash)
+            .collect();
+        for tx_hash in stranded {
+            self.pending_txs.remove(&tx_hash);
+        }
+
+        self.save()?;
         Ok(())
     }
 
@@ -1253,8 +1409,56 @@ impl Wallet {
             for output in &tx.outputs {
                 let commitment_bytes: [u8; 33] = *output.commitment.as_bytes();
 
+                if let Some(request_index) = self
+                    .receive_requests
+                    .iter()
+                    .position(|request| request.commitment == commitment_bytes)
+                {
+                    if self.outputs.get(&commitment_bytes).is_none() {
+                        match self
+                            .receive_blinding_for_index(self.receive_requests[request_index].index)
+                        {
+                            Ok(blinding) => {
+                                let mut owned = OwnedOutput::new(
+                                    commitment_bytes,
+                                    self.receive_requests[request_index].amount,
+                                    *blinding.as_bytes(),
+                                    block_height,
+                                    false,
+                                );
+                                if let Some(hash) = block_hash {
+                                    owned = owned.with_block_hash(hash);
+                                }
+                                self.add_output(owned);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "scan_block: receive blinding derivation failed at height {block_height}: {e}"
+                                );
+                                continue;
+                            }
+                        }
+                    } else if let Some(existing) = self.outputs.get_mut(&commitment_bytes) {
+                        existing.block_height = block_height;
+                        if let Some(hash) = block_hash {
+                            existing.block_hash = Some(hash);
+                        }
+                    }
+
+                    self.receive_requests[request_index].status = ReceiveRequestStatus::Detected {
+                        block_height,
+                        is_coinbase: false,
+                        is_mature: true,
+                    };
+                    continue;
+                }
+
                 // Skip if we already have this output.
-                if self.outputs.get(&commitment_bytes).is_some() {
+                if let Some(existing) = self.outputs.get_mut(&commitment_bytes) {
+                    existing.block_height = block_height;
+                    if let Some(hash) = block_hash {
+                        existing.block_hash = Some(hash);
+                    }
                     continue;
                 }
 
@@ -1655,6 +1859,17 @@ impl Wallet {
         }
 
         *blake2b_256_tagged("DOM:wallet-canonical-digest:v1", &bytes).as_bytes()
+    }
+}
+
+fn output_is_disconnected(
+    output: &OwnedOutput,
+    common_ancestor_height: u64,
+    disconnected: &HashSet<(u64, [u8; 32])>,
+) -> bool {
+    match output.block_hash {
+        Some(hash) => disconnected.contains(&(output.block_height, hash)),
+        None => output.block_height > common_ancestor_height,
     }
 }
 

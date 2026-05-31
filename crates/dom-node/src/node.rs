@@ -1903,6 +1903,17 @@ fn relay_block_action(result: &Result<dom_chain::ConnectResult, DomError>) -> Re
     }
 }
 
+fn wallet_reorg_blocks(blocks: &[dom_chain::ReorgBlockDelta]) -> Vec<dom_wallet::WalletReorgBlock> {
+    blocks
+        .iter()
+        .map(|block| dom_wallet::WalletReorgBlock {
+            block_hash: block.block_hash,
+            block_height: block.block_height,
+            transactions: block.transactions.clone(),
+        })
+        .collect()
+}
+
 fn tx_hash(tx: &Transaction) -> Result<[u8; 32], DomError> {
     use dom_serialization::DomSerialize;
 
@@ -2726,7 +2737,7 @@ async fn resume_ibd_block_sync(
             let txs_for_scan = block.transactions.clone();
             {
                 let mut c = chain.lock().await;
-                let best_chain = match c.connect_block(
+                let connect_result = c.connect_block(
                     &block,
                     Timestamp(
                         std::time::SystemTime::now()
@@ -2734,7 +2745,8 @@ async fn resume_ibd_block_sync(
                             .unwrap_or_default()
                             .as_secs(),
                     ),
-                ) {
+                );
+                let best_chain = match &connect_result {
                     Ok(dom_chain::ConnectResult::BestChain) => {
                         connected_any = true;
                         true
@@ -2767,12 +2779,31 @@ async fn resume_ibd_block_sync(
                     purge_mempool_confirmed_inputs(chain, &runtime.mempool, &txs_for_scan).await?;
                     if let Some(ref wallet_arc) = runtime.wallet {
                         let mut w = wallet_arc.lock().await;
-                        w.apply_canonical_block(&txs_for_scan, height)
-                            .map_err(|e| {
-                                DomError::Internal(format!(
-                                    "wallet canonical block apply during resumed IBD failed: {e}"
-                                ))
-                            })?;
+                        match &connect_result {
+                            Ok(dom_chain::ConnectResult::BestChain) => w
+                                .apply_canonical_block(&txs_for_scan, height)
+                                .map_err(|e| {
+                                    DomError::Internal(format!(
+                                        "wallet canonical block apply during resumed IBD failed: {e}"
+                                    ))
+                                })?,
+                            Ok(dom_chain::ConnectResult::Reorg(delta)) => w
+                                .apply_canonical_reorg(
+                                    delta.common_ancestor_height,
+                                    &wallet_reorg_blocks(&delta.disconnected_blocks),
+                                    &wallet_reorg_blocks(&delta.connected_blocks),
+                                )
+                                .map_err(|e| {
+                                    DomError::Internal(format!(
+                                        "wallet reorg apply during resumed IBD failed: {e}"
+                                    ))
+                                })?,
+                            Ok(
+                                dom_chain::ConnectResult::SideChain
+                                | dom_chain::ConnectResult::AlreadyHave,
+                            ) => {}
+                            Err(_) => unreachable!("connect_result error returned above"),
+                        }
                     }
                 }
             }
@@ -3673,10 +3704,28 @@ async fn message_loop(
                                                         }
                                                     }
                                                 }
-                                                dom_chain::ConnectResult::Reorg(_) => {
-                                                    tracing::debug!(
-                                                        "Skipping wallet canonical apply for reorg from {peer_addr}; rollback hooks remain explicit follow-up work"
-                                                    );
+                                                dom_chain::ConnectResult::Reorg(delta) => {
+                                                    if let Some(ref wallet_arc) = svc.wallet {
+                                                        let mut w = traced_lock(
+                                                            wallet_arc,
+                                                            lock_class_name(LockClass::Wallet),
+                                                            "wallet_apply_canonical_reorg",
+                                                        )
+                                                        .await;
+                                                        if let Err(e) = w.apply_canonical_reorg(
+                                                            delta.common_ancestor_height,
+                                                            &wallet_reorg_blocks(
+                                                                &delta.disconnected_blocks,
+                                                            ),
+                                                            &wallet_reorg_blocks(
+                                                                &delta.connected_blocks,
+                                                            ),
+                                                        ) {
+                                                            tracing::warn!(
+                                                                "wallet canonical reorg apply failed from {peer_addr}: {e}"
+                                                            );
+                                                        }
+                                                    }
                                                 }
                                                 dom_chain::ConnectResult::SideChain
                                                 | dom_chain::ConnectResult::AlreadyHave => {}
