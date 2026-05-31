@@ -234,6 +234,7 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
 
     let rate_limit_read = middleware::rate_limit_read();
     let rate_limit_submit = middleware::rate_limit_submit();
+    let rate_limit_wallet_spend = middleware::rate_limit_submit();
 
     let public_routes = Router::new()
         .route("/status", get(status))
@@ -246,11 +247,14 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
 
     let submit_route = Router::new()
         .route("/tx/submit", post(submit_tx))
-        .route("/wallet/spend", post(wallet_spend_handler))
         .layer(rate_limit_submit);
 
     let auth_routes = Router::new()
         .route("/peers", get(get_peers_handler))
+        .route(
+            "/wallet/spend",
+            post(wallet_spend_handler).layer(rate_limit_wallet_spend),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             bearer_token,
             middleware::require_bearer_token,
@@ -678,6 +682,16 @@ mod tests {
         serde_json::from_slice(&b).unwrap()
     }
 
+    fn wallet_spend_body() -> String {
+        serde_json::json!({
+            "recipient_commitment": "02".repeat(33),
+            "recipient_blinding": "11".repeat(32),
+            "amount_noms": 1,
+            "fee_noms": 1
+        })
+        .to_string()
+    }
+
     fn app() -> Router {
         let token = Arc::new(middleware::BearerToken("test-token".to_string()));
         router(Arc::new(MockNode::new(42)), token)
@@ -817,6 +831,64 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
         assert_eq!(body_json(r).await["accepted"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
+    async fn submit_without_bearer_remains_public() {
+        let valid_tx_hex = hex::encode(vec![0xdeu8; 64]);
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tx/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"tx_hex":"{valid_tx_hex}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(body_json(r).await["accepted"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn wallet_spend_without_bearer_returns_401() {
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/wallet/spend")
+                    .header("content-type", "application/json")
+                    .body(Body::from(wallet_spend_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn wallet_spend_with_valid_bearer_reaches_handler() {
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/wallet/spend")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(wallet_spend_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body_json(r).await["error"],
+            serde_json::json!("internal: wallet not available")
+        );
     }
 
     #[tokio::test]
