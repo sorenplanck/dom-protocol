@@ -42,12 +42,59 @@ Sequence state:
 - DONE: Task 45 `27a89db8b5965621747fbb10fae6c064a51b6bdf`.
 - DONE: Task 46 `a89a36160e73e57fa45f4887797e0c8e611c4787`.
 - DONE: Task 47 `bc8bbd630e3f1763e132e98cf37ce9f8379e6927`.
-- DONE: Task 48 committed locally; authoritative hash is in git history/final report.
-- CURRENT: Task 49 pending.
-- REMAINING: Tasks 49-50.
+- DONE: Task 48 `6a3fb9cc8bcd6162bf8f5352a84fb237b441ef56`.
+- DONE: Task 49 committed locally; authoritative hash is in git history/final report.
+- CURRENT: Task 50 pending.
+- REMAINING: Task 50.
 
 Open items:
-- Do not start Task 49 until Task 48 is pushed, verified, and reviewed.
+- Do not start Task 50 until Task 49 is pushed, verified, and reviewed.
+
+## 2026-05-31 — Task 49 Windows Portable Packaging
+
+Objective:
+- Harden Windows portable wallet/node packaging so updates are understandable and do not overwrite user data.
+
+Changed files:
+- `packaging/windows/portable/layout.txt`
+- `packaging/windows/portable/README.md`
+- `packaging/windows/portable/build_portable.ps1`
+- `packaging/windows/portable/update_portable.ps1`
+- `scripts/validate_windows_portable_package.sh`
+- `docs/testing/WINDOWS_TEST_RUNNER.md`
+- `docs/README.md`
+- `WORKLOG.md`
+
+Implementation notes:
+- Added explicit portable layout:
+  - `bin/`
+  - `config/`
+  - `data/wallets/`
+  - `data/chain/`
+  - `logs/`
+  - `backups/`
+  - `cache/`
+- Added PowerShell build script for fresh staging packages.
+- Added PowerShell update script that backs up `data\wallets` before replacing binaries and preserves config, chain data, logs, backups, and cache.
+- Added version/build metadata generation into `VERSION.txt`.
+- Added portable README with start, stop, update, backup, validation, and safety instructions.
+- Added local validation script for required package files/layout and obvious secret assignments.
+- Linked portable packaging docs from Windows testing docs and docs index.
+- No wallet password, seed phrase, private key, bearer token, API token, or other secret value was added.
+
+Validation:
+- `bash -n scripts/validate_windows_portable_package.sh` (PASS)
+- `scripts/validate_windows_portable_package.sh` (PASS)
+- PowerShell parse validation (SKIPPED: `pwsh` not installed in this environment)
+- `cargo fmt` (PASS)
+- `cargo check` (PASS)
+- `git diff --check` (PASS)
+
+Test note:
+- No narrow Rust tests were run for Task 49 because the change is limited to packaging scripts and markdown docs; no Rust crate behavior changed.
+
+Integration test note:
+- No `dom-integration-tests` command was run for Task 49 because no integration behavior changed.
 
 ## 2026-05-31 — Task 48 Systemd Backbone Service
 
