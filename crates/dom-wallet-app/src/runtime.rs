@@ -10,12 +10,15 @@ use dom_wallet::{
     ReceiveRequestStatus, RpcClientError, SeedAcceptance, Transaction, TxStatus, Wallet,
     WalletBalance, WalletDir,
 };
+use dom_wire::message::{Command, WireMessage};
+use rand::RngCore;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 const INITIAL_RECONNECT_DELAY_SECS: u64 = 1;
 const MAX_RECONNECT_DELAY_SECS: u64 = 60;
+const HEARTBEAT_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -104,6 +107,128 @@ pub struct NetworkStatus {
     pub peer_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeartbeatError {
+    NoPingInFlight,
+    MalformedPong { len: usize },
+    NonceMismatch { expected: u64, got: u64 },
+    Timeout { nonce: u64 },
+    UnexpectedCommand(Command),
+}
+
+impl std::fmt::Display for HeartbeatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoPingInFlight => write!(f, "pong received without ping in flight"),
+            Self::MalformedPong { len } => write!(f, "pong payload must be 8 bytes, got {len}"),
+            Self::NonceMismatch { expected, got } => {
+                write!(f, "pong nonce mismatch: expected {expected}, got {got}")
+            }
+            Self::Timeout { nonce } => write!(f, "pong timeout for nonce {nonce}"),
+            Self::UnexpectedCommand(command) => {
+                write!(f, "unexpected heartbeat command: {command:?}")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeartbeatEvent {
+    None,
+    PongAccepted,
+    ReconnectRequired(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeartbeatSession {
+    pending_nonce: Option<u64>,
+    ping_sent_at: Option<u64>,
+    timeout: Duration,
+}
+
+impl Default for HeartbeatSession {
+    fn default() -> Self {
+        Self {
+            pending_nonce: None,
+            ping_sent_at: None,
+            timeout: Duration::from_secs(HEARTBEAT_TIMEOUT_SECS),
+        }
+    }
+}
+
+impl HeartbeatSession {
+    pub fn begin_ping_with_nonce(
+        &mut self,
+        now_secs: u64,
+        network_magic: u32,
+        nonce: u64,
+    ) -> WireMessage {
+        self.pending_nonce = Some(nonce);
+        self.ping_sent_at = Some(now_secs);
+        WireMessage {
+            magic: network_magic,
+            command: Command::Ping,
+            payload: nonce.to_le_bytes().to_vec(),
+        }
+    }
+
+    pub fn begin_ping(&mut self, now_secs: u64, network_magic: u32) -> WireMessage {
+        let nonce = rand::thread_rng().next_u64();
+        self.begin_ping_with_nonce(now_secs, network_magic, nonce)
+    }
+
+    pub fn observe_message(
+        &mut self,
+        status: &mut NetworkStatus,
+        now_secs: u64,
+        message: &WireMessage,
+    ) -> Result<HeartbeatEvent, HeartbeatError> {
+        if message.command != Command::Pong {
+            return Ok(HeartbeatEvent::None);
+        }
+        let nonce = decode_pong_nonce(&message.payload)?;
+        match self.pending_nonce {
+            Some(expected) if expected == nonce => {
+                self.pending_nonce = None;
+                self.ping_sent_at = None;
+                status.last_pong_at = Some(now_secs);
+                Ok(HeartbeatEvent::PongAccepted)
+            }
+            Some(expected) => Err(HeartbeatError::NonceMismatch {
+                expected,
+                got: nonce,
+            }),
+            None => Err(HeartbeatError::NoPingInFlight),
+        }
+    }
+
+    pub fn check_timeout(&mut self, status: &mut NetworkStatus, now_secs: u64) -> HeartbeatEvent {
+        let Some(sent_at) = self.ping_sent_at else {
+            return HeartbeatEvent::None;
+        };
+        if now_secs.saturating_sub(sent_at) < self.timeout.as_secs() {
+            return HeartbeatEvent::None;
+        }
+        let nonce = self.pending_nonce.take().unwrap_or_default();
+        self.ping_sent_at = None;
+        let error = HeartbeatError::Timeout { nonce }.to_string();
+        status.mark_reconnecting(error.clone());
+        HeartbeatEvent::ReconnectRequired(error)
+    }
+
+    pub fn clear(&mut self) {
+        self.pending_nonce = None;
+        self.ping_sent_at = None;
+    }
+}
+
+fn decode_pong_nonce(payload: &[u8]) -> Result<u64, HeartbeatError> {
+    let bytes: [u8; 8] = payload
+        .try_into()
+        .map_err(|_| HeartbeatError::MalformedPong { len: payload.len() })?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
 impl Default for NetworkStatus {
     fn default() -> Self {
         Self {
@@ -170,6 +295,7 @@ impl NetworkStatus {
 pub struct NodeConnectionSession {
     client: Option<NodeRpcClient>,
     pub status: NetworkStatus,
+    pub heartbeat: HeartbeatSession,
     next_reconnect_at: Option<u64>,
     consecutive_failures: u32,
 }
@@ -179,6 +305,7 @@ impl Default for NodeConnectionSession {
         Self {
             client: None,
             status: NetworkStatus::default(),
+            heartbeat: HeartbeatSession::default(),
             next_reconnect_at: None,
             consecutive_failures: 0,
         }
@@ -234,6 +361,7 @@ impl NodeConnectionSession {
 
     fn on_session_closed(&mut self, now_secs: u64, error: impl Into<String>) {
         self.client = None;
+        self.heartbeat.clear();
         self.status.mark_reconnecting(error);
         self.next_reconnect_at =
             Some(now_secs.saturating_add(self.status.reconnect_delay.as_secs()));
@@ -249,6 +377,7 @@ impl NodeConnectionSession {
 
     fn reset(&mut self) {
         self.client = None;
+        self.heartbeat.clear();
         self.status.reset();
         self.next_reconnect_at = None;
         self.consecutive_failures = 0;
@@ -384,6 +513,43 @@ impl AppRuntime {
         if let Err(e) = self.refresh_node_status() {
             self.last_error = Some(format!("node reconnect: {e}"));
         }
+    }
+
+    pub fn send_heartbeat_ping(&mut self, now_secs: u64) -> Option<WireMessage> {
+        if self.node_connection.status.state != NetworkStatusState::Connected {
+            return None;
+        }
+        let network = self.persisted.network?;
+        Some(
+            self.node_connection
+                .heartbeat
+                .begin_ping(now_secs, network.magic()),
+        )
+    }
+
+    pub fn handle_heartbeat_message(
+        &mut self,
+        now_secs: u64,
+        message: &WireMessage,
+    ) -> Result<HeartbeatEvent, HeartbeatError> {
+        let event = self.node_connection.heartbeat.observe_message(
+            &mut self.node_connection.status,
+            now_secs,
+            message,
+        )?;
+        Ok(event)
+    }
+
+    pub fn check_heartbeat_timeout(&mut self, now_secs: u64) -> HeartbeatEvent {
+        let event = self
+            .node_connection
+            .heartbeat
+            .check_timeout(&mut self.node_connection.status, now_secs);
+        if let HeartbeatEvent::ReconnectRequired(error) = &event {
+            self.node_connection
+                .on_session_closed(now_secs, error.clone());
+        }
+        event
     }
 
     fn refresh_node_status_at(&mut self, now_secs: u64) -> Result<(), RpcClientError> {
@@ -1045,5 +1211,127 @@ mod tests {
         assert_eq!(status.last_tcp_connect_at, Some(43));
         assert_eq!(status.last_handshake_at, Some(43));
         assert_eq!(status.last_error, None);
+    }
+
+    #[test]
+    fn valid_pong_keeps_connection_healthy_and_updates_status() {
+        let mut heartbeat = HeartbeatSession::default();
+        let mut status = NetworkStatus::default();
+        status.mark_connected(10, "127.0.0.1:33369");
+        let ping = heartbeat.begin_ping_with_nonce(11, Network::Regtest.magic(), 77);
+        assert_eq!(ping.command, Command::Ping);
+        assert_eq!(ping.payload, 77u64.to_le_bytes());
+
+        let pong = WireMessage {
+            magic: Network::Regtest.magic(),
+            command: Command::Pong,
+            payload: 77u64.to_le_bytes().to_vec(),
+        };
+        let event = heartbeat
+            .observe_message(&mut status, 12, &pong)
+            .expect("matching pong");
+
+        assert_eq!(event, HeartbeatEvent::PongAccepted);
+        assert_eq!(status.state, NetworkStatusState::Connected);
+        assert_eq!(status.last_pong_at, Some(12));
+        assert_eq!(
+            heartbeat.check_timeout(&mut status, 100),
+            HeartbeatEvent::None
+        );
+    }
+
+    #[test]
+    fn missing_pong_causes_reconnect_without_sleep() {
+        let mut heartbeat = HeartbeatSession::default();
+        let mut status = NetworkStatus::default();
+        status.mark_connected(20, "127.0.0.1:33369");
+        heartbeat.begin_ping_with_nonce(21, Network::Regtest.magic(), 88);
+
+        assert_eq!(
+            heartbeat.check_timeout(&mut status, 35),
+            HeartbeatEvent::None
+        );
+        let event = heartbeat.check_timeout(&mut status, 36);
+
+        assert_eq!(
+            event,
+            HeartbeatEvent::ReconnectRequired("pong timeout for nonce 88".to_string())
+        );
+        assert_eq!(status.state, NetworkStatusState::Reconnecting);
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("pong timeout for nonce 88")
+        );
+    }
+
+    #[test]
+    fn wrong_nonce_does_not_count_as_pong() {
+        let mut heartbeat = HeartbeatSession::default();
+        let mut status = NetworkStatus::default();
+        status.mark_connected(30, "127.0.0.1:33369");
+        heartbeat.begin_ping_with_nonce(31, Network::Regtest.magic(), 99);
+        let wrong_pong = WireMessage {
+            magic: Network::Regtest.magic(),
+            command: Command::Pong,
+            payload: 100u64.to_le_bytes().to_vec(),
+        };
+
+        let err = heartbeat
+            .observe_message(&mut status, 32, &wrong_pong)
+            .expect_err("wrong nonce must reject");
+
+        assert_eq!(
+            err,
+            HeartbeatError::NonceMismatch {
+                expected: 99,
+                got: 100
+            }
+        );
+        assert_eq!(status.last_pong_at, None);
+        assert_eq!(
+            heartbeat.check_timeout(&mut status, 46),
+            HeartbeatEvent::ReconnectRequired("pong timeout for nonce 99".to_string())
+        );
+    }
+
+    #[test]
+    fn malformed_pong_is_rejected() {
+        let mut heartbeat = HeartbeatSession::default();
+        let mut status = NetworkStatus::default();
+        status.mark_connected(40, "127.0.0.1:33369");
+        heartbeat.begin_ping_with_nonce(41, Network::Regtest.magic(), 101);
+        let malformed_pong = WireMessage {
+            magic: Network::Regtest.magic(),
+            command: Command::Pong,
+            payload: vec![1, 2, 3],
+        };
+
+        let err = heartbeat
+            .observe_message(&mut status, 42, &malformed_pong)
+            .expect_err("malformed pong must reject");
+
+        assert_eq!(err, HeartbeatError::MalformedPong { len: 3 });
+        assert_eq!(status.last_pong_at, None);
+    }
+
+    #[test]
+    fn heartbeat_message_handling_does_not_starve_non_heartbeat_messages() {
+        let mut heartbeat = HeartbeatSession::default();
+        let mut status = NetworkStatus::default();
+        status.mark_connected(50, "127.0.0.1:33369");
+        heartbeat.begin_ping_with_nonce(51, Network::Regtest.magic(), 102);
+        let block_message = WireMessage {
+            magic: Network::Regtest.magic(),
+            command: Command::Block,
+            payload: vec![9, 9, 9],
+        };
+
+        let event = heartbeat
+            .observe_message(&mut status, 52, &block_message)
+            .expect("non-heartbeat message is left for the normal dispatcher");
+
+        assert_eq!(event, HeartbeatEvent::None);
+        assert_eq!(status.state, NetworkStatusState::Connected);
+        assert_eq!(status.last_pong_at, None);
     }
 }
