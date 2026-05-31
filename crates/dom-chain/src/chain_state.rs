@@ -179,7 +179,6 @@ impl ChainState {
                 )
             }
             None => {
-                ensure_canonical_utxo_set(&store, BlockHeight::GENESIS)?;
                 prune_retained_side_chains(&store, BlockHeight::GENESIS, [0u8; 32])?;
                 (Hash256::ZERO, BlockHeight::GENESIS, U256::zero())
             }
@@ -1120,7 +1119,7 @@ fn reconstruct_canonical_utxo_set(
     tip_height: BlockHeight,
 ) -> Result<BTreeMap<[u8; 33], Vec<u8>>, DomError> {
     let mut utxos = BTreeMap::new();
-    for h in 1..=tip_height.0 {
+    for h in 0..=tip_height.0 {
         let hash = store.get_hash_at_height(h)?.ok_or_else(|| {
             DomError::Internal(format!(
                 "{CHAIN_CORRUPT_SENTINEL}: missing canonical height_index entry at height {h} during UTXO rebuild"
@@ -1214,7 +1213,7 @@ fn rebuild_kernel_index_from_canonical_chain(
     store: &DomStore,
     tip_height: BlockHeight,
 ) -> Result<(), DomError> {
-    for h in 1..=tip_height.0 {
+    for h in 0..=tip_height.0 {
         let hash = store.get_hash_at_height(h)?.ok_or_else(|| {
             DomError::Internal(format!(
                 "{CHAIN_CORRUPT_SENTINEL}: missing canonical height_index entry at height {h}"

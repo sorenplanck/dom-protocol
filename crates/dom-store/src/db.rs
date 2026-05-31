@@ -314,6 +314,25 @@ impl DomStore {
         Ok(out)
     }
 
+    /// Read the full persisted kernel index as raw key/value bytes.
+    ///
+    /// Tests and recovery checks use this to compare canonical kernel-index
+    /// convergence without trusting any higher-level reconstruction first.
+    pub fn read_all_kernel_index_raw(&self) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, DomError> {
+        let txn = self
+            .env
+            .begin_ro_txn()
+            .map_err(|e| DomError::Internal(format!("ro txn: {e}")))?;
+        let mut cursor = txn
+            .open_ro_cursor(self.db_kernels)
+            .map_err(|e| DomError::Internal(format!("open kernel cursor: {e}")))?;
+        let mut out = BTreeMap::new();
+        for (key, value) in cursor.iter() {
+            out.insert(key.to_vec(), value.to_vec());
+        }
+        Ok(out)
+    }
+
     /// Read every persisted block header by hash.
     ///
     /// Includes canonical and retained non-canonical blocks. Used by
