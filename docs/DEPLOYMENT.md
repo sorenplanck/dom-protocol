@@ -54,6 +54,10 @@ mine = false
 
 ## Systemd Service
 
+For the current devnet/testnet VPS backbone service template, environment
+file, install script, health checks, journal logs, update flow, and firewall
+commands, see [`BACKBONE_SYSTEMD.md`](./BACKBONE_SYSTEMD.md).
+
 ```bash
 sudo systemctl enable dom-node
 sudo systemctl start dom-node
