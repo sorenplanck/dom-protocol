@@ -195,6 +195,13 @@ impl HelloPayload {
         let user_agent = String::from_utf8_lossy(&data[82..82 + ua_len]).into_owned();
         // local_timestamp: 8 bytes after user_agent (added in PROTOCOL_VERSION 2)
         let ts_offset = 82 + ua_len;
+        if data.len() != ts_offset && data.len() != ts_offset + 8 {
+            return Err(DomError::Malformed(format!(
+                "hello length mismatch: expected {ts_offset} or {}, got {}",
+                ts_offset + 8,
+                data.len()
+            )));
+        }
         let local_timestamp = if data.len() >= ts_offset + 8 {
             u64::from_le_bytes(data[ts_offset..ts_offset + 8].try_into().unwrap())
         } else {
@@ -334,6 +341,12 @@ impl HeadersPayload {
             headers.push(data[pos..pos + hlen].to_vec());
             pos += hlen;
         }
+        if pos != data.len() {
+            return Err(DomError::Malformed(format!(
+                "headers trailing bytes: parsed {pos}, total {}",
+                data.len()
+            )));
+        }
         Ok(Self { headers })
     }
 }
@@ -470,6 +483,25 @@ mod tests {
     }
 
     #[test]
+    fn headers_exact_payload_accepted() {
+        let p = HeadersPayload {
+            headers: vec![vec![0u8; 200], vec![1u8; 200]],
+        };
+        let bytes = p.to_bytes().unwrap();
+        assert!(HeadersPayload::from_bytes(&bytes).is_ok());
+    }
+
+    #[test]
+    fn headers_trailing_bytes_rejected() {
+        let p = HeadersPayload {
+            headers: vec![vec![0u8; 200], vec![1u8; 200]],
+        };
+        let mut bytes = p.to_bytes().unwrap();
+        bytes.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        assert!(HeadersPayload::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
     fn getblockdata_roundtrip() {
         let p = GetBlockDataPayload {
             hashes: vec![[7u8; 32]; 5],
@@ -527,5 +559,60 @@ mod tests {
         assert_eq!(hello2.best_height, 12345);
         assert_eq!(hello2.user_agent, "dom-node/0.1.0");
         assert_eq!(hello2.chain_id, [0xCCu8; 32]);
+    }
+
+    fn hello_payload_for_tests() -> HelloPayload {
+        HelloPayload {
+            version: dom_core::PROTOCOL_VERSION,
+            network_magic: dom_core::NETWORK_MAGIC_MAINNET,
+            chain_id: [0xCCu8; 32],
+            best_height: 12345,
+            best_hash: [0xAAu8; 32],
+            user_agent: "dom-node/0.1.0".into(),
+            local_timestamp: 1_717_171_717,
+        }
+    }
+
+    #[test]
+    fn hello_v2_exact_payload_accepted() {
+        let hello = hello_payload_for_tests();
+        let bytes = hello.to_bytes().unwrap();
+        let parsed = HelloPayload::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.local_timestamp, hello.local_timestamp);
+    }
+
+    #[test]
+    fn hello_v1_exact_payload_accepted() {
+        let hello = hello_payload_for_tests();
+        let mut bytes = hello.to_bytes().unwrap();
+        let ts_offset = bytes.len() - 8;
+        bytes.truncate(ts_offset);
+
+        let parsed = HelloPayload::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.local_timestamp, 0);
+        assert_eq!(parsed.user_agent, hello.user_agent);
+    }
+
+    #[test]
+    fn hello_trailing_bytes_rejected() {
+        let hello = hello_payload_for_tests();
+        let mut bytes = hello.to_bytes().unwrap();
+        bytes.extend_from_slice(&[0xde, 0xad]);
+        assert!(HelloPayload::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn hello_truncated_timestamp_rejected() {
+        let hello = hello_payload_for_tests();
+        let bytes = hello.to_bytes().unwrap();
+        let ts_offset = bytes.len() - 8;
+
+        for extra_ts_bytes in 1..8 {
+            let truncated = &bytes[..ts_offset + extra_ts_bytes];
+            assert!(
+                HelloPayload::from_bytes(truncated).is_err(),
+                "accepted timestamp with {extra_ts_bytes} byte(s)"
+            );
+        }
     }
 }
