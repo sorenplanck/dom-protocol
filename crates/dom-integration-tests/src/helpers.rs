@@ -84,6 +84,7 @@ pub async fn wait_for_height(
 ) -> Result<(), String> {
     timeout(timeout_duration, async {
         loop {
+            let notified = node.state_events.notified();
             let chain = node.chain.lock().await;
             let current_height = chain.tip_height.0;
             drop(chain);
@@ -92,7 +93,7 @@ pub async fn wait_for_height(
                 return Ok(());
             }
 
-            sleep(Duration::from_millis(100)).await;
+            notified.await;
         }
     })
     .await
@@ -107,6 +108,7 @@ pub async fn wait_for_mempool_count(
 ) -> Result<(), String> {
     timeout(timeout_duration, async {
         loop {
+            let notified = node.state_events.notified();
             let n = {
                 let mempool = node.mempool.lock().await;
                 mempool.len()
@@ -114,7 +116,7 @@ pub async fn wait_for_mempool_count(
             if n >= min_count {
                 return Ok(());
             }
-            sleep(Duration::from_millis(100)).await;
+            notified.await;
         }
     })
     .await
@@ -129,6 +131,7 @@ pub async fn wait_for_peer_count(
 ) -> Result<(), String> {
     timeout(timeout_duration, async {
         loop {
+            let notified = node.state_events.notified();
             let peers = node.peers.lock().await;
             let count = peers.connected_peers().len();
             drop(peers);
@@ -137,7 +140,7 @@ pub async fn wait_for_peer_count(
                 return Ok(());
             }
 
-            sleep(Duration::from_millis(100)).await;
+            notified.await;
         }
     })
     .await
@@ -208,5 +211,61 @@ pub fn test_config(name: &str, port: u16, _mine: bool) -> NodeConfig {
         wallet_password: None,
         log_level: "debug".into(),
         rpc_listen_addr: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dom_core::BlockHeight;
+    use dom_wire::peer::{PeerInfo, PeerState};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    #[tokio::test]
+    async fn wait_for_height_wakes_on_node_state_event() {
+        let node = spawn_node(test_config("wait-height-event", free_local_port(), false)).await;
+        let waiter = {
+            let node = node.clone();
+            tokio::spawn(async move { wait_for_height(&node, 3, Duration::from_secs(5)).await })
+        };
+
+        tokio::task::yield_now().await;
+        {
+            let mut chain = node.chain.lock().await;
+            chain.tip_height = BlockHeight(3);
+        }
+        node.notify_state_changed();
+
+        waiter
+            .await
+            .expect("waiter task")
+            .expect("height waiter should observe notified state");
+    }
+
+    #[tokio::test]
+    async fn wait_for_peer_count_wakes_on_node_state_event() {
+        let node = spawn_node(test_config("wait-peer-event", free_local_port(), false)).await;
+        let waiter = {
+            let node = node.clone();
+            tokio::spawn(async move { wait_for_peer_count(&node, 1, Duration::from_secs(5)).await })
+        };
+
+        tokio::task::yield_now().await;
+        {
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), free_local_port());
+            let mut peer = PeerInfo::new(addr, false);
+            peer.state = PeerState::Connected;
+            node.peers
+                .lock()
+                .await
+                .register_peer(peer)
+                .expect("register peer");
+        }
+        node.notify_state_changed();
+
+        waiter
+            .await
+            .expect("waiter task")
+            .expect("peer waiter should observe notified state");
     }
 }
