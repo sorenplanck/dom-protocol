@@ -206,6 +206,7 @@ pub fn test_config(name: &str, port: u16, _mine: bool) -> NodeConfig {
         dns_seeds: vec![],
         seed_peers: vec![],
         mine: false,
+        miner_throttle: Default::default(),
         miner_address: None,
         wallet_path: None,
         wallet_password: None,
