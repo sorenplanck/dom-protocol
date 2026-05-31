@@ -12,6 +12,9 @@ use dom_wallet::{
 };
 use dom_wire::message::{Command, WireMessage};
 use rand::RngCore;
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
@@ -19,6 +22,8 @@ use url::Url;
 const INITIAL_RECONNECT_DELAY_SECS: u64 = 1;
 const MAX_RECONNECT_DELAY_SECS: u64 = 60;
 const HEARTBEAT_TIMEOUT_SECS: u64 = 15;
+const DIAGNOSTIC_LOG_MAX_ENTRIES: usize = 512;
+const DIAGNOSTIC_LOG_MAX_EXPORT_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -68,6 +73,151 @@ pub struct ParsedPaymentRequest {
 
 pub struct WalletSession {
     pub wallet_dir: WalletDir,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildDiagnostics {
+    pub app_version: &'static str,
+    pub git_hash: &'static str,
+}
+
+impl Default for BuildDiagnostics {
+    fn default() -> Self {
+        Self {
+            app_version: env!("CARGO_PKG_VERSION"),
+            git_hash: option_env!("GITHUB_SHA")
+                .or(option_env!("DOM_GIT_HASH"))
+                .or(option_env!("VERGEN_GIT_SHA"))
+                .unwrap_or("unknown"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticLog {
+    entries: VecDeque<String>,
+    max_entries: usize,
+    max_export_bytes: usize,
+    build: BuildDiagnostics,
+}
+
+impl Default for DiagnosticLog {
+    fn default() -> Self {
+        Self::new(
+            DIAGNOSTIC_LOG_MAX_ENTRIES,
+            DIAGNOSTIC_LOG_MAX_EXPORT_BYTES,
+            BuildDiagnostics::default(),
+        )
+    }
+}
+
+impl DiagnosticLog {
+    pub fn new(max_entries: usize, max_export_bytes: usize, build: BuildDiagnostics) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            max_entries,
+            max_export_bytes,
+            build,
+        }
+    }
+
+    pub fn append(&mut self, timestamp: u64, event: &str, detail: impl AsRef<str>) {
+        let line = format!(
+            "ts={timestamp} event={} {}",
+            redact_secret_text(event),
+            redact_secret_text(detail.as_ref())
+        );
+        self.entries.push_back(line);
+        while self.entries.len() > self.max_entries {
+            self.entries.pop_front();
+        }
+    }
+
+    pub fn append_network_snapshot(
+        &mut self,
+        timestamp: u64,
+        network: Option<Network>,
+        backbone_peer: &str,
+        status: &NetworkStatus,
+    ) {
+        self.append(
+            timestamp,
+            "network_snapshot",
+            format!(
+                "app_version={} git_hash={} network_mode={} backbone_peers={} state={} connected_peer={} peer_count={} reconnect_delay={}s last_error={}",
+                self.build.app_version,
+                self.build.git_hash,
+                network.map(network_name).unwrap_or("unconfigured"),
+                backbone_peer,
+                status.state.label(),
+                status.connected_peer.as_deref().unwrap_or("none"),
+                status.peer_count,
+                status.reconnect_delay.as_secs(),
+                status.last_error.as_deref().unwrap_or("none")
+            ),
+        );
+    }
+
+    pub fn export_text(&self) -> String {
+        let mut out = format!(
+            "DOM wallet diagnostics\napp_version={}\ngit_hash={}\n",
+            self.build.app_version, self.build.git_hash
+        );
+        for entry in &self.entries {
+            out.push_str(entry);
+            out.push('\n');
+            if out.len() > self.max_export_bytes {
+                out.truncate(self.max_export_bytes);
+                out.push_str("\n[truncated]\n");
+                break;
+            }
+        }
+        out
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+fn redact_secret_text(input: &str) -> String {
+    let sensitive = [
+        "password",
+        "wallet_password",
+        "seed",
+        "seed_phrase",
+        "private_key",
+        "secret_key",
+        "token",
+        "bearer",
+        "authorization",
+    ];
+    let mut out = Vec::new();
+    let mut redact_next = 0usize;
+    for part in input.split_whitespace() {
+        if redact_next > 0 {
+            out.push("<redacted>".to_string());
+            redact_next -= 1;
+            continue;
+        }
+        let lower = part.to_ascii_lowercase();
+        if lower == "bearer" {
+            out.push("bearer <redacted>".to_string());
+            redact_next = 1;
+        } else if lower == "authorization" || lower == "authorization:" {
+            out.push(format!("{} <redacted>", part.trim_end_matches(':')));
+            redact_next = 2;
+        } else if sensitive.iter().any(|key| {
+            lower.starts_with(&format!("{key}=")) || lower.starts_with(&format!("{key}:"))
+        }) {
+            let separator = if part.contains('=') { '=' } else { ':' };
+            let key = part.split(['=', ':']).next().unwrap_or(part);
+            out.push(format!("{key}{separator}<redacted>"));
+        } else {
+            out.push(part.to_string());
+        }
+    }
+    out.join(" ")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,6 +584,7 @@ pub struct AppRuntime {
     pub history: Vec<HistoryRow>,
     pub receive_requests: Vec<ReceiveRow>,
     pub last_error: Option<String>,
+    pub diagnostic_log: DiagnosticLog,
 }
 
 impl AppRuntime {
@@ -450,6 +601,7 @@ impl AppRuntime {
             history: Vec::new(),
             receive_requests: Vec::new(),
             last_error: None,
+            diagnostic_log: DiagnosticLog::default(),
         })
     }
 
@@ -465,8 +617,29 @@ impl AppRuntime {
         storage::save(&self.data_dir, &self.persisted)
     }
 
+    pub fn export_diagnostics(&mut self) -> Result<PathBuf, AppStorageError> {
+        std::fs::create_dir_all(&self.data_dir).map_err(|e| AppStorageError::Io(e.to_string()))?;
+        self.diagnostic_log.append_network_snapshot(
+            unix_now(),
+            self.persisted.network,
+            &self.persisted.node_url,
+            &self.node_connection.status,
+        );
+        let path = self
+            .data_dir
+            .join(format!("dom-wallet-diagnostics-{}.log", unix_now()));
+        let mut file = File::create(&path).map_err(|e| AppStorageError::Io(e.to_string()))?;
+        file.write_all(self.diagnostic_log.export_text().as_bytes())
+            .map_err(|e| AppStorageError::Io(e.to_string()))?;
+        file.sync_all()
+            .map_err(|e| AppStorageError::Io(e.to_string()))?;
+        Ok(path)
+    }
+
     pub fn set_error(&mut self, error: impl Into<String>) {
-        self.last_error = Some(error.into());
+        let error = error.into();
+        self.diagnostic_log.append(unix_now(), "error", &error);
+        self.last_error = Some(error);
     }
 
     pub fn clear_error(&mut self) {
@@ -521,6 +694,18 @@ impl AppRuntime {
             .ok_or_else(|| anyhow::anyhow!("wallet directory is not configured"))?;
         let wallet_dir = WalletDir::open(&wallet_dir_path, password)?;
         self.session = Some(WalletSession { wallet_dir });
+        self.diagnostic_log.append(
+            unix_now(),
+            "wallet_unlocked",
+            format!(
+                "network_mode={} backbone_peers={}",
+                self.persisted
+                    .network
+                    .map(network_name)
+                    .unwrap_or("unconfigured"),
+                self.persisted.node_url
+            ),
+        );
         self.refresh_wallet_view();
         let _ = self.refresh_node_status();
         self.screen = Screen::Dashboard;
@@ -528,6 +713,8 @@ impl AppRuntime {
     }
 
     pub fn lock_wallet(&mut self) {
+        self.diagnostic_log
+            .append(unix_now(), "wallet_locked", "session closed");
         self.session = None;
         self.node_connection.reset();
         self.node_status = None;
@@ -576,6 +763,10 @@ impl AppRuntime {
             now_secs,
             message,
         )?;
+        if event == HeartbeatEvent::PongAccepted {
+            self.diagnostic_log
+                .append(now_secs, "heartbeat_pong", "valid matching pong");
+        }
         Ok(event)
     }
 
@@ -587,6 +778,8 @@ impl AppRuntime {
         if let HeartbeatEvent::ReconnectRequired(error) = &event {
             self.node_connection
                 .on_session_closed(now_secs, error.clone());
+            self.diagnostic_log
+                .append(now_secs, "connection_reconnecting", error);
         }
         event
     }
@@ -599,18 +792,40 @@ impl AppRuntime {
             Ok(client) => client.status(),
             Err(err) => Err(err),
         };
+        let previous_height = self.node_status.as_ref().map(|status| status.chain_height);
         let status = match status {
             Ok(status) => status,
             Err(err) => {
                 self.node_status = None;
                 self.node_connection
                     .on_session_closed(now_secs, err.to_string());
+                self.diagnostic_log
+                    .append(now_secs, "connection_error", err.to_string());
                 return Err(err);
             }
         };
+        if previous_height != Some(status.chain_height) {
+            self.diagnostic_log.append(
+                now_secs,
+                "chain_height_changed",
+                format!(
+                    "from={} to={}",
+                    previous_height
+                        .map(|height| height.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    status.chain_height
+                ),
+            );
+        }
         self.node_status = Some(status);
         self.node_connection
             .on_success(now_secs, &self.persisted.node_url);
+        self.diagnostic_log.append_network_snapshot(
+            now_secs,
+            self.persisted.network,
+            &self.persisted.node_url,
+            &self.node_connection.status,
+        );
         self.refresh_wallet_view();
         Ok(())
     }
@@ -1408,5 +1623,76 @@ mod tests {
         assert_eq!(rows.last_handshake, "never");
         assert_eq!(rows.last_pong, "never");
         assert_eq!(rows.peer_count, "8");
+    }
+
+    #[test]
+    fn diagnostic_log_redacts_secrets_on_append_and_export() {
+        let mut log = DiagnosticLog::new(
+            8,
+            4096,
+            BuildDiagnostics {
+                app_version: "test",
+                git_hash: "abc123",
+            },
+        );
+        log.append(
+            1,
+            "secret_test",
+            "password=hunter2 seed_phrase=alpha-beta token=rpc-token private_key=deadbeef Authorization: Bearer bearer-secret",
+        );
+
+        let exported = log.export_text();
+
+        assert!(exported.contains("password=<redacted>"));
+        assert!(exported.contains("seed_phrase=<redacted>"));
+        assert!(exported.contains("token=<redacted>"));
+        assert!(exported.contains("private_key=<redacted>"));
+        assert!(exported.contains("Authorization <redacted>"));
+        assert!(!exported.contains("hunter2"));
+        assert!(!exported.contains("alpha-beta"));
+        assert!(!exported.contains("rpc-token"));
+        assert!(!exported.contains("deadbeef"));
+        assert!(!exported.contains("bearer-secret"));
+    }
+
+    #[test]
+    fn diagnostic_log_rotation_bounds_entries() {
+        let mut log = DiagnosticLog::new(
+            2,
+            4096,
+            BuildDiagnostics {
+                app_version: "test",
+                git_hash: "abc123",
+            },
+        );
+        log.append(1, "first", "height=1");
+        log.append(2, "second", "height=2");
+        log.append(3, "third", "height=3");
+
+        let exported = log.export_text();
+
+        assert_eq!(log.len(), 2);
+        assert!(!exported.contains("first"));
+        assert!(exported.contains("second"));
+        assert!(exported.contains("third"));
+    }
+
+    #[test]
+    fn diagnostic_export_writes_redacted_file() {
+        let temp = TempDir::new().unwrap();
+        let mut runtime = AppRuntime::load(temp.path().to_path_buf()).unwrap();
+        runtime
+            .diagnostic_log
+            .append(1, "export", "wallet_password=open-sesame token=rpc-token");
+
+        let path = runtime.export_diagnostics().expect("export diagnostics");
+        let exported = std::fs::read_to_string(path).expect("read export");
+
+        assert!(exported.contains("wallet_password=<redacted>"));
+        assert!(exported.contains("token=<redacted>"));
+        assert!(!exported.contains("open-sesame"));
+        assert!(!exported.contains("rpc-token"));
+        assert!(exported.contains("app_version="));
+        assert!(exported.contains("network_mode=unconfigured"));
     }
 }
