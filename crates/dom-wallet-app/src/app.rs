@@ -298,11 +298,15 @@ impl WalletApp {
 
             card(&mut columns[1], |ui| {
                 mini_header(ui, "Node State");
+                let network_rows = self.runtime.node_connection.status.diagnostics_rows();
                 status_badge(
                     ui,
-                    self.runtime.node_connection.state_label(),
+                    &network_rows.state,
                     network_state_color(self.runtime.node_connection.status.state),
                 );
+                labeled_value(ui, "Connected peer", &network_rows.connected_peer);
+                labeled_value(ui, "Peer count", &network_rows.peer_count);
+                labeled_value(ui, "Last Pong", &network_rows.last_pong);
                 if let Some(status) = &self.runtime.node_status {
                     labeled_value(ui, "Network", &status.network);
                     labeled_value(ui, "Chain height", &status.chain_height.to_string());
@@ -515,21 +519,21 @@ impl WalletApp {
         ui.columns(2, |columns| {
             card(&mut columns[0], |ui| {
                 mini_header(ui, "Node Connectivity");
+                let network_rows = self.runtime.node_connection.status.diagnostics_rows();
                 status_badge(
                     ui,
-                    self.runtime.node_connection.state_label(),
+                    &network_rows.state,
                     network_state_color(self.runtime.node_connection.status.state),
                 );
-                labeled_value(
-                    ui,
-                    "Reconnect delay",
-                    &format!("{}s", self.runtime.node_connection.reconnect_delay_secs()),
-                );
+                labeled_value(ui, "Connected peer", &network_rows.connected_peer);
+                labeled_value(ui, "Last error", &network_rows.last_error);
+                labeled_value(ui, "Last TCP connect", &network_rows.last_tcp_connect);
+                labeled_value(ui, "Last handshake", &network_rows.last_handshake);
+                labeled_value(ui, "Last Pong", &network_rows.last_pong);
+                labeled_value(ui, "Reconnect delay", &network_rows.reconnect_delay);
+                labeled_value(ui, "Peer count", &network_rows.peer_count);
                 if let Some(next) = self.runtime.node_connection.next_reconnect_at() {
                     labeled_value(ui, "Next attempt", &next.to_string());
-                }
-                if let Some(error) = &self.runtime.node_connection.status.last_error {
-                    labeled_value(ui, "Last error", error);
                 }
                 if let Some(status) = &self.runtime.node_status {
                     labeled_value(ui, "Protocol version", &status.version.to_string());
