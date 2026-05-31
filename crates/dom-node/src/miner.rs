@@ -2,6 +2,7 @@
 
 use crate::node::{reconcile_mempool_after_connect, DomNode};
 use crate::task_supervisor::ShutdownToken;
+use dom_config::MinerThrottleConfig;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{compute_block_pmmr_roots, derive_chain_id};
 use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionOutput};
@@ -16,7 +17,7 @@ use dom_pow::{
 };
 use primitive_types::U256;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
 fn now_secs() -> u64 {
@@ -90,6 +91,48 @@ impl MiningMode {
 
     fn light_vm(self) -> bool {
         matches!(self, Self::RegtestRandomXLight | Self::RegtestFastDevOnly)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MinerThrottle {
+    enabled: bool,
+    yield_every_nonces: u64,
+    sleep_micros: u64,
+}
+
+impl MinerThrottle {
+    fn from_config(config: &MinerThrottleConfig) -> Self {
+        Self {
+            enabled: config.enabled && config.yield_every_nonces > 0,
+            yield_every_nonces: config.yield_every_nonces,
+            sleep_micros: config.sleep_micros,
+        }
+    }
+
+    fn after_nonce(self, nonce: u64) {
+        if !self.enabled || !nonce.is_multiple_of(self.yield_every_nonces) {
+            return;
+        }
+        if self.sleep_micros == 0 {
+            std::thread::yield_now();
+        } else {
+            std::thread::sleep(Duration::from_micros(self.sleep_micros));
+        }
+    }
+
+    fn describe(self) -> String {
+        if !self.enabled {
+            return "disabled".into();
+        }
+        if self.sleep_micros == 0 {
+            format!("yield every {} nonces", self.yield_every_nonces)
+        } else {
+            format!(
+                "sleep {}us every {} nonces",
+                self.sleep_micros, self.yield_every_nonces
+            )
+        }
     }
 }
 
@@ -436,12 +479,14 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     let block_diff = target_to_difficulty(&target);
     let new_total_diff = tip_difficulty.saturating_add(U256::from(block_diff));
     let mining_mode = MiningMode::for_network(node.config.network)?;
+    let throttle = MinerThrottle::from_config(&node.config.miner_throttle);
 
     info!(
-        "Minerando bloco {} | target: {}... | mode: {:?}",
+        "Minerando bloco {} | target: {}... | mode: {:?} | throttle: {}",
         new_height,
         hex::encode(&target[0..4]),
-        mining_mode
+        mining_mode,
+        throttle.describe()
     );
 
     let seed_h = randomx_seed_height(new_height);
@@ -550,6 +595,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
                 rangeproof_root,
                 light_vm,
                 pow_mode,
+                throttle,
             );
             let _ = tx.send(result.map_err(|e| e.to_string()));
         })
@@ -579,6 +625,7 @@ fn mine_blocking(
     rangeproof_root: Hash256,
     light_vm: bool,
     pow_mode: PowValidationMode,
+    throttle: MinerThrottle,
 ) -> Result<BlockHeader, DomError> {
     use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
     // Mainnet / Testnet mining sets `FLAG_FULL_MEM` for throughput
@@ -656,6 +703,7 @@ fn mine_blocking(
             return Ok(final_header);
         }
         nonce = nonce.wrapping_add(1);
+        throttle.after_nonce(nonce);
         if nonce.is_multiple_of(HEARTBEAT_NONCES) {
             let now = std::time::Instant::now();
             let window = now.duration_since(last_heartbeat).as_secs_f64();
@@ -665,11 +713,12 @@ fn mine_blocking(
                 0.0
             };
             info!(
-                "⛏ minerando h={} | nonces={} | {:.1} H/s | total={:.1}s",
+                "⛏ minerando h={} | nonces={} | {:.1} H/s | total={:.1}s | throttle={}",
                 new_height,
                 nonce,
                 hps,
-                mining_start.elapsed().as_secs_f64()
+                mining_start.elapsed().as_secs_f64(),
+                throttle.describe()
             );
             last_heartbeat = now;
         }
@@ -707,9 +756,12 @@ mod genesis_determinism_tests {
     //!   3. Different chain_ids produce different coinbases (sanity:
     //!      Mainnet vs Testnet vs Regtest genesis must NOT collide).
 
-    use super::{build_genesis_coinbase, build_real_coinbase, finalize_mined_block, mine_blocking};
+    use super::{
+        build_genesis_coinbase, build_real_coinbase, finalize_mined_block, mine_blocking,
+        MinerThrottle,
+    };
     use crate::node::DomNode;
-    use dom_config::NodeConfig;
+    use dom_config::{MinerThrottleConfig, NodeConfig};
     use dom_consensus::block::validate_pow_for_network;
     use dom_consensus::block::{BlockHeader, ProofOfWork};
     use dom_consensus::compute_block_pmmr_roots;
@@ -779,6 +831,10 @@ mod genesis_determinism_tests {
         config.wallet_password = None;
         config.mine = false;
         config
+    }
+
+    fn disabled_throttle() -> MinerThrottle {
+        MinerThrottle::from_config(&MinerThrottleConfig::default())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -948,6 +1004,7 @@ mod genesis_determinism_tests {
             dom_core::Hash256::ZERO,
             mode.light_vm(),
             mode.pow_mode(),
+            disabled_throttle(),
         )
         .expect("fast mining with consensus target");
 
@@ -1040,6 +1097,130 @@ mod genesis_determinism_tests {
     }
 
     #[test]
+    fn throttle_config_defaults_to_disabled_when_missing() {
+        let json = r#"{
+            "network": "Regtest",
+            "data_dir": "./dom-regtest-data",
+            "p2p_listen_addr": "127.0.0.1:33371",
+            "max_inbound": 8,
+            "min_outbound": 0,
+            "dns_seeds": [],
+            "seed_peers": [],
+            "mine": true,
+            "miner_address": null,
+            "wallet_path": null,
+            "wallet_password": null,
+            "log_level": "debug",
+            "rpc_listen_addr": null
+        }"#;
+        let config: NodeConfig = serde_json::from_str(json).expect("regtest config parses");
+        assert_eq!(config.miner_throttle, Default::default());
+        assert_eq!(
+            MinerThrottle::from_config(&config.miner_throttle),
+            disabled_throttle()
+        );
+    }
+
+    #[test]
+    fn target_calculation_unchanged_by_throttle() {
+        let timestamp = Timestamp(1_778_642_753);
+        let mut off = NodeConfig::regtest();
+        off.miner_throttle = Default::default();
+        let mut on = NodeConfig::regtest();
+        on.miner_throttle = MinerThrottleConfig {
+            enabled: true,
+            yield_every_nonces: 1,
+            sleep_micros: 1,
+        };
+
+        assert_eq!(off.network, on.network);
+        let off_target = compute_expected_target(off.network.magic(), timestamp, BlockHeight(1))
+            .expect("target off");
+        let on_target = compute_expected_target(on.network.magic(), timestamp, BlockHeight(1))
+            .expect("target on");
+        assert_eq!(off_target, on_target);
+    }
+
+    #[test]
+    fn mined_block_validity_independent_of_throttle() {
+        std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+        let timestamp = Timestamp(1_700_000_000);
+        let target =
+            compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, BlockHeight(1)).unwrap();
+
+        for throttle in [
+            disabled_throttle(),
+            MinerThrottle::from_config(&MinerThrottleConfig {
+                enabled: true,
+                yield_every_nonces: 1,
+                sleep_micros: 0,
+            }),
+        ] {
+            let header = mine_blocking(
+                1,
+                dom_core::Hash256::ZERO,
+                timestamp,
+                target,
+                primitive_types::U256::one(),
+                [0u8; 32],
+                dom_core::Hash256::ZERO,
+                dom_core::Hash256::ZERO,
+                dom_core::Hash256::ZERO,
+                true,
+                PowValidationMode::FastDevOnly,
+                throttle,
+            )
+            .expect("fast mining");
+
+            assert_eq!(header.target.to_target().unwrap(), target);
+            assert!(validate_pow_for_network(NETWORK_MAGIC_REGTEST, &header, &[0u8; 32]).is_ok());
+        }
+    }
+
+    #[test]
+    fn throttle_config_does_not_enter_consensus_serialization() {
+        let timestamp = Timestamp(1_700_000_000);
+        let mut off = NodeConfig::regtest();
+        off.miner_throttle = Default::default();
+        let mut on = NodeConfig::regtest();
+        on.miner_throttle = MinerThrottleConfig {
+            enabled: true,
+            yield_every_nonces: 17,
+            sleep_micros: 250,
+        };
+
+        let build_header = |config: &NodeConfig| {
+            let target = compute_expected_target(config.network.magic(), timestamp, BlockHeight(1))
+                .expect("target");
+            BlockHeader {
+                version: PROTOCOL_VERSION,
+                prev_hash: Hash256::ZERO,
+                height: BlockHeight(1),
+                timestamp,
+                output_root: Hash256::ZERO,
+                kernel_root: Hash256::ZERO,
+                rangeproof_root: Hash256::ZERO,
+                total_kernel_offset: [0u8; 32],
+                target: dom_pow::CompactTarget(target_to_compact(&target)),
+                total_difficulty: primitive_types::U256::one(),
+                pow: ProofOfWork {
+                    nonce: 7,
+                    randomx_hash: Hash256::from_bytes([0x42; 32]),
+                },
+            }
+        };
+
+        let off_header = build_header(&off);
+        let on_header = build_header(&on);
+        assert_eq!(off_header, on_header);
+        assert_eq!(
+            off_header.to_bytes().expect("off header bytes"),
+            on_header.to_bytes().expect("on header bytes")
+        );
+        assert_eq!(off_header.pow_preimage(), on_header.pow_preimage());
+    }
+
+    #[test]
     fn miner_uses_consensus_target_not_fixed_dev_target() {
         let timestamp = Timestamp(1_778_642_753);
         for network_magic in [
@@ -1060,6 +1241,7 @@ mod genesis_determinism_tests {
                 dom_core::Hash256::ZERO,
                 true,
                 PowValidationMode::FastDevOnly,
+                disabled_throttle(),
             )
             .expect("fast test mining");
 
@@ -1089,6 +1271,7 @@ mod genesis_determinism_tests {
             dom_core::Hash256::ZERO,
             true,
             dom_pow::PowValidationMode::FastDevOnly,
+            disabled_throttle(),
         )
         .expect("fast mining");
 
@@ -1116,6 +1299,7 @@ mod genesis_determinism_tests {
             dom_core::Hash256::ZERO,
             true,
             dom_pow::PowValidationMode::FastDevOnly,
+            disabled_throttle(),
         )
         .expect("mine mainnet-style header");
 
