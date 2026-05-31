@@ -11,7 +11,11 @@ use dom_wallet::{
     WalletBalance, WalletDir,
 };
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
+
+const INITIAL_RECONNECT_DELAY_SECS: u64 = 1;
+const MAX_RECONNECT_DELAY_SECS: u64 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -63,11 +67,110 @@ pub struct WalletSession {
     pub wallet_dir: WalletDir,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalletNetworkState {
+    Disconnected,
+    Connected,
+    Reconnecting,
+}
+
+impl WalletNetworkState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disconnected => "Disconnected",
+            Self::Connected => "Connected",
+            Self::Reconnecting => "Reconnecting",
+        }
+    }
+}
+
+pub struct NodeConnectionSession {
+    client: Option<NodeRpcClient>,
+    pub state: WalletNetworkState,
+    pub reconnect_delay: Duration,
+    next_reconnect_at: Option<u64>,
+    consecutive_failures: u32,
+    pub last_error: Option<String>,
+}
+
+impl Default for NodeConnectionSession {
+    fn default() -> Self {
+        Self {
+            client: None,
+            state: WalletNetworkState::Disconnected,
+            reconnect_delay: Duration::from_secs(INITIAL_RECONNECT_DELAY_SECS),
+            next_reconnect_at: None,
+            consecutive_failures: 0,
+            last_error: None,
+        }
+    }
+}
+
+impl NodeConnectionSession {
+    pub fn state_label(&self) -> &'static str {
+        self.state.label()
+    }
+
+    pub fn reconnect_delay_secs(&self) -> u64 {
+        self.reconnect_delay.as_secs()
+    }
+
+    pub fn next_reconnect_at(&self) -> Option<u64> {
+        self.next_reconnect_at
+    }
+
+    pub fn is_reconnect_due(&self, now_secs: u64) -> bool {
+        match self.state {
+            WalletNetworkState::Disconnected => true,
+            WalletNetworkState::Connected => false,
+            WalletNetworkState::Reconnecting => self
+                .next_reconnect_at
+                .map(|deadline| now_secs >= deadline)
+                .unwrap_or(true),
+        }
+    }
+
+    fn client(&mut self, node_url: &str) -> Result<&NodeRpcClient, RpcClientError> {
+        if self.client.is_none() {
+            self.client = Some(node_client(node_url)?);
+        }
+        Ok(self.client.as_ref().expect("client just initialized"))
+    }
+
+    fn on_success(&mut self) {
+        self.state = WalletNetworkState::Connected;
+        self.next_reconnect_at = None;
+        self.consecutive_failures = 0;
+        self.reconnect_delay = Duration::from_secs(INITIAL_RECONNECT_DELAY_SECS);
+        self.last_error = None;
+    }
+
+    fn on_session_closed(&mut self, now_secs: u64, error: impl Into<String>) {
+        self.client = None;
+        self.state = WalletNetworkState::Reconnecting;
+        self.last_error = Some(error.into());
+        self.next_reconnect_at = Some(now_secs.saturating_add(self.reconnect_delay.as_secs()));
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let next_delay = self.reconnect_delay.as_secs().saturating_mul(2).max(1);
+        self.reconnect_delay = Duration::from_secs(next_delay.min(MAX_RECONNECT_DELAY_SECS));
+    }
+
+    fn reset(&mut self) {
+        self.client = None;
+        self.state = WalletNetworkState::Disconnected;
+        self.next_reconnect_at = None;
+        self.consecutive_failures = 0;
+        self.reconnect_delay = Duration::from_secs(INITIAL_RECONNECT_DELAY_SECS);
+        self.last_error = None;
+    }
+}
+
 pub struct AppRuntime {
     pub data_dir: PathBuf,
     pub persisted: PersistedAppState,
     pub screen: Screen,
     pub session: Option<WalletSession>,
+    pub node_connection: NodeConnectionSession,
     pub node_status: Option<NodeStatus>,
     pub wallet_balance: Option<WalletBalance>,
     pub history: Vec<HistoryRow>,
@@ -83,6 +186,7 @@ impl AppRuntime {
             persisted,
             screen: Screen::Splash,
             session: None,
+            node_connection: NodeConnectionSession::default(),
             node_status: None,
             wallet_balance: None,
             history: Vec::new(),
@@ -167,6 +271,8 @@ impl AppRuntime {
 
     pub fn lock_wallet(&mut self) {
         self.session = None;
+        self.node_connection.reset();
+        self.node_status = None;
         self.wallet_balance = None;
         self.history.clear();
         self.receive_requests.clear();
@@ -178,9 +284,34 @@ impl AppRuntime {
     }
 
     pub fn refresh_node_status(&mut self) -> Result<(), RpcClientError> {
-        let client = node_client(&self.persisted.node_url)?;
-        let status = client.status()?;
+        self.refresh_node_status_at(unix_now())
+    }
+
+    pub fn poll_node_reconnect(&mut self) {
+        if self.session.is_none() || !self.node_connection.is_reconnect_due(unix_now()) {
+            return;
+        }
+        if let Err(e) = self.refresh_node_status() {
+            self.last_error = Some(format!("node reconnect: {e}"));
+        }
+    }
+
+    fn refresh_node_status_at(&mut self, now_secs: u64) -> Result<(), RpcClientError> {
+        let status = match self.node_connection.client(&self.persisted.node_url) {
+            Ok(client) => client.status(),
+            Err(err) => Err(err),
+        };
+        let status = match status {
+            Ok(status) => status,
+            Err(err) => {
+                self.node_status = None;
+                self.node_connection
+                    .on_session_closed(now_secs, err.to_string());
+                return Err(err);
+            }
+        };
         self.node_status = Some(status);
+        self.node_connection.on_success();
         self.refresh_wallet_view();
         Ok(())
     }
@@ -528,6 +659,13 @@ fn node_client(url: &str) -> Result<NodeRpcClient, RpcClientError> {
     NodeRpcClient::builder(parsed).build()
 }
 
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 fn format_payment_request(network: Network, descriptor: &ReceiveRequestDescriptor) -> String {
     format!(
         "DOM-PAYMENT-REQUEST-V1\nnetwork={}\namount_noms={}\naddress={}\ncommitment={}\nblinding={}",
@@ -707,5 +845,72 @@ mod tests {
         let err = parse_payment_request("DOM-PAYMENT-REQUEST-V1\nnetwork=regtest")
             .expect_err("missing fields must be rejected");
         assert!(err.to_string().contains("missing amount_noms"));
+    }
+
+    #[test]
+    fn session_drop_schedules_fresh_reconnect_without_poisoning_peer() {
+        let mut session = NodeConnectionSession::default();
+        session.on_success();
+        assert_eq!(session.state, WalletNetworkState::Connected);
+
+        session.on_session_closed(100, "tcp closed");
+
+        assert_eq!(session.state, WalletNetworkState::Reconnecting);
+        assert_eq!(session.next_reconnect_at(), Some(101));
+        assert_eq!(session.last_error.as_deref(), Some("tcp closed"));
+        assert!(!session.is_reconnect_due(100));
+        assert!(session.is_reconnect_due(101));
+        assert_eq!(
+            session.reconnect_delay_secs(),
+            INITIAL_RECONNECT_DELAY_SECS * 2
+        );
+    }
+
+    #[test]
+    fn repeated_failures_apply_bounded_exponential_backoff_without_duplicate_loops() {
+        let mut session = NodeConnectionSession::default();
+        session.on_session_closed(10, "first");
+        assert_eq!(session.next_reconnect_at(), Some(11));
+        assert_eq!(session.reconnect_delay_secs(), 2);
+
+        session.on_session_closed(11, "second");
+        assert_eq!(session.next_reconnect_at(), Some(13));
+        assert_eq!(session.reconnect_delay_secs(), 4);
+
+        for now in 12..30 {
+            if session.is_reconnect_due(now) {
+                session.on_session_closed(now, "still down");
+            }
+        }
+        assert!(session.reconnect_delay_secs() <= MAX_RECONNECT_DELAY_SECS);
+        assert_eq!(session.state, WalletNetworkState::Reconnecting);
+    }
+
+    #[test]
+    fn stable_connection_resets_backoff() {
+        let mut session = NodeConnectionSession::default();
+        session.on_session_closed(1, "down");
+        session.on_session_closed(2, "still down");
+        assert!(session.reconnect_delay_secs() > INITIAL_RECONNECT_DELAY_SECS);
+
+        session.on_success();
+
+        assert_eq!(session.state, WalletNetworkState::Connected);
+        assert_eq!(session.reconnect_delay_secs(), INITIAL_RECONNECT_DELAY_SECS);
+        assert_eq!(session.next_reconnect_at(), None);
+        assert_eq!(session.last_error, None);
+    }
+
+    #[test]
+    fn reconnect_does_not_require_wallet_close_reopen() {
+        let mut session = NodeConnectionSession::default();
+        session.on_session_closed(50, "session dropped");
+        assert_eq!(session.state, WalletNetworkState::Reconnecting);
+
+        assert!(session.is_reconnect_due(51));
+        session.on_success();
+
+        assert_eq!(session.state, WalletNetworkState::Connected);
+        assert_eq!(session.next_reconnect_at(), None);
     }
 }
