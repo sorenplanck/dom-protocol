@@ -58,6 +58,7 @@ impl eframe::App for WalletApp {
             ctx.request_repaint();
             return;
         }
+        self.runtime.poll_node_reconnect();
 
         egui::TopBottomPanel::top("top_bar")
             .frame(panel_frame())
@@ -297,6 +298,11 @@ impl WalletApp {
 
             card(&mut columns[1], |ui| {
                 mini_header(ui, "Node State");
+                status_badge(
+                    ui,
+                    self.runtime.node_connection.state_label(),
+                    network_state_color(self.runtime.node_connection.state),
+                );
                 if let Some(status) = &self.runtime.node_status {
                     labeled_value(ui, "Network", &status.network);
                     labeled_value(ui, "Chain height", &status.chain_height.to_string());
@@ -509,14 +515,29 @@ impl WalletApp {
         ui.columns(2, |columns| {
             card(&mut columns[0], |ui| {
                 mini_header(ui, "Node Connectivity");
+                status_badge(
+                    ui,
+                    self.runtime.node_connection.state_label(),
+                    network_state_color(self.runtime.node_connection.state),
+                );
+                labeled_value(
+                    ui,
+                    "Reconnect delay",
+                    &format!("{}s", self.runtime.node_connection.reconnect_delay_secs()),
+                );
+                if let Some(next) = self.runtime.node_connection.next_reconnect_at() {
+                    labeled_value(ui, "Next attempt", &next.to_string());
+                }
+                if let Some(error) = &self.runtime.node_connection.last_error {
+                    labeled_value(ui, "Last error", error);
+                }
                 if let Some(status) = &self.runtime.node_status {
-                    status_badge(ui, "Online", palette().success);
                     labeled_value(ui, "Protocol version", &status.version.to_string());
                     labeled_value(ui, "Height", &status.chain_height.to_string());
                     labeled_value(ui, "Mempool", &status.mempool_size.to_string());
                     labeled_value(ui, "Network", &status.network);
                 } else {
-                    status_badge(ui, "Offline or Unverified", palette().warning);
+                    ui.label("Node status unavailable.");
                 }
             });
             card(&mut columns[1], |ui| {
@@ -822,19 +843,19 @@ fn status_color(status: &str) -> egui::Color32 {
     }
 }
 
+fn network_state_color(state: crate::runtime::WalletNetworkState) -> egui::Color32 {
+    match state {
+        crate::runtime::WalletNetworkState::Connected => palette().success,
+        crate::runtime::WalletNetworkState::Reconnecting => palette().warning,
+        crate::runtime::WalletNetworkState::Disconnected => palette().danger,
+    }
+}
+
 fn runtime_status_strip(ui: &mut egui::Ui, runtime: &AppRuntime) {
     status_badge(
         ui,
-        if runtime.node_status.is_some() {
-            "RPC reachable"
-        } else {
-            "RPC unverified"
-        },
-        if runtime.node_status.is_some() {
-            palette().success
-        } else {
-            palette().warning
-        },
+        runtime.node_connection.state_label(),
+        network_state_color(runtime.node_connection.state),
     );
     if let Some(balance) = runtime.wallet_balance {
         status_badge(
