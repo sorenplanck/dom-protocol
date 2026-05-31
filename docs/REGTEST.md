@@ -19,7 +19,7 @@ Regtest is designed so it **cannot leak into a real network**:
 | Default listener | `0.0.0.0` | `0.0.0.0` | `127.0.0.1` |
 | DNS seeds | `seed1/2.dom-protocol.org` | `testnet-seed1.dom-protocol.org` | *(none)* |
 | Hardcoded peers | empty | empty | empty |
-| PoW target | full ASERT difficulty | `MAX_TARGET_BYTES` | `REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION` |
+| PoW target | full ASERT difficulty | `TESTNET_TARGET_COMPACT` floor | `REGTEST_TARGET_COMPACT` |
 | Coinbase maturity | 1000 blocks | 1000 blocks | 1 block |
 | RandomX VM flags | `recommended \| FLAG_FULL_MEM` (~2.25 GB) | `recommended \| FLAG_FULL_MEM` | `recommended` only (~256 MB cache, no dataset) |
 
@@ -40,8 +40,10 @@ and PoW hash check are enforced. The only differences are the *parameter
 values* listed in the table above (target, maturity, VM flags). RFC-0009
 spec is honoured byte-for-byte.
 
-`REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION` is reused as-is from
-`dom-core` — the long name is intentional and must not be changed.
+`REGTEST_TARGET_COMPACT` lives in `dom-pow` and is intentionally
+dev-only. Fast mining, when explicitly enabled for tests, changes only
+the PoW hash function; the miner still serializes and validates the
+target returned by `compute_expected_target`.
 
 ## When to use Regtest
 
@@ -93,10 +95,14 @@ well under two minutes on a developer laptop with 4 GB of free RAM.
 
 * `dom-core/src/constants.rs` — `NETWORK_MAGIC_REGTEST`,
   `P2P_PORT_REGTEST`, `REGTEST_COINBASE_MATURITY`,
-  `GENESIS_HASH_REGTEST`, `REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION`.
+  `GENESIS_HASH_REGTEST`.
+* `dom-pow/src/lib.rs` — `REGTEST_TARGET_COMPACT`,
+  `pow_params_for_network`, `compute_expected_target`,
+  `pow_validation_mode_for_network`.
 * `dom-config/src/lib.rs` — `Network::Regtest`, `NodeConfig::regtest()`.
 * `dom-chain/src/chain_state.rs` — `coinbase_maturity_for_magic`.
 * `dom-store/src/utxo.rs` — `UtxoEntry::is_mature_for`,
   `UtxoSet::validate_input_with_maturity`.
 * `dom-wallet/src/types.rs` — `Network::Regtest`, `coinbase_maturity()`.
-* `dom-node/src/miner.rs` — Regtest target dispatch + `light_vm` mode.
+* `dom-node/src/miner.rs` — explicit `MiningMode` classification and
+  Regtest cache-only / fast-dev mining dispatch.

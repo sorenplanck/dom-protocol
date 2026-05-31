@@ -16,8 +16,8 @@ pub enum Network {
     /// (`NETWORK_MAGIC_REGTEST`) prevents peering with Mainnet/Testnet.
     /// Consensus logic is identical to the real networks; only the PoW
     /// target, coinbase maturity, and RandomX VM flags differ — see
-    /// `REGTEST_COINBASE_MATURITY` and
-    /// `REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION` in `dom-core`.
+    /// `REGTEST_COINBASE_MATURITY` in `dom-core` and
+    /// `REGTEST_TARGET_COMPACT` in `dom-pow`.
     Regtest,
 }
 
