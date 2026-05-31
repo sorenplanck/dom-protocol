@@ -29,13 +29,13 @@ Validated base:
 Sequence state:
 - DONE: Tasks 21-33 are complete and validated on this branch.
 - DONE: Task 34 `ad3528b3d38d727b015ae40427d9af85e3f72400`.
-- DONE: Task 35 pending final commit/push verification.
-- CURRENT: none.
-- REMAINING: Tasks 36-50.
+- DONE: Task 35 `f9af1c08b3170c542a310390a69409745b3813f8`.
+- CURRENT: Task 36 in validation/commit.
+- REMAINING: Tasks 37-50.
 
 Open items:
-- Commit Task 35 as `35 runtime interruption tests`, push, verify remote HEAD, and report.
-- Do not start Task 36 until explicitly requested.
+- Commit Task 36 as `36 multinode replay timeline tests + fix genesis utxo rebuild off-by-one`, push, verify remote HEAD, and report.
+- Do not start Task 37 until Task 36 is committed and pushed.
 
 ## 2026-05-31 — Task 34 Future Block Restart Tests
 
@@ -64,6 +64,47 @@ Commands and results:
 Tests added:
 - `future_block_queue::tests::restart_drop_policy_converges_after_deterministic_redelivery`
 - `future_block_queue::tests::local_elapsed_time_does_not_change_ready_drain_result`
+
+Open items:
+- Stage, commit, verify author, push, verify remote HEAD.
+
+## 2026-05-31 — Task 36 Multinode Replay Timeline Tests
+
+Objective:
+- Add multi-node replay timeline equivalence coverage and fix the consensus bug exposed by the reconnect-mid-delivery timeline.
+
+Changed files:
+- `crates/dom-chain/src/chain_state.rs`
+- `crates/dom-chain/tests/corruption_detection.rs`
+- `crates/dom-node/tests/multinode_reordered_delivery.rs`
+- `crates/dom-store/src/db.rs`
+- `WORKLOG.md`
+
+Implementation notes:
+- Added a deterministic replay timeline equivalence test covering ordered, reversed-valid, delayed-parent, duplicated relay, and reconnect-mid-delivery schedules.
+- Deep snapshots compare tip hash, height, total difficulty, UTXO digest, PMMR digest, kernel index digest, mempool digest, orphan count, missing-parent count, and retained side hashes with detailed diffs.
+- Added `DomStore::read_all_kernel_index_raw` so tests can compare persisted kernel-index bytes without trusting a higher-level reconstruction.
+- The new reconnect-mid-delivery test exposed a real consensus/convergence bug: canonical UTXO reconstruction skipped height 0, so reopen could delete the genesis coinbase while retaining the same canonical tip.
+- Fixed canonical UTXO and kernel-index rebuild loops to walk `0..=tip_height`, including genesis.
+- Preserved the legitimate empty-store case by not reconstructing UTXO when no chain tip exists yet.
+- Updated corruption-detection fixtures that fabricated impossible canonical histories starting at height 1 so they now establish a synthetic genesis at height 0 before corrupting the intended target state.
+
+Commands and results:
+- `cargo fmt` (PASS)
+- `cargo check` (PASS)
+- `cargo test -p dom-chain --test corruption_detection` (PASS: 21/21)
+- `cargo test -p dom-node equivalent_live_timelines_converge_to_identical_deep_snapshots` (PASS)
+- `cargo test -p dom-wallet reopen_after_rollback_converges_to_same_state` (PASS)
+- `cargo test -p dom-wallet tx_resurrected_after_reorg` (PASS)
+- `cargo test -p dom-wallet block_hash_attribution_survives_restart_and_rollback` (PASS)
+- `cargo test -p dom-wallet corrupted_wallet_state_is_repaired_by_canonical_rescan` (PASS)
+- `cargo test -p dom-wallet canonical_rescan_after_reorg_removes_disconnected_output` (PASS)
+- `cargo test -p dom-wallet canonical_rescan_marks_spent_outputs_and_drops_consumed_pending` (PASS)
+- `cargo test -p dom-wallet canonical_rescan_survives_restart_and_repeated_full_rescan_matches_digest` (PASS)
+
+Tests added/changed:
+- Added `equivalent_live_timelines_converge_to_identical_deep_snapshots`.
+- Updated corruption-detection fixtures to include genesis in synthetic canonical histories.
 
 Open items:
 - Stage, commit, verify author, push, verify remote HEAD.
