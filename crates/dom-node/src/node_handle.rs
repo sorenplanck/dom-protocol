@@ -11,26 +11,6 @@ use std::sync::Arc;
 /// Newtype so we can impl the foreign NodeHandle trait for Arc<DomNode>.
 pub struct NodeHandleImpl(pub Arc<DomNode>);
 
-fn rollback_failed_wallet_spend(
-    wallet_arc: &tokio::sync::Mutex<dom_wallet::Wallet>,
-    tx_hash: [u8; 32],
-    original: RpcError,
-) -> RpcError {
-    match wallet_arc.try_lock() {
-        Ok(mut wallet) => match wallet.cancel_tx(tx_hash) {
-            Ok(()) => original,
-            Err(e) => RpcError::Internal(format!(
-                "{original}; wallet rollback for {} failed: {e}",
-                hex::encode(tx_hash)
-            )),
-        },
-        Err(_) => RpcError::Internal(format!(
-            "{original}; wallet rollback for {} failed: wallet busy",
-            hex::encode(tx_hash)
-        )),
-    }
-}
-
 impl NodeHandle for NodeHandleImpl {
     fn chain_height(&self) -> u64 {
         match self.0.chain.try_lock() {
@@ -210,7 +190,6 @@ impl NodeHandle for NodeHandleImpl {
 
     fn wallet_spend(&self, req: dom_rpc::SpendRequest) -> Result<[u8; 32], dom_rpc::RpcError> {
         use dom_crypto::{pedersen::Commitment, BlindingFactor};
-        use dom_serialization::DomSerialize;
 
         // Decode recipient commitment (33 bytes hex)
         let commitment_bytes = hex::decode(&req.recipient_commitment)
@@ -238,78 +217,76 @@ impl NodeHandle for NodeHandleImpl {
         let recipient_blinding = BlindingFactor::from_bytes(bb)
             .map_err(|e| dom_rpc::RpcError::Rejected(format!("blinding: {e}")))?;
 
-        // Get current height
-        let height = self
-            .0
-            .chain
-            .try_lock()
-            .map_err(|_| dom_rpc::RpcError::Overloaded("chain busy".into()))?
-            .tip_height
-            .0;
-
-        // Build spend transaction via wallet
         let wallet_arc = self
             .0
             .wallet
             .as_ref()
             .ok_or_else(|| dom_rpc::RpcError::Internal("wallet not configured".into()))?;
 
-        let tx = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // DOM-AUDIT-005: reserve funds only under the same wallet lock that
+        // performs mempool admission, so any rollback runs with the lock
+        // already in hand — never a try_lock that could give up and leave
+        // funds reserved.
+        //
+        // Acquire all three subsystem locks in canonical order
+        // (Chain -> Mempool -> Wallet; see `lock_order`) and hold them across
+        // the whole synchronous critical section. The wallet lock is held
+        // continuously from coin selection through admission so no concurrent
+        // spend can select the same inputs, and `accept_tx_with_chain_view`
+        // (sync, operating on the chain *snapshot* + the held mempool guard)
+        // never re-acquires chain or mempool. There is no `.await` inside the
+        // critical section, so this does not reintroduce the DOM-AUDIT-001
+        // lock-across-await pattern.
+        let (tx_hash, tx_bytes) = {
+            let chain = self
+                .0
+                .chain
+                .try_lock()
+                .map_err(|_| dom_rpc::RpcError::Overloaded("chain busy".into()))?;
+            let mut mempool = self
+                .0
+                .mempool
+                .try_lock()
+                .map_err(|_| dom_rpc::RpcError::Overloaded("mempool busy".into()))?;
             let mut wallet = wallet_arc
                 .try_lock()
                 .map_err(|_| dom_rpc::RpcError::Overloaded("wallet busy".into()))?;
-            wallet
-                .build_spend(
+
+            let height = chain.tip_height.0;
+
+            // Phase 1: construct the tx WITHOUT reserving. The fallible
+            // hash/serialize steps live in here, before any reservation, so
+            // a failure leaks nothing.
+            let built = wallet
+                .build_spend_unreserved(
                     recipient_commitment,
                     recipient_blinding,
                     req.amount_noms,
                     req.fee_noms,
                     height,
                 )
-                .map_err(|e| dom_rpc::RpcError::Rejected(format!("build_spend: {e}")))?
-        };
+                .map_err(|e| dom_rpc::RpcError::Rejected(format!("build_spend: {e}")))?;
 
-        let wallet_tx_hash = dom_wallet::Wallet::tracking_tx_hash(&tx)
-            .map_err(|e| dom_rpc::RpcError::Internal(format!("wallet tx hash: {e}")))?;
+            let chain_view = snapshot_tx_chain_view(&chain, &built.tx)
+                .map_err(|e| dom_rpc::RpcError::Rejected(format!("mempool precheck: {e}")))?;
 
-        // Serialize and submit to mempool
-        let tx_bytes = tx
-            .to_bytes()
-            .map_err(|e| dom_rpc::RpcError::Internal(format!("serialize: {e}")))?;
-        let tx_hash = *dom_crypto::blake2b_256(&tx_bytes).as_bytes();
+            let tx_hash = built.tx_hash;
+            let tx_bytes = built.tx_bytes.clone();
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+            // Phase 2: reserve, then attempt admission. Both run under the
+            // wallet lock held here, so the rollback below cannot fail to
+            // take the lock.
+            wallet
+                .reserve_built_spend(&built)
+                .map_err(|e| dom_rpc::RpcError::Internal(format!("reserve: {e}")))?;
 
-        let mut mempool = self.0.mempool.try_lock().map_err(|_| {
-            rollback_failed_wallet_spend(
-                wallet_arc,
-                wallet_tx_hash,
-                dom_rpc::RpcError::Overloaded("mempool busy".into()),
-            )
-        })?;
-
-        let chain_view = {
-            let chain = self.0.chain.try_lock().map_err(|_| {
-                rollback_failed_wallet_spend(
-                    wallet_arc,
-                    wallet_tx_hash,
-                    dom_rpc::RpcError::Overloaded("chain busy".into()),
-                )
-            })?;
-            snapshot_tx_chain_view(&chain, &tx).map_err(|e| {
-                rollback_failed_wallet_spend(
-                    wallet_arc,
-                    wallet_tx_hash,
-                    dom_rpc::RpcError::Rejected(format!("mempool precheck: {e}")),
-                )
-            })?
-        };
-
-        mempool
-            .accept_tx_with_chain_view(
+            let dom_wallet::BuiltSpend { tx, .. } = built;
+            if let Err(e) = mempool.accept_tx_with_chain_view(
                 tx,
                 tx_hash,
                 now,
@@ -317,14 +294,20 @@ impl NodeHandle for NodeHandleImpl {
                 chain_view.chain_id,
                 chain_view.coinbase_maturity,
                 |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
-            )
-            .map_err(|e| {
-                rollback_failed_wallet_spend(
-                    wallet_arc,
-                    wallet_tx_hash,
-                    dom_rpc::RpcError::Rejected(format!("mempool: {e}")),
-                )
-            })?;
+            ) {
+                // Rollback with the wallet lock ALREADY held — infallible
+                // w.r.t. locking, so the reservation is never left stuck.
+                if let Err(ce) = wallet.cancel_tx(tx_hash) {
+                    return Err(dom_rpc::RpcError::Internal(format!(
+                        "mempool: {e}; wallet rollback for {} failed: {ce}",
+                        hex::encode(tx_hash)
+                    )));
+                }
+                return Err(dom_rpc::RpcError::Rejected(format!("mempool: {e}")));
+            }
+
+            (tx_hash, tx_bytes)
+        };
 
         // Route via Dandelion++: decide Stem vs Fluff and dispatch over
         // the corresponding broadcast channel. Same logic as submit_tx above.
@@ -530,6 +513,89 @@ mod tests {
             "rollback must persist across restart"
         );
         assert_eq!(reopened.network(), Network::Regtest);
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_file(&wallet_path);
+    }
+
+    #[test]
+    fn wallet_spend_rolls_back_reservation_when_admission_rejected() {
+        // DOM-AUDIT-005: this is the case the old try_lock rollback could
+        // leave stuck. The wallet output is fabricated and never enters the
+        // chain's canonical UTXO set, so mempool admission rejects the tx
+        // ("input commitment not found") AFTER the inputs were reserved. The
+        // fix reserves and admits under the SAME wallet lock, so the rollback
+        // (cancel_tx) runs with the lock already held — it can never fail to
+        // acquire it, and the reservation must be fully released.
+        let unique = format!(
+            "dom-node-handle-rollback-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos()
+        );
+        let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
+        let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_file(&wallet_path);
+
+        let node = std::sync::Arc::new(
+            DomNode::init_with_map_size(
+                test_config(
+                    data_dir.to_str().expect("utf8 data dir"),
+                    wallet_path.to_str().expect("utf8 wallet path"),
+                ),
+                TEST_LMDB_MAP_SIZE,
+            )
+            .expect("init node"),
+        );
+        let handle = NodeHandleImpl(node.clone());
+
+        {
+            let wallet_arc = node.wallet.as_ref().expect("wallet configured");
+            let mut wallet = wallet_arc.try_lock().expect("wallet lock");
+            wallet.add_output(make_output(900, 100, false));
+            wallet.save().expect("persist wallet");
+        }
+
+        let recipient_blinding = BlindingFactor::random();
+        let recipient_commitment = Commitment::commit(800, &recipient_blinding);
+        let req = SpendRequest {
+            recipient_commitment: hex::encode(recipient_commitment.as_bytes()),
+            recipient_blinding: hex::encode(recipient_blinding.as_bytes()),
+            amount_noms: 800,
+            fee_noms: 100,
+        };
+
+        // No locks held by the test: the spend proceeds far enough to RESERVE,
+        // then the mempool rejects admission, exercising the rollback path.
+        let err = handle
+            .wallet_spend(req)
+            .expect_err("admission of an unknown-input tx must be rejected");
+        assert!(
+            matches!(err, dom_rpc::RpcError::Rejected(ref msg) if msg.contains("mempool:")),
+            "expected mempool rejection, got {err}"
+        );
+
+        {
+            let wallet_arc = node.wallet.as_ref().expect("wallet configured");
+            let wallet = wallet_arc.try_lock().expect("wallet lock");
+            let balance = wallet.balance(1000);
+            assert_eq!(balance.confirmed, 900);
+            assert_eq!(
+                balance.reserved, 0,
+                "rejected admission must roll back the reservation (no funds left stuck)"
+            );
+        }
+
+        let reopened =
+            Wallet::open(&wallet_path, "password123").expect("reopen wallet after rollback");
+        let reopened_balance = reopened.balance(1000);
+        assert_eq!(reopened_balance.confirmed, 900);
+        assert_eq!(
+            reopened_balance.reserved, 0,
+            "rollback must persist across restart"
+        );
 
         let _ = std::fs::remove_dir_all(&data_dir);
         let _ = std::fs::remove_file(&wallet_path);
