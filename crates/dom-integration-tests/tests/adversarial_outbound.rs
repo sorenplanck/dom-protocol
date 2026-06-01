@@ -1,5 +1,5 @@
 use dom_integration_tests::helpers::*;
-use dom_wire::handshake::HANDSHAKE_TIMEOUT_SECS;
+use dom_wire::handshake::handshake_timeout_secs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +19,7 @@ async fn spawn_stalling_listener(addr: &str) -> (Arc<AtomicUsize>, tokio::task::
             };
             accepts_task.fetch_add(1, Ordering::Relaxed);
             tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS * 3)).await;
+                tokio::time::sleep(Duration::from_secs(stale_pending_outbound_secs())).await;
                 drop(stream);
             });
         }
@@ -27,30 +27,35 @@ async fn spawn_stalling_listener(addr: &str) -> (Arc<AtomicUsize>, tokio::task::
     (accepts, handle)
 }
 
+fn use_short_handshake_timeout() {
+    std::env::set_var("DOM_TEST_HANDSHAKE_TIMEOUT_SECS", "1");
+}
+
+fn stale_pending_outbound_secs() -> u64 {
+    handshake_timeout_secs() * 3
+}
+
 async fn expect_outbound_cleanup(node: &std::sync::Arc<dom_node::node::DomNode>) {
-    // Cleanup converges after STALE_PENDING_OUTBOUND_SECS in production:
-    // HANDSHAKE_TIMEOUT_SECS * 3 = 30s. Use a * 6 ceiling (60s) to keep 100%
-    // margin over the real protocol window and absorb runner variance under
-    // load. The previous * 3 + 10 ceiling (40s) was tight and produced a
-    // spurious Elapsed under CI load (observed: 50.93s). This still detects
-    // cleanup that never converges, which would be infinite.
-    tokio::time::timeout(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS * 6), async {
-        loop {
-            let peers = node.peers.lock().await;
-            let pending_outbound = peers.pending_outbound_count();
-            let connected = peers.connected_peers().len();
-            drop(peers);
-            if pending_outbound == 0
-                && connected == 0
-                && node.metrics.peer_count.load(Ordering::Relaxed) == 0
-                && node.metrics.outbound_peers.load(Ordering::Relaxed) == 0
-                && node.metrics.inbound_peers.load(Ordering::Relaxed) == 0
-            {
-                break;
+    tokio::time::timeout(
+        Duration::from_secs(stale_pending_outbound_secs() * 4),
+        async {
+            loop {
+                let peers = node.peers.lock().await;
+                let pending_outbound = peers.pending_outbound_count();
+                let connected = peers.connected_peers().len();
+                drop(peers);
+                if pending_outbound == 0
+                    && connected == 0
+                    && node.metrics.peer_count.load(Ordering::Relaxed) == 0
+                    && node.metrics.outbound_peers.load(Ordering::Relaxed) == 0
+                    && node.metrics.inbound_peers.load(Ordering::Relaxed) == 0
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
+        },
+    )
     .await
     .expect("outbound cleanup should converge after failed handshakes");
 }
@@ -58,6 +63,7 @@ async fn expect_outbound_cleanup(node: &std::sync::Arc<dom_node::node::DomNode>)
 #[tokio::test]
 async fn duplicate_seed_outbound_dials_are_deduplicated_live() {
     init_tracing();
+    use_short_handshake_timeout();
     let seed_port = free_local_port();
     let seed_addr = format!("127.0.0.1:{seed_port}");
     let (accepts, listener_task) = spawn_stalling_listener(&seed_addr).await;
@@ -103,6 +109,7 @@ async fn duplicate_seed_outbound_dials_are_deduplicated_live() {
 #[tokio::test]
 async fn stalled_outbound_dials_are_bounded_by_min_outbound_live() {
     init_tracing();
+    use_short_handshake_timeout();
     let mut accept_counters = Vec::new();
     let mut listener_tasks = Vec::new();
     let mut seed_addrs = Vec::new();
