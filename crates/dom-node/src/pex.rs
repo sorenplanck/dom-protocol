@@ -224,23 +224,36 @@ pub fn decode_addr_payload(data: &[u8]) -> Result<Vec<String>, dom_core::DomErro
         ));
     }
     let count = u16::from_le_bytes([data[0], data[1]]) as usize;
-    let count = count.min(MAX_ADDR_RESPONSE);
+    if count > MAX_ADDR_RESPONSE {
+        return Err(dom_core::DomError::Malformed(
+            "addr count exceeds limit".into(),
+        ));
+    }
     let mut addrs = Vec::with_capacity(count);
     let mut pos = 2usize;
 
     for _ in 0..count {
         if pos >= data.len() {
-            break;
+            return Err(dom_core::DomError::Malformed(
+                "addr payload truncated".into(),
+            ));
         }
         let len = data[pos] as usize;
         pos += 1;
         if pos + len + 8 > data.len() {
-            break;
+            return Err(dom_core::DomError::Malformed(
+                "addr payload truncated".into(),
+            ));
         }
         let addr = String::from_utf8_lossy(&data[pos..pos + len]).to_string();
         pos += len + 8; // skip last_seen timestamp
         addrs.push(addr);
     }
+
+    if pos != data.len() {
+        return Err(dom_core::DomError::Malformed("addr trailing bytes".into()));
+    }
+
     Ok(addrs)
 }
 
@@ -337,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn addr_decode_ignores_truncated_tail_without_panicking() {
+    fn addr_decode_rejects_truncated_tail() {
         let peer = PeerAddr {
             addr: "127.0.0.1:33370".to_string(),
             last_seen: 1_700_000_000,
@@ -347,15 +360,63 @@ mod tests {
         encoded.extend_from_slice(&[0x0f, b'1', b'2', b'7']);
         encoded[0..2].copy_from_slice(&2u16.to_le_bytes());
 
-        let decoded = decode_addr_payload(&encoded).expect("truncated tail is lenient today");
-        assert_eq!(decoded, vec!["127.0.0.1:33370".to_string()]);
+        let err = decode_addr_payload(&encoded).expect_err("truncated tail must reject");
+        assert!(
+            format!("{err}").contains("addr payload truncated"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
-    fn addr_decode_bounds_declared_count_to_response_cap() {
-        let encoded = u16::MAX.to_le_bytes();
-        let decoded = decode_addr_payload(&encoded).expect("empty oversized count is bounded");
-        assert!(decoded.is_empty());
+    fn addr_decode_rejects_trailing_bytes() {
+        let peer = PeerAddr {
+            addr: "127.0.0.1:33370".to_string(),
+            last_seen: 1_700_000_000,
+            failures: 0,
+        };
+        let mut encoded = encode_addr_payload(&[&peer]);
+        encoded.push(0xff);
+
+        let err = decode_addr_payload(&encoded).expect_err("trailing byte must reject");
+        assert!(
+            format!("{err}").contains("addr trailing bytes"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn addr_decode_rejects_oversized_count() {
+        let encoded = ((MAX_ADDR_RESPONSE + 1) as u16).to_le_bytes();
+
+        let err = decode_addr_payload(&encoded).expect_err("oversized count must reject");
+        assert!(
+            format!("{err}").contains("addr count exceeds limit"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn addr_decode_accepts_exact_valid() {
+        let peer_a = PeerAddr {
+            addr: "127.0.0.1:33370".to_string(),
+            last_seen: 1_700_000_000,
+            failures: 0,
+        };
+        let peer_b = PeerAddr {
+            addr: "192.168.1.1:8080".to_string(),
+            last_seen: 1_700_000_001,
+            failures: 0,
+        };
+        let encoded = encode_addr_payload(&[&peer_a, &peer_b]);
+
+        let decoded = decode_addr_payload(&encoded).expect("exact addr payload must decode");
+        assert_eq!(
+            decoded,
+            vec![
+                "127.0.0.1:33370".to_string(),
+                "192.168.1.1:8080".to_string()
+            ]
+        );
     }
 
     #[test]
