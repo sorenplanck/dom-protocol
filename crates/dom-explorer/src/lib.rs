@@ -18,6 +18,7 @@ use tower_http::cors::CorsLayer;
 pub trait ChainProvider: Send + Sync + 'static {
     fn chain_height(&self) -> u64;
     fn chain_tip_hash(&self) -> [u8; 32];
+    fn network(&self) -> String;
     fn get_block_at_height(&self, height: u64) -> Option<BlockSummary>;
     fn get_block_by_hash(&self, hash: &[u8; 32]) -> Option<BlockSummary>;
 }
@@ -28,8 +29,10 @@ pub struct BlockSummary {
     pub hash: String,
     pub prev_hash: String,
     pub timestamp: u64,
-    pub output_count: u32,
-    pub kernel_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kernel_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,6 +57,7 @@ impl<P: ChainProvider> ExplorerServer<P> {
             .route("/", get(root))
             .route("/api/info", get(get_info::<P>))
             .route("/api/block/height/:height", get(get_block_by_height::<P>))
+            .route("/api/block/hash/:hash", get(get_block_by_hash::<P>))
             .layer(CorsLayer::permissive())
             .with_state(self.provider);
 
@@ -73,7 +77,7 @@ async fn get_info<P: ChainProvider>(State(provider): State<Arc<P>>) -> Json<Chai
     Json(ChainInfo {
         height: provider.chain_height(),
         tip_hash: hex_encode(&hash),
-        network: "Testnet".to_string(),
+        network: provider.network(),
     })
 }
 
@@ -87,12 +91,28 @@ async fn get_block_by_height<P: ChainProvider>(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+async fn get_block_by_hash<P: ChainProvider>(
+    State(provider): State<Arc<P>>,
+    Path(hash): Path<String>,
+) -> Result<Json<BlockSummary>, StatusCode> {
+    let hash = decode_hash(&hash).ok_or(StatusCode::BAD_REQUEST)?;
+    provider
+        .get_block_by_hash(&hash)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         s.push_str(&format!("{:02x}", b));
     }
     s
+}
+
+fn decode_hash(s: &str) -> Option<[u8; 32]> {
+    let bytes = hex::decode(s).ok()?;
+    bytes.try_into().ok()
 }
 
 #[cfg(test)]
@@ -107,14 +127,17 @@ mod tests {
         fn chain_tip_hash(&self) -> [u8; 32] {
             [0x42u8; 32]
         }
+        fn network(&self) -> String {
+            "regtest".to_string()
+        }
         fn get_block_at_height(&self, height: u64) -> Option<BlockSummary> {
             Some(BlockSummary {
                 height,
                 hash: "deadbeef".to_string(),
                 prev_hash: "cafebabe".to_string(),
                 timestamp: 1747958400,
-                output_count: 1,
-                kernel_count: 1,
+                output_count: Some(1),
+                kernel_count: Some(1),
             })
         }
         fn get_block_by_hash(&self, _: &[u8; 32]) -> Option<BlockSummary> {
@@ -132,5 +155,11 @@ mod tests {
     #[test]
     fn hex_encode_works() {
         assert_eq!(hex_encode(&[0xde, 0xad]), "dead");
+    }
+
+    #[test]
+    fn decode_hash_rejects_non_32_byte_hex() {
+        assert_eq!(decode_hash("dead"), None);
+        assert_eq!(decode_hash("not-hex"), None);
     }
 }

@@ -175,6 +175,8 @@ pub struct NodeStatus {
     pub version: u32,
     /// Canonical chain tip height.
     pub chain_height: u64,
+    /// Current canonical chain tip hash, if exposed by the node.
+    pub tip_hash: Option<[u8; 32]>,
     /// Current number of transactions in the node's mempool.
     pub mempool_size: u64,
     /// Network identifier ("mainnet", "testnet", "regtest").
@@ -195,6 +197,10 @@ pub struct BlockHeaderInfo {
     pub timestamp: u64,
     /// Difficulty target encoded as big-endian 32 bytes.
     pub target: [u8; 32],
+    /// Number of outputs in the block, if exposed by the node.
+    pub output_count: Option<u32>,
+    /// Number of kernels in the block, if exposed by the node.
+    pub kernel_count: Option<u32>,
 }
 
 /// Outcome of a successful [`NodeRpc::submit_tx`] call.
@@ -392,6 +398,11 @@ impl NodeRpc for NodeRpcClient {
             Ok(NodeStatus {
                 version: parsed.version,
                 chain_height: parsed.chain_height,
+                tip_hash: parsed
+                    .tip_hash
+                    .as_deref()
+                    .map(|s| parse_hash_hex(s, &url_s))
+                    .transpose()?,
                 mempool_size: parsed.mempool_size,
                 network: parsed.network,
             })
@@ -556,6 +567,8 @@ impl NodeRpcClient {
                             })?,
                         &url_s,
                     )?,
+                    output_count: parsed.output_count,
+                    kernel_count: parsed.kernel_count,
                 }))
             }
             StatusCode::NOT_FOUND => Ok(None),
@@ -669,6 +682,8 @@ struct WireHealth {
 struct WireStatus {
     version: u32,
     chain_height: u64,
+    #[serde(default)]
+    tip_hash: Option<String>,
     mempool_size: u64,
     network: String,
 }
@@ -725,6 +740,10 @@ struct WireBlockHeader {
     timestamp: Option<u64>,
     #[serde(default)]
     target: Option<String>,
+    #[serde(default)]
+    output_count: Option<u32>,
+    #[serde(default)]
+    kernel_count: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
