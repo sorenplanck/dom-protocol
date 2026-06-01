@@ -69,6 +69,7 @@
 //! forward-compat unknown event type, or a misordered log, never
 //! panics.
 
+use crate::store::PendingChange;
 use crate::types::WalletError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
@@ -189,6 +190,11 @@ pub enum TxJournalEvent {
         output_count: u32,
         /// Fee in noms (informational).
         fee_noms: u64,
+        /// Self-spend change material needed to recover the change output
+        /// if the wallet crashes after the Built journal append but before
+        /// the pending transaction is saved.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change: Option<PendingChange>,
     },
     /// Transaction has been handed off to a node / mempool.
     Submitted,
@@ -299,6 +305,8 @@ pub struct TxRecord {
     pub tx_bytes: Vec<u8>,
     /// Fee in noms from the original Built event.
     pub fee_noms: u64,
+    /// Change material from the original Built event, when present.
+    pub change: Option<PendingChange>,
     /// Timestamp of the Built event.
     pub created_at: u64,
     /// Timestamp of the most recently applied event.
@@ -419,6 +427,7 @@ fn apply_entry(map: &mut HashMap<[u8; 32], TxRecord>, entry: &JournalEntry, line
             tx_hex,
             output_count: _,
             fee_noms,
+            change,
         } => {
             if map.contains_key(&tx_hash) {
                 // Idempotent: a duplicate Built event for the same
@@ -441,6 +450,7 @@ fn apply_entry(map: &mut HashMap<[u8; 32], TxRecord>, entry: &JournalEntry, line
                         .and_then(|hex| hex::decode(hex).ok())
                         .unwrap_or_default(),
                     fee_noms: *fee_noms,
+                    change: change.clone(),
                     created_at: ts,
                     last_updated_at: ts,
                 },
@@ -617,6 +627,7 @@ mod tests {
                 tx_hex: None,
                 output_count: 1,
                 fee_noms: 100,
+                change: None,
             },
         })
         .unwrap();
@@ -654,6 +665,7 @@ mod tests {
                 tx_hex: None,
                 output_count: 1,
                 fee_noms: 50,
+                change: None,
             },
         })
         .unwrap();
@@ -681,6 +693,7 @@ mod tests {
                     tx_hex: None,
                     output_count: 1,
                     fee_noms: 1,
+                    change: None,
                 },
             })
             .unwrap();
@@ -703,6 +716,7 @@ mod tests {
                 tx_hex: None,
                 output_count: 1,
                 fee_noms: 10,
+                change: None,
             },
         })
         .unwrap();
@@ -756,6 +770,7 @@ mod tests {
                     tx_hex: None,
                     output_count: 1,
                     fee_noms: i as u64,
+                    change: None,
                 },
             })
             .unwrap();
@@ -793,6 +808,7 @@ mod tests {
                 tx_hex: None,
                 output_count: 1,
                 fee_noms: 99,
+                change: None,
             },
         })
         .unwrap();
@@ -818,6 +834,7 @@ mod tests {
                 tx_hex: None,
                 output_count: 1,
                 fee_noms: 5,
+                change: None,
             },
         })
         .unwrap();
@@ -855,6 +872,7 @@ mod tests {
                 tx_hex: None,
                 output_count: 1,
                 fee_noms: 1,
+                change: None,
             },
         })
         .unwrap();
@@ -874,6 +892,7 @@ mod tests {
                 tx_hex: None,
                 output_count: 1,
                 fee_noms: 2,
+                change: None,
             },
         })
         .unwrap();
@@ -918,6 +937,7 @@ mod tests {
                 tx_hex: None,
                 output_count: 1,
                 fee_noms: 10,
+                change: None,
             },
         })
         .unwrap();
@@ -935,6 +955,7 @@ mod tests {
                 tx_hex: None,
                 output_count: 1,
                 fee_noms: 20,
+                change: None,
             },
         })
         .unwrap();
@@ -981,6 +1002,7 @@ mod tests {
                 tx_hex: None,
                 output_count: 1,
                 fee_noms: 5,
+                change: None,
             },
             TxJournalEvent::Submitted,
             TxJournalEvent::Confirmed { block_height: 200 },
@@ -1011,6 +1033,7 @@ mod tests {
                 tx_hex: None,
                 output_count: 1,
                 fee_noms: 5,
+                change: None,
             },
             TxJournalEvent::Confirmed { block_height: 100 },
             // reorg_height == confirmation_height: confirmation
@@ -1047,6 +1070,7 @@ mod tests {
                 tx_hex: None,
                 output_count: 1,
                 fee_noms: 5,
+                change: None,
             },
             // Building → Reorged is invalid.
             TxJournalEvent::Reorged { reorg_height: 99 },
@@ -1076,6 +1100,7 @@ mod tests {
                 tx_hex: None,
                 output_count: 1,
                 fee_noms: 1,
+                change: None,
             },
             TxJournalEvent::Confirmed { block_height: 200 },
             TxJournalEvent::Reorged { reorg_height: 150 },

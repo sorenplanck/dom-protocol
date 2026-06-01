@@ -343,6 +343,7 @@ fn reconcile_on_open_reinstates_lost_pending() {
             tx_hex: Some(hex::encode(&tx_bytes)),
             output_count: 1,
             fee_noms: 42,
+            change: None,
         },
     })
     .unwrap();
@@ -394,6 +395,7 @@ fn reconcile_on_open_skips_reinstate_when_inputs_missing() {
             tx_hex: None,
             output_count: 1,
             fee_noms: 1,
+            change: None,
         },
     })
     .unwrap();
