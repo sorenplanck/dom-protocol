@@ -110,6 +110,11 @@ pub struct NodeConfig {
     /// RPC listen address (e.g. "127.0.0.1:3370"). None = RPC disabled.
     #[serde(default)]
     pub rpc_listen_addr: Option<String>,
+    /// Prometheus metrics listen address (e.g. "127.0.0.1:3371").
+    /// None = metrics endpoint disabled. Prefer loopback/internal bindings;
+    /// metrics expose node health and topology signals.
+    #[serde(default)]
+    pub metrics_listen_addr: Option<String>,
 }
 
 /// Local miner CPU throttle configuration.
@@ -147,6 +152,7 @@ impl NodeConfig {
             wallet_password: None,
             log_level: "info".into(),
             rpc_listen_addr: None,
+            metrics_listen_addr: None,
         }
     }
     /// Default testnet config.
@@ -166,6 +172,7 @@ impl NodeConfig {
             wallet_password: None,
             log_level: "debug".into(),
             rpc_listen_addr: None,
+            metrics_listen_addr: None,
         }
     }
 
@@ -188,18 +195,45 @@ impl NodeConfig {
             wallet_password: None,
             log_level: "debug".into(),
             rpc_listen_addr: None,
+            metrics_listen_addr: None,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Network;
+    use super::{Network, NodeConfig};
 
     #[test]
     fn network_as_str_matches_variant() {
         assert_eq!(Network::Mainnet.as_str(), "mainnet");
         assert_eq!(Network::Testnet.as_str(), "testnet");
         assert_eq!(Network::Regtest.as_str(), "regtest");
+    }
+
+    #[test]
+    fn metrics_listen_addr_defaults_to_disabled() {
+        assert!(NodeConfig::mainnet().metrics_listen_addr.is_none());
+        assert!(NodeConfig::testnet().metrics_listen_addr.is_none());
+        assert!(NodeConfig::regtest().metrics_listen_addr.is_none());
+    }
+
+    #[test]
+    fn metrics_listen_addr_is_serde_defaulted_for_legacy_configs() {
+        let json = r#"{
+            "network":"Regtest",
+            "data_dir":"./tmp",
+            "p2p_listen_addr":"127.0.0.1:0",
+            "max_inbound":8,
+            "min_outbound":0,
+            "dns_seeds":[],
+            "seed_peers":[],
+            "mine":false,
+            "miner_address":null,
+            "log_level":"debug",
+            "rpc_listen_addr":null
+        }"#;
+        let config: NodeConfig = serde_json::from_str(json).expect("legacy config");
+        assert!(config.metrics_listen_addr.is_none());
     }
 }

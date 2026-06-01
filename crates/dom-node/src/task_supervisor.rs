@@ -1,8 +1,8 @@
 //! Node task registry and supervision (Roadmap v2 — TASK 19).
 //!
 //! `DomNode::run` spawns a fixed set of long-lived runtime tasks (P2P listener,
-//! peer connector, miner, RPC server, future-block-queue drain, Dandelion++
-//! stem-timeout promoter) plus a dynamic set of per-peer relay workers. On
+//! peer connector, miner, RPC server, metrics server, future-block-queue drain,
+//! Dandelion++ stem-timeout promoter) plus a dynamic set of per-peer relay workers. On
 //! `main` these are bare `tokio::spawn` calls whose `JoinHandle`s are dropped,
 //! so a task that panics or exits with an error vanishes silently and there is
 //! no way to observe or coordinate shutdown.
@@ -50,6 +50,8 @@ pub enum TaskKind {
     Miner,
     /// JSON-RPC server.
     Rpc,
+    /// Prometheus metrics HTTP server.
+    Metrics,
     /// Future-block-queue drain / replay loop.
     FutureQueue,
     /// Dandelion++ stem-timeout promoter.
@@ -375,13 +377,13 @@ impl NodeTaskSupervisor {
     /// * 2 — stop the miner: `Miner`
     /// * 3 — stop relay / connectors: `Connector`, `DandelionStem`, `Relay`
     /// * (4 — caller's persistence-critical drain runs here)
-    /// * 5 — stop RPC / UI-facing last: `Rpc`
+    /// * 5 — stop RPC / UI-facing last: `Rpc`, `Metrics`
     pub fn shutdown_phase(kind: TaskKind) -> u8 {
         match kind {
             TaskKind::Listener | TaskKind::FutureQueue => 1,
             TaskKind::Miner => 2,
             TaskKind::Connector | TaskKind::DandelionStem | TaskKind::Relay(_) => 3,
-            TaskKind::Rpc => 5,
+            TaskKind::Rpc | TaskKind::Metrics => 5,
         }
     }
 
@@ -541,6 +543,7 @@ mod tests {
             TaskKind::Connector,
             TaskKind::Miner,
             TaskKind::Rpc,
+            TaskKind::Metrics,
             TaskKind::FutureQueue,
             TaskKind::DandelionStem,
         ] {
@@ -553,6 +556,7 @@ mod tests {
             TaskKind::Connector,
             TaskKind::Miner,
             TaskKind::Rpc,
+            TaskKind::Metrics,
             TaskKind::FutureQueue,
             TaskKind::DandelionStem,
         ] {
@@ -746,6 +750,7 @@ mod tests {
         // Register in a deliberately non-canonical order.
         for kind in [
             TaskKind::Rpc,
+            TaskKind::Metrics,
             TaskKind::Listener,
             TaskKind::Miner,
             TaskKind::Connector,
@@ -770,6 +775,10 @@ mod tests {
                 assert!(
                     drain_sup.contains(TaskKind::Rpc).await,
                     "RPC still up during persistence drain"
+                );
+                assert!(
+                    drain_sup.contains(TaskKind::Metrics).await,
+                    "metrics still up during persistence drain"
                 );
             })
             .await;
@@ -940,6 +949,7 @@ mod tests {
             TaskKind::Miner,
             TaskKind::Connector,
             TaskKind::Rpc,
+            TaskKind::Metrics,
             TaskKind::FutureQueue,
             TaskKind::DandelionStem,
         ] {
@@ -952,7 +962,7 @@ mod tests {
         assert_eq!(sup.len().await, 0);
         assert_eq!(sup.relay_count().await, 0);
         assert!(
-            report.stopped_order.len() >= 6,
+            report.stopped_order.len() >= 7,
             "all long-lived critical tasks must be accounted for in the stop order"
         );
     }

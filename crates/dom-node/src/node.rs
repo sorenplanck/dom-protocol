@@ -27,6 +27,7 @@ use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, Notify};
 use tracing::{info, warn};
 
@@ -183,12 +184,72 @@ const FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS: u64 = 30;
 const FUTURE_BLOCK_QUEUE_MAX_AGE_SECS: u64 = dom_core::MAX_FUTURE_BLOCK_TIME
     + dom_core::FUTURE_BLOCK_SOFT_BUFFER_SECS
     + FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS * 2;
+const METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 const HELLO_EXCHANGE_TIMEOUT_SECS: u64 = dom_wire::handshake::HANDSHAKE_TIMEOUT_SECS;
 const PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v2";
 const LEGACY_PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v1";
 const PEER_REPUTATION_METADATA_KEY: &[u8] = b"dom/peer_reputation_state/v1";
 const MEMPOOL_METADATA_KEY: &[u8] = b"dom/mempool_state/v1";
 const NOISE_STATIC_KEY_METADATA_KEY: &[u8] = b"dom/noise_static_key/v1";
+
+async fn bind_metrics_listener(
+    config: &NodeConfig,
+) -> Result<Option<tokio::net::TcpListener>, DomError> {
+    let Some(metrics_addr) = config.metrics_listen_addr.as_ref() else {
+        return Ok(None);
+    };
+    let parsed: std::net::SocketAddr = metrics_addr.parse().map_err(|e| {
+        DomError::Internal(format!("Invalid metrics listen addr {metrics_addr}: {e}"))
+    })?;
+    let listener = tokio::net::TcpListener::bind(parsed)
+        .await
+        .map_err(|e| DomError::Internal(format!("metrics bind {parsed}: {e}")))?;
+    Ok(Some(listener))
+}
+
+async fn serve_metrics(
+    listener: tokio::net::TcpListener,
+    metrics: Arc<Metrics>,
+) -> Result<(), DomError> {
+    loop {
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .map_err(|e| DomError::Internal(format!("metrics accept: {e}")))?;
+        if let Err(e) = handle_metrics_connection(&mut stream, &metrics).await {
+            tracing::debug!("metrics request failed: {e}");
+        }
+    }
+}
+
+async fn handle_metrics_connection(
+    stream: &mut tokio::net::TcpStream,
+    metrics: &Metrics,
+) -> Result<(), DomError> {
+    let mut buf = [0u8; 1024];
+    let n = stream
+        .read(&mut buf)
+        .await
+        .map_err(|e| DomError::Internal(format!("metrics read: {e}")))?;
+    let request = std::str::from_utf8(&buf[..n]).unwrap_or_default();
+    let first_line = request.lines().next().unwrap_or_default();
+    let (status, body) = if first_line.starts_with("GET /metrics ") {
+        ("200 OK", metrics.export_prometheus())
+    } else if first_line.starts_with("GET ") {
+        ("404 Not Found", "not found\n".to_string())
+    } else {
+        ("405 Method Not Allowed", "method not allowed\n".to_string())
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {METRICS_CONTENT_TYPE}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(response.as_bytes())
+        .await
+        .map_err(|e| DomError::Internal(format!("metrics write: {e}")))?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutboundAttemptOutcome {
@@ -483,6 +544,7 @@ impl DomNode {
         } else {
             None
         };
+        let metrics_listener = bind_metrics_listener(&self.config).await?;
 
         // ── Supervised runtime tasks ────────────────────────────────────
         // Binds already succeeded; from here on long-lived services are
@@ -543,6 +605,24 @@ impl DomNode {
                             _ = rpc_shutdown.wait() => Ok(()),
                             result = dom_rpc::serve(handle, listener) => {
                                 result.map_err(|e| format!("RPC server error: {e}"))
+                            }
+                        }
+                    })
+                    .await
+                })
+                .await;
+        }
+
+        if let Some(listener) = metrics_listener {
+            let metrics_shutdown = shutdown.clone();
+            let metrics = self.metrics.clone();
+            supervisor
+                .spawn_critical(TaskKind::Metrics, async move {
+                    trace_task_result("metrics_server", async move {
+                        tokio::select! {
+                            _ = metrics_shutdown.wait() => Ok(()),
+                            result = serve_metrics(listener, metrics) => {
+                                result.map_err(|e| format!("metrics server error: {e}"))
                             }
                         }
                     })
@@ -3865,17 +3945,17 @@ async fn message_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_persisted_mempool_snapshot, continue_ibd_header_sync, decode_deferred_block_bytes,
-        decode_ibd_block_response, decode_relay_block, deferred_replay_action, ibd_now,
-        initialize_ibd_state, load_mempool_snapshot, load_or_create_noise_static_key,
-        load_peer_reputation_snapshot, load_peer_rotation_snapshot,
-        parse_persisted_noise_static_key, peer_violation_score, pending_peer_violation_score,
-        persist_mempool_snapshot, persist_peer_reputation_snapshot, purge_mempool_confirmed_inputs,
-        reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action,
-        restore_peer_rotation_state, trace_lock, tx_hash, DeferredReplayAction, DomNode,
-        IbdRoundState, OutboundAttemptOutcome, RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY,
-        MEMPOOL_METADATA_KEY, NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY,
-        PEER_ROTATION_METADATA_KEY,
+        bind_metrics_listener, clear_persisted_mempool_snapshot, continue_ibd_header_sync,
+        decode_deferred_block_bytes, decode_ibd_block_response, decode_relay_block,
+        deferred_replay_action, ibd_now, initialize_ibd_state, load_mempool_snapshot,
+        load_or_create_noise_static_key, load_peer_reputation_snapshot,
+        load_peer_rotation_snapshot, parse_persisted_noise_static_key, peer_violation_score,
+        pending_peer_violation_score, persist_mempool_snapshot, persist_peer_reputation_snapshot,
+        purge_mempool_confirmed_inputs, reconcile_mempool_after_connect, refresh_peer_metrics,
+        relay_block_action, restore_peer_rotation_state, serve_metrics, trace_lock, tx_hash,
+        DeferredReplayAction, DomNode, IbdRoundState, OutboundAttemptOutcome, RelayBlockAction,
+        LEGACY_PEER_ROTATION_METADATA_KEY, MEMPOOL_METADATA_KEY, METRICS_CONTENT_TYPE,
+        NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY, PEER_ROTATION_METADATA_KEY,
     };
     use crate::future_block_queue::DeferredBlock;
     use crate::metrics::Metrics;
@@ -3920,6 +4000,7 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::sync::Mutex;
 
@@ -3935,6 +4016,45 @@ mod tests {
             *guard = 1;
         }
         assert_eq!(*state.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn metrics_listener_none_does_not_bind() {
+        let config = regtest_node_config(std::path::Path::new("/tmp/dom-metrics-none"));
+        assert!(config.metrics_listen_addr.is_none());
+        let listener = bind_metrics_listener(&config)
+            .await
+            .expect("metrics listener disabled");
+        assert!(listener.is_none());
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_serves_prometheus_text() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind metrics test listener");
+        let addr = listener.local_addr().expect("metrics listener addr");
+        let metrics = Arc::new(Metrics::new());
+        metrics.chain_height.store(42, Ordering::Relaxed);
+        let server = tokio::spawn(serve_metrics(listener, metrics));
+
+        let mut stream = TcpStream::connect(addr).await.expect("connect metrics");
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .expect("write metrics request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read metrics response");
+        let response = String::from_utf8(response).expect("utf8 metrics response");
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains(&format!("Content-Type: {METRICS_CONTENT_TYPE}")));
+        assert!(response.contains("dom_chain_height 42"));
+        server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]
