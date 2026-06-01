@@ -25,6 +25,33 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
+/// A spend transaction that has been *constructed* but not yet reserved
+/// or persisted.
+///
+/// This is the output of [`Wallet::build_spend_unreserved`] (phase 1 of a
+/// spend): coin selection + transaction building, with **no mutation** of
+/// wallet state. Handing this to [`Wallet::reserve_built_spend`] (phase 2)
+/// performs the reservation under the caller's lock. Splitting the two
+/// phases lets a caller validate mempool/chain admissibility *before*
+/// reserving, so a rejected spend never leaves funds reserved.
+pub struct BuiltSpend {
+    /// The fully constructed transaction.
+    pub tx: Transaction,
+    /// Tracking hash (`blake2b_256(tx.to_bytes())`) — the key under which
+    /// inputs are reserved and the pending tx is tracked. Equal to the
+    /// hash the mempool computes for the same bytes.
+    pub tx_hash: [u8; 32],
+    /// Canonical serialized transaction bytes (computed once in phase 1 so
+    /// serialization failures surface before any reservation).
+    pub tx_bytes: Vec<u8>,
+    /// Commitments of the inputs this spend consumes (to be reserved).
+    selected_commitments: Vec<[u8; 33]>,
+    /// Self-spend change to track, if any.
+    pending_change: Option<PendingChange>,
+    /// Fee in noms (recorded in the journal `Built` event).
+    fee: u64,
+}
+
 /// Canonical wallet rescan execution mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalletRescanMode {
@@ -1111,13 +1138,46 @@ impl Wallet {
     /// future change output before the transaction confirms.
     pub fn build_spend(
         &mut self,
-        _recipient_commitment: Commitment,
+        recipient_commitment: Commitment,
         recipient_blinding: BlindingFactor,
         amount: u64,
         fee: u64,
         current_height: u64,
     ) -> Result<Transaction, WalletError> {
-        debug!("building spend: {} noms + {} fee", amount, fee);
+        // Construct then immediately reserve. The two-phase split exists so
+        // callers that need to validate admissibility before committing the
+        // reservation can call the phases separately (see
+        // `build_spend_unreserved` / `reserve_built_spend`); this convenience
+        // wrapper preserves the original construct-and-reserve behaviour.
+        let built = self.build_spend_unreserved(
+            recipient_commitment,
+            recipient_blinding,
+            amount,
+            fee,
+            current_height,
+        )?;
+        self.reserve_built_spend(&built)?;
+        Ok(built.tx)
+    }
+
+    /// Phase 1 of a spend: select coins and build the transaction **without
+    /// mutating wallet state** (no reservation, no pending entry, no save).
+    ///
+    /// Takes `&self` — it only reads the output index — so any failure here
+    /// (insufficient funds, build error, serialization) leaves no funds
+    /// reserved. Coin selection skips already-reserved outputs, so callers
+    /// MUST hold the wallet lock continuously from this call through
+    /// [`reserve_built_spend`] to avoid two concurrent spends selecting the
+    /// same inputs.
+    pub fn build_spend_unreserved(
+        &self,
+        _recipient_commitment: Commitment,
+        recipient_blinding: BlindingFactor,
+        amount: u64,
+        fee: u64,
+        current_height: u64,
+    ) -> Result<BuiltSpend, WalletError> {
+        debug!("building spend (unreserved): {} noms + {} fee", amount, fee);
 
         let required = amount.saturating_add(fee);
 
@@ -1169,50 +1229,64 @@ impl Wallet {
 
         let tx = builder.build()?;
 
-        // Compute tx_hash for tracking.
+        // Compute tx_hash + canonical bytes once, here in the non-mutating
+        // phase, so a serialization/hash failure can never leave a dangling
+        // reservation behind.
         let tx_hash = compute_tx_hash(&tx)?;
+        let tx_bytes = tx.to_bytes()?;
 
-        // WAL ORDER: write the Built event to the journal FIRST,
-        // before mutating any in-memory state. If we crash between
-        // journal-append and the in-memory mutation below, replay
-        // on reopen will reinstate the pending tx (Phase 1.6
-        // reconcile-on-open in WalletDir::open).
-        self.record_journal(
+        Ok(BuiltSpend {
+            tx,
             tx_hash,
+            tx_bytes,
+            selected_commitments,
+            pending_change,
+            fee,
+        })
+    }
+
+    /// Phase 2 of a spend: reserve the inputs of an already-constructed
+    /// [`BuiltSpend`] and persist the pending transaction.
+    ///
+    /// Mutates wallet state: appends a `Built` journal event, reserves each
+    /// input, inserts the pending entry, and saves. Preserves WAL order
+    /// (journal append BEFORE the in-memory mutation) so reconcile-on-open
+    /// can reinstate the pending tx after a crash between append and save.
+    pub fn reserve_built_spend(&mut self, built: &BuiltSpend) -> Result<(), WalletError> {
+        // WAL ORDER: write the Built event to the journal FIRST,
+        // before mutating any in-memory state.
+        self.record_journal(
+            built.tx_hash,
             TxJournalEvent::Built {
-                inputs: selected_commitments.clone(),
-                tx_hex: Some(hex::encode(tx.to_bytes()?)),
-                output_count: tx.outputs.len() as u32,
-                fee_noms: fee,
-                change: pending_change.clone(),
+                inputs: built.selected_commitments.clone(),
+                tx_hex: Some(hex::encode(&built.tx_bytes)),
+                output_count: built.tx.outputs.len() as u32,
+                fee_noms: built.fee,
+                change: built.pending_change.clone(),
             },
         )?;
 
         // Reserve inputs.
-        for commitment in &selected_commitments {
-            self.outputs.reserve(commitment, tx_hash)?;
+        for commitment in &built.selected_commitments {
+            self.outputs.reserve(commitment, built.tx_hash)?;
         }
 
         // Record pending transaction.
         self.pending_txs.insert(
-            tx_hash,
+            built.tx_hash,
             PendingTx {
-                tx_hash,
-                inputs: selected_commitments,
-                tx_bytes: tx.to_bytes()?,
-                change: pending_change,
+                tx_hash: built.tx_hash,
+                inputs: built.selected_commitments.clone(),
+                tx_bytes: built.tx_bytes.clone(),
+                change: built.pending_change.clone(),
             },
         );
 
         // Save wallet state.
         self.save()?;
 
-        info!(
-            "created pending tx {} ({} noms)",
-            hex::encode(tx_hash),
-            amount
-        );
-        Ok(tx)
+        info!("created pending tx {}", hex::encode(built.tx_hash));
+        Ok(())
     }
 
     /// Confirm a pending transaction (mark inputs as spent).
