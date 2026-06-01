@@ -1333,14 +1333,27 @@ impl Wallet {
             }
         };
 
+        let total_fees = transactions.iter().try_fold(0u64, |acc, tx| {
+            let fee = match tx.total_fee() {
+                Ok(fee) => fee,
+                Err(e) => {
+                    tracing::warn!("scan_block: failed to compute transaction fee: {e}");
+                    return None;
+                }
+            };
+            match acc.checked_add(fee) {
+                Some(total) => Some(total),
+                None => {
+                    tracing::warn!("scan_block: total fee overflow at height {block_height}");
+                    None
+                }
+            }
+        });
+
         // Compute the expected commitment for our coinbase at this height.
-        // We don't know the exact value (fees vary), so we check all outputs
-        // in all transactions and see if the commitment matches r*G + value*H
-        // for value = block_reward(height) + fees.
-        //
-        // Simpler approach: re-derive the commitment the same way build_coinbase does
-        // and compare directly. Since we know the reward schedule, we can compute
-        // the expected value for each transaction output and verify.
+        // Re-derive the commitment the same way build_coinbase does and
+        // compare directly. Try both the base reward and reward+fees so
+        // historical zero-fee blocks and fee-bearing blocks both recover.
         for tx in transactions {
             for output in &tx.outputs {
                 let commitment_bytes: [u8; 33] = *output.commitment.as_bytes();
@@ -1350,22 +1363,20 @@ impl Wallet {
                     continue;
                 }
 
-                // Try to determine if this output matches our blinding at this height.
-                // We check by verifying: commitment == value*H + blinding*G
-                // We don't know value directly, so we extract it from the excess.
-                // For now, record any output whose commitment equals commit(v, blinding)
-                // for any v in [0, MAX_SUPPLY]. In practice we only check coinbase reward.
                 let reward = dom_core::block_reward(BlockHeight(block_height)).noms();
+                let reward_with_fees = total_fees.and_then(|fees| reward.checked_add(fees));
+                let matched_value =
+                    [Some(reward), reward_with_fees]
+                        .into_iter()
+                        .flatten()
+                        .find(|value| {
+                            *Commitment::commit(*value, &blinding).as_bytes() == commitment_bytes
+                        });
 
-                // Try reward only (no fees case) and reward+fees if we can read them.
-                // The exact value is encoded in the kernel's explicit_value field —
-                // but Transaction doesn't carry coinbase kernels here.
-                // Conservative: try the base reward.
-                let candidate = Commitment::commit(reward, &blinding);
-                if *candidate.as_bytes() == commitment_bytes {
+                if let Some(value) = matched_value {
                     let mut owned = OwnedOutput::new(
                         commitment_bytes,
-                        reward,
+                        value,
                         *blinding.as_bytes(),
                         block_height,
                         true,
@@ -1375,7 +1386,7 @@ impl Wallet {
                     }
                     self.add_output(owned);
                     tracing::info!(
-                        "scan_block: found output at height {block_height} value={reward} noms"
+                        "scan_block: found output at height {block_height} value={value} noms"
                     );
                 }
             }
