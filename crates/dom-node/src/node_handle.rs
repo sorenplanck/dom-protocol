@@ -82,6 +82,14 @@ impl NodeHandle for NodeHandleImpl {
             |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
         )
         .map_err(|e| RpcError::Rejected(format!("{e}")))?;
+        self.0
+            .metrics
+            .txs_received
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.0
+            .metrics
+            .mempool_size
+            .store(m.len() as u64, std::sync::atomic::Ordering::Relaxed);
         drop(m);
         let chain = self
             .0
@@ -111,17 +119,35 @@ impl NodeHandle for NodeHandleImpl {
         use dom_wire::dandelion::{DandelionPhase, StemEnvelope};
         match phase {
             DandelionPhase::Fluff => {
-                let _ = self.0.tx_fluff_tx.send(tx_bytes.clone());
+                if self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok() {
+                    self.0
+                        .metrics
+                        .txs_relayed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
             DandelionPhase::Stem => {
                 if let Some(target) = stem_target {
-                    let _ = self.0.tx_stem_tx.send(StemEnvelope {
-                        target_peer: target,
-                        tx_bytes: tx_bytes.clone(),
-                    });
-                } else {
+                    if self
+                        .0
+                        .tx_stem_tx
+                        .send(StemEnvelope {
+                            target_peer: target,
+                            tx_bytes: tx_bytes.clone(),
+                        })
+                        .is_ok()
+                    {
+                        self.0
+                            .metrics
+                            .txs_relayed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                } else if self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok() {
                     // Route said Stem but no peer was stored — fall back to Fluff.
-                    let _ = self.0.tx_fluff_tx.send(tx_bytes.clone());
+                    self.0
+                        .metrics
+                        .txs_relayed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
@@ -242,7 +268,7 @@ impl NodeHandle for NodeHandleImpl {
         // never re-acquires chain or mempool. There is no `.await` inside the
         // critical section, so this does not reintroduce the DOM-AUDIT-001
         // lock-across-await pattern.
-        let (tx_hash, tx_bytes) = {
+        let (tx_hash, tx_bytes, mempool_len) = {
             let chain = self
                 .0
                 .chain
@@ -258,10 +284,6 @@ impl NodeHandle for NodeHandleImpl {
                 .map_err(|_| dom_rpc::RpcError::Overloaded("wallet busy".into()))?;
 
             let height = chain.tip_height.0;
-
-            // Phase 1: construct the tx WITHOUT reserving. The fallible
-            // hash/serialize steps live in here, before any reservation, so
-            // a failure leaks nothing.
             let built = wallet
                 .build_spend_unreserved(
                     recipient_commitment,
@@ -306,8 +328,17 @@ impl NodeHandle for NodeHandleImpl {
                 return Err(dom_rpc::RpcError::Rejected(format!("mempool: {e}")));
             }
 
-            (tx_hash, tx_bytes)
+            (tx_hash, tx_bytes, mempool.len())
         };
+
+        self.0
+            .metrics
+            .txs_received
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.0
+            .metrics
+            .mempool_size
+            .store(mempool_len as u64, std::sync::atomic::Ordering::Relaxed);
 
         // Route via Dandelion++: decide Stem vs Fluff and dispatch over
         // the corresponding broadcast channel. Same logic as submit_tx above.
@@ -327,16 +358,34 @@ impl NodeHandle for NodeHandleImpl {
         use dom_wire::dandelion::{DandelionPhase, StemEnvelope};
         match phase {
             DandelionPhase::Fluff => {
-                let _ = self.0.tx_fluff_tx.send(tx_bytes.clone());
+                if self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok() {
+                    self.0
+                        .metrics
+                        .txs_relayed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
             DandelionPhase::Stem => {
                 if let Some(target) = stem_target {
-                    let _ = self.0.tx_stem_tx.send(StemEnvelope {
-                        target_peer: target,
-                        tx_bytes: tx_bytes.clone(),
-                    });
-                } else {
-                    let _ = self.0.tx_fluff_tx.send(tx_bytes.clone());
+                    if self
+                        .0
+                        .tx_stem_tx
+                        .send(StemEnvelope {
+                            target_peer: target,
+                            tx_bytes: tx_bytes.clone(),
+                        })
+                        .is_ok()
+                    {
+                        self.0
+                            .metrics
+                            .txs_relayed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                } else if self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok() {
+                    self.0
+                        .metrics
+                        .txs_relayed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
@@ -358,7 +407,9 @@ mod tests {
     use dom_crypto::{bp_prove, pedersen::Commitment, schnorr_sign, BlindingFactor, SecretKey};
     use dom_rpc::SpendRequest;
     use dom_serialization::DomSerialize;
+    use dom_store::utxo::UtxoEntry;
     use dom_wallet::{Network, OwnedOutput, Wallet};
+    use std::sync::atomic::Ordering;
 
     const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
 
@@ -676,6 +727,76 @@ mod tests {
             matches!(err, dom_rpc::RpcError::Rejected(ref msg) if msg.contains("input commitment not found in canonical UTXO set")),
             "expected canonical-utxo rejection, got {err}"
         );
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_file(&wallet_path);
+    }
+
+    #[test]
+    fn submit_tx_updates_received_relayed_and_mempool_metrics() {
+        let unique = format!(
+            "dom-node-handle-submit-metrics-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos()
+        );
+        let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
+        let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_file(&wallet_path);
+
+        let node = std::sync::Arc::new(
+            DomNode::init_with_map_size(
+                test_config(
+                    data_dir.to_str().expect("utf8 data dir"),
+                    wallet_path.to_str().expect("utf8 wallet path"),
+                ),
+                TEST_LMDB_MAP_SIZE,
+            )
+            .expect("init node"),
+        );
+        let _relay_rx = node.tx_fluff_tx.subscribe();
+        let chain_id = {
+            let chain = node.chain.try_lock().expect("chain lock");
+            *dom_consensus::derive_chain_id(chain.network_magic, &chain.genesis_hash).as_bytes()
+        };
+
+        let input_value = 500_000;
+        let input_blinding = BlindingFactor::random();
+        let input_commitment = Commitment::commit(input_value, &input_blinding);
+        {
+            let chain = node.chain.try_lock().expect("chain lock");
+            chain
+                .store
+                .commit_block(
+                    &[0xA7; 32],
+                    0,
+                    b"metrics-test-header",
+                    b"metrics-test-body",
+                    &[(
+                        *input_commitment.as_bytes(),
+                        UtxoEntry {
+                            block_height: 0,
+                            is_coinbase: false,
+                            proof: Vec::new(),
+                        }
+                        .to_bytes(),
+                    )],
+                    &[],
+                    &[],
+                )
+                .expect("plant canonical input utxo");
+        }
+        let tx_bytes = raw_spend_tx(input_value, &input_blinding, &chain_id);
+        let handle = NodeHandleImpl(node.clone());
+
+        let tx_hash = handle.submit_tx(tx_bytes).expect("submit tx");
+
+        assert_ne!(tx_hash, [0u8; 32]);
+        assert_eq!(node.metrics.txs_received.load(Ordering::Relaxed), 1);
+        assert_eq!(node.metrics.mempool_size.load(Ordering::Relaxed), 1);
+        assert_eq!(node.metrics.txs_relayed.load(Ordering::Relaxed), 1);
 
         let _ = std::fs::remove_dir_all(&data_dir);
         let _ = std::fs::remove_file(&wallet_path);

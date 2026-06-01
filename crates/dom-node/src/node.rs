@@ -410,6 +410,35 @@ impl DomNode {
         self.state_events.notify_waiters();
     }
 
+    pub(crate) async fn refresh_runtime_metrics(
+        chain: &Arc<Mutex<ChainState>>,
+        mempool: &Arc<Mutex<Mempool>>,
+        future_block_queue: &Arc<crate::future_block_queue::FutureBlockQueue>,
+        metrics: &Metrics,
+    ) {
+        let chain_height = {
+            let chain = chain.lock().await;
+            chain.tip_height.0
+        };
+        metrics
+            .chain_height
+            .store(chain_height, std::sync::atomic::Ordering::Relaxed);
+
+        let mempool_size = {
+            let mempool = mempool.lock().await;
+            mempool.len() as u64
+        };
+        metrics
+            .mempool_size
+            .store(mempool_size, std::sync::atomic::Ordering::Relaxed);
+
+        let future_block_queue_size = future_block_queue.size().await as u64;
+        metrics.future_block_queue_size.store(
+            future_block_queue_size,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
     /// Request coordinated shutdown of live node tasks.
     pub async fn request_shutdown(&self) {
         tracing::info!("shutdown_requested");
@@ -556,6 +585,7 @@ impl DomNode {
                     let ready = queue
                         .drain_ready(now_secs, dom_core::FUTURE_BLOCK_SOFT_BUFFER_SECS)
                         .await;
+                    let drained_ready = ready.len();
                     for deferred in ready {
                         tracing::debug!("Re-evaluating deferred block ts={}", deferred.timestamp);
                         match decode_deferred_block_bytes(&deferred.block_bytes) {
@@ -676,6 +706,10 @@ impl DomNode {
                             }
                         }
                     }
+                    if evicted > 0 || drained_ready > 0 {
+                        DomNode::refresh_runtime_metrics(&chain, &mempool, &queue, &metrics)
+                            .await;
+                    }
                 }
                     })
                     .await
@@ -697,6 +731,7 @@ impl DomNode {
             let dandelion = self.dandelion.clone();
             let mempool = self.mempool.clone();
             let tx_fluff_tx = self.tx_fluff_tx.clone();
+            let metrics = self.metrics.clone();
             let dandelion_shutdown = shutdown.clone();
             supervisor
                 .spawn_critical(TaskKind::DandelionStem, async move {
@@ -729,7 +764,11 @@ impl DomNode {
                                     m.get_tx(&tx_hash).and_then(|e| e.tx.to_bytes().ok())
                                 };
                                 if let Some(tx_bytes) = tx_bytes_opt {
-                                    let _ = tx_fluff_tx.send(tx_bytes);
+                                    if tx_fluff_tx.send(tx_bytes).is_ok() {
+                                        metrics
+                                            .txs_relayed
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
                                 } else {
                                     tracing::debug!(
                                         "Stem-timed-out tx {} not in mempool; dropping",
@@ -1079,6 +1118,12 @@ impl dom_rpc::NodeHandle for DomNode {
             |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
         )
         .map_err(|e| dom_rpc::RpcError::Rejected(e.to_string()))?;
+        self.metrics
+            .txs_received
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .mempool_size
+            .store(pool.len() as u64, std::sync::atomic::Ordering::Relaxed);
         drop(pool);
         self.notify_state_changed();
         let chain = self
@@ -1212,6 +1257,8 @@ async fn handle_inbound(
                     &svc.mempool,
                     addr,
                     peer_hello.best_height,
+                    svc.future_block_queue.clone(),
+                    svc.metrics.clone(),
                     svc.wallet.clone(),
                     svc.state_events.clone(),
                 )
@@ -1374,6 +1421,8 @@ async fn connect_outbound(
                     &svc.mempool,
                     peer_addr,
                     peer_hello.best_height,
+                    svc.future_block_queue.clone(),
+                    svc.metrics.clone(),
                     svc.wallet.clone(),
                     svc.state_events.clone(),
                 )
@@ -1868,21 +1917,22 @@ fn decode_relay_block(msg_payload: &[u8]) -> Result<(Vec<u8>, dom_consensus::Blo
 async fn reprocess_orphan_children(
     parent_hash: [u8; 32],
     chain: &Arc<Mutex<ChainState>>,
-    mempool: &Arc<Mutex<Mempool>>,
     relay_tx: &tokio::sync::broadcast::Sender<Vec<u8>>,
-    orphan_pool: &Arc<Mutex<RuntimeOrphanPool>>,
-    missing_blocks: &Arc<Mutex<MissingBlockTracker>>,
-    metrics: &Arc<Metrics>,
+    svc: &NodeServices,
 ) -> Result<(), DomError> {
     let mut ready_parents = vec![parent_hash];
     while let Some(available_parent) = ready_parents.pop() {
-        missing_blocks.lock().await.resolve(&available_parent);
-        let children = orphan_pool.lock().await.take_children(&available_parent);
+        svc.missing_blocks.lock().await.resolve(&available_parent);
+        let children = svc
+            .orphan_pool
+            .lock()
+            .await
+            .take_children(&available_parent);
         for orphan in children {
             let child = match decode_deferred_block_bytes(&orphan.block_bytes) {
                 Ok(block) => block,
                 Err(e) => {
-                    metrics
+                    svc.metrics
                         .malformed_block_relays
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     tracing::warn!(
@@ -1905,12 +1955,19 @@ async fn reprocess_orphan_children(
                     if let Ok(ref connect_result) = result {
                         reconcile_mempool_after_connect(
                             chain,
-                            mempool,
+                            &svc.mempool,
                             connect_result,
                             &child.transactions,
                         )
                         .await?;
                     }
+                    DomNode::refresh_runtime_metrics(
+                        chain,
+                        &svc.mempool,
+                        &svc.future_block_queue,
+                        &svc.metrics,
+                    )
+                    .await;
                     let _ = relay_tx.send(orphan.block_bytes.clone());
                     ready_parents.push(orphan.block_hash);
                 }
@@ -1923,12 +1980,12 @@ async fn reprocess_orphan_children(
                         ready_parents.push(orphan.block_hash);
                     } else if matches!(result, Err(DomError::Orphan(_))) {
                         let new_parent = *child.header.prev_hash.as_bytes();
-                        missing_blocks.lock().await.note_orphan(
+                        svc.missing_blocks.lock().await.note_orphan(
                             orphan.block_hash,
                             new_parent,
                             child.header.height.0.checked_sub(1),
                         );
-                        let _ = orphan_pool.lock().await.insert(OrphanBlock {
+                        let _ = svc.orphan_pool.lock().await.insert(OrphanBlock {
                             block_hash: orphan.block_hash,
                             parent_hash: new_parent,
                             height: child.header.height.0,
@@ -2322,6 +2379,8 @@ struct IbdRuntimeContext<'a> {
     config: &'a NodeConfig,
     peer_addr: std::net::SocketAddr,
     mempool: Arc<Mutex<Mempool>>,
+    future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
+    metrics: Arc<Metrics>,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
     state_events: Arc<Notify>,
 }
@@ -2492,6 +2551,13 @@ async fn resume_ibd_block_sync(
             // wallet internally and must run with NO chain guard held.
             if best_chain {
                 purge_mempool_confirmed_inputs(chain, &runtime.mempool, &txs_for_scan).await?;
+                DomNode::refresh_runtime_metrics(
+                    chain,
+                    &runtime.mempool,
+                    &runtime.future_block_queue,
+                    &runtime.metrics,
+                )
+                .await;
                 if let Some(ref wallet_arc) = runtime.wallet {
                     let mut w = wallet_arc.lock().await;
                     match connect_result {
@@ -2640,6 +2706,8 @@ async fn run_ibd_session(
     mempool: &Arc<Mutex<Mempool>>,
     peer_addr: std::net::SocketAddr,
     peer_best_height: u64,
+    future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
+    metrics: Arc<Metrics>,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
     state_events: Arc<Notify>,
 ) -> Result<(), DomError> {
@@ -2649,6 +2717,8 @@ async fn run_ibd_session(
         config,
         peer_addr,
         mempool: mempool.clone(),
+        future_block_queue,
+        metrics,
         wallet: wallet.clone(),
         state_events: state_events.clone(),
     };
@@ -2886,6 +2956,8 @@ async fn run_ibd_session(
             chain,
             mempool,
             peer_addr,
+            runtime.future_block_queue.clone(),
+            runtime.metrics.clone(),
             wallet.clone(),
             state_events.clone(),
             &mut ibd,
@@ -3007,6 +3079,8 @@ async fn ibd_sync_round(
     chain: &Arc<Mutex<ChainState>>,
     mempool: &Arc<Mutex<Mempool>>,
     peer_addr: std::net::SocketAddr,
+    future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
+    metrics: Arc<Metrics>,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
     state_events: Arc<Notify>,
     ibd: &mut dom_chain::IbdState,
@@ -3089,6 +3163,8 @@ async fn ibd_sync_round(
         config,
         peer_addr,
         mempool: mempool.clone(),
+        future_block_queue,
+        metrics,
         wallet,
         state_events,
     };
@@ -3221,6 +3297,9 @@ async fn message_loop(
                         if let Err(e) = codec.send(stream, &msg).await {
                             return Err(DomError::Internal(format!("fluff send to {peer_addr}: {e}")));
                         }
+                        svc.metrics
+                            .txs_relayed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!("tx_fluff lagged by {n} for {peer_addr}");
@@ -3246,6 +3325,9 @@ async fn message_loop(
                             if let Err(e) = codec.send(stream, &msg).await {
                                 return Err(DomError::Internal(format!("stem send to {peer_addr}: {e}")));
                             }
+                            svc.metrics
+                                .txs_relayed
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
                         // else: this envelope is targeted at a different peer; ignore
                     }
@@ -3443,6 +3525,13 @@ async fn message_loop(
                                                 | dom_chain::ConnectResult::AlreadyHave => {}
                                             }
                                         }
+                                        DomNode::refresh_runtime_metrics(
+                                            &chain,
+                                            &svc.mempool,
+                                            &svc.future_block_queue,
+                                            &svc.metrics,
+                                        )
+                                        .await;
                                         // DOM-SEC-RELAY-LOOP: only rebroadcast when we
                                         // actually extended the best chain. SideChain
                                         // and AlreadyHave MUST NOT rebroadcast — that
@@ -3452,11 +3541,8 @@ async fn message_loop(
                                         if let Err(e) = reprocess_orphan_children(
                                             current_block_hash,
                                             &chain,
-                                            &svc.mempool,
                                             &block_relay_tx,
-                                            &svc.orphan_pool,
-                                            &svc.missing_blocks,
-                                            &svc.metrics,
+                                            &svc,
                                         )
                                         .await
                                         {
@@ -3477,11 +3563,8 @@ async fn message_loop(
                                             if let Err(e) = reprocess_orphan_children(
                                                 current_block_hash,
                                                 &chain,
-                                                &svc.mempool,
                                                 &block_relay_tx,
-                                                &svc.orphan_pool,
-                                                &svc.missing_blocks,
-                                                &svc.metrics,
+                                                &svc,
                                             )
                                             .await
                                             {
@@ -3594,6 +3677,13 @@ async fn message_loop(
                                         block.header.timestamp.0
                                     );
                                 }
+                                DomNode::refresh_runtime_metrics(
+                                    &chain,
+                                    &svc.mempool,
+                                    &svc.future_block_queue,
+                                    &svc.metrics,
+                                )
+                                .await;
                             }
                             Err(e) => {
                                 tracing::info!(
@@ -3607,6 +3697,9 @@ async fn message_loop(
                                     "future block rejected by timestamp policy"
                                 );
                                 tracing::warn!("Block from {peer_addr} rejected by timestamp: {e}");
+                                svc.metrics
+                                    .blocks_rejected_timestamp
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                     }
@@ -3642,6 +3735,16 @@ async fn message_loop(
                                         );
                                         drop(m);
                                         if result.is_ok() {
+                                            svc.metrics
+                                                .txs_received
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            DomNode::refresh_runtime_metrics(
+                                                &chain,
+                                                &svc.mempool,
+                                                &svc.future_block_queue,
+                                                &svc.metrics,
+                                            )
+                                            .await;
                                             let chain = chain.lock().await;
                                             clear_persisted_mempool_snapshot(&chain.store)?;
                                         }
@@ -3672,14 +3775,24 @@ async fn message_loop(
                                     use dom_wire::dandelion::{DandelionPhase, StemEnvelope};
                                     match phase {
                                         DandelionPhase::Fluff => {
-                                            let _ = tx_fluff_tx.send(tx_bytes.clone());
+                                            if tx_fluff_tx.send(tx_bytes.clone()).is_ok() {
+                                                svc.metrics.txs_relayed.fetch_add(
+                                                    1,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                            }
                                         }
                                         DandelionPhase::Stem => {
                                             if let Some(target) = svc.dandelion.lock().await.get_stem_peer(&tx_hash) {
-                                                let _ = tx_stem_tx.send(StemEnvelope {
+                                                if tx_stem_tx.send(StemEnvelope {
                                                     target_peer: target,
                                                     tx_bytes: tx_bytes.clone(),
-                                                });
+                                                }).is_ok() {
+                                                    svc.metrics.txs_relayed.fetch_add(
+                                                        1,
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -3822,6 +3935,48 @@ mod tests {
             *guard = 1;
         }
         assert_eq!(*state.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_runtime_metrics_reads_chain_mempool_and_future_queue() {
+        let dir = fresh_test_dir("runtime-metrics-refresh");
+        let node = init_test_node(regtest_node_config(&dir));
+        let block = synthetic_block(7, 1);
+        commit_chain_block(&node.chain, &block).await;
+        let tx = mempool_tx(0x44, 100);
+        let tx_hash = tx_hash(&tx).expect("tx hash");
+        {
+            let mut mempool = node.mempool.lock().await;
+            mempool.accept_tx(tx, tx_hash, 1).expect("accept tx");
+        }
+        assert!(
+            node.future_block_queue
+                .defer(DeferredBlock {
+                    block_hash: [0x55; 32],
+                    block_height: 8,
+                    timestamp: 2_000_000_000,
+                    queued_at: Instant::now(),
+                    block_bytes: vec![0x01],
+                })
+                .await
+        );
+
+        DomNode::refresh_runtime_metrics(
+            &node.chain,
+            &node.mempool,
+            &node.future_block_queue,
+            &node.metrics,
+        )
+        .await;
+
+        assert_eq!(node.metrics.chain_height.load(Ordering::Relaxed), 7);
+        assert_eq!(node.metrics.mempool_size.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            node.metrics.future_block_queue_size.load(Ordering::Relaxed),
+            1
+        );
+
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
     fn commitment(seed: u8, value: u64) -> Commitment {
