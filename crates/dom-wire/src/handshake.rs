@@ -19,6 +19,18 @@ pub const NOISE_MAX_MSG: usize = 65535;
 /// If not completed within this time, connection is dropped.
 pub const HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 
+/// Runtime handshake timeout.
+///
+/// Production keeps using [`HANDSHAKE_TIMEOUT_SECS`]. Integration tests can
+/// set `DOM_TEST_HANDSHAKE_TIMEOUT_SECS` to shorten wall-clock waits without
+/// changing production defaults.
+pub fn handshake_timeout_secs() -> u64 {
+    std::env::var("DOM_TEST_HANDSHAKE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(HANDSHAKE_TIMEOUT_SECS)
+}
+
 /// Idle timeout for established connections.
 /// Peers that send no messages for this long are disconnected.
 pub const IDLE_TIMEOUT_SECS: u64 = 60;
@@ -100,14 +112,13 @@ pub async fn perform_handshake_initiator(
     network_magic: u32,
     chain_id: &[u8; 32],
 ) -> Result<TransportState, DomError> {
+    let timeout_secs = handshake_timeout_secs();
     tokio::time::timeout(
-        tokio::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
+        tokio::time::Duration::from_secs(timeout_secs),
         perform_handshake_initiator_inner(stream, static_privkey, network_magic, chain_id),
     )
     .await
-    .map_err(|_| {
-        DomError::PolicyRejected(format!("handshake timeout after {HANDSHAKE_TIMEOUT_SECS}s"))
-    })?
+    .map_err(|_| DomError::PolicyRejected(format!("handshake timeout after {timeout_secs}s")))?
 }
 
 async fn perform_handshake_initiator_inner(
@@ -148,14 +159,13 @@ pub async fn perform_handshake_responder(
     network_magic: u32,
     chain_id: &[u8; 32],
 ) -> Result<TransportState, DomError> {
+    let timeout_secs = handshake_timeout_secs();
     tokio::time::timeout(
-        tokio::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
+        tokio::time::Duration::from_secs(timeout_secs),
         perform_handshake_responder_inner(stream, static_privkey, network_magic, chain_id),
     )
     .await
-    .map_err(|_| {
-        DomError::PolicyRejected(format!("handshake timeout after {HANDSHAKE_TIMEOUT_SECS}s"))
-    })?
+    .map_err(|_| DomError::PolicyRejected(format!("handshake timeout after {timeout_secs}s")))?
 }
 
 async fn perform_handshake_responder_inner(
