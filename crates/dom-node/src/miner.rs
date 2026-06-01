@@ -20,6 +20,27 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
+struct MiningActiveGuard {
+    metrics: Arc<crate::metrics::Metrics>,
+}
+
+impl MiningActiveGuard {
+    fn new(metrics: Arc<crate::metrics::Metrics>) -> Self {
+        metrics
+            .mining_active
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        Self { metrics }
+    }
+}
+
+impl Drop for MiningActiveGuard {
+    fn drop(&mut self) {
+        self.metrics
+            .mining_active
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -250,6 +271,7 @@ fn build_coinbase_with_blinding(
 
 pub async fn mining_loop(node: Arc<DomNode>, shutdown: ShutdownToken) -> Result<(), DomError> {
     info!("Minerador iniciado");
+    let _mining_active = MiningActiveGuard::new(node.metrics.clone());
     {
         if shutdown.is_shutdown() {
             return Ok(());
@@ -330,6 +352,9 @@ async fn finalize_mined_block(node: &Arc<DomNode>, block: Block) -> Result<u64, 
             return Ok(new_height);
         }
     }
+    node.metrics
+        .blocks_mined
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     reconcile_mempool_after_connect(
         &node.chain,
@@ -339,6 +364,13 @@ async fn finalize_mined_block(node: &Arc<DomNode>, block: Block) -> Result<u64, 
     )
     .await
     .map_err(|e| DomError::Internal(format!("mempool reconciliation: {e}")))?;
+    DomNode::refresh_runtime_metrics(
+        &node.chain,
+        &node.mempool,
+        &node.future_block_queue,
+        &node.metrics,
+    )
+    .await;
 
     // Scan block for wallet outputs (coinbase reward recovery).
     if matches!(
@@ -954,6 +986,7 @@ mod genesis_determinism_tests {
     use primitive_types::U256;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
@@ -1626,6 +1659,59 @@ mod genesis_determinism_tests {
             relay_rx.try_recv().is_err(),
             "invalid mined block must not be broadcast before local validation"
         );
+
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    #[tokio::test]
+    async fn accepted_mined_block_updates_blocks_mined_and_runtime_gauges() {
+        std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+        let dir = fresh_test_dir("metrics-accepted-mined-block");
+        let node = Arc::new(init_test_node(regtest_config(&dir)));
+        super::create_genesis_block(node.clone())
+            .await
+            .expect("create genesis");
+
+        let coinbase =
+            build_real_coinbase(BlockHeight(1), 0, &chain_id_regtest()).expect("coinbase");
+        let (output_root, kernel_root, rangeproof_root) =
+            compute_block_pmmr_roots(&coinbase, &[]).expect("roots");
+        let (tip_hash, tip_difficulty) = {
+            let chain = node.chain.lock().await;
+            (chain.tip_hash, chain.tip_difficulty)
+        };
+        let timestamp = genesis_anchor(NETWORK_MAGIC_REGTEST)
+            .expect("anchor")
+            .timestamp
+            .checked_add_secs(dom_core::TARGET_SPACING)
+            .expect("timestamp");
+        let target = compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, BlockHeight(1))
+            .expect("target");
+        let header = mine_fast_test_header(
+            *tip_hash.as_bytes(),
+            tip_hash,
+            BlockHeight(1),
+            timestamp,
+            output_root,
+            kernel_root,
+            rangeproof_root,
+            [0u8; 32],
+            tip_difficulty + U256::from(target_to_difficulty(&target)),
+        );
+        let block = Block {
+            header,
+            coinbase,
+            transactions: vec![],
+        };
+
+        let height = finalize_mined_block(&node, block)
+            .await
+            .expect("valid mined block accepted");
+
+        assert_eq!(height, 1);
+        assert_eq!(node.metrics.blocks_mined.load(Ordering::Relaxed), 1);
+        assert_eq!(node.metrics.chain_height.load(Ordering::Relaxed), 1);
+        assert_eq!(node.metrics.mempool_size.load(Ordering::Relaxed), 0);
 
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
