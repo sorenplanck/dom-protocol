@@ -406,8 +406,14 @@ Using the same hash-to-curve algorithm (Section 1) and SHA-256.
 
 ### 5.3 Proof Format
 
-A Bulletproof+ for a single output in range [0, 2^64) with the transcript above
-produces approximately 672 bytes. `MAX_PROOF_SIZE = 4096` is sufficient.
+A Bulletproof+ for a single DOM output in range [0, 2^52) with the concrete
+secp256k1-zkp implementation used by this codebase serializes to approximately
+4166 bytes. `MAX_PROOF_SIZE = 6144` provides about 1.5x headroom over the
+measured proof size while keeping malformed proof payloads bounded.
+
+Earlier estimates of approximately 672 bytes described a theoretical minimum
+aggregated Bulletproof+ shape, not the serialized proof produced by this
+implementation.
 
 Proofs are NOT aggregated across outputs in DOM v1.0. Each output has one independent
 range proof.
