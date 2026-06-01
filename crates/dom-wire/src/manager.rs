@@ -15,10 +15,6 @@ use std::time::{Duration, Instant};
 
 /// Maximum peers from the same /16 subnet (eclipse protection).
 const MAX_PEERS_SAME_SLASH_16: usize = 2;
-/// Reservations older than this are treated as dead handshakes and ignored.
-const STALE_PENDING_INBOUND_SECS: u64 = crate::handshake::HANDSHAKE_TIMEOUT_SECS * 3;
-/// Outbound reservations older than this are treated as dead handshakes.
-const STALE_PENDING_OUTBOUND_SECS: u64 = crate::handshake::HANDSHAKE_TIMEOUT_SECS * 3;
 /// Pre-registration penalties expire after this interval.
 const PENDING_PENALTY_TTL_SECS: u64 = 15 * 60;
 /// Bound memory used by hostile pre-registration address churn.
@@ -943,15 +939,25 @@ impl PeerManager {
 }
 
 fn reservation_is_stale(pending: PendingInbound) -> bool {
-    pending.reserved_at.elapsed() >= Duration::from_secs(STALE_PENDING_INBOUND_SECS)
+    pending.reserved_at.elapsed() >= Duration::from_secs(stale_pending_inbound_secs())
 }
 
 fn outbound_reservation_is_stale(pending: PendingOutbound) -> bool {
-    pending.reserved_at.elapsed() >= Duration::from_secs(STALE_PENDING_OUTBOUND_SECS)
+    pending.reserved_at.elapsed() >= Duration::from_secs(stale_pending_outbound_secs())
 }
 
 fn penalty_is_stale(pending: PendingPenalty) -> bool {
     pending.last_updated.elapsed() >= Duration::from_secs(PENDING_PENALTY_TTL_SECS)
+}
+
+/// Reservations older than this are treated as dead handshakes and ignored.
+fn stale_pending_inbound_secs() -> u64 {
+    crate::handshake::handshake_timeout_secs() * 3
+}
+
+/// Outbound reservations older than this are treated as dead handshakes.
+fn stale_pending_outbound_secs() -> u64 {
+    crate::handshake::handshake_timeout_secs() * 3
 }
 
 fn deterministic_addr_jitter(addr: &str, max_jitter_secs: u64) -> u64 {
@@ -1163,7 +1169,7 @@ mod tests {
         mgr.pending_inbound
             .get_mut(&a.to_string())
             .unwrap()
-            .reserved_at = Instant::now() - Duration::from_secs(STALE_PENDING_INBOUND_SECS + 1);
+            .reserved_at = Instant::now() - Duration::from_secs(stale_pending_inbound_secs() + 1);
 
         assert_eq!(mgr.pending_inbound_count(), 1);
         mgr.reserve_inbound(c)
@@ -1190,7 +1196,7 @@ mod tests {
         let addr = "203.0.113.20:33369";
         mgr.reserve_outbound(addr).expect("reserve outbound");
         mgr.pending_outbound.get_mut(addr).unwrap().reserved_at =
-            Instant::now() - Duration::from_secs(STALE_PENDING_OUTBOUND_SECS + 1);
+            Instant::now() - Duration::from_secs(stale_pending_outbound_secs() + 1);
 
         assert_eq!(mgr.pending_outbound_count(), 0);
         mgr.reserve_outbound("203.0.113.21:33369")
