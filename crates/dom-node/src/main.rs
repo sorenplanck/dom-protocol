@@ -40,6 +40,14 @@ async fn main() -> anyhow::Result<()> {
         config.p2p_listen_addr = addr;
     }
 
+    // Allow internal Prometheus metrics endpoint via DOM_METRICS_LISTEN_ADDR.
+    // Prefer loopback bindings such as 127.0.0.1:3371; metrics expose node
+    // health and topology signals and should not be public by default.
+    if let Ok(addr) = std::env::var("DOM_METRICS_LISTEN_ADDR") {
+        info!("Enabling metrics listen address: {addr}");
+        config.metrics_listen_addr = Some(addr);
+    }
+
     // Allow override of data dir via DOM_DATA_DIR.
     if let Ok(dir) = std::env::var("DOM_DATA_DIR") {
         info!("Overriding data dir: {dir}");
