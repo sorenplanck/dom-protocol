@@ -149,6 +149,10 @@ impl NodeHandle for NodeHandleImpl {
         Ok(tx_hash)
     }
 
+    fn network(&self) -> &'static str {
+        self.0.config.network.as_str()
+    }
+
     fn get_block_header(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
         let c = self.0.chain.try_lock().ok()?;
         c.store.get_block_header(hash).ok().flatten()
@@ -526,6 +530,42 @@ mod tests {
             "rollback must persist across restart"
         );
         assert_eq!(reopened.network(), Network::Regtest);
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_file(&wallet_path);
+    }
+
+    #[test]
+    fn network_reports_configured_value_not_hardcoded_mainnet() {
+        // DOM-AUDIT-006: NodeHandle::network() must reflect the node's actual
+        // configured network. test_config uses Regtest, so the handle must
+        // report "regtest" — never the old hardcoded "mainnet".
+        let unique = format!(
+            "dom-node-handle-network-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos()
+        );
+        let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
+        let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_file(&wallet_path);
+
+        let node = std::sync::Arc::new(
+            DomNode::init_with_map_size(
+                test_config(
+                    data_dir.to_str().expect("utf8 data dir"),
+                    wallet_path.to_str().expect("utf8 wallet path"),
+                ),
+                TEST_LMDB_MAP_SIZE,
+            )
+            .expect("init node"),
+        );
+        let handle = NodeHandleImpl(node);
+
+        assert_eq!(handle.network(), "regtest");
+        assert_ne!(handle.network(), "mainnet");
 
         let _ = std::fs::remove_dir_all(&data_dir);
         let _ = std::fs::remove_file(&wallet_path);
