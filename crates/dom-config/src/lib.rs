@@ -51,6 +51,17 @@ impl Network {
         }
     }
 
+    /// Lowercase network name as reported over RPC (`/status`) and in log
+    /// banners: `"mainnet"`, `"testnet"`, or `"regtest"`. Informational only;
+    /// network isolation is enforced by [`magic`](Self::magic), not this string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Network::Mainnet => "mainnet",
+            Network::Testnet => "testnet",
+            Network::Regtest => "regtest",
+        }
+    }
+
     /// `true` if this network exists for local development only and must
     /// never reach a real-network peer. Magic-byte isolation is the
     /// primary guarantee; this helper is informational (e.g. for log
@@ -178,5 +189,17 @@ impl NodeConfig {
             log_level: "debug".into(),
             rpc_listen_addr: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Network;
+
+    #[test]
+    fn network_as_str_matches_variant() {
+        assert_eq!(Network::Mainnet.as_str(), "mainnet");
+        assert_eq!(Network::Testnet.as_str(), "testnet");
+        assert_eq!(Network::Regtest.as_str(), "regtest");
     }
 }

@@ -22,6 +22,12 @@ pub trait NodeHandle: Send + Sync + 'static {
     fn get_mempool_tx(&self, hash: &[u8; 32]) -> Option<MempoolTxInfo>;
     fn submit_tx(&self, tx_bytes: Vec<u8>) -> Result<[u8; 32], RpcError>;
 
+    /// Lowercase name of the network this node is configured for —
+    /// `"mainnet"`, `"testnet"`, or `"regtest"`. Reported verbatim by
+    /// `/status`. Implementations must read the node's actual config, never
+    /// a hardcoded literal.
+    fn network(&self) -> &'static str;
+
     /// Get block header bytes by hash. Returns None if not found.
     fn get_block_header(&self, hash: &[u8; 32]) -> Option<Vec<u8>>;
 
@@ -337,7 +343,7 @@ async fn status(State(handle): State<Arc<dyn NodeHandle>>) -> Json<StatusRespons
         version: PROTOCOL_VERSION,
         chain_height: handle.chain_height(),
         mempool_size: handle.mempool_size(),
-        network: "mainnet",
+        network: handle.network(),
     })
 }
 
@@ -568,6 +574,7 @@ mod tests {
     struct MockNode {
         height: u64,
         txs: Mutex<HashMap<[u8; 32], MempoolTxInfo>>,
+        network: &'static str,
     }
 
     impl MockNode {
@@ -575,6 +582,14 @@ mod tests {
             Self {
                 height,
                 txs: Mutex::new(HashMap::new()),
+                network: "regtest",
+            }
+        }
+
+        fn with_network(height: u64, network: &'static str) -> Self {
+            Self {
+                network,
+                ..Self::new(height)
             }
         }
     }
@@ -585,6 +600,9 @@ mod tests {
         }
         fn mempool_size(&self) -> usize {
             self.txs.lock().unwrap().len()
+        }
+        fn network(&self) -> &'static str {
+            self.network
         }
         fn mempool_tx_hashes(&self) -> Vec<[u8; 32]> {
             self.txs.lock().unwrap().keys().copied().collect()
@@ -629,6 +647,9 @@ mod tests {
         fn mempool_size(&self) -> usize {
             0
         }
+        fn network(&self) -> &'static str {
+            "regtest"
+        }
         fn mempool_tx_hashes(&self) -> Vec<[u8; 32]> {
             vec![]
         }
@@ -656,6 +677,9 @@ mod tests {
         }
         fn mempool_size(&self) -> usize {
             0
+        }
+        fn network(&self) -> &'static str {
+            "regtest"
         }
         fn mempool_tx_hashes(&self) -> Vec<[u8; 32]> {
             vec![]
@@ -729,10 +753,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
-        assert_eq!(
-            body_json(r).await["version"],
-            serde_json::json!(PROTOCOL_VERSION)
-        );
+        let body = body_json(r).await;
+        assert_eq!(body["version"], serde_json::json!(PROTOCOL_VERSION));
+        // app()'s MockNode is configured for regtest, so /status must report
+        // it — never the old hardcoded "mainnet" (DOM-AUDIT-006).
+        assert_eq!(body["network"], serde_json::json!("regtest"));
+    }
+
+    #[tokio::test]
+    async fn status_reports_configured_network_not_mainnet() {
+        // A node configured for testnet must not report itself as mainnet.
+        let app = app_with(MockNode::with_network(7, "testnet"));
+        let r = app
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = body_json(r).await;
+        assert_eq!(body["network"], serde_json::json!("testnet"));
+        assert_ne!(body["network"], serde_json::json!("mainnet"));
     }
 
     #[tokio::test]
