@@ -201,9 +201,11 @@ Especificar explicitamente:
 2. O gerador H nos Bulletproofs DEVE ser o mesmo H derivado via hash-to-curve
 3. Transcript: definir exatamente a sequência de labels e dados no transcript Merlin
 4. Provas são individuais por output (não agregadas) na versão 1.0
-5. MAX_PROOF_SIZE = 4096 bytes: verificar se é suficiente para Bulletproofs+ simples
-   (uma prova Bulletproofs+ para range [0, 2^64) em secp256k1 tem ~672 bytes,
-   então 4096 é adequado, mas DEVE ser documentado)
+5. RESOLVIDO: MAX_PROOF_SIZE = 6144 bytes é suficiente e correto para a
+   implementação atual. Provas DOM v1 são individuais por output (não
+   agregadas), range [0, 2^52), via secp256k1-zkp; o proof serializado real
+   mede ~4166 bytes. A estimativa anterior de ~672 bytes era teórica e não
+   correspondia ao proof concreto desta implementação.
 ```
 
 ---
