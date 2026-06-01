@@ -38,7 +38,7 @@ All weight values are in abstract "weight units" (wu). This is the canonical def
 
 ```
 weight(TransactionInput)  = 1 wu
-weight(TransactionOutput) = 21 wu   // 33 (commitment) + 4096 (max proof) scaled
+weight(TransactionOutput) = 21 wu   // abstract scaled unit; proof bytes are capped separately
 weight(TransactionKernel) = 3 wu    // features(1) + fee(8) + excess(33) + sig(65) + lock(8) scaled
 weight(CoinbaseKernel)    = 2 wu    // lighter: no fee, no lock_height
 
@@ -47,6 +47,12 @@ weight(Transaction) =
   + sum(weight(output) for output in tx.outputs)
   + sum(weight(kernel) for kernel in tx.kernels)
 ```
+
+`WEIGHT_OUTPUT = 21 wu` is a fixed consensus weight unit, not a formula derived
+from serialized proof bytes. DOM v1 range proofs are non-aggregated
+single-output Bulletproof+ proofs; the current secp256k1-zkp implementation
+serializes them at approximately 4166 bytes, and `MAX_PROOF_SIZE = 6144` is the
+independent malformed-payload sanity cap.
 
 ### 1.2 Block Weight
 
