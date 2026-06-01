@@ -299,7 +299,7 @@ async fn finalize_mined_block(node: &Arc<DomNode>, block: Block) -> Result<u64, 
     //
     // Audit (2026-05-23, first auditor): SideChain should not be warn-level
     // because it pollutes logs under normal pool/solo miner concurrency.
-    match connect_outcome {
+    match &connect_outcome {
         dom_chain::ConnectResult::BestChain => { /* normal path */ }
         dom_chain::ConnectResult::Reorg(_) => {
             tracing::debug!(
@@ -341,18 +341,19 @@ async fn finalize_mined_block(node: &Arc<DomNode>, block: Block) -> Result<u64, 
     .map_err(|e| DomError::Internal(format!("mempool reconciliation: {e}")))?;
 
     // Scan block for wallet outputs (coinbase reward recovery).
-    if matches!(connect_outcome, dom_chain::ConnectResult::BestChain) {
+    if matches!(
+        &connect_outcome,
+        dom_chain::ConnectResult::BestChain | dom_chain::ConnectResult::Reorg(_)
+    ) {
         if let Some(ref wallet_arc) = node.wallet {
             let mut wallet = wallet_arc.lock().await;
-            wallet
-                .apply_canonical_block(&block.transactions, new_height)
-                .map_err(|e| DomError::Internal(format!("wallet canonical block apply: {e}")))?;
+            apply_wallet_after_mined_connect(
+                &mut wallet,
+                &connect_outcome,
+                &block.transactions,
+                new_height,
+            )?;
         }
-    } else if matches!(connect_outcome, dom_chain::ConnectResult::Reorg(_)) {
-        tracing::debug!(
-            "Skipping wallet canonical apply for mined reorg block at height {}; rollback hooks remain explicit follow-up work",
-            new_height
-        );
     }
 
     // Relay newly-mined block to all connected peers via broadcast channel.
@@ -367,6 +368,37 @@ async fn finalize_mined_block(node: &Arc<DomNode>, block: Block) -> Result<u64, 
     node.notify_state_changed();
 
     Ok(new_height)
+}
+
+fn apply_wallet_after_mined_connect(
+    wallet: &mut dom_wallet::Wallet,
+    connect_outcome: &dom_chain::ConnectResult,
+    block_transactions: &[Transaction],
+    new_height: u64,
+) -> Result<(), DomError> {
+    match connect_outcome {
+        dom_chain::ConnectResult::BestChain => wallet
+            .apply_canonical_block(block_transactions, new_height)
+            .map_err(|e| DomError::Internal(format!("wallet canonical block apply: {e}"))),
+        dom_chain::ConnectResult::Reorg(delta) => {
+            wallet
+                .rollback_to(delta.common_ancestor_height)
+                .map_err(|e| DomError::Internal(format!("wallet mined reorg rollback: {e}")))?;
+            for block in &delta.connected_blocks {
+                wallet
+                    .apply_canonical_block_with_hash(
+                        &block.transactions,
+                        block.block_height,
+                        Some(block.block_hash),
+                    )
+                    .map_err(|e| {
+                        DomError::Internal(format!("wallet mined reorg block apply: {e}"))
+                    })?;
+            }
+            Ok(())
+        }
+        dom_chain::ConnectResult::SideChain | dom_chain::ConnectResult::AlreadyHave => Ok(()),
+    }
 }
 
 /// Create the deterministic genesis block on a fresh chain.
@@ -897,24 +929,28 @@ mod genesis_determinism_tests {
     //!      Mainnet vs Testnet vs Regtest genesis must NOT collide).
 
     use super::{
-        build_genesis_coinbase, build_real_coinbase, finalize_mined_block, mine_blocking,
-        MinerThrottle,
+        apply_wallet_after_mined_connect, build_genesis_coinbase, build_real_coinbase,
+        finalize_mined_block, mine_blocking, MinerThrottle,
     };
     use crate::node::DomNode;
+    use dom_chain::{ConnectResult, ReorgBlockDelta, ReorgDelta};
     use dom_config::{MinerThrottleConfig, NodeConfig};
     use dom_consensus::block::validate_pow_for_network;
     use dom_consensus::block::{BlockHeader, ProofOfWork};
     use dom_consensus::compute_block_pmmr_roots;
-    use dom_consensus::Block;
+    use dom_consensus::{Block, Transaction};
     use dom_core::{
         BlockHeight, Hash256, Timestamp, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST,
         NETWORK_MAGIC_TESTNET, PROTOCOL_VERSION,
     };
+    use dom_crypto::pedersen::Commitment;
+    use dom_crypto::BlindingFactor;
     use dom_pow::{
         compute_expected_target, fast_pow_hash, genesis_anchor, hash_meets_target,
         target_to_compact, target_to_difficulty, PowValidationMode, REGTEST_TARGET_COMPACT,
     };
     use dom_serialization::DomSerialize;
+    use dom_wallet::{Network, OwnedOutput, WalletDir};
     use primitive_types::U256;
     use std::fs;
     use std::path::PathBuf;
@@ -984,6 +1020,75 @@ mod genesis_determinism_tests {
 
     fn disabled_throttle() -> MinerThrottle {
         MinerThrottle::from_config(&MinerThrottleConfig::default())
+    }
+
+    #[test]
+    fn mined_reorg_wallet_apply_rolls_back_and_applies_connected_blocks() {
+        let dir = fresh_test_dir("wallet-mined-reorg-apply");
+        let mut wd = WalletDir::create(
+            &dir,
+            "pw",
+            Network::Regtest,
+            &Hash256::from_bytes([0x42; 32]),
+        )
+        .expect("wallet dir");
+
+        let stale_blinding = BlindingFactor::random();
+        let stale_commitment = Commitment::commit(123, &stale_blinding);
+        let stale_commitment_bytes = *stale_commitment.as_bytes();
+        wd.wallet_mut().add_output(
+            OwnedOutput::new(
+                stale_commitment_bytes,
+                123,
+                *stale_blinding.as_bytes(),
+                3,
+                true,
+            )
+            .with_block_hash([0xA3; 32]),
+        );
+
+        let coinbase = wd
+            .wallet_mut()
+            .build_coinbase(BlockHeight(2), 0)
+            .expect("coinbase");
+        let canonical_commitment = *coinbase.output.commitment.as_bytes();
+        assert!(wd.wallet_mut().forget_output(&canonical_commitment));
+
+        let connected_tx = Transaction {
+            inputs: vec![],
+            outputs: vec![coinbase.output],
+            kernels: vec![],
+            offset: [0u8; 32],
+        };
+        let canonical_hash = [0xB2; 32];
+        let delta = ReorgDelta {
+            common_ancestor_height: 1,
+            connected_blocks: vec![ReorgBlockDelta {
+                block_hash: canonical_hash,
+                block_height: 2,
+                transactions: vec![connected_tx],
+            }],
+            ..Default::default()
+        };
+
+        apply_wallet_after_mined_connect(wd.wallet_mut(), &ConnectResult::Reorg(delta), &[], 2)
+            .expect("wallet mined reorg apply");
+
+        assert!(
+            wd.wallet()
+                .outputs()
+                .all(|output| output.commitment != stale_commitment_bytes),
+            "rollback must remove outputs above the common ancestor"
+        );
+        let recovered = wd
+            .wallet()
+            .outputs()
+            .find(|output| output.commitment == canonical_commitment)
+            .expect("connected reorg block must be applied to wallet");
+        assert_eq!(recovered.block_height, 2);
+        assert_eq!(recovered.block_hash, Some(canonical_hash));
+
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
     #[allow(clippy::too_many_arguments)]
