@@ -1021,6 +1021,10 @@ impl dom_rpc::NodeHandle for DomNode {
         self.mempool.try_lock().map(|m| m.len()).unwrap_or(0)
     }
 
+    fn network(&self) -> &'static str {
+        self.config.network.as_str()
+    }
+
     fn mempool_tx_hashes(&self) -> Vec<[u8; 32]> {
         self.mempool
             .try_lock()
