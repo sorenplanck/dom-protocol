@@ -46,7 +46,7 @@ use dom_consensus::transaction::Transaction;
 use dom_serialization::DomSerialize;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
 use url::Url;
@@ -209,6 +209,13 @@ pub struct TxSubmitOutcome {
     pub tx_hash: [u8; 32],
 }
 
+/// Outcome of a successful `POST /wallet/spend` call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalletSpendOutcome {
+    /// Transaction hash returned by the node after building and submitting.
+    pub tx_hash: [u8; 32],
+}
+
 /// Snapshot of a transaction sitting in the node's mempool.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MempoolTxInfo {
@@ -304,6 +311,33 @@ impl NodeRpcClient {
     /// The base URL the client was constructed with.
     pub fn base_url(&self) -> &Url {
         &self.base_url
+    }
+
+    /// `POST /wallet/spend`. This endpoint is bearer-token protected by
+    /// the node and builds a wallet spend to an exact commitment/blinding.
+    pub fn wallet_spend(
+        &self,
+        recipient_commitment: String,
+        recipient_blinding: String,
+        amount_noms: u64,
+        fee_noms: u64,
+    ) -> Result<WalletSpendOutcome, RpcClientError> {
+        let url = self.url_for("wallet/spend")?;
+        let url_s = url.to_string();
+        let body = WireSpendRequest {
+            recipient_commitment,
+            recipient_blinding,
+            amount_noms,
+            fee_noms,
+        };
+        let resp = self.send(self.with_auth(self.http.post(url).json(&body)), &url_s)?;
+        let status = resp.status();
+        if status == StatusCode::OK {
+            let parsed: WireWalletSpend = decode_body(resp, &url_s)?;
+            let tx_hash = parse_hash_hex(&parsed.tx_hash, &url_s)?;
+            return Ok(WalletSpendOutcome { tx_hash });
+        }
+        Err(classify_response_status(resp, status, &url_s))
     }
 
     fn url_for(&self, path: &str) -> Result<Url, RpcClientError> {
@@ -646,6 +680,19 @@ struct WireSubmitTx {
     tx_hash: Option<String>,
     #[serde(default)]
     error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WireSpendRequest {
+    recipient_commitment: String,
+    recipient_blinding: String,
+    amount_noms: u64,
+    fee_noms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireWalletSpend {
+    tx_hash: String,
 }
 
 #[derive(Debug, Deserialize)]
