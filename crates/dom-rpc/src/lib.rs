@@ -350,16 +350,33 @@ async fn status(State(handle): State<Arc<dyn NodeHandle>>) -> Json<StatusRespons
 async fn mempool(
     State(handle): State<Arc<dyn NodeHandle>>,
     Query(params): Query<MempoolQuery>,
-) -> impl IntoResponse {
+) -> Response {
     let limit = params.limit.clamp(1, MEMPOOL_MAX_LIMIT);
     let page = params.page;
+
+    // `page` is client-controlled and unbounded; `page * limit` (usize) can
+    // overflow (panic under overflow-checks, silent wrap in release). Compute
+    // the offset with a checked multiply and reject an overflowing page with a
+    // clean 400 instead. A valid page past the end is handled by `skip` below.
+    let offset = match page.checked_mul(limit) {
+        Some(offset) => offset,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "page too large".to_owned(),
+                }),
+            )
+                .into_response()
+        }
+    };
 
     let all_hashes = handle.mempool_tx_hashes();
     let total = all_hashes.len();
 
     let tx_hashes = all_hashes
         .into_iter()
-        .skip(page * limit)
+        .skip(offset)
         .take(limit)
         .map(hex::encode)
         .collect::<Vec<_>>();
@@ -373,6 +390,7 @@ async fn mempool(
         limit,
         tx_hashes,
     })
+    .into_response()
 }
 
 async fn submit_tx(
@@ -843,6 +861,61 @@ mod tests {
         let body = body_json(r).await;
         assert_eq!(body["total"], serde_json::json!(5));
         assert_eq!(body["count"], serde_json::json!(1));
+    }
+
+    #[tokio::test]
+    async fn mempool_pagination_overflow_returns_400() {
+        // A client-controlled `page` of usize::MAX makes `page * limit` overflow.
+        // Before the fix this panics under overflow-checks (debug); after it must
+        // be a clean 400 — never a panic and never a 500.
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/mempool?page={}", usize::MAX))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_json(r).await,
+            serde_json::json!({"error": "page too large"})
+        );
+    }
+
+    #[tokio::test]
+    async fn mempool_normal_pagination_unchanged() {
+        let node = MockNode::new(0);
+        for i in 1u8..=5 {
+            let mut hash = [0u8; 32];
+            hash[0] = i;
+            node.txs.lock().unwrap().insert(
+                hash,
+                MempoolTxInfo {
+                    tx_hash: hash,
+                    fee: 0,
+                    fee_rate: 0,
+                    weight: 0,
+                },
+            );
+        }
+        let r = app_with(node)
+            .oneshot(
+                Request::builder()
+                    .uri("/mempool?page=1&limit=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = body_json(r).await;
+        assert_eq!(body["total"], serde_json::json!(5));
+        assert_eq!(body["count"], serde_json::json!(2));
+        assert_eq!(body["page"], serde_json::json!(1));
+        assert_eq!(body["limit"], serde_json::json!(2));
+        assert_eq!(body["tx_hashes"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]
