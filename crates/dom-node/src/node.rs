@@ -2433,7 +2433,14 @@ async fn resume_ibd_block_sync(
                 })?;
             let height = block.header.height.0;
             let txs_for_scan = block.transactions.clone();
-            {
+            // DOM-AUDIT-001: connect the block under the chain guard, capture
+            // the owned `ConnectResult` (and `best_chain`), then DROP the guard
+            // before any follow-up work. `purge_mempool_confirmed_inputs`
+            // re-acquires the chain lock (via `persist_mempool_state`); calling
+            // it while the guard is still alive deadlocks the non-reentrant
+            // Tokio mutex. Mirrors the correct call-sites (deferred replay /
+            // orphan reprocess / peer block): capture-in-scope, act-after-drop.
+            let (connect_result, best_chain) = {
                 let mut c = chain.lock().await;
                 let connect_result = match c.connect_block(
                     &block,
@@ -2475,49 +2482,52 @@ async fn resume_ibd_block_sync(
                         false
                     }
                 };
-                if best_chain {
-                    purge_mempool_confirmed_inputs(chain, &runtime.mempool, &txs_for_scan).await?;
-                    if let Some(ref wallet_arc) = runtime.wallet {
-                        let mut w = wallet_arc.lock().await;
-                        match connect_result {
-                            dom_chain::ConnectResult::BestChain => {
+                (connect_result, best_chain)
+            };
+            // Chain guard dropped above. The following re-acquire chain/mempool/
+            // wallet internally and must run with NO chain guard held.
+            if best_chain {
+                purge_mempool_confirmed_inputs(chain, &runtime.mempool, &txs_for_scan).await?;
+                if let Some(ref wallet_arc) = runtime.wallet {
+                    let mut w = wallet_arc.lock().await;
+                    match connect_result {
+                        dom_chain::ConnectResult::BestChain => {
+                            w.apply_canonical_block_with_hash(
+                                &txs_for_scan,
+                                height,
+                                Some(*expected_hash),
+                            )
+                            .map_err(|e| {
+                                DomError::Internal(format!(
+                                    "wallet canonical block apply during resumed IBD failed: {e}"
+                                ))
+                            })?;
+                        }
+                        dom_chain::ConnectResult::Reorg(delta) => {
+                            w.rollback_to(delta.common_ancestor_height).map_err(|e| {
+                                DomError::Internal(format!(
+                                    "wallet rollback during resumed IBD reorg failed: {e}"
+                                ))
+                            })?;
+                            for block in &delta.connected_blocks {
                                 w.apply_canonical_block_with_hash(
-                                    &txs_for_scan,
-                                    height,
-                                    Some(*expected_hash),
+                                    &block.transactions,
+                                    block.block_height,
+                                    Some(block.block_hash),
                                 )
                                 .map_err(|e| {
                                     DomError::Internal(format!(
-                                        "wallet canonical block apply during resumed IBD failed: {e}"
+                                        "wallet canonical reorg block apply during resumed IBD failed: {e}"
                                     ))
                                 })?;
                             }
-                            dom_chain::ConnectResult::Reorg(delta) => {
-                                w.rollback_to(delta.common_ancestor_height).map_err(|e| {
-                                    DomError::Internal(format!(
-                                        "wallet rollback during resumed IBD reorg failed: {e}"
-                                    ))
-                                })?;
-                                for block in &delta.connected_blocks {
-                                    w.apply_canonical_block_with_hash(
-                                        &block.transactions,
-                                        block.block_height,
-                                        Some(block.block_hash),
-                                    )
-                                    .map_err(|e| {
-                                        DomError::Internal(format!(
-                                            "wallet canonical reorg block apply during resumed IBD failed: {e}"
-                                        ))
-                                    })?;
-                                }
-                            }
-                            dom_chain::ConnectResult::SideChain
-                            | dom_chain::ConnectResult::AlreadyHave => {}
                         }
+                        dom_chain::ConnectResult::SideChain
+                        | dom_chain::ConnectResult::AlreadyHave => {}
                     }
                 }
-                runtime.state_events.notify_waiters();
             }
+            runtime.state_events.notify_waiters();
             processed = processed.saturating_add(1);
             persist_ibd_state(
                 chain,
@@ -5643,6 +5653,82 @@ mod tests {
             0,
             "confirmed inputs must be purged from mempool"
         );
+        fs::remove_dir_all(&dir).expect("cleanup test dir");
+    }
+
+    /// DOM-AUDIT-001 regression. `resume_ibd_block_sync` used to call
+    /// `purge_mempool_confirmed_inputs` while the chain guard `c` from
+    /// `connect_block` was still alive. `purge` re-acquires the chain lock via
+    /// `persist_mempool_state`, and tokio's `Mutex` is NOT reentrant, so the IBD
+    /// task deadlocked on its own guard. The fix captures the `ConnectResult`
+    /// under the guard, drops it, and only then purges + applies to the wallet.
+    ///
+    /// This test pins both halves of the invariant on the non-empty purge path
+    /// (a non-coinbase tx whose input commitment is live in the mempool, which
+    /// forces the re-acquiring `persist_mempool_state` branch):
+    ///   1. holding the chain guard across `purge` deadlocks (pre-fix behaviour),
+    ///   2. dropping it first lets `purge` complete and empties the mempool.
+    /// The deadlock is detected with a short `tokio::time::timeout`: the IBD task
+    /// parks forever on the self-held mutex while the runtime's timer driver
+    /// still fires the timeout, so the pre-fix branch resolves to `Err(Elapsed)`
+    /// rather than hanging the test. The fixed branch completes in microseconds,
+    /// well inside its (deliberately generous) timeout.
+    #[tokio::test]
+    async fn ibd_resume_purge_after_connect_does_not_deadlock_on_chain_relock() {
+        let dir = fresh_test_dir("ibd-purge-relock");
+        let chain = open_chain(&dir);
+        let shared_input = commitment(9, 50);
+
+        // (1) Pre-fix pattern: chain guard held across purge -> must deadlock.
+        {
+            let mempool = Arc::new(Mutex::new(Mempool::new()));
+            let tx = spending_tx(shared_input.clone(), 0x21);
+            {
+                let mut pool = mempool.lock().await;
+                pool.accept_tx(tx.clone(), [0x21; 32], 0)
+                    .expect("accept tx");
+                assert_eq!(pool.len(), 1);
+            }
+
+            let guard = chain.lock().await;
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                purge_mempool_confirmed_inputs(&chain, &mempool, &[tx]),
+            )
+            .await;
+            assert!(
+                outcome.is_err(),
+                "purge while holding the chain guard must deadlock on the re-acquire (DOM-AUDIT-001)"
+            );
+            drop(guard);
+        }
+
+        // (2) Fixed pattern: guard dropped before purge -> completes + purges.
+        {
+            let mempool = Arc::new(Mutex::new(Mempool::new()));
+            let tx = spending_tx(shared_input, 0x22);
+            {
+                let mut pool = mempool.lock().await;
+                pool.accept_tx(tx.clone(), [0x22; 32], 0)
+                    .expect("accept tx");
+                assert_eq!(pool.len(), 1);
+            }
+
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                purge_mempool_confirmed_inputs(&chain, &mempool, &[tx]),
+            )
+            .await
+            .expect("purge must not deadlock once the chain guard is dropped")
+            .expect("purge succeeds");
+
+            assert_eq!(
+                mempool.lock().await.len(),
+                0,
+                "confirmed inputs must be purged once the chain guard is released"
+            );
+        }
+
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
