@@ -168,13 +168,6 @@ impl DomDeserialize for CoinbaseKernel {
             )));
         }
         let explicit_value = r.read_u64()?;
-        // explicit_value must be non-zero — a zero coinbase reward is suspicious
-        // (could indicate a serialization bug or attempt to create a free coinbase)
-        if explicit_value == 0 {
-            return Err(DomError::Invalid(
-                "coinbase explicit_value must be non-zero".into(),
-            ));
-        }
         let excess = Commitment::from_compressed_bytes(&r.read_array::<33>()?)?;
         let excess_signature = r.read_array::<65>()?;
         Ok(Self {
@@ -551,6 +544,41 @@ mod tests {
             excess_signature: [0u8; 65],
         };
         assert!(k.validate_explicit_value(BlockHeight(0), 5000).is_ok());
+    }
+
+    #[test]
+    fn coinbase_kernel_deserialize_accepts_zero_explicit_value() {
+        use dom_serialization::{DomDeserialize, DomSerialize};
+
+        let k = CoinbaseKernel {
+            features: KERNEL_FEAT_COINBASE,
+            explicit_value: 0,
+            excess: g_point(),
+            excess_signature: [0u8; 65],
+        };
+        let bytes = k.to_bytes().unwrap();
+        let decoded = CoinbaseKernel::from_bytes(&bytes).expect("zero value decodes");
+
+        assert_eq!(decoded.explicit_value, 0);
+        assert_eq!(decoded.features, KERNEL_FEAT_COINBASE);
+    }
+
+    #[test]
+    fn coinbase_zero_value_valid_only_when_reward_plus_fees_is_zero() {
+        let k = CoinbaseKernel {
+            features: KERNEL_FEAT_COINBASE,
+            explicit_value: 0,
+            excess: g_point(),
+            excess_signature: [0u8; 65],
+        };
+
+        assert!(k
+            .validate_explicit_value(BlockHeight(HALVING_INTERVAL * 54), 0)
+            .is_ok());
+        assert!(k.validate_explicit_value(BlockHeight(0), 0).is_err());
+        assert!(k
+            .validate_explicit_value(BlockHeight(HALVING_INTERVAL * 54), 1)
+            .is_err());
     }
 
     #[test]
