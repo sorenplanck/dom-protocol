@@ -210,15 +210,18 @@ fn addr_response_caps_at_max_addr_response() {
     );
 }
 
-/// decode_addr_payload MUST not panic on a payload claiming
-/// `count = u16::MAX` — internally clamped to MAX_ADDR_RESPONSE.
+/// decode_addr_payload MUST reject a payload claiming
+/// `count = u16::MAX` before allocating based on the declared count.
 #[test]
-fn decode_addr_payload_handles_oversized_count() {
+fn decode_addr_payload_rejects_oversized_count() {
     let mut buf = u16::MAX.to_le_bytes().to_vec();
-    // Stop after the count — decoder sees the truncation and
-    // returns whatever it managed to parse, not a panic.
     buf.extend_from_slice(&[0u8; 32]); // partial body
-    let _ = decode_addr_payload(&buf).expect("must not panic");
+
+    let err = decode_addr_payload(&buf).expect_err("oversized count must reject");
+    assert!(
+        format!("{err}").contains("addr count exceeds limit"),
+        "unexpected error: {err}"
+    );
 }
 
 // ── (7) MAX_PEER_AGE_SECS is honoured for shared peers ───────────────────────
