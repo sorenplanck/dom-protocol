@@ -1410,12 +1410,17 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "dom-core",
+ "dom-crypto",
+ "dom-wallet",
+ "hex",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tower-http 0.5.2",
  "tracing",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
