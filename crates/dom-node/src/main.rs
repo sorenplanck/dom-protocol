@@ -48,6 +48,14 @@ async fn main() -> anyhow::Result<()> {
         config.metrics_listen_addr = Some(addr);
     }
 
+    // Allow enabling the RPC server via DOM_RPC_LISTEN_ADDR.
+    // The RPC exposes /status, /block, /wallet/spend (bearer-auth) etc. Prefer an internal
+    // binding (127.0.0.1) or a firewalled interface; /wallet/spend is sensitive.
+    if let Ok(addr) = std::env::var("DOM_RPC_LISTEN_ADDR") {
+        info!("Enabling RPC listen address: {addr}");
+        config.rpc_listen_addr = Some(addr);
+    }
+
     // Allow override of data dir via DOM_DATA_DIR.
     if let Ok(dir) = std::env::var("DOM_DATA_DIR") {
         info!("Overriding data dir: {dir}");
