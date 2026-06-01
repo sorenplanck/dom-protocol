@@ -168,6 +168,13 @@ impl Mempool {
         }
     }
 
+    /// Override the weight cap. Test-only: lets eviction tests fill the pool
+    /// with a handful of small transactions instead of `10 * MAX_BLOCK_WEIGHT`.
+    #[cfg(test)]
+    fn set_max_weight_for_test(&mut self, max_weight: u64) {
+        self.max_weight = max_weight;
+    }
+
     /// Current transaction count.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -253,10 +260,42 @@ impl Mempool {
             )));
         }
 
-        // Evict low-fee transactions if pool is full
-        if self.total_weight + entry.weight as u64 > self.max_weight {
-            self.evict_lowest_fee(entry.fee_rate)?;
+        // A transaction heavier than the entire pool capacity can never be
+        // admitted — no amount of eviction frees enough room. Reject up front
+        // so the eviction loop below always has a reachable exit (DOM-AUDIT-003).
+        if entry.weight as u64 > self.max_weight {
+            return Err(DomError::PolicyRejected(format!(
+                "tx weight {} exceeds mempool max_weight {}",
+                entry.weight, self.max_weight
+            )));
         }
+
+        // Evict low-fee transactions until the incoming tx fits. A single
+        // eviction can be insufficient when the incoming tx is heavier than
+        // the one evicted, which previously left total_weight above max_weight
+        // (DOM-AUDIT-003, DoS). Loop instead — but never spin: each iteration
+        // either removes exactly one strictly-cheaper tx (evict_lowest_fee
+        // returns Ok) or returns Err. The fee policy is preserved across the
+        // whole loop: evict_lowest_fee refuses (PolicyRejected) once the
+        // cheapest pooled tx is not strictly cheaper than the incoming one, so
+        // we never evict a >= fee tx to admit a < fee one. The weight-progress
+        // guard is a defensive backstop: if a successful eviction ever freed
+        // nothing (e.g. an empty pool still over cap), stop instead of looping.
+        while self.total_weight + entry.weight as u64 > self.max_weight {
+            let weight_before = self.total_weight;
+            self.evict_lowest_fee(entry.fee_rate)?;
+            if self.total_weight >= weight_before {
+                return Err(DomError::PolicyRejected(
+                    "mempool full, unable to free enough space for incoming tx".into(),
+                ));
+            }
+        }
+
+        // Invariant: after the loop the incoming tx fits within the weight cap.
+        debug_assert!(
+            self.total_weight + entry.weight as u64 <= self.max_weight,
+            "eviction loop must leave room for the incoming tx"
+        );
 
         debug!(
             "Mempool: accepted tx {} fee_rate={}",
@@ -909,5 +948,133 @@ mod tests {
         assert!(pool.get_tx(&hash_a).is_none());
         assert!(pool.get_tx(&hash_b).is_some());
         assert_eq!(pool.all_hashes(), vec![hash_b]);
+    }
+
+    /// Build a structurally-valid (legacy-path) tx with `num_outputs` distinct
+    /// outputs and one kernel, so its weight is
+    /// `num_outputs * WEIGHT_OUTPUT + WEIGHT_KERNEL`. `seed` makes the output
+    /// commitments and `tx_hash` distinct across calls.
+    fn make_tx_weighted(fee: u64, num_outputs: u32, seed: u8) -> (Transaction, [u8; 32]) {
+        let outputs = (0..num_outputs)
+            .map(|i| TransactionOutput {
+                // Distinct value per output guarantees a distinct commitment
+                // (so structural duplicate-output detection passes).
+                commitment: Commitment::commit(
+                    1_000 + i as u64,
+                    &scalar(seed.wrapping_add(i as u8)),
+                ),
+                proof: vec![seed; 100],
+            })
+            .collect();
+        let tx = Transaction {
+            inputs: vec![],
+            outputs,
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(fee).unwrap(),
+                lock_height: 0,
+                excess: g_commitment(),
+                excess_signature: [seed; 65],
+            }],
+            offset: [0u8; 32],
+        };
+        let mut hash = [0u8; 32];
+        hash[0..8].copy_from_slice(&fee.to_le_bytes());
+        hash[8] = seed;
+        (tx, hash)
+    }
+
+    // DOM-AUDIT-003: a single eviction can free less weight than a heavier
+    // incoming tx needs. Admission must evict in a loop until it fits, while
+    // preserving the fee policy and never spinning.
+
+    #[test]
+    fn eviction_loops_until_heavy_high_fee_tx_fits() {
+        let mut pool = Mempool::new();
+        pool.set_max_weight_for_test(96); // exactly four small (weight-24) txs
+
+        // Fill to capacity with four small, low-fee txs (weight 24 each).
+        let mut filler_hashes = vec![];
+        for i in 0..4u64 {
+            let fee = 24_000 + i * 24; // fee_rate = 1000 + i (low, >= MIN_RELAY)
+            let (tx, hash) = make_tx(fee);
+            pool.accept_tx(tx, hash, i).unwrap();
+            filler_hashes.push(hash);
+        }
+        assert_eq!(pool.len(), 4);
+        assert_eq!(pool.total_weight, 96);
+
+        // Incoming: heavy (3 outputs + 1 kernel = weight 66) with a far higher
+        // fee rate. 96 + 66 = 162 > 96, and evicting a single 24-weight filler
+        // (→ 138) still doesn't fit: the loop must evict three of them.
+        let (big_tx, big_hash) = make_tx_weighted(66 * 1_000_000, 3, 0x70);
+        assert_eq!(big_tx.weight(), 66);
+        pool.accept_tx(big_tx, big_hash, 100).unwrap();
+
+        // (b) the heavy high-fee tx was accepted.
+        assert!(pool.get_tx(&big_hash).is_some());
+        // (c) the weight cap holds after the single accept call.
+        assert!(pool.total_weight <= pool.max_weight);
+        assert_eq!(pool.total_weight, 90); // one filler (24) + big (66)
+                                           // (a) exactly the necessary number of small txs were evicted (3 of 4).
+        assert_eq!(pool.len(), 2);
+        let remaining = filler_hashes
+            .iter()
+            .filter(|h| pool.get_tx(h).is_some())
+            .count();
+        assert_eq!(remaining, 1, "three of four fillers must be evicted");
+    }
+
+    #[test]
+    fn heavy_low_fee_tx_rejected_and_pool_left_intact() {
+        let mut pool = Mempool::new();
+        pool.set_max_weight_for_test(96);
+
+        // Fill to capacity with four small HIGH-fee txs.
+        let mut hashes = vec![];
+        for i in 0..4u64 {
+            let fee = 24 * 1_000_000 + i * 24; // fee_rate ~ 1_000_000 (high)
+            let (tx, hash) = make_tx(fee);
+            pool.accept_tx(tx, hash, i).unwrap();
+            hashes.push(hash);
+        }
+        assert_eq!(pool.len(), 4);
+        let weight_before = pool.total_weight;
+
+        // Incoming heavy tx whose fee rate (1000) is below everything pooled:
+        // the fee policy forbids evicting any of them, so it must be rejected.
+        let (big_tx, big_hash) = make_tx_weighted(66 * 1_000, 3, 0x70);
+        let err = pool.accept_tx(big_tx, big_hash, 100).unwrap_err();
+        assert!(
+            matches!(err, DomError::PolicyRejected(_)),
+            "expected policy rejection, got {err:?}"
+        );
+
+        // Pool untouched: nothing evicted, nothing added.
+        assert_eq!(pool.len(), 4);
+        assert_eq!(pool.total_weight, weight_before);
+        assert!(pool.get_tx(&big_hash).is_none());
+        for h in &hashes {
+            assert!(
+                pool.get_tx(h).is_some(),
+                "high-fee txs must survive a rejected low-fee insert"
+            );
+        }
+    }
+
+    #[test]
+    fn tx_heavier_than_cap_rejected_without_eviction() {
+        let mut pool = Mempool::new();
+        pool.set_max_weight_for_test(50); // smaller than one heavy tx
+
+        // weight = 3 * 21 + 3 = 66 > 50; no eviction can ever make room.
+        let (big_tx, big_hash) = make_tx_weighted(66 * 1_000_000, 3, 0x70);
+        assert!(big_tx.weight() as u64 > 50);
+        let err = pool.accept_tx(big_tx, big_hash, 0).unwrap_err();
+        assert!(
+            matches!(err, DomError::PolicyRejected(ref m) if m.contains("exceeds mempool max_weight")),
+            "expected max_weight rejection, got {err:?}"
+        );
+        assert!(pool.is_empty());
     }
 }
