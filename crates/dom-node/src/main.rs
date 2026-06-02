@@ -16,8 +16,27 @@ async fn main() -> anyhow::Result<()> {
     info!("Author: Soren Planck");
     info!("License: MIT");
 
-    // Load config — default to testnet for now
-    let mut config = NodeConfig::testnet();
+    // Select network via DOM_NETWORK (regtest|testnet|mainnet). Defaults to testnet.
+    // Regtest is a LOCAL dev network with a trivial PoW target — fast blocks, no real mining power
+    // needed. NEVER use regtest for anything public.
+    let mut config = match std::env::var("DOM_NETWORK").as_deref() {
+        Ok("regtest") => {
+            info!("Network: REGTEST (local dev, trivial PoW)");
+            NodeConfig::regtest()
+        }
+        Ok("mainnet") => {
+            info!("Network: MAINNET");
+            NodeConfig::mainnet()
+        }
+        Ok("testnet") | Err(_) => {
+            info!("Network: testnet");
+            NodeConfig::testnet()
+        }
+        Ok(other) => {
+            info!("Unknown DOM_NETWORK={other}, defaulting to testnet");
+            NodeConfig::testnet()
+        }
+    };
 
     // Allow override of seed peers via DOM_SEED_PEERS env var (CSV of host:port).
     // Useful for testnet privado where DNS seeds don't exist.
