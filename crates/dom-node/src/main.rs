@@ -56,6 +56,17 @@ async fn main() -> anyhow::Result<()> {
         config.rpc_listen_addr = Some(addr);
     }
 
+    // Allow disabling mining via DOM_MINE=false (validator/relay-only node).
+    // Accepts "false"/"0"/"no" (case-insensitive) to disable; anything else leaves the default.
+    if let Ok(v) = std::env::var("DOM_MINE") {
+        let on = !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "no" | "off"
+        );
+        info!("Mining set via DOM_MINE={v} -> mine={on}");
+        config.mine = on;
+    }
+
     // Allow override of data dir via DOM_DATA_DIR.
     if let Ok(dir) = std::env::var("DOM_DATA_DIR") {
         info!("Overriding data dir: {dir}");
