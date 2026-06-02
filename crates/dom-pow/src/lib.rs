@@ -87,10 +87,9 @@ pub const MAX_COMPACT_TARGET: u32 = 0x1e7f_ffff;
 
 /// Testnet compact target floor.
 ///
-/// This expands to a target about 32x harder than `MAX_COMPACT_TARGET` under
-/// DOM's current compact-target byte layout while retaining the public
-/// DOM-ASERT-288 spacing and half-life parameters.
-pub const TESTNET_TARGET_COMPACT: u32 = 0x1e7f_ff07;
+/// Testnet now operates at the easiest representable target accepted by
+/// consensus: `MAX_COMPACT_TARGET`, about 546 H/s at 120 seconds per block.
+pub const TESTNET_TARGET_COMPACT: u32 = MAX_COMPACT_TARGET;
 
 /// Regtest compact target. Dev-only and intentionally easy.
 pub const REGTEST_TARGET_COMPACT: u32 = MAX_COMPACT_TARGET;
@@ -1005,11 +1004,16 @@ mod tests {
     }
 
     #[test]
-    fn testnet_floor_is_about_32x_harder_than_easy_compact_target() {
-        let easy = CompactTarget(MAX_COMPACT_TARGET).to_target().unwrap();
+    fn testnet_floor_is_the_global_representable_floor() {
+        // Testnet previously used a dedicated floor about 32x harder than
+        // MAX_COMPACT_TARGET. It now starts at the easiest compact target
+        // accepted by consensus.
         let testnet = CompactTarget(TESTNET_TARGET_COMPACT).to_target().unwrap();
-        let ratio = U256::from_big_endian(&easy) / U256::from_big_endian(&testnet);
-        assert!(ratio >= U256::from(31u8) && ratio <= U256::from(33u8));
+        let max = CompactTarget(MAX_COMPACT_TARGET).to_target().unwrap();
+
+        assert_eq!(TESTNET_TARGET_COMPACT, MAX_COMPACT_TARGET);
+        assert_eq!(TESTNET_TARGET_COMPACT, 0x1e7f_ffff);
+        assert_eq!(testnet, max);
     }
 
     #[test]
