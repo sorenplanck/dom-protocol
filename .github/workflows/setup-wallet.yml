@@ -1,0 +1,58 @@
+name: Setup Wallet From Zip
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: "Path to the uploaded wallet zip (in repo root)"
+        required: false
+        default: "dom-wallet-tauri.zip"
+
+permissions:
+  contents: write
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Unpack wallet zip into wallet-desktop/
+        run: |
+          set -e
+          ZIP="${{ github.event.inputs.zip_path }}"
+          if [ ! -f "$ZIP" ]; then
+            echo "ERROR: $ZIP not found in repo root. Upload it first."
+            exit 1
+          fi
+          rm -rf wallet-desktop
+          mkdir -p wallet-desktop
+          unzip -o "$ZIP" -d wallet-desktop
+          echo "Unpacked. Tree:"
+          find wallet-desktop -maxdepth 2 -type f | sort
+
+      - name: Fix crate paths in wallet Cargo.toml (../../crates)
+        run: |
+          set -e
+          CT="wallet-desktop/src-tauri/Cargo.toml"
+          if [ -f "$CT" ]; then
+            sed -i 's|\.\./\.\./dom-protocol/crates/|../../crates/|g' "$CT"
+            echo "Paths after fix:"
+            grep -E "dom-(core|wallet|node|tx|consensus|crypto|config|rpc|serialization)" "$CT" | grep path || true
+          fi
+
+      - name: Remove the wallet's own inner CI workflow (avoid duplicate runs)
+        run: |
+          rm -rf wallet-desktop/.github || true
+
+      - name: Remove the uploaded zip
+        run: rm -f "${{ github.event.inputs.zip_path }}"
+
+      - name: Commit the result
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Add desktop wallet under wallet-desktop/ (unpacked from zip)" || echo "nothing to commit"
+          git push
