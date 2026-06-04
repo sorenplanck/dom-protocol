@@ -7,7 +7,7 @@ use crate::keys::{PublicKey, SecretKey};
 use dom_core::{DomError, Hash256, TAG_KERNEL_SIG};
 use hmac::{Hmac, Mac};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
-use k256::{elliptic_curve::PrimeField, ProjectivePoint, Scalar};
+use k256::{elliptic_curve::group::Group, elliptic_curve::PrimeField, ProjectivePoint, Scalar};
 use sha2::Sha256;
 use subtle::{Choice, ConstantTimeEq};
 
@@ -22,6 +22,34 @@ const SECP256K1_N: [u8; 32] = [
 pub struct SchnorrSignature {
     r_compressed: [u8; 33],
     s: [u8; 32],
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PartialSig {
+    s: [u8; 32],
+}
+
+impl PartialSig {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DomError> {
+        if bytes.len() != 32 {
+            return Err(DomError::Malformed(format!(
+                "partial signature must be 32 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let mut s = [0u8; 32];
+        s.copy_from_slice(bytes);
+        if !is_scalar_valid(&s) {
+            return Err(DomError::Invalid(
+                "partial signature scalar is zero or >= n".into(),
+            ));
+        }
+        Ok(Self { s })
+    }
+
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.s
+    }
 }
 
 impl SchnorrSignature {
@@ -123,6 +151,76 @@ pub fn schnorr_sign(
     Ok(SchnorrSignature {
         r_compressed,
         s: s_bytes,
+    })
+}
+
+pub fn schnorr_add_public_keys(public_keys: &[PublicKey]) -> Result<PublicKey, DomError> {
+    if public_keys.is_empty() {
+        return Err(DomError::Malformed(
+            "cannot aggregate an empty public key set".into(),
+        ));
+    }
+
+    let mut sum = ProjectivePoint::IDENTITY;
+    for public_key in public_keys {
+        let bytes = public_key.to_compressed_bytes();
+        sum += compressed_to_projective(&bytes)?;
+    }
+
+    if bool::from(sum.is_identity()) {
+        return Err(DomError::Invalid(
+            "aggregated public key is the point at infinity".into(),
+        ));
+    }
+
+    let compressed = projective_to_compressed(&sum);
+    PublicKey::from_compressed_bytes(&compressed)
+}
+
+pub fn schnorr_partial_sign(
+    sk_i: &SecretKey,
+    nonce_k_i: &SecretKey,
+    agg_r: &PublicKey,
+    agg_p: &PublicKey,
+    chain_id: &[u8; 32],
+    message: &[u8],
+) -> Result<PartialSig, DomError> {
+    let sk_bytes = sk_i.to_be_bytes_raw();
+    let nonce_bytes = nonce_k_i.to_be_bytes_raw();
+    let r_compressed = agg_r.to_compressed_bytes();
+    let challenge_hash = schnorr_challenge(&r_compressed, agg_p, chain_id, message);
+    let c_bytes: [u8; 32] = *challenge_hash.as_bytes();
+    let s = scalar_add_mul(&nonce_bytes, &c_bytes, &sk_bytes)?;
+    PartialSig::from_bytes(&s)
+}
+
+pub fn schnorr_aggregate_sigs(
+    partials: &[PartialSig],
+    agg_r: &PublicKey,
+) -> Result<SchnorrSignature, DomError> {
+    if partials.is_empty() {
+        return Err(DomError::Malformed(
+            "cannot aggregate an empty partial signature set".into(),
+        ));
+    }
+
+    let mut sum = Scalar::ZERO;
+    for partial in partials {
+        let scalar = scalar_from_bytes(&partial.s)
+            .ok_or_else(|| DomError::Invalid("partial signature scalar invalid".into()))?;
+        sum += scalar;
+    }
+
+    let s: [u8; 32] = sum.to_repr().into();
+    if !is_scalar_valid(&s) {
+        return Err(DomError::Invalid(
+            "aggregated signature scalar is zero or >= n".into(),
+        ));
+    }
+
+    Ok(SchnorrSignature {
+        r_compressed: agg_r.to_compressed_bytes(),
+        s,
     })
 }
 
@@ -405,5 +503,77 @@ mod tests {
         // R prefix must be SEC1 (not 0x00/0x04/0x06/0x07 or out-of-range).
         let r = sig.r_compressed();
         assert!(r[0] == 0x02 || r[0] == 0x03);
+    }
+
+    #[test]
+    fn aggregate_schnorr_two_parties_verifies() {
+        let sk_sender = SecretKey::from_bytes(&[3u8; 32]).unwrap();
+        let sk_recipient = SecretKey::from_bytes(&[4u8; 32]).unwrap();
+        let nonce_sender = SecretKey::from_bytes(&[5u8; 32]).unwrap();
+        let nonce_recipient = SecretKey::from_bytes(&[6u8; 32]).unwrap();
+
+        let agg_p =
+            schnorr_add_public_keys(&[sk_sender.public_key(), sk_recipient.public_key()]).unwrap();
+        let agg_r =
+            schnorr_add_public_keys(&[nonce_sender.public_key(), nonce_recipient.public_key()])
+                .unwrap();
+
+        let msg = b"kernel:fee=2,lock_height=9";
+        let sender_partial = schnorr_partial_sign(
+            &sk_sender,
+            &nonce_sender,
+            &agg_r,
+            &agg_p,
+            &TESTNET_CHAIN_ID,
+            msg,
+        )
+        .unwrap();
+        let recipient_partial = schnorr_partial_sign(
+            &sk_recipient,
+            &nonce_recipient,
+            &agg_r,
+            &agg_p,
+            &TESTNET_CHAIN_ID,
+            msg,
+        )
+        .unwrap();
+
+        let sig = schnorr_aggregate_sigs(&[sender_partial, recipient_partial], &agg_r).unwrap();
+        assert!(schnorr_verify(&sig, &agg_p, &TESTNET_CHAIN_ID, msg).unwrap());
+    }
+
+    #[test]
+    fn aggregate_schnorr_single_partial_does_not_verify() {
+        let sk_sender = SecretKey::from_bytes(&[7u8; 32]).unwrap();
+        let sk_recipient = SecretKey::from_bytes(&[8u8; 32]).unwrap();
+        let nonce_sender = SecretKey::from_bytes(&[9u8; 32]).unwrap();
+        let nonce_recipient = SecretKey::from_bytes(&[10u8; 32]).unwrap();
+
+        let agg_p =
+            schnorr_add_public_keys(&[sk_sender.public_key(), sk_recipient.public_key()]).unwrap();
+        let agg_r =
+            schnorr_add_public_keys(&[nonce_sender.public_key(), nonce_recipient.public_key()])
+                .unwrap();
+
+        let msg = b"partial signatures are not final signatures";
+        let sender_partial = schnorr_partial_sign(
+            &sk_sender,
+            &nonce_sender,
+            &agg_r,
+            &agg_p,
+            &TESTNET_CHAIN_ID,
+            msg,
+        )
+        .unwrap();
+
+        let sig = schnorr_aggregate_sigs(&[sender_partial], &agg_r).unwrap();
+        assert!(!schnorr_verify(&sig, &agg_p, &TESTNET_CHAIN_ID, msg).unwrap());
+    }
+
+    #[test]
+    fn aggregate_empty_inputs_are_rejected() {
+        assert!(schnorr_add_public_keys(&[]).is_err());
+        let nonce = SecretKey::from_bytes(&[11u8; 32]).unwrap().public_key();
+        assert!(schnorr_aggregate_sigs(&[], &nonce).is_err());
     }
 }
