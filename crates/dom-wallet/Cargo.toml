@@ -38,6 +38,7 @@ clap = { version = "4.5", features = ["derive"] }
 # Random & encoding
 rand.workspace = true
 hex.workspace  = true
+k256.workspace = true
 
 # HTTP client for the wallet ↔ node RPC (Phase 1.9). Blocking variant so
 # dom-wallet remains synchronous; reqwest spawns its own internal
