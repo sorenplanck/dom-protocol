@@ -6,7 +6,8 @@ use crate::restore::{ChainScanSource, RestoreError};
 use crate::seed::{self, Bip39Seed};
 use crate::store::{
     load_wallet as load_wallet_file, save_wallet as save_wallet_file, PendingChange,
-    PendingSendSlate, PendingSendSlateSecrets, PendingTx, WalletKeychainState, WalletState,
+    PendingReceiveSlate, PendingReceiveSlateSecrets, PendingSendSlate, PendingSendSlateSecrets,
+    PendingTx, WalletKeychainState, WalletState,
 };
 use crate::types::{
     Network, OwnedOutput, ReceiveRequest, ReceiveRequestDescriptor, ReceiveRequestStatus,
@@ -16,9 +17,12 @@ use crate::unlock::{LockState, UnlockedSession};
 use dom_consensus::transaction::{
     CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionOutput,
 };
-use dom_core::{Address, BlockHeight, KERNEL_FEAT_COINBASE};
+use dom_core::{Address, Amount, BlockHeight, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN};
 use dom_crypto::pedersen::Commitment;
-use dom_crypto::{blake2b_256_tagged, bp_prove, BlindingFactor, Hash256, SecretKey};
+use dom_crypto::{
+    blake2b_256_tagged, bp_prove, schnorr_add_public_keys, schnorr_partial_sign, BlindingFactor,
+    Hash256, SecretKey,
+};
 use dom_serialization::DomSerialize;
 use dom_tx::slate::{OutputCommitmentAndProof, Slate};
 use dom_tx::SpendBuilder;
@@ -471,6 +475,8 @@ impl Wallet {
                                 change: record.change.clone(),
                                 send_slate: None,
                                 send_slate_secrets: None,
+                                receive_slate: None,
+                                receive_slate_secrets: None,
                             },
                         );
                     }
@@ -622,6 +628,8 @@ impl Wallet {
                     change: record.change.clone(),
                     send_slate: None,
                     send_slate_secrets: None,
+                    receive_slate: None,
+                    receive_slate_secrets: None,
                 },
             );
         }
@@ -1244,12 +1252,117 @@ impl Wallet {
                     sender_excess_blinding,
                     sender_nonce,
                 }),
+                receive_slate: None,
+                receive_slate_secrets: None,
             },
         );
 
         self.save()?;
         info!("created pending send slate {}", hex::encode(slate_hash));
         Ok(slate)
+    }
+
+    /// Respond to a sender-created interactive Mimblewimble slate.
+    ///
+    /// This is step 2 of the slate protocol. It rejects cross-chain slates,
+    /// creates the recipient output and range proof, generates a fresh
+    /// single-use recipient nonce, signs the aggregate kernel message
+    /// partially, persists only the recipient output blinding in encrypted
+    /// wallet state, and returns a slate containing public response data.
+    pub fn receive_slate(
+        &mut self,
+        slate: Slate,
+        _current_height: u64,
+    ) -> Result<Slate, WalletError> {
+        if slate.chain_id != self.chain_id {
+            return Err(WalletError::Crypto(
+                "slate chain_id does not match wallet chain_id".into(),
+            ));
+        }
+        if slate.recipient_output.is_some()
+            || slate.recipient_public_excess.is_some()
+            || slate.recipient_public_nonce.is_some()
+            || slate.recipient_partial_sig.is_some()
+        {
+            return Err(WalletError::Crypto(
+                "slate already contains recipient response fields".into(),
+            ));
+        }
+
+        Amount::from_noms(slate.amount)
+            .map_err(|e| WalletError::Crypto(format!("invalid slate amount: {e}")))?;
+        Amount::from_noms(slate.fee)
+            .map_err(|e| WalletError::Crypto(format!("invalid slate fee: {e}")))?;
+
+        let recipient_blinding = BlindingFactor::random();
+        let (proof, commitment_bytes) = bp_prove(slate.amount, &recipient_blinding)
+            .map_err(|e| WalletError::Crypto(format!("recipient range proof failed: {e}")))?;
+        let recipient_output = OutputCommitmentAndProof {
+            commitment: Commitment::from_compressed_bytes(&commitment_bytes)?,
+            proof,
+        };
+        let recipient_excess_key = SecretKey::from_bytes(recipient_blinding.as_bytes())
+            .map_err(|e| WalletError::Crypto(format!("recipient excess key invalid: {e}")))?;
+        let recipient_public_excess = recipient_excess_key.public_key();
+
+        // Multisignature Schnorr nonces must be fresh CSPRNG output and
+        // single-use. Deterministic/RFC6979 nonces are unsafe in aggregate
+        // signing because nonce reuse across sessions leaks the signing key.
+        // The recipient nonce is consumed immediately for s_R and is not
+        // exported or persisted.
+        let recipient_nonce_key = random_secret_key();
+        let recipient_public_nonce = recipient_nonce_key.public_key();
+
+        let agg_r = schnorr_add_public_keys(&[
+            slate.sender_public_nonce.clone(),
+            recipient_public_nonce.clone(),
+        ])
+        .map_err(|e| WalletError::Crypto(format!("aggregate nonce failed: {e}")))?;
+        let agg_p = schnorr_add_public_keys(&[
+            slate.sender_public_excess.clone(),
+            recipient_public_excess.clone(),
+        ])
+        .map_err(|e| WalletError::Crypto(format!("aggregate public excess failed: {e}")))?;
+        let kernel_message = plain_kernel_message(slate.fee, slate.lock_height)?;
+        let recipient_partial_sig = schnorr_partial_sign(
+            &recipient_excess_key,
+            &recipient_nonce_key,
+            &agg_r,
+            &agg_p,
+            &self.chain_id,
+            kernel_message.as_bytes(),
+        )
+        .map_err(|e| WalletError::Crypto(format!("recipient partial signature failed: {e}")))?;
+
+        let mut response = slate;
+        response.recipient_output = Some(recipient_output);
+        response.recipient_public_excess = Some(recipient_public_excess);
+        response.recipient_public_nonce = Some(recipient_public_nonce);
+        response.recipient_partial_sig = Some(recipient_partial_sig);
+
+        let response_bytes = response.to_bytes()?;
+        let slate_hash = *dom_crypto::blake2b_256(&response_bytes).as_bytes();
+        self.pending_txs.insert(
+            slate_hash,
+            PendingTx {
+                tx_hash: slate_hash,
+                inputs: Vec::new(),
+                tx_bytes: Vec::new(),
+                change: None,
+                send_slate: None,
+                send_slate_secrets: None,
+                receive_slate: Some(PendingReceiveSlate {
+                    slate_bytes: response_bytes,
+                }),
+                receive_slate_secrets: Some(PendingReceiveSlateSecrets {
+                    recipient_output_blinding: *recipient_blinding.as_bytes(),
+                }),
+            },
+        );
+        self.save()?;
+
+        info!("created pending receive slate {}", hex::encode(slate_hash));
+        Ok(response)
     }
 
     /// Build, reserve, and persist a single-party spend transaction.
@@ -1402,6 +1515,8 @@ impl Wallet {
                 change: built.pending_change.clone(),
                 send_slate: None,
                 send_slate_secrets: None,
+                receive_slate: None,
+                receive_slate_secrets: None,
             },
         );
 
@@ -1965,6 +2080,22 @@ impl Wallet {
                 }
                 None => bytes.push(0),
             }
+            match &pending.receive_slate {
+                Some(receive_slate) => {
+                    bytes.push(1);
+                    bytes
+                        .extend_from_slice(&(receive_slate.slate_bytes.len() as u64).to_le_bytes());
+                    bytes.extend_from_slice(&receive_slate.slate_bytes);
+                }
+                None => bytes.push(0),
+            }
+            match &pending.receive_slate_secrets {
+                Some(secrets) => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&secrets.recipient_output_blinding);
+                }
+                None => bytes.push(0),
+            }
         }
 
         let mut receives_sorted: Vec<&ReceiveRequest> = receive_requests.iter().collect();
@@ -2000,6 +2131,15 @@ fn scan_error_to_wallet(err: RestoreError) -> WalletError {
         )),
         other => WalletError::Io(format!("canonical rescan failed: {other}")),
     }
+}
+
+fn plain_kernel_message(fee: u64, lock_height: u64) -> Result<Hash256, WalletError> {
+    Amount::from_noms(fee).map_err(|e| WalletError::Crypto(format!("invalid kernel fee: {e}")))?;
+    let mut data = Vec::with_capacity(1 + 8 + 8);
+    data.push(KERNEL_FEAT_PLAIN);
+    data.extend_from_slice(&fee.to_le_bytes());
+    data.extend_from_slice(&lock_height.to_le_bytes());
+    Ok(blake2b_256_tagged(dom_core::TAG_KERNEL_MSG, &data))
 }
 
 fn sender_excess_blinding(
@@ -2149,6 +2289,93 @@ mod tests {
         );
     }
 
+    fn sender_slate_for_receive() -> Slate {
+        let mut sender = Wallet::new_in_memory(Network::Testnet, &Hash256::from_bytes([9u8; 32]));
+        sender.add_output(fixed_output(1_000, 100, 6));
+        sender.create_send_slate(900, 100, 2_000).unwrap()
+    }
+
+    #[test]
+    fn receive_slate_rejects_wrong_chain_id() {
+        let slate = sender_slate_for_receive();
+        let mut receiver = Wallet::new_in_memory(Network::Mainnet, &Hash256::from_bytes([9u8; 32]));
+
+        let err = receiver.receive_slate(slate, 2_000).unwrap_err();
+        assert!(
+            err.to_string().contains("chain_id"),
+            "expected chain_id mismatch error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn receive_slate_populates_recipient_fields_and_preserves_sender_fields() {
+        let slate = sender_slate_for_receive();
+        let mut receiver = Wallet::new_in_memory(Network::Testnet, &Hash256::from_bytes([9u8; 32]));
+
+        let response = receiver.receive_slate(slate.clone(), 2_000).unwrap();
+
+        assert_eq!(response.version, slate.version);
+        assert_eq!(response.chain_id, slate.chain_id);
+        assert_eq!(response.amount, slate.amount);
+        assert_eq!(response.fee, slate.fee);
+        assert_eq!(response.lock_height, slate.lock_height);
+        assert_eq!(response.sender_inputs, slate.sender_inputs);
+        assert_eq!(response.sender_change_output, slate.sender_change_output);
+        assert_eq!(response.sender_public_excess, slate.sender_public_excess);
+        assert_eq!(response.sender_public_nonce, slate.sender_public_nonce);
+        assert_eq!(
+            response.sender_offset_contribution,
+            slate.sender_offset_contribution
+        );
+        assert_eq!(response.sender_partial_sig, slate.sender_partial_sig);
+
+        assert!(response.recipient_output.is_some());
+        assert!(response.recipient_public_excess.is_some());
+        assert!(response.recipient_public_nonce.is_some());
+        assert!(response.recipient_partial_sig.is_some());
+    }
+
+    #[test]
+    fn receive_slate_keeps_recipient_blinding_out_of_slate_bytes() {
+        let slate = sender_slate_for_receive();
+        let mut receiver = Wallet::new_in_memory(Network::Testnet, &Hash256::from_bytes([9u8; 32]));
+
+        let response = receiver.receive_slate(slate, 2_000).unwrap();
+        let response_bytes = response.to_bytes().unwrap();
+        let response_hash = *dom_crypto::blake2b_256(&response_bytes).as_bytes();
+        let pending = receiver.pending_txs.get(&response_hash).unwrap();
+        let secrets = pending.receive_slate_secrets.as_ref().unwrap();
+
+        assert!(pending.receive_slate.is_some());
+        assert!(!bytes_contain(
+            &response_bytes,
+            &secrets.recipient_output_blinding
+        ));
+    }
+
+    #[test]
+    fn receive_slate_uses_fresh_random_nonce_each_time() {
+        let slate = sender_slate_for_receive();
+        let mut receiver = Wallet::new_in_memory(Network::Testnet, &Hash256::from_bytes([9u8; 32]));
+
+        let first = receiver.receive_slate(slate.clone(), 2_000).unwrap();
+        let second = receiver.receive_slate(slate, 2_000).unwrap();
+
+        assert_ne!(
+            first
+                .recipient_public_nonce
+                .as_ref()
+                .unwrap()
+                .to_compressed_bytes(),
+            second
+                .recipient_public_nonce
+                .as_ref()
+                .unwrap()
+                .to_compressed_bytes(),
+            "recipient nonce public keys must differ across responses"
+        );
+    }
+
     fn wallet_with_pending_cancel(journal_root: &Path) -> (Wallet, [u8; 32], [u8; 33]) {
         let tx_hash = [3u8; 32];
         let blinding = BlindingFactor::random();
@@ -2169,6 +2396,8 @@ mod tests {
                 change: None,
                 send_slate: None,
                 send_slate_secrets: None,
+                receive_slate: None,
+                receive_slate_secrets: None,
             },
         );
 

@@ -311,6 +311,24 @@ pub struct PendingSendSlateSecrets {
     pub sender_nonce: [u8; 32],
 }
 
+/// Public recipient-answered slate bytes for an in-flight receive.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct PendingReceiveSlate {
+    /// Canonical `dom_tx::slate::Slate` bytes after recipient response.
+    pub slate_bytes: Vec<u8>,
+}
+
+/// Recipient-only secrets needed to spend an output received via slate.
+///
+/// These bytes are persisted only inside the encrypted wallet payload. They
+/// must never be written to the plaintext journal or exported slate.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct PendingReceiveSlateSecrets {
+    /// Recipient output blinding `x_R`.
+    #[serde(with = "serde_blinding32")]
+    pub recipient_output_blinding: [u8; 32],
+}
+
 /// A transaction pending confirmation.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PendingTx {
@@ -335,6 +353,12 @@ pub struct PendingTx {
     /// Encrypted sender-side slate finalization secrets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub send_slate_secrets: Option<PendingSendSlateSecrets>,
+    /// Public recipient-answered slate material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receive_slate: Option<PendingReceiveSlate>,
+    /// Encrypted recipient-side output secret material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receive_slate_secrets: Option<PendingReceiveSlateSecrets>,
 }
 
 /// Derive the wallet encryption key from a password and per-wallet salt.
