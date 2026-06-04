@@ -26,6 +26,13 @@ members = [
     "crates/dom-agent-runner",
 ]
 
+# Tauri desktop wallet — excluded from the workspace because it needs a
+# frontend dist/ that would break `cargo build --workspace`. Built on its
+# own from wallet-desktop/ (npm run tauri build / CI).
+exclude = [
+    "wallet-desktop",
+]
+
 [workspace.package]
 version     = "0.1.0"
 edition     = "2021"
