@@ -1624,6 +1624,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "k256",
  "rand 0.8.6",
  "reqwest",
  "serde",
