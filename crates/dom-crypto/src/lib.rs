@@ -17,6 +17,9 @@ pub use h_generator::{derive_h_generator, h_compressed, verify_h_matches_derivat
 pub use hash::{blake2b_256, blake2b_256_tagged, DomHasher};
 pub use keys::{PublicKey, Scalar, SecretKey};
 pub use pedersen::{verify_block_balance_equation, BlindingFactor, BlindingFactorOrZero};
-pub use schnorr::{schnorr_challenge, schnorr_sign, schnorr_verify, SchnorrSignature};
+pub use schnorr::{
+    schnorr_add_public_keys, schnorr_aggregate_sigs, schnorr_challenge, schnorr_partial_sign,
+    schnorr_sign, schnorr_verify, PartialSig, SchnorrSignature,
+};
 pub mod bulletproof;
 pub use bulletproof::{prove as bp_prove, verify as bp_verify, RangeProof};
