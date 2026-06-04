@@ -285,6 +285,32 @@ pub struct PendingChange {
     pub blinding: [u8; 32],
 }
 
+/// Public sender-created slate bytes for an in-flight interactive spend.
+///
+/// The serialized slate contains only public data: commitments, public keys,
+/// proofs, offsets, amounts, fees, and optional partial signatures. Sender
+/// secrets required for finalization live in [`PendingSendSlateSecrets`].
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct PendingSendSlate {
+    /// Canonical `dom_tx::slate::Slate` bytes from step 1.
+    pub slate_bytes: Vec<u8>,
+}
+
+/// Sender-only secrets needed to finalize an interactive slate.
+///
+/// These bytes are persisted only inside the encrypted wallet payload. They
+/// must never be written to the plaintext journal. The sender nonce is
+/// single-use and must be discarded once finalization is implemented.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct PendingSendSlateSecrets {
+    /// Sender excess blinding `x_S` used for the aggregate kernel key.
+    #[serde(with = "serde_blinding32")]
+    pub sender_excess_blinding: [u8; 32],
+    /// Random sender nonce `k_S`; unique per slate and single-use.
+    #[serde(with = "serde_blinding32")]
+    pub sender_nonce: [u8; 32],
+}
+
 /// A transaction pending confirmation.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PendingTx {
@@ -302,6 +328,13 @@ pub struct PendingTx {
     /// pending entries written before change tracking existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change: Option<PendingChange>,
+    /// Public step-1 slate material when this pending item is an
+    /// interactive send rather than a finalized transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_slate: Option<PendingSendSlate>,
+    /// Encrypted sender-side slate finalization secrets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_slate_secrets: Option<PendingSendSlateSecrets>,
 }
 
 /// Derive the wallet encryption key from a password and per-wallet salt.
