@@ -1,6 +1,8 @@
 //! dom-tx — Transaction building and validation.
 #![deny(unsafe_code)]
 
+pub mod slate;
+
 use dom_consensus::{
     validate_balance_equation, validate_transaction_structure, Transaction, TransactionInput,
     TransactionKernel, TransactionOutput,

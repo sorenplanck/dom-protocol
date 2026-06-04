@@ -1603,6 +1603,7 @@ dependencies = [
  "dom-consensus",
  "dom-core",
  "dom-crypto",
+ "dom-serialization",
  "thiserror 1.0.69",
 ]
 
