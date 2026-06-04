@@ -2415,6 +2415,31 @@ mod tests {
             .any(|window| window == needle)
     }
 
+    fn recipient_output(value: u64, blinding_byte: u8) -> OutputCommitmentAndProof {
+        let blinding = BlindingFactor::from_bytes([blinding_byte; 32]).unwrap();
+        let (proof, commitment_bytes) = bp_prove(value, &blinding).unwrap();
+        OutputCommitmentAndProof {
+            commitment: Commitment::from_compressed_bytes(&commitment_bytes).unwrap(),
+            proof,
+        }
+    }
+
+    fn slate_participants() -> (Wallet, Wallet) {
+        let genesis = Hash256::from_bytes([10u8; 32]);
+        (
+            Wallet::new_in_memory(Network::Regtest, &genesis),
+            Wallet::new_in_memory(Network::Regtest, &genesis),
+        )
+    }
+
+    fn answered_slate() -> (Wallet, Wallet, Slate, Slate) {
+        let (mut sender, mut recipient) = slate_participants();
+        sender.add_output(fixed_output(1_000, 10, 21));
+        let send_slate = sender.create_send_slate(900, 100, 2_000).unwrap();
+        let response_slate = recipient.receive_slate(send_slate.clone(), 2_000).unwrap();
+        (sender, recipient, send_slate, response_slate)
+    }
+
     #[test]
     fn create_send_slate_reserves_inputs_and_keeps_secrets_out_of_slate() {
         let mut wallet = Wallet::new_in_memory(Network::Testnet, &Hash256::from_bytes([7u8; 32]));
@@ -2564,14 +2589,7 @@ mod tests {
 
     #[test]
     fn finalize_slate_end_to_end_builds_valid_aggregate_transaction() {
-        let chain_id = Hash256::from_bytes([10u8; 32]);
-        let mut sender = Wallet::new_in_memory(Network::Regtest, &chain_id);
-        let mut recipient = Wallet::new_in_memory(Network::Regtest, &chain_id);
-
-        let sender_input = fixed_output(1_000, 10, 21);
-        sender.add_output(sender_input);
-
-        let send_slate = sender.create_send_slate(900, 100, 2_000).unwrap();
+        let (mut sender, recipient, send_slate, response_slate) = answered_slate();
         let send_slate_hash = *dom_crypto::blake2b_256(&send_slate.to_bytes().unwrap()).as_bytes();
         assert!(sender
             .pending_txs
@@ -2580,7 +2598,6 @@ mod tests {
             .send_slate_secrets
             .is_some());
 
-        let response_slate = recipient.receive_slate(send_slate.clone(), 2_000).unwrap();
         let recipient_output = response_slate.recipient_output.clone().unwrap();
         let response_hash =
             *dom_crypto::blake2b_256(&response_slate.to_bytes().unwrap()).as_bytes();
@@ -2629,6 +2646,80 @@ mod tests {
         let finalized_pending = sender.pending_txs.get(&send_slate_hash).unwrap();
         assert!(!finalized_pending.tx_bytes.is_empty());
         assert!(finalized_pending.send_slate_secrets.is_none());
+    }
+
+    #[test]
+    fn adversarial_cross_chain_slate_is_rejected_by_receive_and_finalize() {
+        let (_sender, _recipient, send_slate, _response_slate) = answered_slate();
+        let mut wrong_chain_receiver =
+            Wallet::new_in_memory(Network::Testnet, &Hash256::from_bytes([11u8; 32]));
+        assert!(wrong_chain_receiver
+            .receive_slate(send_slate.clone(), 2_000)
+            .is_err());
+
+        let (mut sender, _recipient, _send_slate, mut response_slate) = answered_slate();
+        response_slate.chain_id = [0xEE; 32];
+        assert!(sender.finalize_slate(response_slate, 2_000).is_err());
+    }
+
+    #[test]
+    fn adversarial_amount_or_fee_tampering_is_rejected_by_finalize() {
+        let (mut sender, _recipient, _send_slate, mut amount_tampered) = answered_slate();
+        amount_tampered.amount = amount_tampered.amount.saturating_add(1);
+        assert!(sender.finalize_slate(amount_tampered, 2_000).is_err());
+
+        let (mut sender, _recipient, _send_slate, mut fee_tampered) = answered_slate();
+        fee_tampered.fee = fee_tampered.fee.saturating_add(1);
+        assert!(sender.finalize_slate(fee_tampered, 2_000).is_err());
+    }
+
+    #[test]
+    fn adversarial_recipient_output_tampering_is_rejected_by_finalize() {
+        let (mut sender, _recipient, _send_slate, mut response_slate) = answered_slate();
+        response_slate.recipient_output = Some(recipient_output(response_slate.amount, 31));
+
+        assert!(sender.finalize_slate(response_slate, 2_000).is_err());
+    }
+
+    #[test]
+    fn adversarial_invalid_recipient_partial_signature_is_rejected_by_finalize() {
+        let (mut sender, _recipient, _send_slate, mut response_slate) = answered_slate();
+        response_slate.recipient_partial_sig =
+            Some(dom_crypto::PartialSig::from_bytes(&[42u8; 32]).unwrap());
+
+        assert!(sender.finalize_slate(response_slate, 2_000).is_err());
+    }
+
+    #[test]
+    fn adversarial_finalize_requires_all_recipient_fields() {
+        let (mut sender, _recipient, send_slate, response_slate) = answered_slate();
+        assert!(sender.finalize_slate(send_slate, 2_000).is_err());
+
+        let mut missing_output = response_slate.clone();
+        missing_output.recipient_output = None;
+        assert!(sender.finalize_slate(missing_output, 2_000).is_err());
+
+        let mut missing_excess = response_slate.clone();
+        missing_excess.recipient_public_excess = None;
+        assert!(sender.finalize_slate(missing_excess, 2_000).is_err());
+
+        let mut missing_nonce = response_slate.clone();
+        missing_nonce.recipient_public_nonce = None;
+        assert!(sender.finalize_slate(missing_nonce, 2_000).is_err());
+
+        let mut missing_partial = response_slate;
+        missing_partial.recipient_partial_sig = None;
+        assert!(sender.finalize_slate(missing_partial, 2_000).is_err());
+    }
+
+    #[test]
+    fn adversarial_non_owned_slate_is_rejected_by_finalize() {
+        let (mut sender, _recipient) = slate_participants();
+        sender.add_output(fixed_output(1_000, 10, 41));
+
+        let (_stranger_sender, _recipient, _send_slate, stranger_response) = answered_slate();
+
+        assert!(sender.finalize_slate(stranger_response, 2_000).is_err());
     }
 
     fn wallet_with_pending_cancel(journal_root: &Path) -> (Wallet, [u8; 32], [u8; 33]) {
