@@ -117,7 +117,7 @@ impl WalletManager {
         let genesis = dom_core::startup_genesis_hash_for_network_magic(network.magic())
             .map_err(|e| anyhow!("genesis hash: {e}"))?;
 
-        let seed = Bip39Seed::from_phrase(phrase, SeedAcceptance::AcceptKnown)
+        let seed = Bip39Seed::from_phrase(phrase, SeedAcceptance::LegacyRestore)
             .map_err(|e| anyhow!("invalid seed phrase: {e}"))?;
 
         let dir = WalletDir::create_from_seed(path, password, network, &genesis, &seed)
