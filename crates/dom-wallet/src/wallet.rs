@@ -761,6 +761,24 @@ impl Wallet {
         Ok(())
     }
 
+    /// Verify `password` against the on-disk ciphertext WITHOUT mutating
+    /// session state and WITHOUT acquiring the wallet-directory lock.
+    ///
+    /// This exists so callers (e.g. a "confirm password" UI gate) can check a
+    /// password while the wallet is already open. Re-opening the [`WalletDir`]
+    /// would instead try to take its exclusive `wallet.lock` and fail. Here we
+    /// only perform the Argon2id+ChaCha20Poly1305 decrypt of the wallet header,
+    /// which touches no locks.
+    ///
+    /// For in-memory wallets (no `file_path`) there is no ciphertext to verify
+    /// against, so this returns whether the wallet is currently unlocked.
+    pub fn verify_password(&self, password: &str) -> bool {
+        match &self.file_path {
+            Some(path) => load_wallet_file(path, password).is_ok(),
+            None => self.is_unlocked(),
+        }
+    }
+
     /// Borrow the unlocked session, or return `WalletError::Locked`.
     fn session(&self) -> Result<&UnlockedSession, WalletError> {
         self.session.as_ref().ok_or(WalletError::Locked)
@@ -2796,5 +2814,25 @@ mod tests {
         assert!(String::from_utf8(journal_bytes)
             .unwrap()
             .contains("canceled"));
+    }
+
+    #[test]
+    fn verify_password_checks_ciphertext_without_unlocking() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("w.dom");
+        let genesis = Hash256::from_bytes([3u8; 32]);
+        let mut wallet = Wallet::create(&path, "correct horse", Network::Testnet, &genesis).unwrap();
+
+        // Correct password verifies; wrong password does not.
+        assert!(wallet.verify_password("correct horse"));
+        assert!(!wallet.verify_password("wrong"));
+
+        // Still works while locked: it decrypts the on-disk header (no session)
+        // and — crucially for the desktop wallet (M3) — without re-acquiring the
+        // WalletDir lock that re-opening the directory would need.
+        wallet.lock();
+        assert!(!wallet.is_unlocked());
+        assert!(wallet.verify_password("correct horse"));
+        assert!(!wallet.verify_password("nope"));
     }
 }
