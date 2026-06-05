@@ -61,6 +61,7 @@ export const api = {
   nodeState: () => invoke("node_state"),
   nodeStatus: () => invoke("node_status"),
   nodeMetrics: (addr) => invoke("node_metrics", { addr }),
+  sweepMinerRewards: () => invoke("sweep_miner_rewards"),
   defaultSettings: () => invoke("default_settings"),
 };
 
