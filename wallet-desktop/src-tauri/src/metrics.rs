@@ -61,6 +61,35 @@ fn parse_metrics(text: &str) -> NodeMetrics {
     m
 }
 
+/// Balance of the node's (miner) wallet, read from `GET /wallet/balance`.
+/// Fields default to 0 if absent. Used by the auto-sweep to know how much
+/// matured (confirmed) balance can be moved to the user's wallet.
+#[derive(Clone, Copy, Default, serde::Deserialize)]
+pub struct NodeWalletBalance {
+    #[serde(default)]
+    pub confirmed_noms: u64,
+    #[serde(default)]
+    pub immature_noms: u64,
+    #[serde(default)]
+    pub reserved_noms: u64,
+}
+
+/// Fetch the node (miner) wallet balance. `rpc_base` is e.g. "127.0.0.1:33372",
+/// `token` is the RPC bearer token. The endpoint is bearer-protected.
+pub fn fetch_node_wallet_balance(rpc_base: &str, token: &str) -> Result<NodeWalletBalance> {
+    let url = format!("http://{rpc_base}/wallet/balance");
+    let resp = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?
+        .get(url)
+        .bearer_auth(token)
+        .send()?;
+    if !resp.status().is_success() {
+        anyhow::bail!("node wallet balance unavailable (status {})", resp.status());
+    }
+    Ok(resp.json::<NodeWalletBalance>()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
