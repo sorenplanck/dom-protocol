@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "wallet-v*"
+
+  release:
+    types:
+      - published
+      - created
+
   workflow_dispatch:
 
 permissions:
@@ -29,9 +35,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust
+        if: matrix.platform != 'macos-latest'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust macOS universal
+        if: matrix.platform == 'macos-latest'
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -67,13 +78,13 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LIBCLANG_PATH: ${{ matrix.platform == 'windows-latest' && 'C:\\Program Files\\LLVM\\bin' || '' }}
+          LIBCLANG_PATH: ${{ matrix.platform == 'windows-latest' && 'C:\Program Files\LLVM\bin' || '' }}
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform == 'macos-latest' && '11.0' || '' }}
           RUSTFLAGS: ${{ matrix.platform == 'macos-latest' && '-C link-arg=-Wl,-undefined,dynamic_lookup' || '' }}
         with:
           projectPath: wallet-desktop
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('wallet-v0.0.0-dev-{0}', github.run_number) }}
-          releaseName: "DOM Wallet ${{ github.ref_type == 'tag' && github.ref_name || 'dev build' }}"
+          releaseName: "DOM Wallet ${{ github.ref_type == 'tag' && github.ref_name || github.event.release.tag_name || 'dev build' }}"
           releaseBody: "Official DOM Wallet desktop build with integrated node. Not a store of value. A means of exchange."
           releaseDraft: true
           prerelease: ${{ github.ref_type != 'tag' }}
