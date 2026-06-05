@@ -1,7 +1,7 @@
 // Screen renderers. Each returns an element and wires its own events.
 import {
   api, el, copy, toast, nomsToDom, domToNoms,
-  pickSaveFile, pickFile, pickSaveTextFile, saveTextViaDialog, savePrefs, humanizeError, getLang, setLang,
+  pickSaveFile, pickFolder, pickFile, pickSaveTextFile, saveTextViaDialog, savePrefs, humanizeError, getLang, setLang,
 } from "./api.js";
 import {
   getLogLines, clearLogs, subscribeLogs, logsToText,
@@ -59,9 +59,9 @@ export function renderCreate(go, onReady) {
         <label>Local da carteira</label>
         <div class="copyable"><code id="path">— escolha um local —</code><button class="btn ghost" id="pick">Escolher</button></div>
         <label>Senha</label>
-        <input type="password" id="pw" placeholder="Encrypts the wallet on disk" />
+        <input type="password" id="pw" placeholder="Criptografa a carteira no disco" />
         <label>Confirmar senha</label>
-        <input type="password" id="pw2" placeholder="Re-enter password" />
+        <input type="password" id="pw2" placeholder="Digite a senha novamente" />
         <div class="btn-row">
           <button class="btn ghost" id="back">Voltar</button>
           <button class="btn" id="next" disabled>Gerar frase</button>
@@ -85,8 +85,8 @@ export function renderCreate(go, onReady) {
     const pw = node.querySelector("#pw").value;
     const pw2 = node.querySelector("#pw2").value;
     const err = node.querySelector("#err");
-    if (pw !== pw2) { err.textContent = "Passwords do not match."; return; }
-    if (pw.length < 8) { err.textContent = "Use at least 8 characters."; return; }
+    if (pw !== pw2) { err.textContent = "As senhas não conferem."; return; }
+    if (pw.length < 8) { err.textContent = "Use pelo menos 8 caracteres."; return; }
     err.textContent = "";
     try {
       const phrase = await api.walletCreate(path, pw, settings.current);
@@ -170,7 +170,7 @@ export function renderRestore(go, onReady) {
     </div>`);
   let path = null;
   node.querySelector("#pick").onclick = async () => {
-    const p = await pickSaveFile("Save restored DOM wallet");
+    const p = await pickSaveFile("Salvar carteira DOM restaurada");
     if (p) { path = p; node.querySelector("#path").textContent = p; }
   };
   node.querySelector("#back").onclick = () => go("welcome");
@@ -178,8 +178,8 @@ export function renderRestore(go, onReady) {
     const err = node.querySelector("#err");
     const phrase = node.querySelector("#phrase").value.trim();
     const pw = node.querySelector("#pw").value;
-    if (!path) { err.textContent = "Choose a wallet location."; return; }
-    if (pw.length < 8) { err.textContent = "Use at least 8 characters."; return; }
+    if (!path) { err.textContent = "Escolha o local da carteira."; return; }
+    if (pw.length < 8) { err.textContent = "Use pelo menos 8 caracteres."; return; }
     try {
       await api.walletRestore(path, pw, phrase, settings.current);
       toast(t("walletRestored"));
@@ -195,7 +195,7 @@ export function renderOpen(go, onReady) {
     <div>
       <h1>Abrir carteira</h1>
       <div class="card">
-        <label>Arquivo da carteira (diretório .dom)</label>
+        <label>Pasta da carteira (diretório .dom)</label>
         <div class="copyable"><code id="path">— escolher —</code><button class="btn ghost" id="pick">Escolher</button></div>
         <label>Senha</label>
         <input type="password" id="pw" />
@@ -208,13 +208,13 @@ export function renderOpen(go, onReady) {
     </div>`);
   let path = null;
   node.querySelector("#pick").onclick = async () => {
-    const p = await pickFile("Open DOM wallet");
+    const p = await pickFolder("Abrir carteira DOM");
     if (p) { path = p; node.querySelector("#path").textContent = p; }
   };
   node.querySelector("#back").onclick = () => go("welcome");
   node.querySelector("#go").onclick = async () => {
     const err = node.querySelector("#err");
-    if (!path) { err.textContent = "Choose a wallet."; return; }
+    if (!path) { err.textContent = "Escolha uma carteira."; return; }
     try {
       await api.walletOpen(path, node.querySelector("#pw").value);
       toast(t("walletOpened"));
