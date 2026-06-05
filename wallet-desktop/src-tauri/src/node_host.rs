@@ -88,6 +88,22 @@ impl NodeHost {
             .map(|s| format!("http://{}", s.rpc_listen_addr))
     }
 
+    /// The raw RPC listen address (host:port, no scheme), e.g. "127.0.0.1:33372".
+    /// Used by the auto-sweep to read the node wallet balance endpoint.
+    pub async fn rpc_listen_addr(&self) -> Option<String> {
+        let inner = self.inner.lock().await;
+        inner
+            .last_settings
+            .as_ref()
+            .map(|s| s.rpc_listen_addr.clone())
+    }
+
+    /// Whether the last-applied settings have mining enabled.
+    pub async fn is_mining_enabled(&self) -> bool {
+        let inner = self.inner.lock().await;
+        inner.last_settings.as_ref().map(|s| s.mine).unwrap_or(false)
+    }
+
     /// Start the node with the given settings. No-op (Ok) if already running.
     pub async fn start(&self, settings: NodeSettings) -> Result<()> {
         let mut inner = self.inner.lock().await;
