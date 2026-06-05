@@ -1,5 +1,5 @@
 // App bootstrap + router.
-import { api, loadPrefs, savePrefs, toast, humanizeError, getLang } from "./api.js";
+import { api, loadPrefs, savePrefs, toast, humanizeError } from "./api.js";
 import { startLogCapture } from "./logbuffer.js";
 import * as S from "./screens.js";
 
@@ -25,10 +25,10 @@ document.getElementById("lockBtn").onclick = async () => {
   await lockNow();
 };
 
-// ── Auto-lock por inatividade ───────────────────────────────────────────────
-// Timer resetado a cada interação. Ao expirar, trava a carteira (encerra a
-// sessão sensível no backend) e volta para a tela de desbloqueio.
-// O tempo é configurável em Configurações (minutos; 0 = nunca).
+// ── Auto-lock on inactivity ─────────────────────────────────────────────────
+// The timer resets on every interaction. On expiry it locks the wallet (ending
+// the sensitive backend session) and returns to the unlock screen.
+// The duration is configurable in Settings (minutes; 0 = never).
 let idleTimer = null;
 let idleListenersAttached = false;
 
@@ -40,7 +40,7 @@ function autoLockMinutes() {
 function resetIdleTimer() {
   clearTimeout(idleTimer);
   const mins = autoLockMinutes();
-  if (!mins || mins <= 0) return; // "nunca"
+  if (!mins || mins <= 0) return; // "never"
   idleTimer = setTimeout(() => { lockNow(true); }, mins * 60 * 1000);
 }
 
@@ -61,11 +61,9 @@ async function lockNow(byTimeout = false) {
   try { await api.walletLock(); } catch {}
   if (currentScreen && currentScreen._cleanup) currentScreen._cleanup();
   if (byTimeout) {
-    toast(getLang() === "en"
-      ? "Wallet locked due to inactivity."
-      : "Carteira bloqueada por inatividade.");
+    toast("Wallet locked due to inactivity.");
   }
-  // Volta ao gate de desbloqueio (carteira segue aberta, só travada).
+  // Back to the unlock gate (the wallet stays open, just locked).
   showGate(S.renderUnlock(() => enterApp()));
 }
 
@@ -135,13 +133,13 @@ async function enterApp() {
 // ── Boot ────────────────────────────────────────────────────────────────────────
 async function boot() {
   initTheme();
-  // Começa a capturar os logs do nó já no boot, para o buffer ter histórico
-  // mesmo se a aba Nó / Logs for aberta depois.
+  // Start capturing node logs at boot so the buffer has history even if the
+  // Node / Logs tab is opened later.
   await startLogCapture();
   // Load default node settings from the backend, merge saved non-sensitive prefs.
   const defaults = await api.defaultSettings();
-  // auto_lock_minutes é uma pref local (não faz parte do NodeConfig do backend;
-  // o serde de NodeSettings ignora campos extras, então é seguro carregá-lo junto).
+  // auto_lock_minutes is a local pref (not part of the backend NodeConfig; the
+  // NodeSettings serde ignores extra fields, so loading it alongside is safe).
   S.settings.current = loadPrefs({ ...defaults, auto_lock_minutes: 5 });
   savePrefs(S.settings.current);
 
@@ -156,5 +154,5 @@ async function boot() {
 }
 
 boot().catch((e) => {
-  gateBody.innerHTML = `<div class="card"><h1>${getLang() === "en" ? "Startup error" : "Erro ao iniciar"}</h1><p class="err-text">${humanizeError(e)}</p></div>`;
+  gateBody.innerHTML = `<div class="card"><h1>Startup error</h1><p class="err-text">${humanizeError(e)}</p></div>`;
 });

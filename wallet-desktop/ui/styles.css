@@ -4,6 +4,17 @@
    warm engraved bronze. Sober, metallic, utilitarian — "a means of exchange".
    ============================================================================ */
 
+/* Bundled fonts (M6) — served locally; no remote requests, works offline.
+   Paths are relative to this stylesheet (ui/styles.css). */
+@font-face { font-family: 'Cormorant Garamond'; font-style: normal; font-weight: 500; font-display: swap; src: url('assets/fonts/cormorant-garamond-500.ttf') format('truetype'); }
+@font-face { font-family: 'Cormorant Garamond'; font-style: normal; font-weight: 600; font-display: swap; src: url('assets/fonts/cormorant-garamond-600.ttf') format('truetype'); }
+@font-face { font-family: 'Cormorant Garamond'; font-style: normal; font-weight: 700; font-display: swap; src: url('assets/fonts/cormorant-garamond-700.ttf') format('truetype'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url('assets/fonts/jetbrains-mono-400.ttf') format('truetype'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 600; font-display: swap; src: url('assets/fonts/jetbrains-mono-600.ttf') format('truetype'); }
+@font-face { font-family: 'Spectral'; font-style: italic; font-weight: 400; font-display: swap; src: url('assets/fonts/spectral-400-italic.ttf') format('truetype'); }
+@font-face { font-family: 'Spectral'; font-style: normal; font-weight: 400; font-display: swap; src: url('assets/fonts/spectral-400.ttf') format('truetype'); }
+@font-face { font-family: 'Spectral'; font-style: normal; font-weight: 500; font-display: swap; src: url('assets/fonts/spectral-500.ttf') format('truetype'); }
+
 :root {
   /* Patina / background tones (from the coin's dark field) */
   --bg-0: #0c0807;          /* near-black field behind the coin */
@@ -284,3 +295,24 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--font-mono); fo
 .coin-hero { width: 120px; height: 120px; border-radius: 50%; box-shadow: var(--shadow), var(--ring); margin-bottom: 20px; }
 .muted { color: var(--text-2); font-size: 13px; }
 .err-text { color: var(--err); font-size: 13px; margin-top: 8px; }
+
+/* Utility classes (L9) — replace inline style="" attributes so the CSP can drop
+   style-src 'unsafe-inline'. */
+.tc { text-align: center; }
+.w-full { width: 100%; }
+.flex1 { flex: 1; }
+.flex1-min260 { flex: 1; min-width: 260px; }
+.fs26 { font-size: 26px; }
+.mt0 { margin-top: 0; }
+.mt4 { margin-top: 4px; }
+.mt6 { margin-top: 6px; }
+.mt10 { margin-top: 10px; }
+.ml8 { margin-left: 8px; }
+.ml-auto { margin-left: auto; }
+.c-warn { color: var(--warn); }
+.gate-body { width: 520px; max-width: 90vw; }
+.stat-mini-label { color: var(--text-2); font-size: 11px; text-transform: uppercase; }
+.qr-fallback { padding: 20px; max-width: 200px; }
+.pill-bare { background: transparent; border: none; }
+.sync-banner { border-color: var(--warn); background: rgba(212, 162, 74, 0.10); }
+.warn-box-err { border-color: var(--err); color: var(--err); }
