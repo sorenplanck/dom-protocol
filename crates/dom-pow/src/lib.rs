@@ -480,6 +480,17 @@ fn pow_validation_mode_for_network_inner(
         return Ok(PowValidationMode::FastDevOnly);
     }
 
+    // Regtest is a development-only network and ALWAYS uses the deterministic
+    // fast validation path, as a pure function of the network — never relying
+    // on process-global env state. This guarantees that any two regtest nodes
+    // agree on PoW validation regardless of start order or whether the
+    // DOM_REGTEST_FAST_MINING env var happens to be set in a given process.
+    // Mainnet/testnet are unaffected: the fast_requested guard below still
+    // rejects FastDevOnly on any non-regtest network.
+    if network_magic == NETWORK_MAGIC_REGTEST {
+        return Ok(PowValidationMode::FastDevOnly);
+    }
+
     if fast_requested {
         if network_magic == NETWORK_MAGIC_REGTEST {
             return Ok(PowValidationMode::FastDevOnly);
@@ -1173,9 +1184,13 @@ mod tests {
 
     #[test]
     fn fast_pow_mode_activates_only_for_explicit_regtest_or_test_mode() {
+        // Regtest ALWAYS uses FastDevOnly as a pure function of the network,
+        // regardless of the env-var-derived `fast_requested` flag. This keeps
+        // two regtest nodes in agreement without relying on process-global env
+        // state.
         assert_eq!(
             pow_validation_mode_for_network_inner(NETWORK_MAGIC_REGTEST, false, false).unwrap(),
-            PowValidationMode::RandomX
+            PowValidationMode::FastDevOnly
         );
         assert_eq!(
             pow_validation_mode_for_network_inner(NETWORK_MAGIC_REGTEST, false, true).unwrap(),
