@@ -24,7 +24,7 @@ use wallet_manager::{BalanceInfo, ReceiveInfo, WalletManager};
 
 /// Shared application state, available to every command via `State<AppState>`.
 pub struct AppState {
-    wallet: WalletManager,
+    wallet: Arc<WalletManager>,
     node: Arc<NodeHost>,
     /// Retained so future commands can subscribe to the log bus directly.
     #[allow(dead_code)]
@@ -34,14 +34,17 @@ pub struct AppState {
 /// Build a `NodeRpcClient` pointed at the embedded node, authenticated with the
 /// process bearer token. Returns an error if the node was never started.
 async fn rpc_client(state: &AppState) -> Result<NodeRpcClient, String> {
-    let base = state
-        .node
+    rpc_client_from_node(&state.node).await
+}
+
+async fn rpc_client_from_node(node: &Arc<NodeHost>) -> Result<NodeRpcClient, String> {
+    let base = node
         .rpc_base_url()
         .await
         .ok_or_else(|| "node not started yet".to_string())?;
     let url = url::Url::parse(&base).map_err(|e| format!("bad rpc url: {e}"))?;
     NodeRpcClient::builder(url)
-        .bearer_token(state.node.rpc_token().to_string())
+        .bearer_token(node.rpc_token().to_string())
         .build()
         .map_err(|e| format!("rpc client: {e}"))
 }
@@ -305,6 +308,63 @@ async fn node_metrics(state: State<'_, AppState>, addr: String) -> Result<NodeMe
         .map_err(|e| e.to_string())
 }
 
+const AUTO_SWEEP_INTERVAL_SECS: u64 = 60;
+const MINER_SWEEP_FEE_NOMS: u64 = 100_000; // 0.00100000 DOM
+
+/// Move mature rewards from the embedded node miner wallet into the currently
+/// open user wallet. Returns Some(tx_hash_hex) when a sweep was submitted,
+/// or None when there is no mature balance above the sweep fee.
+async fn do_sweep(
+    node: Arc<NodeHost>,
+    wallet: Arc<WalletManager>,
+) -> Result<Option<String>, String> {
+    if !wallet.is_open().await || !wallet.is_unlocked().await {
+        return Ok(None);
+    }
+
+    let rpc_addr = match node.rpc_listen_addr().await {
+        Some(addr) => addr,
+        None => return Ok(None),
+    };
+
+    let balance = {
+        let token = node.rpc_token().to_string();
+        tauri::async_runtime::spawn_blocking(move || {
+            metrics::fetch_node_wallet_balance(&rpc_addr, &token)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?
+    };
+
+    if balance.confirmed_noms <= MINER_SWEEP_FEE_NOMS {
+        return Ok(None);
+    }
+
+    let amount = balance.confirmed_noms - MINER_SWEEP_FEE_NOMS;
+    let receive = wallet
+        .create_receive(amount)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let client = rpc_client_from_node(&node).await?;
+    let outcome = client
+        .wallet_spend(
+            receive.commitment_hex,
+            receive.blinding_hex,
+            amount,
+            MINER_SWEEP_FEE_NOMS,
+        )
+        .map_err(|e| format!("node wallet spend: {e}"))?;
+
+    Ok(Some(hex::encode(outcome.tx_hash)))
+}
+
+#[tauri::command]
+async fn sweep_miner_rewards(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    do_sweep(state.node.clone(), state.wallet.clone()).await
+}
+
 #[tauri::command]
 fn default_settings() -> NodeSettings {
     NodeSettings::default()
@@ -335,8 +395,10 @@ pub fn run() {
         }
     };
 
+    let wallet = Arc::new(WalletManager::new());
+
     let state = AppState {
-        wallet: WalletManager::new(),
+        wallet: wallet.clone(),
         node: node.clone(),
         logs: bus.clone(),
     };
@@ -364,6 +426,30 @@ pub fn run() {
                     }
                 }
             });
+
+            // Best-effort miner reward auto-sweep. It only runs when mining is
+            // enabled, a user wallet is open/unlocked, and the node miner wallet
+            // reports mature balance above the fixed sweep fee. Errors are logged
+            // but never block the UI.
+            let sweep_node = node.clone();
+            let sweep_wallet = wallet.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                    AUTO_SWEEP_INTERVAL_SECS,
+                ));
+                loop {
+                    interval.tick().await;
+                    if !sweep_node.is_mining_enabled().await {
+                        continue;
+                    }
+                    match do_sweep(sweep_node.clone(), sweep_wallet.clone()).await {
+                        Ok(Some(tx)) => tracing::info!("auto-swept miner rewards to wallet: {tx}"),
+                        Ok(None) => {}
+                        Err(e) => tracing::debug!("auto-sweep skipped/failed: {e}"),
+                    }
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -389,6 +475,7 @@ pub fn run() {
             node_state,
             node_status,
             node_metrics,
+            sweep_miner_rewards,
             default_settings,
         ])
         .run(tauri::generate_context!())
