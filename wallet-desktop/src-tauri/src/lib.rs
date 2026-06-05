@@ -13,14 +13,15 @@ mod wallet_manager;
 use std::sync::Arc;
 
 use dom_wallet::{NodeRpc, NodeRpcClient};
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, State};
+use tauri_plugin_dialog::DialogExt;
 use tracing_subscriber::prelude::*;
 
 use log_capture::{BroadcastLayer, LogBus};
 use metrics::NodeMetrics;
 use node_host::{NodeHost, NodeState};
 use settings::NodeSettings;
-use wallet_manager::{BalanceInfo, ReceiveInfo, WalletManager};
+use wallet_manager::{BalanceInfo, WalletManager};
 
 /// Shared application state, available to every command via `State<AppState>`.
 pub struct AppState {
@@ -29,6 +30,10 @@ pub struct AppState {
     /// Retained so future commands can subscribe to the log bus directly.
     #[allow(dead_code)]
     logs: Arc<LogBus>,
+    /// Serializes miner-reward sweeps (L5) so the periodic auto-sweep and the
+    /// manual "sweep now" button can never run concurrently and double-spend the
+    /// same matured outputs.
+    sweep_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Build a `NodeRpcClient` pointed at the embedded node, authenticated with the
@@ -47,6 +52,17 @@ async fn rpc_client_from_node(node: &Arc<NodeHost>) -> Result<NodeRpcClient, Str
         .bearer_token(node.rpc_token().to_string())
         .build()
         .map_err(|e| format!("rpc client: {e}"))
+}
+
+/// Parse a noms amount that arrives over the IPC boundary as a STRING (M1).
+///
+/// Amounts are `u64` noms. JSON numbers lose precision above 2^53, so the UI
+/// sends them as decimal strings and we parse them losslessly here.
+fn parse_noms(value: &str) -> Result<u64, String> {
+    value
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| format!("invalid amount: {value:?}"))
 }
 
 // ── Wallet commands ───────────────────────────────────────────────────────────
@@ -123,54 +139,33 @@ async fn wallet_unlock(state: State<'_, AppState>, password: String) -> Result<(
 #[tauri::command]
 async fn wallet_balance(state: State<'_, AppState>) -> Result<BalanceInfo, String> {
     // Height from the node so maturity is computed correctly.
+    // L2: do NOT fall back to height 0 on RPC failure — balance(0) marks all
+    // coinbase as immature and under-reports the spendable balance. Surface the
+    // error instead so the UI shows "balance unavailable" rather than a wrong
+    // number.
     let client = rpc_client(&state).await?;
-    let height = client.status().map(|s| s.chain_height).unwrap_or(0);
+    let height = client.status().map_err(|e| e.to_string())?.chain_height;
     state.wallet.balance(height).await.map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-async fn wallet_create_receive(
-    state: State<'_, AppState>,
-    amount: u64,
-) -> Result<ReceiveInfo, String> {
-    state
-        .wallet
-        .create_receive(amount)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn wallet_send(
-    state: State<'_, AppState>,
-    recipient_commitment_hex: String,
-    recipient_blinding_hex: String,
-    amount: u64,
-    fee: u64,
-) -> Result<String, String> {
-    let client = rpc_client(&state).await?;
-    state
-        .wallet
-        .send(
-            &client,
-            &recipient_commitment_hex,
-            &recipient_blinding_hex,
-            amount,
-            fee,
-        )
-        .await
-        .map_err(|e| e.to_string())
-}
+// NOTE (L8): the non-interactive `wallet_send` / `wallet_create_receive`
+// commands were removed. The wallet's only send/receive path is the interactive
+// Slate protocol below (`slate_create_send` / `slate_receive` / `slate_finalize`).
+// The internal `WalletManager::create_receive` is still used by the miner-reward
+// auto-sweep (see `do_sweep`), but it is not exposed as a UI command.
 
 // ── Slate protocol commands (interactive person-to-person) ───────────────────
 
-/// Step 1 (sender): create a send slate. `amount`/`fee` in noms. Returns hex.
+/// Step 1 (sender): create a send slate. `amount`/`fee` are decimal-string noms
+/// (M1: strings avoid the JSON 2^53 precision loss). Returns hex.
 #[tauri::command]
 async fn slate_create_send(
     state: State<'_, AppState>,
-    amount: u64,
-    fee: u64,
+    amount: String,
+    fee: String,
 ) -> Result<String, String> {
+    let amount = parse_noms(&amount)?;
+    let fee = parse_noms(&fee)?;
     let client = rpc_client(&state).await?;
     state
         .wallet
@@ -208,15 +203,11 @@ async fn wallet_verify_password(
     state: State<'_, AppState>,
     password: String,
 ) -> Result<bool, String> {
-    let path = state
+    state
         .wallet
-        .wallet_path()
+        .verify_password(&password)
         .await
-        .ok_or_else(|| "no wallet open".to_string())?;
-    match state.wallet.verify_password(&path, &password).await {
-        Ok(()) => Ok(true),
-        Err(e) => Err(e.to_string()),
-    }
+        .map_err(|e| e.to_string())
 }
 
 /// Generate an SVG QR code for an arbitrary string (the receive address).
@@ -234,28 +225,86 @@ fn make_qr_svg(data: String) -> Result<String, String> {
     Ok(svg)
 }
 
-/// Write plain text to a file chosen by the user. Used by "Save logs".
-/// This touches only the path the user explicitly picked via the dialog.
+/// Max bytes we will write to a user-chosen text file (logs / slate export).
+const MAX_SAVE_BYTES: usize = 16 * 1024 * 1024;
+/// Max bytes we will read from a user-chosen text file (slate import).
+const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Save plain text to a file (M4). The native save dialog is opened HERE, in
+/// the backend, so the renderer never supplies a path — closing the
+/// arbitrary-file-write hole. Returns `true` if saved, `false` if the user
+/// cancelled the dialog.
 #[tauri::command]
-fn save_text_file(path: String, contents: String) -> Result<(), String> {
-    std::fs::write(&path, contents).map_err(|e| format!("io error: {e}"))
+async fn save_text_file(
+    app: tauri::AppHandle,
+    title: String,
+    default_name: String,
+    contents: String,
+) -> Result<bool, String> {
+    if contents.len() > MAX_SAVE_BYTES {
+        return Err("content too large to save".into());
+    }
+    let picked = app
+        .dialog()
+        .file()
+        .set_title(&title)
+        .set_file_name(&default_name)
+        .add_filter("Text", &["txt"])
+        .blocking_save_file();
+    let path = match picked {
+        Some(fp) => fp.into_path().map_err(|e| format!("invalid path: {e}"))?,
+        None => return Ok(false),
+    };
+    std::fs::write(&path, contents).map_err(|e| format!("io error: {e}"))?;
+    Ok(true)
 }
 
-/// Read a UTF-8 text file the user explicitly picked (for importing a slate).
-/// Bounded to avoid loading a huge file by mistake.
+/// Read a UTF-8 text file (M4). The native open dialog is opened HERE, in the
+/// backend; the renderer never supplies a path. Returns `None` if the user
+/// cancelled. Bounded to avoid loading a huge file by mistake.
 #[tauri::command]
-fn read_text_file(path: String) -> Result<String, String> {
+async fn read_text_file(app: tauri::AppHandle, title: String) -> Result<Option<String>, String> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title(&title)
+        .blocking_pick_file();
+    let path = match picked {
+        Some(fp) => fp.into_path().map_err(|e| format!("invalid path: {e}"))?,
+        None => return Ok(None),
+    };
     let meta = std::fs::metadata(&path).map_err(|e| format!("io error: {e}"))?;
-    if meta.len() > 4 * 1024 * 1024 {
+    if meta.len() > MAX_READ_BYTES {
         return Err("file too large".into());
     }
-    std::fs::read_to_string(&path).map_err(|e| format!("io error: {e}"))
+    std::fs::read_to_string(&path)
+        .map(Some)
+        .map_err(|e| format!("io error: {e}"))
 }
 
 // ── Node commands ───────────────────────────────────────────────────────────
 
+/// M2: refuse to (re)start the embedded node on a network that doesn't match
+/// the currently-open wallet. A testnet wallet driven by a mainnet node (or
+/// vice-versa) would silently show an inconsistent balance/genesis view.
+async fn ensure_wallet_network_matches(
+    state: &AppState,
+    settings: &NodeSettings,
+) -> Result<(), String> {
+    if let Some(wallet_net) = state.wallet.wallet_network().await {
+        if !settings.matches_wallet_network(wallet_net) {
+            return Err(format!(
+                "network mismatch: the open wallet is {:?} but the selected network is {:?}",
+                wallet_net, settings.network
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn node_start(state: State<'_, AppState>, settings: NodeSettings) -> Result<(), String> {
+    ensure_wallet_network_matches(&state, &settings).await?;
     state.node.start(settings).await.map_err(|e| e.to_string())
 }
 
@@ -269,6 +318,9 @@ async fn node_restart(
     state: State<'_, AppState>,
     settings: Option<NodeSettings>,
 ) -> Result<(), String> {
+    if let Some(s) = &settings {
+        ensure_wallet_network_matches(&state, s).await?;
+    }
     state
         .node
         .restart(settings)
@@ -298,9 +350,24 @@ async fn node_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
     Ok(out)
 }
 
+/// L6: only allow scraping a loopback metrics endpoint. The address comes from
+/// the frontend, so without this guard a compromised renderer could turn this
+/// command into an SSRF primitive against arbitrary hosts. The node's metrics
+/// endpoint is always local (default 127.0.0.1:33371).
+fn require_loopback_addr(addr: &str) -> Result<(), String> {
+    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
+    let host = host.trim().trim_matches(|c| c == '[' || c == ']');
+    if matches!(host, "127.0.0.1" | "localhost" | "::1") {
+        Ok(())
+    } else {
+        Err(format!("refusing non-loopback metrics address: {addr}"))
+    }
+}
+
 #[tauri::command]
 async fn node_metrics(state: State<'_, AppState>, addr: String) -> Result<NodeMetrics, String> {
     let _ = state; // metrics are read directly from the local endpoint
+    require_loopback_addr(&addr)?;
     // Run the blocking scrape off the async runtime worker.
     tauri::async_runtime::spawn_blocking(move || metrics::fetch_metrics(&addr))
         .await
@@ -317,7 +384,15 @@ const MINER_SWEEP_FEE_NOMS: u64 = 100_000; // 0.00100000 DOM
 async fn do_sweep(
     node: Arc<NodeHost>,
     wallet: Arc<WalletManager>,
+    sweep_lock: Arc<tokio::sync::Mutex<()>>,
 ) -> Result<Option<String>, String> {
+    // L5: if a sweep is already in progress, skip rather than queue — two
+    // concurrent sweeps would read the same matured balance and try to spend
+    // the same outputs twice.
+    let _guard = match sweep_lock.try_lock() {
+        Ok(g) => g,
+        Err(_) => return Ok(None),
+    };
     if !wallet.is_open().await || !wallet.is_unlocked().await {
         return Ok(None);
     }
@@ -362,7 +437,12 @@ async fn do_sweep(
 
 #[tauri::command]
 async fn sweep_miner_rewards(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    do_sweep(state.node.clone(), state.wallet.clone()).await
+    do_sweep(
+        state.node.clone(),
+        state.wallet.clone(),
+        state.sweep_lock.clone(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -387,20 +467,22 @@ pub fn run() {
     let node = match NodeHost::new() {
         Ok(n) => Arc::new(n),
         Err(e) => {
-            // RNG do SO indisponível — sem token RPC não há como operar com
-            // segurança. Logamos de forma legível e encerramos sem panic.
-            tracing::error!("falha ao iniciar o host do nó: {e}");
-            eprintln!("DOM Wallet não pôde iniciar: {e}");
+            // OS RNG unavailable — without an RPC token there is no safe way to
+            // operate. Log it readably and exit without panicking.
+            tracing::error!("failed to start the node host: {e}");
+            eprintln!("DOM Wallet could not start: {e}");
             std::process::exit(1);
         }
     };
 
     let wallet = Arc::new(WalletManager::new());
+    let sweep_lock = Arc::new(tokio::sync::Mutex::new(()));
 
     let state = AppState {
         wallet: wallet.clone(),
         node: node.clone(),
         logs: bus.clone(),
+        sweep_lock: sweep_lock.clone(),
     };
 
     tauri::Builder::default()
@@ -433,6 +515,7 @@ pub fn run() {
             // but never block the UI.
             let sweep_node = node.clone();
             let sweep_wallet = wallet.clone();
+            let sweep_lock = sweep_lock.clone();
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(
                     AUTO_SWEEP_INTERVAL_SECS,
@@ -442,7 +525,7 @@ pub fn run() {
                     if !sweep_node.is_mining_enabled().await {
                         continue;
                     }
-                    match do_sweep(sweep_node.clone(), sweep_wallet.clone()).await {
+                    match do_sweep(sweep_node.clone(), sweep_wallet.clone(), sweep_lock.clone()).await {
                         Ok(Some(tx)) => tracing::info!("auto-swept miner rewards to wallet: {tx}"),
                         Ok(None) => {}
                         Err(e) => tracing::debug!("auto-sweep skipped/failed: {e}"),
@@ -460,8 +543,6 @@ pub fn run() {
             wallet_lock,
             wallet_unlock,
             wallet_balance,
-            wallet_create_receive,
-            wallet_send,
             slate_create_send,
             slate_receive,
             slate_finalize,
@@ -480,8 +561,8 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {
-            tracing::error!("erro fatal ao executar a DOM Wallet: {e}");
-            eprintln!("Erro fatal ao executar a DOM Wallet: {e}");
+            tracing::error!("fatal error running DOM Wallet: {e}");
+            eprintln!("Fatal error running DOM Wallet: {e}");
             std::process::exit(1);
         });
 }

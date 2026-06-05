@@ -6,22 +6,25 @@
 //! keeps the unlocked handle inside the Rust backend (never the frontend).
 //!
 //! SECURITY:
-//!   * The unlocked `WalletDir` lives only here, behind a `Mutex`. The seed and
-//!     keys never cross the Tauri IPC boundary.
+//!   * The unlocked `WalletDir` lives only here, behind a `Mutex`. The seed
+//!     *bytes* and derived private keys never cross the Tauri IPC boundary.
+//!   * The BIP-39 *mnemonic phrase* is the one exception: it crosses the IPC
+//!     boundary EXACTLY ONCE, at wallet creation, so the onboarding UI can force
+//!     the user to write it down (see `wallet_create`). It is never persisted by
+//!     the frontend and the renderer scrubs it after confirmation (L7). After
+//!     creation the words are not re-derivable from the opened wallet.
 //!   * Passwords arrive as `String` from a single command, are used, and the
 //!     binding is dropped. We wrap the live copy in `Zeroizing` where we hold
 //!     it transiently.
-//!   * Seed phrases are only ever returned to the UI on an explicit,
-//!     password-gated request (onboarding confirmation / "show seed").
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{anyhow, Result};
-use dom_crypto::pedersen::Commitment;
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_tx::slate::Slate;
 use dom_wallet::{
-    Bip39Seed, NodeRpc, NodeRpcClient, ReceiveRequestDescriptor, SeedAcceptance, Wallet, WalletDir,
+    Bip39Seed, NodeRpc, NodeRpcClient, ReceiveRequestDescriptor, RpcClientError, SeedAcceptance,
+    Wallet, WalletDir,
 };
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
@@ -35,6 +38,13 @@ pub struct ReceiveInfo {
     pub amount: u64,
     pub address: String,
     pub commitment_hex: String,
+    // TODO(protocol-team): `blinding_hex` carries the output's blinding factor.
+    // Sharing it with a counterparty is part of `dom-wallet`'s receive protocol
+    // (`ReceiveRequestDescriptor`), but whether exposing it is acceptable under
+    // the project's confidentiality/theft model is a PROTOCOL-level question,
+    // out of scope for the wallet-desktop. Not changed here — flagged for review
+    // by the protocol team. Within this app it only travels over the local,
+    // bearer-authenticated node RPC during the miner-reward auto-sweep.
     pub blinding_hex: String,
     pub status: String,
 }
@@ -173,57 +183,6 @@ impl WalletManager {
         Ok(desc.into())
     }
 
-    /// Build a spend against a recipient receive descriptor (its commitment +
-    /// blinding hex) and submit it through the local node RPC. Returns the
-    /// tx hash hex on success.
-    pub async fn send(
-        &self,
-        rpc: &NodeRpcClient,
-        recipient_commitment_hex: &str,
-        recipient_blinding_hex: &str,
-        amount: u64,
-        fee: u64,
-    ) -> Result<String> {
-        // Fetch current height from the node first — required by build_spend
-        // for coinbase-maturity-aware coin selection.
-        let status = rpc.status().map_err(|e| anyhow!("node status: {e}"))?;
-        let height = status.chain_height;
-
-        let commitment_bytes = parse_commitment_hex(recipient_commitment_hex)?;
-        let blinding = parse_blinding_hex(recipient_blinding_hex)?;
-
-        let mut guard = self.inner.lock().await;
-        let dir = guard.as_mut().ok_or_else(|| anyhow!("no wallet open"))?;
-
-        let tx = dir
-            .wallet_mut()
-            .build_spend(
-                Commitment::from_compressed_bytes(&commitment_bytes)
-                    .map_err(|e| anyhow!("recipient commitment decode: {e}"))?,
-                blinding,
-                amount,
-                fee,
-                height,
-            )
-            .map_err(|e| anyhow!("build spend: {e}"))?;
-
-        let tx_hash = Wallet::tracking_tx_hash(&tx).map_err(|e| anyhow!("tx hash: {e}"))?;
-
-        match rpc.submit_tx(&tx) {
-            Ok(_) => {
-                if let Err(e) = dir.wallet_mut().mark_submitted(tx_hash) {
-                    tracing::warn!("mark_submitted failed after submit (tx {}): {e}", hex::encode(tx_hash));
-                }
-                Ok(hex::encode(tx_hash))
-            }
-            Err(e) => {
-                // Roll back the reservation so funds aren't stuck pending.
-                let _ = dir.wallet_mut().cancel_tx(tx_hash);
-                Err(anyhow!("submit failed: {e}"))
-            }
-        }
-    }
-
     // ── Slate protocol (interactive person-to-person send) ────────────────────
     // Three steps, Mimblewimble-style. The Slate carries only PUBLIC data, so it
     // is safe to export as hex and hand to the other party. Secrets stay in the
@@ -284,51 +243,69 @@ impl WalletManager {
                 Ok(hex::encode(tx_hash))
             }
             Err(e) => {
-                let _ = dir.wallet_mut().cancel_tx(tx_hash);
+                // L10: only roll back the reservation when the tx definitely did
+                // NOT reach the node. On an ambiguous failure (read timeout, or a
+                // mid-flight transport error) the node may have accepted it into
+                // its mempool — cancelling locally would free the inputs and let
+                // the wallet respend them, creating a conflicting transaction.
+                if submit_failure_is_safe_to_rollback(&e) {
+                    let _ = dir.wallet_mut().cancel_tx(tx_hash);
+                } else {
+                    tracing::warn!(
+                        "submit ambiguous, keeping tx {} pending (no rollback): {e}",
+                        hex::encode(tx_hash)
+                    );
+                }
                 Err(anyhow!("submit failed: {e}"))
             }
         }
     }
 
-    /// Verify the password by re-opening the directory. Used to gate the
-    /// "show seed" UI.
+    /// Verify a password against the ALREADY-OPEN wallet (M3).
     ///
-    /// IMPORTANT (verified against the crate): `dom-wallet` intentionally does
-    /// NOT expose a way to re-derive the BIP-39 *mnemonic words* from an opened
-    /// wallet — the encrypted store keeps the seed *bytes*, and `Bip39Seed`'s
-    /// `phrase()` is only available at generation/restore time. This is a
-    /// deliberate security property. Therefore the only place we can show the
-    /// words is onboarding (where we still hold them). This method confirms the
-    /// password so the UI can, at most, confirm wallet ownership and guide the
-    /// user to their original written-down backup.
-    pub async fn verify_password(&self, path: &Path, password: &str) -> Result<()> {
-        let _ = WalletDir::open(path, password).map_err(|e| anyhow!("password check: {e}"))?;
-        Ok(())
+    /// We must NOT re-open the `WalletDir` here: `WalletDir::open` takes an
+    /// exclusive `wallet.lock`, which always fails while this wallet is open,
+    /// so the old implementation could never succeed. Instead we decrypt the
+    /// on-disk header in place via `Wallet::verify_password`, which touches no
+    /// locks. Returns `Ok(true)` for the correct password, `Ok(false)` for a
+    /// wrong one, and an error only when no wallet is open.
+    ///
+    /// NOTE (verified against the crate): `dom-wallet` intentionally does NOT
+    /// expose a way to re-derive the BIP-39 *mnemonic words* from an opened
+    /// wallet — the encrypted store keeps the seed *bytes*. Showing the words is
+    /// only possible during onboarding (where we still hold them). This method
+    /// merely confirms ownership.
+    pub async fn verify_password(&self, password: &str) -> Result<bool> {
+        let guard = self.inner.lock().await;
+        let dir = guard.as_ref().ok_or_else(|| anyhow!("no wallet open"))?;
+        Ok(dir.wallet().verify_password(password))
     }
 
-    pub async fn wallet_path(&self) -> Option<PathBuf> {
+    /// The network of the currently-open wallet, if any (M2). Used to refuse
+    /// starting the node on a network that doesn't match the open wallet.
+    pub async fn wallet_network(&self) -> Option<dom_wallet::Network> {
         self.inner
             .lock()
             .await
             .as_ref()
-            .map(|d| d.path().to_path_buf())
+            .map(|d| d.wallet().network())
     }
 }
 
-fn parse_commitment_hex(value: &str) -> Result<[u8; 33]> {
-    let bytes = hex::decode(value.trim())?;
-    let arr: [u8; 33] = bytes
-        .try_into()
-        .map_err(|v: Vec<u8>| anyhow!("commitment must be 33 bytes, got {}", v.len()))?;
-    Ok(arr)
-}
-
-fn parse_blinding_hex(value: &str) -> Result<dom_crypto::BlindingFactor> {
-    let bytes = hex::decode(value.trim())?;
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .map_err(|v: Vec<u8>| anyhow!("blinding must be 32 bytes, got {}", v.len()))?;
-    dom_crypto::BlindingFactor::from_bytes(arr).map_err(|e| anyhow!("blinding decode: {e}"))
+/// Whether a failed `submit_tx` is safe to roll back locally (L10).
+///
+/// Returns `false` for the ambiguous cases where the node MAY already have the
+/// transaction (a read timeout after the request was sent, or a transport error
+/// that could have landed mid-flight). In those cases we keep the local
+/// reservation pending instead of cancelling, so the wallet never respends the
+/// same inputs. Every other failure (connect timeout, explicit rejection,
+/// unauthorized, decode, config, serialization) means the tx did not take
+/// effect and the reservation can be released.
+fn submit_failure_is_safe_to_rollback(err: &RpcClientError) -> bool {
+    !matches!(
+        err,
+        RpcClientError::ReadTimeout { .. } | RpcClientError::Transport { .. }
+    )
 }
 
 // ── Slate (de)serialization for the UI bridge ────────────────────────────────
