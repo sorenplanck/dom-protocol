@@ -68,6 +68,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LIBCLANG_PATH: ${{ matrix.platform == 'windows-latest' && 'C:\\Program Files\\LLVM\\bin' || '' }}
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform == 'macos-latest' && '11.0' || '' }}
+          RUSTFLAGS: ${{ matrix.platform == 'macos-latest' && '-C link-arg=-Wl,-undefined,dynamic_lookup' || '' }}
         with:
           projectPath: wallet-desktop
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('wallet-v0.0.0-dev-{0}', github.run_number) }}
