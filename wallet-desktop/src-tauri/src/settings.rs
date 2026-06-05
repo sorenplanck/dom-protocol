@@ -19,16 +19,6 @@ pub enum NetworkKind {
     Regtest,
 }
 
-impl NetworkKind {
-    pub fn as_env(self) -> &'static str {
-        match self {
-            NetworkKind::Mainnet => "mainnet",
-            NetworkKind::Testnet => "testnet",
-            NetworkKind::Regtest => "regtest",
-        }
-    }
-}
-
 /// All knobs the Settings + Node tabs expose. Serializable so the frontend can
 /// round-trip it; NEVER contains the wallet password (that lives only in the
 /// backend, transiently — see `commands.rs`).
@@ -65,59 +55,24 @@ impl Default for NodeSettings {
 }
 
 impl NodeSettings {
-    /// Export the `DOM_*` env vars. Mirrors `dom-node`'s `main.rs` reads.
-    ///
-    /// MINING WALLET (DOM-SEC-004): to credit block rewards, the node needs a
-    /// wallet *path AND password*. We deliberately NEVER pass the user's wallet
-    /// password to the node. Instead, when mining is enabled, we use a
-    /// DEDICATED miner wallet that the app manages: its path lives under the
-    /// data dir and its password is generated once and stored beside it. The
-    /// node auto-creates this wallet on first run. The user's own wallet is
-    /// never touched and its password never leaves the wallet manager.
-    pub fn export_env(&self) {
-        std::env::set_var("DOM_NETWORK", self.network.as_env());
-        std::env::set_var("DOM_P2P_LISTEN_ADDR", &self.p2p_listen_addr);
-        std::env::set_var("DOM_RPC_LISTEN_ADDR", &self.rpc_listen_addr);
-        std::env::set_var("DOM_DATA_DIR", &self.data_dir);
-        std::env::set_var("DOM_MINE", if self.mine { "true" } else { "false" });
-        std::env::set_var("DOM_LOG", &self.log_level);
-        // Regtest fast mining (FastDevOnly): blocos quase instantâneos para
-        // desenvolvimento/teste local. O nó só aceita esta flag em regtest
-        // (guarda fail-closed em mainnet/testnet), então é seguro exportá-la
-        // apenas quando a rede selecionada for Regtest.
-        match self.network {
-            NetworkKind::Regtest => std::env::set_var("DOM_REGTEST_FAST_MINING", "1"),
-            _ => std::env::remove_var("DOM_REGTEST_FAST_MINING"),
-        }
-        if !self.seed_peers.is_empty() {
-            std::env::set_var("DOM_SEED_PEERS", self.seed_peers.join(","));
-        } else {
-            std::env::remove_var("DOM_SEED_PEERS");
-        }
-        match &self.metrics_listen_addr {
-            Some(a) => std::env::set_var("DOM_METRICS_LISTEN_ADDR", a),
-            None => std::env::remove_var("DOM_METRICS_LISTEN_ADDR"),
-        }
-
-        if self.mine {
-            // Dedicated miner wallet (path + generated password). If the user
-            // explicitly chose a miner_wallet_path we honour it; otherwise we
-            // default to one under the data dir.
-            if let Ok((path, password)) = self.miner_wallet_credentials() {
-                std::env::set_var("DOM_WALLET_PATH", &path);
-                std::env::set_var("DOM_WALLET_PASSWORD", &password);
-            } else {
-                std::env::remove_var("DOM_WALLET_PATH");
-                std::env::remove_var("DOM_WALLET_PASSWORD");
-            }
-        } else {
-            // Not mining → never expose any wallet path/password to the node.
-            std::env::remove_var("DOM_WALLET_PATH");
-            std::env::remove_var("DOM_WALLET_PASSWORD");
-        }
-    }
-
     /// Build the strongly-typed `NodeConfig`.
+    ///
+    /// This is the SINGLE source of truth handed to the embedded node via
+    /// `DomNode::init(config)`. We deliberately do NOT export any `DOM_*`
+    /// environment variables (H1/M5): `std::env::set_var` is not thread-safe
+    /// and would race the node's Tokio threads, and exporting
+    /// `DOM_WALLET_PASSWORD` would leak the miner-wallet secret into the
+    /// process environment (and any child process / crash dump). Every knob
+    /// the standalone node reads from `DOM_*` is set directly on the
+    /// `NodeConfig` below, so the embedded node behaves identically without
+    /// touching global process state.
+    ///
+    /// MINING WALLET (DOM-SEC-004): to credit block rewards the node needs a
+    /// wallet *path AND password*. We NEVER pass the user's wallet password to
+    /// the node. When mining is enabled we use a DEDICATED miner wallet the app
+    /// manages (path under the data dir, password generated once and stored in a
+    /// permission-restricted `.key` beside it). The node auto-creates it on
+    /// first run; the user's own wallet is never touched.
     pub fn to_node_config(&self) -> Result<NodeConfig> {
         let mut config = match self.network {
             NetworkKind::Mainnet => NodeConfig::mainnet(),
@@ -211,6 +166,14 @@ impl NodeSettings {
             NetworkKind::Regtest => WalletNetwork::Regtest,
         }
     }
+
+    /// Whether an open wallet's network matches this node configuration (M2).
+    /// Used to refuse starting the embedded node on a network that doesn't
+    /// match the open wallet, which would otherwise yield an inconsistent
+    /// balance/genesis view.
+    pub fn matches_wallet_network(&self, wallet_network: WalletNetwork) -> bool {
+        self.wallet_network() == wallet_network
+    }
 }
 
 /// `~/.dom/data` cross-platform.
@@ -231,9 +194,13 @@ fn dirs_home() -> Option<std::path::PathBuf> {
     }
 }
 
-/// Restrict a file to owner-only read/write where the OS supports it.
-/// On Windows this is a no-op (NTFS ACLs differ); the file lives in the user's
-/// own data dir. The miner wallet key is a local test-network secret.
+/// Restrict the miner-wallet key file to the current user only.
+///
+/// On Unix: `chmod 0600`. On Windows: strip inherited ACEs and grant the
+/// current user full control via `icacls` (H1) — NTFS files created in the
+/// user's data dir otherwise inherit broad ACLs, leaving the plaintext key
+/// readable by other principals. Best-effort: failures are non-fatal because
+/// the key file already lives under the user's own profile directory.
 fn restrict_permissions(path: &std::path::Path) {
     #[cfg(unix)]
     {
@@ -244,7 +211,39 @@ fn restrict_permissions(path: &std::path::Path) {
             let _ = std::fs::set_permissions(path, perms);
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+        // Avoid flashing a console window from the GUI process.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        let p = path.to_string_lossy().to_string();
+        // Resolve the current account as DOMAIN\user (or bare user for local
+        // accounts) so the /grant ACE targets exactly this principal.
+        let user = std::env::var("USERNAME").unwrap_or_default();
+        let account = match std::env::var("USERDOMAIN") {
+            Ok(dom) if !dom.is_empty() && !user.is_empty() => format!("{dom}\\{user}"),
+            _ => user.clone(),
+        };
+
+        // /inheritance:r removes inherited permissions (must run first);
+        // /grant:r replaces this user's ACE with full control only.
+        let _ = Command::new("icacls")
+            .arg(&p)
+            .arg("/inheritance:r")
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        if !account.is_empty() {
+            let _ = Command::new("icacls")
+                .arg(&p)
+                .arg("/grant:r")
+                .arg(format!("{account}:F"))
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
     }
