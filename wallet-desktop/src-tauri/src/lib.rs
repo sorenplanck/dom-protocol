@@ -145,7 +145,11 @@ async fn wallet_balance(state: State<'_, AppState>) -> Result<BalanceInfo, Strin
     // number.
     let client = rpc_client(&state).await?;
     let height = client.status().map_err(|e| e.to_string())?.chain_height;
-    state.wallet.balance(height).await.map_err(|e| e.to_string())
+    state
+        .wallet
+        .balance(height)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // NOTE (L8): the non-interactive `wallet_send` / `wallet_create_receive`
@@ -264,11 +268,7 @@ async fn save_text_file(
 /// cancelled. Bounded to avoid loading a huge file by mistake.
 #[tauri::command]
 async fn read_text_file(app: tauri::AppHandle, title: String) -> Result<Option<String>, String> {
-    let picked = app
-        .dialog()
-        .file()
-        .set_title(&title)
-        .blocking_pick_file();
+    let picked = app.dialog().file().set_title(&title).blocking_pick_file();
     let path = match picked {
         Some(fp) => fp.into_path().map_err(|e| format!("invalid path: {e}"))?,
         None => return Ok(None),
@@ -517,15 +517,16 @@ pub fn run() {
             let sweep_wallet = wallet.clone();
             let sweep_lock = sweep_lock.clone();
             tauri::async_runtime::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                    AUTO_SWEEP_INTERVAL_SECS,
-                ));
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(AUTO_SWEEP_INTERVAL_SECS));
                 loop {
                     interval.tick().await;
                     if !sweep_node.is_mining_enabled().await {
                         continue;
                     }
-                    match do_sweep(sweep_node.clone(), sweep_wallet.clone(), sweep_lock.clone()).await {
+                    match do_sweep(sweep_node.clone(), sweep_wallet.clone(), sweep_lock.clone())
+                        .await
+                    {
                         Ok(Some(tx)) => tracing::info!("auto-swept miner rewards to wallet: {tx}"),
                         Ok(None) => {}
                         Err(e) => tracing::debug!("auto-sweep skipped/failed: {e}"),
