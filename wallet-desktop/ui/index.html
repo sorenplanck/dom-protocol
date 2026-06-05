@@ -4,15 +4,13 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>DOM Wallet</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Spectral:ital,wght@0,400;0,500;1,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <!-- ── Onboarding / unlock (no sidebar) ──────────────────────────────── -->
   <div id="gate" class="center-screen">
     <img class="coin-hero" src="assets/dom-coin.png" alt="DOM" />
-    <div id="gate-body" style="width: 520px; max-width: 90vw;"></div>
+    <div id="gate-body" class="gate-body"></div>
   </div>
 
   <!-- ── Main app (hidden until wallet open + unlocked) ────────────────── -->
@@ -27,16 +25,16 @@
       </div>
       <nav class="nav" id="nav">
         <button data-screen="dashboard" class="active">Dashboard</button>
-        <button data-screen="pay">Pagar</button>
-        <button data-screen="receive">Receber</button>
-        <button data-screen="history">Histórico</button>
-        <button data-screen="node">Nó / Logs</button>
-        <button data-screen="settings">Configurações</button>
+        <button data-screen="pay">Pay</button>
+        <button data-screen="receive">Receive</button>
+        <button data-screen="history">History</button>
+        <button data-screen="node">Node / Logs</button>
+        <button data-screen="settings">Settings</button>
       </nav>
       <div class="foot">
         <div class="motto">"Not a store of value.<br/>A means of exchange."</div>
         <button class="theme-toggle" id="themeToggle">Toggle theme</button>
-        <button class="theme-toggle" id="lockBtn" style="margin-top:6px;">Lock wallet</button>
+        <button class="theme-toggle mt6" id="lockBtn">Lock wallet</button>
       </div>
     </aside>
     <main class="main"><div id="screen"></div></main>
