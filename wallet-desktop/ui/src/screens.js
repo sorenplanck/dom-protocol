@@ -577,6 +577,7 @@ export function renderNode() {
           <button class="btn" id="bStart">Iniciar</button>
           <button class="btn ghost" id="bStop">Parar</button>
           <button class="btn ghost" id="bRestart">Reiniciar</button>
+          <button class="btn ghost" id="bSweep">Recolher recompensas</button>
           <label class="check" style="margin-left:auto"><input type="checkbox" id="mineToggle" /><span>Minerar</span></label>
         </div>
       </div>
@@ -641,6 +642,18 @@ export function renderNode() {
   node.querySelector("#bRestart").onclick = async () => {
     try { await api.nodeRestart(settings.current); toast(t("nodeRestarting")); }
     catch (e) { toast(humanizeError(e), true); }
+  };
+  node.querySelector("#bSweep").onclick = async () => {
+    const btn = node.querySelector("#bSweep"); btn.disabled = true;
+    try {
+      const tx = await api.sweepMinerRewards();
+      if (tx) {
+        toast((getLang() === "en" ? "Rewards swept to your wallet: " : "Recompensas recolhidas: ") + tx.slice(0, 16) + "…");
+      } else {
+        toast(getLang() === "en" ? "Nothing matured to sweep yet." : "Nada maduro para recolher ainda.");
+      }
+    } catch (e) { toast(humanizeError(e), true); }
+    finally { btn.disabled = false; }
   };
   const mineToggle = node.querySelector("#mineToggle");
   mineToggle.checked = !!settings.current.mine;
@@ -710,6 +723,7 @@ export function renderSettings(onApply) {
         <div class="copyable"><code id="data"></code><button class="btn ghost" id="pickData">Alterar</button></div>
         <label>Carteira de recompensa do minerador (.dom, opcional)</label>
         <div class="copyable"><code id="miner"></code><button class="btn ghost" id="pickMiner">Escolher</button></div>
+        <p class="muted" style="margin-top:4px">Deixe em branco para o app usar uma carteira de mineração dedicada (criada automaticamente na pasta de dados). Sua carteira pessoal não é usada para minerar e a senha dela nunca é compartilhada com o nó.</p>
         <div class="check"><input type="checkbox" id="mine" /><label>Minerar neste nó</label></div>
         <div class="btn-row"><button class="btn" id="apply">Salvar e aplicar</button></div>
       </div>
@@ -760,7 +774,7 @@ export function renderSettings(onApply) {
     if (dir) { s.data_dir = dir; node.querySelector("#data").textContent = dir; }
   };
   node.querySelector("#pickMiner").onclick = async () => {
-    const f = await pickFile("Escolher carteira do minerador");
+    const f = await pickSaveFile("Escolher carteira do minerador (.dom)");
     if (f) { s.miner_wallet_path = f; node.querySelector("#miner").textContent = f; }
   };
   node.querySelector("#lock").onclick = async () => { await api.walletLock(); location.reload(); };
