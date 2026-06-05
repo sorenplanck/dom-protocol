@@ -8,6 +8,22 @@
 //! Prometheus client dependency needed for a handful of gauges.
 
 use anyhow::Result;
+use std::sync::OnceLock;
+use std::time::Duration;
+
+/// Shared blocking HTTP client (M7). Building a reqwest client sets up a TLS
+/// backend and connection pool; the dashboard and Node tab poll every few
+/// seconds, so we build it once and reuse it. Per-request timeouts are applied
+/// at each call site via `RequestBuilder::timeout`.
+fn http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("failed to build shared reqwest client")
+    })
+}
 
 #[derive(Clone, Copy, Default, serde::Serialize)]
 pub struct NodeMetrics {
@@ -21,13 +37,9 @@ pub struct NodeMetrics {
 /// Fetch + parse the metrics text. `base` is e.g. "127.0.0.1:33371".
 pub fn fetch_metrics(base: &str) -> Result<NodeMetrics> {
     let url = format!("http://{base}/metrics");
-    // Blocking minreq-free fetch via std + ureq-like manual TCP would be
-    // heavier; reuse reqwest's blocking client which is already in the tree
-    // through dom-wallet's rpc_client.
-    let body = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()?
+    let body = http_client()
         .get(url)
+        .timeout(Duration::from_secs(3))
         .send()?
         .text()?;
     Ok(parse_metrics(&body))
@@ -64,7 +76,13 @@ fn parse_metrics(text: &str) -> NodeMetrics {
 /// Balance of the node's (miner) wallet, read from `GET /wallet/balance`.
 /// Fields default to 0 if absent. Used by the auto-sweep to know how much
 /// matured (confirmed) balance can be moved to the user's wallet.
+///
+/// `immature_noms` / `reserved_noms` mirror the node's JSON response shape so
+/// the deserializer stays faithful to the endpoint contract; only
+/// `confirmed_noms` drives the sweep decision, so the other two are allowed to
+/// be unread.
 #[derive(Clone, Copy, Default, serde::Deserialize)]
+#[allow(dead_code)]
 pub struct NodeWalletBalance {
     #[serde(default)]
     pub confirmed_noms: u64,
@@ -78,10 +96,9 @@ pub struct NodeWalletBalance {
 /// `token` is the RPC bearer token. The endpoint is bearer-protected.
 pub fn fetch_node_wallet_balance(rpc_base: &str, token: &str) -> Result<NodeWalletBalance> {
     let url = format!("http://{rpc_base}/wallet/balance");
-    let resp = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()?
+    let resp = http_client()
         .get(url)
+        .timeout(Duration::from_secs(5))
         .bearer_auth(token)
         .send()?;
     if !resp.status().is_success() {
