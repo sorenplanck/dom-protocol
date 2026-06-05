@@ -84,7 +84,9 @@ impl Visit for MessageVisitor {
         if field.name() == "message" {
             self.message = format!("{value:?}");
             // Strip the surrounding quotes Debug adds to plain messages.
-            if self.message.starts_with('"') && self.message.ends_with('"') && self.message.len() >= 2
+            if self.message.starts_with('"')
+                && self.message.ends_with('"')
+                && self.message.len() >= 2
             {
                 self.message = self.message[1..self.message.len() - 1].to_string();
             }
@@ -99,7 +101,12 @@ impl Visit for MessageVisitor {
 /// the UI or any in-memory ring buffer.
 fn scrub(mut s: String) -> String {
     const NEEDLES: [&str; 6] = [
-        "password", "passphrase", "seed", "mnemonic", "private_key", "secret",
+        "password",
+        "passphrase",
+        "seed",
+        "mnemonic",
+        "private_key",
+        "secret",
     ];
     let lower = s.to_lowercase();
     if NEEDLES.iter().any(|n| lower.contains(n)) {

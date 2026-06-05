@@ -100,7 +100,11 @@ impl NodeHost {
     /// Whether the last-applied settings have mining enabled.
     pub async fn is_mining_enabled(&self) -> bool {
         let inner = self.inner.lock().await;
-        inner.last_settings.as_ref().map(|s| s.mine).unwrap_or(false)
+        inner
+            .last_settings
+            .as_ref()
+            .map(|s| s.mine)
+            .unwrap_or(false)
     }
 
     /// Start the node with the given settings. No-op (Ok) if already running.
@@ -119,9 +123,7 @@ impl NodeHost {
 
         // Initialize the node (opens LMDB, verifies the H generator, etc.).
         // This is synchronous and can fail fast — surface the error to the UI.
-        let node = Arc::new(
-            DomNode::init(config).map_err(|e| anyhow!("node init failed: {e}"))?,
-        );
+        let node = Arc::new(DomNode::init(config).map_err(|e| anyhow!("node init failed: {e}"))?);
 
         let run_node = node.clone();
         let task = tokio::spawn(async move {

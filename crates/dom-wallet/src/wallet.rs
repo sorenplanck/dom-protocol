@@ -2821,7 +2821,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("w.dom");
         let genesis = Hash256::from_bytes([3u8; 32]);
-        let mut wallet = Wallet::create(&path, "correct horse", Network::Testnet, &genesis).unwrap();
+        let mut wallet =
+            Wallet::create(&path, "correct horse", Network::Testnet, &genesis).unwrap();
 
         // Correct password verifies; wrong password does not.
         assert!(wallet.verify_password("correct horse"));
