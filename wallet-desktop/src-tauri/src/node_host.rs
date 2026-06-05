@@ -18,7 +18,6 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context as _, Result};
-use dom_config::NodeConfig;
 use dom_node::node::DomNode;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -112,11 +111,9 @@ impl NodeHost {
         }
         inner.state = NodeState::Starting;
 
-        // Export the DOM_* env vars so any in-node re-read is consistent with
-        // what we pass through the config struct. These mirror the variables
-        // documented for the standalone node.
-        settings.export_env();
-
+        // All configuration is passed via the strongly-typed NodeConfig below —
+        // we never export DOM_* env vars (H1/M5): set_var is not thread-safe and
+        // would leak the miner-wallet password into the process environment.
         let config = settings.to_node_config()?;
         inner.last_settings = Some(settings);
 
