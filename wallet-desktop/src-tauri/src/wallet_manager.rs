@@ -197,7 +197,10 @@ impl WalletManager {
         amount: u64,
         fee: u64,
     ) -> Result<String> {
-        let height = rpc.status().map_err(|e| anyhow!("node status: {e}"))?.chain_height;
+        let height = rpc
+            .status()
+            .map_err(|e| anyhow!("node status: {e}"))?
+            .chain_height;
         let mut guard = self.inner.lock().await;
         let dir = guard.as_mut().ok_or_else(|| anyhow!("no wallet open"))?;
         let slate = dir
@@ -210,7 +213,10 @@ impl WalletManager {
     /// Step 2 (recipient): import the sender's slate, respond, return the
     /// responded slate as hex to hand back to the sender.
     pub async fn slate_receive(&self, rpc: &NodeRpcClient, slate_hex: &str) -> Result<String> {
-        let height = rpc.status().map_err(|e| anyhow!("node status: {e}"))?.chain_height;
+        let height = rpc
+            .status()
+            .map_err(|e| anyhow!("node status: {e}"))?
+            .chain_height;
         let slate = slate_from_hex(slate_hex)?;
         let mut guard = self.inner.lock().await;
         let dir = guard.as_mut().ok_or_else(|| anyhow!("no wallet open"))?;
@@ -224,7 +230,10 @@ impl WalletManager {
     /// Step 3 (sender): import the responded slate, finalize into a Transaction,
     /// and submit it to the node. Returns the tx hash hex.
     pub async fn slate_finalize(&self, rpc: &NodeRpcClient, slate_hex: &str) -> Result<String> {
-        let height = rpc.status().map_err(|e| anyhow!("node status: {e}"))?.chain_height;
+        let height = rpc
+            .status()
+            .map_err(|e| anyhow!("node status: {e}"))?
+            .chain_height;
         let slate = slate_from_hex(slate_hex)?;
         let mut guard = self.inner.lock().await;
         let dir = guard.as_mut().ok_or_else(|| anyhow!("no wallet open"))?;
@@ -238,7 +247,10 @@ impl WalletManager {
         match rpc.submit_tx(&tx) {
             Ok(_) => {
                 if let Err(e) = dir.wallet_mut().mark_submitted(tx_hash) {
-                    tracing::warn!("mark_submitted failed after submit (tx {}): {e}", hex::encode(tx_hash));
+                    tracing::warn!(
+                        "mark_submitted failed after submit (tx {}): {e}",
+                        hex::encode(tx_hash)
+                    );
                 }
                 Ok(hex::encode(tx_hash))
             }
@@ -314,7 +326,9 @@ fn submit_failure_is_safe_to_rollback(err: &RpcClientError) -> bool {
 // traits (dom-serialization).
 
 fn slate_to_hex(slate: &Slate) -> Result<String> {
-    let bytes = slate.to_bytes().map_err(|e| anyhow!("slate serialize: {e}"))?;
+    let bytes = slate
+        .to_bytes()
+        .map_err(|e| anyhow!("slate serialize: {e}"))?;
     Ok(hex::encode(bytes))
 }
 
