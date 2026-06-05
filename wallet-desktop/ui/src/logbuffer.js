@@ -1,27 +1,45 @@
-// Buffer compartilhado de logs do nó.
+// Shared node-log buffer.
 //
-// O backend já transmite cada linha como evento "node-log" (e mantém um buffer
-// bounded próprio). Aqui guardamos um espelho em memória no frontend para que a
-// aba Nó / Logs mostre as últimas N linhas mesmo se for aberta DEPOIS de o nó
-// já ter iniciado — sem isso, o usuário só veria o que chega após abrir a aba.
+// The backend already streams each line as a "node-log" event (and keeps its
+// own bounded buffer). Here we keep an in-memory mirror in the frontend so the
+// Node / Logs tab can show the last N lines even if it is opened AFTER the node
+// has started — without this, the user would only see lines arriving after the
+// tab is opened.
 //
-// O listener é registrado UMA vez no boot (startLogCapture), não a cada render
-// da aba.
+// The listener is registered ONCE at boot (startLogCapture), not on every tab
+// render.
 
 import { events } from "./api.js";
 
 const MAX = 5000;
-const lines = [];
+// Ring buffer (H2): fixed-size array + head/count instead of push()/shift().
+// shift() is O(n) and, combined with a full re-render per line, made the log
+// console O(n²). Here append is O(1) and subscribers receive only the new line.
+const ring = new Array(MAX);
+let head = 0; // index of the next write slot
+let count = 0; // number of valid entries (<= MAX)
 const subscribers = new Set();
 let started = false;
 
+function pushLine(line) {
+  ring[head] = line;
+  head = (head + 1) % MAX;
+  if (count < MAX) count += 1;
+}
+
+// Ordered snapshot, oldest → newest. O(n); only called on a full re-render
+// (mount / filter change) and by logsToText — never per incoming line.
 export function getLogLines() {
-  return lines;
+  const out = new Array(count);
+  const start = (head - count + MAX) % MAX;
+  for (let i = 0; i < count; i++) out[i] = ring[(start + i) % MAX];
+  return out;
 }
 
 export function clearLogs() {
-  lines.length = 0;
-  notify();
+  head = 0;
+  count = 0;
+  notify(null); // null = full reset; subscribers do a full re-render
 }
 
 export function subscribeLogs(fn) {
@@ -29,9 +47,10 @@ export function subscribeLogs(fn) {
   return () => subscribers.delete(fn);
 }
 
-function notify() {
+// `line` is the newly-appended LogLine, or null to signal a reset/full redraw.
+function notify(line) {
   for (const fn of subscribers) {
-    try { fn(); } catch {}
+    try { fn(line); } catch {}
   }
 }
 
@@ -40,16 +59,15 @@ export async function startLogCapture() {
   if (started) return;
   started = true;
   await events.listen("node-log", (e) => {
-    lines.push(e.payload);
-    if (lines.length > MAX) lines.shift();
-    notify();
+    pushLine(e.payload);
+    notify(e.payload);
   });
 }
 
-// Serializa o buffer atual para texto (para o botão "Salvar logs").
+// Serialize the current buffer to text (for the "Save logs" button).
 export function logsToText(filter = "", level = "") {
   const f = filter.toLowerCase();
-  return lines
+  return getLogLines()
     .filter((l) =>
       (!level || l.level === level) &&
       (!f || (l.message + l.target).toLowerCase().includes(f)))
