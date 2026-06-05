@@ -185,7 +185,7 @@ impl NodeConfig {
             data_dir: "./dom-regtest-data".into(),
             p2p_listen_addr: format!("127.0.0.1:{P2P_PORT_REGTEST}"),
             max_inbound: 8,
-            min_outbound: 0,
+            min_outbound: 1,
             dns_seeds: vec![],
             seed_peers: vec![],
             mine: false,
