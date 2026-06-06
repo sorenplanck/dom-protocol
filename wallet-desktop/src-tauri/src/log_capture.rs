@@ -100,13 +100,18 @@ impl Visit for MessageVisitor {
 /// contains a password/seed-looking key we redact the value before it reaches
 /// the UI or any in-memory ring buffer.
 fn scrub(mut s: String) -> String {
-    const NEEDLES: [&str; 6] = [
+    const NEEDLES: [&str; 11] = [
         "password",
         "passphrase",
         "seed",
         "mnemonic",
         "private_key",
         "secret",
+        "token",
+        "bearer",
+        "key",
+        "blinding",
+        "rpc_token",
     ];
     let lower = s.to_lowercase();
     if NEEDLES.iter().any(|n| lower.contains(n)) {
