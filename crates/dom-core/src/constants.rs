@@ -206,6 +206,14 @@ pub const MAX_PROOF_SIZE: usize = 6_144;
 /// [CONSENSUS] Maximum serialized block size in bytes (16 MiB).
 pub const MAX_BLOCK_SERIALIZED_SIZE: usize = 16 * 1_024 * 1_024;
 
+/// [TRANSPORT] Maximum reassembled logical wire message, across Noise transport
+/// fragments. A single logical message (e.g. a full `Block`, or an IBD `Headers`
+/// batch) may exceed one Noise frame and is fragmented by the codec; this bounds
+/// the reassembly buffer. Sized to the largest legitimate message — a full Block
+/// — plus headroom for the `WireMessage` envelope. The codec rejects any frame
+/// stream whose declared total exceeds this BEFORE allocating, as DoS defense.
+pub const MAX_LOGICAL_MSG_BYTES: usize = MAX_BLOCK_SERIALIZED_SIZE + 64 * 1_024;
+
 /// [POLICY] Maximum headers per Headers message (IBD batch size).
 pub const MAX_HEADERS_PER_MSG: usize = 2_000;
 
