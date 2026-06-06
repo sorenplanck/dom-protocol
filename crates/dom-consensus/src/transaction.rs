@@ -649,7 +649,9 @@ mod tests {
 ///
 /// RFC-0007 Step 6: Bulletproofs+ validation.
 /// Each output commitment must have a valid range proof showing
-/// the committed value is in [0, 2^64).
+/// the committed value is in [0, 2^52) (MAX_PROVABLE_VALUE = 2^52 − 1 noms,
+/// ≈ 45M DOM > MAX_SUPPLY_DOM; the 52-bit limit is enforced by the
+/// Bulletproof+ prove() call in dom-crypto/src/bulletproof.rs).
 ///
 /// This prevents negative value outputs which would enable inflation.
 pub fn validate_range_proofs(tx: &Transaction) -> Result<(), DomError> {
