@@ -15,14 +15,17 @@ use std::time::Duration;
 /// backend and connection pool; the dashboard and Node tab poll every few
 /// seconds, so we build it once and reuse it. Per-request timeouts are applied
 /// at each call site via `RequestBuilder::timeout`.
-fn http_client() -> &'static reqwest::blocking::Client {
-    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .expect("failed to build shared reqwest client")
-    })
+fn http_client() -> Result<&'static reqwest::blocking::Client> {
+    static CLIENT: OnceLock<Result<reqwest::blocking::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("failed to build shared reqwest client: {e}"))
 }
 
 #[derive(Clone, Copy, Default, serde::Serialize)]
@@ -37,7 +40,7 @@ pub struct NodeMetrics {
 /// Fetch + parse the metrics text. `base` is e.g. "127.0.0.1:33371".
 pub fn fetch_metrics(base: &str) -> Result<NodeMetrics> {
     let url = format!("http://{base}/metrics");
-    let body = http_client()
+    let body = http_client()?
         .get(url)
         .timeout(Duration::from_secs(3))
         .send()?
@@ -96,7 +99,7 @@ pub struct NodeWalletBalance {
 /// `token` is the RPC bearer token. The endpoint is bearer-protected.
 pub fn fetch_node_wallet_balance(rpc_base: &str, token: &str) -> Result<NodeWalletBalance> {
     let url = format!("http://{rpc_base}/wallet/balance");
-    let resp = http_client()
+    let resp = http_client()?
         .get(url)
         .timeout(Duration::from_secs(5))
         .bearer_auth(token)

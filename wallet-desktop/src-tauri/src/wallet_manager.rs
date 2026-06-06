@@ -235,17 +235,20 @@ impl WalletManager {
             .map_err(|e| anyhow!("node status: {e}"))?
             .chain_height;
         let slate = slate_from_hex(slate_hex)?;
-        let mut guard = self.inner.lock().await;
-        let dir = guard.as_mut().ok_or_else(|| anyhow!("no wallet open"))?;
-
-        let tx = dir
-            .wallet_mut()
-            .finalize_slate(slate, height)
-            .map_err(|e| anyhow!("finalize slate: {e}"))?;
-
-        let tx_hash = Wallet::tracking_tx_hash(&tx).map_err(|e| anyhow!("tx hash: {e}"))?;
+        let (tx, tx_hash) = {
+            let mut guard = self.inner.lock().await;
+            let dir = guard.as_mut().ok_or_else(|| anyhow!("no wallet open"))?;
+            let tx = dir
+                .wallet_mut()
+                .finalize_slate(slate, height)
+                .map_err(|e| anyhow!("finalize slate: {e}"))?;
+            let tx_hash = Wallet::tracking_tx_hash(&tx).map_err(|e| anyhow!("tx hash: {e}"))?;
+            (tx, tx_hash)
+        };
         match rpc.submit_tx(&tx) {
             Ok(_) => {
+                let mut guard = self.inner.lock().await;
+                let dir = guard.as_mut().ok_or_else(|| anyhow!("no wallet open"))?;
                 if let Err(e) = dir.wallet_mut().mark_submitted(tx_hash) {
                     tracing::warn!(
                         "mark_submitted failed after submit (tx {}): {e}",
@@ -261,7 +264,10 @@ impl WalletManager {
                 // its mempool — cancelling locally would free the inputs and let
                 // the wallet respend them, creating a conflicting transaction.
                 if submit_failure_is_safe_to_rollback(&e) {
-                    let _ = dir.wallet_mut().cancel_tx(tx_hash);
+                    let mut guard = self.inner.lock().await;
+                    if let Some(dir) = guard.as_mut() {
+                        let _ = dir.wallet_mut().cancel_tx(tx_hash);
+                    }
                 } else {
                     tracing::warn!(
                         "submit ambiguous, keeping tx {} pending (no rollback): {e}",
