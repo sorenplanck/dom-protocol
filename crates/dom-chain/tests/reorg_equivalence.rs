@@ -776,6 +776,10 @@ fn side_chain_retention_prunes_to_deterministic_tip_bound_and_survives_restart()
         .map(|hash| *hash.as_bytes())
         .collect();
 
+    // Close the writer env before reopening: on Windows a second LMDB env on
+    // the same dir while the first handle is live fails with
+    // ERROR_USER_MAPPED_FILE (DOM-AUDIT-001).
+    drop(store);
     let reopened = open_chain(dir.path());
     let retained = retained_noncanonical_hashes(&reopened);
     assert_eq!(retained.len(), MAX_RETAINED_SIDE_BRANCH_TIPS);
@@ -822,6 +826,10 @@ fn retained_reorg_candidate_is_not_pruned_before_promotion() {
     let pruned = valid_coinbase_only_block(shared_hash, 2, 1, 99, 120);
     let pruned_hash = store_side_block(&store, &pruned);
 
+    // Close the writer env before reopening: on Windows a second LMDB env on
+    // the same dir while the first handle is live fails with
+    // ERROR_USER_MAPPED_FILE (DOM-AUDIT-001).
+    drop(store);
     let mut chain = open_chain(dir.path());
     let retained = retained_noncanonical_hashes(&chain);
     assert!(retained.contains(candidate_4_hash.as_bytes()));
