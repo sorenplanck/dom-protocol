@@ -10,12 +10,15 @@ mod node_host;
 mod settings;
 mod wallet_manager;
 
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dom_wallet::{NodeRpc, NodeRpcClient};
 use tauri::{Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tracing_subscriber::prelude::*;
+use zeroize::Zeroizing;
 
 use log_capture::{BroadcastLayer, LogBus};
 use metrics::NodeMetrics;
@@ -65,6 +68,37 @@ fn parse_noms(value: &str) -> Result<u64, String> {
         .map_err(|_| format!("invalid amount: {value:?}"))
 }
 
+fn validate_wallet_path(path: &str, must_exist: bool) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("wallet path must not be empty".into());
+    }
+    let path = Path::new(trimmed);
+    if must_exist {
+        return path
+            .canonicalize()
+            .map_err(|e| format!("invalid wallet path: {e}"));
+    }
+
+    if path.exists() {
+        return path
+            .canonicalize()
+            .map_err(|e| format!("invalid wallet path: {e}"));
+    }
+
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = parent
+        .canonicalize()
+        .map_err(|e| format!("invalid wallet parent path: {e}"))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "wallet path must include a file or directory name".to_string())?;
+    Ok(parent.join(file_name))
+}
+
 // ── Wallet commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -81,16 +115,18 @@ async fn wallet_status(state: State<'_, AppState>) -> Result<serde_json::Value, 
 async fn wallet_create(
     state: State<'_, AppState>,
     path: String,
-    password: String,
+    password: Zeroizing<String>,
     settings: NodeSettings,
 ) -> Result<String, String> {
+    settings.validate().map_err(|e| e.to_string())?;
+    let path = validate_wallet_path(&path, false)?;
     let phrase = state
         .wallet
-        .create_new(std::path::Path::new(&path), &password, &settings)
+        .create_new(&path, password.as_str(), &settings)
         .await
         .map_err(|e| e.to_string())?;
-    // `phrase` is Zeroizing<String>; clone the inner words out for the one-time
-    // return, then both copies drop/zeroize at end of scope.
+    // The mnemonic must cross IPC once so the user can write it down. Keep the
+    // Rust-side copy zeroized and hand Tauri only the unavoidable return string.
     Ok(phrase.to_string())
 }
 
@@ -98,13 +134,15 @@ async fn wallet_create(
 async fn wallet_restore(
     state: State<'_, AppState>,
     path: String,
-    password: String,
-    phrase: String,
+    password: Zeroizing<String>,
+    phrase: Zeroizing<String>,
     settings: NodeSettings,
 ) -> Result<(), String> {
+    settings.validate().map_err(|e| e.to_string())?;
+    let path = validate_wallet_path(&path, false)?;
     state
         .wallet
-        .restore_from_phrase(std::path::Path::new(&path), &password, &phrase, &settings)
+        .restore_from_phrase(&path, password.as_str(), phrase.as_str(), &settings)
         .await
         .map_err(|e| e.to_string())
 }
@@ -113,11 +151,12 @@ async fn wallet_restore(
 async fn wallet_open(
     state: State<'_, AppState>,
     path: String,
-    password: String,
+    password: Zeroizing<String>,
 ) -> Result<(), String> {
+    let path = validate_wallet_path(&path, true)?;
     state
         .wallet
-        .open(std::path::Path::new(&path), &password)
+        .open(&path, password.as_str())
         .await
         .map_err(|e| e.to_string())
 }
@@ -128,10 +167,13 @@ async fn wallet_lock(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn wallet_unlock(state: State<'_, AppState>, password: String) -> Result<(), String> {
+async fn wallet_unlock(
+    state: State<'_, AppState>,
+    password: Zeroizing<String>,
+) -> Result<(), String> {
     state
         .wallet
-        .unlock(&password)
+        .unlock(password.as_str())
         .await
         .map_err(|e| e.to_string())
 }
@@ -205,11 +247,11 @@ async fn slate_finalize(state: State<'_, AppState>, slate_hex: String) -> Result
 #[tauri::command]
 async fn wallet_verify_password(
     state: State<'_, AppState>,
-    password: String,
+    password: Zeroizing<String>,
 ) -> Result<bool, String> {
     state
         .wallet
-        .verify_password(&password)
+        .verify_password(password.as_str())
         .await
         .map_err(|e| e.to_string())
 }
@@ -291,6 +333,7 @@ async fn ensure_wallet_network_matches(
     state: &AppState,
     settings: &NodeSettings,
 ) -> Result<(), String> {
+    settings.validate().map_err(|e| e.to_string())?;
     if let Some(wallet_net) = state.wallet.wallet_network().await {
         if !settings.matches_wallet_network(wallet_net) {
             return Err(format!(
@@ -355,13 +398,13 @@ async fn node_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
 /// command into an SSRF primitive against arbitrary hosts. The node's metrics
 /// endpoint is always local (default 127.0.0.1:33371).
 fn require_loopback_addr(addr: &str) -> Result<(), String> {
-    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
-    let host = host.trim().trim_matches(|c| c == '[' || c == ']');
-    if matches!(host, "127.0.0.1" | "localhost" | "::1") {
-        Ok(())
-    } else {
-        Err(format!("refusing non-loopback metrics address: {addr}"))
+    let parsed: SocketAddr = addr
+        .parse()
+        .map_err(|e| format!("invalid listen address {addr:?}: {e}"))?;
+    if !parsed.ip().is_loopback() {
+        return Err(format!("refusing non-loopback address: {addr}"));
     }
+    Ok(())
 }
 
 #[tauri::command]
@@ -401,6 +444,7 @@ async fn do_sweep(
         Some(addr) => addr,
         None => return Ok(None),
     };
+    require_loopback_addr(&rpc_addr)?;
 
     let balance = {
         let token = node.rpc_token().to_string();
