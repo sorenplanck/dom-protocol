@@ -9,10 +9,31 @@ pub fn generate_token() -> String {
     hex::encode(bytes)
 }
 
+/// Get the Bearer token from explicit config, environment, or file, or generate new one.
+///
+/// Order of precedence:
+/// 1. Explicit config token, for embedded callers that must not export secrets
+/// 2. DOM_RPC_TOKEN env var (standalone-node override)
+/// 3. ~/.dom/rpc_token file (fallback)
+/// 4. Generate new + save to file + log warning
+pub fn get_or_create_token_with_config(
+    configured_token: Option<&str>,
+) -> Result<String, std::io::Error> {
+    if let Some(token) = configured_token {
+        let token = token.trim();
+        if !token.is_empty() {
+            tracing::info!("Using Bearer token from explicit node config");
+            return Ok(token.to_string());
+        }
+    }
+
+    get_or_create_token()
+}
+
 /// Get the Bearer token from environment or file, or generate new one.
 ///
 /// Order of precedence:
-/// 1. DOM_RPC_TOKEN env var (primary)
+/// 1. DOM_RPC_TOKEN env var (standalone-node override)
 /// 2. ~/.dom/rpc_token file (fallback)
 /// 3. Generate new + save to file + log warning
 pub fn get_or_create_token() -> Result<String, std::io::Error> {

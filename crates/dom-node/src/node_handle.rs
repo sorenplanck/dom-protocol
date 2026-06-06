@@ -441,6 +441,7 @@ mod tests {
             wallet_password: Some("password123".into()),
             log_level: "debug".into(),
             rpc_listen_addr: None,
+            rpc_bearer_token: None,
             metrics_listen_addr: None,
         }
     }

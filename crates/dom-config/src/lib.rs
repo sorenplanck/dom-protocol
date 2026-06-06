@@ -110,6 +110,12 @@ pub struct NodeConfig {
     /// RPC listen address (e.g. "127.0.0.1:3370"). None = RPC disabled.
     #[serde(default)]
     pub rpc_listen_addr: Option<String>,
+    /// Explicit RPC bearer token for embedded callers.
+    ///
+    /// If unset, `dom-rpc` falls back to its standalone-node behavior: read
+    /// `DOM_RPC_TOKEN`, then `~/.dom/rpc_token`, then generate a token file.
+    #[serde(default)]
+    pub rpc_bearer_token: Option<String>,
     /// Prometheus metrics listen address (e.g. "127.0.0.1:3371").
     /// None = metrics endpoint disabled. Prefer loopback/internal bindings;
     /// metrics expose node health and topology signals.
@@ -152,6 +158,7 @@ impl NodeConfig {
             wallet_password: None,
             log_level: "info".into(),
             rpc_listen_addr: None,
+            rpc_bearer_token: None,
             metrics_listen_addr: None,
         }
     }
@@ -172,6 +179,7 @@ impl NodeConfig {
             wallet_password: None,
             log_level: "debug".into(),
             rpc_listen_addr: None,
+            rpc_bearer_token: None,
             metrics_listen_addr: None,
         }
     }
@@ -195,6 +203,7 @@ impl NodeConfig {
             wallet_password: None,
             log_level: "debug".into(),
             rpc_listen_addr: None,
+            rpc_bearer_token: None,
             metrics_listen_addr: None,
         }
     }
