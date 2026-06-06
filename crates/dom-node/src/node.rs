@@ -540,7 +540,7 @@ impl DomNode {
                 .await
                 .map_err(|e| DomError::Internal(format!("RPC bind {parsed}: {e}")))?;
             let handle: Arc<dyn dom_rpc::NodeHandle> = Arc::new(NodeHandleImpl(self.clone()));
-            Some((handle, listener))
+            Some((handle, listener, self.config.rpc_bearer_token.clone()))
         } else {
             None
         };
@@ -596,14 +596,14 @@ impl DomNode {
                 .await;
         }
 
-        if let Some((handle, listener)) = rpc_pair {
+        if let Some((handle, listener, rpc_bearer_token)) = rpc_pair {
             let rpc_shutdown = shutdown.clone();
             supervisor
                 .spawn_critical(TaskKind::Rpc, async move {
                     trace_task_result("rpc_server", async move {
                         tokio::select! {
                             _ = rpc_shutdown.wait() => Ok(()),
-                            result = dom_rpc::serve(handle, listener) => {
+                            result = dom_rpc::serve_with_token(handle, listener, rpc_bearer_token) => {
                                 result.map_err(|e| format!("RPC server error: {e}"))
                             }
                         }

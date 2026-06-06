@@ -213,6 +213,7 @@ pub fn test_config(name: &str, port: u16, _mine: bool) -> NodeConfig {
         wallet_password: None,
         log_level: "debug".into(),
         rpc_listen_addr: None,
+        rpc_bearer_token: None,
         metrics_listen_addr: None,
     }
 }

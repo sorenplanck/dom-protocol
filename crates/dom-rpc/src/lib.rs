@@ -308,7 +308,19 @@ pub async fn serve(
     handle: Arc<dyn NodeHandle>,
     listener: tokio::net::TcpListener,
 ) -> Result<(), RpcError> {
-    let token_str = token::get_or_create_token()
+    serve_with_token(handle, listener, None).await
+}
+
+/// Run the RPC accept loop using an explicit bearer token when supplied.
+///
+/// Embedded callers use this to avoid putting bearer tokens in process-global
+/// environment variables. Passing `None` preserves the standalone fallback path.
+pub async fn serve_with_token(
+    handle: Arc<dyn NodeHandle>,
+    listener: tokio::net::TcpListener,
+    configured_token: Option<String>,
+) -> Result<(), RpcError> {
+    let token_str = token::get_or_create_token_with_config(configured_token.as_deref())
         .map_err(|e| RpcError::Internal(format!("failed to init token: {e}")))?;
     let bearer_token = Arc::new(BearerToken(token_str));
 

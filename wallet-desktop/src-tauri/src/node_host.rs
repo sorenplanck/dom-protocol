@@ -10,10 +10,9 @@
 //!   3. `DomNode::init(config)` then `Arc::new(node).run().await` on a Tokio
 //!      task. `request_shutdown()` stops it; dropping + re-initing restarts it.
 //!
-//! RPC token: `dom-rpc` resolves its bearer token from `DOM_RPC_TOKEN`, else
-//! `~/.dom/rpc_token`, else it generates one. We generate the token ourselves,
-//! export it via `DOM_RPC_TOKEN` *before* the node starts, and hand the same
-//! value to the wallet's `NodeRpcClient`. No terminal, no copy-paste.
+//! RPC token: we generate a process-local bearer token and pass it through the
+//! embedded node config, then hand the same value to the wallet's `NodeRpcClient`.
+//! We do not export it through process-global environment variables.
 
 use std::sync::Arc;
 
@@ -55,9 +54,6 @@ impl NodeHost {
         // Generate a strong random token once. dom-rpc's own generator yields a
         // 64-char hex token; we match that shape.
         let token = generate_token()?;
-        // Export immediately so dom-rpc picks it up no matter when it reads.
-        std::env::set_var("DOM_RPC_TOKEN", &token);
-
         Ok(Self {
             inner: Mutex::new(HostInner {
                 state: NodeState::Stopped,
@@ -115,10 +111,10 @@ impl NodeHost {
         }
         inner.state = NodeState::Starting;
 
-        // All configuration is passed via the strongly-typed NodeConfig below —
-        // we never export DOM_* env vars (H1/M5): set_var is not thread-safe and
-        // would leak the miner-wallet password into the process environment.
-        let config = settings.to_node_config()?;
+        // All configuration is passed via the strongly-typed NodeConfig below,
+        // including the RPC bearer token. No DOM_* secret is exported through
+        // process-global environment variables.
+        let config = settings.to_node_config(Some(self.rpc_token.clone()))?;
         inner.last_settings = Some(settings);
 
         // Initialize the node (opens LMDB, verifies the H generator, etc.).
