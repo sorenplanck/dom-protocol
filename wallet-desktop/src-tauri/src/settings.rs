@@ -1,11 +1,13 @@
 //! User-controllable node settings, and the mapping to `dom_config::NodeConfig`.
 //!
 //! Each field corresponds to one of the `DOM_*` environment variables the
-//! standalone node honours. We both (a) populate the strongly-typed
-//! `NodeConfig` and (b) export the matching env vars, so the embedded node
-//! behaves identically to the CLI node.
+//! standalone node honours. The desktop wallet passes them through the
+//! strongly-typed `NodeConfig` instead of exporting process-global env vars.
 
-use anyhow::{anyhow, Result};
+use std::io::Write as _;
+use std::net::SocketAddr;
+
+use anyhow::{anyhow, Context as _, Result};
 use dom_config::NodeConfig;
 use dom_wallet::Network as WalletNetwork;
 use serde::{Deserialize, Serialize};
@@ -55,6 +57,31 @@ impl Default for NodeSettings {
 }
 
 impl NodeSettings {
+    pub fn validate(&self) -> Result<()> {
+        parse_socket_addr("P2P listen address", &self.p2p_listen_addr)?;
+        let rpc = parse_socket_addr("RPC listen address", &self.rpc_listen_addr)?;
+        if !rpc.ip().is_loopback() {
+            return Err(anyhow!("RPC listen address must be loopback"));
+        }
+        if let Some(addr) = self.metrics_listen_addr.as_deref() {
+            if !addr.trim().is_empty() {
+                let metrics = parse_socket_addr("metrics listen address", addr)?;
+                if !metrics.ip().is_loopback() {
+                    return Err(anyhow!("metrics listen address must be loopback"));
+                }
+            }
+        }
+        if self.data_dir.trim().is_empty() {
+            return Err(anyhow!("data directory must not be empty"));
+        }
+        if let Some(path) = &self.miner_wallet_path {
+            if path.trim().is_empty() {
+                return Err(anyhow!("miner wallet path must not be empty when set"));
+            }
+        }
+        Ok(())
+    }
+
     /// Build the strongly-typed `NodeConfig`.
     ///
     /// This is the SINGLE source of truth handed to the embedded node via
@@ -73,7 +100,8 @@ impl NodeSettings {
     /// manages (path under the data dir, password generated once and stored in a
     /// permission-restricted `.key` beside it). The node auto-creates it on
     /// first run; the user's own wallet is never touched.
-    pub fn to_node_config(&self) -> Result<NodeConfig> {
+    pub fn to_node_config(&self, rpc_bearer_token: Option<String>) -> Result<NodeConfig> {
+        self.validate()?;
         let mut config = match self.network {
             NetworkKind::Mainnet => NodeConfig::mainnet(),
             NetworkKind::Testnet => NodeConfig::testnet(),
@@ -85,6 +113,7 @@ impl NodeSettings {
         config.mine = self.mine;
         config.log_level = self.log_level.clone();
         config.rpc_listen_addr = Some(self.rpc_listen_addr.clone());
+        config.rpc_bearer_token = rpc_bearer_token;
         config.metrics_listen_addr = self.metrics_listen_addr.clone();
 
         // Mining wallet (dedicated; never the user's). Only set when mining.
@@ -136,22 +165,22 @@ impl NodeSettings {
 
         // Ensure parent dir exists (data_dir may not be created yet).
         if let Some(parent) = key_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "could not create miner wallet key directory {}",
+                    parent.display()
+                )
+            })?;
         }
 
         // Read existing password, or generate and persist a new one.
+        if key_path.exists() {
+            restrict_permissions(&key_path)?;
+        }
+
         let password = match std::fs::read_to_string(&key_path) {
             Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
-            _ => {
-                let mut bytes = [0u8; 24];
-                getrandom::getrandom(&mut bytes)
-                    .map_err(|e| anyhow!("OS RNG unavailable for miner wallet key: {e}"))?;
-                let pw = hex::encode(bytes);
-                std::fs::write(&key_path, &pw)
-                    .map_err(|e| anyhow!("could not store miner wallet key: {e}"))?;
-                restrict_permissions(&key_path);
-                pw
-            }
+            _ => create_miner_key_file(&key_path)?,
         };
 
         Ok((wallet_path.to_string_lossy().to_string(), password))
@@ -174,6 +203,11 @@ impl NodeSettings {
     pub fn matches_wallet_network(&self, wallet_network: WalletNetwork) -> bool {
         self.wallet_network() == wallet_network
     }
+}
+
+fn parse_socket_addr(label: &str, addr: &str) -> Result<SocketAddr> {
+    addr.parse::<SocketAddr>()
+        .map_err(|e| anyhow!("{label} is invalid ({addr:?}): {e}"))
 }
 
 /// `~/.dom/data` cross-platform.
@@ -199,17 +233,51 @@ fn dirs_home() -> Option<std::path::PathBuf> {
 /// On Unix: `chmod 0600`. On Windows: strip inherited ACEs and grant the
 /// current user full control via `icacls` (H1) — NTFS files created in the
 /// user's data dir otherwise inherit broad ACLs, leaving the plaintext key
-/// readable by other principals. Best-effort: failures are non-fatal because
-/// the key file already lives under the user's own profile directory.
-fn restrict_permissions(path: &std::path::Path) {
+/// readable by other principals. Permission failures are fatal for miner-key
+/// creation because the key is stored plaintext.
+fn create_miner_key_file(key_path: &std::path::Path) -> Result<String> {
+    if let Some(parent) = key_path.parent() {
+        restrict_permissions(parent).with_context(|| {
+            format!(
+                "could not secure miner wallet key directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let mut bytes = [0u8; 24];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|e| anyhow!("OS RNG unavailable for miner wallet key: {e}"))?;
+    let pw = hex::encode(bytes);
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(key_path)
+        .with_context(|| format!("could not create miner wallet key {}", key_path.display()))?;
+    file.write_all(pw.as_bytes())
+        .with_context(|| format!("could not write miner wallet key {}", key_path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("could not sync miner wallet key {}", key_path.display()))?;
+    drop(file);
+    restrict_permissions(key_path)
+        .with_context(|| format!("could not secure miner wallet key {}", key_path.display()))?;
+    Ok(pw)
+}
+
+fn restrict_permissions(path: &std::path::Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(path) {
-            let mut perms = meta.permissions();
-            perms.set_mode(0o600);
-            let _ = std::fs::set_permissions(path, perms);
-        }
+        let meta = std::fs::metadata(path)?;
+        let mut perms = meta.permissions();
+        perms.set_mode(if meta.is_dir() { 0o700 } else { 0o600 });
+        std::fs::set_permissions(path, perms)?;
     }
     #[cfg(windows)]
     {
@@ -229,22 +297,33 @@ fn restrict_permissions(path: &std::path::Path) {
 
         // /inheritance:r removes inherited permissions (must run first);
         // /grant:r replaces this user's ACE with full control only.
-        let _ = Command::new("icacls")
+        let status = Command::new("icacls")
             .arg(&p)
             .arg("/inheritance:r")
             .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        if !account.is_empty() {
-            let _ = Command::new("icacls")
-                .arg(&p)
-                .arg("/grant:r")
-                .arg(format!("{account}:F"))
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
+            .status()?;
+        if !status.success() {
+            return Err(anyhow!("icacls inheritance removal failed for {p}"));
+        }
+        if account.is_empty() {
+            return Err(anyhow!("could not determine current Windows account"));
+        }
+        let status = Command::new("icacls")
+            .arg(&p)
+            .arg("/grant:r")
+            .arg(format!("{account}:F"))
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()?;
+        if !status.success() {
+            return Err(anyhow!("icacls grant failed for {p}"));
         }
     }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
+        return Err(anyhow!(
+            "permission hardening is unsupported on this platform"
+        ));
     }
+    Ok(())
 }

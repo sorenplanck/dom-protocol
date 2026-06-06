@@ -216,6 +216,7 @@ export function renderRestore(go, onReady) {
     if (pw !== pw2) { err.textContent = "Passwords do not match."; return; }
     try {
       await api.walletRestore(path, pw, phrase, settings.current);
+      node.querySelector("#phrase").value = "";
       toast(t("walletRestored"));
       onReady();
     } catch (e) { err.textContent = humanizeError(e); }
