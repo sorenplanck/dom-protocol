@@ -616,3 +616,123 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod parser_boundary_tests {
+    // AUDIT-003: Deterministic boundary tests. Full coverage requires running
+    // fuzz targets (fuzz_wire_message, fuzz_validate_block, etc.) on Linux with
+    // cargo-fuzz before mainnet. Every parser must return Err (never panic) on
+    // crafted/truncated input.
+    use super::*;
+
+    const TEST_MAGIC: u32 = dom_core::NETWORK_MAGIC_MAINNET;
+
+    /// Build a well-framed message (correct length + checksum) for the negatives
+    /// that only corrupt one field.
+    fn frame(command: Command, payload: &[u8]) -> Vec<u8> {
+        WireMessage {
+            magic: TEST_MAGIC,
+            command,
+            payload: payload.to_vec(),
+        }
+        .to_bytes()
+    }
+
+    // 1. Empty frame → Err, not panic.
+    #[test]
+    fn empty_frame_errs() {
+        assert!(WireMessage::from_bytes(&[], TEST_MAGIC).is_err());
+    }
+
+    // 2. Declared length > MAX_MESSAGE_PAYLOAD → Err.
+    #[test]
+    fn frame_length_over_max_errs() {
+        let mut data = TEST_MAGIC.to_le_bytes().to_vec();
+        data.push(Command::Ping as u8);
+        data.extend_from_slice(&((MAX_MESSAGE_PAYLOAD as u32) + 1).to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes()); // checksum (rejected earlier on length)
+        assert!(WireMessage::from_bytes(&data, TEST_MAGIC).is_err());
+    }
+
+    // 3. Wrong checksum → Err.
+    #[test]
+    fn frame_bad_checksum_errs() {
+        let mut data = frame(Command::Ping, &[1, 2, 3]);
+        data[9] ^= 0xFF; // flip a checksum byte
+        assert!(WireMessage::from_bytes(&data, TEST_MAGIC).is_err());
+    }
+
+    // 4. GetHeaders with n == MAX_LOCATOR_HASHES → Ok.
+    #[test]
+    fn getheaders_max_locator_ok() {
+        let p = GetHeadersPayload {
+            locator_hashes: vec![[1u8; 32]; dom_core::MAX_LOCATOR_HASHES],
+            stop_hash: [0u8; 32],
+        };
+        let bytes = p.to_bytes().unwrap();
+        assert!(GetHeadersPayload::from_bytes(&bytes).is_ok());
+    }
+
+    // 5. GetHeaders with n == MAX_LOCATOR_HASHES + 1 → Err.
+    #[test]
+    fn getheaders_over_max_locator_errs() {
+        let n = dom_core::MAX_LOCATOR_HASHES + 1;
+        let mut data = (n as u16).to_le_bytes().to_vec();
+        data.resize(2 + n * 32 + 32, 0u8);
+        assert!(GetHeadersPayload::from_bytes(&data).is_err());
+    }
+
+    // 6. GetHeaders truncated mid-hash → Err, not panic.
+    #[test]
+    fn getheaders_truncated_hash_errs() {
+        // Declares 2 locator hashes but supplies 1.5 hashes and no stop hash.
+        let mut data = 2u16.to_le_bytes().to_vec();
+        data.resize(2 + 32 + 16, 0u8);
+        assert!(GetHeadersPayload::from_bytes(&data).is_err());
+    }
+
+    // 7. Headers count declared larger than bytes available → Err, not panic.
+    #[test]
+    fn headers_count_exceeds_data_errs() {
+        let data = 5u16.to_le_bytes().to_vec(); // 5 headers declared, no bodies
+        assert!(HeadersPayload::from_bytes(&data).is_err());
+    }
+
+    // 7b. Headers with hlen pointing past the buffer → Err, not panic
+    //     (exercises the data[pos..pos+hlen] bound check).
+    #[test]
+    fn headers_hlen_beyond_data_errs() {
+        let mut data = 1u16.to_le_bytes().to_vec();
+        data.extend_from_slice(&500u32.to_le_bytes()); // hlen = 500
+        data.resize(data.len() + 10, 0u8); // only 10 bytes of body
+        assert!(HeadersPayload::from_bytes(&data).is_err());
+    }
+
+    // 8. Headers with hlen > 1024 → Err.
+    #[test]
+    fn headers_hlen_too_large_errs() {
+        let mut data = 1u16.to_le_bytes().to_vec();
+        data.extend_from_slice(&2048u32.to_le_bytes()); // hlen = 2048 > 1024
+        data.resize(data.len() + 2048, 0u8);
+        assert!(HeadersPayload::from_bytes(&data).is_err());
+    }
+
+    // 9. Empty payload for commands that require a body → Err.
+    #[test]
+    fn empty_payload_for_body_commands_errs() {
+        assert!(GetHeadersPayload::from_bytes(&[]).is_err());
+        assert!(HeadersPayload::from_bytes(&[]).is_err());
+        assert!(GetBlockDataPayload::from_bytes(&[]).is_err());
+        assert!(HelloPayload::from_bytes(&[]).is_err());
+    }
+
+    // 10. Huge declared length (u32::MAX) with short data → Err, not panic/OOM.
+    #[test]
+    fn frame_huge_length_short_data_errs() {
+        let mut data = TEST_MAGIC.to_le_bytes().to_vec();
+        data.push(Command::Headers as u8);
+        data.extend_from_slice(&u32::MAX.to_le_bytes()); // ~4.29 GB declared
+        data.extend_from_slice(&0u32.to_le_bytes()); // checksum
+        assert!(WireMessage::from_bytes(&data, TEST_MAGIC).is_err());
+    }
+}

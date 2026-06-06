@@ -413,3 +413,122 @@ mod phase1_verification {
         );
     }
 }
+
+#[cfg(test)]
+mod bridge_edge_case_tests {
+    // AUDIT-002: These tests reduce but do not eliminate the need for a
+    // human cryptographer to sign off on the SEC1<->zkp bridge and the
+    // is_square oracle equivalence before mainnet.
+    use super::*;
+    use crate::pedersen::{BlindingFactor, Commitment};
+
+    /// Blindings that are valid secp256k1 scalars (nonzero, < curve order n).
+    /// `[0xff; 32]` and `[0u8; 32]` are intentionally NOT here — they are
+    /// rejected by `BlindingFactor::from_bytes` (see `invalid_blindings_rejected`).
+    fn edge_blindings() -> Vec<BlindingFactor> {
+        let mut last_byte_one = [0u8; 32];
+        last_byte_one[31] = 1;
+        let mut v = vec![
+            BlindingFactor::from_bytes(last_byte_one).expect("last-byte-1 is a valid scalar"),
+            // 0xEE..EE < n (n starts 0xFFFFFFFF..), a valid high scalar standing
+            // in for the audit's [0xff;32], which is out of range.
+            BlindingFactor::from_bytes([0xee; 32]).expect("0xee..ee < n is a valid scalar"),
+        ];
+        for _ in 0..10 {
+            v.push(BlindingFactor::random());
+        }
+        v
+    }
+
+    /// 1. Cross-validate the is_square bridge + prove/verify for edge-case values
+    ///    and blindings that 200 random samples are unlikely to hit.
+    #[test]
+    fn edge_value_blinding_bridge_roundtrip_and_prove_verify() {
+        let values = [
+            0u64,
+            1,
+            MAX_PROVABLE_VALUE, // 2^52 - 1
+            dom_core::MAX_SUPPLY_NOMS,
+        ];
+        for &value in &values {
+            for r in edge_blindings() {
+                // (a) Pedersen commitment -> SEC1 bytes.
+                let sec1 = *Commitment::commit(value, &r).as_bytes();
+
+                // (b,c) SEC1 -> zkp -> SEC1 must be byte-identical.
+                let zkp = sec1_to_zkp(&sec1).expect("sec1->zkp");
+                let back = zkp_to_sec1(&zkp).expect("zkp->sec1");
+                assert_eq!(sec1, back, "bridge roundtrip drift at value={value}");
+
+                // bulletproof prove() must yield the same SEC1 commitment as
+                // Pedersen (single H, single generator).
+                let (proof, bp_sec1) = prove(value, &r).expect("prove");
+                assert_eq!(sec1, bp_sec1, "pedersen vs bulletproof commitment drift");
+
+                // (d) prove + verify round-trips.
+                assert!(
+                    verify(&bp_sec1, &proof.bytes).expect("verify"),
+                    "valid proof must verify at value={value}"
+                );
+
+                // (e) single-bit mutation of the commitment must NOT verify.
+                let mut mutated = bp_sec1;
+                mutated[17] ^= 0x01; // flip a bit inside the X coordinate
+                assert!(
+                    !matches!(verify(&mutated, &proof.bytes), Ok(true)),
+                    "single-bit-mutated commitment must not verify (value={value})"
+                );
+            }
+        }
+    }
+
+    /// Out-of-range / zero blindings are rejected, not silently accepted.
+    #[test]
+    fn invalid_blindings_rejected() {
+        assert!(
+            BlindingFactor::from_bytes([0xff; 32]).is_err(),
+            "0xff..ff > curve order n must be rejected"
+        );
+        assert!(
+            BlindingFactor::from_bytes([0u8; 32]).is_err(),
+            "zero blinding must be rejected"
+        );
+    }
+
+    /// 2. H generator unification: the bulletproof generator and the documented
+    ///    H_DOM compressed point must be the SAME curve point — asserted by full
+    ///    [u8;33] byte-equality of H in SEC1 plus X-coordinate equality of the
+    ///    zkp generator, not merely an X match in a single representation.
+    #[test]
+    fn h_generator_unification_byte_equality() {
+        // The zkp generator serializes as 0x0a/0x0b || X. Its X must be H_DOM_X.
+        let gen_ser = dom_generator().serialize();
+        let gen_x: [u8; 32] = gen_ser[1..].try_into().expect("33-byte generator");
+        assert_eq!(gen_x, H_DOM_X, "bulletproof generator X must equal H_DOM_X");
+        assert_eq!(
+            &H_DOM_COMPRESSED[1..],
+            &H_DOM_X[..],
+            "H_DOM_COMPRESSED X must equal H_DOM_X"
+        );
+        // The Pedersen H, in SEC1, must equal the hard-coded H_DOM_COMPRESSED
+        // byte-for-byte (full 33 bytes, prefix included).
+        let h_sec1 = crate::h_generator::h_compressed().expect("H must be finalized");
+        assert_eq!(
+            h_sec1, H_DOM_COMPRESSED,
+            "Pedersen H (SEC1) must equal hard-coded H_DOM_COMPRESSED byte-for-byte"
+        );
+    }
+
+    /// 3. sec1<->zkp round-trip for >= 1000 random scalars (extends the existing
+    ///    100-sample format_conversion_tests).
+    #[test]
+    fn bridge_roundtrip_1000_random_scalars() {
+        for i in 0..1000u64 {
+            let r = BlindingFactor::random();
+            let sec1 = *Commitment::commit(i.wrapping_mul(1_000_003), &r).as_bytes();
+            let zkp = sec1_to_zkp(&sec1).expect("sec1->zkp");
+            let back = zkp_to_sec1(&zkp).expect("zkp->sec1");
+            assert_eq!(sec1, back, "bridge roundtrip drift at sample {i}");
+        }
+    }
+}
