@@ -455,7 +455,7 @@ impl ChainState {
                 }
 
                 validate_future_timestamp_with_limit(header, now, self.max_future_block_time())?;
-                let seed = self.compute_randomx_seed(header.height.0)?;
+                let seed = self.compute_randomx_seed_with_batch(header.height.0, &decoded)?;
                 validate_pow_for_network(self.network_magic, header, &seed)?;
 
                 if let Some(parent_header) =
@@ -621,7 +621,8 @@ impl ChainState {
                 }
 
                 validate_future_timestamp_with_limit(&header, now, self.max_future_block_time())?;
-                let seed = self.compute_randomx_seed(header.height.0)?;
+                let seed =
+                    self.compute_randomx_seed_with_batch(header.height.0, &decoded_prefix)?;
                 validate_pow_for_network(self.network_magic, &header, &seed)?;
 
                 if let Some(parent_header) =
@@ -770,17 +771,69 @@ impl ChainState {
         self.expected_target_for_child(&tip, next_timestamp, next_height)
     }
 
-    /// Compute the RandomX seed for a block at `height`.
+    /// Compute the RandomX seed for a block at `height`, consulting the
+    /// committed store only.
     ///
-    /// Seed = hash of block at `randomx_seed_height(height)`.
-    /// For early blocks where the seed_height has no block yet (chain bootstrap),
-    /// returns [0u8; 32] by convention.
+    /// Seed = hash of block at `randomx_seed_height(height)`. Used by the
+    /// non-IBD paths (`connect_block`, `validate_header_only`) where the chain
+    /// up to the parent is already fully committed, so the seed block is always
+    /// present in the height index.
+    ///
+    /// Epoch 0 (`seed_height == 0`): genesis is used as the seed by convention
+    /// (RFC-0011); the `[0u8; 32]` fallback covers the narrow bootstrap window
+    /// before genesis is indexed. For epoch > 0 a missing seed block means the
+    /// committed store is corrupt — surface it as an error rather than silently
+    /// hashing against a zero seed, which would reject an otherwise valid block.
     fn compute_randomx_seed(&self, height: u64) -> Result<[u8; 32], DomError> {
         let seed_height = randomx_seed_height(height);
         match self.store.get_hash_at_height(seed_height)? {
             Some(hash) => Ok(hash),
-            None => Ok([0u8; 32]),
+            None if seed_height == 0 => Ok([0u8; 32]),
+            None => Err(DomError::Internal(format!(
+                "RandomX seed block at height {seed_height} missing from \
+                 committed store (needed for block at height {height})"
+            ))),
         }
+    }
+
+    /// Compute the RandomX seed for a block at `height` during header-first
+    /// IBD, where the seed block may still be inside the in-memory header
+    /// batch (not yet committed to the store).
+    ///
+    /// Resolution order:
+    ///   1. the in-memory `batch` of headers being validated (not yet committed),
+    ///   2. the committed store (headers from earlier, committed batches),
+    ///   3. epoch 0 only: genesis fallback (`[0u8; 32]`).
+    ///
+    /// For epoch > 0, absence from both the batch and the store is a data bug
+    /// and is surfaced as an error instead of silently falling back to a zero
+    /// seed (the original cause of the IBD PoW split at the epoch boundary).
+    fn compute_randomx_seed_with_batch(
+        &self,
+        height: u64,
+        batch: &[(BlockHeader, Hash256, bool)],
+    ) -> Result<[u8; 32], DomError> {
+        let seed_height = randomx_seed_height(height);
+
+        // 1. In-memory batch (headers validated but not yet committed).
+        if let Some((_, hash, _)) = batch.iter().find(|(h, _, _)| h.height.0 == seed_height) {
+            return Ok(*hash.as_bytes());
+        }
+
+        // 2. Committed store (headers from earlier batches).
+        if let Some(hash) = self.store.get_hash_at_height(seed_height)? {
+            return Ok(hash);
+        }
+
+        // 3. Epoch 0: genesis used as seed by convention (RFC-0011).
+        if seed_height == 0 {
+            return Ok([0u8; 32]);
+        }
+
+        Err(DomError::Internal(format!(
+            "RandomX seed block at height {seed_height} not available \
+             (needed for block at height {height})"
+        )))
     }
 
     fn validate_expected_target(
@@ -1792,4 +1845,105 @@ fn compute_block_hash(header_bytes: &[u8]) -> Hash256 {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&result);
     Hash256::from_bytes(arr)
+}
+
+#[cfg(test)]
+mod randomx_seed_tests {
+    //! Unit tests for RandomX seed resolution in the header-first IBD path.
+    //!
+    //! Regression coverage for the IBD PoW consensus split at the epoch
+    //! boundary: `compute_randomx_seed` used to fall back silently to a zero
+    //! seed for epoch > 0 blocks whose seed-height block was not yet committed
+    //! to the store (the normal state during header sync). The validator then
+    //! hashed against `[0u8; 32]` while the miner used the real seed, producing
+    //! a "proof-of-work invalid" rejection on otherwise valid blocks.
+    use super::*;
+    use dom_consensus::block::ProofOfWork;
+    use dom_core::PROTOCOL_VERSION;
+    use dom_pow::CompactTarget;
+
+    const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
+
+    fn empty_chain() -> (tempfile::TempDir, ChainState) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store =
+            DomStore::open_with_map_size(dir.path(), TEST_LMDB_MAP_SIZE).expect("store open");
+        let chain = ChainState::open(store, Hash256::ZERO, dom_core::NETWORK_MAGIC_REGTEST)
+            .expect("chain open");
+        (dir, chain)
+    }
+
+    fn synth_header(height: u64) -> BlockHeader {
+        BlockHeader {
+            version: PROTOCOL_VERSION,
+            height: BlockHeight(height),
+            prev_hash: Hash256::ZERO,
+            timestamp: Timestamp(1_704_067_200 + height),
+            output_root: Hash256::ZERO,
+            kernel_root: Hash256::ZERO,
+            rangeproof_root: Hash256::ZERO,
+            total_kernel_offset: [0u8; 32],
+            target: CompactTarget(0x1f00_ffff),
+            total_difficulty: U256::one(),
+            pow: ProofOfWork {
+                nonce: 0,
+                randomx_hash: Hash256::ZERO,
+            },
+        }
+    }
+
+    /// Epoch 1 (height 2048, seed_height 1984): the seed block lives in the
+    /// in-memory batch, not the store. The seed MUST be resolved from the batch
+    /// rather than silently falling back to a zero seed.
+    #[test]
+    fn ibd_pow_seed_resolved_from_batch() {
+        let (_dir, chain) = empty_chain();
+
+        // seed_height for height 2048 is 2048 - 64 = 1984.
+        assert_eq!(randomx_seed_height(2048), 1984);
+
+        let expected = [7u8; 32];
+        // Synthetic batch including the seed-height header (1984) with a known
+        // hash; the store is empty (no commits yet), mirroring header sync.
+        let batch: Vec<(BlockHeader, Hash256, bool)> = vec![
+            (synth_header(1983), Hash256::from_bytes([1u8; 32]), false),
+            (synth_header(1984), Hash256::from_bytes(expected), false),
+            (synth_header(2048), Hash256::from_bytes([2u8; 32]), false),
+        ];
+
+        let seed = chain
+            .compute_randomx_seed_with_batch(2048, &batch)
+            .expect("seed resolves from batch");
+        assert_eq!(seed, expected, "seed must come from the in-memory batch");
+        assert_ne!(seed, [0u8; 32], "must not fall back to zero seed");
+    }
+
+    /// Epoch 0 (height 100, seed_height 0): with an empty batch and an
+    /// un-indexed genesis, the genesis fallback `[0u8; 32]` is correct and must
+    /// NOT be promoted to an error.
+    #[test]
+    fn ibd_pow_seed_epoch0_uses_zero_fallback() {
+        let (_dir, chain) = empty_chain();
+
+        assert_eq!(randomx_seed_height(100), 0);
+
+        let seed = chain
+            .compute_randomx_seed_with_batch(100, &[])
+            .expect("epoch 0 falls back to genesis without error");
+        assert_eq!(seed, [0u8; 32]);
+    }
+
+    /// Epoch 1 on the committed-store path: a store missing the seed block at
+    /// height 1984 is data corruption and MUST surface as an error rather than
+    /// silently hashing against a zero seed.
+    #[test]
+    fn ibd_pow_seed_epoch1_missing_errors() {
+        let (_dir, chain) = empty_chain();
+
+        let result = chain.compute_randomx_seed(2048);
+        assert!(
+            matches!(result, Err(DomError::Internal(_))),
+            "missing epoch>0 seed block must error, got {result:?}"
+        );
+    }
 }
