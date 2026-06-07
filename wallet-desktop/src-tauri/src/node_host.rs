@@ -4,9 +4,12 @@
 //!   1. Build a `dom_config::NodeConfig` for the chosen network.
 //!   2. Apply the settings the user controls in the UI (seed peers, ports,
 //!      data dir, mining toggle, miner wallet) — exactly the same fields the
-//!      stock node reads from its `DOM_*` environment variables. We set those
-//!      env vars too, so any code path inside the node that re-reads them sees
-//!      consistent values.
+//!      stock node reads from its `DOM_*` environment variables. We pass them
+//!      ONLY through the strongly-typed `NodeConfig`; we do NOT export any
+//!      `DOM_*` process-global env var (H1/M5): `std::env::set_var` is not
+//!      thread-safe against the running Tokio threads, and exporting
+//!      `DOM_WALLET_PASSWORD` would leak the miner-wallet secret into the
+//!      process environment. See `settings::to_node_config`.
 //!   3. `DomNode::init(config)` then `Arc::new(node).run().await` on a Tokio
 //!      task. `request_shutdown()` stops it; dropping + re-initing restarts it.
 //!
