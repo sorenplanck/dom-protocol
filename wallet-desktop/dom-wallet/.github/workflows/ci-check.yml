@@ -1,0 +1,89 @@
+name: CI Check (Wallet)
+
+# Runs on every push/PR touching the wallet subfolder. This is the workflow to
+# use FIRST: it actually compiles the Rust backend (the part never built in the
+# sandbox), runs clippy and tests, and builds the frontend — WITHOUT creating a
+# release and WITHOUT the rev-pinning guard. Use it to shake out compiler errors
+# before you ever tag a release.
+#
+# MUST live at the repo root in `.github/workflows/`. Adjust WALLET_DIR if your
+# subfolder is named differently.
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "wallet/**"
+      - ".github/workflows/ci-check.yml"
+  pull_request:
+    paths:
+      - "wallet/**"
+  workflow_dispatch:
+
+env:
+  WALLET_DIR: wallet
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.WALLET_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential \
+            curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev \
+            librsvg2-dev clang cmake pkg-config
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Rust (stable) + clippy/rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ env.WALLET_DIR }}/src-tauri/target
+          key: ci-${{ hashFiles(format('{0}/src-tauri/Cargo.toml', env.WALLET_DIR)) }}
+
+      # ── Frontend ────────────────────────────────────────────────────────────
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Frontend tests
+        run: npm run test
+
+      - name: Frontend build
+        run: npm run build
+
+      # ── Backend (the part not yet compiled) ──────────────────────────────────
+      - name: rustfmt check
+        working-directory: ${{ env.WALLET_DIR }}/src-tauri
+        run: cargo fmt --check
+
+      - name: cargo build
+        working-directory: ${{ env.WALLET_DIR }}/src-tauri
+        run: cargo build --all-targets
+
+      - name: cargo test
+        working-directory: ${{ env.WALLET_DIR }}/src-tauri
+        run: cargo test --all-targets
+
+      - name: clippy (strict)
+        working-directory: ${{ env.WALLET_DIR }}/src-tauri
+        run: cargo clippy --all-targets -- -D warnings

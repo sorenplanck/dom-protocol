@@ -1,0 +1,223 @@
+/* DOM visual identity — "private banking, not crypto casino".
+   Palette derived from the bronze coin. Dark is default; light must also look
+   good. Sober, calm, trustworthy. */
+
+:root,
+[data-theme="dark"] {
+  /* Bronze accents */
+  --bronze-1: #7a4f2a;
+  --bronze-2: #9c6b3d;
+  --bronze-glow: rgba(156, 107, 61, 0.18);
+
+  /* Dark backgrounds (deepest → raised surfaces) */
+  --bg-0: #0f0b08;
+  --bg-1: #15100b;
+  --bg-2: #1a1410;
+  --bg-3: #221a13;
+  --surface: #1a1410;
+  --surface-raised: #221a13;
+  --border: #2e241a;
+  --border-strong: #3d2f20;
+
+  /* Text */
+  --text: #f5ede0;
+  --text-dim: #c9b79e;
+  --text-faint: #8a7a64;
+
+  /* Semantic */
+  --success: #5a8a4a;
+  --warning: #c9a14a;
+  --error: #a04030;
+
+  /* Log levels */
+  --log-error: #c75b46;
+  --log-warn: #c9a14a;
+  --log-info: #f5ede0;
+  --log-debug: #8a7a64;
+  --log-trace: #5e5345;
+
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  --radius: 10px;
+  --radius-sm: 6px;
+}
+
+[data-theme="light"] {
+  --bronze-1: #8a5a30;
+  --bronze-2: #a8753f;
+  --bronze-glow: rgba(138, 90, 48, 0.12);
+
+  --bg-0: #f3ece1;
+  --bg-1: #efe6d8;
+  --bg-2: #e9dccb;
+  --bg-3: #e2d2bd;
+  --surface: #fbf6ee;
+  --surface-raised: #ffffff;
+  --border: #d8c6ad;
+  --border-strong: #c4ad8e;
+
+  --text: #2a1f14;
+  --text-dim: #5c4a36;
+  --text-faint: #8a7a64;
+
+  --success: #4a7a3c;
+  --warning: #a8801f;
+  --error: #8f3625;
+
+  --log-error: #8f3625;
+  --log-warn: #a8801f;
+  --log-info: #2a1f14;
+  --log-debug: #6b5a44;
+  --log-trace: #9a8a72;
+
+  --shadow: 0 8px 24px rgba(120, 90, 50, 0.14);
+  --radius: 10px;
+  --radius-sm: 6px;
+}
+
+/* Typography: a refined slab/serif display for headings (characterful, banking
+   feel) paired with a clean sans for body. Monospace for technical detail.
+   Loaded as system-available stacks — no external fetches (security: no remote
+   font CDN). */
+:root {
+  --font-display: "Iowan Old Style", "Palatino Linotype", "Hoefler Text",
+    Georgia, "Times New Roman", serif;
+  --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", "Cascadia Code", ui-monospace,
+    Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   V2 — transaction UI (Send / Receive / pending / modals)
+   ───────────────────────────────────────────────────────────────────────── */
+
+.mode-selector {
+  display: flex;
+  gap: 10px;
+  margin: 12px 0 20px;
+}
+.mode-pill {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-2);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.mode-pill.active {
+  border-color: var(--bronze-2);
+  background: var(--bg-3);
+}
+.mode-pill .mode-title {
+  font-weight: 600;
+  color: var(--text);
+}
+.mode-pill .mode-sub {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.slate-box {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-1);
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-all;
+  white-space: pre-wrap;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.parsed {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+  padding: 12px 14px;
+}
+
+.radio-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.alert {
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 14px;
+  margin: 8px 0;
+}
+.alert.warn {
+  background: rgba(201, 161, 74, 0.12);
+  border: 1px solid var(--warning);
+  color: var(--warning);
+}
+.alert.error {
+  background: rgba(160, 64, 48, 0.12);
+  border: 1px solid var(--error);
+  color: var(--error);
+}
+.alert.success {
+  background: rgba(90, 138, 74, 0.12);
+  border: 1px solid var(--success);
+  color: var(--success);
+}
+
+.pending-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-2);
+  padding: 14px 16px;
+}
+.pending-card .status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-right: 10px;
+  margin-top: 3px;
+}
+.pending-card .status-badge .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.status-badge.warn .dot { background: var(--warning); }
+.status-badge.info .dot { background: #4a7ac9; }
+.status-badge.ok .dot { background: var(--success); }
+.status-badge.err .dot { background: var(--error); }
+.status-badge.muted .dot { background: var(--text-dim); }
+
+.amount-neg { color: var(--error); font-family: var(--font-mono); }
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  width: min(440px, 92vw);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+}
+.modal h3 {
+  margin: 0 0 16px;
+}
