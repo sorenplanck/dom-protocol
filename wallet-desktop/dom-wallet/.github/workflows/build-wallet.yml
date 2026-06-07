@@ -1,0 +1,95 @@
+name: Build DOM Wallet
+
+# Tag-triggered cross-platform build (per the brief). Push a tag like `v0.1.0`
+# (or `v0.3.0-MANDATORY-HARD-FORK` for hard forks) to produce signed installers
+# and a GitHub Release. Also runnable manually via workflow_dispatch.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-latest
+          - platform: windows-latest
+          - platform: macos-latest
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Release safety (audit W-02 / HIGH-01): a tagged release MUST pin every
+      # dom-* protocol crate to an immutable commit (`rev = "<sha>"`), never a
+      # mutable `branch`. Otherwise the same tag can compile against different
+      # consensus code over time. Fail the build if any branch-tracked dom dep
+      # remains. (Allowed only outside tag builds, e.g. local development.)
+      - name: Enforce pinned protocol dependencies
+        shell: bash
+        run: |
+          if grep -nE 'dom-[a-z]+\s*=\s*\{[^}]*branch\s*=' src-tauri/Cargo.toml; then
+            echo "::error::Release builds must pin dom-* crates to rev=<sha>, not branch. See audit W-02."
+            exit 1
+          fi
+          if [ ! -f src-tauri/Cargo.lock ]; then
+            echo "::error::src-tauri/Cargo.lock must be committed for reproducible releases."
+            exit 1
+          fi
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential \
+            curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev \
+            librsvg2-dev clang cmake pkg-config
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cargo will fetch the dom-protocol crates from GitHub (they are git deps),
+      # so no sibling checkout of the protocol repo is required here. Cache the
+      # registry + git db + target to speed up repeat builds.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ matrix.platform }}-cargo-${{ hashFiles('src-tauri/Cargo.toml') }}
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm run test
+
+      - name: Build + release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS signing/notarization (optional — set these secrets to enable):
+          # APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+          # APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+          # Windows signing (optional):
+          # TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "DOM Wallet ${{ github.ref_name }}"
+          releaseBody: "See CHANGELOG.md for details."
+          releaseDraft: true
+          prerelease: false
+          # Build from the repo root; the Tauri config lives in src-tauri/.
+          projectPath: "."

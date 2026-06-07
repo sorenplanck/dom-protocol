@@ -1,0 +1,13 @@
+# deps + build
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# tauri
+src-tauri/Cargo.lock
+
+# env / local
+.DS_Store
+*.local
+.env
