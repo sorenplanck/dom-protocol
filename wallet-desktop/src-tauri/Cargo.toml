@@ -1,0 +1,73 @@
+[package]
+name = "dom-wallet-desktop"
+version = "0.1.0"
+description = "DOM Wallet — official desktop wallet with an integrated DOM node"
+authors = ["DOM Protocol"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.75"
+
+# The Tauri binary. `lib` is used by mobile/test tooling; `bin` is the desktop app.
+[lib]
+name = "dom_wallet_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-clipboard-manager = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+hex = "0.4"
+getrandom = "0.2"
+url = "2.5"
+zeroize = { version = "1.7", features = ["derive", "serde"] }
+
+# Async runtime + log capture for the embedded node.
+tokio = { version = "1.35", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# QR generation for the Receive screen (pure-Rust, renders to SVG).
+qrcode = "0.14"
+
+# Blocking HTTP for scraping the node's Prometheus /metrics endpoint.
+# (dom-wallet's RPC client already pulls reqwest into the tree.)
+reqwest = { version = "0.12", features = ["blocking"] }
+
+# ── DOM Protocol crates ───────────────────────────────────────────────────────
+# These are consumed by PATH from a sibling checkout of the dom-protocol repo.
+# In CI we check the protocol repo out next to this app (see build-wallet.yml).
+# We REUSE these crates — no crypto / consensus / P2P / wallet logic is
+# reimplemented here. The Tauri backend only orchestrates them.
+dom-core        = { path = "../../crates/dom-core" }
+dom-consensus   = { path = "../../crates/dom-consensus" }
+dom-crypto      = { path = "../../crates/dom-crypto" }
+dom-config      = { path = "../../crates/dom-config" }
+dom-wallet      = { path = "../../crates/dom-wallet" }
+dom-node        = { path = "../../crates/dom-node" }
+dom-rpc         = { path = "../../crates/dom-rpc" }
+# Slate protocol: the Slate type lives in dom-tx; (de)serialization traits
+# (to_bytes/from_bytes) live in dom-serialization. We only call into them.
+dom-tx          = { path = "../../crates/dom-tx" }
+dom-serialization = { path = "../../crates/dom-serialization" }
+
+[features]
+# By default the desktop binary builds with the embedded node + real crates.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+# Consensus-critical crates compile with overflow checks via their own profiles;
+# we keep them on here too for the parts we touch.
+overflow-checks = true
