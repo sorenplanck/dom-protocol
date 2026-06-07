@@ -129,6 +129,20 @@ impl NodeSettings {
 
         if !self.seed_peers.is_empty() {
             config.seed_peers = self.seed_peers.clone();
+            // Defense-in-depth for the P2P "peers stays 0" bug. The peer
+            // connector only dials while `PeerManager::needs_outbound()` is
+            // true, and that is `outbound+pending < min(min_outbound,
+            // max_in_flight)`. If `min_outbound == 0` (regtest historically
+            // shipped 0 — fixed to 1 upstream, but a future regression or a
+            // legacy persisted config could bring it back), the connector
+            // NEVER dials even with seed peers configured, so two local nodes
+            // never connect. When the user explicitly configured seed peers we
+            // therefore guarantee at least one outbound slot. Scoped to "seed
+            // peers present" so it never widens outbound for the public
+            // mainnet/testnet defaults.
+            if config.min_outbound == 0 {
+                config.min_outbound = self.seed_peers.len().clamp(1, 8);
+            }
         }
 
         // Basic validation that would otherwise fail deep inside the node.
@@ -326,4 +340,53 @@ fn restrict_permissions(path: &std::path::Path) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn regtest_settings_with_seed(seed: Vec<String>) -> NodeSettings {
+        NodeSettings {
+            network: NetworkKind::Regtest,
+            seed_peers: seed,
+            p2p_listen_addr: "127.0.0.1:33370".into(),
+            rpc_listen_addr: "127.0.0.1:33372".into(),
+            data_dir: std::env::temp_dir()
+                .join("dom-settings-test")
+                .to_string_lossy()
+                .into_owned(),
+            miner_wallet_path: None,
+            mine: false,
+            metrics_listen_addr: Some("127.0.0.1:33371".into()),
+            log_level: "debug".into(),
+        }
+    }
+
+    /// Regression guard for the "peers stays 0" bug: when the user configures
+    /// seed peers, `to_node_config` must guarantee at least one outbound slot
+    /// so `PeerManager::needs_outbound()` can ever be true and the connector
+    /// actually dials. Without the guard a `min_outbound == 0` config silently
+    /// disables all outbound dialing.
+    #[test]
+    fn seed_peers_force_at_least_one_outbound() {
+        let settings = regtest_settings_with_seed(vec!["127.0.0.1:33371".into()]);
+        let config = settings.to_node_config(None).expect("config");
+        assert_eq!(config.seed_peers, vec!["127.0.0.1:33371".to_string()]);
+        assert!(
+            config.min_outbound >= 1,
+            "min_outbound must be >= 1 when seed peers are configured, got {}",
+            config.min_outbound
+        );
+    }
+
+    /// The guard must NOT widen outbound when no seed peers are set: the public
+    /// network defaults (mainnet 8 / testnet 4 / regtest 1) stay untouched.
+    #[test]
+    fn no_seed_peers_leaves_outbound_default() {
+        let settings = regtest_settings_with_seed(vec![]);
+        let config = settings.to_node_config(None).expect("config");
+        assert!(config.seed_peers.is_empty());
+        assert_eq!(config.min_outbound, NodeConfig::regtest().min_outbound);
+    }
 }
