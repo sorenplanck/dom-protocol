@@ -14,7 +14,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Mirror para dom-wallet
+      - name: Mirror to dom-wallet
+        env:
+          BACKUP_TOKEN: ${{ secrets.BACKUP_TOKEN }}
         run: |
-          git remote add backup https://x-access-token:${{ secrets.BACKUP_TOKEN }}@github.com/sorenplanck/dom-wallet.git
+          git remote add backup https://x-access-token:${BACKUP_TOKEN}@github.com/sorenplanck/dom-wallet.git
           git push backup --mirror
