@@ -9,6 +9,10 @@ const app = document.getElementById("app");
 const screenHost = document.getElementById("screen");
 
 let currentScreen = null;
+// Whether the local registry has at least one saved wallet. Decides the entry
+// screen (login-by-name vs. first-run welcome) and the "Back" target within
+// onboarding. Set at boot from the non-sensitive registry list.
+let hasSavedWallets = false;
 
 // ── Theme ─────────────────────────────────────────────────────────────────────
 function initTheme() {
@@ -86,6 +90,10 @@ function gotoOnboarding(which) {
   const onReady = () => enterApp();
   const go = gotoOnboarding;
   const map = {
+    // "start" resolves to the right entry screen: login-by-name when wallets
+    // are registered, otherwise the first-run welcome. "Back" buttons target it.
+    start: () => (hasSavedWallets ? S.renderLogin(go, onReady) : S.renderWelcome(go)),
+    login: () => S.renderLogin(go, onReady),
     welcome: () => S.renderWelcome(go),
     create: () => S.renderCreate(go, onReady),
     restore: () => S.renderRestore(go, onReady),
@@ -147,12 +155,21 @@ async function boot() {
   savePrefs(S.settings.current);
 
   const status = await api.walletStatus();
-  if (!status.open) {
-    gotoOnboarding("welcome");
-  } else if (!status.unlocked) {
+  if (status.open && status.unlocked) {
+    enterApp();
+  } else if (status.open) {
+    // A wallet is open but locked (e.g. auto-lock): just ask for the password.
     showGate(S.renderUnlock(() => enterApp()));
   } else {
-    enterApp();
+    // No wallet open. If the user has saved profiles, offer login-by-name;
+    // otherwise this is a first run, so show the welcome/onboarding screen.
+    try {
+      const saved = await api.walletRegistryList();
+      hasSavedWallets = Array.isArray(saved) && saved.length > 0;
+    } catch {
+      hasSavedWallets = false;
+    }
+    gotoOnboarding(hasSavedWallets ? "login" : "welcome");
   }
 }
 

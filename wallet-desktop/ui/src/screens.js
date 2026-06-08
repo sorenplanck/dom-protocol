@@ -55,6 +55,65 @@ async function applyMiningEnabled(enabled) {
   await api.nodeRestart(settings.current);
 }
 
+// ── Login by name (primary screen when wallets are registered) ───────────────
+// The user types the friendly name of a registered wallet ("Carteira 1") plus
+// the password; the backend resolves the vault location from the local registry
+// and unlocks. No folder picker in this normal flow (the path lives only in the
+// backend). Secondary actions cover the less-common cases.
+export function renderLogin(go, onReady) {
+  const node = el(`
+    <div>
+      <h1 class="tc">DOM Wallet</h1>
+      <p class="sub tc">Unlock your wallet by name.</p>
+      <div class="card">
+        <label>Wallet name</label>
+        <input type="text" id="name" list="walletNames" placeholder="e.g. Carteira 1" autocomplete="off" spellcheck="false" autofocus />
+        <datalist id="walletNames"></datalist>
+        <label>Password</label>
+        <input type="password" id="pw" placeholder="Your wallet password" />
+        <div class="btn-row"><button class="btn w-full" id="unlock">Unlock</button></div>
+        <div class="err-text" id="err"></div>
+        <div class="btn-row"><button class="btn ghost w-full" id="bLocate">Locate existing wallet</button></div>
+        <div class="btn-row"><button class="btn ghost w-full" id="bCreate">Create wallet</button></div>
+        <div class="btn-row"><button class="btn ghost w-full" id="bRestore">Restore wallet</button></div>
+      </div>
+      <div class="warn-box">The wallet name only remembers where your encrypted wallet is stored. Your recovery phrase is the real backup.</div>
+    </div>`);
+
+  // Populate the name suggestions from the non-sensitive registry list.
+  api.walletRegistryList().then((list) => {
+    const dl = node.querySelector("#walletNames");
+    dl.replaceChildren();
+    for (const w of list || []) {
+      const opt = document.createElement("option");
+      opt.value = String(w.name || "");
+      dl.appendChild(opt);
+    }
+  }).catch(() => {});
+
+  const submit = async () => {
+    const err = node.querySelector("#err"); err.textContent = "";
+    const name = node.querySelector("#name").value.trim();
+    const pw = node.querySelector("#pw").value;
+    if (!name) { err.textContent = "Enter the wallet name."; return; }
+    const btn = node.querySelector("#unlock"); btn.disabled = true;
+    try {
+      await api.walletOpenByName(name, pw);
+      toast(t("walletOpened"));
+      onReady();
+    } catch (e) {
+      err.textContent = humanizeError(e);
+    } finally { btn.disabled = false; }
+  };
+  node.querySelector("#unlock").onclick = submit;
+  node.querySelector("#pw").onkeydown = (e) => { if (e.key === "Enter") submit(); };
+  node.querySelector("#name").onkeydown = (e) => { if (e.key === "Enter") node.querySelector("#pw").focus(); };
+  node.querySelector("#bLocate").onclick = () => go("open");
+  node.querySelector("#bCreate").onclick = () => go("create");
+  node.querySelector("#bRestore").onclick = () => go("restore");
+  return node;
+}
+
 // ── Onboarding: welcome ──────────────────────────────────────────────────────
 export function renderWelcome(go) {
   const node = el(`
@@ -81,6 +140,9 @@ export function renderCreate(go, onReady) {
       <h1>Create wallet</h1>
       <p class="sub">A new 24-word recovery phrase will be generated. Write it down — it is the only way to recover your funds.</p>
       <div class="card">
+        <label>Wallet name</label>
+        <input type="text" id="name" placeholder="e.g. Carteira 1" autocomplete="off" spellcheck="false" />
+        <p class="muted mt4">A friendly name so you can later log in by name. The name only remembers where the encrypted wallet is stored — your recovery phrase is the real backup.</p>
         <label>Network</label>
         <select id="net">
           <option value="testnet">Testnet</option>
@@ -119,16 +181,19 @@ export function renderCreate(go, onReady) {
     if (p) { path = p; node.querySelector("#path").textContent = p; refresh(); }
   };
   node.querySelector("#pw").oninput = refresh;
-  node.querySelector("#back").onclick = () => go("welcome");
+  node.querySelector("#back").onclick = () => go("start");
   node.querySelector("#next").onclick = async () => {
     const pw = node.querySelector("#pw").value;
     const pw2 = node.querySelector("#pw2").value;
+    const name = node.querySelector("#name").value.trim();
     const err = node.querySelector("#err");
+    if (!name) { err.textContent = "Enter a name for this wallet."; return; }
     if (pw !== pw2) { err.textContent = "Passwords do not match."; return; }
     if (pw.length < 8) { err.textContent = "Use at least 8 characters."; return; }
     err.textContent = "";
     try {
-      const phrase = await api.walletCreate(path, pw, settings.current);
+      // The friendly name is auto-registered by the backend on success.
+      const phrase = await api.walletCreate(path, pw, settings.current, name);
       showSeedConfirm(node, phrase, onReady);
     } catch (e) {
       err.textContent = humanizeError(e);
@@ -199,6 +264,9 @@ export function renderRestore(go, onReady) {
       <h1>Restore wallet</h1>
       <p class="sub">Enter your BIP-39 recovery phrase, choose where to save it, and set a new password.</p>
       <div class="card">
+        <label>Wallet name</label>
+        <input type="text" id="name" placeholder="e.g. Carteira 1" autocomplete="off" spellcheck="false" />
+        <p class="muted mt4">A friendly name for login by name. Your recovery phrase is never saved to this name — it is the real backup.</p>
         <label>Recovery phrase</label>
         <textarea id="phrase" placeholder="word1 word2 word3 ..."></textarea>
         <label>Network</label>
@@ -232,18 +300,21 @@ export function renderRestore(go, onReady) {
     const p = await pickSaveFile("Save restored DOM wallet");
     if (p) { path = p; node.querySelector("#path").textContent = p; }
   };
-  node.querySelector("#back").onclick = () => go("welcome");
+  node.querySelector("#back").onclick = () => go("start");
   node.querySelector("#go").onclick = async () => {
     const err = node.querySelector("#err");
+    const name = node.querySelector("#name").value.trim();
     const phrase = node.querySelector("#phrase").value.trim();
     const pw = node.querySelector("#pw").value;
     const pw2 = node.querySelector("#pw2").value;
+    if (!name) { err.textContent = "Enter a name for this wallet."; return; }
     if (!path) { err.textContent = "Choose the wallet location."; return; }
     if (pw.length < 8) { err.textContent = "Use at least 8 characters."; return; }
     // L1: confirm the password so a typo can't lock the restored wallet.
     if (pw !== pw2) { err.textContent = "Passwords do not match."; return; }
     try {
-      await api.walletRestore(path, pw, phrase, settings.current);
+      // Auto-registered by the backend under `name`; the phrase is never stored.
+      await api.walletRestore(path, pw, phrase, settings.current, name);
       node.querySelector("#phrase").value = "";
       toast(t("walletRestored"));
       onReady();
@@ -256,12 +327,17 @@ export function renderRestore(go, onReady) {
 export function renderOpen(go, onReady) {
   const node = el(`
     <div>
-      <h1>Open wallet</h1>
+      <h1>Locate existing wallet</h1>
+      <p class="sub">Find your wallet folder once. If you remember it, next time you only need its name and password.</p>
       <div class="card">
         <label>Wallet folder (.dom directory)</label>
         <div class="copyable"><code id="path">— choose —</code><button class="btn ghost" id="pick">Choose</button></div>
         <label>Password</label>
         <input type="password" id="pw" />
+        <label>Wallet name</label>
+        <input type="text" id="name" placeholder="e.g. Carteira 1" autocomplete="off" spellcheck="false" />
+        <div class="check"><input type="checkbox" id="remember" checked /><label>Remember this wallet for login by name</label></div>
+        <p class="muted mt4">The name only remembers where your encrypted wallet is stored. Your recovery phrase is the real backup.</p>
         <div class="btn-row">
           <button class="btn ghost" id="back">Back</button>
           <button class="btn" id="go">Open</button>
@@ -274,12 +350,15 @@ export function renderOpen(go, onReady) {
     const p = await pickFolder("Open DOM wallet");
     if (p) { path = p; node.querySelector("#path").textContent = p; }
   };
-  node.querySelector("#back").onclick = () => go("welcome");
+  node.querySelector("#back").onclick = () => go("start");
   node.querySelector("#go").onclick = async () => {
     const err = node.querySelector("#err");
     if (!path) { err.textContent = "Choose a wallet."; return; }
+    const remember = node.querySelector("#remember").checked;
+    const name = node.querySelector("#name").value.trim();
+    if (remember && !name) { err.textContent = "Enter a name to remember this wallet, or uncheck “Remember”."; return; }
     try {
-      await api.walletOpen(path, node.querySelector("#pw").value);
+      await api.walletOpen(path, node.querySelector("#pw").value, name || null, remember);
       toast(t("walletOpened"));
       onReady();
     } catch (e) { err.textContent = humanizeError(e); }

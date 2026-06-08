@@ -62,6 +62,16 @@ impl From<ReceiveRequestDescriptor> for ReceiveInfo {
     }
 }
 
+/// Non-sensitive metadata about the currently-open wallet, used to populate a
+/// Wallet Registry entry. Contains NO secret material (no password/seed/key) —
+/// just the vault location and the plaintext `config.json` fields.
+#[derive(Clone)]
+pub struct OpenWalletMeta {
+    pub vault_path: String,
+    pub network: String,
+    pub created_at: u64,
+}
+
 /// Balance breakdown for the dashboard, all in noms.
 #[derive(Clone, Copy, serde::Serialize)]
 pub struct BalanceInfo {
@@ -91,6 +101,21 @@ impl WalletManager {
             Some(dir) => dir.wallet().is_unlocked(),
             None => false,
         }
+    }
+
+    /// Non-sensitive metadata about the open wallet, for the Wallet Registry.
+    /// Returns `None` when no wallet is open. Reads only the vault path and the
+    /// plaintext `config.json` (network, created_at) — never a secret.
+    pub async fn open_wallet_meta(&self) -> Option<OpenWalletMeta> {
+        let guard = self.inner.lock().await;
+        guard.as_ref().map(|dir| {
+            let cfg = dir.config();
+            OpenWalletMeta {
+                vault_path: dir.path().to_string_lossy().to_string(),
+                network: network_str(cfg.network),
+                created_at: cfg.created_at,
+            }
+        })
     }
 
     /// Create a brand-new deterministic wallet from a freshly generated BIP-39
@@ -308,6 +333,17 @@ impl WalletManager {
             .as_ref()
             .map(|d| d.wallet().network())
     }
+}
+
+/// Stable lowercase string for a wallet `Network`, used in registry metadata
+/// (mirrors the desktop `NodeSettings` lowercase serde values).
+fn network_str(network: dom_wallet::Network) -> String {
+    match network {
+        dom_wallet::Network::Mainnet => "mainnet",
+        dom_wallet::Network::Testnet => "testnet",
+        dom_wallet::Network::Regtest => "regtest",
+    }
+    .to_string()
 }
 
 /// Whether a failed `submit_tx` is safe to roll back locally (L10).
