@@ -9,12 +9,13 @@ mod metrics;
 mod node_host;
 mod settings;
 mod wallet_manager;
+mod wallet_registry;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dom_wallet::{NodeRpc, NodeRpcClient};
+use dom_wallet::{new_wallet_id, NodeRpc, NodeRpcClient, RegistryEntry, WalletRegistry};
 use tauri::{Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tracing_subscriber::prelude::*;
@@ -99,6 +100,151 @@ fn validate_wallet_path(path: &str, must_exist: bool) -> Result<PathBuf, String>
     Ok(parent.join(file_name))
 }
 
+// ── Wallet Registry (login-by-name) ───────────────────────────────────────────
+
+/// Marker returned by `wallet_open_by_name` when the typed name is not in the
+/// registry. The UI maps this to the "Wallet profile not found…" message.
+const PROFILE_NOT_FOUND: &str = "wallet profile not found";
+
+/// Current Unix time in seconds (for `created_at` / `last_opened` stamps).
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Record the currently-open wallet in the registry under `name` (best-effort).
+///
+/// Only non-sensitive metadata is written (name, opaque id, vault path,
+/// network, timestamps). A failure here never fails the surrounding
+/// create/restore/open: the wallet is already usable, registration is a
+/// convenience for next time. We log at WARN (never the password/seed) and the
+/// user can still "Locate existing wallet" later.
+async fn register_open_wallet(state: &AppState, name: &str) {
+    let name = name.trim();
+    if name.is_empty() {
+        return;
+    }
+    if let Err(e) = try_register_open_wallet(state, name).await {
+        // L: do not log the wallet path at INFO; this is a non-fatal warning.
+        tracing::warn!("could not save wallet to the registry: {e}");
+    }
+}
+
+async fn try_register_open_wallet(state: &AppState, name: &str) -> Result<(), String> {
+    let meta = state
+        .wallet
+        .open_wallet_meta()
+        .await
+        .ok_or_else(|| "no wallet open".to_string())?;
+    let reg_path = wallet_registry::default_registry_path().map_err(|e| e.to_string())?;
+    register_wallet_meta_at(&reg_path, name, meta, now_secs())
+}
+
+fn register_wallet_meta_at(
+    reg_path: &Path,
+    name: &str,
+    meta: wallet_manager::OpenWalletMeta,
+    now: u64,
+) -> Result<(), String> {
+    let mut reg = WalletRegistry::load(&reg_path).map_err(|e| e.to_string())?;
+    reg.upsert(RegistryEntry {
+        name: name.to_string(),
+        // upsert preserves an existing id; this is only used for a new entry.
+        wallet_id: new_wallet_id(),
+        vault_path: meta.vault_path,
+        network: meta.network,
+        created_at: Some(meta.created_at),
+        last_opened: Some(now),
+    });
+    reg.save(&reg_path).map_err(|e| e.to_string())
+}
+
+/// A non-sensitive registry row for the login screen's name list.
+#[derive(serde::Serialize)]
+struct RegistrySummary {
+    name: String,
+    network: String,
+}
+
+/// List registered wallet profiles (names + networks only). Never exposes the
+/// vault path or any secret to the renderer.
+#[tauri::command]
+async fn wallet_registry_list() -> Result<Vec<RegistrySummary>, String> {
+    let reg_path = wallet_registry::default_registry_path().map_err(|e| e.to_string())?;
+    let reg = WalletRegistry::load(&reg_path).map_err(|e| e.to_string())?;
+    Ok(reg
+        .wallets
+        .into_iter()
+        .map(|e| RegistrySummary {
+            name: e.name,
+            network: e.network,
+        })
+        .collect())
+}
+
+/// Login-by-name: resolve the vault path from the registry, then open + unlock
+/// the wallet with `password`. The renderer never supplies a path.
+///
+/// Errors:
+///   * unknown name → `PROFILE_NOT_FOUND` (UI shows "Wallet profile not found…")
+///   * registered vault missing on disk → explicit "files missing" error
+///   * wrong password → propagated from `WalletDir::open` ("Incorrect password")
+#[tauri::command]
+async fn wallet_open_by_name(
+    state: State<'_, AppState>,
+    name: String,
+    password: Zeroizing<String>,
+) -> Result<(), String> {
+    let reg_path = wallet_registry::default_registry_path().map_err(|e| e.to_string())?;
+    open_registered_wallet_at(
+        state.wallet.as_ref(),
+        &reg_path,
+        &name,
+        password.as_str(),
+        now_secs(),
+    )
+    .await
+}
+
+async fn open_registered_wallet_at(
+    wallet: &WalletManager,
+    reg_path: &Path,
+    name: &str,
+    password: &str,
+    now: u64,
+) -> Result<(), String> {
+    let mut reg = WalletRegistry::load(&reg_path).map_err(|e| e.to_string())?;
+
+    let (vault_path, stored_name) = {
+        let entry = reg
+            .resolve(name)
+            .ok_or_else(|| PROFILE_NOT_FOUND.to_string())?;
+        (entry.vault_path.clone(), entry.name.clone())
+    };
+
+    if !Path::new(&vault_path).is_dir() {
+        return Err(format!(
+            "wallet profile files missing: the saved location for {stored_name:?} no longer exists. Use \"Locate existing wallet\" to find it, or restore from your recovery phrase."
+        ));
+    }
+
+    let path = validate_wallet_path(&vault_path, true)?;
+    wallet
+        .open(&path, password)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Best-effort: stamp last_opened. Never fail the unlock over a metadata write.
+    if reg.touch_last_opened(&stored_name, now) {
+        if let Err(e) = reg.save(&reg_path) {
+            tracing::warn!("could not update wallet last_opened: {e}");
+        }
+    }
+    Ok(())
+}
+
 // ── Wallet commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -117,6 +263,7 @@ async fn wallet_create(
     path: String,
     password: Zeroizing<String>,
     settings: NodeSettings,
+    name: Option<String>,
 ) -> Result<String, String> {
     settings.validate().map_err(|e| e.to_string())?;
     let path = validate_wallet_path(&path, false)?;
@@ -125,6 +272,11 @@ async fn wallet_create(
         .create_new(&path, password.as_str(), &settings)
         .await
         .map_err(|e| e.to_string())?;
+    // Auto-register the new wallet under its friendly name so the user can log
+    // in by name next time. Best-effort: never block returning the phrase.
+    if let Some(name) = name.as_deref() {
+        register_open_wallet(&state, name).await;
+    }
     // The mnemonic must cross IPC once so the user can write it down. Keep the
     // Rust-side copy zeroized and hand Tauri only the unavoidable return string.
     Ok(phrase.to_string())
@@ -137,6 +289,7 @@ async fn wallet_restore(
     password: Zeroizing<String>,
     phrase: Zeroizing<String>,
     settings: NodeSettings,
+    name: Option<String>,
 ) -> Result<(), String> {
     settings.validate().map_err(|e| e.to_string())?;
     let path = validate_wallet_path(&path, false)?;
@@ -144,7 +297,13 @@ async fn wallet_restore(
         .wallet
         .restore_from_phrase(&path, password.as_str(), phrase.as_str(), &settings)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // Auto-register under the friendly name (best-effort). The recovery phrase
+    // is NEVER written to the registry — only non-sensitive metadata.
+    if let Some(name) = name.as_deref() {
+        register_open_wallet(&state, name).await;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -152,13 +311,157 @@ async fn wallet_open(
     state: State<'_, AppState>,
     path: String,
     password: Zeroizing<String>,
+    name: Option<String>,
+    remember: Option<bool>,
 ) -> Result<(), String> {
     let path = validate_wallet_path(&path, true)?;
     state
         .wallet
         .open(&path, password.as_str())
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // "Locate existing wallet": if the user gave a friendly name and asked to
+    // remember it, save the resolved location so future logins only need the
+    // name + password. Best-effort.
+    if remember.unwrap_or(false) {
+        if let Some(name) = name.as_deref() {
+            register_open_wallet(&state, name).await;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod wallet_registry_tests {
+    use super::*;
+    use dom_wallet::{Bip39Seed, Network, WalletDir};
+    use tempfile::tempdir;
+
+    const PASSWORD: &str = "correct horse battery staple";
+
+    fn create_temp_wallet(path: &Path) {
+        let network = Network::Regtest;
+        let genesis = dom_core::startup_genesis_hash_for_network_magic(network.magic()).unwrap();
+        let seed = Bip39Seed::generate_new().unwrap();
+        let dir = WalletDir::create_from_seed(path, PASSWORD, network, &genesis, &seed).unwrap();
+        drop(dir);
+    }
+
+    fn registry_entry(name: &str, vault_path: &Path) -> RegistryEntry {
+        RegistryEntry {
+            name: name.to_string(),
+            wallet_id: new_wallet_id(),
+            vault_path: vault_path.to_string_lossy().to_string(),
+            network: "regtest".to_string(),
+            created_at: Some(1_700_000_000),
+            last_opened: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn login_by_name_resolves_path_and_opens_wallet() {
+        let dir = tempdir().unwrap();
+        let wallet_path = dir.path().join("wallet.dom");
+        let registry_path = dir.path().join("registry.json");
+        create_temp_wallet(&wallet_path);
+
+        let mut reg = WalletRegistry::default();
+        reg.upsert(registry_entry("Carteira 1", &wallet_path));
+        reg.save(&registry_path).unwrap();
+
+        let manager = WalletManager::new();
+        open_registered_wallet_at(&manager, &registry_path, "Carteira 1", PASSWORD, 1_700_000_123)
+            .await
+            .unwrap();
+
+        assert!(manager.is_open().await);
+        assert!(manager.is_unlocked().await);
+        let reg = WalletRegistry::load(&registry_path).unwrap();
+        assert_eq!(
+            reg.resolve("Carteira 1").unwrap().vault_path,
+            wallet_path.to_string_lossy()
+        );
+        assert_eq!(
+            reg.resolve("Carteira 1").unwrap().last_opened,
+            Some(1_700_000_123)
+        );
+    }
+
+    #[tokio::test]
+    async fn login_by_name_with_wrong_password_does_not_open_wallet() {
+        let dir = tempdir().unwrap();
+        let wallet_path = dir.path().join("wallet.dom");
+        let registry_path = dir.path().join("registry.json");
+        create_temp_wallet(&wallet_path);
+
+        let mut reg = WalletRegistry::default();
+        reg.upsert(registry_entry("Carteira 1", &wallet_path));
+        reg.save(&registry_path).unwrap();
+
+        let manager = WalletManager::new();
+        let err = open_registered_wallet_at(
+            &manager,
+            &registry_path,
+            "Carteira 1",
+            "wrong password",
+            1_700_000_123,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(!manager.is_open().await);
+        assert!(
+            err.to_lowercase().contains("decrypt") || err.to_lowercase().contains("password"),
+            "wrong-password error should remain password/decryption related, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_by_name_reports_profile_not_found_without_opening_picker() {
+        let dir = tempdir().unwrap();
+        let registry_path = dir.path().join("registry.json");
+        WalletRegistry::default().save(&registry_path).unwrap();
+
+        let manager = WalletManager::new();
+        let err = open_registered_wallet_at(
+            &manager,
+            &registry_path,
+            "Carteira 1",
+            PASSWORD,
+            1_700_000_123,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, PROFILE_NOT_FOUND);
+        assert!(!manager.is_open().await);
+    }
+
+    #[test]
+    fn locate_existing_wallet_registration_persists_for_future_login() {
+        let dir = tempdir().unwrap();
+        let wallet_path = dir.path().join("wallet.dom");
+        let registry_path = dir.path().join("registry.json");
+        create_temp_wallet(&wallet_path);
+
+        register_wallet_meta_at(
+            &registry_path,
+            "Carteira 1",
+            wallet_manager::OpenWalletMeta {
+                vault_path: wallet_path.to_string_lossy().to_string(),
+                network: "regtest".to_string(),
+                created_at: 1_700_000_000,
+            },
+            1_700_000_111,
+        )
+        .unwrap();
+
+        let reg = WalletRegistry::load(&registry_path).unwrap();
+        let entry = reg.resolve("Carteira 1").unwrap();
+        assert_eq!(entry.vault_path, wallet_path.to_string_lossy());
+        assert_eq!(entry.network, "regtest");
+        assert_eq!(entry.last_opened, Some(1_700_000_111));
+    }
 }
 
 #[tauri::command]
@@ -585,6 +888,8 @@ pub fn run() {
             wallet_create,
             wallet_restore,
             wallet_open,
+            wallet_open_by_name,
+            wallet_registry_list,
             wallet_lock,
             wallet_unlock,
             wallet_balance,

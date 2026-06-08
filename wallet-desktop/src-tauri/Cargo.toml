@@ -63,6 +63,9 @@ dom-serialization = { path = "../../crates/dom-serialization" }
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
+[dev-dependencies]
+tempfile = "3.10"
+
 [profile.release]
 opt-level = 3
 lto = true
