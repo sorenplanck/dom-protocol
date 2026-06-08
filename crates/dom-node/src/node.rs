@@ -515,6 +515,31 @@ impl DomNode {
     pub async fn run(self: Arc<Self>) -> Result<(), DomError> {
         info!("Starting DOM node services");
 
+        // Bootstrap the local genesis block on EVERY node, not just miners.
+        //
+        // The genesis is deterministic (a pure function of the network), so
+        // every node derives the identical genesis hash. This MUST happen
+        // before the peer connector starts IBD, because the proof-of-work seed
+        // for epoch-0 blocks is the hash of the block at seed_height 0 — i.e.
+        // the genesis. The miner seals epoch-0 blocks against the real genesis
+        // hash (`get_hash_at_height(0)`), but a node that never committed its
+        // own genesis falls back to a `[0u8; 32]` seed during IBD validation
+        // (`compute_randomx_seed`/`_with_batch`). The two seeds disagree, so
+        // every epoch-0 block fails PoW with "hash mismatch" and a non-mining
+        // node can never sync from a miner. Previously genesis was created only
+        // inside `mining_loop` (gated on `config.mine`), which is exactly why a
+        // mining node worked but a sync-only node did not. Creating genesis
+        // unconditionally here makes the seed consistent on both the mining and
+        // validating paths. The `mining_loop` keeps its own idempotent check,
+        // so this never double-creates.
+        let needs_genesis = {
+            let chain = self.chain.lock().await;
+            chain.tip_height.0 == 0 && chain.tip_hash == dom_core::Hash256::ZERO
+        };
+        if needs_genesis {
+            crate::miner::create_genesis_block(self.clone()).await?;
+        }
+
         // ── Synchronous listener binds ──────────────────────────────────
         // Bind P2P and RPC sockets BEFORE spawning their accept loops, so
         // bind errors (EADDRINUSE, permission denied, malformed addr)
@@ -2548,10 +2573,36 @@ async fn resume_ibd_block_sync(
         codec.send(stream, &wire).await?;
 
         for expected_hash in batch {
-            let msg = loop {
+            let block = loop {
                 let m = codec.recv(stream).await?;
                 match m.command {
-                    Command::Block => break m,
+                    Command::Block => {
+                        // The peer relays freshly-mined blocks on the SAME
+                        // connection while we are still fetching IBD bodies (its
+                        // per-peer task forwards every newly mined block — see the
+                        // `block_relay_rx` arm of `message_loop`). Such an
+                        // unsolicited relay block is NOT the response to our
+                        // GetBlockData request. Treating it as one corrupts the
+                        // request/response alignment and aborts the entire sync
+                        // against an actively-mining peer with "IBD block response
+                        // hash mismatch" — the bug that made a mining node and a
+                        // sync-only node unable to converge. Match the response by
+                        // hash: if it is the block we asked for, accept it;
+                        // otherwise skip it (we re-fetch it in a later IBD round
+                        // or receive it via normal relay once we are caught up and
+                        // back in `message_loop`) and keep waiting for ours.
+                        match decode_ibd_block_response(&m.payload, *expected_hash) {
+                            Ok((_, block)) => break block,
+                            Err(_) => {
+                                tracing::debug!(
+                                    "IBD resume: skipping unsolicited relayed block while \
+                                     awaiting {} from {}",
+                                    hex::encode(expected_hash),
+                                    runtime.peer_addr
+                                );
+                            }
+                        }
+                    }
                     Command::Ping => {
                         let pong = WireMessage {
                             magic: runtime.config.network.magic(),
@@ -2566,14 +2617,6 @@ async fn resume_ibd_block_sync(
                     }
                 }
             };
-            let (_, block) =
-                decode_ibd_block_response(&msg.payload, *expected_hash).map_err(|e| {
-                    DomError::Invalid(format!(
-                        "IBD from {}: resumed block response for {} rejected: {e}",
-                        runtime.peer_addr,
-                        hex::encode(expected_hash)
-                    ))
-                })?;
             let height = block.header.height.0;
             let txs_for_scan = block.transactions.clone();
             // DOM-AUDIT-001: connect the block under the chain guard, capture
