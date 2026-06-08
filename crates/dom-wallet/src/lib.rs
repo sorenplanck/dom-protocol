@@ -45,6 +45,7 @@ pub mod coin_selection;
 pub mod hd_wallet;
 pub mod journal;
 pub mod output_index;
+pub mod registry;
 pub mod restore;
 pub mod rpc_client;
 pub mod seed;
@@ -57,6 +58,9 @@ pub mod wallet_dir;
 pub use hd_wallet::{ExtendedPrivKey, HdError, DOM_COIN_TYPE};
 pub use journal::{
     JournalEntry, JournalError, TxJournal, TxJournalEvent, TxRecord, TxStatus, JOURNAL_LOG_NAME,
+};
+pub use registry::{
+    new_wallet_id, RegistryEntry, RegistryError, WalletRegistry, REGISTRY_FORMAT_V1,
 };
 pub use restore::{
     restore_from_phrase, ChainScanSource, InMemoryChainScan, RestoreError, RestoredWallet,

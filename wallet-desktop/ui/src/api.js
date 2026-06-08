@@ -29,11 +29,19 @@ export function domToNoms(dom) {
 // ── thin command wrappers ────────────────────────────────────────────────────
 export const api = {
   walletStatus: () => invoke("wallet_status"),
-  walletCreate: (path, password, settings) =>
-    invoke("wallet_create", { path, password, settings }),
-  walletRestore: (path, password, phrase, settings) =>
-    invoke("wallet_restore", { path, password, phrase, settings }),
-  walletOpen: (path, password) => invoke("wallet_open", { path, password }),
+  walletCreate: (path, password, settings, name) =>
+    invoke("wallet_create", { path, password, settings, name }),
+  walletRestore: (path, password, phrase, settings, name) =>
+    invoke("wallet_restore", { path, password, phrase, settings, name }),
+  walletOpen: (path, password, name, remember) =>
+    invoke("wallet_open", { path, password, name, remember }),
+  // Login-by-name: resolve the vault location from the local registry, then
+  // unlock with the password. The renderer never handles a filesystem path.
+  walletOpenByName: (name, password) =>
+    invoke("wallet_open_by_name", { name, password }),
+  // Non-sensitive list of saved profiles (names + networks only) for the login
+  // screen. Never returns a vault path or any secret.
+  walletRegistryList: () => invoke("wallet_registry_list"),
   walletLock: () => invoke("wallet_lock"),
   walletUnlock: (password) => invoke("wallet_unlock", { password }),
   walletBalance: () => invoke("wallet_balance"),
@@ -106,6 +114,8 @@ const ERROR_RULES = [
   [/output already spent/i, "This output was already spent."],
   [/(decryption failed|invalid password|password check|decrypt)/i, "Incorrect password."],
   [/wallet is locked/i, "The wallet is locked. Unlock it with your password to continue."],
+  [/wallet profile not found/i, "Wallet profile not found. Locate existing wallet, restore, or create a new wallet."],
+  [/wallet profile files missing/i, "The saved location for this wallet no longer exists. Use “Locate existing wallet” to find it, or restore from your recovery phrase."],
   [/no wallet open/i, "No wallet is open."],
   [/node not started/i, "The node hasn't started yet. Start it from the Node / Logs tab."],
   [/(connect timeout|read timeout|transport failure|unexpected HTTP)/i, "Couldn't reach the local node. Check that it's running."],
