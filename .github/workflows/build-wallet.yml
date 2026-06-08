@@ -5,15 +5,14 @@ on:
     tags:
       - "wallet-v*"
 
-  release:
-    types:
-      - published
-      - created
-
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: dom-wallet-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -84,7 +83,7 @@ jobs:
         with:
           projectPath: wallet-desktop
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('wallet-v0.0.0-dev-{0}', github.run_number) }}
-          releaseName: "DOM Wallet ${{ github.ref_type == 'tag' && github.ref_name || github.event.release.tag_name || 'dev build' }}"
+          releaseName: "DOM Wallet ${{ github.ref_type == 'tag' && github.ref_name || 'dev build' }}"
           releaseBody: "Official DOM Wallet desktop build with integrated node. Not a store of value. A means of exchange."
           releaseDraft: true
           prerelease: ${{ github.ref_type != 'tag' }}
