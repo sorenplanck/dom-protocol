@@ -151,6 +151,9 @@ jobs:
       DOM_NETWORK: regtest
       DOM_REGTEST_FAST_MINING: "1"
       RUST_BACKTRACE: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_OPT_LEVEL: "3"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -180,6 +183,57 @@ jobs:
       - name: cargo test -p dom-integration-tests --ignored
         run: cargo test -p dom-integration-tests -- --ignored --test-threads=1
 
+  ibd-integration:
+    name: ibd-integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DOM_NETWORK: regtest
+      DOM_REGTEST_FAST_MINING: "1"
+      RUST_BACKTRACE: "1"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_OPT_LEVEL: "3"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      DOM_INTEGRATION_LOG_DIR: ${{ github.workspace }}/ibd-two-node-logs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-linux-ibd-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-linux-ibd-integration-
+
+      - name: Install Linux build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+
+      - name: cargo build --release -p dom-node
+        run: cargo build --release -p dom-node
+
+      - name: cargo test -p dom-integration-tests --test ibd_two_node
+        run: |
+          mkdir -p "$DOM_INTEGRATION_LOG_DIR"
+          cargo test -p dom-integration-tests --test ibd_two_node -- --nocapture --test-threads=1
+
+      - name: Upload IBD node logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ibd-integration-logs
+          path: ibd-two-node-logs
+          if-no-files-found: warn
+
   release-blocker-gate:
     name: release blocker gate
     runs-on: ubuntu-latest
@@ -188,6 +242,7 @@ jobs:
       - build-test
       - release-blocker-crate-tests
       - release-blocker-integration-tests
+      - ibd-integration
     if: always()
     steps:
       - name: Require every release-blocker job to pass
@@ -196,6 +251,7 @@ jobs:
           test "${{ needs.build-test.result }}" = "success"
           test "${{ needs.release-blocker-crate-tests.result }}" = "success"
           test "${{ needs.release-blocker-integration-tests.result }}" = "success"
+          test "${{ needs.ibd-integration.result }}" = "success"
 
   critical-domain-coverage-report:
     name: critical domain coverage report
