@@ -8,7 +8,7 @@ use std::io::Write as _;
 use std::net::SocketAddr;
 
 use anyhow::{anyhow, Context as _, Result};
-use dom_config::NodeConfig;
+use dom_config::{MinerThrottleConfig, NodeConfig};
 use dom_wallet::Network as WalletNetwork;
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +35,15 @@ pub struct NodeSettings {
     /// Optional miner wallet file (.dom) so coinbase rewards are spendable.
     pub miner_wallet_path: Option<String>,
     pub mine: bool,
+    /// Operator-facing CPU limit. The embedded miner currently runs one active
+    /// nonce-search worker; keep this explicit so saved wallet settings cannot
+    /// request unbounded miner workers in future builds.
+    #[serde(default = "default_miner_threads")]
+    pub miner_threads: usize,
+    /// Local sleep applied by the node miner throttle. This is resource control
+    /// only and is not consensus data.
+    #[serde(default = "default_miner_throttle_ms")]
+    pub miner_throttle_ms: u64,
     pub metrics_listen_addr: Option<String>,
     pub log_level: String,
 }
@@ -44,12 +53,14 @@ impl Default for NodeSettings {
         let data_dir = default_data_dir();
         Self {
             network: NetworkKind::Testnet,
-            seed_peers: Vec::new(),
+            seed_peers: vec!["192.153.57.211:8443".to_string()],
             p2p_listen_addr: "0.0.0.0:33370".to_string(),
             rpc_listen_addr: "127.0.0.1:33372".to_string(),
             data_dir,
             miner_wallet_path: None,
             mine: false,
+            miner_threads: default_miner_threads(),
+            miner_throttle_ms: default_miner_throttle_ms(),
             metrics_listen_addr: Some("127.0.0.1:33371".to_string()),
             log_level: "info".to_string(),
         }
@@ -62,6 +73,9 @@ impl NodeSettings {
         let rpc = parse_socket_addr("RPC listen address", &self.rpc_listen_addr)?;
         if !rpc.ip().is_loopback() {
             return Err(anyhow!("RPC listen address must be loopback"));
+        }
+        for peer in self.normalized_seed_peers() {
+            parse_socket_addr("seed peer", &peer)?;
         }
         if let Some(addr) = self.metrics_listen_addr.as_deref() {
             if !addr.trim().is_empty() {
@@ -78,6 +92,11 @@ impl NodeSettings {
             if path.trim().is_empty() {
                 return Err(anyhow!("miner wallet path must not be empty when set"));
             }
+        }
+        if self.mine && self.miner_wallet_path.is_none() {
+            return Err(anyhow!(
+                "mining requires a selected miner reward wallet; choose a dedicated .dom miner wallet first"
+            ));
         }
         Ok(())
     }
@@ -111,6 +130,7 @@ impl NodeSettings {
         config.p2p_listen_addr = self.p2p_listen_addr.clone();
         config.data_dir = self.data_dir.clone();
         config.mine = self.mine;
+        config.miner_throttle = self.miner_throttle_config();
         config.log_level = self.log_level.clone();
         config.rpc_listen_addr = Some(self.rpc_listen_addr.clone());
         config.rpc_bearer_token = rpc_bearer_token;
@@ -118,17 +138,17 @@ impl NodeSettings {
 
         // Mining wallet (dedicated; never the user's). Only set when mining.
         if self.mine {
-            if let Ok((path, password)) = self.miner_wallet_credentials() {
-                config.wallet_path = Some(path);
-                config.wallet_password = Some(password);
-            }
+            let (path, password) = self.miner_wallet_credentials()?;
+            config.wallet_path = Some(path);
+            config.wallet_password = Some(password);
         } else {
             config.wallet_path = None;
             config.wallet_password = None;
         }
 
-        if !self.seed_peers.is_empty() {
-            config.seed_peers = self.seed_peers.clone();
+        let seed_peers = self.normalized_seed_peers();
+        if !seed_peers.is_empty() {
+            config.seed_peers = seed_peers;
             // Defense-in-depth for the P2P "peers stays 0" bug. The peer
             // connector only dials while `PeerManager::needs_outbound()` is
             // true, and that is `outbound+pending < min(min_outbound,
@@ -149,7 +169,48 @@ impl NodeSettings {
         if config.rpc_listen_addr.as_deref() == Some("") {
             return Err(anyhow!("RPC listen address must not be empty"));
         }
+        tracing::info!(
+            "wallet node settings: mining_enabled={} miner_threads={} miner_throttle_ms={} seed_peers={}",
+            config.mine,
+            self.normalized_miner_threads(),
+            self.normalized_miner_throttle_ms(),
+            if config.seed_peers.is_empty() {
+                "(none)".to_string()
+            } else {
+                config.seed_peers.join(",")
+            }
+        );
         Ok(config)
+    }
+
+    pub fn normalized_miner_threads(&self) -> usize {
+        self.miner_threads.clamp(1, available_parallelism())
+    }
+
+    pub fn normalized_miner_throttle_ms(&self) -> u64 {
+        self.miner_throttle_ms
+    }
+
+    fn normalized_seed_peers(&self) -> Vec<String> {
+        self.seed_peers
+            .iter()
+            .map(|peer| peer.trim())
+            .filter(|peer| !peer.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    fn miner_throttle_config(&self) -> MinerThrottleConfig {
+        let ms = self.normalized_miner_throttle_ms();
+        if ms == 0 {
+            MinerThrottleConfig::default()
+        } else {
+            MinerThrottleConfig {
+                enabled: true,
+                yield_every_nonces: 1_000,
+                sleep_micros: ms.saturating_mul(1_000),
+            }
+        }
     }
 
     /// Resolve the dedicated miner wallet's path and password.
@@ -217,6 +278,20 @@ impl NodeSettings {
     pub fn matches_wallet_network(&self, wallet_network: WalletNetwork) -> bool {
         self.wallet_network() == wallet_network
     }
+}
+
+fn default_miner_threads() -> usize {
+    1
+}
+
+fn default_miner_throttle_ms() -> u64 {
+    10
+}
+
+fn available_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
 }
 
 fn parse_socket_addr(label: &str, addr: &str) -> Result<SocketAddr> {
@@ -358,6 +433,8 @@ mod tests {
                 .into_owned(),
             miner_wallet_path: None,
             mine: false,
+            miner_threads: 1,
+            miner_throttle_ms: 10,
             metrics_listen_addr: Some("127.0.0.1:33371".into()),
             log_level: "debug".into(),
         }
@@ -388,5 +465,68 @@ mod tests {
         let config = settings.to_node_config(None).expect("config");
         assert!(config.seed_peers.is_empty());
         assert_eq!(config.min_outbound, NodeConfig::regtest().min_outbound);
+    }
+
+    #[test]
+    fn default_wallet_settings_do_not_mine_and_keep_local_services() {
+        let settings = NodeSettings::default();
+        assert!(!settings.mine);
+        assert_eq!(settings.miner_threads, 1);
+        assert_eq!(settings.miner_throttle_ms, 10);
+        assert_eq!(settings.seed_peers, vec!["192.153.57.211:8443"]);
+        let config = settings.to_node_config(None).expect("default config");
+        assert!(!config.mine);
+        assert_eq!(config.rpc_listen_addr.as_deref(), Some("127.0.0.1:33372"));
+        assert_eq!(
+            config.metrics_listen_addr.as_deref(),
+            Some("127.0.0.1:33371")
+        );
+    }
+
+    #[test]
+    fn mining_requires_selected_reward_wallet() {
+        let mut settings = regtest_settings_with_seed(vec![]);
+        settings.mine = true;
+        let err = settings
+            .to_node_config(None)
+            .expect_err("mining without miner wallet must fail");
+        assert!(err.to_string().contains("miner reward wallet"));
+    }
+
+    #[test]
+    fn miner_thread_limit_is_normalized_safely() {
+        let mut settings = regtest_settings_with_seed(vec![]);
+        settings.miner_threads = 0;
+        assert_eq!(settings.normalized_miner_threads(), 1);
+
+        settings.miner_threads = usize::MAX;
+        assert_eq!(settings.normalized_miner_threads(), available_parallelism());
+    }
+
+    #[test]
+    fn miner_throttle_maps_to_local_node_throttle_only() {
+        let mut settings = regtest_settings_with_seed(vec![]);
+        settings.miner_throttle_ms = 25;
+        let config = settings.to_node_config(None).expect("config");
+        assert!(!config.mine);
+        assert!(config.miner_throttle.enabled);
+        assert_eq!(config.miner_throttle.yield_every_nonces, 1_000);
+        assert_eq!(config.miner_throttle.sleep_micros, 25_000);
+    }
+
+    #[test]
+    fn bootstrap_seed_peer_is_valid_socket() {
+        let settings = regtest_settings_with_seed(vec!["192.153.57.211:8443".into()]);
+        let config = settings.to_node_config(None).expect("bootstrap peer accepted");
+        assert_eq!(config.seed_peers, vec!["192.153.57.211:8443"]);
+    }
+
+    #[test]
+    fn invalid_seed_peer_is_rejected() {
+        let settings = regtest_settings_with_seed(vec!["not-a-socket".into()]);
+        let err = settings
+            .to_node_config(None)
+            .expect_err("invalid seed peer must fail");
+        assert!(err.to_string().contains("seed peer is invalid"));
     }
 }

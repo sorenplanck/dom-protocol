@@ -227,6 +227,7 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--font-mono); fo
 
 /* Seed words grid */
 .seed-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 14px 0; }
+.seed-card { max-height: min(420px, calc(100vh - 260px)); overflow-y: auto; }
 .seed-word { background: var(--bg-1); border: 1px solid var(--bg-4); border-radius: var(--radius-sm);
   padding: 8px 10px; font-family: var(--font-mono); font-size: 13px; }
 .seed-word .i { color: var(--text-2); margin-right: 8px; user-select: none; }
@@ -291,7 +292,39 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--font-mono); fo
 #toast.err { border-color: var(--err); color: var(--err); }
 
 .hidden { display: none !important; }
-.center-screen { display: flex; align-items: center; justify-content: center; min-height: 100vh; flex-direction: column; }
+#gate {
+  height: 100vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 28px 0;
+}
+
+#gate, .main, .seed-card, .log-console {
+  scrollbar-color: var(--bronze-1) var(--bg-2);
+  scrollbar-width: thin;
+}
+
+#gate::-webkit-scrollbar,
+.main::-webkit-scrollbar,
+.seed-card::-webkit-scrollbar,
+.log-console::-webkit-scrollbar { width: 10px; }
+
+#gate::-webkit-scrollbar-track,
+.main::-webkit-scrollbar-track,
+.seed-card::-webkit-scrollbar-track,
+.log-console::-webkit-scrollbar-track { background: var(--bg-2); }
+
+#gate::-webkit-scrollbar-thumb,
+.main::-webkit-scrollbar-thumb,
+.seed-card::-webkit-scrollbar-thumb,
+.log-console::-webkit-scrollbar-thumb {
+  background: var(--bronze-1);
+  border: 2px solid var(--bg-2);
+  border-radius: 999px;
+}
+
+.center-screen { display: flex; align-items: center; justify-content: flex-start; min-height: 100vh; flex-direction: column; }
 .coin-hero { width: 120px; height: 120px; border-radius: 50%; box-shadow: var(--shadow), var(--ring); margin-bottom: 20px; }
 .muted { color: var(--text-2); font-size: 13px; }
 .err-text { color: var(--err); font-size: 13px; margin-top: 8px; }
@@ -310,9 +343,24 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--font-mono); fo
 .ml8 { margin-left: 8px; }
 .ml-auto { margin-left: auto; }
 .c-warn { color: var(--warn); }
-.gate-body { width: 520px; max-width: 90vw; }
+.gate-body { width: 520px; max-width: min(90vw, 720px); padding-bottom: 22px; }
 .stat-mini-label { color: var(--text-2); font-size: 11px; text-transform: uppercase; }
 .qr-fallback { padding: 20px; max-width: 200px; }
 .pill-bare { background: transparent; border: none; }
 .sync-banner { border-color: var(--warn); background: rgba(212, 162, 74, 0.10); }
 .warn-box-err { border-color: var(--err); color: var(--err); }
+
+@media (max-height: 760px) {
+  #gate { padding: 16px 0; }
+  .coin-hero { width: 82px; height: 82px; margin-bottom: 12px; }
+  .gate-body h1 { font-size: 26px; }
+  .gate-body .sub { margin-bottom: 14px; }
+  .gate-body .card { padding: 16px 18px; }
+  .seed-card { max-height: calc(100vh - 220px); }
+}
+
+@media (max-width: 560px) {
+  .seed-grid { grid-template-columns: repeat(2, 1fr); }
+  .copyable { align-items: stretch; flex-direction: column; }
+  .copyable .btn { width: 100%; }
+}
