@@ -141,6 +141,9 @@ async function boot() {
   // auto_lock_minutes is a local pref (not part of the backend NodeConfig; the
   // NodeSettings serde ignores extra fields, so loading it alongside is safe).
   S.settings.current = loadPrefs({ ...defaults, auto_lock_minutes: 5 });
+  // Mining is an explicit per-session action. A stale saved preference must not
+  // make the embedded node start mining when the wallet opens.
+  S.settings.current.mine = false;
   savePrefs(S.settings.current);
 
   const status = await api.walletStatus();
