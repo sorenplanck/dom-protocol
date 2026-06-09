@@ -277,13 +277,15 @@ mod tests {
     async fn evict_expired_works() {
         let queue = FutureBlockQueue::new();
         let mut block = mock_block(1, 10, 1000);
-        // Pretend it was queued 1 hour ago
+        // Backdate by 2s only: `Instant` cannot represent times before boot,
+        // so a 1h backdate silently became "now" on freshly booted CI
+        // runners (uptime < 1h) and nothing was evicted.
         block.queued_at = Instant::now()
-            .checked_sub(std::time::Duration::from_secs(3600))
-            .unwrap_or_else(Instant::now);
+            .checked_sub(std::time::Duration::from_secs(2))
+            .expect("machine uptime exceeds 2s");
         queue.defer(block).await;
 
-        let evicted = queue.evict_expired(60).await; // 60s max age
+        let evicted = queue.evict_expired(1).await; // 1s max age
         assert_eq!(evicted, 1);
         assert_eq!(queue.size().await, 0);
     }

@@ -249,8 +249,8 @@ mod tests {
         snapshot_a
             .assert_equivalent(&snapshot_b)
             .expect("canonical snapshot equivalence");
-        fs::remove_dir_all(&dir_a).expect("cleanup a");
-        fs::remove_dir_all(&dir_b).expect("cleanup b");
+        crate::test_dir::remove_test_dir(&dir_a);
+        crate::test_dir::remove_test_dir(&dir_b);
     }
 
     #[test]
@@ -285,7 +285,7 @@ mod tests {
         snapshot_before
             .assert_equivalent(&snapshot_after)
             .expect("reopen replay equivalence");
-        fs::remove_dir_all(&dir).expect("cleanup reopen");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -401,6 +401,6 @@ mod tests {
             vec!["mempool_hashes"],
             "only the volatile mempool listing may diverge across a restart"
         );
-        fs::remove_dir_all(&dir).expect("cleanup reopen");
+        crate::test_dir::remove_test_dir(&dir);
     }
 }

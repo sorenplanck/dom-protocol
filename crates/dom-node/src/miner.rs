@@ -1121,7 +1121,7 @@ mod genesis_determinism_tests {
         assert_eq!(recovered.block_height, 2);
         assert_eq!(recovered.block_hash, Some(canonical_hash));
 
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1660,7 +1660,7 @@ mod genesis_determinism_tests {
             "invalid mined block must not be broadcast before local validation"
         );
 
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[tokio::test]
@@ -1713,7 +1713,7 @@ mod genesis_determinism_tests {
         assert_eq!(node.metrics.chain_height.load(Ordering::Relaxed), 1);
         assert_eq!(node.metrics.mempool_size.load(Ordering::Relaxed), 0);
 
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     /// DOM-AUDIT-001 regression: a freshly *created* genesis node and a node
@@ -1795,7 +1795,7 @@ mod genesis_determinism_tests {
         );
 
         drop(reopened);
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 }
 

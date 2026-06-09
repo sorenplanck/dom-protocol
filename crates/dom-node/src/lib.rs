@@ -14,5 +14,7 @@ pub mod pex;
 pub mod relay;
 pub mod replay_snapshot;
 pub mod task_supervisor;
+#[cfg(test)]
+pub(crate) mod test_dir;
 pub mod time_health;
 pub mod wallet_helpers;

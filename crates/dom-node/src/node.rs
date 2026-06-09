@@ -4169,7 +4169,7 @@ mod tests {
             1
         );
 
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     fn commitment(seed: u8, value: u64) -> Commitment {
@@ -4731,7 +4731,7 @@ mod tests {
 
         wait_for_core_runtime(&node).await;
         shutdown_and_join_run(&node, run, "core runtime").await;
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[tokio::test]
@@ -4751,7 +4751,7 @@ mod tests {
         })
         .await;
         shutdown_and_join_run(&node_off, run_off, "miner disabled runtime").await;
-        fs::remove_dir_all(&dir_off).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir_off);
 
         let dir_on = fresh_test_dir("runtime-miner-enabled");
         let mut config_on = regtest_node_config(&dir_on);
@@ -4768,7 +4768,7 @@ mod tests {
         })
         .await;
         shutdown_and_join_run(&node_on, run_on, "miner enabled runtime").await;
-        fs::remove_dir_all(&dir_on).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir_on);
     }
 
     #[tokio::test]
@@ -4789,7 +4789,7 @@ mod tests {
         );
 
         shutdown_and_join_run(&node, run, "long-lived runtime").await;
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[tokio::test]
@@ -4807,7 +4807,7 @@ mod tests {
         wait_for_relay_count(&node, 0).await;
 
         shutdown_and_join_run(&node, run, "relay cleanup runtime").await;
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -4821,7 +4821,7 @@ mod tests {
         let second = load_or_create_noise_static_key(&reopened).expect("second load");
 
         assert_eq!(first, second, "persisted Noise key must survive reopen");
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -4841,7 +4841,7 @@ mod tests {
             dom_wire::handshake::derive_static_pubkey(&second.noise_privkey),
             "derived public identity must survive restart"
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -4865,7 +4865,7 @@ mod tests {
                 .expect("metadata present"),
             b"corrupt"
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -4895,7 +4895,7 @@ mod tests {
                 .expect("metadata present"),
             b"corrupt"
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -4935,7 +4935,7 @@ mod tests {
             0,
             "mempool must restart empty instead of reconstructing runtime-only state"
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     /// TASK 27 / RFC-0012 §2: under the volatile policy there is no persisted
@@ -5014,8 +5014,8 @@ mod tests {
             "no persisted mempool is trusted or loaded on reopen"
         );
 
-        fs::remove_dir_all(&dir_a).expect("cleanup a");
-        fs::remove_dir_all(&dir_b).expect("cleanup b");
+        crate::test_dir::remove_test_dir(&dir_a);
+        crate::test_dir::remove_test_dir(&dir_b);
     }
 
     #[test]
@@ -5055,7 +5055,7 @@ mod tests {
         let mut peers = PeerManager::new(125, 2);
         restore_peer_rotation_state(&store, &mut peers).expect("restore peer rotation");
         assert_eq!(peers.outbound_failure_count("198.51.100.30:33369"), 3);
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -5085,7 +5085,7 @@ mod tests {
                 .expect("metadata present"),
             b"invalid"
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -5099,7 +5099,7 @@ mod tests {
         let node = init_test_node(regtest_node_config(&dir));
         let peers = node.peers.try_lock().expect("peer lock");
         assert_eq!(peers.pending_penalty_count(), 0);
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -5119,7 +5119,7 @@ mod tests {
         let peers = node.peers.try_lock().expect("peer lock");
         assert_eq!(peers.pending_ban_score(&addr), 35);
         assert_eq!(peers.ban_score(&addr), None);
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -5146,7 +5146,7 @@ mod tests {
                 .is_err(),
             "persisted ban should block later inbound retry"
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -5168,7 +5168,7 @@ mod tests {
             peers.pending_ban_score("10.0.0.44:33369"),
             ban_scores::WRONG_CHAIN_ID
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -5198,7 +5198,7 @@ mod tests {
                 .expect("metadata present"),
             b"invalid"
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -5229,7 +5229,7 @@ mod tests {
                 .expect("peer reputation present"),
             snapshot
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -5264,7 +5264,7 @@ mod tests {
                 .is_none(),
             "legacy mempool snapshot metadata must be cleared on restart"
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -5291,7 +5291,7 @@ mod tests {
                 .is_none(),
             "invalid legacy mempool metadata should be cleared explicitly"
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -5307,7 +5307,7 @@ mod tests {
             .get_metadata(MEMPOOL_METADATA_KEY)
             .expect("reload metadata")
             .is_none());
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -5491,7 +5491,7 @@ mod tests {
             pool.get_tx(&conflicting_live_hash).is_none(),
             "connected-branch input must evict conflicting mempool tx"
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[tokio::test]
@@ -5602,7 +5602,7 @@ mod tests {
             pool_b.all_hashes() == pool_a.all_hashes(),
             "repeated reinjection over the same inputs must converge identically"
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     /// RFC-0012 §3.2: a disconnected transaction carrying a coinbase/system kernel
@@ -5693,7 +5693,7 @@ mod tests {
         );
         assert_eq!(pool.len(), 1, "exactly the eligible plain tx is reinjected");
         drop(pool);
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     /// RFC-0012 §3.4: two nodes that experience the same reorg but originally
@@ -5795,7 +5795,7 @@ mod tests {
         );
         drop(pool_a);
         drop(pool_b);
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -5937,7 +5937,7 @@ mod tests {
             "expected economic-balance rejection, got: {msg}"
         );
 
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -6045,7 +6045,7 @@ mod tests {
             0,
             "confirmed inputs must be purged from mempool"
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     /// DOM-AUDIT-001 regression. `resume_ibd_block_sync` used to call
@@ -6121,7 +6121,7 @@ mod tests {
             );
         }
 
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[tokio::test]
@@ -6196,7 +6196,7 @@ mod tests {
         assert_eq!(persisted.header_cursor, 0);
         assert_eq!(persisted.headers_height, 1);
         assert_eq!(persisted.phase, IbdPhase::Discovering);
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[tokio::test]
@@ -6260,7 +6260,7 @@ mod tests {
             matches!(err, DomError::Invalid(ref msg) if msg.contains("prev_hash mismatch")),
             "unexpected error: {err}"
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[tokio::test]
@@ -6316,7 +6316,7 @@ mod tests {
             matches!(err, DomError::Malformed(_)),
             "unexpected error: {err}"
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[tokio::test]
@@ -6371,7 +6371,7 @@ mod tests {
             persisted.is_none(),
             "mismatched snapshot must be cleared deterministically"
         );
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     /// TASK 17 — chain-lock-across-await regression guard.
@@ -6435,7 +6435,7 @@ mod tests {
             .expect("reconcile task join")
             .expect("reconcile must succeed");
 
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6508,7 +6508,7 @@ mod tests {
             "missing-parent tracker is runtime-only and restarts empty"
         );
 
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6576,7 +6576,7 @@ mod tests {
             .assert_equivalent(&after_restart)
             .expect("deep replay snapshot remains valid after restart");
 
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[tokio::test]
@@ -6614,6 +6614,6 @@ mod tests {
         assert!(node.task_supervisor.is_empty().await);
         assert!(node.task_supervisor.failure().await.is_none());
 
-        fs::remove_dir_all(&dir).expect("cleanup test dir");
+        crate::test_dir::remove_test_dir(&dir);
     }
 }
