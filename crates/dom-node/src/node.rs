@@ -4658,6 +4658,13 @@ mod tests {
         .await;
     }
 
+    async fn wait_for_listener_runtime(node: &Arc<DomNode>) {
+        wait_for_supervisor(node, |kinds, _, status, shutdown| {
+            kinds.contains(&TaskKind::Listener) && status == SupervisorStatus::Running && !shutdown
+        })
+        .await;
+    }
+
     async fn shutdown_and_join_run(
         node: &Arc<DomNode>,
         run: JoinHandle<Result<(), DomError>>,
@@ -4759,7 +4766,7 @@ mod tests {
         let node = Arc::new(init_test_node(config));
         let run = tokio::spawn(node.clone().run());
 
-        wait_for_core_runtime(&node).await;
+        wait_for_listener_runtime(&node).await;
 
         let stream = TcpStream::connect(&listen_addr)
             .await
