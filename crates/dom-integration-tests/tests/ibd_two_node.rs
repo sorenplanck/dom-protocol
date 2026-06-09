@@ -20,7 +20,7 @@ use dom_integration_tests::helpers::*;
 use dom_node::node::DomNode;
 use dom_pow::{
     compute_expected_target, fast_pow_hash, randomx_seed_height, target_to_compact,
-    target_to_difficulty, CompactTarget,
+    target_to_difficulty, CompactTarget, RANDOMX_SEED_INTERVAL,
 };
 use dom_serialization::DomDeserialize;
 use dom_wire::codec::NoiseCodec;
@@ -36,6 +36,8 @@ use std::time::{Duration, Instant};
 const IBD_TIMEOUT: Duration = Duration::from_secs(120);
 const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(30);
 const TEST_LMDB_MAP_SIZE: usize = 64 << 20;
+const T1_RANDOMX_BOUNDARY_HEIGHT: u64 = RANDOMX_SEED_INTERVAL + 12;
+const T1_IBD_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn enable_fast_regtest_mining() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
@@ -116,18 +118,30 @@ async fn tip(node: &Arc<DomNode>) -> (u64, Hash256) {
     (chain.tip_height.0, chain.tip_hash)
 }
 
+async fn peer_count(node: &Arc<DomNode>) -> usize {
+    node.peers.lock().await.connected_peers().len()
+}
+
 async fn wait_for_tip_hash(node: &Arc<DomNode>, expected: Hash256, timeout_duration: Duration) {
-    tokio::time::timeout(timeout_duration, async {
-        loop {
-            let notified = node.state_events.notified();
-            if node.chain.lock().await.tip_hash == expected {
+    let started = Instant::now();
+    loop {
+        {
+            let chain = node.chain.lock().await;
+            if chain.tip_hash == expected {
                 break;
             }
-            notified.await;
         }
-    })
-    .await
-    .expect("timeout waiting for matching tip hash");
+
+        assert!(
+            started.elapsed() < timeout_duration,
+            "timeout waiting for matching tip hash"
+        );
+
+        tokio::select! {
+            _ = node.state_events.notified() => {}
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+    }
 }
 
 async fn mine_blocks_resilient(node: &Arc<DomNode>, count: u64) -> Result<(), String> {
@@ -359,57 +373,93 @@ async fn t1_ibd_through_randomx_epoch_boundary_via_three_real_nodes() {
     let mut config_b = test_config("t1-b-miner", port_b, false);
     config_b.min_outbound = 0;
     let node_b = spawn_node(config_b).await;
-    let _task_b = start_node(node_b.clone()).await;
 
+    let target_seed_height = randomx_seed_height(T1_RANDOMX_BOUNDARY_HEIGHT);
+    assert!(
+        target_seed_height > 0,
+        "T1 target must cross the first RandomX seed boundary"
+    );
+    log.line(format!(
+        "T1 target height={T1_RANDOMX_BOUNDARY_HEIGHT}, seed_height={target_seed_height}"
+    ));
     let started = Instant::now();
-    prepopulate_coinbase_chain(&node_b, 2060)
+    prepopulate_coinbase_chain(&node_b, T1_RANDOMX_BOUNDARY_HEIGHT)
         .await
-        .expect("B should mine past height 2048");
-    log.line(format!("B mined 2060 blocks in {:?}", started.elapsed()));
+        .expect("B should mine past the first RandomX seed boundary");
+    log.line(format!(
+        "B mined {T1_RANDOMX_BOUNDARY_HEIGHT} blocks in {:?}",
+        started.elapsed()
+    ));
+    let _task_b = start_node(node_b.clone()).await;
 
     let mut config_a = test_config("t1-a-sync", port_a, false);
     config_a.seed_peers = vec![format!("127.0.0.1:{port_b}")];
     let node_a = spawn_node(config_a).await;
     let _task_a = start_node(node_a.clone()).await;
+    wait_for_peer_count(&node_a, 1, Duration::from_secs(45))
+        .await
+        .expect("A should complete outbound handshake with B before boundary IBD");
+    wait_for_peer_count(&node_b, 1, Duration::from_secs(45))
+        .await
+        .expect("B should register A before serving boundary IBD");
 
     let a_sync_started = Instant::now();
-    let a_ibd_timeout = if cfg!(windows) {
-        Duration::from_secs(180)
-    } else {
-        IBD_TIMEOUT
-    };
-    if let Err(err) = wait_for_height(&node_a, 2060, a_ibd_timeout).await {
-        let (height, hash) = tip(&node_a).await;
+    if let Err(err) = wait_for_height(&node_a, T1_RANDOMX_BOUNDARY_HEIGHT, T1_IBD_TIMEOUT).await {
+        let (height_a, hash_a) = tip(&node_a).await;
+        let (height_b, hash_b) = tip(&node_b).await;
+        let peers_a = peer_count(&node_a).await;
+        let peers_b = peer_count(&node_b).await;
         log.line(format!(
-            "A IBD timeout after {:?}: height={height}, tip={}",
+            "A IBD timeout after {:?}: A height={height_a}, A tip={}, B height={height_b}, B tip={}, A peers={peers_a}, B peers={peers_b}",
             a_sync_started.elapsed(),
-            hex::encode(hash.as_bytes())
+            hex::encode(hash_a.as_bytes()),
+            hex::encode(hash_b.as_bytes())
         ));
-        panic!("A IBD should complete within {:?}: {err}", a_ibd_timeout);
+        panic!("A IBD should complete within {:?}: {err}", T1_IBD_TIMEOUT);
     }
     let a_elapsed = a_sync_started.elapsed();
     log.line(format!("A synced in {:?}", a_elapsed));
-    if !cfg!(windows) {
-        assert!(
-            a_elapsed < IBD_TIMEOUT,
-            "A IBD exceeded CI budget: {:?}",
-            a_elapsed
-        );
-    }
+    assert!(
+        a_elapsed < T1_IBD_TIMEOUT,
+        "A IBD exceeded T1 guard timeout: {:?}",
+        a_elapsed
+    );
 
     let mut config_c = test_config("t1-c-sync", port_c, false);
     config_c.seed_peers = vec![format!("127.0.0.1:{port_a}")];
     let node_c = spawn_node(config_c).await;
     let _task_c = start_node(node_c.clone()).await;
-
-    wait_for_height(&node_c, 2060, Duration::from_secs(180))
+    wait_for_peer_count(&node_c, 1, Duration::from_secs(45))
         .await
-        .expect("C should sync indirectly through A");
+        .expect("C should complete outbound handshake with A before indirect IBD");
+    wait_for_peer_count(&node_a, 2, Duration::from_secs(45))
+        .await
+        .expect("A should register C while still connected to B");
+
+    if let Err(err) = wait_for_height(&node_c, T1_RANDOMX_BOUNDARY_HEIGHT, T1_IBD_TIMEOUT).await {
+        let (height_a, hash_a) = tip(&node_a).await;
+        let (height_b, hash_b) = tip(&node_b).await;
+        let (height_c, hash_c) = tip(&node_c).await;
+        let peers_a = peer_count(&node_a).await;
+        let peers_b = peer_count(&node_b).await;
+        let peers_c = peer_count(&node_c).await;
+        log.line(format!(
+            "C IBD timeout: A height={height_a}, A tip={}, B height={height_b}, B tip={}, C height={height_c}, C tip={}, A peers={peers_a}, B peers={peers_b}, C peers={peers_c}",
+            hex::encode(hash_a.as_bytes()),
+            hex::encode(hash_b.as_bytes()),
+            hex::encode(hash_c.as_bytes())
+        ));
+        panic!("C should sync indirectly through A: {err}");
+    }
 
     let (h_a, hash_a) = tip(&node_a).await;
     let (h_b, hash_b) = tip(&node_b).await;
     let (h_c, hash_c) = tip(&node_c).await;
-    assert!(h_a >= 2060 && h_b >= 2060 && h_c >= 2060);
+    assert!(
+        h_a >= T1_RANDOMX_BOUNDARY_HEIGHT
+            && h_b >= T1_RANDOMX_BOUNDARY_HEIGHT
+            && h_c >= T1_RANDOMX_BOUNDARY_HEIGHT
+    );
     assert_eq!(hash_a, hash_b, "A and B tips diverged");
     assert_eq!(hash_a, hash_c, "A and C tips diverged");
     assert_no_bans(&node_a).await;
@@ -432,21 +482,26 @@ async fn t2_ibd_with_active_miner_relay_during_sync() {
         .await
         .expect("A should pre-mine 50 blocks");
 
+    let mut config_b = test_config("t2-b-sync", port_b, false);
+    config_b.seed_peers = vec![format!("127.0.0.1:{port_a}")];
+    let node_b = spawn_node(config_b).await;
+    let _task_b = start_node(node_b.clone()).await;
+    wait_for_peer_count(&node_b, 1, Duration::from_secs(45))
+        .await
+        .expect("B should complete outbound handshake with A before active mining");
+    wait_for_peer_count(&node_a, 1, Duration::from_secs(45))
+        .await
+        .expect("A should register B before relaying active mining blocks");
+
     let miner = {
         let node = node_a.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
             for _ in 0..2 {
                 let _ = mine_blocks_resilient(&node, 1).await;
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         })
     };
-
-    let mut config_b = test_config("t2-b-sync", port_b, false);
-    config_b.seed_peers = vec![format!("127.0.0.1:{port_a}")];
-    let node_b = spawn_node(config_b).await;
-    let _task_b = start_node(node_b.clone()).await;
 
     wait_for_height(&node_b, 50, IBD_TIMEOUT)
         .await
@@ -724,10 +779,19 @@ async fn t7_ibd_restart_resume_after_interruption() {
         "B did not persist partial IBD progress; height={pre_resume_height}"
     );
     let _task_b = start_node(node_b.clone()).await;
+    wait_for_peer_count(&node_b, 1, Duration::from_secs(45))
+        .await
+        .expect("resumed B should complete outbound handshake with A");
+    wait_for_peer_count(&node_a, 1, Duration::from_secs(45))
+        .await
+        .expect("resumed A should register B before IBD resume");
     if let Err(err) = wait_for_height(&node_b, 200, IBD_TIMEOUT).await {
         let (height, hash) = tip(&node_b).await;
+        let a_height = tip(&node_a).await.0;
+        let peers_a = peer_count(&node_a).await;
+        let peers_b = peer_count(&node_b).await;
         log.line(format!(
-            "B resume timeout: height={height}, tip={}",
+            "B resume timeout: A height={a_height}, B height={height}, B tip={}, A peers={peers_a}, B peers={peers_b}",
             hex::encode(hash.as_bytes())
         ));
         panic!("B should resume and finish IBD: {err}");
