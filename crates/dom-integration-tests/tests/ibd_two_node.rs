@@ -297,6 +297,21 @@ async fn assert_no_bans(node: &Arc<DomNode>) {
     );
 }
 
+fn clear_test_peer_rotation_backoff(data_dir: &str) {
+    const PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v2";
+    const LEGACY_PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v1";
+
+    let store =
+        dom_store::DomStore::open_with_map_size(std::path::Path::new(data_dir), TEST_LMDB_MAP_SIZE)
+            .expect("open store to clear test peer rotation backoff");
+    store
+        .delete_metadata(PEER_ROTATION_METADATA_KEY)
+        .expect("clear test peer rotation metadata");
+    store
+        .delete_metadata(LEGACY_PEER_ROTATION_METADATA_KEY)
+        .expect("clear legacy test peer rotation metadata");
+}
+
 fn chain_id_for(network: Network) -> [u8; 32] {
     let genesis_hash = match network {
         Network::Mainnet => dom_core::GENESIS_HASH_MAINNET,
@@ -759,6 +774,8 @@ async fn t7_ibd_restart_resume_after_interruption() {
         log.line("A stopped to drop B's IBD connection before restart");
         stop_node(&node_b, task_b).await;
         drop(node_b);
+        clear_test_peer_rotation_backoff(&data_dir);
+        log.line("B peer-rotation backoff cleared for deterministic test reconnect");
         tokio::time::sleep(Duration::from_millis(500)).await;
         data_dir
     };
@@ -771,6 +788,10 @@ async fn t7_ibd_restart_resume_after_interruption() {
     let mut resumed = test_config("t7-b-resumed", port_b2, false);
     resumed.data_dir = data_dir;
     resumed.seed_peers = vec![format!("127.0.0.1:{port_a}")];
+    log.line(format!(
+        "B resume config: listen={}, seed_peers={:?}; A listen={}",
+        resumed.p2p_listen_addr, resumed.seed_peers, node_a.config.p2p_listen_addr
+    ));
     let node_b = spawn_node(resumed).await;
     let pre_resume_height = tip(&node_b).await.0;
     log.line(format!("B reopened at height {pre_resume_height}"));
@@ -779,12 +800,34 @@ async fn t7_ibd_restart_resume_after_interruption() {
         "B did not persist partial IBD progress; height={pre_resume_height}"
     );
     let _task_b = start_node(node_b.clone()).await;
-    wait_for_peer_count(&node_b, 1, Duration::from_secs(45))
-        .await
-        .expect("resumed B should complete outbound handshake with A");
-    wait_for_peer_count(&node_a, 1, Duration::from_secs(45))
-        .await
-        .expect("resumed A should register B before IBD resume");
+    if let Err(err) = wait_for_peer_count(&node_b, 1, Duration::from_secs(45)).await {
+        let (height_a, hash_a) = tip(&node_a).await;
+        let (height_b, hash_b) = tip(&node_b).await;
+        let peers_a = peer_count(&node_a).await;
+        let peers_b = peer_count(&node_b).await;
+        log.line(format!(
+            "B resume handshake timeout: err={err}, A listen={}, B listen={}, A height={height_a}, A tip={}, B height={height_b}, B tip={}, A peers={peers_a}, B peers={peers_b}",
+            node_a.config.p2p_listen_addr,
+            node_b.config.p2p_listen_addr,
+            hex::encode(hash_a.as_bytes()),
+            hex::encode(hash_b.as_bytes())
+        ));
+        panic!("resumed B should complete outbound handshake with A: {err}");
+    }
+    if let Err(err) = wait_for_peer_count(&node_a, 1, Duration::from_secs(45)).await {
+        let (height_a, hash_a) = tip(&node_a).await;
+        let (height_b, hash_b) = tip(&node_b).await;
+        let peers_a = peer_count(&node_a).await;
+        let peers_b = peer_count(&node_b).await;
+        log.line(format!(
+            "A resume registration timeout: err={err}, A listen={}, B listen={}, A height={height_a}, A tip={}, B height={height_b}, B tip={}, A peers={peers_a}, B peers={peers_b}",
+            node_a.config.p2p_listen_addr,
+            node_b.config.p2p_listen_addr,
+            hex::encode(hash_a.as_bytes()),
+            hex::encode(hash_b.as_bytes())
+        ));
+        panic!("resumed A should register B before IBD resume: {err}");
+    }
     if let Err(err) = wait_for_height(&node_b, 200, IBD_TIMEOUT).await {
         let (height, hash) = tip(&node_b).await;
         let a_height = tip(&node_a).await.0;
