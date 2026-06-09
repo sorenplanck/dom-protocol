@@ -69,6 +69,7 @@ jobs:
           components: clippy
 
       - name: Cache cargo registry + target
+        if: runner.os != 'Windows'
         uses: actions/cache@v4
         with:
           path: |
@@ -78,6 +79,17 @@ jobs:
           key: cargo-${{ matrix.host }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             cargo-${{ matrix.host }}-
+
+      - name: Cache cargo registry only (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ matrix.host }}-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ matrix.host }}-registry-
 
       # secp256k1-zkp and randomx-rs link against C — make sure
       # build-essential / Xcode CLT / MSVC are present. On Linux runners
