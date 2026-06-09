@@ -4658,11 +4658,31 @@ mod tests {
         .await;
     }
 
-    async fn wait_for_listener_runtime(node: &Arc<DomNode>) {
-        wait_for_supervisor(node, |kinds, _, status, shutdown| {
-            kinds.contains(&TaskKind::Listener) && status == SupervisorStatus::Running && !shutdown
+    async fn connect_when_listener_accepts(listen_addr: &str) -> TcpStream {
+        tokio::time::timeout(RUNTIME_TEST_CONVERGENCE_TIMEOUT, async {
+            loop {
+                match TcpStream::connect(listen_addr).await {
+                    Ok(stream) => return stream,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+                }
+            }
         })
-        .await;
+        .await
+        .expect("listener should accept connections")
+    }
+
+    async fn wait_for_relay_count(node: &Arc<DomNode>, expected: usize) {
+        tokio::time::timeout(RUNTIME_TEST_CONVERGENCE_TIMEOUT, async {
+            loop {
+                let relay_count = node.task_supervisor.relay_count().await;
+                if relay_count == expected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("relay worker count should converge to {expected}"));
     }
 
     async fn shutdown_and_join_run(
@@ -4766,14 +4786,10 @@ mod tests {
         let node = Arc::new(init_test_node(config));
         let run = tokio::spawn(node.clone().run());
 
-        wait_for_listener_runtime(&node).await;
-
-        let stream = TcpStream::connect(&listen_addr)
-            .await
-            .expect("connect test peer");
-        wait_for_supervisor(&node, |_, relay_count, _, _| relay_count > 0).await;
+        let stream = connect_when_listener_accepts(&listen_addr).await;
+        wait_for_relay_count(&node, 1).await;
         drop(stream);
-        wait_for_supervisor(&node, |_, relay_count, _, _| relay_count == 0).await;
+        wait_for_relay_count(&node, 0).await;
 
         shutdown_and_join_run(&node, run, "relay cleanup runtime").await;
         fs::remove_dir_all(&dir).expect("cleanup test dir");
