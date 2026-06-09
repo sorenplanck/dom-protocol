@@ -4,9 +4,13 @@ Este arquivo define como qualquer agente deve trabalhar neste repositório.
 Vale para TODA sessão, não só auditorias.
 
 ## Autoria
-- Todo commit é assinado como: Soren Planck <sorenplanck@tutamail.com>.
-- Não adicionar co-autoria de assistentes de IA nos commits.
-- Manter o nome de autor uniforme (sem variações de grafia ou e-mails pessoais).
+- AUTOR ÚNICO, SEMPRE: Soren Planck <sorenplanck@tutamail.com>.
+- NUNCA adicionar co-autor a nenhum commit. Sem linhas "Co-authored-by:",
+  sem "Co-authored-by: Claude", sem créditos de IA, sem "Generated with",
+  sem qualquer Trailer de co-autoria no corpo da mensagem de commit.
+- Todo commit tem exatamente um autor: Soren Planck. Nada de autor secundário.
+- Manter o nome de autor uniforme (sem variações de grafia nem e-mails pessoais).
+
 
 ## Integridade — nunca mascarar falha
 - NUNCA afrouxar uma asserção, marcar #[ignore], inserir sleep, ou ajustar um
