@@ -175,9 +175,32 @@ export function toast(msg, isErr = false) {
 // Non-sensitive node prefs persist to localStorage so the user doesn't retype.
 const PREF_KEY = "dom_wallet_node_prefs";
 const NONE_TEXT = " none ";
+const DEFAULT_BOOTSTRAP_SEED_PEER = "192.153.57.211:8443";
+const LEGACY_BOOTSTRAP_SEED_PEER = "192.153.57.211:33370";
+
+export function normalizeSeedPeers(seedPeers) {
+  const raw = Array.isArray(seedPeers)
+    ? seedPeers
+    : typeof seedPeers === "string"
+      ? seedPeers.split(",")
+      : [];
+  const peers = [];
+  for (const value of raw) {
+    const trimmed = String(value).trim();
+    if (!trimmed) continue;
+    const peer = trimmed === LEGACY_BOOTSTRAP_SEED_PEER
+      ? DEFAULT_BOOTSTRAP_SEED_PEER
+      : trimmed;
+    if (!peers.includes(peer)) peers.push(peer);
+  }
+  return peers;
+}
 
 export function normalizeNodePrefs(prefs) {
-  const next = { ...prefs };
+  const next = {
+    ...prefs,
+    seed_peers: normalizeSeedPeers(prefs.seed_peers),
+  };
   if (typeof next.miner_wallet_path === "string" && !next.miner_wallet_path.trim()) {
     next.miner_wallet_path = null;
   }

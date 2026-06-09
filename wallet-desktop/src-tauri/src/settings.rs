@@ -13,6 +13,9 @@ use dom_config::{MinerThrottleConfig, NodeConfig};
 use dom_wallet::Network as WalletNetwork;
 use serde::{Deserialize, Serialize};
 
+const DEFAULT_BOOTSTRAP_SEED_PEER: &str = "192.153.57.211:8443";
+const LEGACY_BOOTSTRAP_SEED_PEER: &str = "192.153.57.211:33370";
+
 /// Mirrors the `DOM_NETWORK` values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -54,7 +57,7 @@ impl Default for NodeSettings {
         let data_dir = default_data_dir();
         Self {
             network: NetworkKind::Testnet,
-            seed_peers: vec!["192.153.57.211:8443".to_string()],
+            seed_peers: vec![DEFAULT_BOOTSTRAP_SEED_PEER.to_string()],
             p2p_listen_addr: "0.0.0.0:33370".to_string(),
             rpc_listen_addr: "127.0.0.1:33372".to_string(),
             data_dir,
@@ -150,6 +153,7 @@ impl NodeSettings {
 
         let seed_peers = self.normalized_seed_peers();
         if !seed_peers.is_empty() {
+            let seed_peer_count = seed_peers.len();
             config.seed_peers = seed_peers;
             // Defense-in-depth for the P2P "peers stays 0" bug. The peer
             // connector only dials while `PeerManager::needs_outbound()` is
@@ -163,7 +167,7 @@ impl NodeSettings {
             // peers present" so it never widens outbound for the public
             // mainnet/testnet defaults.
             if config.min_outbound == 0 {
-                config.min_outbound = self.seed_peers.len().clamp(1, 8);
+                config.min_outbound = seed_peer_count.clamp(1, 8);
             }
         }
 
@@ -172,7 +176,7 @@ impl NodeSettings {
             return Err(anyhow!("RPC listen address must not be empty"));
         }
         tracing::info!(
-            "wallet node settings: mining_enabled={} miner_threads={} miner_throttle_ms={} seed_peers={}",
+            "wallet node settings: mining_enabled={} miner_threads={} miner_throttle_ms={} effective_seed_peers={}",
             config.mine,
             self.normalized_miner_threads(),
             self.normalized_miner_throttle_ms(),
@@ -194,12 +198,18 @@ impl NodeSettings {
     }
 
     fn normalized_seed_peers(&self) -> Vec<String> {
-        self.seed_peers
-            .iter()
-            .map(|peer| peer.trim())
-            .filter(|peer| !peer.is_empty())
-            .map(ToOwned::to_owned)
-            .collect()
+        let mut peers = Vec::new();
+        for peer in &self.seed_peers {
+            let peer = match peer.trim() {
+                "" => continue,
+                LEGACY_BOOTSTRAP_SEED_PEER => DEFAULT_BOOTSTRAP_SEED_PEER,
+                peer => peer,
+            };
+            if !peers.iter().any(|existing| existing == peer) {
+                peers.push(peer.to_string());
+            }
+        }
+        peers
     }
 
     fn miner_throttle_config(&self) -> MinerThrottleConfig {
@@ -614,6 +624,19 @@ mod tests {
         let config = settings
             .to_node_config(None)
             .expect("bootstrap peer accepted");
+        assert_eq!(config.seed_peers, vec!["192.153.57.211:8443"]);
+    }
+
+    #[test]
+    fn legacy_bootstrap_seed_peer_is_migrated_and_deduplicated() {
+        let settings = regtest_settings_with_seed(vec![
+            "192.153.57.211:33370".into(),
+            "192.153.57.211:8443".into(),
+            " 192.153.57.211:33370 ".into(),
+        ]);
+        let config = settings
+            .to_node_config(None)
+            .expect("legacy bootstrap peer migrated");
         assert_eq!(config.seed_peers, vec!["192.153.57.211:8443"]);
     }
 

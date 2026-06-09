@@ -2,7 +2,7 @@
 import {
   api, el, copy, toast, nomsToDom, domToNoms,
   pickSaveFile, pickFolder, saveTextViaDialog, savePrefs, humanizeError,
-  minerWalletDisplay, clearMinerWalletSettings,
+  minerWalletDisplay, clearMinerWalletSettings, normalizeSeedPeers,
 } from "./api.js";
 import {
   getLogLines, clearLogs, subscribeLogs, logsToText,
@@ -909,7 +909,7 @@ export function renderSettings(onApply) {
         </select>
         <p class="muted mt4">The network is fixed by the open wallet and cannot be changed here. To use another network, create or restore a wallet for it.</p>
         <label>Seed peers (host:port, comma-separated)</label>
-        <input type="text" id="seeds" placeholder="1.2.3.4:33370, 5.6.7.8:33370" />
+        <input type="text" id="seeds" placeholder="192.153.57.211:8443" />
         <div class="row">
           <div class="flex1"><label>P2P listen</label><input type="text" id="p2p" /></div>
           <div class="flex1"><label>RPC listen</label><input type="text" id="rpc" /></div>
@@ -1000,7 +1000,7 @@ export function renderSettings(onApply) {
   node.querySelector("#apply").onclick = async () => {
     const wasMining = !!settings.current.mine;
     // Network stays fixed to the open wallet (M2); the disabled select keeps it.
-    s.seed_peers = node.querySelector("#seeds").value.split(",").map((x) => x.trim()).filter(Boolean);
+    s.seed_peers = normalizeSeedPeers(node.querySelector("#seeds").value);
     s.p2p_listen_addr = node.querySelector("#p2p").value.trim();
     s.rpc_listen_addr = node.querySelector("#rpc").value.trim();
     const met = node.querySelector("#metrics").value.trim();
