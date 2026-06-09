@@ -255,6 +255,7 @@ async fn handle_metrics_connection(
 enum OutboundAttemptOutcome {
     RetryableFailure,
     Registered,
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1302,14 +1303,15 @@ async fn handle_inbound(
     };
     let chain_id =
         *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes();
-    let transport = match dom_wire::handshake::perform_handshake_responder(
-        &mut stream,
-        &privkey,
-        config.network.magic(),
-        &chain_id,
-    )
-    .await
-    {
+    let transport = match tokio::select! {
+        _ = shutdown.wait() => return,
+        result = dom_wire::handshake::perform_handshake_responder(
+            &mut stream,
+            &privkey,
+            config.network.magic(),
+            &chain_id,
+        ) => result,
+    } {
         Ok(t) => t,
         Err(e) => {
             let _ = record_pending_peer_violation(&chain, &svc.peers, addr, &e).await;
@@ -1320,7 +1322,10 @@ async fn handle_inbound(
     info!("Noise handshake complete with {addr}");
 
     let mut codec = dom_wire::codec::NoiseCodec::new(transport, config.network.magic());
-    match hello_exchange(&mut stream, &mut codec, &config, &chain_id, &chain).await {
+    match tokio::select! {
+        _ = shutdown.wait() => return,
+        result = hello_exchange(&mut stream, &mut codec, &config, &chain_id, &chain) => result,
+    } {
         Ok(peer_hello) => {
             info!(
                 "Hello from {addr}: height={} ua={:?}",
@@ -1427,7 +1432,10 @@ async fn connect_outbound(
         tx_fluff_tx,
         tx_stem_tx,
     } = channels.clone();
-    let mut stream = match tokio::net::TcpStream::connect(addr).await {
+    let mut stream = match tokio::select! {
+        _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
+        result = tokio::net::TcpStream::connect(addr) => result,
+    } {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(
@@ -1449,14 +1457,15 @@ async fn connect_outbound(
     };
     let chain_id =
         *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes();
-    let transport = match dom_wire::handshake::perform_handshake_initiator(
-        &mut stream,
-        &privkey,
-        config.network.magic(),
-        &chain_id,
-    )
-    .await
-    {
+    let transport = match tokio::select! {
+        _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
+        result = dom_wire::handshake::perform_handshake_initiator(
+            &mut stream,
+            &privkey,
+            config.network.magic(),
+            &chain_id,
+        ) => result,
+    } {
         Ok(t) => t,
         Err(e) => {
             if let Ok(peer_addr) = addr.parse() {
@@ -1469,7 +1478,10 @@ async fn connect_outbound(
     info!("Connected to {addr}");
 
     let mut codec = dom_wire::codec::NoiseCodec::new(transport, config.network.magic());
-    match hello_exchange(&mut stream, &mut codec, &config, &chain_id, &chain).await {
+    match tokio::select! {
+        _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
+        result = hello_exchange(&mut stream, &mut codec, &config, &chain_id, &chain) => result,
+    } {
         Ok(peer_hello) => {
             info!(
                 "Hello from {addr}: height={} ua={:?}",
@@ -4046,8 +4058,13 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::sync::Mutex;
+    use tokio::task::JoinHandle;
 
-    const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
+    // 64 MiB
+    const TEST_LMDB_MAP_SIZE: usize = 64 << 20;
+    // Guard for CI scheduler stalls. Tests still wait on explicit supervisor
+    // readiness and `ShutdownToken`; this is not the shutdown mechanism.
+    const RUNTIME_TEST_CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(15);
 
     type TestUtxoBytes = ([u8; 33], Vec<u8>);
 
@@ -4613,7 +4630,7 @@ mod tests {
         node: &Arc<DomNode>,
         predicate: impl Fn(Vec<TaskKind>, usize, SupervisorStatus, bool) -> bool,
     ) {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(RUNTIME_TEST_CONVERGENCE_TIMEOUT, async {
             loop {
                 let kinds = node.task_supervisor.active_kinds().await;
                 let relay_count = node.task_supervisor.relay_count().await;
@@ -4629,6 +4646,39 @@ mod tests {
         .expect("runtime status should converge");
     }
 
+    async fn wait_for_core_runtime(node: &Arc<DomNode>) {
+        wait_for_supervisor(node, |kinds, _, status, shutdown| {
+            kinds.contains(&TaskKind::Listener)
+                && kinds.contains(&TaskKind::Connector)
+                && kinds.contains(&TaskKind::FutureQueue)
+                && kinds.contains(&TaskKind::DandelionStem)
+                && status == SupervisorStatus::Running
+                && !shutdown
+        })
+        .await;
+    }
+
+    async fn shutdown_and_join_run(
+        node: &Arc<DomNode>,
+        run: JoinHandle<Result<(), DomError>>,
+        context: &str,
+    ) {
+        node.request_shutdown().await;
+        tokio::time::timeout(RUNTIME_TEST_CONVERGENCE_TIMEOUT, run)
+            .await
+            .unwrap_or_else(|_| panic!("{context}: run should stop after shutdown"))
+            .expect("join")
+            .expect("graceful shutdown");
+        assert!(
+            node.task_supervisor.is_empty().await,
+            "{context}: supervisor registry drained"
+        );
+        assert!(
+            node.task_supervisor.failure().await.is_none(),
+            "{context}: no critical task failure recorded"
+        );
+    }
+
     #[tokio::test]
     async fn run_registers_listener_connector_future_queue_and_dandelion_tasks() {
         let dir = fresh_test_dir("runtime-registers-core-tasks");
@@ -4637,21 +4687,8 @@ mod tests {
         let node = Arc::new(init_test_node(config));
         let run = tokio::spawn(node.clone().run());
 
-        wait_for_supervisor(&node, |kinds, _, status, _| {
-            kinds.contains(&TaskKind::Listener)
-                && kinds.contains(&TaskKind::Connector)
-                && kinds.contains(&TaskKind::FutureQueue)
-                && kinds.contains(&TaskKind::DandelionStem)
-                && status == SupervisorStatus::Running
-        })
-        .await;
-
-        node.request_shutdown().await;
-        tokio::time::timeout(Duration::from_secs(5), run)
-            .await
-            .expect("run should stop after shutdown")
-            .expect("join")
-            .expect("graceful shutdown");
+        wait_for_core_runtime(&node).await;
+        shutdown_and_join_run(&node, run, "core runtime").await;
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
@@ -4664,15 +4701,14 @@ mod tests {
         let node_off = Arc::new(init_test_node(config_off));
         let run_off = tokio::spawn(node_off.clone().run());
         wait_for_supervisor(&node_off, |kinds, _, _, _| {
-            !kinds.contains(&TaskKind::Miner) && kinds.contains(&TaskKind::Listener)
+            !kinds.contains(&TaskKind::Miner)
+                && kinds.contains(&TaskKind::Listener)
+                && kinds.contains(&TaskKind::Connector)
+                && kinds.contains(&TaskKind::FutureQueue)
+                && kinds.contains(&TaskKind::DandelionStem)
         })
         .await;
-        node_off.request_shutdown().await;
-        tokio::time::timeout(Duration::from_secs(5), run_off)
-            .await
-            .expect("run should stop")
-            .expect("join")
-            .expect("shutdown");
+        shutdown_and_join_run(&node_off, run_off, "miner disabled runtime").await;
         fs::remove_dir_all(&dir_off).expect("cleanup test dir");
 
         let dir_on = fresh_test_dir("runtime-miner-enabled");
@@ -4681,13 +4717,15 @@ mod tests {
         config_on.mine = true;
         let node_on = Arc::new(init_test_node(config_on));
         let run_on = tokio::spawn(node_on.clone().run());
-        wait_for_supervisor(&node_on, |kinds, _, _, _| kinds.contains(&TaskKind::Miner)).await;
-        node_on.request_shutdown().await;
-        tokio::time::timeout(Duration::from_secs(5), run_on)
-            .await
-            .expect("run should stop")
-            .expect("join")
-            .expect("shutdown");
+        wait_for_supervisor(&node_on, |kinds, _, _, _| {
+            kinds.contains(&TaskKind::Miner)
+                && kinds.contains(&TaskKind::Listener)
+                && kinds.contains(&TaskKind::Connector)
+                && kinds.contains(&TaskKind::FutureQueue)
+                && kinds.contains(&TaskKind::DandelionStem)
+        })
+        .await;
+        shutdown_and_join_run(&node_on, run_on, "miner enabled runtime").await;
         fs::remove_dir_all(&dir_on).expect("cleanup test dir");
     }
 
@@ -4708,12 +4746,7 @@ mod tests {
             "DomNode::run must stay alive until explicit shutdown"
         );
 
-        node.request_shutdown().await;
-        tokio::time::timeout(Duration::from_secs(5), run)
-            .await
-            .expect("run should stop")
-            .expect("join")
-            .expect("shutdown");
+        shutdown_and_join_run(&node, run, "long-lived runtime").await;
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
@@ -4726,7 +4759,7 @@ mod tests {
         let node = Arc::new(init_test_node(config));
         let run = tokio::spawn(node.clone().run());
 
-        wait_for_supervisor(&node, |kinds, _, _, _| kinds.contains(&TaskKind::Listener)).await;
+        wait_for_core_runtime(&node).await;
 
         let stream = TcpStream::connect(&listen_addr)
             .await
@@ -4735,12 +4768,7 @@ mod tests {
         drop(stream);
         wait_for_supervisor(&node, |_, relay_count, _, _| relay_count == 0).await;
 
-        node.request_shutdown().await;
-        tokio::time::timeout(Duration::from_secs(5), run)
-            .await
-            .expect("run should stop")
-            .expect("join")
-            .expect("shutdown");
+        shutdown_and_join_run(&node, run, "relay cleanup runtime").await;
         fs::remove_dir_all(&dir).expect("cleanup test dir");
     }
 
@@ -5891,6 +5919,10 @@ mod tests {
             OutboundAttemptOutcome::RetryableFailure,
             OutboundAttemptOutcome::Registered
         );
+        assert_ne!(
+            OutboundAttemptOutcome::RetryableFailure,
+            OutboundAttemptOutcome::Shutdown
+        );
     }
 
     #[tokio::test]
@@ -6520,7 +6552,7 @@ mod tests {
         let running = node.clone();
         let handle = tokio::spawn(async move { running.run().await });
 
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(RUNTIME_TEST_CONVERGENCE_TIMEOUT, async {
             loop {
                 if node.task_supervisor.contains(TaskKind::Listener).await
                     && node.task_supervisor.contains(TaskKind::Connector).await
@@ -6536,7 +6568,7 @@ mod tests {
         .expect("live node tasks registered");
 
         node.request_shutdown().await;
-        tokio::time::timeout(Duration::from_secs(10), handle)
+        tokio::time::timeout(RUNTIME_TEST_CONVERGENCE_TIMEOUT, handle)
             .await
             .expect("run returns after shutdown")
             .expect("join")
