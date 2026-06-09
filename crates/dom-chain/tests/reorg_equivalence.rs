@@ -748,7 +748,7 @@ fn promote_heavier_known_tip_rewrites_canonical_state_and_survives_restart() {
 #[test]
 fn side_chain_retention_prunes_to_deterministic_tip_bound_and_survives_restart() {
     let dir = TempDir::new().expect("tempdir");
-    let store = DomStore::open(dir.path()).expect("open");
+    let store = open_test_store(dir.path());
     commit_genesis(&store);
 
     let canonical_1 = valid_coinbase_only_block(Hash256::ZERO, 1, 100, 1, 60);
@@ -801,7 +801,7 @@ fn side_chain_retention_prunes_to_deterministic_tip_bound_and_survives_restart()
 #[test]
 fn retained_reorg_candidate_is_not_pruned_before_promotion() {
     let dir = TempDir::new().expect("tempdir");
-    let store = DomStore::open(dir.path()).expect("open");
+    let store = open_test_store(dir.path());
     commit_genesis(&store);
 
     let shared = valid_coinbase_only_block(Hash256::ZERO, 1, 100, 1, 80);
