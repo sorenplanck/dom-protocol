@@ -10,6 +10,7 @@ Arquivos lidos antes de qualquer auditoria, patch ou teste:
 
 - `AGENTS.md`
 - `audit/00_MASTER_INDEX`
+- `audit/00_MASTER_INDEX.md` (compatibility path added later)
 - `audit/01_PROTOCOL_OVERVIEW.md`
 - `audit/02_CONSENSUS_INVARIANTS.md`
 - `audit/03_CRYPTOGRAPHIC_ASSUMPTIONS.md`
@@ -21,7 +22,7 @@ Arquivos lidos antes de qualquer auditoria, patch ou teste:
 - `audit/09_KNOWN_RISKS.md`
 - `audit/10_REPORT_TEMPLATE.md`
 
-Observacao: a solicitacao menciona `audit/00_MASTER_INDEX.md`, mas o repositorio contem `audit/00_MASTER_INDEX` sem extensao `.md`. O conteudo desse arquivo foi lido e usado como indice operacional. O caminho com `.md` deve ser tratado como nao disponivel ate ser criado ou renomeado por decisao explicita.
+Observacao: na data original deste relatorio, a solicitacao mencionava `audit/00_MASTER_INDEX.md`, mas o repositorio continha apenas `audit/00_MASTER_INDEX` sem extensao `.md`. O conteudo desse arquivo foi lido e usado como indice operacional. Atualizacao de compatibilidade: `audit/00_MASTER_INDEX.md` agora existe como ponte equivalente, preservando o arquivo original.
 
 ## 2. Resumo Operacional Da Arquitetura
 

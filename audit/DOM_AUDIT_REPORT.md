@@ -26,6 +26,7 @@ Crates and areas reviewed:
 Mandatory knowledge base read:
 
 - `audit/00_MASTER_INDEX`
+- `audit/00_MASTER_INDEX.md` (compatibility path added later)
 - `audit/01_PROTOCOL_OVERVIEW.md`
 - `audit/02_CONSENSUS_INVARIANTS.md`
 - `audit/03_CRYPTOGRAPHIC_ASSUMPTIONS.md`
@@ -37,7 +38,9 @@ Mandatory knowledge base read:
 - `audit/09_KNOWN_RISKS.md`
 - `audit/10_REPORT_TEMPLATE.md`
 
-Note: the master index exists as `audit/00_MASTER_INDEX` without `.md`.
+Note: this report originally observed that the master index existed only as
+`audit/00_MASTER_INDEX` without `.md`. The compatibility path
+`audit/00_MASTER_INDEX.md` now exists while preserving the original file.
 
 ## 3. Methodology
 

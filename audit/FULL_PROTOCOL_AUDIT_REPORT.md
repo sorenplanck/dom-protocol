@@ -176,11 +176,11 @@ Nenhum codigo-fonte foi alterado.
 ### DOM-AUDIT-010 - Inconsistencias operacionais na knowledge base e ambiente de validacao
 
 - Severidade: Informational
-- Arquivo afetado: `audit/00_MASTER_INDEX`; `audit/08_VALIDATION_COMMANDS.md`; ambiente local
+- Arquivo afetado: `audit/00_MASTER_INDEX`; `audit/00_MASTER_INDEX.md`; `audit/08_VALIDATION_COMMANDS.md`; ambiente local
 - Trecho ou funcao relevante: leitura obrigatoria e comandos permitidos
 - Impacto: automacao de auditoria pode falhar ou ficar ambigua.
-- Cenario de exploracao: agentes esperam `audit/00_MASTER_INDEX.md`, mas o arquivo no repo e `audit/00_MASTER_INDEX` sem extensao. A validacao referencia `dom-p2p` e `dom-miner`, mas o workspace contem `dom-wire` e miner dentro de `dom-node`. `rg`, `cargo-audit` e `cargo-deny` nao estavam disponiveis localmente.
-- Evidencia no codigo/docs: `AGENTS.md` referencia `audit/00_MASTER_INDEX.md`; `git`/filesystem contem `audit/00_MASTER_INDEX`. Workspace em `Cargo.toml` lista `dom-wire`, nao `dom-p2p`, e nao lista `dom-miner`.
+- Cenario de exploracao: na data original deste relatorio, agentes esperavam `audit/00_MASTER_INDEX.md`, mas o arquivo no repo era `audit/00_MASTER_INDEX` sem extensao. Atualizacao de compatibilidade: `audit/00_MASTER_INDEX.md` agora existe como ponte equivalente, preservando o arquivo original. A validacao referencia `dom-p2p` e `dom-miner`, mas o workspace contem `dom-wire` e miner dentro de `dom-node`. `rg`, `cargo-audit` e `cargo-deny` nao estavam disponiveis localmente.
+- Evidencia no codigo/docs: `AGENTS.md` referencia `audit/00_MASTER_INDEX.md`; o filesystem contem `audit/00_MASTER_INDEX` e `audit/00_MASTER_INDEX.md`. Workspace em `Cargo.toml` lista `dom-wire`, nao `dom-p2p`, e nao lista `dom-miner`.
 - Correcao recomendada: alinhar nomes de arquivos/crates nos documentos de auditoria; adicionar prereq de ferramentas ou fallback oficial para Windows/PowerShell.
 - Testes necessarios: script de bootstrap que verifica existencia de todos docs/crates/comandos antes da auditoria.
 - Prioridade de correcao: P4.
