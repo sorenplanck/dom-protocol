@@ -18,8 +18,8 @@ pub fn init_tracing() {
 }
 use dom_node::node::DomNode;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::{sleep, timeout};
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
 
 /// Pick an ephemeral localhost TCP port for tests.
 ///
@@ -82,22 +82,27 @@ pub async fn wait_for_height(
     target_height: u64,
     timeout_duration: Duration,
 ) -> Result<(), String> {
-    timeout(timeout_duration, async {
-        loop {
-            let notified = node.state_events.notified();
+    let started = Instant::now();
+    loop {
+        let current_height = {
             let chain = node.chain.lock().await;
-            let current_height = chain.tip_height.0;
-            drop(chain);
-
-            if current_height >= target_height {
-                return Ok(());
-            }
-
-            notified.await;
+            chain.tip_height.0
+        };
+        if current_height >= target_height {
+            return Ok(());
         }
-    })
-    .await
-    .map_err(|_| format!("timeout waiting for height {}", target_height))?
+
+        if started.elapsed() >= timeout_duration {
+            return Err(format!(
+                "timeout waiting for height {target_height}; last observed height {current_height}"
+            ));
+        }
+
+        tokio::select! {
+            _ = node.state_events.notified() => {}
+            _ = sleep(Duration::from_millis(50)) => {}
+        }
+    }
 }
 
 /// Wait for node's mempool to have at least N transactions.
@@ -106,21 +111,27 @@ pub async fn wait_for_mempool_count(
     min_count: usize,
     timeout_duration: Duration,
 ) -> Result<(), String> {
-    timeout(timeout_duration, async {
-        loop {
-            let notified = node.state_events.notified();
-            let n = {
-                let mempool = node.mempool.lock().await;
-                mempool.len()
-            };
-            if n >= min_count {
-                return Ok(());
-            }
-            notified.await;
+    let started = Instant::now();
+    loop {
+        let current_count = {
+            let mempool = node.mempool.lock().await;
+            mempool.len()
+        };
+        if current_count >= min_count {
+            return Ok(());
         }
-    })
-    .await
-    .map_err(|_| format!("timeout waiting for {} mempool tx", min_count))?
+
+        if started.elapsed() >= timeout_duration {
+            return Err(format!(
+                "timeout waiting for {min_count} mempool tx; last observed count {current_count}"
+            ));
+        }
+
+        tokio::select! {
+            _ = node.state_events.notified() => {}
+            _ = sleep(Duration::from_millis(50)) => {}
+        }
+    }
 }
 
 /// Wait for node to have at least N peers connected.
@@ -129,22 +140,27 @@ pub async fn wait_for_peer_count(
     min_peers: usize,
     timeout_duration: Duration,
 ) -> Result<(), String> {
-    timeout(timeout_duration, async {
-        loop {
-            let notified = node.state_events.notified();
+    let started = Instant::now();
+    loop {
+        let current_count = {
             let peers = node.peers.lock().await;
-            let count = peers.connected_peers().len();
-            drop(peers);
-
-            if count >= min_peers {
-                return Ok(());
-            }
-
-            notified.await;
+            peers.connected_peers().len()
+        };
+        if current_count >= min_peers {
+            return Ok(());
         }
-    })
-    .await
-    .map_err(|_| format!("timeout waiting for {} peers", min_peers))?
+
+        if started.elapsed() >= timeout_duration {
+            return Err(format!(
+                "timeout waiting for {min_peers} peers; last observed count {current_count}"
+            ));
+        }
+
+        tokio::select! {
+            _ = node.state_events.notified() => {}
+            _ = sleep(Duration::from_millis(50)) => {}
+        }
+    }
 }
 
 /// Mine N blocks on a node (blocks until done).
