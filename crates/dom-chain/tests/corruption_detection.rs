@@ -457,7 +457,7 @@ fn reopen_rebuilds_exact_canonical_utxo_after_missing_entry_corruption() {
     let (header_bytes, body_bytes, hash, output, excess) =
         synthetic_block_bytes(1, 0xB1, g_point(), h_point());
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         commit_synthetic_genesis(&store);
         store
             .commit_block(
@@ -484,7 +484,7 @@ fn reopen_rebuilds_exact_canonical_utxo_after_missing_entry_corruption() {
         utxo_digest(&dump_utxo_db(&normalized.store))
     };
     {
-        let store = DomStore::open(dir.path()).expect("reopen raw store");
+        let store = open_test_store(dir.path());
         delete_raw(&store, DB_UTXOS, &output);
         delete_raw(&store, DB_METADATA, METADATA_UTXO_SET_DIGEST_KEY);
     }
@@ -505,7 +505,7 @@ fn reopen_rebuilds_exact_canonical_utxo_after_fake_entry_corruption() {
     fake_commitment[0] = 0x02;
     fake_commitment[32] = 0xFD;
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         commit_synthetic_genesis(&store);
         store
             .commit_block(
@@ -532,7 +532,7 @@ fn reopen_rebuilds_exact_canonical_utxo_after_fake_entry_corruption() {
         utxo_digest(&dump_utxo_db(&normalized.store))
     };
     {
-        let store = DomStore::open(dir.path()).expect("reopen raw store");
+        let store = open_test_store(dir.path());
         put_raw(
             &store,
             DB_UTXOS,
@@ -560,7 +560,7 @@ fn reopen_rebuilds_exact_canonical_utxo_after_altered_persisted_utxo() {
     let (header_bytes, body_bytes, hash, output, excess) =
         synthetic_block_bytes(1, 0xB3, g_point(), h_point());
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         commit_synthetic_genesis(&store);
         store
             .commit_block(
@@ -587,7 +587,7 @@ fn reopen_rebuilds_exact_canonical_utxo_after_altered_persisted_utxo() {
         utxo_digest(&dump_utxo_db(&normalized.store))
     };
     {
-        let store = DomStore::open(dir.path()).expect("reopen raw store");
+        let store = open_test_store(dir.path());
         put_raw(
             &store,
             DB_UTXOS,
@@ -615,7 +615,7 @@ fn reopen_rebuilds_exact_canonical_utxo_after_digest_metadata_corruption() {
     let (header_bytes, body_bytes, hash, output, excess) =
         synthetic_block_bytes(1, 0xB4, g_point(), h_point());
     {
-        let store = DomStore::open(dir.path()).expect("open");
+        let store = open_test_store(dir.path());
         commit_synthetic_genesis(&store);
         store
             .commit_block(
@@ -642,7 +642,7 @@ fn reopen_rebuilds_exact_canonical_utxo_after_digest_metadata_corruption() {
         utxo_digest(&dump_utxo_db(&normalized.store))
     };
     {
-        let store = DomStore::open(dir.path()).expect("reopen raw store");
+        let store = open_test_store(dir.path());
         put_raw(
             &store,
             DB_METADATA,
