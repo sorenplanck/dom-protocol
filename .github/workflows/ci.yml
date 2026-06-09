@@ -35,11 +35,6 @@ jobs:
   build-test:
     name: build + clippy + test (${{ matrix.host }})
     runs-on: ${{ matrix.runner }}
-    # Temporary PR #8 recovery: Windows CI still runs and reports failures, but
-    # remains advisory while LMDB map-size/filesystem behavior on GitHub Actions
-    # Windows runners is being stabilized. This is not production Windows
-    # support removal.
-    continue-on-error: ${{ matrix.host == 'windows-x86_64' }}
     strategy:
       fail-fast: false
       matrix:
