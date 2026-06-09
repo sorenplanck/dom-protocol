@@ -174,8 +174,36 @@ coinbase_kernel.explicit_value = block_reward(block_height) + sum(tx_fees_in_blo
 ```
 
 Where:
-- `block_reward(h)` = `INITIAL_BLOCK_REWARD >> (h / HALVING_INTERVAL)` (integer shift)
+- `block_reward(h)` = deterministic lookup in `BLOCK_REWARD_TABLE`, using
+  `epoch = h / HALVING_INTERVAL`
 - `sum(tx_fees_in_block)` = sum of all `kernel.fee` from non-coinbase kernels in this block
+
+The reward schedule is defined by the implementation-authoritative constants in
+`crates/dom-core/src/constants.rs` and the lookup function in
+`crates/dom-core/src/types.rs`.
+
+Normative reward rule:
+
+```
+epoch = height / HALVING_INTERVAL
+if epoch >= HALVING_EPOCHS:
+    block_reward(height) = 0
+else:
+    block_reward(height) = BLOCK_REWARD_TABLE[epoch]
+```
+
+`BLOCK_REWARD_TABLE` is the normative current reward schedule. The table is
+derived deterministically with integer arithmetic:
+
+```
+reward(0) = INITIAL_BLOCK_REWARD
+reward(n) = (reward(n - 1) * 67) / 100
+```
+
+No floating-point arithmetic is used. Implementations MUST NOT use an alternate
+reward formula when that formula diverges from `BLOCK_REWARD_TABLE`.
+The table lookup performed by `dom_core::block_reward(height)` is the canonical
+rule for coinbase validation.
 
 **Validators MUST verify**:
 ```
