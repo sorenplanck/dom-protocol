@@ -6,6 +6,7 @@
 
 use std::io::Write as _;
 use std::net::SocketAddr;
+use std::path::Path;
 
 use anyhow::{anyhow, Context as _, Result};
 use dom_config::{MinerThrottleConfig, NodeConfig};
@@ -88,15 +89,16 @@ impl NodeSettings {
         if self.data_dir.trim().is_empty() {
             return Err(anyhow!("data directory must not be empty"));
         }
-        if let Some(path) = &self.miner_wallet_path {
-            if path.trim().is_empty() {
-                return Err(anyhow!("miner wallet path must not be empty when set"));
-            }
-        }
-        if self.mine && self.miner_wallet_path.is_none() {
-            return Err(anyhow!(
-                "mining requires a selected miner reward wallet; choose a dedicated .dom miner wallet first"
-            ));
+        if self.mine {
+            let path = self
+                .miner_wallet_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| {
+                    anyhow!("Choose a dedicated miner reward wallet before enabling mining.")
+                })?;
+            validate_miner_wallet_path(path)?;
         }
         Ok(())
     }
@@ -299,6 +301,33 @@ fn parse_socket_addr(label: &str, addr: &str) -> Result<SocketAddr> {
         .map_err(|e| anyhow!("{label} is invalid ({addr:?}): {e}"))
 }
 
+fn validate_miner_wallet_path(path: &str) -> Result<()> {
+    let path = Path::new(path);
+    if path.exists() {
+        let meta = std::fs::metadata(path)
+            .map_err(|_| anyhow!("Miner reward wallet is invalid or cannot be opened."))?;
+        if meta.is_dir() {
+            return Err(anyhow!(
+                "Miner reward wallet is invalid or cannot be opened."
+            ));
+        }
+        return Ok(());
+    }
+
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| anyhow!("Miner reward wallet is invalid or cannot be opened."))?;
+    let meta = std::fs::metadata(parent)
+        .map_err(|_| anyhow!("Miner reward wallet is invalid or cannot be opened."))?;
+    if !meta.is_dir() {
+        return Err(anyhow!(
+            "Miner reward wallet is invalid or cannot be opened."
+        ));
+    }
+    Ok(())
+}
+
 /// `~/.dom/data` cross-platform.
 fn default_data_dir() -> String {
     dirs_home()
@@ -490,7 +519,72 @@ mod tests {
         let err = settings
             .to_node_config(None)
             .expect_err("mining without miner wallet must fail");
-        assert!(err.to_string().contains("miner reward wallet"));
+        assert_eq!(
+            err.to_string(),
+            "Choose a dedicated miner reward wallet before enabling mining."
+        );
+    }
+
+    #[test]
+    fn mining_off_accepts_missing_empty_or_invalid_miner_wallet() {
+        let mut settings = regtest_settings_with_seed(vec![]);
+
+        settings.mine = false;
+        settings.miner_wallet_path = None;
+        let config = settings.to_node_config(None).expect("none accepted");
+        assert!(!config.mine);
+        assert_eq!(config.wallet_path, None);
+        assert_eq!(config.wallet_password, None);
+
+        settings.miner_wallet_path = Some("".into());
+        let config = settings.to_node_config(None).expect("empty accepted");
+        assert!(!config.mine);
+        assert_eq!(config.wallet_path, None);
+        assert_eq!(config.wallet_password, None);
+
+        settings.miner_wallet_path = Some(
+            std::env::temp_dir()
+                .join("dom-missing-miner-parent")
+                .join("node.dom")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let config = settings
+            .to_node_config(None)
+            .expect("invalid ignored while off");
+        assert!(!config.mine);
+        assert_eq!(config.wallet_path, None);
+        assert_eq!(config.wallet_password, None);
+    }
+
+    #[test]
+    fn mining_on_rejects_empty_or_invalid_miner_wallet() {
+        let mut settings = regtest_settings_with_seed(vec![]);
+        settings.mine = true;
+
+        settings.miner_wallet_path = Some("".into());
+        let err = settings
+            .to_node_config(None)
+            .expect_err("empty miner wallet must fail");
+        assert_eq!(
+            err.to_string(),
+            "Choose a dedicated miner reward wallet before enabling mining."
+        );
+
+        settings.miner_wallet_path = Some(
+            std::env::temp_dir()
+                .join("dom-missing-miner-parent")
+                .join("node.dom")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let err = settings
+            .to_node_config(None)
+            .expect_err("invalid miner wallet must fail");
+        assert_eq!(
+            err.to_string(),
+            "Miner reward wallet is invalid or cannot be opened."
+        );
     }
 
     #[test]
@@ -517,7 +611,9 @@ mod tests {
     #[test]
     fn bootstrap_seed_peer_is_valid_socket() {
         let settings = regtest_settings_with_seed(vec!["192.153.57.211:8443".into()]);
-        let config = settings.to_node_config(None).expect("bootstrap peer accepted");
+        let config = settings
+            .to_node_config(None)
+            .expect("bootstrap peer accepted");
         assert_eq!(config.seed_peers, vec!["192.153.57.211:8443"]);
     }
 
