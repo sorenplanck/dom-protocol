@@ -25,6 +25,10 @@ use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::DomStore;
 use primitive_types::U256;
 use std::collections::BTreeSet;
+
+// Windows CI reserves the LMDB map size on disk, so multi-node fixtures must
+// not open production-sized (16 GiB) maps. These fixtures are tiny.
+const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
 use tempfile::TempDir;
 
 fn scalar(seed: u8) -> BlindingFactor {
@@ -289,7 +293,8 @@ struct HarnessNode {
 impl HarnessNode {
     fn new(orphan_total: usize, per_parent: usize) -> Self {
         let dir = TempDir::new().expect("tempdir");
-        let store = DomStore::open(dir.path()).expect("store open");
+        let store =
+            DomStore::open_with_map_size(dir.path(), TEST_LMDB_MAP_SIZE).expect("store open");
         let chain = ChainState::open(
             store,
             Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
@@ -307,7 +312,8 @@ impl HarnessNode {
     }
 
     fn reconnect_runtime(&mut self, orphan_total: usize, per_parent: usize) {
-        let store = DomStore::open(self.dir.path()).expect("store reopen");
+        let store = DomStore::open_with_map_size(self.dir.path(), TEST_LMDB_MAP_SIZE)
+            .expect("store reopen");
         self.chain = ChainState::open(
             store,
             Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
