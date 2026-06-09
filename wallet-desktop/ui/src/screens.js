@@ -2,6 +2,7 @@
 import {
   api, el, copy, toast, nomsToDom, domToNoms,
   pickSaveFile, pickFolder, saveTextViaDialog, savePrefs, humanizeError,
+  minerWalletDisplay, clearMinerWalletSettings,
 } from "./api.js";
 import {
   getLogLines, clearLogs, subscribeLogs, logsToText,
@@ -44,7 +45,7 @@ function normalizeMinerThrottleMs(value) {
 }
 
 function minerRewardWalletSelected() {
-  return !!(settings.current?.miner_wallet_path && settings.current.miner_wallet_path.trim());
+  return minerWalletDisplay(settings.current) !== " none ";
 }
 
 async function applyMiningEnabled(enabled) {
@@ -922,7 +923,7 @@ export function renderSettings(onApply) {
         <label>Data directory</label>
         <div class="copyable"><code id="data"></code><button class="btn ghost" id="pickData">Change</button></div>
         <label>Miner reward wallet (.dom, optional)</label>
-        <div class="copyable"><code id="miner"></code><button class="btn ghost" id="pickMiner">Choose</button></div>
+        <div class="copyable"><code id="miner"></code><button class="btn ghost" id="pickMiner">Choose</button><button class="btn ghost" id="clearMiner">Remove</button></div>
         <p class="muted mt4">Mining requires a dedicated miner reward wallet. Your personal wallet is never used for mining and its password is never shared with the node.</p>
         <div class="row">
           <div class="flex1"><label>Miner threads</label><input type="number" id="minerThreads" min="1" step="1" /></div>
@@ -961,7 +962,10 @@ export function renderSettings(onApply) {
   node.querySelector("#metrics").value = s.metrics_listen_addr || "";
   node.querySelector("#log").value = s.log_level;
   node.querySelector("#data").textContent = s.data_dir;
-  node.querySelector("#miner").textContent = s.miner_wallet_path || "— none —";
+  const renderMinerWallet = () => {
+    node.querySelector("#miner").textContent = minerWalletDisplay(s);
+  };
+  renderMinerWallet();
   node.querySelector("#minerThreads").value = normalizeMinerThreads(s.miner_threads || 1);
   node.querySelector("#minerThrottle").value = normalizeMinerThrottleMs(s.miner_throttle_ms ?? 10);
   node.querySelector("#mine").checked = !!s.mine;
@@ -976,7 +980,13 @@ export function renderSettings(onApply) {
   };
   node.querySelector("#pickMiner").onclick = async () => {
     const f = await pickSaveFile("Choose miner wallet (.dom)");
-    if (f) { s.miner_wallet_path = f; node.querySelector("#miner").textContent = f; savePrefs(s); }
+    if (f) { s.miner_wallet_path = f; renderMinerWallet(); savePrefs(s); }
+  };
+  node.querySelector("#clearMiner").onclick = () => {
+    clearMinerWalletSettings(s);
+    node.querySelector("#mine").checked = false;
+    renderMinerWallet();
+    savePrefs(s);
   };
   node.querySelector("#lock").onclick = async () => { await api.walletLock(); location.reload(); };
 
@@ -1003,6 +1013,9 @@ export function renderSettings(onApply) {
       s.mine = false;
       node.querySelector("#mine").checked = false;
       toast("Choose a dedicated miner reward wallet before enabling mining.", true);
+      savePrefs(s);
+      onApply();
+      return;
     }
     if (s.mine && !wasMining && !window.confirm("Mining can use significant CPU. Start mining?")) {
       s.mine = false;
@@ -1011,7 +1024,15 @@ export function renderSettings(onApply) {
     savePrefs(s);
     onApply();
     try { await api.nodeRestart(s); toast(t("settingsApplied")); }
-    catch (e) { toast(humanizeError(e), true); }
+    catch (e) {
+      const msg = humanizeError(e);
+      if (/miner reward wallet/i.test(msg)) {
+        s.mine = false;
+        node.querySelector("#mine").checked = false;
+        savePrefs(s);
+      }
+      toast(msg, true);
+    }
   };
   return node;
 }

@@ -128,9 +128,19 @@ const ERROR_RULES = [
   [/(commitment must be 33 bytes|blinding must be 32 bytes|decode|hex)/i, "Invalid recipient data. Check the commitment and blinding you pasted."],
   [/OS RNG unavailable/i, "The system random generator failed. Please restart the app."],
   [/network mismatch/i, "The open wallet belongs to a different network. Switch the network back to the wallet's (or open/create a wallet for the selected network)."],
+  [/choose a dedicated miner reward wallet before enabling mining/i, "Choose a dedicated miner reward wallet before enabling mining."],
+  [/miner reward wallet is invalid or cannot be opened/i, "Miner reward wallet is invalid or cannot be opened."],
   [/invalid amount/i, "Invalid amount. Check the number you entered."],
   [/io error|read wallet directory/i, "Disk read/write error. Check permissions and free space."],
 ];
+
+function sanitizeErrorMessage(msg) {
+  return String(msg || "")
+    .replace(/(password|passphrase|mnemonic|recovery phrase|private key|wallet secret|seed)\s*[:=]\s*[^,\s;]+/gi, "$1: [redacted]")
+    .replace(/(DOM_WALLET_PASSWORD|DOM_SEED|DOM_MNEMONIC)=([^,\s;]+)/g, "$1=[redacted]")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 export function humanizeError(e) {
   // Normalize to a string. Tauri errors usually arrive as strings already.
@@ -145,8 +155,11 @@ export function humanizeError(e) {
     const m = msg.match(re);
     if (m) return text.replace(/\$(\d+)/g, (_, n) => m[+n] ?? "");
   }
-  // Fallback: never return a raw stack trace.
-  return "Something went wrong. Please try again.";
+  const sanitized = sanitizeErrorMessage(msg);
+  if (!sanitized || /\bat .*:\d+:\d+/i.test(sanitized)) {
+    return "Something went wrong. Please try again.";
+  }
+  return sanitized;
 }
 
 let toastTimer = null;
@@ -161,19 +174,49 @@ export function toast(msg, isErr = false) {
 // Settings are kept in memory only (sensitive data never touches localStorage).
 // Non-sensitive node prefs persist to localStorage so the user doesn't retype.
 const PREF_KEY = "dom_wallet_node_prefs";
+const NONE_TEXT = " none ";
+
+export function normalizeNodePrefs(prefs) {
+  const next = { ...prefs };
+  if (typeof next.miner_wallet_path === "string" && !next.miner_wallet_path.trim()) {
+    next.miner_wallet_path = null;
+  }
+  const minerPath = typeof next.miner_wallet_path === "string"
+    ? next.miner_wallet_path.trim()
+    : "";
+  if (!next.mine && /(^|[\\/])\.dom[\\/]node\.dom$/i.test(minerPath)) {
+    next.miner_wallet_path = null;
+    next.mine = false;
+  }
+  return next;
+}
+
+export function minerWalletDisplay(settings) {
+  const path = settings?.miner_wallet_path;
+  if (typeof path !== "string" || !path.trim()) return NONE_TEXT;
+  if (!settings?.mine && /(^|[\\/])\.dom[\\/]node\.dom$/i.test(path.trim())) return NONE_TEXT;
+  return path.trim();
+}
+
+export function clearMinerWalletSettings(settings) {
+  settings.miner_wallet_path = null;
+  settings.mine = false;
+  return settings;
+}
+
 export function loadPrefs(defaults) {
   try {
     const raw = localStorage.getItem(PREF_KEY);
-    if (!raw) return { ...defaults };
+    if (!raw) return normalizeNodePrefs({ ...defaults });
     const saved = JSON.parse(raw);
-    return { ...defaults, ...saved };
+    return normalizeNodePrefs({ ...defaults, ...saved });
   } catch {
-    return { ...defaults };
+    return normalizeNodePrefs({ ...defaults });
   }
 }
 export function savePrefs(prefs) {
   // Strip anything sensitive defensively (there is nothing sensitive here,
   // but make the contract explicit).
-  const { password, phrase, ...safe } = prefs;
+  const { password, phrase, ...safe } = normalizeNodePrefs(prefs);
   localStorage.setItem(PREF_KEY, JSON.stringify(safe));
 }
