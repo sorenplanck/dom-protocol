@@ -95,8 +95,11 @@ jobs:
       - name: cargo clippy --workspace -- -D warnings
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: cargo test --workspace (excluding integration)
-        run: cargo test --workspace --exclude dom-integration-tests --all-targets
+      - name: cargo test --workspace (excluding integration and dom-node)
+        run: cargo test --workspace --exclude dom-integration-tests --exclude dom-node --all-targets
+
+      - name: cargo test -p dom-node --all-targets (serial shutdown/supervisor coverage)
+        run: cargo test -p dom-node --all-targets -- --test-threads=1
 
   release-blocker-crate-tests:
     name: "release blockers: crate tests (linux)"
@@ -137,8 +140,8 @@ jobs:
       - name: cargo test -p dom-store
         run: cargo test -p dom-store
 
-      - name: cargo test -p dom-node
-        run: cargo test -p dom-node
+      - name: cargo test -p dom-node (serial shutdown/supervisor coverage)
+        run: cargo test -p dom-node -- --test-threads=1
 
       - name: cargo test -p dom-mempool
         run: cargo test -p dom-mempool
