@@ -1047,9 +1047,22 @@ impl DomNode {
                 }
                 let is_mainnet = self.config.network == dom_config::Network::Mainnet;
                 let port = self.config.network.default_port();
-                let mut addrs =
+                // Regtest is a private local network: without explicitly
+                // configured dns_seeds it must not fall back to the built-in
+                // public testnet DNS seeds, otherwise local/CI regtest nodes
+                // dial real internet hosts. A single such dial parks a relay
+                // worker inside `TcpStream::connect` for the full OS connect
+                // timeout when the SYN is silently dropped, so the relay
+                // registry (and any outbound slot budget) stays occupied by a
+                // peer that can never handshake.
+                let mut addrs = if self.config.network == dom_config::Network::Regtest
+                    && self.config.dns_seeds.is_empty()
+                {
+                    Vec::new()
+                } else {
                     dom_wire::dns_seed::resolve_seeds(is_mainnet, port, &self.config.dns_seeds)
-                        .await;
+                        .await
+                };
 
                 // Also try configured seed peers
                 addrs.extend(self.config.seed_peers.iter().cloned());
@@ -4672,17 +4685,19 @@ mod tests {
     }
 
     async fn wait_for_relay_count(node: &Arc<DomNode>, expected: usize) {
-        tokio::time::timeout(RUNTIME_TEST_CONVERGENCE_TIMEOUT, async {
-            loop {
-                let relay_count = node.task_supervisor.relay_count().await;
-                if relay_count == expected {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
+        let deadline = tokio::time::Instant::now() + RUNTIME_TEST_CONVERGENCE_TIMEOUT;
+        loop {
+            let relay_count = node.task_supervisor.relay_count().await;
+            if relay_count == expected {
+                return;
             }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("relay worker count should converge to {expected}"));
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "relay worker count should converge to {expected}; last observed {relay_count}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 
     async fn shutdown_and_join_run(
