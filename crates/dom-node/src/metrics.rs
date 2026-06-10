@@ -32,6 +32,9 @@ pub struct Metrics {
     pub malformed_block_relays: Arc<AtomicU64>,
     /// Total times a peer exceeded duplicate block relay quota.
     pub duplicate_block_relay_quota_exceeded: Arc<AtomicU64>,
+    /// Total relayed txs already in the mempool, skipped before chain lock /
+    /// validation (FABLE5-001 replay short-circuit).
+    pub suppressed_duplicate_tx_relays: Arc<AtomicU64>,
 }
 
 impl Metrics {
@@ -56,6 +59,7 @@ impl Metrics {
             suppressed_duplicate_block_relays: Arc::new(AtomicU64::new(0)),
             malformed_block_relays: Arc::new(AtomicU64::new(0)),
             duplicate_block_relay_quota_exceeded: Arc::new(AtomicU64::new(0)),
+            suppressed_duplicate_tx_relays: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -169,6 +173,12 @@ impl Metrics {
                 "Times a peer exceeded duplicate block relay quota",
                 "counter",
                 &self.duplicate_block_relay_quota_exceeded,
+            ),
+            (
+                "dom_suppressed_duplicate_tx_relays_total",
+                "Relayed txs already in mempool, skipped before validation",
+                "counter",
+                &self.suppressed_duplicate_tx_relays,
             ),
         ];
 

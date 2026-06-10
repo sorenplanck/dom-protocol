@@ -221,6 +221,20 @@ impl Mempool {
     where
         F: FnMut(&[u8; 33]) -> Result<Option<UtxoEntry>, DomError>,
     {
+        // FABLE5-001: run the cheap, crypto-independent admission gates BEFORE the
+        // expensive `validate_transaction` (Bulletproof + Schnorr). A duplicate or
+        // below-floor-fee/over-capacity tx is rejected without paying for crypto, so
+        // a peer replaying a known tx can no longer force repeated range-proof
+        // verification. These gates are structural only (hash lookup, kernel-fee
+        // sum, weight) — they never depend on cryptographic validity — so detecting
+        // them earlier cannot change any tx's accept/reject verdict, only the
+        // (cheaper) rejection reason. `accept_validated_tx` re-checks the same
+        // conditions, so the legacy `accept_tx` path is unaffected.
+        //
+        // `tx_hash` must be the canonical hash of the tx bytes; the production
+        // callers pass `blake2b_256(tx_bytes)` (see dom-node node.rs / node_handle).
+        self.precheck_cheap_admission_gates(&tx, &tx_hash)?;
+
         let ctx = ValidationContext {
             current_height: BlockHeight(current_height),
             chain_id,
@@ -229,6 +243,41 @@ impl Mempool {
         validate_transaction(&tx, &ctx)?;
         validate_tx_against_chain_view(&tx, current_height, coinbase_maturity, &mut lookup_utxo)?;
         self.accept_validated_tx(tx, tx_hash, now_secs)
+    }
+
+    /// Cheap, crypto-independent admission gates, hoisted ahead of
+    /// `validate_transaction` (FABLE5-001). Mirrors exactly the duplicate,
+    /// min-relay-fee, and capacity checks inside `accept_validated_tx` (same
+    /// error messages), so moving them earlier changes no verdict — only how
+    /// soon a rejection is detected. Returns `Ok(())` when the tx is not a
+    /// duplicate, meets the fee floor, and could fit within the weight cap.
+    fn precheck_cheap_admission_gates(
+        &self,
+        tx: &Transaction,
+        tx_hash: &[u8; 32],
+    ) -> Result<(), DomError> {
+        if self.entries.contains_key(tx_hash) {
+            return Err(DomError::PolicyRejected(
+                "transaction already in mempool".into(),
+            ));
+        }
+
+        let fee = tx.total_fee()?;
+        let weight = tx.weight();
+        let fee_rate = if weight == 0 { 0 } else { fee / weight as u64 };
+        if fee_rate < MIN_RELAY_FEE_RATE {
+            return Err(DomError::PolicyRejected(format!(
+                "fee rate {} < MIN_RELAY_FEE_RATE {}",
+                fee_rate, MIN_RELAY_FEE_RATE
+            )));
+        }
+        if weight as u64 > self.max_weight {
+            return Err(DomError::PolicyRejected(format!(
+                "tx weight {} exceeds mempool max_weight {}",
+                weight, self.max_weight
+            )));
+        }
+        Ok(())
     }
 
     fn accept_validated_tx(
@@ -368,6 +417,13 @@ impl Mempool {
     /// Get a transaction by hash.
     pub fn get_tx(&self, hash: &[u8; 32]) -> Option<&MempoolEntry> {
         self.entries.get(hash)
+    }
+
+    /// Whether a transaction with this hash is already pooled. Cheap O(1) lookup
+    /// used by the P2P relay path to short-circuit replays of already-known txs
+    /// before acquiring the chain lock or running validation (FABLE5-001).
+    pub fn contains(&self, hash: &[u8; 32]) -> bool {
+        self.entries.contains_key(hash)
     }
 
     /// Get all transaction hashes (for INV messages).
