@@ -3867,9 +3867,27 @@ async fn message_loop(
                         use dom_serialization::DomDeserialize;
                         use dom_consensus::Transaction;
                         let tx_bytes = msg.payload.clone();
+                        let tx_hash = *dom_crypto::blake2b_256(&tx_bytes).as_bytes();
+                        // FABLE5-001: short-circuit replays of txs already in our
+                        // mempool BEFORE deserializing, taking the chain lock, or
+                        // running validation. The mempool's entry set is the
+                        // (bounded) set of known-good txs; a hash hit means this is a
+                        // duplicate whose admission could only be rejected as "already
+                        // in mempool", so re-validating it would only burn CPU and
+                        // chain-lock time on every replay. Invalid/unknown txs are NOT
+                        // in the mempool, so they still flow through full validation
+                        // and peer-scoring below.
+                        if svc.mempool.lock().await.contains(&tx_hash) {
+                            svc.metrics
+                                .suppressed_duplicate_tx_relays
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::debug!(
+                                "Tx {} already in mempool — skipping replay before validation",
+                                hex::encode(tx_hash)
+                            );
+                        } else {
                         match Transaction::from_bytes(&tx_bytes) {
                             Ok(tx) => {
-                                let tx_hash = *dom_crypto::blake2b_256(&tx_bytes).as_bytes();
                                 let chain_view = {
                                     let c = chain.lock().await;
                                     snapshot_tx_chain_view(&c, &tx)
@@ -3985,6 +4003,7 @@ async fn message_loop(
                                     return Err(e);
                                 }
                             }
+                        }
                         }
                     }
                     Command::GetBlockData => {
