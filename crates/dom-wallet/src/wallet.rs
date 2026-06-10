@@ -2041,6 +2041,92 @@ impl Wallet {
         Ok(true)
     }
 
+    /// Promote a receive request whose exact commitment was observed in the
+    /// canonical UTXO set into a spendable wallet output.
+    ///
+    /// This is the receive-side settlement step: callers observe the chain
+    /// (e.g. via a node's `/utxo/{commitment}` endpoint), and on a hit pass
+    /// the observed `block_height` here. The wallet re-derives the
+    /// deterministic receive blinding for the request index, records the
+    /// `OwnedOutput`, marks the request `Detected`, and persists.
+    ///
+    /// Idempotent: returns `Ok(false)` when the output is already recorded.
+    /// Errors with `OutputNotFound` when no receive request matches, and
+    /// `Locked` when the session is unavailable (blinding derivation needs
+    /// the encrypted seed).
+    pub fn confirm_receive_request(
+        &mut self,
+        commitment: &[u8; 33],
+        block_height: u64,
+        block_hash: Option<[u8; 32]>,
+    ) -> Result<bool, WalletError> {
+        let _ = self.session()?;
+        let (index, amount) = self
+            .receive_requests
+            .iter()
+            .find(|request| &request.commitment == commitment)
+            .map(|request| (request.index, request.amount))
+            .ok_or_else(|| WalletError::OutputNotFound(hex::encode(commitment)))?;
+
+        let detected = ReceiveRequestStatus::Detected {
+            block_height,
+            is_coinbase: false,
+            is_mature: true,
+        };
+
+        if self.outputs.get(commitment).is_some() {
+            // Output already recorded (earlier confirm or canonical rescan).
+            // Keep the request status consistent, but report "no change".
+            let _ = self.update_receive_request_status(commitment, Some(detected))?;
+            return Ok(false);
+        }
+
+        let blinding = self.receive_blinding_for_index(index)?;
+        let mut owned = OwnedOutput::new(
+            *commitment,
+            amount,
+            *blinding.as_bytes(),
+            block_height,
+            false,
+        );
+        if let Some(hash) = block_hash {
+            owned = owned.with_block_hash(hash);
+        }
+        self.add_output(owned);
+        if let Some(request) = self
+            .receive_requests
+            .iter_mut()
+            .find(|request| &request.commitment == commitment)
+        {
+            request.status = detected;
+        }
+        self.save()?;
+        Ok(true)
+    }
+
+    /// Remove a still-pending receive request whose payment is known to have
+    /// never been submitted (e.g. the paying spend was definitively rejected
+    /// by the node). Refuses to remove a request whose output was already
+    /// detected or recorded — cancelling those could hide settled funds from
+    /// a future canonical rescan. Returns `Ok(true)` when removed.
+    pub fn cancel_receive_request(&mut self, commitment: &[u8; 33]) -> Result<bool, WalletError> {
+        let Some(pos) = self
+            .receive_requests
+            .iter()
+            .position(|request| &request.commitment == commitment)
+        else {
+            return Ok(false);
+        };
+        if self.outputs.get(commitment).is_some()
+            || self.receive_requests[pos].status != ReceiveRequestStatus::Pending
+        {
+            return Ok(false);
+        }
+        self.receive_requests.remove(pos);
+        self.save()?;
+        Ok(true)
+    }
+
     /// Get the chain id.
     pub fn chain_id(&self) -> &[u8; 32] {
         &self.chain_id
