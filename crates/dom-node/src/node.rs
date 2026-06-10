@@ -75,6 +75,9 @@ pub struct DomNode {
     pub task_supervisor: NodeTaskSupervisor,
     /// Test/runtime observers wait here for chain, mempool, or peer-state changes.
     pub state_events: Arc<Notify>,
+    /// Peer Exchange state: known peer addresses learned from seeds and Addr
+    /// gossip, plus GetAddr cooldown tracking (RFC-0005 §6).
+    pub pex: Arc<Mutex<crate::pex::PexManager>>,
 }
 
 /// Per-connection I/O context passed into message_loop.
@@ -97,6 +100,7 @@ struct NodeServices {
     orphan_pool: Arc<Mutex<RuntimeOrphanPool>>,
     wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
     state_events: Arc<Notify>,
+    pex: Arc<Mutex<crate::pex::PexManager>>,
 }
 
 /// Broadcast channels shared across connection tasks.
@@ -179,6 +183,17 @@ where
     }
     result
 }
+
+/// Upper bound on PEX known-peer entries. Each entry is an addr string
+/// (<= 255 bytes) plus 12 bytes of metadata, so the table tops out at ~3 MiB
+/// even with hostile max-length addresses.
+const PEX_MAX_KNOWN_PEERS: usize = 10_000;
+/// Stop soliciting addresses once we already know at least this many peers.
+const PEX_TARGET_KNOWN_PEERS: usize = 64;
+/// How often each peer connection considers sending a GetAddr (the 10-minute
+/// per-peer cooldown in PexManager is the real limiter; this just paces the
+/// check).
+const PEX_GETADDR_TICK_SECS: u64 = 60;
 
 const FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS: u64 = 30;
 const FUTURE_BLOCK_QUEUE_MAX_AGE_SECS: u64 = dom_core::MAX_FUTURE_BLOCK_TIME
@@ -465,6 +480,7 @@ impl DomNode {
             ))),
             task_supervisor: NodeTaskSupervisor::new(),
             state_events: Arc::new(Notify::new()),
+            pex: Arc::new(Mutex::new(crate::pex::PexManager::new(PEX_MAX_KNOWN_PEERS))),
         })
     }
 
@@ -971,6 +987,7 @@ impl DomNode {
                         orphan_pool: self.orphan_pool.clone(),
                         wallet: self.wallet.clone(),
                         state_events: self.state_events.clone(),
+                        pex: self.pex.clone(),
                     };
                     let peers = svc.peers.clone();
                     let metrics = svc.metrics.clone();
@@ -1031,6 +1048,7 @@ impl DomNode {
             orphan_pool: self.orphan_pool.clone(),
             wallet: self.wallet.clone(),
             state_events: self.state_events.clone(),
+            pex: self.pex.clone(),
         };
         loop {
             if shutdown.is_shutdown() {
@@ -1049,6 +1067,16 @@ impl DomNode {
 
                 // Also try configured seed peers
                 addrs.extend(self.config.seed_peers.iter().cloned());
+                // PEX: seed the known-peer table with the bootstrap addresses,
+                // drop entries with too many failed dials, and add
+                // gossip-learned peers as outbound candidates. Guard dropped
+                // before any await below.
+                {
+                    let mut px = trace_lock("pex", &self.pex).await;
+                    px.seed_from_config(&addrs);
+                    px.evict_dead_peers();
+                    addrs.extend(px.connectable_peers().iter().map(|p| p.addr.clone()));
+                }
                 addrs.sort();
                 addrs.dedup();
                 addrs = {
@@ -1101,6 +1129,7 @@ impl DomNode {
                     let peers = self.peers.clone();
                     let metrics = self.metrics.clone();
                     let svc_c = svc.clone();
+                    let pex = self.pex.clone();
                     let chain_for_persist = self.chain.clone();
                     let peer_shutdown = shutdown.clone();
                     let task_id = supervisor
@@ -1116,6 +1145,11 @@ impl DomNode {
                                     peer_shutdown,
                                 )
                                 .await;
+                                if outcome == OutboundAttemptOutcome::RetryableFailure {
+                                    // PEX learns the failed dial so dead
+                                    // gossiped addresses get evicted.
+                                    trace_lock("pex", &pex).await.record_failure(&cleanup_addr);
+                                }
                                 let mut mgr = trace_lock("peers", &peers).await;
                                 if outcome == OutboundAttemptOutcome::RetryableFailure {
                                     mgr.record_outbound_failure(&cleanup_addr);
@@ -1714,6 +1748,9 @@ fn peer_violation_score(error: &DomError) -> Option<u32> {
 
     match error {
         DomError::Malformed(_) => Some(ban_scores::MALFORMED_MESSAGE),
+        DomError::PolicyRejected(msg) if msg.contains("address flooding") => {
+            Some(ban_scores::ADDRESS_FLOODING)
+        }
         DomError::PolicyRejected(msg) if msg.contains("handshake timeout") => {
             Some(ban_scores::PROTOCOL_VIOLATION)
         }
@@ -3407,7 +3444,8 @@ async fn message_loop(
     let tx_stem_tx = channels.tx_stem_tx.clone();
     let PeerConn { stream, codec } = conn;
     use dom_wire::message::{
-        BlockPayload, Command, GetBlockDataPayload, GetHeadersPayload, HeadersPayload, WireMessage,
+        AddrPayload, BlockPayload, Command, GetAddrPayload, GetBlockDataPayload, GetHeadersPayload,
+        HeadersPayload, WireMessage,
     };
 
     const PING_INTERVAL_SECS: u64 = 30;
@@ -3415,6 +3453,17 @@ async fn message_loop(
         tokio::time::interval(tokio::time::Duration::from_secs(PING_INTERVAL_SECS));
     // Skip the immediate first tick.
     ping_timer.tick().await;
+
+    // PEX (RFC-0005 §6): periodically consider asking this peer for addresses.
+    // The per-peer GETADDR_COOLDOWN_SECS inside PexManager is the real rate
+    // limit; this timer only paces the check.
+    let mut pex_timer =
+        tokio::time::interval(tokio::time::Duration::from_secs(PEX_GETADDR_TICK_SECS));
+    pex_timer.tick().await;
+    let pex_peer_key = peer_addr.to_string();
+    // Inbound Addr rate limit for THIS connection: beyond the budget each
+    // extra Addr message scores ADDRESS_FLOODING instead of being processed.
+    let mut addr_flood = crate::pex::AddrFloodTracker::new();
 
     loop {
         tokio::select! {
@@ -3508,6 +3557,33 @@ async fn message_loop(
                 };
                 if let Err(e) = codec.send(stream, &ping).await {
                     return Err(DomError::Internal(format!("ping send to {peer_addr}: {e}")));
+                }
+            }
+            // Periodic PEX: solicit addresses while our known set is below
+            // target, at most once per GETADDR_COOLDOWN_SECS per peer.
+            // Decision is taken (and recorded) under the lock; the guard is
+            // dropped before the send await.
+            _ = pex_timer.tick() => {
+                let send_getaddr = {
+                    let mut px = trace_lock("pex", &svc.pex).await;
+                    if px.known_count() < PEX_TARGET_KNOWN_PEERS
+                        && px.should_getaddr(&pex_peer_key)
+                    {
+                        px.record_getaddr(&pex_peer_key);
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if send_getaddr {
+                    let msg = WireMessage {
+                        magic: config.network.magic(),
+                        command: Command::GetAddr,
+                        payload: GetAddrPayload.to_bytes()?,
+                    };
+                    if let Err(e) = codec.send(stream, &msg).await {
+                        return Err(DomError::Internal(format!("getaddr send to {peer_addr}: {e}")));
+                    }
                 }
             }
             // Inbound message
@@ -4029,6 +4105,77 @@ async fn message_loop(
                                 };
                                 codec.send(stream, &wire).await?;
                             }
+                        }
+                    }
+                    Command::GetAddr => {
+                        // Strict parse: GetAddr carries no body.
+                        if let Err(e) = GetAddrPayload::from_bytes(&msg.payload) {
+                            let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e)
+                                .await;
+                            return Err(e);
+                        }
+                        // Serve-side rate limit: at most one Addr response per
+                        // peer per GETADDR_COOLDOWN_SECS. Response is encoded
+                        // under the lock; the guard drops before the send.
+                        let response_payload = {
+                            let mut px = trace_lock("pex", &svc.pex).await;
+                            if px.should_serve_getaddr(&pex_peer_key) {
+                                px.record_getaddr_served(&pex_peer_key);
+                                Some(crate::pex::encode_addr_payload(&px.peers_for_sharing()))
+                            } else {
+                                None
+                            }
+                        };
+                        match response_payload {
+                            Some(payload) => {
+                                let wire = WireMessage {
+                                    magic: config.network.magic(),
+                                    command: Command::Addr,
+                                    payload,
+                                };
+                                codec.send(stream, &wire).await?;
+                            }
+                            None => {
+                                tracing::debug!(
+                                    "suppressing GetAddr response to {peer_addr} (cooldown)"
+                                );
+                            }
+                        }
+                    }
+                    Command::Addr => {
+                        let payload = match AddrPayload::from_bytes(&msg.payload) {
+                            Ok(payload) => payload,
+                            Err(e) => {
+                                let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e)
+                                    .await;
+                                return Err(e);
+                            }
+                        };
+                        if !addr_flood.allow() {
+                            // Too many Addr messages this window: score
+                            // ADDRESS_FLOODING and drop the message without
+                            // touching the PEX table.
+                            let err = DomError::PolicyRejected(format!(
+                                "address flooding: more than {} Addr messages in {}s [ban+{}]",
+                                crate::pex::MAX_ADDR_MESSAGES_PER_WINDOW,
+                                crate::pex::ADDR_FLOOD_WINDOW_SECS,
+                                dom_wire::peer::ban_scores::ADDRESS_FLOODING,
+                            ));
+                            let banned =
+                                record_peer_violation(&chain, &svc.peers, peer_addr, &err).await;
+                            if banned {
+                                return Err(err);
+                            }
+                        } else {
+                            let addrs: Vec<String> =
+                                payload.entries.into_iter().map(|e| e.addr).collect();
+                            let added = {
+                                let mut px = trace_lock("pex", &svc.pex).await;
+                                px.process_addr_message(addrs)
+                            };
+                            tracing::debug!(
+                                "PEX: learned {added} new peer address(es) from {peer_addr}"
+                            );
                         }
                     }
                     other => {
@@ -5399,6 +5546,21 @@ mod tests {
         );
         assert_eq!(
             peer_violation_score(&DomError::Orphan("missing parent".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn address_flooding_maps_to_address_flooding_score() {
+        assert_eq!(
+            peer_violation_score(&DomError::PolicyRejected(
+                "address flooding: more than 4 Addr messages in 600s [ban+30]".into()
+            )),
+            Some(ban_scores::ADDRESS_FLOODING)
+        );
+        // Other policy rejections must NOT inherit the flooding score.
+        assert_eq!(
+            peer_violation_score(&DomError::PolicyRejected("mempool full".into())),
             None
         );
     }
