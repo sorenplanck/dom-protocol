@@ -154,5 +154,8 @@ async fn restored_wallet_recovers_preexisting_coinbases_via_node_rescan() {
         digest_after,
         "rescan é idempotente: estado reconstruído estável entre execuções"
     );
-    assert!(again.matched_persisted, "segundo rescan já bate o persistido");
+    assert!(
+        again.matched_persisted,
+        "segundo rescan já bate o persistido"
+    );
 }
