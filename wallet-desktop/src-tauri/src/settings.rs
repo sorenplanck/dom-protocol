@@ -28,7 +28,7 @@ pub enum NetworkKind {
 /// All knobs the Settings + Node tabs expose. Serializable so the frontend can
 /// round-trip it; NEVER contains the wallet password (that lives only in the
 /// backend, transiently — see `commands.rs`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NodeSettings {
     pub network: NetworkKind,
     /// CSV becomes Vec on the way in; we store the parsed list.
@@ -155,6 +155,18 @@ impl NodeSettings {
         if !seed_peers.is_empty() {
             let seed_peer_count = seed_peers.len();
             config.seed_peers = seed_peers;
+            // When the user supplies explicit seed peers we treat them as the
+            // authoritative bootstrap set and DISABLE DNS-seed discovery. Note
+            // that clearing `config.dns_seeds` alone is NOT enough: an empty
+            // list makes `dom_wire::dns_seed::resolve_seeds` fall back to the
+            // hardcoded network DNS seeds, and the testnet seed
+            // (`testnet-seed1.dom-protocol.org`) resolves to the bootstrap host
+            // which would then be dialed on the default P2P port (33370). The
+            // explicit flag makes the connector skip DNS resolution entirely,
+            // so a custom seed (e.g. a local tunnel `127.0.0.1:18443`) is the
+            // only bootstrap source. Scoped to "seed peers present" so the
+            // public mainnet/testnet defaults keep DNS discovery.
+            config.disable_dns_seeds = true;
             // Defense-in-depth for the P2P "peers stays 0" bug. The peer
             // connector only dials while `PeerManager::needs_outbound()` is
             // true, and that is `outbound+pending < min(min_outbound,
@@ -484,6 +496,55 @@ mod tests {
     /// so `PeerManager::needs_outbound()` can ever be true and the connector
     /// actually dials. Without the guard a `min_outbound == 0` config silently
     /// disables all outbound dialing.
+    fn testnet_settings_with_seed(seed: Vec<String>) -> NodeSettings {
+        NodeSettings {
+            network: NetworkKind::Testnet,
+            seed_peers: seed,
+            p2p_listen_addr: "0.0.0.0:33370".into(),
+            rpc_listen_addr: "127.0.0.1:33372".into(),
+            data_dir: std::env::temp_dir()
+                .join("dom-settings-test-testnet")
+                .to_string_lossy()
+                .into_owned(),
+            miner_wallet_path: None,
+            mine: false,
+            miner_threads: 1,
+            miner_throttle_ms: 10,
+            metrics_listen_addr: Some("127.0.0.1:33371".into()),
+            log_level: "debug".into(),
+        }
+    }
+
+    /// Etapa 1: a custom seed peer (e.g. the local SSH tunnel `127.0.0.1:18443`)
+    /// must be PRESERVED and must DISABLE DNS-seed discovery, so the testnet DNS
+    /// seed cannot reintroduce the bootstrap host on the default P2P port
+    /// (`192.153.57.211:33370`).
+    #[test]
+    fn custom_seed_peers_disable_dns_seeds_and_preserve_tunnel() {
+        // Sanity: testnet ships a non-empty DNS seed by default, so disabling it
+        // is a deliberate, observable change rather than a no-op.
+        assert!(!NodeConfig::testnet().dns_seeds.is_empty());
+
+        let settings = testnet_settings_with_seed(vec!["127.0.0.1:18443".into()]);
+        let config = settings.to_node_config(None).expect("config");
+        assert_eq!(config.seed_peers, vec!["127.0.0.1:18443".to_string()]);
+        assert!(
+            config.disable_dns_seeds,
+            "custom seed peers must disable DNS-seed discovery"
+        );
+    }
+
+    /// Without a custom seed peer the default behavior is unchanged: DNS-seed
+    /// discovery stays enabled and the testnet DNS seed list is preserved.
+    #[test]
+    fn no_custom_seed_peers_keep_dns_seeds_enabled() {
+        let settings = testnet_settings_with_seed(vec![]);
+        let config = settings.to_node_config(None).expect("config");
+        assert!(config.seed_peers.is_empty());
+        assert!(!config.disable_dns_seeds);
+        assert_eq!(config.dns_seeds, NodeConfig::testnet().dns_seeds);
+    }
+
     #[test]
     fn seed_peers_force_at_least_one_outbound() {
         let settings = regtest_settings_with_seed(vec!["127.0.0.1:33371".into()]);
@@ -596,7 +657,6 @@ mod tests {
             "Miner reward wallet is invalid or cannot be opened."
         );
     }
-
     #[test]
     fn miner_thread_limit_is_normalized_safely() {
         let mut settings = regtest_settings_with_seed(vec![]);
