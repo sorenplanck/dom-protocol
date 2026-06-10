@@ -18,3 +18,4 @@ pub mod task_supervisor;
 pub(crate) mod test_dir;
 pub mod time_health;
 pub mod wallet_helpers;
+pub mod wallet_scan;
