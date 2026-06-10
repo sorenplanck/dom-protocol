@@ -1,5 +1,9 @@
 # DOM Release Blockers — Updated after External Audit
 
+Last reconciled against code: 2026-06-10 — see `docs/RECONCILIATION_REPORT.md`
+(the 5 `[MAINNET]` blockers below were re-verified against the real source; status
+and residuals updated to match the code, with `file:line` evidence in that report).
+
 Last updated: 2026-05-24 (post-B7 — `Network::Regtest` added; unblocks local two-miner integration tests including Doc 8 spend_e2e. Magic byte / port / maturity / RandomX-flags isolated; consensus logic unchanged. See `docs/REGTEST.md`.)
 
 **B7 follow-up (2026-05-24):** two consensus bugs surfaced by spend_e2e re-enablement and were fixed:
@@ -51,6 +55,8 @@ weakening their assertions.
 ✅ RESOLVED — fixed in codebase
 🔴 OPEN — not yet resolved
 🔧 PARTIAL — partially resolved, residual issue documented
+🟠 OPEN (OPERATIONAL) — code mechanism present; what remains is operational data /
+governance, not engineering
 
 ---
 
@@ -295,69 +301,149 @@ Test `max_supply_approximately_33m` verifies result is in [32.9M, 33.1M] DOM.
 
 ---
 
-## [MAINNET] RB-BAN-POLICY — Peer ban scoring never called
+## [MAINNET] RB-BAN-POLICY — Peer ban scoring
 
-**Severity: CRITICAL — DoS defense is decoration**
-**Status:** 🔴 OPEN
+**Severity: CRITICAL — DoS defense**
+**Status:** 🔧 PARTIAL (reconciled 2026-06-10)
 
-`add_ban_score` defined but zero call sites. Malformed messages, invalid PoW,
-wrong chain_id — none increment the ban score.
+**Correction:** the original "`add_ban_score` defined but zero call sites" is FALSE.
+Scoring IS wired and enforced:
+- `record_peer_violation` / `record_pending_peer_violation` are called at ~14
+  rejection points in `crates/dom-node/src/node.rs` (handshake/hello timeout,
+  malformed frame, second Hello, GetHeaders/GetBlockData parse errors, block/tx
+  validation errors, etc.); mapping in `peer_violation_score`
+  (`node.rs:1712-1731`).
+- Enforcement: `PeerInfo::add_ban_score` (`crates/dom-wire/src/peer.rs:84-92`) sets
+  `PeerState::Banned` at `BAN_THRESHOLD=100` and the node drops the connection.
+- Persistence: `persist_peer_reputation_state` + `PEER_REPUTATION_METADATA_KEY`
+  store reputation in LMDB and reload on restart.
+- Applied as specced: `Malformed → +20`, `WRONG_CHAIN_ID → +100`.
 
-**Required:** Call `add_ban_score` at every message rejection point with scores:
-- Malformed message: +20
-- Invalid PoW: +50
-- Wrong chain_id: +100 (immediate ban)
-- Address flooding: +30 + rate limit
-- Invalid signature: +25
+**Residual (what still differs from the spec above):**
+- **Score granularity.** `INVALID_POW(50)`, `INVALID_SIGNATURE(25)`,
+  `INVALID_TX_STRUCTURE(15)` are defined (`peer.rs:11,17,19`) but NOT mapped —
+  invalid PoW/signature/block fall into the catch-all `Invalid(_) →
+  PROTOCOL_VIOLATION(10)` (`node.rs:1729`). They ARE scored, but at +10 instead of
+  the higher per-class weights.
+- **Address flooding.** `ADDRESS_FLOODING(+30)` is not applied; `Command::Addr` has
+  no handler in the message loop (falls into `other => ignoring`, `node.rs:~4015`),
+  so there is no ADDR rate limiting.
+- **No decay/expiry for a registered peer.** Pre-registration penalties expire
+  (`PENDING_PENALTY_TTL_SECS=15min`, `crates/dom-wire/src/manager.rs:18-21`), but a
+  registered peer's `ban_score` has no time-based decay / expire timestamp — once
+  banned, it persists across restart.
 
-Persist bans in LMDB with expire timestamp.
+**Required to close:** map the per-class scores; wire `Command::Addr` + ADDR rate
+limiting (ties into RB-DNS-SEEDS); add ban decay/expire timestamp.
 
 ---
 
-## [MAINNET] RB-HANDSHAKE-TIMEOUT — Slowloris DoS via no I/O timeout
+## RB-HANDSHAKE-TIMEOUT — Slowloris DoS via no I/O timeout
 
 **Severity: CRITICAL**
-**Status:** 🔴 OPEN
+**Status:** ✅ RESOLVED (reconciled 2026-06-10)
 
-`read_framed` has no timeout. 125 attackers each holding a half-open connection
-exhaust `MAX_INBOUND_CONNECTIONS`.
-
-**Required:** `tokio::time::timeout(Duration::from_secs(10), read_framed(...))` 
-in handshake, `60s` idle timeout in message loop.
+This previously-duplicated `[MAINNET] 🔴 OPEN` entry was obsolete and contradicted
+the resolved entry below. The code confirms the fix: `HANDSHAKE_TIMEOUT_SECS=10`
+(`crates/dom-wire/src/handshake.rs:20`) wraps both `perform_handshake_initiator`
+and `_responder` in `tokio::time::timeout` (`:116-121`, `:163-168`), and
+`NoiseCodec::recv` enforces `IDLE_TIMEOUT_SECS=60` per frame
+(`crates/dom-wire/src/codec.rs:125-135`). Timeout returns `PolicyRejected`
+(non-bannable — a slow peer is not a malicious one). See the canonical resolved
+section "[TESTNET] RB-HANDSHAKE-TIMEOUT — Reclassified from Mainnet to Testnet"
+below.
 
 ---
 
-## [MAINNET] RB-DNS-SEEDS — DNS seeds undefined
+## [MAINNET] RB-DNS-SEEDS — Bootstrap discovery
 
 **Severity: CRITICAL for bootstrap security**
-**Status:** 🔴 OPEN
+**Status:** 🟠 OPEN (OPERATIONAL) (reconciled 2026-06-10)
 
-No domains specified, no governance, no hardcoded fallback IPs.
+**Correction:** the resolution *mechanism* exists and is wired into bootstrap:
+- `crates/dom-wire/src/dns_seed.rs` — `resolve_seeds(mainnet, port, custom_seeds)`
+  resolves via the system resolver, accepts custom seeds, and falls back to
+  hardcoded IPs. `MAINNET_DNS_SEEDS` lists 5 domains, `TESTNET_DNS_SEEDS` 2.
+- `NodeConfig` has the fields (`crates/dom-config/src/lib.rs:88,98,100`):
+  `dns_seeds`, `disable_dns_seeds`, `seed_peers`; mainnet default lists 2 domains
+  (`:159-162`).
+- Wired at startup: `resolve_configured_dns_seeds` (`node.rs:2302`) is called on
+  boot (`:1048`) and extended with `seed_peers` (`:1051`).
 
-**Required:** RFC-0011 "Bootstrap Discovery" with ≥5 independent seed operators,
-hardcoded fallback IPs, ADDR rate limiting, DNSSEC guidance.
+**Residual (genuinely open — operational/governance, not code):**
+- The `seed*.dom-protocol.org` domains are placeholders — not yet operated /
+  published in DNS by independent operators.
+- `MAINNET_SEED_IPS` is empty (`dns_seed.rs` literal comment "To be filled after
+  genesis") — no hardcoded fallback IPs.
+- Governance (≥5 independent operators) and DNSSEC guidance are not decided.
+- ADDR rate limiting is absent (shares the gap with RB-BAN-POLICY residual).
+
+This is the only one of the five `[MAINNET]` blockers that genuinely blocks a
+public network today — but as a **launch/operational** task, not engineering.
+
+**Required:** stand up real seeds (DNS or IPs) and populate the lists; formal
+RFC-0011 "Bootstrap Discovery" (≥5 operators, fallback IPs, ADDR rate limiting,
+DNSSEC guidance).
 
 ---
 
-## [MAINNET] RB-WALLET-SLATE — Wallet slate protocol not specified
+## [MAINNET] RB-WALLET-SLATE — Wallet slate protocol
 
-**Severity: IMPORTANT — no interactive payment protocol**
-**Status:** 🔴 OPEN
+**Severity: IMPORTANT — interactive payment protocol**
+**Status:** 🔧 PARTIAL (reconciled 2026-06-10)
 
-`dom-wallet` is empty. No RFC for slate format, rounds, replay protection, timeout.
+**Correction:** "`dom-wallet` is empty" is FALSE, and the design decision was
+already made and implemented:
+- The model is **interactive Mimblewimble (Grin-style)** — decided in code (round
+  partial-signature flow; no ECDH/stealth addresses).
+- Slate type: `crates/dom-tx/src/slate.rs:41` (`version, chain_id, amount, fee,
+  lock_height`, sender/recipient inputs/outputs, `*_public_excess`,
+  `*_public_nonce`, `*_partial_sig`).
+- 3-step flow implemented: `create_send_slate` (`crates/dom-wallet/src/wallet.rs:1163`)
+  → `receive_slate` (`:1292`) → `finalize_slate` (`:1395`), aggregating via
+  `schnorr_partial_sign` / `schnorr_aggregate_sigs` / `schnorr_add_public_keys`.
+- Replay protection: `chain_id` bound in the Schnorr challenge.
+- Tested e2e + adversarial:
+  `finalize_slate_end_to_end_builds_valid_aggregate_transaction` (`wallet.rs:2695`),
+  cross-chain / non-owned / amount-fee / output / partial-sig tamper rejection
+  (`:2756`, `:2820`, …).
 
-**Required:** Decision between Grin-style interactive vs ECDH stealth addresses,
-then RFC + implementation.
+**Residual:**
+- Formal RFC for the slate (document) is missing — only code doc-comments exist.
+- No slate timeout/expiry — reserved inputs are released only via manual
+  `cancel_tx`.
+- Transport / async exchange UX (file/QR/endpoint between sender and recipient) is
+  out of the slate's own scope; the finished tx relays through the normal tx path.
+
+**Required to close:** write the slate RFC; add slate timeout/expiry; (optionally)
+a transport/UX layer.
 
 ---
 
 ## [MAINNET] RB-IBD — Initial Block Download
 
 **Severity: CRITICAL**
-**Status:** 🔧 PARTIAL (ibd.rs skeleton present, RFC missing)
+**Status:** 🔧 PARTIAL (reconciled 2026-06-10)
 
-**Required:** RFC with headers-first mandate, minimum work checkpoint, stalling detection,
-parallel block download, hardcoded checkpoints.
+**Correction:** "skeleton present" understates it — `crates/dom-chain/src/ibd.rs`
+is a real implementation (~867 lines): `IbdPhase`/`IbdInterruption`/`IbdControl`,
+a resumable, LMDB-persisted `PersistedIbdState` (`save/load/clear`,
+`from_persisted`), headers-first `process_headers` (`:433`), stalling/timeout
+handling (`note_round_progress`/`note_empty_response`, `MAX_IBD_RETRY_ATTEMPTS=3`),
+and batched block download via `MAX_GETBLOCKDATA_HASHES` in `dom-node`. Tested by
+`ibd_adversarial.rs` (invalid/out-of-order/flood/memory-growth),
+`ibd_persistence.rs` (resume), and `ibd_two_node.rs` (2-node, env-gated by RandomX).
+
+**Residual:**
+- Formal IBD RFC (document) is missing — this is the doc's actual gap.
+- No hardcoded checkpoints / minimum-work checkpoint (grep for `CHECKPOINT` in
+  `dom-core`/`dom-config`/`ibd.rs` is empty; `checkpoint_tip_hash`, `ibd.rs:93`, is
+  a per-session resume anchor, not a global trust checkpoint).
+- Parallel multi-peer block download not verified (current path is sequential
+  batches).
+
+**Required to close:** write the IBD RFC; add hardcoded checkpoints / minimum-work
+checkpoint; (optionally) parallel multi-peer download.
 
 ---
 
@@ -386,6 +472,10 @@ Post-B5 sweep across the entire workspace produced the following observations:
   invokes), RB-DNS-SEEDS, RB-WALLET-SLATE (Doc 7), RB-IBD RFC,
   RB-MUSIG2 (mandatory-vs-deferred decision), RB-GENESIS-ANCHOR
   mainnet finalization (testnet anchor is already frozen).
+  *[Superseded 2026-06-10: the "no call sites for `add_ban_score`" observation is
+  no longer accurate — scoring is wired, enforced and persisted. RB-BAN-POLICY,
+  RB-WALLET-SLATE and RB-IBD were re-classified after code reconciliation; see
+  their sections above and `docs/RECONCILIATION_REPORT.md`.]*
 * **Local-dev blocker (not a security/consensus issue):** B7 added
   `Network::Regtest` with `REGTEST_COINBASE_MATURITY = 1` and the
   cache-only RandomX VM (~256 MB instead of ~2 GB), which removed the
@@ -413,11 +503,11 @@ Post-B5 sweep across the entire workspace produced the following observations:
 | RB-ASERT-ARITH | ASERT 256-bit arithmetic | Testnet | 🔧 PARTIAL (U256 correct, tests strict) |
 | RB-SUM-COMMITS | Balance eq identity crash | Testnet | ✅ RESOLVED |
 | RB-MAX-SUPPLY | Supply constant consistency | Testnet | ✅ RESOLVED |
-| RB-BAN-POLICY | Peer ban enforcement | Mainnet | 🔴 OPEN |
-| RB-HANDSHAKE-TIMEOUT | Slowloris DoS | Mainnet | 🔴 OPEN |
-| RB-DNS-SEEDS | Bootstrap discovery | Mainnet | 🔴 OPEN |
-| RB-WALLET-SLATE | Wallet slate protocol | Mainnet | 🔴 OPEN |
-| RB-IBD | Initial block download | Mainnet | 🔧 PARTIAL |
+| RB-BAN-POLICY | Peer ban enforcement | Mainnet | 🔧 PARTIAL (wired+persisted; residual: score granularity, ADDR flooding, ban decay) |
+| RB-HANDSHAKE-TIMEOUT | Slowloris DoS | Mainnet | ✅ RESOLVED (10s handshake + 60s idle) |
+| RB-DNS-SEEDS | Bootstrap discovery | Mainnet | 🟠 OPEN (OPERATIONAL) (mechanism done; real seeds + governance pending) |
+| RB-WALLET-SLATE | Wallet slate protocol | Mainnet | 🔧 PARTIAL (interactive slate implemented+tested; residual: RFC, timeout) |
+| RB-IBD | Initial block download | Mainnet | 🔧 PARTIAL (implemented+tested; residual: RFC, hardcoded checkpoints) |
 
 ---
 
