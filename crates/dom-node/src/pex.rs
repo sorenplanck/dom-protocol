@@ -14,7 +14,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use dom_store::PeerAddr;
 
 /// Maximum peers to return in a single Addr response.
-pub const MAX_ADDR_RESPONSE: usize = 1_000;
+/// Same bound as the wire parser, so everything we share always decodes.
+pub const MAX_ADDR_RESPONSE: usize = dom_wire::message::MAX_ADDRS_PER_MESSAGE;
 
 /// Maximum age of peer addresses to share (7 days in seconds).
 pub const MAX_PEER_AGE_SECS: u64 = 7 * 24 * 3600;
@@ -119,6 +120,33 @@ impl PexManager {
         self.record_getaddr_at(peer_id, unix_now());
     }
 
+    /// Check if we should ANSWER a GetAddr from this peer (serve-side
+    /// rate-limit). Reuses the same bounded cooldown table as the send side,
+    /// under a distinct key namespace, so a peer cannot make us build Addr
+    /// responses more than once per GETADDR_COOLDOWN_SECS.
+    pub fn should_serve_getaddr(&self, peer_id: &str) -> bool {
+        self.should_serve_getaddr_at(peer_id, unix_now())
+    }
+
+    /// Record that we answered a GetAddr from this peer.
+    pub fn record_getaddr_served(&mut self, peer_id: &str) {
+        self.record_getaddr_served_at(peer_id, unix_now());
+    }
+
+    fn should_serve_getaddr_at(&self, peer_id: &str, now: u64) -> bool {
+        self.should_getaddr_at(&Self::served_key(peer_id), now)
+    }
+
+    fn record_getaddr_served_at(&mut self, peer_id: &str, now: u64) {
+        self.record_getaddr_at(&Self::served_key(peer_id), now);
+    }
+
+    /// Namespace serve-side cooldown entries away from send-side ones.
+    /// Peer ids are SocketAddr strings, which never start with "served/".
+    fn served_key(peer_id: &str) -> String {
+        format!("served/{peer_id}")
+    }
+
     /// Process incoming Addr message — add peers to our known set.
     pub fn process_addr_message(&mut self, addrs: Vec<String>) -> usize {
         let mut added = 0usize;
@@ -200,61 +228,71 @@ impl PexManager {
     }
 }
 
-/// Serialize Addr payload — list of address strings.
-pub fn encode_addr_payload(addrs: &[&PeerAddr]) -> Vec<u8> {
-    let mut out = Vec::new();
-    // Count (u16)
-    let count = addrs.len().min(MAX_ADDR_RESPONSE) as u16;
-    out.extend_from_slice(&count.to_le_bytes());
-    for peer in addrs.iter().take(count as usize) {
-        // Each addr: u8 length + bytes + u64 last_seen
-        let addr_bytes = peer.addr.as_bytes();
-        out.push(addr_bytes.len() as u8);
-        out.extend_from_slice(addr_bytes);
-        out.extend_from_slice(&peer.last_seen.to_le_bytes());
+/// Window for counting inbound Addr messages from one peer (same as the
+/// GetAddr cooldown: an honest peer triggers at most one solicited Addr per
+/// window, plus occasional unsolicited gossip).
+pub const ADDR_FLOOD_WINDOW_SECS: u64 = GETADDR_COOLDOWN_SECS;
+
+/// Addr messages tolerated per window per connection before each extra one
+/// scores ADDRESS_FLOODING (+30): 1 solicited response + 3 unsolicited gossip.
+/// At +30 each, a flooder is banned (score >= 100) on the 8th message.
+pub const MAX_ADDR_MESSAGES_PER_WINDOW: u32 = 4;
+
+/// Per-connection rate limiter for inbound Addr messages.
+///
+/// Fixed-window counter: cheap, no allocation, and the worst-case burst across
+/// a window boundary (2x the limit) still bans a flooder within seconds.
+#[derive(Debug, Default)]
+pub struct AddrFloodTracker {
+    window_start: u64,
+    count: u32,
+}
+
+impl AddrFloodTracker {
+    /// Create a tracker with an empty window.
+    pub fn new() -> Self {
+        Self::default()
     }
-    out
+
+    /// Register one inbound Addr message. Returns true if it is within the
+    /// per-window budget, false if the peer is flooding.
+    pub fn allow(&mut self) -> bool {
+        self.allow_at(unix_now())
+    }
+
+    /// Clock-injected variant for deterministic tests.
+    pub fn allow_at(&mut self, now: u64) -> bool {
+        if now.saturating_sub(self.window_start) >= ADDR_FLOOD_WINDOW_SECS {
+            self.window_start = now;
+            self.count = 0;
+        }
+        self.count = self.count.saturating_add(1);
+        self.count <= MAX_ADDR_MESSAGES_PER_WINDOW
+    }
+}
+
+/// Serialize Addr payload — list of address strings.
+/// Thin wrapper over the wire-level `AddrPayload` (single parser, no drift).
+pub fn encode_addr_payload(addrs: &[&PeerAddr]) -> Vec<u8> {
+    let entries: Vec<dom_wire::message::AddrEntry> = addrs
+        .iter()
+        .take(MAX_ADDR_RESPONSE)
+        .filter(|p| p.addr.len() <= u8::MAX as usize)
+        .map(|p| dom_wire::message::AddrEntry {
+            addr: p.addr.clone(),
+            last_seen: p.last_seen,
+        })
+        .collect();
+    dom_wire::message::AddrPayload { entries }
+        .to_bytes()
+        .expect("bounded, length-filtered entries always encode")
 }
 
 /// Deserialize Addr payload.
+/// Thin wrapper over the wire-level `AddrPayload` (single parser, no drift).
 pub fn decode_addr_payload(data: &[u8]) -> Result<Vec<String>, dom_core::DomError> {
-    if data.len() < 2 {
-        return Err(dom_core::DomError::Malformed(
-            "addr payload too short".into(),
-        ));
-    }
-    let count = u16::from_le_bytes([data[0], data[1]]) as usize;
-    if count > MAX_ADDR_RESPONSE {
-        return Err(dom_core::DomError::Malformed(
-            "addr count exceeds limit".into(),
-        ));
-    }
-    let mut addrs = Vec::with_capacity(count);
-    let mut pos = 2usize;
-
-    for _ in 0..count {
-        if pos >= data.len() {
-            return Err(dom_core::DomError::Malformed(
-                "addr payload truncated".into(),
-            ));
-        }
-        let len = data[pos] as usize;
-        pos += 1;
-        if pos + len + 8 > data.len() {
-            return Err(dom_core::DomError::Malformed(
-                "addr payload truncated".into(),
-            ));
-        }
-        let addr = String::from_utf8_lossy(&data[pos..pos + len]).to_string();
-        pos += len + 8; // skip last_seen timestamp
-        addrs.push(addr);
-    }
-
-    if pos != data.len() {
-        return Err(dom_core::DomError::Malformed("addr trailing bytes".into()));
-    }
-
-    Ok(addrs)
+    let payload = dom_wire::message::AddrPayload::from_bytes(data)?;
+    Ok(payload.entries.into_iter().map(|e| e.addr).collect())
 }
 
 fn unix_now() -> u64 {
@@ -295,6 +333,51 @@ mod tests {
         assert!(pex.should_getaddr("peer1"));
         pex.record_getaddr("peer1");
         assert!(!pex.should_getaddr("peer1"));
+    }
+
+    #[test]
+    fn serve_getaddr_cooldown_suppresses_second_within_window() {
+        let mut pex = PexManager::new(1000);
+        assert!(pex.should_serve_getaddr_at("1.2.3.4:5", 1_000));
+        pex.record_getaddr_served_at("1.2.3.4:5", 1_000);
+        // Second GetAddr from the same peer inside the window: suppressed.
+        assert!(!pex.should_serve_getaddr_at("1.2.3.4:5", 1_000 + GETADDR_COOLDOWN_SECS));
+        // Window elapsed: served again.
+        assert!(pex.should_serve_getaddr_at("1.2.3.4:5", 1_001 + GETADDR_COOLDOWN_SECS));
+    }
+
+    #[test]
+    fn serve_and_send_cooldowns_are_independent() {
+        let mut pex = PexManager::new(1000);
+        pex.record_getaddr_at("1.2.3.4:5", 1_000);
+        // We sent GetAddr to the peer; that must not block us from ANSWERING
+        // the peer's own GetAddr (and vice versa).
+        assert!(pex.should_serve_getaddr_at("1.2.3.4:5", 1_000));
+        pex.record_getaddr_served_at("1.2.3.4:5", 1_000);
+        assert!(!pex.should_getaddr_at("1.2.3.4:5", 1_000));
+        assert!(!pex.should_serve_getaddr_at("1.2.3.4:5", 1_000));
+    }
+
+    #[test]
+    fn addr_flood_tracker_allows_budget_then_rejects() {
+        let mut tracker = AddrFloodTracker::new();
+        for i in 0..MAX_ADDR_MESSAGES_PER_WINDOW {
+            assert!(tracker.allow_at(1_000), "message {i} within budget");
+        }
+        assert!(
+            !tracker.allow_at(1_000),
+            "message beyond budget must reject"
+        );
+        assert!(!tracker.allow_at(1_000 + ADDR_FLOOD_WINDOW_SECS - 1));
+    }
+
+    #[test]
+    fn addr_flood_tracker_resets_after_window() {
+        let mut tracker = AddrFloodTracker::new();
+        for _ in 0..=MAX_ADDR_MESSAGES_PER_WINDOW {
+            tracker.allow_at(1_000);
+        }
+        assert!(tracker.allow_at(1_000 + ADDR_FLOOD_WINDOW_SECS));
     }
 
     #[test]
