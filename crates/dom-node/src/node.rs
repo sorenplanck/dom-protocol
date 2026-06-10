@@ -18,7 +18,7 @@ use dom_core::Timestamp;
 use dom_mempool::Mempool;
 use dom_store::utxo::UtxoEntry;
 use dom_store::DomStore;
-use dom_wallet::Wallet;
+use dom_wallet::WalletDir;
 use dom_wire::dandelion::DandelionRouter;
 use dom_wire::manager::PeerManager;
 use std::collections::HashMap;
@@ -59,10 +59,14 @@ pub struct DomNode {
     /// matches StemEnvelope.target_peer actually forwards to its peer.
     /// Senders: submit_tx and Command::Tx handler when route decides Stem.
     pub tx_stem_tx: tokio::sync::broadcast::Sender<dom_wire::dandelion::StemEnvelope>,
-    /// Optional wallet for mining rewards.
+    /// Optional wallet for mining rewards, held as an opened [`WalletDir`] —
+    /// the canonical on-disk format the CLI (`dom-wallet init`) and the
+    /// desktop wallet create — so the directory's exclusive lock and WAL
+    /// journal stay alive for the node's lifetime.
     /// If Some, miner uses wallet.build_coinbase() for deterministic blinding.
-    /// If None, miner falls back to random blinding (DOM-SEC-004 unresolved).
-    pub wallet: Option<Arc<Mutex<Wallet>>>,
+    /// If None, mining on public networks stays disabled (DOM-SEC-004
+    /// fail-closed).
+    pub wallet: Option<Arc<Mutex<WalletDir>>>,
     /// Node metrics for Prometheus export.
     pub metrics: Arc<Metrics>,
     /// Future block queue for soft buffer (Doc 4.5 mitigation 1).
@@ -98,7 +102,7 @@ struct NodeServices {
     future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
     missing_blocks: Arc<Mutex<MissingBlockTracker>>,
     orphan_pool: Arc<Mutex<RuntimeOrphanPool>>,
-    wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+    wallet: Option<Arc<Mutex<dom_wallet::WalletDir>>>,
     state_events: Arc<Notify>,
     pex: Arc<Mutex<crate::pex::PexManager>>,
 }
@@ -401,31 +405,33 @@ impl DomNode {
         let (tx_stem_tx, _) =
             tokio::sync::broadcast::channel::<dom_wire::dandelion::StemEnvelope>(256);
 
-        // Load or create wallet if configured
+        // Load the wallet if configured (DOM-SEC-004: mining requires one).
+        //
+        // The CLI (`dom-wallet init`) and the desktop wallet create wallets
+        // as WalletDir DIRECTORIES (wallet.dat + config.json + wallet.lock +
+        // journal) — the canonical on-disk format. The node only OPENS such a
+        // directory; it never creates a wallet itself: the old Wallet::create
+        // fallback produced a LEGACY keychain with no recoverable seed phrase,
+        // silently mining rewards into a wallet that cannot be restored. A
+        // missing or unopenable wallet therefore leaves mining disabled
+        // (fail-closed) instead of creating anything.
         let wallet = if let (Some(wallet_path), Some(wallet_password)) =
             (&config.wallet_path, &config.wallet_password)
         {
-            use crate::wallet_helpers::wallet_network_from_config;
-            let wallet_net = wallet_network_from_config(config.network);
             let path = Path::new(wallet_path);
-
-            match Wallet::open(path, wallet_password) {
-                Ok(w) => {
-                    info!("Wallet loaded from {:?}", path);
-                    Some(Arc::new(Mutex::new(w)))
+            match WalletDir::open(path, wallet_password) {
+                Ok(wallet_dir) => {
+                    info!("Wallet loaded from {:?}", wallet_dir.path());
+                    Some(Arc::new(Mutex::new(wallet_dir)))
                 }
-                Err(_) => {
-                    // Create new wallet if doesn't exist
-                    match Wallet::create(path, wallet_password, wallet_net, &genesis_hash) {
-                        Ok(w) => {
-                            info!("New wallet created at {:?}", path);
-                            Some(Arc::new(Mutex::new(w)))
-                        }
-                        Err(e) => {
-                            warn!("Failed to create wallet: {:?}. Mining without wallet (DOM-SEC-004 unresolved).", e);
-                            None
-                        }
-                    }
+                Err(e) => {
+                    warn!(
+                        "Could not open wallet directory {path:?}: {e}. Mining stays \
+                         disabled without a wallet (DOM-SEC-004 fail-closed). Create a \
+                         deterministic wallet with `dom-wallet init` or the desktop \
+                         wallet and point wallet_path at that directory."
+                    );
+                    None
                 }
             }
         } else {
@@ -2559,7 +2565,7 @@ struct IbdRuntimeContext<'a> {
     mempool: Arc<Mutex<Mempool>>,
     future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
     metrics: Arc<Metrics>,
-    wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+    wallet: Option<Arc<Mutex<dom_wallet::WalletDir>>>,
     state_events: Arc<Notify>,
 }
 
@@ -2755,7 +2761,8 @@ async fn resume_ibd_block_sync(
                 )
                 .await;
                 if let Some(ref wallet_arc) = runtime.wallet {
-                    let mut w = wallet_arc.lock().await;
+                    let mut wallet_dir = wallet_arc.lock().await;
+                    let w = wallet_dir.wallet_mut();
                     match connect_result {
                         dom_chain::ConnectResult::BestChain => {
                             w.apply_canonical_block_with_hash(
@@ -2904,7 +2911,7 @@ async fn run_ibd_session(
     peer_best_height: u64,
     future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
     metrics: Arc<Metrics>,
-    wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+    wallet: Option<Arc<Mutex<dom_wallet::WalletDir>>>,
     state_events: Arc<Notify>,
 ) -> Result<(), DomError> {
     let our_height = chain.lock().await.tip_height.0;
@@ -3277,7 +3284,7 @@ async fn ibd_sync_round(
     peer_addr: std::net::SocketAddr,
     future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
     metrics: Arc<Metrics>,
-    wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+    wallet: Option<Arc<Mutex<dom_wallet::WalletDir>>>,
     state_events: Arc<Notify>,
     ibd: &mut dom_chain::IbdState,
 ) -> Result<bool, DomError> {
@@ -3712,7 +3719,9 @@ async fn message_loop(
                                             match connect_result {
                                                 dom_chain::ConnectResult::BestChain => {
                                                     if let Some(ref wallet_arc) = svc.wallet {
-                                                        let mut w = wallet_arc.lock().await;
+                                                        let mut wallet_dir =
+                                                            wallet_arc.lock().await;
+                                                        let w = wallet_dir.wallet_mut();
                                                         if let Err(e) =
                                                             w.apply_canonical_block_with_hash(
                                                                 &txs_for_scan,
@@ -3728,7 +3737,9 @@ async fn message_loop(
                                                 }
                                                 dom_chain::ConnectResult::Reorg(delta) => {
                                                     if let Some(ref wallet_arc) = svc.wallet {
-                                                        let mut w = wallet_arc.lock().await;
+                                                        let mut wallet_dir =
+                                                            wallet_arc.lock().await;
+                                                        let w = wallet_dir.wallet_mut();
                                                         if let Err(e) = w.rollback_to(
                                                             delta.common_ancestor_height,
                                                         ) {

@@ -8,8 +8,25 @@
 // budget within test deadlines. See spend_e2e.rs header for the full
 // classification context.
 
+use dom_core::Hash256;
 use dom_integration_tests::helpers::*;
+use dom_wallet::{Bip39Seed, Network, WalletDir};
 use std::time::Duration;
+
+/// O nó não cria mais wallets (DOM-SEC-004): pré-cria a WalletDir
+/// determinística canônica, como o CLI/desktop fazem, e solta o lock.
+fn create_wallet_dir(path: &str, password: &str) {
+    let _ = std::fs::remove_dir_all(path);
+    let seed = Bip39Seed::generate_new().expect("seed");
+    WalletDir::create_from_seed(
+        std::path::Path::new(path),
+        password,
+        Network::Regtest,
+        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+        &seed,
+    )
+    .expect("create wallet dir");
+}
 
 #[tokio::test]
 #[ignore = "env-blocked-wsl — needs VPS or dedicated 8GB+ machine"]
@@ -18,8 +35,8 @@ async fn test_wallet_coinbase_reward() {
     config_a.wallet_path = Some("/tmp/dom-test-wallet-a.dom".into());
     config_a.wallet_password = Some("password-a".into());
 
-    // Cleanup any prior state
-    let _ = std::fs::remove_file("/tmp/dom-test-wallet-a.dom");
+    // Cleanup any prior state, then pre-create the canonical WalletDir.
+    create_wallet_dir("/tmp/dom-test-wallet-a.dom", "password-a");
 
     let node_a = spawn_node(config_a).await;
     tokio::spawn(node_a.clone().run());
@@ -32,7 +49,7 @@ async fn test_wallet_coinbase_reward() {
     let (chain_height, balance) = {
         let chain = node_a.chain.lock().await;
         let w = wallet_a.lock().await;
-        (chain.tip_height.0, w.balance(chain.tip_height.0))
+        (chain.tip_height.0, w.wallet().balance(chain.tip_height.0))
     };
 
     assert_eq!(chain_height, 2, "should be at height 2");
@@ -60,7 +77,7 @@ async fn test_wallet_coinbase_reward() {
 #[ignore = "env-blocked-wsl — needs VPS or dedicated 8GB+ machine"]
 async fn test_wallet_persists_across_restart() {
     let wallet_path = "/tmp/dom-test-wallet-persist.dom".to_string();
-    let _ = std::fs::remove_file(&wallet_path);
+    create_wallet_dir(&wallet_path, "pw");
     let data_dir = "/tmp/dom-test-persist".to_string();
     let _ = std::fs::remove_dir_all(&data_dir);
 
@@ -80,7 +97,7 @@ async fn test_wallet_persists_across_restart() {
         let wallet = node.wallet.as_ref().unwrap();
         let chain = node.chain.lock().await;
         let w = wallet.lock().await;
-        w.balance(chain.tip_height.0).immature
+        w.wallet().balance(chain.tip_height.0).immature
     };
 
     assert!(immature_first > 0, "first run should have immature balance");

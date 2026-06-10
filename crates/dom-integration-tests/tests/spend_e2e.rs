@@ -25,9 +25,26 @@
 //   - 65c6a2d: REGTEST_TRIVIAL_TARGET = MAX_TARGET_BYTES
 //   - a0dfbd2: stop overwriting chain.genesis_hash post-genesis
 
+use dom_core::Hash256;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_integration_tests::helpers::*;
+use dom_wallet::{Bip39Seed, Network, WalletDir};
 use std::time::Duration;
+
+/// O nó não cria mais wallets (DOM-SEC-004): pré-cria a WalletDir
+/// determinística canônica, como o CLI/desktop fazem, e solta o lock.
+fn create_wallet_dir(path: &str, password: &str) {
+    let _ = std::fs::remove_dir_all(path);
+    let seed = Bip39Seed::generate_new().expect("seed");
+    WalletDir::create_from_seed(
+        std::path::Path::new(path),
+        password,
+        Network::Regtest,
+        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+        &seed,
+    )
+    .expect("create wallet dir");
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "env-blocked-wsl — needs VPS or dedicated 8GB+ machine"]
@@ -43,7 +60,7 @@ async fn test_spend_e2e_cross_node_propagation() {
     config_a.wallet_password = Some("pw-a".into());
     config_a.rpc_listen_addr = Some("127.0.0.1:43480".into());
 
-    let _ = std::fs::remove_file("/tmp/dom-spend-e2e-wallet-a.dom");
+    create_wallet_dir("/tmp/dom-spend-e2e-wallet-a.dom", "pw-a");
     let _ = std::fs::remove_dir_all("/tmp/dom-test-spend-e2e-a");
 
     // ── Node B (peer that should receive the tx via Dandelion fluff) ──────
@@ -85,7 +102,7 @@ async fn test_spend_e2e_cross_node_propagation() {
         let wallet = node_a.wallet.as_ref().expect("A wallet");
         let w = wallet.lock().await;
         let chain = node_a.chain.lock().await;
-        let bal = w.balance(chain.tip_height.0);
+        let bal = w.wallet().balance(chain.tip_height.0);
         assert!(
             bal.confirmed > 0,
             "wallet A must hold a spendable (mature) coinbase under Regtest; got {:?}",
