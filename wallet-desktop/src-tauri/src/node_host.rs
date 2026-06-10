@@ -72,6 +72,13 @@ impl NodeHost {
         &self.rpc_token
     }
 
+    /// The running embedded node, if one is started. Used by the wallet rescan
+    /// path to scan the chain the node already has on disk (see
+    /// `DomNode::rescan_wallet_dir`). Returns `None` while stopped/starting.
+    pub async fn current_node(&self) -> Option<Arc<DomNode>> {
+        self.inner.lock().await.node.clone()
+    }
+
     pub async fn state(&self) -> NodeState {
         self.inner.lock().await.state
     }
