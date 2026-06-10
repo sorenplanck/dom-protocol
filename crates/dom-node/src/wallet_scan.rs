@@ -74,9 +74,9 @@ pub fn collect_chain_scan(
             }
         }
 
-        let total_fees_noms = block.total_fees().map_err(|e| {
-            DomError::Internal(format!("total fees at height {height}: {e}"))
-        })?;
+        let total_fees_noms = block
+            .total_fees()
+            .map_err(|e| DomError::Internal(format!("total fees at height {height}: {e}")))?;
 
         scan.insert(ScanBlock {
             height,
