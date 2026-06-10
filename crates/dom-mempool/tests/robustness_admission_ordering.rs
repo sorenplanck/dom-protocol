@@ -1,29 +1,25 @@
-//! FABLE5 robustness audit — mempool admission *ordering*.
+//! FABLE5-001 — mempool admission *ordering*, AFTER the fix.
 //!
-//! Finding FABLE5-001: `Mempool::accept_tx_with_chain_view` runs the full
-//! cryptographic transaction validation (`dom_consensus::validate_transaction`
-//! → Bulletproof range-proof verify + Schnorr kernel-signature verify) BEFORE
-//! the cheap in-memory gates: the duplicate-hash check and the min-relay-fee
-//! check both live in `accept_validated_tx`, which only runs *after* crypto
-//! succeeds (see `crates/dom-mempool/src/lib.rs:211-292`).
+//! Originally this file documented the vulnerability: full cryptographic
+//! validation (`validate_transaction` → Bulletproof + Schnorr) ran BEFORE the
+//! cheap admission gates (duplicate-hash, min-relay-fee), so a peer replaying a
+//! known tx forced repeated range-proof verification.
 //!
-//! Consequence: a peer that has observed a single valid transaction can replay
-//! its bytes repeatedly. Every replay forces the node to re-run a real
-//! Bulletproof verification before discovering, via the duplicate check, that
-//! it already holds the tx. The replay is rejected with
-//! `DomError::PolicyRejected("transaction already in mempool")`, and
-//! `peer_violation_score` (`crates/dom-node/src/node.rs:1712-1731`) maps that
-//! `PolicyRejected` variant to `None` — i.e. NO ban score. So the amplification
-//! is unbounded by the peer-scoring defence: crypto cost is paid every time and
-//! the peer is never banned for it.
+//! The fix (`Mempool::precheck_cheap_admission_gates`, called at the top of
+//! `accept_tx_with_chain_view`) hoists the crypto-INDEPENDENT gates ahead of
+//! validation. These tests now assert the FIXED ordering, and — critically —
+//! that the reorder did NOT change any transaction's accept/reject verdict:
 //!
-//! These tests do not modify production code; they exercise the public mempool
-//! admission API and assert the *observable ordering* of rejections, which is
-//! what proves the cheap gates run after (not before) the expensive crypto.
+//!   * duplicate / below-fee / over-capacity txs are now rejected WITHOUT
+//!     running crypto (cheap), with the same error messages as before;
+//!   * a genuinely NEW, above-fee, non-duplicate tx with bad crypto is STILL
+//!     rejected by `validate_transaction` (so real invalid txs remain
+//!     cryptographically rejected and peer-scoreable);
+//!   * a valid new tx is STILL accepted.
 //!
-//! The builders below are copied from `convergence_semantics.rs` because the
-//! audit rules forbid editing existing test files; they produce a genuinely
-//! valid signed transaction (real `bp_prove` + `schnorr_sign`).
+//! The builders produce a genuinely valid signed transaction (real `bp_prove`
+//! plus `schnorr_sign`); they are local to this file (the audit forbids editing
+//! existing test files).
 
 use dom_consensus::transaction::{
     Transaction, TransactionInput, TransactionKernel, TransactionOutput,
@@ -97,9 +93,15 @@ fn valid_signed_tx(fee: u64, seed: u8) -> (Transaction, [u8; 32], UtxoEntry) {
     (tx, hash, entry)
 }
 
-/// Accept a tx through the production chain-view path, with the input present
-/// in the (simulated) canonical UTXO set so admission is not blocked by a
-/// missing input.
+/// Same as `valid_signed_tx` but with the Schnorr signature corrupted so that
+/// `validate_transaction` fails at the kernel-signature step (after the range
+/// proof passes). Used to tell "crypto ran" apart from a cheap gate firing.
+fn bad_sig_tx(fee: u64, seed: u8) -> (Transaction, [u8; 32], UtxoEntry) {
+    let (mut tx, hash, entry) = valid_signed_tx(fee, seed);
+    tx.kernels[0].excess_signature[64] ^= 0x01;
+    (tx, hash, entry)
+}
+
 fn accept(
     pool: &mut Mempool,
     tx: Transaction,
@@ -107,126 +109,128 @@ fn accept(
     input_commitment: [u8; 33],
     entry: UtxoEntry,
 ) -> Result<(), DomError> {
-    pool.accept_tx_with_chain_view(
-        tx,
-        hash,
-        0,
-        100,
-        TEST_CHAIN_ID,
-        10,
-        |c| {
-            if *c == input_commitment {
-                Ok(Some(entry.clone()))
-            } else {
-                Ok(None)
-            }
-        },
-    )
+    pool.accept_tx_with_chain_view(tx, hash, 0, 100, TEST_CHAIN_ID, 10, move |c| {
+        if *c == input_commitment {
+            Ok(Some(entry.clone()))
+        } else {
+            Ok(None)
+        }
+    })
 }
 
-/// CORE PROOF: with a tx already in the pool under hash `H`, submitting a
-/// *different* tx that carries a broken signature but reuses hash `H` is
-/// rejected for the SIGNATURE, not for being a duplicate. If the cheap
-/// duplicate check ran first, the error would be "transaction already in
-/// mempool"; instead we get a crypto rejection, proving full crypto runs
-/// before the dedup gate.
+/// FIX PROOF (dedup before crypto): with a tx already in the pool under hash
+/// `H`, submitting a tx with a BROKEN signature that reuses `H` is now rejected
+/// as a DUPLICATE — not for the signature. If crypto still ran first, we'd see a
+/// signature `Invalid`; instead we see the cheap "already in mempool", proving
+/// the dedup gate runs before `validate_transaction`.
 #[test]
-fn robustness_crypto_runs_before_duplicate_check() {
+fn robustness_duplicate_check_runs_before_crypto() {
     let mut pool = Mempool::new();
 
     let (tx, hash, entry) = valid_signed_tx(MIN_RELAY_FEE_RATE * 30, 0x11);
     let input = *tx.inputs[0].commitment.as_bytes();
-    accept(&mut pool, tx, hash, input, entry.clone()).expect("first valid accept");
+    accept(&mut pool, tx, hash, input, entry).expect("first valid accept");
     assert_eq!(pool.len(), 1);
 
-    // Build a second, *different* valid tx, then corrupt its kernel signature.
-    // Reuse the FIRST tx's hash so the dedup check (keyed on the caller-supplied
-    // hash) would fire first if it ran before crypto.
-    let (mut bad, _bad_hash, bad_entry) = valid_signed_tx(MIN_RELAY_FEE_RATE * 30, 0x22);
-    bad.kernels[0].excess_signature[40] ^= 0xFF; // break the Schnorr signature
+    // A different tx (bad signature), submitted under the SAME hash `H`.
+    let (bad, _bad_hash, bad_entry) = bad_sig_tx(MIN_RELAY_FEE_RATE * 30, 0x22);
     let bad_input = *bad.inputs[0].commitment.as_bytes();
 
     let err = accept(&mut pool, bad, hash, bad_input, bad_entry)
-        .expect_err("corrupted-signature tx must be rejected");
+        .expect_err("duplicate-hash tx must be rejected");
 
-    // The decisive assertion: the rejection is a cryptographic one, NOT the
-    // cheap duplicate gate. This is only possible if validate_transaction
-    // (range proof + signature) executed before accept_validated_tx's dedup.
     match &err {
-        DomError::Invalid(msg) => {
-            assert!(
-                msg.contains("signature") || msg.contains("Schnorr") || msg.contains("kernel"),
-                "expected a kernel-signature rejection, got: {msg}"
-            );
-        }
+        DomError::PolicyRejected(msg) => assert!(
+            msg.contains("already in mempool"),
+            "expected cheap duplicate rejection (dedup before crypto), got: {msg}"
+        ),
         other => panic!(
-            "expected DomError::Invalid (crypto ran first); got {other:?} \
-             — if this is 'already in mempool' the ordering would be SAFE"
+            "expected PolicyRejected 'already in mempool' (dedup runs first now); got {other:?}"
         ),
     }
 }
 
-/// AMPLIFICATION + SCORING GAP: replaying the identical valid tx is rejected as
-/// a duplicate with `PolicyRejected`, and that variant carries the message the
-/// node's `peer_violation_score` does NOT score (it only scores the
-/// "handshake timeout" PolicyRejected). So the replay is both (a) re-validated
-/// with full crypto each time and (b) never bannable. We assert the exact error
-/// shape the scoring logic keys on.
+/// FIX PROOF (min-fee before crypto): a below-floor-fee tx whose signature is
+/// ALSO invalid is now rejected by the FEE gate, not by crypto. Seeing the fee
+/// `PolicyRejected` (rather than a signature `Invalid`) proves the min-relay-fee
+/// gate runs before `validate_transaction`.
 #[test]
-fn robustness_duplicate_replay_is_unscored_policy_rejection() {
+fn robustness_min_fee_gate_runs_before_crypto() {
     let mut pool = Mempool::new();
 
-    let (tx, hash, entry) = valid_signed_tx(MIN_RELAY_FEE_RATE * 30, 0x33);
-    let input = *tx.inputs[0].commitment.as_bytes();
-    accept(&mut pool, tx.clone(), hash, input, entry.clone()).expect("first accept");
-
-    // Replay the SAME bytes many times. Each call runs validate_transaction
-    // (Bulletproof + Schnorr) before the dedup rejection.
-    for _ in 0..5 {
-        let err = accept(&mut pool, tx.clone(), hash, input, entry.clone())
-            .expect_err("replay must be rejected as duplicate");
-        match &err {
-            DomError::PolicyRejected(msg) => {
-                assert!(
-                    msg.contains("already in mempool"),
-                    "expected duplicate rejection, got: {msg}"
-                );
-                // Mirror of node.rs peer_violation_score: only a PolicyRejected
-                // mentioning "handshake timeout" is scored; anything else => no
-                // ban score. This replay therefore costs CPU but never bans.
-                assert!(
-                    !msg.contains("handshake timeout"),
-                    "duplicate rejection would be UNSCORED by peer_violation_score"
-                );
-            }
-            other => panic!("expected PolicyRejected duplicate, got {other:?}"),
-        }
-    }
-    assert_eq!(pool.len(), 1, "replays must not inflate the pool");
-}
-
-/// Companion observation: the min-relay-fee gate also lives behind full crypto.
-/// A below-floor-fee tx with a VALID signature is rejected by fee policy
-/// (`PolicyRejected … MIN_RELAY_FEE_RATE`) only after the Bulletproof and
-/// Schnorr verifications have already run. We can't assert timing without
-/// flakiness, but we can assert that a below-floor tx reaches the fee gate
-/// (i.e. crypto passed) rather than being cheaply screened out first.
-#[test]
-fn robustness_min_fee_gate_is_behind_crypto() {
-    let mut pool = Mempool::new();
-
-    // fee = 1 nom → fee_rate far below MIN_RELAY_FEE_RATE, but a fully valid
-    // signature/proof over that fee.
-    let (tx, hash, entry) = valid_signed_tx(1, 0x44);
+    // fee = 1 nom → fee_rate far below MIN_RELAY_FEE_RATE; signature corrupted.
+    let (tx, hash, entry) = bad_sig_tx(1, 0x44);
     let input = *tx.inputs[0].commitment.as_bytes();
 
     let err = accept(&mut pool, tx, hash, input, entry).expect_err("below-floor fee rejected");
     match &err {
         DomError::PolicyRejected(msg) => assert!(
             msg.contains("MIN_RELAY_FEE_RATE") || msg.contains("fee rate"),
-            "expected fee-policy rejection (reached only after crypto passed), got: {msg}"
+            "expected fee-policy rejection BEFORE crypto, got: {msg}"
         ),
-        other => panic!("expected fee PolicyRejected, got {other:?}"),
+        other => panic!("expected fee PolicyRejected (min-fee runs before crypto); got {other:?}"),
     }
     assert_eq!(pool.len(), 0);
+}
+
+/// Replaying the identical valid tx is rejected cheaply as a duplicate
+/// (`PolicyRejected` "already in mempool"). This is the unscored-but-now-CHEAP
+/// path: no Bulletproof verification is paid on the replay.
+#[test]
+fn robustness_duplicate_replay_is_cheaply_rejected() {
+    let mut pool = Mempool::new();
+
+    let (tx, hash, entry) = valid_signed_tx(MIN_RELAY_FEE_RATE * 30, 0x33);
+    let input = *tx.inputs[0].commitment.as_bytes();
+    accept(&mut pool, tx.clone(), hash, input, entry.clone()).expect("first accept");
+
+    for _ in 0..5 {
+        let err = accept(&mut pool, tx.clone(), hash, input, entry.clone())
+            .expect_err("replay must be rejected as duplicate");
+        match &err {
+            DomError::PolicyRejected(msg) => assert!(
+                msg.contains("already in mempool"),
+                "expected duplicate rejection, got: {msg}"
+            ),
+            other => panic!("expected PolicyRejected duplicate, got {other:?}"),
+        }
+    }
+    assert_eq!(pool.len(), 1, "replays must not inflate the pool");
+}
+
+/// VERDICT-PRESERVATION (the reorder must not weaken validation): a genuinely
+/// NEW, above-fee, non-duplicate transaction with a bad signature is STILL
+/// rejected by `validate_transaction` (a crypto `Invalid`), so real invalid txs
+/// remain cryptographically rejected and peer-scoreable.
+#[test]
+fn robustness_new_invalid_tx_still_rejected_by_crypto() {
+    let mut pool = Mempool::new();
+
+    let (tx, hash, entry) = bad_sig_tx(MIN_RELAY_FEE_RATE * 30, 0x55);
+    let input = *tx.inputs[0].commitment.as_bytes();
+
+    let err = accept(&mut pool, tx, hash, input, entry).expect_err("bad-sig tx must be rejected");
+    match &err {
+        DomError::Invalid(msg) => assert!(
+            msg.contains("signature") || msg.contains("Schnorr") || msg.contains("kernel"),
+            "expected a kernel-signature rejection, got: {msg}"
+        ),
+        other => panic!(
+            "a new, above-fee, non-dup invalid-crypto tx must still be rejected by crypto; \
+             got {other:?}"
+        ),
+    }
+    assert_eq!(pool.len(), 0);
+}
+
+/// VERDICT-PRESERVATION: a valid new tx is STILL accepted after the reorder.
+#[test]
+fn robustness_valid_new_tx_still_accepted() {
+    let mut pool = Mempool::new();
+
+    let (tx, hash, entry) = valid_signed_tx(MIN_RELAY_FEE_RATE * 30, 0x66);
+    let input = *tx.inputs[0].commitment.as_bytes();
+
+    accept(&mut pool, tx, hash, input, entry).expect("valid new tx must still be accepted");
+    assert_eq!(pool.len(), 1);
 }

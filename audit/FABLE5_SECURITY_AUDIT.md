@@ -41,7 +41,7 @@ auditorias anteriores rodadas em sandbox read-only).
 |---|---|---|
 | **Regtest** | ✅ **Pronto** | Suíte verde; isolamento por magic/chain_id; crypto ativa. |
 | **Testnet privada** | ✅ **Pronto** | Invariantes monetárias fecham; fixes herdados válidos; parsers/Noise com teto. |
-| **Testnet pública** | ⚠️ **Pronto com ressalva** | Aceitável; recomenda-se tratar FABLE5-001 ( amplificação de CPU por replay de tx válida, não-banível) antes de expor a peers não confiáveis em escala. |
+| **Testnet pública** | ✅ **Pronto** | FABLE5-001 **corrigido** (ver §11): gates baratos antes da crypto + short-circuit de replay no caminho P2P, validados por teste. |
 | **Mainnet** | ⛔ **Ainda não** | Pré-requisito operacional fora do escopo deste agente: as constantes `GENESIS_HASH_{MAINNET,TESTNET,REGTEST}` ainda são placeholders pré-launch (ver `miner.rs:525-532`) — **PRECISA DECISÃO HUMANA** (cerimônia de genesis). Além de soak/observação em testnet. |
 
 ---
@@ -50,7 +50,7 @@ auditorias anteriores rodadas em sandbox read-only).
 
 | ID | Sev. | Título | Arquivo:linha | Status |
 |---|---|---|---|---|
-| FABLE5-001 | Média | Validação criptográfica completa roda **antes** dos gates baratos (dedup/min-fee/chain-view); replay de tx válida é re-verificado por completo e a rejeição duplicada **não** pontua o peer | `dom-mempool/src/lib.rs:211-292`; `dom-consensus/src/lib.rs:81-116`; `dom-node/src/node.rs:1712-1731` | **Confirmado por teste** |
+| FABLE5-001 | Média | Validação criptográfica completa roda **antes** dos gates baratos (dedup/min-fee/chain-view); replay de tx válida é re-verificado por completo e a rejeição duplicada **não** pontua o peer | `dom-mempool/src/lib.rs:211-292`; `dom-consensus/src/lib.rs:81-116`; `dom-node/src/node.rs:1712-1731` | **CORRIGIDO** (confirmado por teste; ver §11) |
 | FABLE5-002 | Baixa | Bloco side-chain é persistido (`store_known_block`) após PoW+validação estática, mas **antes** da validação contextual de inputs/maturity | `dom-chain/src/chain_state.rs:347-372` | **Confirmado por leitura** (intencional, bounded) |
 | — | Info | Constantes de genesis hash ainda placeholders pré-launch | `dom-node/src/miner.rs:525-532` | **PRECISA DECISÃO HUMANA** (cerimônia) |
 
@@ -230,9 +230,14 @@ Amplificação de CPU peer-facing sem contenção por ban. Mitigantes existentes
 processamento sequencial por conexão, `IDLE_TIMEOUT`, e o atacante precisa de uma
 tx válida real para o caso não-banível. Não há risco de inflação/double-spend.
 
-### Correção (com trade-offs) — **PRECISA PATCH PARA CONFIRMAR**
-Como a regra desta auditoria proíbe tocar em `src/`, deixo o fix para decisão.
-Opções:
+### Correção (com trade-offs) — **RESOLVIDO em §11**
+> Nota (2026-06-10): as opções abaixo foram a análise original (auditoria
+> read-only). A correção foi desde então implementada e validada por teste —
+> ver **§11 (FABLE5-001 — Resolução)**. As opções 1 e 3 foram adotadas (PASSO 2 e
+> PASSO 3); a opção 2 (pontuar replay) foi **descartada** para não gerar
+> falso-positivo em corridas honestas de gossip e não enfraquecer o ban de spam.
+
+Opções (análise original):
 1. **Reordenar a admissão**: checar dedup por hash e min-fee **antes** de
    `validate_transaction`. Barato e elimina o caso de replay. Trade-off: o
    `tx_hash` é suprido pelo chamador; é preciso garantir que o hash usado no dedup
@@ -290,9 +295,9 @@ opcionalmente, custo por-peer.
   forcei condições de disco cheio.
 
 ## 9. Limitações de método
-- Trabalho **read-only** em produção: achados cuja confirmação exigiria patch
-  estão marcados "PRECISA PATCH PARA CONFIRMAR" (FABLE5-001 correção) — o **achado**
-  em si está confirmado por teste; o **fix** não foi aplicado.
+- A auditoria original foi **read-only** em produção; FABLE5-001 ficou marcado
+  "PRECISA PATCH PARA CONFIRMAR". Em sessão posterior (autorizada a tocar `src/`)
+  o fix foi **implementado e validado por teste** — ver §11.
 - Mapeamento amplo das três fases foi feito com agentes de exploração e depois
   **reverificado no código** nos pontos críticos (genesis changeset, ordem de
   validação da mempool, codec Noise, schnorr verify, coinbase bp_verify). Onde cito
@@ -302,9 +307,127 @@ opcionalmente, custo por-peer.
 
 ---
 
-## 10. Arquivos criados nesta auditoria
-- `crates/dom-mempool/tests/robustness_admission_ordering.rs` (novo; 3 testes verdes)
+## 10. Arquivos criados na auditoria original
+- `crates/dom-mempool/tests/robustness_admission_ordering.rs` (testes de ordering)
 - `audit/FABLE5_SECURITY_AUDIT.md` (este relatório)
 
-Nenhum arquivo de `src/`, `Cargo.toml`, `deploy/`, `scripts/` ou teste existente
-foi modificado. Nenhum commit/push realizado.
+---
+
+## 11. FABLE5-001 — Resolução (2026-06-10)
+
+A correção foi implementada e validada por teste. O escopo foi decidido pelo
+**resultado do PASSO 1** (prova no caminho P2P real), não o contrário.
+
+### PASSO 1 — Prova no caminho P2P REAL (antes de qualquer fix)
+**Pergunta:** quando um peer reenvia os mesmos bytes de uma tx, o replay chega a
+`validate_transaction` (Bulletproof+Schnorr) ou é cortado antes por uma camada de
+inventory/gossip/dedup?
+
+**Achado de arquitetura (código real):** o handler `Command::Tx`
+(`dom-node/src/node.rs:3865`) chama `accept_tx_with_chain_view` **sem** nenhuma
+consulta de inventory/cache antes. Não existe handler de `Command::Inv` (cai no
+catch-all `other => ignoring`, `node.rs:4015`); o relay de tx é **push direto** de
+`Command::Tx` (Dandelion fluff/stem). Ou seja, **não há camada de dedup antes da
+validação** — a hipótese da revisão (de que o inventory poderia cortar o replay) é
+**refutada** pelo código.
+
+**Prova executável (determinística, não-timing):** teste novo
+`crates/dom-integration-tests/tests/robustness_tx_replay_p2p.rs`
+→ `robustness_p2p_tx_replay_reaches_crypto_each_time`. Sobe um node real, conecta um
+peer via Noise+Hello, e reenvia 3× a MESMA tx com **range proof válido + assinatura
+Schnorr corrompida** (garante que o `bp_verify` caro roda antes da rejeição por
+assinatura). Observável: o ban score do peer, lido via
+`PeerManager::ban_score(addr)`. Se cada replay chega à crypto, o score sobe
+`PROTOCOL_VIOLATION (10)` por envio; se houvesse dedup pré-validação, estagnaria
+em 10.
+
+```
+$ cargo test -p dom-integration-tests --test robustness_tx_replay_p2p -- --nocapture
+PASSO 1 RESULT: replay reaches crypto on the real P2P path. ban score after 3
+identical replays = 30 (= 3 × 10). No pre-validation inventory/dedup exists.
+test robustness_p2p_tx_replay_reaches_crypto_each_time ... ok
+```
+
+**Conclusão PASSO 1:** o replay **PASSA até a crypto** no caminho P2P real. Isso
+(a) confirma que FABLE5-001 era real no caminho real e (b) habilita o PASSO 3.
+
+### PASSO 2 — Reordenação dos gates de admissão (higiene)
+`Mempool::accept_tx_with_chain_view` agora chama
+`precheck_cheap_admission_gates(&tx, &tx_hash)` **antes** de `validate_transaction`
+(`dom-mempool/src/lib.rs`). Os gates hoisted são estruturais (sem crypto): dedup por
+hash, min-relay-fee e teto de peso — com as **mesmas mensagens de erro** de
+`accept_validated_tx` (que permanece como rede de segurança e para o caminho legado
+`accept_tx`). Uma tx duplicada/abaixo-do-piso é agora rejeitada **sem pagar
+Bulletproof/Schnorr**.
+
+**Sem mudança de veredito:** os gates não dependem de validade criptográfica, logo
+detectá-los mais cedo não muda o resultado binário aceita/rejeita — só a (mais
+barata) razão. Provado por testes em
+`crates/dom-mempool/tests/robustness_admission_ordering.rs` (reescrito para o estado
+corrigido):
+- `robustness_duplicate_check_runs_before_crypto` — dup-hash com assinatura quebrada
+  agora é rejeitada como "already in mempool" (dedup antes da crypto).
+- `robustness_min_fee_gate_runs_before_crypto` — tx abaixo do piso **com** assinatura
+  inválida é rejeitada pela **fee** (min-fee antes da crypto).
+- `robustness_new_invalid_tx_still_rejected_by_crypto` — tx NOVA, acima do piso,
+  não-dup, com crypto inválida **continua** rejeitada por crypto (`Invalid`) →
+  invalid real permanece criptograficamente rejeitada e peer-scoreável.
+- `robustness_valid_new_tx_still_accepted` — tx válida nova **continua aceita**.
+
+### PASSO 3 — Short-circuit de replay no caminho P2P (DECISÃO TÉCNICA)
+Como o PASSO 1 provou que o replay passa até a crypto, o cache é justificado. Após o
+PASSO 2 restava um caminho residual **não-pontuado**: um replay de tx **já no
+mempool** ainda fazia, no handler, `deserialize → chain.lock() → snapshot de UTXO`
+**antes** do dedup barato da mempool — i.e. contenção do `chain` lock sob flood de
+replays válidos.
+
+**Decisão (delegada ao agente):** em vez de uma estrutura de cache nova e separada
+(mais superfície + risco de *orphan-starvation* se cacheasse hashes ainda-não-válidos
++ regressão de scoring se cacheasse inválidas), o handler `Command::Tx` agora faz um
+**pré-check de pertinência à mempool** (`Mempool::contains`) **antes** do chain lock.
+Justificativa:
+- Reusa o conjunto de entradas da mempool — **já bounded** por `max_weight` — em vez
+  de introduzir um LRU/anel paralelo (menos código morto, menos superfície de bug).
+- **Seguro:** só faz short-circuit de tx que estão **comprovadamente** no pool
+  (duplicatas certas); nunca afama um orphan (que nunca está no pool).
+- **Preserva o scoring:** tx inválidas/desconhecidas **não** estão no pool → seguem
+  para validação completa e peer-scoring (banimento de spam preservado). Por isso o
+  teste do PASSO 1 (tx inválida) continua válido: score chega a 30.
+- Observável por métrica nova `suppressed_duplicate_tx_relays` (espelha o padrão
+  existente `suppressed_duplicate_block_relays`).
+
+**Prova executável:** `robustness_p2p_known_tx_replay_is_short_circuited_before_validation`
+semeia o mempool do node com uma tx (sob o hash canônico que o handler computa),
+reenvia-a pelo fio e verifica que `suppressed_duplicate_tx_relays` incrementa
+(replay cortado antes da validação) e que o peer **não** é pontuado (duplicata não é
+violação).
+
+```
+test robustness_p2p_known_tx_replay_is_short_circuited_before_validation ... ok
+test robustness_p2p_tx_replay_reaches_crypto_each_time ... ok
+test result: ok. 2 passed; 0 failed; ...
+```
+
+**Residual aceito e documentado:** replays de tx **abaixo-do-piso** (que nunca entram
+no mempool) ainda incorrem em `chain.lock()` + lookups de UTXO por envio (sem crypto,
+graças ao PASSO 2). Custo ~O(lookup), ordens de magnitude abaixo do `bp_verify`
+original; não justifica cachear hashes rejeitadas (que arriscaria scoring/orphan).
+
+### Verificação final
+- `cargo build --workspace`: **OK**.
+- `cargo test --workspace`: **1180 passed, 0 failed**.
+- `cargo clippy` nos crates tocados (`-D warnings`): **limpo**.
+- `cargo fmt --check`: **OK**.
+- Nenhuma tx muda de veredito aceita↔rejeita (testes de verdict-preservation acima).
+
+### Arquivos tocados na resolução
+- `crates/dom-mempool/src/lib.rs` — `precheck_cheap_admission_gates`, `contains`.
+- `crates/dom-node/src/node.rs` — short-circuit de replay no handler `Command::Tx`.
+- `crates/dom-node/src/metrics.rs` — métrica `suppressed_duplicate_tx_relays`.
+- `crates/dom-mempool/tests/robustness_admission_ordering.rs` — reescrito p/ estado
+  corrigido (5 testes, incl. verdict-preservation).
+- `crates/dom-integration-tests/tests/robustness_tx_replay_p2p.rs` — novo (PASSO 1 +
+  PASSO 3).
+
+Decisões de mérito remanescentes inalteradas: cerimônia de `GENESIS_HASH_*` antes de
+mainnet (**PRECISA DECISÃO HUMANA**).
