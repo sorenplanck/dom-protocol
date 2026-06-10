@@ -534,6 +534,41 @@ impl DomNode {
         self.task_supervisor.shutdown_token()
     }
 
+    /// Rebuild a wallet's recoverable output set by scanning the canonical chain
+    /// this node already has on disk, then persist the repaired state.
+    ///
+    /// This is the recovery path for a wallet restored from a seed phrase: the
+    /// seed is the sole authority for ownership, but the on-chain coinbases it
+    /// owns are only discoverable by walking the chain (see
+    /// [`crate::wallet_scan`]). It is the missing step that left a freshly
+    /// restored wallet at a zero balance even though the node had the matching
+    /// coinbases synced.
+    ///
+    /// `wallet_dir` MUST be a DIFFERENT wallet directory than the one this node
+    /// opened for mining (if any): we only read this node's chain store and
+    /// write the passed-in wallet — never the node's own `wallet`, so no
+    /// `WalletDir` lock is contended and the `Wallet` lock-order rank is not
+    /// involved. The wallet must be unlocked (the deterministic scan derives the
+    /// coinbase blinding from the encrypted seed).
+    ///
+    /// The tip is snapshotted and the blocks are read under the chain lock; the
+    /// lock is released BEFORE the CPU-heavy deterministic rescan so block
+    /// connection is not stalled while a long chain is re-derived.
+    pub async fn rescan_wallet_dir(
+        &self,
+        wallet_dir: &mut WalletDir,
+    ) -> Result<dom_wallet::WalletRescanSummary, DomError> {
+        let scan = {
+            let chain = self.chain.lock().await;
+            let tip = chain.tip_height.0;
+            crate::wallet_scan::collect_chain_scan(&chain.store, tip)?
+        };
+        wallet_dir
+            .wallet_mut()
+            .rescan_canonical_chain(&scan, dom_wallet::WalletRescanMode::Repair)
+            .map_err(|e| DomError::Internal(format!("wallet rescan failed: {e}")))
+    }
+
     /// Start all node services.
     pub async fn run(self: Arc<Self>) -> Result<(), DomError> {
         info!("Starting DOM node services");

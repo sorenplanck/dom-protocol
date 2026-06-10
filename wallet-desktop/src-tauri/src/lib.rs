@@ -717,6 +717,32 @@ async fn wallet_balance(state: State<'_, AppState>) -> Result<BalanceInfo, Strin
         .map_err(|e| e.to_string())
 }
 
+/// Rebuild the open wallet's output index by scanning the embedded node's
+/// chain. This is the explicit "rescan now" path (e.g. right after a seed
+/// restore, or a manual refresh). Returns the scan summary so the UI can show
+/// progress / how many outputs were recovered.
+///
+/// Idempotent: `Repair` rescan re-deriving the same chain yields the same state.
+#[tauri::command]
+async fn wallet_rescan(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let node = state
+        .node
+        .current_node()
+        .await
+        .ok_or_else(|| "node not started yet".to_string())?;
+    let summary = state
+        .wallet
+        .rescan_against_node(&node)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "scanned_tip": summary.scanned_tip,
+        "rebuilt_outputs": summary.rebuilt_outputs,
+        "repaired": summary.repaired,
+        "matched_persisted": summary.matched_persisted,
+    }))
+}
+
 // NOTE (L8): the non-interactive `wallet_send` / `wallet_create_receive`
 // commands were removed. The wallet's only send/receive path is the interactive
 // Slate protocol below (`slate_create_send` / `slate_receive` / `slate_finalize`).
@@ -944,6 +970,11 @@ async fn node_metrics(state: State<'_, AppState>, addr: String) -> Result<NodeMe
 const AUTO_SWEEP_INTERVAL_SECS: u64 = 60;
 const MINER_SWEEP_FEE_NOMS: u64 = 100_000; // 0.00100000 DOM
 
+/// How often the background rescan checks whether the chain advanced and a
+/// restored wallet needs its output index rebuilt. Cheap when nothing changed
+/// (the loop short-circuits unless the tip moved or the open wallet changed).
+const RESCAN_POLL_INTERVAL_SECS: u64 = 8;
+
 /// Move mature rewards from the embedded node miner wallet into the currently
 /// open user wallet. Returns Some(tx_hash_hex) when a sweep was submitted,
 /// or None when there is no mature balance above the sweep fee.
@@ -1102,6 +1133,66 @@ pub fn run() {
                 }
             });
 
+            // Background wallet rescan. A wallet restored from a seed phrase is
+            // persisted with an EMPTY output index — `restore_from_phrase` does
+            // not scan — so its pre-existing on-chain coinbases (and any later
+            // ones mined to the same seed) are invisible until the chain is
+            // walked. The node, however, isn't even started at restore time
+            // (the managed flow returns settings for the UI to start it), and
+            // then it syncs for a while. So we rebuild the index here, off the
+            // chain the embedded node has on disk, once it is available — and
+            // again whenever the tip advances or the open wallet changes.
+            //
+            // Debounced on (open vault path, tip height): a full `Repair`
+            // rescan only runs when there is genuinely new chain to scan, so the
+            // steady state is a cheap height comparison. The rescan is
+            // idempotent and preserves persisted receive requests and live
+            // pending spends, so re-running it never loses sweep-received funds.
+            let rescan_node = node.clone();
+            let rescan_wallet = wallet.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                    RESCAN_POLL_INTERVAL_SECS,
+                ));
+                // Last (vault_path, tip) we successfully rescanned, to skip
+                // redundant full rescans when nothing changed.
+                let mut last_scanned: Option<(String, u64)> = None;
+                loop {
+                    interval.tick().await;
+
+                    // Need a running node and an UNLOCKED wallet (the scan
+                    // derives the coinbase blinding from the encrypted seed).
+                    let Some(node) = rescan_node.current_node().await else {
+                        continue;
+                    };
+                    if !rescan_wallet.is_unlocked().await {
+                        continue;
+                    }
+                    let Some(meta) = rescan_wallet.open_wallet_meta().await else {
+                        continue;
+                    };
+                    let tip = { node.chain.lock().await.tip_height.0 };
+                    let key = (meta.vault_path, tip);
+                    if last_scanned.as_ref() == Some(&key) {
+                        continue; // same wallet, no new blocks — nothing to do
+                    }
+
+                    match rescan_wallet.rescan_against_node(&node).await {
+                        Ok(summary) => {
+                            if summary.repaired {
+                                tracing::info!(
+                                    "wallet rescan: rebuilt {} outputs up to height {}",
+                                    summary.rebuilt_outputs,
+                                    summary.scanned_tip
+                                );
+                            }
+                            last_scanned = Some(key);
+                        }
+                        Err(e) => tracing::debug!("wallet rescan skipped/failed: {e}"),
+                    }
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1120,6 +1211,7 @@ pub fn run() {
             wallet_lock,
             wallet_unlock,
             wallet_balance,
+            wallet_rescan,
             slate_create_send,
             slate_receive,
             slate_finalize,
