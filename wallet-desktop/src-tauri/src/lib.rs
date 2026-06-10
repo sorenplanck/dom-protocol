@@ -5,6 +5,7 @@
 //! or wallet logic is reimplemented here.
 
 mod log_capture;
+mod managed_storage;
 mod metrics;
 mod node_host;
 mod settings;
@@ -22,9 +23,10 @@ use tracing_subscriber::prelude::*;
 use zeroize::Zeroizing;
 
 use log_capture::{BroadcastLayer, LogBus};
+use managed_storage::ManagedLayout;
 use metrics::NodeMetrics;
 use node_host::{NodeHost, NodeState};
-use settings::NodeSettings;
+use settings::{NetworkKind, NodeSettings};
 use wallet_manager::{BalanceInfo, WalletManager};
 
 /// Shared application state, available to every command via `State<AppState>`.
@@ -38,6 +40,10 @@ pub struct AppState {
     /// manual "sweep now" button can never run concurrently and double-spend the
     /// same matured outputs.
     sweep_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Managed-storage layout of the currently open wallet, when it was
+    /// created/opened through the managed flow. Used to persist per-wallet node
+    /// settings (mining toggle, ports) next to the wallet.
+    managed: Arc<tokio::sync::Mutex<Option<ManagedLayout>>>,
 }
 
 /// Build a `NodeRpcClient` pointed at the embedded node, authenticated with the
@@ -148,7 +154,7 @@ fn register_wallet_meta_at(
     meta: wallet_manager::OpenWalletMeta,
     now: u64,
 ) -> Result<(), String> {
-    let mut reg = WalletRegistry::load(&reg_path).map_err(|e| e.to_string())?;
+    let mut reg = WalletRegistry::load(reg_path).map_err(|e| e.to_string())?;
     reg.upsert(RegistryEntry {
         name: name.to_string(),
         // upsert preserves an existing id; this is only used for a new entry.
@@ -158,7 +164,7 @@ fn register_wallet_meta_at(
         created_at: Some(meta.created_at),
         last_opened: Some(now),
     });
-    reg.save(&reg_path).map_err(|e| e.to_string())
+    reg.save(reg_path).map_err(|e| e.to_string())
 }
 
 /// A non-sensitive registry row for the login screen's name list.
@@ -196,7 +202,7 @@ async fn wallet_open_by_name(
     state: State<'_, AppState>,
     name: String,
     password: Zeroizing<String>,
-) -> Result<(), String> {
+) -> Result<Option<NodeSettings>, String> {
     let reg_path = wallet_registry::default_registry_path().map_err(|e| e.to_string())?;
     open_registered_wallet_at(
         state.wallet.as_ref(),
@@ -205,7 +211,11 @@ async fn wallet_open_by_name(
         password.as_str(),
         now_secs(),
     )
-    .await
+    .await?;
+    // Managed wallets carry their own node settings (data dir, ports, mining
+    // choice) next to the vault; loading them here is what makes "open by
+    // name" also bring up the RIGHT node for that wallet.
+    Ok(adopt_managed_layout(&state, &name).await)
 }
 
 async fn open_registered_wallet_at(
@@ -215,7 +225,7 @@ async fn open_registered_wallet_at(
     password: &str,
     now: u64,
 ) -> Result<(), String> {
-    let mut reg = WalletRegistry::load(&reg_path).map_err(|e| e.to_string())?;
+    let mut reg = WalletRegistry::load(reg_path).map_err(|e| e.to_string())?;
 
     let (vault_path, stored_name) = {
         let entry = reg
@@ -238,7 +248,7 @@ async fn open_registered_wallet_at(
 
     // Best-effort: stamp last_opened. Never fail the unlock over a metadata write.
     if reg.touch_last_opened(&stored_name, now) {
-        if let Err(e) = reg.save(&reg_path) {
+        if let Err(e) = reg.save(reg_path) {
             tracing::warn!("could not update wallet last_opened: {e}");
         }
     }
@@ -320,6 +330,10 @@ async fn wallet_open(
         .open(&path, password.as_str())
         .await
         .map_err(|e| e.to_string())?;
+    // A manually located wallet is not (necessarily) in managed storage; drop
+    // any previous wallet's managed context so its node settings file is not
+    // overwritten by this wallet's changes.
+    *state.managed.lock().await = None;
     // "Locate existing wallet": if the user gave a friendly name and asked to
     // remember it, save the resolved location so future logins only need the
     // name + password. Best-effort.
@@ -329,6 +343,206 @@ async fn wallet_open(
         }
     }
     Ok(())
+}
+
+// ── Managed storage commands (name + password only; the app owns all paths) ──
+
+/// Result of creating a wallet through the managed flow: the one-time recovery
+/// phrase plus the per-wallet node settings the UI should start the node with.
+#[derive(serde::Serialize)]
+struct ManagedWalletCreated {
+    phrase: String,
+    settings: NodeSettings,
+}
+
+fn parse_network_kind(network: Option<&str>) -> Result<NetworkKind, String> {
+    match network.map(str::trim).filter(|n| !n.is_empty()) {
+        None => Ok(NetworkKind::Testnet),
+        Some("testnet") => Ok(NetworkKind::Testnet),
+        Some("mainnet") => Ok(NetworkKind::Mainnet),
+        Some("regtest") => Ok(NetworkKind::Regtest),
+        Some(other) => Err(format!("unknown network: {other:?}")),
+    }
+}
+
+/// Refuse names that are already taken, either as a managed wallet directory
+/// or as a registry profile pointing somewhere else. Never overwrites.
+fn ensure_wallet_name_available(base: &Path, name: &str) -> Result<(), String> {
+    if managed_storage::managed_wallet_exists(base, name) {
+        return Err(format!(
+            "a wallet named {name:?} already exists — choose another name"
+        ));
+    }
+    let reg_path = wallet_registry::default_registry_path().map_err(|e| e.to_string())?;
+    if let Ok(reg) = WalletRegistry::load(&reg_path) {
+        if reg.resolve(name).is_some() {
+            return Err(format!(
+                "a wallet named {name:?} already exists — choose another name"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Create a wallet from just a NAME + PASSWORD + mining toggle. The app creates
+/// the managed wallet directory, the encrypted vault, the per-wallet node dir
+/// and node settings (conflict-free local ports), registers the name for
+/// login-by-name, and returns the one-time recovery phrase plus the node
+/// settings to start the embedded node with. The renderer never sees a path.
+#[tauri::command]
+async fn wallet_create_managed(
+    state: State<'_, AppState>,
+    name: String,
+    password: Zeroizing<String>,
+    mine: bool,
+    network: Option<String>,
+) -> Result<ManagedWalletCreated, String> {
+    let network = parse_network_kind(network.as_deref())?;
+    let base = managed_storage::resolve_app_data_base_dir().map_err(|e| e.to_string())?;
+    ensure_wallet_name_available(&base, &name)?;
+
+    let (layout, node_settings) =
+        managed_storage::create_wallet_and_node_layout(&base, &name, network, mine)
+            .map_err(|e| e.to_string())?;
+
+    let phrase = match state
+        .wallet
+        .create_new(&layout.vault_path, password.as_str(), &node_settings)
+        .await
+    {
+        Ok(phrase) => phrase,
+        Err(e) => {
+            // Leave no half-created wallet directory behind: the vault was not
+            // created, so removing the managed dir cannot destroy funds.
+            let _ = std::fs::remove_dir_all(&layout.wallet_dir);
+            return Err(e.to_string());
+        }
+    };
+
+    register_open_wallet(&state, &layout.display_name).await;
+    // Slug only — never the password or phrase. The slug locates the managed
+    // dir for support/diagnostics without exposing the full filesystem path.
+    tracing::info!("managed wallet created (slug {})", layout.slug);
+    *state.managed.lock().await = Some(layout);
+    Ok(ManagedWalletCreated {
+        phrase: phrase.to_string(),
+        settings: node_settings,
+    })
+}
+
+/// Non-sensitive storage locations for the Settings screen's advanced "data
+/// folder" display. Paths only — never wallet contents or secrets.
+#[tauri::command]
+async fn wallet_storage_info(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let wallets_base = managed_storage::resolve_wallets_base_dir().map_err(|e| e.to_string())?;
+    let open_wallet_dir = state
+        .managed
+        .lock()
+        .await
+        .as_ref()
+        .map(|layout| layout.wallet_dir.to_string_lossy().to_string());
+    Ok(serde_json::json!({
+        "wallets_dir": wallets_base.to_string_lossy(),
+        "open_wallet_dir": open_wallet_dir,
+    }))
+}
+
+/// Restore a wallet from a recovery phrase through the managed flow. Same
+/// storage rules as `wallet_create_managed`; the phrase is never persisted.
+#[tauri::command]
+async fn wallet_restore_managed(
+    state: State<'_, AppState>,
+    name: String,
+    password: Zeroizing<String>,
+    phrase: Zeroizing<String>,
+    mine: bool,
+    network: Option<String>,
+) -> Result<NodeSettings, String> {
+    let network = parse_network_kind(network.as_deref())?;
+    let base = managed_storage::resolve_app_data_base_dir().map_err(|e| e.to_string())?;
+    ensure_wallet_name_available(&base, &name)?;
+
+    let (layout, node_settings) =
+        managed_storage::create_wallet_and_node_layout(&base, &name, network, mine)
+            .map_err(|e| e.to_string())?;
+
+    if let Err(e) = state
+        .wallet
+        .restore_from_phrase(
+            &layout.vault_path,
+            password.as_str(),
+            phrase.as_str(),
+            &node_settings,
+        )
+        .await
+    {
+        let _ = std::fs::remove_dir_all(&layout.wallet_dir);
+        return Err(e.to_string());
+    }
+
+    register_open_wallet(&state, &layout.display_name).await;
+    *state.managed.lock().await = Some(layout);
+    Ok(node_settings)
+}
+
+/// Whether a wallet name is already taken (managed dir or registry profile).
+/// Lets the create screen warn about duplicates before submitting.
+#[tauri::command]
+async fn wallet_name_taken(name: String) -> Result<bool, String> {
+    if name.trim().is_empty() {
+        return Ok(false);
+    }
+    let base = managed_storage::resolve_app_data_base_dir().map_err(|e| e.to_string())?;
+    if managed_storage::managed_wallet_exists(&base, &name) {
+        return Ok(true);
+    }
+    let reg_path = wallet_registry::default_registry_path().map_err(|e| e.to_string())?;
+    Ok(WalletRegistry::load(&reg_path)
+        .map(|reg| reg.resolve(&name).is_some())
+        .unwrap_or(false))
+}
+
+/// Load (or create, for legacy wallets) the per-wallet node settings after a
+/// wallet was opened by name, and remember the managed layout so later settings
+/// changes are persisted next to the wallet. Returns None for wallets that live
+/// outside the managed storage (located manually) — the UI keeps its current
+/// settings in that case.
+async fn adopt_managed_layout(state: &AppState, name: &str) -> Option<NodeSettings> {
+    let base = managed_storage::resolve_app_data_base_dir().ok()?;
+    match managed_storage::load_wallet_node_layout(&base, name) {
+        Ok((layout, settings)) => {
+            *state.managed.lock().await = Some(layout);
+            Some(settings)
+        }
+        Err(_) => {
+            *state.managed.lock().await = None;
+            None
+        }
+    }
+}
+
+/// Persist node settings (mining toggle, ports, peers) for the currently open
+/// MANAGED wallet, so they are restored the next time it is opened by name.
+/// No-op (Ok) when the open wallet is not managed.
+#[tauri::command]
+async fn managed_settings_save(
+    state: State<'_, AppState>,
+    settings: NodeSettings,
+) -> Result<(), String> {
+    settings.validate().map_err(|e| e.to_string())?;
+    let guard = state.managed.lock().await;
+    if let Some(layout) = guard.as_ref() {
+        managed_storage::save_node_settings(layout, &settings).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Ensure the embedded node runs with exactly these settings (start when
+/// stopped, restart when running on different settings, no-op otherwise).
+#[tauri::command]
+async fn node_ensure(state: State<'_, AppState>, settings: NodeSettings) -> Result<(), String> {
+    ensure_wallet_network_matches(&state, &settings).await?;
+    state.node.ensure(settings).await.map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -370,9 +584,15 @@ mod wallet_registry_tests {
         reg.save(&registry_path).unwrap();
 
         let manager = WalletManager::new();
-        open_registered_wallet_at(&manager, &registry_path, "Carteira 1", PASSWORD, 1_700_000_123)
-            .await
-            .unwrap();
+        open_registered_wallet_at(
+            &manager,
+            &registry_path,
+            "Carteira 1",
+            PASSWORD,
+            1_700_000_123,
+        )
+        .await
+        .unwrap();
 
         assert!(manager.is_open().await);
         assert!(manager.is_unlocked().await);
@@ -830,6 +1050,7 @@ pub fn run() {
         node: node.clone(),
         logs: bus.clone(),
         sweep_lock: sweep_lock.clone(),
+        managed: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
     tauri::Builder::default()
@@ -886,7 +1107,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             wallet_status,
             wallet_create,
+            wallet_create_managed,
             wallet_restore,
+            wallet_restore_managed,
+            wallet_name_taken,
+            wallet_storage_info,
+            managed_settings_save,
+            node_ensure,
             wallet_open,
             wallet_open_by_name,
             wallet_registry_list,

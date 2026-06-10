@@ -44,15 +44,15 @@ function normalizeMinerThrottleMs(value) {
   return n;
 }
 
-function minerRewardWalletSelected() {
-  return minerWalletDisplay(settings.current) !== " none ";
-}
 
 async function applyMiningEnabled(enabled) {
   settings.current.mine = !!enabled;
   settings.current.miner_threads = normalizeMinerThreads(settings.current.miner_threads);
   settings.current.miner_throttle_ms = normalizeMinerThrottleMs(settings.current.miner_throttle_ms);
   savePrefs(settings.current);
+  // Persist the choice next to the open managed wallet so reopening it by
+  // name restores the same mining state (no-op for non-managed wallets).
+  try { await api.managedSettingsSave(settings.current); } catch {}
   await api.nodeRestart(settings.current);
 }
 
@@ -99,7 +99,13 @@ export function renderLogin(go, onReady) {
     if (!name) { err.textContent = "Enter the wallet name."; return; }
     const btn = node.querySelector("#unlock"); btn.disabled = true;
     try {
-      await api.walletOpenByName(name, pw);
+      // Managed wallets return their own saved node settings (data dir, ports,
+      // mining choice); adopting them here makes the node follow the wallet.
+      const managed = await api.walletOpenByName(name, pw);
+      if (managed) {
+        settings.current = { ...settings.current, ...managed };
+        savePrefs(settings.current);
+      }
       toast(t("walletOpened"));
       onReady();
     } catch (e) {
@@ -135,6 +141,11 @@ export function renderWelcome(go) {
 }
 
 // ── Onboarding: create (generate seed → confirm → set password) ──────────────
+// Managed flow: the user supplies ONLY a name, a password and the mining
+// toggle. The app creates the wallet directory, the encrypted vault and the
+// per-wallet node (data dir, config, conflict-free local ports) in storage it
+// manages itself — there is no folder picker and the renderer never sees a
+// filesystem path.
 export function renderCreate(go, onReady) {
   const node = el(`
     <div>
@@ -143,19 +154,22 @@ export function renderCreate(go, onReady) {
       <div class="card">
         <label>Wallet name</label>
         <input type="text" id="name" placeholder="e.g. Carteira 1" autocomplete="off" spellcheck="false" />
-        <p class="muted mt4">A friendly name so you can later log in by name. The name only remembers where the encrypted wallet is stored — your recovery phrase is the real backup.</p>
-        <label>Network</label>
-        <select id="net">
-          <option value="testnet">Testnet</option>
-          <option value="mainnet">Mainnet</option>
-          <option value="regtest">Regtest (local dev)</option>
-        </select>
-        <label>Wallet location</label>
-        <div class="copyable"><code id="path">— choose a location —</code><button class="btn ghost" id="pick">Choose</button></div>
+        <p class="muted mt4" id="nameHint">A friendly name; you will log in with it. The wallet and its node are stored automatically by the app.</p>
         <label>Password</label>
         <input type="password" id="pw" placeholder="Encrypts the wallet on disk" />
         <label>Confirm password</label>
         <input type="password" id="pw2" placeholder="Type the password again" />
+        <div class="check"><input type="checkbox" id="mine" /><label>Enable mining on this wallet's node</label></div>
+        <p class="muted mt4">Mining is optional and off by default. Rewards go to an app-managed miner wallet and are swept to this wallet automatically. You can change this later in Settings.</p>
+        <details class="mt4">
+          <summary class="muted">Advanced</summary>
+          <label>Network</label>
+          <select id="net">
+            <option value="testnet">Testnet</option>
+            <option value="mainnet">Mainnet</option>
+            <option value="regtest">Regtest (local dev)</option>
+          </select>
+        </details>
         <div class="btn-row">
           <button class="btn ghost" id="back">Back</button>
           <button class="btn" id="next" disabled>Generate phrase</button>
@@ -164,40 +178,52 @@ export function renderCreate(go, onReady) {
       </div>
     </div>`);
 
-  let path = null;
   // M2: the network is chosen here, at creation, and baked into the wallet.
   // It cannot be changed afterwards (Settings shows it read-only).
   const netEl = node.querySelector("#net");
   netEl.value = settings.current.network;
-  netEl.onchange = () => {
-    settings.current.network = netEl.value;
-    savePrefs(settings.current);
-  };
+  const nameEl = node.querySelector("#name");
+  const errEl = node.querySelector("#err");
+
   const refresh = () => {
     node.querySelector("#next").disabled =
-      !(path && node.querySelector("#pw").value.length >= 8);
+      !(nameEl.value.trim() && node.querySelector("#pw").value.length >= 8);
   };
-  node.querySelector("#pick").onclick = async () => {
-    const p = await pickSaveFile("Save new DOM wallet");
-    if (p) { path = p; node.querySelector("#path").textContent = p; refresh(); }
-  };
+  nameEl.oninput = refresh;
   node.querySelector("#pw").oninput = refresh;
+  // Duplicate-name warning as soon as the user leaves the field.
+  nameEl.onblur = async () => {
+    const name = nameEl.value.trim();
+    if (!name) return;
+    try {
+      if (await api.walletNameTaken(name)) {
+        errEl.textContent = `A wallet named “${name}” already exists. Choose another name.`;
+      } else if (errEl.textContent.includes("already exists")) {
+        errEl.textContent = "";
+      }
+    } catch {}
+  };
   node.querySelector("#back").onclick = () => go("start");
   node.querySelector("#next").onclick = async () => {
     const pw = node.querySelector("#pw").value;
     const pw2 = node.querySelector("#pw2").value;
-    const name = node.querySelector("#name").value.trim();
-    const err = node.querySelector("#err");
-    if (!name) { err.textContent = "Enter a name for this wallet."; return; }
-    if (pw !== pw2) { err.textContent = "Passwords do not match."; return; }
-    if (pw.length < 8) { err.textContent = "Use at least 8 characters."; return; }
-    err.textContent = "";
+    const name = nameEl.value.trim();
+    const mine = node.querySelector("#mine").checked;
+    if (!name) { errEl.textContent = "Enter a name for this wallet."; return; }
+    if (pw !== pw2) { errEl.textContent = "Passwords do not match."; return; }
+    if (pw.length < 8) { errEl.textContent = "Use at least 8 characters."; return; }
+    errEl.textContent = "";
+    const btn = node.querySelector("#next"); btn.disabled = true;
     try {
-      // The friendly name is auto-registered by the backend on success.
-      const phrase = await api.walletCreate(path, pw, settings.current, name);
-      showSeedConfirm(node, phrase, onReady);
+      // The backend creates wallet + node layout, registers the name, and
+      // returns the one-time phrase plus this wallet's node settings.
+      const created = await api.walletCreateManaged(name, pw, mine, netEl.value);
+      settings.current = { ...settings.current, ...created.settings };
+      savePrefs(settings.current);
+      showSeedConfirm(node, created.phrase, onReady);
     } catch (e) {
-      err.textContent = humanizeError(e);
+      errEl.textContent = humanizeError(e);
+      btn.disabled = false;
     }
   };
   return node;
@@ -259,29 +285,32 @@ function pickThree(n) {
 }
 
 // ── Onboarding: restore ──────────────────────────────────────────────────────
+// Managed flow: like create, the app owns all storage — no folder picker.
 export function renderRestore(go, onReady) {
   const node = el(`
     <div>
       <h1>Restore wallet</h1>
-      <p class="sub">Enter your BIP-39 recovery phrase, choose where to save it, and set a new password.</p>
+      <p class="sub">Enter your BIP-39 recovery phrase and set a new password. The app stores the wallet and its node automatically.</p>
       <div class="card">
         <label>Wallet name</label>
         <input type="text" id="name" placeholder="e.g. Carteira 1" autocomplete="off" spellcheck="false" />
         <p class="muted mt4">A friendly name for login by name. Your recovery phrase is never saved to this name — it is the real backup.</p>
         <label>Recovery phrase</label>
         <textarea id="phrase" placeholder="word1 word2 word3 ..."></textarea>
-        <label>Network</label>
-        <select id="net">
-          <option value="testnet">Testnet</option>
-          <option value="mainnet">Mainnet</option>
-          <option value="regtest">Regtest (local dev)</option>
-        </select>
-        <label>Wallet location</label>
-        <div class="copyable"><code id="path">— choose a location —</code><button class="btn ghost" id="pick">Choose</button></div>
         <label>New password</label>
         <input type="password" id="pw" />
         <label>Confirm password</label>
         <input type="password" id="pw2" />
+        <div class="check"><input type="checkbox" id="mine" /><label>Enable mining on this wallet's node</label></div>
+        <details class="mt4">
+          <summary class="muted">Advanced</summary>
+          <label>Network</label>
+          <select id="net">
+            <option value="testnet">Testnet</option>
+            <option value="mainnet">Mainnet</option>
+            <option value="regtest">Regtest (local dev)</option>
+          </select>
+        </details>
         <div class="btn-row">
           <button class="btn ghost" id="back">Back</button>
           <button class="btn" id="go">Restore</button>
@@ -289,18 +318,9 @@ export function renderRestore(go, onReady) {
         <div class="err-text" id="err"></div>
       </div>
     </div>`);
-  let path = null;
   // M2: network is chosen at restore time and baked into the wallet.
   const netEl = node.querySelector("#net");
   netEl.value = settings.current.network;
-  netEl.onchange = () => {
-    settings.current.network = netEl.value;
-    savePrefs(settings.current);
-  };
-  node.querySelector("#pick").onclick = async () => {
-    const p = await pickSaveFile("Save restored DOM wallet");
-    if (p) { path = p; node.querySelector("#path").textContent = p; }
-  };
   node.querySelector("#back").onclick = () => go("start");
   node.querySelector("#go").onclick = async () => {
     const err = node.querySelector("#err");
@@ -308,18 +328,23 @@ export function renderRestore(go, onReady) {
     const phrase = node.querySelector("#phrase").value.trim();
     const pw = node.querySelector("#pw").value;
     const pw2 = node.querySelector("#pw2").value;
+    const mine = node.querySelector("#mine").checked;
     if (!name) { err.textContent = "Enter a name for this wallet."; return; }
-    if (!path) { err.textContent = "Choose the wallet location."; return; }
+    if (!phrase) { err.textContent = "Enter your recovery phrase."; return; }
     if (pw.length < 8) { err.textContent = "Use at least 8 characters."; return; }
     // L1: confirm the password so a typo can't lock the restored wallet.
     if (pw !== pw2) { err.textContent = "Passwords do not match."; return; }
+    const btn = node.querySelector("#go"); btn.disabled = true;
     try {
       // Auto-registered by the backend under `name`; the phrase is never stored.
-      await api.walletRestore(path, pw, phrase, settings.current, name);
+      const restored = await api.walletRestoreManaged(name, pw, phrase, mine, netEl.value);
+      settings.current = { ...settings.current, ...restored };
+      savePrefs(settings.current);
       node.querySelector("#phrase").value = "";
       toast(t("walletRestored"));
       onReady();
     } catch (e) { err.textContent = humanizeError(e); }
+    finally { btn.disabled = false; }
   };
   return node;
 }
@@ -839,10 +864,9 @@ export function renderNode() {
     finally { btn.disabled = false; }
   };
   node.querySelector("#bStartMining").onclick = async () => {
-    if (!minerRewardWalletSelected()) {
-      toast("Choose a dedicated miner reward wallet in Settings before mining.", true);
-      return;
-    }
+    // No manual reward wallet needed: rewards go to the app-managed miner
+    // wallet under this wallet's node dir and are auto-swept to the user
+    // wallet. An explicit reward wallet in Settings remains an override.
     if (!window.confirm("Mining can use significant CPU. Start mining?")) return;
     try { await applyMiningEnabled(true); toast(t("applyingMining")); }
     catch (e) {
@@ -922,15 +946,16 @@ export function renderSettings(onApply) {
         </div>
         <label>Data directory</label>
         <div class="copyable"><code id="data"></code><button class="btn ghost" id="pickData">Change</button></div>
-        <label>Miner reward wallet (.dom, optional)</label>
+        <p class="muted mt4" id="storageInfo"></p>
+        <label>Miner reward wallet (.dom, optional override)</label>
         <div class="copyable"><code id="miner"></code><button class="btn ghost" id="pickMiner">Choose</button><button class="btn ghost" id="clearMiner">Remove</button></div>
-        <p class="muted mt4">Mining requires a dedicated miner reward wallet. Your personal wallet is never used for mining and its password is never shared with the node.</p>
+        <p class="muted mt4">Optional: rewards normally go to an app-managed miner wallet and are swept to your wallet automatically. Your personal wallet is never used for mining and its password is never shared with the node.</p>
         <div class="row">
           <div class="flex1"><label>Miner threads</label><input type="number" id="minerThreads" min="1" step="1" /></div>
           <div class="flex1"><label>Miner throttle (ms)</label><input type="number" id="minerThrottle" min="0" step="1" /></div>
         </div>
         <div class="check"><input type="checkbox" id="mine" /><label>Mining enabled</label></div>
-        <div class="warn-box">Mining can use significant CPU. Start mining from Node / Logs after choosing a reward wallet.</div>
+        <div class="warn-box">Mining can use significant CPU.</div>
         <div class="btn-row"><button class="btn" id="apply">Save and apply</button></div>
       </div>
       <div class="card">
@@ -956,6 +981,13 @@ export function renderSettings(onApply) {
     </div>`);
 
   node.querySelector("#network").value = s.network;
+  // Advanced, read-only: where the app keeps managed wallets on this system.
+  api.walletStorageInfo().then((info) => {
+    const parts = [];
+    if (info?.open_wallet_dir) parts.push(`This wallet: ${info.open_wallet_dir}`);
+    if (info?.wallets_dir) parts.push(`Managed wallets folder: ${info.wallets_dir}`);
+    node.querySelector("#storageInfo").textContent = parts.join(" · ");
+  }).catch(() => {});
   node.querySelector("#seeds").value = (s.seed_peers || []).join(", ");
   node.querySelector("#p2p").value = s.p2p_listen_addr;
   node.querySelector("#rpc").value = s.rpc_listen_addr;
@@ -1009,20 +1041,17 @@ export function renderSettings(onApply) {
     s.miner_threads = normalizeMinerThreads(node.querySelector("#minerThreads").value);
     s.miner_throttle_ms = normalizeMinerThrottleMs(node.querySelector("#minerThrottle").value);
     s.mine = node.querySelector("#mine").checked;
-    if (s.mine && !minerRewardWalletSelected()) {
-      s.mine = false;
-      node.querySelector("#mine").checked = false;
-      toast("Choose a dedicated miner reward wallet before enabling mining.", true);
-      savePrefs(s);
-      onApply();
-      return;
-    }
+    // No manual reward wallet required: mining uses the app-managed miner
+    // wallet unless an explicit override is chosen above.
     if (s.mine && !wasMining && !window.confirm("Mining can use significant CPU. Start mining?")) {
       s.mine = false;
       node.querySelector("#mine").checked = false;
     }
     savePrefs(s);
     onApply();
+    // Persist next to the open managed wallet (no-op otherwise) so the choice
+    // is restored when this wallet is opened by name again.
+    try { await api.managedSettingsSave(s); } catch {}
     try { await api.nodeRestart(s); toast(t("settingsApplied")); }
     catch (e) {
       const msg = humanizeError(e);
