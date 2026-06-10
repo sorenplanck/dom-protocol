@@ -130,9 +130,11 @@ async function enterApp() {
   showApp();
   attachIdleListeners();
   resetIdleTimer();
-  // Auto-start the embedded node with current settings.
+  // Bring the embedded node up on the OPEN wallet's settings. `nodeEnsure`
+  // restarts the node when it is still running on another wallet's data
+  // dir/ports (wallet switch) and is a no-op when settings are unchanged.
   try {
-    await api.nodeStart(S.settings.current);
+    await api.nodeEnsure(S.settings.current);
   } catch (e) {
     toast(humanizeError(e), true);
   }

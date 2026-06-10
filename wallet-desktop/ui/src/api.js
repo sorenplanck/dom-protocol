@@ -35,8 +35,27 @@ export const api = {
     invoke("wallet_restore", { path, password, phrase, settings, name }),
   walletOpen: (path, password, name, remember) =>
     invoke("wallet_open", { path, password, name, remember }),
+  // Managed flow: the app owns every path. The user supplies only a name, a
+  // password and the mining toggle; the backend creates the wallet directory,
+  // the encrypted vault AND the per-wallet node (data dir, config, free local
+  // ports). Resolves to { phrase, settings }.
+  walletCreateManaged: (name, password, mine, network) =>
+    invoke("wallet_create_managed", { name, password, mine, network }),
+  // Managed restore: same storage rules, plus the recovery phrase (never
+  // persisted). Resolves to the per-wallet node settings.
+  walletRestoreManaged: (name, password, phrase, mine, network) =>
+    invoke("wallet_restore_managed", { name, password, phrase, mine, network }),
+  // Duplicate-name pre-check for the create screen.
+  walletNameTaken: (name) => invoke("wallet_name_taken", { name }),
+  // Non-sensitive managed-storage locations for the Settings screen.
+  walletStorageInfo: () => invoke("wallet_storage_info"),
+  // Persist node settings next to the open MANAGED wallet (no-op otherwise).
+  managedSettingsSave: (settings) =>
+    invoke("managed_settings_save", { settings }),
   // Login-by-name: resolve the vault location from the local registry, then
   // unlock with the password. The renderer never handles a filesystem path.
+  // Resolves to the wallet's saved node settings (or null for wallets located
+  // outside the managed storage).
   walletOpenByName: (name, password) =>
     invoke("wallet_open_by_name", { name, password }),
   // Non-sensitive list of saved profiles (names + networks only) for the login
@@ -63,6 +82,10 @@ export const api = {
   readTextFile: (title) => invoke("read_text_file", { title }),
 
   nodeStart: (settings) => invoke("node_start", { settings }),
+  // Start when stopped, restart when running on DIFFERENT settings, no-op when
+  // already running on these settings. Used on wallet open/switch so the node
+  // always serves the open wallet's own data dir and ports.
+  nodeEnsure: (settings) => invoke("node_ensure", { settings }),
   nodeStop: () => invoke("node_stop"),
   nodeRestart: (settings) => invoke("node_restart", { settings }),
   nodeState: () => invoke("node_state"),

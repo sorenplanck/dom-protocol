@@ -165,6 +165,33 @@ impl NodeHost {
         Ok(())
     }
 
+    /// Make sure the node is running with EXACTLY these settings.
+    ///
+    /// * stopped → start;
+    /// * running with the same settings → no-op;
+    /// * running with different settings (e.g. another wallet's node dir or
+    ///   ports) → restart on the new settings.
+    ///
+    /// This is what wallet open/switch uses: a plain `start` is a no-op while
+    /// running, which would silently leave the PREVIOUS wallet's node (and its
+    /// chain data dir) serving the newly opened wallet.
+    pub async fn ensure(&self, settings: NodeSettings) -> Result<()> {
+        let needs_restart = {
+            let inner = self.inner.lock().await;
+            match inner.state {
+                NodeState::Stopped | NodeState::Stopping => false,
+                NodeState::Running | NodeState::Starting => {
+                    inner.last_settings.as_ref() != Some(&settings)
+                }
+            }
+        };
+        if needs_restart {
+            self.restart(Some(settings)).await
+        } else {
+            self.start(settings).await
+        }
+    }
+
     /// Stop then start again with the last-used (or new) settings.
     pub async fn restart(&self, settings: Option<NodeSettings>) -> Result<()> {
         let settings = match settings {
