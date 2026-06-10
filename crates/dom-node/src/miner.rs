@@ -335,8 +335,8 @@ async fn finalize_mined_block(node: &Arc<DomNode>, block: Block) -> Result<u64, 
                 new_height
             );
             if let Some(ref wallet_arc) = node.wallet {
-                let mut wallet = wallet_arc.lock().await;
-                wallet.forget_output(&coinbase_commitment);
+                let mut wallet_dir = wallet_arc.lock().await;
+                wallet_dir.wallet_mut().forget_output(&coinbase_commitment);
             }
         }
         dom_chain::ConnectResult::AlreadyHave => {
@@ -345,8 +345,8 @@ async fn finalize_mined_block(node: &Arc<DomNode>, block: Block) -> Result<u64, 
                 new_height
             );
             if let Some(ref wallet_arc) = node.wallet {
-                let mut wallet = wallet_arc.lock().await;
-                wallet.forget_output(&coinbase_commitment);
+                let mut wallet_dir = wallet_arc.lock().await;
+                wallet_dir.wallet_mut().forget_output(&coinbase_commitment);
             }
             // Don't relay — peers already have it (somehow).
             return Ok(new_height);
@@ -378,9 +378,9 @@ async fn finalize_mined_block(node: &Arc<DomNode>, block: Block) -> Result<u64, 
         dom_chain::ConnectResult::BestChain | dom_chain::ConnectResult::Reorg(_)
     ) {
         if let Some(ref wallet_arc) = node.wallet {
-            let mut wallet = wallet_arc.lock().await;
+            let mut wallet_dir = wallet_arc.lock().await;
             apply_wallet_after_mined_connect(
-                &mut wallet,
+                wallet_dir.wallet_mut(),
                 &connect_outcome,
                 &block.transactions,
                 new_height,
@@ -679,8 +679,9 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     // Build coinbase reflecting tx fees so explicit_value == reward + fees.
     let coinbase = if let Some(ref wallet_arc) = node.wallet {
         // Wallet-integrated mining: deterministic blinding, output recorded
-        let mut wallet = wallet_arc.lock().await;
-        wallet
+        let mut wallet_dir = wallet_arc.lock().await;
+        wallet_dir
+            .wallet_mut()
             .build_coinbase(BlockHeight(new_height), total_tx_fees)
             .map_err(|e| DomError::Internal(format!("wallet coinbase: {e}")))?
     } else if node.config.network == dom_config::Network::Regtest {
