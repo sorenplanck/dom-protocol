@@ -93,15 +93,19 @@ impl NodeSettings {
             return Err(anyhow!("data directory must not be empty"));
         }
         if self.mine {
-            let path = self
+            // No explicit path means the app-managed default
+            // (`<data_dir>/miner-wallet.dom`, auto-created with its own
+            // generated key — see `miner_wallet_credentials`). Mining must
+            // never require the user to pick a reward wallet manually; an
+            // EXPLICIT path is an advanced override and is still validated.
+            if let Some(path) = self
                 .miner_wallet_path
                 .as_deref()
                 .map(str::trim)
                 .filter(|path| !path.is_empty())
-                .ok_or_else(|| {
-                    anyhow!("Choose a dedicated miner reward wallet before enabling mining.")
-                })?;
-            validate_miner_wallet_path(path)?;
+            {
+                validate_miner_wallet_path(path)?;
+            }
         }
         Ok(())
     }
@@ -583,17 +587,34 @@ mod tests {
         );
     }
 
+    /// Mining without an explicit reward wallet must auto-provision the
+    /// app-managed one under the node data dir — the user never picks a path.
     #[test]
-    fn mining_requires_selected_reward_wallet() {
+    fn mining_without_explicit_reward_wallet_uses_managed_default() {
         let mut settings = regtest_settings_with_seed(vec![]);
+        settings.data_dir = tempfile::tempdir()
+            .expect("tempdir")
+            .keep()
+            .to_string_lossy()
+            .into_owned();
         settings.mine = true;
-        let err = settings
+        settings.miner_wallet_path = None;
+        let config = settings
             .to_node_config(None)
-            .expect_err("mining without miner wallet must fail");
-        assert_eq!(
-            err.to_string(),
-            "Choose a dedicated miner reward wallet before enabling mining."
+            .expect("mining must not require a manual reward wallet");
+        assert!(config.mine);
+        let wallet_path = config.wallet_path.expect("auto miner wallet path");
+        assert!(
+            wallet_path.ends_with("miner-wallet.dom"),
+            "auto reward wallet must live under the data dir, got {wallet_path}"
         );
+        assert!(
+            wallet_path.starts_with(&settings.data_dir),
+            "auto reward wallet must live under the data dir"
+        );
+        let password = config.wallet_password.expect("auto miner wallet password");
+        assert!(!password.is_empty());
+        let _ = std::fs::remove_dir_all(&settings.data_dir);
     }
 
     #[test]
@@ -628,19 +649,13 @@ mod tests {
         assert_eq!(config.wallet_password, None);
     }
 
+    /// An EXPLICIT miner wallet override is still validated: a path whose
+    /// parent does not exist must be rejected, while an empty string now falls
+    /// back to the app-managed default instead of failing.
     #[test]
-    fn mining_on_rejects_empty_or_invalid_miner_wallet() {
+    fn mining_on_rejects_invalid_explicit_miner_wallet() {
         let mut settings = regtest_settings_with_seed(vec![]);
         settings.mine = true;
-
-        settings.miner_wallet_path = Some("".into());
-        let err = settings
-            .to_node_config(None)
-            .expect_err("empty miner wallet must fail");
-        assert_eq!(
-            err.to_string(),
-            "Choose a dedicated miner reward wallet before enabling mining."
-        );
 
         settings.miner_wallet_path = Some(
             std::env::temp_dir()
@@ -657,6 +672,7 @@ mod tests {
             "Miner reward wallet is invalid or cannot be opened."
         );
     }
+
     #[test]
     fn miner_thread_limit_is_normalized_safely() {
         let mut settings = regtest_settings_with_seed(vec![]);
