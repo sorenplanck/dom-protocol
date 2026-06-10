@@ -86,6 +86,16 @@ pub struct NodeConfig {
     pub min_outbound: usize,
     /// DNS seeds.
     pub dns_seeds: Vec<String>,
+    /// When `true`, the outbound connector skips DNS-seed resolution entirely,
+    /// including the hardcoded fallback seeds in `dom_wire::dns_seed`. The
+    /// desktop wallet sets this whenever the user supplies explicit
+    /// `seed_peers`, so a custom seed (e.g. a local SSH tunnel) is the ONLY
+    /// bootstrap source and the network's default DNS seeds cannot reintroduce
+    /// unwanted peers (e.g. a testnet DNS seed resolving to the bootstrap host
+    /// on the default P2P port). Default `false` leaves standalone-node
+    /// behavior unchanged. `#[serde(default)]` keeps legacy configs loadable.
+    #[serde(default)]
+    pub disable_dns_seeds: bool,
     /// Hardcoded seed peers (IP:port).
     pub seed_peers: Vec<String>,
     /// Enable mining.
@@ -150,6 +160,7 @@ impl NodeConfig {
                 "seed1.dom-protocol.org".into(),
                 "seed2.dom-protocol.org".into(),
             ],
+            disable_dns_seeds: false,
             seed_peers: vec![],
             mine: false,
             miner_throttle: MinerThrottleConfig::default(),
@@ -171,6 +182,7 @@ impl NodeConfig {
             max_inbound: 50,
             min_outbound: 4,
             dns_seeds: vec!["testnet-seed1.dom-protocol.org".into()],
+            disable_dns_seeds: false,
             seed_peers: vec![],
             mine: true,
             miner_throttle: MinerThrottleConfig::default(),
@@ -195,6 +207,7 @@ impl NodeConfig {
             max_inbound: 8,
             min_outbound: 1,
             dns_seeds: vec![],
+            disable_dns_seeds: false,
             seed_peers: vec![],
             mine: false,
             miner_throttle: MinerThrottleConfig::default(),

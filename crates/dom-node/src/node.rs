@@ -1045,24 +1045,7 @@ impl DomNode {
                 if let Err(e) = advance_peer_rotation_cooldowns(&self.chain, &self.peers).await {
                     warn!("Advancing peer rotation cooldowns failed: {e}");
                 }
-                let is_mainnet = self.config.network == dom_config::Network::Mainnet;
-                let port = self.config.network.default_port();
-                // Regtest is a private local network: without explicitly
-                // configured dns_seeds it must not fall back to the built-in
-                // public testnet DNS seeds, otherwise local/CI regtest nodes
-                // dial real internet hosts. A single such dial parks a relay
-                // worker inside `TcpStream::connect` for the full OS connect
-                // timeout when the SYN is silently dropped, so the relay
-                // registry (and any outbound slot budget) stays occupied by a
-                // peer that can never handshake.
-                let mut addrs = if self.config.network == dom_config::Network::Regtest
-                    && self.config.dns_seeds.is_empty()
-                {
-                    Vec::new()
-                } else {
-                    dom_wire::dns_seed::resolve_seeds(is_mainnet, port, &self.config.dns_seeds)
-                        .await
-                };
+                let mut addrs = resolve_configured_dns_seeds(&self.config).await;
 
                 // Also try configured seed peers
                 addrs.extend(self.config.seed_peers.iter().cloned());
@@ -2298,6 +2281,34 @@ pub(crate) fn restore_peer_reputation_state(
         }),
         None => Ok(()),
     }
+}
+
+/// Resolve the DNS-seed bootstrap candidates for this configuration.
+///
+/// Two gates, both yielding NO candidates:
+///   * [`NodeConfig::disable_dns_seeds`] — the desktop wallet sets it whenever
+///     the user configured explicit `seed_peers`, so a custom seed (e.g. a
+///     local SSH tunnel) is the ONLY bootstrap source and the hardcoded
+///     fallback seeds in `dom_wire::dns_seed` cannot reintroduce unwanted
+///     peers;
+///   * Regtest with no explicitly configured dns_seeds — a private local
+///     network must never dial the built-in public testnet seeds. A single
+///     such dial parks a relay worker inside `TcpStream::connect` for the
+///     full OS connect timeout when the SYN is silently dropped, so the relay
+///     registry (and any outbound slot budget) stays occupied by a peer that
+///     can never handshake.
+///
+/// Every other configuration resolves the network's DNS seeds unchanged.
+pub(crate) async fn resolve_configured_dns_seeds(config: &NodeConfig) -> Vec<String> {
+    if config.disable_dns_seeds {
+        return Vec::new();
+    }
+    if config.network == dom_config::Network::Regtest && config.dns_seeds.is_empty() {
+        return Vec::new();
+    }
+    let is_mainnet = config.network == dom_config::Network::Mainnet;
+    let port = config.network.default_port();
+    dom_wire::dns_seed::resolve_seeds(is_mainnet, port, &config.dns_seeds).await
 }
 
 async fn persist_peer_rotation_state(
@@ -4020,10 +4031,11 @@ mod tests {
         load_peer_rotation_snapshot, parse_persisted_noise_static_key, peer_violation_score,
         pending_peer_violation_score, persist_mempool_snapshot, persist_peer_reputation_snapshot,
         purge_mempool_confirmed_inputs, reconcile_mempool_after_connect, refresh_peer_metrics,
-        relay_block_action, restore_peer_rotation_state, serve_metrics, trace_lock, tx_hash,
-        DeferredReplayAction, DomNode, IbdRoundState, OutboundAttemptOutcome, RelayBlockAction,
-        LEGACY_PEER_ROTATION_METADATA_KEY, MEMPOOL_METADATA_KEY, METRICS_CONTENT_TYPE,
-        NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY, PEER_ROTATION_METADATA_KEY,
+        relay_block_action, resolve_configured_dns_seeds, restore_peer_rotation_state,
+        serve_metrics, trace_lock, tx_hash, DeferredReplayAction, DomNode, IbdRoundState,
+        OutboundAttemptOutcome, RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY,
+        MEMPOOL_METADATA_KEY, METRICS_CONTENT_TYPE, NOISE_STATIC_KEY_METADATA_KEY,
+        PEER_REPUTATION_METADATA_KEY, PEER_ROTATION_METADATA_KEY,
     };
     use crate::future_block_queue::DeferredBlock;
     use crate::metrics::Metrics;
@@ -4072,6 +4084,36 @@ mod tests {
     use tokio::net::TcpStream;
     use tokio::sync::Mutex;
     use tokio::task::JoinHandle;
+
+    /// When `disable_dns_seeds` is set the outbound connector must contribute
+    /// NO DNS-resolved bootstrap candidates — neither the configured DNS seeds
+    /// nor the hardcoded fallback list. This is what stops a testnet DNS seed
+    /// from reintroducing the bootstrap host on the default P2P port once the
+    /// user supplies an explicit seed peer. The disabled path performs no
+    /// network access, so the test is hermetic.
+    #[tokio::test]
+    async fn disabled_dns_seeds_yield_no_candidates() {
+        let mut config = NodeConfig::testnet();
+        // Sanity: testnet ships a non-empty DNS seed by default, so an empty
+        // result can only come from the gate (not from an empty seed list).
+        assert!(!config.dns_seeds.is_empty());
+        config.disable_dns_seeds = true;
+        assert!(resolve_configured_dns_seeds(&config).await.is_empty());
+    }
+
+    /// Regtest with no explicitly configured dns_seeds must contribute NO
+    /// bootstrap candidates either — a private local network must never dial
+    /// the hardcoded public testnet fallback. (Same invariant the relay
+    /// registry CI fix relies on; kept here so the wallet's
+    /// `disable_dns_seeds` path and the regtest gate cannot regress each
+    /// other.)
+    #[tokio::test]
+    async fn regtest_without_explicit_dns_seeds_yields_no_candidates() {
+        let config = NodeConfig::regtest();
+        assert!(config.dns_seeds.is_empty());
+        assert!(!config.disable_dns_seeds);
+        assert!(resolve_configured_dns_seeds(&config).await.is_empty());
+    }
 
     // 64 MiB
     const TEST_LMDB_MAP_SIZE: usize = 64 << 20;
