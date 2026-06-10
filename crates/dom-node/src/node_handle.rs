@@ -433,6 +433,7 @@ mod tests {
             max_inbound: 4,
             min_outbound: 0,
             dns_seeds: vec![],
+            disable_dns_seeds: false,
             seed_peers: vec![],
             mine: false,
             miner_throttle: Default::default(),

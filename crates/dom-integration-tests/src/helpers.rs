@@ -221,6 +221,7 @@ pub fn test_config(name: &str, port: u16, _mine: bool) -> NodeConfig {
         max_inbound: 10,
         min_outbound: 1,
         dns_seeds: vec![],
+        disable_dns_seeds: false,
         seed_peers: vec![],
         mine: false,
         miner_throttle: Default::default(),
