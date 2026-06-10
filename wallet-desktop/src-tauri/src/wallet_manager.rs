@@ -184,6 +184,31 @@ impl WalletManager {
         Ok(())
     }
 
+    /// Rebuild the open wallet's output index by scanning the chain the
+    /// embedded node already has on disk.
+    ///
+    /// This is the recovery step a seed restore needs: `restore_from_phrase`
+    /// only persists the seed, so a wallet restored from a phrase that already
+    /// owns on-chain coinbases would otherwise show a zero balance until the
+    /// chain is scanned. We delegate to `DomNode::rescan_wallet_dir` (which owns
+    /// the chain) — no scan logic is reimplemented here. The wallet must be
+    /// open and unlocked (the deterministic scan derives the coinbase blinding
+    /// from the encrypted seed); a locked wallet returns an error.
+    ///
+    /// `Repair`-mode rescan is idempotent and preserves persisted receive
+    /// requests and still-live pending spends, so it is safe to call repeatedly
+    /// (e.g. once per new chain tip after a restore).
+    pub async fn rescan_against_node(
+        &self,
+        node: &dom_node::node::DomNode,
+    ) -> Result<dom_wallet::WalletRescanSummary> {
+        let mut guard = self.inner.lock().await;
+        let dir = guard.as_mut().ok_or_else(|| anyhow!("no wallet open"))?;
+        node.rescan_wallet_dir(dir)
+            .await
+            .map_err(|e| anyhow!("wallet rescan failed: {e}"))
+    }
+
     pub async fn balance(&self, current_height: u64) -> Result<BalanceInfo> {
         let guard = self.inner.lock().await;
         let dir = guard.as_ref().ok_or_else(|| anyhow!("no wallet open"))?;
