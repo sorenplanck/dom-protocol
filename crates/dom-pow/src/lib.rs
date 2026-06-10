@@ -85,12 +85,17 @@ pub struct CompactTarget(pub u32);
 /// compact form miners and validators can round-trip exactly.
 pub const MAX_COMPACT_TARGET: u32 = 0x1e7f_ffff;
 
-/// Testnet compact target floor.
+/// Testnet genesis compact target.
 ///
-/// This expands to a target about 32x harder than `MAX_COMPACT_TARGET` under
-/// DOM's current compact-target byte layout while retaining the public
-/// DOM-ASERT-288 spacing and half-life parameters.
-pub const TESTNET_TARGET_COMPACT: u32 = 0x1e7f_ff07;
+/// Calibrated for an accessible public-testnet bootstrap on modest CPUs while
+/// remaining REAL proof-of-work — never the regtest trivial target. Expands to
+/// ~131,075 expected hashes per block (~11.8 min at 185 h/s, ~21.8 min at
+/// 100 h/s), exactly 2x harder than `MAX_COMPACT_TARGET`, so testnet ASERT
+/// keeps headroom to EASE difficulty toward the consensus floor (~65,537
+/// hashes per block) when network hashrate is low. The previous anchor
+/// (0x1e7fff07, ~2.1M hashes) stalled weak hardware at block 1 because
+/// genesis == max left the retarget clamp no room to ease.
+pub const TESTNET_TARGET_COMPACT: u32 = 0x1e2e_ff7f;
 
 /// Regtest compact target. Dev-only and intentionally easy.
 pub const REGTEST_TARGET_COMPACT: u32 = MAX_COMPACT_TARGET;
@@ -127,7 +132,12 @@ pub fn pow_params_for_network(network_magic: u32) -> PowParams {
             target_spacing: TARGET_SPACING,
             half_life: ASERT_HALF_LIFE,
             genesis_target_compact: TESTNET_TARGET_COMPACT,
-            max_compact_target: TESTNET_TARGET_COMPACT,
+            // Decoupled from the genesis anchor: with genesis == max the
+            // apply_exponent clamp froze every retarget at the anchor, so
+            // testnet difficulty could never EASE under low hashrate. The
+            // ceiling of easiness is the canonical compact-stable maximum
+            // (still real PoW, ~65,537 expected hashes per block).
+            max_compact_target: MAX_COMPACT_TARGET,
         },
         NETWORK_MAGIC_REGTEST => PowParams {
             target_spacing: TARGET_SPACING,
@@ -1015,12 +1025,100 @@ mod tests {
         }
     }
 
+    /// Expected hash attempts for one block at the given target.
+    fn expected_hashes(target: &[u8; 32]) -> U256 {
+        U256::MAX / U256::from_big_endian(target)
+    }
+
     #[test]
-    fn testnet_floor_is_about_32x_harder_than_easy_compact_target() {
+    fn testnet_genesis_is_2x_harder_than_easy_compact_target() {
         let easy = CompactTarget(MAX_COMPACT_TARGET).to_target().unwrap();
         let testnet = CompactTarget(TESTNET_TARGET_COMPACT).to_target().unwrap();
         let ratio = U256::from_big_endian(&easy) / U256::from_big_endian(&testnet);
-        assert!(ratio >= U256::from(31u8) && ratio <= U256::from(33u8));
+        assert_eq!(ratio, U256::from(2u8));
+    }
+
+    /// Prova 1: o genesis da testnet passa validate_target_bounds (to_target
+    /// valida internamente) e exige ~131k hashes/bloco — mineável por CPU
+    /// modesta (~11.8 min a 185 h/s) sem ser trivial.
+    #[test]
+    fn testnet_genesis_passes_bounds_and_requires_about_131k_hashes() {
+        let target = CompactTarget(TESTNET_TARGET_COMPACT)
+            .to_target()
+            .expect("genesis target must pass validate_target_bounds");
+        let hashes = expected_hashes(&target);
+        assert!(
+            hashes >= U256::from(130_000u32) && hashes <= U256::from(132_000u32),
+            "expected ~131,075 hashes per block, got {hashes}"
+        );
+    }
+
+    /// Prova 2: na testnet, max_target é estritamente MAIS FÁCIL (maior) que
+    /// o genesis_target — o clamp de apply_exponent tem espaço para o ASERT
+    /// baixar a dificuldade (antes genesis == max congelava o retarget).
+    #[test]
+    fn testnet_asert_has_headroom_to_ease() {
+        let params = pow_params_for_network(NETWORK_MAGIC_TESTNET);
+        let genesis = params.genesis_target().unwrap();
+        let max = params.max_target().unwrap();
+        assert!(
+            U256::from_big_endian(&max) > U256::from_big_endian(&genesis),
+            "max_target must be easier than genesis_target on testnet"
+        );
+    }
+
+    /// Prova 3: com blocos chegando MAIS DEVAGAR que o spacing (hashrate
+    /// baixo), o retarget produz um alvo MAIS FÁCIL que o inicial — impossível
+    /// antes desta mudança, quando o clamp prendia o resultado no anchor.
+    #[test]
+    fn testnet_slow_blocks_ease_difficulty_below_genesis() {
+        let params = pow_params_for_network(NETWORK_MAGIC_TESTNET);
+        let anchor = genesis_anchor(NETWORK_MAGIC_TESTNET).unwrap();
+        // Bloco 1 atrasado meia half-life (17.280s além do ideal): o ASERT
+        // deve facilitar ~sqrt(2)x — estritamente entre genesis e max.
+        let late = Timestamp(anchor.timestamp.0 + params.target_spacing + params.half_life / 2);
+        let next = asert_next_target_with_params(&anchor, late, BlockHeight(1), &params).unwrap();
+
+        let genesis = U256::from_big_endian(&anchor.target);
+        let max = U256::from_big_endian(&params.max_target().unwrap());
+        let eased = U256::from_big_endian(&next);
+        assert!(
+            eased > genesis,
+            "slow blocks must EASE the target (was impossible with genesis == max)"
+        );
+        assert!(eased <= max, "eased target must respect the max clamp");
+    }
+
+    /// Prova 4: mainnet e regtest ficam EXATAMENTE como estavam.
+    #[test]
+    fn mainnet_and_regtest_pow_params_unchanged() {
+        assert_eq!(GENESIS_TARGET_COMPACT, 0x1e00_ffff);
+        let mainnet = pow_params_for_network(NETWORK_MAGIC_MAINNET);
+        assert_eq!(mainnet.genesis_target_compact, GENESIS_TARGET_COMPACT);
+        assert_eq!(mainnet.max_compact_target, GENESIS_TARGET_COMPACT);
+
+        let regtest = pow_params_for_network(NETWORK_MAGIC_REGTEST);
+        assert_eq!(regtest.genesis_target_compact, REGTEST_TARGET_COMPACT);
+        assert_eq!(regtest.max_compact_target, REGTEST_TARGET_COMPACT);
+        assert_eq!(REGTEST_TARGET_COMPACT, MAX_COMPACT_TARGET);
+    }
+
+    /// Prova 5: o alvo de testnet continua PoW REAL — exige pelo menos 2x o
+    /// piso do consenso (65.536 hashes, o mesmo do trivial de regtest) e nunca
+    /// é mais fácil que o teto compact permitido.
+    #[test]
+    fn testnet_genesis_remains_real_pow() {
+        let genesis = CompactTarget(TESTNET_TARGET_COMPACT).to_target().unwrap();
+        let hashes = expected_hashes(&genesis);
+        assert!(
+            hashes >= U256::from(2u32 * 65_536),
+            "testnet genesis must require at least 2x the consensus floor, got {hashes}"
+        );
+        let easiest = CompactTarget(MAX_COMPACT_TARGET).to_target().unwrap();
+        assert!(
+            U256::from_big_endian(&genesis) < U256::from_big_endian(&easiest),
+            "testnet genesis must be strictly harder than the easiest allowed target"
+        );
     }
 
     #[test]
@@ -1066,10 +1164,11 @@ mod tests {
     }
 
     #[test]
-    fn testnet_params_keep_dedicated_compact_floor() {
+    fn testnet_params_decouple_genesis_anchor_from_max_target() {
         let params = pow_params_for_network(NETWORK_MAGIC_TESTNET);
         assert_eq!(params.target_spacing, TARGET_SPACING);
-        assert_eq!(params.max_compact_target, TESTNET_TARGET_COMPACT);
+        assert_eq!(params.genesis_target_compact, TESTNET_TARGET_COMPACT);
+        assert_eq!(params.max_compact_target, MAX_COMPACT_TARGET);
     }
 
     #[test]
