@@ -201,9 +201,9 @@ impl NodeHandle for NodeHandleImpl {
     }
 
     fn get_wallet_balance(&self) -> Option<dom_rpc::WalletBalanceResponse> {
-        let wallet = self.0.wallet.as_ref()?.try_lock().ok()?;
+        let wallet_dir = self.0.wallet.as_ref()?.try_lock().ok()?;
         let height = self.0.chain.try_lock().ok()?.tip_height.0;
-        let bal = wallet.balance(height);
+        let bal = wallet_dir.wallet().balance(height);
         const NOMS: f64 = 100_000_000.0;
         Some(dom_rpc::WalletBalanceResponse {
             confirmed_noms: bal.confirmed,
@@ -279,9 +279,10 @@ impl NodeHandle for NodeHandleImpl {
                 .mempool
                 .try_lock()
                 .map_err(|_| dom_rpc::RpcError::Overloaded("mempool busy".into()))?;
-            let mut wallet = wallet_arc
+            let mut wallet_dir = wallet_arc
                 .try_lock()
                 .map_err(|_| dom_rpc::RpcError::Overloaded("wallet busy".into()))?;
+            let wallet = wallet_dir.wallet_mut();
 
             let height = chain.tip_height.0;
             let built = wallet
@@ -408,7 +409,7 @@ mod tests {
     use dom_rpc::SpendRequest;
     use dom_serialization::DomSerialize;
     use dom_store::utxo::UtxoEntry;
-    use dom_wallet::{Network, OwnedOutput, Wallet};
+    use dom_wallet::{Network, OwnedOutput, Wallet, WalletDir, WALLET_DAT_NAME};
     use std::sync::atomic::Ordering;
 
     const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
@@ -445,6 +446,21 @@ mod tests {
             rpc_bearer_token: None,
             metrics_listen_addr: None,
         }
+    }
+
+    /// The node no longer CREATES wallets (DOM-SEC-004: the old auto-create
+    /// produced a legacy keychain with no recoverable seed). Tests pre-create
+    /// the canonical WalletDir directory, exactly like the CLI/desktop wallet,
+    /// and drop the handle so the node can take the exclusive lock.
+    fn create_test_wallet_dir(path: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(path);
+        WalletDir::create(
+            path,
+            "password123",
+            Network::Regtest,
+            &dom_core::Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+        )
+        .expect("create test wallet dir");
     }
 
     fn raw_spend_tx(
@@ -505,7 +521,7 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
         let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        create_test_wallet_dir(&wallet_path);
 
         let node = std::sync::Arc::new(
             DomNode::init_with_map_size(
@@ -524,7 +540,8 @@ mod tests {
 
         {
             let wallet_arc = node.wallet.as_ref().expect("wallet configured");
-            let mut wallet = wallet_arc.try_lock().expect("wallet lock");
+            let mut wallet_dir = wallet_arc.try_lock().expect("wallet lock");
+            let wallet = wallet_dir.wallet_mut();
             wallet.add_output(make_output(900, 100, false));
             wallet.save().expect("persist wallet");
         }
@@ -549,8 +566,8 @@ mod tests {
 
         {
             let wallet_arc = node.wallet.as_ref().expect("wallet configured");
-            let wallet = wallet_arc.try_lock().expect("wallet lock");
-            let balance = wallet.balance(1000);
+            let wallet_dir = wallet_arc.try_lock().expect("wallet lock");
+            let balance = wallet_dir.wallet().balance(1000);
             assert_eq!(balance.confirmed, 900);
             assert_eq!(
                 balance.reserved, 0,
@@ -558,8 +575,8 @@ mod tests {
             );
         }
 
-        let reopened =
-            Wallet::open(&wallet_path, "password123").expect("reopen wallet after rollback");
+        let reopened = Wallet::open(&wallet_path.join(WALLET_DAT_NAME), "password123")
+            .expect("reopen wallet after rollback");
         let reopened_balance = reopened.balance(1000);
         assert_eq!(reopened_balance.confirmed, 900);
         assert_eq!(
@@ -569,7 +586,7 @@ mod tests {
         assert_eq!(reopened.network(), Network::Regtest);
 
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
     }
 
     #[test]
@@ -591,7 +608,7 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
         let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        create_test_wallet_dir(&wallet_path);
 
         let node = std::sync::Arc::new(
             DomNode::init_with_map_size(
@@ -607,7 +624,8 @@ mod tests {
 
         {
             let wallet_arc = node.wallet.as_ref().expect("wallet configured");
-            let mut wallet = wallet_arc.try_lock().expect("wallet lock");
+            let mut wallet_dir = wallet_arc.try_lock().expect("wallet lock");
+            let wallet = wallet_dir.wallet_mut();
             wallet.add_output(make_output(900, 100, false));
             wallet.save().expect("persist wallet");
         }
@@ -633,8 +651,8 @@ mod tests {
 
         {
             let wallet_arc = node.wallet.as_ref().expect("wallet configured");
-            let wallet = wallet_arc.try_lock().expect("wallet lock");
-            let balance = wallet.balance(1000);
+            let wallet_dir = wallet_arc.try_lock().expect("wallet lock");
+            let balance = wallet_dir.wallet().balance(1000);
             assert_eq!(balance.confirmed, 900);
             assert_eq!(
                 balance.reserved, 0,
@@ -642,8 +660,8 @@ mod tests {
             );
         }
 
-        let reopened =
-            Wallet::open(&wallet_path, "password123").expect("reopen wallet after rollback");
+        let reopened = Wallet::open(&wallet_path.join(WALLET_DAT_NAME), "password123")
+            .expect("reopen wallet after rollback");
         let reopened_balance = reopened.balance(1000);
         assert_eq!(reopened_balance.confirmed, 900);
         assert_eq!(
@@ -652,7 +670,7 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
     }
 
     #[test]
@@ -670,7 +688,7 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
         let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
 
         let node = std::sync::Arc::new(
             DomNode::init_with_map_size(
@@ -688,7 +706,7 @@ mod tests {
         assert_ne!(handle.network(), "mainnet");
 
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
     }
 
     #[test]
@@ -703,7 +721,7 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
         let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
 
         let node = std::sync::Arc::new(
             DomNode::init_with_map_size(
@@ -732,7 +750,7 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
     }
 
     #[test]
@@ -747,7 +765,7 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
         let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
 
         let node = std::sync::Arc::new(
             DomNode::init_with_map_size(
@@ -802,6 +820,6 @@ mod tests {
         assert_eq!(node.metrics.txs_relayed.load(Ordering::Relaxed), 1);
 
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
     }
 }
