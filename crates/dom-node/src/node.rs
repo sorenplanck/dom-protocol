@@ -1804,6 +1804,18 @@ fn peer_violation_score(error: &DomError) -> Option<u32> {
         DomError::Invalid(msg) if msg.contains("unexpected Hello") => {
             Some(ban_scores::PROTOCOL_VIOLATION)
         }
+        // Severity routing for expensive-to-detect consensus violations: a peer
+        // forcing full PoW/signature validation on garbage must not score the
+        // same 10 points as a cheap protocol slip (audit: P2P CPU-burn).
+        // Matched substrings are produced only by dom-consensus:
+        //   "proof-of-work invalid" → block.rs (validate_pow / _for_network)
+        //   "signature invalid"     → lib.rs (kernel Schnorr), transaction.rs (coinbase)
+        DomError::Invalid(msg) if msg.contains("proof-of-work invalid") => {
+            Some(ban_scores::INVALID_POW)
+        }
+        DomError::Invalid(msg) if msg.contains("signature invalid") => {
+            Some(ban_scores::INVALID_SIGNATURE)
+        }
         DomError::Invalid(_) => Some(ban_scores::PROTOCOL_VIOLATION),
         _ => None,
     }
@@ -5582,6 +5594,76 @@ mod tests {
             peer_violation_score(&DomError::Invalid("network_magic mismatch".into())),
             Some(ban_scores::WRONG_CHAIN_ID)
         );
+    }
+
+    #[test]
+    fn invalid_pow_maps_to_invalid_pow_score() {
+        // Both real messages from dom-consensus block.rs (validate_pow and
+        // validate_pow_for_network) must route to INVALID_POW, not the
+        // generic PROTOCOL_VIOLATION catch-all.
+        assert_eq!(
+            peer_violation_score(&DomError::Invalid(
+                "proof-of-work invalid: RandomX hash mismatch or does not meet target".into()
+            )),
+            Some(ban_scores::INVALID_POW)
+        );
+        assert_eq!(
+            peer_violation_score(&DomError::Invalid(
+                "proof-of-work invalid: hash mismatch or does not meet target".into()
+            )),
+            Some(ban_scores::INVALID_POW)
+        );
+    }
+
+    #[test]
+    fn invalid_signature_maps_to_invalid_signature_score() {
+        // Real messages from dom-consensus: kernel Schnorr verification
+        // (lib.rs) and coinbase kernel verification (transaction.rs).
+        assert_eq!(
+            peer_violation_score(&DomError::Invalid(
+                "kernel 0 Schnorr signature invalid".into()
+            )),
+            Some(ban_scores::INVALID_SIGNATURE)
+        );
+        assert_eq!(
+            peer_violation_score(&DomError::Invalid(
+                "coinbase kernel signature invalid — miner does not prove ownership".into()
+            )),
+            Some(ban_scores::INVALID_SIGNATURE)
+        );
+    }
+
+    #[test]
+    fn generic_invalid_still_maps_to_protocol_violation() {
+        // Regression: Invalid errors without a specific severity arm keep the
+        // generic PROTOCOL_VIOLATION score.
+        assert_eq!(
+            peer_violation_score(&DomError::Invalid("claimed fees 5 != actual fees 7".into())),
+            Some(ban_scores::PROTOCOL_VIOLATION)
+        );
+    }
+
+    #[test]
+    fn two_invalid_pow_blocks_cross_ban_threshold() {
+        // The audit finding: at PROTOCOL_VIOLATION (10) a peer needed ~10
+        // invalid-PoW blocks (each forcing full validation) to be banned.
+        // At INVALID_POW (50), two blocks must reach BAN_THRESHOLD (100).
+        let pow_error = DomError::Invalid(
+            "proof-of-work invalid: RandomX hash mismatch or does not meet target".into(),
+        );
+        let score = peer_violation_score(&pow_error).expect("invalid PoW must score");
+
+        let mut peer =
+            dom_wire::peer::PeerInfo::new("127.0.0.1:33369".parse().expect("addr"), false);
+        assert!(
+            !peer.add_ban_score(score),
+            "first invalid-PoW block must not ban yet"
+        );
+        assert!(
+            peer.add_ban_score(score),
+            "second invalid-PoW block must cross BAN_THRESHOLD"
+        );
+        assert!(peer.ban_score >= ban_scores::BAN_THRESHOLD);
     }
 
     #[test]

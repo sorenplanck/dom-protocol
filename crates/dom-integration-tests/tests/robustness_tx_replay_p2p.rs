@@ -13,13 +13,13 @@
 //! consulta nenhum cache antes de `accept_tx_with_chain_view`. Uma tx com prova
 //! de range VÁLIDA mas assinatura Schnorr INVÁLIDA é rejeitada por
 //! `validate_transaction` com `DomError::Invalid`, que `peer_violation_score`
-//! (`node.rs:1729`) pontua como `PROTOCOL_VIOLATION (10)`. O score do peer é
+//! pontua como `INVALID_SIGNATURE (25)`. O score do peer é
 //! consultável via `PeerManager::ban_score(addr)`.
 //!
-//! Logo: se CADA replay chega à crypto, o score sobe +10 por envio. Se houvesse
+//! Logo: se CADA replay chega à crypto, o score sobe +25 por envio. Se houvesse
 //! um dedup ANTES da validação (keyed por hash dos bytes), os reenvios idênticos
-//! seriam descartados e o score ESTAGNARIA em 10 — refutando a tese. A prova é a
-//! progressão do score (10, 20, 30, ...), não o tempo.
+//! seriam descartados e o score ESTAGNARIA em 25 — refutando a tese. A prova é a
+//! progressão do score (25, 50, 75, ...), não o tempo.
 //!
 //! A prova usa range proof válido + assinatura corrompida DE PROPÓSITO para
 //! garantir que o passo caro (`bp_verify`, passo 6 de `validate_transaction`)
@@ -182,7 +182,7 @@ async fn wait_for_ban_score(
 
 /// PASSO 1: provar que cada replay de uma tx chega a `validate_transaction` no
 /// caminho P2P real. Enviamos a MESMA tx (assinatura inválida) N vezes e
-/// observamos o score do peer subir `PROTOCOL_VIOLATION` por envio.
+/// observamos o score do peer subir `INVALID_SIGNATURE` por envio.
 #[tokio::test]
 async fn robustness_p2p_tx_replay_reaches_crypto_each_time() {
     init_tracing();
@@ -209,9 +209,9 @@ async fn robustness_p2p_tx_replay_reaches_crypto_each_time() {
         payload: tx_bytes,
     };
 
-    // Send the SAME invalid tx 3 times. PROTOCOL_VIOLATION = 10, BAN_THRESHOLD =
-    // 100, so 3 sends (score 30) stays comfortably below a ban — the connection
-    // stays open and every send is processed.
+    // Send the SAME invalid tx 3 times. A bad-signature tx scores
+    // INVALID_SIGNATURE = 25, BAN_THRESHOLD = 100, so 3 sends (score 75) stays
+    // below a ban — the connection stays open and every send is processed.
     let sends = 3u32;
     for i in 0..sends {
         codec
@@ -220,7 +220,7 @@ async fn robustness_p2p_tx_replay_reaches_crypto_each_time() {
             .unwrap_or_else(|e| panic!("send replay #{i} failed: {e:?}"));
     }
 
-    let expected = ban_scores::PROTOCOL_VIOLATION * sends; // 30
+    let expected = ban_scores::INVALID_SIGNATURE * sends; // 75
     let score = wait_for_ban_score(&node, &peer_key, expected, Duration::from_secs(10))
         .await
         .unwrap_or_else(|got| {
@@ -233,9 +233,9 @@ async fn robustness_p2p_tx_replay_reaches_crypto_each_time() {
 
     assert!(
         score >= expected,
-        "each of {sends} identical replays must add PROTOCOL_VIOLATION ({}) — \
+        "each of {sends} identical replays must add INVALID_SIGNATURE ({}) — \
          score {score} proves every replay reached validate_transaction (crypto)",
-        ban_scores::PROTOCOL_VIOLATION
+        ban_scores::INVALID_SIGNATURE
     );
 
     // CONCLUSÃO PASSO 1: o replay PASSA até a crypto no caminho P2P real.
@@ -244,7 +244,7 @@ async fn robustness_p2p_tx_replay_reaches_crypto_each_time() {
         "PASSO 1 RESULT: replay reaches crypto on the real P2P path. \
          ban score after {sends} identical replays = {score} (= {sends} × {}). \
          No pre-validation inventory/dedup exists.",
-        ban_scores::PROTOCOL_VIOLATION
+        ban_scores::INVALID_SIGNATURE
     );
 }
 
