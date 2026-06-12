@@ -59,6 +59,7 @@ impl eframe::App for WalletApp {
             return;
         }
         self.runtime.poll_node_reconnect();
+        self.runtime.poll_pending_resubmit();
 
         egui::TopBottomPanel::top("top_bar")
             .frame(panel_frame())
