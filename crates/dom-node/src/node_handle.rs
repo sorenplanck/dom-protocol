@@ -4,7 +4,7 @@
 //! both Arc<DomNode> and NodeHandle are defined outside dom-node.
 
 use crate::node::{clear_persisted_mempool_snapshot, snapshot_tx_chain_view, DomNode};
-use dom_rpc::{MempoolTxInfo, NodeHandle, PeerInfo, RpcError, UtxoInfo};
+use dom_rpc::{MempoolTxInfo, NodeHandle, PeerInfo, RpcError, TxAdmission, UtxoInfo};
 use dom_serialization::DomDeserialize;
 use std::sync::Arc;
 
@@ -44,7 +44,7 @@ impl NodeHandle for NodeHandleImpl {
         })
     }
 
-    fn submit_tx(&self, tx_bytes: Vec<u8>) -> Result<[u8; 32], RpcError> {
+    fn submit_tx(&self, tx_bytes: Vec<u8>) -> Result<TxAdmission, RpcError> {
         use dom_consensus::Transaction;
 
         let tx = Transaction::from_bytes(&tx_bytes)
@@ -117,42 +117,41 @@ impl NodeHandle for NodeHandleImpl {
                 (dom_wire::dandelion::DandelionPhase::Fluff, None)
             };
         use dom_wire::dandelion::{DandelionPhase, StemEnvelope};
-        match phase {
-            DandelionPhase::Fluff => {
-                if self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok() {
-                    self.0
-                        .metrics
-                        .txs_relayed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
+        // `relayed` is true only when a broadcast channel actually had a live
+        // subscriber (a connected peer task). With zero peers, send() returns
+        // Err and the relay is a silent no-op — exactly how the first testnet
+        // Slatepack tx was lost. We report this up so the RPC can warn and the
+        // wallet can retransmit.
+        let relayed = match phase {
+            DandelionPhase::Fluff => self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok(),
             DandelionPhase::Stem => {
                 if let Some(target) = stem_target {
-                    if self
-                        .0
+                    self.0
                         .tx_stem_tx
                         .send(StemEnvelope {
                             target_peer: target,
                             tx_bytes: tx_bytes.clone(),
                         })
                         .is_ok()
-                    {
-                        self.0
-                            .metrics
-                            .txs_relayed
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                } else if self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok() {
+                } else {
                     // Route said Stem but no peer was stored — fall back to Fluff.
-                    self.0
-                        .metrics
-                        .txs_relayed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok()
                 }
             }
+        };
+        if relayed {
+            self.0
+                .metrics
+                .txs_relayed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            tracing::info!(
+                "tx accepted but not relayed: no peer subscribers (tx {})",
+                hex::encode(tx_hash)
+            );
         }
 
-        Ok(tx_hash)
+        Ok(TxAdmission { tx_hash, relayed })
     }
 
     fn network(&self) -> &'static str {
@@ -357,38 +356,32 @@ impl NodeHandle for NodeHandleImpl {
                 (dom_wire::dandelion::DandelionPhase::Fluff, None)
             };
         use dom_wire::dandelion::{DandelionPhase, StemEnvelope};
-        match phase {
-            DandelionPhase::Fluff => {
-                if self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok() {
-                    self.0
-                        .metrics
-                        .txs_relayed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
+        let relayed = match phase {
+            DandelionPhase::Fluff => self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok(),
             DandelionPhase::Stem => {
                 if let Some(target) = stem_target {
-                    if self
-                        .0
+                    self.0
                         .tx_stem_tx
                         .send(StemEnvelope {
                             target_peer: target,
                             tx_bytes: tx_bytes.clone(),
                         })
                         .is_ok()
-                    {
-                        self.0
-                            .metrics
-                            .txs_relayed
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                } else if self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok() {
-                    self.0
-                        .metrics
-                        .txs_relayed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok()
                 }
             }
+        };
+        if relayed {
+            self.0
+                .metrics
+                .txs_relayed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            tracing::info!(
+                "tx accepted but not relayed: no peer subscribers (tx {})",
+                hex::encode(tx_hash)
+            );
         }
 
         Ok(tx_hash)
@@ -813,12 +806,83 @@ mod tests {
         let tx_bytes = raw_spend_tx(input_value, &input_blinding, &chain_id);
         let handle = NodeHandleImpl(node.clone());
 
-        let tx_hash = handle.submit_tx(tx_bytes).expect("submit tx");
+        let admission = handle.submit_tx(tx_bytes).expect("submit tx");
 
-        assert_ne!(tx_hash, [0u8; 32]);
+        assert_ne!(admission.tx_hash, [0u8; 32]);
+        assert!(admission.relayed);
         assert_eq!(node.metrics.txs_received.load(Ordering::Relaxed), 1);
         assert_eq!(node.metrics.mempool_size.load(Ordering::Relaxed), 1);
         assert_eq!(node.metrics.txs_relayed.load(Ordering::Relaxed), 1);
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_dir_all(&wallet_path);
+    }
+
+    #[test]
+    fn submit_tx_with_zero_peer_subscribers_reports_not_relayed() {
+        let unique = format!(
+            "dom-node-handle-submit-no-subscribers-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos()
+        );
+        let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
+        let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_dir_all(&wallet_path);
+
+        let node = std::sync::Arc::new(
+            DomNode::init_with_map_size(
+                test_config(
+                    data_dir.to_str().expect("utf8 data dir"),
+                    wallet_path.to_str().expect("utf8 wallet path"),
+                ),
+                TEST_LMDB_MAP_SIZE,
+            )
+            .expect("init node"),
+        );
+        let chain_id = {
+            let chain = node.chain.try_lock().expect("chain lock");
+            *dom_consensus::derive_chain_id(chain.network_magic, &chain.genesis_hash).as_bytes()
+        };
+
+        let input_value = 500_000;
+        let input_blinding = BlindingFactor::random();
+        let input_commitment = Commitment::commit(input_value, &input_blinding);
+        {
+            let chain = node.chain.try_lock().expect("chain lock");
+            chain
+                .store
+                .commit_block(
+                    &[0xB7; 32],
+                    0,
+                    b"no-subscriber-test-header",
+                    b"no-subscriber-test-body",
+                    &[(
+                        *input_commitment.as_bytes(),
+                        UtxoEntry {
+                            block_height: 0,
+                            is_coinbase: false,
+                            proof: Vec::new(),
+                        }
+                        .to_bytes(),
+                    )],
+                    &[],
+                    &[],
+                )
+                .expect("plant canonical input utxo");
+        }
+        let tx_bytes = raw_spend_tx(input_value, &input_blinding, &chain_id);
+        let handle = NodeHandleImpl(node.clone());
+
+        let admission = handle.submit_tx(tx_bytes).expect("submit tx");
+
+        assert_ne!(admission.tx_hash, [0u8; 32]);
+        assert!(!admission.relayed);
+        assert_eq!(node.metrics.txs_received.load(Ordering::Relaxed), 1);
+        assert_eq!(node.metrics.mempool_size.load(Ordering::Relaxed), 1);
+        assert_eq!(node.metrics.txs_relayed.load(Ordering::Relaxed), 0);
 
         let _ = std::fs::remove_dir_all(&data_dir);
         let _ = std::fs::remove_dir_all(&wallet_path);

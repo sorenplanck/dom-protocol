@@ -7,7 +7,7 @@ use dom_crypto::BlindingFactor;
 use dom_serialization::DomDeserialize;
 use dom_wallet::{
     Bip39Seed, Network, NodeRpc, NodeRpcClient, NodeStatus, ReceiveRequestDescriptor,
-    ReceiveRequestStatus, RpcClientError, SeedAcceptance, Transaction, TxStatus, Wallet,
+    ReceiveRequestStatus, RpcClientError, SeedAcceptance, Transaction, TxJournal, TxStatus, Wallet,
     WalletBalance, WalletDir,
 };
 use dom_wire::message::{Command, WireMessage};
@@ -22,6 +22,7 @@ use url::Url;
 const INITIAL_RECONNECT_DELAY_SECS: u64 = 1;
 const MAX_RECONNECT_DELAY_SECS: u64 = 60;
 const HEARTBEAT_TIMEOUT_SECS: u64 = 15;
+const PENDING_RESUBMIT_INTERVAL_SECS: u64 = 60;
 const DIAGNOSTIC_LOG_MAX_ENTRIES: usize = 512;
 const DIAGNOSTIC_LOG_MAX_EXPORT_BYTES: usize = 256 * 1024;
 
@@ -578,6 +579,7 @@ pub struct AppRuntime {
     pub receive_requests: Vec<ReceiveRow>,
     pub last_error: Option<String>,
     pub diagnostic_log: DiagnosticLog,
+    next_pending_resubmit_at: Option<u64>,
 }
 
 impl AppRuntime {
@@ -595,6 +597,7 @@ impl AppRuntime {
             receive_requests: Vec::new(),
             last_error: None,
             diagnostic_log: DiagnosticLog::default(),
+            next_pending_resubmit_at: None,
         })
     }
 
@@ -687,6 +690,7 @@ impl AppRuntime {
             .ok_or_else(|| anyhow::anyhow!("wallet directory is not configured"))?;
         let wallet_dir = WalletDir::open(&wallet_dir_path, password)?;
         self.session = Some(WalletSession { wallet_dir });
+        self.next_pending_resubmit_at = None;
         self.diagnostic_log.append(
             unix_now(),
             "wallet_unlocked",
@@ -710,6 +714,7 @@ impl AppRuntime {
             .append(unix_now(), "wallet_locked", "session closed");
         self.session = None;
         self.node_connection.reset();
+        self.next_pending_resubmit_at = None;
         self.node_status = None;
         self.wallet_balance = None;
         self.history.clear();
@@ -732,6 +737,22 @@ impl AppRuntime {
         if let Err(e) = self.refresh_node_status() {
             self.last_error = Some(format!("node reconnect: {e}"));
         }
+    }
+
+    pub fn poll_pending_resubmit(&mut self) {
+        self.poll_pending_resubmit_at(unix_now());
+    }
+
+    fn poll_pending_resubmit_at(&mut self, now_secs: u64) {
+        if self.session.is_none()
+            || self.node_connection.status.state != NetworkStatusState::Connected
+        {
+            return;
+        }
+        let Some(client) = self.node_connection.client.clone() else {
+            return;
+        };
+        let _ = self.resubmit_pending_transactions_due_with(&client, now_secs, false);
     }
 
     pub fn send_heartbeat_ping(&mut self, now_secs: u64) -> Option<WireMessage> {
@@ -778,6 +799,7 @@ impl AppRuntime {
     }
 
     fn refresh_node_status_at(&mut self, now_secs: u64) -> Result<(), RpcClientError> {
+        let was_connected = self.node_connection.status.state == NetworkStatusState::Connected;
         let status = match self
             .node_connection
             .begin_attempt(&self.persisted.node_url, now_secs)
@@ -790,6 +812,7 @@ impl AppRuntime {
             Ok(status) => status,
             Err(err) => {
                 self.node_status = None;
+                self.next_pending_resubmit_at = None;
                 self.node_connection
                     .on_session_closed(now_secs, err.to_string());
                 self.diagnostic_log
@@ -813,6 +836,14 @@ impl AppRuntime {
         self.node_status = Some(status);
         self.node_connection
             .on_success(now_secs, &self.persisted.node_url);
+        let force_pending_resubmit = !was_connected || self.next_pending_resubmit_at.is_none();
+        if let Some(client) = self.node_connection.client.clone() {
+            let _ = self.resubmit_pending_transactions_due_with(
+                &client,
+                now_secs,
+                force_pending_resubmit,
+            );
+        }
         self.diagnostic_log.append_network_snapshot(
             now_secs,
             self.persisted.network,
@@ -821,6 +852,176 @@ impl AppRuntime {
         );
         self.refresh_wallet_view();
         Ok(())
+    }
+
+    fn resubmit_pending_transactions_due_with<R: NodeRpc>(
+        &mut self,
+        rpc: &R,
+        now_secs: u64,
+        force: bool,
+    ) -> PendingResubmitSummary {
+        if !force
+            && self
+                .next_pending_resubmit_at
+                .map(|deadline| now_secs < deadline)
+                .unwrap_or(false)
+        {
+            return PendingResubmitSummary::default();
+        }
+        self.next_pending_resubmit_at =
+            Some(now_secs.saturating_add(PENDING_RESUBMIT_INTERVAL_SECS));
+        self.resubmit_pending_transactions_with(rpc, now_secs)
+    }
+
+    fn resubmit_pending_transactions_with<R: NodeRpc>(
+        &mut self,
+        rpc: &R,
+        now_secs: u64,
+    ) -> PendingResubmitSummary {
+        let mut summary = PendingResubmitSummary::default();
+        let Some(session) = self.session.as_mut() else {
+            return summary;
+        };
+
+        let records = match TxJournal::open(session.wallet_dir.path()).and_then(|j| j.replay()) {
+            Ok(records) => records,
+            Err(err) => {
+                self.diagnostic_log.append(
+                    now_secs,
+                    "pending_resubmit_journal_error",
+                    err.to_string(),
+                );
+                return summary;
+            }
+        };
+
+        let mut candidates = Vec::new();
+        for (tx_hash, record) in records {
+            if !matches!(record.status, TxStatus::Building | TxStatus::Submitted) {
+                continue;
+            }
+            let Some(tx_bytes) = session.wallet_dir.wallet().pending_tx_bytes(&tx_hash) else {
+                continue;
+            };
+            let tx = match Transaction::from_bytes(tx_bytes) {
+                Ok(tx) => tx,
+                Err(err) => {
+                    let reason = format!("pending tx bytes decode failed: {err}");
+                    if let Err(mark_err) = session
+                        .wallet_dir
+                        .wallet_mut()
+                        .mark_failed(tx_hash, &reason)
+                    {
+                        self.diagnostic_log.append(
+                            now_secs,
+                            "pending_resubmit_mark_failed_error",
+                            format!(
+                                "tx={} reason={} mark_failed={mark_err}",
+                                hex::encode(tx_hash),
+                                reason
+                            ),
+                        );
+                    }
+                    summary.failed += 1;
+                    continue;
+                }
+            };
+            candidates.push((tx_hash, record.status, tx));
+        }
+
+        for (pending_key, status, tx) in candidates {
+            summary.attempted += 1;
+            match rpc.submit_tx(&tx) {
+                Ok(outcome) => {
+                    if let Some(warning) = &outcome.warning {
+                        self.diagnostic_log.append(
+                            now_secs,
+                            "pending_resubmit_warning",
+                            format!("tx={} warning={warning}", hex::encode(outcome.tx_hash)),
+                        );
+                    }
+                    if matches!(status, TxStatus::Building) {
+                        if let Err(err) =
+                            session.wallet_dir.wallet_mut().mark_submitted(pending_key)
+                        {
+                            self.diagnostic_log.append(
+                                now_secs,
+                                "pending_resubmit_mark_submitted_error",
+                                format!("tx={} error={err}", hex::encode(pending_key)),
+                            );
+                        }
+                    }
+                    summary.submitted += 1;
+                }
+                Err(RpcClientError::NodeRejected { status: 409, .. }) => {
+                    if matches!(status, TxStatus::Building) {
+                        if let Err(err) =
+                            session.wallet_dir.wallet_mut().mark_submitted(pending_key)
+                        {
+                            self.diagnostic_log.append(
+                                now_secs,
+                                "pending_resubmit_mark_submitted_error",
+                                format!("tx={} error={err}", hex::encode(pending_key)),
+                            );
+                        }
+                    }
+                    summary.already_in_mempool += 1;
+                }
+                Err(err) if pending_resubmit_should_retry(&err) => {
+                    self.diagnostic_log.append(
+                        now_secs,
+                        "pending_resubmit_retry_later",
+                        format!("tx={} error={err}", hex::encode(pending_key)),
+                    );
+                    summary.retry_later += 1;
+                }
+                Err(err) => {
+                    let reason = format!("pending resubmit stopped: {err}");
+                    tracing::warn!(
+                        "pending tx {} marked failed: {reason}",
+                        hex::encode(pending_key)
+                    );
+                    if let Err(mark_err) = session
+                        .wallet_dir
+                        .wallet_mut()
+                        .mark_failed(pending_key, &reason)
+                    {
+                        self.diagnostic_log.append(
+                            now_secs,
+                            "pending_resubmit_mark_failed_error",
+                            format!(
+                                "tx={} reason={} mark_failed={mark_err}",
+                                hex::encode(pending_key),
+                                reason
+                            ),
+                        );
+                    }
+                    self.diagnostic_log.append(
+                        now_secs,
+                        "pending_resubmit_failed",
+                        format!("tx={} reason={reason}", hex::encode(pending_key)),
+                    );
+                    summary.failed += 1;
+                }
+            }
+        }
+
+        if summary.attempted > 0 {
+            self.diagnostic_log.append(
+                now_secs,
+                "pending_resubmit_summary",
+                format!(
+                    "attempted={} submitted={} already_in_mempool={} retry_later={} failed={}",
+                    summary.attempted,
+                    summary.submitted,
+                    summary.already_in_mempool,
+                    summary.retry_later,
+                    summary.failed
+                ),
+            );
+        }
+        self.refresh_wallet_view();
+        summary
     }
 
     pub fn refresh_wallet_view(&mut self) {
@@ -939,7 +1140,13 @@ impl AppRuntime {
 
         let tx_hash = Wallet::tracking_tx_hash(&tx)?;
         match client.submit_tx(&tx) {
-            Ok(_) => {
+            Ok(outcome) => {
+                if let Some(warning) = &outcome.warning {
+                    tracing::warn!(
+                        "transaction {} accepted with relay warning: {warning}",
+                        tx_hash_hex(outcome.tx_hash)
+                    );
+                }
                 let session = self
                     .session
                     .as_mut()
@@ -1011,7 +1218,20 @@ impl AppRuntime {
         };
 
         match client.submit_tx(&tx) {
-            Ok(_) | Err(RpcClientError::NodeRejected { status: 409, .. }) => {
+            Ok(outcome) => {
+                if let Some(warning) = &outcome.warning {
+                    tracing::warn!(
+                        "rebroadcast {} accepted with relay warning: {warning}",
+                        tx_hash_hex(outcome.tx_hash)
+                    );
+                }
+                let session = self
+                    .session
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("wallet is not unlocked"))?;
+                session.wallet_dir.wallet_mut().mark_submitted(tx_hash)?;
+            }
+            Err(RpcClientError::NodeRejected { status: 409, .. }) => {
                 let session = self
                     .session
                     .as_mut()
@@ -1046,6 +1266,24 @@ impl AppRuntime {
         self.refresh_wallet_view();
         Ok(())
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PendingResubmitSummary {
+    attempted: usize,
+    submitted: usize,
+    already_in_mempool: usize,
+    retry_later: usize,
+    failed: usize,
+}
+
+fn pending_resubmit_should_retry(err: &RpcClientError) -> bool {
+    matches!(
+        err,
+        RpcClientError::ConnectTimeout { .. }
+            | RpcClientError::ReadTimeout { .. }
+            | RpcClientError::Transport { .. }
+    )
 }
 
 fn journal_rows(
@@ -1303,7 +1541,143 @@ fn parse_network_name(value: &str) -> anyhow::Result<Network> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dom_crypto::pedersen::Commitment;
+    use dom_wallet::{BlockHeaderInfo, OwnedOutput, RpcMempoolTxInfo, TxSubmitOutcome, UtxoInfo};
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
     use tempfile::TempDir;
+
+    fn test_genesis() -> Hash256 {
+        Hash256::from_bytes([0x42u8; 32])
+    }
+
+    fn make_output(value: u64, height: u64, is_coinbase: bool) -> OwnedOutput {
+        let bf = BlindingFactor::random();
+        let commitment = Commitment::commit(value, &bf);
+        OwnedOutput::new(
+            *commitment.as_bytes(),
+            value,
+            *bf.as_bytes(),
+            height,
+            is_coinbase,
+        )
+    }
+
+    fn build_runtime_with_pending(mark_submitted: bool) -> (TempDir, AppRuntime, [u8; 32]) {
+        let temp = TempDir::new().unwrap();
+        let wallet_dir = temp.path().join("wallet");
+        let mut wallet_dir_handle =
+            WalletDir::create(&wallet_dir, "pw", Network::Regtest, &test_genesis()).unwrap();
+        wallet_dir_handle
+            .wallet_mut()
+            .add_output(make_output(900, 100, false));
+
+        let recipient_blinding = BlindingFactor::random();
+        let recipient_commitment = Commitment::commit(800, &recipient_blinding);
+        let tx = wallet_dir_handle
+            .wallet_mut()
+            .build_spend(recipient_commitment, recipient_blinding, 800, 100, 1000)
+            .unwrap();
+        let tx_hash = Wallet::tracking_tx_hash(&tx).unwrap();
+        if mark_submitted {
+            wallet_dir_handle
+                .wallet_mut()
+                .mark_submitted(tx_hash)
+                .unwrap();
+        }
+
+        let mut runtime = AppRuntime::load(temp.path().join("app")).unwrap();
+        runtime.persisted.wallet_dir = Some(wallet_dir);
+        runtime.persisted.network = Some(Network::Regtest);
+        runtime.session = Some(WalletSession {
+            wallet_dir: wallet_dir_handle,
+        });
+        (temp, runtime, tx_hash)
+    }
+
+    fn replay_status(runtime: &AppRuntime, tx_hash: &[u8; 32]) -> TxStatus {
+        let session = runtime.session.as_ref().unwrap();
+        let journal = TxJournal::open(session.wallet_dir.path()).unwrap();
+        journal
+            .replay()
+            .unwrap()
+            .get(tx_hash)
+            .unwrap()
+            .status
+            .clone()
+    }
+
+    struct FakeRpc {
+        outcomes: RefCell<VecDeque<Result<TxSubmitOutcome, RpcClientError>>>,
+        calls: Cell<usize>,
+    }
+
+    impl FakeRpc {
+        fn new(outcomes: Vec<Result<TxSubmitOutcome, RpcClientError>>) -> Self {
+            Self {
+                outcomes: RefCell::new(outcomes.into()),
+                calls: Cell::new(0),
+            }
+        }
+
+        fn success(tx_hash: [u8; 32]) -> Self {
+            Self::new(vec![Ok(TxSubmitOutcome {
+                tx_hash,
+                relayed: true,
+                warning: None,
+            })])
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.get()
+        }
+    }
+
+    impl NodeRpc for FakeRpc {
+        fn health(&self) -> Result<(), RpcClientError> {
+            Ok(())
+        }
+
+        fn status(&self) -> Result<NodeStatus, RpcClientError> {
+            Ok(NodeStatus {
+                version: 1,
+                chain_height: 0,
+                tip_hash: None,
+                mempool_size: 0,
+                network: "regtest".to_string(),
+            })
+        }
+
+        fn block_at_height(&self, _height: u64) -> Result<Option<BlockHeaderInfo>, RpcClientError> {
+            Ok(None)
+        }
+
+        fn block_by_hash(
+            &self,
+            _hash: &[u8; 32],
+        ) -> Result<Option<BlockHeaderInfo>, RpcClientError> {
+            Ok(None)
+        }
+
+        fn submit_tx(&self, _tx: &Transaction) -> Result<TxSubmitOutcome, RpcClientError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            self.outcomes
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(|| panic!("unexpected submit_tx call {}", self.calls.get()))
+        }
+
+        fn mempool_tx(
+            &self,
+            _tx_hash: &[u8; 32],
+        ) -> Result<Option<RpcMempoolTxInfo>, RpcClientError> {
+            Ok(None)
+        }
+
+        fn utxo(&self, _commitment: &[u8; 33]) -> Result<Option<UtxoInfo>, RpcClientError> {
+            Ok(None)
+        }
+    }
 
     #[test]
     fn runtime_without_wallet_starts_in_welcome() {
@@ -1323,6 +1697,116 @@ mod tests {
         storage::save(temp.path(), &persisted).unwrap();
         let runtime = AppRuntime::load(temp.path().to_path_buf()).unwrap();
         assert_eq!(runtime.screen, Screen::Splash);
+    }
+
+    #[test]
+    fn pending_resubmit_on_open_marks_building_tx_submitted() {
+        let (_temp, mut runtime, tx_hash) = build_runtime_with_pending(false);
+        let rpc = FakeRpc::success(tx_hash);
+
+        let summary = runtime.resubmit_pending_transactions_due_with(&rpc, 10, true);
+
+        assert_eq!(summary.attempted, 1);
+        assert_eq!(summary.submitted, 1);
+        assert_eq!(rpc.calls(), 1);
+        assert_eq!(replay_status(&runtime, &tx_hash), TxStatus::Submitted);
+    }
+
+    #[test]
+    fn pending_resubmit_after_reconnect_forces_retry_before_interval() {
+        let (_temp, mut runtime, tx_hash) = build_runtime_with_pending(true);
+        runtime.next_pending_resubmit_at = Some(1_000);
+        let rpc = FakeRpc::success(tx_hash);
+
+        let skipped = runtime.resubmit_pending_transactions_due_with(&rpc, 20, false);
+        assert_eq!(skipped.attempted, 0);
+        assert_eq!(rpc.calls(), 0);
+
+        let summary = runtime.resubmit_pending_transactions_due_with(&rpc, 21, true);
+        assert_eq!(summary.attempted, 1);
+        assert_eq!(summary.submitted, 1);
+        assert_eq!(rpc.calls(), 1);
+        assert_eq!(replay_status(&runtime, &tx_hash), TxStatus::Submitted);
+    }
+
+    #[test]
+    fn submitted_tx_survives_node_restart_by_wallet_resubmit() {
+        let (_temp, mut runtime, tx_hash) = build_runtime_with_pending(true);
+        let restarted_node_rpc = FakeRpc::success(tx_hash);
+
+        let summary = runtime.resubmit_pending_transactions_due_with(&restarted_node_rpc, 60, true);
+
+        assert_eq!(summary.attempted, 1);
+        assert_eq!(summary.submitted, 1);
+        assert_eq!(
+            restarted_node_rpc.calls(),
+            1,
+            "wallet must resubmit the pending tx after a node restart lost volatile mempool state"
+        );
+        assert_eq!(replay_status(&runtime, &tx_hash), TxStatus::Submitted);
+    }
+
+    #[test]
+    fn pending_resubmit_treats_409_already_in_mempool_as_success() {
+        let (_temp, mut runtime, tx_hash) = build_runtime_with_pending(false);
+        let rpc = FakeRpc::new(vec![Err(RpcClientError::NodeRejected {
+            status: 409,
+            reason: "already in mempool".to_string(),
+        })]);
+
+        let summary = runtime.resubmit_pending_transactions_due_with(&rpc, 10, true);
+
+        assert_eq!(summary.attempted, 1);
+        assert_eq!(summary.already_in_mempool, 1);
+        assert_eq!(rpc.calls(), 1);
+        assert_eq!(replay_status(&runtime, &tx_hash), TxStatus::Submitted);
+    }
+
+    #[test]
+    fn pending_resubmit_validation_rejection_marks_failed_and_stops_retrying() {
+        let (_temp, mut runtime, tx_hash) = build_runtime_with_pending(true);
+        let rpc = FakeRpc::new(vec![Err(RpcClientError::NodeRejected {
+            status: 400,
+            reason: "invalid transaction".to_string(),
+        })]);
+
+        let summary = runtime.resubmit_pending_transactions_due_with(&rpc, 10, true);
+
+        assert_eq!(summary.attempted, 1);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(rpc.calls(), 1);
+        assert!(matches!(
+            replay_status(&runtime, &tx_hash),
+            TxStatus::Failed { ref reason }
+                if reason.contains("invalid transaction")
+        ));
+
+        let retry = FakeRpc::success(tx_hash);
+        let second = runtime.resubmit_pending_transactions_due_with(&retry, 11, true);
+        assert_eq!(second.attempted, 0);
+        assert_eq!(retry.calls(), 0);
+    }
+
+    #[test]
+    fn pending_resubmit_network_error_retries_next_cycle() {
+        let (_temp, mut runtime, tx_hash) = build_runtime_with_pending(true);
+        let rpc = FakeRpc::new(vec![Err(RpcClientError::Transport {
+            url: "http://127.0.0.1:33369/tx/submit".to_string(),
+            reason: "connection reset".to_string(),
+        })]);
+
+        let summary = runtime.resubmit_pending_transactions_due_with(&rpc, 10, true);
+
+        assert_eq!(summary.attempted, 1);
+        assert_eq!(summary.retry_later, 1);
+        assert_eq!(rpc.calls(), 1);
+        assert_eq!(replay_status(&runtime, &tx_hash), TxStatus::Submitted);
+
+        let retry = FakeRpc::success(tx_hash);
+        let second = runtime.resubmit_pending_transactions_due_with(&retry, 70, false);
+        assert_eq!(second.attempted, 1);
+        assert_eq!(second.submitted, 1);
+        assert_eq!(retry.calls(), 1);
     }
 
     #[test]
