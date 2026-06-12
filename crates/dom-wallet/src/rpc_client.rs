@@ -213,6 +213,10 @@ pub struct TxSubmitOutcome {
     /// Mempool hash assigned by the node. Equals the wallet's
     /// `compute_tx_hash` since Phase 1.7 unified the hash spaces.
     pub tx_hash: [u8; 32],
+    /// Whether the node reported handing the accepted tx to a peer relay path.
+    pub relayed: bool,
+    /// Non-fatal node advisory, such as accepted locally with no peers.
+    pub warning: Option<String>,
 }
 
 /// Outcome of a successful `POST /wallet/spend` call.
@@ -435,7 +439,11 @@ impl NodeRpc for NodeRpcClient {
                 reason: "accepted=true but tx_hash missing".into(),
             })?;
             let tx_hash = parse_hash_hex(&tx_hash_hex, &url_s)?;
-            Ok(TxSubmitOutcome { tx_hash })
+            Ok(TxSubmitOutcome {
+                tx_hash,
+                relayed: parsed.relayed.unwrap_or(true),
+                warning: parsed.warning,
+            })
         } else if status.is_client_error() || status.is_server_error() {
             if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
                 return Err(RpcClientError::Unauthorized { url: url_s });
@@ -452,8 +460,8 @@ impl NodeRpc for NodeRpcClient {
                 url: url_s,
                 status: status.as_u16(),
                 body: format!(
-                    "accepted={} tx_hash={:?} error={:?}",
-                    parsed.accepted, parsed.tx_hash, parsed.error
+                    "accepted={} tx_hash={:?} relayed={:?} warning={:?} error={:?}",
+                    parsed.accepted, parsed.tx_hash, parsed.relayed, parsed.warning, parsed.error
                 ),
             })
         }
@@ -692,7 +700,11 @@ struct WireStatus {
 struct WireSubmitTx {
     accepted: bool,
     #[serde(default)]
+    relayed: Option<bool>,
+    #[serde(default)]
     tx_hash: Option<String>,
+    #[serde(default)]
+    warning: Option<String>,
     #[serde(default)]
     error: Option<String>,
 }

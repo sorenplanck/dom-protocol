@@ -1261,7 +1261,7 @@ impl dom_rpc::NodeHandle for DomNode {
         })
     }
 
-    fn submit_tx(&self, tx_bytes: Vec<u8>) -> Result<[u8; 32], dom_rpc::RpcError> {
+    fn submit_tx(&self, tx_bytes: Vec<u8>) -> Result<dom_rpc::TxAdmission, dom_rpc::RpcError> {
         use dom_serialization::DomDeserialize;
         let tx = dom_consensus::Transaction::from_bytes(&tx_bytes)
             .map_err(|e| dom_rpc::RpcError::InvalidHex(format!("invalid tx: {e}")))?;
@@ -1309,7 +1309,51 @@ impl dom_rpc::NodeHandle for DomNode {
             .map_err(|_| dom_rpc::RpcError::Internal("chain locked".into()))?;
         clear_persisted_mempool_snapshot(&chain.store)
             .map_err(|e| dom_rpc::RpcError::Internal(format!("persist mempool: {e}")))?;
-        Ok(hash)
+
+        let (phase, stem_target) =
+            if let (Ok(mut d), Ok(p)) = (self.dandelion.try_lock(), self.peers.try_lock()) {
+                let peers: Vec<std::net::SocketAddr> = p
+                    .connected_peers()
+                    .into_iter()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                let phase = d.route_new_tx(hash, &peers);
+                let target = d.get_stem_peer(&hash);
+                (phase, target)
+            } else {
+                (dom_wire::dandelion::DandelionPhase::Fluff, None)
+            };
+        use dom_wire::dandelion::{DandelionPhase, StemEnvelope};
+        let relayed = match phase {
+            DandelionPhase::Fluff => self.tx_fluff_tx.send(tx_bytes.clone()).is_ok(),
+            DandelionPhase::Stem => {
+                if let Some(target) = stem_target {
+                    self.tx_stem_tx
+                        .send(StemEnvelope {
+                            target_peer: target,
+                            tx_bytes: tx_bytes.clone(),
+                        })
+                        .is_ok()
+                } else {
+                    self.tx_fluff_tx.send(tx_bytes.clone()).is_ok()
+                }
+            }
+        };
+        if relayed {
+            self.metrics
+                .txs_relayed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            info!(
+                "tx accepted but not relayed: no peer subscribers (tx {})",
+                hex::encode(hash)
+            );
+        }
+
+        Ok(dom_rpc::TxAdmission {
+            tx_hash: hash,
+            relayed,
+        })
     }
 
     fn get_block_header(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
