@@ -107,6 +107,51 @@ mod hex32 {
     }
 }
 
+mod hex32_opt {
+    use super::*;
+    pub fn serialize<S: Serializer>(bytes: &Option<[u8; 32]>, s: S) -> Result<S::Ok, S::Error> {
+        match bytes {
+            Some(bytes) => s.serialize_some(&hex::encode(bytes)),
+            None => s.serialize_none(),
+        }
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<[u8; 32]>, D::Error> {
+        let Some(s) = Option::<String>::deserialize(d)? else {
+            return Ok(None);
+        };
+        let v = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        if v.len() != 32 {
+            return Err(serde::de::Error::custom(format!(
+                "expected 32 bytes, got {}",
+                v.len()
+            )));
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&v);
+        Ok(Some(out))
+    }
+}
+
+mod hex33 {
+    use super::*;
+    pub fn serialize<S: Serializer>(bytes: &[u8; 33], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(bytes))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 33], D::Error> {
+        let s: String = serde::Deserialize::deserialize(d)?;
+        let v = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        if v.len() != 33 {
+            return Err(serde::de::Error::custom(format!(
+                "expected 33 bytes, got {}",
+                v.len()
+            )));
+        }
+        let mut out = [0u8; 33];
+        out.copy_from_slice(&v);
+        Ok(out)
+    }
+}
+
 mod hex33_vec {
     use super::*;
     use serde::ser::SerializeSeq;
@@ -236,6 +281,27 @@ pub enum TxJournalEvent {
         /// than this value for the transition to apply.
         reorg_height: u64,
     },
+    /// A pending receive slate output was found in a canonical block.
+    ///
+    /// Receive slates do not reserve inputs and do not produce a local
+    /// transaction before the sender finalizes/broadcasts, so they cannot
+    /// start with `Built`. This event creates a terminal receive record
+    /// directly under the pending receive slate hash.
+    ReceiveConfirmed {
+        /// Commitment of the received output.
+        #[serde(with = "hex33")]
+        commitment: [u8; 33],
+        /// Received amount in noms.
+        amount: u64,
+        /// Confirmation block height.
+        block_height: u64,
+        /// Confirmation block hash, when the caller has it.
+        #[serde(default, with = "hex32_opt", skip_serializing_if = "Option::is_none")]
+        block_hash: Option<[u8; 32]>,
+        /// Pending receive slate hash that produced this output.
+        #[serde(with = "hex32")]
+        source_slate_hash: [u8; 32],
+    },
 }
 
 /// Coarse status of a journaled transaction.
@@ -250,6 +316,22 @@ pub enum TxStatus {
     Confirmed {
         /// Confirmation block height.
         block_height: u64,
+    },
+    /// Receive slate output confirmed on-chain.
+    Received {
+        /// Commitment of the received output.
+        #[serde(with = "hex33")]
+        commitment: [u8; 33],
+        /// Received amount in noms.
+        amount: u64,
+        /// Confirmation block height.
+        block_height: u64,
+        /// Confirmation block hash, when known.
+        #[serde(default, with = "hex32_opt", skip_serializing_if = "Option::is_none")]
+        block_hash: Option<[u8; 32]>,
+        /// Pending receive slate hash that produced this output.
+        #[serde(with = "hex32")]
+        source_slate_hash: [u8; 32],
     },
     /// Failed terminally (still convertible to Replaced if the
     /// operator builds a replacement).
@@ -271,7 +353,10 @@ impl TxStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            TxStatus::Confirmed { .. } | TxStatus::Replaced { .. } | TxStatus::Canceled
+            TxStatus::Confirmed { .. }
+                | TxStatus::Received { .. }
+                | TxStatus::Replaced { .. }
+                | TxStatus::Canceled
         )
     }
 }
@@ -499,6 +584,63 @@ fn apply_entry(map: &mut HashMap<[u8; 32], TxRecord>, entry: &JournalEntry, line
             let rh = *reorg_height;
             apply_reorged(map, &tx_hash, ts, line_no, rh);
         }
+        TxJournalEvent::ReceiveConfirmed {
+            commitment,
+            amount,
+            block_height,
+            block_hash,
+            source_slate_hash,
+        } => {
+            if let Some(record) = map.get(&tx_hash) {
+                match record.status {
+                    TxStatus::Received {
+                        commitment: existing_commitment,
+                        amount: existing_amount,
+                        block_height: existing_height,
+                        block_hash: existing_hash,
+                        source_slate_hash: existing_source,
+                    } if existing_commitment == *commitment
+                        && existing_amount == *amount
+                        && existing_height == *block_height
+                        && existing_hash == *block_hash
+                        && existing_source == *source_slate_hash =>
+                    {
+                        warn!(
+                            "journal: duplicate ReceiveConfirmed event at line {line_no} for tx {} ignored",
+                            hex::encode(tx_hash)
+                        );
+                        return;
+                    }
+                    _ => {
+                        warn!(
+                            "journal: ReceiveConfirmed event at line {line_no} ignored; tx {} already has status {:?}",
+                            hex::encode(tx_hash),
+                            record.status
+                        );
+                        return;
+                    }
+                }
+            }
+            map.insert(
+                tx_hash,
+                TxRecord {
+                    tx_hash,
+                    status: TxStatus::Received {
+                        commitment: *commitment,
+                        amount: *amount,
+                        block_height: *block_height,
+                        block_hash: *block_hash,
+                        source_slate_hash: *source_slate_hash,
+                    },
+                    inputs: Vec::new(),
+                    tx_bytes: Vec::new(),
+                    fee_noms: 0,
+                    change: None,
+                    created_at: ts,
+                    last_updated_at: ts,
+                },
+            );
+        }
     }
 }
 
@@ -650,6 +792,80 @@ mod tests {
         assert_eq!(rec.inputs.len(), 2);
         assert_eq!(rec.fee_noms, 100);
         assert!(rec.status.is_terminal());
+    }
+
+    #[test]
+    fn receive_confirmed_roundtrip_creates_terminal_received_record() {
+        let temp = TempDir::new().unwrap();
+        let j = TxJournal::open(temp.path()).unwrap();
+        let h = hash(0x31);
+        let commitment = input(0x44);
+        let block_hash = Some(hash(0x55));
+
+        j.append(&JournalEntry {
+            timestamp: now(),
+            tx_hash: h,
+            event: TxJournalEvent::ReceiveConfirmed {
+                commitment,
+                amount: 900,
+                block_height: 77,
+                block_hash,
+                source_slate_hash: h,
+            },
+        })
+        .unwrap();
+
+        let map = j.replay().unwrap();
+        let rec = map.get(&h).expect("receive must be present");
+        assert_eq!(
+            rec.status,
+            TxStatus::Received {
+                commitment,
+                amount: 900,
+                block_height: 77,
+                block_hash,
+                source_slate_hash: h,
+            }
+        );
+        assert!(rec.status.is_terminal());
+    }
+
+    #[test]
+    fn legacy_journal_without_receive_confirmed_still_replays() {
+        let temp = TempDir::new().unwrap();
+        let j = TxJournal::open(temp.path()).unwrap();
+        let h = hash(0x32);
+
+        j.append(&JournalEntry {
+            timestamp: now(),
+            tx_hash: h,
+            event: TxJournalEvent::Built {
+                inputs: vec![input(0xAA)],
+                tx_hex: None,
+                output_count: 1,
+                fee_noms: 7,
+                change: None,
+            },
+        })
+        .unwrap();
+        j.append(&JournalEntry {
+            timestamp: now(),
+            tx_hash: h,
+            event: TxJournalEvent::Submitted,
+        })
+        .unwrap();
+        j.append(&JournalEntry {
+            timestamp: now(),
+            tx_hash: h,
+            event: TxJournalEvent::Confirmed { block_height: 88 },
+        })
+        .unwrap();
+
+        let map = j.replay().unwrap();
+        assert_eq!(
+            map.get(&h).unwrap().status,
+            TxStatus::Confirmed { block_height: 88 }
+        );
     }
 
     #[test]
@@ -906,6 +1122,14 @@ mod tests {
     #[test]
     fn tx_status_terminality_classification() {
         assert!(TxStatus::Confirmed { block_height: 1 }.is_terminal());
+        assert!(TxStatus::Received {
+            commitment: input(0xAA),
+            amount: 1,
+            block_height: 1,
+            block_hash: None,
+            source_slate_hash: hash(0xAA),
+        }
+        .is_terminal());
         assert!(TxStatus::Canceled.is_terminal());
         assert!(TxStatus::Replaced {
             by_tx_hash: [0u8; 32]
