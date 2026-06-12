@@ -62,6 +62,23 @@ pub struct BuiltSpend {
     fee: u64,
 }
 
+/// Result of finalizing an interactive Mimblewimble slate
+/// ([`Wallet::finalize_slate`]).
+///
+/// Carries both the finished [`Transaction`] (to submit to the node) and the
+/// `pending_key` under which the wallet tracks the corresponding pending tx.
+/// The pending entry for a slate send is keyed by the **sender slate hash**
+/// (`blake2b_256` of the sender-phase slate bytes), *not* by the transaction
+/// tracking hash — so callers must use `pending_key`, never
+/// `tracking_tx_hash(&tx)`, when calling [`Wallet::mark_submitted`] /
+/// [`Wallet::cancel_tx`] for a finalized slate.
+pub struct FinalizedSlate {
+    /// The finished aggregate transaction, ready to submit.
+    pub tx: Transaction,
+    /// Key of the pending tx in `pending_txs` (the sender slate hash).
+    pub pending_key: [u8; 32],
+}
+
 /// Canonical wallet rescan execution mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalletRescanMode {
@@ -1396,7 +1413,7 @@ impl Wallet {
         &mut self,
         slate: Slate,
         _current_height: u64,
-    ) -> Result<Transaction, WalletError> {
+    ) -> Result<FinalizedSlate, WalletError> {
         if slate.chain_id != self.chain_id {
             return Err(WalletError::Crypto(
                 "slate chain_id does not match wallet chain_id".into(),
@@ -1528,7 +1545,10 @@ impl Wallet {
 
         self.save()?;
         info!("finalized send slate {}", hex::encode(sender_slate_hash));
-        Ok(tx)
+        Ok(FinalizedSlate {
+            tx,
+            pending_key: sender_slate_hash,
+        })
     }
 
     /// Build, reserve, and persist a single-party spend transaction.
@@ -2628,9 +2648,14 @@ mod tests {
             .unwrap()
             .recipient_output_blinding;
 
-        let tx = sender
+        let finalized = sender
             .finalize_slate(response_slate.clone(), 2_000)
             .unwrap();
+        // F1: the pending tx is keyed by the sender slate hash, and
+        // finalize_slate must hand that key back so callers mark/cancel the
+        // right pending entry (regression guard for the mark_submitted bug).
+        assert_eq!(finalized.pending_key, send_slate_hash);
+        let tx = finalized.tx;
 
         validate_transaction_structure(&tx).unwrap();
         validate_balance_equation(&tx).unwrap();
@@ -2664,6 +2689,51 @@ mod tests {
         let finalized_pending = sender.pending_txs.get(&send_slate_hash).unwrap();
         assert!(!finalized_pending.tx_bytes.is_empty());
         assert!(finalized_pending.send_slate_secrets.is_none());
+    }
+
+    #[test]
+    fn finalize_marks_submitted_under_slate_hash_key_and_advances_journal() {
+        // F1 regression: the pending tx for a slate send is keyed by the
+        // sender slate hash, NOT by the tx tracking hash. finalize_slate must
+        // return that key so mark_submitted finds the pending entry. The old
+        // code passed tracking_tx_hash(&tx), so every slate finalize logged
+        // "mark_submitted failed after submit: pending tx not found".
+        let dir = tempdir().unwrap();
+        let (mut sender, mut recipient) = slate_participants();
+        // Journal must be attached before the spend so the Built event is
+        // recorded and the Submitted transition has a record to advance.
+        sender.attach_journal(TxJournal::open(dir.path()).unwrap());
+        sender.add_output(fixed_output(1_000, 10, 21));
+
+        let send_slate = sender.create_send_slate(900, 100, 2_000).unwrap();
+        let send_slate_hash = *dom_crypto::blake2b_256(&send_slate.to_bytes().unwrap()).as_bytes();
+        let response_slate = recipient.receive_slate(send_slate, 2_000).unwrap();
+
+        let finalized = sender.finalize_slate(response_slate, 2_000).unwrap();
+        assert_eq!(
+            finalized.pending_key, send_slate_hash,
+            "finalize must hand back the sender-slate-hash pending key"
+        );
+
+        // The OLD (buggy) key — the tx tracking hash — differs and is not found.
+        let tracking_hash = Wallet::tracking_tx_hash(&finalized.tx).unwrap();
+        assert_ne!(tracking_hash, finalized.pending_key);
+        assert!(
+            sender.mark_submitted(tracking_hash).is_err(),
+            "tracking hash is the wrong key (this was the bug)"
+        );
+
+        // The FIX: marking with the pending key succeeds and the journal
+        // advances Building -> Submitted.
+        sender.mark_submitted(finalized.pending_key).unwrap();
+        let records = sender.journal().unwrap().replay().unwrap();
+        assert!(
+            matches!(
+                records.get(&finalized.pending_key).map(|r| &r.status),
+                Some(TxStatus::Submitted)
+            ),
+            "journal should advance to Submitted under the pending key"
+        );
     }
 
     #[test]

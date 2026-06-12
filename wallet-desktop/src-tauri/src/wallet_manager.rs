@@ -285,21 +285,28 @@ impl WalletManager {
             .map_err(|e| anyhow!("node status: {e}"))?
             .chain_height;
         let slate = slate_from_hex(slate_hex)?;
-        let (tx, tx_hash) = {
+        // `tx_hash` is the network/tracking hash (blake2b of the tx bytes, what
+        // the node and the UI use). `pending_key` is the key under which the
+        // wallet tracks this pending tx — the *sender slate hash*, NOT the tx
+        // tracking hash. mark_submitted/cancel_tx must use `pending_key`
+        // (F1: the old code passed `tx_hash`, so every slate finalize logged
+        // "mark_submitted failed: pending tx not found").
+        let (tx, tx_hash, pending_key) = {
             let mut guard = self.inner.lock().await;
             let dir = guard.as_mut().ok_or_else(|| anyhow!("no wallet open"))?;
-            let tx = dir
+            let finalized = dir
                 .wallet_mut()
                 .finalize_slate(slate, height)
                 .map_err(|e| anyhow!("finalize slate: {e}"))?;
-            let tx_hash = Wallet::tracking_tx_hash(&tx).map_err(|e| anyhow!("tx hash: {e}"))?;
-            (tx, tx_hash)
+            let tx_hash =
+                Wallet::tracking_tx_hash(&finalized.tx).map_err(|e| anyhow!("tx hash: {e}"))?;
+            (finalized.tx, tx_hash, finalized.pending_key)
         };
         match rpc.submit_tx(&tx) {
             Ok(_) => {
                 let mut guard = self.inner.lock().await;
                 let dir = guard.as_mut().ok_or_else(|| anyhow!("no wallet open"))?;
-                if let Err(e) = dir.wallet_mut().mark_submitted(tx_hash) {
+                if let Err(e) = dir.wallet_mut().mark_submitted(pending_key) {
                     tracing::warn!(
                         "mark_submitted failed after submit (tx {}): {e}",
                         hex::encode(tx_hash)
@@ -316,7 +323,7 @@ impl WalletManager {
                 if submit_failure_is_safe_to_rollback(&e) {
                     let mut guard = self.inner.lock().await;
                     if let Some(dir) = guard.as_mut() {
-                        let _ = dir.wallet_mut().cancel_tx(tx_hash);
+                        let _ = dir.wallet_mut().cancel_tx(pending_key);
                     }
                 } else {
                     tracing::warn!(
