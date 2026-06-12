@@ -1471,6 +1471,13 @@ async fn handle_inbound(
             )
             .await
             {
+                // Anti-slowloris: a write that timed out means the peer stalled
+                // our sends. recv-side errors are already scored inline before
+                // they propagate, so score ONLY write timeouts here to avoid
+                // double-counting.
+                if is_write_timeout(&e) {
+                    let _ = record_peer_violation(&chain, &svc.peers, addr, &e).await;
+                }
                 tracing::info!(
                     event = "session_closed_reason",
                     peer_addr = %addr,
@@ -1643,6 +1650,13 @@ async fn connect_outbound(
             )
             .await
             {
+                // Anti-slowloris: a write that timed out means the peer stalled
+                // our sends. recv-side errors are already scored inline before
+                // they propagate, so score ONLY write timeouts here to avoid
+                // double-counting.
+                if is_write_timeout(&e) {
+                    let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
+                }
                 tracing::info!(
                     event = "session_closed_reason",
                     peer_addr = %addr,
@@ -1795,6 +1809,12 @@ fn peer_violation_score(error: &DomError) -> Option<u32> {
         DomError::PolicyRejected(msg) if msg.contains("handshake timeout") => {
             Some(ban_scores::PROTOCOL_VIOLATION)
         }
+        // Anti-slowloris write timeout (dom_wire::codec::NoiseCodec::send): a peer
+        // that stops reading stalls our writes. Low severity — a slow peer is not
+        // necessarily malicious, so it is a protocol violation, not a ban-on-sight.
+        DomError::PolicyRejected(msg) if msg.contains("write timeout") => {
+            Some(ban_scores::PROTOCOL_VIOLATION)
+        }
         DomError::Invalid(msg) if msg.contains("chain_id mismatch") => {
             Some(ban_scores::WRONG_CHAIN_ID)
         }
@@ -1819,6 +1839,25 @@ fn peer_violation_score(error: &DomError) -> Option<u32> {
         DomError::Invalid(_) => Some(ban_scores::PROTOCOL_VIOLATION),
         _ => None,
     }
+}
+
+/// Annotate a `codec.send` failure with which broadcast/message kind failed,
+/// for diagnostics — WITHOUT burying the anti-slowloris write-timeout type. A
+/// `PolicyRejected("write timeout …")` is passed through unchanged so it still
+/// routes through [`peer_violation_score`]; everything else (broken pipe,
+/// encrypt) is our/transport side and is wrapped as `Internal` (unscored).
+fn annotate_send_err(kind: &str, peer_addr: std::net::SocketAddr, e: DomError) -> DomError {
+    match &e {
+        DomError::PolicyRejected(msg) if msg.contains("write timeout") => e,
+        _ => DomError::Internal(format!("{kind} send to {peer_addr}: {e}")),
+    }
+}
+
+/// Whether an error escaping `message_loop` is the anti-slowloris write timeout.
+/// Used to score it at the loop boundary WITHOUT double-scoring recv-side errors
+/// (which are already scored inline before they propagate).
+fn is_write_timeout(error: &DomError) -> bool {
+    matches!(error, DomError::PolicyRejected(msg) if msg.contains("write timeout"))
 }
 
 fn pending_peer_violation_score(error: &DomError) -> Option<u32> {
@@ -3535,7 +3574,7 @@ async fn message_loop(
                             payload: payload.to_bytes()?,
                         };
                         if let Err(e) = codec.send(stream, &msg).await {
-                            return Err(DomError::Internal(format!("relay send to {peer_addr}: {e}")));
+                            return Err(annotate_send_err("relay", peer_addr, e));
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -3557,7 +3596,7 @@ async fn message_loop(
                             payload: tx_bytes,
                         };
                         if let Err(e) = codec.send(stream, &msg).await {
-                            return Err(DomError::Internal(format!("fluff send to {peer_addr}: {e}")));
+                            return Err(annotate_send_err("fluff", peer_addr, e));
                         }
                         svc.metrics
                             .txs_relayed
@@ -3585,7 +3624,7 @@ async fn message_loop(
                                 payload: env.tx_bytes,
                             };
                             if let Err(e) = codec.send(stream, &msg).await {
-                                return Err(DomError::Internal(format!("stem send to {peer_addr}: {e}")));
+                                return Err(annotate_send_err("stem", peer_addr, e));
                             }
                             svc.metrics
                                 .txs_relayed
@@ -3610,7 +3649,7 @@ async fn message_loop(
                     payload: nonce.to_vec(),
                 };
                 if let Err(e) = codec.send(stream, &ping).await {
-                    return Err(DomError::Internal(format!("ping send to {peer_addr}: {e}")));
+                    return Err(annotate_send_err("ping", peer_addr, e));
                 }
             }
             // Periodic PEX: solicit addresses while our known set is below
@@ -3636,7 +3675,7 @@ async fn message_loop(
                         payload: GetAddrPayload.to_bytes()?,
                     };
                     if let Err(e) = codec.send(stream, &msg).await {
-                        return Err(DomError::Internal(format!("getaddr send to {peer_addr}: {e}")));
+                        return Err(annotate_send_err("getaddr", peer_addr, e));
                     }
                 }
             }
@@ -4248,18 +4287,19 @@ async fn message_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_metrics_listener, clear_persisted_mempool_snapshot, continue_ibd_header_sync,
-        decode_deferred_block_bytes, decode_ibd_block_response, decode_relay_block,
-        deferred_replay_action, ibd_now, initialize_ibd_state, load_mempool_snapshot,
-        load_or_create_noise_static_key, load_peer_reputation_snapshot,
-        load_peer_rotation_snapshot, parse_persisted_noise_static_key, peer_violation_score,
-        pending_peer_violation_score, persist_mempool_snapshot, persist_peer_reputation_snapshot,
-        purge_mempool_confirmed_inputs, reconcile_mempool_after_connect, refresh_peer_metrics,
-        relay_block_action, resolve_configured_dns_seeds, restore_peer_rotation_state,
-        serve_metrics, trace_lock, tx_hash, DeferredReplayAction, DomNode, IbdRoundState,
-        OutboundAttemptOutcome, RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY,
-        MEMPOOL_METADATA_KEY, METRICS_CONTENT_TYPE, NOISE_STATIC_KEY_METADATA_KEY,
-        PEER_REPUTATION_METADATA_KEY, PEER_ROTATION_METADATA_KEY,
+        annotate_send_err, bind_metrics_listener, clear_persisted_mempool_snapshot,
+        continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
+        decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
+        is_write_timeout, load_mempool_snapshot, load_or_create_noise_static_key,
+        load_peer_reputation_snapshot, load_peer_rotation_snapshot,
+        parse_persisted_noise_static_key, peer_violation_score, pending_peer_violation_score,
+        persist_mempool_snapshot, persist_peer_reputation_snapshot, purge_mempool_confirmed_inputs,
+        reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action,
+        resolve_configured_dns_seeds, restore_peer_rotation_state, serve_metrics, trace_lock,
+        tx_hash, DeferredReplayAction, DomNode, IbdRoundState, OutboundAttemptOutcome,
+        RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY, MEMPOOL_METADATA_KEY,
+        METRICS_CONTENT_TYPE, NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY,
+        PEER_ROTATION_METADATA_KEY,
     };
     use crate::future_block_queue::DeferredBlock;
     use crate::metrics::Metrics;
@@ -5641,6 +5681,57 @@ mod tests {
             peer_violation_score(&DomError::Invalid("claimed fees 5 != actual fees 7".into())),
             Some(ban_scores::PROTOCOL_VIOLATION)
         );
+    }
+
+    #[test]
+    fn write_timeout_maps_to_protocol_violation() {
+        // Anti-slowloris: a stalled write (peer stopped reading) is a low-severity
+        // protocol violation — a slow peer is not necessarily malicious.
+        assert_eq!(
+            peer_violation_score(&DomError::PolicyRejected("write timeout after 30s".into())),
+            Some(ban_scores::PROTOCOL_VIOLATION)
+        );
+    }
+
+    #[test]
+    fn is_write_timeout_distinguishes_write_stall_from_recv_errors() {
+        // Only the write-side timeout is scored at the message_loop boundary;
+        // recv-side errors are scored inline and must NOT match here (else they
+        // would be double-counted).
+        assert!(is_write_timeout(&DomError::PolicyRejected(
+            "write timeout after 30s".into()
+        )));
+        assert!(!is_write_timeout(&DomError::PolicyRejected(
+            "idle timeout after 60s".into()
+        )));
+        assert!(!is_write_timeout(&DomError::Malformed("bad frame".into())));
+        assert!(!is_write_timeout(&DomError::Internal(
+            "relay channel closed".into()
+        )));
+    }
+
+    #[test]
+    fn annotate_send_err_preserves_write_timeout_but_wraps_others() {
+        let addr: std::net::SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        // Write timeout passes through unchanged so it still routes to scoring.
+        let to = annotate_send_err(
+            "relay",
+            addr,
+            DomError::PolicyRejected("write timeout after 30s".into()),
+        );
+        assert_eq!(
+            peer_violation_score(&to),
+            Some(ban_scores::PROTOCOL_VIOLATION)
+        );
+        // Non-timeout failures (broken pipe etc.) are our/transport side: wrapped
+        // as Internal (diagnostic context) and left unscored.
+        let other = annotate_send_err(
+            "relay",
+            addr,
+            DomError::Internal("write frame data: broken pipe".into()),
+        );
+        assert!(matches!(&other, DomError::Internal(m) if m.contains("relay send to")));
+        assert_eq!(peer_violation_score(&other), None);
     }
 
     #[test]
