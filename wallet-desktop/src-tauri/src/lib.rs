@@ -64,6 +64,18 @@ async fn rpc_client_from_node(node: &Arc<NodeHost>) -> Result<NodeRpcClient, Str
         .map_err(|e| format!("rpc client: {e}"))
 }
 
+async fn try_resubmit_pending(state: &AppState) -> Result<wallet_manager::PendingResubmitReport, String> {
+    if !state.wallet.is_open().await || !state.wallet.is_unlocked().await {
+        return Ok(wallet_manager::PendingResubmitReport::default());
+    }
+    let client = rpc_client(state).await?;
+    state
+        .wallet
+        .resubmit_pending(&client)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Parse a noms amount that arrives over the IPC boundary as a STRING (M1).
 ///
 /// Amounts are `u64` noms. JSON numbers lose precision above 2^53, so the UI
@@ -212,6 +224,9 @@ async fn wallet_open_by_name(
         now_secs(),
     )
     .await?;
+    if let Err(e) = try_resubmit_pending(&state).await {
+        tracing::debug!("pending tx resubmit after wallet open skipped/failed: {e}");
+    }
     // Managed wallets carry their own node settings (data dir, ports, mining
     // choice) next to the vault; loading them here is what makes "open by
     // name" also bring up the RIGHT node for that wallet.
@@ -341,6 +356,9 @@ async fn wallet_open(
         if let Some(name) = name.as_deref() {
             register_open_wallet(&state, name).await;
         }
+    }
+    if let Err(e) = try_resubmit_pending(&state).await {
+        tracing::debug!("pending tx resubmit after wallet open skipped/failed: {e}");
     }
     Ok(())
 }
@@ -698,7 +716,11 @@ async fn wallet_unlock(
         .wallet
         .unlock(password.as_str())
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = try_resubmit_pending(&state).await {
+        tracing::debug!("pending tx resubmit after wallet unlock skipped/failed: {e}");
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1129,6 +1151,34 @@ pub fn run() {
                         Ok(Some(tx)) => tracing::info!("auto-swept miner rewards to wallet: {tx}"),
                         Ok(None) => {}
                         Err(e) => tracing::debug!("auto-sweep skipped/failed: {e}"),
+                    }
+                }
+            });
+
+            let resubmit_node = node.clone();
+            let resubmit_wallet = wallet.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(AUTO_SWEEP_INTERVAL_SECS));
+                loop {
+                    interval.tick().await;
+                    if !resubmit_wallet.is_open().await || !resubmit_wallet.is_unlocked().await {
+                        continue;
+                    }
+                    match rpc_client_from_node(&resubmit_node).await {
+                        Ok(client) => match resubmit_wallet.resubmit_pending(&client).await {
+                            Ok(report) if report.attempted > 0 => tracing::info!(
+                                "pending tx resubmit: attempted={} submitted={} already_in_mempool={} retry_later={} failed={}",
+                                report.attempted,
+                                report.submitted,
+                                report.already_in_mempool,
+                                report.retry_later,
+                                report.failed
+                            ),
+                            Ok(_) => {}
+                            Err(e) => tracing::debug!("pending tx resubmit skipped/failed: {e}"),
+                        },
+                        Err(e) => tracing::debug!("pending tx resubmit skipped/failed: {e}"),
                     }
                 }
             });

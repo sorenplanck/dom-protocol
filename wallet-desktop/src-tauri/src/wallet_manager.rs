@@ -24,7 +24,7 @@ use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_tx::slate::Slate;
 use dom_wallet::{
     Bip39Seed, NodeRpc, NodeRpcClient, ReceiveRequestDescriptor, RpcClientError, SeedAcceptance,
-    Wallet, WalletDir,
+    Transaction, TxJournal, TxStatus, Wallet, WalletDir,
 };
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
@@ -79,6 +79,15 @@ pub struct BalanceInfo {
     pub spendable: u64,
     pub confirmed: u64,
     pub immature: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+pub struct PendingResubmitReport {
+    pub attempted: usize,
+    pub submitted: usize,
+    pub already_in_mempool: usize,
+    pub retry_later: usize,
+    pub failed: usize,
 }
 
 pub struct WalletManager {
@@ -303,7 +312,13 @@ impl WalletManager {
             (finalized.tx, tx_hash, finalized.pending_key)
         };
         match rpc.submit_tx(&tx) {
-            Ok(_) => {
+            Ok(outcome) => {
+                if let Some(warning) = &outcome.warning {
+                    tracing::warn!(
+                        "slate tx {} accepted with relay warning: {warning}",
+                        hex::encode(outcome.tx_hash)
+                    );
+                }
                 let mut guard = self.inner.lock().await;
                 let dir = guard.as_mut().ok_or_else(|| anyhow!("no wallet open"))?;
                 if let Err(e) = dir.wallet_mut().mark_submitted(pending_key) {
@@ -365,6 +380,77 @@ impl WalletManager {
             .as_ref()
             .map(|d| d.wallet().network())
     }
+
+    pub async fn resubmit_pending(&self, rpc: &NodeRpcClient) -> Result<PendingResubmitReport> {
+        let candidates = {
+            let guard = self.inner.lock().await;
+            let dir = guard.as_ref().ok_or_else(|| anyhow!("no wallet open"))?;
+            let records = TxJournal::open(dir.path())
+                .and_then(|journal| journal.replay())
+                .map_err(|e| anyhow!("pending journal replay: {e}"))?;
+            let mut candidates = Vec::new();
+            for (tx_hash, record) in records {
+                if !matches!(record.status, TxStatus::Building | TxStatus::Submitted) {
+                    continue;
+                }
+                let Some(tx_bytes) = dir.wallet().pending_tx_bytes(&tx_hash) else {
+                    continue;
+                };
+                let tx = Transaction::from_bytes(tx_bytes)
+                    .map_err(|e| anyhow!("pending tx decode {}: {e}", hex::encode(tx_hash)))?;
+                candidates.push((tx_hash, record.status, tx));
+            }
+            candidates
+        };
+
+        let mut report = PendingResubmitReport::default();
+        for (pending_key, status, tx) in candidates {
+            report.attempted += 1;
+            match rpc.submit_tx(&tx) {
+                Ok(outcome) => {
+                    if let Some(warning) = &outcome.warning {
+                        tracing::warn!(
+                            "pending tx {} accepted with relay warning: {warning}",
+                            hex::encode(outcome.tx_hash)
+                        );
+                    }
+                    if matches!(status, TxStatus::Building) {
+                        let mut guard = self.inner.lock().await;
+                        if let Some(dir) = guard.as_mut() {
+                            dir.wallet_mut().mark_submitted(pending_key)?;
+                        }
+                    }
+                    report.submitted += 1;
+                }
+                Err(RpcClientError::NodeRejected { status: 409, .. }) => {
+                    if matches!(status, TxStatus::Building) {
+                        let mut guard = self.inner.lock().await;
+                        if let Some(dir) = guard.as_mut() {
+                            dir.wallet_mut().mark_submitted(pending_key)?;
+                        }
+                    }
+                    report.already_in_mempool += 1;
+                }
+                Err(err) if pending_resubmit_should_retry(&err) => {
+                    tracing::info!(
+                        "pending tx {} resubmit deferred after retryable RPC error: {err}",
+                        hex::encode(pending_key)
+                    );
+                    report.retry_later += 1;
+                }
+                Err(err) => {
+                    let reason = format!("pending resubmit stopped: {err}");
+                    tracing::warn!("pending tx {} marked failed: {reason}", hex::encode(pending_key));
+                    let mut guard = self.inner.lock().await;
+                    if let Some(dir) = guard.as_mut() {
+                        dir.wallet_mut().mark_failed(pending_key, reason)?;
+                    }
+                    report.failed += 1;
+                }
+            }
+        }
+        Ok(report)
+    }
 }
 
 /// Stable lowercase string for a wallet `Network`, used in registry metadata
@@ -391,6 +477,15 @@ fn submit_failure_is_safe_to_rollback(err: &RpcClientError) -> bool {
     !matches!(
         err,
         RpcClientError::ReadTimeout { .. } | RpcClientError::Transport { .. }
+    )
+}
+
+fn pending_resubmit_should_retry(err: &RpcClientError) -> bool {
+    matches!(
+        err,
+        RpcClientError::ConnectTimeout { .. }
+            | RpcClientError::ReadTimeout { .. }
+            | RpcClientError::Transport { .. }
     )
 }
 
