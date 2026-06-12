@@ -86,6 +86,25 @@ async fn main() -> anyhow::Result<()> {
         config.mine = on;
     }
 
+    // Allow override of miner worker count via DOM_MINER_THREADS (resource
+    // control only, never consensus data). Clamped to 1..=256; invalid values
+    // keep the default.
+    if let Ok(v) = std::env::var("DOM_MINER_THREADS") {
+        match v.trim().parse::<usize>() {
+            Ok(n) if n >= 1 => {
+                let n = n.min(256);
+                info!("Miner threads set via DOM_MINER_THREADS={v} -> {n}");
+                config.miner_threads = n;
+            }
+            _ => {
+                info!(
+                    "Invalid DOM_MINER_THREADS={v}, keeping {}",
+                    config.miner_threads
+                );
+            }
+        }
+    }
+
     // Allow override of data dir via DOM_DATA_DIR.
     if let Ok(dir) = std::env::var("DOM_DATA_DIR") {
         info!("Overriding data dir: {dir}");
