@@ -1,6 +1,6 @@
 [package]
 name = "dom-wallet-desktop"
-version = "0.2.9"
+version = "0.3.0"
 description = "DOM Wallet — official desktop wallet with an integrated DOM node"
 authors = ["DOM Protocol"]
 license = "MIT"
