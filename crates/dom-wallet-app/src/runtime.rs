@@ -1342,6 +1342,11 @@ fn history_row(
             Some("submitted earlier but not currently observed in mempool".to_string()),
         ),
         TxStatus::Confirmed { block_height } => (format!("confirmed @ {block_height}"), None),
+        TxStatus::Received {
+            amount,
+            block_height,
+            ..
+        } => (format!("received {amount} noms @ {block_height}"), None),
         TxStatus::Failed { reason } => (
             "failed".to_string(),
             Some(format!(
