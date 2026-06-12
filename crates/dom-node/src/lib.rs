@@ -6,6 +6,7 @@ pub mod lock_order;
 pub mod metrics;
 pub mod miner;
 pub mod missing_block_tracker;
+pub mod msg_rate_limit;
 pub mod node;
 pub mod node_handle;
 pub mod orphan_pool;
