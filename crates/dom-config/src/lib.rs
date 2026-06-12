@@ -105,6 +105,12 @@ pub struct NodeConfig {
     /// network messages.
     #[serde(default)]
     pub miner_throttle: MinerThrottleConfig,
+    /// Number of concurrent nonce-search workers the local miner spawns.
+    /// Resource control only — never consensus data. Values are clamped to
+    /// at least 1 by the miner; `#[serde(default)]` keeps legacy configs
+    /// loadable (defaulting to the historical single worker).
+    #[serde(default = "default_miner_threads")]
+    pub miner_threads: usize,
     /// Miner reward address.
     pub miner_address: Option<String>,
     /// Path to the wallet file (.dom). Required if mining and using wallet-integrated mining.
@@ -131,6 +137,11 @@ pub struct NodeConfig {
     /// metrics expose node health and topology signals.
     #[serde(default)]
     pub metrics_listen_addr: Option<String>,
+}
+
+/// Historical default: one nonce-search worker.
+fn default_miner_threads() -> usize {
+    1
 }
 
 /// Local miner CPU throttle configuration.
@@ -164,6 +175,7 @@ impl NodeConfig {
             seed_peers: vec![],
             mine: false,
             miner_throttle: MinerThrottleConfig::default(),
+            miner_threads: 1,
             miner_address: None,
             wallet_path: None,
             wallet_password: None,
@@ -186,6 +198,7 @@ impl NodeConfig {
             seed_peers: vec![],
             mine: true,
             miner_throttle: MinerThrottleConfig::default(),
+            miner_threads: 1,
             miner_address: None,
             wallet_path: None,
             wallet_password: None,
@@ -211,6 +224,7 @@ impl NodeConfig {
             seed_peers: vec![],
             mine: false,
             miner_throttle: MinerThrottleConfig::default(),
+            miner_threads: 1,
             miner_address: None,
             wallet_path: None,
             wallet_password: None,
@@ -257,5 +271,16 @@ mod tests {
         }"#;
         let config: NodeConfig = serde_json::from_str(json).expect("legacy config");
         assert!(config.metrics_listen_addr.is_none());
+        assert_eq!(
+            config.miner_threads, 1,
+            "legacy configs without miner_threads must keep the historical single worker"
+        );
+    }
+
+    #[test]
+    fn miner_threads_defaults_to_one_worker() {
+        assert_eq!(NodeConfig::mainnet().miner_threads, 1);
+        assert_eq!(NodeConfig::testnet().miner_threads, 1);
+        assert_eq!(NodeConfig::regtest().miner_threads, 1);
     }
 }

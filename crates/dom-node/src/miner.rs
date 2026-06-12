@@ -737,7 +737,8 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     // networks before mining starts.
     let light_vm = mining_mode.light_vm();
     let pow_mode = mining_mode.pow_mode();
-    let (tx, rx) = tokio::sync::oneshot::channel::<Result<BlockHeader, String>>();
+    let threads = node.config.miner_threads.max(1);
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<(BlockHeader, MiningStats), String>>();
     std::thread::Builder::new()
         .name(format!("miner-{}", new_height))
         .spawn(move || {
@@ -754,21 +755,167 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
                 total_kernel_offset,
                 light_vm,
                 pow_mode,
+                threads,
                 throttle,
             );
             let _ = tx.send(result.map_err(|e| e.to_string()));
         })
         .map_err(|e| DomError::Internal(format!("spawn thread: {e}")))?;
-    let header = rx
+    let (header, stats) = rx
         .await
         .map_err(|e| DomError::Internal(format!("channel: {e}")))?
         .map_err(DomError::Internal)?;
+    tracing::debug!(
+        "Bloco {new_height}: nonce encontrado com {} worker(s)",
+        stats.workers
+    );
     let block = Block {
         header,
         coinbase,
         transactions: selected_txs,
     };
     finalize_mined_block(&node, block).await
+}
+
+/// Outcome statistics of a mining run — for operator logs and tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MiningStats {
+    /// Nonce-search workers actually spawned. The deterministic FastDevOnly
+    /// path searches nothing and always reports 1.
+    workers: usize,
+}
+
+/// RandomX cache/dataset handles that may cross thread boundaries.
+///
+/// `randomx-rs` wraps the C pointers in `Arc` but the raw pointers strip the
+/// `Send` auto-trait. The RandomX C API documents `randomx_cache` and
+/// `randomx_dataset` as immutable after initialization and safe for
+/// concurrent use by any number of VMs on any threads (one VM per thread);
+/// release happens exactly once via the inner `Arc`'s last drop, and
+/// `randomx_release_*` has no thread affinity. We therefore assert `Send` to
+/// move CLONES of the fully-initialized handles into worker threads. `Sync`
+/// is deliberately NOT asserted — each worker receives an owned clone, never
+/// a shared reference.
+#[allow(unsafe_code)]
+mod shared_rx {
+    pub(super) struct SharedCache(pub(super) randomx_rs::RandomXCache);
+    // SAFETY: see module docs — immutable after init, Arc-managed single release.
+    unsafe impl Send for SharedCache {}
+
+    pub(super) struct SharedDataset(pub(super) randomx_rs::RandomXDataset);
+    // SAFETY: see module docs.
+    unsafe impl Send for SharedDataset {}
+}
+
+/// Immutable inputs of one worker's strided nonce search.
+struct NonceSearch {
+    /// Header with everything but the nonce/randomx_hash filled in.
+    template: BlockHeader,
+    target: [u8; 32],
+    seed_hash: [u8; 32],
+    /// `true` = deterministic dev hashing (no RandomX VM).
+    fast_mode: bool,
+    worker_id: usize,
+    /// Total worker count; also the nonce stride.
+    workers: usize,
+    throttle: MinerThrottle,
+}
+
+/// Build the per-worker RandomX VM (None in fast mode). Light mode links the
+/// shared cache only; full-mem mode links the shared cache AND dataset, so N
+/// workers cost one ~2 GB dataset total, not N of them.
+fn build_worker_vm(
+    light_vm: bool,
+    flags: randomx_rs::RandomXFlag,
+    cache: Option<shared_rx::SharedCache>,
+    dataset: Option<shared_rx::SharedDataset>,
+) -> Result<Option<randomx_rs::RandomXVM>, DomError> {
+    use randomx_rs::RandomXVM;
+    let Some(shared_rx::SharedCache(cache)) = cache else {
+        return Ok(None); // fast mode: no VM
+    };
+    let vm = if light_vm {
+        // Cache-only VM. No dataset is allocated.
+        RandomXVM::new(flags, Some(cache), None)
+    } else {
+        let shared_rx::SharedDataset(dataset) =
+            dataset.ok_or_else(|| DomError::Internal("dataset missing for full-mem vm".into()))?;
+        RandomXVM::new(flags, Some(cache), Some(dataset))
+    }
+    .map_err(|e| DomError::Internal(format!("vm: {e}")))?;
+    Ok(Some(vm))
+}
+
+/// One worker's nonce search: starts at `worker_id` and strides by `workers`
+/// so the workers partition the nonce space without coordination. Returns
+/// `Ok(None)` when another worker won (stop flag set).
+fn search_nonces(
+    params: NonceSearch,
+    vm: Option<&randomx_rs::RandomXVM>,
+    stop: &std::sync::atomic::AtomicBool,
+    total_hashes: &std::sync::atomic::AtomicU64,
+) -> Result<Option<BlockHeader>, DomError> {
+    use std::sync::atomic::Ordering;
+
+    // Heartbeat: blocks can take minutes to hours under low-effort targets +
+    // light VM. Without a periodic log, "stuck" miners are indistinguishable
+    // from "still hashing" — worker 0 logs every HEARTBEAT_NONCES of its own
+    // iterations with the aggregate hash-rate so operators (and tests) see
+    // continuous progress.
+    const HEARTBEAT_NONCES: u64 = 5_000;
+    let mining_start = std::time::Instant::now();
+    let mut last_heartbeat = mining_start;
+    let mut last_total = 0u64;
+
+    let mut header = params.template.clone();
+    let new_height = header.height.0;
+    let mut nonce = params.worker_id as u64;
+    let stride = params.workers as u64;
+    let mut iterations = 0u64;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        header.pow.nonce = nonce;
+        let preimage = header.pow_preimage();
+        let hash = if params.fast_mode {
+            fast_pow_hash(&params.seed_hash, &preimage)
+        } else {
+            randomx_hash(vm.expect("vm"), &preimage)?
+        };
+        total_hashes.fetch_add(1, Ordering::Relaxed);
+        if hash_meets_target(&hash, &params.target) {
+            header.pow.randomx_hash = Hash256::from_bytes(hash);
+            return Ok(Some(header));
+        }
+        nonce = nonce.wrapping_add(stride);
+        iterations = iterations.wrapping_add(1);
+        // Throttle on the worker-local iteration count, not the global nonce:
+        // strided nonces of worker i>0 may never be multiples of the
+        // configured yield interval.
+        params.throttle.after_nonce(iterations);
+        if params.worker_id == 0 && iterations.is_multiple_of(HEARTBEAT_NONCES) {
+            let now = std::time::Instant::now();
+            let window = now.duration_since(last_heartbeat).as_secs_f64();
+            let total = total_hashes.load(Ordering::Relaxed);
+            let hps = if window > 0.0 {
+                total.saturating_sub(last_total) as f64 / window
+            } else {
+                0.0
+            };
+            info!(
+                "⛏ minerando h={} | nonces={} | {:.1} H/s | workers={} | total={:.1}s | throttle={}",
+                new_height,
+                total,
+                hps,
+                params.workers,
+                mining_start.elapsed().as_secs_f64(),
+                params.throttle.describe()
+            );
+            last_heartbeat = now;
+            last_total = total;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -785,16 +932,26 @@ fn mine_blocking(
     total_kernel_offset: [u8; 32],
     light_vm: bool,
     pow_mode: PowValidationMode,
+    threads: usize,
     throttle: MinerThrottle,
-) -> Result<BlockHeader, DomError> {
-    use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag, RandomXVM};
+) -> Result<(BlockHeader, MiningStats), DomError> {
+    use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     // Mainnet / Testnet mining sets `FLAG_FULL_MEM` for throughput
-    // (allocates the ~2 GB RandomX dataset). Regtest opts out via
-    // `light_vm = true` and uses the cache-only VM (~256 MB). Regtest still
-    // performs real PoW against `REGTEST_TARGET_COMPACT` unless explicit
-    // FastDevOnly hashing is enabled for tests. Both paths check the same
-    // consensus target supplied by `compute_expected_target`.
+    // (allocates the ~2 GB RandomX dataset, shared by all workers). Regtest
+    // opts out via `light_vm = true` and uses cache-only VMs (~256 MB shared).
+    // Regtest still performs real PoW against `REGTEST_TARGET_COMPACT` unless
+    // explicit FastDevOnly hashing is enabled for tests. All paths check the
+    // same consensus target supplied by `compute_expected_target`.
     let fast_mode = matches!(pow_mode, PowValidationMode::FastDevOnly);
+    // FastDevOnly finds its nonce deterministically without searching, so
+    // extra workers add nothing and would only make the winning nonce racy
+    // for tests — force the single inline worker.
+    let workers = if fast_mode { 1 } else { threads.max(1) };
+    info!(
+        "Starting miner h={new_height}: configured_threads={threads} workers={workers} throttle={}",
+        throttle.describe()
+    );
     let flags = if light_vm {
         RandomXFlag::get_recommended_flags()
     } else {
@@ -808,80 +965,136 @@ fn mine_blocking(
                 .map_err(|e| DomError::Internal(format!("cache: {e}")))?,
         )
     };
-    let vm = if fast_mode {
+    let dataset = if fast_mode || light_vm {
         None
-    } else if light_vm {
-        // Cache-only VM. No dataset is allocated.
-        Some(
-            RandomXVM::new(flags, Some(cache.clone().expect("cache")), None)
-                .map_err(|e| DomError::Internal(format!("vm: {e}")))?,
-        )
     } else {
-        let cache = cache.clone().expect("cache");
-        let dataset = RandomXDataset::new(flags, cache.clone(), 0)
-            .map_err(|e| DomError::Internal(format!("dataset: {e}")))?;
         Some(
-            RandomXVM::new(flags, Some(cache), Some(dataset))
-                .map_err(|e| DomError::Internal(format!("vm: {e}")))?,
+            RandomXDataset::new(flags, cache.clone().expect("cache"), 0)
+                .map_err(|e| DomError::Internal(format!("dataset: {e}")))?,
         )
     };
+    let template = BlockHeader {
+        version: dom_core::PROTOCOL_VERSION,
+        prev_hash: tip_hash,
+        height: BlockHeight(new_height),
+        timestamp: block_timestamp,
+        output_root,
+        kernel_root,
+        rangeproof_root,
+        total_kernel_offset,
+        target: CompactTarget(target_to_compact(&target)),
+        total_difficulty: new_total_diff,
+        pow: ProofOfWork {
+            nonce: 0,
+            randomx_hash: Hash256::ZERO,
+        },
+    };
 
-    // Heartbeat: blocks can take minutes to hours under low-effort targets +
-    // light VM. Without a periodic log, "stuck" miners are indistinguishable
-    // from "still hashing" — log every HEARTBEAT_NONCES iterations with the
-    // current hash-rate so operators (and tests) see continuous progress.
-    const HEARTBEAT_NONCES: u64 = 5_000;
-    let mining_start = std::time::Instant::now();
-    let mut last_heartbeat = mining_start;
-    let mut nonce = 0u64;
-    loop {
-        let header = BlockHeader {
-            version: dom_core::PROTOCOL_VERSION,
-            prev_hash: tip_hash,
-            height: BlockHeight(new_height),
-            timestamp: block_timestamp,
-            output_root,
-            kernel_root,
-            rangeproof_root,
-            total_kernel_offset,
-            target: CompactTarget(target_to_compact(&target)),
-            total_difficulty: new_total_diff,
-            pow: ProofOfWork {
-                nonce,
-                randomx_hash: Hash256::ZERO,
+    if workers == 1 {
+        // Single worker: search inline on this thread, exactly the historical
+        // behavior — no extra spawn, no cross-thread RandomX handles.
+        let stop = AtomicBool::new(false);
+        let total_hashes = AtomicU64::new(0);
+        let vm = build_worker_vm(
+            light_vm,
+            flags,
+            cache.map(shared_rx::SharedCache),
+            dataset.map(shared_rx::SharedDataset),
+        )?;
+        let header = search_nonces(
+            NonceSearch {
+                template,
+                target,
+                seed_hash,
+                fast_mode,
+                worker_id: 0,
+                workers: 1,
+                throttle,
             },
+            vm.as_ref(),
+            &stop,
+            &total_hashes,
+        )?
+        .ok_or_else(|| DomError::Internal("nonce search stopped without a result".into()))?;
+        return Ok((header, MiningStats { workers: 1 }));
+    }
+
+    // Multi-worker: N strided searchers over one shared cache/dataset, first
+    // valid header wins and stops the rest.
+    let stop = Arc::new(AtomicBool::new(false));
+    let total_hashes = Arc::new(AtomicU64::new(0));
+    let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<BlockHeader, DomError>>();
+    let mut handles = Vec::with_capacity(workers);
+    for worker_id in 0..workers {
+        let cache_w = cache.clone().map(shared_rx::SharedCache);
+        let dataset_w = dataset.clone().map(shared_rx::SharedDataset);
+        let stop_w = Arc::clone(&stop);
+        let hashes_w = Arc::clone(&total_hashes);
+        let tx_w = result_tx.clone();
+        let params = NonceSearch {
+            template: template.clone(),
+            target,
+            seed_hash,
+            fast_mode,
+            worker_id,
+            workers,
+            throttle,
         };
-        let preimage = header.pow_preimage();
-        let hash = if fast_mode {
-            fast_pow_hash(&seed_hash, &preimage)
-        } else {
-            randomx_hash(vm.as_ref().expect("vm"), &preimage)?
-        };
-        if hash_meets_target(&hash, &target) {
-            let mut final_header = header;
-            final_header.pow.randomx_hash = Hash256::from_bytes(hash);
-            return Ok(final_header);
+        let spawned = std::thread::Builder::new()
+            .name(format!("miner-{new_height}-w{worker_id}"))
+            .spawn(move || {
+                info!("⛏ h={new_height} worker #{worker_id}/{workers} iniciado");
+                let outcome = build_worker_vm(light_vm, flags, cache_w, dataset_w)
+                    .and_then(|vm| search_nonces(params, vm.as_ref(), &stop_w, &hashes_w));
+                match outcome {
+                    Ok(Some(header)) => {
+                        stop_w.store(true, Ordering::Relaxed);
+                        let _ = tx_w.send(Ok(header));
+                    }
+                    Ok(None) => {} // another worker won
+                    Err(e) => {
+                        let _ = tx_w.send(Err(e));
+                    }
+                }
+            });
+        match spawned {
+            Ok(handle) => handles.push(handle),
+            Err(e) => {
+                // Don't leak already-running workers on spawn failure.
+                stop.store(true, Ordering::Relaxed);
+                for handle in handles {
+                    let _ = handle.join();
+                }
+                return Err(DomError::Internal(format!(
+                    "spawn miner worker {worker_id}: {e}"
+                )));
+            }
         }
-        nonce = nonce.wrapping_add(1);
-        throttle.after_nonce(nonce);
-        if nonce.is_multiple_of(HEARTBEAT_NONCES) {
-            let now = std::time::Instant::now();
-            let window = now.duration_since(last_heartbeat).as_secs_f64();
-            let hps = if window > 0.0 {
-                HEARTBEAT_NONCES as f64 / window
-            } else {
-                0.0
-            };
-            info!(
-                "⛏ minerando h={} | nonces={} | {:.1} H/s | total={:.1}s | throttle={}",
-                new_height,
-                nonce,
-                hps,
-                mining_start.elapsed().as_secs_f64(),
-                throttle.describe()
-            );
-            last_heartbeat = now;
+    }
+    // Drop our sender so recv() unblocks with an error if every worker exits
+    // without producing a result (e.g. all VMs failed to build).
+    drop(result_tx);
+
+    let mut winner: Option<BlockHeader> = None;
+    let mut last_err: Option<DomError> = None;
+    while let Ok(msg) = result_rx.recv() {
+        match msg {
+            Ok(header) => {
+                winner = Some(header);
+                break;
+            }
+            Err(e) => last_err = Some(e),
         }
+    }
+    stop.store(true, Ordering::Relaxed);
+    for handle in handles {
+        let _ = handle.join();
+    }
+    match winner {
+        Some(header) => Ok((header, MiningStats { workers })),
+        None => Err(last_err.unwrap_or_else(|| {
+            DomError::Internal("all miner workers exited without a result".into())
+        })),
     }
 }
 
@@ -1280,7 +1493,7 @@ mod genesis_determinism_tests {
             compute_expected_target(NETWORK_MAGIC_REGTEST, timestamp, BlockHeight(1)).unwrap();
         assert_eq!(target_to_compact(&target), REGTEST_TARGET_COMPACT);
 
-        let header = mine_blocking(
+        let (header, stats) = mine_blocking(
             1,
             dom_core::Hash256::ZERO,
             timestamp,
@@ -1293,9 +1506,11 @@ mod genesis_determinism_tests {
             [0u8; 32],
             mode.light_vm(),
             mode.pow_mode(),
+            1,
             disabled_throttle(),
         )
         .expect("fast mining with consensus target");
+        assert_eq!(stats.workers, 1);
 
         assert_eq!(header.pow.nonce, 0, "fast mining should not search nonces");
         assert_eq!(
@@ -1445,7 +1660,7 @@ mod genesis_determinism_tests {
                 sleep_micros: 0,
             }),
         ] {
-            let header = mine_blocking(
+            let (header, _stats) = mine_blocking(
                 1,
                 dom_core::Hash256::ZERO,
                 timestamp,
@@ -1458,6 +1673,7 @@ mod genesis_determinism_tests {
                 [0u8; 32],
                 true,
                 PowValidationMode::FastDevOnly,
+                1,
                 throttle,
             )
             .expect("fast mining");
@@ -1519,7 +1735,7 @@ mod genesis_determinism_tests {
             NETWORK_MAGIC_REGTEST,
         ] {
             let target = compute_expected_target(network_magic, timestamp, BlockHeight(1)).unwrap();
-            let header = mine_blocking(
+            let (header, _stats) = mine_blocking(
                 1,
                 dom_core::Hash256::ZERO,
                 timestamp,
@@ -1532,6 +1748,7 @@ mod genesis_determinism_tests {
                 [0u8; 32],
                 true,
                 PowValidationMode::FastDevOnly,
+                1,
                 disabled_throttle(),
             )
             .expect("fast test mining");
@@ -1550,7 +1767,7 @@ mod genesis_determinism_tests {
         std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
         let target = dom_core::MAX_TARGET_BYTES;
 
-        let header = mine_blocking(
+        let (header, _stats) = mine_blocking(
             1,
             dom_core::Hash256::ZERO,
             Timestamp(1_700_000_000),
@@ -1563,12 +1780,123 @@ mod genesis_determinism_tests {
             [0u8; 32],
             true,
             dom_pow::PowValidationMode::FastDevOnly,
+            1,
             disabled_throttle(),
         )
         .expect("fast mining");
 
         assert_eq!(header.pow.nonce, 0, "fast mining should not search nonces");
         assert!(validate_pow_for_network(NETWORK_MAGIC_REGTEST, &header, &[0u8; 32]).is_ok());
+    }
+
+    #[test]
+    fn multithreaded_randomx_mining_spawns_workers_and_produces_real_hash() {
+        // Real RandomX (cache-only light VM, shared by 4 workers). The raw
+        // all-0xFF search target makes EVERY hash a winner, so each worker
+        // does exactly one RandomX hash and the test costs cache-init + 4
+        // hashes instead of the ~2^16 expected for the smallest
+        // consensus-encodable target (MAX_TARGET_BYTES) — minutes in debug
+        // builds. Consequence: `validate_pow` (which re-derives the target
+        // from the compact header field) is not applicable here; the property
+        // this test pins is the multi-worker orchestration itself — N workers
+        // spawn, partition the nonce space, share one RandomX cache across
+        // threads, and the winner's hash is REAL RandomX (recomputed below on
+        // an independent VM), not garbage from a torn/shared-state race.
+        use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
+
+        let seed = [0u8; 32];
+        let trivial_target = [0xff_u8; 32];
+        let (header, stats) = mine_blocking(
+            1,
+            dom_core::Hash256::ZERO,
+            Timestamp(1_700_000_000),
+            trivial_target,
+            primitive_types::U256::one(),
+            seed,
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            [0u8; 32],
+            true, // light VM: cache-only RandomX, no 2 GB dataset in tests
+            PowValidationMode::RandomX,
+            4,
+            disabled_throttle(),
+        )
+        .expect("multithreaded RandomX mining");
+
+        assert_eq!(
+            stats.workers, 4,
+            "configured 4 threads must spawn 4 workers"
+        );
+        // Strided partition: worker i searches nonces i, i+4, i+8, ... — with
+        // the all-0xFF target every worker wins on its FIRST nonce, so the
+        // winner is deterministically one of {0, 1, 2, 3}.
+        assert!(
+            header.pow.nonce < 4,
+            "nonce {} outside the first stride of 4 workers",
+            header.pow.nonce
+        );
+        // The winning hash must be genuine RandomX over the shared cache:
+        // recompute it on a fresh, independent VM and require equality.
+        let flags = RandomXFlag::get_recommended_flags();
+        let cache = RandomXCache::new(flags, &seed).expect("verification cache");
+        let vm = RandomXVM::new(flags, Some(cache), None).expect("verification vm");
+        let recomputed = super::randomx_hash(&vm, &header.pow_preimage()).expect("recompute hash");
+        assert_eq!(
+            Hash256::from_bytes(recomputed),
+            header.pow.randomx_hash,
+            "worker hash must equal independently recomputed RandomX hash"
+        );
+    }
+
+    #[test]
+    fn fast_dev_mode_ignores_thread_count_and_stays_deterministic() {
+        // FastDevOnly searches nothing; requesting many threads must not
+        // make the found nonce racy (workers forced to 1).
+        let (header, stats) = mine_blocking(
+            1,
+            dom_core::Hash256::ZERO,
+            Timestamp(1_700_000_000),
+            dom_core::MAX_TARGET_BYTES,
+            primitive_types::U256::one(),
+            [0u8; 32],
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            [0u8; 32],
+            true,
+            PowValidationMode::FastDevOnly,
+            8,
+            disabled_throttle(),
+        )
+        .expect("fast mining");
+
+        assert_eq!(stats.workers, 1, "FastDevOnly must keep a single worker");
+        assert_eq!(header.pow.nonce, 0, "fast mining should not search nonces");
+    }
+
+    #[test]
+    fn zero_thread_config_clamps_to_one_worker() {
+        // All-0xFF raw target: one RandomX hash ends the search (see the
+        // multithread test above for why MAX_TARGET_BYTES is too slow here).
+        let (_header, stats) = mine_blocking(
+            1,
+            dom_core::Hash256::ZERO,
+            Timestamp(1_700_000_000),
+            [0xff_u8; 32],
+            primitive_types::U256::one(),
+            [0u8; 32],
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            dom_core::Hash256::ZERO,
+            [0u8; 32],
+            true,
+            PowValidationMode::RandomX,
+            0,
+            disabled_throttle(),
+        )
+        .expect("zero-thread mining clamps to one worker");
+        assert_eq!(stats.workers, 1);
     }
 
     #[test]
@@ -1579,7 +1907,7 @@ mod genesis_determinism_tests {
         let target =
             compute_expected_target(NETWORK_MAGIC_MAINNET, timestamp, BlockHeight(1)).unwrap();
         let total_difficulty = U256::from(target_to_difficulty(&target));
-        let header = mine_blocking(
+        let (header, _stats) = mine_blocking(
             1,
             dom_core::Hash256::ZERO,
             timestamp,
@@ -1592,6 +1920,7 @@ mod genesis_determinism_tests {
             [0u8; 32],
             true,
             dom_pow::PowValidationMode::FastDevOnly,
+            1,
             disabled_throttle(),
         )
         .expect("mine mainnet-style header");

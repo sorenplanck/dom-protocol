@@ -438,6 +438,7 @@ mod tests {
             seed_peers: vec![],
             mine: false,
             miner_throttle: Default::default(),
+            miner_threads: 1,
             miner_address: None,
             wallet_path: Some(wallet_path.to_string()),
             wallet_password: Some("password123".into()),
