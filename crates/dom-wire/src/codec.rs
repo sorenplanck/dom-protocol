@@ -99,13 +99,26 @@ impl NoiseCodec {
         let mut framed = Vec::with_capacity(4 + plaintext.len());
         framed.extend_from_slice(&(plaintext.len() as u32).to_le_bytes());
         framed.extend_from_slice(&plaintext);
+        let write_timeout = crate::handshake::write_timeout_secs();
         for chunk in framed.chunks(CHUNK) {
             let mut ciphertext = vec![0u8; chunk.len() + 16]; // +16 for AEAD tag
             let len = self
                 .transport
                 .write_message(chunk, &mut ciphertext)
                 .map_err(|e| DomError::Internal(format!("noise encrypt: {e}")))?;
-            write_framed(stream, &ciphertext[..len]).await?;
+            // Anti-slowloris: bound each frame write. A peer that stops reading
+            // fills our send buffer and would otherwise block `write_all`
+            // forever, pinning this task. Mirrors the per-frame read timeout in
+            // `recv`. NOT cancel-safe (see method docs): on timeout the stream
+            // is desynchronized, so the caller MUST drop the connection.
+            tokio::time::timeout(
+                tokio::time::Duration::from_secs(write_timeout),
+                write_framed(stream, &ciphertext[..len]),
+            )
+            .await
+            .map_err(|_| {
+                DomError::PolicyRejected(format!("write timeout after {write_timeout}s"))
+            })??;
         }
         Ok(())
     }

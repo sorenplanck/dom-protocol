@@ -35,6 +35,28 @@ pub fn handshake_timeout_secs() -> u64 {
 /// Peers that send no messages for this long are disconnected.
 pub const IDLE_TIMEOUT_SECS: u64 = 60;
 
+/// Per-frame write timeout for established connections.
+///
+/// Anti-slowloris: a peer that deliberately stops reading lets our kernel send
+/// buffer fill, after which `write_all` blocks forever and pins the per-peer
+/// task (and any broadcast — relay/fluff/stem — that awaits it). Bounding each
+/// frame write disconnects such a peer instead of hanging. Chosen between the
+/// read idle timeout (60s) and the handshake timeout (10s): generous enough for
+/// any honest, congested-but-draining link, short enough to bound the stall.
+pub const WRITE_TIMEOUT_SECS: u64 = 30;
+
+/// Runtime write timeout.
+///
+/// Production keeps using [`WRITE_TIMEOUT_SECS`]. Tests can set
+/// `DOM_TEST_WRITE_TIMEOUT_SECS` to shorten wall-clock waits without changing
+/// production defaults (mirrors [`handshake_timeout_secs`]).
+pub fn write_timeout_secs() -> u64 {
+    std::env::var("DOM_TEST_WRITE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(WRITE_TIMEOUT_SECS)
+}
+
 /// Build the Noise prologue that binds chain_id to the transport.
 ///
 /// RFC-0009: prologue = "DOM" || u32_le(PROTOCOL_VERSION) || u32_le(NETWORK_MAGIC) || chain_id[32]
