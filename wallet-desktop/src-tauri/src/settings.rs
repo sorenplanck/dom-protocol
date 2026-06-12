@@ -39,9 +39,10 @@ pub struct NodeSettings {
     /// Optional miner wallet file (.dom) so coinbase rewards are spendable.
     pub miner_wallet_path: Option<String>,
     pub mine: bool,
-    /// Operator-facing CPU limit. The embedded miner currently runs one active
-    /// nonce-search worker; keep this explicit so saved wallet settings cannot
-    /// request unbounded miner workers in future builds.
+    /// Operator-facing CPU limit: number of concurrent nonce-search workers
+    /// the embedded miner spawns. Clamped to 1..=available_parallelism before
+    /// reaching `NodeConfig.miner_threads`, so saved wallet settings cannot
+    /// request unbounded miner workers.
     #[serde(default = "default_miner_threads")]
     pub miner_threads: usize,
     /// Local sleep applied by the node miner throttle. This is resource control
@@ -139,6 +140,7 @@ impl NodeSettings {
         config.p2p_listen_addr = self.p2p_listen_addr.clone();
         config.data_dir = self.data_dir.clone();
         config.mine = self.mine;
+        config.miner_threads = self.normalized_miner_threads();
         config.miner_throttle = self.miner_throttle_config();
         config.log_level = self.log_level.clone();
         config.rpc_listen_addr = Some(self.rpc_listen_addr.clone());
@@ -760,6 +762,22 @@ mod tests {
         assert!(config.miner_throttle.enabled);
         assert_eq!(config.miner_throttle.yield_every_nonces, 1_000);
         assert_eq!(config.miner_throttle.sleep_micros, 25_000);
+    }
+
+    #[test]
+    fn miner_threads_map_into_node_config() {
+        let mut settings = regtest_settings_with_seed(vec![]);
+        settings.miner_threads = 2;
+        let config = settings.to_node_config(None).expect("config");
+        assert_eq!(
+            config.miner_threads,
+            settings.normalized_miner_threads(),
+            "UI thread count must reach NodeConfig (clamped to available parallelism)"
+        );
+
+        settings.miner_threads = 0;
+        let config = settings.to_node_config(None).expect("config");
+        assert_eq!(config.miner_threads, 1, "zero clamps to one worker");
     }
 
     #[test]
