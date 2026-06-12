@@ -1815,6 +1815,12 @@ fn peer_violation_score(error: &DomError) -> Option<u32> {
         DomError::PolicyRejected(msg) if msg.contains("write timeout") => {
             Some(ban_scores::PROTOCOL_VIOLATION)
         }
+        // Anti-flood per-category message rate limit (crate::msg_rate_limit): a
+        // peer flooding valid-but-excessive messages. Low severity — sustained
+        // overflow (~10 windows) is what crosses the ban threshold.
+        DomError::PolicyRejected(msg) if msg.contains("message rate limit") => {
+            Some(ban_scores::PROTOCOL_VIOLATION)
+        }
         DomError::Invalid(msg) if msg.contains("chain_id mismatch") => {
             Some(ban_scores::WRONG_CHAIN_ID)
         }
@@ -3557,6 +3563,12 @@ async fn message_loop(
     // Inbound Addr rate limit for THIS connection: beyond the budget each
     // extra Addr message scores ADDRESS_FLOODING instead of being processed.
     let mut addr_flood = crate::pex::AddrFloodTracker::new();
+    // Per-category inbound message rate limit for THIS connection (anti-flood):
+    // a peer that floods one category scores PROTOCOL_VIOLATION and, on
+    // sustained overflow, is disconnected — without affecting other peers
+    // (each connection has its own limiter). GetAddr/Addr are excluded here
+    // (they have their own limiters above).
+    let mut msg_rate = crate::msg_rate_limit::MessageRateLimiter::from_env();
 
     loop {
         tokio::select! {
@@ -3688,6 +3700,27 @@ async fn message_loop(
                         return Err(e);
                     }
                 };
+                // Anti-flood: per-category inbound rate limit (before the
+                // potentially expensive handler runs). Overflow scores a
+                // low-severity PROTOCOL_VIOLATION and drops THIS message; a
+                // peer that keeps overflowing crosses the ban threshold (~10
+                // windows) and is disconnected. Honest sync/relay flows stay
+                // well under the budgets (see msg_rate_limit).
+                if !msg_rate.allow(msg.command) {
+                    let err = DomError::PolicyRejected(format!(
+                        "message rate limit exceeded for {:?} [ban+{}]",
+                        msg.command,
+                        dom_wire::peer::ban_scores::PROTOCOL_VIOLATION,
+                    ));
+                    if record_peer_violation(&chain, &svc.peers, peer_addr, &err).await {
+                        return Err(err);
+                    }
+                    tracing::debug!(
+                        "rate-limited {:?} from {peer_addr}; dropping message",
+                        msg.command
+                    );
+                    continue;
+                }
                 match msg.command {
                     Command::Ping => {
                         // Echo payload as Pong
@@ -5689,6 +5722,18 @@ mod tests {
         // protocol violation — a slow peer is not necessarily malicious.
         assert_eq!(
             peer_violation_score(&DomError::PolicyRejected("write timeout after 30s".into())),
+            Some(ban_scores::PROTOCOL_VIOLATION)
+        );
+    }
+
+    #[test]
+    fn message_rate_limit_maps_to_protocol_violation() {
+        // Anti-flood: exceeding a per-category inbound message budget is a
+        // low-severity protocol violation; ~10 overflowing windows ban the peer.
+        assert_eq!(
+            peer_violation_score(&DomError::PolicyRejected(
+                "message rate limit exceeded for Block [ban+10]".into()
+            )),
             Some(ban_scores::PROTOCOL_VIOLATION)
         );
     }
