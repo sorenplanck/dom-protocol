@@ -15,22 +15,14 @@ use crate::types::{
 };
 use crate::unlock::{LockState, UnlockedSession};
 use dom_consensus::transaction::{
-    CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionInput, TransactionKernel,
-    TransactionOutput,
+    CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionOutput,
 };
-use dom_consensus::{validate_balance_equation, validate_transaction_structure};
-use dom_core::{Address, Amount, BlockHeight, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN};
+use dom_core::{Address, Amount, BlockHeight, KERNEL_FEAT_COINBASE};
 use dom_crypto::pedersen::Commitment;
-use dom_crypto::{
-    blake2b_256_tagged, bp_prove, schnorr_add_public_keys, schnorr_aggregate_sigs,
-    schnorr_partial_sign, schnorr_verify, BlindingFactor, Hash256, SecretKey,
-};
+use dom_crypto::{blake2b_256_tagged, BlindingFactor, Hash256};
 use dom_serialization::{DomDeserialize, DomSerialize};
-use dom_tx::slate::{OutputCommitmentAndProof, Slate};
+use dom_tx::slate::Slate;
 use dom_tx::SpendBuilder;
-use k256::elliptic_curve::PrimeField;
-use k256::Scalar;
-use rand::RngCore;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
@@ -1380,62 +1372,26 @@ impl Wallet {
         let change_value = total_selected
             .checked_sub(required)
             .ok_or_else(|| WalletError::Crypto("selected value below spend requirement".into()))?;
-        let (sender_change_output, pending_change, change_blinding) = if change_value > 0 {
-            let change_blinding = BlindingFactor::random();
-            let (proof, commitment_bytes) = bp_prove(change_value, &change_blinding)
-                .map_err(|e| WalletError::Crypto(format!("change range proof failed: {e}")))?;
-            let change_commitment = Commitment::from_compressed_bytes(&commitment_bytes)?;
-            let pending_change = PendingChange {
-                commitment: commitment_bytes,
-                value: change_value,
-                blinding: *change_blinding.as_bytes(),
-            };
-            (
-                Some(OutputCommitmentAndProof {
-                    commitment: change_commitment,
-                    proof,
-                }),
-                Some(pending_change),
-                Some(change_blinding),
-            )
-        } else {
-            (None, None, None)
-        };
-
-        let sender_offset = BlindingFactor::random();
-        let sender_excess_blinding =
-            sender_excess_blinding(&selected, change_blinding.as_ref(), &sender_offset)?;
-        let sender_excess_key = SecretKey::from_bytes(&sender_excess_blinding)
-            .map_err(|e| WalletError::Crypto(format!("sender excess key invalid: {e}")))?;
-
-        // Multisignature Schnorr nonces must be fresh CSPRNG output and
-        // single-use. RFC6979-style deterministic nonces are unsafe here:
-        // if a nonce is reused across aggregate-signing sessions, the
-        // sender excess private key can be recovered. Persist this nonce
-        // only in the encrypted wallet state and discard it after finalize.
-        let sender_nonce_key = random_secret_key();
-        let sender_nonce = sender_nonce_key.to_be_bytes_raw();
-
-        let slate = Slate {
-            version: 1,
-            chain_id: self.chain_id,
-            amount,
-            fee,
-            lock_height: 0,
-            sender_inputs: selected
-                .iter()
-                .map(|output| Commitment::from_compressed_bytes(&output.commitment))
-                .collect::<Result<Vec<_>, _>>()?,
-            sender_change_output,
-            sender_public_excess: sender_excess_key.public_key(),
-            sender_public_nonce: sender_nonce_key.public_key(),
-            sender_offset_contribution: *sender_offset.as_bytes(),
-            recipient_output: None,
-            recipient_public_excess: None,
-            recipient_public_nonce: None,
-            sender_partial_sig: None,
-            recipient_partial_sig: None,
-        };
+        // Slate crypto (change output, sender excess/offset/nonce, slate
+        // assembly) lives in the shared `dom-slate` crate; this wallet method
+        // is a thin wrapper that owns coin selection and persistence only.
+        let input_material: Vec<dom_slate::SlateInput> = selected
+            .iter()
+            .map(|output| dom_slate::SlateInput {
+                commitment: output.commitment,
+                blinding: *output.blinding,
+            })
+            .collect();
+        let built =
+            dom_slate::build_send(&input_material, change_value, amount, fee, self.chain_id)?;
+        let sender_excess_blinding = built.excess_blinding;
+        let sender_nonce = built.nonce;
+        let pending_change = built.change.map(|c| PendingChange {
+            commitment: c.commitment,
+            value: c.value,
+            blinding: c.blinding,
+        });
+        let slate = built.slate;
 
         let slate_bytes = slate.to_bytes()?;
         let slate_hash = *dom_crypto::blake2b_256(&slate_bytes).as_bytes();
@@ -1489,71 +1445,12 @@ impl Wallet {
         slate: Slate,
         _current_height: u64,
     ) -> Result<Slate, WalletError> {
-        if slate.chain_id != self.chain_id {
-            return Err(WalletError::Crypto(
-                "slate chain_id does not match wallet chain_id".into(),
-            ));
-        }
-        if slate.recipient_output.is_some()
-            || slate.recipient_public_excess.is_some()
-            || slate.recipient_public_nonce.is_some()
-            || slate.recipient_partial_sig.is_some()
-        {
-            return Err(WalletError::Crypto(
-                "slate already contains recipient response fields".into(),
-            ));
-        }
-
-        Amount::from_noms(slate.amount)
-            .map_err(|e| WalletError::Crypto(format!("invalid slate amount: {e}")))?;
-        Amount::from_noms(slate.fee)
-            .map_err(|e| WalletError::Crypto(format!("invalid slate fee: {e}")))?;
-
-        let recipient_blinding = BlindingFactor::random();
-        let (proof, commitment_bytes) = bp_prove(slate.amount, &recipient_blinding)
-            .map_err(|e| WalletError::Crypto(format!("recipient range proof failed: {e}")))?;
-        let recipient_output = OutputCommitmentAndProof {
-            commitment: Commitment::from_compressed_bytes(&commitment_bytes)?,
-            proof,
-        };
-        let recipient_excess_key = SecretKey::from_bytes(recipient_blinding.as_bytes())
-            .map_err(|e| WalletError::Crypto(format!("recipient excess key invalid: {e}")))?;
-        let recipient_public_excess = recipient_excess_key.public_key();
-
-        // Multisignature Schnorr nonces must be fresh CSPRNG output and
-        // single-use. Deterministic/RFC6979 nonces are unsafe in aggregate
-        // signing because nonce reuse across sessions leaks the signing key.
-        // The recipient nonce is consumed immediately for s_R and is not
-        // exported or persisted.
-        let recipient_nonce_key = random_secret_key();
-        let recipient_public_nonce = recipient_nonce_key.public_key();
-
-        let agg_r = schnorr_add_public_keys(&[
-            slate.sender_public_nonce.clone(),
-            recipient_public_nonce.clone(),
-        ])
-        .map_err(|e| WalletError::Crypto(format!("aggregate nonce failed: {e}")))?;
-        let agg_p = schnorr_add_public_keys(&[
-            slate.sender_public_excess.clone(),
-            recipient_public_excess.clone(),
-        ])
-        .map_err(|e| WalletError::Crypto(format!("aggregate public excess failed: {e}")))?;
-        let kernel_message = plain_kernel_message(slate.fee, slate.lock_height)?;
-        let recipient_partial_sig = schnorr_partial_sign(
-            &recipient_excess_key,
-            &recipient_nonce_key,
-            &agg_r,
-            &agg_p,
-            &self.chain_id,
-            kernel_message.as_bytes(),
-        )
-        .map_err(|e| WalletError::Crypto(format!("recipient partial signature failed: {e}")))?;
-
-        let mut response = slate;
-        response.recipient_output = Some(recipient_output);
-        response.recipient_public_excess = Some(recipient_public_excess);
-        response.recipient_public_nonce = Some(recipient_public_nonce);
-        response.recipient_partial_sig = Some(recipient_partial_sig);
+        // Slate crypto (validation, recipient output + range proof, partial
+        // signature) lives in the shared `dom-slate` crate; this wallet method
+        // is a thin wrapper that owns persistence only.
+        let resp = dom_slate::respond_receive(slate, &self.chain_id)?;
+        let recipient_output_blinding = resp.recipient_output_blinding;
+        let response = resp.slate;
 
         let response_bytes = response.to_bytes()?;
         let slate_hash = *dom_crypto::blake2b_256(&response_bytes).as_bytes();
@@ -1570,7 +1467,7 @@ impl Wallet {
                     slate_bytes: response_bytes,
                 }),
                 receive_slate_secrets: Some(PendingReceiveSlateSecrets {
-                    recipient_output_blinding: *recipient_blinding.as_bytes(),
+                    recipient_output_blinding,
                 }),
             },
         );
@@ -1598,23 +1495,11 @@ impl Wallet {
             ));
         }
 
-        let recipient_output = slate
-            .recipient_output
-            .clone()
-            .ok_or_else(|| WalletError::Crypto("slate missing recipient output".into()))?;
-        let recipient_public_excess = slate
-            .recipient_public_excess
-            .clone()
-            .ok_or_else(|| WalletError::Crypto("slate missing recipient public excess".into()))?;
-        let recipient_public_nonce = slate
-            .recipient_public_nonce
-            .clone()
-            .ok_or_else(|| WalletError::Crypto("slate missing recipient public nonce".into()))?;
-        let recipient_partial_sig = slate.recipient_partial_sig.clone().ok_or_else(|| {
-            WalletError::Crypto("slate missing recipient partial signature".into())
-        })?;
-
-        let sender_slate = sender_phase_slate(&slate);
+        // Recipient-field presence and all slate crypto are validated by
+        // `dom_slate::finalize` below. The wallet wrapper keeps the
+        // ownership/anti-replay checks (matching the slate against the
+        // persisted pending sender record and its reserved inputs).
+        let sender_slate = dom_slate::sender_phase_slate(&slate);
         let sender_slate_bytes = sender_slate.to_bytes()?;
         let sender_slate_hash = *dom_crypto::blake2b_256(&sender_slate_bytes).as_bytes();
 
@@ -1649,70 +1534,12 @@ impl Wallet {
             ));
         }
 
-        let agg_r = schnorr_add_public_keys(&[
-            slate.sender_public_nonce.clone(),
-            recipient_public_nonce.clone(),
-        ])
-        .map_err(|e| WalletError::Crypto(format!("aggregate nonce failed: {e}")))?;
-        let agg_p = schnorr_add_public_keys(&[
-            slate.sender_public_excess.clone(),
-            recipient_public_excess.clone(),
-        ])
-        .map_err(|e| WalletError::Crypto(format!("aggregate excess failed: {e}")))?;
-        let kernel_message = plain_kernel_message(slate.fee, slate.lock_height)?;
-
-        let sender_excess_key = SecretKey::from_bytes(&send_secrets.sender_excess_blinding)
-            .map_err(|e| WalletError::Crypto(format!("sender excess key invalid: {e}")))?;
-        let sender_nonce_key = SecretKey::from_bytes(&send_secrets.sender_nonce)
-            .map_err(|e| WalletError::Crypto(format!("sender nonce invalid: {e}")))?;
-        let sender_partial_sig = schnorr_partial_sign(
-            &sender_excess_key,
-            &sender_nonce_key,
-            &agg_r,
-            &agg_p,
+        let tx = dom_slate::finalize(
+            &slate,
+            &send_secrets.sender_excess_blinding,
+            &send_secrets.sender_nonce,
             &self.chain_id,
-            kernel_message.as_bytes(),
-        )
-        .map_err(|e| WalletError::Crypto(format!("sender partial signature failed: {e}")))?;
-        let aggregate_sig =
-            schnorr_aggregate_sigs(&[sender_partial_sig, recipient_partial_sig], &agg_r)
-                .map_err(|e| WalletError::Crypto(format!("aggregate signature failed: {e}")))?;
-
-        let tx = Transaction {
-            inputs: slate
-                .sender_inputs
-                .iter()
-                .cloned()
-                .map(|commitment| TransactionInput { commitment })
-                .collect(),
-            outputs: slate_outputs(&slate, recipient_output),
-            kernels: vec![TransactionKernel {
-                features: KERNEL_FEAT_PLAIN,
-                fee: Amount::from_noms(slate.fee)
-                    .map_err(|e| WalletError::Crypto(format!("invalid kernel fee: {e}")))?,
-                lock_height: slate.lock_height,
-                excess: Commitment::from_compressed_bytes(&agg_p.to_compressed_bytes())?,
-                excess_signature: aggregate_sig.to_bytes(),
-            }],
-            offset: slate.sender_offset_contribution,
-        };
-
-        validate_transaction_structure(&tx)
-            .map_err(|e| WalletError::Crypto(format!("final slate tx structure invalid: {e}")))?;
-        validate_balance_equation(&tx)
-            .map_err(|e| WalletError::Crypto(format!("final slate tx balance invalid: {e}")))?;
-        if !schnorr_verify(
-            &aggregate_sig,
-            &agg_p,
-            &self.chain_id,
-            kernel_message.as_bytes(),
-        )
-        .map_err(|e| WalletError::Crypto(format!("final slate signature invalid: {e}")))?
-        {
-            return Err(WalletError::Crypto(
-                "final slate aggregate signature verification failed".into(),
-            ));
-        }
+        )?;
 
         let tx_bytes = tx.to_bytes()?;
         if let Some(pending) = self.pending_txs.get_mut(&sender_slate_hash) {
@@ -2520,97 +2347,6 @@ fn scan_error_to_wallet(err: RestoreError) -> WalletError {
     }
 }
 
-fn plain_kernel_message(fee: u64, lock_height: u64) -> Result<Hash256, WalletError> {
-    Amount::from_noms(fee).map_err(|e| WalletError::Crypto(format!("invalid kernel fee: {e}")))?;
-    let mut data = Vec::with_capacity(1 + 8 + 8);
-    data.push(KERNEL_FEAT_PLAIN);
-    data.extend_from_slice(&fee.to_le_bytes());
-    data.extend_from_slice(&lock_height.to_le_bytes());
-    Ok(blake2b_256_tagged(dom_core::TAG_KERNEL_MSG, &data))
-}
-
-fn sender_phase_slate(slate: &Slate) -> Slate {
-    Slate {
-        version: slate.version,
-        chain_id: slate.chain_id,
-        amount: slate.amount,
-        fee: slate.fee,
-        lock_height: slate.lock_height,
-        sender_inputs: slate.sender_inputs.clone(),
-        sender_change_output: slate.sender_change_output.clone(),
-        sender_public_excess: slate.sender_public_excess.clone(),
-        sender_public_nonce: slate.sender_public_nonce.clone(),
-        sender_offset_contribution: slate.sender_offset_contribution,
-        recipient_output: None,
-        recipient_public_excess: None,
-        recipient_public_nonce: None,
-        sender_partial_sig: None,
-        recipient_partial_sig: None,
-    }
-}
-
-fn slate_outputs(
-    slate: &Slate,
-    recipient_output: OutputCommitmentAndProof,
-) -> Vec<TransactionOutput> {
-    let mut outputs = Vec::with_capacity(usize::from(slate.sender_change_output.is_some()) + 1);
-    if let Some(change) = &slate.sender_change_output {
-        outputs.push(TransactionOutput {
-            commitment: change.commitment.clone(),
-            proof: change.proof.bytes.clone(),
-        });
-    }
-    outputs.push(TransactionOutput {
-        commitment: recipient_output.commitment,
-        proof: recipient_output.proof.bytes,
-    });
-    outputs
-}
-
-fn sender_excess_blinding(
-    selected_inputs: &[OwnedOutput],
-    change_blinding: Option<&BlindingFactor>,
-    sender_offset: &BlindingFactor,
-) -> Result<[u8; 32], WalletError> {
-    let mut acc = Scalar::ZERO;
-
-    if let Some(change_blinding) = change_blinding {
-        acc += scalar_from_bytes(change_blinding.as_bytes())?;
-    }
-    for input in selected_inputs {
-        acc -= scalar_from_bytes(&input.blinding)?;
-    }
-    acc -= scalar_from_bytes(sender_offset.as_bytes())?;
-
-    if bool::from(acc.is_zero()) {
-        return Err(WalletError::Crypto(
-            "sender excess blinding unexpectedly became zero".into(),
-        ));
-    }
-
-    Ok(acc.to_repr().into())
-}
-
-fn scalar_from_bytes(bytes: &[u8; 32]) -> Result<Scalar, WalletError> {
-    let repr = k256::FieldBytes::from(*bytes);
-    let scalar = Scalar::from_repr(repr);
-    if scalar.is_some().into() {
-        Ok(scalar.unwrap())
-    } else {
-        Err(WalletError::Crypto("invalid scalar bytes".into()))
-    }
-}
-
-fn random_secret_key() -> SecretKey {
-    let mut bytes = [0u8; 32];
-    loop {
-        rand::thread_rng().fill_bytes(&mut bytes);
-        if let Ok(secret_key) = SecretKey::from_bytes(&bytes) {
-            return secret_key;
-        }
-    }
-}
-
 /// Compute the canonical transaction hash used for wallet-mempool
 /// cross-lookup.
 ///
@@ -2636,6 +2372,12 @@ mod tests {
     use super::*;
     use crate::restore::{InMemoryChainScan, ScanBlock};
     use crate::wallet_dir::WalletDir;
+    // Slate crypto moved to the `dom-slate` crate; these symbols are now
+    // consumed by the slate tests below rather than by production wallet code.
+    use dom_consensus::{validate_balance_equation, validate_transaction_structure};
+    use dom_crypto::{bp_prove, schnorr_add_public_keys, schnorr_verify};
+    use dom_slate::plain_kernel_message;
+    use dom_tx::slate::OutputCommitmentAndProof;
     use tempfile::tempdir;
 
     fn fixed_output(value: u64, height: u64, blinding_byte: u8) -> OwnedOutput {

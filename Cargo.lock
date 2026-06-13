@@ -1554,6 +1554,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-slate"
+version = "0.1.0"
+dependencies = [
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-serialization",
+ "dom-tx",
+ "k256",
+ "rand 0.8.6",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "dom-store"
 version = "0.1.0"
 dependencies = [
@@ -1619,6 +1633,7 @@ dependencies = [
  "dom-core",
  "dom-crypto",
  "dom-serialization",
+ "dom-slate",
  "dom-tx",
  "fs2",
  "hex",
