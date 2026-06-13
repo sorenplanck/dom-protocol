@@ -59,6 +59,22 @@ jobs:
         with:
           submodules: recursive
 
+      # Reclaim ~30 GB of preinstalled SDKs this build never uses. The
+      # `cargo build --workspace --all-targets` step links the dom-integration-tests
+      # test binaries (randomx-rs + full workspace), which exhausts the
+      # GitHub-hosted runner's ~14 GB free disk and fails with
+      # "rustc-LLVM ERROR: No space left on device". Linux-only: the macOS and
+      # Windows runners don't have these paths and aren't disk-constrained here.
+      - name: Free disk space (Linux runners)
+        if: runner.os == 'Linux'
+        run: |
+          echo "Disk before cleanup:"; df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /usr/local/lib/node_modules
+          sudo docker image prune -af || true
+          echo "Disk after cleanup:"; df -h /
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
