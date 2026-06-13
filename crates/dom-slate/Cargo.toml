@@ -1,0 +1,18 @@
+[package]
+name        = "dom-slate"
+description = "DOM protocol — interactive Mimblewimble slate crypto (sender/recipient/finalize), shared by dom-wallet and dom-wallet2"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+license.workspace      = true
+
+[dependencies]
+dom-core.workspace          = true
+dom-consensus.workspace     = true
+dom-crypto.workspace        = true
+dom-tx.workspace            = true
+dom-serialization.workspace = true
+thiserror.workspace         = true
+rand.workspace              = true
+k256.workspace              = true

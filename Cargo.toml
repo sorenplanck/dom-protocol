@@ -11,6 +11,7 @@ members = [
     "crates/dom-chain",
     "crates/dom-wire",
     "crates/dom-tx",
+    "crates/dom-slate",
     "crates/dom-mempool",
     "crates/dom-store",
     "crates/dom-config",
@@ -89,6 +90,7 @@ dom-pow            = { path = "crates/dom-pow" }
 dom-chain          = { path = "crates/dom-chain" }
 dom-store          = { path = "crates/dom-store" }
 dom-tx             = { path = "crates/dom-tx" }
+dom-slate          = { path = "crates/dom-slate" }
 dom-mempool        = { path = "crates/dom-mempool" }
 dom-wire           = { path = "crates/dom-wire" }
 dom-config         = { path = "crates/dom-config" }

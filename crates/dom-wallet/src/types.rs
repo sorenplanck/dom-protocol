@@ -343,3 +343,12 @@ pub enum WalletError {
     #[error("crypto error: {0}")]
     Crypto(String),
 }
+
+impl From<dom_slate::SlateError> for WalletError {
+    /// Slate crypto errors surface as wallet crypto errors, preserving the
+    /// underlying message (callers and tests match on substrings such as
+    /// `"chain_id"`).
+    fn from(e: dom_slate::SlateError) -> Self {
+        WalletError::Crypto(e.to_string())
+    }
+}
