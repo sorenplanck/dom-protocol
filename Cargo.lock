@@ -1636,6 +1636,7 @@ dependencies = [
  "dom-slate",
  "dom-tx",
  "dom-wallet-crypto",
+ "dom-wallet-keys",
  "fs2",
  "hex",
  "hkdf",
@@ -1687,6 +1688,18 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
+name = "dom-wallet-keys"
+version = "0.1.0"
+dependencies = [
+ "bip39",
+ "hmac",
+ "rand 0.8.6",
+ "sha2",
  "thiserror 1.0.69",
  "zeroize",
 ]
