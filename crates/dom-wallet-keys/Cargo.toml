@@ -1,0 +1,21 @@
+[package]
+name        = "dom-wallet-keys"
+description = "DOM protocol — shared wallet key derivation: BIP-39 seed handling + BIP-32/BIP-44 HD derivation of coinbase/spend blindings. Single audited source for dom-wallet (v1) and dom-wallet2 (v2)."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+license.workspace      = true
+
+[dependencies]
+# BIP-32 HMAC-SHA512 derivation.
+hmac.workspace = true
+sha2.workspace = true
+# BIP-39 mnemonic ↔ seed.
+bip39.workspace = true
+# Secure RNG for fresh mnemonic generation.
+rand.workspace = true
+# Secret zeroization.
+zeroize.workspace = true
+# Errors.
+thiserror.workspace = true
