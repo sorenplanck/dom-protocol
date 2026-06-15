@@ -1708,7 +1708,10 @@ dependencies = [
 name = "dom-wallet2"
 version = "0.1.0"
 dependencies = [
+ "dom-core",
+ "dom-crypto",
  "dom-wallet-crypto",
+ "dom-wallet-keys",
  "serde",
  "tempfile",
  "thiserror 1.0.69",
