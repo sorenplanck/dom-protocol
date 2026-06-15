@@ -1635,6 +1635,7 @@ dependencies = [
  "dom-serialization",
  "dom-slate",
  "dom-tx",
+ "dom-wallet-crypto",
  "fs2",
  "hex",
  "hkdf",
@@ -1672,6 +1673,22 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "dom-wallet-crypto"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "chacha20poly1305",
+ "hkdf",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "zeroize",
 ]
 
 [[package]]

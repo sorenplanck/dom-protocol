@@ -49,21 +49,17 @@ mod serde_commitment_vec {
 }
 
 use crate::types::{Network, OwnedOutput, ReceiveRequest, WalletError};
-use chacha20poly1305::aead::{Aead, KeyInit};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
 use tracing::debug;
 use zeroize::Zeroizing;
 
-const MAGIC: &[u8] = b"DOM-WALLET-V1\0";
+/// v1 wallet-file identity. The envelope crypto and on-disk layout live in
+/// `dom-wallet-crypto`; only the magic and version identify this format. Both
+/// are UNCHANGED — existing `wallet.dat` files load byte-for-byte as before.
+const MAGIC: &[u8; dom_wallet_crypto::MAGIC_LEN] = b"DOM-WALLET-V1\0";
 const VERSION: u16 = 1;
-const HEADER_SIZE: usize = 64;
-const SALT_SIZE: usize = 32;
-const NONCE_SIZE: usize = 12;
 
 mod serde_seed64_opt {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -361,117 +357,15 @@ pub struct PendingTx {
     pub receive_slate_secrets: Option<PendingReceiveSlateSecrets>,
 }
 
-/// Derive the wallet encryption key from a password and per-wallet salt.
+/// Save wallet state to the encrypted file, atomically.
 ///
-/// Single source of truth lives in `unlock::derive_wallet_key`
-/// (Argon2id m=64 MiB / t=3 / p=1, then HKDF-SHA256 with
-/// `info = "DOM:wallet-key:v1"`). This shim adapts the [`WalletKey`]
-/// opaque type back to a `Zeroizing<[u8; 32]>` for the AEAD layer
-/// below.
-///
-/// Keep this shim — the call sites here predate `unlock.rs` and
-/// changing them in this commit would expand the diff beyond the
-/// lock-state-machine scope.
-pub(crate) fn derive_key(
-    password: &str,
-    salt: &[u8; 32],
-) -> Result<Zeroizing<[u8; 32]>, WalletError> {
-    let key =
-        crate::unlock::derive_wallet_key(password, salt, &crate::unlock::KdfParams::OWASP_V1)?;
-    Ok(Zeroizing::new(*key.as_bytes()))
-}
-
-/// Save wallet state to encrypted file with atomic write.
-///
-/// Format on disk: 64-byte header (magic, version, salt, nonce) + ciphertext.
-///
-/// The write is atomic: data is first written to `<path>.tmp` then renamed.
-/// A new random salt and nonce are generated on every call.
+/// Thin wrapper over the shared `dom-wallet-crypto` envelope: same on-disk
+/// format (64-byte header + ChaCha20Poly1305 ciphertext), same atomic write
+/// with fsync (DOM-SEC-007), same KDF (Argon2id + HKDF). A fresh salt and nonce
+/// are generated on every call. The `wallet.dat` magic (`DOM-WALLET-V1\0`) and
+/// version (1) are unchanged.
 pub fn save_wallet(path: &Path, state: &WalletState, password: &str) -> Result<(), WalletError> {
-    // Generate fresh random salt for this save (re-derives key).
-    let mut salt = [0u8; SALT_SIZE];
-    rand::thread_rng().fill_bytes(&mut salt);
-
-    // Derive encryption key from password + salt.
-    let key = derive_key(password, &salt)?;
-
-    // Generate fresh random nonce for this encryption.
-    let mut nonce_bytes = [0u8; NONCE_SIZE];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
-
-    // Serialize state to JSON.
-    let json = serde_json::to_vec(state).map_err(|e| WalletError::Serialization(e.to_string()))?;
-
-    // Encrypt payload.
-    #[allow(deprecated)]
-    let cipher_key = Key::from_slice(&key[..]);
-    let cipher = ChaCha20Poly1305::new(cipher_key);
-    #[allow(deprecated)]
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher
-        .encrypt(nonce, json.as_slice())
-        .map_err(|_| WalletError::Encryption)?;
-
-    // Build 64-byte header.
-    let mut header = [0u8; HEADER_SIZE];
-    header[0..14].copy_from_slice(MAGIC);
-    header[14..16].copy_from_slice(&VERSION.to_le_bytes());
-    header[16..48].copy_from_slice(&salt);
-    header[48..60].copy_from_slice(&nonce_bytes);
-    // bytes 60..64 = padding (zero)
-
-    // Assemble final file content.
-    let mut file_bytes = Vec::with_capacity(HEADER_SIZE + ciphertext.len());
-    file_bytes.extend_from_slice(&header);
-    file_bytes.extend_from_slice(&ciphertext);
-
-    // Atomic write with fsync (DOM-SEC-007 fix).
-    //
-    // 4-step durability guarantee:
-    //   1. Write to <path>.tmp
-    //   2. sync_all() on temp file (data + metadata flushed to disk)
-    //   3. Atomic rename to final path
-    //   4. sync_all() on parent directory (rename durably recorded)
-    //
-    // After this returns Ok, the wallet survives any crash (power loss,
-    // kernel panic, SIGKILL).
-    let temp_path = path.with_extension("tmp");
-
-    // Step 1+2: Write and fsync the file
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&temp_path)
-            .map_err(|e| WalletError::Io(format!("failed to create wallet temp file: {}", e)))?;
-        f.write_all(&file_bytes)
-            .map_err(|e| WalletError::Io(format!("failed to write wallet temp file: {}", e)))?;
-        f.sync_all()
-            .map_err(|e| WalletError::Io(format!("failed to fsync wallet temp file: {}", e)))?;
-        // f is dropped (closed) here
-    }
-
-    // Step 3: Atomic rename
-    fs::rename(&temp_path, path)
-        .map_err(|e| WalletError::Io(format!("failed to rename wallet file atomically: {}", e)))?;
-
-    // Step 4: fsync parent directory (ensures rename is durable).
-    //
-    // Unix: open the directory and sync_all() to flush the rename to disk.
-    // Windows: NTFS's MoveFileEx (used by std::fs::rename) is durable by
-    // contract; there is no concept of "fsync a directory handle" — opening
-    // a directory as a file fails with ERROR_ACCESS_DENIED (os error 5).
-    // We rely on the rename itself for durability on Windows.
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            let dir = std::fs::File::open(parent).map_err(|e| {
-                WalletError::Io(format!("failed to open wallet parent dir for fsync: {}", e))
-            })?;
-            dir.sync_all().map_err(|e| {
-                WalletError::Io(format!("failed to fsync wallet parent dir: {}", e))
-            })?;
-        }
-    }
-
+    dom_wallet_crypto::save_envelope(path, MAGIC, VERSION, state, password)?;
     debug!("wallet saved to {:?}", path);
     Ok(())
 }
@@ -481,52 +375,11 @@ pub fn save_wallet(path: &Path, state: &WalletState, password: &str) -> Result<(
 /// Verifies the magic bytes and version before attempting decryption.
 /// Returns `WalletError::Decryption` if the password is wrong or the file is tampered.
 pub fn load_wallet(path: &Path, password: &str) -> Result<WalletState, WalletError> {
-    let data = fs::read(path)
-        .map_err(|e| WalletError::Io(format!("failed to read wallet file: {}", e)))?;
-
-    if data.len() < HEADER_SIZE {
-        return Err(WalletError::Io("wallet file too short".into()));
-    }
-
-    // Verify magic bytes.
-    if &data[0..14] != MAGIC {
-        return Err(WalletError::Io("invalid wallet file magic".into()));
-    }
-
-    // Verify version.
-    let version = u16::from_le_bytes([data[14], data[15]]);
-    if version != VERSION {
-        return Err(WalletError::Io(format!(
-            "unsupported wallet version: {}",
-            version
-        )));
-    }
-
-    // Extract salt and nonce from header.
-    let mut salt = [0u8; SALT_SIZE];
-    salt.copy_from_slice(&data[16..48]);
-    let mut nonce_bytes = [0u8; NONCE_SIZE];
-    nonce_bytes.copy_from_slice(&data[48..60]);
-
-    // Derive key from password + stored salt.
-    let key = derive_key(password, &salt)?;
-
-    // Decrypt payload.
-    #[allow(deprecated)]
-    let cipher_key = Key::from_slice(&key[..]);
-    let cipher = ChaCha20Poly1305::new(cipher_key);
-    #[allow(deprecated)]
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = &data[HEADER_SIZE..];
-
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|_| WalletError::Decryption)?;
-
-    // Deserialize JSON.
-    let state: WalletState = serde_json::from_slice(&plaintext)
-        .map_err(|e| WalletError::Serialization(e.to_string()))?;
-
+    // Thin wrapper over the shared envelope. Magic/version are verified before
+    // decryption; an unknown version is rejected, never reinterpreted. The
+    // `From<EnvelopeError>` mapping preserves v1's exact error variants
+    // (`Decryption` on wrong password / tampered file, `Io` on a bad header).
+    let state: WalletState = dom_wallet_crypto::load_envelope(path, MAGIC, VERSION, password)?;
     debug!("wallet loaded from {:?}", path);
     Ok(state)
 }
