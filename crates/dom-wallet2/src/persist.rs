@@ -1,28 +1,23 @@
-//! At-rest persistence of the [`OutputStore`] (design §2.1–§2.3).
+//! At-rest persistence of the [`WalletV2State`] (design §2.1–§2.3).
 //!
-//! The store is written to disk through the shared, audited
-//! [`dom_wallet_crypto`] envelope — the same crypto v1 uses (Argon2id + HKDF
-//! key derivation, ChaCha20Poly1305 AEAD, atomic write with fsync). The
-//! blinding factors therefore persist **encrypted**, never in plaintext.
+//! The whole wallet state is written to disk through the shared, audited
+//! [`dom_wallet_crypto`] envelope — the same crypto v1 uses (Argon2id + HKDF key
+//! derivation, ChaCha20Poly1305 AEAD, atomic write with fsync). The secrets it
+//! carries — the output blindings AND the keychain seed — persist **encrypted**,
+//! never in plaintext.
 //!
 //! ## Two-level versioning
 //! - **Envelope:** magic [`WALLET_V2_MAGIC`] (`DOM-WALLET-V2\0`) + header
 //!   [`ENVELOPE_VERSION`]. The magic rejects v1 files by construction; an
 //!   unknown envelope version is rejected by [`dom_wallet_crypto`] before
 //!   decryption.
-//! - **Payload:** an inner [`SCHEMA_VERSION`] gates future in-place migration of
-//!   the serialized layout. An unknown schema is rejected after decryption with
-//!   a clear [`PersistError::UnsupportedSchema`] — never reinterpreted, never a
+//! - **Payload:** the inner [`WalletV2State::schema_version`] gates future
+//!   in-place migration. An unknown schema is rejected after decryption with a
+//!   clear [`PersistError::UnsupportedSchema`] — never reinterpreted, never a
 //!   panic.
-//!
-//! Scope note (3C): this persists the output set, which is the v2 balance source
-//! of truth. The full `WalletV2State` of §2.3 (keychain, pending slates, meta
-//! cursors) wraps additional fields that land with their features in later
-//! sub-steps; `schema_version` is the gate that lets the payload grow.
 
-use crate::store::{OutputStore, StoreError};
-use crate::types::StoredOutput;
-use serde::{Deserialize, Serialize};
+use crate::store::StoreError;
+use crate::wallet_state::{WalletV2State, SCHEMA_VERSION};
 use std::path::Path;
 use thiserror::Error;
 
@@ -33,11 +28,7 @@ pub const WALLET_V2_MAGIC: &[u8; dom_wallet_crypto::MAGIC_LEN] = b"DOM-WALLET-V2
 /// Envelope (file-format) version written in the header.
 pub const ENVELOPE_VERSION: u16 = 1;
 
-/// Payload schema version. Bumped when the serialized layout changes; an
-/// unknown value is rejected, gating future in-place migration.
-pub const SCHEMA_VERSION: u16 = 2;
-
-/// Errors from persisting / loading the store.
+/// Errors from persisting / loading the wallet state.
 #[derive(Debug, Error)]
 pub enum PersistError {
     /// Key derivation / AEAD / IO / header-validation error from the shared
@@ -46,64 +37,63 @@ pub enum PersistError {
     #[error(transparent)]
     Envelope(#[from] dom_wallet_crypto::EnvelopeError),
     /// The decrypted payload declares a schema this build does not understand.
-    #[error("unsupported store schema version: {0}")]
+    #[error("unsupported wallet schema version: {0}")]
     UnsupportedSchema(u16),
-    /// The decrypted output set violated a store invariant (e.g. a duplicate
+    /// The decrypted state violated a store invariant (e.g. a duplicate
     /// commitment) — corruption that the AEAD tag did not catch.
-    #[error("invalid persisted store: {0}")]
+    #[error("invalid persisted wallet state: {0}")]
     Store(#[from] StoreError),
 }
 
-/// The serialized payload. Versioned independently of the envelope so the
-/// layout can evolve without changing the file magic.
-#[derive(Serialize, Deserialize)]
-struct PersistedStoreV2 {
-    schema_version: u16,
-    outputs: Vec<StoredOutput>,
-}
-
-/// Encrypt and atomically write the store to `path`.
+/// Encrypt and atomically write the whole wallet state to `path`.
 ///
 /// A fresh salt and nonce are generated per call (by the envelope). The on-disk
-/// layout is the shared v2 envelope; the blindings are written only encrypted.
-pub fn save_store(store: &OutputStore, path: &Path, password: &str) -> Result<(), PersistError> {
-    let payload = PersistedStoreV2 {
-        schema_version: SCHEMA_VERSION,
-        outputs: store.iter().cloned().collect(),
-    };
-    dom_wallet_crypto::save_envelope(path, WALLET_V2_MAGIC, ENVELOPE_VERSION, &payload, password)?;
+/// layout is the shared v2 envelope; the blindings AND the keychain seed are
+/// written only encrypted.
+pub fn save_wallet_state(
+    state: &WalletV2State,
+    path: &Path,
+    password: &str,
+) -> Result<(), PersistError> {
+    dom_wallet_crypto::save_envelope(path, WALLET_V2_MAGIC, ENVELOPE_VERSION, state, password)?;
     Ok(())
 }
 
-/// Decrypt and reconstruct the store from `path`.
+/// Decrypt and reconstruct the wallet state from `path`.
 ///
 /// Verifies the v2 magic and envelope version (rejecting v1 files and unknown
 /// versions before decryption), then the payload schema version. A wrong
 /// password or tampered file fails with [`PersistError::Envelope`]
-/// ([`dom_wallet_crypto::EnvelopeError::Decryption`]). Never panics on a bad
-/// file.
-pub fn load_store(path: &Path, password: &str) -> Result<OutputStore, PersistError> {
-    let payload: PersistedStoreV2 =
+/// ([`dom_wallet_crypto::EnvelopeError::Decryption`]). The `OutputStore`
+/// primary-key invariant is re-checked on deserialization. Never panics on a
+/// bad file.
+pub fn load_wallet_state(path: &Path, password: &str) -> Result<WalletV2State, PersistError> {
+    let state: WalletV2State =
         dom_wallet_crypto::load_envelope(path, WALLET_V2_MAGIC, ENVELOPE_VERSION, password)?;
 
-    if payload.schema_version != SCHEMA_VERSION {
-        return Err(PersistError::UnsupportedSchema(payload.schema_version));
+    if state.schema_version != SCHEMA_VERSION {
+        return Err(PersistError::UnsupportedSchema(state.schema_version));
     }
 
-    Ok(OutputStore::from_outputs(payload.outputs)?)
+    Ok(state)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{BlockRef, DerivIndex, OutputOrigin, OutputStatus};
+    use crate::store::OutputStore;
+    use crate::types::{BlockRef, DerivIndex, Network, OutputOrigin, OutputStatus, StoredOutput};
+    use zeroize::Zeroizing;
 
-    /// A store holding one output of each origin, in different statuses, so the
-    /// round-trip exercises status / blinding / origin_block / derivable.
+    /// Distinctive 64-byte seed pattern, so the "not in plaintext" scan is exact.
+    const SEED: [u8; 64] = [0x5eu8; 64];
+    /// A non-derivable (random) blinding on the reorged receive output.
+    const RECEIVE_BLINDING: [u8; 32] = [0x9au8; 32];
+
+    /// A store holding one output of each origin, in different statuses.
     fn populated_store() -> OutputStore {
         let mut store = OutputStore::new();
 
-        // Coinbase, confirmed (derivable by height).
         let mut coinbase = StoredOutput::new_unconfirmed(
             [0x01u8; 33],
             1000,
@@ -124,12 +114,11 @@ mod tests {
             .unwrap();
         store.insert(coinbase).unwrap();
 
-        // Receive-slate, reorged (random blinding, non-derivable) — the case v1
-        // loses; must survive persistence with its blinding intact.
+        // Receive-slate, reorged (random blinding) — must survive intact.
         let mut receive = StoredOutput::new_unconfirmed(
             [0xC7u8; 33],
             500,
-            [0x9au8; 32],
+            RECEIVE_BLINDING,
             OutputOrigin::ReceiveSlate,
             false,
             None,
@@ -147,7 +136,6 @@ mod tests {
         receive.mark_reorged(1002).unwrap();
         store.insert(receive).unwrap();
 
-        // Change, unconfirmed (random blinding).
         store
             .insert(StoredOutput::new_unconfirmed(
                 [0xCCu8; 33],
@@ -163,64 +151,101 @@ mod tests {
         store
     }
 
-    fn assert_output_eq(a: &StoredOutput, b: &StoredOutput) {
-        assert_eq!(a.commitment, b.commitment);
-        assert_eq!(a.value, b.value);
-        assert_eq!(*a.blinding, *b.blinding, "blinding must survive round-trip");
-        assert_eq!(a.origin, b.origin);
-        assert_eq!(a.status, b.status, "status must survive round-trip");
-        assert_eq!(a.origin_block, b.origin_block, "origin_block must survive");
-        assert_eq!(a.is_coinbase, b.is_coinbase);
-        assert_eq!(a.derivable, b.derivable);
-        assert_eq!(a.reserved_for, b.reserved_for);
+    /// A full wallet state: outputs + a keychain carrying the seed + meta cursors.
+    fn populated_state() -> WalletV2State {
+        let mut state = WalletV2State::new(Network::Regtest, [0x7eu8; 32]);
+        state.keychain.seed_bytes = Some(Zeroizing::new(SEED));
+        state.keychain.seed_word_count = Some(24);
+        state.keychain.next_change_index = 3;
+        state.keychain.next_receive_index = 5;
+        state.keychain.account = 0;
+        state.meta.last_reconciled_tip = 42;
+        state.meta.last_reconciled_hash = Some([0x42u8; 32]);
+        state.outputs = populated_store();
+        state
     }
 
     #[test]
     fn round_trip_preserves_every_field() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("wallet.dat");
-        let store = populated_store();
+        let state = populated_state();
 
-        save_store(&store, &path, "pw").unwrap();
-        let loaded = load_store(&path, "pw").unwrap();
+        save_wallet_state(&state, &path, "pw").unwrap();
+        let back = load_wallet_state(&path, "pw").unwrap();
 
-        assert_eq!(loaded.len(), store.len());
-        for original in store.iter() {
-            let back = loaded
-                .get(&original.commitment)
-                .expect("every output present after load");
-            assert_output_eq(original, back);
+        // Identity + cursors.
+        assert_eq!(back.schema_version, state.schema_version);
+        assert_eq!(back.network, Network::Regtest);
+        assert_eq!(back.chain_id, [0x7eu8; 32]);
+        assert_eq!(back.meta, state.meta);
+        // Keychain (including the seed).
+        assert_eq!(back.keychain.seed_bytes.as_ref().unwrap()[..], SEED[..]);
+        assert_eq!(back.keychain.seed_word_count, Some(24));
+        assert_eq!(back.keychain.next_change_index, 3);
+        assert_eq!(back.keychain.next_receive_index, 5);
+        // Outputs (status / blinding / origin_block).
+        assert_eq!(back.outputs.len(), state.outputs.len());
+        for original in state.outputs.iter() {
+            let b = back.outputs.get(&original.commitment).unwrap();
+            assert_eq!(b.value, original.value);
+            assert_eq!(*b.blinding, *original.blinding);
+            assert_eq!(b.status, original.status);
+            assert_eq!(b.origin_block, original.origin_block);
+            assert_eq!(b.derivable, original.derivable);
         }
+        let receive = back.outputs.get(&[0xC7u8; 33]).unwrap();
+        assert_eq!(receive.status, OutputStatus::Reorged);
     }
 
     #[test]
-    fn reorged_receive_blinding_persists_encrypted() {
-        // The non-derivable blinding (the WDSF case) must come back identical.
+    fn seed_and_blinding_persist_encrypted_never_plaintext() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("wallet.dat");
-        let store = populated_store();
-        save_store(&store, &path, "pw").unwrap();
+        save_wallet_state(&populated_state(), &path, "pw").unwrap();
 
-        // The plaintext blinding must NOT appear on disk.
         let raw = std::fs::read(&path).unwrap();
+        // Neither the seed nor a blinding may appear in plaintext on disk.
         assert!(
-            !raw.windows(32).any(|w| w == [0x9au8; 32]),
+            !raw.windows(64).any(|w| w == SEED),
+            "seed leaked in plaintext on disk"
+        );
+        assert!(
+            !raw.windows(32).any(|w| w == RECEIVE_BLINDING),
             "blinding leaked in plaintext on disk"
         );
 
-        let loaded = load_store(&path, "pw").unwrap();
-        let receive = loaded.get(&[0xC7u8; 33]).unwrap();
-        assert_eq!(receive.status, OutputStatus::Reorged);
-        assert_eq!(*receive.blinding, [0x9au8; 32]);
+        // …but both come back identical after decryption.
+        let back = load_wallet_state(&path, "pw").unwrap();
+        assert_eq!(back.keychain.seed_bytes.as_ref().unwrap()[..], SEED[..]);
+        assert_eq!(
+            *back.outputs.get(&[0xC7u8; 33]).unwrap().blinding,
+            RECEIVE_BLINDING
+        );
+    }
+
+    #[test]
+    fn debug_redacts_seed_and_blinding() {
+        let state = populated_state();
+        let dump = format!("{state:?}");
+        assert!(dump.contains("<redacted>"), "expected redaction markers");
+        // The raw seed / blinding bytes must not show up in Debug output.
+        let seed_hex: String = SEED.iter().map(|b| format!("{b:02x}")).collect();
+        assert!(!dump.contains(&seed_hex), "seed bytes leaked via Debug");
+        assert!(!dump.contains("5e, 5e, 5e"), "seed bytes leaked via Debug");
+        assert!(
+            !dump.contains("9a, 9a, 9a"),
+            "blinding bytes leaked via Debug"
+        );
     }
 
     #[test]
     fn wrong_password_is_rejected_without_panic() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("wallet.dat");
-        save_store(&populated_store(), &path, "pw").unwrap();
+        save_wallet_state(&populated_state(), &path, "pw").unwrap();
 
-        let err = load_store(&path, "wrong").unwrap_err();
+        let err = load_wallet_state(&path, "wrong").unwrap_err();
         assert!(
             matches!(
                 err,
@@ -232,22 +257,18 @@ mod tests {
 
     #[test]
     fn v1_magic_file_is_rejected() {
-        // A file written with the v1 magic must be rejected by the v2 loader.
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("wallet.dat");
         dom_wallet_crypto::save_envelope(
             &path,
             b"DOM-WALLET-V1\0",
             1,
-            &PersistedStoreV2 {
-                schema_version: SCHEMA_VERSION,
-                outputs: vec![],
-            },
+            &WalletV2State::new(Network::Regtest, [0u8; 32]),
             "pw",
         )
         .unwrap();
 
-        let err = load_store(&path, "pw").unwrap_err();
+        let err = load_wallet_state(&path, "pw").unwrap_err();
         assert!(
             matches!(
                 err,
@@ -261,20 +282,16 @@ mod tests {
     fn unknown_envelope_version_is_rejected() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("wallet.dat");
-        // Same v2 magic, but a future envelope version.
         dom_wallet_crypto::save_envelope(
             &path,
             WALLET_V2_MAGIC,
             ENVELOPE_VERSION + 1,
-            &PersistedStoreV2 {
-                schema_version: SCHEMA_VERSION,
-                outputs: vec![],
-            },
+            &WalletV2State::new(Network::Regtest, [0u8; 32]),
             "pw",
         )
         .unwrap();
 
-        let err = load_store(&path, "pw").unwrap_err();
+        let err = load_wallet_state(&path, "pw").unwrap_err();
         assert!(
             matches!(
                 err,
@@ -289,20 +306,12 @@ mod tests {
     fn unknown_payload_schema_is_rejected() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("wallet.dat");
-        // Correct magic + envelope version, but a future payload schema.
-        dom_wallet_crypto::save_envelope(
-            &path,
-            WALLET_V2_MAGIC,
-            ENVELOPE_VERSION,
-            &PersistedStoreV2 {
-                schema_version: SCHEMA_VERSION + 7,
-                outputs: vec![],
-            },
-            "pw",
-        )
-        .unwrap();
+        let mut future = WalletV2State::new(Network::Regtest, [0u8; 32]);
+        future.schema_version = SCHEMA_VERSION + 7;
+        dom_wallet_crypto::save_envelope(&path, WALLET_V2_MAGIC, ENVELOPE_VERSION, &future, "pw")
+            .unwrap();
 
-        let err = load_store(&path, "pw").unwrap_err();
+        let err = load_wallet_state(&path, "pw").unwrap_err();
         assert!(
             matches!(err, PersistError::UnsupportedSchema(v) if v == SCHEMA_VERSION + 7),
             "got {err:?}"
@@ -313,14 +322,14 @@ mod tests {
     fn tampered_file_is_rejected_without_panic() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("wallet.dat");
-        save_store(&populated_store(), &path, "pw").unwrap();
+        save_wallet_state(&populated_state(), &path, "pw").unwrap();
 
         let mut data = std::fs::read(&path).unwrap();
         let n = data.len();
-        data[n - 8] ^= 0xFF; // flip a byte inside the ciphertext
+        data[n - 8] ^= 0xFF;
         std::fs::write(&path, &data).unwrap();
 
-        let err = load_store(&path, "pw").unwrap_err();
+        let err = load_wallet_state(&path, "pw").unwrap_err();
         assert!(
             matches!(
                 err,

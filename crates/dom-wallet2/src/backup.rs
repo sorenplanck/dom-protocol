@@ -296,10 +296,12 @@ mod tests {
         // A v2 store file (wallet.dat) must NOT be importable as a backup.
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("wallet.dat");
-        let mut src = OutputStore::new();
-        src.insert(unconfirmed_output(1, 1, OutputOrigin::Change))
+        let mut state = crate::WalletV2State::new(crate::Network::Regtest, [0u8; 32]);
+        state
+            .outputs
+            .insert(unconfirmed_output(1, 1, OutputOrigin::Change))
             .unwrap();
-        crate::persist::save_store(&src, &path, "pw").unwrap();
+        crate::persist::save_wallet_state(&state, &path, "pw").unwrap();
 
         let mut store = OutputStore::new();
         let err = import_backup(&mut store, &path, "pw").unwrap_err();
@@ -349,7 +351,7 @@ mod tests {
             .unwrap();
         export_backup(&src, &path, "pw", 1).unwrap();
 
-        let err = crate::persist::load_store(&path, "pw").unwrap_err();
+        let err = crate::persist::load_wallet_state(&path, "pw").unwrap_err();
         assert!(
             matches!(
                 err,
