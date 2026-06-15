@@ -62,7 +62,7 @@ pub use backup::{export_backup, import_backup, BackupError, BACKUP_MAGIC};
 pub use keychain::{
     restore_coinbase_from_seed, KeychainDeriver, KeychainError, ReceiveRequest, RestoreBlock,
 };
-pub use payment::{cancel, create_send, PaymentError, SentSlate};
+pub use payment::{cancel, create_send, finalize, receive, PaymentError, SentSlate};
 pub use pending::{PendingSlate, SlateLifecycle, SlateRole, SlateSecrets};
 pub use persist::{load_wallet_state, save_wallet_state, PersistError, WALLET_V2_MAGIC};
 pub use reconcile::{reconcile, CanonicalView, ReconcileReport, ScanBlock};
