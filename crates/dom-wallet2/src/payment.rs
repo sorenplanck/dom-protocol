@@ -1,23 +1,26 @@
-//! Sender-side payment orchestration (design §5.2 / §2.5) — slate → store.
+//! Interactive payment orchestration (design §5.2 / §2.5) — slate → store.
 //!
 //! These are **pure state transitions** over [`WalletV2State`] (no disk I/O — the
 //! caller persists via [`crate::save_wallet_state`]). The crypto is the shared,
-//! pure [`dom_slate`]; this layer only does coin selection, the C0 inserts, the
-//! input reservation and the cancel path.
+//! pure [`dom_slate`]; this layer does coin selection, the C0 inserts, input
+//! reservation, the cancel path, and the receiver / finalize steps.
 //!
 //! **Atomicity:** every action validates and calls `dom-slate` *before* it
 //! mutates the state, so an early error (insufficient funds, slate failure)
-//! leaves the state **untouched** — nothing is reserved or inserted.
+//! leaves the state **untouched** — nothing is reserved, inserted, or wiped.
 //!
-//! This sub-step (7B-i) covers the sender side + cancel. `receive` / `finalize`
-//! (7B-ii) are not here.
+//! The full flow: [`create_send`] (sender, C0 change) → [`receive`] (receiver,
+//! C0 recipient) → [`finalize`] (sender closes, wipes the secrets) → the returned
+//! `Transaction` goes to the node. [`cancel`] undoes a still-Unconfirmed send.
 
 use crate::pending::{PendingSlate, SlateLifecycle, SlateRole, SlateSecrets};
 use crate::store::StoreError;
 use crate::types::{OutputOrigin, OutputStatus, StoredOutput};
 use crate::wallet_state::WalletV2State;
+use dom_consensus::transaction::Transaction;
 use dom_serialization::DomSerialize;
-use dom_slate::{build_send, SlateError, SlateInput};
+use dom_slate::{build_send, finalize as slate_finalize, respond_receive, sender_phase_slate};
+use dom_slate::{SlateError, SlateInput};
 use dom_tx::slate::Slate;
 use zeroize::Zeroizing;
 
@@ -44,6 +47,12 @@ pub enum PaymentError {
     /// No pending slate with this hash.
     #[error("pending slate not found")]
     NotFound,
+    /// The answered slate is missing the recipient output (malformed response).
+    #[error("answered slate missing recipient output")]
+    MissingRecipientOutput,
+    /// The pending sender slate has no usable secrets (already finalized/cleared).
+    #[error("pending sender slate has no secrets (already finalized?)")]
+    SecretsUnavailable,
     /// A store invariant was violated (should not happen in normal flow).
     #[error("store error: {0}")]
     Store(#[from] StoreError),
@@ -173,10 +182,10 @@ pub fn create_send(
         slate_hash,
         role: SlateRole::Sender,
         slate_bytes,
-        secrets: SlateSecrets::Sender {
+        secrets: Some(SlateSecrets::Sender {
             excess_blinding: Zeroizing::new(sender.excess_blinding),
             nonce: Zeroizing::new(sender.nonce),
-        },
+        }),
         reserved_inputs: selected.clone(),
         produced_output,
         status: SlateLifecycle::Built,
@@ -230,6 +239,106 @@ pub fn cancel(
 
     state.pending_slates[idx].status = SlateLifecycle::Canceled;
     Ok(())
+}
+
+/// Receiver step: answer a sender-created slate, creating the recipient output in
+/// the store at C0 (design §5.2). The recipient amount is **known** — it is
+/// `slate.amount` (carried in the slate) — so the output is fully reconstructed
+/// (unlike seed restore, which lacks the amount).
+///
+/// On success the state gains a `StoredOutput{ReceiveSlate, Unconfirmed}` (random
+/// blinding persisted) and a `PendingSlate{Receiver}`. Returns the answered slate
+/// to hand back to the sender. On any error the state is untouched (the crypto
+/// runs before any mutation).
+pub fn receive(state: &mut WalletV2State, slate: Slate, now: u64) -> Result<Slate, PaymentError> {
+    // 1) Crypto first (fallible): validates chain_id, builds the recipient output.
+    let resp = respond_receive(slate, &state.chain_id)?;
+    let commitment = *resp
+        .slate
+        .recipient_output
+        .as_ref()
+        .ok_or(PaymentError::MissingRecipientOutput)?
+        .commitment
+        .as_bytes();
+    let value = resp.slate.amount; // the receiver knows the amount
+    let slate_bytes = resp
+        .slate
+        .to_bytes()
+        .map_err(|e| PaymentError::Serialization(e.to_string()))?;
+    let slate_hash = *dom_crypto::blake2b_256(&slate_bytes).as_bytes();
+
+    // 2) Mutate: C0 recipient output + pending receiver slate.
+    state
+        .outputs
+        .insert(StoredOutput::new_unconfirmed(
+            commitment,
+            value,
+            resp.recipient_output_blinding,
+            OutputOrigin::ReceiveSlate,
+            false,
+            None,
+            now,
+        ))
+        .map_err(PaymentError::Store)?;
+
+    state.pending_slates.push(PendingSlate {
+        slate_hash,
+        role: SlateRole::Receiver,
+        slate_bytes,
+        secrets: Some(SlateSecrets::Receiver {
+            output_blinding: Zeroizing::new(resp.recipient_output_blinding),
+        }),
+        reserved_inputs: Vec::new(),
+        produced_output: Some(commitment),
+        status: SlateLifecycle::Built,
+    });
+
+    Ok(resp.slate)
+}
+
+/// Sender step 3: finalize a recipient-answered slate into a validated
+/// transaction (design §5.2). Looks up our `PendingSlate{Sender}` by the sender
+/// phase hash, runs the pure [`dom_slate`] finalize with the stored secrets, and
+/// — **only on success** — marks the slate `Finalized` and **wipes the secrets**
+/// (the single-use nonce is discarded). No new output is created; the change was
+/// born at C0 in `create_send`.
+///
+/// **Atomicity:** if the crypto fails, the pending slate is left `Built` with its
+/// secrets intact, so the caller can retry. Returns the `Transaction` to submit
+/// to the network (submission itself is out of scope).
+pub fn finalize(
+    state: &mut WalletV2State,
+    answered_slate: Slate,
+    _now: u64,
+) -> Result<Transaction, PaymentError> {
+    // 1) Locate our pending sender slate by the sender (step-1) phase hash.
+    let sender_bytes = sender_phase_slate(&answered_slate)
+        .to_bytes()
+        .map_err(|e| PaymentError::Serialization(e.to_string()))?;
+    let sender_hash = *dom_crypto::blake2b_256(&sender_bytes).as_bytes();
+    let idx = state
+        .pending_slates
+        .iter()
+        .position(|p| p.slate_hash == sender_hash && p.role == SlateRole::Sender)
+        .ok_or(PaymentError::NotFound)?;
+
+    // Copy the secrets into zeroizing locals (wiped when this fn returns).
+    let (excess, nonce) = match state.pending_slates[idx].secrets.as_ref() {
+        Some(SlateSecrets::Sender {
+            excess_blinding,
+            nonce,
+        }) => (Zeroizing::new(**excess_blinding), Zeroizing::new(**nonce)),
+        _ => return Err(PaymentError::SecretsUnavailable),
+    };
+
+    // 2) Crypto FIRST (fallible) — state not yet mutated.
+    let tx = slate_finalize(&answered_slate, &excess, &nonce, &state.chain_id)?;
+
+    // 3) Success only: mark Finalized and WIPE the secrets (nonce discarded).
+    state.pending_slates[idx].status = SlateLifecycle::Finalized;
+    state.pending_slates[idx].secrets = None;
+
+    Ok(tx)
 }
 
 #[cfg(test)]
@@ -422,5 +531,189 @@ mod tests {
         // Reservations still released; slate marked Canceled.
         assert!(state.outputs.iter().all(|o| !o.is_reserved()));
         assert_eq!(state.pending_slates[0].status, SlateLifecycle::Canceled);
+    }
+
+    // ── Receiver + finalize + end-to-end ────────────────────────────────────
+
+    const CHAIN_ID: [u8; 32] = [0x77u8; 32];
+
+    /// An empty receiver wallet on the same chain as `funded_state`.
+    fn receiver_state() -> WalletV2State {
+        let mut s = WalletV2State::new(Network::Regtest, CHAIN_ID);
+        s.meta.last_reconciled_tip = 100;
+        s
+    }
+
+    #[test]
+    fn receive_creates_recipient_c0_with_slate_amount() {
+        let mut sender = funded_state(&[600, 600]);
+        let sent = create_send(&mut sender, 1000, 10, 2000).unwrap();
+
+        let mut recv = receiver_state();
+        let answered = receive(&mut recv, sent.slate, 3000).unwrap();
+
+        // The recipient output is born at C0 with the slate's amount.
+        let rc = recv.pending_slates[0].produced_output.unwrap();
+        let out = recv.outputs.get(&rc).unwrap();
+        assert_eq!(out.value, 1000, "recipient value is slate.amount");
+        assert_eq!(out.origin, OutputOrigin::ReceiveSlate);
+        assert_eq!(out.status, OutputStatus::Unconfirmed);
+        // The C0 commitment matches the one in the answered slate.
+        let slate_rc = answered.recipient_output.as_ref().unwrap();
+        assert_eq!(out.commitment, *slate_rc.commitment.as_bytes());
+        assert_eq!(recv.pending_slates[0].role, SlateRole::Receiver);
+    }
+
+    #[test]
+    fn finalize_success_marks_finalized_and_wipes_secrets() {
+        let mut sender = funded_state(&[600, 600]);
+        let sent = create_send(&mut sender, 1000, 10, 2000).unwrap();
+        let mut recv = receiver_state();
+        let answered = receive(&mut recv, sent.slate, 3000).unwrap();
+
+        let _tx = finalize(&mut sender, answered, 4000).unwrap();
+
+        // Sender slate is Finalized and its secrets are WIPED (nonce discarded).
+        assert_eq!(sender.pending_slates[0].status, SlateLifecycle::Finalized);
+        assert!(
+            sender.pending_slates[0].secrets.is_none(),
+            "secrets must be wiped after a successful finalize"
+        );
+    }
+
+    #[test]
+    fn finalize_error_preserves_secrets_retryable() {
+        // Finalizing the step-1 slate (no recipient fields) must fail — and leave
+        // the pending slate Built with its secrets intact, so a retry works.
+        let mut sender = funded_state(&[600, 600]);
+        let sent = create_send(&mut sender, 1000, 10, 2000).unwrap();
+
+        let err = finalize(&mut sender, sent.slate, 4000).unwrap_err();
+        assert!(matches!(err, PaymentError::Slate(_)), "got {err:?}");
+        assert_eq!(sender.pending_slates[0].status, SlateLifecycle::Built);
+        assert!(
+            sender.pending_slates[0].secrets.is_some(),
+            "secrets must be preserved on a failed finalize (retryable)"
+        );
+    }
+
+    #[test]
+    fn end_to_end_tx_contains_both_c0_commitments() {
+        let mut sender = funded_state(&[600, 600]);
+        let sent = create_send(&mut sender, 1000, 10, 2000).unwrap();
+        let change_c = sender.pending_slates[0].produced_output.unwrap();
+        let reserved = sender.pending_slates[0].reserved_inputs.clone();
+
+        let mut recv = receiver_state();
+        let answered = receive(&mut recv, sent.slate, 3000).unwrap();
+        let recipient_c = recv.pending_slates[0].produced_output.unwrap();
+
+        let tx = finalize(&mut sender, answered, 4000).unwrap();
+
+        // THE guarantee at the tx level: the finalized tx's outputs are exactly
+        // the two C0 outputs the two wallets registered.
+        let tx_outs: Vec<[u8; 33]> = tx
+            .outputs
+            .iter()
+            .map(|o| *o.commitment.as_bytes())
+            .collect();
+        assert!(
+            tx_outs.contains(&change_c),
+            "tx must contain the sender's C0 change"
+        );
+        assert!(
+            tx_outs.contains(&recipient_c),
+            "tx must contain the receiver's C0 recipient output"
+        );
+        // And the tx spends exactly the reserved inputs.
+        let tx_ins: Vec<[u8; 33]> = tx.inputs.iter().map(|i| *i.commitment.as_bytes()).collect();
+        assert_eq!(tx_ins.len(), reserved.len());
+        for c in &reserved {
+            assert!(tx_ins.contains(c), "tx must spend the reserved input");
+        }
+    }
+
+    #[test]
+    fn slate_outputs_survive_reorg_via_real_slate_path() {
+        use crate::reconcile::{reconcile, CanonicalView, ScanBlock};
+
+        // Run the real interactive flow, then prove both produced outputs survive
+        // a reorg + re-mine through the reconciler.
+        let mut sender = funded_state(&[600, 600]);
+        let sent = create_send(&mut sender, 1000, 10, 2000).unwrap();
+        let change_c = sender.pending_slates[0].produced_output.unwrap();
+        let change_blinding = *sender.outputs.get(&change_c).unwrap().blinding;
+
+        let mut recv = receiver_state();
+        let answered = receive(&mut recv, sent.slate, 3000).unwrap();
+        let recipient_c = recv.pending_slates[0].produced_output.unwrap();
+        let recipient_blinding = *recv.outputs.get(&recipient_c).unwrap().blinding;
+
+        let _tx = finalize(&mut sender, answered, 4000).unwrap();
+
+        // Both wallets see the tx mined at block 5.
+        let mined = CanonicalView::from_blocks(&[ScanBlock {
+            height: 5,
+            hash: [5u8; 32],
+            output_commitments: vec![change_c, recipient_c],
+            input_commitments: vec![],
+        }]);
+        reconcile(&mut sender.outputs, &mined, 5000);
+        reconcile(&mut recv.outputs, &mined, 5000);
+        assert_eq!(
+            sender.outputs.get(&change_c).unwrap().status,
+            OutputStatus::Confirmed
+        );
+        assert_eq!(
+            recv.outputs.get(&recipient_c).unwrap().status,
+            OutputStatus::Confirmed
+        );
+
+        // Reorg: block 5 leaves — both go Reorged, blindings kept.
+        reconcile(&mut sender.outputs, &CanonicalView::empty(), 6000);
+        reconcile(&mut recv.outputs, &CanonicalView::empty(), 6000);
+        assert_eq!(
+            sender.outputs.get(&change_c).unwrap().status,
+            OutputStatus::Reorged
+        );
+        assert_eq!(
+            recv.outputs.get(&recipient_c).unwrap().status,
+            OutputStatus::Reorged
+        );
+        assert_eq!(
+            *sender.outputs.get(&change_c).unwrap().blinding,
+            change_blinding
+        );
+        assert_eq!(
+            *recv.outputs.get(&recipient_c).unwrap().blinding,
+            recipient_blinding
+        );
+
+        // Re-mine at block 5' — both re-confirm from persisted material.
+        let remined = CanonicalView::from_blocks(&[ScanBlock {
+            height: 5,
+            hash: [0x5bu8; 32],
+            output_commitments: vec![change_c, recipient_c],
+            input_commitments: vec![],
+        }]);
+        reconcile(&mut sender.outputs, &remined, 7000);
+        reconcile(&mut recv.outputs, &remined, 7000);
+        assert_eq!(
+            sender.outputs.get(&change_c).unwrap().status,
+            OutputStatus::Confirmed
+        );
+        assert_eq!(
+            recv.outputs.get(&recipient_c).unwrap().status,
+            OutputStatus::Confirmed
+        );
+        // The funds survived end to end via the real slate path.
+        assert_eq!(
+            *sender.outputs.get(&change_c).unwrap().blinding,
+            change_blinding
+        );
+        assert_eq!(
+            *recv.outputs.get(&recipient_c).unwrap().blinding,
+            recipient_blinding
+        );
     }
 }

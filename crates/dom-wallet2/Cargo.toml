@@ -30,6 +30,8 @@ dom-slate.workspace = true
 # The Slate wire type + DomSerialize (slate_hash = blake2b of slate bytes).
 dom-tx.workspace          = true
 dom-serialization.workspace = true
+# The finalized Transaction type returned by finalize.
+dom-consensus.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
