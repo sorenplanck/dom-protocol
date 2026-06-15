@@ -81,6 +81,7 @@ pub fn load_wallet_state(path: &Path, password: &str) -> Result<WalletV2State, P
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pending::{PendingSlate, SlateLifecycle, SlateRole, SlateSecrets};
     use crate::store::OutputStore;
     use crate::types::{BlockRef, DerivIndex, Network, OutputOrigin, OutputStatus, StoredOutput};
     use zeroize::Zeroizing;
@@ -89,6 +90,39 @@ mod tests {
     const SEED: [u8; 64] = [0x5eu8; 64];
     /// A non-derivable (random) blinding on the reorged receive output.
     const RECEIVE_BLINDING: [u8; 32] = [0x9au8; 32];
+    /// Distinctive slate-secret patterns (sender excess / nonce / receiver output).
+    const EXCESS: [u8; 32] = [0xe1u8; 32];
+    const NONCE: [u8; 32] = [0xe2u8; 32];
+    const OUTPUT_BLINDING: [u8; 32] = [0xe3u8; 32];
+
+    /// Two in-flight slates carrying secrets — a sender and a receiver.
+    fn populated_pending_slates() -> Vec<PendingSlate> {
+        vec![
+            PendingSlate {
+                slate_hash: [0xa1u8; 32],
+                role: SlateRole::Sender,
+                slate_bytes: vec![1, 2, 3, 4],
+                secrets: SlateSecrets::Sender {
+                    excess_blinding: Zeroizing::new(EXCESS),
+                    nonce: Zeroizing::new(NONCE),
+                },
+                reserved_inputs: vec![[0x01u8; 33]],
+                produced_output: Some([0xCCu8; 33]),
+                status: SlateLifecycle::Built,
+            },
+            PendingSlate {
+                slate_hash: [0xb2u8; 32],
+                role: SlateRole::Receiver,
+                slate_bytes: vec![5, 6, 7],
+                secrets: SlateSecrets::Receiver {
+                    output_blinding: Zeroizing::new(OUTPUT_BLINDING),
+                },
+                reserved_inputs: vec![],
+                produced_output: Some([0xC7u8; 33]),
+                status: SlateLifecycle::Submitted,
+            },
+        ]
+    }
 
     /// A store holding one output of each origin, in different statuses.
     fn populated_store() -> OutputStore {
@@ -162,6 +196,7 @@ mod tests {
         state.meta.last_reconciled_tip = 42;
         state.meta.last_reconciled_hash = Some([0x42u8; 32]);
         state.outputs = populated_store();
+        state.pending_slates = populated_pending_slates();
         state
     }
 
@@ -196,6 +231,91 @@ mod tests {
         }
         let receive = back.outputs.get(&[0xC7u8; 33]).unwrap();
         assert_eq!(receive.status, OutputStatus::Reorged);
+
+        // Pending slates (and their secrets) round-trip.
+        assert_eq!(back.pending_slates.len(), 2);
+        let sender = back
+            .pending_slates
+            .iter()
+            .find(|p| p.role == SlateRole::Sender)
+            .unwrap();
+        assert_eq!(sender.slate_hash, [0xa1u8; 32]);
+        assert_eq!(sender.reserved_inputs, vec![[0x01u8; 33]]);
+        assert_eq!(sender.produced_output, Some([0xCCu8; 33]));
+        assert_eq!(sender.status, SlateLifecycle::Built);
+        match &sender.secrets {
+            SlateSecrets::Sender {
+                excess_blinding,
+                nonce,
+            } => {
+                assert_eq!(**excess_blinding, EXCESS);
+                assert_eq!(**nonce, NONCE);
+            }
+            _ => panic!("expected sender secrets"),
+        }
+        let receiver = back
+            .pending_slates
+            .iter()
+            .find(|p| p.role == SlateRole::Receiver)
+            .unwrap();
+        match &receiver.secrets {
+            SlateSecrets::Receiver { output_blinding } => {
+                assert_eq!(**output_blinding, OUTPUT_BLINDING);
+            }
+            _ => panic!("expected receiver secrets"),
+        }
+    }
+
+    #[test]
+    fn slate_secrets_persist_encrypted_never_plaintext() {
+        // The same rigor as the seed: in-flight slate secrets must never appear
+        // in plaintext on disk, yet round-trip identically after decryption.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("wallet.dat");
+        save_wallet_state(&populated_state(), &path, "pw").unwrap();
+
+        let raw = std::fs::read(&path).unwrap();
+        for (label, secret) in [
+            ("excess_blinding", EXCESS),
+            ("nonce", NONCE),
+            ("output_blinding", OUTPUT_BLINDING),
+        ] {
+            assert!(
+                !raw.windows(32).any(|w| w == secret),
+                "slate secret {label} leaked in plaintext on disk"
+            );
+        }
+
+        // And Debug of the whole state must not leak them either.
+        let dump = format!("{:?}", populated_state());
+        for secret in [EXCESS, NONCE, OUTPUT_BLINDING] {
+            let hex: String = secret.iter().map(|b| format!("{b:02x}")).collect();
+            assert!(!dump.contains(&hex), "slate secret leaked via Debug");
+        }
+        assert!(!dump.contains("e1, e1, e1"), "excess leaked via Debug");
+        assert!(!dump.contains("e2, e2, e2"), "nonce leaked via Debug");
+        assert!(
+            !dump.contains("e3, e3, e3"),
+            "output_blinding leaked via Debug"
+        );
+
+        // Decryption recovers them intact.
+        let back = load_wallet_state(&path, "pw").unwrap();
+        let sender = back
+            .pending_slates
+            .iter()
+            .find(|p| p.role == SlateRole::Sender)
+            .unwrap();
+        match &sender.secrets {
+            SlateSecrets::Sender {
+                excess_blinding,
+                nonce,
+            } => {
+                assert_eq!(**excess_blinding, EXCESS);
+                assert_eq!(**nonce, NONCE);
+            }
+            _ => panic!("expected sender secrets"),
+        }
     }
 
     #[test]
