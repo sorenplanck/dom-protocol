@@ -28,6 +28,20 @@ pub enum StoreError {
     NotDeletable,
 }
 
+/// Summary of a non-destructive backup merge ([`OutputStore::merge_backup`]).
+/// `inserted + advanced + kept` equals the number of incoming records; no
+/// existing record is ever removed or downgraded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MergeReport {
+    /// Incoming outputs that were absent locally and got inserted.
+    pub inserted: usize,
+    /// Existing outputs whose status was advanced to the backup's (strictly
+    /// more advanced).
+    pub advanced: usize,
+    /// Existing outputs left unchanged (backup not more advanced).
+    pub kept: usize,
+}
+
 /// In-memory collection of [`StoredOutput`], keyed by commitment.
 ///
 /// Backed by a `Vec` to mirror the persisted form of §2.3. Lookups are linear
@@ -112,6 +126,51 @@ impl OutputStore {
     /// Count of outputs in the given status.
     pub fn count(&self, status: OutputStatus) -> usize {
         self.outputs.iter().filter(|o| o.status == status).count()
+    }
+
+    /// Non-destructive merge of outputs from an encrypted backup (design §2.7).
+    ///
+    /// For each incoming record:
+    /// - **absent** → inserted (recovers a lost, typically non-derivable output);
+    /// - **present** → keep the status of higher [`OutputStatus::merge_rank`].
+    ///   The backup's status is adopted **only if strictly more advanced**;
+    ///   otherwise the current one is kept. The record is never removed and the
+    ///   status is never downgraded — INV-RET. When advancing, the backup's
+    ///   `origin_block` is taken if present and `updated_at` is moved forward.
+    ///
+    /// The blinding is identical per commitment (same output), so it is never
+    /// touched. The caller SHOULD run [`crate::reconcile`] afterwards to bring
+    /// statuses up to the current tip (§2.7) — the merge itself only guarantees
+    /// no loss and no downgrade, not chain-consistency.
+    pub fn merge_backup(&mut self, incoming: Vec<StoredOutput>) -> MergeReport {
+        let mut report = MergeReport::default();
+        for out_bak in incoming {
+            match self.get(&out_bak.commitment) {
+                None => {
+                    // Absent locally: recover it. insert() cannot fail here
+                    // (we just checked the commitment is not present).
+                    let _ = self.insert(out_bak);
+                    report.inserted += 1;
+                }
+                Some(existing) => {
+                    let existing_rank = existing.status.merge_rank();
+                    if out_bak.status.merge_rank() > existing_rank {
+                        let slot = self
+                            .get_mut(&out_bak.commitment)
+                            .expect("commitment present");
+                        slot.status = out_bak.status;
+                        if out_bak.origin_block.is_some() {
+                            slot.origin_block = out_bak.origin_block;
+                        }
+                        slot.updated_at = slot.updated_at.max(out_bak.updated_at);
+                        report.advanced += 1;
+                    } else {
+                        report.kept += 1;
+                    }
+                }
+            }
+        }
+        report
     }
 
     /// Remove an output **only if** the `D1` guard allows it (still
