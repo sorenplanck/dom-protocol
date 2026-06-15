@@ -15,6 +15,7 @@
 //! - the keychain **derivation engine** (coinbase by height, receive by index,
 //!   restore-from-seed) — only the persisted keychain state lives here for now.
 
+use crate::pending::PendingSlate;
 use crate::store::OutputStore;
 use crate::transport::{sync, ChainSource, SyncError};
 use crate::types::{KeychainV2, Network, StoreMeta};
@@ -42,6 +43,11 @@ pub struct WalletV2State {
     pub keychain: KeychainV2,
     /// The owned outputs — the balance source of truth.
     pub outputs: OutputStore,
+    /// In-flight interactive slates (sender and receiver). Their secrets are
+    /// encrypted-at-rest and redacted from `Debug` (see [`crate::pending`]). The
+    /// orchestration that fills this is sub-step 7B.
+    #[serde(default)]
+    pub pending_slates: Vec<PendingSlate>,
     /// Store-level cursors / metadata.
     pub meta: StoreMeta,
 }
@@ -56,6 +62,7 @@ impl WalletV2State {
             chain_id,
             keychain: KeychainV2::default(),
             outputs: OutputStore::new(),
+            pending_slates: Vec::new(),
             meta: StoreMeta::default(),
         }
     }

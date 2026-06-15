@@ -36,14 +36,19 @@
 //!   unblocks incremental sync). `WalletV2State::sync` advances those cursors.
 //!   Deferred (schema-gated): `pending_slates` (slate→store step),
 //!   `canonical_digest`.
-//! - **Keychain derivation (this code):** [`keychain`] — derives the derivable
-//!   blindings from the seed via the shared `dom-wallet-keys` (#76): coinbase by
-//!   height, receive-request by index, `create_receive_request`, and
-//!   `restore_coinbase_from_seed` (recovers ONLY derivable coinbase; the
-//!   non-derivable change/receive-slate need the store/backup).
+//! - Keychain derivation: [`keychain`] — derives the derivable blindings from
+//!   the seed via the shared `dom-wallet-keys` (#76): coinbase by height,
+//!   receive-request by index, `create_receive_request`, and
+//!   `restore_coinbase_from_seed` (recovers ONLY derivable coinbase).
+//! - **Pending slates (this code):** [`pending`] — the secure data model for
+//!   in-flight interactive slates (design §2.5): `PendingSlate` + `SlateSecrets`
+//!   (`Zeroizing`, redacted `Debug`, encrypted-only) + `pending_slates` on
+//!   `WalletV2State`. The orchestration (create_send/receive/finalize/cancel
+//!   consuming `dom-slate`) is the next sub-step.
 
 pub mod backup;
 pub mod keychain;
+pub mod pending;
 pub mod persist;
 pub mod reconcile;
 pub mod state;
@@ -56,6 +61,7 @@ pub use backup::{export_backup, import_backup, BackupError, BACKUP_MAGIC};
 pub use keychain::{
     restore_coinbase_from_seed, KeychainDeriver, KeychainError, ReceiveRequest, RestoreBlock,
 };
+pub use pending::{PendingSlate, SlateLifecycle, SlateRole, SlateSecrets};
 pub use persist::{load_wallet_state, save_wallet_state, PersistError, WALLET_V2_MAGIC};
 pub use reconcile::{reconcile, CanonicalView, ReconcileReport, ScanBlock};
 pub use state::TransitionError;
