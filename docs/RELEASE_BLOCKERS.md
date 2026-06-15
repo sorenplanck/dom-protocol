@@ -520,6 +520,36 @@ Deferred deliberately to its own PR because the node is in production mining
 
 ---
 
+## [MAINNET] RB-WALLET2-RECEIVE-RESTORE — Wallet v2 receive-request restore-from-seed
+
+**Severity: IMPORTANT — affects seed-only recovery completeness**
+**Status:** 🔴 OPEN
+
+Wallet v2 restore-from-seed (`crates/dom-wallet2/src/keychain.rs`,
+`restore_coinbase_from_seed`) recovers the **coinbase** outputs (seed-derivable
+by height, value public = `reward + fees`). **Receive-requests are not restored**
+yet.
+
+The blocker is the **amount**: matching a receive-request output requires
+`Commitment::commit(amount, derived_blinding)`, but the amount is neither
+on-chain (hidden in the Pedersen commitment) nor derivable from the seed. The
+blinding is seed-derivable (by index); the amount is not. So receive-request
+restore needs an **amount source** — in practice the store backup (`wallet.dombak`,
+§2.7), the same 2nd recovery layer that already covers the fully non-derivable
+change / receive-slate outputs.
+
+This is the inherent derivable/non-derivable boundary of the v2 design, exposed
+rather than hidden: the seed alone is a partial recovery; the encrypted store
+backup is the complete one.
+
+**Required to close:**
+- Decide the amount source for receive-requests (store backup is the natural
+  one) and implement matching against it, OR
+- Persist created receive-requests (amount + index) so a from-store restore can
+  reconstruct them; document that seed-only restore cannot.
+
+---
+
 ## Summary Table
 
 | ID | Description | Target | Status |
@@ -541,6 +571,7 @@ Deferred deliberately to its own PR because the node is in production mining
 | RB-WALLET-SLATE | Wallet slate protocol | Mainnet | 🔧 PARTIAL (interactive slate implemented+tested; residual: RFC, timeout) |
 | RB-IBD | Initial block download | Mainnet | 🔧 PARTIAL (implemented+tested; residual: RFC, hardcoded checkpoints) |
 | RB-WALLET2-RPC-SOURCE | Wallet v2 chain scan transport (node RPC endpoint + RpcChainSource) | Mainnet | 🔴 OPEN (in-memory ChainSource done; node endpoint + RPC source deferred) |
+| RB-WALLET2-RECEIVE-RESTORE | Wallet v2 restore-from-seed of receive-requests (needs an amount source) | Mainnet | 🔴 OPEN (coinbase restore done; receive-request restore deferred) |
 
 ---
 
