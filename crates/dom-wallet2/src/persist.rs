@@ -102,10 +102,10 @@ mod tests {
                 slate_hash: [0xa1u8; 32],
                 role: SlateRole::Sender,
                 slate_bytes: vec![1, 2, 3, 4],
-                secrets: SlateSecrets::Sender {
+                secrets: Some(SlateSecrets::Sender {
                     excess_blinding: Zeroizing::new(EXCESS),
                     nonce: Zeroizing::new(NONCE),
-                },
+                }),
                 reserved_inputs: vec![[0x01u8; 33]],
                 produced_output: Some([0xCCu8; 33]),
                 status: SlateLifecycle::Built,
@@ -114,9 +114,9 @@ mod tests {
                 slate_hash: [0xb2u8; 32],
                 role: SlateRole::Receiver,
                 slate_bytes: vec![5, 6, 7],
-                secrets: SlateSecrets::Receiver {
+                secrets: Some(SlateSecrets::Receiver {
                     output_blinding: Zeroizing::new(OUTPUT_BLINDING),
-                },
+                }),
                 reserved_inputs: vec![],
                 produced_output: Some([0xC7u8; 33]),
                 status: SlateLifecycle::Submitted,
@@ -243,11 +243,11 @@ mod tests {
         assert_eq!(sender.reserved_inputs, vec![[0x01u8; 33]]);
         assert_eq!(sender.produced_output, Some([0xCCu8; 33]));
         assert_eq!(sender.status, SlateLifecycle::Built);
-        match &sender.secrets {
-            SlateSecrets::Sender {
+        match sender.secrets.as_ref() {
+            Some(SlateSecrets::Sender {
                 excess_blinding,
                 nonce,
-            } => {
+            }) => {
                 assert_eq!(**excess_blinding, EXCESS);
                 assert_eq!(**nonce, NONCE);
             }
@@ -258,8 +258,8 @@ mod tests {
             .iter()
             .find(|p| p.role == SlateRole::Receiver)
             .unwrap();
-        match &receiver.secrets {
-            SlateSecrets::Receiver { output_blinding } => {
+        match receiver.secrets.as_ref() {
+            Some(SlateSecrets::Receiver { output_blinding }) => {
                 assert_eq!(**output_blinding, OUTPUT_BLINDING);
             }
             _ => panic!("expected receiver secrets"),
@@ -306,11 +306,11 @@ mod tests {
             .iter()
             .find(|p| p.role == SlateRole::Sender)
             .unwrap();
-        match &sender.secrets {
-            SlateSecrets::Sender {
+        match sender.secrets.as_ref() {
+            Some(SlateSecrets::Sender {
                 excess_blinding,
                 nonce,
-            } => {
+            }) => {
                 assert_eq!(**excess_blinding, EXCESS);
                 assert_eq!(**nonce, NONCE);
             }
