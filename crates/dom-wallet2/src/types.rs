@@ -46,7 +46,8 @@ mod serde_commitment {
 ///
 /// Keeps v1's 32-byte-bytes representation and `Zeroizing` wrapper (wiped on
 /// drop). Ported verbatim from v1 (`dom-wallet/src/types.rs`).
-mod serde_blinding {
+// `pub(crate)` so the slate-secret fields (`pending.rs`) reuse the same codec.
+pub(crate) mod serde_blinding {
     use serde::{Deserializer, Serializer};
     use zeroize::Zeroizing;
 
