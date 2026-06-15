@@ -18,6 +18,7 @@ members = [
     "crates/dom-node",
     "crates/dom-wallet",
     "crates/dom-wallet-crypto",
+    "crates/dom-wallet2",
     "crates/dom-rpc",
     "crates/dom-test-vectors",
     "crates/dom-integration-tests",
@@ -97,6 +98,7 @@ dom-wire           = { path = "crates/dom-wire" }
 dom-config         = { path = "crates/dom-config" }
 dom-wallet         = { path = "crates/dom-wallet" }
 dom-wallet-crypto  = { path = "crates/dom-wallet-crypto" }
+dom-wallet2        = { path = "crates/dom-wallet2" }
 dom-node           = { path = "crates/dom-node" }
 dom-rpc            = { path = "crates/dom-rpc" }
 axum = { version = "0.7", features = ["json"] }
