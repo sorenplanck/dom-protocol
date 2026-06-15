@@ -16,18 +16,22 @@
 //! **not** depend on v1.
 //!
 //! ## Implementation status (Phase 2 sub-steps)
-//! - **3A (this code):** central store types ([`types`]), output state machine
-//!   ([`state`], transitions T1–T7 + D1 with INV-RET), and the in-memory store
-//!   with its read surface ([`store`]).
-//! - 3B: status-only reconciler (design §4) — not yet implemented.
+//! - 3A: central store types ([`types`]), output state machine ([`state`],
+//!   transitions T1–T7 + D1 with INV-RET), and the in-memory store with its
+//!   read surface ([`store`]).
+//! - **3B (this code):** status-only reconciler ([`reconcile`], design §4) —
+//!   iterates the store against an abstract [`reconcile::CanonicalView`] and
+//!   updates status only. Acceptance suite (WDSF-001/002) lives in `tests/`.
 //! - 3C: encrypted on-disk persistence (`wallet.dat`, design §2.1/§5) — pending.
 //! - 3D: encrypted store export/import (`wallet.dombak`, design §2.7) — pending.
-//! - 3E: port the v1 robustness acceptance suite onto this store — pending.
+//! - Transport (node/RPC → `ScanBlock`s): a later layer, deliberately not here.
 
+pub mod reconcile;
 pub mod state;
 pub mod store;
 pub mod types;
 
+pub use reconcile::{reconcile, CanonicalView, ReconcileReport, ScanBlock};
 pub use state::TransitionError;
 pub use store::{OutputStore, StoreError};
 pub use types::{BlockRef, DerivIndex, OutputOrigin, OutputStatus, StoredOutput};
