@@ -33,7 +33,7 @@ pub enum StoreError {
 /// Backed by a `Vec` to mirror the persisted form of §2.3. Lookups are linear
 /// for now; an index may be layered on in a later sub-step if profiling calls
 /// for it.
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct OutputStore {
     outputs: Vec<StoredOutput>,
 }
@@ -42,6 +42,18 @@ impl OutputStore {
     /// An empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Rebuild a store from a vector of records (e.g. loaded from disk).
+    /// Inserts each through [`OutputStore::insert`], so a duplicate commitment
+    /// in the persisted data is rejected with [`StoreError::DuplicateCommitment`]
+    /// rather than silently admitted.
+    pub fn from_outputs(outputs: Vec<StoredOutput>) -> Result<Self, StoreError> {
+        let mut store = Self::default();
+        for output in outputs {
+            store.insert(output)?;
+        }
+        Ok(store)
     }
 
     /// Number of stored outputs (all statuses).
