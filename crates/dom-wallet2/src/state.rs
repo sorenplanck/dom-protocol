@@ -57,6 +57,26 @@ impl OutputStatus {
                 | (Spent, Reorged)
         )
     }
+
+    /// Merge precedence for the **non-destructive backup import** (design §2.7):
+    /// `Unconfirmed < Reorged < Confirmed < Spent`. Higher rank = more advanced.
+    ///
+    /// This is a total order used **only** to decide, when a commitment exists
+    /// in both the store and the backup, which status to keep — it is NOT the
+    /// state-machine transition graph ([`can_transition_to`]). The import only
+    /// ever *adopts a strictly higher* rank or keeps the current one; it never
+    /// downgrades and never deletes (INV-RET). A stale backup therefore cannot
+    /// revert the store — e.g. a current `Spent` (3) is kept against a backup's
+    /// `Confirmed` (2). The mandatory post-import `reconcile` (§2.7) then
+    /// re-establishes the chain-consistent status via legal transitions.
+    pub fn merge_rank(self) -> u8 {
+        match self {
+            OutputStatus::Unconfirmed => 0,
+            OutputStatus::Reorged => 1,
+            OutputStatus::Confirmed => 2,
+            OutputStatus::Spent => 3,
+        }
+    }
 }
 
 impl StoredOutput {

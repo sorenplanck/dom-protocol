@@ -22,20 +22,23 @@
 //! - 3B: status-only reconciler ([`reconcile`], design §4) — iterates the store
 //!   against an abstract [`reconcile::CanonicalView`] and updates status only.
 //!   Acceptance suite (WDSF-001/002) lives in `tests/`.
-//! - **3C (this code):** encrypted on-disk persistence ([`persist`], design
-//!   §2.1–§2.3) via the shared `dom-wallet-crypto` envelope, magic
-//!   `DOM-WALLET-V2\0`, versioned payload.
-//! - 3D: encrypted store export/import (`wallet.dombak`, design §2.7) — pending.
+//! - 3C: encrypted on-disk persistence ([`persist`], design §2.1–§2.3) via the
+//!   shared `dom-wallet-crypto` envelope, magic `DOM-WALLET-V2\0`, versioned
+//!   payload.
+//! - **3D (this code):** encrypted store export/import ([`backup`],
+//!   `wallet.dombak`, design §2.7) — non-destructive merge respecting INV-RET.
 //! - Transport (node/RPC → `ScanBlock`s): a later layer, deliberately not here.
 
+pub mod backup;
 pub mod persist;
 pub mod reconcile;
 pub mod state;
 pub mod store;
 pub mod types;
 
+pub use backup::{export_backup, import_backup, BackupError, BACKUP_MAGIC};
 pub use persist::{load_store, save_store, PersistError, SCHEMA_VERSION, WALLET_V2_MAGIC};
 pub use reconcile::{reconcile, CanonicalView, ReconcileReport, ScanBlock};
 pub use state::TransitionError;
-pub use store::{OutputStore, StoreError};
+pub use store::{MergeReport, OutputStore, StoreError};
 pub use types::{BlockRef, DerivIndex, OutputOrigin, OutputStatus, StoredOutput};
