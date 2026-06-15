@@ -8,14 +8,20 @@ authors.workspace      = true
 license.workspace      = true
 
 [dependencies]
-# Security & serialization (used by the store types in this sub-step, 3A).
+# Security & serialization (store types since 3A).
 zeroize.workspace   = true
 serde.workspace     = true
 thiserror.workspace = true
 
-# Protocol crates from the allowed set (dom-slate, dom-tx, dom-crypto, dom-core,
-# dom-serialization). They are wired in as the later sub-steps require them:
-#   3B reconciler        -> dom-core (scan source heights/refs), dom-tx, dom-slate
-#   3C encrypted persist -> dom-crypto, dom-serialization, serde_json
-# Per the 3A instruction ("o necessário"), only the deps exercised by the store
-# types are declared now; the rest are added when the code that uses them lands.
+# At-rest persistence (3C): the shared, audited encrypted-file envelope + KDF.
+# Same crate v1 uses (extracted in PR #71) — single source for the on-disk
+# crypto that guards the blinding factors.
+dom-wallet-crypto.workspace = true
+
+# Protocol crates from the allowed set (dom-slate, dom-tx, dom-crypto, dom-core)
+# are wired in as later sub-steps require them (e.g. transport feeding the
+# reconciler). Per the "o necessário" rule, only the deps the current code
+# exercises are declared.
+
+[dev-dependencies]
+tempfile.workspace = true
