@@ -17,7 +17,8 @@
 //! - `RpcChainSource` (a [`ChainSource`] backed by the node's RPC). The node
 //!   does not yet expose per-block commitments over REST; adding that endpoint
 //!   touches the production node and belongs in its own isolated PR. The trait
-//!   signature below is ready for that impl — see the TODO on [`ChainSource`].
+//!   signature below is ready for that impl — see the TODO (RB-WALLET2-RPC-SOURCE)
+//!   on [`ChainSource`].
 //!
 //! ## View completeness (first cut = full view "A")
 //! The reconciler needs the **full** canonical view `0..=tip` to detect reorgs
@@ -39,9 +40,10 @@ use thiserror::Error;
 /// PR — the node's RPC) into [`ScanBlock`]s and the current tip. The reconciler
 /// itself never sees this trait; only [`sync`] does.
 ///
-/// TODO(transport): add `RpcChainSource: ChainSource` backed by the node RPC
-/// once the node exposes per-block output/input commitments (own PR; the node
-/// is in production). This trait's signature is the contract that impl must meet.
+/// TODO(RB-WALLET2-RPC-SOURCE): add `RpcChainSource: ChainSource` backed by the
+/// node RPC once the node exposes per-block output/input commitments (own PR;
+/// the node is in production). This trait's signature is the contract that impl
+/// must meet. Tracked in `docs/RELEASE_BLOCKERS.md`.
 pub trait ChainSource {
     /// Error surfaced by the backend (network, decode, …). The in-memory fake
     /// uses [`Infallible`].

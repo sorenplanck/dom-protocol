@@ -488,6 +488,38 @@ Post-B5 sweep across the entire workspace produced the following observations:
 
 ---
 
+## [MAINNET] RB-WALLET2-RPC-SOURCE — Wallet v2 chain scan transport
+
+**Severity: IMPORTANT — wallet v2 cannot sync against a live node without it**
+**Status:** 🔴 OPEN
+
+Wallet v2 (`dom-wallet2`) reconciles its store from `ScanBlock`s via the
+`ChainSource` trait + `sync` driver (`crates/dom-wallet2/src/transport.rs`). The
+in-memory `ChainSource` is implemented and tested end-to-end; the **RPC-backed
+`RpcChainSource` is not**, because the node does not yet expose per-block
+output/input commitments over its REST RPC.
+
+- The node already computes this data internally
+  (`crates/dom-node/src/wallet_scan.rs::collect_chain_scan` — per height:
+  `height`, `hash`, `output_commitments`, `input_commitments`, `fees`). It is
+  NOT surfaced via the REST RPC (`crates/dom-rpc`), which exposes only headers,
+  UTXO lookup, mempool and tx submit.
+- `/status` exposes `chain_height` but not the tip hash.
+
+Deferred deliberately to its own PR because the node is in production mining
+(touching the RPC surface of a live node warrants an isolated, reviewed change).
+
+**Required to close:**
+- Add a node RPC endpoint exposing per-block (or per-range)
+  `{height, hash, output_commitments, input_commitments}` (+ the tip hash),
+  wrapping the existing `collect_chain_scan` logic.
+- Implement `RpcChainSource: ChainSource` in `dom-wallet2` against it.
+- (Optional) incremental sync (view B): `StoreMeta.last_reconciled_tip` +
+  a height-based `rollback_to` (design §4.4) — the `sync` `from` parameter
+  already accommodates it.
+
+---
+
 ## Summary Table
 
 | ID | Description | Target | Status |
@@ -508,6 +540,7 @@ Post-B5 sweep across the entire workspace produced the following observations:
 | RB-DNS-SEEDS | Bootstrap discovery | Mainnet | 🟠 OPEN (OPERATIONAL) (mechanism done; real seeds + governance pending) |
 | RB-WALLET-SLATE | Wallet slate protocol | Mainnet | 🔧 PARTIAL (interactive slate implemented+tested; residual: RFC, timeout) |
 | RB-IBD | Initial block download | Mainnet | 🔧 PARTIAL (implemented+tested; residual: RFC, hardcoded checkpoints) |
+| RB-WALLET2-RPC-SOURCE | Wallet v2 chain scan transport (node RPC endpoint + RpcChainSource) | Mainnet | 🔴 OPEN (in-memory ChainSource done; node endpoint + RPC source deferred) |
 
 ---
 
