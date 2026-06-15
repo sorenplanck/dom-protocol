@@ -18,10 +18,13 @@ thiserror.workspace = true
 # crypto that guards the blinding factors.
 dom-wallet-crypto.workspace = true
 
-# Protocol crates from the allowed set (dom-slate, dom-tx, dom-crypto, dom-core)
-# are wired in as later sub-steps require them (e.g. transport feeding the
-# reconciler). Per the "o necessário" rule, only the deps the current code
-# exercises are declared.
+# Keychain derivation (this step): the shared BIP-39/BIP-32 derivation (#76),
+# so coinbase/receive blindings are byte-identical to v1.
+dom-wallet-keys.workspace = true
+# Pedersen commitments / blinding factors (output matching during restore).
+dom-crypto.workspace = true
+# Block reward by height (coinbase candidate value during restore).
+dom-core.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
