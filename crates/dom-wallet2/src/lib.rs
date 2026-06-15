@@ -29,8 +29,8 @@
 //!   §2.7) — non-destructive merge respecting INV-RET.
 //! - **Transport (this code):** [`transport`] — a `ChainSource` trait + the
 //!   [`transport::sync`] driver (`tip → scan → reconcile`) with an in-memory
-//!   fake. The RPC-backed source is a documented TODO (own PR; the node is in
-//!   production).
+//!   fake. The RPC-backed source is a documented TODO (RB-WALLET2-RPC-SOURCE;
+//!   own PR — the node is in production).
 
 pub mod backup;
 pub mod persist;
