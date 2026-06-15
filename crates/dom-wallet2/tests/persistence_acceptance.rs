@@ -8,8 +8,8 @@
 //! a reorg uses persisted material with no pending and no re-derivation.
 
 use dom_wallet2::{
-    load_store, reconcile, save_store, BlockRef, CanonicalView, OutputOrigin, OutputStatus,
-    OutputStore, ScanBlock, StoredOutput,
+    load_wallet_state, reconcile, save_wallet_state, BlockRef, CanonicalView, Network,
+    OutputOrigin, OutputStatus, OutputStore, ScanBlock, StoredOutput, WalletV2State,
 };
 use tempfile::TempDir;
 
@@ -18,11 +18,14 @@ const RECIPIENT_C: [u8; 33] = [0xC7u8; 33];
 const CHANGE_C: [u8; 33] = [0xCCu8; 33];
 const X_R: [u8; 32] = [0x9au8; 32]; // recipient's random, non-derivable blinding
 
-/// Encrypt the store to a fresh file and load it back — a full restart cycle.
+/// Encrypt the store (inside a full WalletV2State) to a fresh file and load it
+/// back — a full restart cycle through the top-level persisted state.
 fn save_load_cycle(store: &OutputStore, dir: &TempDir) -> OutputStore {
     let path = dir.path().join("wallet.dat");
-    save_store(store, &path, "pw").expect("save");
-    load_store(&path, "pw").expect("load")
+    let mut state = WalletV2State::new(Network::Regtest, [0u8; 32]);
+    state.outputs = store.clone();
+    save_wallet_state(&state, &path, "pw").expect("save");
+    load_wallet_state(&path, "pw").expect("load").outputs
 }
 
 fn block_with_output(height: u64, hash_byte: u8, commitment: [u8; 33]) -> ScanBlock {
