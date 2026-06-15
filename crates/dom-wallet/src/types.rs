@@ -352,3 +352,26 @@ impl From<dom_slate::SlateError> for WalletError {
         WalletError::Crypto(e.to_string())
     }
 }
+
+impl From<dom_wallet_crypto::EnvelopeError> for WalletError {
+    /// Map the shared envelope errors back onto the v1 `WalletError` variants
+    /// and messages, byte-for-byte, so the wallet's externally-observed error
+    /// behaviour is unchanged by the extraction. In particular wrong password /
+    /// tampered file stays `Decryption`, and the header-validation failures keep
+    /// their original `Io(..)` strings.
+    fn from(e: dom_wallet_crypto::EnvelopeError) -> Self {
+        use dom_wallet_crypto::EnvelopeError as E;
+        match e {
+            E::Kdf(s) => WalletError::Crypto(s),
+            E::Encryption => WalletError::Encryption,
+            E::Decryption => WalletError::Decryption,
+            E::Serialization(s) => WalletError::Serialization(s),
+            E::Io(s) => WalletError::Io(s),
+            E::FileTooShort => WalletError::Io("wallet file too short".into()),
+            E::BadMagic => WalletError::Io("invalid wallet file magic".into()),
+            E::UnsupportedVersion(v) => {
+                WalletError::Io(format!("unsupported wallet version: {}", v))
+            }
+        }
+    }
+}
