@@ -1710,6 +1710,9 @@ version = "0.1.0"
 dependencies = [
  "dom-core",
  "dom-crypto",
+ "dom-serialization",
+ "dom-slate",
+ "dom-tx",
  "dom-wallet-crypto",
  "dom-wallet-keys",
  "serde",
