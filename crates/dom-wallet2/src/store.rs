@@ -10,7 +10,25 @@
 //! structural property of the API, not merely a convention.
 
 use crate::types::{OutputStatus, StoredOutput};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Serialize the store transparently as its `Vec<StoredOutput>` (so the
+/// persisted form matches design §2.3 `outputs: Vec<StoredOutput>`).
+impl Serialize for OutputStore {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.outputs.serialize(s)
+    }
+}
+
+/// Deserialize via [`OutputStore::from_outputs`], so the primary-key invariant
+/// (no duplicate commitments) is enforced on load rather than silently admitted.
+impl<'de> Deserialize<'de> for OutputStore {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let outputs = Vec::<StoredOutput>::deserialize(d)?;
+        OutputStore::from_outputs(outputs).map_err(serde::de::Error::custom)
+    }
+}
 
 /// Errors from store mutations.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

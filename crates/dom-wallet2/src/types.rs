@@ -218,3 +218,116 @@ impl std::fmt::Debug for StoredOutput {
             .finish()
     }
 }
+
+/// Custom serde for the optional 64-byte BIP-39 seed (`Zeroizing<[u8; 64]>`).
+///
+/// `serde` only provides array impls up to length 32, so the 64-byte seed needs
+/// an explicit codec. Mirrors v1's `serde_seed64_opt`. The seed is persisted
+/// only inside the encrypted payload; this codec never runs against plaintext.
+mod serde_seed64_opt {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use zeroize::Zeroizing;
+
+    pub fn serialize<S>(seed: &Option<Zeroizing<[u8; 64]>>, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match seed {
+            Some(bytes) => s.serialize_some(&bytes[..]),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(d: D) -> Result<Option<Zeroizing<[u8; 64]>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt: Option<Vec<u8>> = Option::deserialize(d)?;
+        match opt {
+            None => Ok(None),
+            Some(v) => {
+                if v.len() != 64 {
+                    return Err(serde::de::Error::custom("seed must be 64 bytes"));
+                }
+                let mut a = [0u8; 64];
+                a.copy_from_slice(&v);
+                Ok(Some(Zeroizing::new(a)))
+            }
+        }
+    }
+}
+
+/// Network identifier (wallet-side mirror of `dom_config::Network`, kept local so
+/// the crate stays decoupled — same approach as v1's `dom-wallet/src/types.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Network {
+    /// Mainnet.
+    Mainnet,
+    /// Testnet.
+    Testnet,
+    /// Regtest — DEV-ONLY.
+    Regtest,
+}
+
+/// Deterministic keychain state (design §2.6 `KeychainV2`, = v1
+/// `WalletKeychainState`). This holds ONLY the persisted state — the seed and
+/// the derivation cursors. The key-derivation logic (coinbase by height,
+/// receive-request by index, restore-from-seed) is a separate sub-step.
+///
+/// The seed is persisted **encrypted** inside the wallet payload, never the
+/// mnemonic phrase, and is wiped from memory on drop (`Zeroizing`).
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct KeychainV2 {
+    /// BIP-39 seed bytes (64) when this is a deterministic wallet.
+    #[serde(
+        default,
+        with = "serde_seed64_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub seed_bytes: Option<Zeroizing<[u8; 64]>>,
+    /// Original mnemonic word count. v2 wallets MUST be 24.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_word_count: Option<u8>,
+    /// Change-chain cursor for future deterministic change outputs.
+    #[serde(default)]
+    pub next_change_index: u32,
+    /// Receive-chain cursor for future deterministic receive requests.
+    #[serde(default)]
+    pub next_receive_index: u32,
+    /// BIP-44 account. v2 pins this to 0.
+    #[serde(default)]
+    pub account: u32,
+}
+
+/// Manual `Debug` that **redacts the seed**. Deriving `Debug` would print the
+/// seed bytes (the master secret) in logs/test output; this impl keeps them out.
+impl std::fmt::Debug for KeychainV2 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeychainV2")
+            .field(
+                "seed_bytes",
+                &self.seed_bytes.as_ref().map(|_| "<redacted>"),
+            )
+            .field("seed_word_count", &self.seed_word_count)
+            .field("next_change_index", &self.next_change_index)
+            .field("next_receive_index", &self.next_receive_index)
+            .field("account", &self.account)
+            .finish()
+    }
+}
+
+/// Store-level metadata (design §2.6 `StoreMeta`).
+///
+/// `last_reconciled_tip` / `last_reconciled_hash` record how far the store has
+/// been reconciled — the cursors that unblock incremental sync (view B). The
+/// `canonical_digest` (set drift detection) is deferred: it needs a hash
+/// (blake2b) and the actual drift-detection wiring, which land later.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreMeta {
+    /// Highest height already reconciled.
+    #[serde(default)]
+    pub last_reconciled_tip: u64,
+    /// Hash of the block at `last_reconciled_tip`, when known.
+    #[serde(default)]
+    pub last_reconciled_hash: Option<[u8; 32]>,
+}
