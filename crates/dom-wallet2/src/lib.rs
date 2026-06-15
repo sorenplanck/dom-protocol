@@ -25,15 +25,19 @@
 //! - 3C: encrypted on-disk persistence ([`persist`], design §2.1–§2.3) via the
 //!   shared `dom-wallet-crypto` envelope, magic `DOM-WALLET-V2\0`, versioned
 //!   payload.
-//! - **3D (this code):** encrypted store export/import ([`backup`],
-//!   `wallet.dombak`, design §2.7) — non-destructive merge respecting INV-RET.
-//! - Transport (node/RPC → `ScanBlock`s): a later layer, deliberately not here.
+//! - 3D: encrypted store export/import ([`backup`], `wallet.dombak`, design
+//!   §2.7) — non-destructive merge respecting INV-RET.
+//! - **Transport (this code):** [`transport`] — a `ChainSource` trait + the
+//!   [`transport::sync`] driver (`tip → scan → reconcile`) with an in-memory
+//!   fake. The RPC-backed source is a documented TODO (own PR; the node is in
+//!   production).
 
 pub mod backup;
 pub mod persist;
 pub mod reconcile;
 pub mod state;
 pub mod store;
+pub mod transport;
 pub mod types;
 
 pub use backup::{export_backup, import_backup, BackupError, BACKUP_MAGIC};
@@ -41,4 +45,5 @@ pub use persist::{load_store, save_store, PersistError, SCHEMA_VERSION, WALLET_V
 pub use reconcile::{reconcile, CanonicalView, ReconcileReport, ScanBlock};
 pub use state::TransitionError;
 pub use store::{MergeReport, OutputStore, StoreError};
+pub use transport::{sync, ChainSource, InMemoryChainSource, SyncError};
 pub use types::{BlockRef, DerivIndex, OutputOrigin, OutputStatus, StoredOutput};
