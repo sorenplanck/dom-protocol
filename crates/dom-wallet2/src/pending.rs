@@ -167,8 +167,11 @@ pub struct PendingSlate {
     pub role: SlateRole,
     /// The PUBLIC slate wire bytes (no secrets).
     pub slate_bytes: Vec<u8>,
-    /// Encrypted-at-rest secret material; redacted from `Debug`.
-    pub secrets: SlateSecrets,
+    /// Encrypted-at-rest secret material; redacted from `Debug`. `None` once the
+    /// secrets are no longer needed (wiped at `finalize`, when the `Zeroizing`
+    /// drop clears the memory) — the single-use nonce is discarded.
+    #[serde(default)]
+    pub secrets: Option<SlateSecrets>,
     /// For a sender: the input commitments reserved by this slate.
     #[serde(with = "serde_commitments", default)]
     pub reserved_inputs: Vec<[u8; 33]>,

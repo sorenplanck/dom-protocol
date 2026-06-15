@@ -1708,6 +1708,7 @@ dependencies = [
 name = "dom-wallet2"
 version = "0.1.0"
 dependencies = [
+ "dom-consensus",
  "dom-core",
  "dom-crypto",
  "dom-serialization",
