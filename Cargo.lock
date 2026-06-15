@@ -1692,6 +1692,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-wallet2"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "dom-wire"
 version = "0.1.0"
 dependencies = [
