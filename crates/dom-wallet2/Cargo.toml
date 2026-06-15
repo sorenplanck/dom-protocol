@@ -25,6 +25,11 @@ dom-wallet-keys.workspace = true
 dom-crypto.workspace = true
 # Block reward by height (coinbase candidate value during restore).
 dom-core.workspace = true
+# Interactive slate crypto (send/receive/finalize) — pure, shared with v1 (#68).
+dom-slate.workspace = true
+# The Slate wire type + DomSerialize (slate_hash = blake2b of slate bytes).
+dom-tx.workspace          = true
+dom-serialization.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
