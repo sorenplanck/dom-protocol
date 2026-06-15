@@ -17,6 +17,7 @@ dom-tx.workspace            = true
 dom-slate.workspace         = true
 dom-serialization.workspace = true
 dom-wallet-crypto.workspace = true
+dom-wallet-keys.workspace   = true
 
 # Security & Cryptography
 zeroize.workspace          = true
