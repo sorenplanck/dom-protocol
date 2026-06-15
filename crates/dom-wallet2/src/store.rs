@@ -82,6 +82,12 @@ impl OutputStore {
         self.outputs.iter()
     }
 
+    /// Mutable iteration over all stored outputs — the handle the reconciler
+    /// (3B) uses to drive status-only transitions across the whole store.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut StoredOutput> {
+        self.outputs.iter_mut()
+    }
+
     /// Sum of values of outputs in the given status.
     pub fn balance(&self, status: OutputStatus) -> u64 {
         self.outputs
