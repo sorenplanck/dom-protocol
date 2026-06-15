@@ -270,6 +270,19 @@ pub enum Network {
     Regtest,
 }
 
+impl Network {
+    /// Coinbase maturity (blocks) for this network — mirrors v1's
+    /// `Network::coinbase_maturity`. Mainnet / Testnet use the canonical
+    /// `dom_core::COINBASE_MATURITY` (1000); Regtest uses
+    /// `REGTEST_COINBASE_MATURITY` (1) so dev chains exercise spends quickly.
+    pub fn coinbase_maturity(self) -> u64 {
+        match self {
+            Network::Mainnet | Network::Testnet => dom_core::COINBASE_MATURITY,
+            Network::Regtest => dom_core::REGTEST_COINBASE_MATURITY,
+        }
+    }
+}
+
 /// Deterministic keychain state (design §2.6 `KeychainV2`, = v1
 /// `WalletKeychainState`). This holds ONLY the persisted state — the seed and
 /// the derivation cursors. The key-derivation logic (coinbase by height,
