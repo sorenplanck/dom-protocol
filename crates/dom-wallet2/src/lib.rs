@@ -27,10 +27,15 @@
 //!   payload.
 //! - 3D: encrypted store export/import ([`backup`], `wallet.dombak`, design
 //!   §2.7) — non-destructive merge respecting INV-RET.
-//! - **Transport (this code):** [`transport`] — a `ChainSource` trait + the
-//!   [`transport::sync`] driver (`tip → scan → reconcile`) with an in-memory
-//!   fake. The RPC-backed source is a documented TODO (RB-WALLET2-RPC-SOURCE;
-//!   own PR — the node is in production).
+//! - Transport: [`transport`] — a `ChainSource` trait + the [`transport::sync`]
+//!   driver (`tip → scan → reconcile`) with an in-memory fake. The RPC-backed
+//!   source is a documented TODO (RB-WALLET2-RPC-SOURCE; own PR).
+//! - **WalletV2State (this code):** [`wallet_state`] — the top-level persisted
+//!   state (design §2.3): `network`, `chain_id`, `keychain` (encrypted seed +
+//!   cursors, state only), `outputs`, `meta` (`last_reconciled_tip` —
+//!   unblocks incremental sync). `WalletV2State::sync` advances those cursors.
+//!   Deferred (schema-gated): `pending_slates` (slate→store step),
+//!   `canonical_digest`, the keychain derivation engine.
 
 pub mod backup;
 pub mod persist;
@@ -39,11 +44,15 @@ pub mod state;
 pub mod store;
 pub mod transport;
 pub mod types;
+pub mod wallet_state;
 
 pub use backup::{export_backup, import_backup, BackupError, BACKUP_MAGIC};
-pub use persist::{load_store, save_store, PersistError, SCHEMA_VERSION, WALLET_V2_MAGIC};
+pub use persist::{load_wallet_state, save_wallet_state, PersistError, WALLET_V2_MAGIC};
 pub use reconcile::{reconcile, CanonicalView, ReconcileReport, ScanBlock};
 pub use state::TransitionError;
 pub use store::{MergeReport, OutputStore, StoreError};
 pub use transport::{sync, ChainSource, InMemoryChainSource, SyncError};
-pub use types::{BlockRef, DerivIndex, OutputOrigin, OutputStatus, StoredOutput};
+pub use types::{
+    BlockRef, DerivIndex, KeychainV2, Network, OutputOrigin, OutputStatus, StoreMeta, StoredOutput,
+};
+pub use wallet_state::{WalletV2State, SCHEMA_VERSION};
