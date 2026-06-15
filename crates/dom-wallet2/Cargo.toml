@@ -1,0 +1,21 @@
+[package]
+name        = "dom-wallet2"
+description = "DOM protocol — wallet v2 persistent store (StoredOutput source of truth, status-only reconciliation). Coexists with dom-wallet v1."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+license.workspace      = true
+
+[dependencies]
+# Security & serialization (used by the store types in this sub-step, 3A).
+zeroize.workspace   = true
+serde.workspace     = true
+thiserror.workspace = true
+
+# Protocol crates from the allowed set (dom-slate, dom-tx, dom-crypto, dom-core,
+# dom-serialization). They are wired in as the later sub-steps require them:
+#   3B reconciler        -> dom-core (scan source heights/refs), dom-tx, dom-slate
+#   3C encrypted persist -> dom-crypto, dom-serialization, serde_json
+# Per the 3A instruction ("o necessário"), only the deps exercised by the store
+# types are declared now; the rest are added when the code that uses them lands.
