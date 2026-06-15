@@ -57,9 +57,13 @@ fn empty_scan_block(height: u64) -> ScanBlock {
 fn robustness_confirmed_slate_receive_survives_subsequent_repair_rescan() {
     // --- Remetente A: coinbase espendível para originar o slate. ---
     let temp_a = TempDir::new().unwrap();
-    let mut sender =
-        WalletDir::create(&temp_a.path().join("a"), "pw", Network::Regtest, &test_genesis())
-            .unwrap();
+    let mut sender = WalletDir::create(
+        &temp_a.path().join("a"),
+        "pw",
+        Network::Regtest,
+        &test_genesis(),
+    )
+    .unwrap();
     let coinbase = sender
         .wallet_mut()
         .build_coinbase(BlockHeight(1), 0)
@@ -86,9 +90,13 @@ fn robustness_confirmed_slate_receive_survives_subsequent_repair_rescan() {
 
     // --- Destinatário B: responde o slate (blinding aleatório no pending). ---
     let temp_b = TempDir::new().unwrap();
-    let mut recipient =
-        WalletDir::create(&temp_b.path().join("b"), "pw", Network::Regtest, &test_genesis())
-            .unwrap();
+    let mut recipient = WalletDir::create(
+        &temp_b.path().join("b"),
+        "pw",
+        Network::Regtest,
+        &test_genesis(),
+    )
+    .unwrap();
     let response = recipient
         .wallet_mut()
         .receive_slate(slate, 3)
@@ -157,9 +165,13 @@ fn robustness_confirmed_slate_receive_survives_subsequent_repair_rescan() {
 #[test]
 fn robustness_confirmed_change_survives_repair_rescan() {
     let temp = TempDir::new().unwrap();
-    let mut wd =
-        WalletDir::create(&temp.path().join("w"), "pw", Network::Regtest, &test_genesis())
-            .unwrap();
+    let mut wd = WalletDir::create(
+        &temp.path().join("w"),
+        "pw",
+        Network::Regtest,
+        &test_genesis(),
+    )
+    .unwrap();
 
     let coinbase = wd
         .wallet_mut()
@@ -181,8 +193,7 @@ fn robustness_confirmed_change_survives_repair_rescan() {
     let reward = dom_core::block_reward(BlockHeight(1)).noms();
     let spend_amount = reward / 2;
     let recipient_blinding = dom_crypto::BlindingFactor::random();
-    let recipient =
-        dom_crypto::pedersen::Commitment::commit(spend_amount, &recipient_blinding);
+    let recipient = dom_crypto::pedersen::Commitment::commit(spend_amount, &recipient_blinding);
     let recipient_commitment = *recipient.as_bytes();
     let tx = wd
         .wallet_mut()
@@ -204,11 +215,7 @@ fn robustness_confirmed_change_survives_repair_rescan() {
             .iter()
             .map(|o| *o.commitment.as_bytes())
             .collect(),
-        input_commitments: tx
-            .inputs
-            .iter()
-            .map(|i| *i.commitment.as_bytes())
-            .collect(),
+        input_commitments: tx.inputs.iter().map(|i| *i.commitment.as_bytes()).collect(),
         total_fees_noms: 100,
     };
     let scan2 = scan_with_blocks(vec![

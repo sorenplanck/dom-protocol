@@ -30,9 +30,13 @@ fn test_genesis() -> Hash256 {
 fn robustness_slate_receive_survives_reorg_when_tx_is_remined() {
     // --- Remetente A com coinbase espendível. ---
     let temp_a = TempDir::new().unwrap();
-    let mut sender =
-        WalletDir::create(&temp_a.path().join("a"), "pw", Network::Regtest, &test_genesis())
-            .unwrap();
+    let mut sender = WalletDir::create(
+        &temp_a.path().join("a"),
+        "pw",
+        Network::Regtest,
+        &test_genesis(),
+    )
+    .unwrap();
     let coinbase = sender
         .wallet_mut()
         .build_coinbase(BlockHeight(1), 0)
@@ -60,9 +64,13 @@ fn robustness_slate_receive_survives_reorg_when_tx_is_remined() {
 
     // --- Destinatário B responde; A finaliza a transação agregada. ---
     let temp_b = TempDir::new().unwrap();
-    let mut recipient =
-        WalletDir::create(&temp_b.path().join("b"), "pw", Network::Regtest, &test_genesis())
-            .unwrap();
+    let mut recipient = WalletDir::create(
+        &temp_b.path().join("b"),
+        "pw",
+        Network::Regtest,
+        &test_genesis(),
+    )
+    .unwrap();
     let response = recipient
         .wallet_mut()
         .receive_slate(slate, 3)
@@ -81,11 +89,7 @@ fn robustness_slate_receive_survives_reorg_when_tx_is_remined() {
     // --- Bloco 2 canônico entrega a tx: B confirma o receive. ---
     recipient
         .wallet_mut()
-        .apply_canonical_block_with_hash(
-            std::slice::from_ref(&finalized.tx),
-            2,
-            Some([2u8; 32]),
-        )
+        .apply_canonical_block_with_hash(std::slice::from_ref(&finalized.tx), 2, Some([2u8; 32]))
         .expect("apply block 2");
     assert!(
         recipient
@@ -104,11 +108,7 @@ fn robustness_slate_receive_survives_reorg_when_tx_is_remined() {
     // --- A MESMA tx é re-minerada no bloco 2' da branch vencedora. ---
     recipient
         .wallet_mut()
-        .apply_canonical_block_with_hash(
-            std::slice::from_ref(&finalized.tx),
-            2,
-            Some([0xB2u8; 32]),
-        )
+        .apply_canonical_block_with_hash(std::slice::from_ref(&finalized.tx), 2, Some([0xB2u8; 32]))
         .expect("apply block 2'");
 
     let survivor = recipient
