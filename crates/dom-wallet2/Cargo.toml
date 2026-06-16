@@ -32,6 +32,11 @@ dom-tx.workspace          = true
 dom-serialization.workspace = true
 # The finalized Transaction type returned by finalize.
 dom-consensus.workspace = true
+# Blocking HTTP client for the RpcChainSource (same lib v1 uses). The
+# ChainSource trait is synchronous, so reqwest::blocking fits.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+# Hex decoding of commitments / hashes from the JSON response.
+hex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
