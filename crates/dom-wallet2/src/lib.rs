@@ -52,6 +52,7 @@ pub mod payment;
 pub mod pending;
 pub mod persist;
 pub mod reconcile;
+pub mod rpc_source;
 pub mod state;
 pub mod store;
 pub mod transport;
@@ -66,6 +67,7 @@ pub use payment::{cancel, create_send, finalize, receive, PaymentError, SentSlat
 pub use pending::{PendingSlate, SlateLifecycle, SlateRole, SlateSecrets};
 pub use persist::{load_wallet_state, save_wallet_state, PersistError, WALLET_V2_MAGIC};
 pub use reconcile::{reconcile, CanonicalView, ReconcileReport, ScanBlock};
+pub use rpc_source::{RpcChainSource, RpcSourceError};
 pub use state::TransitionError;
 pub use store::{MergeReport, OutputStore, StoreError};
 pub use transport::{sync, ChainSource, InMemoryChainSource, SyncError};
