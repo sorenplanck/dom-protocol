@@ -391,13 +391,14 @@ pub enum SubmitError<E: std::error::Error + 'static> {
 /// Reads the persisted `finalized_tx` (no secrets needed — they were wiped at
 /// finalize), so it works after a restart / resubmit. The [`TxSink`] is pure
 /// transport: it never touches state. **Atomicity:** the network call happens
-/// first; on any error the slate stays `Finalized` (retryable / inspectable) —
-/// a rejection is surfaced, never guessed into `Failed` (the next `reconcile`
-/// establishes the truth).
+/// first; on a reject the slate stays `Finalized` (retryable / inspectable) and
+/// the reservation is released (R-31(c), below) — a rejection is surfaced, never
+/// guessed into `Failed` (the next `reconcile` establishes the truth).
 pub fn submit_finalized<S: TxSink>(
     state: &mut WalletV2State,
     sink: &S,
     slate_hash: [u8; 32],
+    now: u64,
 ) -> Result<SubmitOutcome, SubmitError<S::Error>> {
     let idx = state
         .pending_slates
@@ -411,8 +412,24 @@ pub fn submit_finalized<S: TxSink>(
         .ok_or(SubmitError::NotFinalized)?;
     let tx = Transaction::from_bytes(&bytes).map_err(|e| SubmitError::Decode(e.to_string()))?;
 
-    // Network first; on error the state is untouched (slate stays Finalized).
-    let outcome = sink.submit_tx(&tx)?;
+    // Network first.
+    let outcome = match sink.submit_tx(&tx) {
+        Ok(o) => o,
+        Err(e) => {
+            // R-31(c): node rejected the tx — release the input reservations so they
+            // are not left stuck. Do NOT mark Failed: a reject does not prove the tx is
+            // dead; the next reconcile establishes the truth (Spent if it landed,
+            // Confirmed if not). The reservation is only a local double-spend guard and
+            // is safe to release here.
+            let reserved = state.pending_slates[idx].reserved_inputs.clone();
+            for c in &reserved {
+                if let Some(out) = state.outputs.get_mut(c) {
+                    out.release_reservation(now);
+                }
+            }
+            return Err(SubmitError::from(e));
+        }
+    };
 
     state.pending_slates[idx].status = SlateLifecycle::Submitted;
     Ok(outcome)
@@ -847,7 +864,7 @@ mod tests {
         let (mut sender, hash) = finalized_sender();
         let sink = InMemoryTxSink::accepting([0x42u8; 32]);
 
-        let out = submit_finalized(&mut sender, &sink, hash).unwrap();
+        let out = submit_finalized(&mut sender, &sink, hash, 5000).unwrap();
 
         assert_eq!(out.tx_hash, [0x42u8; 32]);
         assert!(out.relayed);
@@ -860,7 +877,7 @@ mod tests {
         let (mut sender, hash) = finalized_sender();
         let sink = InMemoryTxSink::accepting_not_relayed([0x99u8; 32], "accepted but not relayed");
 
-        let out = submit_finalized(&mut sender, &sink, hash).unwrap();
+        let out = submit_finalized(&mut sender, &sink, hash, 5000).unwrap();
 
         // Accepted-but-not-relayed is still success: state advances and the
         // node's advisory is surfaced verbatim for the caller to act on.
@@ -874,7 +891,7 @@ mod tests {
         let (mut sender, hash) = finalized_sender();
         let sink = InMemoryTxSink::rejecting("tx rejected: invalid kernel");
 
-        let err = submit_finalized(&mut sender, &sink, hash).unwrap_err();
+        let err = submit_finalized(&mut sender, &sink, hash, 5000).unwrap_err();
 
         // The rejection is surfaced (never auto-Failed), and the slate stays
         // Finalized so the tx can be inspected / resubmitted.
@@ -888,6 +905,47 @@ mod tests {
     }
 
     #[test]
+    fn reserved_input_released_on_submit_reject() {
+        // R-31(c): a node reject must release the input reservations (so they are
+        // not left stuck) while keeping the slate Finalized — a reject is not proof
+        // the tx is dead; reconcile establishes the truth.
+        let (mut sender, hash) = finalized_sender();
+
+        // Precondition: the finalized slate reserved inputs, all currently reserved.
+        let reserved = sender.pending_slates[0].reserved_inputs.clone();
+        assert!(
+            !reserved.is_empty(),
+            "precondition: the send reserved inputs"
+        );
+        assert!(
+            reserved
+                .iter()
+                .all(|c| sender.outputs.get(c).unwrap().is_reserved()),
+            "precondition: every selected input is reserved before submit"
+        );
+
+        let sink = InMemoryTxSink::rejecting("tx rejected: node says no");
+        let err = submit_finalized(&mut sender, &sink, hash, 5000).unwrap_err();
+
+        // (3) The error is propagated, with the node's reason surfaced verbatim.
+        match err {
+            SubmitError::Sink(e) => assert!(e.to_string().contains("node says no"), "{e}"),
+            other => panic!("expected Sink error, got {other:?}"),
+        }
+        // (1) Every reserved input was released — none is left stuck.
+        for c in &reserved {
+            assert!(
+                !sender.outputs.get(c).unwrap().is_reserved(),
+                "reserved input must be released after a submit reject"
+            );
+        }
+        // (2) The slate stays Finalized (NOT Failed/Canceled) — retryable/inspectable,
+        // and the persisted tx is intact for a retry/reconcile.
+        assert_eq!(sender.pending_slates[0].status, SlateLifecycle::Finalized);
+        assert!(sender.pending_slates[0].finalized_tx.is_some());
+    }
+
+    #[test]
     fn submit_reads_persisted_tx_without_secrets() {
         let (mut sender, hash) = finalized_sender();
         // finalize wiped the secrets — submit must not need them.
@@ -896,7 +954,7 @@ mod tests {
             "precondition: secrets were wiped at finalize"
         );
         let sink = InMemoryTxSink::accepting([0x01u8; 32]);
-        submit_finalized(&mut sender, &sink, hash).unwrap();
+        submit_finalized(&mut sender, &sink, hash, 5000).unwrap();
         assert_eq!(sender.pending_slates[0].status, SlateLifecycle::Submitted);
     }
 
@@ -925,7 +983,7 @@ mod tests {
 
         // Resubmit from the reloaded state works (no secrets required).
         let sink = InMemoryTxSink::accepting([0x55u8; 32]);
-        let out = submit_finalized(&mut reloaded, &sink, hash).unwrap();
+        let out = submit_finalized(&mut reloaded, &sink, hash, 5000).unwrap();
         assert_eq!(out.tx_hash, [0x55u8; 32]);
         assert_eq!(reloaded.pending_slates[0].status, SlateLifecycle::Submitted);
     }
@@ -946,7 +1004,7 @@ mod tests {
         );
 
         let sink = InMemoryTxSink::accepting([0x42u8; 32]);
-        submit_finalized(&mut sender, &sink, hash).unwrap();
+        submit_finalized(&mut sender, &sink, hash, 5000).unwrap();
         assert_eq!(sender.pending_slates[0].status, SlateLifecycle::Submitted);
     }
 
@@ -954,7 +1012,7 @@ mod tests {
     fn submit_unknown_slate_is_not_found() {
         let (mut sender, _hash) = finalized_sender();
         let sink = InMemoryTxSink::accepting([0u8; 32]);
-        let err = submit_finalized(&mut sender, &sink, [0xFFu8; 32]).unwrap_err();
+        let err = submit_finalized(&mut sender, &sink, [0xFFu8; 32], 5000).unwrap_err();
         assert!(matches!(err, SubmitError::NotFound), "got {err:?}");
         assert_eq!(sink.calls(), 0, "no submission for an unknown slate");
     }
@@ -965,7 +1023,7 @@ mod tests {
         let mut sender = funded_state(&[600, 600]);
         let sent = create_send(&mut sender, 1000, 10, 2000).unwrap();
         let sink = InMemoryTxSink::accepting([0u8; 32]);
-        let err = submit_finalized(&mut sender, &sink, sent.slate_hash).unwrap_err();
+        let err = submit_finalized(&mut sender, &sink, sent.slate_hash, 5000).unwrap_err();
         assert!(matches!(err, SubmitError::NotFinalized), "got {err:?}");
         assert_eq!(sink.calls(), 0);
     }
