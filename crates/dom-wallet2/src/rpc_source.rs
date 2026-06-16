@@ -17,9 +17,12 @@
 //!   [`RpcSourceError::Unsupported`].
 
 use crate::reconcile::ScanBlock;
+use crate::tx_sink::{SubmitOutcome, TxSink};
 use crate::types::BlockRef;
 use crate::ChainSource;
-use serde::Deserialize;
+use dom_consensus::transaction::Transaction;
+use dom_serialization::DomSerialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -38,6 +41,11 @@ pub enum RpcSourceError {
     /// The node returned an unexpected HTTP status.
     #[error("unexpected status {0}")]
     Status(u16),
+    /// The node rejected the transaction (invalid / double-spend / already
+    /// known) — a `400`/`409`. The wallet leaves the slate `Finalized` and lets
+    /// `reconcile` establish the truth (inputs `Spent` / change confirmed-or-not).
+    #[error("node rejected tx: {0}")]
+    Rejected(String),
     /// The response could not be decoded (bad JSON / bad hex / wrong length).
     #[error("decode error: {0}")]
     Decode(String),
@@ -189,6 +197,96 @@ impl ChainSource for RpcChainSource {
             cur = scan.to + 1;
         }
         Ok(blocks)
+    }
+}
+
+#[derive(Serialize)]
+struct SubmitReq {
+    tx_hex: String,
+}
+
+#[derive(Deserialize)]
+struct SubmitRespDto {
+    accepted: bool,
+    #[serde(default)]
+    relayed: Option<bool>,
+    #[serde(default)]
+    tx_hash: Option<String>,
+    #[serde(default)]
+    warning: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+impl TxSink for RpcChainSource {
+    type Error = RpcSourceError;
+
+    /// `POST /tx/submit {"tx_hex": hex(tx.to_bytes())}`. A busy chain (`503`) is
+    /// retried with backoff; a rejection (`400`/`409`) surfaces as
+    /// [`RpcSourceError::Rejected`]; an unknown node (`500 "not supported"`) as
+    /// [`RpcSourceError::Unsupported`].
+    fn submit_tx(&self, tx: &Transaction) -> Result<SubmitOutcome, RpcSourceError> {
+        let bytes = tx
+            .to_bytes()
+            .map_err(|e| RpcSourceError::Decode(e.to_string()))?;
+        let req = SubmitReq {
+            tx_hex: hex::encode(&bytes),
+        };
+        let url = format!("{}/tx/submit", self.base_url);
+        let mut backoff = Duration::from_millis(50);
+
+        for attempt in 0..=self.max_retries {
+            let resp = self
+                .client
+                .post(&url)
+                .json(&req)
+                .send()
+                .map_err(|e| RpcSourceError::Request(e.to_string()))?;
+            let status = resp.status();
+
+            if status.is_success() {
+                let parsed: SubmitRespDto = resp
+                    .json()
+                    .map_err(|e| RpcSourceError::Decode(e.to_string()))?;
+                if !parsed.accepted {
+                    return Err(RpcSourceError::Rejected(
+                        parsed.error.unwrap_or_else(|| "not accepted".into()),
+                    ));
+                }
+                let tx_hash = parsed
+                    .tx_hash
+                    .ok_or_else(|| RpcSourceError::Decode("accepted but no tx_hash".into()))?;
+                return Ok(SubmitOutcome {
+                    tx_hash: decode_hash(&tx_hash)?,
+                    relayed: parsed.relayed.unwrap_or(true),
+                    warning: parsed.warning,
+                });
+            }
+
+            let code = status.as_u16();
+            if code == 503 {
+                if attempt == self.max_retries {
+                    return Err(RpcSourceError::Busy);
+                }
+                std::thread::sleep(backoff);
+                backoff = backoff.saturating_mul(2);
+                continue;
+            }
+            // Read the node's error body for context.
+            let msg = resp
+                .json::<SubmitRespDto>()
+                .ok()
+                .and_then(|p| p.error)
+                .unwrap_or_default();
+            if code == 500 && msg.contains("not supported") {
+                return Err(RpcSourceError::Unsupported);
+            }
+            if code == 400 || code == 409 {
+                return Err(RpcSourceError::Rejected(msg));
+            }
+            return Err(RpcSourceError::Status(code));
+        }
+        Err(RpcSourceError::Busy)
     }
 }
 
@@ -362,6 +460,79 @@ mod tests {
         let src = source(&base);
         let err = src.tip().unwrap_err();
         assert!(matches!(err, RpcSourceError::Unsupported), "got {err:?}");
+        let _ = stop.send(());
+    }
+
+    // ── TxSink (POST /tx/submit) ────────────────────────────────────────────
+
+    /// A tiny, serializable transaction — `submit_tx` only serializes whatever it
+    /// is given; the HTTP status mapping is what these tests exercise.
+    fn empty_tx() -> Transaction {
+        Transaction {
+            inputs: vec![],
+            outputs: vec![],
+            kernels: vec![],
+            offset: [0u8; 32],
+        }
+    }
+
+    #[test]
+    fn submit_accepted_maps_to_outcome() {
+        let hash_hex = "aa".repeat(32);
+        let body =
+            format!(r#"{{"accepted":true,"relayed":true,"tx_hash":"{hash_hex}","warning":null}}"#);
+        let (base, stop) = spawn_mock(move |_, _| (200, body.clone()));
+        let src = source(&base);
+        let out = src.submit_tx(&empty_tx()).unwrap();
+        assert_eq!(out.tx_hash, [0xaau8; 32]);
+        assert!(out.relayed);
+        assert!(out.warning.is_none());
+        let _ = stop.send(());
+    }
+
+    #[test]
+    fn submit_accepted_not_relayed_carries_warning() {
+        let hash_hex = "bb".repeat(32);
+        let body = format!(
+            r#"{{"accepted":true,"relayed":false,"tx_hash":"{hash_hex}","warning":"accepted but not relayed (no peers)"}}"#
+        );
+        let (base, stop) = spawn_mock(move |_, _| (200, body.clone()));
+        let src = source(&base);
+        let out = src.submit_tx(&empty_tx()).unwrap();
+        assert_eq!(out.tx_hash, [0xbbu8; 32]);
+        assert!(!out.relayed);
+        assert_eq!(
+            out.warning.as_deref(),
+            Some("accepted but not relayed (no peers)")
+        );
+        let _ = stop.send(());
+    }
+
+    #[test]
+    fn submit_rejected_409_surfaces_reason() {
+        let (base, stop) = spawn_mock(|_, _| {
+            (
+                409,
+                r#"{"accepted":false,"error":"tx rejected: invalid kernel"}"#.into(),
+            )
+        });
+        let src = source(&base);
+        let err = src.submit_tx(&empty_tx()).unwrap_err();
+        match err {
+            RpcSourceError::Rejected(msg) => assert!(msg.contains("invalid kernel"), "got {msg:?}"),
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+        let _ = stop.send(());
+    }
+
+    #[test]
+    fn submit_busy_retries_then_busy() {
+        // 503 every time → after retries, Busy (retryable; state untouched upstream).
+        let (base, stop) = spawn_mock(|_, _| (503, r#"{"error":"chain busy"}"#.into()));
+        let mut src = source(&base);
+        src.max_retries = 2; // keep the test fast
+        let err = src.submit_tx(&empty_tx()).unwrap_err();
+        assert!(matches!(err, RpcSourceError::Busy), "got {err:?}");
         let _ = stop.send(());
     }
 }
