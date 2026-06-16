@@ -909,7 +909,10 @@ mod tests {
         let answered = receive(&mut recv, sent.slate, 3000).unwrap();
 
         let (_tx, hash) = finalize_tracked(&mut sender, answered, 4000).unwrap();
-        assert_eq!(hash, sent.slate_hash, "tracked hash is the create_send hash");
+        assert_eq!(
+            hash, sent.slate_hash,
+            "tracked hash is the create_send hash"
+        );
 
         let sink = InMemoryTxSink::accepting([0x42u8; 32]);
         submit_finalized(&mut sender, &sink, hash).unwrap();
