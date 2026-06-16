@@ -204,6 +204,12 @@ All files properly formatted
 | A2-002 | [pending] | p2p | [pending] | ⏳ | ⏳ |
 | ... | ... | ... | ... | ⏳ | ⏳ |
 
+### Wallet v2 Hardening Notes (docs/audits/)
+
+| ID | Severity | Component | Issue | Status | Note |
+|----|----------|-----------|-------|--------|------|
+| R-32 | baixa (defensivo; não-consenso) | dom-wallet2 / dom-rpc | wallet não reconcilia `network`/`chain_id` contra o nó antes de scan/submit; `/status` não expõe `chain_id`/genesis | 📝 documentado, não corrigido | [R-32-wallet-node-chain-reconciliation.md](audits/R-32-wallet-node-chain-reconciliation.md) |
+
 ---
 
 ## Testnet Burn-In Metrics
