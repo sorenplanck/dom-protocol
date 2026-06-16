@@ -675,6 +675,37 @@ mod tests {
     }
 
     #[test]
+    fn double_finalize_refused() {
+        // A second finalize of the SAME sender slate must be refused: the first
+        // success wiped (x_S, k_S), so there is nothing to re-derive a partial
+        // signature from. This is the anti-replay that prevents a second partial
+        // sig with the same nonce k_S (which would leak the excess key x_S).
+        let mut sender = funded_state(&[600, 600]);
+        let sent = create_send(&mut sender, 1000, 10, 2000).unwrap();
+        let mut recv = receiver_state();
+        let answered = receive(&mut recv, sent.slate, 3000).unwrap();
+
+        // First finalize succeeds and wipes the secrets.
+        let _tx = finalize(&mut sender, answered.clone(), 4000).unwrap();
+        assert_eq!(sender.pending_slates[0].status, SlateLifecycle::Finalized);
+        assert!(
+            sender.pending_slates[0].secrets.is_none(),
+            "first finalize must wipe the secrets"
+        );
+
+        // Second finalize of the same answered slate finds the same (now
+        // Finalized) record but has no secrets to sign with → SecretsUnavailable.
+        let err = finalize(&mut sender, answered, 4001).unwrap_err();
+        assert!(
+            matches!(err, PaymentError::SecretsUnavailable),
+            "second finalize must be refused (secrets discarded, not re-derivable); got {err:?}"
+        );
+        // The slate stays terminally Finalized; nothing was re-derived.
+        assert_eq!(sender.pending_slates[0].status, SlateLifecycle::Finalized);
+        assert!(sender.pending_slates[0].secrets.is_none());
+    }
+
+    #[test]
     fn end_to_end_tx_contains_both_c0_commitments() {
         let mut sender = funded_state(&[600, 600]);
         let sent = create_send(&mut sender, 1000, 10, 2000).unwrap();
