@@ -180,6 +180,13 @@ pub struct PendingSlate {
     /// `Failed`/`Canceled` slate `D1`-delete its still-`Unconfirmed` output.
     #[serde(with = "serde_commitment_opt", default)]
     pub produced_output: Option<[u8; 33]>,
+    /// The finalized transaction bytes, set by `finalize` (sender). This is
+    /// **public** data (the tx is broadcast), not a secret — no `Zeroizing`. It
+    /// is persisted so the tx can be (re)submitted after finalize wiped the
+    /// secrets, including across a crash; without it a finalized-but-unsent tx
+    /// would be unrecoverable (finalize cannot run twice).
+    #[serde(default)]
+    pub finalized_tx: Option<Vec<u8>>,
     /// Lifecycle state.
     pub status: SlateLifecycle,
 }

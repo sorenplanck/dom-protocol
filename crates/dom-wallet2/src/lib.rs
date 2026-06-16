@@ -56,6 +56,7 @@ pub mod rpc_source;
 pub mod state;
 pub mod store;
 pub mod transport;
+pub mod tx_sink;
 pub mod types;
 pub mod wallet_state;
 
@@ -63,7 +64,9 @@ pub use backup::{export_backup, import_backup, BackupError, BACKUP_MAGIC};
 pub use keychain::{
     restore_coinbase_from_seed, KeychainDeriver, KeychainError, ReceiveRequest, RestoreBlock,
 };
-pub use payment::{cancel, create_send, finalize, receive, PaymentError, SentSlate};
+pub use payment::{
+    cancel, create_send, finalize, receive, submit_finalized, PaymentError, SentSlate, SubmitError,
+};
 pub use pending::{PendingSlate, SlateLifecycle, SlateRole, SlateSecrets};
 pub use persist::{load_wallet_state, save_wallet_state, PersistError, WALLET_V2_MAGIC};
 pub use reconcile::{reconcile, CanonicalView, ReconcileReport, ScanBlock};
@@ -71,6 +74,7 @@ pub use rpc_source::{RpcChainSource, RpcSourceError};
 pub use state::TransitionError;
 pub use store::{MergeReport, OutputStore, StoreError};
 pub use transport::{sync, ChainSource, InMemoryChainSource, SyncError};
+pub use tx_sink::{FakeSinkError, InMemoryTxSink, SubmitOutcome, TxSink};
 pub use types::{
     BlockRef, DerivIndex, KeychainV2, Network, OutputOrigin, OutputStatus, StoreMeta, StoredOutput,
 };

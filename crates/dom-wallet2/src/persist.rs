@@ -108,7 +108,8 @@ mod tests {
                 }),
                 reserved_inputs: vec![[0x01u8; 33]],
                 produced_output: Some([0xCCu8; 33]),
-                status: SlateLifecycle::Built,
+                finalized_tx: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+                status: SlateLifecycle::Finalized,
             },
             PendingSlate {
                 slate_hash: [0xb2u8; 32],
@@ -119,6 +120,7 @@ mod tests {
                 }),
                 reserved_inputs: vec![],
                 produced_output: Some([0xC7u8; 33]),
+                finalized_tx: None,
                 status: SlateLifecycle::Submitted,
             },
         ]
@@ -242,7 +244,8 @@ mod tests {
         assert_eq!(sender.slate_hash, [0xa1u8; 32]);
         assert_eq!(sender.reserved_inputs, vec![[0x01u8; 33]]);
         assert_eq!(sender.produced_output, Some([0xCCu8; 33]));
-        assert_eq!(sender.status, SlateLifecycle::Built);
+        assert_eq!(sender.finalized_tx, Some(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+        assert_eq!(sender.status, SlateLifecycle::Finalized);
         match sender.secrets.as_ref() {
             Some(SlateSecrets::Sender {
                 excess_blinding,
