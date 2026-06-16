@@ -7,7 +7,7 @@
 //! <base>/                          ("DOM Wallet Data" next to a portable app,
 //!   wallets/                        else the per-user application data dir)
 //!     <wallet-slug>/
-//!       wallet.dom/                encrypted wallet vault (dom_wallet::WalletDir)
+//!       wallet.dom                 encrypted wallet vault (dom_wallet2 file)
 //!       node/
 //!         node-settings.json       per-wallet NodeSettings (ports, mining, …)
 //!         …                        chain/p2p data created by the embedded node
@@ -31,7 +31,7 @@ pub const PORTABLE_DATA_DIR_NAME: &str = "DOM Wallet Data";
 pub const APP_DATA_DIR_NAME: &str = "DOM Wallet";
 /// Per-user fallback directory name on Linux (XDG convention).
 pub const APP_DATA_DIR_NAME_XDG: &str = "dom-wallet";
-/// Vault directory name inside each wallet directory.
+/// Vault file name inside each wallet directory (a single dom-wallet2 file).
 pub const WALLET_VAULT_NAME: &str = "wallet.dom";
 /// Node directory name inside each wallet directory.
 pub const NODE_DIR_NAME: &str = "node";
@@ -444,7 +444,8 @@ pub fn load_wallet_node_layout(
     wallet_name: &str,
 ) -> Result<(ManagedLayout, NodeSettings)> {
     let layout = layout_in(base, wallet_name)?;
-    if !layout.vault_path.is_dir() {
+    // The v2 vault is a single encrypted FILE (v1 was a directory).
+    if !layout.vault_path.is_file() {
         return Err(anyhow!(
             "no managed wallet named {:?} was found",
             layout.display_name
@@ -684,8 +685,8 @@ mod tests {
         let (layout, created) =
             create_wallet_and_node_layout(base.path(), "Round Trip", NetworkKind::Regtest, true)
                 .unwrap();
-        // Simulate the vault the wallet creation step would add.
-        std::fs::create_dir_all(&layout.vault_path).unwrap();
+        // Simulate the vault the wallet creation step would add (a v2 file).
+        std::fs::write(&layout.vault_path, b"vault").unwrap();
 
         let (loaded_layout, loaded) = load_wallet_node_layout(base.path(), "round trip").unwrap();
         assert_eq!(loaded_layout.slug, layout.slug);
@@ -698,8 +699,9 @@ mod tests {
     fn load_layout_creates_missing_node_config_for_legacy_wallets() {
         let base = tempdir().unwrap();
         let layout = layout_in(base.path(), "Legacy").unwrap();
-        // A wallet vault exists but no node config (legacy import).
-        std::fs::create_dir_all(&layout.vault_path).unwrap();
+        // A wallet vault exists (v2 file) but no node config (legacy import).
+        std::fs::create_dir_all(&layout.wallet_dir).unwrap();
+        std::fs::write(&layout.vault_path, b"vault").unwrap();
 
         let (_, settings) = load_wallet_node_layout(base.path(), "Legacy").unwrap();
         assert!(layout.node_config_path.is_file());

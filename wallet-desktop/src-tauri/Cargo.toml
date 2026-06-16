@@ -50,7 +50,12 @@ dom-core        = { path = "../../crates/dom-core" }
 dom-consensus   = { path = "../../crates/dom-consensus" }
 dom-crypto      = { path = "../../crates/dom-crypto" }
 dom-config      = { path = "../../crates/dom-config" }
+# dom-wallet (v1) is retained for the wallet REGISTRY (name→path profiles) and
+# the node RPC client (status / wallet_spend), plus the miner wallet the embedded
+# node opens. The user-wallet ENGINE is dom-wallet2 (create/restore/balance/
+# send/receive/finalize/submit/sync) — see wallet_manager.rs.
 dom-wallet      = { path = "../../crates/dom-wallet" }
+dom-wallet2     = { path = "../../crates/dom-wallet2" }
 dom-node        = { path = "../../crates/dom-node" }
 dom-rpc         = { path = "../../crates/dom-rpc" }
 # Slate protocol: the Slate type lives in dom-tx; (de)serialization traits

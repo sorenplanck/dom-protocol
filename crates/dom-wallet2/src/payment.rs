@@ -312,8 +312,25 @@ pub fn receive(state: &mut WalletV2State, slate: Slate, now: u64) -> Result<Slat
 pub fn finalize(
     state: &mut WalletV2State,
     answered_slate: Slate,
-    _now: u64,
+    now: u64,
 ) -> Result<Transaction, PaymentError> {
+    finalize_tracked(state, answered_slate, now).map(|(tx, _hash)| tx)
+}
+
+/// Like [`finalize`], but also returns the sender slate hash — the key
+/// [`submit_finalized`] needs to find and advance this slate.
+///
+/// `finalize` derives that hash internally (from the answered slate's step-1
+/// phase) and then discards it; a caller that wants to submit right after
+/// finalizing would otherwise have to re-derive it by reaching into
+/// `dom-slate`. Exposing it here keeps the hash derivation single-sourced. The
+/// behaviour is otherwise identical to [`finalize`] (same atomicity: on a crypto
+/// error the slate is left `Built` with its secrets intact, retryable).
+pub fn finalize_tracked(
+    state: &mut WalletV2State,
+    answered_slate: Slate,
+    _now: u64,
+) -> Result<(Transaction, [u8; 32]), PaymentError> {
     // 1) Locate our pending sender slate by the sender (step-1) phase hash.
     let sender_bytes = sender_phase_slate(&answered_slate)
         .to_bytes()
@@ -347,7 +364,7 @@ pub fn finalize(
     state.pending_slates[idx].finalized_tx = Some(tx_bytes);
     state.pending_slates[idx].secrets = None;
 
-    Ok(tx)
+    Ok((tx, sender_hash))
 }
 
 /// Error from [`submit_finalized`]. Wraps the sink's transport error plus the
@@ -880,6 +897,23 @@ mod tests {
         let out = submit_finalized(&mut reloaded, &sink, hash).unwrap();
         assert_eq!(out.tx_hash, [0x55u8; 32]);
         assert_eq!(reloaded.pending_slates[0].status, SlateLifecycle::Submitted);
+    }
+
+    #[test]
+    fn finalize_tracked_returns_the_submit_key() {
+        // The hash returned by finalize_tracked must be exactly the sender slate
+        // hash submit_finalized looks up — proven by submitting with it.
+        let mut sender = funded_state(&[600, 600]);
+        let sent = create_send(&mut sender, 1000, 10, 2000).unwrap();
+        let mut recv = receiver_state();
+        let answered = receive(&mut recv, sent.slate, 3000).unwrap();
+
+        let (_tx, hash) = finalize_tracked(&mut sender, answered, 4000).unwrap();
+        assert_eq!(hash, sent.slate_hash, "tracked hash is the create_send hash");
+
+        let sink = InMemoryTxSink::accepting([0x42u8; 32]);
+        submit_finalized(&mut sender, &sink, hash).unwrap();
+        assert_eq!(sender.pending_slates[0].status, SlateLifecycle::Submitted);
     }
 
     #[test]

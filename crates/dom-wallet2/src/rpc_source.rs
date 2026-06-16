@@ -16,6 +16,7 @@
 //!   `500` whose body mentions "not supported" → surfaced as
 //!   [`RpcSourceError::Unsupported`].
 
+use crate::keychain::RestoreBlock;
 use crate::reconcile::ScanBlock;
 use crate::tx_sink::{SubmitOutcome, TxSink};
 use crate::types::BlockRef;
@@ -65,8 +66,9 @@ struct ScanBlockDto {
     hash: String,
     output_commitments: Vec<String>,
     input_commitments: Vec<String>,
-    // `fees` is present in the response but the reconciler does not need it.
-    #[allow(dead_code)]
+    // `fees` is dropped by the reconciler path (`to_scan_block`) but carried
+    // through by `scan_for_restore` (the coinbase candidate value is
+    // `reward + fees`). `#[serde(default)]` tolerates an older node omitting it.
     #[serde(default)]
     fees: u64,
 }
@@ -164,6 +166,46 @@ impl RpcChainSource {
             output_commitments: decode_commitments(&dto.output_commitments)?,
             input_commitments: decode_commitments(&dto.input_commitments)?,
         })
+    }
+
+    /// Page `/chain/scan` into [`RestoreBlock`]s for seed-based coinbase recovery
+    /// ([`crate::restore_coinbase_from_seed`]).
+    ///
+    /// This is **not** the [`ChainSource::scan_range`] path: that one yields
+    /// [`ScanBlock`] for the reconciler and deliberately drops the per-block fee
+    /// total (the reconciler does not need it). Restore *does* — the coinbase
+    /// candidate value is `block_reward(height) + fees` — so this carries the
+    /// `fees` field (already on the `/chain/scan` response) through into
+    /// [`RestoreBlock::total_fees_noms`]. Paging mirrors `scan_range`: the node
+    /// caps each response and reports the highest height it served, and we keep
+    /// requesting `from = served_to + 1` until the requested range is covered.
+    pub fn scan_for_restore(
+        &self,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<RestoreBlock>, RpcSourceError> {
+        let mut blocks = Vec::new();
+        let mut cur = from;
+        while cur <= to {
+            let scan = self.fetch(cur, to)?;
+            for dto in scan.blocks {
+                blocks.push(RestoreBlock {
+                    height: dto.height,
+                    hash: decode_hash(&dto.hash)?,
+                    output_commitments: decode_commitments(&dto.output_commitments)?,
+                    total_fees_noms: dto.fees,
+                });
+            }
+            // No progress (served range below `cur`, e.g. past the tip) → done.
+            if scan.to < cur {
+                break;
+            }
+            if scan.to >= to {
+                break;
+            }
+            cur = scan.to + 1;
+        }
+        Ok(blocks)
     }
 }
 
@@ -435,6 +477,55 @@ mod tests {
         for (i, b) in blocks.iter().enumerate() {
             assert_eq!(b.height, i as u64);
         }
+        let _ = stop.send(());
+    }
+
+    /// Scan body whose every block carries `fees = height * 100`, so the test
+    /// can prove `scan_for_restore` carries the per-block fee total through.
+    fn scan_body_with_fees(from: u64, to: u64, tip: u64, cap: u64) -> (u16, String) {
+        let tip_hash = "ee".repeat(32);
+        if from > to {
+            return (
+                200,
+                format!(
+                    r#"{{"tip":{{"height":{tip},"hash":"{tip_hash}"}},"from":{from},"to":{},"blocks":[]}}"#,
+                    from.saturating_sub(1)
+                ),
+            );
+        }
+        let served_to = to.min(tip).min(from + cap - 1);
+        let blocks: Vec<String> = (from..=served_to)
+            .map(|h| {
+                let hash = format!("{:02x}", (h % 256) as u8).repeat(32);
+                let out = format!("{:02x}", ((h + 1) % 256) as u8).repeat(33);
+                format!(
+                    r#"{{"height":{h},"hash":"{hash}","output_commitments":["{out}"],"input_commitments":[],"fees":{}}}"#,
+                    h * 100
+                )
+            })
+            .collect();
+        (
+            200,
+            format!(
+                r#"{{"tip":{{"height":{tip},"hash":"{tip_hash}"}},"from":{from},"to":{served_to},"blocks":[{}]}}"#,
+                blocks.join(",")
+            ),
+        )
+    }
+
+    #[test]
+    fn scan_for_restore_carries_fees_and_pages() {
+        // Tip 1500, cap 1000 → the restore scan must page twice and preserve the
+        // per-block `fees` (which the reconciler's ScanBlock drops) verbatim.
+        let (base, stop) = spawn_mock(|from, to| scan_body_with_fees(from, to, 1500, 1000));
+        let src = source(&base);
+        let blocks = src.scan_for_restore(0, 1500).unwrap();
+        assert_eq!(blocks.len(), 1501);
+        assert_eq!(blocks.first().unwrap().height, 0);
+        assert_eq!(blocks.last().unwrap().height, 1500);
+        // The fee total survived the wire → RestoreBlock mapping.
+        assert_eq!(blocks[3].total_fees_noms, 300);
+        assert_eq!(blocks.last().unwrap().total_fees_noms, 150_000);
         let _ = stop.send(());
     }
 

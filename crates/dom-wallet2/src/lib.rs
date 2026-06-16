@@ -65,7 +65,8 @@ pub use keychain::{
     restore_coinbase_from_seed, KeychainDeriver, KeychainError, ReceiveRequest, RestoreBlock,
 };
 pub use payment::{
-    cancel, create_send, finalize, receive, submit_finalized, PaymentError, SentSlate, SubmitError,
+    cancel, create_send, finalize, finalize_tracked, receive, submit_finalized, PaymentError,
+    SentSlate, SubmitError,
 };
 pub use pending::{PendingSlate, SlateLifecycle, SlateRole, SlateSecrets};
 pub use persist::{load_wallet_state, save_wallet_state, PersistError, WALLET_V2_MAGIC};

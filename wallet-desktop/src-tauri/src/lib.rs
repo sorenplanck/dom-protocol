@@ -64,14 +64,24 @@ async fn rpc_client_from_node(node: &Arc<NodeHost>) -> Result<NodeRpcClient, Str
         .map_err(|e| format!("rpc client: {e}"))
 }
 
+/// The node's RPC base URL (e.g. `http://127.0.0.1:33372`) for the v2 wallet's
+/// `RpcChainSource` (`/chain/scan` + `/tx/submit`, both PUBLIC routes — no token).
+async fn rpc_base_url(state: &AppState) -> Result<String, String> {
+    state
+        .node
+        .rpc_base_url()
+        .await
+        .ok_or_else(|| "node not started yet".to_string())
+}
+
 async fn try_resubmit_pending(state: &AppState) -> Result<wallet_manager::PendingResubmitReport, String> {
     if !state.wallet.is_open().await || !state.wallet.is_unlocked().await {
         return Ok(wallet_manager::PendingResubmitReport::default());
     }
-    let client = rpc_client(state).await?;
+    let base = rpc_base_url(state).await?;
     state
         .wallet
-        .resubmit_pending(&client)
+        .resubmit_pending(&base)
         .await
         .map_err(|e| e.to_string())
 }
@@ -173,7 +183,9 @@ fn register_wallet_meta_at(
         wallet_id: new_wallet_id(),
         vault_path: meta.vault_path,
         network: meta.network,
-        created_at: Some(meta.created_at),
+        // v2 state carries no creation timestamp; stamp registration time. Only
+        // used for display ordering, never for anything load-bearing.
+        created_at: Some(now),
         last_opened: Some(now),
     });
     reg.save(reg_path).map_err(|e| e.to_string())
@@ -249,7 +261,8 @@ async fn open_registered_wallet_at(
         (entry.vault_path.clone(), entry.name.clone())
     };
 
-    if !Path::new(&vault_path).is_dir() {
+    // The v2 vault is a single encrypted FILE (v1 was a directory).
+    if !Path::new(&vault_path).is_file() {
         return Err(format!(
             "wallet profile files missing: the saved location for {stored_name:?} no longer exists. Use \"Locate existing wallet\" to find it, or restore from your recovery phrase."
         ));
@@ -566,17 +579,17 @@ async fn node_ensure(state: State<'_, AppState>, settings: NodeSettings) -> Resu
 #[cfg(test)]
 mod wallet_registry_tests {
     use super::*;
-    use dom_wallet::{Bip39Seed, Network, WalletDir};
+    use dom_wallet2::{save_wallet_state, Network as V2Network, WalletV2State};
     use tempfile::tempdir;
 
     const PASSWORD: &str = "correct horse battery staple";
 
+    /// Create a v2 wallet FILE at `path` (the engine persists a single encrypted
+    /// file, not a directory). These tests exercise the registry login flow, so a
+    /// seedless state is enough to be opened/unlocked.
     fn create_temp_wallet(path: &Path) {
-        let network = Network::Regtest;
-        let genesis = dom_core::startup_genesis_hash_for_network_magic(network.magic()).unwrap();
-        let seed = Bip39Seed::generate_new().unwrap();
-        let dir = WalletDir::create_from_seed(path, PASSWORD, network, &genesis, &seed).unwrap();
-        drop(dir);
+        let state = WalletV2State::new(V2Network::Regtest, [0u8; 32]);
+        save_wallet_state(&state, path, PASSWORD).unwrap();
     }
 
     fn registry_entry(name: &str, vault_path: &Path) -> RegistryEntry {
@@ -688,7 +701,6 @@ mod wallet_registry_tests {
             wallet_manager::OpenWalletMeta {
                 vault_path: wallet_path.to_string_lossy().to_string(),
                 network: "regtest".to_string(),
-                created_at: 1_700_000_000,
             },
             1_700_000_111,
         )
@@ -725,18 +737,12 @@ async fn wallet_unlock(
 
 #[tauri::command]
 async fn wallet_balance(state: State<'_, AppState>) -> Result<BalanceInfo, String> {
-    // Height from the node so maturity is computed correctly.
-    // L2: do NOT fall back to height 0 on RPC failure — balance(0) marks all
-    // coinbase as immature and under-reports the spendable balance. Surface the
-    // error instead so the UI shows "balance unavailable" rather than a wrong
-    // number.
-    let client = rpc_client(&state).await?;
-    let height = client.status().map_err(|e| e.to_string())?.chain_height;
-    state
-        .wallet
-        .balance(height)
-        .await
-        .map_err(|e| e.to_string())
+    // v2 computes the balance from the store against its own
+    // `last_reconciled_tip` — the SAME tip coin selection uses — so the
+    // "spendable" shown is exactly what a send can select. No node round-trip is
+    // needed; the background reconcile keeps the cursor fresh. (This also means
+    // the balance is readable while the node is briefly unavailable.)
+    state.wallet.balance().await.map_err(|e| e.to_string())
 }
 
 /// Rebuild the open wallet's output index by scanning the embedded node's
@@ -747,21 +753,22 @@ async fn wallet_balance(state: State<'_, AppState>) -> Result<BalanceInfo, Strin
 /// Idempotent: `Repair` rescan re-deriving the same chain yields the same state.
 #[tauri::command]
 async fn wallet_rescan(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let node = state
-        .node
-        .current_node()
-        .await
-        .ok_or_else(|| "node not started yet".to_string())?;
+    let base = rpc_base_url(&state).await?;
     let summary = state
         .wallet
-        .rescan_against_node(&node)
+        .recover_from_seed(&base, now_secs())
         .await
         .map_err(|e| e.to_string())?;
+    // Keys the UI already reads (`scanned_tip`, `rebuilt_outputs`, `repaired`)
+    // are preserved; `rebuilt_outputs` now means coinbase outputs recovered from
+    // the seed this pass, and the reconciliation counts are added for context.
     Ok(serde_json::json!({
         "scanned_tip": summary.scanned_tip,
-        "rebuilt_outputs": summary.rebuilt_outputs,
-        "repaired": summary.repaired,
-        "matched_persisted": summary.matched_persisted,
+        "rebuilt_outputs": summary.recovered,
+        "repaired": summary.recovered > 0 || summary.confirmed > 0,
+        "confirmed": summary.confirmed,
+        "spent": summary.spent,
+        "reorged": summary.reorged,
     }))
 }
 
@@ -783,10 +790,11 @@ async fn slate_create_send(
 ) -> Result<String, String> {
     let amount = parse_noms(&amount)?;
     let fee = parse_noms(&fee)?;
-    let client = rpc_client(&state).await?;
+    // No node round-trip: v2 coin selection uses the store's reconciled tip for
+    // maturity; `now` is only output bookkeeping.
     state
         .wallet
-        .slate_create_send(&client, amount, fee)
+        .slate_create_send(amount, fee, now_secs())
         .await
         .map_err(|e| e.to_string())
 }
@@ -794,10 +802,9 @@ async fn slate_create_send(
 /// Step 2 (recipient): import sender's slate (hex), respond, return responded hex.
 #[tauri::command]
 async fn slate_receive(state: State<'_, AppState>, slate_hex: String) -> Result<String, String> {
-    let client = rpc_client(&state).await?;
     state
         .wallet
-        .slate_receive(&client, &slate_hex)
+        .slate_receive(&slate_hex, now_secs())
         .await
         .map_err(|e| e.to_string())
 }
@@ -805,10 +812,10 @@ async fn slate_receive(state: State<'_, AppState>, slate_hex: String) -> Result<
 /// Step 3 (sender): import responded slate (hex), finalize + submit. Returns tx hash hex.
 #[tauri::command]
 async fn slate_finalize(state: State<'_, AppState>, slate_hex: String) -> Result<String, String> {
-    let client = rpc_client(&state).await?;
+    let base = rpc_base_url(&state).await?;
     state
         .wallet
-        .slate_finalize(&client, &slate_hex)
+        .slate_finalize(&base, &slate_hex, now_secs())
         .await
         .map_err(|e| e.to_string())
 }
@@ -1038,7 +1045,7 @@ async fn do_sweep(
 
     let amount = balance.confirmed_noms - MINER_SWEEP_FEE_NOMS;
     let receive = wallet
-        .create_receive(amount)
+        .create_receive(amount, now_secs())
         .await
         .map_err(|e| e.to_string())?;
 
@@ -1165,19 +1172,19 @@ pub fn run() {
                     if !resubmit_wallet.is_open().await || !resubmit_wallet.is_unlocked().await {
                         continue;
                     }
-                    match rpc_client_from_node(&resubmit_node).await {
-                        Ok(client) => match resubmit_wallet.resubmit_pending(&client).await {
-                            Ok(report) if report.attempted > 0 => tracing::info!(
-                                "pending tx resubmit: attempted={} submitted={} already_in_mempool={} retry_later={} failed={}",
-                                report.attempted,
-                                report.submitted,
-                                report.already_in_mempool,
-                                report.retry_later,
-                                report.failed
-                            ),
-                            Ok(_) => {}
-                            Err(e) => tracing::debug!("pending tx resubmit skipped/failed: {e}"),
-                        },
+                    let Some(base) = resubmit_node.rpc_base_url().await else {
+                        continue;
+                    };
+                    match resubmit_wallet.resubmit_pending(&base).await {
+                        Ok(report) if report.attempted > 0 => tracing::info!(
+                            "pending tx resubmit: attempted={} submitted={} already_in_mempool={} retry_later={} failed={}",
+                            report.attempted,
+                            report.submitted,
+                            report.already_in_mempool,
+                            report.retry_later,
+                            report.failed
+                        ),
+                        Ok(_) => {}
                         Err(e) => tracing::debug!("pending tx resubmit skipped/failed: {e}"),
                     }
                 }
@@ -1210,8 +1217,10 @@ pub fn run() {
                 loop {
                     interval.tick().await;
 
-                    // Need a running node and an UNLOCKED wallet (the scan
+                    // Need a running node and an UNLOCKED wallet (the recovery
                     // derives the coinbase blinding from the encrypted seed).
+                    // The in-process node gives a cheap tip read for the debounce;
+                    // the actual reconcile drives over the node's RPC.
                     let Some(node) = rescan_node.current_node().await else {
                         continue;
                     };
@@ -1221,24 +1230,27 @@ pub fn run() {
                     let Some(meta) = rescan_wallet.open_wallet_meta().await else {
                         continue;
                     };
+                    let Some(base) = rescan_node.rpc_base_url().await else {
+                        continue;
+                    };
                     let tip = { node.chain.lock().await.tip_height.0 };
                     let key = (meta.vault_path, tip);
                     if last_scanned.as_ref() == Some(&key) {
                         continue; // same wallet, no new blocks — nothing to do
                     }
 
-                    match rescan_wallet.rescan_against_node(&node).await {
+                    match rescan_wallet.recover_from_seed(&base, now_secs()).await {
                         Ok(summary) => {
-                            if summary.repaired {
+                            if summary.recovered > 0 {
                                 tracing::info!(
-                                    "wallet rescan: rebuilt {} outputs up to height {}",
-                                    summary.rebuilt_outputs,
+                                    "wallet recover: +{} coinbase outputs up to height {}",
+                                    summary.recovered,
                                     summary.scanned_tip
                                 );
                             }
                             last_scanned = Some(key);
                         }
-                        Err(e) => tracing::debug!("wallet rescan skipped/failed: {e}"),
+                        Err(e) => tracing::debug!("wallet recover skipped/failed: {e}"),
                     }
                 }
             });
