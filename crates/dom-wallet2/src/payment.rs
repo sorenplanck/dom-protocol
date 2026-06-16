@@ -15,10 +15,11 @@
 
 use crate::pending::{PendingSlate, SlateLifecycle, SlateRole, SlateSecrets};
 use crate::store::StoreError;
+use crate::tx_sink::{SubmitOutcome, TxSink};
 use crate::types::{OutputOrigin, OutputStatus, StoredOutput};
 use crate::wallet_state::WalletV2State;
 use dom_consensus::transaction::Transaction;
-use dom_serialization::DomSerialize;
+use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_slate::{build_send, finalize as slate_finalize, respond_receive, sender_phase_slate};
 use dom_slate::{SlateError, SlateInput};
 use dom_tx::slate::Slate;
@@ -188,6 +189,7 @@ pub fn create_send(
         }),
         reserved_inputs: selected.clone(),
         produced_output,
+        finalized_tx: None,
         status: SlateLifecycle::Built,
     });
 
@@ -290,6 +292,7 @@ pub fn receive(state: &mut WalletV2State, slate: Slate, now: u64) -> Result<Slat
         }),
         reserved_inputs: Vec::new(),
         produced_output: Some(commitment),
+        finalized_tx: None,
         status: SlateLifecycle::Built,
     });
 
@@ -333,12 +336,69 @@ pub fn finalize(
 
     // 2) Crypto FIRST (fallible) — state not yet mutated.
     let tx = slate_finalize(&answered_slate, &excess, &nonce, &state.chain_id)?;
+    // Persist the (public) tx bytes so it can be submitted/resubmitted even
+    // though finalize is about to wipe the secrets (it cannot run twice).
+    let tx_bytes = tx
+        .to_bytes()
+        .map_err(|e| PaymentError::Serialization(e.to_string()))?;
 
-    // 3) Success only: mark Finalized and WIPE the secrets (nonce discarded).
+    // 3) Success only: mark Finalized, persist the tx, WIPE the secrets.
     state.pending_slates[idx].status = SlateLifecycle::Finalized;
+    state.pending_slates[idx].finalized_tx = Some(tx_bytes);
     state.pending_slates[idx].secrets = None;
 
     Ok(tx)
+}
+
+/// Error from [`submit_finalized`]. Wraps the sink's transport error plus the
+/// wallet-level lookup/decoding errors.
+#[derive(Debug, thiserror::Error)]
+pub enum SubmitError<E: std::error::Error + 'static> {
+    /// No sender slate with this hash.
+    #[error("pending sender slate not found")]
+    NotFound,
+    /// The slate has not been finalized (no tx to submit).
+    #[error("slate is not finalized; nothing to submit")]
+    NotFinalized,
+    /// The persisted tx bytes failed to decode.
+    #[error("stored tx decode failed: {0}")]
+    Decode(String),
+    /// The transport (TxSink) failed.
+    #[error(transparent)]
+    Sink(#[from] E),
+}
+
+/// Submit a finalized sender slate's transaction to the network and, **only on
+/// success**, advance it `Finalized -> Submitted`.
+///
+/// Reads the persisted `finalized_tx` (no secrets needed — they were wiped at
+/// finalize), so it works after a restart / resubmit. The [`TxSink`] is pure
+/// transport: it never touches state. **Atomicity:** the network call happens
+/// first; on any error the slate stays `Finalized` (retryable / inspectable) —
+/// a rejection is surfaced, never guessed into `Failed` (the next `reconcile`
+/// establishes the truth).
+pub fn submit_finalized<S: TxSink>(
+    state: &mut WalletV2State,
+    sink: &S,
+    slate_hash: [u8; 32],
+) -> Result<SubmitOutcome, SubmitError<S::Error>> {
+    let idx = state
+        .pending_slates
+        .iter()
+        .position(|p| p.slate_hash == slate_hash && p.role == SlateRole::Sender)
+        .ok_or(SubmitError::NotFound)?;
+
+    let bytes = state.pending_slates[idx]
+        .finalized_tx
+        .clone()
+        .ok_or(SubmitError::NotFinalized)?;
+    let tx = Transaction::from_bytes(&bytes).map_err(|e| SubmitError::Decode(e.to_string()))?;
+
+    // Network first; on error the state is untouched (slate stays Finalized).
+    let outcome = sink.submit_tx(&tx)?;
+
+    state.pending_slates[idx].status = SlateLifecycle::Submitted;
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -715,5 +775,130 @@ mod tests {
             *recv.outputs.get(&recipient_c).unwrap().blinding,
             recipient_blinding
         );
+    }
+
+    // ── submit_finalized (orchestration over a TxSink) ──────────────────────
+
+    use crate::tx_sink::InMemoryTxSink;
+
+    /// Run the real interactive flow to a finalized sender slate, returning the
+    /// sender state and the sender slate's hash.
+    fn finalized_sender() -> (WalletV2State, [u8; 32]) {
+        let mut sender = funded_state(&[600, 600]);
+        let sent = create_send(&mut sender, 1000, 10, 2000).unwrap();
+        let hash = sent.slate_hash;
+        let mut recv = receiver_state();
+        let answered = receive(&mut recv, sent.slate, 3000).unwrap();
+        let _tx = finalize(&mut sender, answered, 4000).unwrap();
+        assert_eq!(sender.pending_slates[0].status, SlateLifecycle::Finalized);
+        (sender, hash)
+    }
+
+    #[test]
+    fn submit_accepted_advances_to_submitted() {
+        let (mut sender, hash) = finalized_sender();
+        let sink = InMemoryTxSink::accepting([0x42u8; 32]);
+
+        let out = submit_finalized(&mut sender, &sink, hash).unwrap();
+
+        assert_eq!(out.tx_hash, [0x42u8; 32]);
+        assert!(out.relayed);
+        assert_eq!(sender.pending_slates[0].status, SlateLifecycle::Submitted);
+        assert_eq!(sink.calls(), 1);
+    }
+
+    #[test]
+    fn submit_not_relayed_still_submitted_with_warning_preserved() {
+        let (mut sender, hash) = finalized_sender();
+        let sink = InMemoryTxSink::accepting_not_relayed([0x99u8; 32], "accepted but not relayed");
+
+        let out = submit_finalized(&mut sender, &sink, hash).unwrap();
+
+        // Accepted-but-not-relayed is still success: state advances and the
+        // node's advisory is surfaced verbatim for the caller to act on.
+        assert!(!out.relayed);
+        assert_eq!(out.warning.as_deref(), Some("accepted but not relayed"));
+        assert_eq!(sender.pending_slates[0].status, SlateLifecycle::Submitted);
+    }
+
+    #[test]
+    fn submit_rejected_keeps_state_finalized_and_surfaces_error() {
+        let (mut sender, hash) = finalized_sender();
+        let sink = InMemoryTxSink::rejecting("tx rejected: invalid kernel");
+
+        let err = submit_finalized(&mut sender, &sink, hash).unwrap_err();
+
+        // The rejection is surfaced (never auto-Failed), and the slate stays
+        // Finalized so the tx can be inspected / resubmitted.
+        match err {
+            SubmitError::Sink(e) => assert!(e.to_string().contains("invalid kernel"), "{e}"),
+            other => panic!("expected Sink error, got {other:?}"),
+        }
+        assert_eq!(sender.pending_slates[0].status, SlateLifecycle::Finalized);
+        // The persisted tx is intact for a retry.
+        assert!(sender.pending_slates[0].finalized_tx.is_some());
+    }
+
+    #[test]
+    fn submit_reads_persisted_tx_without_secrets() {
+        let (mut sender, hash) = finalized_sender();
+        // finalize wiped the secrets — submit must not need them.
+        assert!(
+            sender.pending_slates[0].secrets.is_none(),
+            "precondition: secrets were wiped at finalize"
+        );
+        let sink = InMemoryTxSink::accepting([0x01u8; 32]);
+        submit_finalized(&mut sender, &sink, hash).unwrap();
+        assert_eq!(sender.pending_slates[0].status, SlateLifecycle::Submitted);
+    }
+
+    #[test]
+    fn finalized_tx_survives_reload_and_resubmits_after_crash() {
+        use crate::persist::{load_wallet_state, save_wallet_state};
+
+        let (sender, hash) = finalized_sender();
+        let expected_tx = sender.pending_slates[0].finalized_tx.clone().unwrap();
+
+        // Persist (encrypted) and reload — simulating a crash after finalize but
+        // before submit. The secrets are gone; only the public tx remains.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wallet.dom");
+        save_wallet_state(&sender, &path, "pw").unwrap();
+        let mut reloaded = load_wallet_state(&path, "pw").unwrap();
+
+        let slate = &reloaded.pending_slates[0];
+        assert_eq!(slate.status, SlateLifecycle::Finalized);
+        assert!(slate.secrets.is_none(), "secrets must not survive");
+        assert_eq!(
+            slate.finalized_tx.as_ref(),
+            Some(&expected_tx),
+            "the public tx must survive the crash for resubmit"
+        );
+
+        // Resubmit from the reloaded state works (no secrets required).
+        let sink = InMemoryTxSink::accepting([0x55u8; 32]);
+        let out = submit_finalized(&mut reloaded, &sink, hash).unwrap();
+        assert_eq!(out.tx_hash, [0x55u8; 32]);
+        assert_eq!(reloaded.pending_slates[0].status, SlateLifecycle::Submitted);
+    }
+
+    #[test]
+    fn submit_unknown_slate_is_not_found() {
+        let (mut sender, _hash) = finalized_sender();
+        let sink = InMemoryTxSink::accepting([0u8; 32]);
+        let err = submit_finalized(&mut sender, &sink, [0xFFu8; 32]).unwrap_err();
+        assert!(matches!(err, SubmitError::NotFound), "got {err:?}");
+        assert_eq!(sink.calls(), 0, "no submission for an unknown slate");
+    }
+
+    #[test]
+    fn submit_not_finalized_slate_is_rejected() {
+        // A freshly built (not finalized) sender slate has no tx to submit.
+        let mut sender = funded_state(&[600, 600]);
+        let sent = create_send(&mut sender, 1000, 10, 2000).unwrap();
+        let sink = InMemoryTxSink::accepting([0u8; 32]);
+        let err = submit_finalized(&mut sender, &sink, sent.slate_hash).unwrap_err();
+        assert!(matches!(err, SubmitError::NotFinalized), "got {err:?}");
+        assert_eq!(sink.calls(), 0);
     }
 }
