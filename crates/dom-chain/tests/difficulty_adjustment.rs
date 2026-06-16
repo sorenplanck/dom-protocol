@@ -268,7 +268,7 @@ fn public_next_block_target_matches_canonical_asert_helper() {
 }
 
 #[test]
-fn public_networks_do_not_share_regtest_target() {
+fn testnet_uses_representable_floor_while_mainnet_remains_distinct() {
     let regtest_target = compute_expected_target(
         NETWORK_MAGIC_REGTEST,
         Timestamp(dom_core::GENESIS_TIMESTAMP_TESTNET + dom_core::TARGET_SPACING),
@@ -289,7 +289,10 @@ fn public_networks_do_not_share_regtest_target() {
     .expect("testnet target");
 
     assert_ne!(mainnet_target, regtest_target);
-    assert_ne!(testnet_target, regtest_target);
+    assert_eq!(
+        testnet_target, regtest_target,
+        "testnet intentionally uses MAX_COMPACT_TARGET, the same easiest representable target as regtest"
+    );
 }
 
 #[test]
