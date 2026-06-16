@@ -208,6 +208,7 @@ All files properly formatted
 
 | ID | Severity | Component | Issue | Status | Note |
 |----|----------|-----------|-------|--------|------|
+| R-31 / R-19 | baixa-média (correção/UX; não-consenso) | dom-wallet2 / coin selection | `create_send` confia no estado persistido e em `meta.last_reconciled_tip`; sem checagem do UTXO ao vivo nem reconcile como pré-condição → pode reservar/montar sobre input não-canônico (rejeitado só no submit; input fica preso) | 📝 documentado, não corrigido | [R-31-R-19-coin-selection-freshness.md](audits/R-31-R-19-coin-selection-freshness.md) |
 | R-32 | baixa (defensivo; não-consenso) | dom-wallet2 / dom-rpc | wallet não reconcilia `network`/`chain_id` contra o nó antes de scan/submit; `/status` não expõe `chain_id`/genesis | 📝 documentado, não corrigido | [R-32-wallet-node-chain-reconciliation.md](audits/R-32-wallet-node-chain-reconciliation.md) |
 
 ---
