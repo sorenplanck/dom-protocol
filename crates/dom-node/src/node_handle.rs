@@ -386,6 +386,58 @@ impl NodeHandle for NodeHandleImpl {
 
         Ok(tx_hash)
     }
+
+    fn scan_chain(&self, from: u64, to: u64) -> Result<dom_rpc::ChainScan, RpcError> {
+        // GOLDEN RULE: never block on the chain lock. If it is busy (mining /
+        // connecting a block), yield immediately with a retriable 503 — mining
+        // always has priority over this read-only RPC.
+        let c = self
+            .0
+            .chain
+            .try_lock()
+            .map_err(|_| RpcError::Overloaded("chain busy; retry".into()))?;
+
+        let tip_height = c.tip_height.0;
+        let tip_hash = *c.tip_hash.as_bytes();
+        // Bound the work (and the lock hold): at most MAX_SCAN_RANGE heights,
+        // never past the tip. Clients page across larger ranges.
+        let effective_to = scan_to_clamped(from, to, tip_height);
+
+        let mut blocks = Vec::new();
+        if from <= effective_to {
+            for height in from..=effective_to {
+                if let Some(sb) = crate::wallet_scan::scan_block_at(&c.store, height)
+                    .map_err(|e| RpcError::Internal(e.to_string()))?
+                {
+                    blocks.push(dom_rpc::ScanBlockData {
+                        height: sb.height,
+                        hash: sb.block_hash.unwrap_or([0u8; 32]),
+                        output_commitments: sb.output_commitments,
+                        input_commitments: sb.input_commitments,
+                        fees: sb.total_fees_noms,
+                    });
+                }
+            }
+        }
+
+        Ok(dom_rpc::ChainScan {
+            tip: dom_rpc::ChainTip {
+                height: tip_height,
+                hash: tip_hash,
+            },
+            from,
+            to: effective_to,
+            blocks,
+        })
+    }
+}
+
+/// Highest height a single scan serves: `min(to, tip, from + MAX_SCAN_RANGE - 1)`.
+/// When `from > to` (or `from > tip`) the result is `< from`, i.e. an empty scan
+/// that still carries the tip.
+pub(crate) fn scan_to_clamped(from: u64, to: u64, tip: u64) -> u64 {
+    let cap = from.saturating_add(dom_rpc::MAX_SCAN_RANGE - 1);
+    to.min(tip).min(cap)
 }
 
 #[cfg(test)]
@@ -886,5 +938,67 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&data_dir);
         let _ = std::fs::remove_dir_all(&wallet_path);
+    }
+
+    // ── /chain/scan (RB-WALLET2-RPC-SOURCE, node side) ──────────────────────
+
+    #[test]
+    fn scan_to_clamped_caps_range_and_tip() {
+        // Capped to MAX_SCAN_RANGE blocks (0..=999).
+        assert_eq!(super::scan_to_clamped(0, 5000, 10_000), 999);
+        // Smaller than the cap → honoured as requested.
+        assert_eq!(super::scan_to_clamped(0, 5, 10_000), 5);
+        // Never past the tip.
+        assert_eq!(super::scan_to_clamped(0, 5000, 3), 3);
+        // Empty request (from > to) → result < from (empty scan, tip still served).
+        assert!(super::scan_to_clamped(5, 0, 100) < 5);
+    }
+
+    fn fresh_node(tag: &str) -> std::sync::Arc<DomNode> {
+        let data_dir = std::env::temp_dir().join(format!("{tag}-data"));
+        let wallet_path = std::env::temp_dir().join(format!("{tag}.dom"));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        create_test_wallet_dir(&wallet_path);
+        std::sync::Arc::new(
+            DomNode::init_with_map_size(
+                test_config(
+                    data_dir.to_str().expect("utf8 data dir"),
+                    wallet_path.to_str().expect("utf8 wallet path"),
+                ),
+                TEST_LMDB_MAP_SIZE,
+            )
+            .expect("init node"),
+        )
+    }
+
+    #[test]
+    fn scan_chain_clamps_to_tip_on_idle_node() {
+        let node = fresh_node("scanchain-idle");
+        let handle = NodeHandleImpl(node.clone());
+
+        let scan = handle.scan_chain(0, 100).expect("scan ok on idle node");
+        let tip = node.chain.try_lock().expect("idle chain lock").tip_height.0;
+        assert_eq!(scan.tip.height, tip, "scan reports the real tip");
+        assert_eq!(scan.from, 0);
+        assert_eq!(scan.to, 100u64.min(tip), "to is clamped to the tip");
+        // Every returned block is within the served range.
+        assert!(scan.blocks.iter().all(|b| b.height <= scan.to));
+    }
+
+    #[test]
+    fn scan_chain_yields_to_busy_chain_lock() {
+        // GOLDEN RULE: a busy chain (mining / connecting) must get a retriable
+        // 503 immediately — the scan never waits on the lock.
+        let node = fresh_node("scanchain-busy");
+        let handle = NodeHandleImpl(node.clone());
+
+        let _chain_guard = node.chain.try_lock().expect("hold chain lock");
+        let err = handle
+            .scan_chain(0, 10)
+            .expect_err("scan must not block on a held chain lock");
+        assert!(
+            matches!(err, dom_rpc::RpcError::Overloaded(ref m) if m.contains("chain busy")),
+            "expected retriable Overloaded, got {err}"
+        );
     }
 }

@@ -48,44 +48,54 @@ pub fn collect_chain_scan(
     tip_height: u64,
 ) -> Result<InMemoryChainScan, DomError> {
     let mut scan = InMemoryChainScan::new();
-
     for height in 0..=tip_height {
-        let Some(hash) = store.get_hash_at_height(height)? else {
-            continue;
-        };
-        let Some(body) = store.get_block_body(&hash)? else {
-            continue;
-        };
-        let block = Block::from_bytes(&body).map_err(|e| {
-            DomError::Internal(format!("decode canonical block at height {height}: {e}"))
-        })?;
-
-        // Coinbase output first (it lives outside `transactions`), then every
-        // non-coinbase output. Inputs feed the wallet's spent/unspent rebuild.
-        let mut output_commitments = Vec::with_capacity(1 + block.transactions.len());
-        output_commitments.push(*block.coinbase.output.commitment.as_bytes());
-        let mut input_commitments = Vec::new();
-        for tx in &block.transactions {
-            for output in &tx.outputs {
-                output_commitments.push(*output.commitment.as_bytes());
-            }
-            for input in &tx.inputs {
-                input_commitments.push(*input.commitment.as_bytes());
-            }
+        if let Some(block) = scan_block_at(store, height)? {
+            scan.insert(block);
         }
+    }
+    Ok(scan)
+}
 
-        let total_fees_noms = block
-            .total_fees()
-            .map_err(|e| DomError::Internal(format!("total fees at height {height}: {e}")))?;
+/// Project the canonical block at `height` into a [`ScanBlock`] (coinbase output
+/// included, every tx output/input commitment, the block hash and total fees),
+/// or `None` if no block is committed there (pruned / gap).
+///
+/// The single per-block extractor reused by [`collect_chain_scan`] (the embedded
+/// rescan) and by the node's `/chain/scan` RPC, so the two never diverge.
+pub fn scan_block_at(store: &DomStore, height: u64) -> Result<Option<ScanBlock>, DomError> {
+    let Some(hash) = store.get_hash_at_height(height)? else {
+        return Ok(None);
+    };
+    let Some(body) = store.get_block_body(&hash)? else {
+        return Ok(None);
+    };
+    let block = Block::from_bytes(&body).map_err(|e| {
+        DomError::Internal(format!("decode canonical block at height {height}: {e}"))
+    })?;
 
-        scan.insert(ScanBlock {
-            height,
-            block_hash: Some(hash),
-            output_commitments,
-            input_commitments,
-            total_fees_noms,
-        });
+    // Coinbase output first (it lives outside `transactions`), then every
+    // non-coinbase output. Inputs feed the wallet's spent/unspent rebuild.
+    let mut output_commitments = Vec::with_capacity(1 + block.transactions.len());
+    output_commitments.push(*block.coinbase.output.commitment.as_bytes());
+    let mut input_commitments = Vec::new();
+    for tx in &block.transactions {
+        for output in &tx.outputs {
+            output_commitments.push(*output.commitment.as_bytes());
+        }
+        for input in &tx.inputs {
+            input_commitments.push(*input.commitment.as_bytes());
+        }
     }
 
-    Ok(scan)
+    let total_fees_noms = block
+        .total_fees()
+        .map_err(|e| DomError::Internal(format!("total fees at height {height}: {e}")))?;
+
+    Ok(Some(ScanBlock {
+        height,
+        block_hash: Some(hash),
+        output_commitments,
+        input_commitments,
+        total_fees_noms,
+    }))
 }
