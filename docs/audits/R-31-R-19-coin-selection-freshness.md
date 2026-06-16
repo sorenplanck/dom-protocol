@@ -1,6 +1,7 @@
 # R-31 / R-19 — Frescura do UTXO na seleção de inputs (wallet v2)
 
-**Status:** ABERTO (documentação; nenhuma alteração de `src/` nesta etapa)
+**Status:** camada (c) IMPLEMENTADA (release da reserva no reject do submit em
+`submit_finalized`); camada (b) ABERTA (frescura antes do send)
 **Componente:** `dom-wallet2` — `create_send` / coin selection (`payment.rs`) ↔
 camada de orquestração (caller send→submit) ↔ reconciliador (`reconcile.rs`,
 `transport.rs`)
@@ -97,19 +98,28 @@ Antes de chamar `create_send`, a orquestração:
 Custo mínimo, fecha o caso comum (store simplesmente atrasado). Não cobre um
 reorg que aconteça **entre** a montagem e o submit.
 
-### Camada (c) — robusto: revalidar e tratar o reject no submit
+### Camada (c) — robusto: revalidar e tratar o reject no submit — IMPLEMENTADA
 
 No caminho de submit (orquestração sobre `submit_finalized`):
 - tratar a **rejeição do nó** como sinal de input não-canônico;
-- **liberar o input reservado** (release da reserva) e marcar o slate
-  `Failed`/`Canceled`, devolvendo o saldo gastável;
+- **liberar o input reservado** (release da reserva), devolvendo o saldo
+  gastável;
 - opcionalmente revalidar os inputs selecionados contra o nó imediatamente antes
   do submit.
 
 Cobre o reorg-durante-montagem (a janela que (b) não fecha) e resolve o "input
-preso". Hoje o submit já **não** auto-marca `Failed` (`payment.rs:394-396`): a
-rejeição é só surfaçada e o slate fica `Finalized` — então a liberação do input
-após reject ainda **não** existe e é o cerne de (c).
+preso".
+
+**Status: IMPLEMENTADO.** `submit_finalized` agora recebe `now: u64` e, no
+**reject do `submit_tx`**, libera a reserva de cada input do slate
+(`out.release_reservation(now)`) antes de propagar o erro. O slate é mantido
+`Finalized` de propósito — **NÃO** vira `Failed`/`Canceled`: uma rejeição não
+prova que a tx morreu (pode ter entrado no mempool de outra forma); o próximo
+`reconcile` estabelece a verdade (`Spent` se entrou, `Confirmed` se não). A
+reserva é só um guard local de double-spend e é seguro liberá-la aqui. Coberto
+pelo teste `reserved_input_released_on_submit_reject`. Os chamadores do desktop
+(`wallet_manager::submit_finalized` e `resubmit_pending`, e os callers em
+`lib.rs`) passam `now_secs()`.
 
 **Recomendação:** (b) é o piso barato; (c) é o que dá robustez real contra reorg
 durante a montagem. Idealmente ambos — (b) reduz a frequência, (c) cobre o resto.
@@ -146,8 +156,9 @@ desktop. **Não implementar antes de coordenar com o branch da UI.**
   (`reconcile.rs`/`transport.rs`); frescura é do chamador.
 - Severidade: correção/UX + input reservado preso — **não** consenso, **não**
   perda de fundos.
-- Fix em camadas na orquestração: (b) frescura antes do send (mínimo), (c)
-  liberar input + tratar reject no submit (robusto contra reorg).
+- Fix em camadas na orquestração: (b) frescura antes do send (mínimo, **ABERTO**),
+  (c) liberar input + tratar reject no submit (robusto contra reorg,
+  **IMPLEMENTADO** em `submit_finalized`).
 - (b)/(c) tocam a fiação do desktop → **coordenar com o branch da UI**.
 
 Relacionado: [[wallet-v2-desktop-integration]].
