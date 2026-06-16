@@ -20,7 +20,7 @@ pub trait NodeHandle: Send + Sync + 'static {
     fn mempool_size(&self) -> usize;
     fn mempool_tx_hashes(&self) -> Vec<[u8; 32]>;
     fn get_mempool_tx(&self, hash: &[u8; 32]) -> Option<MempoolTxInfo>;
-    fn submit_tx(&self, tx_bytes: Vec<u8>) -> Result<[u8; 32], RpcError>;
+    fn submit_tx(&self, tx_bytes: Vec<u8>) -> Result<TxAdmission, RpcError>;
 
     /// Lowercase name of the network this node is configured for —
     /// `"mainnet"`, `"testnet"`, or `"regtest"`. Reported verbatim by
@@ -78,6 +78,19 @@ pub struct MempoolTxInfo {
     pub fee: u64,
     pub fee_rate: u64,
     pub weight: u32,
+}
+
+/// Outcome of admitting a transaction to the node (`submit_tx`).
+///
+/// The tx is in the local mempool either way; `relayed` reports whether the
+/// node actually handed it to a peer. When the node has no connected peers (or
+/// no live relay subscribers), `relayed` is `false`: the mempool is volatile
+/// (RFC-0012 §1), so a tx accepted-but-not-relayed can be silently lost on
+/// restart. The RPC surfaces this as a warning so the wallet can retransmit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TxAdmission {
+    pub tx_hash: [u8; 32],
+    pub relayed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -182,11 +195,21 @@ struct SubmitTxRequest {
 #[derive(Debug, Serialize)]
 struct SubmitTxResponse {
     accepted: bool,
+    /// Whether the node actually relayed the tx to a peer. `false` means it was
+    /// accepted into the local (volatile) mempool but no peer received it yet.
+    relayed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     tx_hash: Option<String>,
+    /// Non-fatal advisory (e.g. accepted but not relayed: no peers connected).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
+
+/// Advisory returned when a tx is accepted locally but not relayed onward.
+const WARN_ACCEPTED_NOT_RELAYED: &str =
+    "no peers connected; tx will be retransmitted when the node reconnects";
 
 #[derive(Debug, Serialize)]
 struct TxFoundResponse {
@@ -417,14 +440,27 @@ async fn submit_tx(
         }
     };
     match handle.submit_tx(tx_bytes) {
-        Ok(hash) => (
-            StatusCode::OK,
-            Json(SubmitTxResponse {
-                accepted: true,
-                tx_hash: Some(hex::encode(hash)),
-                error: None,
-            }),
-        ),
+        Ok(admission) => {
+            let warning = if admission.relayed {
+                None
+            } else {
+                info!(
+                    "submit_tx: accepted tx {} but not relayed (no peers connected)",
+                    hex::encode(admission.tx_hash)
+                );
+                Some(WARN_ACCEPTED_NOT_RELAYED.to_owned())
+            };
+            (
+                StatusCode::OK,
+                Json(SubmitTxResponse {
+                    accepted: true,
+                    relayed: admission.relayed,
+                    tx_hash: Some(hex::encode(admission.tx_hash)),
+                    warning,
+                    error: None,
+                }),
+            )
+        }
         Err(e) => {
             match &e {
                 RpcError::Internal(msg) => error!("submit_tx: internal error: {msg}"),
@@ -547,7 +583,9 @@ fn submit_error(err: RpcError) -> (StatusCode, Json<SubmitTxResponse>) {
         status,
         Json(SubmitTxResponse {
             accepted: false,
+            relayed: false,
             tx_hash: None,
+            warning: None,
             error: Some(err.to_string()),
         }),
     )
@@ -605,6 +643,9 @@ mod tests {
         height: u64,
         txs: Mutex<HashMap<[u8; 32], MempoolTxInfo>>,
         network: &'static str,
+        /// When true, submit_tx reports the tx as accepted-but-not-relayed
+        /// (the no-peers case exercised by F3).
+        no_peers: bool,
     }
 
     impl MockNode {
@@ -613,12 +654,21 @@ mod tests {
                 height,
                 txs: Mutex::new(HashMap::new()),
                 network: "regtest",
+                no_peers: false,
             }
         }
 
         fn with_network(height: u64, network: &'static str) -> Self {
             Self {
                 network,
+                ..Self::new(height)
+            }
+        }
+
+        /// A node that accepts txs but has no peers to relay to.
+        fn no_peers(height: u64) -> Self {
+            Self {
+                no_peers: true,
                 ..Self::new(height)
             }
         }
@@ -640,7 +690,7 @@ mod tests {
         fn get_mempool_tx(&self, hash: &[u8; 32]) -> Option<MempoolTxInfo> {
             self.txs.lock().unwrap().get(hash).cloned()
         }
-        fn submit_tx(&self, tx_bytes: Vec<u8>) -> Result<[u8; 32], RpcError> {
+        fn submit_tx(&self, tx_bytes: Vec<u8>) -> Result<TxAdmission, RpcError> {
             if tx_bytes.is_empty() {
                 return Err(RpcError::InvalidTx("empty".to_owned()));
             }
@@ -656,7 +706,10 @@ mod tests {
                     weight: 0,
                 },
             );
-            Ok(hash)
+            Ok(TxAdmission {
+                tx_hash: hash,
+                relayed: !self.no_peers,
+            })
         }
         fn get_block_header(&self, _: &[u8; 32]) -> Option<Vec<u8>> {
             None
@@ -686,7 +739,7 @@ mod tests {
         fn get_mempool_tx(&self, _: &[u8; 32]) -> Option<MempoolTxInfo> {
             None
         }
-        fn submit_tx(&self, _: Vec<u8>) -> Result<[u8; 32], RpcError> {
+        fn submit_tx(&self, _: Vec<u8>) -> Result<TxAdmission, RpcError> {
             Err(RpcError::Rejected("already in mempool".to_owned()))
         }
         fn get_block_header(&self, _: &[u8; 32]) -> Option<Vec<u8>> {
@@ -717,7 +770,7 @@ mod tests {
         fn get_mempool_tx(&self, _: &[u8; 32]) -> Option<MempoolTxInfo> {
             None
         }
-        fn submit_tx(&self, _: Vec<u8>) -> Result<[u8; 32], RpcError> {
+        fn submit_tx(&self, _: Vec<u8>) -> Result<TxAdmission, RpcError> {
             Err(RpcError::Overloaded("mempool full".to_owned()))
         }
         fn get_block_header(&self, _: &[u8; 32]) -> Option<Vec<u8>> {
@@ -978,7 +1031,35 @@ mod tests {
             .unwrap();
 
         assert_eq!(r.status(), StatusCode::OK);
-        assert_eq!(body_json(r).await["accepted"], serde_json::json!(true));
+        let body = body_json(r).await;
+        assert_eq!(body["accepted"], serde_json::json!(true));
+        assert_eq!(body["relayed"], serde_json::json!(true));
+        assert!(body.get("warning").is_none());
+    }
+
+    #[tokio::test]
+    async fn submit_with_no_peers_returns_accepted_warning() {
+        let valid_tx_hex = hex::encode(vec![0xdeu8; 64]);
+        let r = app_with(MockNode::no_peers(42))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/tx/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"tx_hex":"{valid_tx_hex}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = body_json(r).await;
+        assert_eq!(body["accepted"], serde_json::json!(true));
+        assert_eq!(body["relayed"], serde_json::json!(false));
+        assert_eq!(
+            body["warning"],
+            serde_json::json!(WARN_ACCEPTED_NOT_RELAYED)
+        );
     }
 
     #[tokio::test]

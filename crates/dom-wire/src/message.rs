@@ -430,6 +430,118 @@ impl BlockPayload {
     }
 }
 
+/// Maximum addresses in a single Addr message (anti-flood / anti-OOM).
+/// Must stay in sync with the PEX sharing bound (dom-node reuses this constant).
+pub const MAX_ADDRS_PER_MESSAGE: usize = 1_000;
+
+/// One peer address entry in an Addr message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddrEntry {
+    /// Peer address as "ip:port" string (max 255 bytes on the wire).
+    pub addr: String,
+    /// Unix timestamp the sender last saw this peer.
+    pub last_seen: u64,
+}
+
+/// GetAddr request: ask a peer for addresses it knows. Carries no body —
+/// from_bytes rejects any payload so a bloated GetAddr is a malformed message.
+#[derive(Debug, Clone)]
+pub struct GetAddrPayload;
+
+impl GetAddrPayload {
+    /// Serialize (empty body).
+    pub fn to_bytes(&self) -> Result<Vec<u8>, DomError> {
+        Ok(Vec::new())
+    }
+
+    /// Deserialize. GetAddr must have an empty payload.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, DomError> {
+        if !data.is_empty() {
+            return Err(DomError::Malformed(format!(
+                "getaddr payload must be empty, got {} bytes",
+                data.len()
+            )));
+        }
+        Ok(Self)
+    }
+}
+
+/// Addr response: list of peer addresses with last-seen timestamps.
+/// Format: count[u16 LE] + per entry (len[u8] + addr bytes + last_seen[u64 LE]).
+#[derive(Debug, Clone)]
+pub struct AddrPayload {
+    /// Peer address entries (up to MAX_ADDRS_PER_MESSAGE).
+    pub entries: Vec<AddrEntry>,
+}
+
+/// Minimum wire size of one Addr entry: len byte + empty addr + timestamp.
+const ADDR_ENTRY_MIN_BYTES: usize = 1 + 8;
+
+impl AddrPayload {
+    /// Serialize.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, DomError> {
+        if self.entries.len() > MAX_ADDRS_PER_MESSAGE {
+            return Err(DomError::Invalid("too many addrs".into()));
+        }
+        let mut out = Vec::with_capacity(
+            2 + self
+                .entries
+                .iter()
+                .map(|e| ADDR_ENTRY_MIN_BYTES + e.addr.len())
+                .sum::<usize>(),
+        );
+        out.extend_from_slice(&(self.entries.len() as u16).to_le_bytes());
+        for entry in &self.entries {
+            let addr_bytes = entry.addr.as_bytes();
+            if addr_bytes.len() > u8::MAX as usize {
+                return Err(DomError::Invalid("addr string too long".into()));
+            }
+            out.push(addr_bytes.len() as u8);
+            out.extend_from_slice(addr_bytes);
+            out.extend_from_slice(&entry.last_seen.to_le_bytes());
+        }
+        Ok(out)
+    }
+
+    /// Deserialize. Rejects oversized counts, truncated payloads, and trailing
+    /// bytes; allocates only after the declared count is proven plausible.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, DomError> {
+        if data.len() < 2 {
+            return Err(DomError::Malformed("addr payload too short".into()));
+        }
+        let count = u16::from_le_bytes(data[0..2].try_into().unwrap()) as usize;
+        if count > MAX_ADDRS_PER_MESSAGE {
+            return Err(DomError::Malformed("addr count exceeds limit".into()));
+        }
+        // Anti-OOM: the declared count must fit in the bytes actually present
+        // before any allocation sized by it.
+        if data.len() < 2 + count * ADDR_ENTRY_MIN_BYTES {
+            return Err(DomError::Malformed("addr payload truncated".into()));
+        }
+        let mut entries = Vec::with_capacity(count);
+        let mut pos = 2usize;
+        for _ in 0..count {
+            if pos >= data.len() {
+                return Err(DomError::Malformed("addr payload truncated".into()));
+            }
+            let len = data[pos] as usize;
+            pos += 1;
+            if pos + len + 8 > data.len() {
+                return Err(DomError::Malformed("addr payload truncated".into()));
+            }
+            let addr = String::from_utf8_lossy(&data[pos..pos + len]).into_owned();
+            pos += len;
+            let last_seen = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            pos += 8;
+            entries.push(AddrEntry { addr, last_seen });
+        }
+        if pos != data.len() {
+            return Err(DomError::Malformed("addr trailing bytes".into()));
+        }
+        Ok(Self { entries })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -734,5 +846,151 @@ mod parser_boundary_tests {
         data.extend_from_slice(&u32::MAX.to_le_bytes()); // ~4.29 GB declared
         data.extend_from_slice(&0u32.to_le_bytes()); // checksum
         assert!(WireMessage::from_bytes(&data, TEST_MAGIC).is_err());
+    }
+}
+
+#[cfg(test)]
+mod addr_payload_tests {
+    use super::*;
+
+    fn entry(addr: &str, last_seen: u64) -> AddrEntry {
+        AddrEntry {
+            addr: addr.into(),
+            last_seen,
+        }
+    }
+
+    #[test]
+    fn addr_roundtrip() {
+        let p = AddrPayload {
+            entries: vec![
+                entry("127.0.0.1:33370", 1_700_000_000),
+                entry("192.168.1.1:8080", 1_700_000_001),
+            ],
+        };
+        let bytes = p.to_bytes().unwrap();
+        let p2 = AddrPayload::from_bytes(&bytes).unwrap();
+        assert_eq!(p2.entries, p.entries);
+    }
+
+    #[test]
+    fn addr_empty_roundtrip() {
+        let p = AddrPayload { entries: vec![] };
+        let bytes = p.to_bytes().unwrap();
+        assert_eq!(bytes, 0u16.to_le_bytes());
+        assert!(AddrPayload::from_bytes(&bytes).unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn addr_max_count_accepted() {
+        let p = AddrPayload {
+            entries: vec![entry("10.0.0.1:33369", 1); MAX_ADDRS_PER_MESSAGE],
+        };
+        let bytes = p.to_bytes().unwrap();
+        let p2 = AddrPayload::from_bytes(&bytes).unwrap();
+        assert_eq!(p2.entries.len(), MAX_ADDRS_PER_MESSAGE);
+    }
+
+    #[test]
+    fn addr_encode_rejects_over_max_count() {
+        let p = AddrPayload {
+            entries: vec![entry("10.0.0.1:33369", 1); MAX_ADDRS_PER_MESSAGE + 1],
+        };
+        assert!(p.to_bytes().is_err());
+    }
+
+    #[test]
+    fn addr_decode_rejects_oversized_count() {
+        // Declared count just above the cap, no bodies. Must reject on the
+        // count check, before any allocation sized by it.
+        let bytes = ((MAX_ADDRS_PER_MESSAGE + 1) as u16).to_le_bytes();
+        let err = AddrPayload::from_bytes(&bytes).expect_err("oversized count must reject");
+        assert!(
+            format!("{err}").contains("addr count exceeds limit"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn addr_decode_rejects_huge_count_short_data_without_alloc() {
+        // u16::MAX entries declared with 2 bytes of data: rejected by the
+        // count cap (and by the plausibility check), never allocating.
+        let bytes = u16::MAX.to_le_bytes();
+        assert!(AddrPayload::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn addr_decode_rejects_count_exceeding_available_bytes() {
+        // Count within the cap but more entries declared than bytes present.
+        let mut bytes = 100u16.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&[0u8; 30]); // far less than 100 * 9 bytes
+        let err = AddrPayload::from_bytes(&bytes).expect_err("implausible count must reject");
+        assert!(
+            format!("{err}").contains("addr payload truncated"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn addr_decode_rejects_too_short() {
+        let err = AddrPayload::from_bytes(&[0x01]).expect_err("missing count must reject");
+        assert!(
+            format!("{err}").contains("addr payload too short"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn addr_decode_rejects_truncated_entry() {
+        let p = AddrPayload {
+            entries: vec![entry("127.0.0.1:33370", 1_700_000_000)],
+        };
+        let mut bytes = p.to_bytes().unwrap();
+        // Declare a second entry but supply only a partial body.
+        bytes[0..2].copy_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&[0x0f, b'1', b'2', b'7']);
+        let err = AddrPayload::from_bytes(&bytes).expect_err("truncated entry must reject");
+        assert!(
+            format!("{err}").contains("addr payload truncated"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn addr_decode_rejects_trailing_bytes() {
+        let p = AddrPayload {
+            entries: vec![entry("127.0.0.1:33370", 1_700_000_000)],
+        };
+        let mut bytes = p.to_bytes().unwrap();
+        bytes.push(0xff);
+        let err = AddrPayload::from_bytes(&bytes).expect_err("trailing byte must reject");
+        assert!(
+            format!("{err}").contains("addr trailing bytes"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn addr_encode_rejects_oversized_addr_string() {
+        let p = AddrPayload {
+            entries: vec![entry(&"x".repeat(256), 1)],
+        };
+        assert!(p.to_bytes().is_err());
+    }
+
+    #[test]
+    fn getaddr_empty_roundtrip() {
+        let bytes = GetAddrPayload.to_bytes().unwrap();
+        assert!(bytes.is_empty());
+        assert!(GetAddrPayload::from_bytes(&bytes).is_ok());
+    }
+
+    #[test]
+    fn getaddr_nonempty_payload_rejected() {
+        let err = GetAddrPayload::from_bytes(&[0x00]).expect_err("getaddr body must reject");
+        assert!(
+            format!("{err}").contains("getaddr payload must be empty"),
+            "unexpected error: {err}"
+        );
     }
 }

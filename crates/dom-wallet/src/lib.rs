@@ -80,7 +80,7 @@ pub use types::{
     WalletBalance, WalletError,
 };
 pub use unlock::{derive_wallet_key, KdfParams, LockState, UnlockedSession, WalletKey};
-pub use wallet::{BuiltSpend, Wallet, WalletRescanMode, WalletRescanSummary};
+pub use wallet::{BuiltSpend, FinalizedSlate, Wallet, WalletRescanMode, WalletRescanSummary};
 pub use wallet_dir::{
     WalletConfig, WalletDir, WalletVersion, WALLET_BACKUPS_SUBDIR, WALLET_CONFIG_NAME,
     WALLET_DAT_NAME, WALLET_LOCK_NAME, WALLET_LOGS_SUBDIR,

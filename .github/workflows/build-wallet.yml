@@ -21,11 +21,11 @@ jobs:
       matrix:
         include:
           - platform: ubuntu-latest
-            args: ""
+            args: "-- --locked"
           - platform: macos-latest
-            args: "--target universal-apple-darwin"
+            args: "--target universal-apple-darwin -- --locked"
           - platform: windows-latest
-            args: ""
+            args: "-- --locked"
 
     runs-on: ${{ matrix.platform }}
 

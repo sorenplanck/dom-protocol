@@ -3,6 +3,7 @@
 /src-tauri/gen/
 **/*.rs.bk
 Cargo.lock
+!/src-tauri/Cargo.lock
 
 # OS
 .DS_Store

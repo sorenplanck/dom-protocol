@@ -59,6 +59,7 @@ impl eframe::App for WalletApp {
             return;
         }
         self.runtime.poll_node_reconnect();
+        self.runtime.poll_pending_resubmit();
 
         egui::TopBottomPanel::top("top_bar")
             .frame(panel_frame())
@@ -844,7 +845,7 @@ fn transaction_summary(ui: &mut egui::Ui, row: &crate::runtime::HistoryRow) {
 
 fn status_color(status: &str) -> egui::Color32 {
     let lower = status.to_ascii_lowercase();
-    if lower.contains("confirmed") {
+    if lower.contains("confirmed") || lower.contains("received") {
         palette().success
     } else if lower.contains("failed") || lower.contains("rejected") {
         palette().danger

@@ -10,7 +10,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context as _, Result};
 use dom_config::{MinerThrottleConfig, NodeConfig};
-use dom_wallet::Network as WalletNetwork;
+use dom_wallet::{Bip39Seed, Network as WalletNetwork, WalletDir};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_BOOTSTRAP_SEED_PEER: &str = "192.153.57.211:8443";
@@ -39,9 +39,10 @@ pub struct NodeSettings {
     /// Optional miner wallet file (.dom) so coinbase rewards are spendable.
     pub miner_wallet_path: Option<String>,
     pub mine: bool,
-    /// Operator-facing CPU limit. The embedded miner currently runs one active
-    /// nonce-search worker; keep this explicit so saved wallet settings cannot
-    /// request unbounded miner workers in future builds.
+    /// Operator-facing CPU limit: number of concurrent nonce-search workers
+    /// the embedded miner spawns. Clamped to 1..=available_parallelism before
+    /// reaching `NodeConfig.miner_threads`, so saved wallet settings cannot
+    /// request unbounded miner workers.
     #[serde(default = "default_miner_threads")]
     pub miner_threads: usize,
     /// Local sleep applied by the node miner throttle. This is resource control
@@ -139,6 +140,7 @@ impl NodeSettings {
         config.p2p_listen_addr = self.p2p_listen_addr.clone();
         config.data_dir = self.data_dir.clone();
         config.mine = self.mine;
+        config.miner_threads = self.normalized_miner_threads();
         config.miner_throttle = self.miner_throttle_config();
         config.log_level = self.log_level.clone();
         config.rpc_listen_addr = Some(self.rpc_listen_addr.clone());
@@ -148,6 +150,14 @@ impl NodeSettings {
         // Mining wallet (dedicated; never the user's). Only set when mining.
         if self.mine {
             let (path, password) = self.miner_wallet_credentials()?;
+            // DOM-SEC-004: the embedded node only OPENS a wallet directory — it
+            // never creates one. Resolving the path/password above is not
+            // enough; without a real wallet on disk the node fails to open
+            // `miner-wallet.dom` and fail-closes mining. Materialize it here,
+            // right before `DomNode::init`, so it exists for every path that
+            // enables mining (create, restore, open-by-name, or toggling mining
+            // on later in Settings).
+            self.ensure_miner_wallet_exists(&path, &password)?;
             config.wallet_path = Some(path);
             config.wallet_password = Some(password);
         } else {
@@ -289,6 +299,54 @@ impl NodeSettings {
         Ok((wallet_path.to_string_lossy().to_string(), password))
     }
 
+    /// Materialize the dedicated miner wallet at `path` if it does not exist.
+    ///
+    /// DOM-SEC-004: the embedded node only OPENS a wallet directory — it never
+    /// creates one (see `dom_node::node`: a missing/unopenable wallet leaves
+    /// mining disabled, fail-closed). `miner_wallet_credentials` resolves the
+    /// path and persists the generated password, but without a real wallet on
+    /// disk the node cannot open `miner-wallet.dom`. We create a genuine,
+    /// reopenable `WalletDir` here — same primitive the user's own wallet uses
+    /// (`wallet_manager::create_new`) — so the fail-closed check is SATISFIED,
+    /// not bypassed.
+    ///
+    /// The miner wallet has its OWN fresh seed (never the user's seed or
+    /// password): coinbase rewards land here and the periodic auto-sweep
+    /// (`lib.rs::do_sweep`) forwards matured rewards to the user's wallet. The
+    /// mnemonic is intentionally throwaway — it is discarded immediately and
+    /// NEVER logged, the same way the generated key password is never logged.
+    ///
+    /// Idempotent: when a wallet already exists at `path` we leave it untouched.
+    /// Recreating it would discard already-mined rewards and the existing seed.
+    /// (`WalletDir::create_from_seed` itself refuses to overwrite a non-empty
+    /// directory, but we skip it explicitly so a normal app restart is a clean
+    /// no-op rather than a swallowed error.)
+    fn ensure_miner_wallet_exists(&self, path: &str, password: &str) -> Result<()> {
+        let wallet_dir = Path::new(path);
+        if wallet_dir_is_populated(wallet_dir) {
+            // Already created on a previous run — reuse it as-is.
+            return Ok(());
+        }
+
+        let network = self.wallet_network();
+        let genesis = dom_core::startup_genesis_hash_for_network_magic(network.magic())
+            .map_err(|e| anyhow!("miner wallet genesis hash: {e}"))?;
+        let seed = Bip39Seed::generate_new().map_err(|e| anyhow!("miner wallet seed gen: {e}"))?;
+
+        // Create then immediately drop: `create_from_seed` holds the exclusive
+        // wallet lockfile, and the embedded node opens this same directory
+        // moments later — dropping the handle releases the lock. The mnemonic
+        // is never bound to a variable that outlives this call and is never
+        // logged.
+        let dir = WalletDir::create_from_seed(wallet_dir, password, network, &genesis, &seed)
+            .map_err(|e| anyhow!("create miner wallet: {e}"))?;
+        drop(dir);
+
+        // Path only — never the seed or password.
+        tracing::info!("dedicated miner wallet created at {}", wallet_dir.display());
+        Ok(())
+    }
+
     /// Map our UI network to the wallet `Network` enum used by
     /// `Wallet::create`, `Wallet::create_from_seed`, etc.
     pub fn wallet_network(&self) -> WalletNetwork {
@@ -306,6 +364,18 @@ impl NodeSettings {
     pub fn matches_wallet_network(&self, wallet_network: WalletNetwork) -> bool {
         self.wallet_network() == wallet_network
     }
+}
+
+/// Whether `path` already holds a wallet directory we must not clobber.
+///
+/// Mirrors `WalletDir::create_from_seed`'s own guard: a non-empty directory is
+/// treated as an existing wallet (reuse it), while a missing or empty directory
+/// means "create". Used to keep miner-wallet creation idempotent across restarts.
+fn wallet_dir_is_populated(path: &Path) -> bool {
+    path.is_dir()
+        && std::fs::read_dir(path)
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false)
 }
 
 fn default_miner_threads() -> usize {
@@ -695,6 +765,22 @@ mod tests {
     }
 
     #[test]
+    fn miner_threads_map_into_node_config() {
+        let mut settings = regtest_settings_with_seed(vec![]);
+        settings.miner_threads = 2;
+        let config = settings.to_node_config(None).expect("config");
+        assert_eq!(
+            config.miner_threads,
+            settings.normalized_miner_threads(),
+            "UI thread count must reach NodeConfig (clamped to available parallelism)"
+        );
+
+        settings.miner_threads = 0;
+        let config = settings.to_node_config(None).expect("config");
+        assert_eq!(config.miner_threads, 1, "zero clamps to one worker");
+    }
+
+    #[test]
     fn bootstrap_seed_peer_is_valid_socket() {
         let settings = regtest_settings_with_seed(vec!["192.153.57.211:8443".into()]);
         let config = settings
@@ -723,5 +809,149 @@ mod tests {
             .to_node_config(None)
             .expect_err("invalid seed peer must fail");
         assert!(err.to_string().contains("seed peer is invalid"));
+    }
+
+    /// A `mine=true` config in a fresh data dir whose miner wallet does not yet
+    /// exist on disk.
+    fn mining_settings_in_fresh_dir() -> NodeSettings {
+        let mut settings = regtest_settings_with_seed(vec![]);
+        settings.data_dir = tempfile::tempdir()
+            .expect("tempdir")
+            .keep()
+            .to_string_lossy()
+            .into_owned();
+        settings.mine = true;
+        settings.miner_wallet_path = None;
+        settings
+    }
+
+    fn miner_wallet_paths(settings: &NodeSettings) -> (std::path::PathBuf, std::path::PathBuf) {
+        let wallet = std::path::Path::new(&settings.data_dir).join("miner-wallet.dom");
+        let key = std::path::Path::new(&settings.data_dir).join("miner-wallet.dom.key");
+        (wallet, key)
+    }
+
+    /// DOM-SEC-004 root cause: when mining is enabled and the miner wallet does
+    /// not exist yet, `to_node_config` must CREATE a real, reopenable wallet —
+    /// not just resolve a path/password. Proven by reopening the created wallet
+    /// with the persisted key password, exactly as the embedded node does.
+    #[test]
+    fn mining_creates_a_reopenable_miner_wallet() {
+        let settings = mining_settings_in_fresh_dir();
+        let (wallet_path, key_path) = miner_wallet_paths(&settings);
+
+        assert!(
+            !wallet_path.exists(),
+            "precondition: miner wallet must not exist yet"
+        );
+
+        let config = settings.to_node_config(None).expect("mining config");
+        assert!(config.mine);
+        assert_eq!(config.wallet_path.as_deref(), wallet_path.to_str());
+
+        // The wallet directory now exists and can be OPENED with the generated
+        // key password — i.e. the node's `WalletDir::open` will succeed and
+        // mining will NOT fall into the DOM-SEC-004 fail-closed branch.
+        assert!(wallet_dir_is_populated(&wallet_path));
+        let password = std::fs::read_to_string(&key_path).expect("key file");
+        WalletDir::open(&wallet_path, password.trim()).expect("miner wallet must reopen");
+
+        let _ = std::fs::remove_dir_all(&settings.data_dir);
+    }
+
+    /// Idempotence: a second `to_node_config` (e.g. an app restart, or toggling
+    /// settings) must REUSE the existing miner wallet, never recreate or
+    /// overwrite it — recreating would discard already-mined rewards and the
+    /// original seed.
+    #[test]
+    fn miner_wallet_creation_is_idempotent() {
+        let settings = mining_settings_in_fresh_dir();
+        let (wallet_path, _key_path) = miner_wallet_paths(&settings);
+
+        settings.to_node_config(None).expect("first config");
+        let dat_path = wallet_path.join("wallet.dat");
+        let first = std::fs::read(&dat_path).expect("wallet.dat after first run");
+
+        // Second call must succeed (no "refusing to overwrite" error) AND leave
+        // the encrypted vault byte-for-byte identical (same seed/state).
+        settings.to_node_config(None).expect("second config");
+        let second = std::fs::read(&dat_path).expect("wallet.dat after second run");
+        assert_eq!(
+            first, second,
+            "miner wallet must be reused, not recreated/overwritten"
+        );
+
+        let _ = std::fs::remove_dir_all(&settings.data_dir);
+    }
+
+    /// Mining OFF must never create the miner wallet (no path/password set, and
+    /// nothing is written to disk).
+    #[test]
+    fn mining_off_does_not_create_miner_wallet() {
+        let mut settings = mining_settings_in_fresh_dir();
+        settings.mine = false;
+        let (wallet_path, key_path) = miner_wallet_paths(&settings);
+
+        let config = settings.to_node_config(None).expect("config");
+        assert!(!config.mine);
+        assert_eq!(config.wallet_path, None);
+        assert_eq!(config.wallet_password, None);
+        assert!(
+            !wallet_path.exists(),
+            "mining off must not create the miner wallet"
+        );
+        assert!(
+            !key_path.exists(),
+            "mining off must not even generate the key file"
+        );
+
+        let _ = std::fs::remove_dir_all(&settings.data_dir);
+    }
+
+    /// The miner wallet password (and, by construction, its seed) must NEVER
+    /// reach any log. We capture all tracing output produced while creating the
+    /// wallet and assert the generated key password does not appear in it.
+    #[test]
+    fn miner_wallet_secret_is_never_logged() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedBuf {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let settings = mining_settings_in_fresh_dir();
+        let (_wallet_path, key_path) = miner_wallet_paths(&settings);
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let make = {
+            let buf = buf.clone();
+            move || SharedBuf(buf.clone())
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(make)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            settings.to_node_config(None).expect("mining config");
+        });
+
+        let logs = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8 logs");
+        let password = std::fs::read_to_string(&key_path).expect("key file");
+        let password = password.trim();
+        assert!(!password.is_empty());
+        assert!(
+            !logs.contains(password),
+            "miner wallet password must never be logged"
+        );
+
+        let _ = std::fs::remove_dir_all(&settings.data_dir);
     }
 }

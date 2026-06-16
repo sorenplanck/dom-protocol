@@ -4,7 +4,7 @@
 //! both Arc<DomNode> and NodeHandle are defined outside dom-node.
 
 use crate::node::{clear_persisted_mempool_snapshot, snapshot_tx_chain_view, DomNode};
-use dom_rpc::{MempoolTxInfo, NodeHandle, PeerInfo, RpcError, UtxoInfo};
+use dom_rpc::{MempoolTxInfo, NodeHandle, PeerInfo, RpcError, TxAdmission, UtxoInfo};
 use dom_serialization::DomDeserialize;
 use std::sync::Arc;
 
@@ -44,7 +44,7 @@ impl NodeHandle for NodeHandleImpl {
         })
     }
 
-    fn submit_tx(&self, tx_bytes: Vec<u8>) -> Result<[u8; 32], RpcError> {
+    fn submit_tx(&self, tx_bytes: Vec<u8>) -> Result<TxAdmission, RpcError> {
         use dom_consensus::Transaction;
 
         let tx = Transaction::from_bytes(&tx_bytes)
@@ -117,42 +117,41 @@ impl NodeHandle for NodeHandleImpl {
                 (dom_wire::dandelion::DandelionPhase::Fluff, None)
             };
         use dom_wire::dandelion::{DandelionPhase, StemEnvelope};
-        match phase {
-            DandelionPhase::Fluff => {
-                if self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok() {
-                    self.0
-                        .metrics
-                        .txs_relayed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
+        // `relayed` is true only when a broadcast channel actually had a live
+        // subscriber (a connected peer task). With zero peers, send() returns
+        // Err and the relay is a silent no-op — exactly how the first testnet
+        // Slatepack tx was lost. We report this up so the RPC can warn and the
+        // wallet can retransmit.
+        let relayed = match phase {
+            DandelionPhase::Fluff => self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok(),
             DandelionPhase::Stem => {
                 if let Some(target) = stem_target {
-                    if self
-                        .0
+                    self.0
                         .tx_stem_tx
                         .send(StemEnvelope {
                             target_peer: target,
                             tx_bytes: tx_bytes.clone(),
                         })
                         .is_ok()
-                    {
-                        self.0
-                            .metrics
-                            .txs_relayed
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                } else if self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok() {
+                } else {
                     // Route said Stem but no peer was stored — fall back to Fluff.
-                    self.0
-                        .metrics
-                        .txs_relayed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok()
                 }
             }
+        };
+        if relayed {
+            self.0
+                .metrics
+                .txs_relayed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            tracing::info!(
+                "tx accepted but not relayed: no peer subscribers (tx {})",
+                hex::encode(tx_hash)
+            );
         }
 
-        Ok(tx_hash)
+        Ok(TxAdmission { tx_hash, relayed })
     }
 
     fn network(&self) -> &'static str {
@@ -201,9 +200,9 @@ impl NodeHandle for NodeHandleImpl {
     }
 
     fn get_wallet_balance(&self) -> Option<dom_rpc::WalletBalanceResponse> {
-        let wallet = self.0.wallet.as_ref()?.try_lock().ok()?;
+        let wallet_dir = self.0.wallet.as_ref()?.try_lock().ok()?;
         let height = self.0.chain.try_lock().ok()?.tip_height.0;
-        let bal = wallet.balance(height);
+        let bal = wallet_dir.wallet().balance(height);
         const NOMS: f64 = 100_000_000.0;
         Some(dom_rpc::WalletBalanceResponse {
             confirmed_noms: bal.confirmed,
@@ -279,9 +278,10 @@ impl NodeHandle for NodeHandleImpl {
                 .mempool
                 .try_lock()
                 .map_err(|_| dom_rpc::RpcError::Overloaded("mempool busy".into()))?;
-            let mut wallet = wallet_arc
+            let mut wallet_dir = wallet_arc
                 .try_lock()
                 .map_err(|_| dom_rpc::RpcError::Overloaded("wallet busy".into()))?;
+            let wallet = wallet_dir.wallet_mut();
 
             let height = chain.tip_height.0;
             let built = wallet
@@ -356,38 +356,32 @@ impl NodeHandle for NodeHandleImpl {
                 (dom_wire::dandelion::DandelionPhase::Fluff, None)
             };
         use dom_wire::dandelion::{DandelionPhase, StemEnvelope};
-        match phase {
-            DandelionPhase::Fluff => {
-                if self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok() {
-                    self.0
-                        .metrics
-                        .txs_relayed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
+        let relayed = match phase {
+            DandelionPhase::Fluff => self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok(),
             DandelionPhase::Stem => {
                 if let Some(target) = stem_target {
-                    if self
-                        .0
+                    self.0
                         .tx_stem_tx
                         .send(StemEnvelope {
                             target_peer: target,
                             tx_bytes: tx_bytes.clone(),
                         })
                         .is_ok()
-                    {
-                        self.0
-                            .metrics
-                            .txs_relayed
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                } else if self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok() {
-                    self.0
-                        .metrics
-                        .txs_relayed
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    self.0.tx_fluff_tx.send(tx_bytes.clone()).is_ok()
                 }
             }
+        };
+        if relayed {
+            self.0
+                .metrics
+                .txs_relayed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            tracing::info!(
+                "tx accepted but not relayed: no peer subscribers (tx {})",
+                hex::encode(tx_hash)
+            );
         }
 
         Ok(tx_hash)
@@ -408,7 +402,7 @@ mod tests {
     use dom_rpc::SpendRequest;
     use dom_serialization::DomSerialize;
     use dom_store::utxo::UtxoEntry;
-    use dom_wallet::{Network, OwnedOutput, Wallet};
+    use dom_wallet::{Network, OwnedOutput, Wallet, WalletDir, WALLET_DAT_NAME};
     use std::sync::atomic::Ordering;
 
     const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
@@ -437,6 +431,7 @@ mod tests {
             seed_peers: vec![],
             mine: false,
             miner_throttle: Default::default(),
+            miner_threads: 1,
             miner_address: None,
             wallet_path: Some(wallet_path.to_string()),
             wallet_password: Some("password123".into()),
@@ -445,6 +440,21 @@ mod tests {
             rpc_bearer_token: None,
             metrics_listen_addr: None,
         }
+    }
+
+    /// The node no longer CREATES wallets (DOM-SEC-004: the old auto-create
+    /// produced a legacy keychain with no recoverable seed). Tests pre-create
+    /// the canonical WalletDir directory, exactly like the CLI/desktop wallet,
+    /// and drop the handle so the node can take the exclusive lock.
+    fn create_test_wallet_dir(path: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(path);
+        WalletDir::create(
+            path,
+            "password123",
+            Network::Regtest,
+            &dom_core::Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+        )
+        .expect("create test wallet dir");
     }
 
     fn raw_spend_tx(
@@ -505,7 +515,7 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
         let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        create_test_wallet_dir(&wallet_path);
 
         let node = std::sync::Arc::new(
             DomNode::init_with_map_size(
@@ -524,7 +534,8 @@ mod tests {
 
         {
             let wallet_arc = node.wallet.as_ref().expect("wallet configured");
-            let mut wallet = wallet_arc.try_lock().expect("wallet lock");
+            let mut wallet_dir = wallet_arc.try_lock().expect("wallet lock");
+            let wallet = wallet_dir.wallet_mut();
             wallet.add_output(make_output(900, 100, false));
             wallet.save().expect("persist wallet");
         }
@@ -549,8 +560,8 @@ mod tests {
 
         {
             let wallet_arc = node.wallet.as_ref().expect("wallet configured");
-            let wallet = wallet_arc.try_lock().expect("wallet lock");
-            let balance = wallet.balance(1000);
+            let wallet_dir = wallet_arc.try_lock().expect("wallet lock");
+            let balance = wallet_dir.wallet().balance(1000);
             assert_eq!(balance.confirmed, 900);
             assert_eq!(
                 balance.reserved, 0,
@@ -558,8 +569,8 @@ mod tests {
             );
         }
 
-        let reopened =
-            Wallet::open(&wallet_path, "password123").expect("reopen wallet after rollback");
+        let reopened = Wallet::open(&wallet_path.join(WALLET_DAT_NAME), "password123")
+            .expect("reopen wallet after rollback");
         let reopened_balance = reopened.balance(1000);
         assert_eq!(reopened_balance.confirmed, 900);
         assert_eq!(
@@ -569,7 +580,7 @@ mod tests {
         assert_eq!(reopened.network(), Network::Regtest);
 
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
     }
 
     #[test]
@@ -591,7 +602,7 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
         let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        create_test_wallet_dir(&wallet_path);
 
         let node = std::sync::Arc::new(
             DomNode::init_with_map_size(
@@ -607,7 +618,8 @@ mod tests {
 
         {
             let wallet_arc = node.wallet.as_ref().expect("wallet configured");
-            let mut wallet = wallet_arc.try_lock().expect("wallet lock");
+            let mut wallet_dir = wallet_arc.try_lock().expect("wallet lock");
+            let wallet = wallet_dir.wallet_mut();
             wallet.add_output(make_output(900, 100, false));
             wallet.save().expect("persist wallet");
         }
@@ -633,8 +645,8 @@ mod tests {
 
         {
             let wallet_arc = node.wallet.as_ref().expect("wallet configured");
-            let wallet = wallet_arc.try_lock().expect("wallet lock");
-            let balance = wallet.balance(1000);
+            let wallet_dir = wallet_arc.try_lock().expect("wallet lock");
+            let balance = wallet_dir.wallet().balance(1000);
             assert_eq!(balance.confirmed, 900);
             assert_eq!(
                 balance.reserved, 0,
@@ -642,8 +654,8 @@ mod tests {
             );
         }
 
-        let reopened =
-            Wallet::open(&wallet_path, "password123").expect("reopen wallet after rollback");
+        let reopened = Wallet::open(&wallet_path.join(WALLET_DAT_NAME), "password123")
+            .expect("reopen wallet after rollback");
         let reopened_balance = reopened.balance(1000);
         assert_eq!(reopened_balance.confirmed, 900);
         assert_eq!(
@@ -652,7 +664,7 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
     }
 
     #[test]
@@ -670,7 +682,7 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
         let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
 
         let node = std::sync::Arc::new(
             DomNode::init_with_map_size(
@@ -688,7 +700,7 @@ mod tests {
         assert_ne!(handle.network(), "mainnet");
 
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
     }
 
     #[test]
@@ -703,7 +715,7 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
         let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
 
         let node = std::sync::Arc::new(
             DomNode::init_with_map_size(
@@ -732,7 +744,7 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
     }
 
     #[test]
@@ -747,7 +759,7 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
         let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
 
         let node = std::sync::Arc::new(
             DomNode::init_with_map_size(
@@ -794,14 +806,85 @@ mod tests {
         let tx_bytes = raw_spend_tx(input_value, &input_blinding, &chain_id);
         let handle = NodeHandleImpl(node.clone());
 
-        let tx_hash = handle.submit_tx(tx_bytes).expect("submit tx");
+        let admission = handle.submit_tx(tx_bytes).expect("submit tx");
 
-        assert_ne!(tx_hash, [0u8; 32]);
+        assert_ne!(admission.tx_hash, [0u8; 32]);
+        assert!(admission.relayed);
         assert_eq!(node.metrics.txs_received.load(Ordering::Relaxed), 1);
         assert_eq!(node.metrics.mempool_size.load(Ordering::Relaxed), 1);
         assert_eq!(node.metrics.txs_relayed.load(Ordering::Relaxed), 1);
 
         let _ = std::fs::remove_dir_all(&data_dir);
-        let _ = std::fs::remove_file(&wallet_path);
+        let _ = std::fs::remove_dir_all(&wallet_path);
+    }
+
+    #[test]
+    fn submit_tx_with_zero_peer_subscribers_reports_not_relayed() {
+        let unique = format!(
+            "dom-node-handle-submit-no-subscribers-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos()
+        );
+        let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
+        let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_dir_all(&wallet_path);
+
+        let node = std::sync::Arc::new(
+            DomNode::init_with_map_size(
+                test_config(
+                    data_dir.to_str().expect("utf8 data dir"),
+                    wallet_path.to_str().expect("utf8 wallet path"),
+                ),
+                TEST_LMDB_MAP_SIZE,
+            )
+            .expect("init node"),
+        );
+        let chain_id = {
+            let chain = node.chain.try_lock().expect("chain lock");
+            *dom_consensus::derive_chain_id(chain.network_magic, &chain.genesis_hash).as_bytes()
+        };
+
+        let input_value = 500_000;
+        let input_blinding = BlindingFactor::random();
+        let input_commitment = Commitment::commit(input_value, &input_blinding);
+        {
+            let chain = node.chain.try_lock().expect("chain lock");
+            chain
+                .store
+                .commit_block(
+                    &[0xB7; 32],
+                    0,
+                    b"no-subscriber-test-header",
+                    b"no-subscriber-test-body",
+                    &[(
+                        *input_commitment.as_bytes(),
+                        UtxoEntry {
+                            block_height: 0,
+                            is_coinbase: false,
+                            proof: Vec::new(),
+                        }
+                        .to_bytes(),
+                    )],
+                    &[],
+                    &[],
+                )
+                .expect("plant canonical input utxo");
+        }
+        let tx_bytes = raw_spend_tx(input_value, &input_blinding, &chain_id);
+        let handle = NodeHandleImpl(node.clone());
+
+        let admission = handle.submit_tx(tx_bytes).expect("submit tx");
+
+        assert_ne!(admission.tx_hash, [0u8; 32]);
+        assert!(!admission.relayed);
+        assert_eq!(node.metrics.txs_received.load(Ordering::Relaxed), 1);
+        assert_eq!(node.metrics.mempool_size.load(Ordering::Relaxed), 1);
+        assert_eq!(node.metrics.txs_relayed.load(Ordering::Relaxed), 0);
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_dir_all(&wallet_path);
     }
 }

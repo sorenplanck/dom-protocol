@@ -25,7 +25,7 @@ use dom_crypto::{
     blake2b_256_tagged, bp_prove, schnorr_add_public_keys, schnorr_aggregate_sigs,
     schnorr_partial_sign, schnorr_verify, BlindingFactor, Hash256, SecretKey,
 };
-use dom_serialization::DomSerialize;
+use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_tx::slate::{OutputCommitmentAndProof, Slate};
 use dom_tx::SpendBuilder;
 use k256::elliptic_curve::PrimeField;
@@ -62,6 +62,23 @@ pub struct BuiltSpend {
     fee: u64,
 }
 
+/// Result of finalizing an interactive Mimblewimble slate
+/// ([`Wallet::finalize_slate`]).
+///
+/// Carries both the finished [`Transaction`] (to submit to the node) and the
+/// `pending_key` under which the wallet tracks the corresponding pending tx.
+/// The pending entry for a slate send is keyed by the **sender slate hash**
+/// (`blake2b_256` of the sender-phase slate bytes), *not* by the transaction
+/// tracking hash — so callers must use `pending_key`, never
+/// `tracking_tx_hash(&tx)`, when calling [`Wallet::mark_submitted`] /
+/// [`Wallet::cancel_tx`] for a finalized slate.
+pub struct FinalizedSlate {
+    /// The finished aggregate transaction, ready to submit.
+    pub tx: Transaction,
+    /// Key of the pending tx in `pending_txs` (the sender slate hash).
+    pub pending_key: [u8; 32],
+}
+
 /// Canonical wallet rescan execution mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalletRescanMode {
@@ -94,6 +111,14 @@ pub struct WalletRescanSummary {
     pub matched_persisted: bool,
     /// Whether the rebuilt state was written back to disk.
     pub repaired: bool,
+}
+
+#[derive(Clone)]
+struct PendingReceiveCandidate {
+    tx_hash: [u8; 32],
+    commitment: [u8; 33],
+    amount: u64,
+    blinding: [u8; 32],
 }
 
 /// The DOM Protocol wallet.
@@ -358,6 +383,38 @@ impl Wallet {
 
         for (tx_hash, record) in &records {
             match &record.status {
+                TxStatus::Received {
+                    commitment,
+                    amount,
+                    block_height,
+                    block_hash,
+                    source_slate_hash,
+                } => {
+                    let pending_candidate = self
+                        .pending_receive_candidates()?
+                        .into_iter()
+                        .find(|candidate| candidate.tx_hash == *source_slate_hash);
+                    let pending_removed = self.pending_txs.remove(source_slate_hash).is_some();
+                    let output_registered = if let Some(candidate) = pending_candidate {
+                        self.register_confirmed_receive(&candidate, *block_height, *block_hash)
+                    } else {
+                        tracing::warn!(
+                            "reconcile: receive-confirmed journal entry {} has no encrypted pending receive secrets; cannot reconstruct missing output {}",
+                            hex::encode(source_slate_hash),
+                            hex::encode(commitment)
+                        );
+                        false
+                    };
+                    if pending_removed || output_registered {
+                        changed = true;
+                    }
+                    tracing::info!(
+                        "reconcile: receive slate {} confirmed {} noms at height {}",
+                        hex::encode(source_slate_hash),
+                        amount,
+                        block_height
+                    );
+                }
                 TxStatus::Confirmed { .. } | TxStatus::Replaced { .. } | TxStatus::Canceled => {
                     if let Some(pending) = self.pending_txs.remove(tx_hash) {
                         let confirmed = matches!(record.status, TxStatus::Confirmed { .. });
@@ -964,6 +1021,8 @@ impl Wallet {
         let mut rebuilt_outputs = OutputIndex::new();
         let mut canonical_inputs = HashSet::new();
         let mut detected_receives: BTreeMap<[u8; 33], ReceiveRequestStatus> = BTreeMap::new();
+        let pending_receives = self.pending_receive_candidates()?;
+        let mut confirmed_pending_receives = BTreeMap::new();
 
         for height in 0..=scanned_tip {
             let block = scan.block_at(height).map_err(scan_error_to_wallet)?;
@@ -1032,6 +1091,24 @@ impl Wallet {
                     );
                 }
             }
+
+            for receive in &pending_receives {
+                if block.output_commitments.contains(&receive.commitment) {
+                    let mut owned = OwnedOutput::new(
+                        receive.commitment,
+                        receive.amount,
+                        receive.blinding,
+                        height,
+                        false,
+                    );
+                    if let Some(hash) = block.block_hash {
+                        owned = owned.with_block_hash(hash);
+                    }
+                    rebuilt_outputs.insert(owned);
+                    confirmed_pending_receives
+                        .insert(receive.tx_hash, (receive.clone(), height, block.block_hash));
+                }
+            }
         }
 
         for commitment in &canonical_inputs {
@@ -1044,6 +1121,10 @@ impl Wallet {
         let mut rebuilt_pending = HashMap::new();
         let mut pending_dropped = 0usize;
         for (tx_hash, pending) in &self.pending_txs {
+            if confirmed_pending_receives.contains_key(tx_hash) {
+                pending_dropped = pending_dropped.saturating_add(1);
+                continue;
+            }
             let survives = pending.inputs.iter().all(|commitment| {
                 rebuilt_outputs
                     .get(commitment)
@@ -1099,6 +1180,9 @@ impl Wallet {
         };
 
         if matches!(mode, WalletRescanMode::Repair) {
+            for (receive, block_height, block_hash) in confirmed_pending_receives.values() {
+                self.record_receive_confirmed_if_needed(receive, *block_height, *block_hash)?;
+            }
             self.outputs = rebuilt_outputs;
             self.pending_txs = rebuilt_pending;
             self.receive_requests = rebuilt_receive_requests;
@@ -1150,6 +1234,117 @@ impl Wallet {
             owned = owned.with_block_hash(hash);
         }
         self.outputs.insert(owned);
+    }
+
+    fn pending_receive_candidates(&self) -> Result<Vec<PendingReceiveCandidate>, WalletError> {
+        let mut candidates = Vec::new();
+
+        for (tx_hash, pending) in &self.pending_txs {
+            let Some(receive_slate) = &pending.receive_slate else {
+                continue;
+            };
+            let secrets = pending.receive_slate_secrets.as_ref().ok_or_else(|| {
+                WalletError::Crypto(format!(
+                    "pending receive slate {} is missing recipient secrets",
+                    hex::encode(tx_hash)
+                ))
+            })?;
+            let slate = Slate::from_bytes(&receive_slate.slate_bytes).map_err(|e| {
+                WalletError::Crypto(format!(
+                    "pending receive slate {} failed to decode: {e}",
+                    hex::encode(tx_hash)
+                ))
+            })?;
+            if slate.chain_id != self.chain_id {
+                return Err(WalletError::Crypto(format!(
+                    "pending receive slate {} chain_id does not match wallet",
+                    hex::encode(tx_hash)
+                )));
+            }
+            Amount::from_noms(slate.amount).map_err(|e| {
+                WalletError::Crypto(format!(
+                    "pending receive slate {} has invalid amount: {e}",
+                    hex::encode(tx_hash)
+                ))
+            })?;
+            let recipient_output = slate.recipient_output.as_ref().ok_or_else(|| {
+                WalletError::Crypto(format!(
+                    "pending receive slate {} is missing recipient output",
+                    hex::encode(tx_hash)
+                ))
+            })?;
+            let blinding = BlindingFactor::from_bytes(secrets.recipient_output_blinding)?;
+            let expected_commitment = Commitment::commit(slate.amount, &blinding);
+            if expected_commitment != recipient_output.commitment {
+                return Err(WalletError::Crypto(format!(
+                    "pending receive slate {} commitment does not match stored recipient blinding",
+                    hex::encode(tx_hash)
+                )));
+            }
+
+            candidates.push(PendingReceiveCandidate {
+                tx_hash: *tx_hash,
+                commitment: *recipient_output.commitment.as_bytes(),
+                amount: slate.amount,
+                blinding: secrets.recipient_output_blinding,
+            });
+        }
+
+        candidates.sort_by_key(|candidate| candidate.tx_hash);
+        Ok(candidates)
+    }
+
+    fn register_confirmed_receive(
+        &mut self,
+        receive: &PendingReceiveCandidate,
+        block_height: u64,
+        block_hash: Option<[u8; 32]>,
+    ) -> bool {
+        if self.outputs.get(&receive.commitment).is_some() {
+            return false;
+        }
+        let mut owned = OwnedOutput::new(
+            receive.commitment,
+            receive.amount,
+            receive.blinding,
+            block_height,
+            false,
+        );
+        if let Some(hash) = block_hash {
+            owned = owned.with_block_hash(hash);
+        }
+        self.outputs.insert(owned);
+        true
+    }
+
+    fn record_receive_confirmed_if_needed(
+        &self,
+        receive: &PendingReceiveCandidate,
+        block_height: u64,
+        block_hash: Option<[u8; 32]>,
+    ) -> Result<(), WalletError> {
+        let Some(journal) = self.journal.as_ref() else {
+            return Ok(());
+        };
+        if matches!(
+            journal
+                .replay()?
+                .get(&receive.tx_hash)
+                .map(|record| &record.status),
+            Some(TxStatus::Received { .. })
+        ) {
+            return Ok(());
+        }
+        self.record_journal(
+            receive.tx_hash,
+            TxJournalEvent::ReceiveConfirmed {
+                commitment: receive.commitment,
+                amount: receive.amount,
+                block_height,
+                block_hash,
+                source_slate_hash: receive.tx_hash,
+            },
+        )
     }
 
     /// Create the sender side of an interactive Mimblewimble slate.
@@ -1396,7 +1591,7 @@ impl Wallet {
         &mut self,
         slate: Slate,
         _current_height: u64,
-    ) -> Result<Transaction, WalletError> {
+    ) -> Result<FinalizedSlate, WalletError> {
         if slate.chain_id != self.chain_id {
             return Err(WalletError::Crypto(
                 "slate chain_id does not match wallet chain_id".into(),
@@ -1528,7 +1723,10 @@ impl Wallet {
 
         self.save()?;
         info!("finalized send slate {}", hex::encode(sender_slate_hash));
-        Ok(tx)
+        Ok(FinalizedSlate {
+            tx,
+            pending_key: sender_slate_hash,
+        })
     }
 
     /// Build, reserve, and persist a single-party spend transaction.
@@ -1899,9 +2097,13 @@ impl Wallet {
         block_hash: Option<[u8; 32]>,
     ) -> Result<(), WalletError> {
         let mut consumed_inputs = std::collections::HashSet::new();
+        let mut created_outputs = std::collections::HashSet::new();
         for tx in transactions {
             for input in &tx.inputs {
                 consumed_inputs.insert(*input.commitment.as_bytes());
+            }
+            for output in &tx.outputs {
+                created_outputs.insert(*output.commitment.as_bytes());
             }
         }
 
@@ -1940,6 +2142,25 @@ impl Wallet {
                         self.register_pending_change(c, block_height, block_hash);
                     }
                 }
+            }
+        }
+
+        if !created_outputs.is_empty() {
+            let confirmed_receives: Vec<PendingReceiveCandidate> = self
+                .pending_receive_candidates()?
+                .into_iter()
+                .filter(|receive| created_outputs.contains(&receive.commitment))
+                .collect();
+
+            for receive in &confirmed_receives {
+                self.record_receive_confirmed_if_needed(receive, block_height, block_hash)?;
+                self.pending_txs.remove(&receive.tx_hash);
+                self.register_confirmed_receive(receive, block_height, block_hash);
+                tracing::info!(
+                    "confirmed pending receive slate {} at height {}",
+                    hex::encode(receive.tx_hash),
+                    block_height
+                );
             }
         }
 
@@ -2413,6 +2634,8 @@ fn compute_tx_hash(tx: &Transaction) -> Result<[u8; 32], WalletError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::restore::{InMemoryChainScan, ScanBlock};
+    use crate::wallet_dir::WalletDir;
     use tempfile::tempdir;
 
     fn fixed_output(value: u64, height: u64, blinding_byte: u8) -> OwnedOutput {
@@ -2456,6 +2679,14 @@ mod tests {
         let send_slate = sender.create_send_slate(900, 100, 2_000).unwrap();
         let response_slate = recipient.receive_slate(send_slate.clone(), 2_000).unwrap();
         (sender, recipient, send_slate, response_slate)
+    }
+
+    fn receive_confirmed_event_count(journal: &TxJournal) -> usize {
+        std::fs::read_to_string(journal.path())
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains("\"type\":\"receive_confirmed\""))
+            .count()
     }
 
     #[test]
@@ -2628,9 +2859,14 @@ mod tests {
             .unwrap()
             .recipient_output_blinding;
 
-        let tx = sender
+        let finalized = sender
             .finalize_slate(response_slate.clone(), 2_000)
             .unwrap();
+        // F1: the pending tx is keyed by the sender slate hash, and
+        // finalize_slate must hand that key back so callers mark/cancel the
+        // right pending entry (regression guard for the mark_submitted bug).
+        assert_eq!(finalized.pending_key, send_slate_hash);
+        let tx = finalized.tx;
 
         validate_transaction_structure(&tx).unwrap();
         validate_balance_equation(&tx).unwrap();
@@ -2664,6 +2900,215 @@ mod tests {
         let finalized_pending = sender.pending_txs.get(&send_slate_hash).unwrap();
         assert!(!finalized_pending.tx_bytes.is_empty());
         assert!(finalized_pending.send_slate_secrets.is_none());
+    }
+
+    #[test]
+    fn apply_canonical_block_confirms_received_slate_output() {
+        let (mut sender, mut recipient, _send_slate, response_slate) = answered_slate();
+        let response_hash =
+            *dom_crypto::blake2b_256(&response_slate.to_bytes().unwrap()).as_bytes();
+        let recipient_output = response_slate.recipient_output.clone().unwrap();
+        let recipient_secret = recipient
+            .pending_txs
+            .get(&response_hash)
+            .unwrap()
+            .receive_slate_secrets
+            .as_ref()
+            .unwrap()
+            .recipient_output_blinding;
+
+        let tx = sender.finalize_slate(response_slate, 2_000).unwrap().tx;
+        recipient
+            .apply_canonical_block_with_hash(std::slice::from_ref(&tx), 77, Some([77u8; 32]))
+            .unwrap();
+
+        assert!(!recipient.pending_txs.contains_key(&response_hash));
+        let confirmed = recipient
+            .outputs
+            .get(recipient_output.commitment.as_bytes())
+            .expect("recipient output should be registered on confirmation");
+        assert_eq!(confirmed.value, 900);
+        assert_eq!(&*confirmed.blinding, &recipient_secret);
+        assert_eq!(confirmed.block_height, 77);
+        assert_eq!(confirmed.block_hash, Some([77u8; 32]));
+        assert!(!confirmed.is_coinbase);
+        assert!(!confirmed.spent);
+        assert!(confirmed.reserved_for_tx.is_none());
+    }
+
+    #[test]
+    fn apply_canonical_block_journals_confirmed_receive_slate() {
+        let dir = tempdir().unwrap();
+        let genesis = Hash256::from_bytes([43u8; 32]);
+        let mut recipient_dir =
+            WalletDir::create(dir.path(), "pw", Network::Regtest, &genesis).unwrap();
+        let mut sender = Wallet::new_in_memory(Network::Regtest, &genesis);
+        sender.add_output(fixed_output(1_000, 10, 92));
+
+        let send_slate = sender.create_send_slate(900, 100, 2_000).unwrap();
+        let response_slate = recipient_dir
+            .wallet_mut()
+            .receive_slate(send_slate, 2_000)
+            .unwrap();
+        let response_hash =
+            *dom_crypto::blake2b_256(&response_slate.to_bytes().unwrap()).as_bytes();
+        let recipient_output = response_slate.recipient_output.clone().unwrap();
+        let tx = sender.finalize_slate(response_slate, 2_000).unwrap().tx;
+
+        recipient_dir
+            .wallet_mut()
+            .apply_canonical_block_with_hash(std::slice::from_ref(&tx), 77, Some([77u8; 32]))
+            .unwrap();
+
+        let journal = TxJournal::open(dir.path()).unwrap();
+        assert_eq!(receive_confirmed_event_count(&journal), 1);
+        let records = journal.replay().unwrap();
+        assert_eq!(
+            records.get(&response_hash).unwrap().status,
+            TxStatus::Received {
+                commitment: *recipient_output.commitment.as_bytes(),
+                amount: 900,
+                block_height: 77,
+                block_hash: Some([77u8; 32]),
+                source_slate_hash: response_hash,
+            }
+        );
+    }
+
+    #[test]
+    fn canonical_rescan_confirms_received_slate_output_after_restart() {
+        let dir = tempdir().unwrap();
+        let genesis = Hash256::from_bytes([42u8; 32]);
+        let mut recipient_dir =
+            WalletDir::create(dir.path(), "pw", Network::Regtest, &genesis).unwrap();
+        let mut sender = Wallet::new_in_memory(Network::Regtest, &genesis);
+        sender.add_output(fixed_output(1_000, 10, 91));
+
+        let send_slate = sender.create_send_slate(900, 100, 2_000).unwrap();
+        let response_slate = recipient_dir
+            .wallet_mut()
+            .receive_slate(send_slate, 2_000)
+            .unwrap();
+        let response_hash =
+            *dom_crypto::blake2b_256(&response_slate.to_bytes().unwrap()).as_bytes();
+        let recipient_output = response_slate.recipient_output.clone().unwrap();
+        let recipient_secret = recipient_dir
+            .wallet()
+            .pending_txs
+            .get(&response_hash)
+            .unwrap()
+            .receive_slate_secrets
+            .as_ref()
+            .unwrap()
+            .recipient_output_blinding;
+
+        drop(recipient_dir);
+        let mut reopened = WalletDir::open(dir.path(), "pw").unwrap();
+        assert!(reopened.wallet().pending_txs.contains_key(&response_hash));
+        assert!(reopened
+            .wallet()
+            .outputs
+            .get(recipient_output.commitment.as_bytes())
+            .is_none());
+
+        let mut scan = InMemoryChainScan::new();
+        scan.insert(ScanBlock {
+            height: 77,
+            block_hash: Some([77u8; 32]),
+            output_commitments: vec![*recipient_output.commitment.as_bytes()],
+            input_commitments: Vec::new(),
+            total_fees_noms: 0,
+        });
+
+        let summary = reopened
+            .wallet_mut()
+            .rescan_canonical_chain(&scan, WalletRescanMode::Repair)
+            .unwrap();
+        assert_eq!(summary.rebuilt_outputs, 1);
+        assert_eq!(summary.pending_dropped, 1);
+        assert!(!reopened.wallet().pending_txs.contains_key(&response_hash));
+
+        let confirmed = reopened
+            .wallet()
+            .outputs
+            .get(recipient_output.commitment.as_bytes())
+            .expect("recipient output should be reconstructed by rescan");
+        assert_eq!(confirmed.value, 900);
+        assert_eq!(&*confirmed.blinding, &recipient_secret);
+        assert_eq!(confirmed.block_height, 77);
+        assert_eq!(confirmed.block_hash, Some([77u8; 32]));
+        assert!(!confirmed.is_coinbase);
+        assert!(!confirmed.spent);
+        assert!(confirmed.reserved_for_tx.is_none());
+
+        let journal = TxJournal::open(dir.path()).unwrap();
+        assert_eq!(receive_confirmed_event_count(&journal), 1);
+        let records = journal.replay().unwrap();
+        assert_eq!(
+            records.get(&response_hash).unwrap().status,
+            TxStatus::Received {
+                commitment: *recipient_output.commitment.as_bytes(),
+                amount: 900,
+                block_height: 77,
+                block_hash: Some([77u8; 32]),
+                source_slate_hash: response_hash,
+            }
+        );
+
+        reopened
+            .wallet_mut()
+            .rescan_canonical_chain(&scan, WalletRescanMode::Repair)
+            .unwrap();
+        assert_eq!(
+            receive_confirmed_event_count(&journal),
+            1,
+            "re-scanning the same chain must not duplicate receive-confirmed journal events"
+        );
+    }
+
+    #[test]
+    fn finalize_marks_submitted_under_slate_hash_key_and_advances_journal() {
+        // F1 regression: the pending tx for a slate send is keyed by the
+        // sender slate hash, NOT by the tx tracking hash. finalize_slate must
+        // return that key so mark_submitted finds the pending entry. The old
+        // code passed tracking_tx_hash(&tx), so every slate finalize logged
+        // "mark_submitted failed after submit: pending tx not found".
+        let dir = tempdir().unwrap();
+        let (mut sender, mut recipient) = slate_participants();
+        // Journal must be attached before the spend so the Built event is
+        // recorded and the Submitted transition has a record to advance.
+        sender.attach_journal(TxJournal::open(dir.path()).unwrap());
+        sender.add_output(fixed_output(1_000, 10, 21));
+
+        let send_slate = sender.create_send_slate(900, 100, 2_000).unwrap();
+        let send_slate_hash = *dom_crypto::blake2b_256(&send_slate.to_bytes().unwrap()).as_bytes();
+        let response_slate = recipient.receive_slate(send_slate, 2_000).unwrap();
+
+        let finalized = sender.finalize_slate(response_slate, 2_000).unwrap();
+        assert_eq!(
+            finalized.pending_key, send_slate_hash,
+            "finalize must hand back the sender-slate-hash pending key"
+        );
+
+        // The OLD (buggy) key — the tx tracking hash — differs and is not found.
+        let tracking_hash = Wallet::tracking_tx_hash(&finalized.tx).unwrap();
+        assert_ne!(tracking_hash, finalized.pending_key);
+        assert!(
+            sender.mark_submitted(tracking_hash).is_err(),
+            "tracking hash is the wrong key (this was the bug)"
+        );
+
+        // The FIX: marking with the pending key succeeds and the journal
+        // advances Building -> Submitted.
+        sender.mark_submitted(finalized.pending_key).unwrap();
+        let records = sender.journal().unwrap().replay().unwrap();
+        assert!(
+            matches!(
+                records.get(&finalized.pending_key).map(|r| &r.status),
+                Some(TxStatus::Submitted)
+            ),
+            "journal should advance to Submitted under the pending key"
+        );
     }
 
     #[test]

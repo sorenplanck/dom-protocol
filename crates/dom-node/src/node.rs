@@ -18,7 +18,7 @@ use dom_core::Timestamp;
 use dom_mempool::Mempool;
 use dom_store::utxo::UtxoEntry;
 use dom_store::DomStore;
-use dom_wallet::Wallet;
+use dom_wallet::WalletDir;
 use dom_wire::dandelion::DandelionRouter;
 use dom_wire::manager::PeerManager;
 use std::collections::HashMap;
@@ -59,10 +59,14 @@ pub struct DomNode {
     /// matches StemEnvelope.target_peer actually forwards to its peer.
     /// Senders: submit_tx and Command::Tx handler when route decides Stem.
     pub tx_stem_tx: tokio::sync::broadcast::Sender<dom_wire::dandelion::StemEnvelope>,
-    /// Optional wallet for mining rewards.
+    /// Optional wallet for mining rewards, held as an opened [`WalletDir`] —
+    /// the canonical on-disk format the CLI (`dom-wallet init`) and the
+    /// desktop wallet create — so the directory's exclusive lock and WAL
+    /// journal stay alive for the node's lifetime.
     /// If Some, miner uses wallet.build_coinbase() for deterministic blinding.
-    /// If None, miner falls back to random blinding (DOM-SEC-004 unresolved).
-    pub wallet: Option<Arc<Mutex<Wallet>>>,
+    /// If None, mining on public networks stays disabled (DOM-SEC-004
+    /// fail-closed).
+    pub wallet: Option<Arc<Mutex<WalletDir>>>,
     /// Node metrics for Prometheus export.
     pub metrics: Arc<Metrics>,
     /// Future block queue for soft buffer (Doc 4.5 mitigation 1).
@@ -75,6 +79,9 @@ pub struct DomNode {
     pub task_supervisor: NodeTaskSupervisor,
     /// Test/runtime observers wait here for chain, mempool, or peer-state changes.
     pub state_events: Arc<Notify>,
+    /// Peer Exchange state: known peer addresses learned from seeds and Addr
+    /// gossip, plus GetAddr cooldown tracking (RFC-0005 §6).
+    pub pex: Arc<Mutex<crate::pex::PexManager>>,
 }
 
 /// Per-connection I/O context passed into message_loop.
@@ -95,8 +102,9 @@ struct NodeServices {
     future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
     missing_blocks: Arc<Mutex<MissingBlockTracker>>,
     orphan_pool: Arc<Mutex<RuntimeOrphanPool>>,
-    wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+    wallet: Option<Arc<Mutex<dom_wallet::WalletDir>>>,
     state_events: Arc<Notify>,
+    pex: Arc<Mutex<crate::pex::PexManager>>,
 }
 
 /// Broadcast channels shared across connection tasks.
@@ -179,6 +187,17 @@ where
     }
     result
 }
+
+/// Upper bound on PEX known-peer entries. Each entry is an addr string
+/// (<= 255 bytes) plus 12 bytes of metadata, so the table tops out at ~3 MiB
+/// even with hostile max-length addresses.
+const PEX_MAX_KNOWN_PEERS: usize = 10_000;
+/// Stop soliciting addresses once we already know at least this many peers.
+const PEX_TARGET_KNOWN_PEERS: usize = 64;
+/// How often each peer connection considers sending a GetAddr (the 10-minute
+/// per-peer cooldown in PexManager is the real limiter; this just paces the
+/// check).
+const PEX_GETADDR_TICK_SECS: u64 = 60;
 
 const FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS: u64 = 30;
 const FUTURE_BLOCK_QUEUE_MAX_AGE_SECS: u64 = dom_core::MAX_FUTURE_BLOCK_TIME
@@ -386,31 +405,33 @@ impl DomNode {
         let (tx_stem_tx, _) =
             tokio::sync::broadcast::channel::<dom_wire::dandelion::StemEnvelope>(256);
 
-        // Load or create wallet if configured
+        // Load the wallet if configured (DOM-SEC-004: mining requires one).
+        //
+        // The CLI (`dom-wallet init`) and the desktop wallet create wallets
+        // as WalletDir DIRECTORIES (wallet.dat + config.json + wallet.lock +
+        // journal) — the canonical on-disk format. The node only OPENS such a
+        // directory; it never creates a wallet itself: the old Wallet::create
+        // fallback produced a LEGACY keychain with no recoverable seed phrase,
+        // silently mining rewards into a wallet that cannot be restored. A
+        // missing or unopenable wallet therefore leaves mining disabled
+        // (fail-closed) instead of creating anything.
         let wallet = if let (Some(wallet_path), Some(wallet_password)) =
             (&config.wallet_path, &config.wallet_password)
         {
-            use crate::wallet_helpers::wallet_network_from_config;
-            let wallet_net = wallet_network_from_config(config.network);
             let path = Path::new(wallet_path);
-
-            match Wallet::open(path, wallet_password) {
-                Ok(w) => {
-                    info!("Wallet loaded from {:?}", path);
-                    Some(Arc::new(Mutex::new(w)))
+            match WalletDir::open(path, wallet_password) {
+                Ok(wallet_dir) => {
+                    info!("Wallet loaded from {:?}", wallet_dir.path());
+                    Some(Arc::new(Mutex::new(wallet_dir)))
                 }
-                Err(_) => {
-                    // Create new wallet if doesn't exist
-                    match Wallet::create(path, wallet_password, wallet_net, &genesis_hash) {
-                        Ok(w) => {
-                            info!("New wallet created at {:?}", path);
-                            Some(Arc::new(Mutex::new(w)))
-                        }
-                        Err(e) => {
-                            warn!("Failed to create wallet: {:?}. Mining without wallet (DOM-SEC-004 unresolved).", e);
-                            None
-                        }
-                    }
+                Err(e) => {
+                    warn!(
+                        "Could not open wallet directory {path:?}: {e}. Mining stays \
+                         disabled without a wallet (DOM-SEC-004 fail-closed). Create a \
+                         deterministic wallet with `dom-wallet init` or the desktop \
+                         wallet and point wallet_path at that directory."
+                    );
+                    None
                 }
             }
         } else {
@@ -465,6 +486,7 @@ impl DomNode {
             ))),
             task_supervisor: NodeTaskSupervisor::new(),
             state_events: Arc::new(Notify::new()),
+            pex: Arc::new(Mutex::new(crate::pex::PexManager::new(PEX_MAX_KNOWN_PEERS))),
         })
     }
 
@@ -510,6 +532,41 @@ impl DomNode {
     /// Observe the node's live shutdown signal.
     pub fn shutdown_token(&self) -> ShutdownToken {
         self.task_supervisor.shutdown_token()
+    }
+
+    /// Rebuild a wallet's recoverable output set by scanning the canonical chain
+    /// this node already has on disk, then persist the repaired state.
+    ///
+    /// This is the recovery path for a wallet restored from a seed phrase: the
+    /// seed is the sole authority for ownership, but the on-chain coinbases it
+    /// owns are only discoverable by walking the chain (see
+    /// [`crate::wallet_scan`]). It is the missing step that left a freshly
+    /// restored wallet at a zero balance even though the node had the matching
+    /// coinbases synced.
+    ///
+    /// `wallet_dir` MUST be a DIFFERENT wallet directory than the one this node
+    /// opened for mining (if any): we only read this node's chain store and
+    /// write the passed-in wallet — never the node's own `wallet`, so no
+    /// `WalletDir` lock is contended and the `Wallet` lock-order rank is not
+    /// involved. The wallet must be unlocked (the deterministic scan derives the
+    /// coinbase blinding from the encrypted seed).
+    ///
+    /// The tip is snapshotted and the blocks are read under the chain lock; the
+    /// lock is released BEFORE the CPU-heavy deterministic rescan so block
+    /// connection is not stalled while a long chain is re-derived.
+    pub async fn rescan_wallet_dir(
+        &self,
+        wallet_dir: &mut WalletDir,
+    ) -> Result<dom_wallet::WalletRescanSummary, DomError> {
+        let scan = {
+            let chain = self.chain.lock().await;
+            let tip = chain.tip_height.0;
+            crate::wallet_scan::collect_chain_scan(&chain.store, tip)?
+        };
+        wallet_dir
+            .wallet_mut()
+            .rescan_canonical_chain(&scan, dom_wallet::WalletRescanMode::Repair)
+            .map_err(|e| DomError::Internal(format!("wallet rescan failed: {e}")))
     }
 
     /// Start all node services.
@@ -971,6 +1028,7 @@ impl DomNode {
                         orphan_pool: self.orphan_pool.clone(),
                         wallet: self.wallet.clone(),
                         state_events: self.state_events.clone(),
+                        pex: self.pex.clone(),
                     };
                     let peers = svc.peers.clone();
                     let metrics = svc.metrics.clone();
@@ -1031,6 +1089,7 @@ impl DomNode {
             orphan_pool: self.orphan_pool.clone(),
             wallet: self.wallet.clone(),
             state_events: self.state_events.clone(),
+            pex: self.pex.clone(),
         };
         loop {
             if shutdown.is_shutdown() {
@@ -1049,6 +1108,16 @@ impl DomNode {
 
                 // Also try configured seed peers
                 addrs.extend(self.config.seed_peers.iter().cloned());
+                // PEX: seed the known-peer table with the bootstrap addresses,
+                // drop entries with too many failed dials, and add
+                // gossip-learned peers as outbound candidates. Guard dropped
+                // before any await below.
+                {
+                    let mut px = trace_lock("pex", &self.pex).await;
+                    px.seed_from_config(&addrs);
+                    px.evict_dead_peers();
+                    addrs.extend(px.connectable_peers().iter().map(|p| p.addr.clone()));
+                }
                 addrs.sort();
                 addrs.dedup();
                 addrs = {
@@ -1101,6 +1170,7 @@ impl DomNode {
                     let peers = self.peers.clone();
                     let metrics = self.metrics.clone();
                     let svc_c = svc.clone();
+                    let pex = self.pex.clone();
                     let chain_for_persist = self.chain.clone();
                     let peer_shutdown = shutdown.clone();
                     let task_id = supervisor
@@ -1116,6 +1186,11 @@ impl DomNode {
                                     peer_shutdown,
                                 )
                                 .await;
+                                if outcome == OutboundAttemptOutcome::RetryableFailure {
+                                    // PEX learns the failed dial so dead
+                                    // gossiped addresses get evicted.
+                                    trace_lock("pex", &pex).await.record_failure(&cleanup_addr);
+                                }
                                 let mut mgr = trace_lock("peers", &peers).await;
                                 if outcome == OutboundAttemptOutcome::RetryableFailure {
                                     mgr.record_outbound_failure(&cleanup_addr);
@@ -1186,7 +1261,7 @@ impl dom_rpc::NodeHandle for DomNode {
         })
     }
 
-    fn submit_tx(&self, tx_bytes: Vec<u8>) -> Result<[u8; 32], dom_rpc::RpcError> {
+    fn submit_tx(&self, tx_bytes: Vec<u8>) -> Result<dom_rpc::TxAdmission, dom_rpc::RpcError> {
         use dom_serialization::DomDeserialize;
         let tx = dom_consensus::Transaction::from_bytes(&tx_bytes)
             .map_err(|e| dom_rpc::RpcError::InvalidHex(format!("invalid tx: {e}")))?;
@@ -1234,7 +1309,51 @@ impl dom_rpc::NodeHandle for DomNode {
             .map_err(|_| dom_rpc::RpcError::Internal("chain locked".into()))?;
         clear_persisted_mempool_snapshot(&chain.store)
             .map_err(|e| dom_rpc::RpcError::Internal(format!("persist mempool: {e}")))?;
-        Ok(hash)
+
+        let (phase, stem_target) =
+            if let (Ok(mut d), Ok(p)) = (self.dandelion.try_lock(), self.peers.try_lock()) {
+                let peers: Vec<std::net::SocketAddr> = p
+                    .connected_peers()
+                    .into_iter()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                let phase = d.route_new_tx(hash, &peers);
+                let target = d.get_stem_peer(&hash);
+                (phase, target)
+            } else {
+                (dom_wire::dandelion::DandelionPhase::Fluff, None)
+            };
+        use dom_wire::dandelion::{DandelionPhase, StemEnvelope};
+        let relayed = match phase {
+            DandelionPhase::Fluff => self.tx_fluff_tx.send(tx_bytes.clone()).is_ok(),
+            DandelionPhase::Stem => {
+                if let Some(target) = stem_target {
+                    self.tx_stem_tx
+                        .send(StemEnvelope {
+                            target_peer: target,
+                            tx_bytes: tx_bytes.clone(),
+                        })
+                        .is_ok()
+                } else {
+                    self.tx_fluff_tx.send(tx_bytes.clone()).is_ok()
+                }
+            }
+        };
+        if relayed {
+            self.metrics
+                .txs_relayed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            info!(
+                "tx accepted but not relayed: no peer subscribers (tx {})",
+                hex::encode(hash)
+            );
+        }
+
+        Ok(dom_rpc::TxAdmission {
+            tx_hash: hash,
+            relayed,
+        })
     }
 
     fn get_block_header(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
@@ -1396,6 +1515,13 @@ async fn handle_inbound(
             )
             .await
             {
+                // Anti-slowloris: a write that timed out means the peer stalled
+                // our sends. recv-side errors are already scored inline before
+                // they propagate, so score ONLY write timeouts here to avoid
+                // double-counting.
+                if is_write_timeout(&e) {
+                    let _ = record_peer_violation(&chain, &svc.peers, addr, &e).await;
+                }
                 tracing::info!(
                     event = "session_closed_reason",
                     peer_addr = %addr,
@@ -1568,6 +1694,13 @@ async fn connect_outbound(
             )
             .await
             {
+                // Anti-slowloris: a write that timed out means the peer stalled
+                // our sends. recv-side errors are already scored inline before
+                // they propagate, so score ONLY write timeouts here to avoid
+                // double-counting.
+                if is_write_timeout(&e) {
+                    let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
+                }
                 tracing::info!(
                     event = "session_closed_reason",
                     peer_addr = %addr,
@@ -1714,7 +1847,22 @@ fn peer_violation_score(error: &DomError) -> Option<u32> {
 
     match error {
         DomError::Malformed(_) => Some(ban_scores::MALFORMED_MESSAGE),
+        DomError::PolicyRejected(msg) if msg.contains("address flooding") => {
+            Some(ban_scores::ADDRESS_FLOODING)
+        }
         DomError::PolicyRejected(msg) if msg.contains("handshake timeout") => {
+            Some(ban_scores::PROTOCOL_VIOLATION)
+        }
+        // Anti-slowloris write timeout (dom_wire::codec::NoiseCodec::send): a peer
+        // that stops reading stalls our writes. Low severity — a slow peer is not
+        // necessarily malicious, so it is a protocol violation, not a ban-on-sight.
+        DomError::PolicyRejected(msg) if msg.contains("write timeout") => {
+            Some(ban_scores::PROTOCOL_VIOLATION)
+        }
+        // Anti-flood per-category message rate limit (crate::msg_rate_limit): a
+        // peer flooding valid-but-excessive messages. Low severity — sustained
+        // overflow (~10 windows) is what crosses the ban threshold.
+        DomError::PolicyRejected(msg) if msg.contains("message rate limit") => {
             Some(ban_scores::PROTOCOL_VIOLATION)
         }
         DomError::Invalid(msg) if msg.contains("chain_id mismatch") => {
@@ -1726,9 +1874,40 @@ fn peer_violation_score(error: &DomError) -> Option<u32> {
         DomError::Invalid(msg) if msg.contains("unexpected Hello") => {
             Some(ban_scores::PROTOCOL_VIOLATION)
         }
+        // Severity routing for expensive-to-detect consensus violations: a peer
+        // forcing full PoW/signature validation on garbage must not score the
+        // same 10 points as a cheap protocol slip (audit: P2P CPU-burn).
+        // Matched substrings are produced only by dom-consensus:
+        //   "proof-of-work invalid" → block.rs (validate_pow / _for_network)
+        //   "signature invalid"     → lib.rs (kernel Schnorr), transaction.rs (coinbase)
+        DomError::Invalid(msg) if msg.contains("proof-of-work invalid") => {
+            Some(ban_scores::INVALID_POW)
+        }
+        DomError::Invalid(msg) if msg.contains("signature invalid") => {
+            Some(ban_scores::INVALID_SIGNATURE)
+        }
         DomError::Invalid(_) => Some(ban_scores::PROTOCOL_VIOLATION),
         _ => None,
     }
+}
+
+/// Annotate a `codec.send` failure with which broadcast/message kind failed,
+/// for diagnostics — WITHOUT burying the anti-slowloris write-timeout type. A
+/// `PolicyRejected("write timeout …")` is passed through unchanged so it still
+/// routes through [`peer_violation_score`]; everything else (broken pipe,
+/// encrypt) is our/transport side and is wrapped as `Internal` (unscored).
+fn annotate_send_err(kind: &str, peer_addr: std::net::SocketAddr, e: DomError) -> DomError {
+    match &e {
+        DomError::PolicyRejected(msg) if msg.contains("write timeout") => e,
+        _ => DomError::Internal(format!("{kind} send to {peer_addr}: {e}")),
+    }
+}
+
+/// Whether an error escaping `message_loop` is the anti-slowloris write timeout.
+/// Used to score it at the loop boundary WITHOUT double-scoring recv-side errors
+/// (which are already scored inline before they propagate).
+fn is_write_timeout(error: &DomError) -> bool {
+    matches!(error, DomError::PolicyRejected(msg) if msg.contains("write timeout"))
 }
 
 fn pending_peer_violation_score(error: &DomError) -> Option<u32> {
@@ -2522,7 +2701,7 @@ struct IbdRuntimeContext<'a> {
     mempool: Arc<Mutex<Mempool>>,
     future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
     metrics: Arc<Metrics>,
-    wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+    wallet: Option<Arc<Mutex<dom_wallet::WalletDir>>>,
     state_events: Arc<Notify>,
 }
 
@@ -2718,7 +2897,8 @@ async fn resume_ibd_block_sync(
                 )
                 .await;
                 if let Some(ref wallet_arc) = runtime.wallet {
-                    let mut w = wallet_arc.lock().await;
+                    let mut wallet_dir = wallet_arc.lock().await;
+                    let w = wallet_dir.wallet_mut();
                     match connect_result {
                         dom_chain::ConnectResult::BestChain => {
                             w.apply_canonical_block_with_hash(
@@ -2867,7 +3047,7 @@ async fn run_ibd_session(
     peer_best_height: u64,
     future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
     metrics: Arc<Metrics>,
-    wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+    wallet: Option<Arc<Mutex<dom_wallet::WalletDir>>>,
     state_events: Arc<Notify>,
 ) -> Result<(), DomError> {
     let our_height = chain.lock().await.tip_height.0;
@@ -3240,7 +3420,7 @@ async fn ibd_sync_round(
     peer_addr: std::net::SocketAddr,
     future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
     metrics: Arc<Metrics>,
-    wallet: Option<Arc<Mutex<dom_wallet::Wallet>>>,
+    wallet: Option<Arc<Mutex<dom_wallet::WalletDir>>>,
     state_events: Arc<Notify>,
     ibd: &mut dom_chain::IbdState,
 ) -> Result<bool, DomError> {
@@ -3407,7 +3587,8 @@ async fn message_loop(
     let tx_stem_tx = channels.tx_stem_tx.clone();
     let PeerConn { stream, codec } = conn;
     use dom_wire::message::{
-        BlockPayload, Command, GetBlockDataPayload, GetHeadersPayload, HeadersPayload, WireMessage,
+        AddrPayload, BlockPayload, Command, GetAddrPayload, GetBlockDataPayload, GetHeadersPayload,
+        HeadersPayload, WireMessage,
     };
 
     const PING_INTERVAL_SECS: u64 = 30;
@@ -3415,6 +3596,23 @@ async fn message_loop(
         tokio::time::interval(tokio::time::Duration::from_secs(PING_INTERVAL_SECS));
     // Skip the immediate first tick.
     ping_timer.tick().await;
+
+    // PEX (RFC-0005 §6): periodically consider asking this peer for addresses.
+    // The per-peer GETADDR_COOLDOWN_SECS inside PexManager is the real rate
+    // limit; this timer only paces the check.
+    let mut pex_timer =
+        tokio::time::interval(tokio::time::Duration::from_secs(PEX_GETADDR_TICK_SECS));
+    pex_timer.tick().await;
+    let pex_peer_key = peer_addr.to_string();
+    // Inbound Addr rate limit for THIS connection: beyond the budget each
+    // extra Addr message scores ADDRESS_FLOODING instead of being processed.
+    let mut addr_flood = crate::pex::AddrFloodTracker::new();
+    // Per-category inbound message rate limit for THIS connection (anti-flood):
+    // a peer that floods one category scores PROTOCOL_VIOLATION and, on
+    // sustained overflow, is disconnected — without affecting other peers
+    // (each connection has its own limiter). GetAddr/Addr are excluded here
+    // (they have their own limiters above).
+    let mut msg_rate = crate::msg_rate_limit::MessageRateLimiter::from_env();
 
     loop {
         tokio::select! {
@@ -3432,7 +3630,7 @@ async fn message_loop(
                             payload: payload.to_bytes()?,
                         };
                         if let Err(e) = codec.send(stream, &msg).await {
-                            return Err(DomError::Internal(format!("relay send to {peer_addr}: {e}")));
+                            return Err(annotate_send_err("relay", peer_addr, e));
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -3454,7 +3652,7 @@ async fn message_loop(
                             payload: tx_bytes,
                         };
                         if let Err(e) = codec.send(stream, &msg).await {
-                            return Err(DomError::Internal(format!("fluff send to {peer_addr}: {e}")));
+                            return Err(annotate_send_err("fluff", peer_addr, e));
                         }
                         svc.metrics
                             .txs_relayed
@@ -3482,7 +3680,7 @@ async fn message_loop(
                                 payload: env.tx_bytes,
                             };
                             if let Err(e) = codec.send(stream, &msg).await {
-                                return Err(DomError::Internal(format!("stem send to {peer_addr}: {e}")));
+                                return Err(annotate_send_err("stem", peer_addr, e));
                             }
                             svc.metrics
                                 .txs_relayed
@@ -3507,7 +3705,34 @@ async fn message_loop(
                     payload: nonce.to_vec(),
                 };
                 if let Err(e) = codec.send(stream, &ping).await {
-                    return Err(DomError::Internal(format!("ping send to {peer_addr}: {e}")));
+                    return Err(annotate_send_err("ping", peer_addr, e));
+                }
+            }
+            // Periodic PEX: solicit addresses while our known set is below
+            // target, at most once per GETADDR_COOLDOWN_SECS per peer.
+            // Decision is taken (and recorded) under the lock; the guard is
+            // dropped before the send await.
+            _ = pex_timer.tick() => {
+                let send_getaddr = {
+                    let mut px = trace_lock("pex", &svc.pex).await;
+                    if px.known_count() < PEX_TARGET_KNOWN_PEERS
+                        && px.should_getaddr(&pex_peer_key)
+                    {
+                        px.record_getaddr(&pex_peer_key);
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if send_getaddr {
+                    let msg = WireMessage {
+                        magic: config.network.magic(),
+                        command: Command::GetAddr,
+                        payload: GetAddrPayload.to_bytes()?,
+                    };
+                    if let Err(e) = codec.send(stream, &msg).await {
+                        return Err(annotate_send_err("getaddr", peer_addr, e));
+                    }
                 }
             }
             // Inbound message
@@ -3519,6 +3744,27 @@ async fn message_loop(
                         return Err(e);
                     }
                 };
+                // Anti-flood: per-category inbound rate limit (before the
+                // potentially expensive handler runs). Overflow scores a
+                // low-severity PROTOCOL_VIOLATION and drops THIS message; a
+                // peer that keeps overflowing crosses the ban threshold (~10
+                // windows) and is disconnected. Honest sync/relay flows stay
+                // well under the budgets (see msg_rate_limit).
+                if !msg_rate.allow(msg.command) {
+                    let err = DomError::PolicyRejected(format!(
+                        "message rate limit exceeded for {:?} [ban+{}]",
+                        msg.command,
+                        dom_wire::peer::ban_scores::PROTOCOL_VIOLATION,
+                    ));
+                    if record_peer_violation(&chain, &svc.peers, peer_addr, &err).await {
+                        return Err(err);
+                    }
+                    tracing::debug!(
+                        "rate-limited {:?} from {peer_addr}; dropping message",
+                        msg.command
+                    );
+                    continue;
+                }
                 match msg.command {
                     Command::Ping => {
                         // Echo payload as Pong
@@ -3636,7 +3882,9 @@ async fn message_loop(
                                             match connect_result {
                                                 dom_chain::ConnectResult::BestChain => {
                                                     if let Some(ref wallet_arc) = svc.wallet {
-                                                        let mut w = wallet_arc.lock().await;
+                                                        let mut wallet_dir =
+                                                            wallet_arc.lock().await;
+                                                        let w = wallet_dir.wallet_mut();
                                                         if let Err(e) =
                                                             w.apply_canonical_block_with_hash(
                                                                 &txs_for_scan,
@@ -3652,7 +3900,9 @@ async fn message_loop(
                                                 }
                                                 dom_chain::ConnectResult::Reorg(delta) => {
                                                     if let Some(ref wallet_arc) = svc.wallet {
-                                                        let mut w = wallet_arc.lock().await;
+                                                        let mut wallet_dir =
+                                                            wallet_arc.lock().await;
+                                                        let w = wallet_dir.wallet_mut();
                                                         if let Err(e) = w.rollback_to(
                                                             delta.common_ancestor_height,
                                                         ) {
@@ -4031,6 +4281,77 @@ async fn message_loop(
                             }
                         }
                     }
+                    Command::GetAddr => {
+                        // Strict parse: GetAddr carries no body.
+                        if let Err(e) = GetAddrPayload::from_bytes(&msg.payload) {
+                            let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e)
+                                .await;
+                            return Err(e);
+                        }
+                        // Serve-side rate limit: at most one Addr response per
+                        // peer per GETADDR_COOLDOWN_SECS. Response is encoded
+                        // under the lock; the guard drops before the send.
+                        let response_payload = {
+                            let mut px = trace_lock("pex", &svc.pex).await;
+                            if px.should_serve_getaddr(&pex_peer_key) {
+                                px.record_getaddr_served(&pex_peer_key);
+                                Some(crate::pex::encode_addr_payload(&px.peers_for_sharing()))
+                            } else {
+                                None
+                            }
+                        };
+                        match response_payload {
+                            Some(payload) => {
+                                let wire = WireMessage {
+                                    magic: config.network.magic(),
+                                    command: Command::Addr,
+                                    payload,
+                                };
+                                codec.send(stream, &wire).await?;
+                            }
+                            None => {
+                                tracing::debug!(
+                                    "suppressing GetAddr response to {peer_addr} (cooldown)"
+                                );
+                            }
+                        }
+                    }
+                    Command::Addr => {
+                        let payload = match AddrPayload::from_bytes(&msg.payload) {
+                            Ok(payload) => payload,
+                            Err(e) => {
+                                let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e)
+                                    .await;
+                                return Err(e);
+                            }
+                        };
+                        if !addr_flood.allow() {
+                            // Too many Addr messages this window: score
+                            // ADDRESS_FLOODING and drop the message without
+                            // touching the PEX table.
+                            let err = DomError::PolicyRejected(format!(
+                                "address flooding: more than {} Addr messages in {}s [ban+{}]",
+                                crate::pex::MAX_ADDR_MESSAGES_PER_WINDOW,
+                                crate::pex::ADDR_FLOOD_WINDOW_SECS,
+                                dom_wire::peer::ban_scores::ADDRESS_FLOODING,
+                            ));
+                            let banned =
+                                record_peer_violation(&chain, &svc.peers, peer_addr, &err).await;
+                            if banned {
+                                return Err(err);
+                            }
+                        } else {
+                            let addrs: Vec<String> =
+                                payload.entries.into_iter().map(|e| e.addr).collect();
+                            let added = {
+                                let mut px = trace_lock("pex", &svc.pex).await;
+                                px.process_addr_message(addrs)
+                            };
+                            tracing::debug!(
+                                "PEX: learned {added} new peer address(es) from {peer_addr}"
+                            );
+                        }
+                    }
                     other => {
                         tracing::debug!("ignoring {other:?} from {peer_addr}");
                     }
@@ -4043,18 +4364,19 @@ async fn message_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_metrics_listener, clear_persisted_mempool_snapshot, continue_ibd_header_sync,
-        decode_deferred_block_bytes, decode_ibd_block_response, decode_relay_block,
-        deferred_replay_action, ibd_now, initialize_ibd_state, load_mempool_snapshot,
-        load_or_create_noise_static_key, load_peer_reputation_snapshot,
-        load_peer_rotation_snapshot, parse_persisted_noise_static_key, peer_violation_score,
-        pending_peer_violation_score, persist_mempool_snapshot, persist_peer_reputation_snapshot,
-        purge_mempool_confirmed_inputs, reconcile_mempool_after_connect, refresh_peer_metrics,
-        relay_block_action, resolve_configured_dns_seeds, restore_peer_rotation_state,
-        serve_metrics, trace_lock, tx_hash, DeferredReplayAction, DomNode, IbdRoundState,
-        OutboundAttemptOutcome, RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY,
-        MEMPOOL_METADATA_KEY, METRICS_CONTENT_TYPE, NOISE_STATIC_KEY_METADATA_KEY,
-        PEER_REPUTATION_METADATA_KEY, PEER_ROTATION_METADATA_KEY,
+        annotate_send_err, bind_metrics_listener, clear_persisted_mempool_snapshot,
+        continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
+        decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
+        is_write_timeout, load_mempool_snapshot, load_or_create_noise_static_key,
+        load_peer_reputation_snapshot, load_peer_rotation_snapshot,
+        parse_persisted_noise_static_key, peer_violation_score, pending_peer_violation_score,
+        persist_mempool_snapshot, persist_peer_reputation_snapshot, purge_mempool_confirmed_inputs,
+        reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action,
+        resolve_configured_dns_seeds, restore_peer_rotation_state, serve_metrics, trace_lock,
+        tx_hash, DeferredReplayAction, DomNode, IbdRoundState, OutboundAttemptOutcome,
+        RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY, MEMPOOL_METADATA_KEY,
+        METRICS_CONTENT_TYPE, NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY,
+        PEER_ROTATION_METADATA_KEY,
     };
     use crate::future_block_queue::DeferredBlock;
     use crate::metrics::Metrics;
@@ -5392,6 +5714,139 @@ mod tests {
     }
 
     #[test]
+    fn invalid_pow_maps_to_invalid_pow_score() {
+        // Both real messages from dom-consensus block.rs (validate_pow and
+        // validate_pow_for_network) must route to INVALID_POW, not the
+        // generic PROTOCOL_VIOLATION catch-all.
+        assert_eq!(
+            peer_violation_score(&DomError::Invalid(
+                "proof-of-work invalid: RandomX hash mismatch or does not meet target".into()
+            )),
+            Some(ban_scores::INVALID_POW)
+        );
+        assert_eq!(
+            peer_violation_score(&DomError::Invalid(
+                "proof-of-work invalid: hash mismatch or does not meet target".into()
+            )),
+            Some(ban_scores::INVALID_POW)
+        );
+    }
+
+    #[test]
+    fn invalid_signature_maps_to_invalid_signature_score() {
+        // Real messages from dom-consensus: kernel Schnorr verification
+        // (lib.rs) and coinbase kernel verification (transaction.rs).
+        assert_eq!(
+            peer_violation_score(&DomError::Invalid(
+                "kernel 0 Schnorr signature invalid".into()
+            )),
+            Some(ban_scores::INVALID_SIGNATURE)
+        );
+        assert_eq!(
+            peer_violation_score(&DomError::Invalid(
+                "coinbase kernel signature invalid — miner does not prove ownership".into()
+            )),
+            Some(ban_scores::INVALID_SIGNATURE)
+        );
+    }
+
+    #[test]
+    fn generic_invalid_still_maps_to_protocol_violation() {
+        // Regression: Invalid errors without a specific severity arm keep the
+        // generic PROTOCOL_VIOLATION score.
+        assert_eq!(
+            peer_violation_score(&DomError::Invalid("claimed fees 5 != actual fees 7".into())),
+            Some(ban_scores::PROTOCOL_VIOLATION)
+        );
+    }
+
+    #[test]
+    fn write_timeout_maps_to_protocol_violation() {
+        // Anti-slowloris: a stalled write (peer stopped reading) is a low-severity
+        // protocol violation — a slow peer is not necessarily malicious.
+        assert_eq!(
+            peer_violation_score(&DomError::PolicyRejected("write timeout after 30s".into())),
+            Some(ban_scores::PROTOCOL_VIOLATION)
+        );
+    }
+
+    #[test]
+    fn message_rate_limit_maps_to_protocol_violation() {
+        // Anti-flood: exceeding a per-category inbound message budget is a
+        // low-severity protocol violation; ~10 overflowing windows ban the peer.
+        assert_eq!(
+            peer_violation_score(&DomError::PolicyRejected(
+                "message rate limit exceeded for Block [ban+10]".into()
+            )),
+            Some(ban_scores::PROTOCOL_VIOLATION)
+        );
+    }
+
+    #[test]
+    fn is_write_timeout_distinguishes_write_stall_from_recv_errors() {
+        // Only the write-side timeout is scored at the message_loop boundary;
+        // recv-side errors are scored inline and must NOT match here (else they
+        // would be double-counted).
+        assert!(is_write_timeout(&DomError::PolicyRejected(
+            "write timeout after 30s".into()
+        )));
+        assert!(!is_write_timeout(&DomError::PolicyRejected(
+            "idle timeout after 60s".into()
+        )));
+        assert!(!is_write_timeout(&DomError::Malformed("bad frame".into())));
+        assert!(!is_write_timeout(&DomError::Internal(
+            "relay channel closed".into()
+        )));
+    }
+
+    #[test]
+    fn annotate_send_err_preserves_write_timeout_but_wraps_others() {
+        let addr: std::net::SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        // Write timeout passes through unchanged so it still routes to scoring.
+        let to = annotate_send_err(
+            "relay",
+            addr,
+            DomError::PolicyRejected("write timeout after 30s".into()),
+        );
+        assert_eq!(
+            peer_violation_score(&to),
+            Some(ban_scores::PROTOCOL_VIOLATION)
+        );
+        // Non-timeout failures (broken pipe etc.) are our/transport side: wrapped
+        // as Internal (diagnostic context) and left unscored.
+        let other = annotate_send_err(
+            "relay",
+            addr,
+            DomError::Internal("write frame data: broken pipe".into()),
+        );
+        assert!(matches!(&other, DomError::Internal(m) if m.contains("relay send to")));
+        assert_eq!(peer_violation_score(&other), None);
+    }
+
+    #[test]
+    fn two_invalid_pow_blocks_cross_ban_threshold() {
+        // The audit finding: at PROTOCOL_VIOLATION (10) a peer needed ~10
+        // invalid-PoW blocks (each forcing full validation) to be banned.
+        // At INVALID_POW (50), two blocks must reach BAN_THRESHOLD (100).
+        let pow_error = DomError::Invalid(
+            "proof-of-work invalid: RandomX hash mismatch or does not meet target".into(),
+        );
+        let score = peer_violation_score(&pow_error).expect("invalid PoW must score");
+
+        let mut peer =
+            dom_wire::peer::PeerInfo::new("127.0.0.1:33369".parse().expect("addr"), false);
+        assert!(
+            !peer.add_ban_score(score),
+            "first invalid-PoW block must not ban yet"
+        );
+        assert!(
+            peer.add_ban_score(score),
+            "second invalid-PoW block must cross BAN_THRESHOLD"
+        );
+        assert!(peer.ban_score >= ban_scores::BAN_THRESHOLD);
+    }
+
+    #[test]
     fn temporary_peer_errors_do_not_score() {
         assert_eq!(
             peer_violation_score(&DomError::TemporarilyInvalid("future block".into())),
@@ -5399,6 +5854,21 @@ mod tests {
         );
         assert_eq!(
             peer_violation_score(&DomError::Orphan("missing parent".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn address_flooding_maps_to_address_flooding_score() {
+        assert_eq!(
+            peer_violation_score(&DomError::PolicyRejected(
+                "address flooding: more than 4 Addr messages in 600s [ban+30]".into()
+            )),
+            Some(ban_scores::ADDRESS_FLOODING)
+        );
+        // Other policy rejections must NOT inherit the flooding score.
+        assert_eq!(
+            peer_violation_score(&DomError::PolicyRejected("mempool full".into())),
             None
         );
     }
