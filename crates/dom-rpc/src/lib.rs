@@ -49,6 +49,65 @@ pub trait NodeHandle: Send + Sync + 'static {
     fn wallet_spend(&self, _req: SpendRequest) -> Result<[u8; 32], RpcError> {
         Err(RpcError::Internal("wallet not available".into()))
     }
+
+    /// Per-block chain scan for the heights `from..=to` (clamped — see
+    /// [`MAX_SCAN_RANGE`]), plus the current tip. Read-only projection of the
+    /// canonical chain the node already has on disk; serves the v2 wallet's
+    /// `ChainSource`. Default is unsupported, so adding this method does not
+    /// break existing implementations.
+    ///
+    /// Implementations MUST NOT block on a contended chain lock: if the chain is
+    /// busy (mining / connecting a block), return a retriable
+    /// [`RpcError::Overloaded`] immediately. Mining always has priority.
+    fn scan_chain(&self, _from: u64, _to: u64) -> Result<ChainScan, RpcError> {
+        Err(RpcError::Internal("chain scan not supported".into()))
+    }
+}
+
+/// Maximum number of heights a single [`NodeHandle::scan_chain`] / `/chain/scan`
+/// call returns. Bounds how long the chain lock is held so block connection is
+/// never stalled; clients page across larger ranges.
+pub const MAX_SCAN_RANGE: u64 = 1000;
+
+/// Canonical tip (height + hash) returned alongside a scan.
+#[derive(Debug, Clone)]
+pub struct ChainTip {
+    /// Tip height.
+    pub height: u64,
+    /// Tip block hash.
+    pub hash: [u8; 32],
+}
+
+/// One block's scan data: every output commitment created and input commitment
+/// spent, plus the block hash and total fees (fees serve seed-restore).
+#[derive(Debug, Clone)]
+pub struct ScanBlockData {
+    /// Block height.
+    pub height: u64,
+    /// Block hash.
+    pub hash: [u8; 32],
+    /// Output commitments created in this block (coinbase included).
+    pub output_commitments: Vec<[u8; 33]>,
+    /// Input commitments spent in this block.
+    pub input_commitments: Vec<[u8; 33]>,
+    /// Total transaction fees in this block (noms).
+    pub fees: u64,
+}
+
+/// Result of [`NodeHandle::scan_chain`]: the tip, the actual scanned range
+/// (`to` is clamped to `min(requested_to, tip, from + MAX_SCAN_RANGE - 1)`), and
+/// the per-block data. Clients page by continuing from `to + 1` until `to`
+/// reaches `tip.height`.
+#[derive(Debug, Clone)]
+pub struct ChainScan {
+    /// Current canonical tip.
+    pub tip: ChainTip,
+    /// Lowest height scanned (echo of the request).
+    pub from: u64,
+    /// Highest height scanned (clamped).
+    pub to: u64,
+    /// Per-block scan data for `from..=to` (heights with no block are omitted).
+    pub blocks: Vec<ScanBlockData>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,6 +331,7 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
         .route("/block/:height_or_hash", get(get_block))
         .route("/utxo/:commitment", get(get_utxo))
         .route("/wallet/balance", get(wallet_balance_handler))
+        .route("/chain/scan", get(chain_scan_handler))
         .layer(rate_limit_read);
 
     let submit_route = Router::new()
@@ -612,6 +672,72 @@ async fn wallet_balance_handler(State(handle): State<Arc<dyn NodeHandle>>) -> im
     }
 }
 
+/// Query for `/chain/scan?from=<u64>&to=<u64>`.
+#[derive(Debug, Deserialize)]
+struct ScanQuery {
+    from: u64,
+    to: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct TipDto {
+    height: u64,
+    hash: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ScanBlockDto {
+    height: u64,
+    hash: String,
+    output_commitments: Vec<String>,
+    input_commitments: Vec<String>,
+    fees: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ChainScanResponse {
+    tip: TipDto,
+    from: u64,
+    to: u64,
+    blocks: Vec<ScanBlockDto>,
+}
+
+/// `GET /chain/scan?from&to` — per-block output/input commitments for a height
+/// range (clamped to [`MAX_SCAN_RANGE`] and the tip), plus the tip. Public,
+/// read-only. A node that does not support it answers with the trait default
+/// error; a busy chain answers a retriable 503.
+async fn chain_scan_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Query(q): Query<ScanQuery>,
+) -> impl IntoResponse {
+    match handle.scan_chain(q.from, q.to) {
+        Ok(scan) => {
+            let blocks = scan
+                .blocks
+                .into_iter()
+                .map(|b| ScanBlockDto {
+                    height: b.height,
+                    hash: hex::encode(b.hash),
+                    output_commitments: b.output_commitments.iter().map(hex::encode).collect(),
+                    input_commitments: b.input_commitments.iter().map(hex::encode).collect(),
+                    fees: b.fees,
+                })
+                .collect();
+            Json(ChainScanResponse {
+                tip: TipDto {
+                    height: scan.tip.height,
+                    hash: hex::encode(scan.tip.hash),
+                },
+                from: scan.from,
+                to: scan.to,
+                blocks,
+            })
+            .into_response()
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
 async fn wallet_spend_handler(
     State(handle): State<Arc<dyn NodeHandle>>,
     Json(req): Json<SpendRequest>,
@@ -646,6 +772,8 @@ mod tests {
         /// When true, submit_tx reports the tx as accepted-but-not-relayed
         /// (the no-peers case exercised by F3).
         no_peers: bool,
+        /// Canned chain scan for `/chain/scan` tests; `None` → unsupported.
+        scan: Option<ChainScan>,
     }
 
     impl MockNode {
@@ -655,6 +783,15 @@ mod tests {
                 txs: Mutex::new(HashMap::new()),
                 network: "regtest",
                 no_peers: false,
+                scan: None,
+            }
+        }
+
+        /// A node serving a canned chain scan.
+        fn with_scan(height: u64, scan: ChainScan) -> Self {
+            Self {
+                scan: Some(scan),
+                ..Self::new(height)
             }
         }
 
@@ -677,6 +814,22 @@ mod tests {
     impl NodeHandle for MockNode {
         fn chain_height(&self) -> u64 {
             self.height
+        }
+        fn scan_chain(&self, from: u64, to: u64) -> Result<ChainScan, RpcError> {
+            match &self.scan {
+                Some(s) => {
+                    let mut out = s.clone();
+                    out.from = from;
+                    if from > to {
+                        out.blocks.clear();
+                        out.to = from.saturating_sub(1);
+                    } else {
+                        out.to = to.min(s.tip.height);
+                    }
+                    Ok(out)
+                }
+                None => Err(RpcError::Internal("chain scan not supported".into())),
+            }
         }
         fn mempool_size(&self) -> usize {
             self.txs.lock().unwrap().len()
@@ -1150,5 +1303,92 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(body_json(r).await, serde_json::json!({"found": false}));
+    }
+
+    fn canned_scan() -> ChainScan {
+        ChainScan {
+            tip: ChainTip {
+                height: 2,
+                hash: [0xc2u8; 32],
+            },
+            from: 0,
+            to: 2,
+            blocks: vec![
+                ScanBlockData {
+                    height: 1,
+                    hash: [0x11u8; 32],
+                    output_commitments: vec![[0xa1u8; 33]],
+                    input_commitments: vec![],
+                    fees: 0,
+                },
+                ScanBlockData {
+                    height: 2,
+                    hash: [0x22u8; 32],
+                    output_commitments: vec![[0xb2u8; 33]],
+                    input_commitments: vec![[0xa1u8; 33]],
+                    fees: 7,
+                },
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn chain_scan_returns_blocks_and_tip() {
+        let r = app_with(MockNode::with_scan(2, canned_scan()))
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/scan?from=0&to=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let j = body_json(r).await;
+        assert_eq!(j["tip"]["height"], serde_json::json!(2));
+        assert_eq!(j["tip"]["hash"], serde_json::json!("c2".repeat(32)));
+        assert_eq!(j["blocks"].as_array().unwrap().len(), 2);
+        assert_eq!(j["blocks"][1]["height"], serde_json::json!(2));
+        assert_eq!(j["blocks"][1]["fees"], serde_json::json!(7));
+        assert_eq!(
+            j["blocks"][1]["output_commitments"][0],
+            serde_json::json!("b2".repeat(33))
+        );
+        assert_eq!(
+            j["blocks"][1]["input_commitments"][0],
+            serde_json::json!("a1".repeat(33))
+        );
+    }
+
+    #[tokio::test]
+    async fn chain_scan_unsupported_node_errors() {
+        // The default node (no scan) returns the trait default error.
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/scan?from=0&to=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn chain_scan_empty_range_returns_only_tip() {
+        let r = app_with(MockNode::with_scan(2, canned_scan()))
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/scan?from=5&to=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let j = body_json(r).await;
+        assert_eq!(j["tip"]["height"], serde_json::json!(2));
+        assert_eq!(j["blocks"].as_array().unwrap().len(), 0);
     }
 }
