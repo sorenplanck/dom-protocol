@@ -326,6 +326,40 @@ impl ChainState {
             }
             let (new_utxos, spent_utxos) = build_utxo_changeset(block);
             self.validate_direct_extension_inputs(block)?;
+
+            // R-06: explicit kernel/output uniqueness against ALREADY-PERSISTED
+            // chain state, on the direct connect path, returning Invalid so a
+            // replaying peer is ban-scored (DomError::increases_ban_score). The
+            // storage layer's NO_OVERWRITE guard in dom-store::commit_block maps
+            // the same duplicate to DomError::Internal, which does NOT raise ban
+            // score; the reorg path (apply_connect) already rejects this as
+            // Invalid. Mirror that wording here (swap "reorg" -> "direct").
+            //
+            // This runs BEFORE commit_block, so the block being connected is not
+            // yet persisted and therefore cannot collide with itself; intra-block
+            // duplicate outputs/inputs are already rejected by validate_block, so
+            // this only catches collisions against prior persisted state. The
+            // direct path has no pending overlay, so plain store lookups suffice.
+            for output in std::iter::once(&block.coinbase.output)
+                .chain(block.transactions.iter().flat_map(|tx| tx.outputs.iter()))
+            {
+                let commitment = *output.commitment.as_bytes();
+                if self.store.get_utxo(&commitment)?.is_some() {
+                    return Err(DomError::Invalid(format!(
+                        "direct connect duplicate output commitment {}",
+                        hex::encode(commitment)
+                    )));
+                }
+            }
+            for (excess, _) in &kernel_excesses {
+                if self.store.get_kernel_block(excess)?.is_some() {
+                    return Err(DomError::Invalid(format!(
+                        "direct connect kernel replay detected: excess={}",
+                        hex::encode(excess)
+                    )));
+                }
+            }
+
             self.store.commit_block(
                 block_hash.as_bytes(),
                 header.height.0,

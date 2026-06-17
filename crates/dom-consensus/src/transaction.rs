@@ -366,6 +366,18 @@ impl CoinbaseTransaction {
         total_tx_fees: u64,
         chain_id: &[u8; 32],
     ) -> Result<(), DomError> {
+        // R-05: reject any coinbase kernel whose features are not the coinbase
+        // constant, before any signature verification. Defense in depth alongside
+        // the deserialize-side check in CoinbaseKernel::deserialize — a kernel can
+        // reach validate() in memory without ever being deserialized (e.g. built
+        // directly), so a feature mismatch with an otherwise-valid signature must
+        // still be rejected here.
+        if self.kernel.features != KERNEL_FEAT_COINBASE {
+            return Err(DomError::Invalid(format!(
+                "coinbase kernel features must be 0x{:02x}, got 0x{:02x}",
+                KERNEL_FEAT_COINBASE, self.kernel.features
+            )));
+        }
         if self.offset != [0u8; 32] {
             return Err(DomError::Invalid("coinbase offset must be zero".into()));
         }
@@ -624,6 +636,40 @@ mod tests {
             .expect_err("invalid coinbase range proof must reject");
         assert!(
             err.to_string().contains("range proof"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn coinbase_validate_rejects_plain_feature_even_if_resigned() {
+        // R-05: a coinbase carrying KERNEL_FEAT_PLAIN must be rejected even when
+        // the signature is re-computed over that plain feature (so the signature
+        // itself verifies). The feature guard must fire regardless of signature.
+        let chain_id = [7u8; 32];
+        let mut coinbase = valid_coinbase_for_test(&chain_id);
+
+        // Sanity: it validates as a proper coinbase first.
+        assert!(coinbase.validate(BlockHeight(0), 0, &chain_id).is_ok());
+
+        // Flip the feature to PLAIN and RE-SIGN over the plain feature so the
+        // Schnorr signature is internally valid for the tampered message.
+        coinbase.kernel.features = KERNEL_FEAT_PLAIN;
+        let kernel_message = {
+            let mut data = Vec::with_capacity(9);
+            data.push(KERNEL_FEAT_PLAIN);
+            data.extend_from_slice(&coinbase.kernel.explicit_value.to_le_bytes());
+            blake2b_256_tagged(dom_core::TAG_KERNEL_MSG_COINBASE, &data)
+        };
+        // blinding factor [9u8;32] matches valid_coinbase_for_test's excess = r*G.
+        let sk = SecretKey::from_bytes(&[9u8; 32]).unwrap();
+        let signature = schnorr_sign(&sk, kernel_message.as_bytes(), &chain_id).unwrap();
+        coinbase.kernel.excess_signature = signature.to_bytes();
+
+        let err = coinbase
+            .validate(BlockHeight(0), 0, &chain_id)
+            .expect_err("coinbase with plain feature must reject even when re-signed");
+        assert!(
+            err.to_string().contains("coinbase kernel features must be"),
             "unexpected error: {err}"
         );
     }

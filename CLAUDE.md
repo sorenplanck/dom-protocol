@@ -30,7 +30,9 @@ Vale para TODA sessão, não só auditorias.
   "PRECISA DECISÃO HUMANA" e pare. Não escolha sozinho.
 
 ## Git e merges
-- Merge para a branch principal SEMPRE via Pull Request, nunca push direto.
+- Merge para a branch principal pode ser feito por push direto APÓS revisão
+  local do diff. PR continua sendo opção válida para mudanças grandes ou quando
+  se quer rastro de revisão.
 - Não rodar git push, git rebase, force-push, alterar branch ou reescrever
   histórico sem autorização explícita na tarefa.
 - Não commitar binários (.exe, artefatos de build) nem segredos no repositório.

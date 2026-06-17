@@ -413,7 +413,7 @@ impl WalletManager {
         ow.save()?;
 
         let sink = rpc_source(rpc_base_url)?;
-        match v2_submit_finalized(&mut ow.state, &sink, slate_hash) {
+        match v2_submit_finalized(&mut ow.state, &sink, slate_hash, now) {
             Ok(outcome) => {
                 if let Some(warning) = &outcome.warning {
                     tracing::warn!(
@@ -494,7 +494,11 @@ impl WalletManager {
     /// v2 keeps the public finalized tx bytes on each `PendingSlate{Sender}`, so
     /// (unlike v1's journal replay) this just re-runs `submit_finalized` for any
     /// slate still `Finalized`/`Submitted`. Used on unlock/open and on a timer.
-    pub async fn resubmit_pending(&self, rpc_base_url: &str) -> Result<PendingResubmitReport> {
+    pub async fn resubmit_pending(
+        &self,
+        rpc_base_url: &str,
+        now: u64,
+    ) -> Result<PendingResubmitReport> {
         let sink = rpc_source(rpc_base_url)?;
         let mut guard = self.inner.lock().await;
         let ow = self.unlocked_mut(&mut guard)?;
@@ -518,7 +522,7 @@ impl WalletManager {
         let mut changed = false;
         for hash in hashes {
             report.attempted += 1;
-            match v2_submit_finalized(&mut ow.state, &sink, hash) {
+            match v2_submit_finalized(&mut ow.state, &sink, hash, now) {
                 Ok(_) => {
                     report.submitted += 1;
                     changed = true;
@@ -526,7 +530,10 @@ impl WalletManager {
                 // The node already has it (double-spend of an in-mempool tx, or
                 // already mined): treated as success — reconcile will confirm it.
                 Err(SubmitError::Sink(RpcSourceError::Rejected(reason))) => {
-                    tracing::info!("pending slate {} already known to node: {reason}", hex::encode(hash));
+                    tracing::info!(
+                        "pending slate {} already known to node: {reason}",
+                        hex::encode(hash)
+                    );
                     report.already_in_mempool += 1;
                 }
                 // Transient transport / busy chain → try again later.

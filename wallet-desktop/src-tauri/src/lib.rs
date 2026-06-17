@@ -74,14 +74,16 @@ async fn rpc_base_url(state: &AppState) -> Result<String, String> {
         .ok_or_else(|| "node not started yet".to_string())
 }
 
-async fn try_resubmit_pending(state: &AppState) -> Result<wallet_manager::PendingResubmitReport, String> {
+async fn try_resubmit_pending(
+    state: &AppState,
+) -> Result<wallet_manager::PendingResubmitReport, String> {
     if !state.wallet.is_open().await || !state.wallet.is_unlocked().await {
         return Ok(wallet_manager::PendingResubmitReport::default());
     }
     let base = rpc_base_url(state).await?;
     state
         .wallet
-        .resubmit_pending(&base)
+        .resubmit_pending(&base, now_secs())
         .await
         .map_err(|e| e.to_string())
 }
@@ -1175,7 +1177,7 @@ pub fn run() {
                     let Some(base) = resubmit_node.rpc_base_url().await else {
                         continue;
                     };
-                    match resubmit_wallet.resubmit_pending(&base).await {
+                    match resubmit_wallet.resubmit_pending(&base, now_secs()).await {
                         Ok(report) if report.attempted > 0 => tracing::info!(
                             "pending tx resubmit: attempted={} submitted={} already_in_mempool={} retry_later={} failed={}",
                             report.attempted,

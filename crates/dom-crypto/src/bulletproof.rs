@@ -271,6 +271,47 @@ pub fn prove(
     Ok((RangeProof::from_bytes(proof_bytes)?, sec1_bytes))
 }
 
+/// Read a range proof's advertised `[min_value, max_value]` bounds directly from
+/// its header bytes, via libsecp256k1's `secp256k1_rangeproof_info`.
+///
+/// This is the overflow-SAFE counterpart to the upstream `RangeProof::verify`,
+/// which returns `Range { end: max_value + 1, .. }` and therefore overflows
+/// (panics under `overflow-checks = true`; aborts under `panic = "abort"`) for a
+/// 64-bit proof reporting `max_value == u64::MAX` (R-07 F-02). `rangeproof_info`
+/// hands back the raw bounds with no `+ 1`, so `verify()` can bound-check the
+/// proof BEFORE ever calling the panicking upstream path.
+///
+/// Returns `None` when the proof header cannot be parsed (FFI returns 0); the
+/// caller treats that as a malformed/invalid proof.
+#[allow(unsafe_code)] // minimal read-only FFI: inspect the proof header, no mutation
+fn rangeproof_info_bounds(proof_bytes: &[u8]) -> Option<(u64, u64)> {
+    let mut exp: i32 = 0;
+    let mut mantissa: i32 = 0;
+    let mut min_value: u64 = 0;
+    let mut max_value: u64 = 0;
+    // SAFETY: every out-param points at a live local; `proof_bytes` is a valid
+    // slice of length `proof_bytes.len()`; `secp256k1_context_no_precomp` is the
+    // static no-precomputation context this function pointer is documented to
+    // accept. `secp256k1_rangeproof_info` only reads `proof_bytes` and writes the
+    // four out-params, returning 1 on success / 0 on a malformed proof.
+    let ret = unsafe {
+        secp256k1_zkp::ffi::secp256k1_rangeproof_info(
+            secp256k1_zkp::ffi::secp256k1_context_no_precomp,
+            &mut exp,
+            &mut mantissa,
+            &mut min_value,
+            &mut max_value,
+            proof_bytes.as_ptr(),
+            proof_bytes.len(),
+        )
+    };
+    if ret == 1 {
+        Some((min_value, max_value))
+    } else {
+        None
+    }
+}
+
 /// Verifica range proof dado commitment bytes (33 bytes).
 pub fn verify(commitment_bytes: &[u8; 33], proof_bytes: &[u8]) -> Result<bool, DomError> {
     if proof_bytes.is_empty() {
@@ -292,8 +333,29 @@ pub fn verify(commitment_bytes: &[u8; 33], proof_bytes: &[u8]) -> Result<bool, D
     let zkp_proof = ZkpRangeProof::from_slice(proof_bytes)
         .map_err(|e| DomError::Malformed(format!("proof malformado: {e}")))?;
 
+    // R-07 (F-01 soundness + F-02 remote-crash DoS): bound-check the proof's
+    // advertised range BEFORE calling the upstream verify(). The upstream path
+    // computes `max_value + 1`, which overflows -> abort for a 64-bit proof
+    // (max_value == u64::MAX). Reading the bounds here with the overflow-safe
+    // rangeproof_info lets us reject any proof whose declared range escapes
+    // [0, 2^52) before that overflow can be reached. An honest prover only ever
+    // emits 52-bit proofs of values <= MAX_PROVABLE_VALUE (see prove()), so this
+    // rejects nothing legitimate while (a) enforcing the upper bound the verifier
+    // previously ignored (it only checked range.start == 0) and (b) closing the
+    // DoS. A proof whose header cannot even be parsed is treated as invalid.
+    let (_min_value, max_value) = match rangeproof_info_bounds(proof_bytes) {
+        Some(bounds) => bounds,
+        None => return Ok(false),
+    };
+    if max_value > MAX_PROVABLE_VALUE {
+        return Ok(false);
+    }
+
     match zkp_proof.verify(SECP256K1, zkp_commit, b"", generator) {
-        Ok(range) => Ok(range.start == 0),
+        // Defense in depth: re-assert the bound on the verified range. The `+ 1`
+        // here cannot overflow because max_value <= MAX_PROVABLE_VALUE < u64::MAX
+        // was enforced above.
+        Ok(range) => Ok(range.start == 0 && range.end <= MAX_PROVABLE_VALUE + 1),
         Err(_) => Ok(false),
     }
 }
@@ -381,6 +443,161 @@ mod tests {
     fn value_above_max_rejected() {
         let bf = BlindingFactor::random();
         assert!(prove(MAX_PROVABLE_VALUE + 1, &bf).is_err());
+    }
+
+    // ── R-07 (F-01 soundness + F-02 remote-crash DoS) ─────────────────────────
+
+    /// Build a range proof with an explicit `min_bits` width, bypassing prove()'s
+    /// MAX_PROVABLE_VALUE cap. This lets tests exercise the verifier against proof
+    /// widths an honest prover never emits. `min_bits = 64` makes libsecp256k1
+    /// report `max_value = u64::MAX`, the exact input that overflows upstream
+    /// `verify()`'s `max_value + 1` (R-07 phase 1).
+    fn build_wide_proof(
+        value: u64,
+        blinding: &BlindingFactor,
+        min_bits: u8,
+    ) -> (Vec<u8>, [u8; 33]) {
+        let generator = dom_generator();
+        let commit = zkp_commit(value, blinding.as_bytes()).expect("commit");
+        let commit_bytes = commit.serialize();
+        let nonce_sk = SecretKey::new(&mut thread_rng());
+        let tweak = Tweak::from_slice(blinding.as_bytes()).expect("tweak");
+        let proof = ZkpRangeProof::new(
+            SECP256K1,
+            0,
+            commit,
+            value,
+            tweak,
+            b"DOM:bulletproof:v1",
+            b"",
+            nonce_sk,
+            0,
+            min_bits,
+            generator,
+        )
+        .expect("wide proof");
+        let sec1 = zkp_to_sec1(&commit_bytes).expect("zkp->sec1");
+        (proof.serialize(), sec1)
+    }
+
+    /// Read the proof's implied `[min_value, max_value]` via the raw FFI
+    /// `secp256k1_rangeproof_info` (no `+1`, so overflow-safe). Lets tests assert
+    /// the F-02 precondition without aborting the process.
+    #[allow(unsafe_code)] // raw FFI to inspect proof header; see rangeproof_info_bounds
+    fn proof_info(proof_bytes: &[u8]) -> (u64, u64) {
+        let mut exp: i32 = 0;
+        let mut mantissa: i32 = 0;
+        let mut min_value: u64 = 0;
+        let mut max_value: u64 = 0;
+        let ret = unsafe {
+            secp256k1_zkp::ffi::secp256k1_rangeproof_info(
+                secp256k1_zkp::ffi::secp256k1_context_no_precomp,
+                &mut exp,
+                &mut mantissa,
+                &mut min_value,
+                &mut max_value,
+                proof_bytes.as_ptr(),
+                proof_bytes.len(),
+            )
+        };
+        assert_eq!(ret, 1, "rangeproof_info must parse the constructed proof");
+        (min_value, max_value)
+    }
+
+    /// F-02 precondition: a 64-bit-wide proof's `max_value` is `u64::MAX`, so the
+    /// upstream `verify()` doing `max_value + 1` overflows. Runs cleanly (no `+1`).
+    #[test]
+    fn f02_precondition_64bit_proof_max_value_is_u64_max() {
+        let bf = BlindingFactor::random();
+        let (proof_bytes, _sec1) = build_wide_proof(1_000, &bf, 64);
+        let (min_value, max_value) = proof_info(&proof_bytes);
+        assert_eq!(min_value, 0, "min_value should be 0");
+        assert_eq!(
+            max_value,
+            u64::MAX,
+            "64-bit proof must imply max_value = u64::MAX (the +1 overflow input)"
+        );
+    }
+
+    /// F-02 fixed: the 64-bit proof that aborted bp_verify before R-07 (overflow
+    /// at upstream `max_value + 1`) now returns `Ok(false)` — the guard rejects it
+    /// before the overflowing path runs. If this test ever aborts, the guard
+    /// regressed.
+    #[test]
+    fn robustness_verify_64bit_proof_does_not_abort() {
+        let bf = BlindingFactor::random();
+        let (proof_bytes, sec1) = build_wide_proof(1_000, &bf, 64);
+        // Sanity: this proof really is the F-02 input (max_value == u64::MAX).
+        assert_eq!(proof_info(&proof_bytes).1, u64::MAX);
+        let r = verify(&sec1, &proof_bytes);
+        assert_eq!(
+            r,
+            Ok(false),
+            "64-bit proof must be rejected with Ok(false), not abort / not Ok(true)"
+        );
+    }
+
+    /// F-01 fixed: a proof whose declared range exceeds [0, 2^52) is rejected even
+    /// when its committed value and signature are internally valid. Here a 53-bit
+    /// proof of a value above MAX_PROVABLE_VALUE -> Ok(false).
+    #[test]
+    fn robustness_verify_rejects_value_above_2pow52() {
+        let bf = BlindingFactor::random();
+        let value = (1u64 << 52) + 12_345; // > MAX_PROVABLE_VALUE, fits in 53 bits
+        let (proof_bytes, sec1) = build_wide_proof(value, &bf, 53);
+        // The proof's declared upper bound escapes [0, 2^52).
+        assert!(
+            proof_info(&proof_bytes).1 > MAX_PROVABLE_VALUE,
+            "fixture must declare a range above MAX_PROVABLE_VALUE"
+        );
+        assert_eq!(
+            verify(&sec1, &proof_bytes),
+            Ok(false),
+            "a >2^52 range proof must be rejected (F-01)"
+        );
+    }
+
+    /// CRITICAL non-regression: every proof an honest prove() can emit must still
+    /// verify Ok(true) after the guard — including the exact upper boundary
+    /// MAX_PROVABLE_VALUE (2^52-1), zero, max supply, and random valid values.
+    /// This proves the guard rejects nothing legitimate (it only tightens).
+    #[test]
+    fn nonregression_all_honest_proofs_still_verify() {
+        use secp256k1_zkp::rand::Rng;
+
+        let fixed = [
+            0u64,
+            1,
+            2,
+            1_000,
+            1u64 << 20,
+            1u64 << 40,
+            1u64 << 51,
+            dom_core::MAX_SUPPLY_NOMS,
+            MAX_PROVABLE_VALUE - 1,
+            MAX_PROVABLE_VALUE, // 2^52 - 1, the exact accepted upper boundary
+        ];
+        for &v in &fixed {
+            let bf = BlindingFactor::random();
+            let (proof, commit) = prove(v, &bf).expect("honest prove");
+            assert_eq!(
+                verify(&commit, &proof.bytes),
+                Ok(true),
+                "honest proof of value {v} must verify after the guard"
+            );
+        }
+
+        let mut rng = thread_rng();
+        for _ in 0..32 {
+            let v = rng.gen_range(0..=MAX_PROVABLE_VALUE);
+            let bf = BlindingFactor::random();
+            let (proof, commit) = prove(v, &bf).expect("honest prove");
+            assert_eq!(
+                verify(&commit, &proof.bytes),
+                Ok(true),
+                "random honest proof of value {v} must verify after the guard"
+            );
+        }
     }
 }
 
