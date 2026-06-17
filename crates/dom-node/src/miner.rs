@@ -209,7 +209,6 @@ fn build_coinbase_with_blinding(
     blinding_override: Option<dom_crypto::pedersen::BlindingFactor>,
     bulletproof_nonce: Option<[u8; 32]>,
 ) -> Result<CoinbaseTransaction, DomError> {
-    use dom_crypto::bulletproof;
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::keys::SecretKey;
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
@@ -230,19 +229,15 @@ fn build_coinbase_with_blinding(
     let output_commitment = Commitment::commit(explicit_value, &blinding);
 
     // Range proof: proves value in [0, 2^52). Yields the proof bytes (Vec<u8>).
-    //
-    // Normal coinbase now uses the standard Bulletproof (bp2_prove).
-    //
-    // FLAG (Phase 2): the GENESIS path needs a DETERMINISTIC-nonce proof
-    // (`Some(nonce)`), but bp2 has NO `prove_with_nonce` equivalent yet, so it
-    // still uses the borromean `prove_with_nonce`. Genesis cannot be regenerated
-    // as a Bulletproof until a deterministic-nonce bp2 path exists. See report.
+    // Both paths now produce a standard 675-byte Bulletproof (bp2):
+    //   - GENESIS uses a DETERMINISTIC nonce (`Some(nonce)`) so the genesis block
+    //     is byte-reproducible across nodes (bp2_prove_with_nonce).
+    //   - normal blocks use fresh random nonces (bp2_prove).
     let range_proof_bytes: Vec<u8> = match bulletproof_nonce {
         Some(nonce) => {
-            bulletproof::prove_with_nonce(explicit_value, &blinding, &nonce)
+            dom_crypto::bp2_prove_with_nonce(explicit_value, &blinding, &nonce)
                 .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?
                 .0
-                .bytes
         }
         None => {
             dom_crypto::bp2_prove(explicit_value, &blinding)

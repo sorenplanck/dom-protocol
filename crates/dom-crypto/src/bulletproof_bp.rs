@@ -290,26 +290,26 @@ fn commit_zkp(
     Ok(out)
 }
 
-/// Bulletproof prove for `value` under `value_gen` (random nonces). Returns proof bytes.
-fn prove_raw(
+/// Bulletproof prove for `value` under `value_gen` with EXPLICIT nonces.
+/// The proof is a deterministic function of (value, blind, value_gen, rewind,
+/// private) — fixed nonces => byte-identical proof (see determinism gate test).
+fn prove_raw_with_nonces(
     backend: &Backend,
     value: u64,
     blind: &[u8; 32],
     value_gen: &[u8; 64],
+    rewind: &[u8; 32],
+    private: &[u8; 32],
 ) -> Result<Vec<u8>, DomError> {
     let mut proof = [0u8; constants::MAX_PROOF_SIZE];
     let mut plen: usize = constants::MAX_PROOF_SIZE;
-    let mut rewind = [0u8; 32];
-    let mut private = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut rewind);
-    rand::thread_rng().fill_bytes(&mut private);
     let blinds: [*const u8; 1] = [blind.as_ptr()];
     let v = value;
 
     let r = SCRATCH.with(|scratch| {
         // SAFETY: shared ctx/gens are live for the process lifetime; the reused
         // per-thread scratch is exclusive to this thread; all pointers are valid
-        // for the call (proof writable for plen; blind/value_gen fixed lengths).
+        // for the call (proof writable for plen; blind/value_gen/nonces fixed lengths).
         unsafe {
             raw_ffi::secp256k1_bulletproof_rangeproof_prove(
                 backend.ctx,
@@ -339,6 +339,20 @@ fn prove_raw(
         return Err(DomError::Internal("bulletproof prove failed".into()));
     }
     Ok(proof[..plen].to_vec())
+}
+
+/// Bulletproof prove for `value` under `value_gen` with fresh RANDOM nonces.
+fn prove_raw(
+    backend: &Backend,
+    value: u64,
+    blind: &[u8; 32],
+    value_gen: &[u8; 64],
+) -> Result<Vec<u8>, DomError> {
+    let mut rewind = [0u8; 32];
+    let mut private = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut rewind);
+    rand::thread_rng().fill_bytes(&mut private);
+    prove_raw_with_nonces(backend, value, blind, value_gen, &rewind, &private)
 }
 
 /// Bulletproof verify of `proof` against a 33-byte zkp `commit` under `value_gen`.
@@ -402,6 +416,47 @@ pub fn bp_prove(
     let zkp = commit_zkp(backend, value, blind, &h_dom)?;
     let sec1 = zkp_to_sec1(&zkp)?;
     let proof = prove_raw(backend, value, blind, &h_dom)?;
+    Ok((proof, sec1))
+}
+
+// Domain-separation tags for deriving grin's two bulletproof nonces from DOM's
+// single deterministic seed. Distinct tags => independent rewind/private nonces
+// from the same seed, mirroring borromean's single-nonce determinism while
+// satisfying grin's two-nonce API. Stable: changing these changes every
+// deterministic (e.g. genesis) proof, so they are frozen by the pinned vector test.
+const TAG_BP2_REWIND_NONCE: &str = "DOM:bp2-rewind-nonce:v1";
+const TAG_BP2_PRIVATE_NONCE: &str = "DOM:bp2-private-nonce:v1";
+
+/// Generate a standard Bulletproof for `(value, blinding)` under H_DOM with a
+/// DETERMINISTIC nonce derived from a single 32-byte DOM seed.
+///
+/// Mirrors borromean's `prove_with_nonce` (one seed in), but grin's prover needs
+/// two nonces, so both are derived from the seed via domain-separated tagged
+/// hashes ([`TAG_BP2_REWIND_NONCE`] / [`TAG_BP2_PRIVATE_NONCE`]). A fixed seed
+/// therefore yields a byte-reproducible proof — required for the genesis block.
+///
+/// Returns `(proof_bytes, commitment_sec1)`. Rejects `value > MAX_PROVABLE_VALUE`
+/// before any FFI call. Exported as `bp2_prove_with_nonce`.
+pub fn bp_prove_with_nonce(
+    value: u64,
+    blinding: &BlindingFactor,
+    nonce_bytes: &[u8; 32],
+) -> Result<(Vec<u8>, [u8; 33]), DomError> {
+    if value > MAX_PROVABLE_VALUE {
+        return Err(DomError::Invalid(format!(
+            "value {value} > MAX_PROVABLE_VALUE {MAX_PROVABLE_VALUE}"
+        )));
+    }
+    // Deterministically derive grin's two nonces from the single DOM seed.
+    let rewind = *crate::blake2b_256_tagged(TAG_BP2_REWIND_NONCE, nonce_bytes).as_bytes();
+    let private = *crate::blake2b_256_tagged(TAG_BP2_PRIVATE_NONCE, nonce_bytes).as_bytes();
+
+    let backend = backend();
+    let h_dom = h_dom_internal(backend)?;
+    let blind = blinding.as_bytes();
+    let zkp = commit_zkp(backend, value, blind, &h_dom)?;
+    let sec1 = zkp_to_sec1(&zkp)?;
+    let proof = prove_raw_with_nonces(backend, value, blind, &h_dom, &rewind, &private)?;
     Ok((proof, sec1))
 }
 
@@ -561,6 +616,53 @@ mod tests {
             !verify_raw(backend, &c_dom, &pr_dom, &g2).unwrap()
         };
         assert!(n2, "all-zero generator must be rejected");
+    }
+
+    /// DETERMINISM GATE (Phase 2): bp_prove_with_nonce is byte-reproducible.
+    /// Two independent proves with the SAME DOM seed yield BYTE-IDENTICAL 675-byte
+    /// proofs that verify under H_DOM, for values 0, 42, MAX_PROVABLE_VALUE. This
+    /// is the precondition for a reproducible genesis coinbase. If it ever fails,
+    /// genesis cannot be reproducible.
+    #[test]
+    fn bp2_prove_with_nonce_is_deterministic() {
+        let blinding = BlindingFactor::from_bytes([0x11u8; 32]).unwrap();
+        let nonce = [0x07u8; 32];
+        for value in [0u64, 42, MAX_PROVABLE_VALUE] {
+            let (p1, sec1_a) = bp_prove_with_nonce(value, &blinding, &nonce).unwrap();
+            let (p2, sec1_b) = bp_prove_with_nonce(value, &blinding, &nonce).unwrap();
+            assert_eq!(p1.len(), 675, "proof len value={value}");
+            assert_eq!(
+                p1, p2,
+                "NON-DETERMINISTIC bp2 proof for value={value}\n p1={}\n p2={}",
+                hex::encode(&p1),
+                hex::encode(&p2)
+            );
+            assert_eq!(sec1_a, sec1_b, "commitment must be stable, value={value}");
+            assert!(
+                bp_verify(&sec1_a, &p1).unwrap(),
+                "deterministic proof must verify under H_DOM, value={value}"
+            );
+        }
+    }
+
+    /// FROZEN VECTOR: pins the exact 675-byte deterministic proof + commitment for
+    /// a fixed (value, blinding, nonce), so any drift in the nonce derivation or
+    /// the prover output is caught. Genesis-style: a fixed seed must always yield
+    /// these exact bytes.
+    #[test]
+    fn bp2_prove_with_nonce_frozen_vector() {
+        let blinding = BlindingFactor::from_bytes([0x11u8; 32]).unwrap();
+        let nonce = [0x07u8; 32];
+        let (proof, sec1) = bp_prove_with_nonce(42, &blinding, &nonce).unwrap();
+        assert_eq!(proof.len(), 675);
+
+        // Frozen: value=42, blinding=[0x11;32], DOM seed nonce=[0x07;32], H_DOM.
+        const EXPECTED_SEC1: &str =
+            "03171d4a3e65fcaf5f0937308dd1fe1cf33c337c4d5f559a03166e051884e9a402";
+        const EXPECTED_PROOF: &str = "29816c0be734c6cbd7cdab9d67c66cb8a52b8534bb169abb6d74931931969ff4b32054f674bc9b8ea3e8dfb2a1db3551362bb3308c982e1577108204c9f3378d0cdffd891622f8171d3ba09d1b657248ff5dfcb7aabe7b1d734588336a31a6c774462df4ff4cb42a70fb2ebcfbf747a38edfd76dd621e867b48529be73721fd985a9b86e61edc1b2178170c3d176b941ced3454961d2ddb311d87d9bfe59d90c77ef428aef25f1d5955e0586b6331402f9ee2d81e2e78783f0f67b2ee05b12122c1aec82e0ccc0a3e8b7de99e50c856488dacdc120afe2b50d1fea33ba561be32c685c31920d1746b6dd72367415ec3ce77e47edac38d637421d5a0d37512b7e58ba95ad058c83d051adad94e2b0c79c28fbb3aa330d3568ca0217ebe79a0a16a786fb00307a36b6d434c1e33b92f4bed98ed01deee51b86b290b1f999db52b5b1dff4a823eff374714be6bddb061aebea56f206e3e3423d2a41f16e201529aa0a8002be1f28ff996d2ef438dc34f3a66c3235338c9d4965ae46750f408f45a57f550513b96088d75f881e7ecb969d21752382a62a86c367197c7f7cd0ba7e6b4dd1be9314e228d2e4978e79d409312db971b66e112a24d32778a22af1ce0307a9145fd605b7b15d9b4b9da774b4906d64414967192a7b593f0139ca01687252b2e4db249806da2c7e40b21c33a04ec4321deddbe25192e215cfd54846de6a00d30cab00cfede9396bf33fcd641e47b2699e3955b2c24045ac6d858b7e8d0e9621589c1314df4f7aff3567f4aed04ea27bad63154fbabe6367db329054259dedc42c09992ad09314428b57bf2ec22a08ad1cf1bdae36f01efa11488819b900887e51e28085deeca2d14d675eb85beccb7f56707a072cdfbd55d4838d36e3ce869698419080852d19de2a66559ee23ee8f62e7c212ca6527ecc13df4645772eee4b4a4a";
+        assert_eq!(hex::encode(sec1), EXPECTED_SEC1, "commitment drift");
+        assert_eq!(hex::encode(&proof), EXPECTED_PROOF, "proof byte drift");
+        assert!(bp_verify(&sec1, &proof).unwrap());
     }
 }
 

@@ -35,6 +35,9 @@ pub use bulletproof::{prove as bp_prove, verify as bp_verify, RangeProof};
 // into consensus — both paths coexist.
 mod bulletproof_bp;
 /// Standard-Bulletproof (grin backend) range-proof prove/verify, exported as
-/// `bp2_prove`/`bp2_verify`. Parallel to the borromean `bp_prove`/`bp_verify`;
+/// `bp2_prove`/`bp2_verify` (+ `bp2_prove_with_nonce` for deterministic-nonce
+/// proofs, e.g. genesis). Parallel to the borromean `bp_prove`/`bp_verify`;
 /// produces 675-byte proofs bound to H_DOM. Not yet wired into consensus.
-pub use bulletproof_bp::{bp_prove as bp2_prove, bp_verify as bp2_verify};
+pub use bulletproof_bp::{
+    bp_prove as bp2_prove, bp_prove_with_nonce as bp2_prove_with_nonce, bp_verify as bp2_verify,
+};
