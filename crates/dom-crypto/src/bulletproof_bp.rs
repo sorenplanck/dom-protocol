@@ -53,9 +53,11 @@ pub(crate) const SINGLE_BULLETPROOF_SIZE: usize = 675;
 /// is the 64-bit variant; DOM additionally enforces [`MAX_PROVABLE_VALUE`].
 pub(crate) const PROOF_NBITS: usize = 64;
 
-/// Scratch arena size for grin's bulletproof FFI (mirrors grin's own
-/// `SCRATCH_SPACE_SIZE`); generous virtual reservation, freed after each call.
-const SCRATCH_SIZE: usize = 256 * (1 << 20);
+/// Scratch arena size for grin's bulletproof FFI, per thread (reused, not
+/// per-call). Empirically the minimum for a single 64-bit proof is ~15.8 KiB to
+/// prove / ~9.2 KiB to verify (measured against grin 0.7.15); 1 MiB gives ~65x
+/// headroom while being 256x smaller than grin's batch-sized 256 MiB default.
+const SCRATCH_SIZE: usize = 1 << 20; // 1 MiB
 
 /// Number of bulletproof generators to create (mirrors grin's `MAX_GENERATORS`).
 const N_GENERATORS: usize = 256;
@@ -222,43 +224,74 @@ mod raw_ffi {
     }
 }
 
-/// Owns a grin context + bulletproof generator set, freed on drop.
+/// Shared grin context + bulletproof generator set, initialized once and reused
+/// for the lifetime of the process. Building the context (ecmult tables) and the
+/// 256 generators is expensive; per-call recreation (alongside a 256 MiB scratch)
+/// was the consensus-viability blocker flagged in review. Now all three heavy
+/// resources are reused: context+generators here, scratch per-thread below.
 struct Backend {
     ctx: *mut ffi::Context,
     gens: *mut ffi::BulletproofGenerators,
 }
 
-impl Backend {
-    fn new() -> Result<Self, DomError> {
-        // SAFETY: context_create/generators_create are the grin constructors;
-        // we null-check both and free the ctx if generator creation fails.
+// SAFETY (threading): per libsecp256k1's own header — "A constructed context can
+// safely be used from multiple threads simultaneously" for const API calls. We
+// only ever invoke const operations (prove/verify/commit/parse/serialize) and
+// NEVER call the non-const secp256k1_context_randomize after creation, so no
+// locking is required. The BulletproofGenerators set is immutable after
+// creation. Hence sharing context+generators across threads is sound. The
+// mutable scratch is deliberately NOT shared (see SCRATCH). The singleton is
+// intentionally never destroyed (process-lifetime), so there is no Drop /
+// double-free hazard from sharing the raw pointers.
+unsafe impl Send for Backend {}
+unsafe impl Sync for Backend {}
+
+static SHARED: std::sync::OnceLock<Backend> = std::sync::OnceLock::new();
+
+/// Lazily initialize and return the process-wide shared backend.
+fn backend() -> &'static Backend {
+    SHARED.get_or_init(|| {
+        // SAFETY: standard grin constructors; both results checked non-null. The
+        // shim cannot operate without a context/generators, so failure panics.
         unsafe {
             let ctx = ffi::secp256k1_context_create(
                 ffi::SECP256K1_START_SIGN | ffi::SECP256K1_START_VERIFY,
             );
-            if ctx.is_null() {
-                return Err(DomError::Internal("grin context_create returned null".into()));
-            }
-            let gens =
-                ffi::secp256k1_bulletproof_generators_create(ctx, constants::GENERATOR_G.as_ptr(), N_GENERATORS);
-            if gens.is_null() {
-                ffi::secp256k1_context_destroy(ctx);
-                return Err(DomError::Internal("grin generators_create returned null".into()));
-            }
-            Ok(Self { ctx, gens })
+            assert!(!ctx.is_null(), "grin context_create returned null");
+            let gens = ffi::secp256k1_bulletproof_generators_create(
+                ctx,
+                constants::GENERATOR_G.as_ptr(),
+                N_GENERATORS,
+            );
+            assert!(!gens.is_null(), "grin generators_create returned null");
+            Backend { ctx, gens }
         }
+    })
+}
+
+/// Per-thread reusable scratch space. grin's header states scratch "cannot
+/// safely be shared between threads without additional synchronization", so each
+/// thread owns its own, created once and reused across calls (each bulletproof
+/// call does allocate_frame/deallocate_frame internally, leaving it clean).
+/// Freed at thread exit.
+struct ScratchHandle(*mut ffi::ScratchSpace);
+
+impl Drop for ScratchHandle {
+    fn drop(&mut self) {
+        // SAFETY: created via scratch_space_create on the shared ctx; destroyed
+        // exactly once, at thread exit, and never used afterwards.
+        unsafe { ffi::secp256k1_scratch_space_destroy(self.0) };
     }
 }
 
-impl Drop for Backend {
-    fn drop(&mut self) {
-        // SAFETY: ctx/gens were produced by the matching grin constructors and
-        // are not used after this point.
-        unsafe {
-            ffi::secp256k1_bulletproof_generators_destroy(self.ctx, self.gens);
-            ffi::secp256k1_context_destroy(self.ctx);
-        }
-    }
+thread_local! {
+    static SCRATCH: ScratchHandle = {
+        let b = backend();
+        // SAFETY: shared ctx is live for the process lifetime; SCRATCH_SIZE > 0.
+        let s = unsafe { ffi::secp256k1_scratch_space_create(b.ctx, SCRATCH_SIZE) };
+        assert!(!s.is_null(), "grin scratch_space_create returned null");
+        ScratchHandle(s)
+    };
 }
 
 /// Parse the canonical H_DOM into grin's 64-byte internal generator form.
@@ -318,38 +351,35 @@ fn prove_raw(
     let blinds: [*const u8; 1] = [blind.as_ptr()];
     let v = value;
 
-    // SAFETY: scratch from grin constructor (null-checked); all pointers valid
-    // for the call; scratch destroyed before return.
-    let r = unsafe {
-        let scratch = ffi::secp256k1_scratch_space_create(backend.ctx, SCRATCH_SIZE);
-        if scratch.is_null() {
-            return Err(DomError::Internal("scratch_space_create returned null".into()));
+    let r = SCRATCH.with(|scratch| {
+        // SAFETY: shared ctx/gens are live for the process lifetime; the reused
+        // per-thread scratch is exclusive to this thread; all pointers are valid
+        // for the call (proof writable for plen; blind/value_gen fixed lengths).
+        unsafe {
+            raw_ffi::secp256k1_bulletproof_rangeproof_prove(
+                backend.ctx,
+                scratch.0,
+                backend.gens,
+                proof.as_mut_ptr(),
+                &mut plen,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &v as *const u64,
+                ptr::null(),
+                blinds.as_ptr(),
+                ptr::null(),
+                1,
+                value_gen.as_ptr(),
+                PROOF_NBITS,
+                rewind.as_ptr(),
+                private.as_ptr(),
+                ptr::null(),
+                0,
+                ptr::null(),
+            )
         }
-        let r = raw_ffi::secp256k1_bulletproof_rangeproof_prove(
-            backend.ctx,
-            scratch,
-            backend.gens,
-            proof.as_mut_ptr(),
-            &mut plen,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &v as *const u64,
-            ptr::null(),
-            blinds.as_ptr(),
-            ptr::null(),
-            1,
-            value_gen.as_ptr(),
-            PROOF_NBITS,
-            rewind.as_ptr(),
-            private.as_ptr(),
-            ptr::null(),
-            0,
-            ptr::null(),
-        );
-        ffi::secp256k1_scratch_space_destroy(scratch);
-        r
-    };
+    });
     if r != 1 {
         return Err(DomError::Internal("bulletproof prove failed".into()));
     }
@@ -370,30 +400,27 @@ fn verify_raw(
     {
         return Ok(false);
     }
-    // SAFETY: scratch from grin constructor (null-checked); proof readable for
-    // proof.len(); ci is a valid internal commitment; scratch destroyed before return.
-    let r = unsafe {
-        let scratch = ffi::secp256k1_scratch_space_create(backend.ctx, SCRATCH_SIZE);
-        if scratch.is_null() {
-            return Err(DomError::Internal("scratch_space_create returned null".into()));
+    let r = SCRATCH.with(|scratch| {
+        // SAFETY: shared ctx/gens are live for the process lifetime; the reused
+        // per-thread scratch is exclusive to this thread; proof readable for
+        // proof.len(); ci is a valid internal commitment.
+        unsafe {
+            raw_ffi::secp256k1_bulletproof_rangeproof_verify(
+                backend.ctx,
+                scratch.0,
+                backend.gens,
+                proof.as_ptr(),
+                proof.len(),
+                ptr::null(),
+                ci.as_ptr(),
+                1,
+                PROOF_NBITS,
+                value_gen.as_ptr(),
+                ptr::null(),
+                0,
+            )
         }
-        let r = raw_ffi::secp256k1_bulletproof_rangeproof_verify(
-            backend.ctx,
-            scratch,
-            backend.gens,
-            proof.as_ptr(),
-            proof.len(),
-            ptr::null(),
-            ci.as_ptr(),
-            1,
-            PROOF_NBITS,
-            value_gen.as_ptr(),
-            ptr::null(),
-            0,
-        );
-        ffi::secp256k1_scratch_space_destroy(scratch);
-        r
-    };
+    });
     Ok(r == 1)
 }
 
@@ -414,12 +441,12 @@ pub fn bp_prove(
             "value {value} > MAX_PROVABLE_VALUE {MAX_PROVABLE_VALUE}"
         )));
     }
-    let backend = Backend::new()?;
-    let h_dom = h_dom_internal(&backend)?;
+    let backend = backend();
+    let h_dom = h_dom_internal(backend)?;
     let blind = blinding.as_bytes();
-    let zkp = commit_zkp(&backend, value, blind, &h_dom)?;
+    let zkp = commit_zkp(backend, value, blind, &h_dom)?;
     let sec1 = zkp_to_sec1(&zkp)?;
-    let proof = prove_raw(&backend, value, blind, &h_dom)?;
+    let proof = prove_raw(backend, value, blind, &h_dom)?;
     Ok((proof, sec1))
 }
 
@@ -438,10 +465,10 @@ pub fn bp_verify(commitment_sec1: &[u8; 33], proof_bytes: &[u8]) -> Result<bool,
             proof_bytes.len()
         )));
     }
-    let backend = Backend::new()?;
-    let h_dom = h_dom_internal(&backend)?;
+    let backend = backend();
+    let h_dom = h_dom_internal(backend)?;
     let zkp = sec1_to_zkp(commitment_sec1)?;
-    verify_raw(&backend, &zkp, proof_bytes, &h_dom)
+    verify_raw(backend, &zkp, proof_bytes, &h_dom)
 }
 
 #[cfg(test)]
@@ -458,8 +485,8 @@ mod tests {
         let ser = h_dom_zkp_serialized().expect("H_DOM serialize");
         assert_eq!(ser.len(), 33);
         assert!(ser[0] == 0x0a || ser[0] == 0x0b);
-        let backend = Backend::new().expect("backend");
-        let g = h_dom_internal(&backend).expect("H_DOM parse");
+        let backend = backend();
+        let g = h_dom_internal(backend).expect("H_DOM parse");
         assert!(g.iter().any(|&b| b != 0));
         assert_eq!(SINGLE_BULLETPROOF_SIZE, 675);
         assert_eq!(PROOF_NBITS, 64);
@@ -469,25 +496,25 @@ mod tests {
     #[test]
     fn binding_matrix_in_crate() {
         let blind = BlindingFactor::from_bytes(TEST_BLIND).expect("blind");
-        let backend = Backend::new().expect("backend");
-        let h_dom = h_dom_internal(&backend).expect("H_DOM");
+        let backend = backend();
+        let h_dom = h_dom_internal(backend).expect("H_DOM");
         let h_def: [u8; 64] = constants::GENERATOR_H;
         assert_ne!(h_dom, h_def, "H_DOM must differ from grin's default H");
 
         for &v in MATRIX_VALUES.iter() {
-            let c_dom = commit_zkp(&backend, v, blind.as_bytes(), &h_dom).unwrap();
-            let c_def = commit_zkp(&backend, v, blind.as_bytes(), &h_def).unwrap();
-            let pr_dom = prove_raw(&backend, v, blind.as_bytes(), &h_dom).unwrap();
-            let pr_def = prove_raw(&backend, v, blind.as_bytes(), &h_def).unwrap();
+            let c_dom = commit_zkp(backend, v, blind.as_bytes(), &h_dom).unwrap();
+            let c_def = commit_zkp(backend, v, blind.as_bytes(), &h_def).unwrap();
+            let pr_dom = prove_raw(backend, v, blind.as_bytes(), &h_dom).unwrap();
+            let pr_def = prove_raw(backend, v, blind.as_bytes(), &h_def).unwrap();
 
             // A: commit=H_DOM prove=H_DOM verify=H_DOM -> PASS
-            assert!(verify_raw(&backend, &c_dom, &pr_dom, &h_dom).unwrap(), "A v={v}");
+            assert!(verify_raw(backend, &c_dom, &pr_dom, &h_dom).unwrap(), "A v={v}");
             // B: commit=H_DOM prove=H_default verify=H_DOM -> FAIL
-            assert!(!verify_raw(&backend, &c_dom, &pr_def, &h_dom).unwrap(), "B v={v}");
+            assert!(!verify_raw(backend, &c_dom, &pr_def, &h_dom).unwrap(), "B v={v}");
             // C: commit=H_DOM prove=H_DOM verify=H_default -> FAIL
-            assert!(!verify_raw(&backend, &c_dom, &pr_dom, &h_def).unwrap(), "C v={v}");
+            assert!(!verify_raw(backend, &c_dom, &pr_dom, &h_def).unwrap(), "C v={v}");
             // D: control, all H_default -> PASS
-            assert!(verify_raw(&backend, &c_def, &pr_def, &h_def).unwrap(), "D v={v}");
+            assert!(verify_raw(backend, &c_def, &pr_def, &h_def).unwrap(), "D v={v}");
 
             // proof is a real 675-byte Bulletproof
             assert_eq!(pr_dom.len(), 675, "proof len v={v}");
@@ -546,10 +573,10 @@ mod tests {
     #[test]
     fn negative_generator_rejected() {
         let blind = BlindingFactor::from_bytes(TEST_BLIND).unwrap();
-        let backend = Backend::new().unwrap();
-        let h_dom = h_dom_internal(&backend).unwrap();
-        let c_dom = commit_zkp(&backend, 42, blind.as_bytes(), &h_dom).unwrap();
-        let pr_dom = prove_raw(&backend, 42, blind.as_bytes(), &h_dom).unwrap();
+        let backend = backend();
+        let h_dom = h_dom_internal(backend).unwrap();
+        let c_dom = commit_zkp(backend, 42, blind.as_bytes(), &h_dom).unwrap();
+        let pr_dom = prove_raw(backend, 42, blind.as_bytes(), &h_dom).unwrap();
 
         // N1: flip one byte of the serialized H_DOM.
         let mut flipped = h_dom_zkp_serialized().unwrap();
@@ -562,7 +589,7 @@ mod tests {
         let n1 = if parsed1 != 1 {
             true // off-curve => rejected at parse
         } else {
-            !verify_raw(&backend, &c_dom, &pr_dom, &g1).unwrap()
+            !verify_raw(backend, &c_dom, &pr_dom, &g1).unwrap()
         };
         assert!(n1, "flipped generator must be rejected");
 
@@ -576,7 +603,7 @@ mod tests {
         let n2 = if parsed2 != 1 {
             true
         } else {
-            !verify_raw(&backend, &c_dom, &pr_dom, &g2).unwrap()
+            !verify_raw(backend, &c_dom, &pr_dom, &g2).unwrap()
         };
         assert!(n2, "all-zero generator must be rejected");
     }
@@ -660,8 +687,8 @@ mod differential {
 
     #[test]
     fn fixed_and_edges() {
-        let backend = Backend::new().expect("backend");
-        let h_dom = h_dom_internal(&backend).expect("H_DOM");
+        let backend = backend();
+        let h_dom = h_dom_internal(backend).expect("H_DOM");
 
         // The shared-backend shim path must match the public bp_prove wrapper byte-for-byte.
         {
@@ -669,7 +696,7 @@ mod differential {
             let (_proof, wrapper_sec1) = bp_prove(42, &b).unwrap();
             assert_eq!(
                 wrapper_sec1,
-                shim_sec1(&backend, &h_dom, 42, &b),
+                shim_sec1(backend, &h_dom, 42, &b),
                 "public bp_prove must match shared-backend shim commitment"
             );
             assert_eq!(
@@ -708,22 +735,22 @@ mod differential {
         // Fixed values with a fixed mid blinding.
         let mid = BlindingFactor::from_bytes([0x7Au8; 32]).unwrap();
         for &v in fixed_values.iter() {
-            check_pair(&backend, &h_dom, v, &mid, "fixed");
+            check_pair(backend, &h_dom, v, &mid, "fixed");
         }
         // Edge blindings across a few values.
         for (i, eb) in edge_blindings.iter().enumerate() {
             let b = BlindingFactor::from_bytes(*eb)
                 .unwrap_or_else(|e| panic!("edge blinding {i} invalid: {e:?}"));
             for &v in &[0u64, 42, 1_000_000, MAX_PROVABLE_VALUE] {
-                check_pair(&backend, &h_dom, v, &b, "edge");
+                check_pair(backend, &h_dom, v, &b, "edge");
             }
         }
     }
 
     #[test]
     fn random_1000_match() {
-        let backend = Backend::new().expect("backend");
-        let h_dom = h_dom_internal(&backend).expect("H_DOM");
+        let backend = backend();
+        let h_dom = h_dom_internal(backend).expect("H_DOM");
         let mut rng = StdRng::seed_from_u64(SEED);
 
         for i in 0..N_RANDOM {
@@ -735,7 +762,7 @@ mod differential {
                     break b;
                 }
             };
-            check_pair(&backend, &h_dom, value, &blinding, &format!("random#{i}"));
+            check_pair(backend, &h_dom, value, &blinding, &format!("random#{i}"));
         }
     }
 }
