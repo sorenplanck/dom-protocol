@@ -11,6 +11,8 @@ license.workspace    = true
 dom-core.workspace   = true
 secp256k1.workspace     = true
 secp256k1-zkp = { git = "https://github.com/BlockstreamResearch/rust-secp256k1-zkp", branch = "master", features = ["global-context", "rand-std"] }
+# Bulletproof migration (Phase 1): standard-Bulletproof path, parallel to borromean. NOT yet wired into consensus.
+grin_secp256k1zkp.workspace = true
 blake2.workspace     = true
 sha2.workspace       = true
 hmac.workspace       = true

@@ -23,3 +23,8 @@ pub use schnorr::{
 };
 pub mod bulletproof;
 pub use bulletproof::{prove as bp_prove, verify as bp_verify, RangeProof};
+
+// Phase 1 (Bulletproof migration): standard-Bulletproof shim, parallel to the
+// borromean `bulletproof` module above. Crate-private for now — exported under
+// distinct `bp2_*` names in a later commit. NOT wired into consensus.
+mod bulletproof_bp;
