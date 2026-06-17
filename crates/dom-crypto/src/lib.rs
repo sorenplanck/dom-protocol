@@ -24,7 +24,12 @@ pub use schnorr::{
 pub mod bulletproof;
 pub use bulletproof::{prove as bp_prove, verify as bp_verify, RangeProof};
 
-// Phase 1 (Bulletproof migration): standard-Bulletproof shim, parallel to the
-// borromean `bulletproof` module above. Crate-private for now — exported under
-// distinct `bp2_*` names in a later commit. NOT wired into consensus.
+// Phase 2 (Bulletproof migration): standard-Bulletproof shim, parallel to the
+// borromean `bulletproof` module above. Exported under distinct `bp2_*` names so
+// it cannot be confused with the borromean `bp_prove`/`bp_verify`. NOT yet wired
+// into consensus — both paths coexist.
 mod bulletproof_bp;
+/// Standard-Bulletproof (grin backend) range-proof prove/verify, exported as
+/// `bp2_prove`/`bp2_verify`. Parallel to the borromean `bp_prove`/`bp_verify`;
+/// produces 675-byte proofs bound to H_DOM. Not yet wired into consensus.
+pub use bulletproof_bp::{bp_prove as bp2_prove, bp_verify as bp2_verify};
