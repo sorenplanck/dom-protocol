@@ -229,12 +229,26 @@ fn build_coinbase_with_blinding(
     // Output commitment: C = value*H + r*G
     let output_commitment = Commitment::commit(explicit_value, &blinding);
 
-    // Range proof: proves value in [0, 2^52)
-    let (range_proof, _) = match bulletproof_nonce {
-        Some(nonce) => bulletproof::prove_with_nonce(explicit_value, &blinding, &nonce)
-            .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?,
-        None => bulletproof::prove(explicit_value, &blinding)
-            .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?,
+    // Range proof: proves value in [0, 2^52). Yields the proof bytes (Vec<u8>).
+    //
+    // Normal coinbase now uses the standard Bulletproof (bp2_prove).
+    //
+    // FLAG (Phase 2): the GENESIS path needs a DETERMINISTIC-nonce proof
+    // (`Some(nonce)`), but bp2 has NO `prove_with_nonce` equivalent yet, so it
+    // still uses the borromean `prove_with_nonce`. Genesis cannot be regenerated
+    // as a Bulletproof until a deterministic-nonce bp2 path exists. See report.
+    let range_proof_bytes: Vec<u8> = match bulletproof_nonce {
+        Some(nonce) => {
+            bulletproof::prove_with_nonce(explicit_value, &blinding, &nonce)
+                .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?
+                .0
+                .bytes
+        }
+        None => {
+            dom_crypto::bp2_prove(explicit_value, &blinding)
+                .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?
+                .0
+        }
     };
 
     // Kernel excess = r*G (Mimblewimble: coinbase creates value, excess is blinding only)
@@ -257,7 +271,7 @@ fn build_coinbase_with_blinding(
     Ok(CoinbaseTransaction {
         output: TransactionOutput {
             commitment: output_commitment,
-            proof: range_proof.bytes,
+            proof: range_proof_bytes,
         },
         kernel: CoinbaseKernel {
             features: KERNEL_FEAT_COINBASE,
