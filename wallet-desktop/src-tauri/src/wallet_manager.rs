@@ -52,6 +52,12 @@ use crate::settings::NodeSettings;
 /// Per-request timeout for the node RPC source (mirrors v1's 10s default).
 const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// R-31(b) freshness policy: minimum gap (in blocks) between the node tip and the
+/// store's `last_reconciled_tip` that forces a sync before a send. `1` means
+/// "sync whenever the node is ahead at all"; a fresh store skips the scan and the
+/// send pays only one cheap `tip()` round-trip.
+const STALE_TIP_THRESHOLD: u64 = 1;
+
 /// A receive descriptor flattened for the auto-sweep / UI (the crate types are
 /// not all Serialize, and v2's `ReceiveRequest` is thinner than v1's descriptor).
 #[derive(Clone, serde::Serialize)]
@@ -367,9 +373,36 @@ impl WalletManager {
 
     /// Step 1 (sender): create a send slate for `amount`/`fee` (noms).
     /// Returns the slate serialized as hex for the UI to display/share.
-    pub async fn slate_create_send(&self, amount: u64, fee: u64, now: u64) -> Result<String> {
+    ///
+    /// R-31(b): before coin selection we run a freshness short-circuit against the
+    /// node — a cheap `tip()` check, and a full reconcile ONLY if the store is
+    /// behind ([`STALE_TIP_THRESHOLD`]). This stops coin selection from picking
+    /// stale (spent/immature) inputs that the node would later reject at submit
+    /// ("input commitment not found"), without paying a full-chain scan on every
+    /// send. If the node is unreachable the send fails here with a clear message
+    /// rather than building against a possibly-stale store. `dom-wallet2`
+    /// `create_send` stays pure (no node I/O of its own).
+    pub async fn slate_create_send(
+        &self,
+        rpc_base_url: &str,
+        amount: u64,
+        fee: u64,
+        now: u64,
+    ) -> Result<String> {
+        let src = rpc_source(rpc_base_url)?;
         let mut guard = self.inner.lock().await;
         let ow = self.unlocked_mut(&mut guard)?;
+
+        if ow
+            .state
+            .sync_if_behind(&src, STALE_TIP_THRESHOLD, now)
+            .map_err(|e| anyhow!("could not reach node to sync before send: {e}"))?
+            .is_some()
+        {
+            // Persist the reconciled store before coin selection reads it.
+            ow.save()?;
+        }
+
         let sent = v2_create_send(&mut ow.state, amount, fee, now)
             .map_err(|e| anyhow!("create send slate: {e}"))?;
         ow.save()?;

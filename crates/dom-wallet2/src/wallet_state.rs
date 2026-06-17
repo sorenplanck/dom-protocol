@@ -88,6 +88,37 @@ impl WalletV2State {
         }
         Ok(report)
     }
+
+    /// Reconcile against `source` **only if the store is at least
+    /// `stale_threshold` blocks behind the source tip** — otherwise do nothing.
+    ///
+    /// This guards the expensive full reconcile ([`Self::sync`], which scans
+    /// `0..=tip`) behind a cheap `source.tip()` round-trip. It exists for hot
+    /// paths — chiefly building a send (R-31(b)): coin selection must never run
+    /// against a store that is behind the chain (it would pick spent/immature
+    /// inputs the node then rejects), but paying a full-chain scan on *every*
+    /// send is unacceptable as height grows. The freshness short-circuit pays one
+    /// tip lookup when already current and a full reconcile only when needed.
+    ///
+    /// `stale_threshold` is the minimum `source_tip - last_reconciled_tip` gap
+    /// that triggers a sync; pass `1` to reconcile whenever the source is ahead at
+    /// all. Returns `Some(report)` if a reconcile ran (cursors advanced) or `None`
+    /// if the store was already fresh (no scan performed). A failed `tip()` lookup
+    /// surfaces as [`SyncError::Source`] — the caller can refuse the send rather
+    /// than proceed against a possibly-stale store.
+    pub fn sync_if_behind<S: ChainSource>(
+        &mut self,
+        source: &S,
+        stale_threshold: u64,
+        now: u64,
+    ) -> Result<Option<ReconcileReport>, SyncError<S::Error>> {
+        let tip = source.tip().map_err(SyncError::Source)?;
+        if tip.height.saturating_sub(self.meta.last_reconciled_tip) >= stale_threshold {
+            Ok(Some(self.sync(source, 0, now)?))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -138,6 +169,68 @@ mod tests {
         // …and the cursors advanced to the reconciled tip.
         assert_eq!(state.meta.last_reconciled_tip, 7);
         assert_eq!(state.meta.last_reconciled_hash, Some([0x07u8; 32]));
+    }
+
+    #[test]
+    fn sync_if_behind_syncs_when_stale_and_skips_when_fresh() {
+        // R-31(b): the freshness short-circuit the send path relies on.
+        let mut state = state_with_receive();
+        assert_eq!(state.meta.last_reconciled_tip, 0);
+
+        let src = InMemoryChainSource::with_blocks([ScanBlock {
+            height: 7,
+            hash: [0x07u8; 32],
+            output_commitments: vec![C_R],
+            input_commitments: vec![],
+        }]);
+
+        // Stale store (cursor 0) vs node tip 7 → a reconcile runs and advances
+        // the cursor, so coin selection would now see a fresh store.
+        let ran = state.sync_if_behind(&src, 1, 1001).expect("tip reachable");
+        assert!(ran.is_some(), "stale store must trigger a sync");
+        assert_eq!(state.meta.last_reconciled_tip, 7);
+        assert_eq!(
+            state.outputs.get(&C_R).unwrap().status,
+            OutputStatus::Confirmed
+        );
+
+        // Fresh store (cursor now 7) vs same node tip 7 → gap 0 < threshold 1,
+        // so NO scan happens (the cheap tip check short-circuits).
+        let ran_again = state.sync_if_behind(&src, 1, 1002).expect("tip reachable");
+        assert!(ran_again.is_none(), "fresh store must skip the sync");
+        assert_eq!(state.meta.last_reconciled_tip, 7);
+    }
+
+    #[test]
+    fn sync_if_behind_threshold_gates_small_gaps() {
+        // With a threshold of 3, a 2-block gap is tolerated (no sync); a 3-block
+        // gap triggers one.
+        let mut state = state_with_receive();
+        state.meta.last_reconciled_tip = 5;
+
+        let src5 = InMemoryChainSource::with_blocks([ScanBlock {
+            height: 7, // gap = 2 < 3 → skip
+            hash: [0x07u8; 32],
+            output_commitments: vec![C_R],
+            input_commitments: vec![],
+        }]);
+        assert!(state
+            .sync_if_behind(&src5, 3, 1001)
+            .expect("tip reachable")
+            .is_none());
+        assert_eq!(state.meta.last_reconciled_tip, 5, "no sync below threshold");
+
+        let src8 = InMemoryChainSource::with_blocks([ScanBlock {
+            height: 8, // gap = 3 >= 3 → sync
+            hash: [0x08u8; 32],
+            output_commitments: vec![C_R],
+            input_commitments: vec![],
+        }]);
+        assert!(state
+            .sync_if_behind(&src8, 3, 1002)
+            .expect("tip reachable")
+            .is_some());
+        assert_eq!(state.meta.last_reconciled_tip, 8, "sync at threshold");
     }
 
     #[test]
