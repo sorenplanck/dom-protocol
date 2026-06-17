@@ -38,10 +38,9 @@
 
 use crate::bulletproof::MAX_PROVABLE_VALUE; // reuse the borromean bound — do not redefine
 use crate::pedersen::BlindingFactor;
+use crate::sec1_zkp_bridge::{sec1_to_zkp, zkp_to_sec1}; // single source of truth for SEC1<->zkp
 use dom_core::DomError;
-use k256::FieldElement;
 use rand::RngCore;
-use secp256k1::PublicKey as Secp256k1PublicKey;
 use secp256k1zkp::{constants, ffi};
 use std::ptr;
 
@@ -86,52 +85,8 @@ pub(crate) fn h_dom_zkp_serialized() -> Result<[u8; 33], DomError> {
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------
-// SEC1 <-> zkp commitment encoding.
-//
-// Mirrors `crate::bulletproof::{sec1_to_zkp, zkp_to_sec1}` verbatim (those are
-// private to that module). MUST stay consistent — both libs use the identical
-// pedersen serialization `output[0] = 9 ^ is_quad_var(y)` (0x08 square / 0x09).
-// ---------------------------------------------------------------------------
-
-/// Convert a SEC1 commitment (0x02/0x03 prefix) to libsecp zkp form (0x08/0x09).
-fn sec1_to_zkp(sec1_bytes: &[u8; 33]) -> Result<[u8; 33], DomError> {
-    let pk = Secp256k1PublicKey::from_slice(sec1_bytes)
-        .map_err(|e| DomError::Invalid(format!("invalid SEC1: {e}")))?;
-    let uncompressed = pk.serialize_uncompressed();
-    let y_bytes: [u8; 32] = uncompressed[33..65].try_into().unwrap();
-    let y_field = FieldElement::from_bytes(&y_bytes.into())
-        .expect("Y from valid point is valid field element");
-    let is_square: bool = y_field.sqrt().is_some().into();
-    let zkp_prefix = if is_square { 0x08 } else { 0x09 };
-    let mut zkp_bytes = *sec1_bytes;
-    zkp_bytes[0] = zkp_prefix;
-    Ok(zkp_bytes)
-}
-
-/// Convert a libsecp zkp commitment (0x08/0x09 prefix) to SEC1 form (0x02/0x03).
-fn zkp_to_sec1(zkp_bytes: &[u8; 33]) -> Result<[u8; 33], DomError> {
-    let x_bytes: [u8; 32] = zkp_bytes[1..].try_into().unwrap();
-    // Validate the zkp bytes describe a real point (consistent with borromean path).
-    let _ = secp256k1_zkp::PedersenCommitment::from_slice(zkp_bytes)
-        .map_err(|e| DomError::Invalid(format!("invalid zkp: {e}")))?;
-    for &prefix in &[0x02_u8, 0x03_u8] {
-        let mut sec1_bytes = [0u8; 33];
-        sec1_bytes[0] = prefix;
-        sec1_bytes[1..].copy_from_slice(&x_bytes);
-        if let Ok(pk) = Secp256k1PublicKey::from_slice(&sec1_bytes) {
-            let uncompressed = pk.serialize_uncompressed();
-            let y: [u8; 32] = uncompressed[33..65].try_into().unwrap();
-            let y_field = FieldElement::from_bytes(&y.into()).expect("valid Y");
-            let is_square: bool = y_field.sqrt().is_some().into();
-            let expected_zkp = if is_square { 0x08 } else { 0x09 };
-            if expected_zkp == zkp_bytes[0] {
-                return Ok(sec1_bytes);
-            }
-        }
-    }
-    Err(DomError::Internal("zkp→SEC1: no valid prefix found".into()))
-}
+// SEC1 <-> zkp commitment encoding is shared with the borromean path via
+// `crate::sec1_zkp_bridge` (imported above) — single source of truth.
 
 /// Raw FFI bindings to grin's bundled libsecp256k1-zkp.
 ///

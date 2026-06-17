@@ -12,6 +12,11 @@ pub mod keys;
 pub mod pedersen;
 pub mod schnorr;
 
+// Single source of truth for the SEC1<->zkp commitment encoding bridge, shared
+// by the borromean (`bulletproof`) and standard-Bulletproof (`bulletproof_bp`)
+// paths. Crate-private.
+mod sec1_zkp_bridge;
+
 pub use dom_core::Hash256;
 pub use h_generator::{derive_h_generator, h_compressed, verify_h_matches_derivation};
 pub use hash::{blake2b_256, blake2b_256_tagged, DomHasher};

@@ -45,70 +45,10 @@ fn dom_generator() -> Generator {
     Generator::from_slice(&h_bytes).expect("H_DOM_X is a valid x-coordinate on secp256k1")
 }
 
-/// Cria PedersenCommitment zkp a partir de value + blinding.
-use k256::FieldElement;
-use secp256k1::PublicKey as Secp256k1PublicKey;
-
-/// Convert SEC1 commitment (0x02/0x03 prefix) to zkp format (0x08/0x09).
-///
-/// SEC1 encodes y-parity (even/odd) in the prefix byte. zkp encodes is_square(y)
-/// (whether y is a quadratic residue mod p). We use k256::FieldElement::sqrt as
-/// the is_square oracle.
-fn sec1_to_zkp(sec1_bytes: &[u8; 33]) -> Result<[u8; 33], DomError> {
-    let pk = Secp256k1PublicKey::from_slice(sec1_bytes)
-        .map_err(|e| DomError::Invalid(format!("invalid SEC1: {e}")))?;
-
-    let uncompressed = pk.serialize_uncompressed();
-    let y_bytes: [u8; 32] = uncompressed[33..65].try_into().unwrap();
-    let y_field = FieldElement::from_bytes(&y_bytes.into())
-        .expect("Y from valid point is valid field element");
-
-    let is_square: bool = y_field.sqrt().is_some().into();
-    let zkp_prefix = if is_square { 0x08 } else { 0x09 };
-
-    let mut zkp_bytes = *sec1_bytes;
-    zkp_bytes[0] = zkp_prefix;
-    Ok(zkp_bytes)
-}
-
-/// Convert zkp commitment (0x08/0x09 prefix) to SEC1 format (0x02/0x03).
-///
-/// The zkp serialization encodes is_square(y) in the prefix byte but does not
-/// directly expose Y's parity. To determine the correct SEC1 prefix (0x02 for
-/// y-even, 0x03 for y-odd), we must reconstruct the point and validate which
-/// prefix produces a Y coordinate matching the zkp's is_square encoding.
-///
-/// This loop is mathematically necessary (not trial-and-error): given X, there
-/// are exactly 2 possible Y values (Y and -Y), encoded by SEC1's 0x02/0x03.
-/// Exactly one of these will have is_square(Y) matching the zkp prefix.
-fn zkp_to_sec1(zkp_bytes: &[u8; 33]) -> Result<[u8; 33], DomError> {
-    // Validate zkp format first
-    let x_bytes: [u8; 32] = zkp_bytes[1..].try_into().unwrap();
-    let _ = secp256k1_zkp::PedersenCommitment::from_slice(zkp_bytes)
-        .map_err(|e| DomError::Invalid(format!("invalid zkp: {e}")))?;
-
-    // Try both SEC1 prefixes (0x02 and 0x03)
-    for &prefix in &[0x02_u8, 0x03_u8] {
-        let mut sec1_bytes = [0u8; 33];
-        sec1_bytes[0] = prefix;
-        sec1_bytes[1..].copy_from_slice(&x_bytes);
-
-        if let Ok(pk) = Secp256k1PublicKey::from_slice(&sec1_bytes) {
-            let uncompressed = pk.serialize_uncompressed();
-            let y: [u8; 32] = uncompressed[33..65].try_into().unwrap();
-            let y_field = FieldElement::from_bytes(&y.into()).expect("valid Y");
-            let is_square: bool = y_field.sqrt().is_some().into();
-            let expected_zkp = if is_square { 0x08 } else { 0x09 };
-
-            if expected_zkp == zkp_bytes[0] {
-                return Ok(sec1_bytes);
-            }
-        }
-    }
-
-    // Invariant: one of the two prefixes MUST succeed for valid zkp input
-    Err(DomError::Internal("zkp→SEC1: no valid prefix found".into()))
-}
+/// SEC1<->zkp commitment encoding now lives in [`crate::sec1_zkp_bridge`] — the
+/// single source of truth shared with the standard-Bulletproof path. These
+/// imports preserve the original call sites (`sec1_to_zkp(..)` / `zkp_to_sec1(..)`).
+use crate::sec1_zkp_bridge::{sec1_to_zkp, zkp_to_sec1};
 
 #[cfg(test)]
 mod format_conversion_tests {
