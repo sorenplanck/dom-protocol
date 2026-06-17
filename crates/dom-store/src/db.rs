@@ -519,11 +519,15 @@ impl DomStore {
 
         // Index kernels.
         // DOM-LMDB-001 — MOST CRITICAL of the NO_OVERWRITE conversions.
-        // A duplicate kernel excess is the signature of a kernel-replay
-        // attack: the consensus layer should already reject blocks containing
-        // previously-seen kernels (kernel uniqueness check), so if we ever
-        // get here with KeyExist, either:
-        //   - the consensus check has a bypass (security-critical bug)
+        // A duplicate kernel excess is the signature of a kernel-replay attack.
+        // R-06: the consensus layer NOW rejects blocks containing previously-seen
+        // kernels on BOTH connect paths — the reorg path in apply_connect and the
+        // direct connect path in ChainState::connect_block both return
+        // DomError::Invalid (ban-scored) before reaching commit_block. So for a
+        // replay this NO_OVERWRITE branch should be unreachable; it stays as a
+        // last-resort defense-in-depth guard. If we still get here with KeyExist,
+        // either:
+        //   - a consensus check has a bypass (security-critical bug)
         //   - the same block is being committed twice (caught by db_blocks
         //     check above first, so this is defense-in-depth)
         // Either way, loud-fail with explicit error.

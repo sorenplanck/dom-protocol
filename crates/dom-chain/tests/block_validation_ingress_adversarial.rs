@@ -541,3 +541,136 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
         "failed promotion must leave canonical tip unchanged"
     );
 }
+
+// ── R-06: direct connect path kernel/output uniqueness ────────────────────────
+//
+// Before R-06, a duplicate kernel/output on the direct connect path was caught
+// only by dom-store's NO_OVERWRITE guard and surfaced as DomError::Internal,
+// which does NOT increase ban score (dom-core error.rs). The reorg path already
+// returned Invalid. These tests pin that the direct path now also returns
+// Invalid (ban-scored), mirroring the reorg path, so a replaying peer is
+// penalized. Each isolates ONE branch so the matching message is asserted.
+
+#[test]
+fn direct_connect_rejects_replayed_kernel_with_invalid() {
+    std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+    let dir = TempDir::new().expect("tempdir");
+    let store_dir = dir.path().join("chain");
+    let chain_id = *derive_chain_id(
+        NETWORK_MAGIC_REGTEST,
+        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+    )
+    .as_bytes();
+    let mut chain = open_chain(&store_dir);
+
+    let genesis = build_coinbase_only_block(
+        [0u8; 32],
+        Hash256::ZERO,
+        BlockHeight::GENESIS,
+        U256::zero(),
+        [0u8; 32],
+        40,
+        &chain_id,
+    );
+    chain.connect_block(&genesis, safe_now()).expect("genesis");
+
+    // Fully valid height-1 direct extension. Its coinbase uses a DIFFERENT
+    // blinding seed than genesis, so the coinbase OUTPUT commitment does not
+    // collide with any persisted UTXO — only the kernel excess is made to
+    // collide, isolating the kernel-uniqueness branch.
+    let replay = build_coinbase_only_block(
+        *block_hash(&genesis).as_bytes(),
+        block_hash(&genesis),
+        BlockHeight(1),
+        genesis.header.total_difficulty,
+        [0u8; 32],
+        41,
+        &chain_id,
+    );
+
+    // Seed the kernel index with the replay block's coinbase excess (as if a
+    // prior block already used it), WITHOUT persisting its output, so only the
+    // kernel branch can fire.
+    let replayed_excess = *replay.coinbase.kernel.excess.as_bytes();
+    chain
+        .store
+        .ensure_kernel_indices(&[(replayed_excess, *block_hash(&genesis).as_bytes())])
+        .expect("seed kernel index with prior excess");
+
+    let err = chain
+        .connect_block(&replay, safe_now())
+        .expect_err("direct connect must reject a replayed kernel excess");
+    assert!(
+        matches!(err, dom_core::DomError::Invalid(_)),
+        "kernel replay on the direct path must be Invalid, got: {err:?}"
+    );
+    assert!(
+        err.increases_ban_score(),
+        "kernel replay must raise ban score (got non-ban-scored: {err:?})"
+    );
+    assert!(
+        err.to_string()
+            .contains("direct connect kernel replay detected"),
+        "unexpected error message: {err}"
+    );
+}
+
+#[test]
+fn direct_connect_rejects_duplicate_output_commitment() {
+    std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+    let dir = TempDir::new().expect("tempdir");
+    let store_dir = dir.path().join("chain");
+    let chain_id = *derive_chain_id(
+        NETWORK_MAGIC_REGTEST,
+        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+    )
+    .as_bytes();
+    let mut chain = open_chain(&store_dir);
+
+    let genesis = build_coinbase_only_block(
+        [0u8; 32],
+        Hash256::ZERO,
+        BlockHeight::GENESIS,
+        U256::zero(),
+        [0u8; 32],
+        50,
+        &chain_id,
+    );
+    chain.connect_block(&genesis, safe_now()).expect("genesis");
+
+    // Height-1 direct extension whose coinbase REUSES genesis's blinding seed,
+    // so its coinbase output commitment equals genesis's already-persisted UTXO
+    // (reward is constant before the first halving, so the value matches too).
+    // The output branch is checked first, mirroring the reorg path.
+    let dup = build_coinbase_only_block(
+        *block_hash(&genesis).as_bytes(),
+        block_hash(&genesis),
+        BlockHeight(1),
+        genesis.header.total_difficulty,
+        [0u8; 32],
+        50,
+        &chain_id,
+    );
+    assert_eq!(
+        dup.coinbase.output.commitment.as_bytes(),
+        genesis.coinbase.output.commitment.as_bytes(),
+        "fixture must reuse the genesis coinbase output commitment"
+    );
+
+    let err = chain
+        .connect_block(&dup, safe_now())
+        .expect_err("direct connect must reject a duplicate output commitment");
+    assert!(
+        matches!(err, dom_core::DomError::Invalid(_)),
+        "duplicate output on the direct path must be Invalid, got: {err:?}"
+    );
+    assert!(
+        err.increases_ban_score(),
+        "duplicate output must raise ban score (got non-ban-scored: {err:?})"
+    );
+    assert!(
+        err.to_string()
+            .contains("direct connect duplicate output commitment"),
+        "unexpected error message: {err}"
+    );
+}
