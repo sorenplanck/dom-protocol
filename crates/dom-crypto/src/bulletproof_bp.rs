@@ -581,3 +581,161 @@ mod tests {
         assert!(n2, "all-zero generator must be rejected");
     }
 }
+
+/// Differential cross-check: the standard-Bulletproof shim must produce the
+/// EXACT SAME commitment bytes as DOM's canonical Pedersen layer
+/// ([`crate::pedersen::Commitment::commit`], the same SEC1 the borromean path
+/// emits). If they diverged, the range proof and the balance equation would be
+/// proving about different commitments. Also checks both proof systems
+/// (borromean + bulletproof) verify against that one shared commitment.
+#[cfg(test)]
+mod differential {
+    use super::*;
+    use crate::pedersen::Commitment;
+    use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
+
+    const SEED: u64 = 0xD0_4D_B_u64; // deterministic, reproducible
+    const N_RANDOM: usize = 1000;
+
+    /// Largest valid scalar = secp256k1 group order n - 1.
+    const N_MINUS_1: [u8; 32] = [
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36,
+        0x41, 0x40,
+    ];
+
+    /// DOM canonical Pedersen commitment (SEC1), via the same path borromean uses.
+    fn canonical_sec1(value: u64, blinding: &BlindingFactor) -> [u8; 33] {
+        *Commitment::commit(value, blinding).as_bytes()
+    }
+
+    /// Shim commitment (SEC1), exactly as `bp_prove` computes it, but reusing a
+    /// shared backend so a 1000-iteration loop stays fast. Equivalence to the
+    /// public `bp_prove` wrapper is asserted separately in `fixed_and_edges`.
+    fn shim_sec1(backend: &Backend, h_dom: &[u8; 64], value: u64, blinding: &BlindingFactor) -> [u8; 33] {
+        let zkp = commit_zkp(backend, value, blinding.as_bytes(), h_dom).expect("commit_zkp");
+        zkp_to_sec1(&zkp).expect("zkp->sec1")
+    }
+
+    /// Assert byte-identical commitments + both proof systems bind to the shared
+    /// commitment. `report` labels the pair for a CRITICAL mismatch.
+    fn check_pair(
+        backend: &Backend,
+        h_dom: &[u8; 64],
+        value: u64,
+        blinding: &BlindingFactor,
+        report: &str,
+    ) {
+        let canon = canonical_sec1(value, blinding);
+        let shim = shim_sec1(backend, h_dom, value, blinding);
+        assert_eq!(
+            canon,
+            shim,
+            "CRITICAL commitment mismatch [{report}] value={value} blinding={}\n  canonical(pedersen)={}\n  shim(bulletproof_bp)={}",
+            hex::encode(blinding.as_bytes()),
+            hex::encode(canon),
+            hex::encode(shim),
+        );
+
+        // Soundness: both proof systems must verify against this shared commitment.
+        // bulletproof (grin) — reuse the shared backend.
+        let bp_proof = prove_raw(backend, value, blinding.as_bytes(), h_dom).expect("bp prove");
+        let zkp = commit_zkp(backend, value, blinding.as_bytes(), h_dom).expect("commit_zkp");
+        assert!(
+            verify_raw(backend, &zkp, &bp_proof, h_dom).expect("bp verify"),
+            "bulletproof must verify against shared commitment [{report}] value={value}"
+        );
+
+        // borromean (Blockstream) — its returned commitment must equal canonical too.
+        let (rp, borr_sec1) = crate::bulletproof::prove(value, blinding).expect("borromean prove");
+        assert_eq!(
+            canon, borr_sec1,
+            "CRITICAL borromean commitment != canonical [{report}] value={value}"
+        );
+        assert!(
+            crate::bulletproof::verify(&canon, &rp.bytes).expect("borromean verify"),
+            "borromean must verify against shared commitment [{report}] value={value}"
+        );
+    }
+
+    #[test]
+    fn fixed_and_edges() {
+        let backend = Backend::new().expect("backend");
+        let h_dom = h_dom_internal(&backend).expect("H_DOM");
+
+        // The shared-backend shim path must match the public bp_prove wrapper byte-for-byte.
+        {
+            let b = BlindingFactor::from_bytes([0x11u8; 32]).unwrap();
+            let (_proof, wrapper_sec1) = bp_prove(42, &b).unwrap();
+            assert_eq!(
+                wrapper_sec1,
+                shim_sec1(&backend, &h_dom, 42, &b),
+                "public bp_prove must match shared-backend shim commitment"
+            );
+            assert_eq!(
+                wrapper_sec1,
+                canonical_sec1(42, &b),
+                "public bp_prove must match canonical Pedersen commitment"
+            );
+        }
+
+        let fixed_values: [u64; 8] = [
+            0,
+            1,
+            42,
+            1_000,
+            1_000_000,
+            1u64 << 26,
+            1u64 << 40,
+            MAX_PROVABLE_VALUE, // 2^52 - 1
+        ];
+        let edge_blindings: [[u8; 32]; 3] = [
+            {
+                let mut b = [0u8; 32];
+                b[31] = 1; // smallest valid scalar (=1)
+                b
+            },
+            N_MINUS_1, // largest valid scalar
+            {
+                let mut b = [0u8; 32];
+                b[1..].fill(0xff);
+                b[0] = 0x00; // leading 0x00 keeps it < n; "high" pattern, last byte 0xff
+                b[31] = 0x01; // last-byte-1
+                b
+            },
+        ];
+
+        // Fixed values with a fixed mid blinding.
+        let mid = BlindingFactor::from_bytes([0x7Au8; 32]).unwrap();
+        for &v in fixed_values.iter() {
+            check_pair(&backend, &h_dom, v, &mid, "fixed");
+        }
+        // Edge blindings across a few values.
+        for (i, eb) in edge_blindings.iter().enumerate() {
+            let b = BlindingFactor::from_bytes(*eb)
+                .unwrap_or_else(|e| panic!("edge blinding {i} invalid: {e:?}"));
+            for &v in &[0u64, 42, 1_000_000, MAX_PROVABLE_VALUE] {
+                check_pair(&backend, &h_dom, v, &b, "edge");
+            }
+        }
+    }
+
+    #[test]
+    fn random_1000_match() {
+        let backend = Backend::new().expect("backend");
+        let h_dom = h_dom_internal(&backend).expect("H_DOM");
+        let mut rng = StdRng::seed_from_u64(SEED);
+
+        for i in 0..N_RANDOM {
+            let value = rng.gen_range(0..=MAX_PROVABLE_VALUE);
+            let blinding = loop {
+                let mut bytes = [0u8; 32];
+                rng.fill_bytes(&mut bytes);
+                if let Ok(b) = BlindingFactor::from_bytes(bytes) {
+                    break b;
+                }
+            };
+            check_pair(&backend, &h_dom, value, &blinding, &format!("random#{i}"));
+        }
+    }
+}
