@@ -792,11 +792,13 @@ async fn slate_create_send(
 ) -> Result<String, String> {
     let amount = parse_noms(&amount)?;
     let fee = parse_noms(&fee)?;
-    // No node round-trip: v2 coin selection uses the store's reconciled tip for
-    // maturity; `now` is only output bookkeeping.
+    // R-31(b): the wallet auto-syncs against the node before coin selection when
+    // its store is behind the tip, so a send never selects stale inputs. Needs the
+    // node URL; a freshness check skips the scan when already current.
+    let base = rpc_base_url(&state).await?;
     state
         .wallet
-        .slate_create_send(amount, fee, now_secs())
+        .slate_create_send(&base, amount, fee, now_secs())
         .await
         .map_err(|e| e.to_string())
 }
