@@ -387,7 +387,7 @@ impl CoinbaseTransaction {
                 "coinbase output has empty range proof".into(),
             ));
         }
-        match dom_crypto::bp_verify(self.output.commitment.as_bytes(), &self.output.proof) {
+        match dom_crypto::bp2_verify(self.output.commitment.as_bytes(), &self.output.proof) {
             Ok(true) => {}
             Ok(false) => {
                 return Err(DomError::Invalid(
@@ -705,7 +705,7 @@ pub fn validate_range_proofs(tx: &Transaction) -> Result<(), DomError> {
         let commitment = &output.commitment;
         let proof_bytes = &output.proof;
 
-        match dom_crypto::bp_verify(commitment.as_bytes(), proof_bytes) {
+        match dom_crypto::bp2_verify(commitment.as_bytes(), proof_bytes) {
             Ok(true) => {}
             Ok(false) => {
                 return Err(DomError::Invalid(format!(
