@@ -93,6 +93,8 @@ Implemented `sec1_to_zkp()` and `zkp_to_sec1()` conversion functions (~70 lines)
 **Validation Phase 2:**  
 200/200 roundtrip tests pass (100 SEC1→zkp→SEC1, 100 zkp→SEC1→zkp). Full workspace: 203/203 tests. Clippy clean. No new production dependencies (only `expose-field` feature flag for k256).
 
+> Note: the sampling suite was later extended — the SEC1↔zkp bridge is now exercised by 1000+ random scalars plus edge cases (see `bridge_roundtrip_1000_random_scalars`); the 100/200 figures above are the original 2026-05-15 resolution record. The equivalence remains evidenced, not proven (AUDIT-002) — a complete mathematical proof of the is_square equivalence across the whole domain is pending pre-mainnet.
+
 **Files Modified:**
 - `bulletproof.rs`: `dom_generator()`, `sec1_to_zkp()`, `zkp_to_sec1()`, `prove()`, `verify()`
 - `Cargo.toml`: added `expose-field` feature to k256
