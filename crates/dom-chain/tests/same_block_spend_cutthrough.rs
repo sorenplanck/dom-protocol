@@ -30,7 +30,6 @@ use dom_core::{
     MIN_RELAY_FEE_RATE, NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::{
-    bulletproof,
     hash::blake2b_256_tagged,
     keys::SecretKey,
     pedersen::{BlindingFactor, Commitment},
@@ -88,7 +87,7 @@ fn build_coinbase(
     let explicit_value = reward + claimed_fees;
     let blinding = scalar(seed);
     let commitment = Commitment::commit(explicit_value, &blinding);
-    let (proof, _) = bulletproof::prove(explicit_value, &blinding).expect("coinbase proof");
+    let (proof, _) = dom_crypto::bp2_prove(explicit_value, &blinding).expect("coinbase proof");
     let excess = Commitment::commit(0, &blinding);
     let secret = SecretKey::from_bytes(blinding.as_bytes()).expect("coinbase secret");
     let msg = {
@@ -101,7 +100,7 @@ fn build_coinbase(
     CoinbaseTransaction {
         output: TransactionOutput {
             commitment,
-            proof: proof.bytes,
+            proof: proof,
         },
         kernel: CoinbaseKernel {
             features: KERNEL_FEAT_COINBASE,

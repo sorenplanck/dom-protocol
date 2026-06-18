@@ -169,7 +169,6 @@ fn build_test_coinbase(
     height: BlockHeight,
     chain_id: &[u8; 32],
 ) -> Result<CoinbaseTransaction, dom_core::DomError> {
-    use dom_crypto::bulletproof;
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::keys::SecretKey;
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
@@ -178,7 +177,7 @@ fn build_test_coinbase(
     let explicit_value = dom_core::block_reward(height).noms();
     let blinding = BlindingFactor::random();
     let output_commitment = Commitment::commit(explicit_value, &blinding);
-    let (range_proof, _) = bulletproof::prove(explicit_value, &blinding)
+    let (range_proof, _) = dom_crypto::bp2_prove(explicit_value, &blinding)
         .map_err(|e| dom_core::DomError::Internal(format!("coinbase proof: {e}")))?;
     let excess = Commitment::commit(0, &blinding);
     let kernel_message = {
@@ -195,7 +194,7 @@ fn build_test_coinbase(
     Ok(CoinbaseTransaction {
         output: TransactionOutput {
             commitment: output_commitment,
-            proof: range_proof.bytes,
+            proof: range_proof,
         },
         kernel: CoinbaseKernel {
             features: KERNEL_FEAT_COINBASE,

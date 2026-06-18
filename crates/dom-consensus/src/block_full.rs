@@ -194,7 +194,6 @@ mod tests {
         Amount, BlockHeight, Hash256, Timestamp, INITIAL_BLOCK_REWARD, KERNEL_FEAT_COINBASE,
         KERNEL_FEAT_PLAIN, PROTOCOL_VERSION, WEIGHT_COINBASE_KERNEL,
     };
-    use dom_crypto::bulletproof;
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::keys::SecretKey;
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
@@ -282,7 +281,7 @@ mod tests {
         let explicit_value = dom_core::block_reward(BlockHeight(1)).noms() + total_fees;
         let blinding = scalar(90);
         let commitment = Commitment::commit(explicit_value, &blinding);
-        let (proof, _) = bulletproof::prove(explicit_value, &blinding).expect("coinbase proof");
+        let (proof, _) = dom_crypto::bp2_prove(explicit_value, &blinding).expect("coinbase proof");
         let excess = Commitment::commit(0, &blinding);
         let secret = SecretKey::from_bytes(blinding.as_bytes()).expect("coinbase secret");
         let msg = {
@@ -295,7 +294,7 @@ mod tests {
         CoinbaseTransaction {
             output: TransactionOutput {
                 commitment,
-                proof: proof.bytes,
+                proof: proof,
             },
             kernel: CoinbaseKernel {
                 features: KERNEL_FEAT_COINBASE,
@@ -328,7 +327,7 @@ mod tests {
         };
         let input_commitment = Commitment::commit(input_value, &input_blinding);
         let output_commitment = Commitment::commit(output_value, &output_blinding);
-        let (proof, _) = bulletproof::prove(output_value, &output_blinding).expect("tx proof");
+        let (proof, _) = dom_crypto::bp2_prove(output_value, &output_blinding).expect("tx proof");
         let excess = Commitment::commit(0, &kernel_blinding);
         let secret = SecretKey::from_bytes(kernel_blinding.as_bytes()).expect("kernel secret");
         let sig = schnorr_sign(&secret, &kernel_message(fee, 0), &[0x11; 32]).expect("kernel sig");
@@ -340,7 +339,7 @@ mod tests {
                 }],
                 outputs: vec![TransactionOutput {
                     commitment: output_commitment.clone(),
-                    proof: proof.bytes,
+                    proof: proof,
                 }],
                 kernels: vec![TransactionKernel {
                     features: KERNEL_FEAT_PLAIN,
@@ -825,7 +824,7 @@ mod tests {
 
         // Build a block manually so the coinbase output uses coinbase_blinding.
         let total_fees = 0u64;
-        let (proof, _) = bulletproof::prove(
+        let (proof, _) = dom_crypto::bp2_prove(
             dom_core::block_reward(BlockHeight(1)).noms(),
             &coinbase_blinding,
         )
@@ -841,7 +840,7 @@ mod tests {
             dom_crypto::hash::blake2b_256_tagged(TAG_KERNEL_MSG_COINBASE, &data)
         };
         let sig = schnorr_sign(&secret, msg.as_bytes(), &[0x11u8; 32]).expect("sig");
-        let (cb_proof, _) = bulletproof::prove(
+        let (cb_proof, _) = dom_crypto::bp2_prove(
             dom_core::block_reward(BlockHeight(1)).noms(),
             &coinbase_blinding,
         )
@@ -852,7 +851,7 @@ mod tests {
                     dom_core::block_reward(BlockHeight(1)).noms(),
                     &coinbase_blinding,
                 ),
-                proof: cb_proof.bytes,
+                proof: cb_proof,
             },
             kernel: CoinbaseKernel {
                 features: dom_core::KERNEL_FEAT_COINBASE,

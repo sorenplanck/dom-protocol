@@ -22,7 +22,6 @@ use dom_core::{
     TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::{
-    bulletproof,
     hash::blake2b_256_tagged,
     keys::SecretKey,
     pedersen::{BlindingFactor, Commitment},
@@ -44,7 +43,7 @@ fn build_coinbase(claimed_fees: u64, chain_id: &[u8; 32]) -> CoinbaseTransaction
     let explicit_value = reward + claimed_fees;
     let blinding = scalar(50);
     let commitment = Commitment::commit(explicit_value, &blinding);
-    let (proof, _) = bulletproof::prove(explicit_value, &blinding).expect("coinbase proof");
+    let (proof, _) = dom_crypto::bp2_prove(explicit_value, &blinding).expect("coinbase proof");
     let excess = Commitment::commit(0, &blinding);
     let secret = SecretKey::from_bytes(blinding.as_bytes()).expect("coinbase secret");
     let msg = {
@@ -57,7 +56,7 @@ fn build_coinbase(claimed_fees: u64, chain_id: &[u8; 32]) -> CoinbaseTransaction
     CoinbaseTransaction {
         output: TransactionOutput {
             commitment,
-            proof: proof.bytes,
+            proof: proof,
         },
         kernel: CoinbaseKernel {
             features: KERNEL_FEAT_COINBASE,
