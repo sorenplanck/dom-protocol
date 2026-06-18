@@ -214,7 +214,7 @@ Each block commits three PMMRs:
   kernels in `Block.transactions` order). Payload = the 33-byte SEC1 excess
   commitment.
 * **Rangeproof MMR** — one leaf per output (same order as the Output MMR).
-  Payload = the variable-length Bulletproofs+ proof bytes.
+  Payload = the variable-length Bulletproofs proof bytes.
 
 The single source of truth for this iteration order is
 `dom_consensus::compute_block_pmmr_roots(coinbase, &transactions)`. Both

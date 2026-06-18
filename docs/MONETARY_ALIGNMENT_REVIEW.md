@@ -96,7 +96,7 @@ The `CONSENSUS.md` form omits the fee commitment term, uses `sum(kernels)` rathe
 ### TD-03 — Incomplete Validator Enumeration in CONSENSUS.md
 
 **Observed Drift:**  
-`docs/CONSENSUS.md` lists four validators (V9, V13, V14, V18). `WHITEPAPER.md` §8 and `docs/RELEASE_BLOCKERS.md` describe an 18-step block validation pipeline including: ASERT difficulty, RandomX PoW verification, Schnorr signature validation, chain_id binding, kernel malleability rejection, offset canonicalization, cut-through correctness, H-generator startup verification, and Bulletproofs+ range-proof validation. None of these appear in `CONSENSUS.md`.
+`docs/CONSENSUS.md` lists four validators (V9, V13, V14, V18). `WHITEPAPER.md` §8 and `docs/RELEASE_BLOCKERS.md` describe an 18-step block validation pipeline including: ASERT difficulty, RandomX PoW verification, Schnorr signature validation, chain_id binding, kernel malleability rejection, offset canonicalization, cut-through correctness, H-generator startup verification, and Bulletproofs range-proof validation. None of these appear in `CONSENSUS.md`.
 
 **Affected Documents:** `docs/CONSENSUS.md`.
 

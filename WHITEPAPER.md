@@ -7,7 +7,7 @@
 
 ## Abstract
 
-DOM is a peer-to-peer electronic cash system that returns to the original vision of digital money: a medium of exchange, not a store of value. By combining Mimblewimble's transaction model with RandomX proof-of-work, ASERT difficulty adjustment, and Bulletproofs+ range proofs, DOM achieves transactional privacy, ASIC-resistant mining, smooth difficulty retargeting, and constant chain growth through cut-through. There is no premine, no ICO, no reserved supply. The protocol launches with no privileged access. Anyone with a CPU can mine block 0.
+DOM is a peer-to-peer electronic cash system that returns to the original vision of digital money: a medium of exchange, not a store of value. By combining Mimblewimble's transaction model with RandomX proof-of-work, ASERT difficulty adjustment, and Bulletproofs range proofs, DOM achieves transactional privacy, ASIC-resistant mining, smooth difficulty retargeting, and constant chain growth through cut-through. There is no premine, no ICO, no reserved supply. The protocol launches with no privileged access. Anyone with a CPU can mine block 0.
 
 ---
 
@@ -47,7 +47,7 @@ Mimblewimble has two additional properties critical for DOM:
 
 **No script.** There is no scripting language. No smart contracts. This is a deliberate design choice: scripts are the source of most consensus bugs and most surveillance surface in other cryptocurrencies. DOM does one thing — move money — and does it without ambiguity.
 
-DOM uses range proofs (Bulletproofs+ [3]) to prove that each committed value lies in `[0, 2^52)`. This prevents creation of outputs with negative values, which would otherwise allow silent inflation. The range `2^52 ≈ 4.5 × 10^15` is chosen because it exceeds the total supply of DOM in noms (`~3.3 × 10^15`), while avoiding an overflow bug in the `secp256k1-zkp` library at `2^64`.
+DOM uses range proofs (Bulletproofs [3]) to prove that each committed value lies in `[0, 2^52)`. This prevents creation of outputs with negative values, which would otherwise allow silent inflation. The range `2^52 ≈ 4.5 × 10^15` is chosen because it exceeds the total supply of DOM in noms (`~3.3 × 10^15`), while keeping values clear of the `2^64` boundary where 64-bit overflow becomes a concern.
 
 ---
 
@@ -238,7 +238,7 @@ A DOM block consists of:
 | **Max outputs/TX** | 255 |
 | **Max kernels/TX** | 16 |
 | **Max TXs/block** | 5,000 |
-| **Max proof size** | 6,144 bytes |
+| **Max proof size** | 768 bytes |
 | **Max block size** | 16 MiB |
 | **Max future timestamp** | 120 seconds |
 | **Median-time window** | 11 blocks |
@@ -310,7 +310,7 @@ DOM's cryptographic primitives are conservative and standard:
 | **AEAD** | ChaCha20-Poly1305 (Noise) | RFC 7539 |
 | **Key derivation (wallet)** | Argon2id + HKDF-SHA256 | OWASP |
 | **Hash-to-curve** | RFC9380 | RFC 9380 |
-| **Range proofs** | Bulletproofs+ (via secp256k1-zkp) | RFC-0002 |
+| **Range proofs** | Bulletproofs (grin secp256k1zkp, H_DOM generator) | RFC-0002 |
 
 ### 9.1 H Generator
 
@@ -360,7 +360,7 @@ DOM is implemented in Rust as a workspace of 16 crates. As of May 2026:
 | Component | Status |
 |-----------|--------|
 | **Consensus validators (V1-V18)** | ✅ Implemented |
-| **Cryptographic primitives** | ✅ Implemented (Schnorr, Pedersen, Bulletproofs+, H_DOM) |
+| **Cryptographic primitives** | ✅ Implemented (Schnorr, Pedersen, Bulletproofs, H_DOM) |
 | **Serialization (canonical)** | ✅ Implemented |
 | **PMMR (Pruned Merkle Mountain Range)** | ✅ Implemented |
 | **PoW (RandomX + ASERT)** | ✅ Implemented |
@@ -437,7 +437,7 @@ What is new is the synthesis, the launch model, and the commitment to remain a c
 
 [2] Jedusor, T. E. (2016). *Mimblewimble.*
 
-[3] Bünz, B., Bootle, J., Boneh, D., Poelstra, A., Wuille, P., Maxwell, G. (2018). *Bulletproofs: Short Proofs for Confidential Transactions and More.* IEEE S&P 2018. With Bulletproofs+ extension by Chung, H., Han, K., Ju, C., Kim, M., Seo, J. H. (2020).
+[3] Bünz, B., Bootle, J., Boneh, D., Poelstra, A., Wuille, P., Maxwell, G. (2018). *Bulletproofs: Short Proofs for Confidential Transactions and More.* IEEE S&P 2018.
 
 [4] tevador et al. (2019). *RandomX Specification.* Available at github.com/tevador/RandomX.
 

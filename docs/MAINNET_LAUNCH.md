@@ -26,7 +26,7 @@
   - [ ] Lock height validation
   - [ ] PMMR root verification
   - [ ] Kernel signature verification (Schnorr + chain_id)
-  - [ ] Range proof validation (Bulletproofs+)
+  - [ ] Range proof validation (Bulletproofs)
   - [ ] Duplicate detection (inputs, outputs, kernels)
   - [ ] Weight calculation (per RFC-0010)
 
@@ -39,7 +39,7 @@
     - [ ] H_DOM derivation (RFC9380, DST="DOM:h2c:secp256k1:v6.1")
     - [ ] Determinism across architectures
     - [ ] Point validation (on-curve, not infinity)
-  - [ ] Bulletproofs+ range proofs
+  - [ ] Bulletproofs range proofs
     - [ ] Prove/verify roundtrip
     - [ ] Format conversion (SEC1 ↔ zkp)
     - [ ] Max value enforcement (2^52)
