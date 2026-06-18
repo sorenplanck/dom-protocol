@@ -1449,6 +1449,7 @@ dependencies = [
  "dom-crypto",
  "dom-node",
  "dom-pow",
+ "dom-rpc",
  "dom-serialization",
  "dom-store",
  "dom-wallet",
