@@ -1393,6 +1393,88 @@ mod genesis_determinism_tests {
     /// A divergence here means a node restarted with the data_dir
     /// wiped would compute a different genesis hash than its peers —
     /// silent fork at height 0.
+    /// FROZEN GENESIS VECTORS (testnet, Bulletproof era). Regenerates the genesis
+    /// end-to-end from the deterministic builder and pins every derived value, so
+    /// any future drift (proof, derivation, roots, or header hash) is caught.
+    ///
+    /// The genesis coinbase now carries a 675-byte standard Bulletproof
+    /// (`bp2_prove_with_nonce`), so `rangeproof_root` and the genesis hash changed
+    /// from the borromean era; `output_root`/`kernel_root` are unchanged (the
+    /// Pedersen commitment and kernel excess are independent of the range-proof
+    /// backend). Recomputed 2026-06-17 (bp2).
+    #[test]
+    fn genesis_testnet_frozen_vectors() {
+        // Pinned values (hex), authoritative from the deterministic builder.
+        const OUTPUT_ROOT: &str =
+            "7dcd67abf72846eadd94cee37060ecd58ac26df2a6c1f6e74a43fe9e6aab9f1d";
+        const KERNEL_ROOT: &str =
+            "69a1283a2fd4a90f0df6110caf2f74150365e31ca96cc2485cb022ceae15834b";
+        const RANGEPROOF_ROOT: &str =
+            "2a9d3121c551dd909d4ad72efc10ade1ad37588d785af5499f987355eaa7b5bb";
+        const GENESIS_HASH: &str =
+            "13236b793ec6aba37f0181d90e9c71bcf1e091551046668d03b2da1e247b630c";
+
+        let cid = chain_id_testnet();
+        let coinbase = build_genesis_coinbase(&cid).expect("genesis coinbase");
+
+        // (1) bp2 range proof: exactly 675 bytes and self-verifies under bp2.
+        assert_eq!(
+            coinbase.output.proof.len(),
+            675,
+            "genesis coinbase proof must be a 675-byte Bulletproof"
+        );
+        assert!(
+            dom_crypto::bp2_verify(coinbase.output.commitment.as_bytes(), &coinbase.output.proof)
+                .expect("bp2_verify"),
+            "genesis coinbase range proof must verify under bp2 (self-validation)"
+        );
+
+        // (2) PMMR roots match the pinned vectors.
+        let (output_root, kernel_root, rangeproof_root) =
+            compute_block_pmmr_roots(&coinbase, &[]).expect("roots");
+        assert_eq!(hex::encode(output_root.as_bytes()), OUTPUT_ROOT, "output_root drift");
+        assert_eq!(hex::encode(kernel_root.as_bytes()), KERNEL_ROOT, "kernel_root drift");
+        assert_eq!(
+            hex::encode(rangeproof_root.as_bytes()),
+            RANGEPROOF_ROOT,
+            "rangeproof_root drift"
+        );
+
+        // (3) Genesis block hash matches the pinned vector AND the source-of-truth
+        //     consensus constant GENESIS_HASH_TESTNET.
+        let anchor = genesis_anchor(NETWORK_MAGIC_TESTNET).expect("anchor");
+        let header = BlockHeader {
+            version: PROTOCOL_VERSION,
+            prev_hash: Hash256::ZERO,
+            height: BlockHeight::GENESIS,
+            timestamp: anchor.timestamp,
+            output_root,
+            kernel_root,
+            rangeproof_root,
+            total_kernel_offset: [0u8; 32],
+            target: dom_pow::CompactTarget(target_to_compact(&anchor.target)),
+            total_difficulty: U256::from(target_to_difficulty(&anchor.target)),
+            pow: ProofOfWork {
+                nonce: 0,
+                randomx_hash: Hash256::ZERO,
+            },
+        };
+        let header_bytes = header.to_bytes().expect("ser");
+        let genesis_hash = *dom_crypto::hash::blake2b_256(&header_bytes).as_bytes();
+        assert_eq!(hex::encode(genesis_hash), GENESIS_HASH, "genesis hash drift");
+        assert_eq!(
+            genesis_hash,
+            dom_core::GENESIS_HASH_TESTNET,
+            "genesis hash must equal the pinned GENESIS_HASH_TESTNET constant"
+        );
+
+        // (4) Byte-reproducible: rebuild and confirm identical proof + roots.
+        let cb2 = build_genesis_coinbase(&cid).expect("genesis coinbase rebuild");
+        assert_eq!(cb2.output.proof, coinbase.output.proof, "genesis proof not reproducible");
+        let (o2, k2, r2) = compute_block_pmmr_roots(&cb2, &[]).expect("roots rebuild");
+        assert_eq!((o2, k2, r2), (output_root, kernel_root, rangeproof_root));
+    }
+
     #[test]
     fn genesis_coinbase_is_deterministic_across_runs() {
         for cid_fn in [
