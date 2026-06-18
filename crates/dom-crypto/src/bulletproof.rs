@@ -31,6 +31,14 @@ const H_DOM_X: [u8; 32] = [
 /// Valores acima deste limite estão fora do supply DOM e não precisam de prova.
 pub const MAX_PROVABLE_VALUE: u64 = (1u64 << 52) - 1;
 
+/// Legacy borromean range-proof byte cap. This module is the LEGACY borromean
+/// path, retired from production (generation and verification now use the
+/// standard Bulletproof `bp2_*` path / `bulletproof_bp`). Borromean proofs are
+/// ~4166 bytes, so this module keeps its own cap rather than the consensus
+/// `dom_core::MAX_PROOF_SIZE` (now sized to the 675-byte Bulletproof). Used only
+/// by this module's prove/verify/tests; not a consensus parameter.
+const LEGACY_BORROMEAN_MAX_PROOF_SIZE: usize = 6_144;
+
 /// Generator DOM derivado de H_DOM_X via Generator::from_slice (prefix 0x0a).
 ///
 /// Esta é a forma correta de carregar o H canônico do DOM no contexto zkp.
@@ -118,11 +126,11 @@ impl RangeProof {
         if bytes.is_empty() {
             return Err(DomError::Malformed("range proof vazio".into()));
         }
-        if bytes.len() > dom_core::MAX_PROOF_SIZE {
+        if bytes.len() > LEGACY_BORROMEAN_MAX_PROOF_SIZE {
             return Err(DomError::Malformed(format!(
-                "range proof {} bytes > MAX_PROOF_SIZE {}",
+                "range proof {} bytes > LEGACY_BORROMEAN_MAX_PROOF_SIZE {}",
                 bytes.len(),
-                dom_core::MAX_PROOF_SIZE
+                LEGACY_BORROMEAN_MAX_PROOF_SIZE
             )));
         }
         Ok(Self { bytes })
@@ -257,7 +265,7 @@ pub fn verify(commitment_bytes: &[u8; 33], proof_bytes: &[u8]) -> Result<bool, D
     if proof_bytes.is_empty() {
         return Err(DomError::Malformed("range proof vazio".into()));
     }
-    if proof_bytes.len() > dom_core::MAX_PROOF_SIZE {
+    if proof_bytes.len() > LEGACY_BORROMEAN_MAX_PROOF_SIZE {
         return Err(DomError::Malformed(format!(
             "range proof muito grande: {} bytes",
             proof_bytes.len()
@@ -371,10 +379,10 @@ mod tests {
         let bf = BlindingFactor::random();
         let (proof, _) = prove(369, &bf).unwrap();
         assert!(
-            proof.bytes.len() <= dom_core::MAX_PROOF_SIZE,
-            "proof {} bytes > MAX_PROOF_SIZE {}",
+            proof.bytes.len() <= LEGACY_BORROMEAN_MAX_PROOF_SIZE,
+            "proof {} bytes > LEGACY_BORROMEAN_MAX_PROOF_SIZE {}",
             proof.bytes.len(),
-            dom_core::MAX_PROOF_SIZE
+            LEGACY_BORROMEAN_MAX_PROOF_SIZE
         );
         println!("RangeProof size: {} bytes", proof.bytes.len());
     }

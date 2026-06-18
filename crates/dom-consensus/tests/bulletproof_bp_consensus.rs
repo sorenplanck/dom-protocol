@@ -103,3 +103,44 @@ fn bp2_proof_is_distinct_from_borromean_path() {
         "a standard Bulletproof must NOT verify under the borromean bp_verify"
     );
 }
+
+/// Sub-step 6: the MAX_PROOF_SIZE serialization envelope is sized to the
+/// Bulletproof format. A real bp2 proof is exactly 675 bytes (pinned), a valid
+/// output round-trips through (de)serialization, and a proof exceeding
+/// MAX_PROOF_SIZE is rejected by the deserializer BEFORE allocation.
+#[test]
+fn bp2_proof_size_and_serialization_envelope() {
+    use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
+
+    // (1) bp2 proof is exactly 675 bytes (pinned — catches any future size drift),
+    //     comfortably within the 700-byte envelope.
+    let blinding = BlindingFactor::from_bytes([4u8; 32]).unwrap();
+    let valid = make_output(1_000, &blinding);
+    assert_eq!(valid.proof.len(), 675, "bp2 proof must be exactly 675 bytes");
+    assert!(valid.proof.len() <= dom_core::MAX_PROOF_SIZE);
+    assert_eq!(dom_core::MAX_PROOF_SIZE, 768, "Bulletproof envelope");
+
+    // (2) A valid output round-trips through serialization and re-validates.
+    let mut w = Writer::new();
+    valid.serialize(&mut w).expect("serialize");
+    let bytes = w.finish();
+    let mut r = Reader::new(&bytes);
+    let decoded = TransactionOutput::deserialize(&mut r).expect("deserialize valid output");
+    assert_eq!(decoded.proof.len(), 675);
+    validate_range_proofs_bp2(std::slice::from_ref(&decoded)).expect("decoded output validates");
+
+    // (3) A proof exceeding MAX_PROOF_SIZE is rejected by the deserializer BEFORE
+    //     allocating it (read_vec checks the declared length against the cap first).
+    let oversized = TransactionOutput {
+        commitment: valid.commitment.clone(),
+        proof: vec![0u8; dom_core::MAX_PROOF_SIZE + 1],
+    };
+    let mut w2 = Writer::new();
+    oversized.serialize(&mut w2).expect("serialize oversized");
+    let bytes2 = w2.finish();
+    let mut r2 = Reader::new(&bytes2);
+    assert!(
+        TransactionOutput::deserialize(&mut r2).is_err(),
+        "a proof above MAX_PROOF_SIZE must be rejected at deserialize, before allocation"
+    );
+}

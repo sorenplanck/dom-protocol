@@ -200,8 +200,17 @@ pub const MAX_KERNELS_PER_TX: usize = 16;
 /// [CONSENSUS] Maximum transactions per block.
 pub const MAX_BLOCK_TXS: usize = 5_000;
 
-/// [CONSENSUS] Maximum Bulletproof size in bytes.
-pub const MAX_PROOF_SIZE: usize = 6_144;
+/// [CONSENSUS] Maximum range-proof size in bytes — the standard Bulletproof
+/// envelope. A single 64-bit Bulletproof is a FIXED 675 bytes (grin
+/// `SINGLE_BULLET_PROOF_SIZE`); DOM only ever emits single-output 64-bit proofs
+/// (one proof per output, no aggregation), so 675 is the true maximum. 768
+/// (3*256) gives ~93 bytes (~13.8%) of defensive headroom — enough to absorb a
+/// minor format/version change without a consensus change — while still bounding
+/// the per-proof deserialization allocation ~8x tighter than the old 6144
+/// (borromean) value. Hard reset: the protocol no longer accepts the legacy
+/// ~4166-byte borromean proofs. (The legacy `bulletproof` module keeps its own
+/// cap for its tests.)
+pub const MAX_PROOF_SIZE: usize = 768;
 
 /// [CONSENSUS] Maximum serialized block size in bytes (16 MiB).
 pub const MAX_BLOCK_SERIALIZED_SIZE: usize = 16 * 1_024 * 1_024;
