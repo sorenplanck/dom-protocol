@@ -202,6 +202,50 @@ fn build_genesis_coinbase(chain_id: &[u8; 32]) -> Result<CoinbaseTransaction, Do
     )
 }
 
+/// Build a byte-reproducible coinbase at an arbitrary height.
+///
+/// **TEST-INFRASTRUCTURE API. Not part of the stable public surface.**
+///
+/// Exposed as `pub` so the deterministic-replay regression test (in the
+/// `dom-integration-tests` crate, which compiles `dom-node` as a normal
+/// dependency and so cannot reach a `#[cfg(test)]` item) can build byte-identical
+/// chains past genesis and pin a frozen canonical-state digest. Never call this
+/// from production code: real blocks are mined via `mine_one_block`, whose
+/// coinbase comes from the wallet or from [`build_real_coinbase`] (a fresh random
+/// blinding per block).
+///
+/// This is a thin deterministic wrapper, not a new coinbase path: it only
+/// derives a deterministic `(blinding, nonce)` pair — from `TAG_GENESIS_BLINDING`
+/// keyed by height, exactly as [`build_genesis_coinbase`] derives the genesis
+/// pair — and hands them to the same `build_coinbase_with_blinding` constructor
+/// the genesis and normal paths use. It adds no coinbase-construction logic,
+/// changes no consensus rule, and every block it produces is fully
+/// consensus-valid (and rejected by `connect_block` if it were not).
+///
+/// Marked `#[doc(hidden)]` to keep this out of generated rustdoc despite needing
+/// `pub` visibility.
+#[doc(hidden)]
+pub fn build_deterministic_coinbase(
+    height: BlockHeight,
+    total_tx_fees: u64,
+    chain_id: &[u8; 32],
+) -> Result<CoinbaseTransaction, DomError> {
+    use dom_crypto::hash::blake2b_256_tagged;
+    use dom_crypto::pedersen::BlindingFactor;
+
+    let mut blind_seed = b"dom:replay-coinbase:blinding:".to_vec();
+    blind_seed.extend_from_slice(&height.0.to_le_bytes());
+    let blinding_hash = blake2b_256_tagged(dom_core::TAG_GENESIS_BLINDING, &blind_seed);
+    let blinding = BlindingFactor::from_bytes(*blinding_hash.as_bytes())
+        .map_err(|e| DomError::Internal(format!("deterministic coinbase blinding: {e}")))?;
+
+    let mut nonce_seed = b"dom:replay-coinbase:bp-nonce:".to_vec();
+    nonce_seed.extend_from_slice(&height.0.to_le_bytes());
+    let nonce = *blake2b_256_tagged(dom_core::TAG_GENESIS_BLINDING, &nonce_seed).as_bytes();
+
+    build_coinbase_with_blinding(height, total_tx_fees, chain_id, Some(blinding), Some(nonce))
+}
+
 fn build_coinbase_with_blinding(
     height: BlockHeight,
     total_tx_fees: u64,

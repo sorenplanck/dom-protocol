@@ -32,3 +32,4 @@ dom-rpc = { workspace = true }
 dom-wire = { workspace = true }
 dom-pow = { workspace = true }
 primitive-types.workspace = true
+sha2.workspace = true
