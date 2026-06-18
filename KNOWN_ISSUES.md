@@ -2,6 +2,12 @@
 
 ## CRITICAL: Pedersen / Bulletproof commitment format mismatch
 
+> **✅ RESOLVED — see the "Resolution" section below.** The H-generator
+> unification + SEC1↔zkp bridge closed this (2026-05-15), and it remains
+> resolved under the later Bulletproof migration (grin `secp256k1zkp`, custom
+> H_DOM generator; commitments byte-identical to Pedersen). The "Open" status
+> line that follows is the original point-in-time record.
+
 **Status:** Open, blocks production use.
 **Discovered:** May 2026, during Etapa 2 defensive integration.
 **Severity:** Consensus-blocking.
