@@ -2,7 +2,7 @@
 
 ## Roadmap
 
-See [docs/ROADMAP_v2.md](./ROADMAP_v2.md) — adopted 2026-05-24.
+See [docs/ROADMAP_v3.md](./ROADMAP_v3.md) — adopted 2026-05-24.
 Deployment progression is milestone-based: adversarial hardening,
 recoverability proofs, public testnet stabilization, external review,
 bug bounty, and genesis ceremony.
@@ -40,7 +40,7 @@ blockchain-specialist reviewer, and was accepted under the principle
 ## Consensus reference
 
 - [CONSENSUS.md](./CONSENSUS.md) — Consensus rules summary
-- [MAINNET_LAUNCH.md](./MAINNET_LAUNCH.md) — Historical launch checklist (superseded by milestone-based readiness gates in ROADMAP_v2)
+- [MAINNET_LAUNCH.md](./MAINNET_LAUNCH.md) — Historical launch checklist (superseded by milestone-based readiness gates in ROADMAP_v3)
 
 ## Troubleshooting
 

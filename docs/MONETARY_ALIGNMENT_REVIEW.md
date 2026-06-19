@@ -31,7 +31,7 @@ This review evaluates the following document categories across the repository:
 - **Normative RFCs:** `docs/DOM_RFC_0004_*`, `DOM_RFC_0008_*`, `DOM_RFC_0009_*`, `DOM_RFC_0010_*`, `DOM_RFC_0011_*`
 - **Design documents:** `WHITEPAPER.md`, `README.md`
 - **Doctrinal documents:** `docs/MONETARY_CONSTITUTION.md`, `docs/MONETARY_GLOSSARY.md`, `docs/MONETARY_INTEGRITY_PROOFS.md`, `docs/PROTOCOL_CHANGE_POLICY.md`
-- **Operational documents:** `docs/CONSENSUS.md`, `docs/RELEASE_BLOCKERS.md`, `docs/GENESIS_CEREMONY.md`, `docs/ECONOMIC_SECURITY.md`, `docs/ROADMAP_v2.md`, `docs/REPLAY_AUDIT_ARCHITECTURE.md`
+- **Operational documents:** `docs/CONSENSUS.md`, `docs/RELEASE_BLOCKERS.md`, `docs/GENESIS_CEREMONY.md`, `docs/ECONOMIC_SECURITY.md`, `docs/ROADMAP_v3.md`, `docs/REPLAY_AUDIT_ARCHITECTURE.md`
 - **Implementation:** `crates/dom-core/src/constants.rs` (canonical constant definitions)
 
 The review is architecture-oriented and operationally conservative. It does not evaluate test infrastructure, binary tooling, or per-crate internal documentation.
@@ -210,7 +210,7 @@ Repository documentation establishes two distinct authority domains that are str
 
 - **Monetary parameters are immutable post-genesis.** `docs/GENESIS_CEREMONY.md` specifies that after `GENESIS_HASH_MAINNET` is pinned, the following constants must never be modified: `INITIAL_BLOCK_REWARD`, `HALVING_INTERVAL`, `HALVING_EPOCHS`, `MAX_SUPPLY_NOMS`, `NETWORK_MAGIC_MAINNET`, `P2P_PORT_MAINNET`. Enforcement is via branch protection on `crates/dom-core/src/constants.rs` requiring CODEOWNERS review.
 
-- **Engineering evolution authority is held by the maintainer.** `docs/ROADMAP_v2.md` states that "HIGH items must be either complete or have documented residual risk accepted by maintainer." `docs/PROTOCOL_CHANGE_POLICY.md` establishes engineering coupling principles but explicitly states it "does not create protocol governance authority."
+- **Engineering evolution authority is held by the maintainer.** `docs/ROADMAP_v3.md` states that "HIGH items must be either complete or have documented residual risk accepted by maintainer." `docs/PROTOCOL_CHANGE_POLICY.md` establishes engineering coupling principles but explicitly states it "does not create protocol governance authority."
 
 The partition is correct and coherent. No single document consolidates it.
 
@@ -220,7 +220,7 @@ The partition is correct and coherent. No single document consolidates it.
 
 **Severity:** Low. The model is internally consistent; the risk is fragmentation of discovery.
 
-**Conservative Remediation Direction:** A short "Governance and Authority Summary" section in `docs/PROTOCOL_CHANGE_POLICY.md` — pointing to `GENESIS_CEREMONY.md` for monetary immutability and `ROADMAP_v2.md` for engineering authority — would consolidate the model without introducing a new governance document.
+**Conservative Remediation Direction:** A short "Governance and Authority Summary" section in `docs/PROTOCOL_CHANGE_POLICY.md` — pointing to `GENESIS_CEREMONY.md` for monetary immutability and `ROADMAP_v3.md` for engineering authority — would consolidate the model without introducing a new governance document.
 
 ---
 
@@ -280,9 +280,9 @@ No conflicting architectural identity claims were found across authoritative doc
 ### AI-02 — Hardening-First Identity in Roadmap vs. Design Documents
 
 **Evidence:**  
-`docs/ROADMAP_v2.md` and `docs/PROTOCOL_CHANGE_POLICY.md` present a hardening-first, milestone-gated operational identity. `WHITEPAPER.md` presents the protocol design but does not characterize the development methodology in equivalent terms.
+`docs/ROADMAP_v3.md` and `docs/PROTOCOL_CHANGE_POLICY.md` present a hardening-first, milestone-gated operational identity. `WHITEPAPER.md` presents the protocol design but does not characterize the development methodology in equivalent terms.
 
-The hardening-first framing in `ROADMAP_v2.md` ("Hardening precedes expansion") and `README.md` §Design Philosophy is consistent with `PROTOCOL_CHANGE_POLICY.md`'s explicit prohibition on "speculative rewrites" and "hype-driven architecture." However, these characterizations are spread across operational documents rather than integrated into the primary design document.
+The hardening-first framing in `ROADMAP_v3.md` ("Hardening precedes expansion") and `README.md` §Design Philosophy is consistent with `PROTOCOL_CHANGE_POLICY.md`'s explicit prohibition on "speculative rewrites" and "hype-driven architecture." However, these characterizations are spread across operational documents rather than integrated into the primary design document.
 
 **Operational Implications:** Reviewers reading `WHITEPAPER.md` alone receive a complete protocol description but not the development discipline that governs how the protocol evolves. This creates a gap between design intent and operational commitment that is filled only by reading operational documents.
 
@@ -431,7 +431,7 @@ This is a six-to-ten line prepended notice. It does not require rewriting the bo
 
 **R-04:** Document the relay-vs-consensus distinction for zero-fee transactions in `docs/MONETARY_GLOSSARY.md` under a "Relay Policy" entry, cross-referencing `WHITEPAPER.md`.
 
-**R-05:** Add a brief "Governance and Authority Summary" to `docs/PROTOCOL_CHANGE_POLICY.md` that maps monetary immutability (per `docs/GENESIS_CEREMONY.md`) and engineering authority (per `docs/ROADMAP_v2.md`) into a single summary, without creating a new governance document.
+**R-05:** Add a brief "Governance and Authority Summary" to `docs/PROTOCOL_CHANGE_POLICY.md` that maps monetary immutability (per `docs/GENESIS_CEREMONY.md`) and engineering authority (per `docs/ROADMAP_v3.md`) into a single summary, without creating a new governance document.
 
 **R-06:** `docs/GENESIS_CEREMONY.md` should specify what independent witnesses are expected to verify during the ceremony. This is an additive clarification, not a procedural change.
 

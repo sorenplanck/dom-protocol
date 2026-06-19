@@ -14,7 +14,7 @@
 //! Update procedure (consensus-class): a deliberate change to PMMR
 //! layout REQUIRES re-running `cargo test print_pmmr_vectors --
 //! --nocapture`, replacing the hex below, AND documenting the
-//! migration / fork implications in RFC-0004 + ROADMAP_v2.
+//! migration / fork implications in RFC-0004 + ROADMAP_v3.
 
 use dom_core::Hash256;
 use dom_pmmr::Pmmr;

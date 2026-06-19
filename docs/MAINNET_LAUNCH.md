@@ -1,14 +1,14 @@
 # DOM Protocol Mainnet Launch Checklist
 
 **Last Updated:** 2026-05-24
-**Status:** Historical checklist retained for reference; authoritative readiness gating lives in `ROADMAP_v2.md`
+**Status:** Historical checklist retained for reference; authoritative readiness gating lives in `ROADMAP_v3.md`
 **Current Phase:** Phase 1 (Consensus Immutability Lock) + Phase 3 (Storage Durability), parallel
 
 > **Roadmap superseded 2026-05-24.** See
-> [`docs/ROADMAP_v2.md`](./ROADMAP_v2.md) for the full phase breakdown
+> [`docs/ROADMAP_v3.md`](./ROADMAP_v3.md) for the full phase breakdown
 > adopted in response to the Track A external audit. The launch
 > checklist below is retained for historical reference only — the
-> authoritative gating criteria live in ROADMAP_v2 Phase 8.
+> authoritative gating criteria live in ROADMAP_v3 Phase 9.
 
 ---
 

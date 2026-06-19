@@ -56,7 +56,7 @@ Out of scope (deferred to follow-up engagements):
 * `docs/ECONOMIC_SECURITY.md` — Phase 5.2 selfish-mining / game
   theory analysis.
 * `docs/RELEASE_BLOCKERS.md` — all open and resolved blockers.
-* `docs/ROADMAP_v2.md` — strategic plan + non-negotiables.
+* `docs/ROADMAP_v3.md` — strategic plan + non-negotiables.
 
 ## Internal test coverage
 
