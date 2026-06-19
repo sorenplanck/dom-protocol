@@ -2,7 +2,7 @@
 
 # DOM Protocol
 
-### Not a store of value. A means of exchange.
+### Not a store of value. A means of exchange. 
 
 **DOM is a Mimblewimble blockchain with CPU-mined RandomX proof-of-work.
 Confidential by construction, fixed in supply, and built to circulate.**
