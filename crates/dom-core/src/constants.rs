@@ -200,8 +200,17 @@ pub const MAX_KERNELS_PER_TX: usize = 16;
 /// [CONSENSUS] Maximum transactions per block.
 pub const MAX_BLOCK_TXS: usize = 5_000;
 
-/// [CONSENSUS] Maximum Bulletproof size in bytes.
-pub const MAX_PROOF_SIZE: usize = 6_144;
+/// [CONSENSUS] Maximum range-proof size in bytes — the standard Bulletproof
+/// envelope. A single 64-bit Bulletproof is a FIXED 675 bytes (grin
+/// `SINGLE_BULLET_PROOF_SIZE`); DOM only ever emits single-output 64-bit proofs
+/// (one proof per output, no aggregation), so 675 is the true maximum. 768
+/// (3*256) gives ~93 bytes (~13.8%) of defensive headroom — enough to absorb a
+/// minor format/version change without a consensus change — while still bounding
+/// the per-proof deserialization allocation ~8x tighter than the old 6144
+/// (borromean) value. Hard reset: the protocol no longer accepts the legacy
+/// ~4166-byte borromean proofs. (The legacy `bulletproof` module keeps its own
+/// cap for its tests.)
+pub const MAX_PROOF_SIZE: usize = 768;
 
 /// [CONSENSUS] Maximum serialized block size in bytes (16 MiB).
 pub const MAX_BLOCK_SERIALIZED_SIZE: usize = 16 * 1_024 * 1_024;
@@ -419,10 +428,14 @@ pub const TAG_COINBASE_BLINDING: &str = "DOM:coinbase-blinding:v1";
 /// construction, coinbase structure, or header serialization) changes this
 /// hash and is therefore consensus-breaking.
 ///
-/// Last computed: 2026-05-19 from clean run with TAG_GENESIS_BLINDING:v1.
+/// Last computed: 2026-06-17 from clean run with TAG_GENESIS_BLINDING:v1 and the
+/// standard Bulletproof coinbase (bp2). The genesis coinbase now carries a
+/// 675-byte Bulletproof, so `rangeproof_root` and this hash changed from the
+/// borromean era; `output_root`/`kernel_root` are unchanged. Pinned and
+/// regression-tested by `dom-node` `miner::tests::genesis_testnet_frozen_vectors`.
 pub const GENESIS_HASH_TESTNET: [u8; 32] = [
-    0xba, 0x73, 0x16, 0xa5, 0x27, 0x03, 0xbf, 0x78, 0x48, 0x25, 0x8b, 0xbb, 0x43, 0x4e, 0xd5, 0xa7,
-    0xd7, 0x96, 0x14, 0x74, 0x6b, 0x66, 0xe9, 0x16, 0x22, 0x7b, 0xe4, 0x41, 0x0a, 0x9d, 0x8e, 0x5b,
+    0x13, 0x23, 0x6b, 0x79, 0x3e, 0xc6, 0xab, 0xa3, 0x7f, 0x01, 0x81, 0xd9, 0x0e, 0x9c, 0x71, 0xbc,
+    0xf1, 0xe0, 0x91, 0x55, 0x10, 0x46, 0x66, 0x8d, 0x03, 0xb2, 0xda, 0x1e, 0x24, 0x7b, 0x63, 0x0c,
 ];
 
 /// Explicit mainnet-launch gate.

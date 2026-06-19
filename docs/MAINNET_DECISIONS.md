@@ -27,4 +27,15 @@ rangeproofs. Migrate to Bulletproofs before mainnet.
 4. Never combine the rangeproof migration with unrelated changes (wallet, P2P,
    etc.) — isolate it so any breakage is unambiguous.
 
-**Status:** registered, not started. Blocks mainnet. Does NOT block v2.
+**Status:** ✅ Implemented and validated on branch `bp-migration-phase1` (pending
+merge to main; NOT yet shipped to mainnet). Both proof generation and consensus
+verification now use standard Bulletproofs (bp2) via grin `secp256k1zkp` (audited
+FFI shim, custom H_DOM generator); the testnet genesis was regenerated with a
+Bulletproof coinbase and `GENESIS_HASH_TESTNET` re-pinned (the sequencing step-3
+restart, performed intentionally); consensus `MAX_PROOF_SIZE` set to 768 for the
+675-byte proof. Validated end-to-end by `transfer_slate_e2e` (wallet-to-wallet
+transfer with the range proof verified through consensus) and `deterministic_replay`
+(frozen canonical-state digest as a permanent regression gate). The migration was
+isolated on its own branch per sequencing rule 4. This gate's implementation
+requirement is satisfied; mainnet launch remains gated on merge and the broader
+mainnet checklist. Does NOT block v2.

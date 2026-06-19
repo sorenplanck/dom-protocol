@@ -375,11 +375,11 @@ to fail, making man-in-the-middle attacks on the P2P layer detectable.
 
 ---
 
-## 5. Bulletproofs+ Binding to H
+## 5. Bulletproofs Binding to H
 
 ### 5.1 H Consistency Requirement
 
-The H generator used in Bulletproofs+ range proofs MUST be the same H derived
+The H generator used in Bulletproofs range proofs MUST be the same H derived
 via hash-to-curve (Section 1 of this RFC).
 
 If a Bulletproof uses a different H internally, it does not prove that the commitment
@@ -406,14 +406,11 @@ Using the same hash-to-curve algorithm (Section 1) and SHA-256.
 
 ### 5.3 Proof Format
 
-A Bulletproof+ for a single DOM output in range [0, 2^52) with the concrete
-secp256k1-zkp implementation used by this codebase serializes to approximately
-4166 bytes. `MAX_PROOF_SIZE = 6144` provides about 1.5x headroom over the
-measured proof size while keeping malformed proof payloads bounded.
-
-Earlier estimates of approximately 672 bytes described a theoretical minimum
-aggregated Bulletproof+ shape, not the serialized proof produced by this
-implementation.
+A non-aggregated Bulletproof for a single DOM output in range [0, 2^52), as
+produced by the grin `secp256k1zkp` backend used by this codebase (via the
+audited FFI shim with the custom H_DOM generator), serializes to exactly
+675 bytes. `MAX_PROOF_SIZE = 768` is the consensus cap: it admits the 675-byte
+proof with ~93 bytes of headroom while keeping malformed proof payloads bounded.
 
 Proofs are NOT aggregated across outputs in DOM v1.0. Each output has one independent
 range proof.

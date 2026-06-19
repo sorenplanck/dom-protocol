@@ -2126,7 +2126,6 @@ impl Wallet {
         height: BlockHeight,
         total_tx_fees: u64,
     ) -> Result<CoinbaseTransaction, WalletError> {
-        use dom_crypto::bulletproof;
         use dom_crypto::keys::SecretKey;
         use dom_crypto::schnorr_sign;
 
@@ -2157,8 +2156,9 @@ impl Wallet {
         // Save the 33-byte SEC1 representation before output_commitment is moved into the tx.
         let output_commitment_bytes: [u8; 33] = *output_commitment.as_bytes();
 
-        // Step 5: Range proof (Bulletproofs+) proves value in [0, 2^52)
-        let (range_proof, _) = bulletproof::prove(explicit_value, &blinding)
+        // Step 5: Range proof (standard Bulletproof — bp2) proves value in [0, 2^52).
+        // bp2_prove returns the proof bytes directly (Vec<u8>).
+        let (range_proof, _) = dom_crypto::bp2_prove(explicit_value, &blinding)
             .map_err(|e| WalletError::Crypto(format!("coinbase range proof: {e}")))?;
 
         // Step 6: Kernel excess = 0*H + r*G = r*G  (NOT same as output commitment!)
@@ -2182,7 +2182,7 @@ impl Wallet {
         let coinbase_tx = CoinbaseTransaction {
             output: TransactionOutput {
                 commitment: output_commitment,
-                proof: range_proof.bytes,
+                proof: range_proof,
             },
             kernel: CoinbaseKernel {
                 features: KERNEL_FEAT_COINBASE,

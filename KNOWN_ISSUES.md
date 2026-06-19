@@ -2,6 +2,12 @@
 
 ## CRITICAL: Pedersen / Bulletproof commitment format mismatch
 
+> **✅ RESOLVED — see the "Resolution" section below.** The H-generator
+> unification + SEC1↔zkp bridge closed this (2026-05-15), and it remains
+> resolved under the later Bulletproof migration (grin `secp256k1zkp`, custom
+> H_DOM generator; commitments byte-identical to Pedersen). The "Open" status
+> line that follows is the original point-in-time record.
+
 **Status:** Open, blocks production use.
 **Discovered:** May 2026, during Etapa 2 defensive integration.
 **Severity:** Consensus-blocking.
@@ -87,6 +93,8 @@ Implemented `sec1_to_zkp()` and `zkp_to_sec1()` conversion functions (~70 lines)
 **Validation Phase 2:**  
 200/200 roundtrip tests pass (100 SEC1→zkp→SEC1, 100 zkp→SEC1→zkp). Full workspace: 203/203 tests. Clippy clean. No new production dependencies (only `expose-field` feature flag for k256).
 
+> Note: the sampling suite was later extended — the SEC1↔zkp bridge is now exercised by 1000+ random scalars plus edge cases (see `bridge_roundtrip_1000_random_scalars`); the 100/200 figures above are the original 2026-05-15 resolution record. The equivalence remains evidenced, not proven (AUDIT-002) — a complete mathematical proof of the is_square equivalence across the whole domain is pending pre-mainnet.
+
 **Files Modified:**
 - `bulletproof.rs`: `dom_generator()`, `sec1_to_zkp()`, `zkp_to_sec1()`, `prove()`, `verify()`
 - `Cargo.toml`: added `expose-field` feature to k256
@@ -97,3 +105,56 @@ Implemented `sec1_to_zkp()` and `zkp_to_sec1()` conversion functions (~70 lines)
 - Do not change H_COMPRESSED_FINAL in h_generator.rs (consensus-critical).
 - Do not partial-fix (sign without fixing format) — produces silently invalid
   blocks.
+
+## ibd_two_node t1/t7: RandomX-throughput timeouts + serial SIGSEGV (PRE-EXISTING)
+
+**Status:** Open, low priority. Test-harness/hardware issue, NOT a protocol bug.
+**Discovered:** 2026-06-17, during the Bulletproof migration (Phase 2, sub-step 5b).
+**Severity:** Flaky integration test on resource-constrained machines. Does not
+affect consensus, node, or wallet correctness.
+
+### Symptom
+
+In `crates/dom-integration-tests/tests/ibd_two_node.rs`, two tests intermittently
+fail with timeouts (never a logic/range-proof error — block height advances
+steadily, just not fast enough):
+
+- `t1_ibd_through_randomx_epoch_boundary_via_three_real_nodes` — must mine past
+  the RandomX seed boundary (height 2060) within a 300s budget.
+- `t7_ibd_restart_resume_after_interruption` — must mine ~200 blocks across a
+  restart within its budget.
+
+Under full `cargo test --workspace` parallelism, `t2`/`t3` can also time out from
+CPU contention. Additionally, the `ibd_two_node` binary has been observed to
+crash with **SIGSEGV (signal 11)** when run serially (`--test-threads=1`) under
+sustained heavy native RandomX load.
+
+### Root cause
+
+These tests perform **real RandomX proof-of-work mining** of many blocks. RandomX
+is deliberately memory-hard and slow; this machine sustains only ~1.9 blocks/s,
+so 2060 blocks (t1) / 200 blocks (t7) cannot be produced within the 300s test
+budgets. The failures are CPU/throughput-bound, not algorithmic.
+
+### Proven PRE-EXISTING and orthogonal to the Bulletproof migration
+
+- Reproduced on `main` (commit 1c143ad, borromean — none of the bp2 changes
+  present): `t1` fails the same way and the binary SIGSEGVs under `--test-threads=1`.
+- The bp2 range proof is **faster** than borromean (measured ~34.8 ms vs ~67.7 ms
+  per prove+verify), so the migration cannot have caused or worsened mining time.
+- All failures are timeouts with valid proofs (height advances; zero
+  "range proof verification failed"). `t2/t3/t4/t5/t6` pass in isolation.
+
+### Mitigation / how to run
+
+- Run the heavy IBD tests in isolation with adequate CPU, e.g.
+  `cargo test -p dom-integration-tests --test ibd_two_node` on a machine that can
+  sustain the required RandomX block rate; or raise/parameterize the per-test
+  height targets and timeouts for CI hardware.
+- Investigate the serial SIGSEGV separately (likely native RandomX/dataset
+  memory pressure under back-to-back runs) — tracked here, not yet root-caused.
+
+### Do NOT
+
+- Do not attribute these timeouts to the range-proof backend — they predate it.
+- Do not "fix" by weakening any range-proof or consensus assertion.

@@ -12,6 +12,11 @@ pub mod keys;
 pub mod pedersen;
 pub mod schnorr;
 
+// Single source of truth for the SEC1<->zkp commitment encoding bridge, shared
+// by the borromean (`bulletproof`) and standard-Bulletproof (`bulletproof_bp`)
+// paths. Crate-private.
+mod sec1_zkp_bridge;
+
 pub use dom_core::Hash256;
 pub use h_generator::{derive_h_generator, h_compressed, verify_h_matches_derivation};
 pub use hash::{blake2b_256, blake2b_256_tagged, DomHasher};
@@ -23,3 +28,16 @@ pub use schnorr::{
 };
 pub mod bulletproof;
 pub use bulletproof::{prove as bp_prove, verify as bp_verify, RangeProof};
+
+// Phase 2 (Bulletproof migration): standard-Bulletproof shim, parallel to the
+// borromean `bulletproof` module above. Exported under distinct `bp2_*` names so
+// it cannot be confused with the borromean `bp_prove`/`bp_verify`. NOT yet wired
+// into consensus — both paths coexist.
+mod bulletproof_bp;
+/// Standard-Bulletproof (grin backend) range-proof prove/verify, exported as
+/// `bp2_prove`/`bp2_verify` (+ `bp2_prove_with_nonce` for deterministic-nonce
+/// proofs, e.g. genesis). Parallel to the borromean `bp_prove`/`bp_verify`;
+/// produces 675-byte proofs bound to H_DOM. Not yet wired into consensus.
+pub use bulletproof_bp::{
+    bp_prove as bp2_prove, bp_prove_with_nonce as bp2_prove_with_nonce, bp_verify as bp2_verify,
+};

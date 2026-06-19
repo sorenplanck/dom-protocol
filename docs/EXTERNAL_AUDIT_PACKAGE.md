@@ -23,7 +23,7 @@ In scope for the engagement:
    `crates/dom-chain`, `crates/dom-pmmr`, `crates/dom-pow`,
    `crates/dom-core`.
 2. **Cryptographic surface** — `crates/dom-crypto` (Schnorr,
-   Pedersen, Bulletproofs+, H generator, hash domains).
+   Pedersen, Bulletproofs, H generator, hash domains).
 3. **Wire / P2P surface** — `crates/dom-wire`,
    `crates/dom-node/src/relay`, `crates/dom-node/src/pex.rs`.
 4. **Storage durability** — `crates/dom-store`,
@@ -150,7 +150,7 @@ codegen-units=1"`.
 * **Likely:** Cross-platform deterministic roots — the CI YAML is
   in place; first green run on the matrix closes this empirically.
 * **Theoretical until external audit:** Cryptographic soundness
-  under adversarial review beyond the BIP-340 / k256 / secp256k1-zkp
+  under adversarial review beyond the BIP-340 / k256 / grin secp256k1zkp
   upstream claims. End-to-end CT validation via `ctgrind` /
   `dudect`. Multi-strategy economic simulation.
 

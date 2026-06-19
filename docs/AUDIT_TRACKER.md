@@ -22,7 +22,7 @@
 | 3 | Scalar validation | `validate_transaction_structure` | ✅ | Inside structure check |
 | 4 | Point validation | `validate_transaction_structure` | ✅ | Commitment parsing |
 | 5 | Duplicate detection | `validate_transaction_structure` | ✅ | Input dedup |
-| 6 | Range proof validation | `validate_range_proofs` | ✅ | Bulletproofs+ per output |
+| 6 | Range proof validation | `validate_range_proofs` | ✅ | Bulletproofs per output |
 | 7 | Kernel signature | `validate_kernel_signatures` | ✅ | Schnorr + chain_id |
 | 8 | Fee calculation | `validate_transaction` | ✅ | Checked arithmetic |
 | 9 | Weight calculation | `validate_transaction` | ✅ | Per RFC-0010 |
@@ -95,7 +95,7 @@
 | **Not Equal to G** | `h_generator.rs` | `test_h_not_equal_to_g` | ✅ |
 | **Binding with Bulletproofs** | `bulletproof.rs` | `test_h_dom_binding_verified` | ✅ |
 
-#### Bulletproofs+ Range Proofs
+#### Bulletproofs Range Proofs
 
 | Aspect | File | Test Coverage | Status |
 |--------|------|----------------|--------|

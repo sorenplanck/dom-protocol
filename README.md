@@ -64,7 +64,7 @@ DOM is developed under a conservative protocol philosophy:
 | **PoW Algorithm** | RandomX (CPU-optimized) | RFC-0005 |
 | **Hash Function** | Blake2b-256 (tagged) | RFC-0001 |
 | **Signature Scheme** | Schnorr (secp256k1, BIP-340) | RFC-0009 |
-| **Range Proof** | Bulletproofs+ (2^52 range) | RFC-0002 |
+| **Range Proof** | Bulletproofs (2^52 range) | RFC-0002 |
 | **Commitment** | Pedersen (secp256k1, H_DOM via RFC9380) | RFC-0002 |
 
 ### Network Identity
@@ -86,7 +86,7 @@ DOM is developed under a conservative protocol philosophy:
 | **Max Outputs/TX** | 255 | Prevent bloat |
 | **Max Kernels/TX** | 16 | Limit signature count |
 | **Max TXs/Block** | 5,000 | Prevent memory exhaustion |
-| **Max Proof Size** | 6,144 bytes | Bulletproof size cap |
+| **Max Proof Size** | 768 bytes | Bulletproof size cap (675-byte proof + headroom) |
 | **Max Block Size** | 16 MiB | Storage limit |
 | **Max Future Timestamp** | 2 minutes | Prevent spam |
 | **Median-Time Window** | 11 blocks | For timestamp validation |
@@ -100,7 +100,7 @@ DOM is developed under a conservative protocol philosophy:
 ```
 dom-protocol/
 ├── dom-core/                    # Constants, types, errors (immutable)
-├── dom-crypto/                  # Schnorr, Pedersen, Bulletproofs+, H_DOM
+├── dom-crypto/                  # Schnorr, Pedersen, Bulletproofs, H_DOM
 ├── dom-serialization/           # DomSerialize/Deserialize trait + codecs
 ├── dom-pmmr/                    # Pruned Merkle Mountain Range
 ├── dom-pow/                     # RandomX, ASERT, difficulty math
@@ -168,7 +168,7 @@ Average Block Time: ~7.2 minutes
 
 ### PHASE 1 Audit (In Progress)
 
-**Scope:** Consensus layer (validators V1-V18) + Crypto layer (Schnorr, Bulletproofs+, Pedersen, H_DOM)
+**Scope:** Consensus layer (validators V1-V18) + Crypto layer (Schnorr, Bulletproofs, Pedersen, H_DOM)
 
 **Status:** Specification review, adversarial testing, and closure of hardening findings are underway.
 
@@ -272,7 +272,7 @@ The miner is integrated into the node. Mining starts automatically on startup.
 ### Implemented Safeguards
 
 - Schnorr signatures with chain_id (replay protection)
-- Bulletproofs+ range proofs (2^52 max value)
+- Bulletproofs range proofs (2^52 max value)
 - Pedersen commitments (deterministic via H_DOM)
 - ASERT difficulty (smooth, non-exploitable)
 - Coinbase maturity (1,000 blocks)

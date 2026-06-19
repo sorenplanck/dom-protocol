@@ -4,7 +4,7 @@ use dom_consensus::transaction::{
 use dom_core::{Amount, DomError, KERNEL_FEAT_PLAIN, MIN_RELAY_FEE_RATE, TAG_KERNEL_MSG};
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
-use dom_crypto::{bp_prove, schnorr_sign, SecretKey};
+use dom_crypto::{bp2_prove, schnorr_sign, SecretKey};
 use dom_mempool::{validate_tx_against_chain_view, Mempool};
 use dom_store::utxo::UtxoEntry;
 
@@ -79,7 +79,7 @@ fn make_valid_spending_tx_from_input(
         .expect("output blinding");
     let input_commitment = Commitment::commit(input_value, &input_blinding);
     let output_commitment = Commitment::commit(output_value, &output_blinding);
-    let (proof, _) = bp_prove(output_value, &output_blinding).expect("range proof");
+    let (proof, _) = bp2_prove(output_value, &output_blinding).expect("range proof");
     let excess = Commitment::commit(0, &kernel_blinding);
     let secret = SecretKey::from_bytes(kernel_blinding.as_bytes()).expect("kernel secret");
     let sig =
@@ -91,7 +91,7 @@ fn make_valid_spending_tx_from_input(
         }],
         outputs: vec![TransactionOutput {
             commitment: output_commitment,
-            proof: proof.bytes,
+            proof: proof,
         }],
         kernels: vec![TransactionKernel {
             features: KERNEL_FEAT_PLAIN,

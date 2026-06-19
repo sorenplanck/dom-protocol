@@ -50,9 +50,10 @@ weight(Transaction) =
 
 `WEIGHT_OUTPUT = 21 wu` is a fixed consensus weight unit, not a formula derived
 from serialized proof bytes. DOM v1 range proofs are non-aggregated
-single-output Bulletproof+ proofs; the current secp256k1-zkp implementation
-serializes them at approximately 4166 bytes, and `MAX_PROOF_SIZE = 6144` is the
-independent malformed-payload sanity cap.
+single-output Bulletproofs; the grin `secp256k1zkp` implementation (via the
+audited FFI shim with the custom H_DOM generator) serializes them at exactly
+675 bytes, and `MAX_PROOF_SIZE = 768` is the independent malformed-payload
+sanity cap.
 
 ### 1.2 Block Weight
 

@@ -108,6 +108,6 @@ points becomes a remote DoS vector.
 
 Not yet covered (future work):
 - Noise codec frame parser (NoiseCodec::decode)
-- Bulletproof+ deserialization
+- Bulletproof deserialization
 - Wallet seed phrase / BIP-32 derivation parsers
 - LMDB binary format edge cases (data corruption)

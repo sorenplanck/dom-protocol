@@ -10,7 +10,7 @@ use dom_consensus::{
 use dom_core::{Amount, DomError, KERNEL_FEAT_PLAIN, TAG_KERNEL_MSG};
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
-use dom_crypto::{bp_prove, schnorr_sign, SecretKey};
+use dom_crypto::{bp2_prove, schnorr_sign, SecretKey};
 use thiserror::Error;
 
 /// Errors that can occur in transaction operations.
@@ -196,13 +196,14 @@ impl SpendBuilder {
             // Generate commitment first
             let commitment = Commitment::commit(output.value, &output.blinding);
 
-            // Then generate range proof
-            let (proof, _commitment_bytes) = bp_prove(output.value, &output.blinding)
+            // Then generate range proof (standard Bulletproof — bp2). Returns
+            // the proof bytes directly (Vec<u8>), unlike borromean's RangeProof.
+            let (proof, _commitment_bytes) = bp2_prove(output.value, &output.blinding)
                 .map_err(|e| TxError::Crypto(format!("range proof generation failed: {e}")))?;
 
             tx_outputs.push(TransactionOutput {
                 commitment,
-                proof: proof.bytes,
+                proof,
             });
         }
 

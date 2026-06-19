@@ -36,7 +36,7 @@ use dom_core::{
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
-use dom_crypto::{bp_prove, schnorr_sign, SecretKey};
+use dom_crypto::{bp2_prove, schnorr_sign, SecretKey};
 use dom_integration_tests::helpers::*;
 use dom_node::node::DomNode;
 use dom_serialization::DomSerialize;
@@ -123,7 +123,7 @@ fn tx_valid_proof_bad_signature(chain_id: &[u8; 32], fee: u64, seed: u8) -> Vec<
         .expect("output blinding");
     let input_commitment = Commitment::commit(input_value, &input_blinding);
     let output_commitment = Commitment::commit(output_value, &output_blinding);
-    let (proof, _) = bp_prove(output_value, &output_blinding).expect("range proof");
+    let (proof, _) = bp2_prove(output_value, &output_blinding).expect("range proof");
     let excess = Commitment::commit(0, &kernel_blinding);
     let secret = SecretKey::from_bytes(kernel_blinding.as_bytes()).expect("kernel secret");
     let sig = schnorr_sign(&secret, &kernel_message(fee, 0), chain_id).expect("kernel signature");
@@ -139,7 +139,7 @@ fn tx_valid_proof_bad_signature(chain_id: &[u8; 32], fee: u64, seed: u8) -> Vec<
         }],
         outputs: vec![TransactionOutput {
             commitment: output_commitment,
-            proof: proof.bytes,
+            proof: proof,
         }],
         kernels: vec![TransactionKernel {
             features: KERNEL_FEAT_PLAIN,

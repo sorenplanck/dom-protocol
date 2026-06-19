@@ -202,6 +202,50 @@ fn build_genesis_coinbase(chain_id: &[u8; 32]) -> Result<CoinbaseTransaction, Do
     )
 }
 
+/// Build a byte-reproducible coinbase at an arbitrary height.
+///
+/// **TEST-INFRASTRUCTURE API. Not part of the stable public surface.**
+///
+/// Exposed as `pub` so the deterministic-replay regression test (in the
+/// `dom-integration-tests` crate, which compiles `dom-node` as a normal
+/// dependency and so cannot reach a `#[cfg(test)]` item) can build byte-identical
+/// chains past genesis and pin a frozen canonical-state digest. Never call this
+/// from production code: real blocks are mined via `mine_one_block`, whose
+/// coinbase comes from the wallet or from [`build_real_coinbase`] (a fresh random
+/// blinding per block).
+///
+/// This is a thin deterministic wrapper, not a new coinbase path: it only
+/// derives a deterministic `(blinding, nonce)` pair — from `TAG_GENESIS_BLINDING`
+/// keyed by height, exactly as [`build_genesis_coinbase`] derives the genesis
+/// pair — and hands them to the same `build_coinbase_with_blinding` constructor
+/// the genesis and normal paths use. It adds no coinbase-construction logic,
+/// changes no consensus rule, and every block it produces is fully
+/// consensus-valid (and rejected by `connect_block` if it were not).
+///
+/// Marked `#[doc(hidden)]` to keep this out of generated rustdoc despite needing
+/// `pub` visibility.
+#[doc(hidden)]
+pub fn build_deterministic_coinbase(
+    height: BlockHeight,
+    total_tx_fees: u64,
+    chain_id: &[u8; 32],
+) -> Result<CoinbaseTransaction, DomError> {
+    use dom_crypto::hash::blake2b_256_tagged;
+    use dom_crypto::pedersen::BlindingFactor;
+
+    let mut blind_seed = b"dom:replay-coinbase:blinding:".to_vec();
+    blind_seed.extend_from_slice(&height.0.to_le_bytes());
+    let blinding_hash = blake2b_256_tagged(dom_core::TAG_GENESIS_BLINDING, &blind_seed);
+    let blinding = BlindingFactor::from_bytes(*blinding_hash.as_bytes())
+        .map_err(|e| DomError::Internal(format!("deterministic coinbase blinding: {e}")))?;
+
+    let mut nonce_seed = b"dom:replay-coinbase:bp-nonce:".to_vec();
+    nonce_seed.extend_from_slice(&height.0.to_le_bytes());
+    let nonce = *blake2b_256_tagged(dom_core::TAG_GENESIS_BLINDING, &nonce_seed).as_bytes();
+
+    build_coinbase_with_blinding(height, total_tx_fees, chain_id, Some(blinding), Some(nonce))
+}
+
 fn build_coinbase_with_blinding(
     height: BlockHeight,
     total_tx_fees: u64,
@@ -209,7 +253,6 @@ fn build_coinbase_with_blinding(
     blinding_override: Option<dom_crypto::pedersen::BlindingFactor>,
     bulletproof_nonce: Option<[u8; 32]>,
 ) -> Result<CoinbaseTransaction, DomError> {
-    use dom_crypto::bulletproof;
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::keys::SecretKey;
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
@@ -229,12 +272,22 @@ fn build_coinbase_with_blinding(
     // Output commitment: C = value*H + r*G
     let output_commitment = Commitment::commit(explicit_value, &blinding);
 
-    // Range proof: proves value in [0, 2^52)
-    let (range_proof, _) = match bulletproof_nonce {
-        Some(nonce) => bulletproof::prove_with_nonce(explicit_value, &blinding, &nonce)
-            .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?,
-        None => bulletproof::prove(explicit_value, &blinding)
-            .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?,
+    // Range proof: proves value in [0, 2^52). Yields the proof bytes (Vec<u8>).
+    // Both paths now produce a standard 675-byte Bulletproof (bp2):
+    //   - GENESIS uses a DETERMINISTIC nonce (`Some(nonce)`) so the genesis block
+    //     is byte-reproducible across nodes (bp2_prove_with_nonce).
+    //   - normal blocks use fresh random nonces (bp2_prove).
+    let range_proof_bytes: Vec<u8> = match bulletproof_nonce {
+        Some(nonce) => {
+            dom_crypto::bp2_prove_with_nonce(explicit_value, &blinding, &nonce)
+                .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?
+                .0
+        }
+        None => {
+            dom_crypto::bp2_prove(explicit_value, &blinding)
+                .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?
+                .0
+        }
     };
 
     // Kernel excess = r*G (Mimblewimble: coinbase creates value, excess is blinding only)
@@ -257,7 +310,7 @@ fn build_coinbase_with_blinding(
     Ok(CoinbaseTransaction {
         output: TransactionOutput {
             commitment: output_commitment,
-            proof: range_proof.bytes,
+            proof: range_proof_bytes,
         },
         kernel: CoinbaseKernel {
             features: KERNEL_FEAT_COINBASE,
@@ -1384,6 +1437,88 @@ mod genesis_determinism_tests {
     /// A divergence here means a node restarted with the data_dir
     /// wiped would compute a different genesis hash than its peers —
     /// silent fork at height 0.
+    /// FROZEN GENESIS VECTORS (testnet, Bulletproof era). Regenerates the genesis
+    /// end-to-end from the deterministic builder and pins every derived value, so
+    /// any future drift (proof, derivation, roots, or header hash) is caught.
+    ///
+    /// The genesis coinbase now carries a 675-byte standard Bulletproof
+    /// (`bp2_prove_with_nonce`), so `rangeproof_root` and the genesis hash changed
+    /// from the borromean era; `output_root`/`kernel_root` are unchanged (the
+    /// Pedersen commitment and kernel excess are independent of the range-proof
+    /// backend). Recomputed 2026-06-17 (bp2).
+    #[test]
+    fn genesis_testnet_frozen_vectors() {
+        // Pinned values (hex), authoritative from the deterministic builder.
+        const OUTPUT_ROOT: &str =
+            "7dcd67abf72846eadd94cee37060ecd58ac26df2a6c1f6e74a43fe9e6aab9f1d";
+        const KERNEL_ROOT: &str =
+            "69a1283a2fd4a90f0df6110caf2f74150365e31ca96cc2485cb022ceae15834b";
+        const RANGEPROOF_ROOT: &str =
+            "2a9d3121c551dd909d4ad72efc10ade1ad37588d785af5499f987355eaa7b5bb";
+        const GENESIS_HASH: &str =
+            "13236b793ec6aba37f0181d90e9c71bcf1e091551046668d03b2da1e247b630c";
+
+        let cid = chain_id_testnet();
+        let coinbase = build_genesis_coinbase(&cid).expect("genesis coinbase");
+
+        // (1) bp2 range proof: exactly 675 bytes and self-verifies under bp2.
+        assert_eq!(
+            coinbase.output.proof.len(),
+            675,
+            "genesis coinbase proof must be a 675-byte Bulletproof"
+        );
+        assert!(
+            dom_crypto::bp2_verify(coinbase.output.commitment.as_bytes(), &coinbase.output.proof)
+                .expect("bp2_verify"),
+            "genesis coinbase range proof must verify under bp2 (self-validation)"
+        );
+
+        // (2) PMMR roots match the pinned vectors.
+        let (output_root, kernel_root, rangeproof_root) =
+            compute_block_pmmr_roots(&coinbase, &[]).expect("roots");
+        assert_eq!(hex::encode(output_root.as_bytes()), OUTPUT_ROOT, "output_root drift");
+        assert_eq!(hex::encode(kernel_root.as_bytes()), KERNEL_ROOT, "kernel_root drift");
+        assert_eq!(
+            hex::encode(rangeproof_root.as_bytes()),
+            RANGEPROOF_ROOT,
+            "rangeproof_root drift"
+        );
+
+        // (3) Genesis block hash matches the pinned vector AND the source-of-truth
+        //     consensus constant GENESIS_HASH_TESTNET.
+        let anchor = genesis_anchor(NETWORK_MAGIC_TESTNET).expect("anchor");
+        let header = BlockHeader {
+            version: PROTOCOL_VERSION,
+            prev_hash: Hash256::ZERO,
+            height: BlockHeight::GENESIS,
+            timestamp: anchor.timestamp,
+            output_root,
+            kernel_root,
+            rangeproof_root,
+            total_kernel_offset: [0u8; 32],
+            target: dom_pow::CompactTarget(target_to_compact(&anchor.target)),
+            total_difficulty: U256::from(target_to_difficulty(&anchor.target)),
+            pow: ProofOfWork {
+                nonce: 0,
+                randomx_hash: Hash256::ZERO,
+            },
+        };
+        let header_bytes = header.to_bytes().expect("ser");
+        let genesis_hash = *dom_crypto::hash::blake2b_256(&header_bytes).as_bytes();
+        assert_eq!(hex::encode(genesis_hash), GENESIS_HASH, "genesis hash drift");
+        assert_eq!(
+            genesis_hash,
+            dom_core::GENESIS_HASH_TESTNET,
+            "genesis hash must equal the pinned GENESIS_HASH_TESTNET constant"
+        );
+
+        // (4) Byte-reproducible: rebuild and confirm identical proof + roots.
+        let cb2 = build_genesis_coinbase(&cid).expect("genesis coinbase rebuild");
+        assert_eq!(cb2.output.proof, coinbase.output.proof, "genesis proof not reproducible");
+        let (o2, k2, r2) = compute_block_pmmr_roots(&cb2, &[]).expect("roots rebuild");
+        assert_eq!((o2, k2, r2), (output_root, kernel_root, rangeproof_root));
+    }
+
     #[test]
     fn genesis_coinbase_is_deterministic_across_runs() {
         for cid_fn in [

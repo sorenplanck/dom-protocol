@@ -108,6 +108,13 @@ so it does not go through the pool.
 **File:** `crates/dom-crypto/src/bulletproof.rs`
 **Status:** ✅ RESOLVED
 
+> **STATUS UPDATE (bp-migration, commit e07af6f):** The integration described
+> below (Blockstream `secp256k1-zkp` / `RangeProof`) was the borromean-era path.
+> It has since been superseded: the consensus range-proof system is now standard
+> Bulletproofs via grin `secp256k1zkp` (audited FFI shim, custom H_DOM generator),
+> 675-byte proofs, consensus `MAX_PROOF_SIZE = 768`. The H_DOM binding and SEC1↔zkp
+> encoding requirements below still hold and are preserved as the historical record.
+
 **Problem (from audit):** Previous homemade implementation was Bulletproofs 2017,
 not Bulletproofs+ 2021, with multiple soundness bugs:
 - IPA missing u·c_L term (forged proofs possible)
@@ -698,6 +705,13 @@ Required: finalize genesis timestamp + target → freeze in RFC-0003 anchor.
 
 **Severity: IMPORTANT**
 **Status:** ✅ RESOLVED (2026-05-24)
+
+> **STATUS UPDATE (bp-migration, commit e07af6f):** The H_DOM binding requirement
+> below carried forward unchanged into the migration. The range-proof backend is
+> now grin `secp256k1zkp` (via the audited FFI shim) rather than the Blockstream
+> `secp256k1-zkp` referenced here, but `dom_generator()` still rebuilds the custom
+> H_DOM generator and `pedersen_and_bulletproof_use_same_generator` still asserts
+> byte-identical SEC1 commitments. Preserved as the historical record.
 
 RFC-0009 §5.1 requires H in Bulletproofs == H in Pedersen commitments.
 `secp256k1-zkp` uses its own internal H (Blockstream convention) by default,

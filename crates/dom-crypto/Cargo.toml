@@ -11,6 +11,8 @@ license.workspace    = true
 dom-core.workspace   = true
 secp256k1.workspace     = true
 secp256k1-zkp = { git = "https://github.com/BlockstreamResearch/rust-secp256k1-zkp", branch = "master", features = ["global-context", "rand-std"] }
+# Bulletproof migration (Phase 1): standard-Bulletproof path, parallel to borromean. NOT yet wired into consensus.
+grin_secp256k1zkp.workspace = true
 blake2.workspace     = true
 sha2.workspace       = true
 hmac.workspace       = true
@@ -25,4 +27,10 @@ rand.workspace       = true
 [dev-dependencies]
 hex.workspace = true
 rand.workspace = true
+# AUDIT-002 is_square equivalence proof companion (test-only): exact big-int
+# exponent arithmetic for the addition-chain / Euler checks, and the real k256
+# field oracle. k256 is also a normal dependency; repeating it here with the
+# same `expose-field` feature lets the integration test reach FieldElement.
+primitive-types.workspace = true
+k256.workspace = true
 

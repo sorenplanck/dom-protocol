@@ -37,8 +37,8 @@ use dom_consensus::{validate_balance_equation, validate_transaction_structure};
 use dom_core::{Amount, KERNEL_FEAT_PLAIN};
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::{
-    blake2b_256_tagged, bp_prove, schnorr_add_public_keys, schnorr_aggregate_sigs,
-    schnorr_partial_sign, schnorr_verify, BlindingFactor, Hash256, SecretKey,
+    blake2b_256_tagged, bp2_prove, schnorr_add_public_keys, schnorr_aggregate_sigs,
+    schnorr_partial_sign, schnorr_verify, BlindingFactor, Hash256, RangeProof, SecretKey,
 };
 use dom_tx::slate::{OutputCommitmentAndProof, Slate};
 use k256::elliptic_curve::PrimeField;
@@ -142,8 +142,12 @@ pub fn build_send(
 ) -> Result<SenderSlate, SlateError> {
     let (sender_change_output, change_material, change_blinding) = if change_value > 0 {
         let change_blinding = BlindingFactor::random();
-        let (proof, commitment_bytes) = bp_prove(change_value, &change_blinding)
+        // Standard Bulletproof (bp2): returns proof bytes; wrap into RangeProof
+        // for the slate's OutputCommitmentAndProof field.
+        let (proof_bytes, commitment_bytes) = bp2_prove(change_value, &change_blinding)
             .map_err(|e| SlateError::Crypto(format!("change range proof failed: {e}")))?;
+        let proof = RangeProof::from_bytes(proof_bytes)
+            .map_err(|e| SlateError::Crypto(format!("change range proof invalid: {e}")))?;
         let change_commitment = Commitment::from_compressed_bytes(&commitment_bytes)
             .map_err(|e| SlateError::Crypto(format!("change commitment invalid: {e}")))?;
         (
@@ -236,8 +240,11 @@ pub fn respond_receive(
         .map_err(|e| SlateError::Crypto(format!("invalid slate fee: {e}")))?;
 
     let recipient_blinding = BlindingFactor::random();
-    let (proof, commitment_bytes) = bp_prove(slate.amount, &recipient_blinding)
+    // Standard Bulletproof (bp2): wrap proof bytes into RangeProof for the slate.
+    let (proof_bytes, commitment_bytes) = bp2_prove(slate.amount, &recipient_blinding)
         .map_err(|e| SlateError::Crypto(format!("recipient range proof failed: {e}")))?;
+    let proof = RangeProof::from_bytes(proof_bytes)
+        .map_err(|e| SlateError::Crypto(format!("recipient range proof invalid: {e}")))?;
     let recipient_output = OutputCommitmentAndProof {
         commitment: Commitment::from_compressed_bytes(&commitment_bytes)
             .map_err(|e| SlateError::Crypto(format!("recipient commitment invalid: {e}")))?,

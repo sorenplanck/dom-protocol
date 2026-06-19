@@ -31,6 +31,14 @@ const H_DOM_X: [u8; 32] = [
 /// Valores acima deste limite estão fora do supply DOM e não precisam de prova.
 pub const MAX_PROVABLE_VALUE: u64 = (1u64 << 52) - 1;
 
+/// Legacy borromean range-proof byte cap. This module is the LEGACY borromean
+/// path, retired from production (generation and verification now use the
+/// standard Bulletproof `bp2_*` path / `bulletproof_bp`). Borromean proofs are
+/// ~4166 bytes, so this module keeps its own cap rather than the consensus
+/// `dom_core::MAX_PROOF_SIZE` (now sized to the 675-byte Bulletproof). Used only
+/// by this module's prove/verify/tests; not a consensus parameter.
+const LEGACY_BORROMEAN_MAX_PROOF_SIZE: usize = 6_144;
+
 /// Generator DOM derivado de H_DOM_X via Generator::from_slice (prefix 0x0a).
 ///
 /// Esta é a forma correta de carregar o H canônico do DOM no contexto zkp.
@@ -45,70 +53,10 @@ fn dom_generator() -> Generator {
     Generator::from_slice(&h_bytes).expect("H_DOM_X is a valid x-coordinate on secp256k1")
 }
 
-/// Cria PedersenCommitment zkp a partir de value + blinding.
-use k256::FieldElement;
-use secp256k1::PublicKey as Secp256k1PublicKey;
-
-/// Convert SEC1 commitment (0x02/0x03 prefix) to zkp format (0x08/0x09).
-///
-/// SEC1 encodes y-parity (even/odd) in the prefix byte. zkp encodes is_square(y)
-/// (whether y is a quadratic residue mod p). We use k256::FieldElement::sqrt as
-/// the is_square oracle.
-fn sec1_to_zkp(sec1_bytes: &[u8; 33]) -> Result<[u8; 33], DomError> {
-    let pk = Secp256k1PublicKey::from_slice(sec1_bytes)
-        .map_err(|e| DomError::Invalid(format!("invalid SEC1: {e}")))?;
-
-    let uncompressed = pk.serialize_uncompressed();
-    let y_bytes: [u8; 32] = uncompressed[33..65].try_into().unwrap();
-    let y_field = FieldElement::from_bytes(&y_bytes.into())
-        .expect("Y from valid point is valid field element");
-
-    let is_square: bool = y_field.sqrt().is_some().into();
-    let zkp_prefix = if is_square { 0x08 } else { 0x09 };
-
-    let mut zkp_bytes = *sec1_bytes;
-    zkp_bytes[0] = zkp_prefix;
-    Ok(zkp_bytes)
-}
-
-/// Convert zkp commitment (0x08/0x09 prefix) to SEC1 format (0x02/0x03).
-///
-/// The zkp serialization encodes is_square(y) in the prefix byte but does not
-/// directly expose Y's parity. To determine the correct SEC1 prefix (0x02 for
-/// y-even, 0x03 for y-odd), we must reconstruct the point and validate which
-/// prefix produces a Y coordinate matching the zkp's is_square encoding.
-///
-/// This loop is mathematically necessary (not trial-and-error): given X, there
-/// are exactly 2 possible Y values (Y and -Y), encoded by SEC1's 0x02/0x03.
-/// Exactly one of these will have is_square(Y) matching the zkp prefix.
-fn zkp_to_sec1(zkp_bytes: &[u8; 33]) -> Result<[u8; 33], DomError> {
-    // Validate zkp format first
-    let x_bytes: [u8; 32] = zkp_bytes[1..].try_into().unwrap();
-    let _ = secp256k1_zkp::PedersenCommitment::from_slice(zkp_bytes)
-        .map_err(|e| DomError::Invalid(format!("invalid zkp: {e}")))?;
-
-    // Try both SEC1 prefixes (0x02 and 0x03)
-    for &prefix in &[0x02_u8, 0x03_u8] {
-        let mut sec1_bytes = [0u8; 33];
-        sec1_bytes[0] = prefix;
-        sec1_bytes[1..].copy_from_slice(&x_bytes);
-
-        if let Ok(pk) = Secp256k1PublicKey::from_slice(&sec1_bytes) {
-            let uncompressed = pk.serialize_uncompressed();
-            let y: [u8; 32] = uncompressed[33..65].try_into().unwrap();
-            let y_field = FieldElement::from_bytes(&y.into()).expect("valid Y");
-            let is_square: bool = y_field.sqrt().is_some().into();
-            let expected_zkp = if is_square { 0x08 } else { 0x09 };
-
-            if expected_zkp == zkp_bytes[0] {
-                return Ok(sec1_bytes);
-            }
-        }
-    }
-
-    // Invariant: one of the two prefixes MUST succeed for valid zkp input
-    Err(DomError::Internal("zkp→SEC1: no valid prefix found".into()))
-}
+/// SEC1<->zkp commitment encoding now lives in [`crate::sec1_zkp_bridge`] — the
+/// single source of truth shared with the standard-Bulletproof path. These
+/// imports preserve the original call sites (`sec1_to_zkp(..)` / `zkp_to_sec1(..)`).
+use crate::sec1_zkp_bridge::{sec1_to_zkp, zkp_to_sec1};
 
 #[cfg(test)]
 mod format_conversion_tests {
@@ -178,11 +126,11 @@ impl RangeProof {
         if bytes.is_empty() {
             return Err(DomError::Malformed("range proof vazio".into()));
         }
-        if bytes.len() > dom_core::MAX_PROOF_SIZE {
+        if bytes.len() > LEGACY_BORROMEAN_MAX_PROOF_SIZE {
             return Err(DomError::Malformed(format!(
-                "range proof {} bytes > MAX_PROOF_SIZE {}",
+                "range proof {} bytes > LEGACY_BORROMEAN_MAX_PROOF_SIZE {}",
                 bytes.len(),
-                dom_core::MAX_PROOF_SIZE
+                LEGACY_BORROMEAN_MAX_PROOF_SIZE
             )));
         }
         Ok(Self { bytes })
@@ -317,7 +265,7 @@ pub fn verify(commitment_bytes: &[u8; 33], proof_bytes: &[u8]) -> Result<bool, D
     if proof_bytes.is_empty() {
         return Err(DomError::Malformed("range proof vazio".into()));
     }
-    if proof_bytes.len() > dom_core::MAX_PROOF_SIZE {
+    if proof_bytes.len() > LEGACY_BORROMEAN_MAX_PROOF_SIZE {
         return Err(DomError::Malformed(format!(
             "range proof muito grande: {} bytes",
             proof_bytes.len()
@@ -431,10 +379,10 @@ mod tests {
         let bf = BlindingFactor::random();
         let (proof, _) = prove(369, &bf).unwrap();
         assert!(
-            proof.bytes.len() <= dom_core::MAX_PROOF_SIZE,
-            "proof {} bytes > MAX_PROOF_SIZE {}",
+            proof.bytes.len() <= LEGACY_BORROMEAN_MAX_PROOF_SIZE,
+            "proof {} bytes > LEGACY_BORROMEAN_MAX_PROOF_SIZE {}",
             proof.bytes.len(),
-            dom_core::MAX_PROOF_SIZE
+            LEGACY_BORROMEAN_MAX_PROOF_SIZE
         );
         println!("RangeProof size: {} bytes", proof.bytes.len());
     }
@@ -633,9 +581,18 @@ mod phase1_verification {
 
 #[cfg(test)]
 mod bridge_edge_case_tests {
-    // AUDIT-002: These tests reduce but do not eliminate the need for a
-    // human cryptographer to sign off on the SEC1<->zkp bridge and the
-    // is_square oracle equivalence before mainnet.
+    // AUDIT-002: The SEC1<->zkp bridge and the is_square oracle equivalence are
+    // PROVEN over the domain E of valid secp256k1 points — CONDITIONAL on the
+    // standard number-theory facts the proof invokes (Euler's criterion; Jacobi =
+    // Legendre for prime p; Legendre multiplicativity) and the correctness of the
+    // underlying field/bignum arithmetic. Not an unqualified absolute. See
+    // docs/DOM_RFC_0009_is_square_equivalence_proof.md: lemmas C1/C2/C3 establish
+    // isq_DOM (k256 sqrt) == is_quad_var (the libsecp/grin Pedersen encoder) on
+    // every point of E, so the bridge is a bijection there. The proof DERIVES the
+    // two secp256k1-specific facts — the k256/libsecp square-root addition chain ==
+    // (p+1)/4, and that -1 is a QNR (p ≡ 3 mod 4). The 1000+ random-sample tests
+    // remain as empirical corroboration; tests/is_square_equivalence_proof.rs
+    // machine-checks the derived facts.
     use super::*;
     use crate::pedersen::{BlindingFactor, Commitment};
 

@@ -177,6 +177,14 @@ Não é o método genérico hash_to_curve — é o specializado para a curva.
 
 ### [CRÍTICO] — RFC-0001 — Bulletproofs+: crate não especificada, binding incompleto
 
+> **STATUS (bp-migration, commit e07af6f):** Resolved. The range-proof system is
+> now standard Bulletproofs (not Bulletproofs+) via grin secp256k1zkp (audited FFI
+> shim, custom H_DOM generator); proofs are individual per output over range
+> [0, 2^52); actual serialized proof size is 675 bytes; consensus
+> `MAX_PROOF_SIZE = 768`. The original finding below — including the "~4166 bytes"
+> and `MAX_PROOF_SIZE = 6144` figures and the "Bulletproofs+" naming — is preserved
+> as a point-in-time record.
+
 **Problema técnico:**
 RFC-0001 menciona "Bulletproofs+" e define range `0 <= value <= 2^64 - 1` mas não especifica:
 
@@ -693,6 +701,13 @@ Adicionar RFC para Dandelion++ routing:
 ---
 
 ### [CRÍTICO] — Crates incompatíveis: secp256k1 vs secp256k1-zkp para Bulletproofs
+
+> **STATUS (bp-migration, commit e07af6f):** Resolved. The range-proof system is
+> now standard Bulletproofs via grin secp256k1zkp (audited FFI shim, custom H_DOM
+> generator); Pedersen commitments and Schnorr signatures use k256 with the same
+> H_DOM, byte-identical to the proof backend's commitment encoding. The
+> Blockstream `secp256k1-zkp` crate referenced below is NOT the dependency that
+> shipped. The original finding below is preserved as a point-in-time record.
 
 **Problema técnico:**
 O workspace Cargo.toml usa `secp256k1 = "0.28"` para operações de chave. Mas

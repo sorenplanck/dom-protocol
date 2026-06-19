@@ -23,7 +23,7 @@ Initial: 369 DOM, halving every 44,715 blocks
 ### V14: Maturity
 Coinbase spendable after 1000 blocks
 
-### V18: Bulletproofs+
+### V18: Bulletproofs
 All range proofs must verify
 
 ---

@@ -249,11 +249,15 @@ fn proof_length_envelope_enforced() {
         "empty proof bytes must surface as a parse / verify error"
     );
 
-    // Oversized: MAX_PROOF_SIZE + 1 random bytes.
-    let oversized = vec![0u8; dom_core::MAX_PROOF_SIZE + 1];
+    // Oversized: above the LEGACY borromean envelope (this module is the legacy
+    // borromean path, capped at 6144 internally; the consensus
+    // dom_core::MAX_PROOF_SIZE is now the smaller 675-byte Bulletproof envelope
+    // used by the bp2 path). One byte over the borromean cap must be rejected.
+    const LEGACY_BORROMEAN_MAX_PROOF_SIZE: usize = 6_144;
+    let oversized = vec![0u8; LEGACY_BORROMEAN_MAX_PROOF_SIZE + 1];
     assert!(
         verify(&commit, &oversized).is_err(),
-        "proof above MAX_PROOF_SIZE must be rejected"
+        "proof above the legacy borromean envelope must be rejected"
     );
 }
 

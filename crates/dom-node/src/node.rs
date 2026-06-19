@@ -4397,7 +4397,6 @@ mod tests {
         MAX_BLOCK_SERIALIZED_SIZE, MIN_RELAY_FEE_RATE, NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION,
         TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
     };
-    use dom_crypto::bulletproof;
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::keys::SecretKey;
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
@@ -4577,7 +4576,7 @@ mod tests {
         let explicit_value = reward + claimed_fees;
         let blinding = scalar(height.0 as u8 + 1);
         let commitment = Commitment::commit(explicit_value, &blinding);
-        let (proof, _) = bulletproof::prove(explicit_value, &blinding).expect("coinbase proof");
+        let (proof, _) = dom_crypto::bp2_prove(explicit_value, &blinding).expect("coinbase proof");
         let excess = Commitment::commit(0, &blinding);
         let secret = SecretKey::from_bytes(blinding.as_bytes()).expect("coinbase secret");
         let msg = {
@@ -4590,7 +4589,7 @@ mod tests {
         CoinbaseTransaction {
             output: TransactionOutput {
                 commitment,
-                proof: proof.bytes,
+                proof: proof,
             },
             kernel: CoinbaseKernel {
                 features: KERNEL_FEAT_COINBASE,
@@ -4793,7 +4792,7 @@ mod tests {
             .expect("output blinding");
         let input = Commitment::commit(input_value, &input_blinding);
         let output = Commitment::commit(output_value, &output_blinding);
-        let (proof, _) = bulletproof::prove(output_value, &output_blinding).expect("tx proof");
+        let (proof, _) = dom_crypto::bp2_prove(output_value, &output_blinding).expect("tx proof");
         let excess = Commitment::commit(0, &kernel_blinding);
         let secret = SecretKey::from_bytes(kernel_blinding.as_bytes()).expect("kernel secret");
         let msg = {
@@ -4809,7 +4808,7 @@ mod tests {
             inputs: vec![TransactionInput { commitment: input }],
             outputs: vec![TransactionOutput {
                 commitment: output,
-                proof: proof.bytes,
+                proof: proof,
             }],
             kernels: vec![TransactionKernel {
                 features: KERNEL_FEAT_PLAIN,

@@ -387,7 +387,7 @@ impl CoinbaseTransaction {
                 "coinbase output has empty range proof".into(),
             ));
         }
-        match dom_crypto::bp_verify(self.output.commitment.as_bytes(), &self.output.proof) {
+        match dom_crypto::bp2_verify(self.output.commitment.as_bytes(), &self.output.proof) {
             Ok(true) => {}
             Ok(false) => {
                 return Err(DomError::Invalid(
@@ -440,7 +440,6 @@ impl CoinbaseTransaction {
 mod tests {
     use super::*;
     use dom_core::{HALVING_INTERVAL, INITIAL_BLOCK_REWARD};
-    use dom_crypto::bulletproof;
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::keys::SecretKey;
     use dom_crypto::pedersen::BlindingFactor;
@@ -476,7 +475,7 @@ mod tests {
         let explicit_value = INITIAL_BLOCK_REWARD;
         let blinding = BlindingFactor::from_bytes([9u8; 32]).unwrap();
         let output_commitment = Commitment::commit(explicit_value, &blinding);
-        let (proof, _) = bulletproof::prove(explicit_value, &blinding).unwrap();
+        let (proof, _) = dom_crypto::bp2_prove(explicit_value, &blinding).unwrap();
         let excess = Commitment::commit(0, &blinding);
         let kernel_message = {
             let mut data = Vec::with_capacity(9);
@@ -490,7 +489,7 @@ mod tests {
         CoinbaseTransaction {
             output: TransactionOutput {
                 commitment: output_commitment,
-                proof: proof.bytes,
+                proof: proof,
             },
             kernel: CoinbaseKernel {
                 features: KERNEL_FEAT_COINBASE,
@@ -705,7 +704,7 @@ pub fn validate_range_proofs(tx: &Transaction) -> Result<(), DomError> {
         let commitment = &output.commitment;
         let proof_bytes = &output.proof;
 
-        match dom_crypto::bp_verify(commitment.as_bytes(), proof_bytes) {
+        match dom_crypto::bp2_verify(commitment.as_bytes(), proof_bytes) {
             Ok(true) => {}
             Ok(false) => {
                 return Err(DomError::Invalid(format!(

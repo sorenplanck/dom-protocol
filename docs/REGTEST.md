@@ -34,7 +34,7 @@ keep the three magic bytes mutually distinct and prevent the canonical
 
 **Consensus logic is identical.** Regtest blocks go through the same
 `validate_block` -> `validate_block_transactions` -> per-tx 10-step
-pipeline as Mainnet. The same Bulletproofs+ range proofs, Schnorr
+pipeline as Mainnet. The same Bulletproofs range proofs, Schnorr
 signatures, balance equation, PMMR roots, MTP / future-timestamp gates,
 and PoW hash check are enforced. The only differences are the *parameter
 values* listed in the table above (target, maturity, VM flags). RFC-0009

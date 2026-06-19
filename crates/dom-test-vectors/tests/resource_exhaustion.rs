@@ -61,7 +61,7 @@ fn per_tx_caps_match_rfc_table() {
     assert_eq!(MAX_INPUTS_PER_TX, 255);
     assert_eq!(MAX_OUTPUTS_PER_TX, 255);
     assert_eq!(MAX_KERNELS_PER_TX, 16);
-    assert_eq!(MAX_PROOF_SIZE, 6_144);
+    assert_eq!(MAX_PROOF_SIZE, 768); // standard Bulletproof envelope (675 + headroom, 3*256)
     assert_eq!(MAX_TX_WEIGHT, 4_000);
 }
 

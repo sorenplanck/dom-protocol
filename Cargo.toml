@@ -49,6 +49,9 @@ repository  = "https://github.com/dom-protocol/dom"
 [workspace.dependencies]
 # Cryptography — audited crates only
 secp256k1-zkp = { git = "https://github.com/BlockstreamResearch/rust-secp256k1-zkp", rev = "264e84adf7b06fb4d028eb2fd992f33c4d8999b7", features = ["global-context", "rand-std"] }
+# Bulletproof migration (Phase 1) — standard Bulletproofs via grin's secp256k1-zkp.
+# Exact pin (no floating); coexists with Blockstream secp256k1-zkp (disjoint native symbols).
+grin_secp256k1zkp = "=0.7.15"
 randomx-rs       = "1.4.1"
 secp256k1   = { version = "0.28", features = ["global-context", "rand-std"] }
 blake2      = { version = "0.10" }

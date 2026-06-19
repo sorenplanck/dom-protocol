@@ -16,7 +16,7 @@ blockchain-specialist reviewer, and was accepted under the principle
 ## RFCs (spec, frozen)
 
 - [DOM_RFC_0008](./DOM_RFC_0008_Balance_Coinbase_Fee_Offset.md) — Balance equation, coinbase, fee offset
-- [DOM_RFC_0009](./DOM_RFC_0009_Cryptographic_Complete.md) — Cryptography (Pedersen, Bulletproofs+, Schnorr, MuSig2)
+- [DOM_RFC_0009](./DOM_RFC_0009_Cryptographic_Complete.md) — Cryptography (Pedersen, Bulletproofs, Schnorr, MuSig2)
 - [DOM_RFC_0010](./DOM_RFC_0010_Validation_Completeness.md) — Validation pipeline completeness
 - [DOM_RFC_0011](./DOM_RFC_0011_Bootstrap_PMMR_FeePolicy.md) — Bootstrap discovery, PMMR, fee policy
 
