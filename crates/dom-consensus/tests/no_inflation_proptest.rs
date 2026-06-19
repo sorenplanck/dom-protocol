@@ -207,8 +207,11 @@ proptest! {
         let r_in = bf();
         let r_out = bf_distinct(&r_in);
         let r_excess = r_out.sub(&r_in).unwrap().require_nonzero().unwrap();
-        // A valid nonzero offset scalar chosen by the "attacker".
-        let offset = *BlindingFactor::from_bytes([offset_seed; 32]).unwrap().as_bytes();
+        // A valid nonzero offset scalar (small, < group order) chosen by the
+        // "attacker". Built in the low byte so it is always in range — `[seed; 32]`
+        // would exceed the secp256k1 group order for high seeds.
+        let mut offset = [0u8; 32];
+        offset[31] = offset_seed;
         let tx = build_tx(
             &[Commitment::commit(v_in, &r_in)],
             &[Commitment::commit(v_out.wrapping_add(delta), &r_out)],
