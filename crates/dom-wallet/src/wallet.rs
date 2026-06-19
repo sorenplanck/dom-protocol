@@ -2375,7 +2375,7 @@ mod tests {
     // Slate crypto moved to the `dom-slate` crate; these symbols are now
     // consumed by the slate tests below rather than by production wallet code.
     use dom_consensus::{validate_balance_equation, validate_transaction_structure};
-    use dom_crypto::{bp_prove, schnorr_add_public_keys, schnorr_verify};
+    use dom_crypto::{bp2_prove, schnorr_add_public_keys, schnorr_verify, RangeProof};
     use dom_slate::plain_kernel_message;
     use dom_tx::slate::OutputCommitmentAndProof;
     use tempfile::tempdir;
@@ -2400,10 +2400,10 @@ mod tests {
 
     fn recipient_output(value: u64, blinding_byte: u8) -> OutputCommitmentAndProof {
         let blinding = BlindingFactor::from_bytes([blinding_byte; 32]).unwrap();
-        let (proof, commitment_bytes) = bp_prove(value, &blinding).unwrap();
+        let (proof_bytes, commitment_bytes) = bp2_prove(value, &blinding).unwrap();
         OutputCommitmentAndProof {
             commitment: Commitment::from_compressed_bytes(&commitment_bytes).unwrap(),
-            proof,
+            proof: RangeProof::from_bytes(proof_bytes).unwrap(),
         }
     }
 

@@ -205,7 +205,7 @@ fn read_partial_sig(r: &mut Reader<'_>) -> Result<PartialSig, DomError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dom_crypto::{bp_prove, BlindingFactor, SecretKey};
+    use dom_crypto::{bp2_prove, BlindingFactor, SecretKey};
 
     fn commitment(value: u64, blinding_byte: u8) -> Commitment {
         let blinding = BlindingFactor::from_bytes([blinding_byte; 32]).unwrap();
@@ -214,10 +214,10 @@ mod tests {
 
     fn output(value: u64, blinding_byte: u8) -> OutputCommitmentAndProof {
         let blinding = BlindingFactor::from_bytes([blinding_byte; 32]).unwrap();
-        let (proof, commitment_bytes) = bp_prove(value, &blinding).unwrap();
+        let (proof_bytes, commitment_bytes) = bp2_prove(value, &blinding).unwrap();
         OutputCommitmentAndProof {
             commitment: Commitment::from_compressed_bytes(&commitment_bytes).unwrap(),
-            proof,
+            proof: RangeProof::from_bytes(proof_bytes).unwrap(),
         }
     }
 
