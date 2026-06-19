@@ -58,4 +58,18 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_addr_payload"
+path = "fuzz_targets/fuzz_addr_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_getaddr_payload"
+path = "fuzz_targets/fuzz_getaddr_payload.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
