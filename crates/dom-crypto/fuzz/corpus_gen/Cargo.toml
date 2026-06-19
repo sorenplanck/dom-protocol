@@ -1,0 +1,10 @@
+[package]
+name = "corpus_gen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+dom-crypto = { path = "../.." }
+
+[workspace]

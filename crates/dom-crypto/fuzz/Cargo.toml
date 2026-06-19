@@ -35,3 +35,10 @@ doc = false
 bench = false
 
 [workspace]
+
+[[bin]]
+name = "fuzz_bp2_verify"
+path = "fuzz_targets/fuzz_bp2_verify.rs"
+test = false
+doc = false
+bench = false
