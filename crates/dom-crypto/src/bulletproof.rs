@@ -581,12 +581,18 @@ mod phase1_verification {
 
 #[cfg(test)]
 mod bridge_edge_case_tests {
-    // AUDIT-002: These tests sample the SEC1<->zkp bridge and the is_square oracle
-    // equivalence (currently 1000+ random scalars plus edge-case values, with zero
-    // mismatches) — strong evidence, but NOT a proof. Closing this fully requires a
-    // complete mathematical proof of the is_square equivalence across the entire
-    // domain, beyond sampling. That proof is pending (pre-mainnet); the equivalence
-    // is currently evidenced, not proven.
+    // AUDIT-002: The SEC1<->zkp bridge and the is_square oracle equivalence are
+    // PROVEN over the domain E of valid secp256k1 points — CONDITIONAL on the
+    // standard number-theory facts the proof invokes (Euler's criterion; Jacobi =
+    // Legendre for prime p; Legendre multiplicativity) and the correctness of the
+    // underlying field/bignum arithmetic. Not an unqualified absolute. See
+    // docs/DOM_RFC_0009_is_square_equivalence_proof.md: lemmas C1/C2/C3 establish
+    // isq_DOM (k256 sqrt) == is_quad_var (the libsecp/grin Pedersen encoder) on
+    // every point of E, so the bridge is a bijection there. The proof DERIVES the
+    // two secp256k1-specific facts — the k256/libsecp square-root addition chain ==
+    // (p+1)/4, and that -1 is a QNR (p ≡ 3 mod 4). The 1000+ random-sample tests
+    // remain as empirical corroboration; tests/is_square_equivalence_proof.rs
+    // machine-checks the derived facts.
     use super::*;
     use crate::pedersen::{BlindingFactor, Commitment};
 

@@ -1391,6 +1391,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "k256",
+ "primitive-types",
  "rand 0.8.6",
  "secp256k1 0.28.2",
  "secp256k1-zkp",
