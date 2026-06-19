@@ -1,312 +1,246 @@
-# DOM Protocol — Decentralized Monetary Protocol
+<div align="center">
 
-**Version:** v0.1.0 Testnet  
-**Status:** Active hardening • controlled testnet validation  
-**Last Updated:** 2026-05-26
+# DOM Protocol
 
----
+### Not a store of value. A means of exchange.
 
-## Executive Summary
+**DOM is a Mimblewimble blockchain with CPU-mined RandomX proof-of-work.
+Confidential by construction, fixed in supply, and built to circulate.**
 
-DOM Protocol is a Mimblewimble-based decentralized monetary protocol with CPU-oriented RandomX proof-of-work. It is being engineered for deterministic behavior, bounded failure modes, and long-term operational survivability. Its aim is durable monetary infrastructure for real-world use, approached with conservative deployment discipline. The current repository state includes a functioning implementation across consensus, cryptography, storage, wallet, and node layers, plus controlled testnet burn-in evidence. Public mainnet deployment remains gated on adversarial validation, distributed testnet stabilization, operational hardening, and final genesis freeze.
+![status](https://img.shields.io/badge/status-active%20hardening-E8A23D)
+![consensus](https://img.shields.io/badge/consensus-Mimblewimble-8B7DF0)
+![pow](https://img.shields.io/badge/PoW-RandomX-3FB68B)
+![mainnet](https://img.shields.io/badge/mainnet-not%20launched-555)
 
-### Current Controlled Testnet Snapshot
+[Whitepaper](WHITEPAPER.md) · [Roadmap](docs/ROADMAP_v3.md) · [Known Issues](KNOWN_ISSUES.md)
 
-| Metric | Value |
-|--------|-------|
-| **Blocks Mined** | 156 |
-| **Uptime** | 18h 38m (continuous) |
-| **Consensus Failures** | 0 |
-| **Block Time Average** | ~7.2 minutes |
-| **Target Block Time** | 2 minutes (ASERT adjusts) |
-| **Network** | Testnet (easy difficulty) |
-| **Nodes** | 1 (single private node) |
+</div>
 
-This snapshot is useful as burn-in evidence only. It does not replace multi-node validation, public adversarial testnet operation, or deployment-readiness review.
+> **Pre-launch.** The consensus, cryptography, storage, wallet, and node layers
+> are implemented and under active adversarial hardening. There is no mainnet
+> yet — and when it launches, it launches from block zero for everyone.
 
 ---
 
-## Design Philosophy
+## Table of Contents
 
-DOM is developed under a conservative protocol philosophy:
+- [What DOM is](#what-dom-is)
+- [How it launches](#how-it-launches)
+- [Monetary policy](#monetary-policy)
+- [Consensus](#consensus)
+- [Repository layout](#repository-layout)
+- [Build & run](#build--run)
+- [Security & validation](#security--validation)
+- [Status](#status)
+- [Contributing](#contributing)
+- [License](#license)
 
-- Deterministic consensus: identical inputs must produce identical results across nodes and platforms.
-- Replay safety: signatures, serialization, and domain separation must not admit cross-context acceptance.
-- Recoverability: unsafe partial state must be detected, refused, or rebuilt without ambiguity.
-- Bounded behavior: validation, block structure, and resource use stay inside explicit limits.
-- Conservative engineering: launch gating follows demonstrated behavior, not calendar promises.
-- Adversarial resilience: hardening is driven by malformed input, reorg, crash, and hostile-network scenarios.
-- Operational survivability: nodes should fail closed, restart cleanly, and preserve durable state.
-- Long-term protocol stability: monetary and consensus rules are treated as infrastructure, not marketing surface.
+## What DOM is
 
----
+DOM is sound money built to be spent, not hoarded. It uses the Mimblewimble
+construction — transaction amounts are hidden inside Pedersen commitments and
+proven valid with Bulletproof range proofs, while the chain stays compact through
+cut-through. Proof-of-work is RandomX, which is CPU-optimized, so mining stays
+accessible to ordinary hardware rather than concentrating in specialized rigs.
 
-## Protocol Specifications
+The design is conservative by intent: identical inputs must produce identical
+results across every node and platform; partial or corrupted state must be
+detected and refused rather than silently carried forward; and validation,
+block structure, and resource use stay inside explicit, bounded limits. Monetary
+and consensus rules are treated as infrastructure — fixed at genesis, guarded by
+consensus-level assertions in the code, not adjustable later.
 
-### Monetary Policy
+DOM is a protocol, not a company's product. No component — including its
+author — can mint outside the schedule, freeze a balance, or seize funds. The
+guarantees are enforced by the chain itself. Don't trust it; verify it.
 
-| Parameter | Value | Justification |
-|-----------|-------|---------------|
-| **Supply Cap** | 33,000,000 DOM | Fixed at genesis; consensus-critical |
-| **Initial Block Reward** | 33 DOM | Halves every 330,000 blocks (~1.25 years) |
-| **Halving Schedule** | 55 epochs | Last reward block: epoch 54 (year ~55) |
-| **Max Supply (Noms)** | 3,299,999,976,900,000 | Integer arithmetic; deterministic |
-| **Coin Unit** | 1 DOM = 100,000,000 noms | Divisibility for payments |
-| **Coinbase Maturity** | 1,000 blocks | ~1.4 days at target spacing |
+## How it launches
 
-### Consensus Rules
+DOM launches the way sound money should: **mainnet from block zero — no premine,
+no private round, no public testnet.** A public testnet would create insiders —
+people holding coins and running infrastructure before everyone else. DOM refuses
+that. The chain is validated *before* the first block, so that everyone who joins,
+joins at block zero, on equal terms.
 
-| Parameter | Value | RFC |
-|-----------|-------|-----|
-| **Target Block Time** | 2 minutes (120s) | RFC-0000 §2 |
-| **Difficulty Algorithm** | ASERT (Absolutely Scheduled Exponential Rise Targets) | RFC-0011 |
-| **ASERT Half-Life** | 288 blocks (34,560s) | RFC-0011 |
-| **PoW Algorithm** | RandomX (CPU-optimized) | RFC-0005 |
-| **Hash Function** | Blake2b-256 (tagged) | RFC-0001 |
-| **Signature Scheme** | Schnorr (secp256k1, BIP-340) | RFC-0009 |
-| **Range Proof** | Bulletproofs (2^52 range) | RFC-0002 |
-| **Commitment** | Pedersen (secp256k1, H_DOM via RFC9380) | RFC-0002 |
+That validation does not happen in public on a live network. It happens here,
+before launch, through two mechanisms:
 
-### Network Identity
+- **The project's own audit software** — a security framework that fuzzes the
+  consensus-critical paths, checks invariants against inflation and double-spend,
+  and runs a catalog of Mimblewimble attacks against the chain.
+- **A private burn-in** — a real, continuous chain run by a single operator before
+  block zero, to surface the time-dependent issues that only sustained operation
+  reveals.
+
+Launch is milestone-based, not calendar-based. Each gate opens only when its work
+is actually done.
+
+## Monetary policy
+
+All values are enforced by consensus-level assertions in `dom-core` — they cannot
+change without breaking the build.
+
+| Parameter | Value |
+|-----------|-------|
+| **Supply cap** | 33,000,000 DOM |
+| **Initial block reward** | 33 DOM |
+| **Halving interval** | 330,000 blocks (~1.25 years) |
+| **Halving epochs** | 55 (last reward in epoch 54) |
+| **Max supply (noms)** | 3,299,999,976,900,000 |
+| **Coin unit** | 1 DOM = 100,000,000 noms |
+| **Coinbase maturity** | 1,000 blocks |
+| **Target block time** | 2 minutes |
+
+## Consensus
+
+| Parameter | Value |
+|-----------|-------|
+| **Construction** | Mimblewimble (confidential, cut-through) |
+| **PoW** | RandomX (CPU-optimized) |
+| **Difficulty** | ASERT — half-life 288 blocks (34,560 s) |
+| **Hash** | Blake2b-256 (tagged / domain-separated) |
+| **Signatures** | Schnorr (secp256k1, BIP-340) |
+| **Range proofs** | Bulletproofs (grin backend, 2^52 range) |
+| **Commitments** | Pedersen (secp256k1, H_DOM via RFC 9380) |
+
+### Limits
+
+| Limit | Value |
+|-------|-------|
+| Max block weight | 40,000 units |
+| Max transaction weight | 4,000 units |
+| Max inputs / outputs per tx | 255 / 255 |
+| Max kernels per tx | 16 |
+| Max transactions per block | 5,000 |
+| Max proof size | 768 bytes |
+| Max block size | 16 MiB |
+| Max future timestamp | 2 minutes |
+| Median-time window | 11 blocks |
+
+### Network identity
 
 | Parameter | Mainnet | Testnet |
 |-----------|---------|---------|
-| **Network Magic** | `0x444F4D31` (ASCII "DOM1") | `0x444F4D54` (ASCII "DOMT") |
-| **P2P Port** | 33,369 | 33,370 |
-| **Protocol Version** | 1 | 1 |
-| **Genesis Hash** | [UNFINALIZED] | `78f5e0f4...` (deterministic) |
+| Network magic | `0x444F4D31` ("DOM1") | `0x444F4D54` ("DOMT") |
+| P2P port | 33369 | 33370 |
+| Genesis hash | unfinalized until launch | `13236b79…247b630c` |
 
-### Consensus Limits
+## Repository layout
 
-| Limit | Value | Purpose |
-|-------|-------|---------|
-| **Max Block Weight** | 40,000 units | Prevent bloat |
-| **Max TX Weight** | 4,000 units | Per-transaction limit |
-| **Max Inputs/TX** | 255 | Prevent quadratic hashing |
-| **Max Outputs/TX** | 255 | Prevent bloat |
-| **Max Kernels/TX** | 16 | Limit signature count |
-| **Max TXs/Block** | 5,000 | Prevent memory exhaustion |
-| **Max Proof Size** | 768 bytes | Bulletproof size cap (675-byte proof + headroom) |
-| **Max Block Size** | 16 MiB | Storage limit |
-| **Max Future Timestamp** | 2 minutes | Prevent spam |
-| **Median-Time Window** | 11 blocks | For timestamp validation |
-
----
-
-## Project Structure
-
-### Rust Workspace (16 Crates)
+A Rust workspace of 27 crates. The consensus-critical core is the must-audit
+heart; the rest is tooling, wallets, and runtime.
 
 ```
 dom-protocol/
-├── dom-core/                    # Constants, types, errors (immutable)
-├── dom-crypto/                  # Schnorr, Pedersen, Bulletproofs, H_DOM
-├── dom-serialization/           # DomSerialize/Deserialize trait + codecs
-├── dom-pmmr/                    # Pruned Merkle Mountain Range
-├── dom-pow/                     # RandomX, ASERT, difficulty math
-├── dom-consensus/               # Validators V1-V18 (CRITICAL)
-├── dom-tx/                      # SpendBuilder, transactions, coinbase
-├── dom-wallet/                  # Argon2id KDF, encrypted persistence
-├── dom-chain/                   # ChainState, connect_block, reorg
-├── dom-store/                   # LMDB persistence
-├── dom-mempool/                 # Mempool (basic, needs relay)
-├── dom-node/                    # P2P, mining, IBD
-├── dom-wire/                    # Noise codec, messages
-├── dom-rpc/                     # JSON-RPC 2.0
-├── dom-config/                  # Config parsing
-└── dom-integration-tests/       # E2E tests (TODO)
+├── dom-core/            Constants, types, errors (consensus-critical)
+├── dom-crypto/          Schnorr, Pedersen, Bulletproofs, H_DOM
+├── dom-serialization/   Canonical encode/decode
+├── dom-pmmr/            Pruned Merkle Mountain Range
+├── dom-pow/             RandomX, ASERT, difficulty math
+├── dom-consensus/       Transaction & block validation
+├── dom-tx/              Spend construction, transactions, coinbase
+├── dom-slate/           Interactive transaction building (slate exchange)
+├── dom-chain/           ChainState, connect_block, reorg
+├── dom-store/           LMDB persistence
+├── dom-mempool/         Mempool
+├── dom-node/            P2P, mining, IBD
+├── dom-wire/            Wire codec, handshake, messages
+├── dom-rpc/             JSON-RPC
+├── dom-config/          Config parsing
+├── dom-wallet*/         Wallet (KDF, encrypted persistence, keys, app)
+├── dom-integration-tests/  Multi-node & end-to-end tests
+└── …                    CLI, explorer, faucet, test tooling
 ```
 
-### Key Files
-
-- **Whitepaper:** `WHITEPAPER.md` (v3, May 2026)
-- **Specs:** `DOM_v6_1_Serialization_RFC.md` + `DOM_RFC_000X_*.md`
-- **Known Issues:** `KNOWN_ISSUES.md` (RESOLVED: Pedersen/Bulletproof format)
-- **Release Blockers:** `docs/RELEASE_BLOCKERS.md` (tracking)
-
----
-
-## Controlled Testnet Burn-In
-
-### Stability Metrics
-
-| Metric | Status |
-|--------|--------|
-| **Consensus Validation** | Validator and crypto suites passing during the recorded burn-in window |
-| **Block Production** | 156 recorded blocks, 0 observed reorgs |
-| **Chain Continuity** | 18h 38m of recorded uninterrupted operation |
-| **Crash Count** | 0 critical failures observed |
-| **Network Sync** | IBD phase 3 complete (single-node evidence only) |
-
-### Block Time Analysis
-
-```
-Genesis → Block 1:      ~0s   (deterministic)
-Block 1 → Block 2:      2m 2s (expected delay)
-Block 2 → Block 3:      1m 32s
-Block 3 → Block 4:      55m 40s (ASERT adjusted — testnet easy target)
-Block 4 → Block 5:      6m 18s (recovered)
-...
-Block 155 → Block 156:  27m 39s (variance normal at testnet difficulty)
-
-Average Block Time: ~7.2 minutes
-(Target: 2 minutes; variance remains expected under easy-difficulty testnet conditions)
-```
-
-### Resource Usage
-
-| Resource | Usage | Limit |
-|----------|-------|-------|
-| **Log File** | 528 KB | Healthy (2,719 lines) |
-| **LMDB Size** | 2.7 MB | Minimal (156 blocks) |
-| **Memory** | <100 MB | Expected |
-| **CPU** | ~1 core (mining) | Acceptable |
-
----
-
-## Security & Audit Status
-
-### PHASE 1 Audit (In Progress)
-
-**Scope:** Consensus layer (validators V1-V18) + Crypto layer (Schnorr, Bulletproofs, Pedersen, H_DOM)
-
-**Status:** Specification review, adversarial testing, and closure of hardening findings are underway.
-
-### PHASE 2 Audit (Planned)
-
-**Scope:** Storage layer (LMDB) + P2P layer (Noise, message loop) + PoW/ASERT
-
-**Entry Condition:** Phase 1 closure and updated release-blocker review.
-
----
-
-## Mainnet Launch Prerequisites
-
-### Completed
-
-- [x] Whitepaper v3 finalized
-- [x] Core workspace implemented across 16 crates
-- [x] Controlled testnet burn-in completed (single private node, 156 recorded blocks)
-- [x] Genesis block deterministic
-- [x] Pedersen/Bulletproof format consistency verified
-- [x] Balance equation proven (multiple test vectors)
-- [x] Schnorr signature validation working
-- [x] ASERT difficulty adjustment working
-- [x] IBD (Initial Block Download) phases 1-3 complete
-- [x] Serialization codec complete + tested
-
-### In Progress
-
-- [ ] Phase 1 audit (consensus + crypto)
-- [ ] Phase 2 audit (storage + P2P + PoW)
-- [ ] Public adversarial testnet stabilization (90+ days minimum)
-- [ ] Distributed survivability validation
-- [ ] Mainnet genesis preparation (frozen params after readiness gates)
-
-### Not Started / Deferred
-
-- [ ] Dandelion++ (privacy mixing) — deferred to v1.1
-- [ ] MuSig2 (multisig) — deferred to v1.1
-- [ ] Wallet slate protocol — deferred to v1.1
-- [ ] DNS seed operators — needs community
-
----
-
-## How to Run
+## Build & run
 
 ### Build
 
 ```bash
-cd ~/dom
+git clone https://github.com/sorenplanck/dom-protocol
+cd dom-protocol
 cargo build --release
 ```
 
-### Run Testnet Node
+### Run a testnet node
 
 ```bash
 ./target/release/dom-node --testnet
 ```
 
-Logs to `/tmp/dom-node-a.log`. Monitor with:
+The miner is integrated and starts automatically.
 
-```bash
-watch -n 30 'grep -c "New chain tip" /tmp/dom-node-a.log'
-```
-
-### Run Tests
+### Test
 
 ```bash
 cargo test --workspace
-cargo clippy --all -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-### Mine a Block (Manual)
+## Security & validation
 
-The miner is integrated into the node. Mining starts automatically on startup.
+DOM treats hardening as the work, not an afterthought. Priority order is fixed:
+**security > stability > usability.**
 
----
+**Implemented safeguards**
 
-## Deployment Maturity Sequence
-
-| Milestone | Condition | Status |
-|-----------|-----------|--------|
-| **Controlled burn-in** | Single-node operational evidence collected | Observed |
-| **Consensus + crypto hardening** | Adversarial review closure and blocker reduction | In progress |
-| **Storage, network, and PoW hardening** | Durability and hostile-network validation | Planned |
-| **Public adversarial testnet** | Multi-node stabilization without consensus breaks | Pending |
-| **Genesis freeze + operator readiness** | Final parameters, seed operators, and runbooks | Pending |
-| **Public mainnet deployment** | After all readiness gates are satisfied | Not scheduled by date |
-
----
-
-## Security Considerations
-
-### Known Limitations
-
-- **Wallet KDF:** Currently uses Argon2id. The wallet layer still requires independent review before public mainnet fund custody.
-- **Dandelion++:** Not implemented; peer-level network privacy remains limited in v0.1.0.
-- **MuSig2:** Not implemented; multisig deferred to v1.1.
-- **Ban Policy:** Peer scoring exists but enforcement remains conservative.
-
-### Implemented Safeguards
-
-- Schnorr signatures with chain_id (replay protection)
-- Bulletproofs range proofs (2^52 max value)
-- Pedersen commitments (deterministic via H_DOM)
-- ASERT difficulty (smooth, non-exploitable)
+- Confidential amounts via Pedersen commitments with Bulletproof range proofs
+- Schnorr signatures with chain-id binding (replay protection)
+- Balance equation enforced in commitment space (Mimblewimble value conservation)
+- ASERT difficulty (smooth, non-exploitable retargeting)
 - Coinbase maturity (1,000 blocks)
-- Balance equation (Mimblewimble-correct)
-- Checked arithmetic (no silent overflow)
-- Tagged hashing (domain separation)
+- Checked arithmetic throughout (no silent overflow)
+- Tagged hashing for domain separation
 
----
+**How validation works**
+
+Findings are produced by the project's own audit software — fuzzing of
+consensus-critical paths, property tests for consensus invariants (no inflation,
+no double-spend), and a Mimblewimble attack catalog — and recorded as measured
+engineering facts. The no-inflation invariant, for example, is verified by a
+property test that drives thousands of adversarial transactions through the
+balance equation; the strongest assertion is that no accepted transaction
+increases the committed-value sum.
+
+To report a vulnerability privately, see `SECURITY.md`.
+
+## Status
+
+| Layer | State |
+|-------|-------|
+| Consensus & immutability | implemented |
+| Cryptographic core (Bulletproofs) | implemented |
+| Storage durability & recovery | implemented |
+| Multi-node & end-to-end tests | implemented |
+| Security audit framework | in progress |
+| Adversarial hardening | ahead |
+| Private burn-in | ahead |
+| Mainnet from block zero | ahead |
+
+Full plan, without dates, in [docs/ROADMAP_v3.md](docs/ROADMAP_v3.md).
 
 ## Contributing
 
-See `CONTRIBUTING.md` (TBD).
-
-All commits must:
-1. Pass `cargo test --workspace`
-2. Pass `cargo clippy --all -- -D warnings`
-3. Follow `rustfmt` style
-4. Reference RFC-XXXX or KB-XX in message
-
----
+Issues and pull requests are welcome. Every commit must pass
+`cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
+and `cargo fmt --check`, and reference the relevant RFC or design note in its
+message.
 
 ## Contact
 
--  Soren Planck
+- **Author:** Soren Planck
 - **Email:** sorenplanck@tutamail.com
-- **GitHub:** github.com/sorenplanck/dom-protocol
-
----
+- **Repository:** github.com/sorenplanck/dom-protocol
 
 ## License
 
-[TBD — Choose MIT, Apache 2.0, or dual]
+[TBD]
 
 ---
 
-**Last Updated:** 2026-05-26  
-**Next Review:** After the next hardening-status update
+<div align="center">
+
+**No premine. No private round. No public testnet. Mainnet from block zero, for everyone.**
+
+</div>
