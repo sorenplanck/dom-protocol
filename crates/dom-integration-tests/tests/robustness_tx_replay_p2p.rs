@@ -139,7 +139,7 @@ fn tx_valid_proof_bad_signature(chain_id: &[u8; 32], fee: u64, seed: u8) -> Vec<
         }],
         outputs: vec![TransactionOutput {
             commitment: output_commitment,
-            proof: proof,
+            proof,
         }],
         kernels: vec![TransactionKernel {
             features: KERNEL_FEAT_PLAIN,

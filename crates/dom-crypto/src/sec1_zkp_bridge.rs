@@ -151,9 +151,17 @@ mod tests {
             let sec1 = *Commitment::commit(v, &r).as_bytes();
             assert_eq!(sec1, exp_sec1, "SEC1 commitment drift v={v}");
             // Bridge SEC1 -> zkp must equal the pinned zkp form.
-            assert_eq!(sec1_to_zkp(&sec1).unwrap(), exp_zkp, "sec1->zkp drift v={v}");
+            assert_eq!(
+                sec1_to_zkp(&sec1).unwrap(),
+                exp_zkp,
+                "sec1->zkp drift v={v}"
+            );
             // Bridge zkp -> SEC1 must roundtrip exactly.
-            assert_eq!(zkp_to_sec1(&exp_zkp).unwrap(), exp_sec1, "zkp->sec1 drift v={v}");
+            assert_eq!(
+                zkp_to_sec1(&exp_zkp).unwrap(),
+                exp_sec1,
+                "zkp->sec1 drift v={v}"
+            );
         }
     }
 }

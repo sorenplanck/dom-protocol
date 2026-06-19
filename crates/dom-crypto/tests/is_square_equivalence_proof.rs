@@ -46,7 +46,7 @@ fn chain_exponent() -> (U512, Vec<(u32, U512)>) {
     let x176 = pow2k(x88, 88) + x88;
     let x220 = pow2k(x176, 44) + x44;
     let x223 = pow2k(x220, 3) + x3; // 2^223 − 1
-    // final assembly: x223.pow2k(23).mul(x22).pow2k(6).mul(x2).pow2k(2)
+                                    // final assembly: x223.pow2k(23).mul(x22).pow2k(6).mul(x2).pow2k(2)
     let res = pow2k(pow2k(pow2k(x223, 23) + x22, 6) + x2, 2);
     let blocks = vec![
         (2u32, x2),
@@ -91,7 +91,11 @@ fn addition_chain_builds_p_plus_1_over_4() {
 #[test]
 fn prime_is_three_mod_four() {
     let p = prime();
-    assert_eq!(p % U512::from(4u64), U512::from(3u64), "p must be ≡ 3 (mod 4)");
+    assert_eq!(
+        p % U512::from(4u64),
+        U512::from(3u64),
+        "p must be ≡ 3 (mod 4)"
+    );
 }
 
 // ---- exact modular arithmetic over U512 (all operands < p < 2^256, so a*b <
@@ -190,7 +194,10 @@ fn isq_dom_agrees_with_euler_on_structured_set() {
     }
     // −1 (= p−1) is a QNR, so the non-square branch is necessarily exercised;
     // assert both branches were hit so the test can never vacuously pass.
-    assert!(squares > 0, "structured set must contain quadratic residues");
+    assert!(
+        squares > 0,
+        "structured set must contain quadratic residues"
+    );
     assert!(
         nonsquares > 0,
         "structured set must contain non-residues (e.g. −1) — both branches tested"

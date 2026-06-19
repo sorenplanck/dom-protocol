@@ -540,7 +540,7 @@ mod tests {
             }],
             outputs: vec![TransactionOutput {
                 commitment: output_commitment,
-                proof: proof,
+                proof,
             }],
             kernels: vec![TransactionKernel {
                 features: KERNEL_FEAT_PLAIN,

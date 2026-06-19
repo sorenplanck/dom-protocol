@@ -91,7 +91,7 @@ fn make_valid_spending_tx_from_input(
         }],
         outputs: vec![TransactionOutput {
             commitment: output_commitment,
-            proof: proof,
+            proof,
         }],
         kernels: vec![TransactionKernel {
             features: KERNEL_FEAT_PLAIN,

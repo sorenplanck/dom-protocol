@@ -1468,16 +1468,27 @@ mod genesis_determinism_tests {
             "genesis coinbase proof must be a 675-byte Bulletproof"
         );
         assert!(
-            dom_crypto::bp2_verify(coinbase.output.commitment.as_bytes(), &coinbase.output.proof)
-                .expect("bp2_verify"),
+            dom_crypto::bp2_verify(
+                coinbase.output.commitment.as_bytes(),
+                &coinbase.output.proof
+            )
+            .expect("bp2_verify"),
             "genesis coinbase range proof must verify under bp2 (self-validation)"
         );
 
         // (2) PMMR roots match the pinned vectors.
         let (output_root, kernel_root, rangeproof_root) =
             compute_block_pmmr_roots(&coinbase, &[]).expect("roots");
-        assert_eq!(hex::encode(output_root.as_bytes()), OUTPUT_ROOT, "output_root drift");
-        assert_eq!(hex::encode(kernel_root.as_bytes()), KERNEL_ROOT, "kernel_root drift");
+        assert_eq!(
+            hex::encode(output_root.as_bytes()),
+            OUTPUT_ROOT,
+            "output_root drift"
+        );
+        assert_eq!(
+            hex::encode(kernel_root.as_bytes()),
+            KERNEL_ROOT,
+            "kernel_root drift"
+        );
         assert_eq!(
             hex::encode(rangeproof_root.as_bytes()),
             RANGEPROOF_ROOT,
@@ -1505,7 +1516,11 @@ mod genesis_determinism_tests {
         };
         let header_bytes = header.to_bytes().expect("ser");
         let genesis_hash = *dom_crypto::hash::blake2b_256(&header_bytes).as_bytes();
-        assert_eq!(hex::encode(genesis_hash), GENESIS_HASH, "genesis hash drift");
+        assert_eq!(
+            hex::encode(genesis_hash),
+            GENESIS_HASH,
+            "genesis hash drift"
+        );
         assert_eq!(
             genesis_hash,
             dom_core::GENESIS_HASH_TESTNET,
@@ -1514,7 +1529,10 @@ mod genesis_determinism_tests {
 
         // (4) Byte-reproducible: rebuild and confirm identical proof + roots.
         let cb2 = build_genesis_coinbase(&cid).expect("genesis coinbase rebuild");
-        assert_eq!(cb2.output.proof, coinbase.output.proof, "genesis proof not reproducible");
+        assert_eq!(
+            cb2.output.proof, coinbase.output.proof,
+            "genesis proof not reproducible"
+        );
         let (o2, k2, r2) = compute_block_pmmr_roots(&cb2, &[]).expect("roots rebuild");
         assert_eq!((o2, k2, r2), (output_root, kernel_root, rangeproof_root));
     }

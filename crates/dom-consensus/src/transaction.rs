@@ -489,7 +489,7 @@ mod tests {
         CoinbaseTransaction {
             output: TransactionOutput {
                 commitment: output_commitment,
-                proof: proof,
+                proof,
             },
             kernel: CoinbaseKernel {
                 features: KERNEL_FEAT_COINBASE,

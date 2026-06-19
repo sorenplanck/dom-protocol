@@ -59,10 +59,7 @@ fn build_coinbase(
     };
     let sig = schnorr_sign(&secret, msg.as_bytes(), chain_id).expect("coinbase sig");
     CoinbaseTransaction {
-        output: TransactionOutput {
-            commitment,
-            proof: proof,
-        },
+        output: TransactionOutput { commitment, proof },
         kernel: CoinbaseKernel {
             features: KERNEL_FEAT_COINBASE,
             explicit_value,
@@ -193,7 +190,7 @@ fn valid_spend_tx(
         }],
         outputs: vec![TransactionOutput {
             commitment: output_commitment,
-            proof: proof,
+            proof,
         }],
         kernels: vec![TransactionKernel {
             features: KERNEL_FEAT_PLAIN,

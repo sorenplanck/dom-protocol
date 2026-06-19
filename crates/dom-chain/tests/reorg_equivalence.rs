@@ -200,10 +200,7 @@ fn valid_coinbase(height: BlockHeight, total_fees: u64, seed: u8) -> CoinbaseTra
     let sig = schnorr_sign(&secret, msg.as_bytes(), &test_chain_id()).expect("coinbase sig");
 
     CoinbaseTransaction {
-        output: TransactionOutput {
-            commitment,
-            proof: proof,
-        },
+        output: TransactionOutput { commitment, proof },
         kernel: CoinbaseKernel {
             features: KERNEL_FEAT_COINBASE,
             explicit_value,
@@ -240,7 +237,7 @@ fn valid_spend_tx(
         }],
         outputs: vec![TransactionOutput {
             commitment: output_commitment,
-            proof: proof,
+            proof,
         }],
         kernels: vec![TransactionKernel {
             features: KERNEL_FEAT_PLAIN,
@@ -272,10 +269,7 @@ fn signed_coinbase(height: BlockHeight, seed: u8) -> CoinbaseTransaction {
     };
     let sig = schnorr_sign(&secret, msg.as_bytes(), chain_id.as_bytes()).expect("coinbase sig");
     CoinbaseTransaction {
-        output: TransactionOutput {
-            commitment,
-            proof: proof,
-        },
+        output: TransactionOutput { commitment, proof },
         kernel: CoinbaseKernel {
             features: KERNEL_FEAT_COINBASE,
             explicit_value: reward,

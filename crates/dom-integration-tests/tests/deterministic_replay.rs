@@ -51,8 +51,7 @@ const N: u64 = 10;
 /// SHA-256 of the canonical dump, pinned from the first green run. Any future
 /// change to genesis, the coinbase/bp2 proof, PMMR roots, or canonical UTXO /
 /// kernel state changes this digest and fails CI.
-const PINNED_DIGEST: &str =
-    "287462ddcf409568a8ad40b049ac8f07ab132ed6158e6942e1b9e4b4aa17942a";
+const PINNED_DIGEST: &str = "287462ddcf409568a8ad40b049ac8f07ab132ed6158e6942e1b9e4b4aa17942a";
 
 /// Build a deterministic Regtest chain of `N` blocks past genesis using the real
 /// production construction path, then return a canonical byte dump of its state:

@@ -254,7 +254,8 @@ fn h_dom_internal(backend: &Backend) -> Result<[u8; 64], DomError> {
     let ser = h_dom_zkp_serialized()?;
     let mut g = [0u8; 64];
     // SAFETY: ctx live; g writable for 64 bytes; ser readable for 33 bytes.
-    let ok = unsafe { raw_ffi::secp256k1_generator_parse(backend.ctx, g.as_mut_ptr(), ser.as_ptr()) };
+    let ok =
+        unsafe { raw_ffi::secp256k1_generator_parse(backend.ctx, g.as_mut_ptr(), ser.as_ptr()) };
     if ok != 1 {
         return Err(DomError::Internal("H_DOM generator_parse failed".into()));
     }
@@ -286,7 +287,9 @@ fn commit_zkp(
     }
     let mut out = [0u8; 33];
     // SAFETY: ctx live; out writable for 33 bytes; ci is a valid internal commitment.
-    unsafe { ffi::secp256k1_pedersen_commitment_serialize(backend.ctx, out.as_mut_ptr(), ci.as_ptr()) };
+    unsafe {
+        ffi::secp256k1_pedersen_commitment_serialize(backend.ctx, out.as_mut_ptr(), ci.as_ptr())
+    };
     Ok(out)
 }
 
@@ -364,8 +367,13 @@ fn verify_raw(
 ) -> Result<bool, DomError> {
     let mut ci = [0u8; 64];
     // SAFETY: ctx live; ci writable for 64 bytes; commit readable for 33 bytes.
-    if unsafe { ffi::secp256k1_pedersen_commitment_parse(backend.ctx, ci.as_mut_ptr(), commit_zkp33.as_ptr()) }
-        != 1
+    if unsafe {
+        ffi::secp256k1_pedersen_commitment_parse(
+            backend.ctx,
+            ci.as_mut_ptr(),
+            commit_zkp33.as_ptr(),
+        )
+    } != 1
     {
         return Ok(false);
     }
@@ -401,10 +409,7 @@ fn verify_raw(
 /// Exported from the crate as `bp2_prove` (the second, standard-Bulletproof
 /// backend). NOT yet wired into consensus — it runs parallel to the borromean
 /// `bp_prove`.
-pub fn bp_prove(
-    value: u64,
-    blinding: &BlindingFactor,
-) -> Result<(Vec<u8>, [u8; 33]), DomError> {
+pub fn bp_prove(value: u64, blinding: &BlindingFactor) -> Result<(Vec<u8>, [u8; 33]), DomError> {
     if value > MAX_PROVABLE_VALUE {
         return Err(DomError::Invalid(format!(
             "value {value} > MAX_PROVABLE_VALUE {MAX_PROVABLE_VALUE}"
@@ -518,13 +523,25 @@ mod tests {
             let pr_def = prove_raw(backend, v, blind.as_bytes(), &h_def).unwrap();
 
             // A: commit=H_DOM prove=H_DOM verify=H_DOM -> PASS
-            assert!(verify_raw(backend, &c_dom, &pr_dom, &h_dom).unwrap(), "A v={v}");
+            assert!(
+                verify_raw(backend, &c_dom, &pr_dom, &h_dom).unwrap(),
+                "A v={v}"
+            );
             // B: commit=H_DOM prove=H_default verify=H_DOM -> FAIL
-            assert!(!verify_raw(backend, &c_dom, &pr_def, &h_dom).unwrap(), "B v={v}");
+            assert!(
+                !verify_raw(backend, &c_dom, &pr_def, &h_dom).unwrap(),
+                "B v={v}"
+            );
             // C: commit=H_DOM prove=H_DOM verify=H_default -> FAIL
-            assert!(!verify_raw(backend, &c_dom, &pr_dom, &h_def).unwrap(), "C v={v}");
+            assert!(
+                !verify_raw(backend, &c_dom, &pr_dom, &h_def).unwrap(),
+                "C v={v}"
+            );
             // D: control, all H_default -> PASS
-            assert!(verify_raw(backend, &c_def, &pr_def, &h_def).unwrap(), "D v={v}");
+            assert!(
+                verify_raw(backend, &c_def, &pr_def, &h_def).unwrap(),
+                "D v={v}"
+            );
 
             // proof is a real 675-byte Bulletproof
             assert_eq!(pr_dom.len(), 675, "proof len v={v}");
@@ -565,7 +582,10 @@ mod tests {
     fn above_max_rejected_without_panic() {
         let blind = BlindingFactor::random();
         let r = bp_prove(MAX_PROVABLE_VALUE + 1, &blind);
-        assert!(r.is_err(), "value above MAX_PROVABLE_VALUE must be rejected");
+        assert!(
+            r.is_err(),
+            "value above MAX_PROVABLE_VALUE must be rejected"
+        );
     }
 
     /// A proof must not verify against a different commitment.
@@ -608,8 +628,9 @@ mod tests {
         zero[0] = 0x0a;
         let mut g2 = [0u8; 64];
         // SAFETY: ctx live; buffers correctly sized.
-        let parsed2 =
-            unsafe { raw_ffi::secp256k1_generator_parse(backend.ctx, g2.as_mut_ptr(), zero.as_ptr()) };
+        let parsed2 = unsafe {
+            raw_ffi::secp256k1_generator_parse(backend.ctx, g2.as_mut_ptr(), zero.as_ptr())
+        };
         let n2 = if parsed2 != 1 {
             true
         } else {
@@ -632,7 +653,8 @@ mod tests {
             let (p2, sec1_b) = bp_prove_with_nonce(value, &blinding, &nonce).unwrap();
             assert_eq!(p1.len(), 675, "proof len value={value}");
             assert_eq!(
-                p1, p2,
+                p1,
+                p2,
                 "NON-DETERMINISTIC bp2 proof for value={value}\n p1={}\n p2={}",
                 hex::encode(&p1),
                 hex::encode(&p2)
@@ -678,7 +700,7 @@ mod differential {
     use crate::pedersen::Commitment;
     use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 
-    const SEED: u64 = 0xD0_4D_B_u64; // deterministic, reproducible
+    const SEED: u64 = 0x000D_04DB_u64; // deterministic, reproducible
     const N_RANDOM: usize = 1000;
 
     /// Largest valid scalar = secp256k1 group order n - 1.
@@ -696,7 +718,12 @@ mod differential {
     /// Shim commitment (SEC1), exactly as `bp_prove` computes it, but reusing a
     /// shared backend so a 1000-iteration loop stays fast. Equivalence to the
     /// public `bp_prove` wrapper is asserted separately in `fixed_and_edges`.
-    fn shim_sec1(backend: &Backend, h_dom: &[u8; 64], value: u64, blinding: &BlindingFactor) -> [u8; 33] {
+    fn shim_sec1(
+        backend: &Backend,
+        h_dom: &[u8; 64],
+        value: u64,
+        blinding: &BlindingFactor,
+    ) -> [u8; 33] {
         let zkp = commit_zkp(backend, value, blinding.as_bytes(), h_dom).expect("commit_zkp");
         zkp_to_sec1(&zkp).expect("zkp->sec1")
     }

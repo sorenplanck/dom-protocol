@@ -56,13 +56,14 @@ async fn transfer_slate_e2e_bp2_through_consensus() {
     let reward = INITIAL_BLOCK_REWARD; // 3_300_000_000 noms = 33 DOM
     let amount: u64 = 1_000_000_000; // 10 DOM transferred A → B
     let fee: u64 = 1_000_000; // 0.01 DOM fee
-    assert!(amount + fee < reward, "a single coinbase must cover the spend");
+    assert!(
+        amount + fee < reward,
+        "a single coinbase must cover the spend"
+    );
 
     // ── Node + sender wallet A ───────────────────────────────────────────────
-    let wallet_a_path = std::env::temp_dir().join(format!(
-        "dom-transfer-slate-a-{}.dom",
-        std::process::id()
-    ));
+    let wallet_a_path =
+        std::env::temp_dir().join(format!("dom-transfer-slate-a-{}.dom", std::process::id()));
     create_wallet_dir(&wallet_a_path, "pw-a");
     let mut config = test_config("transfer-slate", free_local_port(), false);
     config.wallet_path = Some(wallet_a_path.to_string_lossy().into_owned());
@@ -190,7 +191,10 @@ async fn transfer_slate_e2e_bp2_through_consensus() {
     let bal_b = wallet_b.balance(tip);
 
     eprintln!("[transfer_slate_e2e] reward(R)={reward} amount={amount} fee={fee} K={K}");
-    eprintln!("[transfer_slate_e2e] bal_A0.confirmed = {}", bal_a0.confirmed);
+    eprintln!(
+        "[transfer_slate_e2e] bal_A0.confirmed = {}",
+        bal_a0.confirmed
+    );
     eprintln!(
         "[transfer_slate_e2e] bal_A_final = confirmed={} immature={} reserved={}",
         bal_a.confirmed, bal_a.immature, bal_a.reserved

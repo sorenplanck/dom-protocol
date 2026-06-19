@@ -23,7 +23,9 @@ fn validate_range_proofs_bp2(outputs: &[TransactionOutput]) -> Result<(), DomErr
                 )));
             }
             Err(e) => {
-                return Err(DomError::Invalid(format!("output {i} range proof error: {e}")));
+                return Err(DomError::Invalid(format!(
+                    "output {i} range proof error: {e}"
+                )));
             }
         }
     }
@@ -47,11 +49,16 @@ fn bp2_outputs_validate_at_consensus_shape() {
 
     // Every output is a real 675-byte standard Bulletproof.
     for o in &outputs {
-        assert_eq!(o.proof.len(), 675, "expected a 675-byte standard Bulletproof");
+        assert_eq!(
+            o.proof.len(),
+            675,
+            "expected a 675-byte standard Bulletproof"
+        );
     }
 
     // Validates through the consensus-shaped range-proof check.
-    validate_range_proofs_bp2(&outputs).expect("valid bp2 outputs must pass consensus-shape validation");
+    validate_range_proofs_bp2(&outputs)
+        .expect("valid bp2 outputs must pass consensus-shape validation");
 }
 
 #[test]
@@ -82,7 +89,10 @@ fn bp2_wrong_commitment_rejected() {
     };
 
     let err = validate_range_proofs_bp2(std::slice::from_ref(&mismatched));
-    assert!(err.is_err(), "proof must not verify against a different commitment");
+    assert!(
+        err.is_err(),
+        "proof must not verify against a different commitment"
+    );
 }
 
 #[test]
@@ -116,7 +126,11 @@ fn bp2_proof_size_and_serialization_envelope() {
     //     comfortably within the 700-byte envelope.
     let blinding = BlindingFactor::from_bytes([4u8; 32]).unwrap();
     let valid = make_output(1_000, &blinding);
-    assert_eq!(valid.proof.len(), 675, "bp2 proof must be exactly 675 bytes");
+    assert_eq!(
+        valid.proof.len(),
+        675,
+        "bp2 proof must be exactly 675 bytes"
+    );
     assert!(valid.proof.len() <= dom_core::MAX_PROOF_SIZE);
     assert_eq!(dom_core::MAX_PROOF_SIZE, 768, "Bulletproof envelope");
 

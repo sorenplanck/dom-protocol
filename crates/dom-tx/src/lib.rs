@@ -201,10 +201,7 @@ impl SpendBuilder {
             let (proof, _commitment_bytes) = bp2_prove(output.value, &output.blinding)
                 .map_err(|e| TxError::Crypto(format!("range proof generation failed: {e}")))?;
 
-            tx_outputs.push(TransactionOutput {
-                commitment,
-                proof,
-            });
+            tx_outputs.push(TransactionOutput { commitment, proof });
         }
 
         // Random offset for graph privacy. Without this, kernel_excess equals
