@@ -1,0 +1,40 @@
+[package]
+name = "dom-tx-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-tx]
+path = ".."
+
+[dependencies.dom-serialization]
+path = "../../dom-serialization"
+
+[[bin]]
+name = "fuzz_slate_deserialize"
+path = "fuzz_targets/fuzz_slate_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_slate_roundtrip"
+path = "fuzz_targets/fuzz_slate_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_output_commitment_and_proof"
+path = "fuzz_targets/fuzz_output_commitment_and_proof.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
