@@ -2,3 +2,4 @@ target/
 artifacts/
 corpus_gen/target/
 /target
+corpus_gen/Cargo.lock
