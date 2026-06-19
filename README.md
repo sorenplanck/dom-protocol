@@ -235,7 +235,7 @@ message.
 
 ## License
 
-[MIT](LICENSE) — the same license as Bitcoin Core. Use it, fork it, build on it.
+[MIT](LICENSE) 
 ---
 
 <div align="center">
