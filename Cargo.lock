@@ -1366,6 +1366,7 @@ dependencies = [
  "dom-serialization",
  "k256",
  "primitive-types",
+ "proptest",
  "secp256k1 0.28.2",
  "thiserror 1.0.69",
 ]
