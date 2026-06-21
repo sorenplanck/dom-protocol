@@ -224,29 +224,37 @@ fn backend() -> &'static Backend {
     })
 }
 
-/// Per-thread reusable scratch space. grin's header states scratch "cannot
-/// safely be shared between threads without additional synchronization", so each
-/// thread owns its own, created once and reused across calls (each bulletproof
-/// call does allocate_frame/deallocate_frame internally, leaving it clean).
-/// Freed at thread exit.
+/// Owns one grin scratch space, created and destroyed PER FFI CALL.
+///
+/// DS-001: the scratch must NOT be reused across calls. grin's bulletproof FFI
+/// can return early on a malformed proof WITHOUT releasing the scratch frame it
+/// allocated; reusing the same scratch then accumulates leaked frames until the
+/// arena pointer walks off its region and the next call SEGVs (reproduced: a
+/// valid proof crashing on the 5th call after malformed ones). Creating a fresh
+/// scratch per call and destroying it on scope exit (Drop) mirrors grin's own
+/// usage (`pedersen.rs` wraps every prove/verify in create+destroy) and gives
+/// each call a clean arena, so a leak in one call cannot poison the next.
 struct ScratchHandle(*mut ffi::ScratchSpace);
+
+impl ScratchHandle {
+    /// Create a fresh scratch space for a single FFI operation. Paired with
+    /// Drop (destroy), this gives create+destroy per call — grin's own usage
+    /// pattern (pedersen.rs). A reused scratch can leak a frame when the FFI
+    /// returns early on a malformed proof, accumulating until SEGV (DS-001).
+    fn new(backend: &Backend) -> Self {
+        // SAFETY: backend.ctx is live for the process lifetime; SCRATCH_SIZE > 0.
+        let s = unsafe { ffi::secp256k1_scratch_space_create(backend.ctx, SCRATCH_SIZE) };
+        assert!(!s.is_null(), "grin scratch_space_create returned null");
+        ScratchHandle(s)
+    }
+}
 
 impl Drop for ScratchHandle {
     fn drop(&mut self) {
         // SAFETY: created via scratch_space_create on the shared ctx; destroyed
-        // exactly once, at thread exit, and never used afterwards.
+        // exactly once, when this per-call handle leaves scope, never used after.
         unsafe { ffi::secp256k1_scratch_space_destroy(self.0) };
     }
-}
-
-thread_local! {
-    static SCRATCH: ScratchHandle = {
-        let b = backend();
-        // SAFETY: shared ctx is live for the process lifetime; SCRATCH_SIZE > 0.
-        let s = unsafe { ffi::secp256k1_scratch_space_create(b.ctx, SCRATCH_SIZE) };
-        assert!(!s.is_null(), "grin scratch_space_create returned null");
-        ScratchHandle(s)
-    };
 }
 
 /// Parse the canonical H_DOM into grin's 64-byte internal generator form.
@@ -309,35 +317,37 @@ fn prove_raw_with_nonces(
     let blinds: [*const u8; 1] = [blind.as_ptr()];
     let v = value;
 
-    let r = SCRATCH.with(|scratch| {
-        // SAFETY: shared ctx/gens are live for the process lifetime; the reused
-        // per-thread scratch is exclusive to this thread; all pointers are valid
-        // for the call (proof writable for plen; blind/value_gen/nonces fixed lengths).
-        unsafe {
-            raw_ffi::secp256k1_bulletproof_rangeproof_prove(
-                backend.ctx,
-                scratch.0,
-                backend.gens,
-                proof.as_mut_ptr(),
-                &mut plen,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                &v as *const u64,
-                ptr::null(),
-                blinds.as_ptr(),
-                ptr::null(),
-                1,
-                value_gen.as_ptr(),
-                PROOF_NBITS,
-                rewind.as_ptr(),
-                private.as_ptr(),
-                ptr::null(),
-                0,
-                ptr::null(),
-            )
-        }
-    });
+    // DS-001: fresh scratch per call, destroyed on scope exit (Drop) — same
+    // create+destroy-per-call discipline the verify path uses, so the prove path
+    // can never reuse (and thus poison) a scratch arena across calls.
+    let scratch = ScratchHandle::new(backend);
+    // SAFETY: shared ctx/gens are live for the process lifetime; `scratch` is a
+    // freshly-created arena exclusive to this call; all pointers are valid for
+    // the call (proof writable for plen; blind/value_gen/nonces fixed lengths).
+    let r = unsafe {
+        raw_ffi::secp256k1_bulletproof_rangeproof_prove(
+            backend.ctx,
+            scratch.0,
+            backend.gens,
+            proof.as_mut_ptr(),
+            &mut plen,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &v as *const u64,
+            ptr::null(),
+            blinds.as_ptr(),
+            ptr::null(),
+            1,
+            value_gen.as_ptr(),
+            PROOF_NBITS,
+            rewind.as_ptr(),
+            private.as_ptr(),
+            ptr::null(),
+            0,
+            ptr::null(),
+        )
+    };
     if r != 1 {
         return Err(DomError::Internal("bulletproof prove failed".into()));
     }
@@ -377,27 +387,28 @@ fn verify_raw(
     {
         return Ok(false);
     }
-    let r = SCRATCH.with(|scratch| {
-        // SAFETY: shared ctx/gens are live for the process lifetime; the reused
-        // per-thread scratch is exclusive to this thread; proof readable for
-        // proof.len(); ci is a valid internal commitment.
-        unsafe {
-            raw_ffi::secp256k1_bulletproof_rangeproof_verify(
-                backend.ctx,
-                scratch.0,
-                backend.gens,
-                proof.as_ptr(),
-                proof.len(),
-                ptr::null(),
-                ci.as_ptr(),
-                1,
-                PROOF_NBITS,
-                value_gen.as_ptr(),
-                ptr::null(),
-                0,
-            )
-        }
-    });
+    // DS-001: fresh scratch per call, destroyed on scope exit (Drop), so a frame
+    // the FFI may leak on a malformed proof cannot accumulate into a later SEGV.
+    let scratch = ScratchHandle::new(backend);
+    // SAFETY: shared ctx/gens are live for the process lifetime; `scratch` is a
+    // freshly-created arena exclusive to this call; proof readable for
+    // proof.len(); ci is a valid internal commitment.
+    let r = unsafe {
+        raw_ffi::secp256k1_bulletproof_rangeproof_verify(
+            backend.ctx,
+            scratch.0,
+            backend.gens,
+            proof.as_ptr(),
+            proof.len(),
+            ptr::null(),
+            ci.as_ptr(),
+            1,
+            PROOF_NBITS,
+            value_gen.as_ptr(),
+            ptr::null(),
+            0,
+        )
+    };
     Ok(r == 1)
 }
 
@@ -474,9 +485,9 @@ pub fn bp_verify(commitment_sec1: &[u8; 33], proof_bytes: &[u8]) -> Result<bool,
     if proof_bytes.is_empty() {
         return Err(DomError::Malformed("range proof vazio".into()));
     }
-    if proof_bytes.len() > dom_core::MAX_PROOF_SIZE {
+    if proof_bytes.len() != SINGLE_BULLETPROOF_SIZE {
         return Err(DomError::Malformed(format!(
-            "range proof muito grande: {} bytes",
+            "range proof tamanho invalido: {} bytes (esperado {SINGLE_BULLETPROOF_SIZE})",
             proof_bytes.len()
         )));
     }
@@ -492,6 +503,200 @@ mod tests {
 
     const MATRIX_VALUES: [u64; 4] = [1, 42, 1_000_000, 4_503_599_627_370_495]; // last = 2^52 - 1
     const TEST_BLIND: [u8; 32] = [0x11u8; 32];
+
+    /// DS-001 regression: `bp_verify` must reject any proof whose length is not
+    /// EXACTLY `SINGLE_BULLETPROOF_SIZE` (675) BEFORE any FFI call on the proof —
+    /// closing the SEGV path (the reproducer was a 651-byte proof that reached
+    /// grin's scalar parse). Off-size proofs are stopped by the size gate; only
+    /// the exact 675-byte length proceeds to (safe) verification.
+    #[test]
+    fn ds001_proof_size_must_be_exact() {
+        let blind = BlindingFactor::from_bytes(TEST_BLIND).expect("blind");
+        let (proof, commitment) = bp_prove(42, &blind).expect("bp2 prove");
+        assert_eq!(
+            proof.len(),
+            SINGLE_BULLETPROOF_SIZE,
+            "sanity: a real Bulletproof is exactly 675 bytes"
+        );
+
+        // Exact-size (675) real proof passes the size gate AND verifies.
+        match bp_verify(&commitment, &proof) {
+            Ok(true) => {}
+            other => panic!("valid 675-byte proof must verify Ok(true), got {other:?}"),
+        }
+
+        // A 675-byte all-zeros proof passes the SIZE gate (675 == 675); it then
+        // fails verification, but the error must NOT be a size error.
+        match bp_verify(&commitment, &[0u8; SINGLE_BULLETPROOF_SIZE]) {
+            Ok(false) => {}
+            Ok(true) => panic!("all-zeros 675-byte proof must not verify true"),
+            Err(e) => assert!(
+                !e.to_string().contains("tamanho invalido"),
+                "675-byte proof must not be rejected by the size gate, got: {e}"
+            ),
+        }
+
+        // Off-size proofs (incl. 651 = the DS-001 reproducer, the 674/676
+        // boundaries, and 768 = the old cap) are rejected by the size gate with
+        // the specific message, BEFORE any FFI touches the proof bytes.
+        for len in [651usize, 674, 676, 768] {
+            let err = bp_verify(&commitment, &vec![0u8; len])
+                .expect_err("off-size proof must be rejected");
+            assert!(
+                err.to_string().contains("tamanho invalido"),
+                "len {len} must be rejected as size-invalid, got: {err}"
+            );
+        }
+
+        // Empty proof keeps its specific message.
+        let err_empty = bp_verify(&commitment, &[]).expect_err("empty must be rejected");
+        assert!(
+            err_empty.to_string().contains("range proof vazio"),
+            "empty proof must report 'range proof vazio', got: {err_empty}"
+        );
+    }
+
+    /// DS-001 REGRESSION GUARDIAN (runs always — it must NOT crash).
+    ///
+    /// Feeds the grin FFI 200 exact-675-byte but MALFORMED proofs (blake2b of a
+    /// counter), all on the SAME thread, against a valid SEC1 commitment. Before
+    /// the per-call scratch fix this reused-scratch hammering accumulated leaked
+    /// frames and SEGV'd; now every call MUST return (`Ok(false)` or `Err`). A
+    /// panic/SEGV here means the scratch is being reused again (DS-001 regressed).
+    #[test]
+    fn ds001_exact_size_malformed_does_not_crash() {
+        // Deterministic pseudo-random 675-byte buffer derived from a counter.
+        fn pseudo_random_675(counter: u32) -> Vec<u8> {
+            let mut out = Vec::with_capacity(SINGLE_BULLETPROOF_SIZE);
+            let mut block: u32 = 0;
+            while out.len() < SINGLE_BULLETPROOF_SIZE {
+                let mut seed = Vec::with_capacity(8);
+                seed.extend_from_slice(&counter.to_le_bytes());
+                seed.extend_from_slice(&block.to_le_bytes());
+                let h = crate::blake2b_256_tagged("DOM:ds001-malformed-probe:v1", &seed);
+                out.extend_from_slice(h.as_bytes());
+                block += 1;
+            }
+            out.truncate(SINGLE_BULLETPROOF_SIZE);
+            out
+        }
+
+        let blind = BlindingFactor::from_bytes([0x22u8; 32]).expect("blind");
+        let (_real_proof, commitment) = bp_prove(7, &blind).expect("bp2 prove");
+
+        for i in 0..200u32 {
+            let proof = pseudo_random_675(i);
+            assert_eq!(
+                proof.len(),
+                SINGLE_BULLETPROOF_SIZE,
+                "probe proof must be exactly 675 bytes"
+            );
+            // Flushed marker so a SEGV inside the FFI leaves the crashing index
+            // as the last line on stderr (identifies the deterministic reproducer).
+            eprintln!("PROBE iter {i} -> calling bp_verify ...");
+            // Must RETURN gracefully — never panic / SEGV. A valid commitment +
+            // exact-size proof reaches the grin verify FFI by design here.
+            match bp_verify(&commitment, &proof) {
+                Ok(false) | Err(_) => {}
+                Ok(true) => {
+                    panic!("iteration {i}: malformed 675-byte proof verified TRUE (impossible)")
+                }
+            }
+        }
+        println!("DS-001 probe: 200 malformed 675-byte proofs all returned gracefully (no crash).");
+    }
+
+    /// DS-001 REGRESSION GUARDIAN (runs always — it must NOT crash).
+    ///
+    /// This is the permanent guardian distilled from the DS-001 state-vs-content
+    /// investigation. That investigation proved the SEGV was NOT content-driven
+    /// (a single malformed counter=4 in isolation survived) but ACCUMULATION-
+    /// driven: reusing one per-thread grin scratch space leaked a frame on each
+    /// malformed-proof FFI call until the arena pointer ran off its region and a
+    /// later call SEGV'd — deterministically the 5th call, even when that 5th
+    /// call was a VALID proof (the "Scenario D" interleave). The fix
+    /// creates+destroys the scratch PER CALL, so frames cannot accumulate.
+    ///
+    /// The test hammers the SAME thread with 12 `bp_verify` calls, interleaving
+    /// malformed 675-byte proofs (counters 0..=6) with valid proofs from
+    /// `bp_prove`. The first five calls reproduce Scenario D EXACTLY
+    /// (valid, malformed, valid, malformed, valid) — the trailing valid 5th call
+    /// is the one that used to SEGV. Every call must return gracefully (Ok/Err)
+    /// with no panic/SEGV. If the scratch is ever reused again, this test crashes
+    /// the whole test process — the strongest possible regression signal.
+    #[test]
+    fn ds001_scratch_no_accumulation_regression() {
+        // Deterministic 675-byte pseudo-random buffer — same derivation the other
+        // DS-001 probes use, so reproducers line up across tests.
+        fn malformed_proof(counter: u32) -> Vec<u8> {
+            let mut out = Vec::with_capacity(SINGLE_BULLETPROOF_SIZE);
+            let mut block: u32 = 0;
+            while out.len() < SINGLE_BULLETPROOF_SIZE {
+                let mut seed = Vec::with_capacity(8);
+                seed.extend_from_slice(&counter.to_le_bytes());
+                seed.extend_from_slice(&block.to_le_bytes());
+                let h = crate::blake2b_256_tagged("DOM:ds001-malformed-probe:v1", &seed);
+                out.extend_from_slice(h.as_bytes());
+                block += 1;
+            }
+            out.truncate(SINGLE_BULLETPROOF_SIZE);
+            out
+        }
+
+        let blind = BlindingFactor::from_bytes([0x22u8; 32]).expect("blind");
+        let (valid_proof, commitment) = bp_prove(7, &blind).expect("bp2 prove");
+        assert_eq!(
+            valid_proof.len(),
+            SINGLE_BULLETPROOF_SIZE,
+            "sanity: a real Bulletproof is exactly 675 bytes"
+        );
+
+        // 12 calls on ONE thread. Calls 1..=5 are Scenario D verbatim — the old
+        // SEGV fired on call 5 (the trailing VALID proof). The rest keep
+        // interleaving and cover malformed counters 0..=6.
+        let calls: Vec<(&str, Vec<u8>)> = vec![
+            ("valid", valid_proof.clone()),      // 1
+            ("malformed#1", malformed_proof(1)), // 2  (D)
+            ("valid", valid_proof.clone()),      // 3  (D)
+            ("malformed#3", malformed_proof(3)), // 4  (D)
+            ("valid", valid_proof.clone()),      // 5  <- old crash point (VALID)
+            ("malformed#0", malformed_proof(0)), // 6
+            ("valid", valid_proof.clone()),      // 7
+            ("malformed#2", malformed_proof(2)), // 8
+            ("valid", valid_proof.clone()),      // 9
+            ("malformed#4", malformed_proof(4)), // 10 (the documented reproducer counter)
+            ("malformed#5", malformed_proof(5)), // 11
+            ("malformed#6", malformed_proof(6)), // 12
+        ];
+        assert!(
+            calls.len() >= 12,
+            "regression must exercise at least 12 same-thread calls"
+        );
+
+        for (i, (label, proof)) in calls.iter().enumerate() {
+            let n = i + 1;
+            assert_eq!(
+                proof.len(),
+                SINGLE_BULLETPROOF_SIZE,
+                "call {n} ({label}) must be exactly 675 bytes"
+            );
+            // Reaching here on every iteration is the assertion: no SEGV/panic.
+            match bp_verify(&commitment, proof) {
+                Ok(true) => assert!(
+                    label.starts_with("valid"),
+                    "call {n}: a MALFORMED proof verified TRUE (impossible)"
+                ),
+                Ok(false) => assert!(
+                    !label.starts_with("valid"),
+                    "call {n}: a VALID proof failed verification (unexpected)"
+                ),
+                Err(_) => assert!(
+                    !label.starts_with("valid"),
+                    "call {n}: a VALID proof returned Err (unexpected)"
+                ),
+            }
+        }
+    }
 
     /// Link/coexistence smoke test (kept from scaffold): the grin dependency
     /// links inside the real dom-crypto crate and H_DOM parses via grin's FFI.
