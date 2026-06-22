@@ -670,3 +670,125 @@ fn direct_connect_rejects_duplicate_output_commitment() {
         "unexpected error message: {err}"
     );
 }
+
+#[test]
+fn promote_branch_with_within_branch_double_spend_is_rejected() {
+    // SEC-001 Gap 1: a side-branch spending the SAME input in two consecutive
+    // blocks of the SAME branch must be rejected when the heavier branch triggers
+    // an automatic reorg in connect_block. Exercises the overlay carry-forward in
+    // apply_connect: after the first spend the overlay holds the commitment as
+    // None (chain_state.rs:1556); the second block's lookup hits None and fails
+    // closed (chain_state.rs:1545 "missing input").
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut chain = open_chain(dir.path());
+    let chain_id = *derive_chain_id(
+        NETWORK_MAGIC_REGTEST,
+        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+    )
+    .as_bytes();
+    let genesis = build_coinbase_only_block(
+        [0u8; 32],
+        chain.tip_hash,
+        BlockHeight(0),
+        U256::zero(),
+        [0u8; 32],
+        1,
+        &chain_id,
+    );
+    chain
+        .connect_block(&genesis, safe_now())
+        .expect("genesis connects");
+    let canonical_1 = build_coinbase_only_block(
+        *block_hash(&genesis).as_bytes(),
+        block_hash(&genesis),
+        BlockHeight(1),
+        genesis.header.total_difficulty,
+        [0u8; 32],
+        2,
+        &chain_id,
+    );
+    chain
+        .connect_block(&canonical_1, safe_now())
+        .expect("c1 connects");
+    let canonical_2 = build_coinbase_only_block(
+        *block_hash(&genesis).as_bytes(),
+        block_hash(&canonical_1),
+        BlockHeight(2),
+        canonical_1.header.total_difficulty,
+        [0u8; 32],
+        3,
+        &chain_id,
+    );
+    chain
+        .connect_block(&canonical_2, safe_now())
+        .expect("c2 connects");
+    let cb_value = dom_core::block_reward(BlockHeight(0)).noms();
+    let cb_blinding = scalar(1);
+    let side_1 = build_coinbase_only_block(
+        *block_hash(&genesis).as_bytes(),
+        block_hash(&genesis),
+        BlockHeight(1),
+        genesis.header.total_difficulty,
+        [0u8; 32],
+        10,
+        &chain_id,
+    );
+    chain
+        .connect_block(&side_1, safe_now())
+        .expect("side_1 quarantined");
+    let spend_a = valid_spend_tx(
+        cb_value,
+        cb_blinding.clone(),
+        cb_value - dom_core::MIN_RELAY_FEE_RATE * 100,
+        41,
+        &chain_id,
+    );
+    let side_2 = build_block_with_transactions(
+        *block_hash(&genesis).as_bytes(),
+        block_hash(&side_1),
+        BlockHeight(2),
+        side_1.header.total_difficulty,
+        [0u8; 32],
+        11,
+        vec![spend_a],
+        &chain_id,
+    );
+    chain
+        .connect_block(&side_2, safe_now())
+        .expect("side_2 quarantined");
+    let spend_b = valid_spend_tx(
+        cb_value,
+        cb_blinding.clone(),
+        cb_value - dom_core::MIN_RELAY_FEE_RATE * 200,
+        42,
+        &chain_id,
+    );
+    let side_3 = build_block_with_transactions(
+        *block_hash(&genesis).as_bytes(),
+        block_hash(&side_2),
+        BlockHeight(3),
+        side_2.header.total_difficulty,
+        [0u8; 32],
+        12,
+        vec![spend_b],
+        &chain_id,
+    );
+    // side_3 makes the side branch heavier than canonical (h3 > h2), triggering
+    // an automatic reorg in connect_block. apply_connect replays side_1..side_3;
+    // side_3's re-spend of the input already spent in side_2 hits the overlay
+    // carry-forward (chain_state.rs:1556 -> :1545) and the whole connect fails closed.
+    let err = chain
+        .connect_block(&side_3, safe_now())
+        .expect_err("within-branch double-spend must be rejected on auto-reorg");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("missing input") || msg.contains("reorg connect"),
+        "expected within-branch double-spend rejection, got: {msg}"
+    );
+    // The rejected reorg must leave the canonical tip unchanged.
+    assert_eq!(
+        chain.tip_hash,
+        block_hash(&canonical_2),
+        "rejected within-branch double-spend reorg must leave canonical tip unchanged"
+    );
+}
