@@ -72,4 +72,25 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_peer_rotation"
+path = "fuzz_targets/fuzz_peer_rotation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_peer_rotation_legacy"
+path = "fuzz_targets/fuzz_peer_rotation_legacy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_peer_reputation"
+path = "fuzz_targets/fuzz_peer_reputation.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

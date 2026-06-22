@@ -1,0 +1,26 @@
+[package]
+name = "dom-mempool-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-mempool]
+path = ".."
+
+[dependencies.dom-serialization]
+path = "../../dom-serialization"
+
+[[bin]]
+name = "fuzz_mempool_snapshot"
+path = "fuzz_targets/fuzz_mempool_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
