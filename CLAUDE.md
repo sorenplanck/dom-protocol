@@ -45,3 +45,39 @@ Vale para TODA sessão, não só auditorias.
 - Medir números reais (tamanhos, limites, thresholds), não estimar.
 - Ser explícito sobre o que NÃO foi testado e por quê (limitações de método).
 - Preferir provar afirmações com um teste que roda a afirmar por leitura.
+
+## Operational Authorization Policy
+
+Claude Code may be launched with elevated or bypass permissions for workflow efficiency. This does not grant open-ended authorization.
+
+Claude is authorized to perform only the explicit task described in the current user prompt.
+
+Claude must not infer additional work, expand the task, open new audit fronts, refactor unrelated code, clean unrelated files, modify unrelated state, or make opportunistic improvements unless the current prompt explicitly asks for them.
+
+Claude may operate only inside the current repository unless the user explicitly authorizes another path.
+
+Claude must not read, edit, move, delete, or inspect secrets, .env files, SSH keys, API keys, credentials, wallet keys, private keys, files outside the repository, or unrelated system files.
+
+Claude must always run git status before modifying files.
+
+Claude must preserve unrelated changes.
+
+Claude must not modify, stage, commit, reset, delete, or clean unrelated files unless the current user prompt explicitly authorizes it.
+
+Claude must not run git reset --hard, git clean -fd, git push --force, history rewrites, rm -rf, mass deletion, chmod/chown over broad paths, database deletion, firewall changes, SSH changes, systemd changes, Docker changes, or server configuration changes unless the current user prompt explicitly requests that exact action.
+
+Claude may run tests, builds, formatters, linters, and targeted verification commands only when relevant to the current task.
+
+Claude must avoid long-running campaigns unless explicitly requested.
+
+For fuzzing, Claude may build fuzz targets when requested, but must not run long fuzz campaigns unless the prompt explicitly asks for fuzz execution and gives duration/scope.
+
+After each successful commit, Claude may push to GitHub unless the current user prompt explicitly says not to push.
+
+At the end of each task, Claude must report:
+1. what was changed;
+2. what commands were run;
+3. what tests/checks passed or failed;
+4. what files were modified;
+5. whether unrelated files were preserved;
+6. whether commit/push occurred.
