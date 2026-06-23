@@ -42,3 +42,17 @@ path = "fuzz_targets/fuzz_bp2_verify.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_publickey_parse"
+path = "fuzz_targets/fuzz_publickey_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_borromean_rangeproof"
+path = "fuzz_targets/fuzz_borromean_rangeproof.rs"
+test = false
+doc = false
+bench = false
