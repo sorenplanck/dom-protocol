@@ -11,6 +11,10 @@ license.workspace      = true
 # BIP-32 HMAC-SHA512 derivation.
 hmac.workspace = true
 sha2.workspace = true
+# secp256k1 (libsecp256k1 binding) — BIP-32 reference curve ops: scalar add
+# mod n (child key), IL<n validation, and point(kpar) for non-hardened
+# derivation. Bit-identical to the official BIP-32 test vectors.
+secp256k1.workspace = true
 # BIP-39 mnemonic ↔ seed.
 bip39.workspace = true
 # Secure RNG for fresh mnemonic generation.
