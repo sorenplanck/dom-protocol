@@ -329,6 +329,31 @@ impl DomDeserialize for PersistedIbdState {
         }
         let header_cursor_height = r.read_u64()?;
 
+        // Semantic invariants the IBD state machine guarantees in every valid
+        // state (IbdState::new / mark_block_committed / note_round_progress),
+        // copied 1:1 into the snapshot by node::persist_ibd_state. A snapshot
+        // violating these is corrupt. NOTE: `best_peer_height` and
+        // `header_cursor_height` are intentionally NOT constrained — best_peer
+        // can legitimately be < start_height (init Completed) or be exceeded by
+        // headers/blocks when the peer grows, and header_cursor_height has no
+        // proven ordering invariant. Structural checks (cursor ≤ count, caps)
+        // above are kept as-is.
+        if start_height > last_progress_height
+            || last_progress_height > blocks_height
+            || blocks_height > headers_height
+        {
+            return Err(DomError::Malformed(format!(
+                "ibd state: non-monotonic heights (start={start_height}, \
+                 last_progress={last_progress_height}, blocks={blocks_height}, \
+                 headers={headers_height})"
+            )));
+        }
+        if retry_attempts > MAX_IBD_RETRY_ATTEMPTS {
+            return Err(DomError::Malformed(format!(
+                "ibd state: retry_attempts {retry_attempts} exceeds max {MAX_IBD_RETRY_ATTEMPTS}"
+            )));
+        }
+
         Ok(Self {
             phase,
             peer_addr,
@@ -613,6 +638,106 @@ fn compute_hash(data: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A structurally + semantically valid snapshot: heights satisfy the
+    /// state-machine chain (start ≤ last_progress ≤ blocks ≤ headers) and
+    /// retry_attempts ≤ MAX_IBD_RETRY_ATTEMPTS.
+    fn valid_snapshot() -> PersistedIbdState {
+        PersistedIbdState {
+            phase: IbdPhase::BlockSync,
+            peer_addr: "127.0.0.1:33369".into(),
+            start_height: 10,
+            best_peer_height: 25,
+            headers_height: 14,
+            blocks_height: 12,
+            last_progress_height: 12,
+            checkpoint_tip_hash: [0x12; 32],
+            retry_attempts: 2,
+            last_interruption: None,
+            pending_blocks: Vec::new(),
+            pending_headers: Vec::new(),
+            block_cursor: 0,
+            header_cursor: 0,
+            header_cursor_height: 14,
+        }
+    }
+
+    /// Round-trip a snapshot through the validated load path (to_bytes/from_bytes).
+    fn roundtrip(s: &PersistedIbdState) -> Result<PersistedIbdState, DomError> {
+        PersistedIbdState::from_bytes(&s.to_bytes().expect("serialize"))
+    }
+
+    #[test]
+    fn valid_snapshot_roundtrips() {
+        assert!(roundtrip(&valid_snapshot()).is_ok());
+    }
+
+    #[test]
+    fn init_equal_heights_accepted() {
+        // IbdState::new leaves start == last_progress == blocks == headers.
+        let mut s = valid_snapshot();
+        s.start_height = 10;
+        s.last_progress_height = 10;
+        s.blocks_height = 10;
+        s.headers_height = 10;
+        assert!(roundtrip(&s).is_ok());
+    }
+
+    #[test]
+    fn best_peer_below_start_accepted() {
+        // Legitimate: IbdState::new(100, 50) → Completed; best_peer_height is free.
+        let mut s = valid_snapshot();
+        s.start_height = 100;
+        s.last_progress_height = 100;
+        s.blocks_height = 100;
+        s.headers_height = 100;
+        s.best_peer_height = 50;
+        assert!(roundtrip(&s).is_ok());
+    }
+
+    #[test]
+    fn headers_above_best_peer_accepted() {
+        // Legitimate: the peer chain grew; headers/blocks may exceed the initial
+        // best_peer_height claim. best_peer_height carries no ordering invariant.
+        let mut s = valid_snapshot();
+        s.best_peer_height = 25;
+        s.headers_height = 30;
+        s.blocks_height = 28;
+        s.last_progress_height = 28;
+        assert!(roundtrip(&s).is_ok());
+    }
+
+    #[test]
+    fn blocks_above_headers_rejected() {
+        let mut s = valid_snapshot();
+        s.blocks_height = 15; // > headers_height (14)
+        let err = roundtrip(&s).expect_err("must reject blocks > headers");
+        assert!(matches!(err, DomError::Malformed(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn last_progress_above_blocks_rejected() {
+        let mut s = valid_snapshot();
+        s.last_progress_height = 13; // > blocks_height (12)
+        let err = roundtrip(&s).expect_err("must reject last_progress > blocks");
+        assert!(matches!(err, DomError::Malformed(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn start_above_last_progress_rejected() {
+        let mut s = valid_snapshot();
+        s.start_height = 13; // > last_progress_height (12)
+        let err = roundtrip(&s).expect_err("must reject start > last_progress");
+        assert!(matches!(err, DomError::Malformed(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn retry_attempts_over_max_rejected() {
+        let mut s = valid_snapshot();
+        s.retry_attempts = 255; // > MAX_IBD_RETRY_ATTEMPTS
+        let err = roundtrip(&s).expect_err("must reject retry_attempts > max");
+        assert!(matches!(err, DomError::Malformed(_)), "got: {err:?}");
+    }
 
     #[test]
     fn ibd_complete_when_caught_up() {
