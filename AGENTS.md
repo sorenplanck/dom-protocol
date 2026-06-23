@@ -52,3 +52,35 @@ Stop and report instead of patching if:
 - A validation failure appears unrelated to the requested scope and could indicate baseline corruption.
 - You cannot distinguish between expected protocol behavior and a security flaw.
 
+## dom-shield: método de construção de testes (locked 2026-06-22)
+
+O objetivo do dom-shield é CONSTRUIR OS TESTES que descobrem bugs ao rodar — não auditar-e-corrigir à mão. O escudo é o auditor; nós construímos o auditor.
+
+Para CADA parte do código (crate/módulo/função atacável), o fluxo é:
+
+1. **ENUMERAR EXAUSTIVAMENTE os vetores de ataque** — NÃO "achar o bug". Listar TODA forma de quebrar/atacar a parte, com duas lentes:
+   - Lente A (bug-por-função): panic/crash, resultado incorreto/não-conformidade com spec, não-determinismo, maleabilidade, DoS/amplificação, overflow.
+   - Lente B (Lazarus Group / APT de cripto): extração de chave (zeroização de TODOS os intermediários, não só campos), previsão (entropia/CSPRNG), side-channel (toda op sobre bytes secretos não constant-time), supply-chain (procedência de cada dep), cross-impl diferencial (versões derivam idêntico?).
+
+2. **UM TESTE POR VETOR.** Se a parte tem N vetores distintos, ela tem N testes. Não menos (sem porta descoberta), não mais (sem teatro). O número de testes = número de vetores de ataque.
+
+3. **TÉCNICA CERTA POR VETOR** — escolher a adequada àquela porta, não uma default:
+   - corretude/conformância → known-answer vectors (KAV) contra spec/referência externa
+   - panic/crash/OOB → fuzz (cargo-fuzz)
+   - invariante/propriedade → proptest
+   - estado persistido corrompido → teste de corrupção dirigida
+   - side-channel → teste de timing (dudect) / review estático
+   - divergência entre implementações → harness diferencial (XDIFF)
+   - supply-chain → cargo-deny/cargo-audit
+   - DoS-amplificação → fuzz + assert de limite, ou análise se não há multiplicador
+
+4. **ANTI-TEATRO:** um teste só se justifica se o vetor é genuinamente atacável. Provar por análise que um vetor NÃO é explorável (bounded por construção, fonte fora do threat model) vale tanto quanto escrever o teste — registrar com justificativa, sem teste de teatro.
+
+5. **ESCOPO:** toda superfície atacável entra (incl. funds-safety/cripto rotulada como wallet). Só tooling genuinamente não-atacável (cli, test-runners) fica fora. Privacy/de-anon (I4) deprioritizado por estar fora do threat model crítico, não por ser não-atacável.
+
+6. **RITUAL POR TESTE:** criar no dom-protocol (Parte A) → registrar no dom-shield COVERAGE.md + run-audit.sh se fuzz (Parte B) → commit atômico (Soren Planck, sem trailers). Push é decisão humana após verificação OPSEC.
+
+7. **CONSTRUIR TESTE ≠ CORRIGIR BUG.** Construir o teste é seguro (read-only sobre comportamento). Corrigir o que o teste expõe é tarefa separada e PRECISA DECISÃO HUMANA quando toca consenso/derivação de chave/formato. O escudo descobre; a correção é fila à parte.
+
+**Exemplo de referência — dom-wallet-keys:** 41 vetores de ataque distintos enumerados (Lente A: conformância BIP-32, redução modular, panic em seed/path, blinding/máscaras; Lente B: zeroização, entropia, side-channel, supply-chain, cross-impl v1↔v2). 41 vetores = ~41 testes. É a escala real de cobrir uma parte direito.
+
