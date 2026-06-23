@@ -197,6 +197,12 @@ impl ExtendedPrivKey {
     pub fn key_bytes(&self) -> &[u8; 32] {
         &self.key
     }
+
+    /// Get the 32-byte chain code (BIP-32). Exposed for HD interop checks
+    /// (e.g. validating derivation against external BIP-32 test vectors).
+    pub fn chain_code(&self) -> &[u8; 32] {
+        &self.chain_code
+    }
 }
 
 #[cfg(test)]
@@ -205,68 +211,6 @@ mod tests {
 
     fn test_seed() -> Vec<u8> {
         vec![0x5eu8; 64]
-    }
-
-    // ── BIP-32 conformance KAV (shield) ───────────────────────────────────
-    // Known-answer vectors from the official BIP-0032 spec, Test Vector 1
-    // (seed 000102030405060708090a0b0c0d0e0f). Validates DOM HD derivation
-    // against the official BIP-0032 test vectors. Must PASS — proves DOM keys
-    // are recoverable by ANY standard BIP-32 wallet (full interop).
-    //
-    // Expected values are decoded from the spec's official xprv strings (an
-    // external source), not from DOM's own output.
-
-    fn hex_bytes(s: &str) -> Vec<u8> {
-        (0..s.len() / 2)
-            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).expect("valid hex"))
-            .collect()
-    }
-
-    fn hex32(s: &str) -> [u8; 32] {
-        let v = hex_bytes(s);
-        assert_eq!(v.len(), 32, "expected 32-byte hex");
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&v);
-        out
-    }
-
-    #[test]
-    fn test_bip32_vector1_master_key() {
-        let seed = hex_bytes("000102030405060708090a0b0c0d0e0f");
-        let master = ExtendedPrivKey::from_seed(&seed).expect("master from seed");
-        let expected_key =
-            hex32("e8f32e723decf4051aefac8e2c93c9c5b214313817cdb01a1494b917c8436b35");
-        let expected_chain_code =
-            hex32("873dff81c02f525623fd1fe5167eac3a55a049de3d314bb42ee227ffed37d508");
-        assert_eq!(
-            *master.key_bytes(),
-            expected_key,
-            "master private key must match BIP-32 Test Vector 1"
-        );
-        assert_eq!(
-            master.chain_code, expected_chain_code,
-            "master chain code must match BIP-32 Test Vector 1"
-        );
-    }
-
-    #[test]
-    fn test_bip32_vector1_derive_hardened() {
-        let seed = hex_bytes("000102030405060708090a0b0c0d0e0f");
-        let master = ExtendedPrivKey::from_seed(&seed).expect("master from seed");
-        let child = master.derive_path("m/0'").expect("derive m/0'");
-        let expected_key =
-            hex32("edb2e14f9ee77d26dd93b4ecede8d16ed408ce149b6cd80b0715a2d911a0afea");
-        let expected_chain_code =
-            hex32("47fdacbd0f1097043b78c63c20c34ef4ed9a111d980047ad16282c7ae6236141");
-        assert_eq!(
-            *child.key_bytes(),
-            expected_key,
-            "m/0' private key must match BIP-32 Test Vector 1"
-        );
-        assert_eq!(
-            child.chain_code, expected_chain_code,
-            "m/0' chain code must match BIP-32 Test Vector 1"
-        );
     }
 
     #[test]
