@@ -14,3 +14,5 @@ subtle.workspace    = true
 hex.workspace       = true
 
 [dev-dependencies]
+# F4-equivalent algebraic-invariant property test (tests/address_roundtrip_proptest.rs).
+proptest.workspace = true
