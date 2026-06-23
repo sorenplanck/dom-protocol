@@ -82,57 +82,57 @@ At the end of each task, Claude must report:
 5. whether unrelated files were preserved;
 6. whether commit/push occurred.
 
-## dom-shield: método de construção de testes (locked 2026-06-22)
+## dom-shield: test-construction method (locked 2026-06-22)
 
-O objetivo do dom-shield é CONSTRUIR OS TESTES que descobrem bugs ao rodar — não
-auditar-e-corrigir à mão. O escudo é o auditor; nós construímos o auditor.
+The goal of dom-shield is to BUILD THE TESTS that discover bugs by running — not
+to audit-and-fix by hand. The shield is the auditor; we build the auditor.
 
-Para CADA parte do código (crate/módulo/função atacável), o fluxo é:
+For EACH part of the code (attackable crate/module/function), the flow is:
 
-1. **ENUMERAR EXAUSTIVAMENTE os vetores de ataque** — NÃO "achar o bug". Listar
-   TODA forma de quebrar/atacar a parte, com duas lentes:
-   - Lente A (bug-por-função): panic/crash, resultado incorreto/não-conformidade
-     com spec, não-determinismo, maleabilidade, DoS/amplificação, overflow.
-   - Lente B (Lazarus Group / APT de cripto): extração de chave (zeroização de
-     TODOS os intermediários, não só campos), previsão (entropia/CSPRNG),
-     side-channel (toda op sobre bytes secretos não constant-time), supply-chain
-     (procedência de cada dep), cross-impl diferencial (versões derivam idêntico?).
+1. **EXHAUSTIVELY ENUMERATE the attack vectors** — NOT "find the bug". List EVERY
+   way to break/attack the part, through two lenses:
+   - Lens A (bug-per-function): panic/crash, incorrect result / non-conformance
+     with spec, non-determinism, malleability, DoS/amplification, overflow.
+   - Lens B (Lazarus Group / crypto APT): key extraction (zeroization of ALL
+     intermediates, not just fields), prediction (entropy/CSPRNG), side-channel
+     (every op over secret bytes non constant-time), supply-chain (provenance of
+     each dep), cross-impl differential (do versions derive identically?).
 
-2. **UM TESTE POR VETOR.** Se a parte tem N vetores distintos, ela tem N testes.
-   Não menos (sem porta descoberta), não mais (sem teatro). O número de testes =
-   número de vetores de ataque.
+2. **ONE TEST PER VECTOR.** If the part has N distinct vectors, it has N tests.
+   No fewer (no uncovered door), no more (no theater). The number of tests =
+   the number of attack vectors.
 
-3. **TÉCNICA CERTA POR VETOR** — escolher a adequada àquela porta, não uma default:
-   - corretude/conformância → known-answer vectors (KAV) contra spec/referência externa
+3. **RIGHT TECHNIQUE PER VECTOR** — choose the one fit for that door, not a default:
+   - correctness/conformance → known-answer vectors (KAV) against spec/external reference
    - panic/crash/OOB → fuzz (cargo-fuzz)
-   - invariante/propriedade → proptest
-   - estado persistido corrompido → teste de corrupção dirigida
-   - side-channel → teste de timing (dudect) / review estático
-   - divergência entre implementações → harness diferencial (XDIFF)
+   - invariant/property → proptest
+   - corrupted persisted state → directed-corruption test
+   - side-channel → timing test (dudect) / static review
+   - divergence between implementations → differential harness (XDIFF)
    - supply-chain → cargo-deny/cargo-audit
-   - DoS-amplificação → fuzz + assert de limite, ou análise se não há multiplicador
+   - DoS-amplification → fuzz + resource-limit assert, or analysis if there is no multiplier
 
-4. **ANTI-TEATRO:** um teste só se justifica se o vetor é genuinamente atacável.
-   Provar por análise que um vetor NÃO é explorável (bounded por construção, fonte
-   fora do threat model) vale tanto quanto escrever o teste — registrar com
-   justificativa, sem teste de teatro.
+4. **ANTI-THEATER:** a test is justified only if the vector is genuinely
+   attackable. Proving by analysis that a vector is NOT exploitable (bounded by
+   construction, source outside the threat model) is worth as much as writing the
+   test — record it with justification, no theater test.
 
-5. **ESCOPO:** toda superfície atacável entra (incl. funds-safety/cripto rotulada
-   como wallet). Só tooling genuinamente não-atacável (cli, test-runners) fica fora.
-   Privacy/de-anon (I4) deprioritizado por estar fora do threat model crítico, não
-   por ser não-atacável.
+5. **SCOPE:** every attackable surface is in (incl. funds-safety/crypto labeled
+   as wallet). Only genuinely non-attackable tooling (cli, test-runners) stays out.
+   Privacy/de-anon (I4) is deprioritized for being outside the critical threat
+   model, not for being non-attackable.
 
-6. **RITUAL POR TESTE:** criar no dom-protocol (Parte A) → registrar no dom-shield
-   COVERAGE.md + run-audit.sh se fuzz (Parte B) → commit atômico (Soren Planck, sem
-   trailers). Push é decisão humana após verificação OPSEC.
+6. **PER-TEST RITUAL:** create in dom-protocol (Part A) → register in dom-shield
+   COVERAGE.md + run-audit.sh if fuzz (Part B) → atomic commit (Soren Planck, no
+   trailers). Push is a human decision after OPSEC verification.
 
-7. **CONSTRUIR TESTE ≠ CORRIGIR BUG.** Construir o teste é seguro (read-only sobre
-   comportamento). Corrigir o que o teste expõe é tarefa separada e PRECISA DECISÃO
-   HUMANA quando toca consenso/derivação de chave/formato. O escudo descobre; a
-   correção é fila à parte.
+7. **BUILDING A TEST ≠ FIXING A BUG.** Building the test is safe (read-only over
+   behavior). Fixing what the test exposes is a separate task and REQUIRES HUMAN
+   DECISION when it touches consensus/key-derivation/format. The shield discovers;
+   the fix is a separate queue.
 
-**Exemplo de referência — dom-wallet-keys:** 41 vetores de ataque distintos
-enumerados (Lente A: conformância BIP-32, redução modular, panic em seed/path,
-blinding/máscaras; Lente B: zeroização, entropia, side-channel, supply-chain,
-cross-impl v1↔v2). 41 vetores = ~41 testes. É a escala real de cobrir uma parte
-direito.
+**Reference example — dom-wallet-keys:** 41 distinct attack vectors enumerated
+(Lens A: BIP-32 conformance, modular reduction, panic on seed/path,
+blinding/masks; Lens B: zeroization, entropy, side-channel, supply-chain,
+cross-impl v1↔v2). 41 vectors = ~41 tests. That is the real scale of covering a
+part properly.
