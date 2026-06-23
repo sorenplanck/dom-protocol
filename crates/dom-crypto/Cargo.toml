@@ -27,6 +27,8 @@ rand.workspace       = true
 [dev-dependencies]
 hex.workspace = true
 rand.workspace = true
+# F4 algebraic-invariant property tests (tests/algebraic_proptest.rs).
+proptest.workspace = true
 # AUDIT-002 is_square equivalence proof companion (test-only): exact big-int
 # exponent arithmetic for the addition-chain / Euler checks, and the real k256
 # field oracle. k256 is also a normal dependency; repeating it here with the
