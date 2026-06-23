@@ -504,6 +504,43 @@ mod tests {
     const MATRIX_VALUES: [u64; 4] = [1, 42, 1_000_000, 4_503_599_627_370_495]; // last = 2^52 - 1
     const TEST_BLIND: [u8; 32] = [0x11u8; 32];
 
+    /// PROBE [F6-A] — does bp2 `bp_verify` enforce the MAX_PROVABLE_VALUE (2^52-1)
+    /// ceiling at VERIFY time? Borromean `bulletproof::verify` does (R-07); this
+    /// module's `bp_verify` only size-gates + FFI-verifies. We mint a standard
+    /// Bulletproof of value > MAX_PROVABLE_VALUE via the private `prove_raw`
+    /// (bypassing the cap `bp_prove` enforces) and assert the DEFENSE: such a proof
+    /// must be REJECTED (Ok(false) | Err). If it verifies Ok(true), that is a real
+    /// verify-time inflation path.
+    ///
+    /// CONFIRMED 2026-06-23 (by execution): bp_verify returned Ok(true) for
+    /// value = 2^52 (MAX_PROVABLE_VALUE + 1) => FIX-014 (CRITICAL inflation, see
+    /// dom-shield reports/FIX-QUEUE.md).
+    ///
+    // RED until FIX-014: bp_verify lacks the MAX_PROVABLE_VALUE ceiling that
+    // borromean verify has. This test asserts the correct DEFENSE and fails until
+    // the bound is added. DO NOT #[ignore] — the red is the reminder.
+    #[test]
+    fn probe_bp2_verify_rejects_value_above_max_provable() {
+        let backend = backend();
+        let h_dom = h_dom_internal(backend).expect("h_dom");
+        let value = MAX_PROVABLE_VALUE + 1; // 2^52 — one above the ceiling
+        // Mint commitment + proof for the over-cap value via the raw FFI path,
+        // bypassing the MAX_PROVABLE_VALUE check that bp_prove imposes.
+        let zkp = commit_zkp(backend, value, &TEST_BLIND, &h_dom).expect("commit_zkp");
+        let sec1 = zkp_to_sec1(&zkp).expect("zkp_to_sec1");
+        let proof = prove_raw(backend, value, &TEST_BLIND, &h_dom).expect("prove_raw");
+        assert_eq!(proof.len(), SINGLE_BULLETPROOF_SIZE, "raw proof must be 675 bytes");
+
+        let result = bp_verify(&sec1, &proof);
+        assert!(
+            matches!(result, Ok(false) | Err(_)),
+            "INFLATION: bp_verify accepted a proof of value {} > MAX_PROVABLE_VALUE {} => {:?}",
+            value,
+            MAX_PROVABLE_VALUE,
+            result
+        );
+    }
+
     /// DS-001 regression: `bp_verify` must reject any proof whose length is not
     /// EXACTLY `SINGLE_BULLETPROOF_SIZE` (675) BEFORE any FFI call on the proof —
     /// closing the SEGV path (the reproducer was a 651-byte proof that reached
