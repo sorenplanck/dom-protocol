@@ -16,3 +16,10 @@ hex.workspace       = true
 [dev-dependencies]
 # F4-equivalent algebraic-invariant property test (tests/address_roundtrip_proptest.rs).
 proptest.workspace = true
+# XDIFF reference implementation: an independent BIP-173/BIP-350 bech32m codec.
+# Used ONLY by dom-shield tests to differentially check DOM's hand-rolled bech32m
+# against an external reference over random payloads (divergence =
+# address-misdirection / funds-loss surface). Driven from the `shield_bech32m`
+# #[cfg(test)] module in src/address.rs (needs the private codec) and from the
+# tests/address_kav_negative.rs envelope KAVs.
+bech32 = "0.12"

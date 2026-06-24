@@ -55,3 +55,6 @@ tempfile = "3.10"
 # servers to exercise timeout / malformed-response / connection-reset
 # failure modes. Kept dev-only so production builds don't link tokio.
 tokio    = { version = "1", features = ["rt", "macros", "net", "io-util", "time", "sync"] }
+# dom-shield Onda 2: property-based invariants (coin selection, arithmetic
+# asymmetry, balance aggregation). Dev-only.
+proptest.workspace = true

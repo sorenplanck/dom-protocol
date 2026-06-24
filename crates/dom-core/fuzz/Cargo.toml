@@ -1,0 +1,30 @@
+[package]
+name = "dom-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-core]
+path = ".."
+
+[[bin]]
+name = "fuzz_address_decode"
+path = "fuzz_targets/fuzz_address_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_address_roundtrip"
+path = "fuzz_targets/fuzz_address_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

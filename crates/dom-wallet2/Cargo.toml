@@ -40,3 +40,7 @@ hex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+proptest.workspace = true
+# dom-shield XDIFF (v1<->v2 blinding byte-identity) reference path + secret wrappers.
+dom-wallet-keys.workspace = true
+zeroize.workspace = true
