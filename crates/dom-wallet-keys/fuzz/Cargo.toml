@@ -27,4 +27,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_derive_path_deep"
+path = "fuzz_targets/fuzz_derive_path_deep.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
