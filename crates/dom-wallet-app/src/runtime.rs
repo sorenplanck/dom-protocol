@@ -2178,3 +2178,376 @@ mod tests {
         assert!(exported.contains("network_mode=unconfigured"));
     }
 }
+
+// ===========================================================================
+// dom-shield test families for dom-wallet-app (Soren Planck).
+// These cover the *private* untrusted-input / secret-handling / fund-decision
+// surfaces of runtime.rs that integration tests in tests/*.rs cannot reach.
+// Production logic is untouched; these modules only exercise it (#[cfg(test)]).
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Family A — redact_secret_text (Lens B: secret leakage in diagnostics export).
+// The diagnostic log redacts before persisting/exporting. A leak here writes a
+// user's wallet password / seed phrase / RPC credentials to a plaintext file
+// the user may share when reporting a bug. KAV against expected redaction.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod shield_redact_secret_text {
+    use super::redact_secret_text;
+
+    // [x] Single-value key=value pairs ARE redacted (regression pin of the
+    // behavior the diagnostic-log tests already rely on).
+    #[test]
+    fn single_value_secrets_are_redacted() {
+        for input in [
+            "password=hunter2",
+            "wallet_password=open-sesame",
+            "private_key=deadbeef",
+            "secret_key=cafebabe",
+            "token=rpc-token",
+            "seed=oneword",
+        ] {
+            let out = redact_secret_text(input);
+            assert!(
+                out.contains("<redacted>"),
+                "no redaction in {input:?}: {out}"
+            );
+            let secret = input.split(['=', ':']).nth(1).unwrap();
+            assert!(!out.contains(secret), "secret leaked from {input:?}: {out}");
+        }
+    }
+
+    // [x] bearer / Authorization header forms redact the following token(s).
+    #[test]
+    fn bearer_and_authorization_token_redacted() {
+        let out = redact_secret_text("Authorization: Bearer super-secret-token");
+        assert!(
+            !out.contains("super-secret-token"),
+            "auth token leaked: {out}"
+        );
+    }
+
+    // RED / [ignore] — FINDING (NOVO): a multi-word seed phrase is NOT fully
+    // redacted. `redact_secret_text` only blanks the single whitespace token
+    // that carries the `seed=`/`seed_phrase=` prefix; the remaining words of a
+    // BIP-39 mnemonic stay in cleartext and reach the exported diagnostics file.
+    // Empirically: "seed=w1 w2 ... w24" -> "seed=<redacted> w2 ... w24".
+    // This test asserts the SECURE behavior and currently fails; un-ignore it
+    // to prove the fix. Confirmed by probe and by the diagnostic-log path
+    // (DiagnosticLog::append -> redact_secret_text -> export_text).
+    #[test]
+    #[ignore = "FINDING(redact): 24-word seed phrase leaks words 2..=24 in cleartext; assertion documents the required fix"]
+    fn multiword_seed_phrase_is_fully_redacted() {
+        let words: Vec<String> = (1..=24).map(|i| format!("mnemonic{i:02}")).collect();
+        let input = format!("seed={}", words.join(" "));
+        let out = redact_secret_text(&input);
+        for w in &words {
+            assert!(!out.contains(w.as_str()), "seed word {w} leaked: {out}");
+        }
+    }
+
+    // RED / [ignore] — FINDING (NOVO): same leak via the `seed_phrase` key.
+    #[test]
+    #[ignore = "FINDING(redact): seed_phrase=<w1> <w2> <w3> leaks w2,w3 in cleartext"]
+    fn seed_phrase_key_multiword_is_fully_redacted() {
+        let out = redact_secret_text("seed_phrase=alphaword betaword gammaword");
+        assert!(!out.contains("betaword"), "seed word leaked: {out}");
+        assert!(!out.contains("gammaword"), "seed word leaked: {out}");
+    }
+
+    // RED / [ignore] — FINDING (NOVO): credentials embedded in a node_url are
+    // NOT redacted. node_url=http://user:pass@host matches none of the key
+    // prefixes, so the userinfo (incl. the password) is emitted verbatim.
+    // The wallet's node_url is user-editable and flows into network snapshots.
+    #[test]
+    #[ignore = "FINDING(redact): http://user:pass@host userinfo (password) emitted verbatim; redactor never inspects URL userinfo"]
+    fn credentials_in_node_url_are_redacted() {
+        let out = redact_secret_text("node_url=http://alice:hunter2@127.0.0.1:33369");
+        assert!(!out.contains("hunter2"), "URL password leaked: {out}");
+    }
+
+    // [x] panic-safety: arbitrary / pathological whitespace and unicode must
+    // never panic and must terminate.
+    #[test]
+    fn arbitrary_text_never_panics() {
+        let big = "a ".repeat(10_000);
+        for s in [
+            "",
+            " ",
+            "\t\n\r",
+            "=",
+            ":",
+            "seed=",
+            "bearer",
+            "authorization:",
+            "==::==",
+            "\u{1f600} seed=x token=y",
+            big.as_str(),
+        ] {
+            let _ = redact_secret_text(s);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Family B — validate_payment_request (KAV, fund-correctness, HIGHEST VALUE).
+// This is the redirect-funds gate: it cross-checks the counterparty-supplied
+// address against the commitment, the network, and the Pedersen commitment of
+// (amount, blinding). A hole here lets a malicious payment request steer funds
+// to an attacker output or across networks. Each vector MUST be rejected.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod shield_validate_payment_request {
+    use super::{parse_payment_request, validate_payment_request, ParsedPaymentRequest};
+    use dom_core::Address;
+    use dom_crypto::pedersen::Commitment;
+    use dom_crypto::BlindingFactor;
+    use dom_wallet::Network;
+
+    fn honest(amount: u64, network: Network) -> ParsedPaymentRequest {
+        let blinding = BlindingFactor::from_bytes([9u8; 32]).unwrap();
+        let commitment = Commitment::commit(amount, &blinding);
+        let is_mainnet = matches!(network, Network::Mainnet);
+        ParsedPaymentRequest {
+            network,
+            amount,
+            address: Address::new(*commitment.as_bytes(), is_mainnet).encode(),
+            commitment_hex: hex::encode(commitment.as_bytes()),
+            blinding_hex: hex::encode(blinding.as_bytes()),
+        }
+    }
+
+    // [x] An honest, internally-consistent request validates.
+    #[test]
+    fn honest_request_is_accepted() {
+        validate_payment_request(&honest(123, Network::Regtest)).expect("honest must pass");
+    }
+
+    // [x] VECTOR: address payload != commitment field (attacker swaps the
+    // displayed address to one they control while showing victim's commitment).
+    #[test]
+    fn mismatched_address_commitment_is_rejected() {
+        let mut req = honest(123, Network::Regtest);
+        let attacker_blinding = BlindingFactor::from_bytes([1u8; 32]).unwrap();
+        let attacker_commitment = Commitment::commit(123, &attacker_blinding);
+        // Address now encodes the ATTACKER commitment, commitment field stays victim's.
+        req.address = Address::new(*attacker_commitment.as_bytes(), false).encode();
+        let err = validate_payment_request(&req).expect_err("address!=commitment must reject");
+        assert!(
+            err.to_string()
+                .contains("address payload does not match commitment"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // [x] VECTOR: wrong network (mainnet address presented for a regtest/testnet
+    // request, or vice versa) — cross-network confusion.
+    #[test]
+    fn wrong_network_is_rejected() {
+        // Honest regtest request, but address minted as mainnet.
+        let blinding = BlindingFactor::from_bytes([9u8; 32]).unwrap();
+        let commitment = Commitment::commit(123, &blinding);
+        let req = ParsedPaymentRequest {
+            network: Network::Regtest,
+            amount: 123,
+            address: Address::new(*commitment.as_bytes(), /*is_mainnet=*/ true).encode(),
+            commitment_hex: hex::encode(commitment.as_bytes()),
+            blinding_hex: hex::encode(blinding.as_bytes()),
+        };
+        let err = validate_payment_request(&req).expect_err("network mismatch must reject");
+        assert!(
+            err.to_string().contains("address network does not match"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // [x] VECTOR: commitment != commit(amount, blinding) — the displayed amount
+    // does not bind to the commitment (over/under-payment or fake amount).
+    #[test]
+    fn commitment_not_binding_amount_is_rejected() {
+        let mut req = honest(123, Network::Regtest);
+        // Keep address consistent with commitment, but lie about the amount.
+        req.amount = 124;
+        let err = validate_payment_request(&req).expect_err("amount mismatch must reject");
+        assert!(
+            err.to_string().contains("commitment does not match amount"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // [x] VECTOR: wrong blinding (same amount, different blinding) -> commitment
+    // no longer matches; another form of the binding check.
+    #[test]
+    fn wrong_blinding_is_rejected() {
+        let mut req = honest(123, Network::Regtest);
+        let other = BlindingFactor::from_bytes([2u8; 32]).unwrap();
+        req.blinding_hex = hex::encode(other.as_bytes());
+        let err = validate_payment_request(&req).expect_err("wrong blinding must reject");
+        assert!(
+            err.to_string().contains("commitment does not match amount"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // [x] VECTOR: undecodable address -> rejected (not a panic).
+    #[test]
+    fn undecodable_address_is_rejected() {
+        let mut req = honest(123, Network::Regtest);
+        req.address = "not-a-valid-bech32-address".to_string();
+        let err = validate_payment_request(&req).expect_err("bad address must reject");
+        assert!(
+            err.to_string().contains("address decode"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // [x] End-to-end through the parser: a full hostile request text whose
+    // address has been swapped to the attacker's must be rejected by parse
+    // (which calls validate). Defends the real ingestion path.
+    #[test]
+    fn parse_rejects_address_swapped_request_text() {
+        let req = honest(500, Network::Regtest);
+        let attacker_blinding = BlindingFactor::from_bytes([7u8; 32]).unwrap();
+        let attacker_commitment = Commitment::commit(500, &attacker_blinding);
+        let attacker_addr = Address::new(*attacker_commitment.as_bytes(), false).encode();
+        let text = format!(
+            "DOM-PAYMENT-REQUEST-V1\nnetwork=regtest\namount_noms=500\naddress={}\ncommitment={}\nblinding={}",
+            attacker_addr, req.commitment_hex, req.blinding_hex
+        );
+        let err = parse_payment_request(&text).expect_err("swapped address must reject");
+        assert!(
+            err.to_string()
+                .contains("address payload does not match commitment"),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Family C — parse_payment_request robustness (panic/DoS on counterparty text).
+// The request text is fully attacker-controlled (pasted from a counterparty).
+// It must never panic and must not be a DoS multiplier on hostile input.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod shield_parse_payment_request {
+    use super::parse_payment_request;
+    use proptest::prelude::*;
+
+    // [x] Directed adversarial vectors: each must return Err, never panic.
+    #[test]
+    fn adversarial_vectors_return_err_not_panic() {
+        let overflow = "DOM-PAYMENT-REQUEST-V1\namount_noms=99999999999999999999999999";
+        let cases = [
+            "",                                                         // empty
+            "\n\n\n",                                                   // only blank lines
+            "WRONG-HEADER",                                             // bad header
+            "DOM-PAYMENT-REQUEST-V1", // header only, missing fields
+            "DOM-PAYMENT-REQUEST-V1\nno_equals_line", // line without '='
+            "DOM-PAYMENT-REQUEST-V1\nnetwork=regtest\nnetwork=mainnet", // dup key
+            "DOM-PAYMENT-REQUEST-V1\nunknown_field=x", // unknown field
+            "DOM-PAYMENT-REQUEST-V1\namount_noms=notanumber", // bad u64
+            overflow,                 // u64 overflow
+            "DOM-PAYMENT-REQUEST-V1\nnetwork=narnia", // bad network
+            "DOM-PAYMENT-REQUEST-V1\ncommitment=zz", // non-hex commitment
+        ];
+        for c in cases {
+            let _ = parse_payment_request(c); // must be Ok or Err, never panic
+        }
+    }
+
+    // [x] DoS surface: a huge number of duplicate / junk lines must not cause a
+    // panic and must terminate quickly (no quadratic blowup). The parser keeps
+    // only the last value per key, so memory stays O(fields), not O(lines).
+    #[test]
+    fn massive_duplicate_lines_do_not_panic_or_blow_up() {
+        let mut text = String::from("DOM-PAYMENT-REQUEST-V1\n");
+        for _ in 0..200_000 {
+            text.push_str("network=regtest\n");
+        }
+        // Missing other fields -> Err, but the point is: no panic, bounded work.
+        let _ = parse_payment_request(&text);
+    }
+
+    proptest! {
+        // [x] property: arbitrary bytes interpreted as UTF-8 text never panic.
+        #![proptest_config(ProptestConfig::with_cases(512))]
+        #[test]
+        fn arbitrary_text_never_panics(s in ".*") {
+            let _ = parse_payment_request(&s);
+        }
+
+        // [x] property: arbitrary KEY=VALUE lines under the real header never panic.
+        #[test]
+        fn arbitrary_keyvalue_lines_never_panic(
+            lines in proptest::collection::vec("[^\n]{0,40}=[^\n]{0,40}", 0..50)
+        ) {
+            let text = format!("DOM-PAYMENT-REQUEST-V1\n{}", lines.join("\n"));
+            let _ = parse_payment_request(&text);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Family D — hex parsers KAV-negativo (parse_commitment_hex / parse_blinding_hex
+// / parse_hash_hex / decode_pong_nonce). Malformed input must yield a clean Err,
+// never a panic / OOB. These guard length and hex-charset on untrusted bytes.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod shield_hex_parsers {
+    use super::{decode_pong_nonce, parse_blinding_hex, parse_commitment_hex, parse_hash_hex};
+
+    #[test]
+    fn commitment_hex_negatives() {
+        let c32 = "00".repeat(32);
+        let c34 = "00".repeat(34);
+        let c67 = "0".repeat(67);
+        for bad in [
+            "",
+            "zz",
+            "00",
+            c32.as_str(),
+            c34.as_str(),
+            "0",
+            c67.as_str(),
+        ] {
+            assert!(parse_commitment_hex(bad).is_err(), "should reject {bad:?}");
+        }
+        // 33 bytes of valid hex is the only accepted length.
+        assert!(parse_commitment_hex(&"01".repeat(33)).is_ok());
+    }
+
+    #[test]
+    fn blinding_hex_negatives() {
+        let b31 = "00".repeat(31);
+        let b33 = "00".repeat(33);
+        for bad in ["", "zz", b31.as_str(), b33.as_str(), "abc"] {
+            assert!(parse_blinding_hex(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn hash_hex_negatives() {
+        let h31 = "00".repeat(31);
+        let h33 = "00".repeat(33);
+        for bad in ["", "zz", h31.as_str(), h33.as_str(), "ff"] {
+            assert!(parse_hash_hex(bad).is_err(), "should reject {bad:?}");
+        }
+        assert!(parse_hash_hex(&"ab".repeat(32)).is_ok());
+    }
+
+    #[test]
+    fn decode_pong_nonce_negatives_and_positive() {
+        // Wrong lengths must be a clean MalformedPong, never a panic.
+        for len in [0usize, 1, 7, 9, 16, 1024] {
+            let payload = vec![0u8; len];
+            assert!(
+                decode_pong_nonce(&payload).is_err(),
+                "len {len} should reject"
+            );
+        }
+        // Exactly 8 bytes decodes little-endian.
+        let nonce = decode_pong_nonce(&7u64.to_le_bytes()).expect("8 bytes ok");
+        assert_eq!(nonce, 7);
+    }
+}

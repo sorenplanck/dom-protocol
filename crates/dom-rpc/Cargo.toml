@@ -29,4 +29,6 @@ subtle.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"
+proptest.workspace = true
+tempfile = "3"
 

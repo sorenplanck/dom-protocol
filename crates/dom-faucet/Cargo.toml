@@ -21,3 +21,13 @@ tower-http.workspace = true
 thiserror.workspace = true
 hex.workspace      = true
 url                = "2.5"
+
+[features]
+# dom-shield: default-OFF probe that re-exports the private payment-request
+# parser for external fuzz/integration tests. Never enabled in production.
+shield-probe = []
+
+[dev-dependencies]
+proptest.workspace = true
+# enable the shield probe whenever this crate is built as a test target
+dom-faucet = { path = ".", features = ["shield-probe"] }

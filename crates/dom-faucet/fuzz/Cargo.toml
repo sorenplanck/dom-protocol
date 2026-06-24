@@ -1,0 +1,24 @@
+[package]
+name = "dom-faucet-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-faucet]
+path = ".."
+features = ["shield-probe"]
+
+[[bin]]
+name = "fuzz_payment_request"
+path = "fuzz_targets/fuzz_payment_request.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

@@ -5854,6 +5854,67 @@ mod tests {
         );
     }
 
+    // ── dom-shield: peer_violation_score substring-coupling fragility KAV ──────
+    //
+    // peer_violation_score routes severity by SUBSTRING-matching the DomError
+    // message text (`msg.contains("proof-of-work invalid")` etc). That couples
+    // node.rs ban severity to the exact wording produced by dom-consensus. If
+    // dom-consensus ever rewords a message (refactor, i18n, added context that
+    // drops the matched phrase), the high-severity arm silently stops firing and
+    // the error falls through to the generic PROTOCOL_VIOLATION (10) — quartering
+    // the intended INVALID_POW (50) / halving INVALID_SIGNATURE (25) penalty and
+    // letting an attacker force ~5x more expensive validations before a ban.
+    //
+    // These tests are the COUPLING CONTRACT: they pin the exact substrings the
+    // production matcher depends on, and demonstrate the silent-degradation
+    // failure mode of a near-miss wording. Finding recorded (the fix — replacing
+    // string matching with typed error variants — is a behaviour change and a
+    // human decision; not done here).
+
+    #[test]
+    fn shield_pow_severity_depends_on_exact_substring() {
+        // The production arm requires the literal phrase "proof-of-work invalid".
+        // A near-miss wording (no longer containing it) silently degrades to the
+        // generic PROTOCOL_VIOLATION instead of INVALID_POW.
+        let near_miss = DomError::Invalid("PoW check failed: hash above target".into());
+        assert_eq!(
+            peer_violation_score(&near_miss),
+            Some(ban_scores::PROTOCOL_VIOLATION),
+            "a reworded PoW error degrades silently to PROTOCOL_VIOLATION (coupling fragility)"
+        );
+        // Degradation magnitude: 5x weaker than intended.
+        assert_eq!(ban_scores::INVALID_POW, 50);
+        assert_eq!(ban_scores::PROTOCOL_VIOLATION, 10);
+    }
+
+    #[test]
+    fn shield_signature_severity_depends_on_exact_substring() {
+        let near_miss = DomError::Invalid("bad Schnorr sig on kernel 0".into());
+        assert_eq!(
+            peer_violation_score(&near_miss),
+            Some(ban_scores::PROTOCOL_VIOLATION),
+            "a reworded signature error degrades silently to PROTOCOL_VIOLATION"
+        );
+        assert_eq!(ban_scores::INVALID_SIGNATURE, 25);
+    }
+
+    #[test]
+    fn shield_substring_match_is_position_independent_and_overmatches() {
+        // Substring matching also OVER-matches: any Invalid error whose text
+        // happens to contain the phrase anywhere is scored as INVALID_POW, even
+        // if the phrase is incidental (e.g. quoted in a wrapper message). This
+        // pins that behaviour so a future tightening to typed variants is a
+        // deliberate, reviewed change.
+        let incidental = DomError::Invalid(
+            "rejected child block citing parent 'proof-of-work invalid' marker".into(),
+        );
+        assert_eq!(
+            peer_violation_score(&incidental),
+            Some(ban_scores::INVALID_POW),
+            "substring match fires on incidental occurrences of the phrase (over-match)"
+        );
+    }
+
     #[test]
     fn address_flooding_maps_to_address_flooding_score() {
         assert_eq!(

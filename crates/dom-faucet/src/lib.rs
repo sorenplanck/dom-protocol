@@ -340,6 +340,25 @@ fn hex_encode(bytes: &[u8]) -> String {
     hex::encode(bytes)
 }
 
+// ---------------------------------------------------------------------------
+// dom-shield probe (default-off). Re-exports the otherwise-private untrusted
+// parser so external fuzz/integration tests can reach it WITHOUT changing any
+// production logic. Gated behind a feature that is never enabled in production
+// builds; with the feature off this compiles to nothing.
+// ---------------------------------------------------------------------------
+#[cfg(feature = "shield-probe")]
+#[doc(hidden)]
+pub mod shield_probe {
+    /// Probe over the private `parse_and_validate_payment_request`.
+    ///
+    /// Returns `Ok(())` if the request parses+validates, `Err(message)` otherwise.
+    /// Intentionally discards the parsed value: fuzz/KAV harnesses only need the
+    /// accept/reject decision and the (panic-free) behaviour.
+    pub fn parse_and_validate(request_text: &str, faucet_amount_noms: u64) -> Result<(), String> {
+        super::parse_and_validate_payment_request(request_text, faucet_amount_noms).map(|_| ())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

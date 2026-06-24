@@ -1,0 +1,56 @@
+[package]
+name = "dom-node-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-wire]
+path = "../../dom-wire"
+
+[dependencies.dom-chain]
+path = "../../dom-chain"
+
+[dependencies.dom-consensus]
+path = "../../dom-consensus"
+
+[dependencies.dom-crypto]
+path = "../../dom-crypto"
+
+[dependencies.dom-serialization]
+path = "../../dom-serialization"
+
+[[bin]]
+name = "fuzz_persisted_ibd_state"
+path = "fuzz_targets/fuzz_persisted_ibd_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_persisted_peer_rotation"
+path = "fuzz_targets/fuzz_persisted_peer_rotation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_persisted_peer_reputation"
+path = "fuzz_targets/fuzz_persisted_peer_reputation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_block_payload_dispatch"
+path = "fuzz_targets/fuzz_block_payload_dispatch.rs"
+test = false
+doc = false
+bench = false
