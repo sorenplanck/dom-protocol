@@ -23,3 +23,10 @@ rand.workspace = true
 zeroize.workspace = true
 # Errors.
 thiserror.workspace = true
+
+[dev-dependencies]
+# Shield test families: hex KAV decoding, SHA-256 byte-freeze digests,
+# property-based invariants.
+hex.workspace      = true
+sha2.workspace     = true
+proptest.workspace = true

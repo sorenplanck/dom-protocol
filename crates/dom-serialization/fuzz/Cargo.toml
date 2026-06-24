@@ -16,6 +16,9 @@ path = ".."
 [dependencies.dom-consensus]
 path = "../../dom-consensus"
 
+[dependencies.dom-core]
+path = "../../dom-core"
+
 [[bin]]
 name = "fuzz_block_deserialize"
 path = "fuzz_targets/fuzz_block_deserialize.rs"
@@ -33,6 +36,13 @@ bench = false
 [[bin]]
 name = "fuzz_block_header_deserialize"
 path = "fuzz_targets/fuzz_block_header_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_reader_primitives"
+path = "fuzz_targets/fuzz_reader_primitives.rs"
 test = false
 doc = false
 bench = false

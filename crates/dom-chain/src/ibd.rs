@@ -635,6 +635,17 @@ fn compute_hash(data: &[u8]) -> [u8; 32] {
     arr
 }
 
+/// dom-shield XDIFF probe (test-only): expose the otherwise-private IBD
+/// header-hash function so the chain_state XDIFF parity test can prove that the
+/// IBD path and the chain_state connect/validate path hash a header byte string
+/// identically. A divergence between the two would let an IBD-validated header
+/// resolve to a different block hash than the same header connected live —
+/// silently splitting duplicate-suppression and parent linkage.
+#[cfg(test)]
+pub(crate) fn compute_hash_probe(data: &[u8]) -> [u8; 32] {
+    compute_hash(data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

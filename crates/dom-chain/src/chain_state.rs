@@ -1981,3 +1981,51 @@ mod randomx_seed_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod xdiff_hash_parity_tests {
+    //! dom-shield XDIFF — the two private header-hash functions in this crate
+    //! MUST agree byte-for-byte. `chain_state::compute_block_hash` is used by
+    //! the live connect/validate path and `ibd::compute_hash` by the headers-
+    //! first IBD path. If they ever diverged (e.g. one switched digest, domain,
+    //! or input framing), an IBD-validated header would map to a different block
+    //! hash than the same header connected live: duplicate suppression, parent
+    //! linkage and reorg ancestry would silently split between the two paths.
+    use super::compute_block_hash;
+    use crate::ibd::compute_hash_probe;
+
+    fn check(bytes: &[u8]) {
+        assert_eq!(
+            compute_block_hash(bytes).as_bytes(),
+            &compute_hash_probe(bytes),
+            "ibd::compute_hash and chain_state::compute_block_hash diverged for input len {}",
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn empty_input_parity() {
+        check(&[]);
+    }
+
+    #[test]
+    fn header_sized_and_varied_inputs_parity() {
+        // A spread of lengths and byte patterns, including a realistic header
+        // length and adversarial all-zero / all-0xFF buffers.
+        check(&[0u8; 1]);
+        check(&[0xFFu8; 32]);
+        check(&[0xABu8; 200]);
+        let ramp: Vec<u8> = (0..=255u8).cycle().take(1024).collect();
+        check(&ramp);
+        let mut x = 0x9E3779B97F4A7C15u64;
+        let pseudo: Vec<u8> = (0..512)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect();
+        check(&pseudo);
+    }
+}

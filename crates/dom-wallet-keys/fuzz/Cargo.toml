@@ -1,0 +1,30 @@
+[package]
+name = "dom-wallet-keys-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-wallet-keys]
+path = ".."
+
+[[bin]]
+name = "fuzz_from_phrase"
+path = "fuzz_targets/fuzz_from_phrase.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_derive_path"
+path = "fuzz_targets/fuzz_derive_path.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

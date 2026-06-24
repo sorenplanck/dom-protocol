@@ -1,0 +1,42 @@
+[package]
+name = "dom-chain-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-chain]
+path = ".."
+
+[dependencies.dom-core]
+path = "../../dom-core"
+
+[dependencies.dom-store]
+path = "../../dom-store"
+
+[dependencies.dom-serialization]
+path = "../../dom-serialization"
+
+[dependencies.tempfile]
+version = "3.10"
+
+[[bin]]
+name = "fuzz_persisted_ibd_state_deserialize"
+path = "fuzz_targets/fuzz_persisted_ibd_state_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_validate_ibd_headers_batch"
+path = "fuzz_targets/fuzz_validate_ibd_headers_batch.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

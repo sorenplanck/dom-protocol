@@ -533,3 +533,184 @@ mod tests {
         );
     }
 }
+
+// ── dom-shield internal probes ───────────────────────────────────────────────
+//
+// These tests exercise PRIVATE arithmetic (`node_height`, `peak_positions`)
+// and a PRIVATE-field corruption (`nodes`) that is not reachable through the
+// public push/root surface. They live in-crate because the targeted surfaces
+// are crate-private by design. No production logic is modified.
+#[cfg(test)]
+mod shield_internal_probes {
+    use super::*;
+
+    // ── Clean-room references (independent of the production algorithm) ───────
+
+    /// Reference postorder height by repeated binary "peel": subtract the
+    /// size of the most-significant complete level (2^(msb-1) - 1) until
+    /// the position is all-ones, then height = msb - 1. Distinct in form
+    /// from `node_height`'s `jump_left` loop, so a shared bug is unlikely.
+    fn ref_height(mut pos: u64) -> u32 {
+        assert!(pos > 0);
+        let msb = |n: u64| -> u32 {
+            if n == 0 {
+                0
+            } else {
+                64 - n.leading_zeros()
+            }
+        };
+        let all_ones = |n: u64| -> bool { n != 0 && (n + 1).is_power_of_two() };
+        while !all_ones(pos) {
+            let m = msb(pos);
+            pos -= (1u64 << (m - 1)) - 1;
+        }
+        msb(pos) - 1
+    }
+
+    /// Reference peak positions from `leaf_count`'s binary popcount
+    /// decomposition: for each set bit (MSB→LSB) accumulate the subtree
+    /// node size (2*2^bit - 1) and record the running offset as the peak
+    /// position. Independent of `peak_positions`'s loop structure.
+    fn ref_peak_positions(n: u64) -> Vec<u64> {
+        if n == 0 {
+            return vec![];
+        }
+        let mut v = Vec::new();
+        let mut off = 0u64;
+        for bit in (0..64).rev() {
+            if (n >> bit) & 1 == 1 {
+                off += 2 * (1u64 << bit) - 1;
+                v.push(off);
+            }
+        }
+        v
+    }
+
+    // ── proptest-invariante: node_height vs reference (DOM-PMMR-001 class) ────
+
+    /// `node_height(pos)` must match the independent postorder reference
+    /// for every position in 1..=4096. DOM-PMMR-001 was an inflated
+    /// height at odd positions; this pins the whole table, not just 1..15.
+    #[test]
+    fn node_height_matches_reference_to_4096() {
+        for pos in 1u64..=4096 {
+            assert_eq!(
+                node_height(pos),
+                ref_height(pos),
+                "node_height({pos}) diverged from postorder reference"
+            );
+        }
+    }
+
+    /// Spot-check large positions far from the small table, including the
+    /// all-ones perfect-tree roots (2^k - 1) where height == k - 1.
+    #[test]
+    fn node_height_perfect_tree_roots() {
+        for k in 1u32..=40 {
+            let pos = (1u64 << k) - 1; // all-ones => perfect-tree root
+            assert_eq!(node_height(pos), k - 1, "all-ones pos={pos} height");
+            assert_eq!(node_height(pos), ref_height(pos));
+        }
+    }
+
+    // ── proptest-invariante: peak_positions vs binary popcount ───────────────
+
+    /// `peak_positions(n)` must equal the binary-popcount reference for
+    /// every n in 0..=4096. Also checks the count equals popcount(n) and
+    /// the positions are strictly increasing (left-to-right order).
+    #[test]
+    fn peak_positions_matches_popcount_reference_to_4096() {
+        for n in 0u64..=4096 {
+            let got = peak_positions(n);
+            let want = ref_peak_positions(n);
+            assert_eq!(got, want, "peak_positions({n}) diverged from reference");
+            assert_eq!(
+                got.len() as u32,
+                n.count_ones(),
+                "peak count must equal popcount({n})"
+            );
+            for w in got.windows(2) {
+                assert!(w[0] < w[1], "peak positions must be strictly increasing");
+            }
+        }
+    }
+
+    // ── directed-corruption / PROBE FIX-021 ──────────────────────────────────
+    //
+    // `root()` collects peak hashes with `filter_map(|p| self.get_node(p))`,
+    // which SILENTLY DROPS any peak whose node is missing instead of
+    // erroring. A fresh `Pmmr` built via `push` always has every peak
+    // present, so this is unreachable through the public API today.
+    // It becomes reachable the moment pruning (which removes nodes) is
+    // added. This probe constructs that future state directly via the
+    // crate-private `nodes` field and asserts the FAIL-SAFE behavior
+    // (root must NOT silently compute over a subset of peaks).
+    //
+    // EXPECTED OUTCOME: RED. The current code silently bags a SUBSET of
+    // peaks, producing a root that is indistinguishable from a smaller,
+    // legitimately-shaped PMMR — a forged-inclusion / hidden-history
+    // primitive once pruning exists. Recorded as FIX-021 (severity
+    // downgraded: not reachable until pruning lands). DO NOT FIX HERE.
+
+    /// FIX-021 probe — marked `#[ignore]` because it is a RED reproducer
+    /// for a latent (currently-unreachable) bug, not a passing guard.
+    /// Run explicitly with `cargo test -p dom-pmmr -- --ignored
+    /// fix021`. When this stops being RED (i.e. `root()` learns to
+    /// error/poison on a missing peak), remove the `#[ignore]`.
+    #[test]
+    #[ignore = "RED reproducer for FIX-021: root() silently drops a missing peak (latent, pruning-only)"]
+    fn fix021_root_silently_drops_missing_peak() {
+        // Build a 3-leaf PMMR: peaks at positions [3, 4] (a merged
+        // subtree at 3 and a lone leaf at 4).
+        let mut pmmr = Pmmr::new();
+        pmmr.push(b"a").unwrap();
+        pmmr.push(b"b").unwrap();
+        pmmr.push(b"c").unwrap();
+
+        let positions = peak_positions(pmmr.leaf_count());
+        assert_eq!(
+            positions,
+            vec![3, 4],
+            "precondition: 3-leaf peaks are [3,4]"
+        );
+
+        let full_root = pmmr.root();
+
+        // Simulate a pruned node: drop the LONE leaf peak at position 4.
+        // (Direct private-field manipulation — exactly the state a future
+        //  pruning pass would create; no public API can reach it today.)
+        let mut pruned = pmmr.clone();
+        pruned.nodes[4] = None;
+        assert!(pruned.get_node(4).is_none(), "peak 4 is now missing");
+
+        let pruned_root = pruned.root();
+
+        // FAIL-SAFE expectation: a PMMR that has lost a peak it still
+        // claims (leaf_count unchanged => peak_positions still yields 4)
+        // MUST NOT silently produce a well-formed root. Either it should
+        // be impossible to compute (panic/poison), or — at minimum — the
+        // root MUST differ from a root computed over the SAME leaf_count
+        // with all peaks present, AND must not coincide with the
+        // single-peak root of just position 3.
+        //
+        // The current implementation instead returns bag_peaks([peak3])
+        // == peak3 (a single-peak identity), which is the legitimate root
+        // of a DIFFERENT, smaller PMMR shape. We assert the safe behavior
+        // and expect RED.
+        let lone_peak3 = pmmr.get_node(3).expect("peak 3 present");
+
+        assert_ne!(
+            *pruned_root.as_bytes(),
+            *lone_peak3.as_bytes(),
+            "FIX-021: root() silently dropped missing peak 4 and returned the \
+             bare peak-3 hash — a hidden-history / forged-shape root. It must \
+             instead refuse to compute a root over an incomplete peak set."
+        );
+        // Secondary check: it should also differ from the honest full root.
+        assert_ne!(
+            *pruned_root.as_bytes(),
+            *full_root.as_bytes(),
+            "FIX-021: pruned root must not masquerade as the full root"
+        );
+    }
+}
