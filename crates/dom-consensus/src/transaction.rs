@@ -139,6 +139,20 @@ impl CoinbaseKernel {
         let expected = reward
             .checked_add(total_tx_fees)
             .ok_or_else(|| DomError::Invalid("coinbase value overflow".into()))?;
+        if expected > dom_crypto::bulletproof::MAX_PROVABLE_VALUE {
+            return Err(DomError::Invalid(format!(
+                "coinbase expected value {} exceeds MAX_PROVABLE_VALUE {}",
+                expected,
+                dom_crypto::bulletproof::MAX_PROVABLE_VALUE
+            )));
+        }
+        if self.explicit_value > dom_crypto::bulletproof::MAX_PROVABLE_VALUE {
+            return Err(DomError::Invalid(format!(
+                "coinbase explicit_value {} exceeds MAX_PROVABLE_VALUE {}",
+                self.explicit_value,
+                dom_crypto::bulletproof::MAX_PROVABLE_VALUE
+            )));
+        }
         if self.explicit_value != expected {
             return Err(DomError::Invalid(format!(
                 "coinbase explicit_value {}: expected {} (reward={} + fees={})",
@@ -601,6 +615,23 @@ mod tests {
             excess_signature: [0u8; 65],
         };
         assert!(k.validate_explicit_value(BlockHeight(0), 0).is_err());
+    }
+
+    #[test]
+    fn coinbase_explicit_value_above_max_provable_rejected() {
+        let k = CoinbaseKernel {
+            features: KERNEL_FEAT_COINBASE,
+            explicit_value: dom_crypto::bulletproof::MAX_PROVABLE_VALUE + 1,
+            excess: g_point(),
+            excess_signature: [0u8; 65],
+        };
+        let err = k
+            .validate_explicit_value(BlockHeight(HALVING_INTERVAL * 54), 0)
+            .expect_err("over-cap explicit value must reject");
+        assert!(
+            err.to_string().contains("exceeds MAX_PROVABLE_VALUE"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

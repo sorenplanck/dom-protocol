@@ -273,7 +273,7 @@ fn build_coinbase_with_blinding(
     let output_commitment = Commitment::commit(explicit_value, &blinding);
 
     // Range proof: proves value in [0, 2^52). Yields the proof bytes (Vec<u8>).
-    // Both paths now produce a standard 675-byte Bulletproof (bp2):
+    // Both paths now produce a 739-byte bounded aggregate Bulletproof (bp2):
     //   - GENESIS uses a DETERMINISTIC nonce (`Some(nonce)`) so the genesis block
     //     is byte-reproducible across nodes (bp2_prove_with_nonce).
     //   - normal blocks use fresh random nonces (bp2_prove).
@@ -1441,7 +1441,7 @@ mod genesis_determinism_tests {
     /// end-to-end from the deterministic builder and pins every derived value, so
     /// any future drift (proof, derivation, roots, or header hash) is caught.
     ///
-    /// The genesis coinbase now carries a 675-byte standard Bulletproof
+    /// The genesis coinbase now carries a 739-byte bounded aggregate Bulletproof
     /// (`bp2_prove_with_nonce`), so `rangeproof_root` and the genesis hash changed
     /// from the borromean era; `output_root`/`kernel_root` are unchanged (the
     /// Pedersen commitment and kernel excess are independent of the range-proof
@@ -1454,18 +1454,18 @@ mod genesis_determinism_tests {
         const KERNEL_ROOT: &str =
             "69a1283a2fd4a90f0df6110caf2f74150365e31ca96cc2485cb022ceae15834b";
         const RANGEPROOF_ROOT: &str =
-            "2a9d3121c551dd909d4ad72efc10ade1ad37588d785af5499f987355eaa7b5bb";
+            "ac00fb8ccb323f0cfdc2f4da553ad818e289cb2614400cb6d6af4b51d18a872c";
         const GENESIS_HASH: &str =
-            "13236b793ec6aba37f0181d90e9c71bcf1e091551046668d03b2da1e247b630c";
+            "2ab5e6c73607e8bfbbec2d4ce3ea1419cda29ae6892e7f1c24facc465cd65821";
 
         let cid = chain_id_testnet();
         let coinbase = build_genesis_coinbase(&cid).expect("genesis coinbase");
 
-        // (1) bp2 range proof: exactly 675 bytes and self-verifies under bp2.
+        // (1) bp2 range proof: exactly 739 bytes and self-verifies under bp2.
         assert_eq!(
             coinbase.output.proof.len(),
-            675,
-            "genesis coinbase proof must be a 675-byte Bulletproof"
+            739,
+            "genesis coinbase proof must be a 739-byte Bulletproof"
         );
         assert!(
             dom_crypto::bp2_verify(

@@ -38,6 +38,16 @@ fn h_point() -> ProjectivePoint {
     ProjectivePoint::from(affine)
 }
 
+pub(crate) fn commit_unblinded(value: u64) -> Commitment {
+    let h = h_point();
+    let vh = h * Scalar::from(value);
+    let affine: AffinePoint = vh.into();
+    let encoded = EncodedPoint::from(affine).compress();
+    let mut bytes = [0u8; 33];
+    bytes.copy_from_slice(encoded.as_bytes());
+    Commitment(bytes)
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Commitment(pub(crate) [u8; 33]);
 
@@ -213,6 +223,21 @@ impl BlindingFactor {
             )),
         }
     }
+}
+
+pub(crate) fn negate_blinding(blinding: &[u8; 32]) -> Result<[u8; 32], DomError> {
+    let scalar = scalar_from_bytes(blinding)
+        .ok_or_else(|| DomError::Invalid("invalid blinding factor".into()))?;
+    let neg = -scalar;
+    Ok(neg.to_repr().into())
+}
+
+pub(crate) fn derive_complement_commitment(
+    commitment: &Commitment,
+    max_value: u64,
+) -> Result<Commitment, DomError> {
+    let max_commit = commit_unblinded(max_value);
+    max_commit.sub(commitment)
 }
 
 impl std::fmt::Debug for BlindingFactor {

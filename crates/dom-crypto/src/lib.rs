@@ -29,15 +29,15 @@ pub use schnorr::{
 pub mod bulletproof;
 pub use bulletproof::{prove as bp_prove, verify as bp_verify, RangeProof};
 
-// Phase 2 (Bulletproof migration): standard-Bulletproof shim, parallel to the
-// borromean `bulletproof` module above. Exported under distinct `bp2_*` names so
-// it cannot be confused with the borromean `bp_prove`/`bp_verify`. NOT yet wired
-// into consensus — both paths coexist.
+// Standard-Bulletproof backend, exported under distinct `bp2_*` names so it
+// cannot be confused with the borromean `bp_prove`/`bp_verify`.
 mod bulletproof_bp;
 /// Standard-Bulletproof (grin backend) range-proof prove/verify, exported as
 /// `bp2_prove`/`bp2_verify` (+ `bp2_prove_with_nonce` for deterministic-nonce
 /// proofs, e.g. genesis). Parallel to the borromean `bp_prove`/`bp_verify`;
-/// produces 675-byte proofs bound to H_DOM. Not yet wired into consensus.
+/// produces 739-byte bounded aggregate proofs bound to H_DOM and is wired into
+/// consensus as the live standard-Bulletproof path.
 pub use bulletproof_bp::{
-    bp_prove as bp2_prove, bp_prove_with_nonce as bp2_prove_with_nonce, bp_verify as bp2_verify,
+    bp2_test_only_prove_legacy_single_with_nonce, bp_prove as bp2_prove,
+    bp_prove_with_nonce as bp2_prove_with_nonce, bp_verify as bp2_verify,
 };

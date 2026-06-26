@@ -2,7 +2,7 @@
 //!
 //! Confirms that the REAL consensus entry `validate_range_proofs` — the path a
 //! peer's transaction output flows through — SURVIVES malformed-but-exact-size
-//! (675-byte) range proofs, repeatedly, on one thread. Before the scratch fix
+//! (739-byte) range proofs, repeatedly, on one thread. Before the scratch fix
 //! (`dom-crypto` bulletproof_bp: create+destroy the grin scratch per FFI call),
 //! reusing one scratch leaked a frame on every malformed-proof verify until a
 //! later call SIGSEGV'd. This test drives 6 such peer transactions through
@@ -17,7 +17,7 @@ use dom_consensus::validate_range_proofs;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_crypto::{blake2b_256_tagged, bp2_prove};
 
-const PROOF_LEN: usize = 675;
+const PROOF_LEN: usize = 739;
 
 fn counter4_proof() -> Vec<u8> {
     let counter: u32 = 4;
@@ -37,12 +37,12 @@ fn counter4_proof() -> Vec<u8> {
 
 #[test]
 fn ds001_reaches_consensus_validate_range_proofs() {
-    // Valid SEC1 commitment + a malformed exact-size (675-byte) proof.
+    // Valid SEC1 commitment + a malformed exact-size (739-byte) proof.
     let blind = BlindingFactor::from_bytes([0x22u8; 32]).expect("blind");
     let (_p, commitment_sec1) = bp2_prove(7, &blind).expect("prove");
     let commitment = Commitment::from_compressed_bytes(&commitment_sec1).expect("commit parse");
 
-    // One tx with a single malformed-675 output. validate_range_proofs bails on
+    // One tx with a single malformed-739 output. validate_range_proofs bails on
     // the first Ok(false), so each call performs exactly ONE bp2_verify — exactly
     // what a node does per incoming peer tx. Each call rejects the tx (Err) and,
     // with the per-call scratch fix, releases its FFI scratch frame — so nothing
@@ -58,14 +58,14 @@ fn ds001_reaches_consensus_validate_range_proofs() {
     };
 
     for i in 0..6 {
-        eprintln!("peer tx #{i}: dom_consensus::validate_range_proofs (malformed-675 output) ...");
+        eprintln!("peer tx #{i}: dom_consensus::validate_range_proofs (malformed-739 output) ...");
         let r = validate_range_proofs(&tx);
         eprintln!("  -> returned {r:?} (tx rejected, frame released — no accumulation)");
         // A malformed proof MUST be rejected; reaching this assert each iteration
         // is itself the regression check (no SIGSEGV terminated the process).
         assert!(
             r.is_err(),
-            "iteration {i}: malformed 675-byte proof must be rejected by consensus"
+            "iteration {i}: malformed 739-byte proof must be rejected by consensus"
         );
     }
     // Reached only if the consensus FFI path did NOT crash within 6 calls.

@@ -201,9 +201,8 @@ pub const MAX_KERNELS_PER_TX: usize = 16;
 pub const MAX_BLOCK_TXS: usize = 5_000;
 
 /// [CONSENSUS] Maximum range-proof size in bytes — the standard Bulletproof
-/// envelope. A single 64-bit Bulletproof is a FIXED 675 bytes (grin
-/// `SINGLE_BULLET_PROOF_SIZE`); DOM only ever emits single-output 64-bit proofs
-/// (one proof per output, no aggregation), so 675 is the true maximum. 768
+/// envelope. DOM's bounded aggregate Bulletproof is a FIXED 739 bytes; DOM
+/// emits exactly one proof per output, so 739 is the true maximum. 768
 /// (3*256) gives ~93 bytes (~13.8%) of defensive headroom — enough to absorb a
 /// minor format/version change without a consensus change — while still bounding
 /// the per-proof deserialization allocation ~8x tighter than the old 6144
@@ -430,12 +429,12 @@ pub const TAG_COINBASE_BLINDING: &str = "DOM:coinbase-blinding:v1";
 ///
 /// Last computed: 2026-06-17 from clean run with TAG_GENESIS_BLINDING:v1 and the
 /// standard Bulletproof coinbase (bp2). The genesis coinbase now carries a
-/// 675-byte Bulletproof, so `rangeproof_root` and this hash changed from the
+/// 739-byte bounded aggregate Bulletproof, so `rangeproof_root` and this hash changed from the
 /// borromean era; `output_root`/`kernel_root` are unchanged. Pinned and
 /// regression-tested by `dom-node` `miner::tests::genesis_testnet_frozen_vectors`.
 pub const GENESIS_HASH_TESTNET: [u8; 32] = [
-    0x13, 0x23, 0x6b, 0x79, 0x3e, 0xc6, 0xab, 0xa3, 0x7f, 0x01, 0x81, 0xd9, 0x0e, 0x9c, 0x71, 0xbc,
-    0xf1, 0xe0, 0x91, 0x55, 0x10, 0x46, 0x66, 0x8d, 0x03, 0xb2, 0xda, 0x1e, 0x24, 0x7b, 0x63, 0x0c,
+    0x2a, 0xb5, 0xe6, 0xc7, 0x36, 0x07, 0xe8, 0xbf, 0xbb, 0xec, 0x2d, 0x4c, 0xe3, 0xea, 0x14, 0x19,
+    0xcd, 0xa2, 0x9a, 0xe6, 0x89, 0x2e, 0x7f, 0x1c, 0x24, 0xfa, 0xcc, 0x46, 0x5c, 0xd6, 0x58, 0x21,
 ];
 
 /// Explicit mainnet-launch gate.
