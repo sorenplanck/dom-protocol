@@ -1847,31 +1847,31 @@ fn peer_violation_score(error: &DomError) -> Option<u32> {
 
     match error {
         DomError::Malformed(_) => Some(ban_scores::MALFORMED_MESSAGE),
-        DomError::PolicyRejected(msg) if msg.contains("address flooding") => {
+        DomError::PolicyRejected(msg) if msg.starts_with("address flooding") => {
             Some(ban_scores::ADDRESS_FLOODING)
         }
-        DomError::PolicyRejected(msg) if msg.contains("handshake timeout") => {
+        DomError::PolicyRejected(msg) if msg.starts_with("handshake timeout") => {
             Some(ban_scores::PROTOCOL_VIOLATION)
         }
         // Anti-slowloris write timeout (dom_wire::codec::NoiseCodec::send): a peer
         // that stops reading stalls our writes. Low severity — a slow peer is not
         // necessarily malicious, so it is a protocol violation, not a ban-on-sight.
-        DomError::PolicyRejected(msg) if msg.contains("write timeout") => {
+        DomError::PolicyRejected(msg) if msg.starts_with("write timeout") => {
             Some(ban_scores::PROTOCOL_VIOLATION)
         }
         // Anti-flood per-category message rate limit (crate::msg_rate_limit): a
         // peer flooding valid-but-excessive messages. Low severity — sustained
         // overflow (~10 windows) is what crosses the ban threshold.
-        DomError::PolicyRejected(msg) if msg.contains("message rate limit") => {
+        DomError::PolicyRejected(msg) if msg.starts_with("message rate limit") => {
             Some(ban_scores::PROTOCOL_VIOLATION)
         }
-        DomError::Invalid(msg) if msg.contains("chain_id mismatch") => {
+        DomError::Invalid(msg) if msg == "chain_id mismatch" => {
             Some(ban_scores::WRONG_CHAIN_ID)
         }
-        DomError::Invalid(msg) if msg.contains("network_magic mismatch") => {
+        DomError::Invalid(msg) if msg == "network_magic mismatch" => {
             Some(ban_scores::WRONG_CHAIN_ID)
         }
-        DomError::Invalid(msg) if msg.contains("unexpected Hello") => {
+        DomError::Invalid(msg) if msg.starts_with("unexpected Hello") => {
             Some(ban_scores::PROTOCOL_VIOLATION)
         }
         // Severity routing for expensive-to-detect consensus violations: a peer
@@ -1880,10 +1880,13 @@ fn peer_violation_score(error: &DomError) -> Option<u32> {
         // Matched substrings are produced only by dom-consensus:
         //   "proof-of-work invalid" → block.rs (validate_pow / _for_network)
         //   "signature invalid"     → lib.rs (kernel Schnorr), transaction.rs (coinbase)
-        DomError::Invalid(msg) if msg.contains("proof-of-work invalid") => {
+        DomError::Invalid(msg) if msg.starts_with("proof-of-work invalid:") => {
             Some(ban_scores::INVALID_POW)
         }
-        DomError::Invalid(msg) if msg.contains("signature invalid") => {
+        DomError::Invalid(msg)
+            if msg.starts_with("coinbase kernel signature invalid")
+                || (msg.starts_with("kernel ") && msg.ends_with(" Schnorr signature invalid")) =>
+        {
             Some(ban_scores::INVALID_SIGNATURE)
         }
         DomError::Invalid(_) => Some(ban_scores::PROTOCOL_VIOLATION),
@@ -5865,11 +5868,8 @@ mod tests {
     // the intended INVALID_POW (50) / halving INVALID_SIGNATURE (25) penalty and
     // letting an attacker force ~5x more expensive validations before a ban.
     //
-    // These tests are the COUPLING CONTRACT: they pin the exact substrings the
-    // production matcher depends on, and demonstrate the silent-degradation
-    // failure mode of a near-miss wording. Finding recorded (the fix — replacing
-    // string matching with typed error variants — is a behaviour change and a
-    // human decision; not done here).
+    // The matcher now uses anchored patterns that match the real dom-consensus
+    // emissions while avoiding incidental substring overmatch.
 
     #[test]
     fn shield_pow_severity_depends_on_exact_substring() {
@@ -5910,8 +5910,8 @@ mod tests {
         );
         assert_eq!(
             peer_violation_score(&incidental),
-            Some(ban_scores::INVALID_POW),
-            "substring match fires on incidental occurrences of the phrase (over-match)"
+            Some(ban_scores::PROTOCOL_VIOLATION),
+            "incidental quoted text must not inherit INVALID_POW severity"
         );
     }
 

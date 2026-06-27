@@ -508,6 +508,7 @@ pub fn bp_prove_with_nonce(
 /// rejects the historical unsafe format, including over-cap values. Production
 /// code must continue using [`bp_prove`], which enforces the 52-bit ceiling and
 /// emits the bounded aggregate proof.
+#[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn bp2_test_only_prove_legacy_single_with_nonce(
     value: u64,

@@ -141,6 +141,10 @@ pub async fn require_bearer_token(
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    if token.0.trim().is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     let auth_header = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -148,7 +152,10 @@ pub async fn require_bearer_token(
 
     match auth_header {
         Some(header) if header.starts_with("Bearer ") => {
-            let provided = &header[7..];
+            let provided = header[7..].trim();
+            if provided.is_empty() {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
             // Constant-time comparison to avoid leaking the token via a
             // short-circuiting byte compare (timing side-channel). `ct_eq`
             // compares equal-length byte slices without an observable early

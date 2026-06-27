@@ -5,6 +5,9 @@ use dom_crypto::pedersen::Commitment;
 use dom_crypto::{PartialSig, PublicKey, RangeProof};
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
 
+/// Current supported slate wire format version.
+pub const CURRENT_SLATE_VERSION: u16 = 1;
+
 /// Sender input commitment carried in a slate.
 pub type InputCommitment = Commitment;
 
@@ -110,8 +113,14 @@ impl DomSerialize for Slate {
 
 impl DomDeserialize for Slate {
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
+        let version = r.read_u16()?;
+        if version != CURRENT_SLATE_VERSION {
+            return Err(DomError::Invalid(format!(
+                "unsupported slate version {version} (expected {CURRENT_SLATE_VERSION})"
+            )));
+        }
         Ok(Self {
-            version: r.read_u16()?,
+            version,
             chain_id: r.read_array::<32>()?,
             amount: r.read_u64()?,
             fee: r.read_u64()?,
@@ -240,7 +249,7 @@ mod tests {
     #[test]
     fn sender_only_slate_roundtrip() {
         let slate = Slate {
-            version: 1,
+            version: CURRENT_SLATE_VERSION,
             chain_id: [2u8; 32],
             amount: 1_000,
             fee: 10,
@@ -263,7 +272,7 @@ mod tests {
     #[test]
     fn recipient_completed_slate_roundtrip() {
         let slate = Slate {
-            version: 1,
+            version: CURRENT_SLATE_VERSION,
             chain_id: [9u8; 32],
             amount: 2_000,
             fee: 20,
@@ -281,5 +290,33 @@ mod tests {
         };
 
         roundtrip(slate);
+    }
+
+    #[test]
+    fn rejects_unsupported_version_on_deserialize() {
+        let slate = Slate {
+            version: CURRENT_SLATE_VERSION + 1,
+            chain_id: [9u8; 32],
+            amount: 2_000,
+            fee: 20,
+            lock_height: 144,
+            sender_inputs: vec![commitment(3_000, 10)],
+            sender_change_output: None,
+            sender_public_excess: public_key(11),
+            sender_public_nonce: public_key(12),
+            sender_offset_contribution: [13u8; 32],
+            recipient_output: None,
+            recipient_public_excess: None,
+            recipient_public_nonce: None,
+            sender_partial_sig: None,
+            recipient_partial_sig: None,
+        };
+
+        let bytes = slate.to_bytes().unwrap();
+        let err = Slate::from_bytes(&bytes).unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported slate version"),
+            "unexpected error: {err}"
+        );
     }
 }

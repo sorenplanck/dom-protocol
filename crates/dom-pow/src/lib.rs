@@ -177,21 +177,7 @@ impl CompactTarget {
                 "compact exponent {exponent} > 32"
             )));
         }
-        let mut target = [0u8; 32];
-        let w = |t: &mut [u8; 32], pos: usize, v: u8| {
-            if pos < 32 {
-                t[31 - pos] = v;
-            }
-        };
-        if exponent >= 1 {
-            w(&mut target, exponent - 1, (mantissa & 0xff) as u8);
-        }
-        if exponent >= 2 {
-            w(&mut target, exponent - 2, ((mantissa >> 8) & 0xff) as u8);
-        }
-        if exponent >= 3 {
-            w(&mut target, exponent - 3, ((mantissa >> 16) & 0xff) as u8);
-        }
+        let target = compact_to_target_unchecked(bits);
         validate_target_bounds(&target)?;
         Ok(target)
     }
@@ -408,7 +394,10 @@ fn mul_256_div_radix_checked(
     let hi_carry_into_lo: U256 = (hi_prod & U256::from(0xffffu128)) << 112;
     let new_lo_256: U256 = lo_shifted + hi_carry_into_lo;
 
-    let new_hi_256: U256 = hi_prod >> 16;
+    // If the reconstructed low half spills into bit 128, that carry is part of
+    // the high half of the final 256-bit result and must not be dropped.
+    let lo_to_hi_carry: U256 = new_lo_256 >> 128;
+    let new_hi_256: U256 = (hi_prod >> 16) + lo_to_hi_carry;
 
     // Extract u128 halves (results fit in 128 bits each given input constraints)
     let new_hi = new_hi_256.low_u128();
@@ -727,33 +716,47 @@ pub fn expected_target_for_network(
 
 /// Convert a canonical 32-byte target to Bitcoin compact form.
 pub fn target_to_compact(t: &[u8; 32]) -> u32 {
-    let mut first = 0usize;
-    for (i, &b) in t.iter().enumerate() {
-        if b != 0 {
-            first = i;
-            break;
-        }
-    }
-    if t[first] == 0 {
+    let Some(first) = t.iter().position(|&b| b != 0) else {
         return 0;
-    }
+    };
 
-    while first < 32 {
-        let exp = (32 - first) as u32;
-        let m = if first + 2 < 32 {
-            (t[first] as u32) | ((t[first + 1] as u32) << 8) | ((t[first + 2] as u32) << 16)
-        } else {
-            t[first] as u32
+    let mut best_compact: Option<u32> = None;
+    let mut best_expanded = [0u8; 32];
+    for start in first..32 {
+        let mut size = (32 - start) as u32;
+        let mut mantissa = match size {
+            0 => 0,
+            1 => u32::from(t[start]),
+            2 => u32::from(t[start]) | (u32::from(t[start + 1]) << 8),
+            _ => {
+                u32::from(t[start])
+                    | (u32::from(*t.get(start + 1).unwrap_or(&0)) << 8)
+                    | (u32::from(*t.get(start + 2).unwrap_or(&0)) << 16)
+            }
         };
-        let compact = (exp << 24) | m.min(0x007f_ffff);
-        let expanded = compact_to_target_unchecked(compact);
-        if !target_gt(&expanded, t) {
-            return compact;
+        if mantissa == 0 || (mantissa & 0x0080_0000) != 0 {
+            continue;
         }
-        first += 1;
+        while size > 1 && (mantissa & 0xff) == 0 {
+            mantissa >>= 8;
+            size -= 1;
+        }
+        let compact = (size << 24) | mantissa;
+        let Ok(expanded) = CompactTarget(compact).to_target() else {
+            continue;
+        };
+        if !target_gt(&expanded, t) {
+            let better = best_compact.is_none()
+                || target_gt(&expanded, &best_expanded)
+                || (expanded == best_expanded && compact < best_compact.unwrap());
+            if better {
+                best_compact = Some(compact);
+                best_expanded = expanded;
+            }
+        }
     }
 
-    0
+    best_compact.unwrap_or_else(|| target_to_compact(&MIN_TARGET_BYTES))
 }
 
 fn compact_to_target_unchecked(bits: u32) -> [u8; 32] {
@@ -1429,6 +1432,27 @@ mod asert_strict_tests {
 
         let easy_wins = h_easy > h_hard || (h_easy == h_hard && l_easy > l_hard);
         assert!(!easy_wins, "harder target must have HIGHER difficulty pair");
+    }
+
+    #[test]
+    fn mul_256_div_radix_preserves_low_to_high_carry() {
+        let hi = 0x194e88b34efe49cb60f02dd3a47567e7u128;
+        let lo = 0xb255e524264a02b06ba1e68f4a7au128;
+        let multiplier = 69_558u128;
+
+        let (new_hi, new_lo) =
+            mul_256_div_radix_checked(hi, lo, multiplier, ASERT_RADIX as u128).unwrap();
+
+        let value = (U256::from(hi) << 128) | U256::from(lo);
+        let expected = (value.full_mul(U256::from(multiplier))) >> 16;
+        let expected_hi = (expected >> 128).low_u128();
+        let expected_lo = expected.low_u128();
+
+        assert_eq!(
+            (new_hi, new_lo),
+            (expected_hi, expected_lo),
+            "reconstructed 256-bit product must include the carry from low into high limb"
+        );
     }
 }
 

@@ -10,7 +10,7 @@ use crate::peer::{PeerInfo, PeerState};
 use dom_core::DomError;
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 /// Maximum peers from the same /16 subnet (eclipse protection).
@@ -721,13 +721,14 @@ impl PeerManager {
     pub fn register_peer(&mut self, info: PeerInfo) -> Result<(), DomError> {
         self.prune_stale_state();
         let addr_str = info.addr.to_string();
+        let reputation_addr = reputation_key(&addr_str);
         if self.peers.contains_key(&addr_str) {
             return Err(DomError::PolicyRejected(
                 "already connected to this peer".into(),
             ));
         }
         let mut info = info;
-        let pending_score = self.pending_penalty_score(&addr_str);
+        let pending_score = self.pending_penalty_score(&reputation_addr);
         if pending_score > 0 && info.add_ban_score(pending_score) {
             return Err(DomError::PolicyRejected(
                 "pending peer penalties exceeded ban threshold".into(),
@@ -743,7 +744,7 @@ impl PeerManager {
         } else {
             self.pending_outbound.remove(&addr_str);
         }
-        self.pending_penalties.remove(&addr_str);
+        self.pending_penalties.remove(&reputation_addr);
         self.duplicate_block_relays.remove(&addr_str);
         self.peers.insert(addr_str, info);
         Ok(())
@@ -782,10 +783,11 @@ impl PeerManager {
     pub fn add_pending_ban_score(&mut self, addr: &str, score: u32) -> u32 {
         self.prune_stale_state();
         let now = Instant::now();
+        let reputation_addr = reputation_key(addr);
         let updated_score = {
             let entry = self
                 .pending_penalties
-                .entry(addr.to_string())
+                .entry(reputation_addr)
                 .or_insert(PendingPenalty {
                     score: 0,
                     last_updated: now,
@@ -805,7 +807,7 @@ impl PeerManager {
 
     /// Inspect the current pre-registration penalty score for a peer.
     pub fn pending_ban_score(&self, addr: &str) -> u32 {
-        self.pending_penalty_score(addr)
+        self.pending_penalty_score(&reputation_key(addr))
     }
 
     /// Get all connected peer addresses (for broadcasting).
@@ -936,6 +938,16 @@ impl PeerManager {
             self.outbound_failures.remove(&addr);
         }
     }
+}
+
+fn reputation_key(addr: &str) -> String {
+    if let Ok(sock) = addr.parse::<SocketAddr>() {
+        return sock.ip().to_string();
+    }
+    if let Ok(ip) = addr.parse::<IpAddr>() {
+        return ip.to_string();
+    }
+    addr.to_string()
 }
 
 fn reservation_is_stale(pending: PendingInbound) -> bool {

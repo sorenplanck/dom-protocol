@@ -71,6 +71,13 @@ impl Address {
         if s.len() > MAX_ADDRESS_LEN {
             return Err(DomError::Malformed("address too long".into()));
         }
+        let has_lower = s.bytes().any(|b| b.is_ascii_lowercase());
+        let has_upper = s.bytes().any(|b| b.is_ascii_uppercase());
+        if has_lower && has_upper {
+            return Err(DomError::Malformed(
+                "mixed-case bech32m address is not allowed".into(),
+            ));
+        }
         let s_lower = s.to_lowercase();
         let (hrp, payload) = bech32m_decode(&s_lower)?;
         if payload.len() != 33 {

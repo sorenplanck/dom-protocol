@@ -37,10 +37,10 @@ use dom_consensus::{validate_balance_equation, validate_transaction_structure};
 use dom_core::{Amount, KERNEL_FEAT_PLAIN};
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::{
-    blake2b_256_tagged, bp2_prove, schnorr_add_public_keys, schnorr_aggregate_sigs,
+    blake2b_256_tagged, bp2_prove, bp2_verify, schnorr_add_public_keys, schnorr_aggregate_sigs,
     schnorr_partial_sign, schnorr_verify, BlindingFactor, Hash256, RangeProof, SecretKey,
 };
-use dom_tx::slate::{OutputCommitmentAndProof, Slate};
+use dom_tx::slate::{OutputCommitmentAndProof, Slate, CURRENT_SLATE_VERSION};
 use k256::elliptic_curve::PrimeField;
 use k256::Scalar;
 use rand::RngCore;
@@ -53,6 +53,10 @@ use thiserror::Error;
 /// `"chain_id"`).
 #[derive(Debug, Error)]
 pub enum SlateError {
+    /// The slate's wire format version is unsupported.
+    #[error("unsupported slate version {0} (expected {1})")]
+    UnsupportedVersion(u16, u16),
+
     /// The slate's `chain_id` does not match the expected chain.
     #[error("slate chain_id does not match expected chain_id")]
     ChainIdMismatch,
@@ -184,7 +188,7 @@ pub fn build_send(
     let sender_nonce = sender_nonce_key.to_be_bytes_raw();
 
     let slate = Slate {
-        version: 1,
+        version: CURRENT_SLATE_VERSION,
         chain_id,
         amount,
         fee,
@@ -223,6 +227,7 @@ pub fn respond_receive(
     mut slate: Slate,
     expected_chain_id: &[u8; 32],
 ) -> Result<ReceiveResponse, SlateError> {
+    validate_slate_version(&slate)?;
     if slate.chain_id != *expected_chain_id {
         return Err(SlateError::ChainIdMismatch);
     }
@@ -307,6 +312,7 @@ pub fn finalize(
     sender_nonce: &[u8; 32],
     chain_id: &[u8; 32],
 ) -> Result<Transaction, SlateError> {
+    validate_slate_version(slate)?;
     if slate.chain_id != *chain_id {
         return Err(SlateError::ChainIdMismatch);
     }
@@ -379,6 +385,15 @@ pub fn finalize(
 
     validate_transaction_structure(&tx)
         .map_err(|e| SlateError::Crypto(format!("final slate tx structure invalid: {e}")))?;
+    for output in &tx.outputs {
+        let proof_ok = bp2_verify(output.commitment.as_bytes(), &output.proof)
+            .map_err(|e| SlateError::Crypto(format!("final slate range proof invalid: {e}")))?;
+        if !proof_ok {
+            return Err(SlateError::Crypto(
+                "final slate output range proof does not verify".into(),
+            ));
+        }
+    }
     validate_balance_equation(&tx)
         .map_err(|e| SlateError::Crypto(format!("final slate tx balance invalid: {e}")))?;
     if !schnorr_verify(&aggregate_sig, &agg_p, chain_id, kernel_message.as_bytes())
@@ -482,6 +497,16 @@ fn scalar_from_bytes(bytes: &[u8; 32]) -> Result<Scalar, SlateError> {
     } else {
         Err(SlateError::Crypto("invalid scalar bytes".into()))
     }
+}
+
+fn validate_slate_version(slate: &Slate) -> Result<(), SlateError> {
+    if slate.version != CURRENT_SLATE_VERSION {
+        return Err(SlateError::UnsupportedVersion(
+            slate.version,
+            CURRENT_SLATE_VERSION,
+        ));
+    }
+    Ok(())
 }
 
 /// Generate a fresh random secp256k1 secret key via rejection sampling.

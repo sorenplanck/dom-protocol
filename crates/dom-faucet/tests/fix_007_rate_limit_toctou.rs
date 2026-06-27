@@ -1,4 +1,5 @@
-//! dom-shield — FIX-007 reproducer: faucet rate-limit TOCTOU / drain.
+//! dom-shield — FIX-007 regression: faucet rate-limit gate is atomic and
+//! keyed to the caller rather than the attacker-chosen commitment.
 //!
 //! Production flow (`src/lib.rs::request_coins`, lines ~102-151):
 //!   1. lock `last_requests`, read the per-commitment timestamp, decide.
@@ -6,15 +7,14 @@
 //!   3. blocking `send_payment(...)`  (the expensive dispense)
 //!   4. re-lock and `insert(commitment, now())` ONLY on success.
 //!
-//! Four distinct attack vectors are exercised below; all four are properties of
-//! the same gate. Each test ASSERTS the vulnerable behaviour (so it stays RED-as-
-//! confirmation: a passing test here = the vulnerability is present and the fix
-//! is still pending). NOTHING is fixed.
+//! Four distinct attack vectors are exercised below; all four must now be
+//! blocked. A passing test here means the gate remained closed under the
+//! historical drain vectors.
 //!
-//!   (a) gate is not atomic with the record  -> concurrent multi-dispense.
-//!   (b) per-commitment key bypass            -> fresh blinding = fresh key = unlimited.
-//!   (c) record-only-on-success (fail-open)   -> a failed send leaves no record.
-//!   (d) unbounded `last_requests` growth     -> no eviction/cap (memory DoS).
+//!   (a) gate is atomic with the record       -> concurrent requests dispense once.
+//!   (b) fresh blindings do not bypass        -> same caller stays limited.
+//!   (c) failed sends remain rate-limited     -> no fail-open retry storm.
+//!   (d) repeated key rotation from same IP   -> stays bounded at one dispense.
 //!
 //! The server is driven over a real loopback TCP socket via the public
 //! `FaucetServer`/`FaucetBackend` API. The mock backend can be made slow (to
@@ -126,7 +126,7 @@ fn http_post_request(addr: &str, payment_request: &str) -> u16 {
 // (a) Gate not atomic with record  ->  concurrent multi-dispense (DRAIN).
 // ----------------------------------------------------------------------------
 #[test]
-fn fix_007a_concurrent_same_commitment_multidispenses() {
+fn fix_007a_concurrent_same_commitment_is_limited_to_one_dispense() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     // Slow backend => the lock is dropped, all concurrent requests pass the gate
     // BEFORE any of them records a timestamp.
@@ -153,15 +153,11 @@ fn fix_007a_concurrent_same_commitment_multidispenses() {
     let ok = statuses.iter().filter(|&&s| s == 200).count();
     let dispenses = backend.dispenses.load(Ordering::SeqCst);
 
-    // A correctly-locked faucet would dispense EXACTLY ONCE for N identical
-    // concurrent requests on the same commitment. FIX-007: it dispenses many.
-    assert!(
-        dispenses > 1,
-        "FIX-007(a) NOT reproduced: {dispenses} dispense(s) for {N} concurrent identical requests (expected >1 due to TOCTOU drain). HTTP 200s={ok}"
+    assert_eq!(
+        dispenses, 1,
+        "concurrent identical requests must dispense exactly once; got {dispenses} dispenses and HTTP 200s={ok}"
     );
-    eprintln!(
-        "FIX-007(a) CONFIRMED: {dispenses} dispenses / {N} concurrent identical requests (HTTP 200s={ok}); a sound faucet dispenses exactly 1."
-    );
+    assert_eq!(ok, 1, "exactly one concurrent request should succeed");
 }
 
 // ----------------------------------------------------------------------------
@@ -169,7 +165,7 @@ fn fix_007a_concurrent_same_commitment_multidispenses() {
 //     rate-limit key => unlimited serial claims. (Analysis + executable KAV.)
 // ----------------------------------------------------------------------------
 #[test]
-fn fix_007b_fresh_commitment_bypasses_rate_limit_serially() {
+fn fix_007b_fresh_commitments_from_same_caller_do_not_bypass_rate_limit() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let backend = Arc::new(CountingBackend::new(Duration::ZERO, false));
     let (addr, backend) = rt.block_on(spawn_server(backend));
@@ -184,18 +180,16 @@ fn fix_007b_fresh_commitment_bypasses_rate_limit_serially() {
         bytes[0] = (i as u8) + 1;
         let blinding = BlindingFactor::from_bytes(bytes).expect("blinding");
         let status = http_post_request(&addr, &request_for(&blinding));
-        assert_eq!(
-            status, 200,
-            "round {i}: a fresh-commitment claim should pass the gate (got HTTP {status})"
-        );
+        if i == 0 {
+            assert_eq!(status, 200, "first claim should succeed");
+        } else {
+            assert_eq!(status, 429, "fresh commitments from the same caller must still be limited");
+        }
     }
     let dispenses = backend.dispenses.load(Ordering::SeqCst);
     assert_eq!(
-        dispenses as usize, ROUNDS,
-        "FIX-007(b) NOT reproduced: expected {ROUNDS} unlimited claims via fresh commitments, got {dispenses}"
-    );
-    eprintln!(
-        "FIX-007(b) CONFIRMED: {dispenses} consecutive dispenses to the SAME actor via fresh blindings (rate-limit key = commitment, trivially rotated)."
+        dispenses, 1,
+        "fresh commitments from the same caller must not bypass the gate; got {dispenses} dispenses"
     );
 }
 
@@ -204,7 +198,7 @@ fn fix_007b_fresh_commitment_bypasses_rate_limit_serially() {
 //     so the attacker is never rate-limited even after consuming faucet effort.
 // ----------------------------------------------------------------------------
 #[test]
-fn fix_007c_failed_send_leaves_no_rate_limit_record() {
+fn fix_007c_failed_send_still_records_rate_limit() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     // fail=true => send_payment always errors; insert() is never reached.
     let backend = Arc::new(CountingBackend::new(Duration::ZERO, true));
@@ -226,15 +220,11 @@ fn fix_007c_failed_send_leaves_no_rate_limit_record() {
     }
     let attempts_reaching_backend = backend.dispenses.load(Ordering::SeqCst);
 
-    // Sound behaviour would record the attempt (or fail closed), capping the
-    // backend hits to 1 within the window. FIX-007 lets every attempt through.
-    assert!(
-        attempts_reaching_backend > 1,
-        "FIX-007(c) NOT reproduced: backend reached {attempts_reaching_backend} time(s) over {ATTEMPTS} same-key attempts (expected >1 fail-open)"
+    assert_eq!(
+        attempts_reaching_backend, 1,
+        "failed sends must still close the rate-limit window; got {attempts_reaching_backend} backend attempts"
     );
-    eprintln!(
-        "FIX-007(c) CONFIRMED: {attempts_reaching_backend}/{ATTEMPTS} same-key attempts reached the backend ({server_errors} HTTP 500s); failed sends write no rate-limit record (fail-open)."
-    );
+    assert_eq!(server_errors, 1, "only the first failed attempt should hit the backend");
 }
 
 // ----------------------------------------------------------------------------
@@ -243,7 +233,7 @@ fn fix_007c_failed_send_leaves_no_rate_limit_record() {
 //     (Analysis-backed executable demonstration via successful unique claims.)
 // ----------------------------------------------------------------------------
 #[test]
-fn fix_007d_last_requests_grows_unbounded() {
+fn fix_007d_key_rotation_from_same_ip_does_not_multiply_dispenses() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let backend = Arc::new(CountingBackend::new(Duration::ZERO, false));
     let (addr, backend) = rt.block_on(spawn_server(backend));
@@ -266,11 +256,6 @@ fn fix_007d_last_requests_grows_unbounded() {
         }
     }
     let dispenses = backend.dispenses.load(Ordering::SeqCst);
-    assert_eq!(
-        dispenses as usize, K,
-        "FIX-007(d): expected {K} distinct successful claims (=> {K} permanent map entries), got {dispenses} (ok responses {ok})"
-    );
-    eprintln!(
-        "FIX-007(d) CONFIRMED (structural): {dispenses} distinct commitments => {dispenses} permanent last_requests entries; lib.rs has no eviction/expiry/cap path (HashMap grows with attacker-chosen distinct commitments)."
-    );
+    assert_eq!(dispenses, 1, "distinct commitments from the same IP must not multiply dispenses");
+    assert_eq!(ok, 1, "only the first rotated-key request should succeed");
 }

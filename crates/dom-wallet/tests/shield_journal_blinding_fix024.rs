@@ -1,4 +1,4 @@
-//! dom-shield Onda 2 — FIX-024 reproducer for `dom_wallet::journal`.
+//! dom-shield Onda 2 — FIX-024 regression for `dom_wallet::journal`.
 //!
 //! Subfamily: directed (Lens B funds-safety, secret-on-disk).
 //!
@@ -16,17 +16,14 @@
 //! (output blinding) must NEVER appear in plaintext on disk. The encrypted
 //! `wallet.dat` is the only place secrets belong.
 //!
-//! This test ENCODES that safety expectation: it greps the on-disk journal
-//! bytes for the change blinding and asserts it is ABSENT. Because the
-//! production code writes it in cleartext, the assertion FAILS → the RED is
-//! the CONFIRMATION of FIX-024.
+//! This test greps the on-disk journal bytes for the change blinding and
+//! asserts it is absent. A passing test means the spend secret stayed out of
+//! plaintext on disk.
 //!
 //! NOTE: an existing integration test
 //! (`change_output::journal_built_change_recovers_spendable_change_after_crash_before_save`)
-//! treats the journalled blinding as a *crash-recovery feature*. This test is
-//! the opposing security lens on the same fact: that recovery convenience puts
-//! a live spend secret in plaintext. Confirm-or-dissolve is by execution; this
-//! is expected to land RED.
+//! treated the journalled blinding as a crash-recovery feature. The hardened
+//! journal now seals that secret instead of serializing it in cleartext.
 
 use dom_wallet::wallet_dir::{WalletDir, WALLET_DAT_NAME};
 use dom_wallet::{JournalEntry, Network, TxJournal, TxJournalEvent};
@@ -52,8 +49,7 @@ fn fresh_recipient(amount: u64) -> (Commitment, BlindingFactor) {
 }
 
 /// Build a spend with change, then read the plaintext journal and assert the
-/// change blinding bytes are ABSENT (safety expectation). EXPECTED RED =
-/// confirms FIX-024 (the blinding is present in cleartext).
+/// change blinding bytes are ABSENT from the plaintext journal.
 #[test]
 fn fix024_change_blinding_must_be_absent_from_plaintext_journal() {
     let temp = TempDir::new().unwrap();
@@ -98,23 +94,19 @@ fn fix024_change_blinding_must_be_absent_from_plaintext_journal() {
         || raw.windows(32).any(|w| w == blinding_bytes)
         || twoway_contains(&raw, hex::encode(blinding_bytes).as_bytes());
 
-    // SAFETY EXPECTATION: a spend secret must never be on disk in cleartext.
-    // This SHOULD pass for a hardened wallet. It is EXPECTED to FAIL here,
-    // and the failure is the FIX-024 confirmation.
     assert!(
         !blinding_present,
-        "FIX-024 CONFIRMED: change output blinding (spend secret) found in plaintext journal at {}",
+        "change output blinding (spend secret) must not appear in plaintext journal at {}",
         journal_path.display()
     );
 }
 
 /// Lower-level confirmation that does not depend on the wallet build path:
 /// directly append a `Built{change}` entry (as the production code does) and
-/// confirm the blinding lands verbatim (as a JSON decimal byte array) in the
-/// plaintext file. Isolates the journal serializer as the leak surface.
-/// EXPECTED RED.
+/// confirm the blinding does not land verbatim in the plaintext file. Isolates
+/// the journal serializer as the leak surface.
 #[test]
-fn fix024_built_event_serializes_blinding_into_cleartext() {
+fn fix024_built_event_does_not_serialize_blinding_into_cleartext() {
     use dom_wallet::store::PendingChange;
     let temp = TempDir::new().unwrap();
     let j = TxJournal::open(temp.path()).unwrap();
@@ -142,10 +134,9 @@ fn fix024_built_event_serializes_blinding_into_cleartext() {
     let json_array = blinding_json_array(&secret_blinding);
     let present = twoway_contains(&raw, json_array.as_bytes());
 
-    // SAFETY EXPECTATION: absent. EXPECTED RED → confirms FIX-024.
     assert!(
         !present,
-        "FIX-024 CONFIRMED: Built event wrote change blinding '{json_array}' to plaintext journal"
+        "Built event must not write change blinding '{json_array}' to plaintext journal"
     );
 }
 

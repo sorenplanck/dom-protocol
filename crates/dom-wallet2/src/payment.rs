@@ -105,7 +105,10 @@ fn select_inputs(state: &WalletV2State, need: u64) -> Result<(Vec<[u8; 33]>, u64
             .then_with(|| a.commitment.cmp(&b.commitment))
     });
 
-    let total: u64 = candidates.iter().map(|o| o.value).sum();
+    let total = candidates.iter().try_fold(0u64, |acc, output| {
+        acc.checked_add(output.value)
+            .ok_or(PaymentError::AmountOverflow)
+    })?;
     if total < need {
         return Err(PaymentError::InsufficientFunds { have: total, need });
     }
@@ -117,7 +120,7 @@ fn select_inputs(state: &WalletV2State, need: u64) -> Result<(Vec<[u8; 33]>, u64
             break;
         }
         selected.push(o.commitment);
-        sum = sum.saturating_add(o.value);
+        sum = sum.checked_add(o.value).ok_or(PaymentError::AmountOverflow)?;
     }
     Ok((selected, sum))
 }

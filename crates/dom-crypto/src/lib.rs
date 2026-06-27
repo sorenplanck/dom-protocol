@@ -38,6 +38,8 @@ mod bulletproof_bp;
 /// produces 739-byte bounded aggregate proofs bound to H_DOM and is wired into
 /// consensus as the live standard-Bulletproof path.
 pub use bulletproof_bp::{
-    bp2_test_only_prove_legacy_single_with_nonce, bp_prove as bp2_prove,
-    bp_prove_with_nonce as bp2_prove_with_nonce, bp_verify as bp2_verify,
+    bp_prove as bp2_prove, bp_prove_with_nonce as bp2_prove_with_nonce, bp_verify as bp2_verify,
 };
+#[cfg(feature = "test-helpers")]
+#[doc(hidden)]
+pub use bulletproof_bp::bp2_test_only_prove_legacy_single_with_nonce;

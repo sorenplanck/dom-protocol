@@ -88,7 +88,9 @@ impl OutputIndex {
                 break;
             }
             selected.push(output.clone());
-            sum = sum.saturating_add(output.value);
+            sum = sum
+                .checked_add(output.value)
+                .ok_or_else(|| WalletError::Crypto("coin selection sum overflow".into()))?;
         }
 
         if sum < amount_needed {
@@ -200,5 +202,33 @@ impl OutputIndex {
 impl Default for OutputIndex {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn output(commitment_byte: u8, value: u64) -> OwnedOutput {
+        let mut commitment = [0u8; 33];
+        commitment[0] = commitment_byte;
+        OwnedOutput::new(commitment, value, [commitment_byte; 32], 1, false)
+    }
+
+    #[test]
+    fn select_for_spend_rejects_sum_overflow() {
+        let mut index = OutputIndex::new();
+        index.insert(output(1, u64::MAX - 1));
+        index.insert(output(2, 2));
+
+        let err = match index.select_for_spend_with_maturity(u64::MAX, 10, 0) {
+            Ok(_) => panic!("expected explicit overflow error"),
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(err, WalletError::Crypto(ref message) if message.contains("overflow")),
+            "expected explicit overflow error, got {err:?}"
+        );
     }
 }

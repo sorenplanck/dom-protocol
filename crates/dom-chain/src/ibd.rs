@@ -330,17 +330,21 @@ impl DomDeserialize for PersistedIbdState {
         let header_cursor_height = r.read_u64()?;
 
         // Semantic invariants the IBD state machine guarantees in every valid
-        // state (IbdState::new / mark_block_committed / note_round_progress),
-        // copied 1:1 into the snapshot by node::persist_ibd_state. A snapshot
-        // violating these is corrupt. NOTE: `best_peer_height` and
+        // state, copied 1:1 into the snapshot by node::persist_ibd_state. A
+        // snapshot violating these is corrupt. `last_progress_height` tracks
+        // the highest deterministic progress of the session, which can come
+        // from header validation before any block has been committed; so the
+        // valid ordering is `start <= blocks <= last_progress <= headers`.
+        //
+        // NOTE: `best_peer_height` and
         // `header_cursor_height` are intentionally NOT constrained — best_peer
         // can legitimately be < start_height (init Completed) or be exceeded by
         // headers/blocks when the peer grows, and header_cursor_height has no
         // proven ordering invariant. Structural checks (cursor ≤ count, caps)
         // above are kept as-is.
-        if start_height > last_progress_height
-            || last_progress_height > blocks_height
-            || blocks_height > headers_height
+        if start_height > blocks_height
+            || blocks_height > last_progress_height
+            || last_progress_height > headers_height
         {
             return Err(DomError::Malformed(format!(
                 "ibd state: non-monotonic heights (start={start_height}, \
@@ -651,7 +655,7 @@ mod tests {
     use super::*;
 
     /// A structurally + semantically valid snapshot: heights satisfy the
-    /// state-machine chain (start ≤ last_progress ≤ blocks ≤ headers) and
+    /// state-machine chain (start ≤ blocks ≤ last_progress ≤ headers) and
     /// retry_attempts ≤ MAX_IBD_RETRY_ATTEMPTS.
     fn valid_snapshot() -> PersistedIbdState {
         PersistedIbdState {
@@ -727,10 +731,17 @@ mod tests {
     }
 
     #[test]
-    fn last_progress_above_blocks_rejected() {
+    fn header_only_progress_above_blocks_accepted() {
         let mut s = valid_snapshot();
-        s.last_progress_height = 13; // > blocks_height (12)
-        let err = roundtrip(&s).expect_err("must reject last_progress > blocks");
+        s.last_progress_height = 13; // > blocks_height (12), still <= headers_height (14)
+        assert!(roundtrip(&s).is_ok());
+    }
+
+    #[test]
+    fn last_progress_above_headers_rejected() {
+        let mut s = valid_snapshot();
+        s.last_progress_height = 15; // > headers_height (14)
+        let err = roundtrip(&s).expect_err("must reject last_progress > headers");
         assert!(matches!(err, DomError::Malformed(_)), "got: {err:?}");
     }
 

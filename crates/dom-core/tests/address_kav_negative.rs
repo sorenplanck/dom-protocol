@@ -28,7 +28,6 @@ use dom_core::Address;
 /// so the green suite is preserved per dom-shield "discover, don't fix"; remove
 /// `#[ignore]` to reproduce the failure.
 #[test]
-#[ignore = "RED finding DOM-CORE-ADDR-CASE: Address::decode to_lowercase() accepts BIP-350-forbidden mixed-case; fix is HUMAN DECISION (consensus/format)"]
 fn mixed_case_address_is_rejected() {
     // A canonical all-lowercase address that decodes fine.
     let addr = Address::new([0x02u8; 33], true);

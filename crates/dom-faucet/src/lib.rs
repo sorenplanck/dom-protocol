@@ -4,6 +4,7 @@
 //! rate limiting per recipient commitment.
 
 use axum::{
+    extract::ConnectInfo,
     extract::{Json, State},
     http::StatusCode,
     response::IntoResponse,
@@ -15,6 +16,7 @@ use dom_crypto::{pedersen::Commitment, BlindingFactor};
 use dom_wallet::{NodeRpcClient, RpcClientError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -22,6 +24,7 @@ use tower_http::cors::CorsLayer;
 use url::Url;
 
 const RATE_LIMIT_SECS: u64 = 3600;
+const MAX_TRACKED_REQUESTS: usize = 4096;
 
 /// Backend trait: faucet needs to send transactions.
 pub trait FaucetBackend: Send + Sync + 'static {
@@ -68,7 +71,7 @@ impl<B: FaucetBackend> FaucetServer<B> {
 
         let listener = tokio::net::TcpListener::bind(&self.addr).await?;
         tracing::info!("Faucet listening on {}", self.addr);
-        axum::serve(listener, app).await?;
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
         Ok(())
     }
 }
@@ -91,6 +94,7 @@ pub struct FaucetResponse {
 }
 
 async fn request_coins<B: FaucetBackend>(
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<FaucetState<B>>>,
     Json(req): Json<FaucetRequest>,
 ) -> impl IntoResponse {
@@ -99,26 +103,42 @@ async fn request_coins<B: FaucetBackend>(
         Err(e) => return faucet_error(StatusCode::BAD_REQUEST, e),
     };
 
-    let last_requests = state.last_requests.lock().await;
-    if let Some(last_time) = last_requests.get(&parsed.rate_limit_key) {
-        let elapsed = Instant::now().duration_since(*last_time);
-        if elapsed < Duration::from_secs(RATE_LIMIT_SECS) {
-            let remaining = Duration::from_secs(RATE_LIMIT_SECS) - elapsed;
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(FaucetResponse {
-                    success: false,
-                    message: format!(
-                        "Rate limited. Try again in {} minutes",
-                        remaining.as_secs() / 60
-                    ),
-                    tx_hash: None,
-                    amount_noms: None,
-                }),
-            );
+    let now = Instant::now();
+    let rate_limit_key = peer_addr.ip().to_string();
+    {
+        let mut last_requests = state.last_requests.lock().await;
+        last_requests.retain(|_, ts| now.duration_since(*ts) < Duration::from_secs(RATE_LIMIT_SECS));
+        if let Some(last_time) = last_requests.get(&rate_limit_key) {
+            let elapsed = now.duration_since(*last_time);
+            if elapsed < Duration::from_secs(RATE_LIMIT_SECS) {
+                let remaining = Duration::from_secs(RATE_LIMIT_SECS) - elapsed;
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(FaucetResponse {
+                        success: false,
+                        message: format!(
+                            "Rate limited. Try again in {} minutes",
+                            remaining.as_secs() / 60
+                        ),
+                        tx_hash: None,
+                        amount_noms: None,
+                    }),
+                );
+            }
         }
+        if last_requests.len() >= MAX_TRACKED_REQUESTS {
+            let oldest = last_requests
+                .iter()
+                .min_by_key(|(_, ts)| *ts)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                last_requests.remove(&oldest);
+            }
+        }
+        // Record the attempt before the expensive dispense so the gate is
+        // atomic and failures do not reopen the window.
+        last_requests.insert(rate_limit_key.clone(), now);
     }
-    drop(last_requests);
 
     let backend = state.backend.clone();
     let commitment_hex = parsed.commitment_hex.clone();
@@ -140,15 +160,17 @@ async fn request_coins<B: FaucetBackend>(
             }
         },
         Err(e) => {
-            return faucet_error(
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Send task failed: {e}"),
+                Json(FaucetResponse {
+                    success: false,
+                    message: format!("Send task failed: {e}"),
+                    tx_hash: None,
+                    amount_noms: None,
+                }),
             );
         }
     };
-
-    let mut last_requests = state.last_requests.lock().await;
-    last_requests.insert(parsed.rate_limit_key.clone(), Instant::now());
 
     (
         StatusCode::OK,

@@ -199,7 +199,22 @@ fn redact_secret_text(input: &str) -> String {
     ];
     let mut out = Vec::new();
     let mut redact_next = 0usize;
+    let mut redact_phrase = false;
     for part in input.split_whitespace() {
+        if redact_phrase {
+            let lower = part.to_ascii_lowercase();
+            let starts_new_key = lower == "bearer"
+                || lower == "authorization"
+                || lower == "authorization:"
+                || sensitive.iter().any(|key| {
+                    lower.starts_with(&format!("{key}=")) || lower.starts_with(&format!("{key}:"))
+                });
+            if !starts_new_key {
+                out.push("<redacted>".to_string());
+                continue;
+            }
+            redact_phrase = false;
+        }
         if redact_next > 0 {
             out.push("<redacted>".to_string());
             redact_next -= 1;
@@ -212,17 +227,42 @@ fn redact_secret_text(input: &str) -> String {
         } else if lower == "authorization" || lower == "authorization:" {
             out.push(format!("{} <redacted>", part.trim_end_matches(':')));
             redact_next = 2;
+        } else if lower.starts_with("node_url=") || lower.starts_with("node_url:") {
+            let separator = if part.contains('=') { '=' } else { ':' };
+            let key = part.split(['=', ':']).next().unwrap_or(part);
+            let value = part.split_once(separator).map(|(_, value)| value).unwrap_or("");
+            out.push(format!("{key}{separator}{}", redact_url_userinfo(value)));
         } else if sensitive.iter().any(|key| {
             lower.starts_with(&format!("{key}=")) || lower.starts_with(&format!("{key}:"))
         }) {
             let separator = if part.contains('=') { '=' } else { ':' };
             let key = part.split(['=', ':']).next().unwrap_or(part);
-            out.push(format!("{key}{separator}<redacted>"));
+            let value = part.split_once(separator).map(|(_, value)| value).unwrap_or("");
+            if (key.eq_ignore_ascii_case("seed") || key.eq_ignore_ascii_case("seed_phrase"))
+                && !value.is_empty()
+            {
+                out.push(format!("{key}{separator}<redacted>"));
+                redact_phrase = true;
+            } else {
+                out.push(format!("{key}{separator}<redacted>"));
+            }
         } else {
-            out.push(part.to_string());
+            out.push(redact_url_userinfo(part));
         }
     }
     out.join(" ")
+}
+
+fn redact_url_userinfo(input: &str) -> String {
+    let Ok(mut url) = Url::parse(input) else {
+        return input.to_string();
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        let _ = url.set_username("<redacted>");
+        let _ = url.set_password(Some("<redacted>"));
+        return url.to_string();
+    }
+    input.to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1406,6 +1446,34 @@ fn node_client(url: &str) -> Result<NodeRpcClient, RpcClientError> {
     let parsed = Url::parse(url).map_err(|e| RpcClientError::Config {
         reason: format!("invalid node url: {e}"),
     })?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => {
+            return Err(RpcClientError::Config {
+                reason: format!("unsupported node url scheme: {scheme}"),
+            })
+        }
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(RpcClientError::Config {
+            reason: "node url userinfo is not allowed".into(),
+        });
+    }
+    let host = parsed.host_str().ok_or_else(|| RpcClientError::Config {
+        reason: "node url missing host".into(),
+    })?;
+    let loopback = match host {
+        "localhost" => true,
+        _ => host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false),
+    };
+    if !loopback {
+        return Err(RpcClientError::Config {
+            reason: format!("node url host {host} is not loopback"),
+        });
+    }
     NodeRpcClient::builder(parsed).build()
 }
 
@@ -2237,7 +2305,6 @@ mod shield_redact_secret_text {
     // to prove the fix. Confirmed by probe and by the diagnostic-log path
     // (DiagnosticLog::append -> redact_secret_text -> export_text).
     #[test]
-    #[ignore = "FINDING(redact): 24-word seed phrase leaks words 2..=24 in cleartext; assertion documents the required fix"]
     fn multiword_seed_phrase_is_fully_redacted() {
         let words: Vec<String> = (1..=24).map(|i| format!("mnemonic{i:02}")).collect();
         let input = format!("seed={}", words.join(" "));
@@ -2249,7 +2316,6 @@ mod shield_redact_secret_text {
 
     // RED / [ignore] — FINDING (NOVO): same leak via the `seed_phrase` key.
     #[test]
-    #[ignore = "FINDING(redact): seed_phrase=<w1> <w2> <w3> leaks w2,w3 in cleartext"]
     fn seed_phrase_key_multiword_is_fully_redacted() {
         let out = redact_secret_text("seed_phrase=alphaword betaword gammaword");
         assert!(!out.contains("betaword"), "seed word leaked: {out}");
@@ -2261,7 +2327,6 @@ mod shield_redact_secret_text {
     // prefixes, so the userinfo (incl. the password) is emitted verbatim.
     // The wallet's node_url is user-editable and flows into network snapshots.
     #[test]
-    #[ignore = "FINDING(redact): http://user:pass@host userinfo (password) emitted verbatim; redactor never inspects URL userinfo"]
     fn credentials_in_node_url_are_redacted() {
         let out = redact_secret_text("node_url=http://alice:hunter2@127.0.0.1:33369");
         assert!(!out.contains("hunter2"), "URL password leaked: {out}");

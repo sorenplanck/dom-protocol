@@ -21,11 +21,10 @@
 
 use dom_wire::peer::ban_scores;
 
-/// Pre-registration penalties keyed by IP:PORT: rotating the source port spreads
-/// the score across distinct buckets, so the attacker never accumulates a ban on
-/// any single key despite N violations from one IP.
+/// Pre-registration penalties are keyed by source IP, so rotating the port no
+/// longer resets the accumulated score.
 #[test]
-fn pending_ban_score_resets_on_port_rotation() {
+fn pending_ban_score_accumulates_across_port_rotation() {
     let mut mgr = dom_wire::manager::PeerManager::new(128, 8);
 
     // The per-violation pre-auth score (e.g. protocol violation).
@@ -33,19 +32,17 @@ fn pending_ban_score_resets_on_port_rotation() {
     // How many violations on ONE key would be needed to ban.
     let needed = ban_scores::BAN_THRESHOLD.div_ceil(score.max(1));
 
-    // Attacker sends `needed` violations, but rotates the source port each time:
-    // same IP 1.2.3.4, ports 5000, 5001, ...
+    let mut rotated_last = 0u32;
     for i in 0..needed {
         let key = format!("1.2.3.4:{}", 5000 + i);
-        let acc = mgr.add_pending_ban_score(&key, score);
-        assert!(
-            acc < ban_scores::BAN_THRESHOLD,
-            "rotating ports keeps every bucket below the ban threshold (acc={acc})"
-        );
+        rotated_last = mgr.add_pending_ban_score(&key, score);
     }
+    assert!(
+        rotated_last >= ban_scores::BAN_THRESHOLD,
+        "rotating ports must still accumulate to the ban threshold on one IP (acc={rotated_last})"
+    );
 
-    // Contrast: the SAME key hit `needed` times DOES cross the threshold —
-    // proving the evasion is specifically the per-port keying.
+    // Stable-address path remains unchanged.
     let mut mgr2 = dom_wire::manager::PeerManager::new(128, 8);
     let stable = "9.9.9.9:6000";
     let mut last = 0u32;

@@ -1445,7 +1445,7 @@ mod genesis_determinism_tests {
     /// (`bp2_prove_with_nonce`), so `rangeproof_root` and the genesis hash changed
     /// from the borromean era; `output_root`/`kernel_root` are unchanged (the
     /// Pedersen commitment and kernel excess are independent of the range-proof
-    /// backend). Recomputed 2026-06-17 (bp2).
+    /// backend). Recomputed after the bounded aggregate bp2 migration.
     #[test]
     fn genesis_testnet_frozen_vectors() {
         // Pinned values (hex), authoritative from the deterministic builder.

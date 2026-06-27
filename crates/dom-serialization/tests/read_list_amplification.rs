@@ -74,20 +74,10 @@ fn measure_peak<R>(f: impl FnOnce() -> R) -> (R, usize) {
 
 // ── The directed amplification probe ────────────────────────────────────────────
 //
-// STATUS: RED — confirmed real DoS finding (FIX-DS-AMP-001). `read_list` calls
-// `Vec::with_capacity(count)` (src/lib.rs:235) using `count` straight from the
-// wire, validated ONLY against `max_count`, never against remaining bytes. A
-// 4-byte input declaring count=1e8 forces an 800 MB eager allocation before any
-// item is read (measured peak == count*size_of::<T>()).
-//
-// These two tests are `#[ignore]`d so the green suite is not blocked by a
-// production bug the shield is forbidden to fix (test-construction ≠ bug-fix).
-// Run them on demand to reproduce:
-//     cargo test -p dom-serialization --test read_list_amplification -- --ignored
-// Remove the #[ignore] once the production guard lands (see report FIX-QUEUE).
+// STATUS: GREEN regression — `read_list` now rejects impossible counts before
+// any eager allocation proportional to the attacker-controlled count.
 
 #[test]
-#[ignore = "RED FIX-DS-AMP-001: read_list with_capacity(count) eager-alloc DoS; run with --ignored"]
 fn read_list_tiny_buffer_huge_count_bounded_alloc() {
     // 4-byte input: declares 100_000_000 items, ZERO item bytes follow.
     // max_count is large (mirrors a caller that trusts a generous bound).
@@ -126,7 +116,6 @@ fn read_list_tiny_buffer_huge_count_bounded_alloc() {
 }
 
 #[test]
-#[ignore = "RED FIX-DS-AMP-001: read_list with_capacity(count) eager-alloc DoS; run with --ignored"]
 fn read_list_count_exceeding_remaining_bytes_must_not_overalloc() {
     // Tighter case: 8-byte input. 4-byte count = 1_000_000, then 4 stray bytes.
     // Even one full BlockHeight (8 bytes) is not present after the count.

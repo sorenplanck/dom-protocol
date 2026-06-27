@@ -84,9 +84,10 @@ impl UtxoSet {
         maturity: u64,
     ) -> Result<(), DomError> {
         if !entry.is_mature_for(current_height.0, maturity) {
+            let mature_at = entry.block_height.saturating_add(maturity);
             return Err(DomError::TemporarilyInvalid(format!(
                 "coinbase output not mature until height {}",
-                entry.block_height + maturity
+                mature_at
             )));
         }
         Ok(())

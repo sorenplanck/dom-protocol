@@ -1,4 +1,4 @@
-//! dom-shield Onda 2 — FIX-023 reproducer for `dom_wallet::wallet`.
+//! dom-shield Onda 2 — FIX-023 regression for `dom_wallet::wallet`.
 //!
 //! Subfamily: directed-corruption (Lens B funds-safety, unauthenticated WAL).
 //!
@@ -9,8 +9,7 @@
 //! forge journal lines.
 //!
 //! This file forges journal entries by hand, reopens the wallet (which runs
-//! reconcile), and asserts the in-memory wallet state was rewritten by the
-//! forged plaintext:
+//! reconcile), and asserts the forged plaintext is ignored:
 //!
 //!   (a) FORGED `Confirmed` over a real pending tx → reconcile marks the tx's
 //!       inputs `spent` and clears reservations, with no authentication of the
@@ -22,9 +21,8 @@
 //!       owned set via `register_pending_change`. The attacker controls the
 //!       commitment/value/blinding, so this is attacker-chosen wallet state.
 //!
-//! Both asserts encode the OBSERVED (insecure) reconcile behaviour so the file
-//! compiles green; the security expectation each violates is documented inline.
-//! These are CONFIRMATIONS of FIX-023.
+//! These are regressions: a passing test means forged journal lines did not
+//! rewrite spend-state or inject phantom pending transactions.
 
 use dom_core::Hash256;
 use dom_crypto::pedersen::Commitment;
@@ -59,9 +57,9 @@ fn append_line(journal: &TxJournal, line: &serde_json::Value) {
     f.sync_all().unwrap();
 }
 
-/// (a) Forged `Confirmed` rewrites real spend-state with no authentication.
+/// (a) Forged `Confirmed` must not rewrite real spend-state.
 #[test]
-fn fix023_forged_confirmed_marks_inputs_spent_on_reopen() {
+fn fix023_forged_confirmed_is_ignored_on_reopen() {
     let temp = TempDir::new().unwrap();
     let dir = temp.path().join("w");
     let mut wd = WalletDir::create(&dir, "pw", Network::Mainnet, &genesis()).unwrap();
@@ -88,8 +86,8 @@ fn fix023_forged_confirmed_marks_inputs_spent_on_reopen() {
         .unwrap();
     assert_eq!(reserved_before, (false, true), "pre-forgery: reserved, not spent");
 
-    // ATTACKER: append a forged `Confirmed` for this pending tx. No key, no
-    // node, no proof — just a line in the plaintext journal.
+    // ATTACKER: append a forged `Confirmed` for this pending tx. With an
+    // authenticated journal, reopen must ignore it.
     let journal = wd.wallet().journal().unwrap();
     append_line(
         journal,
@@ -101,38 +99,28 @@ fn fix023_forged_confirmed_marks_inputs_spent_on_reopen() {
     );
     drop(wd);
 
-    // Reopen → WalletDir::open runs reconcile_with_journal.
     let reopened = WalletDir::open(&dir, "pw").expect("reopen runs reconcile");
-
-    // The pending tx was a real one, so reconcile consumes it: input is now
-    // marked SPENT and the reservation cleared — purely from the forged line.
     let after = reopened
         .wallet()
         .outputs()
         .find(|o| o.commitment == input_commitment)
         .map(|o| (o.spent, o.reserved_for_tx));
 
-    // CONFIRMS FIX-023(a): unauthenticated journal drives spend-state.
-    // SAFETY EXPECTATION (violated): a forged confirmation must NOT be able to
-    // mark wallet inputs spent.
     assert_eq!(
         after,
-        Some((true, None)),
-        "FIX-023: forged Confirmed marked input spent + released reservation via reconcile"
+        Some((false, Some(tx_hash))),
+        "forged Confirmed must not mark inputs spent or clear reservations"
     );
     assert!(
-        !reopened.wallet().has_pending_tx(&tx_hash),
-        "FIX-023: forged Confirmed evicted the pending tx with no authentication"
+        reopened.wallet().has_pending_tx(&tx_hash),
+        "forged Confirmed must not evict the real pending tx"
     );
 }
 
-/// (b) Forged `Built` for a never-built tx that references a CLEAN owned output
-/// makes reconcile inject a phantom pending tx and HIJACK the reservation of
-/// that output — a forged spend-freeze authored entirely from the plaintext
-/// journal. (The encrypted pending_txs never contained this tx; the
-/// Building/Submitted heal branch creates it from the journal alone.)
+/// (b) Forged `Built` for a never-built tx must not inject a phantom pending tx
+/// or hijack reservations.
 #[test]
-fn fix023_forged_built_injects_phantom_pending_and_hijacks_reservation() {
+fn fix023_forged_built_is_ignored_on_reopen() {
     let temp = TempDir::new().unwrap();
     let dir = temp.path().join("w");
     let mut wd = WalletDir::create(&dir, "pw", Network::Mainnet, &genesis()).unwrap();
@@ -153,7 +141,7 @@ fn fix023_forged_built_injects_phantom_pending_and_hijacks_reservation() {
     assert_eq!(before, (false, None), "pre-forgery: clean owned output");
 
     // ATTACKER: forge a `Built` event for a tx that was never built, naming the
-    // wallet's clean output as a reserved input. Status stays `Building`.
+    // wallet's clean output as a reserved input. Reopen must ignore it.
     let journal = wd.wallet().journal().unwrap();
     let fake_tx_hash = [0x7Fu8; 32];
     append_line(
@@ -173,9 +161,6 @@ fn fix023_forged_built_injects_phantom_pending_and_hijacks_reservation() {
     drop(wd);
 
     let reopened = WalletDir::open(&dir, "pw").expect("reopen runs reconcile");
-
-    // reconcile's Building/Submitted heal branch reinstates the phantom pending
-    // tx and reserves the named input — all from the unauthenticated journal.
     let after = reopened
         .wallet()
         .outputs()
@@ -183,17 +168,13 @@ fn fix023_forged_built_injects_phantom_pending_and_hijacks_reservation() {
         .map(|o| (o.spent, o.reserved_for_tx))
         .unwrap();
 
-    // CONFIRMS FIX-023(b): forged Built injects a phantom pending tx and
-    // hijacks the reservation of a clean owned output. SAFETY EXPECTATION
-    // (violated): an unauthenticated file must not be able to reserve/freeze
-    // wallet funds for a tx the wallet never built.
     assert!(
-        reopened.wallet().has_pending_tx(&fake_tx_hash),
-        "FIX-023: forged Built created a phantom pending tx via reconcile"
+        !reopened.wallet().has_pending_tx(&fake_tx_hash),
+        "forged Built must not create a phantom pending tx"
     );
     assert_eq!(
         after,
-        (false, Some(fake_tx_hash)),
-        "FIX-023: forged Built hijacked the reservation of a clean owned output (spend-freeze)"
+        (false, None),
+        "forged Built must not hijack reservations on clean owned outputs"
     );
 }

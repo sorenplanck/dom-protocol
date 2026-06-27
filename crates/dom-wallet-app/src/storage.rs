@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use url::Url;
 
 pub const APP_STATE_FILE: &str = "app_state.json";
 
@@ -29,6 +30,8 @@ pub enum AppStorageError {
     Io(String),
     #[error("serialization: {0}")]
     Serialization(String),
+    #[error("invalid node url: {0}")]
+    InvalidNodeUrl(String),
 }
 
 pub fn load_or_default(data_dir: &Path) -> Result<PersistedAppState, AppStorageError> {
@@ -38,11 +41,15 @@ pub fn load_or_default(data_dir: &Path) -> Result<PersistedAppState, AppStorageE
     }
 
     let bytes = std::fs::read(&path).map_err(|e| AppStorageError::Io(e.to_string()))?;
-    serde_json::from_slice(&bytes).map_err(|e| AppStorageError::Serialization(e.to_string()))
+    let state: PersistedAppState =
+        serde_json::from_slice(&bytes).map_err(|e| AppStorageError::Serialization(e.to_string()))?;
+    validate_node_url(&state.node_url)?;
+    Ok(state)
 }
 
 pub fn save(data_dir: &Path, state: &PersistedAppState) -> Result<(), AppStorageError> {
     std::fs::create_dir_all(data_dir).map_err(|e| AppStorageError::Io(e.to_string()))?;
+    validate_node_url(&state.node_url)?;
 
     let path = data_dir.join(APP_STATE_FILE);
     let temp_path = data_dir.join(format!("{APP_STATE_FILE}.tmp"));
@@ -77,6 +84,36 @@ pub fn default_data_dir() -> PathBuf {
         .join(".dom-wallet-app")
 }
 
+fn validate_node_url(node_url: &str) -> Result<(), AppStorageError> {
+    let parsed = Url::parse(node_url).map_err(|e| AppStorageError::InvalidNodeUrl(e.to_string()))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => {
+            return Err(AppStorageError::InvalidNodeUrl(format!(
+                "unsupported scheme {scheme}"
+            )))
+        }
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(AppStorageError::InvalidNodeUrl(
+            "userinfo is not allowed in node_url".into(),
+        ));
+    }
+    let Some(host) = parsed.host_str() else {
+        return Err(AppStorageError::InvalidNodeUrl("missing host".into()));
+    };
+    let loopback = match host {
+        "localhost" => true,
+        _ => host.parse::<std::net::IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false),
+    };
+    if !loopback {
+        return Err(AppStorageError::InvalidNodeUrl(format!(
+            "host {host} is not loopback"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +146,31 @@ mod tests {
         std::fs::write(temp.path().join(APP_STATE_FILE), b"{not json").unwrap();
         let err = load_or_default(temp.path()).unwrap_err();
         assert!(matches!(err, AppStorageError::Serialization(_)));
+    }
+
+    #[test]
+    fn hostile_node_url_scheme_is_rejected() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path()).unwrap();
+        std::fs::write(
+            temp.path().join(APP_STATE_FILE),
+            br#"{"wallet_dir":null,"network":null,"node_url":"file:///etc/passwd"}"#,
+        )
+        .unwrap();
+        let err = load_or_default(temp.path()).unwrap_err();
+        assert!(matches!(err, AppStorageError::InvalidNodeUrl(_)));
+    }
+
+    #[test]
+    fn remote_node_url_host_is_rejected() {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path()).unwrap();
+        std::fs::write(
+            temp.path().join(APP_STATE_FILE),
+            br#"{"wallet_dir":null,"network":null,"node_url":"http://attacker.example:1/"}"#,
+        )
+        .unwrap();
+        let err = load_or_default(temp.path()).unwrap_err();
+        assert!(matches!(err, AppStorageError::InvalidNodeUrl(_)));
     }
 }

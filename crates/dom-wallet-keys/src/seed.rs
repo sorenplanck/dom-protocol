@@ -214,8 +214,20 @@ pub fn spend_output_blinding(
     account: u32,
     index: u32,
 ) -> Result<Zeroizing<[u8; 32]>, SeedError> {
-    let account = account & 0x7fff_ffff;
-    let index = index & 0x7fff_ffff;
+    let account = if account <= 0x7fff_ffff {
+        account
+    } else {
+        return Err(SeedError::Internal(format!(
+            "account {account} exceeds u31 BIP-32 hardened index range"
+        )));
+    };
+    let index = if index <= 0x7fff_ffff {
+        index
+    } else {
+        return Err(SeedError::Internal(format!(
+            "index {index} exceeds u31 BIP-32 child index range"
+        )));
+    };
     let path = format!(
         "m/{}'/{}'/{}'/{}/{}",
         BIP44_PURPOSE, DOM_COIN_TYPE, account, 0u32, index

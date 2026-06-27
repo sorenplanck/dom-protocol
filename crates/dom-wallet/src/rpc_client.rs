@@ -670,7 +670,14 @@ impl NodeRpcClientBuilder {
         Ok(NodeRpcClient {
             base_url,
             http,
-            bearer_token: self.bearer_token,
+            bearer_token: self.bearer_token.and_then(|token| {
+                let trimmed = token.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }),
         })
     }
 }

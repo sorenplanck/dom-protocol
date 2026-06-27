@@ -186,8 +186,8 @@ impl ExtendedPrivKey {
     ) -> Result<Zeroizing<[u8; 32]>, HdError> {
         // Build path: m/44'/330'/account'/change/index
         let path = format!(
-            "m/44'/{}'/{}'/{}'/{}/{}",
-            44u32, DOM_COIN_TYPE, account, change, index,
+            "m/44'/{}'/{}'/{}/{}",
+            DOM_COIN_TYPE, account, change, index,
         );
         let child = self.derive_path(&path)?;
         Ok(child.key.clone())

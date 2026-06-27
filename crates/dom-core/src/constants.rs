@@ -427,11 +427,11 @@ pub const TAG_COINBASE_BLINDING: &str = "DOM:coinbase-blinding:v1";
 /// construction, coinbase structure, or header serialization) changes this
 /// hash and is therefore consensus-breaking.
 ///
-/// Last computed: 2026-06-17 from clean run with TAG_GENESIS_BLINDING:v1 and the
-/// standard Bulletproof coinbase (bp2). The genesis coinbase now carries a
-/// 739-byte bounded aggregate Bulletproof, so `rangeproof_root` and this hash changed from the
-/// borromean era; `output_root`/`kernel_root` are unchanged. Pinned and
-/// regression-tested by `dom-node` `miner::tests::genesis_testnet_frozen_vectors`.
+/// Regenerated after the bounded aggregate bp2 migration using
+/// `TAG_GENESIS_BLINDING:v1`. The genesis coinbase now carries a 739-byte
+/// bounded aggregate Bulletproof, so `rangeproof_root` and this hash changed
+/// from the borromean era; `output_root`/`kernel_root` are unchanged. Pinned
+/// and regression-tested by `dom-node` `miner::tests::genesis_testnet_frozen_vectors`.
 pub const GENESIS_HASH_TESTNET: [u8; 32] = [
     0x2a, 0xb5, 0xe6, 0xc7, 0x36, 0x07, 0xe8, 0xbf, 0xbb, 0xec, 0x2d, 0x4c, 0xe3, 0xea, 0x14, 0x19,
     0xcd, 0xa2, 0x9a, 0xe6, 0x89, 0x2e, 0x7f, 0x1c, 0x24, 0xfa, 0xcc, 0x46, 0x5c, 0xd6, 0x58, 0x21,

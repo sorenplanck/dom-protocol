@@ -169,46 +169,28 @@ fn empty_file_is_clean_error() {
     assert!(storage::load_or_default(dir.path()).is_err());
 }
 
-// RED / [ignore] — FINDING-CANDIDATE (directed corruption / SSRF surface):
-// `load_or_default` deserializes `node_url` as a free-form String with NO
-// validation. A tampered app_state.json can redirect the wallet's RPC node to
-// an arbitrary scheme/host (e.g. http://attacker.example, file://, or a LAN
-// metadata endpoint) — a classic SSRF / wrong-node fund-exposure vector. There
-// is no scheme/host allowlist at load time. This test asserts the HARDENED
-// behavior (reject a non-loopback, non-http(s) node_url) and currently fails;
-// it documents the gap. PRECISA DECISÃO HUMANA: whether load should validate
-// node_url (allowlist / scheme check) or whether validation belongs at the
-// connection layer. Un-ignore once a policy is chosen.
+// Hardened load-time policy: `node_url` must remain local-only
+// (`http/https` loopback, no userinfo). Tampered hostile schemes / hosts are
+// rejected before the wallet consumes them.
 #[test]
-#[ignore = "FINDING-CANDIDATE(storage/SSRF): node_url loaded without scheme/host validation; redirect-wallet via tampered app_state.json. Needs human decision on validation policy."]
 fn tampered_node_url_with_hostile_scheme_is_rejected() {
     let dir = TempDir::new().unwrap();
     write_state(
         &dir,
         br#"{"wallet_dir":null,"network":null,"node_url":"file:///etc/passwd"}"#,
     );
-    let loaded = storage::load_or_default(dir.path()).expect("parses today");
-    // Hardened expectation: a non-http(s) scheme must not be accepted as a node URL.
-    assert!(
-        loaded.node_url.starts_with("http://") || loaded.node_url.starts_with("https://"),
-        "hostile scheme accepted: {}",
-        loaded.node_url
-    );
+    assert!(storage::load_or_default(dir.path()).is_err());
 }
 
-// [x] Behavior PIN (documents current, un-validated acceptance — NOT an
-// assertion of correctness): a tampered node_url is loaded verbatim today.
-// This makes the SSRF surface explicit and gives the finding above a
-// before/after contrast. If load gains validation, this pin must be revisited.
+// Remote/non-loopback node URLs are rejected at load time.
 #[test]
-fn pin_tampered_node_url_is_loaded_verbatim_today() {
+fn tampered_remote_node_url_is_rejected() {
     let dir = TempDir::new().unwrap();
     write_state(
         &dir,
         br#"{"wallet_dir":null,"network":null,"node_url":"http://attacker.example:1/"}"#,
     );
-    let loaded = storage::load_or_default(dir.path()).expect("parses");
-    assert_eq!(loaded.node_url, "http://attacker.example:1/");
+    assert!(storage::load_or_default(dir.path()).is_err());
 }
 
 // [x] Behavior PIN: a tampered wallet_dir path is loaded verbatim (no path

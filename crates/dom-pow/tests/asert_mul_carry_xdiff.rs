@@ -21,9 +21,9 @@
 //! reference of the SAME ASERT computation. If they differ, the production
 //! arithmetic is wrong.
 //!
-//! STATUS: RED — exposes a genuine carry-loss in the consensus next-target
-//! arithmetic. See report FIX-PoW-001 (DS-POW-MUL-CARRY). The shield discovers;
-//! the fix is a separate, human-decision task (consensus arithmetic).
+//! STATUS: GREEN regression — the production arithmetic must match the
+//! independent U512 reference on the historical carry-loss vector family.
+//! If this fails, a low→high carry regression re-entered consensus arithmetic.
 
 use dom_core::{BlockHeight, Timestamp, ASERT_HALF_LIFE, TARGET_SPACING};
 use dom_pow::{asert_next_target, AsertAnchor, ASERT_FRAC_TABLE};
@@ -100,8 +100,9 @@ fn asert_reference(
 /// (so it is `>= MIN_TARGET`). frac index 22 (m = 69558). exponent_seconds = 2970
 /// lands exactly on frac index 22 with integer_part == 0 (pure multiply, no shift).
 /// time_diff = ideal_time(=120 for height 1) + 2970 = 3090. The production
-/// `mul_256_div_radix_checked` drops the low→high carry and the resulting target
-/// differs from the U512 reference by one unit in the high limb.
+/// The historical bug dropped the low→high carry in
+/// `mul_256_div_radix_checked`, shifting the target by one unit in the high
+/// limb. This test locks the repaired behavior to the U512 reference.
 #[test]
 fn asert_next_target_matches_u512_reference_on_carry_vector() {
     let target: [u8; 32] = [

@@ -265,7 +265,7 @@ Test `max_target_bytes_layout` verifies byte layout and consistency with `MAX_TA
 
 ---
 
-## [TESTNET] RB-ASERT-ARITH — ASERT saturating_mul overflow
+## [TESTNET] RB-ASERT-ARITH — ASERT 256-bit arithmetic
 
 **Severity: CRITICAL — difficulty corrupted for high targets**
 **File:** `crates/dom-pow/src/lib.rs`
@@ -274,9 +274,12 @@ Test `max_target_bytes_layout` verifies byte layout and consistency with `MAX_TA
 **Previous problem:** `hi.saturating_mul(multiplier)` silently corrupted difficulty
 when target near MAX_TARGET. Also `target_to_difficulty` truncated to 128 bits.
 
-**Current state:** `checked_mul` used throughout — overflow returns `DomError::Invalid`.
-`target_to_difficulty_u256` returns full (u128, u128) 256-bit result.
-Test `asert_no_time_change_returns_same_target` removed fudge factor (was `ratio<=2`).
+**Current state:** the internal multiply reconstructs
+`floor((hi * 2^128 + lo) * m / 65536)` without dropping the carry from the
+low limb into the high limb. `checked_mul`/full-width arithmetic is used
+throughout, `target_to_difficulty_u256` returns the full `(u128, u128)` 256-bit
+result, and strict regression coverage includes the historical carry vector plus
+an independent U512 reference sweep.
 
 ---
 
@@ -569,7 +572,7 @@ backup is the complete one.
 | RB-SCHNORR-RX | R encoding (SEC1 33-byte vs BIP-340) | Testnet | ✅ RESOLVED |
 | RB-SCHNORR-CHAINID | chain_id in Schnorr verify | Testnet | ✅ RESOLVED |
 | RB-MAX-TARGET | MAX_TARGET byte order | Testnet | ✅ RESOLVED |
-| RB-ASERT-ARITH | ASERT 256-bit arithmetic | Testnet | 🔧 PARTIAL (U256 correct, tests strict) |
+| RB-ASERT-ARITH | ASERT 256-bit arithmetic | Testnet | ✅ RESOLVED |
 | RB-SUM-COMMITS | Balance eq identity crash | Testnet | ✅ RESOLVED |
 | RB-MAX-SUPPLY | Supply constant consistency | Testnet | ✅ RESOLVED |
 | RB-BAN-POLICY | Peer ban enforcement | Mainnet | 🔧 PARTIAL (wired+persisted; residual: score granularity, ADDR flooding, ban decay) |
@@ -671,18 +674,16 @@ just a slow one).
 ## [TESTNET] RB-MUSIG2 — MuSig2 implementation missing
 
 **Severity: IMPORTANT**
-**Status:** 🔴 OPEN
+**Status:** ✅ RESOLVED (deferred to v1.1)
 
-RFC-0009 §3 specifies MuSig2 (2-round, HKDF-SHA256 nonce, session tracking).
-No implementation exists. No crate for MuSig2 is referenced in any Cargo.toml.
+MuSig2 is **not** a v1.0 release requirement. The shipping v1.0 kernel signing
+path is single-signer Schnorr only, and the product docs already reflect that:
 
-**Decision needed:** Is MuSig2 mandatory for v1.0 or deferred to v1.1?
+- `WHITEPAPER.md`: "MuSig2 multi-signature aggregation is deferred to v1.1"
+- `docs/MAINNET_LAUNCH.md`: MuSig2 tracked under v1.1 development
 
-- If mandatory: add `secp256k1-zkp` feature `musig` to RB-BULLETPROOFS checklist
-- If deferred: document that v1.0 kernels are single-signer Schnorr only
-
-Until decided, single-signer Schnorr (dom-crypto/schnorr.rs) is the only
-available kernel signing path.
+Resolution: keep v1.0 single-signer only, do **not** treat MuSig2 absence as a
+release blocker, and keep any future MuSig2 work gated to the v1.1 roadmap.
 
 ---
 

@@ -72,7 +72,7 @@ impl Network {
 }
 
 /// Full node configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
     /// Network.
     pub network: Network,
@@ -119,7 +119,7 @@ pub struct NodeConfig {
     pub wallet_path: Option<String>,
     /// Password for the wallet file.
     /// In production, this should come from a separate secret store, not the config TOML.
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub wallet_password: Option<String>,
     /// Log level.
     pub log_level: String,
@@ -130,7 +130,7 @@ pub struct NodeConfig {
     ///
     /// If unset, `dom-rpc` falls back to its standalone-node behavior: read
     /// `DOM_RPC_TOKEN`, then `~/.dom/rpc_token`, then generate a token file.
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub rpc_bearer_token: Option<String>,
     /// Prometheus metrics listen address (e.g. "127.0.0.1:3371").
     /// None = metrics endpoint disabled. Prefer loopback/internal bindings;
@@ -156,6 +156,45 @@ pub struct MinerThrottleConfig {
     pub yield_every_nonces: u64,
     /// Sleep duration in microseconds when throttling. Zero means yield only.
     pub sleep_micros: u64,
+}
+
+impl std::fmt::Debug for NodeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeConfig")
+            .field("network", &self.network)
+            .field("data_dir", &self.data_dir)
+            .field("p2p_listen_addr", &self.p2p_listen_addr)
+            .field("max_inbound", &self.max_inbound)
+            .field("min_outbound", &self.min_outbound)
+            .field("dns_seeds", &self.dns_seeds)
+            .field("disable_dns_seeds", &self.disable_dns_seeds)
+            .field("seed_peers", &self.seed_peers)
+            .field("mine", &self.mine)
+            .field("miner_throttle", &self.miner_throttle)
+            .field("miner_threads", &self.miner_threads)
+            .field("miner_address", &self.miner_address)
+            .field("wallet_path", &self.wallet_path)
+            .field(
+                "wallet_password",
+                &self
+                    .wallet_password
+                    .as_ref()
+                    .map(|_| "<redacted>")
+                    .unwrap_or("<none>"),
+            )
+            .field("log_level", &self.log_level)
+            .field("rpc_listen_addr", &self.rpc_listen_addr)
+            .field(
+                "rpc_bearer_token",
+                &self
+                    .rpc_bearer_token
+                    .as_ref()
+                    .map(|_| "<redacted>")
+                    .unwrap_or("<none>"),
+            )
+            .field("metrics_listen_addr", &self.metrics_listen_addr)
+            .finish()
+    }
 }
 
 impl NodeConfig {
@@ -282,5 +321,33 @@ mod tests {
         assert_eq!(NodeConfig::mainnet().miner_threads, 1);
         assert_eq!(NodeConfig::testnet().miner_threads, 1);
         assert_eq!(NodeConfig::regtest().miner_threads, 1);
+    }
+
+    #[test]
+    fn debug_redacts_secret_fields() {
+        let mut config = NodeConfig::regtest();
+        config.wallet_password = Some("secret-password".into());
+        config.rpc_bearer_token = Some("rpc-secret".into());
+
+        let rendered = format!("{config:?}");
+
+        assert!(rendered.contains("wallet_password: \"<redacted>\""));
+        assert!(rendered.contains("rpc_bearer_token: \"<redacted>\""));
+        assert!(!rendered.contains("secret-password"));
+        assert!(!rendered.contains("rpc-secret"));
+    }
+
+    #[test]
+    fn serialization_omits_secret_fields() {
+        let mut config = NodeConfig::regtest();
+        config.wallet_password = Some("secret-password".into());
+        config.rpc_bearer_token = Some("rpc-secret".into());
+
+        let json = serde_json::to_string(&config).expect("serialize config");
+
+        assert!(!json.contains("wallet_password"));
+        assert!(!json.contains("rpc_bearer_token"));
+        assert!(!json.contains("secret-password"));
+        assert!(!json.contains("rpc-secret"));
     }
 }

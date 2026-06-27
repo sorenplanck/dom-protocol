@@ -1497,11 +1497,9 @@ mod tests {
     /// auth bypass for any deployment whose configured token is empty. Note the
     /// upstream `get_or_create_token*` paths skip empty tokens, but `router()`
     /// (a public API) accepts any `BearerToken`, and an empty token reaching the
-    /// middleware authorizes. The fix (reject empty token / empty provided
-    /// value before ct_eq) is a SEPARATE task and a production change → HUMAN
-    /// DECISION. Kept #[ignore] so the suite stays green; un-ignore to reproduce.
+    /// middleware authorizes. The middleware now rejects empty configured
+    /// tokens and empty bearer values before the constant-time compare.
     #[tokio::test]
-    #[ignore = "RED confirmed-bug (NEW): empty configured token + 'Bearer ' empty value authorizes (200) instead of 401 — auth bypass; fix needs human decision (production change)"]
     async fn empty_configured_token_never_authorizes() {
         let token = Arc::new(middleware::BearerToken(String::new()));
         let app = router(Arc::new(MockNode::new(1)), token);
