@@ -50,7 +50,7 @@ fn getblockdata_request_count_is_capped_at_parse() {
     let n = (MAX_GETBLOCKDATA_HASHES + 1) as u16;
     let mut frame = Vec::new();
     frame.extend_from_slice(&n.to_le_bytes());
-    frame.extend(std::iter::repeat(0u8).take((MAX_GETBLOCKDATA_HASHES + 1) * 32));
+    frame.extend(std::iter::repeat_n(0u8, (MAX_GETBLOCKDATA_HASHES + 1) * 32));
     assert!(
         GetBlockDataPayload::from_bytes(&frame).is_err(),
         "from_bytes must reject an over-cap GetBlockData frame before the serve loop"
@@ -71,7 +71,7 @@ fn getheaders_locator_is_capped_at_parse() {
     let n = (MAX_LOCATOR_HASHES + 1) as u16;
     let mut frame = Vec::new();
     frame.extend_from_slice(&n.to_le_bytes());
-    frame.extend(std::iter::repeat(0u8).take((MAX_LOCATOR_HASHES + 1) * 32));
+    frame.extend(std::iter::repeat_n(0u8, (MAX_LOCATOR_HASHES + 1) * 32));
     frame.extend_from_slice(&[0u8; 32]); // stop_hash
     assert!(
         GetHeadersPayload::from_bytes(&frame).is_err(),
@@ -100,5 +100,8 @@ fn worst_case_getblockdata_multiplier_is_bounded_and_recorded() {
     // serving of a 2 GiB reply is itself gated by per-peer rate limits + the
     // requirement that every requested block actually exists in our store.)
     let multiplier = response_bytes / request_bytes;
-    assert!(multiplier > 0 && multiplier <= 600_000, "multiplier recorded: {multiplier}");
+    assert!(
+        multiplier > 0 && multiplier <= 600_000,
+        "multiplier recorded: {multiplier}"
+    );
 }

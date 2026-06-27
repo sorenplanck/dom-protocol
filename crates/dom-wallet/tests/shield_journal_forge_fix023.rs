@@ -39,7 +39,13 @@ fn genesis() -> Hash256 {
 fn make_output(value: u64, height: u64, blinding_byte: u8) -> OwnedOutput {
     let blinding = BlindingFactor::from_bytes([blinding_byte; 32]).unwrap();
     let commitment = Commitment::commit(value, &blinding);
-    OwnedOutput::new(*commitment.as_bytes(), value, *blinding.as_bytes(), height, false)
+    OwnedOutput::new(
+        *commitment.as_bytes(),
+        value,
+        *blinding.as_bytes(),
+        height,
+        false,
+    )
 }
 
 fn fresh_recipient(amount: u64) -> (Commitment, BlindingFactor) {
@@ -84,7 +90,11 @@ fn fix023_forged_confirmed_is_ignored_on_reopen() {
         .find(|o| o.commitment == input_commitment)
         .map(|o| (o.spent, o.reserved_for_tx.is_some()))
         .unwrap();
-    assert_eq!(reserved_before, (false, true), "pre-forgery: reserved, not spent");
+    assert_eq!(
+        reserved_before,
+        (false, true),
+        "pre-forgery: reserved, not spent"
+    );
 
     // ATTACKER: append a forged `Confirmed` for this pending tx. With an
     // authenticated journal, reopen must ignore it.

@@ -1918,7 +1918,9 @@ mod genesis_determinism_tests {
         use dom_core::NETWORK_MAGIC_REGTEST;
 
         std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
-        let target = dom_core::MAX_TARGET_BYTES;
+        let target = dom_pow::CompactTarget(REGTEST_TARGET_COMPACT)
+            .to_target()
+            .expect("regtest target");
 
         let (header, _stats) = mine_blocking(
             1,

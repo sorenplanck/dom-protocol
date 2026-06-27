@@ -41,8 +41,14 @@ fn fix005_two_backups_same_seed_password_are_randomized() {
         bytes_a, bytes_b,
         "backups must be randomized; two exports of the same seed/password must differ"
     );
-    assert!(bytes_a.len() > 32, "backup envelope must carry nonce/tag overhead");
-    assert!(bytes_b.len() > 32, "backup envelope must carry nonce/tag overhead");
+    assert!(
+        bytes_a.len() > 32,
+        "backup envelope must carry nonce/tag overhead"
+    );
+    assert!(
+        bytes_b.len() > 32,
+        "backup envelope must carry nonce/tag overhead"
+    );
 }
 
 /// Learning one `(seed, backup)` pair must not decrypt another backup exported
@@ -61,7 +67,10 @@ fn fix005_one_known_pair_does_not_decrypt_another_backup() {
 
     let c1 = std::fs::read(&p1).unwrap();
     let c2 = std::fs::read(&p2).unwrap();
-    assert_ne!(c1, c2, "fresh nonces must decorrelate backups under the same password");
+    assert_ne!(
+        c1, c2,
+        "fresh nonces must decorrelate backups under the same password"
+    );
     assert_eq!(import_backup_file(&p2, password).unwrap(), seed2);
     assert_ne!(c1, seed1, "backup bytes must not expose the seed directly");
 }

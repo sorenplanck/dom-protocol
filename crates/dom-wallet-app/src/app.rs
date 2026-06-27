@@ -46,11 +46,12 @@ impl WalletApp {
 }
 
 impl eframe::App for WalletApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        apply_theme(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        apply_theme(&ctx);
 
         if !self.bootstrap_complete {
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 centered_stage(ui, "Loading", "Resolving local wallet application state.");
             });
             self.runtime.complete_bootstrap();
@@ -61,9 +62,9 @@ impl eframe::App for WalletApp {
         self.runtime.poll_node_reconnect();
         self.runtime.poll_pending_resubmit();
 
-        egui::TopBottomPanel::top("top_bar")
+        egui::Panel::top("top_bar")
             .frame(panel_frame())
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
@@ -111,8 +112,8 @@ impl eframe::App for WalletApp {
             });
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().inner_margin(egui::Margin::same(18.0)))
-            .show(ctx, |ui| {
+            .frame(egui::Frame::default().inner_margin(18))
+            .show(ui, |ui| {
                 if let Some(error) = &self.runtime.last_error {
                     warning_banner(ui, "Runtime Error", error, palette().danger);
                     ui.add_space(8.0);
@@ -681,7 +682,7 @@ fn apply_theme(ctx: &egui::Context) {
     visuals.widgets.open.bg_fill = palette.panel_alt;
     ctx.set_visuals(visuals);
 
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.button_padding = egui::vec2(10.0, 6.0);
     style.spacing.indent = 16.0;
@@ -701,22 +702,22 @@ fn apply_theme(ctx: &egui::Context) {
         egui::TextStyle::Button,
         egui::FontId::new(14.0, egui::FontFamily::Proportional),
     );
-    ctx.set_style(style);
+    ctx.set_style_of(egui::Theme::Dark, style);
 }
 
 fn panel_frame() -> egui::Frame {
     egui::Frame::default()
         .fill(palette().panel)
         .stroke(egui::Stroke::new(1.0, palette().border))
-        .inner_margin(egui::Margin::same(12.0))
+        .inner_margin(12)
 }
 
 fn card(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::default()
         .fill(palette().panel)
         .stroke(egui::Stroke::new(1.0, palette().border))
-        .rounding(8.0)
-        .inner_margin(egui::Margin::same(14.0))
+        .corner_radius(8)
+        .inner_margin(14)
         .show(ui, add_contents);
 }
 
@@ -771,8 +772,8 @@ fn status_badge(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
     egui::Frame::default()
         .fill(fill)
         .stroke(egui::Stroke::new(1.0, color))
-        .rounding(6.0)
-        .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
             ui.label(egui::RichText::new(text).color(color).strong());
         });
@@ -783,8 +784,8 @@ fn warning_banner(ui: &mut egui::Ui, title: &str, body: &str, color: egui::Color
     egui::Frame::default()
         .fill(fill)
         .stroke(egui::Stroke::new(1.0, color))
-        .rounding(6.0)
-        .inner_margin(egui::Margin::same(10.0))
+        .corner_radius(6)
+        .inner_margin(10)
         .show(ui, |ui| {
             ui.label(egui::RichText::new(title).strong().color(color));
             ui.label(body);
@@ -795,8 +796,8 @@ fn code_block(ui: &mut egui::Ui, text: &str) {
     egui::Frame::default()
         .fill(egui::Color32::from_rgb(20, 24, 30))
         .stroke(egui::Stroke::new(1.0, palette().border))
-        .rounding(6.0)
-        .inner_margin(egui::Margin::same(8.0))
+        .corner_radius(6)
+        .inner_margin(8)
         .show(ui, |ui| {
             ui.label(egui::RichText::new(text).monospace());
         });

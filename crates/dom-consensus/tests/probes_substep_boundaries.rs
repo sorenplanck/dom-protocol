@@ -24,7 +24,9 @@
 //!   NON-DETERMINISM in the offset path.
 
 use dom_consensus::block::{BlockHeader, ProofOfWork};
-use dom_consensus::transaction::{Transaction, TransactionInput, TransactionKernel, TransactionOutput};
+use dom_consensus::transaction::{
+    Transaction, TransactionInput, TransactionKernel, TransactionOutput,
+};
 use dom_consensus::{
     compute_block_pmmr_roots, validate_block, validate_transaction, Block, CoinbaseKernel,
     CoinbaseTransaction, ValidationContext,
@@ -206,9 +208,9 @@ fn n_plus_one() -> [u8; 32] {
 #[test]
 fn probe_tx_offset_noncanonical_is_deterministic() {
     let offsets: [[u8; 32]; 3] = [
-        SECP256K1_N,      // == n
-        n_plus_one(),     // == n+1
-        [0xFFu8; 32],     // == 2^256-1 (>> n)
+        SECP256K1_N,  // == n
+        n_plus_one(), // == n+1
+        [0xFFu8; 32], // == 2^256-1 (>> n)
     ];
 
     for off in offsets {

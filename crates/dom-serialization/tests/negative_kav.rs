@@ -101,7 +101,10 @@ fn read_vec_short_buffer_eof() {
     w.write_bytes(&[0u8; 10]); // only 10 available
     let buf = w.finish();
     let mut r = Reader::new(&buf);
-    assert!(r.read_vec(200).is_err(), "short buffer must EOF, not partial");
+    assert!(
+        r.read_vec(200).is_err(),
+        "short buffer must EOF, not partial"
+    );
 }
 
 // ── read_list: declared count over limit rejected ───────────────────────────────
@@ -126,5 +129,8 @@ fn read_list_short_buffer_eof() {
     let buf = w.finish();
     let mut r = Reader::new(&buf);
     let res = r.read_list::<BlockHeight>(16);
-    assert!(res.is_err(), "missing item bytes must EOF, not partial decode");
+    assert!(
+        res.is_err(),
+        "missing item bytes must EOF, not partial decode"
+    );
 }

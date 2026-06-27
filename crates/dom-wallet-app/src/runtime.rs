@@ -7,7 +7,7 @@ use dom_crypto::BlindingFactor;
 use dom_serialization::DomDeserialize;
 use dom_wallet::{
     Bip39Seed, Network, NodeRpc, NodeRpcClient, NodeStatus, ReceiveRequestDescriptor,
-    ReceiveRequestStatus, RpcClientError, SeedAcceptance, Transaction, TxJournal, TxStatus, Wallet,
+    ReceiveRequestStatus, RpcClientError, SeedAcceptance, Transaction, TxStatus, Wallet,
     WalletBalance, WalletDir,
 };
 use dom_wire::message::{Command, WireMessage};
@@ -230,14 +230,20 @@ fn redact_secret_text(input: &str) -> String {
         } else if lower.starts_with("node_url=") || lower.starts_with("node_url:") {
             let separator = if part.contains('=') { '=' } else { ':' };
             let key = part.split(['=', ':']).next().unwrap_or(part);
-            let value = part.split_once(separator).map(|(_, value)| value).unwrap_or("");
+            let value = part
+                .split_once(separator)
+                .map(|(_, value)| value)
+                .unwrap_or("");
             out.push(format!("{key}{separator}{}", redact_url_userinfo(value)));
         } else if sensitive.iter().any(|key| {
             lower.starts_with(&format!("{key}=")) || lower.starts_with(&format!("{key}:"))
         }) {
             let separator = if part.contains('=') { '=' } else { ':' };
             let key = part.split(['=', ':']).next().unwrap_or(part);
-            let value = part.split_once(separator).map(|(_, value)| value).unwrap_or("");
+            let value = part
+                .split_once(separator)
+                .map(|(_, value)| value)
+                .unwrap_or("");
             if (key.eq_ignore_ascii_case("seed") || key.eq_ignore_ascii_case("seed_phrase"))
                 && !value.is_empty()
             {
@@ -923,7 +929,13 @@ impl AppRuntime {
             return summary;
         };
 
-        let records = match TxJournal::open(session.wallet_dir.path()).and_then(|j| j.replay()) {
+        let records = match session
+            .wallet_dir
+            .wallet()
+            .journal()
+            .ok_or_else(|| anyhow::anyhow!("wallet journal not attached"))
+            .and_then(|j| j.replay().map_err(anyhow::Error::from))
+        {
             Ok(records) => records,
             Err(err) => {
                 self.diagnostic_log.append(
@@ -1327,11 +1339,11 @@ fn pending_resubmit_should_retry(err: &RpcClientError) -> bool {
 }
 
 fn journal_rows(
-    wallet_dir: &Path,
+    _wallet_dir: &Path,
     wallet: &Wallet,
     rpc: Option<&NodeRpcClient>,
 ) -> Vec<HistoryRow> {
-    let Ok(journal) = dom_wallet::TxJournal::open(wallet_dir) else {
+    let Some(journal) = wallet.journal() else {
         return Vec::new();
     };
     let Ok(records) = journal.replay() else {
@@ -1670,8 +1682,11 @@ mod tests {
 
     fn replay_status(runtime: &AppRuntime, tx_hash: &[u8; 32]) -> TxStatus {
         let session = runtime.session.as_ref().unwrap();
-        let journal = TxJournal::open(session.wallet_dir.path()).unwrap();
-        journal
+        session
+            .wallet_dir
+            .wallet()
+            .journal()
+            .unwrap()
             .replay()
             .unwrap()
             .get(tx_hash)

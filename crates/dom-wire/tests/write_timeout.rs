@@ -56,7 +56,7 @@ async fn connected_codecs() -> (
 }
 
 /// A peer that never reads must NOT pin our write task forever: the per-frame
-/// write timeout fires, `send` returns a `PolicyRejected("write timeout …")`,
+/// write timeout fires, `send` returns structured write-timeout misbehavior,
 /// and other tasks keep running throughout.
 #[tokio::test]
 async fn write_times_out_against_non_reading_peer() {
@@ -116,8 +116,14 @@ async fn write_times_out_against_non_reading_peer() {
 
     let err = result.expect("a send against a non-reading peer must time out");
     assert!(
-        matches!(&err, DomError::PolicyRejected(msg) if msg.contains("write timeout")),
-        "expected a write-timeout PolicyRejected, got: {err:?}"
+        matches!(
+            &err,
+            DomError::PeerMisbehavior {
+                kind: dom_core::PeerMisbehavior::WriteTimeout,
+                ..
+            }
+        ),
+        "expected a structured write-timeout misbehavior, got: {err:?}"
     );
 
     drop(b); // keep the non-reading peer alive until the assertions are done

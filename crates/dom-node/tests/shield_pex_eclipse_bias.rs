@@ -32,7 +32,11 @@ fn single_subnet_flood_monopolises_connectable_set() {
     for i in 0..max_peers {
         pex.add_peer(format!("10.0.0.{}:8333", i % 256));
     }
-    assert_eq!(pex.known_count(), max_peers, "set should be full of attacker");
+    assert_eq!(
+        pex.known_count(),
+        max_peers,
+        "set should be full of attacker"
+    );
 
     // Honest peers from diverse subnets arrive AFTER the set is full.
     for i in 0..32u8 {
@@ -46,9 +50,7 @@ fn single_subnet_flood_monopolises_connectable_set() {
         max_peers,
         "set stays attacker-sized; honest addrs were dropped at the door"
     );
-    let honest_present = connectable
-        .iter()
-        .any(|p| p.addr.starts_with("198.51."));
+    let honest_present = connectable.iter().any(|p| p.addr.starts_with("198.51."));
     assert!(
         !honest_present,
         "ECLIPSE BIAS CONFIRMED: no honest (diverse-subnet) peer is connectable \

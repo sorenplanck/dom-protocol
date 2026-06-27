@@ -32,11 +32,11 @@
 //! defect at its source. Fixing it is a consensus/validation change
 //! (PRECISA DECISÃO HUMANA), out of test-construction scope.
 
+use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::transaction::{CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
 use dom_consensus::{
     compute_block_pmmr_roots, derive_chain_id, validate_block, Block, ValidationContext,
 };
-use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_core::{
     BlockHeight, Hash256, Timestamp, GENESIS_HASH_REGTEST, KERNEL_FEAT_COINBASE,
     NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION, TAG_KERNEL_MSG_COINBASE,
@@ -58,7 +58,10 @@ fn blinding(seed: u8) -> BlindingFactor {
 }
 
 fn regtest_chain_id() -> Hash256 {
-    derive_chain_id(NETWORK_MAGIC_REGTEST, &Hash256::from_bytes(GENESIS_HASH_REGTEST))
+    derive_chain_id(
+        NETWORK_MAGIC_REGTEST,
+        &Hash256::from_bytes(GENESIS_HASH_REGTEST),
+    )
 }
 
 fn signed_coinbase(height: BlockHeight, seed: u8) -> CoinbaseTransaction {
@@ -74,8 +77,8 @@ fn signed_coinbase(height: BlockHeight, seed: u8) -> CoinbaseTransaction {
         data.extend_from_slice(&reward.to_le_bytes());
         blake2b_256_tagged(TAG_KERNEL_MSG_COINBASE, &data)
     };
-    let sig = schnorr_sign(&secret, msg.as_bytes(), regtest_chain_id().as_bytes())
-        .expect("coinbase sig");
+    let sig =
+        schnorr_sign(&secret, msg.as_bytes(), regtest_chain_id().as_bytes()).expect("coinbase sig");
     CoinbaseTransaction {
         output: TransactionOutput { commitment, proof },
         kernel: CoinbaseKernel {

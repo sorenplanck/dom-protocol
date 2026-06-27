@@ -43,6 +43,7 @@ impl From<DomError> for TxError {
             DomError::TemporarilyInvalid(msg) => TxError::InvalidTransaction(msg),
             DomError::Orphan(msg) => TxError::InvalidTransaction(msg),
             DomError::PolicyRejected(msg) => TxError::InvalidTransaction(msg),
+            DomError::PeerMisbehavior { message, .. } => TxError::InvalidTransaction(message),
             DomError::Internal(msg) => TxError::Crypto(msg),
         }
     }

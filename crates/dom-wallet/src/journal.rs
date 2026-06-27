@@ -444,7 +444,8 @@ impl TxJournal {
     /// recorded by the time this returns Ok.
     pub fn append(&self, entry: &JournalEntry) -> Result<(), JournalError> {
         let wire = self.to_wire(entry)?;
-        let mut json = serde_json::to_vec(&wire).map_err(|e| JournalError::Encode(e.to_string()))?;
+        let mut json =
+            serde_json::to_vec(&wire).map_err(|e| JournalError::Encode(e.to_string()))?;
         json.push(b'\n');
 
         let mut f = OpenOptions::new()
@@ -508,7 +509,7 @@ impl TxJournal {
                     continue;
                 }
             };
-            let entry = match self.from_wire(&wire, line_no) {
+            let entry = match self.decode_wire(&wire, line_no) {
                 Ok(entry) => entry,
                 Err(e) => {
                     warn!("journal: authenticated decode failed at line {line_no}: {e}");
@@ -542,19 +543,19 @@ impl TxJournal {
                 change: self.encode_change(change)?,
             },
             TxJournalEvent::Submitted => TxJournalEventWire::Submitted,
-            TxJournalEvent::Confirmed { block_height } => {
-                TxJournalEventWire::Confirmed { block_height: *block_height }
-            }
-            TxJournalEvent::Failed { reason } => {
-                TxJournalEventWire::Failed { reason: reason.clone() }
-            }
-            TxJournalEvent::Replaced { by_tx_hash } => {
-                TxJournalEventWire::Replaced { by_tx_hash: *by_tx_hash }
-            }
+            TxJournalEvent::Confirmed { block_height } => TxJournalEventWire::Confirmed {
+                block_height: *block_height,
+            },
+            TxJournalEvent::Failed { reason } => TxJournalEventWire::Failed {
+                reason: reason.clone(),
+            },
+            TxJournalEvent::Replaced { by_tx_hash } => TxJournalEventWire::Replaced {
+                by_tx_hash: *by_tx_hash,
+            },
             TxJournalEvent::Canceled => TxJournalEventWire::Canceled,
-            TxJournalEvent::Reorged { reorg_height } => {
-                TxJournalEventWire::Reorged { reorg_height: *reorg_height }
-            }
+            TxJournalEvent::Reorged { reorg_height } => TxJournalEventWire::Reorged {
+                reorg_height: *reorg_height,
+            },
             TxJournalEvent::ReceiveConfirmed {
                 commitment,
                 amount,
@@ -582,7 +583,11 @@ impl TxJournal {
         Ok(wire)
     }
 
-    fn from_wire(&self, wire: &JournalEntryWire, line_no: usize) -> Result<JournalEntry, JournalError> {
+    fn decode_wire(
+        &self,
+        wire: &JournalEntryWire,
+        line_no: usize,
+    ) -> Result<JournalEntry, JournalError> {
         if let Some(crypto) = &self.crypto {
             let Some(mac) = &wire.mac else {
                 return Err(JournalError::Decode {
@@ -613,19 +618,19 @@ impl TxJournal {
                 change: self.decode_change(change)?,
             },
             TxJournalEventWire::Submitted => TxJournalEvent::Submitted,
-            TxJournalEventWire::Confirmed { block_height } => {
-                TxJournalEvent::Confirmed { block_height: *block_height }
-            }
+            TxJournalEventWire::Confirmed { block_height } => TxJournalEvent::Confirmed {
+                block_height: *block_height,
+            },
             TxJournalEventWire::Failed { reason } => TxJournalEvent::Failed {
                 reason: reason.clone(),
             },
-            TxJournalEventWire::Replaced { by_tx_hash } => {
-                TxJournalEvent::Replaced { by_tx_hash: *by_tx_hash }
-            }
+            TxJournalEventWire::Replaced { by_tx_hash } => TxJournalEvent::Replaced {
+                by_tx_hash: *by_tx_hash,
+            },
             TxJournalEventWire::Canceled => TxJournalEvent::Canceled,
-            TxJournalEventWire::Reorged { reorg_height } => {
-                TxJournalEvent::Reorged { reorg_height: *reorg_height }
-            }
+            TxJournalEventWire::Reorged { reorg_height } => TxJournalEvent::Reorged {
+                reorg_height: *reorg_height,
+            },
             TxJournalEventWire::ReceiveConfirmed {
                 commitment,
                 amount,
@@ -648,7 +653,10 @@ impl TxJournal {
         })
     }
 
-    fn encode_change(&self, change: &Option<PendingChange>) -> Result<Option<String>, JournalError> {
+    fn encode_change(
+        &self,
+        change: &Option<PendingChange>,
+    ) -> Result<Option<String>, JournalError> {
         let Some(change) = change else {
             return Ok(None);
         };
@@ -671,14 +679,19 @@ impl TxJournal {
         Ok(Some(hex::encode(envelope)))
     }
 
-    fn decode_change(&self, change: &Option<String>) -> Result<Option<PendingChange>, JournalError> {
+    fn decode_change(
+        &self,
+        change: &Option<String>,
+    ) -> Result<Option<PendingChange>, JournalError> {
         let Some(change) = change else {
             return Ok(None);
         };
         let bytes = hex::decode(change).map_err(|e| JournalError::Encode(e.to_string()))?;
         let plaintext = if let Some(crypto) = &self.crypto {
             if bytes.len() < JOURNAL_NONCE_LEN + 16 {
-                return Err(JournalError::Encode("journal change ciphertext too short".into()));
+                return Err(JournalError::Encode(
+                    "journal change ciphertext too short".into(),
+                ));
             }
             let nonce_bytes: [u8; JOURNAL_NONCE_LEN] = bytes[..JOURNAL_NONCE_LEN]
                 .try_into()
@@ -738,8 +751,13 @@ impl JournalCrypto {
         Ok(hex::encode(mac.finalize().into_bytes()))
     }
 
-    fn verify_mac_hex(&self, wire: &JournalEntryWire, expected_hex: &str) -> Result<bool, JournalError> {
-        let expected = hex::decode(expected_hex).map_err(|e| JournalError::Encode(e.to_string()))?;
+    fn verify_mac_hex(
+        &self,
+        wire: &JournalEntryWire,
+        expected_hex: &str,
+    ) -> Result<bool, JournalError> {
+        let expected =
+            hex::decode(expected_hex).map_err(|e| JournalError::Encode(e.to_string()))?;
         let bytes = canonical_entry_bytes(wire)?;
         let mut mac = <HmacSha256 as Mac>::new_from_slice(self.mac_key.as_ref())
             .map_err(|e| JournalError::Encode(e.to_string()))?;

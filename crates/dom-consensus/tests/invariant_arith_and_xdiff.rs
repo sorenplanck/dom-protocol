@@ -18,11 +18,13 @@
 //!     via signature verification) and an independent byte layout agree, across
 //!     randomized (features, fee, lock_height).
 
-use dom_consensus::transaction::{Transaction, TransactionInput, TransactionKernel, TransactionOutput};
+use dom_consensus::transaction::{
+    Transaction, TransactionInput, TransactionKernel, TransactionOutput,
+};
 use dom_consensus::{compute_block_pmmr_roots, CoinbaseKernel, CoinbaseTransaction};
 use dom_core::{
-    Amount, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN, MAX_SUPPLY_NOMS, TAG_KERNEL_MSG,
-    WEIGHT_INPUT, WEIGHT_KERNEL, WEIGHT_OUTPUT,
+    Amount, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN, MAX_SUPPLY_NOMS, TAG_KERNEL_MSG, WEIGHT_INPUT,
+    WEIGHT_KERNEL, WEIGHT_OUTPUT,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
@@ -122,7 +124,10 @@ fn total_fee_two_max_amounts_no_wrap() {
     };
     // 2 * MAX_SUPPLY_NOMS must not wrap a u64 and must equal the true sum.
     let expected = (MAX_SUPPLY_NOMS as u128) * 2;
-    assert!(expected <= u64::MAX as u128, "two MAX amounts fit in u64 by construction");
+    assert!(
+        expected <= u64::MAX as u128,
+        "two MAX amounts fit in u64 by construction"
+    );
     assert_eq!(tx.total_fee().unwrap() as u128, expected);
 }
 
@@ -159,17 +164,32 @@ proptest! {
 fn weight_saturating_is_monotone() {
     let small = Transaction {
         inputs: vec![],
-        outputs: vec![TransactionOutput { commitment: shared_commit(), proof: vec![] }],
+        outputs: vec![TransactionOutput {
+            commitment: shared_commit(),
+            proof: vec![],
+        }],
         kernels: vec![kernel_with_fee(0)],
         offset: [0u8; 32],
     };
     let bigger = Transaction {
-        inputs: (0..255).map(|_| TransactionInput { commitment: shared_commit() }).collect(),
-        outputs: (0..255).map(|_| TransactionOutput { commitment: shared_commit(), proof: vec![] }).collect(),
+        inputs: (0..255)
+            .map(|_| TransactionInput {
+                commitment: shared_commit(),
+            })
+            .collect(),
+        outputs: (0..255)
+            .map(|_| TransactionOutput {
+                commitment: shared_commit(),
+                proof: vec![],
+            })
+            .collect(),
         kernels: (0..16).map(|_| kernel_with_fee(0)).collect(),
         offset: [0u8; 32],
     };
-    assert!(bigger.weight() >= small.weight(), "weight must be monotone in counts");
+    assert!(
+        bigger.weight() >= small.weight(),
+        "weight must be monotone in counts"
+    );
 }
 
 // ── XDIFF: compute_block_pmmr_roots miner vs validator ────────────────────────

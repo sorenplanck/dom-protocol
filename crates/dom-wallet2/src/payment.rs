@@ -120,7 +120,9 @@ fn select_inputs(state: &WalletV2State, need: u64) -> Result<(Vec<[u8; 33]>, u64
             break;
         }
         selected.push(o.commitment);
-        sum = sum.checked_add(o.value).ok_or(PaymentError::AmountOverflow)?;
+        sum = sum
+            .checked_add(o.value)
+            .ok_or(PaymentError::AmountOverflow)?;
     }
     Ok((selected, sum))
 }

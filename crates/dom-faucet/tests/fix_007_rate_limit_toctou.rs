@@ -183,7 +183,10 @@ fn fix_007b_fresh_commitments_from_same_caller_do_not_bypass_rate_limit() {
         if i == 0 {
             assert_eq!(status, 200, "first claim should succeed");
         } else {
-            assert_eq!(status, 429, "fresh commitments from the same caller must still be limited");
+            assert_eq!(
+                status, 429,
+                "fresh commitments from the same caller must still be limited"
+            );
         }
     }
     let dispenses = backend.dispenses.load(Ordering::SeqCst);
@@ -224,7 +227,10 @@ fn fix_007c_failed_send_still_records_rate_limit() {
         attempts_reaching_backend, 1,
         "failed sends must still close the rate-limit window; got {attempts_reaching_backend} backend attempts"
     );
-    assert_eq!(server_errors, 1, "only the first failed attempt should hit the backend");
+    assert_eq!(
+        server_errors, 1,
+        "only the first failed attempt should hit the backend"
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -256,6 +262,9 @@ fn fix_007d_key_rotation_from_same_ip_does_not_multiply_dispenses() {
         }
     }
     let dispenses = backend.dispenses.load(Ordering::SeqCst);
-    assert_eq!(dispenses, 1, "distinct commitments from the same IP must not multiply dispenses");
+    assert_eq!(
+        dispenses, 1,
+        "distinct commitments from the same IP must not multiply dispenses"
+    );
     assert_eq!(ok, 1, "only the first rotated-key request should succeed");
 }

@@ -71,7 +71,11 @@ impl<B: FaucetBackend> FaucetServer<B> {
 
         let listener = tokio::net::TcpListener::bind(&self.addr).await?;
         tracing::info!("Faucet listening on {}", self.addr);
-        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await?;
         Ok(())
     }
 }
@@ -107,7 +111,8 @@ async fn request_coins<B: FaucetBackend>(
     let rate_limit_key = peer_addr.ip().to_string();
     {
         let mut last_requests = state.last_requests.lock().await;
-        last_requests.retain(|_, ts| now.duration_since(*ts) < Duration::from_secs(RATE_LIMIT_SECS));
+        last_requests
+            .retain(|_, ts| now.duration_since(*ts) < Duration::from_secs(RATE_LIMIT_SECS));
         if let Some(last_time) = last_requests.get(&rate_limit_key) {
             let elapsed = now.duration_since(*last_time);
             if elapsed < Duration::from_secs(RATE_LIMIT_SECS) {

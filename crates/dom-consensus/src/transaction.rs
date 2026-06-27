@@ -6,9 +6,10 @@
 //! RFC-0010: Weight units, lock_height validation, coinbase maturity placement.
 
 use dom_core::{
-    Amount, BlockHeight, DomError, KERNEL_FEAT_COINBASE, KERNEL_FEAT_HEIGHT_LOCKED,
-    KERNEL_FEAT_PLAIN, MAX_INPUTS_PER_TX, MAX_KERNELS_PER_TX, MAX_OUTPUTS_PER_TX, MAX_TX_WEIGHT,
-    WEIGHT_COINBASE_KERNEL, WEIGHT_INPUT, WEIGHT_KERNEL, WEIGHT_OUTPUT,
+    Amount, BlockHeight, DomError, PeerMisbehavior, KERNEL_FEAT_COINBASE,
+    KERNEL_FEAT_HEIGHT_LOCKED, KERNEL_FEAT_PLAIN, MAX_INPUTS_PER_TX, MAX_KERNELS_PER_TX,
+    MAX_OUTPUTS_PER_TX, MAX_TX_WEIGHT, WEIGHT_COINBASE_KERNEL, WEIGHT_INPUT, WEIGHT_KERNEL,
+    WEIGHT_OUTPUT,
 };
 use dom_crypto::pedersen::Commitment;
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
@@ -441,8 +442,9 @@ impl CoinbaseTransaction {
 
         match schnorr_verify(&sig, &pk, chain_id, kernel_message.as_bytes()) {
             Ok(true) => Ok(()),
-            Ok(false) => Err(DomError::Invalid(
-                "coinbase kernel signature invalid — miner does not prove ownership".into(),
+            Ok(false) => Err(DomError::peer_misbehavior(
+                PeerMisbehavior::InvalidSignature,
+                "coinbase kernel signature invalid — miner does not prove ownership",
             )),
             Err(DomError::Internal(msg)) => Err(DomError::Internal(format!("coinbase sig: {msg}"))),
             Err(e) => Err(e),

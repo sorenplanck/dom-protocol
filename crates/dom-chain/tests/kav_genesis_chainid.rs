@@ -96,7 +96,10 @@ fn genesis_economic_constants_are_frozen() {
     // tripwires for the same consensus-critical preimage.
     let g = build_mainnet_genesis().expect("mainnet");
     assert_eq!(g.reward, INITIAL_BLOCK_REWARD, "genesis reward changed");
-    assert_eq!(INITIAL_BLOCK_REWARD, 3_300_000_000, "subsidy constant changed");
+    assert_eq!(
+        INITIAL_BLOCK_REWARD, 3_300_000_000,
+        "subsidy constant changed"
+    );
     assert_eq!(g.message, GENESIS_MESSAGE, "genesis message changed");
     assert_eq!(
         GENESIS_MESSAGE, "Not a store of value. A means of exchange.",

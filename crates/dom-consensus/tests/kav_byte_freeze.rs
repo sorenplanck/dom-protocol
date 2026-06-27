@@ -21,9 +21,9 @@
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::derive_chain_id;
 use dom_core::{
-    BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN, NETWORK_MAGIC_MAINNET,
-    NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET, PROTOCOL_VERSION, TAG_CHAIN_ID, TAG_KERNEL_MSG,
-    TAG_KERNEL_MSG_COINBASE,
+    BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
+    NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET, PROTOCOL_VERSION,
+    TAG_CHAIN_ID, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_pow::CompactTarget;
@@ -55,18 +55,31 @@ fn kav_plain_kernel_message_layout_is_frozen() {
     expected_body.push(features);
     expected_body.extend_from_slice(&fee.to_le_bytes());
     expected_body.extend_from_slice(&lock_height.to_le_bytes());
-    assert_eq!(expected_body.len(), 17, "plain kernel preimage body is 17 bytes");
+    assert_eq!(
+        expected_body.len(),
+        17,
+        "plain kernel preimage body is 17 bytes"
+    );
 
     let digest = spec_kernel_message(features, fee, lock_height);
 
     // Frozen byte answer for this exact (features,fee,lock_height) triple under the
     // pinned tag. If the layout, tag, or field order drifts, this is RED.
     let frozen = *blake2b_256_tagged(TAG_KERNEL_MSG, &expected_body).as_bytes();
-    assert_eq!(digest, frozen, "plain kernel message preimage layout drifted");
+    assert_eq!(
+        digest, frozen,
+        "plain kernel message preimage layout drifted"
+    );
 
     // Sensitivity: each field genuinely enters the digest (no field is ignored).
-    assert_ne!(digest, spec_kernel_message(KERNEL_FEAT_PLAIN, fee + 1, lock_height));
-    assert_ne!(digest, spec_kernel_message(KERNEL_FEAT_PLAIN, fee, lock_height + 1));
+    assert_ne!(
+        digest,
+        spec_kernel_message(KERNEL_FEAT_PLAIN, fee + 1, lock_height)
+    );
+    assert_ne!(
+        digest,
+        spec_kernel_message(KERNEL_FEAT_PLAIN, fee, lock_height + 1)
+    );
     assert_ne!(
         digest,
         spec_kernel_message(dom_core::KERNEL_FEAT_HEIGHT_LOCKED, fee, lock_height)
@@ -115,7 +128,10 @@ fn kav_coinbase_message_layout_is_frozen() {
 
     // Sensitivity: value and feature byte both enter the digest.
     assert_ne!(digest, spec_coinbase_message(features, explicit_value + 1));
-    assert_ne!(digest, spec_coinbase_message(KERNEL_FEAT_PLAIN, explicit_value));
+    assert_ne!(
+        digest,
+        spec_coinbase_message(KERNEL_FEAT_PLAIN, explicit_value)
+    );
 }
 
 // ── KAV-conformância: derive_chain_id fixed vectors ───────────────────────────

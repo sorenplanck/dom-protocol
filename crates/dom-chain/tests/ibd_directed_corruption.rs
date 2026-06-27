@@ -24,9 +24,9 @@
 mod common;
 
 use common::open_test_store;
+use dom_chain::PersistedIbdState;
 use dom_core::{DomError, MAX_HEADERS_PER_MSG};
 use dom_serialization::{DomDeserialize, Writer};
-use dom_chain::PersistedIbdState;
 
 // ---------------------------------------------------------------------------
 // A) Poisoned PersistedIbdState frames (raw-byte directed corruption).
@@ -115,8 +115,8 @@ fn deserialize_rejects_pending_header_count_over_cap() {
 fn deserialize_rejects_unknown_phase_tag() {
     // Phase tag 9 is out of range (valid 0..=8). Directed single-byte flip.
     let bytes = craft_frame(9, 0, 0, 0, 0, 0, 0);
-    let err = PersistedIbdState::from_bytes(&bytes)
-        .expect_err("unknown phase tag must be rejected");
+    let err =
+        PersistedIbdState::from_bytes(&bytes).expect_err("unknown phase tag must be rejected");
     assert!(matches!(err, DomError::Malformed(_)), "got {err:?}");
 }
 

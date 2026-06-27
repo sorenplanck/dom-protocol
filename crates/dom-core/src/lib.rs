@@ -21,5 +21,5 @@ pub mod types;
 
 pub use address::{Address, ADDRESS_HRP_MAINNET, ADDRESS_HRP_TESTNET};
 pub use constants::*;
-pub use error::DomError;
+pub use error::{DomError, PeerMisbehavior};
 pub use types::*;

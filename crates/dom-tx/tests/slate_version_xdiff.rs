@@ -1,24 +1,11 @@
-//! dom-shield — XDIFF / KAV on the Slate `version` field.
+//! dom-shield XDIFF/KAV checks for the Slate `version` field.
 //!
-//! FINDING UNDER TEST (likely RED-as-design): `Slate::deserialize` reads
-//! `version: r.read_u16()?` (slate.rs) but NEVER validates or branches on it.
-//! There is no `if version != EXPECTED { return Err(...) }` and no
-//! version-conditional parsing. Consequences:
-//!
-//!   * A v2 sender and a v1 receiver do NOT detect the mismatch at the framing
-//!     layer — the receiver happily decodes whatever follows using the single
-//!     hardcoded layout, regardless of the declared version.
-//!   * Any u16 (0, 1, 2, 0xFFFF, ...) is accepted as long as the remaining
-//!     bytes match the one supported layout.
-//!
-//! These tests DOCUMENT that behavior. They are written to PASS against the
-//! current (version-ignoring) implementation; the comments record that this is
-//! a finding (missing version gate), not a fix. If a version gate is later
-//! added, these tests turn RED and must be revisited — that is the intended
-//! tripwire.
+//! These are regression tests for the version gate: a receiver must reject
+//! unsupported slate versions before parsing the rest of the body with the v1
+//! layout.
 
 use dom_serialization::{DomDeserialize, DomSerialize};
-use dom_tx::slate::{OutputCommitmentAndProof, Slate};
+use dom_tx::slate::{OutputCommitmentAndProof, Slate, CURRENT_SLATE_VERSION};
 
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::{bp2_prove, BlindingFactor, PublicKey, RangeProof, SecretKey};
@@ -63,24 +50,15 @@ fn base_slate(version: u16) -> Slate {
     }
 }
 
-/// XDIFF core: the SAME byte body decodes identically regardless of the
-/// declared version. We take ONE encoded v1 slate, then produce a v2 buffer by
-/// flipping ONLY the 2-byte version prefix in place (the body — including the
-/// randomized range proof — is byte-for-byte identical). Both decode
-/// successfully and agree on every field except `version`. This proves the
-/// version field is inert (no version-conditional parsing exists).
-///
-/// (Note: encoding two slates independently would differ in the range-proof
-/// region because bp2_prove is randomized; we deliberately reuse one body so
-/// the only varying bytes are the version prefix.)
+/// XDIFF core: changing only the version prefix must make the slate invalid.
 #[test]
-fn xdiff_version_field_is_ignored_during_parse() {
-    let b1 = base_slate(1).to_bytes().unwrap();
+fn xdiff_version_field_is_validated_before_body_parse() {
+    let b1 = base_slate(CURRENT_SLATE_VERSION).to_bytes().unwrap();
 
     // v2 buffer = identical body, version prefix overwritten to 2 (LE u16).
     let mut b2 = b1.clone();
-    b2[0] = 2;
-    b2[1] = 0;
+    let unsupported = CURRENT_SLATE_VERSION + 1;
+    b2[0..2].copy_from_slice(&unsupported.to_le_bytes());
 
     // The encodings differ ONLY in the first two (version) bytes.
     assert_eq!(b1.len(), b2.len(), "version must not change body length");
@@ -92,52 +70,48 @@ fn xdiff_version_field_is_ignored_during_parse() {
     );
 
     let d1 = Slate::from_bytes(&b1).unwrap();
-    let d2 = Slate::from_bytes(&b2).unwrap();
+    let err = Slate::from_bytes(&b2).unwrap_err();
 
-    // Both decode; they differ only in version. NO version validation occurs.
-    assert_eq!(d1.version, 1);
-    assert_eq!(d2.version, 2);
-    let mut d2_as_v1 = d2.clone();
-    d2_as_v1.version = 1;
-    assert_eq!(
-        d1, d2_as_v1,
-        "FINDING: parser does not branch on version; bodies decode identically"
+    assert_eq!(d1.version, CURRENT_SLATE_VERSION);
+    assert!(
+        err.to_string().contains(&format!(
+            "unsupported slate version {unsupported} (expected {CURRENT_SLATE_VERSION})"
+        )),
+        "unsupported version should be rejected: {err:?}"
     );
 }
 
-/// Any arbitrary u16 version is accepted (no allow-list, no reject path).
-/// Documents the absence of a version gate at the extreme values.
+/// Unsupported u16 versions are rejected by the allow-list.
 #[test]
-fn xdiff_arbitrary_version_accepted() {
-    for v in [0u16, 1, 2, 7, 255, 256, 0x7FFF, 0xFFFF] {
+fn xdiff_arbitrary_version_rejected() {
+    for v in [0u16, 2, 7, 255, 256, 0x7FFF, 0xFFFF] {
         let s = base_slate(v);
         let bytes = s.to_bytes().unwrap();
-        let decoded = Slate::from_bytes(&bytes)
-            .unwrap_or_else(|e| panic!("version {v} should decode: {e:?}"));
-        assert_eq!(
-            decoded.version, v,
-            "FINDING: version {v} accepted verbatim, never validated"
+        let err = Slate::from_bytes(&bytes).unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported slate version"),
+            "version {v} should be rejected by version gate: {err:?}"
         );
     }
+
+    let current = base_slate(CURRENT_SLATE_VERSION).to_bytes().unwrap();
+    let decoded = Slate::from_bytes(&current).unwrap();
+    assert_eq!(decoded.version, CURRENT_SLATE_VERSION);
 }
 
-/// Cross-version "mis-parse" demonstration: hand-craft bytes whose version
-/// prefix says 0xFFFF but whose body is a valid v1 slate. The receiver decodes
-/// it as if version were irrelevant — confirming a v2 sender / v1 receiver
-/// scenario silently round-trips instead of being rejected at the version gate.
+/// Cross-version "mis-parse" guard: a body that is otherwise valid v1 must
+/// still be rejected when its declared version is unsupported.
 #[test]
-fn xdiff_forged_version_prefix_still_parses_v1_body() {
-    let v1 = base_slate(1);
+fn xdiff_forged_version_prefix_is_rejected_before_body_parse() {
+    let v1 = base_slate(CURRENT_SLATE_VERSION);
     let mut bytes = v1.to_bytes().unwrap();
     // Overwrite the leading u16 LE version with 0xFFFF.
     bytes[0] = 0xFF;
     bytes[1] = 0xFF;
 
-    let decoded = Slate::from_bytes(&bytes).expect("forged-version body still decodes");
-    assert_eq!(decoded.version, 0xFFFF);
-    assert_eq!(decoded.amount, v1.amount);
-    assert_eq!(decoded.fee, v1.fee);
-    assert_eq!(decoded.sender_inputs, v1.sender_inputs);
-    // The body was interpreted with the single hardcoded layout; the declared
-    // version (0xFFFF) had no effect on parsing. FINDING: missing version gate.
+    let err = Slate::from_bytes(&bytes).unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported slate version"),
+        "forged-version body should be rejected: {err:?}"
+    );
 }

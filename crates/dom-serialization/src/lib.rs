@@ -232,7 +232,9 @@ impl<'a> Reader<'a> {
         }
         let min_item_size = std::mem::size_of::<T>().max(1);
         let remaining = self.data.len().saturating_sub(self.pos);
-        let max_by_remaining = remaining / min_item_size;
+        let max_by_remaining = remaining
+            .checked_div(min_item_size)
+            .ok_or_else(|| DomError::Internal("minimum item size is zero".into()))?;
         if count > max_by_remaining {
             return Err(DomError::Malformed(format!(
                 "list count {count} exceeds remaining byte budget {remaining} for minimum item size {min_item_size}"

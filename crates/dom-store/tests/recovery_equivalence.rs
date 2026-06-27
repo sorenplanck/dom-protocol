@@ -45,7 +45,8 @@ fn snapshot(store: &DomStore) -> DbSnapshot {
         let txn = store.env.begin_ro_txn().expect("ro txn");
         let mut cursor = txn.open_ro_cursor(db).expect("open cursor");
         let mut out = BTreeMap::new();
-        for (k, v) in cursor.iter() {
+        for item in cursor.iter() {
+            let (k, v) = item.expect("cursor item");
             out.insert(k.to_vec(), v.to_vec());
         }
         out

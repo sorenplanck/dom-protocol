@@ -1,10 +1,10 @@
-//! dom-shield Lens B (secret hygiene): prove that `NodeConfig` leaks its
-//! secret fields through the two channels its derives make observable.
+//! dom-shield Lens B (secret hygiene): prove that `NodeConfig` does not leak
+//! its secret fields through Debug output or serialization.
 //!
-//! FINDING (DS-config-001, behaviorally confirmed, not speculative):
+//! REGRESSION COVERAGE (DS-config-001):
 //! `NodeConfig` carries `wallet_password: Option<String>` and
-//! `rpc_bearer_token: Option<String>` while deriving `#[derive(Debug, ...,
-//! Serialize, ...)]` with NO zeroization and NO redaction. Consequences:
+//! `rpc_bearer_token: Option<String>`. These values must remain redacted from
+//! `Debug` output and skipped during serialization. Otherwise:
 //!
 //!   * Debug leak: any `{:?}`/`{:#?}` of a NodeConfig (a tracing span field, a
 //!     `dbg!`, a panic message, an `expect("... {config:?}")`) writes the
@@ -15,14 +15,8 @@
 //!
 //! Neither channel is a remote attack on its own, but both are real
 //! confidentiality regressions for funds-bearing material (wallet password) and
-//! an auth credential (RPC bearer token). The Debug and Serialize outputs ARE
-//! observable, so this is a true behavioral test, not an [ignore] aspiration.
-//!
-//! This test ASSERTS THE LEAK EXISTS (current behavior). It is GREEN today and
-//! documents the gap. If a future fix redacts Debug and/or skips the secrets on
-//! Serialize, this test goes RED — at which point flip the assertions to
-//! `assert!(!...contains...)` per the FIX text in the dom-shield report. The
-//! test is therefore a tripwire on the secret-hygiene decision.
+//! an auth credential (RPC bearer token). The Debug and Serialize outputs are
+//! observable, so these tests pin the safe behavior directly.
 
 use dom_config::NodeConfig;
 
@@ -36,65 +30,51 @@ fn config_with_secrets() -> NodeConfig {
     c
 }
 
-/// Debug ({:?}) of a NodeConfig currently EMBEDS the cleartext wallet password.
-/// Confirms the log-leak channel for funds-bearing material.
+/// Debug ({:?}) of a NodeConfig must redact the cleartext wallet password.
 #[test]
-fn debug_output_leaks_wallet_password() {
+fn debug_output_redacts_wallet_password() {
     let c = config_with_secrets();
     let dbg = format!("{c:?}");
-    assert!(
-        dbg.contains(WALLET_SECRET),
-        "EXPECTED-FAIL-ON-FIX: Debug no longer leaks wallet_password \
-         (redaction landed) — update this assertion. Current behavior leaks it."
-    );
+    assert!(!dbg.contains(WALLET_SECRET));
+    assert!(dbg.contains("wallet_password: \"<redacted>\""));
 }
 
-/// Debug ({:?}) currently embeds the cleartext RPC bearer token.
+/// Debug ({:?}) must redact the cleartext RPC bearer token.
 #[test]
-fn debug_output_leaks_rpc_bearer_token() {
+fn debug_output_redacts_rpc_bearer_token() {
     let c = config_with_secrets();
     let dbg = format!("{c:?}");
-    assert!(
-        dbg.contains(RPC_SECRET),
-        "EXPECTED-FAIL-ON-FIX: Debug no longer leaks rpc_bearer_token \
-         (redaction landed) — update this assertion. Current behavior leaks it."
-    );
+    assert!(!dbg.contains(RPC_SECRET));
+    assert!(dbg.contains("rpc_bearer_token: \"<redacted>\""));
 }
 
-/// Pretty Debug ({:#?}) — used by some panic/expect paths — leaks too.
+/// Pretty Debug ({:#?}) — used by some panic/expect paths — must redact too.
 #[test]
-fn pretty_debug_output_leaks_secrets() {
+fn pretty_debug_output_redacts_secrets() {
     let c = config_with_secrets();
     let dbg = format!("{c:#?}");
-    assert!(
-        dbg.contains(WALLET_SECRET) && dbg.contains(RPC_SECRET),
-        "EXPECTED-FAIL-ON-FIX: pretty Debug no longer leaks secrets — update assertion."
-    );
+    assert!(!dbg.contains(WALLET_SECRET));
+    assert!(!dbg.contains(RPC_SECRET));
+    assert!(dbg.contains("wallet_password: \"<redacted>\""));
+    assert!(dbg.contains("rpc_bearer_token: \"<redacted>\""));
 }
 
-/// Serialize (serde_json) currently writes the cleartext wallet password.
-/// Confirms the persist-/echo-to-disk leak channel.
+/// Serialize (serde_json) must not write the cleartext wallet password.
 #[test]
-fn serialize_leaks_wallet_password() {
+fn serialize_skips_wallet_password() {
     let c = config_with_secrets();
     let json = serde_json::to_string(&c).expect("serialize NodeConfig");
-    assert!(
-        json.contains(WALLET_SECRET),
-        "EXPECTED-FAIL-ON-FIX: Serialize no longer emits wallet_password \
-         (#[serde(skip_serializing)] landed) — update this assertion."
-    );
+    assert!(!json.contains(WALLET_SECRET));
+    assert!(!json.contains("wallet_password"));
 }
 
-/// Serialize (serde_json) currently writes the cleartext RPC bearer token.
+/// Serialize (serde_json) must not write the cleartext RPC bearer token.
 #[test]
-fn serialize_leaks_rpc_bearer_token() {
+fn serialize_skips_rpc_bearer_token() {
     let c = config_with_secrets();
     let json = serde_json::to_string(&c).expect("serialize NodeConfig");
-    assert!(
-        json.contains(RPC_SECRET),
-        "EXPECTED-FAIL-ON-FIX: Serialize no longer emits rpc_bearer_token \
-         (#[serde(skip_serializing)] landed) — update this assertion."
-    );
+    assert!(!json.contains(RPC_SECRET));
+    assert!(!json.contains("rpc_bearer_token"));
 }
 
 /// Cross-check: when the secret fields are None (the default mainnet config),

@@ -42,7 +42,7 @@
 
 use crate::handshake::{read_framed_cancel_safe, write_framed, ReadState, NOISE_MAX_MSG};
 use crate::message::WireMessage;
-use dom_core::{DomError, MAX_LOGICAL_MSG_BYTES};
+use dom_core::{DomError, PeerMisbehavior, MAX_LOGICAL_MSG_BYTES};
 use snow::TransportState;
 
 /// Maximum plaintext bytes per Noise transport frame. The frame ciphertext is
@@ -117,7 +117,10 @@ impl NoiseCodec {
             )
             .await
             .map_err(|_| {
-                DomError::PolicyRejected(format!("write timeout after {write_timeout}s"))
+                DomError::peer_misbehavior(
+                    PeerMisbehavior::WriteTimeout,
+                    format!("write timeout after {write_timeout}s"),
+                )
             })??;
         }
         Ok(())

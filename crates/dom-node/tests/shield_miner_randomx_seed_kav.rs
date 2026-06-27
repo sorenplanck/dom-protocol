@@ -36,7 +36,11 @@ use dom_pow::{randomx_seed_height, RANDOMX_SEED_INTERVAL, RANDOMX_SEED_OFFSET};
 fn seed_height_matches_rfc0011_schedule() {
     // Epoch 0: all heights in [0, INTERVAL) seed against height 0.
     for h in [0u64, 1, 100, RANDOMX_SEED_INTERVAL - 1] {
-        assert_eq!(randomx_seed_height(h), 0, "epoch 0 must seed against height 0");
+        assert_eq!(
+            randomx_seed_height(h),
+            0,
+            "epoch 0 must seed against height 0"
+        );
     }
     // Epoch boundary 1: height INTERVAL -> anchor INTERVAL, minus OFFSET.
     assert_eq!(
@@ -54,7 +58,12 @@ fn seed_height_matches_rfc0011_schedule() {
     // Exhaustive cross-check of the formula over many epochs — this is the
     // single source of truth both the miner and the validator consume.
     for epoch in 0u64..50 {
-        for delta in [0u64, 1, RANDOMX_SEED_INTERVAL / 2, RANDOMX_SEED_INTERVAL - 1] {
+        for delta in [
+            0u64,
+            1,
+            RANDOMX_SEED_INTERVAL / 2,
+            RANDOMX_SEED_INTERVAL - 1,
+        ] {
             let h = epoch * RANDOMX_SEED_INTERVAL + delta;
             let expected = if epoch == 0 {
                 0
@@ -72,9 +81,10 @@ fn seed_height_matches_rfc0011_schedule() {
 
 /// Documents the miner vs validator zero-seed-fallback divergence as an
 /// executable note. The values here mirror the production decision points:
-///   * miner  (miner.rs):    missing seed at ANY height -> seed = [0u8;32]
+///   * miner  (miner.rs): missing seed at ANY height -> seed = [0u8;32]
 ///   * chain  (chain_state): missing seed -> [0u8;32] ONLY if seed_height==0,
-///                           else Err.
+///     else Err.
+///
 /// The only height where the two agree on a zero seed is seed_height == 0,
 /// i.e. epoch 0. For epoch>0 the miner's fallback and the validator's error
 /// path disagree.

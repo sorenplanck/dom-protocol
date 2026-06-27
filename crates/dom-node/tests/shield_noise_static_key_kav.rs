@@ -6,6 +6,7 @@
 //!   1. length == 32 bytes (else Invalid), and
 //!   2. the key is in CANONICAL CLAMPED form — `clamp_static_privkey(k) == k` —
 //!      else Invalid ("not in canonical clamped form").
+//!
 //! Both `parse_persisted_noise_static_key` and `load_or_create_noise_static_key`
 //! are private/`pub(crate)` (covered by in-src #[cfg(test)] tests). This file
 //! pins the underlying PUBLIC clamp/keygen contract those checks depend on, so a
@@ -21,6 +22,7 @@
 //! * `NodeConfig.wallet_password: Option<String>` is held in the config struct
 //!   and not wrapped in a zeroizing type — the password lingers in process
 //!   memory for the node's lifetime. STATIC-REVIEW NOTE.
+//!
 //! Neither is exercised as a failing test: zeroization/at-rest-encryption are
 //! fixes (format/behaviour changes), and the test-construction mandate stops at
 //! discovery.
@@ -54,9 +56,17 @@ fn clamp_is_idempotent_and_canonical() {
     let mut k = [0xFFu8; 32];
     clamp_static_privkey(&mut k);
     // Canonical-form bit checks.
-    assert_eq!(k[0] & 0b0000_0111, 0, "low 3 bits of byte 0 must be cleared");
+    assert_eq!(
+        k[0] & 0b0000_0111,
+        0,
+        "low 3 bits of byte 0 must be cleared"
+    );
     assert_eq!(k[31] & 0b1000_0000, 0, "top bit of byte 31 must be cleared");
-    assert_eq!(k[31] & 0b0100_0000, 0b0100_0000, "bit 6 of byte 31 must be set");
+    assert_eq!(
+        k[31] & 0b0100_0000,
+        0b0100_0000,
+        "bit 6 of byte 31 must be set"
+    );
     // Idempotent: a second clamp is a no-op (round-trip stability the node needs).
     let mut twice = k;
     clamp_static_privkey(&mut twice);

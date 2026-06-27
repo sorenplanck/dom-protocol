@@ -9,6 +9,7 @@
 //!      i.e. sorted index 5), and
 //!   2. comparison strictness (`>` vs `>=`): accepting equal-to-median blocks
 //!      would diverge from a node that rejects them.
+//!
 //! Plus the early-chain rule: with fewer than 11 ancestors the rule is a no-op.
 //!
 //! These are known-answer vectors over the production validator
@@ -69,8 +70,7 @@ fn mtp_median_is_sorted_index_five() {
     assert!(matches!(err, DomError::Invalid(_)), "got {err:?}");
 
     // timestamp == median + 1 (56) must be ACCEPTED.
-    validate_median_time_past(&header_at(56), &ancestors)
-        .expect("median + 1 must be accepted");
+    validate_median_time_past(&header_at(56), &ancestors).expect("median + 1 must be accepted");
 
     // timestamp below median (54) must be REJECTED.
     let err = validate_median_time_past(&header_at(54), &ancestors)
@@ -120,9 +120,8 @@ fn mtp_insufficient_ancestors_is_noop() {
     // enforced. A timestamp of 0 (far below any ancestor) MUST still pass.
     for n in 0..MEDIAN_TIME_WINDOW {
         let ancestors = ts(&vec![1_000_000u64; n]);
-        validate_median_time_past(&header_at(0), &ancestors).unwrap_or_else(|e| {
-            panic!("with {n} (<11) ancestors MTP must be a no-op, got {e:?}")
-        });
+        validate_median_time_past(&header_at(0), &ancestors)
+            .unwrap_or_else(|e| panic!("with {n} (<11) ancestors MTP must be a no-op, got {e:?}"));
     }
 }
 

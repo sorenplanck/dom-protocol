@@ -566,11 +566,7 @@ mod tests {
     const MATRIX_VALUES: [u64; 4] = [1, 42, 1_000_000, 4_503_599_627_370_495]; // last = 2^52 - 1
     const TEST_BLIND: [u8; 32] = [0x11u8; 32];
 
-    fn legacy_single_proof(
-        value: u64,
-        blind: &[u8; 32],
-        nonce: &[u8; 32],
-    ) -> (Vec<u8>, [u8; 33]) {
+    fn legacy_single_proof(value: u64, blind: &[u8; 32], nonce: &[u8; 32]) -> (Vec<u8>, [u8; 33]) {
         let bf = BlindingFactor::from_bytes(*blind).expect("blind");
         bp2_test_only_prove_legacy_single_with_nonce(value, &bf, nonce).expect("legacy single bp2")
     }
@@ -590,10 +586,7 @@ mod tests {
             value_gen,
         )
         .expect("second");
-        [
-            first,
-            second,
-        ]
+        [first, second]
     }
 
     /// PROBE [F6-A] — does bp2 `bp_verify` enforce the MAX_PROVABLE_VALUE (2^52-1)

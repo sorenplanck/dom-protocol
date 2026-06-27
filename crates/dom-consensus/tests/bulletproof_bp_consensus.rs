@@ -1,7 +1,7 @@
 //! Phase 2 sub-step 1: prove the standard-Bulletproof shim (`bp2_prove`/
 //! `bp2_verify`, grin backend) is callable and correct at the CONSENSUS level.
 
-use dom_consensus::{validate_range_proofs, Transaction, TransactionOutput, TransactionKernel};
+use dom_consensus::{validate_range_proofs, Transaction, TransactionKernel, TransactionOutput};
 use dom_core::DomError;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_crypto::{bp2_prove, bp2_test_only_prove_legacy_single_with_nonce, bp2_verify};

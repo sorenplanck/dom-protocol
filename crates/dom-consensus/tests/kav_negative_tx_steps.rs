@@ -21,7 +21,9 @@
 //!
 //! Technique: known-answer negative vectors (KAV-negativo).
 
-use dom_consensus::transaction::{Transaction, TransactionInput, TransactionKernel, TransactionOutput};
+use dom_consensus::transaction::{
+    Transaction, TransactionInput, TransactionKernel, TransactionOutput,
+};
 use dom_consensus::{validate_transaction, CoinbaseKernel, CoinbaseTransaction, ValidationContext};
 use dom_core::{
     Amount, BlockHeight, DomError, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_HEIGHT_LOCKED,
@@ -62,7 +64,9 @@ fn valid_tx(input_value: u64, output_value: u64) -> Transaction {
     let input_blinding = scalar(10);
     let kernel_blinding = scalar(11);
     let fee = input_value - output_value;
-    let output_blinding = input_blinding.add(&kernel_blinding).expect("output blinding");
+    let output_blinding = input_blinding
+        .add(&kernel_blinding)
+        .expect("output blinding");
 
     let input_commitment = Commitment::commit(input_value, &input_blinding);
     let output_commitment = Commitment::commit(output_value, &output_blinding);
@@ -133,16 +137,17 @@ fn kav_neg_empty_proof_rejected() {
     let mut tx = valid_tx(100, 90);
     tx.outputs[0].proof.clear();
     let err = validate_transaction(&tx, &ctx()).expect_err("empty proof must reject");
-    assert!(
-        err.to_string().contains("empty range proof"),
-        "got: {err}"
-    );
+    assert!(err.to_string().contains("empty range proof"), "got: {err}");
 }
 
 // ── Door: kernel features — unknown feature byte (256-value sweep) ─────────────
 #[test]
 fn kav_neg_unknown_kernel_feature_byte_sweep() {
-    let known = [KERNEL_FEAT_PLAIN, KERNEL_FEAT_COINBASE, KERNEL_FEAT_HEIGHT_LOCKED];
+    let known = [
+        KERNEL_FEAT_PLAIN,
+        KERNEL_FEAT_COINBASE,
+        KERNEL_FEAT_HEIGHT_LOCKED,
+    ];
     for b in 0u16..=255u16 {
         let feat = b as u8;
         if known.contains(&feat) {
@@ -150,8 +155,7 @@ fn kav_neg_unknown_kernel_feature_byte_sweep() {
         }
         let mut tx = valid_tx(100, 90);
         tx.kernels[0].features = feat;
-        let err = validate_transaction(&tx, &ctx())
-            .unwrap_err_or_else_panic(feat);
+        let err = validate_transaction(&tx, &ctx()).unwrap_err_or_else_panic(feat);
         assert!(
             err.to_string().contains("unknown kernel features"),
             "feature 0x{feat:02x} must reject as unknown, got: {err}"
@@ -193,7 +197,8 @@ fn kav_neg_height_locked_zero_rejected() {
     let err = validate_transaction(&tx, &ctx())
         .expect_err("HEIGHT_LOCKED with lock_height 0 must reject");
     assert!(
-        err.to_string().contains("HEIGHT_LOCKED with lock_height == 0"),
+        err.to_string()
+            .contains("HEIGHT_LOCKED with lock_height == 0"),
         "got: {err}"
     );
 }
@@ -287,7 +292,8 @@ fn kav_neg_wrong_chain_id_rejects_signature() {
     let err = validate_transaction(&tx, &wrong_ctx)
         .expect_err("signature under wrong chain_id must reject (replay protection)");
     assert!(
-        err.to_string().contains("Schnorr signature invalid") || err.to_string().contains("signature"),
+        err.to_string().contains("Schnorr signature invalid")
+            || err.to_string().contains("signature"),
         "got: {err}"
     );
 }
@@ -329,7 +335,12 @@ fn kav_neg_inflated_output_rejected() {
     let (proof, _) = dom_crypto::bp2_prove(inflated_output, &output_blinding).unwrap();
     let excess = Commitment::commit(0, &kernel_blinding);
     let secret = SecretKey::from_bytes(kernel_blinding.as_bytes()).unwrap();
-    let sig = schnorr_sign(&secret, &kernel_message(KERNEL_FEAT_PLAIN, fee, 0), &CHAIN_ID).unwrap();
+    let sig = schnorr_sign(
+        &secret,
+        &kernel_message(KERNEL_FEAT_PLAIN, fee, 0),
+        &CHAIN_ID,
+    )
+    .unwrap();
 
     let tx = Transaction {
         inputs: vec![TransactionInput {
@@ -409,8 +420,5 @@ fn kav_neg_coinbase_wrong_features_rejected() {
     let err = cb
         .validate(BlockHeight(1), 0, &CHAIN_ID)
         .expect_err("coinbase with non-coinbase features must reject");
-    assert!(
-        err.to_string().contains("features must be"),
-        "got: {err}"
-    );
+    assert!(err.to_string().contains("features must be"), "got: {err}");
 }

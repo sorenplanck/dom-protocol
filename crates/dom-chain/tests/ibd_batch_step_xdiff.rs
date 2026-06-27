@@ -69,6 +69,7 @@ fn err_kind(e: &DomError) -> &'static str {
         DomError::Malformed(_) => "Malformed",
         DomError::Orphan(_) => "Orphan",
         DomError::PolicyRejected(_) => "PolicyRejected",
+        DomError::PeerMisbehavior { .. } => "PeerMisbehavior",
         DomError::Internal(_) => "Internal",
         DomError::TemporarilyInvalid(_) => "TemporarilyInvalid",
     }
@@ -77,7 +78,11 @@ fn err_kind(e: &DomError) -> &'static str {
 /// Drive the step API across the whole queue exactly as the resume path does:
 /// start with an empty missing-hash prefix and advance the cursor until either
 /// a step rejects (return that error) or the cursor reaches the end (Ok).
-fn run_step_to_completion(chain: &ChainState, raws: &[Vec<u8>], now: Timestamp) -> Result<(), DomError> {
+fn run_step_to_completion(
+    chain: &ChainState,
+    raws: &[Vec<u8>],
+    now: Timestamp,
+) -> Result<(), DomError> {
     let mut cursor = 0usize;
     let mut missing: Vec<[u8; 32]> = Vec::new();
     while cursor < raws.len() {

@@ -32,6 +32,9 @@ pub use bulletproof::{prove as bp_prove, verify as bp_verify, RangeProof};
 // Standard-Bulletproof backend, exported under distinct `bp2_*` names so it
 // cannot be confused with the borromean `bp_prove`/`bp_verify`.
 mod bulletproof_bp;
+#[cfg(feature = "test-helpers")]
+#[doc(hidden)]
+pub use bulletproof_bp::bp2_test_only_prove_legacy_single_with_nonce;
 /// Standard-Bulletproof (grin backend) range-proof prove/verify, exported as
 /// `bp2_prove`/`bp2_verify` (+ `bp2_prove_with_nonce` for deterministic-nonce
 /// proofs, e.g. genesis). Parallel to the borromean `bp_prove`/`bp_verify`;
@@ -40,6 +43,3 @@ mod bulletproof_bp;
 pub use bulletproof_bp::{
     bp_prove as bp2_prove, bp_prove_with_nonce as bp2_prove_with_nonce, bp_verify as bp2_verify,
 };
-#[cfg(feature = "test-helpers")]
-#[doc(hidden)]
-pub use bulletproof_bp::bp2_test_only_prove_legacy_single_with_nonce;

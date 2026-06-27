@@ -9,7 +9,7 @@
 
 use dom_core::MAX_INPUTS_PER_TX;
 use dom_serialization::{DomDeserialize, DomSerialize};
-use dom_tx::slate::{OutputCommitmentAndProof, Slate};
+use dom_tx::slate::{OutputCommitmentAndProof, Slate, CURRENT_SLATE_VERSION};
 
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::{bp2_prove, BlindingFactor, PartialSig, PublicKey, RangeProof, SecretKey};
@@ -48,7 +48,6 @@ fn partial_sig(scalar_byte: u8) -> PartialSig {
 
 prop_compose! {
     fn arb_slate()(
-        version in any::<u16>(),
         chain_id in any::<[u8; 32]>(),
         amount in any::<u64>(),
         fee in any::<u64>(),
@@ -73,7 +72,7 @@ prop_compose! {
             .map(|i| commitment(1_000 + i as u64, in_byte.wrapping_add(i as u8).max(1)))
             .collect();
         Slate {
-            version,
+            version: CURRENT_SLATE_VERSION,
             chain_id,
             amount,
             fee,

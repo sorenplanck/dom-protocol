@@ -24,7 +24,9 @@
 use dom_consensus::transaction::{
     Transaction, TransactionInput, TransactionKernel, TransactionOutput,
 };
-use dom_core::{Amount, DomError, KERNEL_FEAT_PLAIN, MIN_RELAY_FEE_RATE, TAG_KERNEL_MSG};
+use dom_core::{
+    Amount, DomError, PeerMisbehavior, KERNEL_FEAT_PLAIN, MIN_RELAY_FEE_RATE, TAG_KERNEL_MSG,
+};
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_crypto::{bp2_prove, schnorr_sign, SecretKey};
@@ -200,8 +202,9 @@ fn robustness_duplicate_replay_is_cheaply_rejected() {
 
 /// VERDICT-PRESERVATION (the reorder must not weaken validation): a genuinely
 /// NEW, above-fee, non-duplicate transaction with a bad signature is STILL
-/// rejected by `validate_transaction` (a crypto `Invalid`), so real invalid txs
-/// remain cryptographically rejected and peer-scoreable.
+/// rejected by `validate_transaction` (a structured invalid-signature peer
+/// misbehavior), so real invalid txs remain cryptographically rejected and
+/// peer-scoreable.
 #[test]
 fn robustness_new_invalid_tx_still_rejected_by_crypto() {
     let mut pool = Mempool::new();
@@ -211,7 +214,10 @@ fn robustness_new_invalid_tx_still_rejected_by_crypto() {
 
     let err = accept(&mut pool, tx, hash, input, entry).expect_err("bad-sig tx must be rejected");
     match &err {
-        DomError::Invalid(msg) => assert!(
+        DomError::PeerMisbehavior {
+            kind: PeerMisbehavior::InvalidSignature,
+            message: msg,
+        } => assert!(
             msg.contains("signature") || msg.contains("Schnorr") || msg.contains("kernel"),
             "expected a kernel-signature rejection, got: {msg}"
         ),

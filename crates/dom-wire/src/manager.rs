@@ -639,7 +639,7 @@ impl PeerManager {
         for (addr, peer) in &self.peers {
             if peer.ban_score > 0 {
                 merged
-                    .entry(addr.clone())
+                    .entry(reputation_key(addr))
                     .and_modify(|score| *score = score.saturating_add(peer.ban_score))
                     .or_insert(peer.ban_score);
             }
@@ -699,13 +699,14 @@ impl PeerManager {
                     "peer reputation snapshot contains zero-score entry".into(),
                 ));
             }
-            if restored.contains_key(&entry.addr) {
+            let reputation_addr = reputation_key(&entry.addr);
+            if restored.contains_key(&reputation_addr) {
                 return Err(DomError::Invalid(
                     "peer reputation snapshot contains duplicate addresses".into(),
                 ));
             }
             restored.insert(
-                entry.addr.clone(),
+                reputation_addr,
                 PendingPenalty {
                     score: entry.score,
                     last_updated: now,
@@ -875,6 +876,17 @@ impl PeerManager {
             .collect();
         out.sort();
         out
+    }
+
+    /// Get the last announced best height for a connected peer.
+    pub fn peer_best_height(&self, addr: &str) -> Option<u64> {
+        self.peers.get(addr).and_then(|peer| {
+            if peer.state == PeerState::Connected {
+                Some(peer.best_height)
+            } else {
+                None
+            }
+        })
     }
 
     fn pending_penalty_score(&self, addr: &str) -> u32 {
@@ -1575,7 +1587,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.addr.as_str())
                 .collect::<Vec<_>>(),
-            vec!["10.0.0.42:33369", "10.0.0.99:33369"]
+            vec!["10.0.0.42", "10.0.0.99"]
         );
     }
 

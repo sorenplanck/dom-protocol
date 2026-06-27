@@ -42,14 +42,29 @@ fn scalar_rejects_zero_and_out_of_range() {
     let n_plus_1 = be_increment(n);
 
     // big-endian parser
-    assert!(Scalar::from_be_bytes([0u8; 32]).is_err(), "BE zero must reject");
+    assert!(
+        Scalar::from_be_bytes([0u8; 32]).is_err(),
+        "BE zero must reject"
+    );
     assert!(Scalar::from_be_bytes(n).is_err(), "BE == n must reject");
-    assert!(Scalar::from_be_bytes(n_plus_1).is_err(), "BE n+1 must reject");
-    assert!(Scalar::from_be_bytes([0xFFu8; 32]).is_err(), "BE all-FF must reject");
+    assert!(
+        Scalar::from_be_bytes(n_plus_1).is_err(),
+        "BE n+1 must reject"
+    );
+    assert!(
+        Scalar::from_be_bytes([0xFFu8; 32]).is_err(),
+        "BE all-FF must reject"
+    );
 
     // little-endian parser: zero and all-FF reject; n reversed to LE is also >= n
-    assert!(Scalar::from_le_bytes([0u8; 32]).is_err(), "LE zero must reject");
-    assert!(Scalar::from_le_bytes([0xFFu8; 32]).is_err(), "LE all-FF must reject");
+    assert!(
+        Scalar::from_le_bytes([0u8; 32]).is_err(),
+        "LE zero must reject"
+    );
+    assert!(
+        Scalar::from_le_bytes([0xFFu8; 32]).is_err(),
+        "LE all-FF must reject"
+    );
     let mut n_le = n;
     n_le.reverse();
     assert!(Scalar::from_le_bytes(n_le).is_err(), "LE == n must reject");
@@ -63,7 +78,10 @@ fn scalar_rejects_zero_and_out_of_range() {
             break;
         }
     }
-    assert!(Scalar::from_be_bytes(n_minus_1).is_ok(), "BE n-1 must be accepted");
+    assert!(
+        Scalar::from_be_bytes(n_minus_1).is_ok(),
+        "BE n-1 must be accepted"
+    );
 }
 
 #[test]
@@ -83,19 +101,46 @@ fn scalar_le_be_not_conflated() {
 
 #[test]
 fn secretkey_rejects_wrong_length_and_zero() {
-    assert!(SecretKey::from_bytes(&[1u8; 31]).is_err(), "31 bytes must reject");
-    assert!(SecretKey::from_bytes(&[1u8; 33]).is_err(), "33 bytes must reject");
-    assert!(SecretKey::from_bytes(&[0u8; 32]).is_err(), "zero must reject");
+    assert!(
+        SecretKey::from_bytes(&[1u8; 31]).is_err(),
+        "31 bytes must reject"
+    );
+    assert!(
+        SecretKey::from_bytes(&[1u8; 33]).is_err(),
+        "33 bytes must reject"
+    );
+    assert!(
+        SecretKey::from_bytes(&[0u8; 32]).is_err(),
+        "zero must reject"
+    );
 }
 
 // ── (C) PartialSig range/length rejection (schnorr.rs:33) ────────────────────
 #[test]
 fn partialsig_rejects_zero_oversize_and_wrong_length() {
     // s bytes are big-endian; PartialSig requires 0 < s < n and exactly 32 bytes.
-    assert!(PartialSig::from_bytes(&[0u8; 32]).is_err(), "s = 0 must reject");
-    assert!(PartialSig::from_bytes(&CURVE_ORDER).is_err(), "s = n must reject");
-    assert!(PartialSig::from_bytes(&be_increment(CURVE_ORDER)).is_err(), "s = n+1 must reject");
-    assert!(PartialSig::from_bytes(&[0xFFu8; 32]).is_err(), "s all-FF (>= n) must reject");
-    assert!(PartialSig::from_bytes(&[1u8; 31]).is_err(), "31 bytes must reject");
-    assert!(PartialSig::from_bytes(&[1u8; 33]).is_err(), "33 bytes must reject");
+    assert!(
+        PartialSig::from_bytes(&[0u8; 32]).is_err(),
+        "s = 0 must reject"
+    );
+    assert!(
+        PartialSig::from_bytes(&CURVE_ORDER).is_err(),
+        "s = n must reject"
+    );
+    assert!(
+        PartialSig::from_bytes(&be_increment(CURVE_ORDER)).is_err(),
+        "s = n+1 must reject"
+    );
+    assert!(
+        PartialSig::from_bytes(&[0xFFu8; 32]).is_err(),
+        "s all-FF (>= n) must reject"
+    );
+    assert!(
+        PartialSig::from_bytes(&[1u8; 31]).is_err(),
+        "31 bytes must reject"
+    );
+    assert!(
+        PartialSig::from_bytes(&[1u8; 33]).is_err(),
+        "33 bytes must reject"
+    );
 }

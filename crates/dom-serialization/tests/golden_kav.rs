@@ -124,7 +124,11 @@ fn golden_hash256_wire() {
     }
     let h = Hash256::from_bytes(raw);
     let bytes = DomSerialize::to_bytes(&h).unwrap();
-    assert_eq!(bytes.len(), 32, "Hash256 wire form must be exactly 32 bytes");
+    assert_eq!(
+        bytes.len(),
+        32,
+        "Hash256 wire form must be exactly 32 bytes"
+    );
     assert_eq!(bytes, raw.to_vec());
 }
 

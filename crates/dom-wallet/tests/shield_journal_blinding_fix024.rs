@@ -25,12 +25,12 @@
 //! treated the journalled blinding as a crash-recovery feature. The hardened
 //! journal now seals that secret instead of serializing it in cleartext.
 
-use dom_wallet::wallet_dir::{WalletDir, WALLET_DAT_NAME};
-use dom_wallet::{JournalEntry, Network, TxJournal, TxJournalEvent};
 use dom_core::Hash256;
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::BlindingFactor;
+use dom_wallet::wallet_dir::{WalletDir, WALLET_DAT_NAME};
 use dom_wallet::OwnedOutput;
+use dom_wallet::{JournalEntry, Network, TxJournal, TxJournalEvent};
 use tempfile::TempDir;
 
 fn genesis() -> Hash256 {
@@ -40,7 +40,13 @@ fn genesis() -> Hash256 {
 fn make_output(value: u64, height: u64, blinding_byte: u8) -> OwnedOutput {
     let blinding = BlindingFactor::from_bytes([blinding_byte; 32]).unwrap();
     let commitment = Commitment::commit(value, &blinding);
-    OwnedOutput::new(*commitment.as_bytes(), value, *blinding.as_bytes(), height, false)
+    OwnedOutput::new(
+        *commitment.as_bytes(),
+        value,
+        *blinding.as_bytes(),
+        height,
+        false,
+    )
 }
 
 fn fresh_recipient(amount: u64) -> (Commitment, BlindingFactor) {
@@ -143,7 +149,11 @@ fn fix024_built_event_does_not_serialize_blinding_into_cleartext() {
 /// Render 32 bytes exactly as serde_json's `serialize_bytes` does in a JSON
 /// value: a comma-separated decimal array `[b0,b1,...,b31]` (no spaces).
 fn blinding_json_array(b: &[u8; 32]) -> String {
-    let inner = b.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+    let inner = b
+        .iter()
+        .map(|x| x.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     format!("[{inner}]")
 }
 

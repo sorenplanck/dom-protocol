@@ -91,6 +91,7 @@ use common::{open_test_chain, open_test_store};
 
 type UtxoBytes = ([u8; 33], Vec<u8>);
 type SpentCommitment = [u8; 33];
+type ChainFinalState = (Hash256, [u8; 32]);
 
 // ----------------------------------------------------------------------------
 // Builders. Re-implemented locally because Rust integration tests are separate
@@ -794,7 +795,7 @@ use proptest::prelude::*;
 fn run_scenario_two_orderings(
     a_len: u64,
     b_len: u64,
-) -> Result<((Hash256, [u8; 32]), (Hash256, [u8; 32])), DomError> {
+) -> Result<(ChainFinalState, ChainFinalState), DomError> {
     // Build EVERY block (incl. genesis) exactly once, then replay the SAME
     // serialized bytes into both stores. This is mandatory: `bp2_prove` uses
     // random nonces (dom-crypto bulletproof_bp.rs::prove_raw), so re-building a

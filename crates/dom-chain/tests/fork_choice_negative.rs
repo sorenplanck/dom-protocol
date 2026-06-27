@@ -141,7 +141,11 @@ fn equal_work_sibling_does_not_reorg() {
     // Sibling branch forking at height 2 (shared ancestor), reaching height 5
     // with EQUAL total_difficulty == 5 (different nonces => distinct hashes).
     // Fork at the canonical height-2 block.
-    let canon_h2 = chain.store.get_hash_at_height(2).expect("h2").expect("h2 exists");
+    let canon_h2 = chain
+        .store
+        .get_hash_at_height(2)
+        .expect("h2")
+        .expect("h2 exists");
     let mut sib_prev = Hash256::from_bytes(canon_h2);
     let mut sib_tip = sib_prev;
     for h in 3..=5 {

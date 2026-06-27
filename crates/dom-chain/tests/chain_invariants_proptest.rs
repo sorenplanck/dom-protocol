@@ -28,9 +28,9 @@
 mod common;
 
 use common::open_test_chain;
+use dom_chain::{ChainState, IbdInterruption, IbdPhase, PersistedIbdState};
 use dom_consensus::block::{validate_median_time_past, BlockHeader, ProofOfWork};
 use dom_core::{BlockHeight, Hash256, Timestamp, MEDIAN_TIME_WINDOW, PROTOCOL_VERSION};
-use dom_chain::{ChainState, IbdInterruption, IbdPhase, PersistedIbdState};
 use dom_pow::CompactTarget;
 use dom_serialization::{DomDeserialize, DomSerialize};
 use primitive_types::U256;
@@ -137,10 +137,11 @@ proptest! {
         use_blocks in any::<bool>(),
         header_h in 0u64..50_000,
     ) {
-        // Enforce monotone heights: start <= last_progress <= blocks <= headers.
-        let last_progress = start + gap_lp;
-        let blocks = last_progress + gap_blocks;
-        let headers = blocks + gap_headers;
+        // Enforce decoder/state-machine monotonicity:
+        // start <= blocks <= last_progress <= headers.
+        let blocks = start + gap_blocks;
+        let last_progress = blocks + gap_lp;
+        let headers = last_progress + gap_headers;
 
         // Single-direction queue invariant (is_round_resumable / serializer):
         // at most one of the two queues is non-empty in a resumable snapshot,

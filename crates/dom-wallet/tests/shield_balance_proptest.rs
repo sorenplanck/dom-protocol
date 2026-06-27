@@ -29,7 +29,13 @@ fn owned(value: u64, height: u64, is_coinbase: bool, idx: u16) -> OwnedOutput {
     b[31] = 1; // keep blinding non-zero / valid scalar
     let blinding = BlindingFactor::from_bytes(b).unwrap();
     let commitment = Commitment::commit(value, &blinding);
-    OwnedOutput::new(*commitment.as_bytes(), value, *blinding.as_bytes(), height, is_coinbase)
+    OwnedOutput::new(
+        *commitment.as_bytes(),
+        value,
+        *blinding.as_bytes(),
+        height,
+        is_coinbase,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -41,8 +47,14 @@ struct Spec {
 }
 
 fn spec_strategy() -> impl Strategy<Value = Spec> {
-    (1u64..1_000_000, any::<bool>(), any::<bool>(), any::<bool>())
-        .prop_map(|(value, coinbase, spent, reserved)| Spec { value, coinbase, spent, reserved })
+    (1u64..1_000_000, any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
+        |(value, coinbase, spent, reserved)| Spec {
+            value,
+            coinbase,
+            spent,
+            reserved,
+        },
+    )
 }
 
 proptest! {

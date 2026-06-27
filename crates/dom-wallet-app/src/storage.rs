@@ -41,8 +41,8 @@ pub fn load_or_default(data_dir: &Path) -> Result<PersistedAppState, AppStorageE
     }
 
     let bytes = std::fs::read(&path).map_err(|e| AppStorageError::Io(e.to_string()))?;
-    let state: PersistedAppState =
-        serde_json::from_slice(&bytes).map_err(|e| AppStorageError::Serialization(e.to_string()))?;
+    let state: PersistedAppState = serde_json::from_slice(&bytes)
+        .map_err(|e| AppStorageError::Serialization(e.to_string()))?;
     validate_node_url(&state.node_url)?;
     Ok(state)
 }
@@ -85,7 +85,8 @@ pub fn default_data_dir() -> PathBuf {
 }
 
 fn validate_node_url(node_url: &str) -> Result<(), AppStorageError> {
-    let parsed = Url::parse(node_url).map_err(|e| AppStorageError::InvalidNodeUrl(e.to_string()))?;
+    let parsed =
+        Url::parse(node_url).map_err(|e| AppStorageError::InvalidNodeUrl(e.to_string()))?;
     match parsed.scheme() {
         "http" | "https" => {}
         scheme => {
@@ -104,7 +105,10 @@ fn validate_node_url(node_url: &str) -> Result<(), AppStorageError> {
     };
     let loopback = match host {
         "localhost" => true,
-        _ => host.parse::<std::net::IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false),
+        _ => host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false),
     };
     if !loopback {
         return Err(AppStorageError::InvalidNodeUrl(format!(

@@ -603,7 +603,10 @@ impl IbdState {
             DomError::Orphan(_) | DomError::Internal(_) => {
                 self.note_interruption(IbdInterruption::PeerDisconnected)
             }
-            DomError::Invalid(_) | DomError::Malformed(_) | DomError::PolicyRejected(_) => {
+            DomError::Invalid(_)
+            | DomError::Malformed(_)
+            | DomError::PolicyRejected(_)
+            | DomError::PeerMisbehavior { .. } => {
                 self.phase = IbdPhase::Failed;
                 IbdControl::Fail
             }
