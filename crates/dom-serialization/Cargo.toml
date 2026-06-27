@@ -10,3 +10,8 @@ license.workspace    = true
 [dependencies]
 dom-core.workspace  = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# F4-equivalent roundtrip-invariant property tests (tests/roundtrip_proptest.rs).
+proptest.workspace = true
+dom-core.workspace = true

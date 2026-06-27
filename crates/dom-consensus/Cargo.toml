@@ -17,6 +17,7 @@ thiserror.workspace         = true
 primitive-types.workspace   = true
 
 [dev-dependencies]
+dom-crypto = { workspace = true, features = ["test-helpers"] }
 secp256k1.workspace = true
 k256.workspace = true
 primitive-types.workspace = true

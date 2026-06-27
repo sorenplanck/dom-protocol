@@ -11,6 +11,7 @@ use axum::{
 // but we declare it directly to control the version explicitly.
 use governor::middleware::NoOpMiddleware;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 #[cfg(test)]
 use tower_governor::key_extractor::GlobalKeyExtractor;
 #[cfg(not(test))]
@@ -140,6 +141,10 @@ pub async fn require_bearer_token(
     req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    if token.0.trim().is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     let auth_header = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -147,8 +152,17 @@ pub async fn require_bearer_token(
 
     match auth_header {
         Some(header) if header.starts_with("Bearer ") => {
-            let provided = &header[7..];
-            if provided == token.0 {
+            let provided = header[7..].trim();
+            if provided.is_empty() {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+            // Constant-time comparison to avoid leaking the token via a
+            // short-circuiting byte compare (timing side-channel). `ct_eq`
+            // compares equal-length byte slices without an observable early
+            // return; differing lengths compare unequal (the token length is
+            // public, so that carries no secret). Accept/reject logic is
+            // identical to the previous `==`.
+            if bool::from(provided.as_bytes().ct_eq(token.0.as_bytes())) {
                 Ok(next.run(req).await)
             } else {
                 Err(StatusCode::UNAUTHORIZED)
@@ -161,6 +175,86 @@ pub async fn require_bearer_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, http::Request, middleware::from_fn_with_state, routing::get, Router};
+    use tower::ServiceExt;
+
+    /// A 64-char (256-bit) token, the shape produced by `generate_token`.
+    const TOK: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    async fn protected() -> &'static str {
+        "ok"
+    }
+
+    fn auth_app(token: &str) -> Router {
+        let bt = Arc::new(BearerToken(token.to_string()));
+        Router::new()
+            .route("/protected", get(protected))
+            .layer(from_fn_with_state(bt, require_bearer_token))
+    }
+
+    /// Drive one request through the auth middleware and return the status.
+    async fn status_for(app_token: &str, auth_header: Option<&str>) -> StatusCode {
+        let mut builder = Request::builder().uri("/protected");
+        if let Some(h) = auth_header {
+            builder = builder.header(header::AUTHORIZATION, h);
+        }
+        let req = builder.body(Body::empty()).expect("request");
+        auth_app(app_token)
+            .oneshot(req)
+            .await
+            .expect("oneshot")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn bearer_correct_token_authorizes() {
+        assert_eq!(
+            status_for(TOK, Some(&format!("Bearer {TOK}"))).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn bearer_wrong_token_same_length_rejected() {
+        // Flip the first char → same length, different content (exercises the
+        // constant-time equal-length path).
+        let mut wrong = TOK.to_string();
+        wrong.replace_range(0..1, "f");
+        assert_ne!(wrong, TOK);
+        assert_eq!(
+            status_for(TOK, Some(&format!("Bearer {wrong}"))).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn bearer_short_token_rejected() {
+        assert_eq!(
+            status_for(TOK, Some("Bearer short")).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn bearer_long_token_rejected() {
+        assert_eq!(
+            status_for(TOK, Some(&format!("Bearer {TOK}extra"))).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn bearer_missing_header_rejected() {
+        assert_eq!(status_for(TOK, None).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn bearer_non_bearer_scheme_rejected() {
+        assert_eq!(
+            status_for(TOK, Some(&format!("Basic {TOK}"))).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
 
     #[test]
     fn rate_limit_submit_default_is_10() {

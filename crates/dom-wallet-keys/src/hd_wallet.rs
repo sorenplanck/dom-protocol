@@ -10,6 +10,7 @@
 //! DOM coin type: 330 (matching DOM's 330,000 block halving interval)
 
 use hmac::{Hmac, Mac};
+use secp256k1::{PublicKey, Scalar, SecretKey};
 use sha2::Sha512;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -71,7 +72,7 @@ impl ExtendedPrivKey {
         }
         type HmacSha512 = Hmac<Sha512>;
         let mut mac =
-            HmacSha512::new_from_slice(b"DOM seed").expect("HMAC can take key of any size");
+            HmacSha512::new_from_slice(b"Bitcoin seed").expect("HMAC can take key of any size");
         mac.update(seed);
         let result = mac.finalize().into_bytes();
 
@@ -80,9 +81,9 @@ impl ExtendedPrivKey {
         key.copy_from_slice(&result[..32]);
         chain_code.copy_from_slice(&result[32..]);
 
-        if key == [0u8; 32] {
-            return Err(HdError::InvalidKey);
-        }
+        // BIP-32: the master key is invalid if IL == 0 or IL >= n. `from_slice`
+        // rejects both; if invalid the seed must be discarded (we surface it).
+        SecretKey::from_slice(&key).map_err(|_| HdError::InvalidKey)?;
 
         Ok(Self {
             key: Zeroizing::new(key),
@@ -94,15 +95,24 @@ impl ExtendedPrivKey {
 
     /// Derive a child key at given index.
     pub fn child(&self, index: u32) -> Result<Self, HdError> {
+        // Parent private key as a validated secp256k1 scalar (BIP-32 requires
+        // kpar < n; from_slice enforces it).
+        let parent_sk =
+            SecretKey::from_slice(self.key.as_ref()).map_err(|_| HdError::InvalidKey)?;
+
         type HmacSha512 = Hmac<Sha512>;
         let mut mac =
             HmacSha512::new_from_slice(&self.chain_code).expect("HMAC can take key of any size");
 
         if index >= HARDENED_OFFSET {
+            // Hardened: data = 0x00 || ser256(kpar) || ser32(i)
             mac.update(&[0x00]);
             mac.update(self.key.as_ref());
         } else {
-            mac.update(self.key.as_ref());
+            // Non-hardened: data = serP(point(kpar)) || ser32(i)
+            // serP = 33-byte compressed public key of the parent.
+            let parent_pk = PublicKey::from_secret_key_global(&parent_sk);
+            mac.update(&parent_pk.serialize());
         }
         mac.update(&index.to_be_bytes());
 
@@ -110,7 +120,15 @@ impl ExtendedPrivKey {
 
         let mut il = [0u8; 32];
         il.copy_from_slice(&result[..32]);
-        let child_key = add_scalars_mod_order(&il, &self.key)?;
+
+        // ki = (IL + kpar) mod n. `Scalar::from_be_bytes` rejects IL >= n; the
+        // tweak-add rejects a zero result. Both are the BIP-32 "invalid index"
+        // cases (caller should advance the index; here we surface InvalidKey).
+        let tweak = Scalar::from_be_bytes(il).map_err(|_| HdError::InvalidKey)?;
+        let child_key = parent_sk
+            .add_tweak(&tweak)
+            .map_err(|_| HdError::InvalidKey)?
+            .secret_bytes();
 
         let mut chain_code = [0u8; 32];
         chain_code.copy_from_slice(&result[32..]);
@@ -167,10 +185,7 @@ impl ExtendedPrivKey {
         index: u32,
     ) -> Result<Zeroizing<[u8; 32]>, HdError> {
         // Build path: m/44'/330'/account'/change/index
-        let path = format!(
-            "m/44'/{}'/{}'/{}'/{}/{}",
-            44u32, DOM_COIN_TYPE, account, change, index,
-        );
+        let path = format!("m/44'/{}'/{}'/{}/{}", DOM_COIN_TYPE, account, change, index,);
         let child = self.derive_path(&path)?;
         Ok(child.key.clone())
     }
@@ -179,42 +194,12 @@ impl ExtendedPrivKey {
     pub fn key_bytes(&self) -> &[u8; 32] {
         &self.key
     }
-}
 
-/// Add two scalars modulo the secp256k1 order.
-fn add_scalars_mod_order(a: &[u8; 32], b: &Zeroizing<[u8; 32]>) -> Result<[u8; 32], HdError> {
-    const ORDER: [u8; 32] = [
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36,
-        0x41, 0x41,
-    ];
-
-    let mut result = [0u8; 32];
-    let mut carry: u16 = 0;
-    for i in (0..32).rev() {
-        let sum = a[i] as u16 + b[i] as u16 + carry;
-        result[i] = sum as u8;
-        carry = sum >> 8;
+    /// Get the 32-byte chain code (BIP-32). Exposed for HD interop checks
+    /// (e.g. validating derivation against external BIP-32 test vectors).
+    pub fn chain_code(&self) -> &[u8; 32] {
+        &self.chain_code
     }
-
-    if result >= ORDER || result == [0u8; 32] {
-        let mut borrow: u16 = 0;
-        for i in (0..32).rev() {
-            let diff = result[i] as i16 - ORDER[i] as i16 - borrow as i16;
-            if diff < 0 {
-                result[i] = (diff + 256) as u8;
-                borrow = 1;
-            } else {
-                result[i] = diff as u8;
-                borrow = 0;
-            }
-        }
-    }
-
-    if result == [0u8; 32] {
-        return Err(HdError::InvalidKey);
-    }
-    Ok(result)
 }
 
 #[cfg(test)]

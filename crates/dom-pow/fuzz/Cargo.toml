@@ -1,0 +1,41 @@
+[package]
+name = "dom-pow-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.dom-pow]
+path = ".."
+
+[dependencies.dom-core]
+path = "../../dom-core"
+
+[[bin]]
+name = "fuzz_compact_to_target"
+path = "fuzz_targets/fuzz_compact_to_target.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_asert_next_target"
+path = "fuzz_targets/fuzz_asert_next_target.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_randomx_hash"
+path = "fuzz_targets/fuzz_randomx_hash.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

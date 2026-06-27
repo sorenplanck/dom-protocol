@@ -8,7 +8,7 @@
 //!   - happy-path / consensus-shape, single-byte tamper, cross-commitment
 //!     commit-A-vs-B, and the size-serialization envelope are covered by
 //!     `dom-consensus/tests/bulletproof_bp_consensus.rs`;
-//!   - the exact-675 size gate (empty / != 675 / 675-malformed) is covered by
+//!   - the exact-size gate (empty / != 739 / 739-malformed) is covered by
 //!     `bulletproof_bp::tests::ds001_proof_size_must_be_exact`;
 //!   - the wrong-H generator binding is covered in-crate by `binding_matrix`.
 //!
@@ -16,7 +16,7 @@
 //!   1. Boundary value sweep (0, 1, 2^k, 2^k-1 for k=1..=51, MAX_PROVABLE_VALUE,
 //!      MAX_SUPPLY_NOMS) — each MUST prove + verify clean.
 //!   2. Single-bit mutation across the proof — MUST never verify true.
-//!   3. Garbage proofs of EXACTLY 675 bytes — MUST never verify true.
+//!   3. Garbage proofs of EXACTLY 739 bytes — MUST never verify true.
 //!   4. Cross-commitment, same blinding / different value (2nd variant).
 //!   5. Out-of-range values rejected at prove-time, before any FFI.
 //!   6. `bp2_prove_with_nonce` determinism (byte-identical proofs).
@@ -25,8 +25,8 @@ use dom_crypto::bulletproof::MAX_PROVABLE_VALUE;
 use dom_crypto::pedersen::BlindingFactor;
 use dom_crypto::{bp2_prove, bp2_prove_with_nonce, bp2_verify};
 
-/// Exact serialized length of a single 64-bit grin Bulletproof.
-const BP2_PROOF_LEN: usize = 675;
+/// Exact serialized length of DOM's bounded aggregate bp2 proof.
+const BP2_PROOF_LEN: usize = 739;
 
 /// Deterministic, always-valid blinding from a seed byte (non-zero, well below
 /// the curve order — same shape the borromean suite uses).
@@ -71,7 +71,7 @@ fn bp2_boundary_values_prove_and_verify() {
         assert_eq!(
             proof.len(),
             BP2_PROOF_LEN,
-            "proof for v={v} must be 675 bytes"
+            "proof for v={v} must be 739 bytes"
         );
         let ok = bp2_verify(&commit, &proof).expect("bp2 verify must run");
         assert!(
@@ -123,14 +123,14 @@ fn bp2_single_bit_mutation_invalidates() {
     );
 }
 
-// ── (3) Garbage proofs of exactly 675 bytes ──────────────────────────────────
+// ── (3) Garbage proofs of exactly 739 bytes ──────────────────────────────────
 
-/// Garbage buffers of EXACTLY 675 bytes (so they clear the size gate and reach
+/// Garbage buffers of EXACTLY 739 bytes (so they clear the size gate and reach
 /// the grin verifier) MUST NOT verify against a valid commitment. Off-size
 /// garbage is already rejected by the size gate (`ds001_proof_size_must_be_exact`),
 /// so this targets the verifier's own soundness on right-sized junk.
 #[test]
-fn bp2_garbage_exact_675_never_verifies() {
+fn bp2_garbage_exact_739_never_verifies() {
     let bf = blinding(0x77);
     let (_real, commit) = bp2_prove(1, &bf).expect("bp2 prove control");
 
@@ -156,12 +156,12 @@ fn bp2_garbage_exact_675_never_verifies() {
         assert_eq!(
             garbage.len(),
             BP2_PROOF_LEN,
-            "garbage '{label}' must be 675 bytes"
+            "garbage '{label}' must be 739 bytes"
         );
         let verified = matches!(bp2_verify(&commit, garbage), Ok(true));
         assert!(
             !verified,
-            "garbage proof '{label}' (675B) unexpectedly verified TRUE"
+            "garbage proof '{label}' (739B) unexpectedly verified TRUE"
         );
     }
 }

@@ -9,10 +9,15 @@
 //! Also provides simple password-encrypted backup files for full seed export.
 
 use bip39::{Language, Mnemonic};
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use thiserror::Error;
 use zeroize::Zeroizing;
+
+const BACKUP_MAGIC: &[u8; 4] = b"DBK1";
+const BACKUP_NONCE_LEN: usize = 12;
 
 /// Errors that can occur during backup or restore operations.
 #[derive(Debug, Error)]
@@ -32,6 +37,10 @@ pub enum BackupError {
     /// Backup file is corrupted or has unexpected size.
     #[error("backup file corrupted (expected 32 bytes, got {0})")]
     Corrupted(usize),
+
+    /// Backup authentication failed (wrong password or tampered file).
+    #[error("backup authentication failed")]
+    AuthenticationFailed,
 }
 
 impl From<bip39::Error> for BackupError {
@@ -147,10 +156,9 @@ pub fn entropy_from_mnemonic(phrase: &str) -> Result<Zeroizing<[u8; 16]>, Backup
 
 /// Export a 32-byte seed to a password-encrypted backup file.
 ///
-/// Uses simple XOR with SHA256(password) for transport encryption.
-/// This is intended for moving wallet backups between systems, not for
-/// long-term encrypted storage. The wallet itself uses ChaCha20Poly1305
-/// (see `dom-wallet::store`) for at-rest encryption.
+/// Uses an authenticated ChaCha20Poly1305 envelope derived from SHA256(password).
+/// Wrong passwords and tampering are rejected instead of silently producing a
+/// different seed.
 ///
 /// # Arguments
 /// * `seed` - The 32-byte wallet seed to back up
@@ -167,39 +175,58 @@ pub fn export_backup_file(
     let mut hasher = Sha256::new();
     hasher.update(password.as_bytes());
     let key: [u8; 32] = hasher.finalize().into();
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(&key).map_err(|_| BackupError::AuthenticationFailed)?;
+    let nonce_bytes: [u8; BACKUP_NONCE_LEN] = rand::random();
+    let nonce: Nonce = nonce_bytes.into();
+    let ciphertext = cipher
+        .encrypt(&nonce, seed.as_slice())
+        .map_err(|_| BackupError::AuthenticationFailed)?;
 
-    let mut encrypted = [0u8; 32];
-    for i in 0..32 {
-        encrypted[i] = seed[i] ^ key[i];
-    }
+    let mut envelope = Vec::with_capacity(BACKUP_MAGIC.len() + BACKUP_NONCE_LEN + ciphertext.len());
+    envelope.extend_from_slice(BACKUP_MAGIC);
+    envelope.extend_from_slice(&nonce_bytes);
+    envelope.extend_from_slice(&ciphertext);
 
-    std::fs::write(output_path, encrypted).map_err(|e| BackupError::Io(e.to_string()))?;
+    std::fs::write(output_path, envelope).map_err(|e| BackupError::Io(e.to_string()))?;
     Ok(())
 }
 
 /// Import a 32-byte seed from a password-encrypted backup file.
 ///
-/// Inverse of [`export_backup_file`]. The file must be exactly 32 bytes.
-/// Wrong passwords do not raise an error — they simply produce a different
-/// (and useless) seed. Verification must happen at the wallet layer.
+/// Inverse of [`export_backup_file`]. Wrong passwords and tampering fail
+/// authentication instead of yielding a garbage seed.
 ///
 /// # Errors
 /// Returns [`BackupError::Io`] if the file cannot be read, or
 /// [`BackupError::Corrupted`] if the file size is not 32 bytes.
 pub fn import_backup_file(backup_path: &Path, password: &str) -> Result<[u8; 32], BackupError> {
     let encrypted = std::fs::read(backup_path).map_err(|e| BackupError::Io(e.to_string()))?;
-    if encrypted.len() != 32 {
+    if encrypted.len() < BACKUP_MAGIC.len() + BACKUP_NONCE_LEN + 16 {
+        return Err(BackupError::Corrupted(encrypted.len()));
+    }
+    if &encrypted[..BACKUP_MAGIC.len()] != BACKUP_MAGIC {
         return Err(BackupError::Corrupted(encrypted.len()));
     }
 
     let mut hasher = Sha256::new();
     hasher.update(password.as_bytes());
     let key: [u8; 32] = hasher.finalize().into();
-
-    let mut seed = [0u8; 32];
-    for i in 0..32 {
-        seed[i] = encrypted[i] ^ key[i];
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(&key).map_err(|_| BackupError::AuthenticationFailed)?;
+    let nonce_bytes: [u8; BACKUP_NONCE_LEN] = encrypted
+        [BACKUP_MAGIC.len()..BACKUP_MAGIC.len() + BACKUP_NONCE_LEN]
+        .try_into()
+        .map_err(|_| BackupError::Corrupted(encrypted.len()))?;
+    let nonce: Nonce = nonce_bytes.into();
+    let plaintext = cipher
+        .decrypt(&nonce, &encrypted[BACKUP_MAGIC.len() + BACKUP_NONCE_LEN..])
+        .map_err(|_| BackupError::AuthenticationFailed)?;
+    if plaintext.len() != 32 {
+        return Err(BackupError::Corrupted(plaintext.len()));
     }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&plaintext);
     Ok(seed)
 }
 
@@ -265,15 +292,15 @@ mod tests {
     }
 
     #[test]
-    fn wrong_password_gives_different_seed() {
+    fn wrong_password_is_rejected() {
         let seed = [0xAAu8; 32];
         let temp = std::env::temp_dir().join("test_dom_bip39_wrong.bin");
         let _ = std::fs::remove_file(&temp);
 
         export_backup_file(&seed, "correct", &temp).unwrap();
-        let restored = import_backup_file(&temp, "wrong").unwrap();
+        let err = import_backup_file(&temp, "wrong").unwrap_err();
 
-        assert_ne!(seed, restored);
+        assert!(matches!(err, BackupError::AuthenticationFailed));
         let _ = std::fs::remove_file(&temp);
     }
 

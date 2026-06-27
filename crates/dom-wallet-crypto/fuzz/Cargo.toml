@@ -1,0 +1,25 @@
+[package]
+name = "dom-wallet-crypto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+
+[dependencies.dom-wallet-crypto]
+path = ".."
+
+[[bin]]
+name = "fuzz_load_envelope"
+path = "fuzz_targets/fuzz_load_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

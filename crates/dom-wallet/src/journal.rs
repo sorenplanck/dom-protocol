@@ -71,13 +71,18 @@
 
 use crate::store::PendingChange;
 use crate::types::WalletError;
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tracing::{debug, warn};
+use zeroize::Zeroizing;
 
 // ── Serde helpers — hex-encoded byte arrays ──────────────────────
 //
@@ -184,6 +189,7 @@ mod hex33_vec {
 
 /// Filename of the journal inside a wallet directory.
 pub const JOURNAL_LOG_NAME: &str = "journal.log";
+const JOURNAL_NONCE_LEN: usize = 12;
 
 /// Errors arising from journal operations.
 #[derive(Debug, Error)]
@@ -405,6 +411,7 @@ pub struct TxRecord {
 /// `sync_all` across replay calls.
 pub struct TxJournal {
     path: PathBuf,
+    crypto: Option<JournalCrypto>,
 }
 
 impl TxJournal {
@@ -412,6 +419,19 @@ impl TxJournal {
     pub fn open(walletdir: &Path) -> Result<Self, JournalError> {
         Ok(Self {
             path: walletdir.join(JOURNAL_LOG_NAME),
+            crypto: None,
+        })
+    }
+
+    /// Open an authenticated journal bound to the wallet password and chain id.
+    pub fn open_authenticated(
+        walletdir: &Path,
+        password: &str,
+        chain_id: &[u8; 32],
+    ) -> Result<Self, JournalError> {
+        Ok(Self {
+            path: walletdir.join(JOURNAL_LOG_NAME),
+            crypto: Some(JournalCrypto::derive(password, chain_id)),
         })
     }
 
@@ -423,8 +443,9 @@ impl TxJournal {
     /// Append one entry, then fsync the file. The entry is durably
     /// recorded by the time this returns Ok.
     pub fn append(&self, entry: &JournalEntry) -> Result<(), JournalError> {
+        let wire = self.to_wire(entry)?;
         let mut json =
-            serde_json::to_vec(entry).map_err(|e| JournalError::Encode(e.to_string()))?;
+            serde_json::to_vec(&wire).map_err(|e| JournalError::Encode(e.to_string()))?;
         json.push(b'\n');
 
         let mut f = OpenOptions::new()
@@ -479,12 +500,19 @@ impl TxJournal {
             if raw.trim().is_empty() {
                 continue;
             }
-            let entry: JournalEntry = match serde_json::from_str(&raw) {
+            let wire: JournalEntryWire = match serde_json::from_str(&raw) {
                 Ok(e) => e,
                 Err(e) => {
                     warn!(
                         "journal: malformed entry at line {line_no}; skipping. err = {e}; line = {raw:?}"
                     );
+                    continue;
+                }
+            };
+            let entry = match self.decode_wire(&wire, line_no) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    warn!("journal: authenticated decode failed at line {line_no}: {e}");
                     continue;
                 }
             };
@@ -498,6 +526,304 @@ impl TxJournal {
     pub fn exists(&self) -> bool {
         self.path.exists()
     }
+
+    fn to_wire(&self, entry: &JournalEntry) -> Result<JournalEntryWire, JournalError> {
+        let event = match &entry.event {
+            TxJournalEvent::Built {
+                inputs,
+                tx_hex,
+                output_count,
+                fee_noms,
+                change,
+            } => TxJournalEventWire::Built {
+                inputs: inputs.clone(),
+                tx_hex: tx_hex.clone(),
+                output_count: *output_count,
+                fee_noms: *fee_noms,
+                change: self.encode_change(change)?,
+            },
+            TxJournalEvent::Submitted => TxJournalEventWire::Submitted,
+            TxJournalEvent::Confirmed { block_height } => TxJournalEventWire::Confirmed {
+                block_height: *block_height,
+            },
+            TxJournalEvent::Failed { reason } => TxJournalEventWire::Failed {
+                reason: reason.clone(),
+            },
+            TxJournalEvent::Replaced { by_tx_hash } => TxJournalEventWire::Replaced {
+                by_tx_hash: *by_tx_hash,
+            },
+            TxJournalEvent::Canceled => TxJournalEventWire::Canceled,
+            TxJournalEvent::Reorged { reorg_height } => TxJournalEventWire::Reorged {
+                reorg_height: *reorg_height,
+            },
+            TxJournalEvent::ReceiveConfirmed {
+                commitment,
+                amount,
+                block_height,
+                block_hash,
+                source_slate_hash,
+            } => TxJournalEventWire::ReceiveConfirmed {
+                commitment: *commitment,
+                amount: *amount,
+                block_height: *block_height,
+                block_hash: *block_hash,
+                source_slate_hash: *source_slate_hash,
+            },
+        };
+
+        let mut wire = JournalEntryWire {
+            timestamp: entry.timestamp,
+            tx_hash: entry.tx_hash,
+            event,
+            mac: None,
+        };
+        if let Some(crypto) = &self.crypto {
+            wire.mac = Some(crypto.mac_hex(&wire)?);
+        }
+        Ok(wire)
+    }
+
+    fn decode_wire(
+        &self,
+        wire: &JournalEntryWire,
+        line_no: usize,
+    ) -> Result<JournalEntry, JournalError> {
+        if let Some(crypto) = &self.crypto {
+            let Some(mac) = &wire.mac else {
+                return Err(JournalError::Decode {
+                    line: line_no,
+                    message: "missing journal mac".into(),
+                });
+            };
+            if !crypto.verify_mac_hex(wire, mac)? {
+                return Err(JournalError::Decode {
+                    line: line_no,
+                    message: "invalid journal mac".into(),
+                });
+            }
+        }
+
+        let event = match &wire.event {
+            TxJournalEventWire::Built {
+                inputs,
+                tx_hex,
+                output_count,
+                fee_noms,
+                change,
+            } => TxJournalEvent::Built {
+                inputs: inputs.clone(),
+                tx_hex: tx_hex.clone(),
+                output_count: *output_count,
+                fee_noms: *fee_noms,
+                change: self.decode_change(change)?,
+            },
+            TxJournalEventWire::Submitted => TxJournalEvent::Submitted,
+            TxJournalEventWire::Confirmed { block_height } => TxJournalEvent::Confirmed {
+                block_height: *block_height,
+            },
+            TxJournalEventWire::Failed { reason } => TxJournalEvent::Failed {
+                reason: reason.clone(),
+            },
+            TxJournalEventWire::Replaced { by_tx_hash } => TxJournalEvent::Replaced {
+                by_tx_hash: *by_tx_hash,
+            },
+            TxJournalEventWire::Canceled => TxJournalEvent::Canceled,
+            TxJournalEventWire::Reorged { reorg_height } => TxJournalEvent::Reorged {
+                reorg_height: *reorg_height,
+            },
+            TxJournalEventWire::ReceiveConfirmed {
+                commitment,
+                amount,
+                block_height,
+                block_hash,
+                source_slate_hash,
+            } => TxJournalEvent::ReceiveConfirmed {
+                commitment: *commitment,
+                amount: *amount,
+                block_height: *block_height,
+                block_hash: *block_hash,
+                source_slate_hash: *source_slate_hash,
+            },
+        };
+
+        Ok(JournalEntry {
+            timestamp: wire.timestamp,
+            tx_hash: wire.tx_hash,
+            event,
+        })
+    }
+
+    fn encode_change(
+        &self,
+        change: &Option<PendingChange>,
+    ) -> Result<Option<String>, JournalError> {
+        let Some(change) = change else {
+            return Ok(None);
+        };
+        let Some(crypto) = &self.crypto else {
+            return Ok(Some(hex::encode(
+                serde_json::to_vec(change).map_err(|e| JournalError::Encode(e.to_string()))?,
+            )));
+        };
+        let nonce_bytes: [u8; JOURNAL_NONCE_LEN] = rand::random();
+        let nonce: Nonce = nonce_bytes.into();
+        let plaintext =
+            serde_json::to_vec(change).map_err(|e| JournalError::Encode(e.to_string()))?;
+        let ciphertext = crypto
+            .cipher()
+            .encrypt(&nonce, plaintext.as_slice())
+            .map_err(|_| JournalError::Encode("journal change encrypt".into()))?;
+        let mut envelope = Vec::with_capacity(JOURNAL_NONCE_LEN + ciphertext.len());
+        envelope.extend_from_slice(&nonce_bytes);
+        envelope.extend_from_slice(&ciphertext);
+        Ok(Some(hex::encode(envelope)))
+    }
+
+    fn decode_change(
+        &self,
+        change: &Option<String>,
+    ) -> Result<Option<PendingChange>, JournalError> {
+        let Some(change) = change else {
+            return Ok(None);
+        };
+        let bytes = hex::decode(change).map_err(|e| JournalError::Encode(e.to_string()))?;
+        let plaintext = if let Some(crypto) = &self.crypto {
+            if bytes.len() < JOURNAL_NONCE_LEN + 16 {
+                return Err(JournalError::Encode(
+                    "journal change ciphertext too short".into(),
+                ));
+            }
+            let nonce_bytes: [u8; JOURNAL_NONCE_LEN] = bytes[..JOURNAL_NONCE_LEN]
+                .try_into()
+                .map_err(|_| JournalError::Encode("journal change nonce".into()))?;
+            let nonce: Nonce = nonce_bytes.into();
+            crypto
+                .cipher()
+                .decrypt(&nonce, &bytes[JOURNAL_NONCE_LEN..])
+                .map_err(|_| JournalError::Encode("journal change decrypt".into()))?
+        } else {
+            bytes
+        };
+        let decoded =
+            serde_json::from_slice(&plaintext).map_err(|e| JournalError::Encode(e.to_string()))?;
+        Ok(Some(decoded))
+    }
+}
+
+type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Clone)]
+struct JournalCrypto {
+    mac_key: Zeroizing<[u8; 32]>,
+    enc_key: Zeroizing<[u8; 32]>,
+}
+
+impl JournalCrypto {
+    fn derive(password: &str, chain_id: &[u8; 32]) -> Self {
+        let mut mac_hasher = Sha256::new();
+        mac_hasher.update(b"DOM:journal:mac:v1");
+        mac_hasher.update(password.as_bytes());
+        mac_hasher.update(chain_id);
+        let mac_key: [u8; 32] = mac_hasher.finalize().into();
+
+        let mut enc_hasher = Sha256::new();
+        enc_hasher.update(b"DOM:journal:enc:v1");
+        enc_hasher.update(password.as_bytes());
+        enc_hasher.update(chain_id);
+        let enc_key: [u8; 32] = enc_hasher.finalize().into();
+
+        Self {
+            mac_key: Zeroizing::new(mac_key),
+            enc_key: Zeroizing::new(enc_key),
+        }
+    }
+
+    fn cipher(&self) -> ChaCha20Poly1305 {
+        ChaCha20Poly1305::new_from_slice(self.enc_key.as_ref())
+            .expect("32-byte journal encryption key")
+    }
+
+    fn mac_hex(&self, wire: &JournalEntryWire) -> Result<String, JournalError> {
+        let bytes = canonical_entry_bytes(wire)?;
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(self.mac_key.as_ref())
+            .map_err(|e| JournalError::Encode(e.to_string()))?;
+        mac.update(&bytes);
+        Ok(hex::encode(mac.finalize().into_bytes()))
+    }
+
+    fn verify_mac_hex(
+        &self,
+        wire: &JournalEntryWire,
+        expected_hex: &str,
+    ) -> Result<bool, JournalError> {
+        let expected =
+            hex::decode(expected_hex).map_err(|e| JournalError::Encode(e.to_string()))?;
+        let bytes = canonical_entry_bytes(wire)?;
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(self.mac_key.as_ref())
+            .map_err(|e| JournalError::Encode(e.to_string()))?;
+        mac.update(&bytes);
+        Ok(mac.verify_slice(&expected).is_ok())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JournalEntryWire {
+    pub timestamp: u64,
+    #[serde(with = "hex32")]
+    pub tx_hash: [u8; 32],
+    pub event: TxJournalEventWire,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TxJournalEventWire {
+    Built {
+        #[serde(with = "hex33_vec")]
+        inputs: Vec<[u8; 33]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tx_hex: Option<String>,
+        output_count: u32,
+        fee_noms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change: Option<String>,
+    },
+    Submitted,
+    Confirmed {
+        block_height: u64,
+    },
+    Failed {
+        reason: String,
+    },
+    Replaced {
+        #[serde(with = "hex32")]
+        by_tx_hash: [u8; 32],
+    },
+    Canceled,
+    Reorged {
+        reorg_height: u64,
+    },
+    ReceiveConfirmed {
+        #[serde(with = "hex33")]
+        commitment: [u8; 33],
+        amount: u64,
+        block_height: u64,
+        #[serde(default, with = "hex32_opt", skip_serializing_if = "Option::is_none")]
+        block_hash: Option<[u8; 32]>,
+        #[serde(with = "hex32")]
+        source_slate_hash: [u8; 32],
+    },
+}
+
+fn canonical_entry_bytes(wire: &JournalEntryWire) -> Result<Vec<u8>, JournalError> {
+    let canonical = JournalEntryWire {
+        timestamp: wire.timestamp,
+        tx_hash: wire.tx_hash,
+        event: wire.event.clone(),
+        mac: None,
+    };
+    serde_json::to_vec(&canonical).map_err(|e| JournalError::Encode(e.to_string()))
 }
 
 /// Apply one journal entry to the replay map. Validates the state

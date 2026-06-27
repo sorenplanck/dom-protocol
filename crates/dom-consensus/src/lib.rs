@@ -58,7 +58,7 @@ pub use transaction::{
     TransactionInput, TransactionKernel, TransactionOutput,
 };
 
-use dom_core::{BlockHeight, DomError, Timestamp, MAX_BLOCK_WEIGHT};
+use dom_core::{BlockHeight, DomError, PeerMisbehavior, Timestamp, MAX_BLOCK_WEIGHT};
 
 /// Context required for transaction and block validation.
 pub struct ValidationContext {
@@ -153,9 +153,10 @@ pub fn validate_kernel_signatures(tx: &Transaction, chain_id: &[u8; 32]) -> Resu
         match dom_crypto::schnorr_verify(&sig, &pk, chain_id, kernel_message.as_bytes()) {
             Ok(true) => {}
             Ok(false) => {
-                return Err(DomError::Invalid(format!(
-                    "kernel {i} Schnorr signature invalid"
-                )));
+                return Err(DomError::peer_misbehavior(
+                    PeerMisbehavior::InvalidSignature,
+                    format!("kernel {i} Schnorr signature invalid"),
+                ));
             }
             Err(DomError::Internal(msg)) => {
                 return Err(DomError::Internal(format!("kernel sig: {msg}")));

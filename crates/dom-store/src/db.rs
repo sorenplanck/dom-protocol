@@ -319,7 +319,9 @@ impl DomStore {
             .open_ro_cursor(self.db_utxos)
             .map_err(|e| DomError::Internal(format!("open utxo cursor: {e}")))?;
         let mut out = BTreeMap::new();
-        for (key, value) in cursor.iter() {
+        for item in cursor.iter() {
+            let (key, value) =
+                item.map_err(|e| DomError::Internal(format!("read utxo cursor: {e}")))?;
             out.insert(key.to_vec(), value.to_vec());
         }
         Ok(out)
@@ -338,7 +340,9 @@ impl DomStore {
             .open_ro_cursor(self.db_kernels)
             .map_err(|e| DomError::Internal(format!("open kernel cursor: {e}")))?;
         let mut out = BTreeMap::new();
-        for (key, value) in cursor.iter() {
+        for item in cursor.iter() {
+            let (key, value) =
+                item.map_err(|e| DomError::Internal(format!("read kernel cursor: {e}")))?;
             out.insert(key.to_vec(), value.to_vec());
         }
         Ok(out)
@@ -357,7 +361,9 @@ impl DomStore {
             .open_ro_cursor(self.db_blocks)
             .map_err(|e| DomError::Internal(format!("open block cursor: {e}")))?;
         let mut out = BTreeMap::new();
-        for (key, value) in cursor.iter() {
+        for item in cursor.iter() {
+            let (key, value) =
+                item.map_err(|e| DomError::Internal(format!("read block cursor: {e}")))?;
             if key.len() != 32 {
                 return Err(DomError::Internal("corrupt block hash key".into()));
             }

@@ -3,7 +3,7 @@
 //! This module is the **standard-Bulletproof** path for DOM, distinct from the
 //! borromean-based [`crate::bulletproof`] module. It is built on grin's
 //! `secp256k1zkp` (libsecp256k1-zkp) classic bulletproof rangeproof, which
-//! produces a single 64-bit proof of [`SINGLE_BULLETPROOF_SIZE`] = 675 bytes,
+//! produces one bounded aggregate proof of [`SINGLE_BULLETPROOF_SIZE`] = 739 bytes,
 //! versus the ~4166-byte borromean proof.
 //!
 //! Like the borromean path, proofs here are bound to DOM's **H_DOM** value
@@ -18,12 +18,10 @@
 //! SEC1<->zkp conversion here mirrors [`crate::bulletproof`] exactly and must
 //! stay consistent with it.
 //!
-//! Status: implemented but **NOT wired into consensus** and **NOT exported**
-//! from the crate's public API. The borromean [`crate::bulletproof`] module
-//! remains the live path and is untouched. `bp_prove`/`bp_verify` are
-//! crate-private; this module exists to validate the standard-Bulletproof
-//! prove/verify pair under H_DOM inside the real `dom-crypto` crate, parallel
-//! to borromean, ahead of the migration.
+//! Status: live standard-Bulletproof path under H_DOM. Each output now proves
+//! both `v` and `MAX_PROVABLE_VALUE - v` in one aggregate proof, so consensus
+//! verification enforces the same 52-bit ceiling as the legacy borromean path
+//! without relying on unsupported upstream `max_value` semantics.
 
 // Justification for overriding the crate-wide `#![deny(unsafe_code)]`:
 // the grin bulletproof rangeproof is only reachable through C FFI. The unsafe
@@ -31,26 +29,33 @@
 // that call it; every unsafe site documents its SAFETY invariants. The
 // borromean path stays 100% safe-Rust.
 #![allow(unsafe_code)]
-// Scaffold: `bp_prove`/`bp_verify` (and the helpers they reach) are not called
-// from non-test crate code yet because this path is not wired into consensus.
-// Silence dead_code until it is wired up so a non-test `cargo build` stays clean.
+// Keep dead_code allowed because this module still exposes some narrowly scoped
+// helper paths only used by tests/regressions.
 #![allow(dead_code)]
 
 use crate::bulletproof::MAX_PROVABLE_VALUE; // reuse the borromean bound — do not redefine
-use crate::pedersen::BlindingFactor;
+use crate::pedersen::{derive_complement_commitment, negate_blinding, BlindingFactor};
 use crate::sec1_zkp_bridge::{sec1_to_zkp, zkp_to_sec1}; // single source of truth for SEC1<->zkp
 use dom_core::DomError;
 use rand::RngCore;
 use secp256k1zkp::{constants, ffi};
 use std::ptr;
 
-/// Serialized byte length of a single 64-bit grin Bulletproof range proof.
-/// (grin `constants::SINGLE_BULLET_PROOF_SIZE`; borromean proofs are ~4166 bytes.)
-pub(crate) const SINGLE_BULLETPROOF_SIZE: usize = 675;
+/// Serialized byte length of DOM's bounded aggregate Bulletproof:
+/// one proof over `(v, MAX_PROVABLE_VALUE - v)`, both as 64-bit commitments.
+/// grin upstream's classic aggregate format yields 739 bytes for `(nbits=64,
+/// n_commits=2)`, which still fits DOM's 768-byte consensus envelope.
+pub(crate) const SINGLE_BULLETPROOF_SIZE: usize = 739;
 
-/// Number of bits proven by a grin single-value Bulletproof. The 675-byte proof
-/// is the 64-bit variant; DOM additionally enforces [`MAX_PROVABLE_VALUE`].
+/// Number of bits proven per commitment by grin classic Bulletproof.
+/// DOM keeps the upstream-valid 64-bit width and enforces the 52-bit ceiling by
+/// aggregating proofs for `(v, MAX_PROVABLE_VALUE - v)`.
 pub(crate) const PROOF_NBITS: usize = 64;
+
+/// DOM proves two commitments per output:
+///   1. `v`
+///   2. `MAX_PROVABLE_VALUE - v`
+const PROOF_NCOMMITS: usize = 2;
 
 /// Scratch arena size for grin's bulletproof FFI, per thread (reused, not
 /// per-call). Empirically the minimum for a single 64-bit proof is ~15.8 KiB to
@@ -58,7 +63,9 @@ pub(crate) const PROOF_NBITS: usize = 64;
 /// headroom while being 256x smaller than grin's batch-sized 256 MiB default.
 const SCRATCH_SIZE: usize = 1 << 20; // 1 MiB
 
-/// Number of bulletproof generators to create (mirrors grin's `MAX_GENERATORS`).
+/// Number of bulletproof generators to create.
+/// For the bounded aggregate proof, verify/prove need `2 * nbits * n_commits`
+/// generators = `2 * 64 * 2 = 256`, so the existing grin-sized set remains exact.
 const N_GENERATORS: usize = 256;
 
 /// H_DOM value generator in grin's 33-byte *zkp-serialized* form (`0x0a || H_DOM_X`).
@@ -301,21 +308,20 @@ fn commit_zkp(
     Ok(out)
 }
 
-/// Bulletproof prove for `value` under `value_gen` with EXPLICIT nonces.
-/// The proof is a deterministic function of (value, blind, value_gen, rewind,
-/// private) — fixed nonces => byte-identical proof (see determinism gate test).
-fn prove_raw_with_nonces(
+/// Bulletproof prove for `values` / `blinds` under `value_gen` with explicit
+/// nonces. The proof is deterministic in the full witness tuple, so fixed
+/// nonces yield byte-identical aggregate proofs.
+fn prove_raw_values_with_nonces(
     backend: &Backend,
-    value: u64,
-    blind: &[u8; 32],
+    values: &[u64],
+    blinds: &[[u8; 32]],
     value_gen: &[u8; 64],
     rewind: &[u8; 32],
     private: &[u8; 32],
 ) -> Result<Vec<u8>, DomError> {
     let mut proof = [0u8; constants::MAX_PROOF_SIZE];
     let mut plen: usize = constants::MAX_PROOF_SIZE;
-    let blinds: [*const u8; 1] = [blind.as_ptr()];
-    let v = value;
+    let blind_ptrs: Vec<*const u8> = blinds.iter().map(|b| b.as_ptr()).collect();
 
     // DS-001: fresh scratch per call, destroyed on scope exit (Drop) — same
     // create+destroy-per-call discipline the verify path uses, so the prove path
@@ -334,11 +340,11 @@ fn prove_raw_with_nonces(
             ptr::null_mut(),
             ptr::null_mut(),
             ptr::null_mut(),
-            &v as *const u64,
+            values.as_ptr(),
             ptr::null(),
-            blinds.as_ptr(),
+            blind_ptrs.as_ptr(),
             ptr::null(),
-            1,
+            values.len(),
             value_gen.as_ptr(),
             PROOF_NBITS,
             rewind.as_ptr(),
@@ -352,6 +358,24 @@ fn prove_raw_with_nonces(
         return Err(DomError::Internal("bulletproof prove failed".into()));
     }
     Ok(proof[..plen].to_vec())
+}
+
+/// Prove the bounded pair `(value, MAX_PROVABLE_VALUE - value)` under H_DOM.
+fn prove_raw_with_nonces(
+    backend: &Backend,
+    value: u64,
+    blind: &[u8; 32],
+    value_gen: &[u8; 64],
+    rewind: &[u8; 32],
+    private: &[u8; 32],
+) -> Result<Vec<u8>, DomError> {
+    let complement_value = MAX_PROVABLE_VALUE
+        .checked_sub(value)
+        .ok_or_else(|| DomError::Invalid("value exceeds MAX_PROVABLE_VALUE".into()))?;
+    let complement_blind = negate_blinding(blind)?;
+    let values = [value, complement_value];
+    let blinds = [*blind, complement_blind];
+    prove_raw_values_with_nonces(backend, &values, &blinds, value_gen, rewind, private)
 }
 
 /// Bulletproof prove for `value` under `value_gen` with fresh RANDOM nonces.
@@ -368,24 +392,26 @@ fn prove_raw(
     prove_raw_with_nonces(backend, value, blind, value_gen, &rewind, &private)
 }
 
-/// Bulletproof verify of `proof` against a 33-byte zkp `commit` under `value_gen`.
+/// Bulletproof verify of `proof` against a commitment pair under `value_gen`.
 fn verify_raw(
     backend: &Backend,
-    commit_zkp33: &[u8; 33],
+    commit_zkp33: &[[u8; 33]; PROOF_NCOMMITS],
     proof: &[u8],
     value_gen: &[u8; 64],
 ) -> Result<bool, DomError> {
-    let mut ci = [0u8; 64];
-    // SAFETY: ctx live; ci writable for 64 bytes; commit readable for 33 bytes.
-    if unsafe {
-        ffi::secp256k1_pedersen_commitment_parse(
-            backend.ctx,
-            ci.as_mut_ptr(),
-            commit_zkp33.as_ptr(),
-        )
-    } != 1
-    {
-        return Ok(false);
+    let mut cis = [[0u8; 64]; PROOF_NCOMMITS];
+    for (i, commit) in commit_zkp33.iter().enumerate() {
+        // SAFETY: ctx live; each slot writable for 64 bytes; commits readable for 33 bytes.
+        if unsafe {
+            ffi::secp256k1_pedersen_commitment_parse(
+                backend.ctx,
+                cis[i].as_mut_ptr(),
+                commit.as_ptr(),
+            )
+        } != 1
+        {
+            return Ok(false);
+        }
     }
     // DS-001: fresh scratch per call, destroyed on scope exit (Drop), so a frame
     // the FFI may leak on a malformed proof cannot accumulate into a later SEGV.
@@ -401,8 +427,8 @@ fn verify_raw(
             proof.as_ptr(),
             proof.len(),
             ptr::null(),
-            ci.as_ptr(),
-            1,
+            cis.as_ptr() as *const u8,
+            PROOF_NCOMMITS,
             PROOF_NBITS,
             value_gen.as_ptr(),
             ptr::null(),
@@ -417,9 +443,9 @@ fn verify_raw(
 /// Returns `(proof_bytes, commitment_sec1)`. Rejects `value > MAX_PROVABLE_VALUE`
 /// before any FFI call (same defensive bound as the borromean path).
 ///
-/// Exported from the crate as `bp2_prove` (the second, standard-Bulletproof
-/// backend). NOT yet wired into consensus — it runs parallel to the borromean
-/// `bp_prove`.
+/// Exported from the crate as `bp2_prove` (the standard-Bulletproof backend).
+/// The proof is one aggregate proof over `(v, MAX_PROVABLE_VALUE - v)`, binding
+/// the output to the same 52-bit ceiling consensus expects.
 pub fn bp_prove(value: u64, blinding: &BlindingFactor) -> Result<(Vec<u8>, [u8; 33]), DomError> {
     if value > MAX_PROVABLE_VALUE {
         return Err(DomError::Invalid(format!(
@@ -476,11 +502,39 @@ pub fn bp_prove_with_nonce(
     Ok((proof, sec1))
 }
 
+/// Test-only escape hatch for constructing a legacy single-commit bp2 proof.
+///
+/// This exists solely to regression-test that the bounded aggregate verifier
+/// rejects the historical unsafe format, including over-cap values. Production
+/// code must continue using [`bp_prove`], which enforces the 52-bit ceiling and
+/// emits the bounded aggregate proof.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub fn bp2_test_only_prove_legacy_single_with_nonce(
+    value: u64,
+    blinding: &BlindingFactor,
+    nonce: &[u8; 32],
+) -> Result<(Vec<u8>, [u8; 33]), DomError> {
+    let backend = backend();
+    let h_dom = h_dom_internal(backend)?;
+    let zkp = commit_zkp(backend, value, blinding.as_bytes(), &h_dom)?;
+    let sec1 = zkp_to_sec1(&zkp)?;
+    let proof = prove_raw_values_with_nonces(
+        backend,
+        &[value],
+        &[*blinding.as_bytes()],
+        &h_dom,
+        nonce,
+        nonce,
+    )?;
+    Ok((proof, sec1))
+}
+
 /// Verify a standard Bulletproof against a SEC1 commitment under H_DOM.
 ///
-/// Exported from the crate as `bp2_verify` (the second, standard-Bulletproof
-/// backend). NOT yet wired into consensus — it runs parallel to the borromean
-/// `bp_verify`.
+/// Exported from the crate as `bp2_verify` (the standard-Bulletproof backend).
+/// The verifier derives `C' = MAX_PROVABLE_VALUE*H - C` and verifies one
+/// aggregate proof over `[C, C']`, closing the historical 64-bit inflation gap.
 pub fn bp_verify(commitment_sec1: &[u8; 33], proof_bytes: &[u8]) -> Result<bool, DomError> {
     if proof_bytes.is_empty() {
         return Err(DomError::Malformed("range proof vazio".into()));
@@ -493,22 +547,80 @@ pub fn bp_verify(commitment_sec1: &[u8; 33], proof_bytes: &[u8]) -> Result<bool,
     }
     let backend = backend();
     let h_dom = h_dom_internal(backend)?;
-    let zkp = sec1_to_zkp(commitment_sec1)?;
-    verify_raw(backend, &zkp, proof_bytes, &h_dom)
+    let complement_sec1 = derive_complement_commitment(
+        &crate::pedersen::Commitment::from_compressed_bytes(commitment_sec1)?,
+        MAX_PROVABLE_VALUE,
+    )?;
+    let commits = [
+        sec1_to_zkp(commitment_sec1)?,
+        sec1_to_zkp(complement_sec1.as_bytes())?,
+    ];
+    verify_raw(backend, &commits, proof_bytes, &h_dom)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pedersen::Commitment;
 
     const MATRIX_VALUES: [u64; 4] = [1, 42, 1_000_000, 4_503_599_627_370_495]; // last = 2^52 - 1
     const TEST_BLIND: [u8; 32] = [0x11u8; 32];
 
+    fn legacy_single_proof(value: u64, blind: &[u8; 32], nonce: &[u8; 32]) -> (Vec<u8>, [u8; 33]) {
+        let bf = BlindingFactor::from_bytes(*blind).expect("blind");
+        bp2_test_only_prove_legacy_single_with_nonce(value, &bf, nonce).expect("legacy single bp2")
+    }
+
+    fn commit_pair_with_gen(
+        backend: &Backend,
+        value: u64,
+        blind: &[u8; 32],
+        value_gen: &[u8; 64],
+    ) -> [[u8; 33]; PROOF_NCOMMITS] {
+        let first = commit_zkp(backend, value, blind, value_gen).expect("first");
+        let complement_blind = negate_blinding(blind).expect("neg blind");
+        let second = commit_zkp(
+            backend,
+            MAX_PROVABLE_VALUE - value,
+            &complement_blind,
+            value_gen,
+        )
+        .expect("second");
+        [first, second]
+    }
+
+    /// PROBE [F6-A] — does bp2 `bp_verify` enforce the MAX_PROVABLE_VALUE (2^52-1)
+    /// ceiling at VERIFY time? Borromean `bulletproof::verify` does (R-07); this
+    /// module's `bp_verify` only size-gates + FFI-verifies. We mint a LEGACY
+    /// single-commit Bulletproof of value > MAX_PROVABLE_VALUE and assert the
+    /// bounded aggregate verifier rejects it.
+    ///
+    /// CONFIRMED 2026-06-23 (by execution): bp_verify returned Ok(true) for
+    /// value = 2^52 (MAX_PROVABLE_VALUE + 1) => FIX-014 (CRITICAL inflation, see
+    /// dom-shield reports/FIX-QUEUE.md).
+    ///
+    #[test]
+    fn probe_bp2_verify_rejects_value_above_max_provable() {
+        let value = MAX_PROVABLE_VALUE + 1; // 2^52 — one above the ceiling
+        let nonce = [0xA5; 32];
+        let (proof, sec1) = legacy_single_proof(value, &TEST_BLIND, &nonce);
+        assert_eq!(proof.len(), 675, "legacy unsafe proof must stay 675 bytes");
+
+        let result = bp_verify(&sec1, &proof);
+        assert!(
+            matches!(result, Ok(false) | Err(_)),
+            "INFLATION: bp_verify accepted a proof of value {} > MAX_PROVABLE_VALUE {} => {:?}",
+            value,
+            MAX_PROVABLE_VALUE,
+            result
+        );
+    }
+
     /// DS-001 regression: `bp_verify` must reject any proof whose length is not
-    /// EXACTLY `SINGLE_BULLETPROOF_SIZE` (675) BEFORE any FFI call on the proof —
+    /// EXACTLY `SINGLE_BULLETPROOF_SIZE` (739) BEFORE any FFI call on the proof —
     /// closing the SEGV path (the reproducer was a 651-byte proof that reached
     /// grin's scalar parse). Off-size proofs are stopped by the size gate; only
-    /// the exact 675-byte length proceeds to (safe) verification.
+    /// the exact 739-byte length proceeds to (safe) verification.
     #[test]
     fn ds001_proof_size_must_be_exact() {
         let blind = BlindingFactor::from_bytes(TEST_BLIND).expect("blind");
@@ -516,30 +628,30 @@ mod tests {
         assert_eq!(
             proof.len(),
             SINGLE_BULLETPROOF_SIZE,
-            "sanity: a real Bulletproof is exactly 675 bytes"
+            "sanity: a real bounded aggregate Bulletproof is exactly 739 bytes"
         );
 
-        // Exact-size (675) real proof passes the size gate AND verifies.
+        // Exact-size real proof passes the size gate AND verifies.
         match bp_verify(&commitment, &proof) {
             Ok(true) => {}
-            other => panic!("valid 675-byte proof must verify Ok(true), got {other:?}"),
+            other => panic!("valid 739-byte proof must verify Ok(true), got {other:?}"),
         }
 
-        // A 675-byte all-zeros proof passes the SIZE gate (675 == 675); it then
+        // An all-zeros proof of the exact pinned length passes the SIZE gate; it then
         // fails verification, but the error must NOT be a size error.
         match bp_verify(&commitment, &[0u8; SINGLE_BULLETPROOF_SIZE]) {
             Ok(false) => {}
-            Ok(true) => panic!("all-zeros 675-byte proof must not verify true"),
+            Ok(true) => panic!("all-zeros 739-byte proof must not verify true"),
             Err(e) => assert!(
                 !e.to_string().contains("tamanho invalido"),
-                "675-byte proof must not be rejected by the size gate, got: {e}"
+                "739-byte proof must not be rejected by the size gate, got: {e}"
             ),
         }
 
-        // Off-size proofs (incl. 651 = the DS-001 reproducer, the 674/676
+        // Off-size proofs (incl. 651 = the DS-001 reproducer, the 738/740
         // boundaries, and 768 = the old cap) are rejected by the size gate with
         // the specific message, BEFORE any FFI touches the proof bytes.
-        for len in [651usize, 674, 676, 768] {
+        for len in [651usize, 738, 740, 768] {
             let err = bp_verify(&commitment, &vec![0u8; len])
                 .expect_err("off-size proof must be rejected");
             assert!(
@@ -558,15 +670,15 @@ mod tests {
 
     /// DS-001 REGRESSION GUARDIAN (runs always — it must NOT crash).
     ///
-    /// Feeds the grin FFI 200 exact-675-byte but MALFORMED proofs (blake2b of a
+    /// Feeds the grin FFI 200 exact-size but MALFORMED proofs (blake2b of a
     /// counter), all on the SAME thread, against a valid SEC1 commitment. Before
     /// the per-call scratch fix this reused-scratch hammering accumulated leaked
     /// frames and SEGV'd; now every call MUST return (`Ok(false)` or `Err`). A
     /// panic/SEGV here means the scratch is being reused again (DS-001 regressed).
     #[test]
     fn ds001_exact_size_malformed_does_not_crash() {
-        // Deterministic pseudo-random 675-byte buffer derived from a counter.
-        fn pseudo_random_675(counter: u32) -> Vec<u8> {
+        // Deterministic pseudo-random exact-size buffer derived from a counter.
+        fn pseudo_random_exact(counter: u32) -> Vec<u8> {
             let mut out = Vec::with_capacity(SINGLE_BULLETPROOF_SIZE);
             let mut block: u32 = 0;
             while out.len() < SINGLE_BULLETPROOF_SIZE {
@@ -585,11 +697,11 @@ mod tests {
         let (_real_proof, commitment) = bp_prove(7, &blind).expect("bp2 prove");
 
         for i in 0..200u32 {
-            let proof = pseudo_random_675(i);
+            let proof = pseudo_random_exact(i);
             assert_eq!(
                 proof.len(),
                 SINGLE_BULLETPROOF_SIZE,
-                "probe proof must be exactly 675 bytes"
+                "probe proof must be exactly 739 bytes"
             );
             // Flushed marker so a SEGV inside the FFI leaves the crashing index
             // as the last line on stderr (identifies the deterministic reproducer).
@@ -599,11 +711,11 @@ mod tests {
             match bp_verify(&commitment, &proof) {
                 Ok(false) | Err(_) => {}
                 Ok(true) => {
-                    panic!("iteration {i}: malformed 675-byte proof verified TRUE (impossible)")
+                    panic!("iteration {i}: malformed 739-byte proof verified TRUE (impossible)")
                 }
             }
         }
-        println!("DS-001 probe: 200 malformed 675-byte proofs all returned gracefully (no crash).");
+        println!("DS-001 probe: 200 malformed 739-byte proofs all returned gracefully (no crash).");
     }
 
     /// DS-001 REGRESSION GUARDIAN (runs always — it must NOT crash).
@@ -618,7 +730,7 @@ mod tests {
     /// creates+destroys the scratch PER CALL, so frames cannot accumulate.
     ///
     /// The test hammers the SAME thread with 12 `bp_verify` calls, interleaving
-    /// malformed 675-byte proofs (counters 0..=6) with valid proofs from
+    /// malformed 739-byte proofs (counters 0..=6) with valid proofs from
     /// `bp_prove`. The first five calls reproduce Scenario D EXACTLY
     /// (valid, malformed, valid, malformed, valid) — the trailing valid 5th call
     /// is the one that used to SEGV. Every call must return gracefully (Ok/Err)
@@ -626,7 +738,7 @@ mod tests {
     /// the whole test process — the strongest possible regression signal.
     #[test]
     fn ds001_scratch_no_accumulation_regression() {
-        // Deterministic 675-byte pseudo-random buffer — same derivation the other
+        // Deterministic exact-size pseudo-random buffer — same derivation the other
         // DS-001 probes use, so reproducers line up across tests.
         fn malformed_proof(counter: u32) -> Vec<u8> {
             let mut out = Vec::with_capacity(SINGLE_BULLETPROOF_SIZE);
@@ -648,7 +760,7 @@ mod tests {
         assert_eq!(
             valid_proof.len(),
             SINGLE_BULLETPROOF_SIZE,
-            "sanity: a real Bulletproof is exactly 675 bytes"
+            "sanity: a real bounded aggregate Bulletproof is exactly 739 bytes"
         );
 
         // 12 calls on ONE thread. Calls 1..=5 are Scenario D verbatim — the old
@@ -678,7 +790,7 @@ mod tests {
             assert_eq!(
                 proof.len(),
                 SINGLE_BULLETPROOF_SIZE,
-                "call {n} ({label}) must be exactly 675 bytes"
+                "call {n} ({label}) must be exactly 739 bytes"
             );
             // Reaching here on every iteration is the assertion: no SEGV/panic.
             match bp_verify(&commitment, proof) {
@@ -708,8 +820,9 @@ mod tests {
         let backend = backend();
         let g = h_dom_internal(backend).expect("H_DOM parse");
         assert!(g.iter().any(|&b| b != 0));
-        assert_eq!(SINGLE_BULLETPROOF_SIZE, 675);
+        assert_eq!(SINGLE_BULLETPROOF_SIZE, 739);
         assert_eq!(PROOF_NBITS, 64);
+        assert_eq!(PROOF_NCOMMITS, 2);
     }
 
     /// Gate-1 generator-binding matrix, now in-crate, for all four values.
@@ -722,34 +835,33 @@ mod tests {
         assert_ne!(h_dom, h_def, "H_DOM must differ from grin's default H");
 
         for &v in MATRIX_VALUES.iter() {
-            let c_dom = commit_zkp(backend, v, blind.as_bytes(), &h_dom).unwrap();
-            let c_def = commit_zkp(backend, v, blind.as_bytes(), &h_def).unwrap();
             let pr_dom = prove_raw(backend, v, blind.as_bytes(), &h_dom).unwrap();
             let pr_def = prove_raw(backend, v, blind.as_bytes(), &h_def).unwrap();
+            let c_dom_pair = commit_pair_with_gen(backend, v, blind.as_bytes(), &h_dom);
+            let c_def_pair = commit_pair_with_gen(backend, v, blind.as_bytes(), &h_def);
 
             // A: commit=H_DOM prove=H_DOM verify=H_DOM -> PASS
             assert!(
-                verify_raw(backend, &c_dom, &pr_dom, &h_dom).unwrap(),
+                verify_raw(backend, &c_dom_pair, &pr_dom, &h_dom).unwrap(),
                 "A v={v}"
             );
             // B: commit=H_DOM prove=H_default verify=H_DOM -> FAIL
             assert!(
-                !verify_raw(backend, &c_dom, &pr_def, &h_dom).unwrap(),
+                !verify_raw(backend, &c_dom_pair, &pr_def, &h_dom).unwrap(),
                 "B v={v}"
             );
             // C: commit=H_DOM prove=H_DOM verify=H_default -> FAIL
             assert!(
-                !verify_raw(backend, &c_dom, &pr_dom, &h_def).unwrap(),
+                !verify_raw(backend, &c_dom_pair, &pr_dom, &h_def).unwrap(),
                 "C v={v}"
             );
             // D: control, all H_default -> PASS
             assert!(
-                verify_raw(backend, &c_def, &pr_def, &h_def).unwrap(),
+                verify_raw(backend, &c_def_pair, &pr_def, &h_def).unwrap(),
                 "D v={v}"
             );
 
-            // proof is a real 675-byte Bulletproof
-            assert_eq!(pr_dom.len(), 675, "proof len v={v}");
+            assert_eq!(pr_dom.len(), 739, "proof len v={v}");
         }
     }
 
@@ -759,7 +871,7 @@ mod tests {
         for &v in MATRIX_VALUES.iter() {
             let blind = BlindingFactor::random();
             let (proof, sec1) = bp_prove(v, &blind).expect("prove");
-            assert_eq!(proof.len(), 675, "v={v}");
+            assert_eq!(proof.len(), 739, "v={v}");
             assert!(bp_verify(&sec1, &proof).unwrap(), "verify v={v}");
         }
     }
@@ -769,7 +881,7 @@ mod tests {
     fn value_zero_roundtrips() {
         let blind = BlindingFactor::random();
         let (proof, sec1) = bp_prove(0, &blind).expect("prove 0");
-        assert_eq!(proof.len(), 675);
+        assert_eq!(proof.len(), 739);
         assert!(bp_verify(&sec1, &proof).unwrap());
     }
 
@@ -778,7 +890,7 @@ mod tests {
     fn max_provable_roundtrips() {
         let blind = BlindingFactor::random();
         let (proof, sec1) = bp_prove(MAX_PROVABLE_VALUE, &blind).expect("prove max");
-        assert_eq!(proof.len(), 675);
+        assert_eq!(proof.len(), 739);
         assert!(bp_verify(&sec1, &proof).unwrap());
     }
 
@@ -810,8 +922,8 @@ mod tests {
         let blind = BlindingFactor::from_bytes(TEST_BLIND).unwrap();
         let backend = backend();
         let h_dom = h_dom_internal(backend).unwrap();
-        let c_dom = commit_zkp(backend, 42, blind.as_bytes(), &h_dom).unwrap();
         let pr_dom = prove_raw(backend, 42, blind.as_bytes(), &h_dom).unwrap();
+        let c_dom_pair = commit_pair_with_gen(backend, 42, blind.as_bytes(), &h_dom);
 
         // N1: flip one byte of the serialized H_DOM.
         let mut flipped = h_dom_zkp_serialized().unwrap();
@@ -824,7 +936,7 @@ mod tests {
         let n1 = if parsed1 != 1 {
             true // off-curve => rejected at parse
         } else {
-            !verify_raw(backend, &c_dom, &pr_dom, &g1).unwrap()
+            !verify_raw(backend, &c_dom_pair, &pr_dom, &g1).unwrap()
         };
         assert!(n1, "flipped generator must be rejected");
 
@@ -839,13 +951,13 @@ mod tests {
         let n2 = if parsed2 != 1 {
             true
         } else {
-            !verify_raw(backend, &c_dom, &pr_dom, &g2).unwrap()
+            !verify_raw(backend, &c_dom_pair, &pr_dom, &g2).unwrap()
         };
         assert!(n2, "all-zero generator must be rejected");
     }
 
     /// DETERMINISM GATE (Phase 2): bp_prove_with_nonce is byte-reproducible.
-    /// Two independent proves with the SAME DOM seed yield BYTE-IDENTICAL 675-byte
+    /// Two independent proves with the SAME DOM seed yield BYTE-IDENTICAL 739-byte
     /// proofs that verify under H_DOM, for values 0, 42, MAX_PROVABLE_VALUE. This
     /// is the precondition for a reproducible genesis coinbase. If it ever fails,
     /// genesis cannot be reproducible.
@@ -856,7 +968,7 @@ mod tests {
         for value in [0u64, 42, MAX_PROVABLE_VALUE] {
             let (p1, sec1_a) = bp_prove_with_nonce(value, &blinding, &nonce).unwrap();
             let (p2, sec1_b) = bp_prove_with_nonce(value, &blinding, &nonce).unwrap();
-            assert_eq!(p1.len(), 675, "proof len value={value}");
+            assert_eq!(p1.len(), 739, "proof len value={value}");
             assert_eq!(
                 p1,
                 p2,
@@ -872,7 +984,7 @@ mod tests {
         }
     }
 
-    /// FROZEN VECTOR: pins the exact 675-byte deterministic proof + commitment for
+    /// FROZEN VECTOR: pins the exact 739-byte deterministic proof + commitment for
     /// a fixed (value, blinding, nonce), so any drift in the nonce derivation or
     /// the prover output is caught. Genesis-style: a fixed seed must always yield
     /// these exact bytes.
@@ -881,15 +993,46 @@ mod tests {
         let blinding = BlindingFactor::from_bytes([0x11u8; 32]).unwrap();
         let nonce = [0x07u8; 32];
         let (proof, sec1) = bp_prove_with_nonce(42, &blinding, &nonce).unwrap();
-        assert_eq!(proof.len(), 675);
+        assert_eq!(proof.len(), 739);
 
         // Frozen: value=42, blinding=[0x11;32], DOM seed nonce=[0x07;32], H_DOM.
         const EXPECTED_SEC1: &str =
             "03171d4a3e65fcaf5f0937308dd1fe1cf33c337c4d5f559a03166e051884e9a402";
-        const EXPECTED_PROOF: &str = "29816c0be734c6cbd7cdab9d67c66cb8a52b8534bb169abb6d74931931969ff4b32054f674bc9b8ea3e8dfb2a1db3551362bb3308c982e1577108204c9f3378d0cdffd891622f8171d3ba09d1b657248ff5dfcb7aabe7b1d734588336a31a6c774462df4ff4cb42a70fb2ebcfbf747a38edfd76dd621e867b48529be73721fd985a9b86e61edc1b2178170c3d176b941ced3454961d2ddb311d87d9bfe59d90c77ef428aef25f1d5955e0586b6331402f9ee2d81e2e78783f0f67b2ee05b12122c1aec82e0ccc0a3e8b7de99e50c856488dacdc120afe2b50d1fea33ba561be32c685c31920d1746b6dd72367415ec3ce77e47edac38d637421d5a0d37512b7e58ba95ad058c83d051adad94e2b0c79c28fbb3aa330d3568ca0217ebe79a0a16a786fb00307a36b6d434c1e33b92f4bed98ed01deee51b86b290b1f999db52b5b1dff4a823eff374714be6bddb061aebea56f206e3e3423d2a41f16e201529aa0a8002be1f28ff996d2ef438dc34f3a66c3235338c9d4965ae46750f408f45a57f550513b96088d75f881e7ecb969d21752382a62a86c367197c7f7cd0ba7e6b4dd1be9314e228d2e4978e79d409312db971b66e112a24d32778a22af1ce0307a9145fd605b7b15d9b4b9da774b4906d64414967192a7b593f0139ca01687252b2e4db249806da2c7e40b21c33a04ec4321deddbe25192e215cfd54846de6a00d30cab00cfede9396bf33fcd641e47b2699e3955b2c24045ac6d858b7e8d0e9621589c1314df4f7aff3567f4aed04ea27bad63154fbabe6367db329054259dedc42c09992ad09314428b57bf2ec22a08ad1cf1bdae36f01efa11488819b900887e51e28085deeca2d14d675eb85beccb7f56707a072cdfbd55d4838d36e3ce869698419080852d19de2a66559ee23ee8f62e7c212ca6527ecc13df4645772eee4b4a4a";
+        const EXPECTED_PROOF: &str = "b138ab8ce5eadcd500c45e5f22289780f02fa5a81f498380e48b3ec29fe42fb78dea2dadd5d5177b31ea0e0cb75b81b2480be4af81e5888d7eba7eab861d72f70362172ba077446543c5b607cb78311788d17b6b7662338b224b6b8d8a85f7c8851a6b3498c9fc09946a566545651bd78478ba9dffc9399b244588234309ed59733effd9091b9c875069f318f6b1ca49acb28799326815a36e8be3f9fa5be871bf43c91f800dbbe3851ea4b9378f54c1dbdab43ce1db7a914c8dc49ebb3c58ea1029479af6f3d235a662be92358299323aeadb59e39ba932937bb95b567fd1082ca54666201d8534ae51ec428782e229aa33908af4a1a590a4dd0b1ae8a789877ef9e7402d748f04ec86da01f62ff6266749c117d665de0cada811a0179c4c7d852afee47e996f75eec1b2b458fc30b1f6e3326c564aafa2e79e9f3c7a13ba4c872dcd388f011bc41ffbb0b2be666a2ff0dcfb19d6a5115c41dc4f4bf52fbd5c5cf90c0170be7e419cf053371eb94370b373ff8280956d95f9b20ec53257dfec3496c1d4eda480b5280c8748f0822e900610412448b41dd6ff1c6675bf63b60553c803ab266134cbfdd27349a85d751961ccb7986061b73e4800baeffbf8abf81e0e9424b70bea656cefd9aac1395d3388d888bcb60d07d45bb1fb06330761169a5739f5dfc014cd0a4598e7c77a19f96c150b6a20621f81fe0060790d910c82a8277c47573fbe731f8c8d68381804254526541636f7b797018a580f697d5b96e42eb7614b326fd5e53984bb257ecab9b9e87d1253ea4b00a1b40780e3ba01f72f4b6954f0efab12871dba5ac8660c4e8edc3752014922feae6957babe2310d60c0379eaad90cdd0fe6949d038fc38b103c09412dce7b581b3368bca81047bf2fc14cb9f767452167472db19482d561798bbb2710d820de574253d74304ba60f0775b4f0d22ba1b48b353709cc733ff354bc5f581f242f460892806f8353666108815f7b090d13edd877285e9734a41014204b6764446c7c2d5e03fe035cc29a264d2e";
         assert_eq!(hex::encode(sec1), EXPECTED_SEC1, "commitment drift");
         assert_eq!(hex::encode(&proof), EXPECTED_PROOF, "proof byte drift");
         assert!(bp_verify(&sec1, &proof).unwrap());
+    }
+
+    #[test]
+    fn forged_second_commitment_is_rejected() {
+        let backend = backend();
+        let h_dom = h_dom_internal(backend).expect("h_dom");
+        let value = 42u64;
+        let nonce = [0x44; 32];
+        let values = [value, 1_337u64];
+        let blinds = [TEST_BLIND, [0x55; 32]];
+        let proof = prove_raw_values_with_nonces(backend, &values, &blinds, &h_dom, &nonce, &nonce)
+            .expect("forged aggregate");
+        let sec1 = zkp_to_sec1(&commit_zkp(backend, value, &TEST_BLIND, &h_dom).expect("commit"))
+            .expect("sec1");
+        let result = bp_verify(&sec1, &proof);
+        assert!(
+            matches!(result, Ok(false) | Err(_)),
+            "forged second commitment must be rejected, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn complement_commitment_matches_direct_construction() {
+        let blind = BlindingFactor::from_bytes(TEST_BLIND).expect("blind");
+        let value = 4242u64;
+        let commit = Commitment::commit(value, &blind);
+        let complement = derive_complement_commitment(&commit, MAX_PROVABLE_VALUE).expect("derive");
+        let neg_blind = negate_blinding(blind.as_bytes()).expect("neg");
+        let complement_blind = BlindingFactor::from_bytes(neg_blind).expect("neg blind");
+        let direct = Commitment::commit(MAX_PROVABLE_VALUE - value, &complement_blind);
+        assert_eq!(complement, direct);
     }
 }
 
@@ -957,8 +1100,20 @@ mod differential {
         // bulletproof (grin) — reuse the shared backend.
         let bp_proof = prove_raw(backend, value, blinding.as_bytes(), h_dom).expect("bp prove");
         let zkp = commit_zkp(backend, value, blinding.as_bytes(), h_dom).expect("commit_zkp");
+        let commit_pair = {
+            let sec1 = zkp_to_sec1(&zkp).expect("zkp->sec1");
+            let complement = derive_complement_commitment(
+                &Commitment::from_compressed_bytes(&sec1).expect("commitment parse"),
+                MAX_PROVABLE_VALUE,
+            )
+            .expect("complement");
+            [
+                zkp,
+                sec1_to_zkp(complement.as_bytes()).expect("complement sec1->zkp"),
+            ]
+        };
         assert!(
-            verify_raw(backend, &zkp, &bp_proof, h_dom).expect("bp verify"),
+            verify_raw(backend, &commit_pair, &bp_proof, h_dom).expect("bp verify"),
             "bulletproof must verify against shared commitment [{report}] value={value}"
         );
 

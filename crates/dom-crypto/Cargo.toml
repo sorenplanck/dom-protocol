@@ -7,11 +7,15 @@ rust-version.workspace = true
 authors.workspace    = true
 license.workspace    = true
 
+[features]
+default = []
+test-helpers = []
+
 [dependencies]
 dom-core.workspace   = true
 secp256k1.workspace     = true
-secp256k1-zkp = { git = "https://github.com/BlockstreamResearch/rust-secp256k1-zkp", branch = "master", features = ["global-context", "rand-std"] }
-# Bulletproof migration (Phase 1): standard-Bulletproof path, parallel to borromean. NOT yet wired into consensus.
+secp256k1-zkp = { git = "https://github.com/BlockstreamResearch/rust-secp256k1-zkp", rev = "264e84adf7b06fb4d028eb2fd992f33c4d8999b7", features = ["global-context", "rand-std"] }
+# Bulletproof migration: exact pin, no floating branch.
 grin_secp256k1zkp.workspace = true
 blake2.workspace     = true
 sha2.workspace       = true
@@ -27,10 +31,14 @@ rand.workspace       = true
 [dev-dependencies]
 hex.workspace = true
 rand.workspace = true
+# F4 algebraic-invariant property tests (tests/algebraic_proptest.rs).
+proptest.workspace = true
+# F6 negative KAV: authoritative curve order n (secp256k1::constants::CURVE_ORDER)
+# for boundary rejection cases (>= n). The library constant, not a memorized value.
+secp256k1.workspace = true
 # AUDIT-002 is_square equivalence proof companion (test-only): exact big-int
 # exponent arithmetic for the addition-chain / Euler checks, and the real k256
 # field oracle. k256 is also a normal dependency; repeating it here with the
 # same `expose-field` feature lets the integration test reach FieldElement.
 primitive-types.workspace = true
 k256.workspace = true
-

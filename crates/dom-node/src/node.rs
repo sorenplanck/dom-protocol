@@ -14,6 +14,7 @@ use dom_consensus::derive_chain_id;
 use dom_consensus::Transaction;
 use dom_core::DomError;
 use dom_core::Hash256;
+use dom_core::PeerMisbehavior;
 use dom_core::Timestamp;
 use dom_mempool::Mempool;
 use dom_store::utxo::UtxoEntry;
@@ -960,7 +961,7 @@ impl DomNode {
         );
         let failure = supervisor.failure().await;
         let report = supervisor
-            .shutdown_ordered(Duration::from_secs(5), async {
+            .shutdown_ordered(Duration::from_secs(30), async {
                 tracing::debug!("shutdown_persistence_drain");
             })
             .await;
@@ -1474,21 +1475,25 @@ async fn handle_inbound(
             // tip instead of remaining stuck at a stale height.
             let our_height = chain.lock().await.tip_height.0;
             if peer_hello.best_height > our_height {
-                match run_ibd_session(
-                    &mut stream,
-                    &mut codec,
-                    &config,
-                    &chain,
-                    &svc.mempool,
-                    addr,
-                    peer_hello.best_height,
-                    svc.future_block_queue.clone(),
-                    svc.metrics.clone(),
-                    svc.wallet.clone(),
-                    svc.state_events.clone(),
-                )
-                .await
-                {
+                let ibd_result = tokio::select! {
+                    _ = shutdown.wait() => return,
+                    result = run_ibd_session(
+                        &mut stream,
+                        &mut codec,
+                        &config,
+                        &chain,
+                        &svc.mempool,
+                        addr,
+                        peer_hello.best_height,
+                        svc.future_block_queue.clone(),
+                        svc.metrics.clone(),
+                        svc.wallet.clone(),
+                        svc.state_events.clone(),
+                        channels.block_relay_tx.clone(),
+                        svc.clone(),
+                    ) => result,
+                };
+                match ibd_result {
                     Ok(()) => {}
                     Err(e) => {
                         let _ = record_peer_violation(&chain, &svc.peers, addr, &e).await;
@@ -1652,26 +1657,34 @@ async fn connect_outbound(
             // IBD loop: keep syncing while peer claims to be ahead.
             let our_height = chain.lock().await.tip_height.0;
             if peer_hello.best_height > our_height {
-                match run_ibd_session(
-                    &mut stream,
-                    &mut codec,
-                    &config,
-                    &chain,
-                    &svc.mempool,
-                    peer_addr,
-                    peer_hello.best_height,
-                    svc.future_block_queue.clone(),
-                    svc.metrics.clone(),
-                    svc.wallet.clone(),
-                    svc.state_events.clone(),
-                )
-                .await
-                {
+                let ibd_result = tokio::select! {
+                    _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
+                    result = run_ibd_session(
+                        &mut stream,
+                        &mut codec,
+                        &config,
+                        &chain,
+                        &svc.mempool,
+                        peer_addr,
+                        peer_hello.best_height,
+                        svc.future_block_queue.clone(),
+                        svc.metrics.clone(),
+                        svc.wallet.clone(),
+                        svc.state_events.clone(),
+                        channels.block_relay_tx.clone(),
+                        svc.clone(),
+                    ) => result,
+                };
+                match ibd_result {
                     Ok(()) => {}
                     Err(e) => {
-                        let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
+                        let scored = record_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
                         warn!("IBD with {addr} failed: {e}");
-                        return OutboundAttemptOutcome::RetryableFailure;
+                        return if scored {
+                            OutboundAttemptOutcome::RetryableFailure
+                        } else {
+                            OutboundAttemptOutcome::Registered
+                        };
                     }
                 }
             }
@@ -1752,9 +1765,10 @@ async fn hello_exchange(
     )
     .await
     .map_err(|_| {
-        DomError::PolicyRejected(format!(
-            "hello timeout after {HELLO_EXCHANGE_TIMEOUT_SECS}s"
-        ))
+        DomError::peer_misbehavior(
+            PeerMisbehavior::HelloTimeout,
+            format!("hello timeout after {HELLO_EXCHANGE_TIMEOUT_SECS}s"),
+        )
     })?
 }
 
@@ -1810,14 +1824,20 @@ async fn hello_exchange_inner(
         )));
     }
     if peer_hello.network_magic != config.network.magic() {
-        return Err(DomError::Invalid(format!(
-            "network_magic mismatch: ours=0x{:08x} theirs=0x{:08x}",
-            config.network.magic(),
-            peer_hello.network_magic
-        )));
+        return Err(DomError::peer_misbehavior(
+            PeerMisbehavior::WrongChainId,
+            format!(
+                "network_magic mismatch: ours=0x{:08x} theirs=0x{:08x}",
+                config.network.magic(),
+                peer_hello.network_magic
+            ),
+        ));
     }
     if peer_hello.chain_id != *chain_id {
-        return Err(DomError::Invalid("chain_id mismatch".into()));
+        return Err(DomError::peer_misbehavior(
+            PeerMisbehavior::WrongChainId,
+            "chain_id mismatch",
+        ));
     }
 
     // Peer time discipline evaluation (Doc 4.5 mitigation 3)
@@ -1847,45 +1867,47 @@ fn peer_violation_score(error: &DomError) -> Option<u32> {
 
     match error {
         DomError::Malformed(_) => Some(ban_scores::MALFORMED_MESSAGE),
-        DomError::PolicyRejected(msg) if msg.contains("address flooding") => {
-            Some(ban_scores::ADDRESS_FLOODING)
-        }
-        DomError::PolicyRejected(msg) if msg.contains("handshake timeout") => {
-            Some(ban_scores::PROTOCOL_VIOLATION)
-        }
+        DomError::PeerMisbehavior {
+            kind: PeerMisbehavior::AddressFlooding,
+            ..
+        } => Some(ban_scores::ADDRESS_FLOODING),
+        DomError::PeerMisbehavior {
+            kind: PeerMisbehavior::HandshakeTimeout,
+            ..
+        } => Some(ban_scores::PROTOCOL_VIOLATION),
         // Anti-slowloris write timeout (dom_wire::codec::NoiseCodec::send): a peer
         // that stops reading stalls our writes. Low severity — a slow peer is not
         // necessarily malicious, so it is a protocol violation, not a ban-on-sight.
-        DomError::PolicyRejected(msg) if msg.contains("write timeout") => {
-            Some(ban_scores::PROTOCOL_VIOLATION)
-        }
+        DomError::PeerMisbehavior {
+            kind: PeerMisbehavior::WriteTimeout,
+            ..
+        } => Some(ban_scores::PROTOCOL_VIOLATION),
         // Anti-flood per-category message rate limit (crate::msg_rate_limit): a
         // peer flooding valid-but-excessive messages. Low severity — sustained
         // overflow (~10 windows) is what crosses the ban threshold.
-        DomError::PolicyRejected(msg) if msg.contains("message rate limit") => {
-            Some(ban_scores::PROTOCOL_VIOLATION)
-        }
-        DomError::Invalid(msg) if msg.contains("chain_id mismatch") => {
-            Some(ban_scores::WRONG_CHAIN_ID)
-        }
-        DomError::Invalid(msg) if msg.contains("network_magic mismatch") => {
-            Some(ban_scores::WRONG_CHAIN_ID)
-        }
-        DomError::Invalid(msg) if msg.contains("unexpected Hello") => {
-            Some(ban_scores::PROTOCOL_VIOLATION)
-        }
+        DomError::PeerMisbehavior {
+            kind: PeerMisbehavior::MessageRateLimit,
+            ..
+        } => Some(ban_scores::PROTOCOL_VIOLATION),
+        DomError::PeerMisbehavior {
+            kind: PeerMisbehavior::WrongChainId,
+            ..
+        } => Some(ban_scores::WRONG_CHAIN_ID),
+        DomError::PeerMisbehavior {
+            kind: PeerMisbehavior::UnexpectedHello,
+            ..
+        } => Some(ban_scores::PROTOCOL_VIOLATION),
         // Severity routing for expensive-to-detect consensus violations: a peer
         // forcing full PoW/signature validation on garbage must not score the
         // same 10 points as a cheap protocol slip (audit: P2P CPU-burn).
-        // Matched substrings are produced only by dom-consensus:
-        //   "proof-of-work invalid" → block.rs (validate_pow / _for_network)
-        //   "signature invalid"     → lib.rs (kernel Schnorr), transaction.rs (coinbase)
-        DomError::Invalid(msg) if msg.contains("proof-of-work invalid") => {
-            Some(ban_scores::INVALID_POW)
-        }
-        DomError::Invalid(msg) if msg.contains("signature invalid") => {
-            Some(ban_scores::INVALID_SIGNATURE)
-        }
+        DomError::PeerMisbehavior {
+            kind: PeerMisbehavior::InvalidPow,
+            ..
+        } => Some(ban_scores::INVALID_POW),
+        DomError::PeerMisbehavior {
+            kind: PeerMisbehavior::InvalidSignature,
+            ..
+        } => Some(ban_scores::INVALID_SIGNATURE),
         DomError::Invalid(_) => Some(ban_scores::PROTOCOL_VIOLATION),
         _ => None,
     }
@@ -1893,12 +1915,15 @@ fn peer_violation_score(error: &DomError) -> Option<u32> {
 
 /// Annotate a `codec.send` failure with which broadcast/message kind failed,
 /// for diagnostics — WITHOUT burying the anti-slowloris write-timeout type. A
-/// `PolicyRejected("write timeout …")` is passed through unchanged so it still
+/// `PeerMisbehavior(WriteTimeout)` is passed through unchanged so it still
 /// routes through [`peer_violation_score`]; everything else (broken pipe,
 /// encrypt) is our/transport side and is wrapped as `Internal` (unscored).
 fn annotate_send_err(kind: &str, peer_addr: std::net::SocketAddr, e: DomError) -> DomError {
     match &e {
-        DomError::PolicyRejected(msg) if msg.contains("write timeout") => e,
+        DomError::PeerMisbehavior {
+            kind: PeerMisbehavior::WriteTimeout,
+            ..
+        } => e,
         _ => DomError::Internal(format!("{kind} send to {peer_addr}: {e}")),
     }
 }
@@ -1907,15 +1932,22 @@ fn annotate_send_err(kind: &str, peer_addr: std::net::SocketAddr, e: DomError) -
 /// Used to score it at the loop boundary WITHOUT double-scoring recv-side errors
 /// (which are already scored inline before they propagate).
 fn is_write_timeout(error: &DomError) -> bool {
-    matches!(error, DomError::PolicyRejected(msg) if msg.contains("write timeout"))
+    matches!(
+        error,
+        DomError::PeerMisbehavior {
+            kind: PeerMisbehavior::WriteTimeout,
+            ..
+        }
+    )
 }
 
 fn pending_peer_violation_score(error: &DomError) -> Option<u32> {
     match error {
         DomError::TemporarilyInvalid(_) | DomError::Orphan(_) | DomError::Internal(_) => None,
-        DomError::PolicyRejected(msg) if msg.contains("hello timeout") => {
-            Some(dom_wire::peer::ban_scores::PROTOCOL_VIOLATION)
-        }
+        DomError::PeerMisbehavior {
+            kind: PeerMisbehavior::HelloTimeout,
+            ..
+        } => Some(dom_wire::peer::ban_scores::PROTOCOL_VIOLATION),
         other => peer_violation_score(other),
     }
 }
@@ -2036,7 +2068,9 @@ fn relay_block_action(result: &Result<dom_chain::ConnectResult, DomError>) -> Re
         | Ok(dom_chain::ConnectResult::AlreadyHave)
         | Err(DomError::TemporarilyInvalid(_))
         | Err(DomError::Orphan(_)) => RelayBlockAction::Suppress,
-        Err(DomError::Invalid(_)) | Err(DomError::Malformed(_)) => RelayBlockAction::PenalizePeer,
+        Err(DomError::Invalid(_))
+        | Err(DomError::Malformed(_))
+        | Err(DomError::PeerMisbehavior { .. }) => RelayBlockAction::PenalizePeer,
         Err(_) => RelayBlockAction::Drop,
     }
 }
@@ -2703,6 +2737,8 @@ struct IbdRuntimeContext<'a> {
     metrics: Arc<Metrics>,
     wallet: Option<Arc<Mutex<dom_wallet::WalletDir>>>,
     state_events: Arc<Notify>,
+    block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    svc: NodeServices,
 }
 
 #[derive(Clone)]
@@ -2809,12 +2845,42 @@ async fn resume_ibd_block_sync(
                         match decode_ibd_block_response(&m.payload, *expected_hash) {
                             Ok((_, block)) => break block,
                             Err(_) => {
+                                let (block_bytes, relay_block) = decode_relay_block(&m.payload)
+                                    .map_err(|e| {
+                                        DomError::Malformed(format!(
+                                            "unsolicited IBD relay block decode failed: {e}"
+                                        ))
+                                    })?;
+                                let relay_hash = block_hash(&relay_block)?;
+                                let parent_hash = *relay_block.header.prev_hash.as_bytes();
+                                let insert_outcome =
+                                    runtime.svc.orphan_pool.lock().await.insert(OrphanBlock {
+                                        block_hash: relay_hash,
+                                        parent_hash,
+                                        height: relay_block.header.height.0,
+                                        block_bytes,
+                                    });
+                                runtime.svc.missing_blocks.lock().await.note_orphan(
+                                    relay_hash,
+                                    parent_hash,
+                                    relay_block.header.height.0.checked_sub(1),
+                                );
                                 tracing::debug!(
+                                    child = %hex::encode(relay_hash),
+                                    parent = %hex::encode(parent_hash),
+                                    ?insert_outcome,
                                     "IBD resume: skipping unsolicited relayed block while \
                                      awaiting {} from {}",
                                     hex::encode(expected_hash),
                                     runtime.peer_addr
                                 );
+                                reprocess_orphan_children(
+                                    parent_hash,
+                                    chain,
+                                    &runtime.block_relay_tx,
+                                    &runtime.svc,
+                                )
+                                .await?;
                             }
                         }
                     }
@@ -2937,6 +3003,8 @@ async fn resume_ibd_block_sync(
                 }
             }
             runtime.state_events.notify_waiters();
+            reprocess_orphan_children(*expected_hash, chain, &runtime.block_relay_tx, &runtime.svc)
+                .await?;
             processed = processed.saturating_add(1);
             persist_ibd_state(
                 chain,
@@ -3049,6 +3117,8 @@ async fn run_ibd_session(
     metrics: Arc<Metrics>,
     wallet: Option<Arc<Mutex<dom_wallet::WalletDir>>>,
     state_events: Arc<Notify>,
+    block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    svc: NodeServices,
 ) -> Result<(), DomError> {
     let our_height = chain.lock().await.tip_height.0;
     let (mut ibd, persisted) = initialize_ibd_state(chain, peer_addr, peer_best_height).await?;
@@ -3060,6 +3130,8 @@ async fn run_ibd_session(
         metrics,
         wallet: wallet.clone(),
         state_events: state_events.clone(),
+        block_relay_tx,
+        svc,
     };
     match ibd.begin_session() {
         dom_chain::IbdControl::Complete => {
@@ -3299,6 +3371,8 @@ async fn run_ibd_session(
             runtime.metrics.clone(),
             wallet.clone(),
             state_events.clone(),
+            runtime.block_relay_tx.clone(),
+            runtime.svc.clone(),
             &mut ibd,
         )
         .await
@@ -3422,6 +3496,8 @@ async fn ibd_sync_round(
     metrics: Arc<Metrics>,
     wallet: Option<Arc<Mutex<dom_wallet::WalletDir>>>,
     state_events: Arc<Notify>,
+    block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    svc: NodeServices,
     ibd: &mut dom_chain::IbdState,
 ) -> Result<bool, DomError> {
     use dom_consensus::block::BlockHeader;
@@ -3506,6 +3582,8 @@ async fn ibd_sync_round(
         metrics,
         wallet,
         state_events,
+        block_relay_tx,
+        svc,
     };
     resume_ibd_block_sync(
         stream,
@@ -3592,10 +3670,15 @@ async fn message_loop(
     };
 
     const PING_INTERVAL_SECS: u64 = 30;
+    const CATCHUP_CHECK_INTERVAL_SECS: u64 = 2;
     let mut ping_timer =
         tokio::time::interval(tokio::time::Duration::from_secs(PING_INTERVAL_SECS));
     // Skip the immediate first tick.
     ping_timer.tick().await;
+    let mut catchup_timer = tokio::time::interval(tokio::time::Duration::from_secs(
+        CATCHUP_CHECK_INTERVAL_SECS,
+    ));
+    catchup_timer.tick().await;
 
     // PEX (RFC-0005 §6): periodically consider asking this peer for addresses.
     // The per-peer GETADDR_COOLDOWN_SECS inside PexManager is the real rate
@@ -3708,6 +3791,33 @@ async fn message_loop(
                     return Err(annotate_send_err("ping", peer_addr, e));
                 }
             }
+            _ = catchup_timer.tick() => {
+                let our_height = chain.lock().await.tip_height.0;
+                let peer_best_height = {
+                    let peers = svc.peers.lock().await;
+                    peers.peer_best_height(&pex_peer_key)
+                };
+                if let Some(peer_best_height) = peer_best_height {
+                    if peer_best_height > our_height {
+                        Box::pin(run_ibd_session(
+                            stream,
+                            codec,
+                            config,
+                            &chain,
+                            &svc.mempool,
+                            peer_addr,
+                            peer_best_height,
+                            svc.future_block_queue.clone(),
+                            svc.metrics.clone(),
+                            svc.wallet.clone(),
+                            svc.state_events.clone(),
+                            block_relay_tx.clone(),
+                            svc.clone(),
+                        ))
+                        .await?;
+                    }
+                }
+            }
             // Periodic PEX: solicit addresses while our known set is below
             // target, at most once per GETADDR_COOLDOWN_SECS per peer.
             // Decision is taken (and recorded) under the lock; the guard is
@@ -3751,11 +3861,14 @@ async fn message_loop(
                 // windows) and is disconnected. Honest sync/relay flows stay
                 // well under the budgets (see msg_rate_limit).
                 if !msg_rate.allow(msg.command) {
-                    let err = DomError::PolicyRejected(format!(
-                        "message rate limit exceeded for {:?} [ban+{}]",
-                        msg.command,
-                        dom_wire::peer::ban_scores::PROTOCOL_VIOLATION,
-                    ));
+                    let err = DomError::peer_misbehavior(
+                        PeerMisbehavior::MessageRateLimit,
+                        format!(
+                            "message rate limit exceeded for {:?} [ban+{}]",
+                            msg.command,
+                            dom_wire::peer::ban_scores::PROTOCOL_VIOLATION,
+                        ),
+                    );
                     if record_peer_violation(&chain, &svc.peers, peer_addr, &err).await {
                         return Err(err);
                     }
@@ -3780,8 +3893,9 @@ async fn message_loop(
                     }
                     Command::Hello => {
                         // Second Hello after handshake is a protocol violation
-                        let err = DomError::Invalid(
-                            "unexpected Hello in message loop [ban+20]".into(),
+                        let err = DomError::peer_misbehavior(
+                            PeerMisbehavior::UnexpectedHello,
+                            "unexpected Hello in message loop [ban+20]",
                         );
                         let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &err).await;
                         return Err(err);
@@ -4329,12 +4443,15 @@ async fn message_loop(
                             // Too many Addr messages this window: score
                             // ADDRESS_FLOODING and drop the message without
                             // touching the PEX table.
-                            let err = DomError::PolicyRejected(format!(
-                                "address flooding: more than {} Addr messages in {}s [ban+{}]",
-                                crate::pex::MAX_ADDR_MESSAGES_PER_WINDOW,
-                                crate::pex::ADDR_FLOOD_WINDOW_SECS,
-                                dom_wire::peer::ban_scores::ADDRESS_FLOODING,
-                            ));
+                            let err = DomError::peer_misbehavior(
+                                PeerMisbehavior::AddressFlooding,
+                                format!(
+                                    "address flooding: more than {} Addr messages in {}s [ban+{}]",
+                                    crate::pex::MAX_ADDR_MESSAGES_PER_WINDOW,
+                                    crate::pex::ADDR_FLOOD_WINDOW_SECS,
+                                    dom_wire::peer::ban_scores::ADDRESS_FLOODING,
+                                ),
+                            );
                             let banned =
                                 record_peer_violation(&chain, &svc.peers, peer_addr, &err).await;
                             if banned {
@@ -4392,6 +4509,7 @@ mod tests {
         Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionInput,
         TransactionKernel, TransactionOutput,
     };
+    use dom_core::PeerMisbehavior;
     use dom_core::{
         Amount, BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
         MAX_BLOCK_SERIALIZED_SIZE, MIN_RELAY_FEE_RATE, NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION,
@@ -5700,11 +5818,17 @@ mod tests {
     #[test]
     fn wrong_network_identity_maps_to_immediate_ban_score() {
         assert_eq!(
-            peer_violation_score(&DomError::Invalid("chain_id mismatch".into())),
+            peer_violation_score(&DomError::peer_misbehavior(
+                PeerMisbehavior::WrongChainId,
+                "chain_id mismatch",
+            )),
             Some(ban_scores::WRONG_CHAIN_ID)
         );
         assert_eq!(
-            peer_violation_score(&DomError::Invalid("network_magic mismatch".into())),
+            peer_violation_score(&DomError::peer_misbehavior(
+                PeerMisbehavior::WrongChainId,
+                "network_magic mismatch: ours=0x444f4d31 theirs=0x54444f4d",
+            )),
             Some(ban_scores::WRONG_CHAIN_ID)
         );
     }
@@ -5715,14 +5839,16 @@ mod tests {
         // validate_pow_for_network) must route to INVALID_POW, not the
         // generic PROTOCOL_VIOLATION catch-all.
         assert_eq!(
-            peer_violation_score(&DomError::Invalid(
-                "proof-of-work invalid: RandomX hash mismatch or does not meet target".into()
+            peer_violation_score(&DomError::peer_misbehavior(
+                PeerMisbehavior::InvalidPow,
+                "proof-of-work invalid: RandomX hash mismatch or does not meet target",
             )),
             Some(ban_scores::INVALID_POW)
         );
         assert_eq!(
-            peer_violation_score(&DomError::Invalid(
-                "proof-of-work invalid: hash mismatch or does not meet target".into()
+            peer_violation_score(&DomError::peer_misbehavior(
+                PeerMisbehavior::InvalidPow,
+                "proof-of-work invalid: hash mismatch or does not meet target",
             )),
             Some(ban_scores::INVALID_POW)
         );
@@ -5733,14 +5859,16 @@ mod tests {
         // Real messages from dom-consensus: kernel Schnorr verification
         // (lib.rs) and coinbase kernel verification (transaction.rs).
         assert_eq!(
-            peer_violation_score(&DomError::Invalid(
-                "kernel 0 Schnorr signature invalid".into()
+            peer_violation_score(&DomError::peer_misbehavior(
+                PeerMisbehavior::InvalidSignature,
+                "kernel 0 Schnorr signature invalid",
             )),
             Some(ban_scores::INVALID_SIGNATURE)
         );
         assert_eq!(
-            peer_violation_score(&DomError::Invalid(
-                "coinbase kernel signature invalid — miner does not prove ownership".into()
+            peer_violation_score(&DomError::peer_misbehavior(
+                PeerMisbehavior::InvalidSignature,
+                "coinbase kernel signature invalid — miner does not prove ownership",
             )),
             Some(ban_scores::INVALID_SIGNATURE)
         );
@@ -5761,7 +5889,10 @@ mod tests {
         // Anti-slowloris: a stalled write (peer stopped reading) is a low-severity
         // protocol violation — a slow peer is not necessarily malicious.
         assert_eq!(
-            peer_violation_score(&DomError::PolicyRejected("write timeout after 30s".into())),
+            peer_violation_score(&DomError::peer_misbehavior(
+                PeerMisbehavior::WriteTimeout,
+                "write timeout after 30s",
+            )),
             Some(ban_scores::PROTOCOL_VIOLATION)
         );
     }
@@ -5771,8 +5902,9 @@ mod tests {
         // Anti-flood: exceeding a per-category inbound message budget is a
         // low-severity protocol violation; ~10 overflowing windows ban the peer.
         assert_eq!(
-            peer_violation_score(&DomError::PolicyRejected(
-                "message rate limit exceeded for Block [ban+10]".into()
+            peer_violation_score(&DomError::peer_misbehavior(
+                PeerMisbehavior::MessageRateLimit,
+                "message rate limit exceeded for Block [ban+10]",
             )),
             Some(ban_scores::PROTOCOL_VIOLATION)
         );
@@ -5783,8 +5915,9 @@ mod tests {
         // Only the write-side timeout is scored at the message_loop boundary;
         // recv-side errors are scored inline and must NOT match here (else they
         // would be double-counted).
-        assert!(is_write_timeout(&DomError::PolicyRejected(
-            "write timeout after 30s".into()
+        assert!(is_write_timeout(&DomError::peer_misbehavior(
+            PeerMisbehavior::WriteTimeout,
+            "write timeout after 30s",
         )));
         assert!(!is_write_timeout(&DomError::PolicyRejected(
             "idle timeout after 60s".into()
@@ -5802,7 +5935,7 @@ mod tests {
         let to = annotate_send_err(
             "relay",
             addr,
-            DomError::PolicyRejected("write timeout after 30s".into()),
+            DomError::peer_misbehavior(PeerMisbehavior::WriteTimeout, "write timeout after 30s"),
         );
         assert_eq!(
             peer_violation_score(&to),
@@ -5824,8 +5957,9 @@ mod tests {
         // The audit finding: at PROTOCOL_VIOLATION (10) a peer needed ~10
         // invalid-PoW blocks (each forcing full validation) to be banned.
         // At INVALID_POW (50), two blocks must reach BAN_THRESHOLD (100).
-        let pow_error = DomError::Invalid(
-            "proof-of-work invalid: RandomX hash mismatch or does not meet target".into(),
+        let pow_error = DomError::peer_misbehavior(
+            PeerMisbehavior::InvalidPow,
+            "proof-of-work invalid: RandomX hash mismatch or does not meet target",
         );
         let score = peer_violation_score(&pow_error).expect("invalid PoW must score");
 
@@ -5854,11 +5988,68 @@ mod tests {
         );
     }
 
+    // ── dom-shield: peer_violation_score structured-routing KAV ───────────────
+    //
+    // peer_violation_score must route severity by DomError::PeerMisbehavior kind,
+    // not by inspecting attacker-influenced error text.
+
+    #[test]
+    fn shield_pow_severity_uses_structured_kind_not_text() {
+        let near_miss = DomError::Invalid("PoW check failed: hash above target".into());
+        assert_eq!(
+            peer_violation_score(&near_miss),
+            Some(ban_scores::PROTOCOL_VIOLATION),
+            "plain Invalid text must not receive INVALID_POW severity"
+        );
+        assert_eq!(
+            peer_violation_score(&DomError::peer_misbehavior(
+                PeerMisbehavior::InvalidPow,
+                "PoW check failed: hash above target",
+            )),
+            Some(ban_scores::INVALID_POW),
+            "structured InvalidPow keeps severity independent of message wording"
+        );
+        assert_eq!(ban_scores::INVALID_POW, 50);
+        assert_eq!(ban_scores::PROTOCOL_VIOLATION, 10);
+    }
+
+    #[test]
+    fn shield_signature_severity_uses_structured_kind_not_text() {
+        let near_miss = DomError::Invalid("bad Schnorr sig on kernel 0".into());
+        assert_eq!(
+            peer_violation_score(&near_miss),
+            Some(ban_scores::PROTOCOL_VIOLATION),
+            "plain Invalid text must not receive INVALID_SIGNATURE severity"
+        );
+        assert_eq!(
+            peer_violation_score(&DomError::peer_misbehavior(
+                PeerMisbehavior::InvalidSignature,
+                "bad Schnorr sig on kernel 0",
+            )),
+            Some(ban_scores::INVALID_SIGNATURE),
+            "structured InvalidSignature keeps severity independent of message wording"
+        );
+        assert_eq!(ban_scores::INVALID_SIGNATURE, 25);
+    }
+
+    #[test]
+    fn shield_substring_match_is_position_independent_and_overmatches() {
+        let incidental = DomError::Invalid(
+            "rejected child block citing parent 'proof-of-work invalid' marker".into(),
+        );
+        assert_eq!(
+            peer_violation_score(&incidental),
+            Some(ban_scores::PROTOCOL_VIOLATION),
+            "incidental quoted text must not inherit INVALID_POW severity"
+        );
+    }
+
     #[test]
     fn address_flooding_maps_to_address_flooding_score() {
         assert_eq!(
-            peer_violation_score(&DomError::PolicyRejected(
-                "address flooding: more than 4 Addr messages in 600s [ban+30]".into()
+            peer_violation_score(&DomError::peer_misbehavior(
+                PeerMisbehavior::AddressFlooding,
+                "address flooding: more than 4 Addr messages in 600s [ban+30]",
             )),
             Some(ban_scores::ADDRESS_FLOODING)
         );
@@ -5872,8 +6063,9 @@ mod tests {
     #[test]
     fn pre_registration_handshake_timeout_scores() {
         assert_eq!(
-            pending_peer_violation_score(&DomError::PolicyRejected(
-                "handshake timeout after 10s".into()
+            pending_peer_violation_score(&DomError::peer_misbehavior(
+                PeerMisbehavior::HandshakeTimeout,
+                "handshake timeout after 10s",
             )),
             Some(ban_scores::PROTOCOL_VIOLATION)
         );
@@ -5882,8 +6074,9 @@ mod tests {
     #[test]
     fn pre_registration_hello_timeout_scores() {
         assert_eq!(
-            pending_peer_violation_score(&DomError::PolicyRejected(
-                "hello timeout after 10s".into()
+            pending_peer_violation_score(&DomError::peer_misbehavior(
+                PeerMisbehavior::HelloTimeout,
+                "hello timeout after 10s",
             )),
             Some(ban_scores::PROTOCOL_VIOLATION)
         );

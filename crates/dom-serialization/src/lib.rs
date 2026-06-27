@@ -230,8 +230,16 @@ impl<'a> Reader<'a> {
                 "list count {count} exceeds limit {max_count}"
             )));
         }
-        // Pre-validate allocation: count * size_of::<T>() can overflow for
-        // large T. We cap at max_count which is bounded by consensus limits.
+        let min_item_size = std::mem::size_of::<T>().max(1);
+        let remaining = self.data.len().saturating_sub(self.pos);
+        let max_by_remaining = remaining
+            .checked_div(min_item_size)
+            .ok_or_else(|| DomError::Internal("minimum item size is zero".into()))?;
+        if count > max_by_remaining {
+            return Err(DomError::Malformed(format!(
+                "list count {count} exceeds remaining byte budget {remaining} for minimum item size {min_item_size}"
+            )));
+        }
         let mut items = Vec::with_capacity(count);
         for _ in 0..count {
             items.push(T::deserialize(self)?);

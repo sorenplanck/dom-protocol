@@ -1391,4 +1391,328 @@ mod tests {
         assert_eq!(j["tip"]["height"], serde_json::json!(2));
         assert_eq!(j["blocks"].as_array().unwrap().len(), 0);
     }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // dom-shield TEST FAMILIES (dom-rpc) — Soren Planck
+    //
+    // STRUCTURAL NOTE (why these live in `#[cfg(test)]` and not in tests/*.rs):
+    // `pub fn router(handle, bearer_token: Arc<BearerToken>)` takes a type from
+    // the PRIVATE module `mod middleware;` (`BearerToken` is never re-exported).
+    // An external integration test (`tests/*.rs`) cannot name `BearerToken`, so
+    // it cannot construct the second argument and cannot call `router()`. The
+    // only publicly reachable entry is `serve_with_token` over a real bound
+    // socket (which, in non-test cfg, would also write ~/.dom/rpc_token and use
+    // SmartIpKeyExtractor). The router HTTP surface is therefore exercised here,
+    // in-crate, against the same tower `oneshot` harness the existing tests use.
+    // This is a probe over UNREACHABLE-PUBLIC behavior (HARD RULE 1), not a
+    // production change. No production logic is touched.
+    // ───────────────────────────────────────────────────────────────────────
+
+    // ===== KAV-negativo (auth): coverage gaps beyond the 6 existing bearer tests
+    //
+    // The 6 existing middleware tests (correct/wrong-same-len/short/long/missing/
+    // non-Bearer-scheme) live in middleware.rs against a synthetic router. These
+    // exercise the REAL production router (`router()` wiring), which is where the
+    // /peers route was never tested for auth — a genuine coverage gap.
+
+    /// AUTH-1 — /peers requires the bearer token: no header → 401 (coverage gap;
+    /// /peers auth was never tested through the real router).
+    #[tokio::test]
+    async fn peers_without_bearer_returns_401() {
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/peers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// AUTH-2 — /peers WITH the valid bearer token reaches the handler (200 +
+    /// JSON array). Proves the gate lets a correct token through on the real
+    /// router, not just rejects.
+    #[tokio::test]
+    async fn peers_with_valid_bearer_reaches_handler() {
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/peers")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        // default get_peers() is an empty Vec.
+        assert_eq!(body_json(r).await, serde_json::json!([]));
+    }
+
+    /// AUTH-3 — wrong scheme case ("bearer " lowercase) is rejected. The
+    /// production check is `header.starts_with("Bearer ")` — case-sensitive by
+    /// construction; an RFC-7235 scheme is case-insensitive, so a lowercase
+    /// "bearer" is rejected here. Documents the exact (strict) behavior.
+    #[tokio::test]
+    async fn peers_lowercase_bearer_scheme_rejected() {
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/peers")
+                    .header("authorization", "bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// AUTH-4 — empty value after "Bearer " is rejected when the configured
+    /// token is non-empty (different length → ct_eq false).
+    #[tokio::test]
+    async fn peers_empty_bearer_value_rejected() {
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/peers")
+                    .header("authorization", "Bearer ")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// AUTH-5 — an EMPTY configured token must never authorize.
+    ///
+    /// RED (CONFIRMED BUG, NEW). With `BearerToken("")`, a request carrying
+    /// `Authorization: Bearer ` (empty value after the scheme) is AUTHORIZED
+    /// (200) instead of rejected (401). Mechanism in `require_bearer_token`:
+    /// header `"Bearer "` passes `starts_with("Bearer ")` → `provided =
+    /// &header[7..] = ""` → `"".ct_eq("")` is TRUE → `next.run`. This is an
+    /// auth bypass for any deployment whose configured token is empty. Note the
+    /// upstream `get_or_create_token*` paths skip empty tokens, but `router()`
+    /// (a public API) accepts any `BearerToken`, and an empty token reaching the
+    /// middleware authorizes. The middleware now rejects empty configured
+    /// tokens and empty bearer values before the constant-time compare.
+    #[tokio::test]
+    async fn empty_configured_token_never_authorizes() {
+        let token = Arc::new(middleware::BearerToken(String::new()));
+        let app = router(Arc::new(MockNode::new(1)), token);
+        let r = app
+            .oneshot(
+                Request::builder()
+                    .uri("/peers")
+                    .header("authorization", "Bearer ")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::UNAUTHORIZED,
+            "empty configured token must never authorize any request"
+        );
+    }
+
+    // ===== KAV-negativo (parse): get_tx / get_block / get_utxo
+    //
+    // Each parses untrusted path segments. Assert a clean 4xx (or NOT_FOUND for
+    // the structurally-valid-but-absent case) — never a panic, never a 500.
+
+    /// PARSE-1 — /tx/<non-hex> → 400 InvalidHex (parse_hash_hex via decode_hex).
+    #[tokio::test]
+    async fn get_tx_non_hex_returns_400() {
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/tx/zzzznothex")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// PARSE-2 — /tx/<valid hex, wrong length> → 400 ("hash must be exactly 32
+    /// bytes"). 30 hex chars = 15 bytes decodes fine but try_into::<[u8;32]>
+    /// fails.
+    #[tokio::test]
+    async fn get_tx_wrong_length_hex_returns_400() {
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/tx/{}", "ab".repeat(15))) // 30 chars = 15 bytes
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// PARSE-3 — /tx/<odd-length hex> → 400 (hex::decode rejects odd length;
+    /// must surface as InvalidHex, not panic).
+    #[tokio::test]
+    async fn get_tx_odd_length_hex_returns_400() {
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/tx/abc") // 3 hex chars: odd
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// PARSE-4 — /block/<huge digit string> overflows u64 parse → 400
+    /// InvalidHex("invalid height"), not panic. The handler routes all-digits
+    /// to `u64::parse`, which Errs on overflow.
+    #[tokio::test]
+    async fn get_block_height_overflow_returns_400() {
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    // 30 nines: far beyond u64::MAX (~1.8e19)
+                    .uri("/block/999999999999999999999999999999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// PARSE-5 — /block/<non-digit, non-64-hex> is treated as a hash and parsed
+    /// by parse_hash_hex → 400 (wrong length), not panic.
+    #[tokio::test]
+    async fn get_block_garbage_hash_returns_400() {
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/block/deadbeef") // hex but only 4 bytes
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// PARSE-6 — /utxo/<wrong byte length> → 400 ("commitment must be 33
+    /// bytes"). 32-byte hex decodes but is the wrong commitment size.
+    #[tokio::test]
+    async fn get_utxo_wrong_length_returns_400() {
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/utxo/{}", "ab".repeat(32))) // 32 bytes, need 33
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// PARSE-7 — /utxo/<non-hex> → 400 InvalidHex (decode_hex), not panic.
+    #[tokio::test]
+    async fn get_utxo_non_hex_returns_400() {
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/utxo/nothexnothex")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ===== static / info-leak: RpcError::Internal echoes internal strings
+    //
+    // RpcError::into_response serializes `self.to_string()` into the client
+    // body. For `Internal(msg)` that is `"internal: {msg}"` — i.e. internal
+    // implementation strings reach the untrusted client. This test PINS that
+    // shape so the leak is documented; it is a FINDING (info-leak), not a pass.
+
+    /// LEAK-1 — an unsupported /chain/scan returns the raw internal message
+    /// ("internal: chain scan not supported") in the response body to the
+    /// client. Pins the leak shape (info-leak finding: internal strings are not
+    /// redacted before reaching the client).
+    #[tokio::test]
+    async fn internal_error_echoes_internal_string_to_client() {
+        let r = app() // default MockNode → scan_chain returns Internal(...)
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/scan?from=0&to=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(r).await;
+        // FINDING: internal text reaches the client verbatim.
+        assert_eq!(
+            body["error"],
+            serde_json::json!("internal: chain scan not supported")
+        );
+    }
+
+    // ===== proptest-invariante: mempool offset (page*limit) + limit clamp
+    //
+    // `mempool` computes `offset = page.checked_mul(limit)` and clamps
+    // `limit` to [1, MEMPOOL_MAX_LIMIT]. Invariants over arbitrary client input:
+    //   (a) the endpoint NEVER panics and NEVER returns 500;
+    //   (b) the response is always 200 (valid offset) or 400 (overflow);
+    //   (c) when 200, reported `limit` is in [1, 1000] regardless of input.
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn mempool_page_limit_never_panics_and_clamps(page in 0usize.., limit in 0usize..) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let r = app()
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("/mempool?page={page}&limit={limit}"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = r.status();
+                // (a)+(b): only OK or 400 — never 500, never a panic.
+                proptest::prop_assert!(
+                    status == StatusCode::OK || status == StatusCode::BAD_REQUEST,
+                    "unexpected status {status} for page={page} limit={limit}"
+                );
+                if status == StatusCode::OK {
+                    let body = body_json(r).await;
+                    let reported = body["limit"].as_u64().unwrap() as usize;
+                    // (c): clamp invariant holds for every input.
+                    proptest::prop_assert!(
+                        (1..=MEMPOOL_MAX_LIMIT).contains(&reported),
+                        "limit {reported} out of clamp range for input limit={limit}"
+                    );
+                }
+                Ok(())
+            })?;
+        }
+    }
 }

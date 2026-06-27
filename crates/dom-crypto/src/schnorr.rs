@@ -576,4 +576,87 @@ mod tests {
         let nonce = SecretKey::from_bytes(&[11u8; 32]).unwrap().public_key();
         assert!(schnorr_aggregate_sigs(&[], &nonce).is_err());
     }
+
+    // ── KAV-conformância: RFC-6979 nonce ─────────────────────────────────────
+    // `rfc6979_nonce` is crate-private and only reachable through `schnorr_sign`
+    // (which always pre-hashes the message with Blake2b), so this KAV lives here
+    // as an internal unit test rather than in tests/.
+    //
+    // AUTHORITATIVE VECTOR (sourced from the spec/ecosystem, not from DOM code):
+    // RFC-6979 + secp256k1 + SHA-256, sk = 1, msg = "Satoshi Nakamoto":
+    //   k = 8F8A276C19F4149656B280621E358CCE24F5F52542772691EE69063B74F15D15
+    // This is THE canonical deterministic nonce every conformant RFC-6979
+    // secp256k1 implementation produces for that (sk, message-digest).
+    //
+    // Driving rfc6979_nonce with EXACTLY the RFC-6979 inputs — int2octets(1) as
+    // the secret octets, SHA-256("Satoshi Nakamoto") as the 32-byte digest octets
+    // — exercises the full HMAC_DRBG ladder (schnorr.rs:269). This test PASSES:
+    // it proves DOM's HMAC nonce CORE is RFC-6979-conformant for canonical inputs
+    // (here bits2octets/int2octets are the identity because the digest < n and
+    // sk's representation is already minimal). It is a genuine conformance pass,
+    // not vacuous — the bytes flow through the real ladder and match the spec k.
+    //
+    // The KNOWN non-conformance (FIX-012) is NOT in this core: it is that
+    // `schnorr_sign` feeds rfc6979_nonce a **Blake2b**(msg||chain_id) digest, not
+    // SHA-256(msg). The companion test below documents that divergence directly.
+
+    const RFC6979_SK_1: [u8; 32] = {
+        let mut b = [0u8; 32];
+        b[31] = 1;
+        b
+    };
+
+    /// SHA-256("Satoshi Nakamoto") — the message digest a conformant RFC-6979
+    /// secp256k1 impl feeds (via bits2octets) for the canonical k vector.
+    fn sha256_satoshi() -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"Satoshi Nakamoto");
+        h.finalize().into()
+    }
+
+    const RFC6979_K_SATOSHI: &str =
+        "8F8A276C19F4149656B280621E358CCE24F5F52542772691EE69063B74F15D15";
+
+    #[test]
+    fn rfc6979_nonce_core_matches_authoritative_secp256k1_vector() {
+        let msg_hash = sha256_satoshi();
+        let k = rfc6979_nonce(&RFC6979_SK_1, &msg_hash).expect("nonce derivation");
+        assert_eq!(
+            hex::encode_upper(k),
+            RFC6979_K_SATOSHI,
+            "DOM's RFC-6979 HMAC core diverged from the authoritative secp256k1 k \
+             for (sk=1, digest=SHA-256(\"Satoshi Nakamoto\"))"
+        );
+    }
+
+    /// FIX-012 probe — documents that the END-TO-END signing nonce is NOT
+    /// RFC-6979-conformant because `schnorr_sign` pre-hashes the message with
+    /// Blake2b(msg||chain_id) instead of SHA-256(msg). A standard RFC-6979 Schnorr
+    /// verifier recomputing the nonce over SHA-256("Satoshi Nakamoto") would get
+    /// the authoritative k above; DOM, feeding its Blake2b digest into the SAME
+    /// ladder, gets a DIFFERENT nonce. This test asserts the divergence is real
+    /// (so the divergence is a documented finding, not silent). It PASSES by
+    /// construction (the two nonces differ); if it ever started failing — i.e. the
+    /// Blake2b digest produced the RFC-6979 SHA-256 nonce — that would itself be a
+    /// finding. Decision on whether DOM should be RFC-6979-conformant at the
+    /// message-hash layer is FIX-012 (HUMAN DECISION — consensus/key-derivation).
+    #[test]
+    fn fix012_blake2b_prehash_diverges_from_rfc6979_sha256_nonce() {
+        // DOM's actual signing-path digest for msg="Satoshi Nakamoto" on mainnet.
+        let dom_digest = {
+            use crate::hash::blake2b_256;
+            let mut combined = Vec::new();
+            combined.extend_from_slice(b"Satoshi Nakamoto");
+            combined.extend_from_slice(&MAINNET_CHAIN_ID);
+            *blake2b_256(&combined).as_bytes()
+        };
+        let dom_nonce = rfc6979_nonce(&RFC6979_SK_1, &dom_digest).expect("nonce");
+        assert_ne!(
+            hex::encode_upper(dom_nonce),
+            RFC6979_K_SATOSHI,
+            "DOM's Blake2b-prehash nonce unexpectedly equals the RFC-6979 SHA-256 \
+             nonce — investigate (would imply hash collision / mis-wire)"
+        );
+    }
 }

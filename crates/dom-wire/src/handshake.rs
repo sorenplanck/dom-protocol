@@ -7,7 +7,7 @@
 //!
 //! Any MITM modification to the prologue causes MAC failure — detected cryptographically.
 
-use dom_core::{DomError, PROTOCOL_VERSION};
+use dom_core::{DomError, PeerMisbehavior, PROTOCOL_VERSION};
 use snow::{Builder, HandshakeState, TransportState};
 
 const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
@@ -140,7 +140,12 @@ pub async fn perform_handshake_initiator(
         perform_handshake_initiator_inner(stream, static_privkey, network_magic, chain_id),
     )
     .await
-    .map_err(|_| DomError::PolicyRejected(format!("handshake timeout after {timeout_secs}s")))?
+    .map_err(|_| {
+        DomError::peer_misbehavior(
+            PeerMisbehavior::HandshakeTimeout,
+            format!("handshake timeout after {timeout_secs}s"),
+        )
+    })?
 }
 
 async fn perform_handshake_initiator_inner(
@@ -187,7 +192,12 @@ pub async fn perform_handshake_responder(
         perform_handshake_responder_inner(stream, static_privkey, network_magic, chain_id),
     )
     .await
-    .map_err(|_| DomError::PolicyRejected(format!("handshake timeout after {timeout_secs}s")))?
+    .map_err(|_| {
+        DomError::peer_misbehavior(
+            PeerMisbehavior::HandshakeTimeout,
+            format!("handshake timeout after {timeout_secs}s"),
+        )
+    })?
 }
 
 async fn perform_handshake_responder_inner(

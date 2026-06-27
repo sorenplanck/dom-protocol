@@ -21,3 +21,7 @@ blake2.workspace            = true
 tracing.workspace           = true
 rand.workspace              = true
 futures.workspace           = true
+
+[dev-dependencies]
+# F4-equivalent wire-message roundtrip invariants (tests/message_roundtrip_proptest.rs).
+proptest.workspace = true

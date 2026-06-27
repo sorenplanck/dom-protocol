@@ -230,8 +230,8 @@ impl WalletDir {
         // Attach the WAL journal. On `create` the file does not exist
         // yet — `TxJournal::open` is lazy and the first append will
         // materialise it inside the wallet directory.
-        let journal =
-            TxJournal::open(path).map_err(|e| WalletError::Io(format!("open journal: {e}")))?;
+        let journal = TxJournal::open_authenticated(path, password, &chain_id)
+            .map_err(|e| WalletError::Io(format!("open journal: {e}")))?;
         wallet.attach_journal(journal);
 
         Ok(Self {
@@ -294,8 +294,8 @@ impl WalletDir {
         write_config(path, &config)?;
 
         let mut wallet = Wallet::open(&dat_path, password)?;
-        let journal =
-            TxJournal::open(path).map_err(|e| WalletError::Io(format!("open journal: {e}")))?;
+        let journal = TxJournal::open_authenticated(path, password, &chain_id)
+            .map_err(|e| WalletError::Io(format!("open journal: {e}")))?;
         wallet.attach_journal(journal);
 
         Ok(Self {
@@ -371,8 +371,8 @@ impl WalletDir {
         // lifecycle: a crash between journal append and `save()`
         // leaves the two stores divergent, and reopen is where we
         // heal that divergence.
-        let journal =
-            TxJournal::open(path).map_err(|e| WalletError::Io(format!("open journal: {e}")))?;
+        let journal = TxJournal::open_authenticated(path, password, wallet.chain_id())
+            .map_err(|e| WalletError::Io(format!("open journal: {e}")))?;
         wallet.attach_journal(journal);
         let reconciled = wallet.reconcile_with_journal()?;
         if reconciled {

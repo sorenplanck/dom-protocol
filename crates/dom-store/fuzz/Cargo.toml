@@ -1,0 +1,37 @@
+[package]
+name = "dom-store-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-store]
+path = ".."
+
+[dependencies.dom-core]
+path = "../../dom-core"
+
+# dom-shield fuzz-panic family — persisted-state parsers (UtxoEntry / PeerAddr
+# from_bytes). The on-disk format is fixed-offset and bounded (COVERAGE #8), so
+# these targets are completeness coverage for the directed-corruption family:
+# they assert from_bytes is total (never panics) over arbitrary byte strings.
+[[bin]]
+name = "fuzz_utxo_entry_from_bytes"
+path = "fuzz_targets/fuzz_utxo_entry_from_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_peer_addr_from_bytes"
+path = "fuzz_targets/fuzz_peer_addr_from_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

@@ -11,3 +11,7 @@ dom-core.workspace    = true
 serde.workspace       = true
 serde_json.workspace  = true
 thiserror.workspace   = true
+
+[dev-dependencies]
+# dom-shield proptest-invariante: NodeConfig JSON serde round-trip stability.
+proptest.workspace = true

@@ -67,7 +67,7 @@ rand_core   = { version = "0.6" }
 rand        = { version = "0.8" }
 hex         = { version = "0.4" }
 # Storage
-lmdb        = { version = "0.8" }
+lmdb        = { package = "lmdb-rkv", version = "0.14" }
 # Networking
 tokio       = { version = "1.35", features = ["full"] }
 snow        = { version = "0.9", features = ["default-resolver"] }

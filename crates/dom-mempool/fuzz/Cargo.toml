@@ -16,9 +16,25 @@ path = ".."
 [dependencies.dom-serialization]
 path = "../../dom-serialization"
 
+[dependencies.dom-consensus]
+path = "../../dom-consensus"
+
+[dependencies.dom-crypto]
+path = "../../dom-crypto"
+
+[dependencies.dom-core]
+path = "../../dom-core"
+
 [[bin]]
 name = "fuzz_mempool_snapshot"
 path = "fuzz_targets/fuzz_mempool_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mempool_admission"
+path = "fuzz_targets/fuzz_mempool_admission.rs"
 test = false
 doc = false
 bench = false

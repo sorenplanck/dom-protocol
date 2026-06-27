@@ -20,6 +20,18 @@
 //! RFC-0007 step 14: atomic state commit.
 //! All writes during block processing go into ONE LMDB transaction.
 //! If anything fails, the whole transaction is aborted — no partial state.
+//!
+//! ## LMDB dependency status
+//!
+//! The LMDB backend is provided by the maintained `lmdb-rkv` package through the
+//! workspace `lmdb` crate rename and is isolated behind `DomStore`; callers do
+//! not use LMDB handles directly except corruption/durability tests. A
+//! storage-engine migration is intentionally not performed as an incidental
+//! dependency cleanup because it would alter persistence semantics. The current
+//! mitigation is to keep LMDB usage narrow, retain default sync durability,
+//! perform block commits in a single write transaction, surface `MDB_MAP_FULL`
+//! via `LMDB_MAP_FULL_SENTINEL`, and pin crash/corruption behavior with the
+//! store tests.
 
 // unsafe allowed for lmdb API
 #![deny(missing_docs)]

@@ -4,7 +4,7 @@
 //! DOM_RFC_0007_Validation_Order.md — Block validation steps 1-7.
 
 use dom_core::{
-    BlockHeight, DomError, Hash256, Timestamp, FUTURE_BLOCK_SOFT_BUFFER_SECS,
+    BlockHeight, DomError, Hash256, PeerMisbehavior, Timestamp, FUTURE_BLOCK_SOFT_BUFFER_SECS,
     MAX_FUTURE_BLOCK_TIME, MEDIAN_TIME_WINDOW, PROTOCOL_VERSION,
 };
 use dom_pow::CompactTarget;
@@ -336,8 +336,9 @@ pub fn validate_pow(header: &BlockHeader, seed: &[u8; 32]) -> Result<(), DomErro
     let claimed_hash = header.pow.randomx_hash.as_bytes();
     let ok = dom_pow::validate_pow_randomx(&preimage, claimed_hash, seed, &target)?;
     if !ok {
-        return Err(DomError::Invalid(
-            "proof-of-work invalid: RandomX hash mismatch or does not meet target".into(),
+        return Err(DomError::peer_misbehavior(
+            PeerMisbehavior::InvalidPow,
+            "proof-of-work invalid: RandomX hash mismatch or does not meet target",
         ));
     }
     Ok(())
@@ -358,8 +359,9 @@ pub fn validate_pow_for_network(
     let ok =
         dom_pow::validate_pow_for_network(network_magic, &preimage, claimed_hash, seed, &target)?;
     if !ok {
-        return Err(DomError::Invalid(
-            "proof-of-work invalid: hash mismatch or does not meet target".into(),
+        return Err(DomError::peer_misbehavior(
+            PeerMisbehavior::InvalidPow,
+            "proof-of-work invalid: hash mismatch or does not meet target",
         ));
     }
     Ok(())

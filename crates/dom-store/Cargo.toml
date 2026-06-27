@@ -18,6 +18,8 @@ tracing.workspace           = true
 hex.workspace               = true
 
 [dev-dependencies]
+# F4-equivalent persisted-state roundtrip invariants (tests/persisted_roundtrip_proptest.rs).
+proptest.workspace = true
 tempfile = "3.10"
 lmdb.workspace = true
 dom-crypto.workspace      = true

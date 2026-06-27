@@ -43,6 +43,7 @@ impl From<DomError> for TxError {
             DomError::TemporarilyInvalid(msg) => TxError::InvalidTransaction(msg),
             DomError::Orphan(msg) => TxError::InvalidTransaction(msg),
             DomError::PolicyRejected(msg) => TxError::InvalidTransaction(msg),
+            DomError::PeerMisbehavior { message, .. } => TxError::InvalidTransaction(message),
             DomError::Internal(msg) => TxError::Crypto(msg),
         }
     }
@@ -424,5 +425,306 @@ mod tests {
         builder.fee(1);
 
         assert!(builder.build().is_err());
+    }
+
+    // ===================================================================
+    // dom-shield: KAV / invariant / Lens-B vectors that require access to
+    // private items (`kernel_message`, `checked_sum`, builder internals).
+    // These live in the src `#[cfg(test)]` module by necessity (integration
+    // tests cannot reach private fns). No production logic is altered.
+    // ===================================================================
+
+    // -- KAV: kernel_message byte-freeze ---------------------------------
+    //
+    // Freezes the exact pre-image layout `features ‖ fee_le ‖ lock_height_le`
+    // hashed under TAG_KERNEL_MSG. The expected hash is recomputed here from
+    // the PUBLIC primitive (blake2b_256_tagged) over the byte layout asserted
+    // by RFC, NOT copied from `kernel_message`'s own output — so a silent
+    // reordering / endianness / tag change in `kernel_message` is caught.
+    #[test]
+    fn kav_kernel_message_byte_freeze() {
+        let features = KERNEL_FEAT_PLAIN;
+        // A distinctive in-range fee whose LE byte pattern is non-palindromic,
+        // so endianness/reordering bugs are detectable. Must be <= MAX_SUPPLY.
+        let fee: u64 = 0x0001_0203_0405_0607;
+        let lock_height: u64 = 0; // plain kernels: lock_height is always 0
+
+        let mut expected_preimage = Vec::with_capacity(1 + 8 + 8);
+        expected_preimage.push(features);
+        expected_preimage.extend_from_slice(&fee.to_le_bytes());
+        expected_preimage.extend_from_slice(&lock_height.to_le_bytes());
+        assert_eq!(
+            expected_preimage.len(),
+            17,
+            "kernel message pre-image must be exactly 1+8+8 bytes"
+        );
+
+        let expected = blake2b_256_tagged(TAG_KERNEL_MSG, &expected_preimage);
+        let actual = kernel_message(features, fee, lock_height).unwrap();
+        assert_eq!(
+            actual.as_bytes(),
+            expected.as_bytes(),
+            "kernel_message drifted from features‖fee_le‖lock_height_le under TAG_KERNEL_MSG"
+        );
+    }
+
+    // KAV-drift: a different domain tag MUST produce a different digest, i.e.
+    // the kernel message is genuinely domain-separated. Guards against a
+    // refactor that drops or swaps TAG_KERNEL_MSG.
+    #[test]
+    fn kav_kernel_message_is_domain_separated() {
+        let preimage = {
+            let mut v = Vec::new();
+            v.push(KERNEL_FEAT_PLAIN);
+            v.extend_from_slice(&100u64.to_le_bytes());
+            v.extend_from_slice(&0u64.to_le_bytes());
+            v
+        };
+        let tagged = kernel_message(KERNEL_FEAT_PLAIN, 100, 0).unwrap();
+        let untagged = blake2b_256_tagged("DOM:not-the-kernel-tag", &preimage);
+        assert_ne!(
+            tagged.as_bytes(),
+            untagged.as_bytes(),
+            "kernel_message must be domain-separated under TAG_KERNEL_MSG"
+        );
+    }
+
+    // KAV-drift: fee endianness is little-endian and load-bearing. Swapping a
+    // fee's byte order must change the digest (catches a to_be_bytes regress).
+    #[test]
+    fn kav_kernel_message_fee_endianness_matters() {
+        // Two in-range fees that are byte-reverses of each other within the
+        // low bytes: 0x0102 (258) vs 0x0201 (513). Distinct LE encodings.
+        let a = kernel_message(KERNEL_FEAT_PLAIN, 0x0102, 0).unwrap();
+        let b = kernel_message(KERNEL_FEAT_PLAIN, 0x0201, 0).unwrap();
+        assert_ne!(
+            a.as_bytes(),
+            b.as_bytes(),
+            "fee must be folded into the kernel message as distinct LE bytes"
+        );
+    }
+
+    // -- KAV-negativo: SpendBuilder rejections ---------------------------
+
+    // amount == 0 is rejected at add_output (zero-value output ban).
+    #[test]
+    fn kav_neg_rejects_zero_value_output() {
+        let mut builder = SpendBuilder::new(&[1u8; 32]);
+        let err = builder
+            .add_output(0, BlindingFactor::random())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("zero-value outputs"),
+            "expected zero-value rejection, got: {err}"
+        );
+    }
+
+    // amount > MAX_SUPPLY_NOMS is rejected at add_output (Amount bound).
+    #[test]
+    fn kav_neg_rejects_output_over_max_supply() {
+        let mut builder = SpendBuilder::new(&[1u8; 32]);
+        let over = dom_core::MAX_SUPPLY_NOMS + 1;
+        assert!(
+            builder.add_output(over, BlindingFactor::random()).is_err(),
+            "output above MAX_SUPPLY_NOMS must be rejected"
+        );
+    }
+
+    // Non-zero lock_height is rejected in build() — SpendBuilder only emits
+    // PLAIN kernels, so a "height-locked" spend dressed as a plain kernel must
+    // not be silently downgraded.
+    #[test]
+    fn kav_neg_rejects_nonzero_lock_height_as_plain_kernel() {
+        let input_bf = BlindingFactor::random();
+        let output_bf = BlindingFactor::random();
+        let mut builder = SpendBuilder::new(&[2u8; 32]);
+        builder
+            .add_inputs(vec![TestInput::new(1_000, &input_bf)])
+            .unwrap();
+        builder.add_output(900, output_bf).unwrap();
+        builder.fee(100);
+        builder.lock_height(144);
+
+        let err = builder.build().unwrap_err().to_string();
+        assert!(
+            err.contains("lock_height must be zero"),
+            "non-zero lock_height must be rejected for plain kernels, got: {err}"
+        );
+    }
+
+    // Even when fee makes inputs == outputs + fee, a non-zero lock height
+    // still must NOT silently set kernel.lock_height: the build is rejected
+    // before any kernel is emitted. (Defends against a future relaxation that
+    // forgets to also stamp the kernel feature bit.)
+    #[test]
+    fn kav_neg_balanced_but_locked_still_rejected() {
+        let input_bf = BlindingFactor::random();
+        let output_bf = BlindingFactor::random();
+        let mut builder = SpendBuilder::new(&[3u8; 32]);
+        builder
+            .add_inputs(vec![TestInput::new(500, &input_bf)])
+            .unwrap();
+        builder.add_output(500, output_bf).unwrap();
+        builder.fee(0);
+        builder.lock_height(1);
+        assert!(builder.build().is_err());
+    }
+
+    // -- invariant: balance enforced by build() --------------------------
+
+    // inputs < outputs + fee (deficit) is rejected.
+    #[test]
+    fn inv_rejects_input_deficit() {
+        let input_bf = BlindingFactor::random();
+        let output_bf = BlindingFactor::random();
+        let mut builder = SpendBuilder::new(&[4u8; 32]);
+        builder
+            .add_inputs(vec![TestInput::new(900, &input_bf)])
+            .unwrap();
+        builder.add_output(900, output_bf).unwrap();
+        builder.fee(100); // need 1000, have 900
+        let err = builder.build().unwrap_err().to_string();
+        assert!(err.contains("unbalanced values"), "got: {err}");
+    }
+
+    // inputs > outputs + fee (would mint value to the kernel) is rejected.
+    #[test]
+    fn inv_rejects_input_surplus_no_inflation() {
+        let input_bf = BlindingFactor::random();
+        let output_bf = BlindingFactor::random();
+        let mut builder = SpendBuilder::new(&[5u8; 32]);
+        builder
+            .add_inputs(vec![TestInput::new(2_000, &input_bf)])
+            .unwrap();
+        builder.add_output(900, output_bf).unwrap();
+        builder.fee(100); // need 1000, have 2000 -> surplus must be rejected
+        let err = builder.build().unwrap_err().to_string();
+        assert!(err.contains("unbalanced values"), "got: {err}");
+    }
+
+    // -- invariant: checked_sum overflow ---------------------------------
+
+    // checked_sum saturates to an error rather than wrapping. Two u64::MAX/2+1
+    // values overflow u64.
+    #[test]
+    fn inv_checked_sum_detects_overflow() {
+        let half = u64::MAX / 2 + 1;
+        assert!(
+            checked_sum([half, half]).is_err(),
+            "checked_sum must reject u64 overflow"
+        );
+        assert_eq!(checked_sum([1u64, 2, 3]).unwrap(), 6);
+        assert_eq!(checked_sum(std::iter::empty::<u64>()).unwrap(), 0);
+    }
+
+    // output_sum + fee overflow path: outputs that individually pass but whose
+    // (sum + fee) overflows u64 must be rejected without wrapping. We drive it
+    // through build() so the checked_add in `required` is exercised. Using
+    // MAX_SUPPLY_NOMS-bounded values means the per-output Amount check passes
+    // but consensus balance still rejects; the explicit overflow arithmetic is
+    // unit-tested above via checked_sum. Here we assert the build refuses a
+    // fee that pushes required past input_sum.
+    #[test]
+    fn inv_output_sum_plus_fee_no_wrap() {
+        // Build a balanced tx, then bump fee by u64::MAX to force the
+        // checked_add(required) / balance check to reject instead of wrap.
+        let input_bf = BlindingFactor::random();
+        let output_bf = BlindingFactor::random();
+        let mut builder = SpendBuilder::new(&[6u8; 32]);
+        builder
+            .add_inputs(vec![TestInput::new(1_000, &input_bf)])
+            .unwrap();
+        builder.add_output(1_000, output_bf).unwrap();
+        builder.fee(u64::MAX); // output_sum + fee overflows OR Amount rejects
+        assert!(
+            builder.build().is_err(),
+            "fee=u64::MAX must not wrap output_sum+fee into a valid balance"
+        );
+    }
+
+    // -- invariant: zero-excess rejection (require_nonzero) --------------
+    //
+    // If output_blinding == input_blinding and offset is forced to zero, the
+    // kernel excess scalar would be zero (an identity excess that breaks the
+    // Schnorr binding). compute_kernel_excess_blinding must reject via
+    // require_nonzero. We call it directly with a zero offset to deterministically
+    // hit the require_nonzero guard (build() uses a random offset and cannot be
+    // steered to this state).
+    #[test]
+    fn inv_compute_excess_rejects_zero_scalar() {
+        let bf = BlindingFactor::random();
+        let mut builder = SpendBuilder::new(&[7u8; 32]);
+        // one input and one output sharing the SAME blinding -> excess == 0
+        builder
+            .add_inputs(vec![TestInput::new(1_000, &bf)])
+            .unwrap();
+        builder.add_output(1_000, bf.clone()).unwrap();
+        let zero_offset = [0u8; 32];
+        let res = builder.compute_kernel_excess_blinding(&zero_offset);
+        assert!(
+            res.is_err(),
+            "kernel excess of zero must be rejected by require_nonzero"
+        );
+        let msg = res.unwrap_err().to_string();
+        assert!(
+            msg.contains("zero"),
+            "expected zero-excess rejection, got: {msg}"
+        );
+    }
+
+    // Non-degenerate excess (distinct blindings) is accepted with zero offset:
+    // proves the rejection above is specific to the zero scalar, not a blanket
+    // failure of the zero-offset path.
+    #[test]
+    fn inv_compute_excess_accepts_nonzero_scalar() {
+        let in_bf = BlindingFactor::from_bytes([1u8; 32]).unwrap();
+        let out_bf = BlindingFactor::from_bytes([2u8; 32]).unwrap();
+        let mut builder = SpendBuilder::new(&[7u8; 32]);
+        builder
+            .add_inputs(vec![TestInput::new(1_000, &in_bf)])
+            .unwrap();
+        builder.add_output(1_000, out_bf).unwrap();
+        assert!(builder.compute_kernel_excess_blinding(&[0u8; 32]).is_ok());
+    }
+
+    // -- Lens B (funds-safety): offset escapes Zeroizing ----------------
+    //
+    // STATIC-REVIEW PROBE (documented finding, not a behavioral assertion).
+    //
+    // In build(): `let offset = *BlindingFactor::random().as_bytes();`
+    // dereferences and COPIES the 32 secret bytes out of the Zeroizing
+    // BlindingFactor into a plain `[u8; 32]`. That copy is then moved into
+    // Transaction.offset (a public, non-zeroizing field) and also re-derived
+    // into a BlindingFactor inside compute_kernel_excess_blinding. The plain
+    // [u8;32] stack/heap copy is NOT zeroized on drop.
+    //
+    // NOTE ON SEVERITY: the transaction offset is, by Mimblewimble design,
+    // PUBLIC slate/chain data (it ships in Transaction.offset and on-chain).
+    // So this particular intermediate is not a SECRET leak in the usual sense
+    // — leaking the offset does not reveal a spend key. It IS, however, a
+    // non-zeroized scalar intermediate and worth recording per Lens B.
+    // This cannot be asserted behaviorally (we cannot inspect freed memory in
+    // safe Rust), so it is recorded as an #[ignore] static-review marker.
+    #[test]
+    #[ignore = "static-review: offset = *BlindingFactor::random().as_bytes() copies secret bytes out of Zeroizing into a plain [u8;32] (Transaction.offset is public by design; recorded, not behaviorally testable)"]
+    fn lensb_offset_escapes_zeroizing_static_review() {
+        // Intentionally empty: see #[ignore] note. Documented finding.
+    }
+
+    // STATIC-REVIEW PROBE: compute_kernel_excess_blinding intermediates.
+    // `acc` is a BlindingFactor (Zeroize + ZeroizeOnDrop), and each `.add`/
+    // `.sub`/`.require_nonzero` returns a fresh Zeroizing BlindingFactor; the
+    // shadowed previous `acc` is dropped (and thus zeroized) on reassignment.
+    // The `offset_bf` re-derived from the plain [u8;32] offset is also a
+    // Zeroizing BlindingFactor. The ONLY non-zeroized intermediate on this
+    // path is the plain `offset` array covered above. The accumulator chain
+    // itself is zeroized by construction (ZeroizeOnDrop on BlindingFactor).
+    // Recorded as bounded-by-construction; no behavioral test (cannot inspect
+    // freed memory in safe Rust).
+    #[test]
+    #[ignore = "static-review: compute_kernel_excess_blinding accumulator is Zeroizing/ZeroizeOnDrop by construction; only the public `offset` [u8;32] (above) is non-zeroized"]
+    fn lensb_kernel_excess_accumulator_zeroized_static_review() {
+        // Intentionally empty: see #[ignore] note. Bounded-by-construction.
     }
 }

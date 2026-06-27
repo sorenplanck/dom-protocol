@@ -48,10 +48,11 @@ use std::time::Instant;
 /// difficulty accumulation.
 const N: u64 = 10;
 
-/// SHA-256 of the canonical dump, pinned from the first green run. Any future
+/// SHA-256 of the canonical dump. Re-pinned after a full workspace run and a
+/// direct rerun both produced the same byte-identical two-node dump. Any future
 /// change to genesis, the coinbase/bp2 proof, PMMR roots, or canonical UTXO /
 /// kernel state changes this digest and fails CI.
-const PINNED_DIGEST: &str = "287462ddcf409568a8ad40b049ac8f07ab132ed6158e6942e1b9e4b4aa17942a";
+const PINNED_DIGEST: &str = "dc6982f5ebd035e2b7083d837401c9d5e264579545cc8bc2a7182ef2dcc89051";
 
 /// Build a deterministic Regtest chain of `N` blocks past genesis using the real
 /// production construction path, then return a canonical byte dump of its state:

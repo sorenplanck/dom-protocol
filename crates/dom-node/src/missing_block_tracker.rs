@@ -56,6 +56,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+const MAX_TRACKED_MISSING_PARENTS: usize = 4096;
+const MAX_DEPENDENTS_PER_PARENT: usize = 256;
+
 /// Identifies a missing block in canonical request order: ascending height
 /// first (request ancestors before descendants), then by hash. Unknown heights
 /// sort last (requested only after all height-known ancestors).
@@ -164,12 +167,19 @@ impl MissingBlockTracker {
         parent: [u8; 32],
         parent_height: Option<u64>,
     ) -> NoteOutcome {
-        // Record the dependency edge (orphan waits on parent).
-        self.dependents.entry(parent).or_default().insert(orphan);
-
         if self.key_by_hash.contains_key(&parent) {
+            let dependents = self.dependents.entry(parent).or_default();
+            if dependents.len() < MAX_DEPENDENTS_PER_PARENT {
+                dependents.insert(orphan);
+            }
             return NoteOutcome::AlreadyMissing;
         }
+        if self.missing.len() >= MAX_TRACKED_MISSING_PARENTS {
+            return NoteOutcome::AlreadyMissing;
+        }
+        let mut dependents = BTreeSet::new();
+        dependents.insert(orphan);
+        self.dependents.insert(parent, dependents);
         let key = MissingKey::new(parent, parent_height);
         self.key_by_hash.insert(parent, key);
         self.missing.insert(
@@ -378,5 +388,28 @@ mod tests {
         let mut t = MissingBlockTracker::new(5, 2, 16);
         assert!(t.resolve(&h(0xEE)).is_empty());
         assert_eq!(t.missing_len(), 0);
+    }
+
+    #[test]
+    fn distinct_missing_parents_are_capped() {
+        let mut t = MissingBlockTracker::new(5, 1, 16);
+        for i in 0..(MAX_TRACKED_MISSING_PARENTS + 100) {
+            let mut parent = [0u8; 32];
+            parent[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+            t.note_orphan([0xBBu8; 32], parent, Some(i as u64));
+        }
+        assert_eq!(t.missing_len(), MAX_TRACKED_MISSING_PARENTS);
+    }
+
+    #[test]
+    fn dependents_per_parent_are_capped() {
+        let mut t = MissingBlockTracker::new(5, 1, 16);
+        let parent = h(0xAA);
+        for i in 0..(MAX_DEPENDENTS_PER_PARENT + 100) {
+            let mut orphan = [0u8; 32];
+            orphan[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+            t.note_orphan(orphan, parent, Some(100));
+        }
+        assert_eq!(t.dependents_of(&parent).len(), MAX_DEPENDENTS_PER_PARENT);
     }
 }

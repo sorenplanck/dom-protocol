@@ -1,0 +1,36 @@
+[package]
+name = "dom-slate-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-slate]
+path = ".."
+
+[dependencies.dom-tx]
+path = "../../dom-tx"
+
+[dependencies.dom-serialization]
+path = "../../dom-serialization"
+
+[[bin]]
+name = "fuzz_respond_receive"
+path = "fuzz_targets/fuzz_respond_receive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_finalize"
+path = "fuzz_targets/fuzz_finalize.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

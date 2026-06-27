@@ -1,0 +1,43 @@
+[package]
+name = "dom-wallet2-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.dom-wallet2]
+path = ".."
+
+# dom-shield fuzz targets (panic-safety of the decrypted-plaintext deserialize
+# paths). The on-disk wallet/backup payload is serde_json inside the
+# dom-wallet-crypto envelope, so fuzzing serde_json::from_slice into these public
+# Deserialize types exercises the exact post-decrypt parse surface.
+
+[[bin]]
+name = "fuzz_wallet_state_deserialize"
+path = "fuzz_targets/fuzz_wallet_state_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_output_store_deserialize"
+path = "fuzz_targets/fuzz_output_store_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_stored_output_deserialize"
+path = "fuzz_targets/fuzz_stored_output_deserialize.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

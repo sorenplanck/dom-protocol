@@ -263,6 +263,9 @@ dependencies = [
 name = "dom-mempool-fuzz"
 version = "0.0.0"
 dependencies = [
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
  "dom-mempool",
  "dom-serialization",
  "libfuzzer-sys",

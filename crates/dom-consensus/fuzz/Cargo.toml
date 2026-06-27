@@ -26,4 +26,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_validate_block_amplification"
+path = "fuzz_targets/fuzz_validate_block_amplification.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

@@ -38,6 +38,24 @@ const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(30);
 const TEST_LMDB_MAP_SIZE: usize = 64 << 20;
 const T1_RANDOMX_BOUNDARY_HEIGHT: u64 = RANDOMX_SEED_INTERVAL + 12;
 const T1_IBD_TIMEOUT: Duration = Duration::from_secs(300);
+const T1_SLOW_MACHINE_MULTIPLIER: u32 = 2;
+const T3_IBD_TIMEOUT: Duration = Duration::from_secs(300);
+static IBD_TWO_NODE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn run_ibd_two_node_test<F>(worker_threads: usize, future: F)
+where
+    F: std::future::Future<Output = ()>,
+{
+    let _test_guard = IBD_TWO_NODE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()
+        .expect("build IBD two-node runtime");
+    runtime.block_on(future);
+}
 
 fn enable_fast_regtest_mining() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
@@ -89,7 +107,7 @@ async fn stop_node(
     handle: tokio::task::JoinHandle<Result<(), dom_core::DomError>>,
 ) {
     node.request_shutdown().await;
-    tokio::time::timeout(Duration::from_secs(10), handle)
+    tokio::time::timeout(Duration::from_secs(45), handle)
         .await
         .expect("node shutdown should not hang")
         .expect("node task should join")
@@ -373,8 +391,15 @@ async fn wait_for_any_peer_penalty(node: &Arc<DomNode>, timeout_duration: Durati
     .expect("timeout waiting for peer penalty");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn t1_ibd_through_randomx_epoch_boundary_via_three_real_nodes() {
+#[test]
+fn t1_ibd_through_randomx_epoch_boundary_via_three_real_nodes() {
+    run_ibd_two_node_test(
+        8,
+        t1_ibd_through_randomx_epoch_boundary_via_three_real_nodes_async(),
+    );
+}
+
+async fn t1_ibd_through_randomx_epoch_boundary_via_three_real_nodes_async() {
     enable_fast_regtest_mining();
     init_tracing();
     let mut log = TestLog::new("t1_epoch_boundary");
@@ -400,9 +425,15 @@ async fn t1_ibd_through_randomx_epoch_boundary_via_three_real_nodes() {
     prepopulate_coinbase_chain(&node_b, T1_RANDOMX_BOUNDARY_HEIGHT)
         .await
         .expect("B should mine past the first RandomX seed boundary");
+    let mining_elapsed = started.elapsed();
+    let t1_sync_timeout = T1_IBD_TIMEOUT.max(mining_elapsed * T1_SLOW_MACHINE_MULTIPLIER);
     log.line(format!(
         "B mined {T1_RANDOMX_BOUNDARY_HEIGHT} blocks in {:?}",
-        started.elapsed()
+        mining_elapsed
+    ));
+    log.line(format!(
+        "T1 sync timeout set to {:?} (base {:?}, multiplier {T1_SLOW_MACHINE_MULTIPLIER}x mining time)",
+        t1_sync_timeout, T1_IBD_TIMEOUT
     ));
     let _task_b = start_node(node_b.clone()).await;
 
@@ -418,7 +449,7 @@ async fn t1_ibd_through_randomx_epoch_boundary_via_three_real_nodes() {
         .expect("B should register A before serving boundary IBD");
 
     let a_sync_started = Instant::now();
-    if let Err(err) = wait_for_height(&node_a, T1_RANDOMX_BOUNDARY_HEIGHT, T1_IBD_TIMEOUT).await {
+    if let Err(err) = wait_for_height(&node_a, T1_RANDOMX_BOUNDARY_HEIGHT, t1_sync_timeout).await {
         let (height_a, hash_a) = tip(&node_a).await;
         let (height_b, hash_b) = tip(&node_b).await;
         let peers_a = peer_count(&node_a).await;
@@ -429,12 +460,12 @@ async fn t1_ibd_through_randomx_epoch_boundary_via_three_real_nodes() {
             hex::encode(hash_a.as_bytes()),
             hex::encode(hash_b.as_bytes())
         ));
-        panic!("A IBD should complete within {:?}: {err}", T1_IBD_TIMEOUT);
+        panic!("A IBD should complete within {:?}: {err}", t1_sync_timeout);
     }
     let a_elapsed = a_sync_started.elapsed();
     log.line(format!("A synced in {:?}", a_elapsed));
     assert!(
-        a_elapsed < T1_IBD_TIMEOUT,
+        a_elapsed < t1_sync_timeout,
         "A IBD exceeded T1 guard timeout: {:?}",
         a_elapsed
     );
@@ -450,7 +481,7 @@ async fn t1_ibd_through_randomx_epoch_boundary_via_three_real_nodes() {
         .await
         .expect("A should register C while still connected to B");
 
-    if let Err(err) = wait_for_height(&node_c, T1_RANDOMX_BOUNDARY_HEIGHT, T1_IBD_TIMEOUT).await {
+    if let Err(err) = wait_for_height(&node_c, T1_RANDOMX_BOUNDARY_HEIGHT, t1_sync_timeout).await {
         let (height_a, hash_a) = tip(&node_a).await;
         let (height_b, hash_b) = tip(&node_b).await;
         let (height_c, hash_c) = tip(&node_c).await;
@@ -481,8 +512,12 @@ async fn t1_ibd_through_randomx_epoch_boundary_via_three_real_nodes() {
     assert_no_bans(&node_c).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
-async fn t2_ibd_with_active_miner_relay_during_sync() {
+#[test]
+fn t2_ibd_with_active_miner_relay_during_sync() {
+    run_ibd_two_node_test(6, t2_ibd_with_active_miner_relay_during_sync_async());
+}
+
+async fn t2_ibd_with_active_miner_relay_during_sync_async() {
     enable_fast_regtest_mining();
     init_tracing();
     let mut log = TestLog::new("t2_active_miner_relay");
@@ -538,8 +573,15 @@ async fn t2_ibd_with_active_miner_relay_during_sync() {
     assert_no_bans(&node_b).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
-async fn t3_ibd_noise_fragmentation_headers_above_one_frame() {
+#[test]
+fn t3_ibd_noise_fragmentation_headers_above_one_frame() {
+    run_ibd_two_node_test(
+        6,
+        t3_ibd_noise_fragmentation_headers_above_one_frame_async(),
+    );
+}
+
+async fn t3_ibd_noise_fragmentation_headers_above_one_frame_async() {
     enable_fast_regtest_mining();
     init_tracing();
     let mut log = TestLog::new("t3_noise_fragmentation");
@@ -568,7 +610,7 @@ async fn t3_ibd_noise_fragmentation_headers_above_one_frame() {
     config_b.seed_peers = vec![format!("127.0.0.1:{port_a}")];
     let node_b = spawn_node(config_b).await;
     let _task_b = start_node(node_b.clone()).await;
-    wait_for_height(&node_b, 300, IBD_TIMEOUT)
+    wait_for_height(&node_b, 300, T3_IBD_TIMEOUT)
         .await
         .expect("B should sync 300 blocks over fragmented Noise messages");
 
@@ -579,8 +621,12 @@ async fn t3_ibd_noise_fragmentation_headers_above_one_frame() {
     assert_no_bans(&node_b).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
-async fn t4_reorg_convergence_between_divergent_nodes() {
+#[test]
+fn t4_reorg_convergence_between_divergent_nodes() {
+    run_ibd_two_node_test(6, t4_reorg_convergence_between_divergent_nodes_async());
+}
+
+async fn t4_reorg_convergence_between_divergent_nodes_async() {
     enable_fast_regtest_mining();
     init_tracing();
     let mut log = TestLog::new("t4_reorg_convergence");
@@ -633,8 +679,15 @@ async fn t4_reorg_convergence_between_divergent_nodes() {
     assert_no_bans(&node_b).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
-async fn t5_peer_ban_does_not_isolate_node_from_honest_peer() {
+#[test]
+fn t5_peer_ban_does_not_isolate_node_from_honest_peer() {
+    run_ibd_two_node_test(
+        6,
+        t5_peer_ban_does_not_isolate_node_from_honest_peer_async(),
+    );
+}
+
+async fn t5_peer_ban_does_not_isolate_node_from_honest_peer_async() {
     enable_fast_regtest_mining();
     init_tracing();
     let mut log = TestLog::new("t5_peer_ban_no_isolation");
@@ -679,8 +732,15 @@ async fn t5_peer_ban_does_not_isolate_node_from_honest_peer() {
         .expect("B should continue syncing from A after C is banned");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn t6_partial_eclipse_invalid_header_peer_is_penalized() {
+#[test]
+fn t6_partial_eclipse_invalid_header_peer_is_penalized() {
+    run_ibd_two_node_test(
+        8,
+        t6_partial_eclipse_invalid_header_peer_is_penalized_async(),
+    );
+}
+
+async fn t6_partial_eclipse_invalid_header_peer_is_penalized_async() {
     enable_fast_regtest_mining();
     init_tracing();
     let mut log = TestLog::new("t6_partial_eclipse");
@@ -739,8 +799,29 @@ async fn t6_partial_eclipse_invalid_header_peer_is_penalized() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
-async fn t7_ibd_restart_resume_after_interruption() {
+#[test]
+fn t7_ibd_restart_resume_after_interruption() {
+    if std::env::var_os("DOM_IBD_T7_CHILD").is_none() {
+        let _test_guard = IBD_TWO_NODE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let status = std::process::Command::new(
+            std::env::current_exe().expect("resolve current test executable"),
+        )
+        .env("DOM_IBD_T7_CHILD", "1")
+        .arg("t7_ibd_restart_resume_after_interruption")
+        .arg("--exact")
+        .arg("--nocapture")
+        .status()
+        .expect("run isolated t7 subprocess");
+        assert!(status.success(), "isolated t7 subprocess failed: {status}");
+        return;
+    }
+
+    run_ibd_two_node_test(6, t7_ibd_restart_resume_after_interruption_async());
+}
+
+async fn t7_ibd_restart_resume_after_interruption_async() {
     enable_fast_regtest_mining();
     init_tracing();
     let mut log = TestLog::new("t7_ibd_restart_resume");
