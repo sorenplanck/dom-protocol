@@ -336,8 +336,8 @@ impl TxSink for RpcChainSource {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::mpsc;
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::sync::{mpsc, Arc, Mutex};
 
     /// A minimal blocking mock HTTP server. For each connection it reads the
     /// request line, parses `from`/`to`, and writes whatever the handler returns
@@ -357,9 +357,7 @@ mod tests {
             }
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    let mut buf = [0u8; 2048];
-                    let n = stream.read(&mut buf).unwrap_or(0);
-                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let req = read_http_request(&mut stream);
                     let (from, to) = parse_from_to(&req);
                     let (status, body) = handler(from, to);
                     let reason = if status == 200 {
@@ -370,11 +368,17 @@ mod tests {
                         "Internal Server Error"
                     };
                     let resp = format!(
-                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     );
-                    let _ = stream.write_all(resp.as_bytes());
-                    let _ = stream.flush();
+                    stream
+                        .write_all(resp.as_bytes())
+                        .expect("mock rpc writes response headers");
+                    stream
+                        .write_all(body.as_bytes())
+                        .expect("mock rpc writes response body");
+                    stream.flush().expect("mock rpc flushes response");
+                    let _ = stream.shutdown(Shutdown::Write);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(5));
@@ -383,6 +387,45 @@ mod tests {
             }
         });
         (format!("http://{addr}"), tx)
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set mock rpc read timeout");
+        let mut request = Vec::with_capacity(1024);
+        let mut buf = [0u8; 512];
+        let header_end = loop {
+            let n = stream.read(&mut buf).expect("mock rpc reads request");
+            assert_ne!(n, 0, "client closed before completing request headers");
+            request.extend_from_slice(&buf[..n]);
+            if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+            assert!(
+                request.len() <= 16 * 1024,
+                "mock rpc request headers exceeded 16 KiB"
+            );
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_len = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        let total_len = header_end
+            .checked_add(content_len)
+            .expect("mock rpc request length overflow");
+        while request.len() < total_len {
+            let n = stream.read(&mut buf).expect("mock rpc reads request body");
+            assert_ne!(n, 0, "client closed before completing request body");
+            request.extend_from_slice(&buf[..n]);
+        }
+        String::from_utf8_lossy(&request).into_owned()
     }
 
     fn parse_from_to(req: &str) -> (u64, u64) {
@@ -517,14 +560,23 @@ mod tests {
     fn scan_for_restore_carries_fees_and_pages() {
         // Tip 1500, cap 1000 → the restore scan must page twice and preserve the
         // per-block `fees` (which the reconciler's ScanBlock drops) verbatim.
-        let (base, stop) = spawn_mock(|from, to| scan_body_with_fees(from, to, 1500, 1000));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&requests);
+        let (base, stop) = spawn_mock(move |from, to| {
+            seen.lock().unwrap().push((from, to));
+            scan_body_with_fees(from, to, 1500, 1000)
+        });
         let src = source(&base);
         let blocks = src.scan_for_restore(0, 1500).unwrap();
+        assert_eq!(*requests.lock().unwrap(), vec![(0, 1500), (1000, 1500)]);
         assert_eq!(blocks.len(), 1501);
         assert_eq!(blocks.first().unwrap().height, 0);
+        assert_eq!(blocks[999].height, 999);
+        assert_eq!(blocks[1000].height, 1000);
         assert_eq!(blocks.last().unwrap().height, 1500);
         // The fee total survived the wire → RestoreBlock mapping.
         assert_eq!(blocks[3].total_fees_noms, 300);
+        assert_eq!(blocks[1000].total_fees_noms, 100_000);
         assert_eq!(blocks.last().unwrap().total_fees_noms, 150_000);
         let _ = stop.send(());
     }
