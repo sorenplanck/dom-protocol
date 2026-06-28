@@ -36,6 +36,10 @@ fn test_genesis() -> Hash256 {
     Hash256::from_bytes([0x42u8; 32])
 }
 
+fn test_chain_id() -> [u8; 32] {
+    *dom_consensus::derive_chain_id(Network::Mainnet.magic(), &test_genesis()).as_bytes()
+}
+
 fn make_output(value: u64, height: u64, is_coinbase: bool) -> OwnedOutput {
     let bf = BlindingFactor::random();
     let commitment = Commitment::commit(value, &bf);
@@ -59,7 +63,8 @@ fn build_test_spend(wallet: &mut Wallet) -> Transaction {
 fn replay_records(
     walletdir: &std::path::Path,
 ) -> std::collections::HashMap<[u8; 32], dom_wallet::TxRecord> {
-    let j = TxJournal::open(walletdir).expect("open journal");
+    let j = TxJournal::open_authenticated(walletdir, "pw", &test_chain_id())
+        .expect("open authenticated journal");
     j.replay().expect("replay")
 }
 
@@ -283,7 +288,7 @@ fn reconcile_on_open_cleans_up_terminal_pending() {
     // Manually append a Confirmed event to the journal — simulating a
     // crash where the journal got the terminal event but the wallet
     // never saved its post-confirmation state.
-    let j = TxJournal::open(&dir).unwrap();
+    let j = TxJournal::open_authenticated(&dir, "pw", &test_chain_id()).unwrap();
     j.append(&JournalEntry {
         timestamp: 1234,
         tx_hash,
@@ -334,7 +339,7 @@ fn reconcile_on_open_reinstates_lost_pending() {
     // input commitment matches a wallet-owned output.
     let fake_tx_hash = [0xABu8; 32];
     let tx_bytes = vec![0xAA, 0xBB, 0xCC];
-    let j = TxJournal::open(&dir).unwrap();
+    let j = TxJournal::open_authenticated(&dir, "pw", &test_chain_id()).unwrap();
     j.append(&JournalEntry {
         timestamp: 1,
         tx_hash: fake_tx_hash,
@@ -386,7 +391,7 @@ fn reconcile_on_open_skips_reinstate_when_inputs_missing() {
     // Journal references an input commitment the wallet has no record of.
     let fake_tx_hash = [0xCDu8; 32];
     let phantom_input = [0xEEu8; 33];
-    let j = TxJournal::open(&dir).unwrap();
+    let j = TxJournal::open_authenticated(&dir, "pw", &test_chain_id()).unwrap();
     j.append(&JournalEntry {
         timestamp: 1,
         tx_hash: fake_tx_hash,

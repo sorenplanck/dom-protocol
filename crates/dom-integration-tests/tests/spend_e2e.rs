@@ -5,25 +5,11 @@
 //! includes the transaction in the next block it mines. Asserts at every
 //! stage; runs on every CI invocation.
 //!
-//! Resource profile: `Network::Regtest` mines with the cache-only
-//! RandomX VM (~256 MB per node) and `REGTEST_COINBASE_MATURITY = 1`,
-//! so two miners + a spend pipeline fit comfortably under 1 GB RAM and
-//! complete in well under two minutes on a developer laptop. Consensus
-//! validation is *unchanged* from Mainnet/Testnet — only the PoW target
-//! (trivial), coinbase maturity (1 block), and VM mode (no full dataset)
-//! differ.
-//
-// ENV-BLOCKED-WSL-2026-05-24: spend_e2e e demais integration tests
-// multi-nó dependem de mineração RandomX cache-only + propagação P2P que
-// WSL2 com 4-5GB RAM e CPU compartilhada não consegue sustentar em janela
-// de tempo dos testes. Mining de 2 blocos no Regtest variou de ~10 min
-// (run 1) a >40 min (run 3) com mesmas constantes, padrão consistente
-// com gargalo de hash-rate (RandomX cache-only ~100 H/s single-thread vs
-// target 2^-16). Funciona em VPS dedicado ou máquina física com >=8GB
-// RAM dedicada. Tracking: rodar em ambiente potente quando disponível.
-// Bugs reais já corrigidos antes dessa classificação:
-//   - 65c6a2d: REGTEST_TRIVIAL_TARGET = MAX_TARGET_BYTES
-//   - a0dfbd2: stop overwriting chain.genesis_hash post-genesis
+//! Resource profile: `Network::Regtest` uses deterministic FastDevOnly PoW
+//! and `REGTEST_COINBASE_MATURITY = 1`, so this covers the real wallet/RPC/P2P
+//! path without RandomX cache churn or long nonce searches. Consensus
+//! validation is unchanged from Mainnet/Testnet; only the regtest mining mode
+//! and maturity window are shortened for a stable CI-sized proof.
 
 use dom_core::Hash256;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
@@ -47,38 +33,50 @@ fn create_wallet_dir(path: &str, password: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "env-blocked-wsl — needs VPS or dedicated 8GB+ machine"]
 async fn test_spend_e2e_cross_node_propagation() {
     init_tracing();
 
     // Deterministic Bearer token so the HTTP client knows it without poking files.
     std::env::set_var("DOM_RPC_TOKEN", "spend-e2e-token");
 
-    // ── Node A (miner + wallet + RPC) ────────────────────────────────────
-    let mut config_a = test_config("spend-e2e-a", 43380, false);
-    config_a.wallet_path = Some("/tmp/dom-spend-e2e-wallet-a.dom".into());
-    config_a.wallet_password = Some("pw-a".into());
-    config_a.rpc_listen_addr = Some("127.0.0.1:43480".into());
+    let p2p_a = free_local_port();
+    let p2p_b = free_local_port();
+    let rpc_a = free_local_port();
+    let p2p_a_addr = format!("127.0.0.1:{p2p_a}");
+    let p2p_b_addr = format!("127.0.0.1:{p2p_b}");
+    let rpc_a_addr = format!("127.0.0.1:{rpc_a}");
+    let wallet_path = std::env::temp_dir().join(format!(
+        "dom-spend-e2e-wallet-a-{}-{}.dom",
+        std::process::id(),
+        rpc_a
+    ));
 
-    create_wallet_dir("/tmp/dom-spend-e2e-wallet-a.dom", "pw-a");
-    let _ = std::fs::remove_dir_all("/tmp/dom-test-spend-e2e-a");
+    // ── Node A (miner + wallet + RPC) ────────────────────────────────────
+    let mut config_a = test_config("spend-e2e-a", p2p_a, false);
+    config_a.wallet_path = Some(wallet_path.to_string_lossy().into_owned());
+    config_a.wallet_password = Some("pw-a".into());
+    config_a.rpc_listen_addr = Some(rpc_a_addr.clone());
+
+    create_wallet_dir(&wallet_path.to_string_lossy(), "pw-a");
 
     // ── Node B (peer that should receive the tx via Dandelion fluff) ──────
-    let mut config_b = test_config("spend-e2e-b", 43381, false);
-    config_b.seed_peers = vec!["127.0.0.1:43380".into()];
-    let _ = std::fs::remove_dir_all("/tmp/dom-test-spend-e2e-b");
+    let mut config_b = test_config("spend-e2e-b", p2p_b, false);
+    config_b.seed_peers = vec![p2p_a_addr.clone()];
 
     let node_a = spawn_node(config_a).await;
     let node_b = spawn_node(config_b).await;
 
     tokio::spawn(node_a.clone().run());
-    wait_for_listener_ready("127.0.0.1:43380", 10)
+    wait_for_listener_ready(&p2p_a_addr, 10)
         .await
         .expect("A P2P listener");
-    wait_for_listener_ready("127.0.0.1:43480", 10)
+    wait_for_listener_ready(&rpc_a_addr, 10)
         .await
         .expect("A RPC listener");
     tokio::spawn(node_b.clone().run());
+    wait_for_listener_ready(&p2p_b_addr, 10)
+        .await
+        .expect("B P2P listener");
 
     wait_for_peer_count(&node_b, 1, Duration::from_secs(35))
         .await
@@ -126,8 +124,9 @@ async fn test_spend_e2e_cross_node_propagation() {
     });
 
     let client = reqwest::Client::builder().build().expect("reqwest client");
+    let wallet_spend_url = format!("http://{rpc_a_addr}/wallet/spend");
     let resp = client
-        .post("http://127.0.0.1:43480/wallet/spend")
+        .post(wallet_spend_url)
         .bearer_auth("spend-e2e-token")
         .json(&body)
         .send()
@@ -201,4 +200,6 @@ async fn test_spend_e2e_cross_node_propagation() {
         post_b.tip_height.0,
         tx_hash_hex
     );
+
+    let _ = std::fs::remove_dir_all(&wallet_path);
 }

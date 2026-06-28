@@ -31,6 +31,7 @@
 //!    re-reserve), even though the journal got the Reorged event
 //!    first.
 
+use dom_consensus::derive_chain_id;
 use dom_consensus::transaction::Transaction;
 use dom_core::Hash256;
 use dom_crypto::pedersen::Commitment;
@@ -42,6 +43,10 @@ use tempfile::TempDir;
 
 fn test_genesis() -> Hash256 {
     Hash256::from_bytes([0x42u8; 32])
+}
+
+fn test_chain_id() -> [u8; 32] {
+    *derive_chain_id(Network::Mainnet.magic(), &test_genesis()).as_bytes()
 }
 
 fn make_output(value: u64, height: u64, is_coinbase: bool) -> OwnedOutput {
@@ -76,7 +81,7 @@ fn build_test_spend(wallet: &mut Wallet) -> Transaction {
 fn replay_records(
     walletdir: &std::path::Path,
 ) -> std::collections::HashMap<[u8; 32], dom_wallet::TxRecord> {
-    let j = TxJournal::open(walletdir).expect("open journal");
+    let j = TxJournal::open_authenticated(walletdir, "pw", &test_chain_id()).expect("open journal");
     j.replay().expect("replay")
 }
 
@@ -254,7 +259,7 @@ fn restart_during_rollback_heals_via_journal_replay() {
 
     // Simulate crash mid-rollback: append the Reorged entry
     // manually but leave the encrypted state untouched.
-    let j = TxJournal::open(&dir).unwrap();
+    let j = TxJournal::open_authenticated(&dir, "pw", &test_chain_id()).unwrap();
     j.append(&JournalEntry {
         timestamp: 1,
         tx_hash,
@@ -476,7 +481,7 @@ fn interrupted_persistence_during_rollback_heals_on_reopen() {
 
     // Append Reorged manually — this is the *only* on-disk change
     // before the simulated crash.
-    let j = TxJournal::open(&dir).unwrap();
+    let j = TxJournal::open_authenticated(&dir, "pw", &test_chain_id()).unwrap();
     j.append(&JournalEntry {
         timestamp: 2,
         tx_hash,

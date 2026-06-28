@@ -18,8 +18,9 @@
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::BlindingFactor;
 use dom_serialization::DomSerialize;
-use dom_wallet::{Network, OwnedOutput, WalletDir, JOURNAL_LOG_NAME, WALLET_DAT_NAME};
-use std::io::Write;
+use dom_wallet::{
+    JournalEntry, Network, OwnedOutput, TxJournal, TxJournalEvent, WalletDir, WALLET_DAT_NAME,
+};
 use tempfile::TempDir;
 
 fn test_genesis() -> dom_core::Hash256 {
@@ -46,6 +47,10 @@ fn fresh_recipient(amount: u64) -> (Commitment, BlindingFactor) {
 
 fn tx_hash(tx: &dom_consensus::Transaction) -> [u8; 32] {
     *dom_crypto::blake2b_256(&tx.to_bytes().expect("tx bytes")).as_bytes()
+}
+
+fn test_chain_id() -> [u8; 32] {
+    *dom_consensus::derive_chain_id(Network::Mainnet.magic(), &test_genesis()).as_bytes()
 }
 
 /// End-to-end: build (with change) → confirm → change is spendable.
@@ -271,29 +276,23 @@ fn legacy_built_journal_without_change_field_replays() {
     wd.wallet().save().unwrap();
     drop(wd);
 
-    let tx_hash_hex = hex::encode([0xABu8; 32]);
-    let input_hex = hex::encode(input_commitment);
-    let legacy_line = serde_json::json!({
-        "timestamp": 1u64,
-        "tx_hash": tx_hash_hex,
-        "event": {
-            "type": "built",
-            "inputs": [input_hex],
-            "tx_hex": null,
-            "output_count": 1u32,
-            "fee_noms": 42u64
-        }
-    });
-    let mut journal = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join(JOURNAL_LOG_NAME))
+    let tx_hash = [0xABu8; 32];
+    let journal = TxJournal::open_authenticated(&dir, "pw", &test_chain_id()).unwrap();
+    journal
+        .append(&JournalEntry {
+            timestamp: 1,
+            tx_hash,
+            event: TxJournalEvent::Built {
+                inputs: vec![input_commitment],
+                tx_hex: None,
+                output_count: 1,
+                fee_noms: 42,
+                change: None,
+            },
+        })
         .unwrap();
-    writeln!(journal, "{legacy_line}").unwrap();
-    journal.sync_all().unwrap();
 
     let reopened = WalletDir::open(&dir, "pw").expect("legacy Built without change replays");
-    let tx_hash = [0xABu8; 32];
     assert!(reopened.wallet().has_pending_tx(&tx_hash));
     let input = reopened
         .wallet()

@@ -44,7 +44,7 @@ pub const BACKUP_VERSION: u16 = 1;
 
 /// Backup payload schema version; an unknown value is rejected, gating future
 /// growth of [`BackupEnvelopeV2`].
-pub const BACKUP_SCHEMA: u16 = 2;
+pub const BACKUP_SCHEMA: u16 = 3;
 
 /// Errors from exporting / importing a backup.
 #[derive(Debug, Error)]
@@ -61,12 +61,18 @@ pub enum BackupError {
     /// The decrypted output set violated a store invariant.
     #[error("invalid backup contents: {0}")]
     Store(#[from] StoreError),
+    /// The backup belongs to a different chain than the destination wallet.
+    #[error("backup chain id does not match wallet chain id")]
+    ChainMismatch,
 }
 
 /// The serialized backup payload. Versioned independently of the envelope.
 #[derive(Serialize, Deserialize)]
 struct BackupEnvelopeV2 {
     schema_version: u16,
+    /// Chain identifier of the wallet that produced the backup.
+    #[serde(default)]
+    chain_id: [u8; 32],
     /// Informational unix timestamp of the export (caller-supplied; kept as data
     /// so this module stays pure / deterministically testable).
     exported_at: u64,
@@ -82,10 +88,12 @@ pub fn export_backup(
     store: &OutputStore,
     path: &Path,
     passphrase: &str,
+    chain_id: [u8; 32],
     exported_at: u64,
 ) -> Result<(), BackupError> {
     let payload = BackupEnvelopeV2 {
         schema_version: BACKUP_SCHEMA,
+        chain_id,
         exported_at,
         outputs: store.iter().cloned().collect(),
     };
@@ -106,12 +114,16 @@ pub fn import_backup(
     store: &mut OutputStore,
     path: &Path,
     passphrase: &str,
+    expected_chain_id: [u8; 32],
 ) -> Result<MergeReport, BackupError> {
     let payload: BackupEnvelopeV2 =
         dom_wallet_crypto::load_envelope(path, BACKUP_MAGIC, BACKUP_VERSION, passphrase)?;
 
     if payload.schema_version != BACKUP_SCHEMA {
         return Err(BackupError::UnsupportedSchema(payload.schema_version));
+    }
+    if payload.chain_id != expected_chain_id {
+        return Err(BackupError::ChainMismatch);
     }
 
     Ok(store.merge_backup(payload.outputs))
@@ -121,6 +133,8 @@ pub fn import_backup(
 mod tests {
     use super::*;
     use crate::types::{BlockRef, OutputOrigin, OutputStatus};
+
+    const CHAIN_ID: [u8; 32] = [0xA5; 32];
 
     fn confirmed_output(tag: u8, value: u64, origin: OutputOrigin, h: u64) -> StoredOutput {
         let mut commitment = [0u8; 33];
@@ -165,10 +179,10 @@ mod tests {
         source
             .insert(unconfirmed_output(3, 400, OutputOrigin::Change))
             .unwrap();
-        export_backup(&source, &path, "bakpass", 1_700_000_000).unwrap();
+        export_backup(&source, &path, "bakpass", CHAIN_ID, 1_700_000_000).unwrap();
 
         let mut restored = OutputStore::new();
-        let report = import_backup(&mut restored, &path, "bakpass").unwrap();
+        let report = import_backup(&mut restored, &path, "bakpass", CHAIN_ID).unwrap();
         assert_eq!(report.inserted, 3);
         assert_eq!(report.advanced, 0);
         assert_eq!(report.kept, 0);
@@ -196,7 +210,7 @@ mod tests {
         backup_src
             .insert(confirmed_output(2, 500, OutputOrigin::ReceiveSlate, 2))
             .unwrap();
-        export_backup(&backup_src, &path, "pw", 1).unwrap();
+        export_backup(&backup_src, &path, "pw", CHAIN_ID, 1).unwrap();
 
         // Current store already has output 1 (same status) and a local output 9
         // NOT in the backup — which must be preserved.
@@ -208,7 +222,7 @@ mod tests {
             .insert(unconfirmed_output(9, 42, OutputOrigin::Change))
             .unwrap();
 
-        let report = import_backup(&mut store, &path, "pw").unwrap();
+        let report = import_backup(&mut store, &path, "pw", CHAIN_ID).unwrap();
         assert_eq!(report.inserted, 1, "only the missing output 2 is inserted");
         assert_eq!(report.kept, 1, "output 1 already present, same status");
         assert_eq!(store.len(), 3, "1 (kept) + 9 (preserved) + 2 (recovered)");
@@ -229,14 +243,14 @@ mod tests {
         backup_src
             .insert(confirmed_output(1, 1000, OutputOrigin::Coinbase, 1))
             .unwrap();
-        export_backup(&backup_src, &path, "pw", 1).unwrap();
+        export_backup(&backup_src, &path, "pw", CHAIN_ID, 1).unwrap();
 
         let mut store = OutputStore::new();
         let mut spent = confirmed_output(1, 1000, OutputOrigin::Coinbase, 1);
         spent.mark_spent(2000).unwrap();
         store.insert(spent).unwrap();
 
-        let report = import_backup(&mut store, &path, "pw").unwrap();
+        let report = import_backup(&mut store, &path, "pw", CHAIN_ID).unwrap();
         assert_eq!(report.kept, 1);
         assert_eq!(report.advanced, 0);
         assert_eq!(
@@ -256,14 +270,14 @@ mod tests {
         backup_src
             .insert(confirmed_output(1, 1000, OutputOrigin::Coinbase, 5))
             .unwrap();
-        export_backup(&backup_src, &path, "pw", 1).unwrap();
+        export_backup(&backup_src, &path, "pw", CHAIN_ID, 1).unwrap();
 
         let mut store = OutputStore::new();
         store
             .insert(unconfirmed_output(1, 1000, OutputOrigin::Coinbase))
             .unwrap();
 
-        let report = import_backup(&mut store, &path, "pw").unwrap();
+        let report = import_backup(&mut store, &path, "pw", CHAIN_ID).unwrap();
         assert_eq!(report.advanced, 1);
         let merged = store.get(&key(1)).unwrap();
         assert_eq!(merged.status, OutputStatus::Confirmed);
@@ -277,10 +291,10 @@ mod tests {
         let mut src = OutputStore::new();
         src.insert(unconfirmed_output(1, 1, OutputOrigin::Change))
             .unwrap();
-        export_backup(&src, &path, "right", 1).unwrap();
+        export_backup(&src, &path, "right", CHAIN_ID, 1).unwrap();
 
         let mut store = OutputStore::new();
-        let err = import_backup(&mut store, &path, "wrong").unwrap_err();
+        let err = import_backup(&mut store, &path, "wrong", CHAIN_ID).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -304,7 +318,7 @@ mod tests {
         crate::persist::save_wallet_state(&state, &path, "pw").unwrap();
 
         let mut store = OutputStore::new();
-        let err = import_backup(&mut store, &path, "pw").unwrap_err();
+        let err = import_backup(&mut store, &path, "pw", CHAIN_ID).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -324,6 +338,7 @@ mod tests {
             1,
             &BackupEnvelopeV2 {
                 schema_version: BACKUP_SCHEMA,
+                chain_id: CHAIN_ID,
                 exported_at: 0,
                 outputs: vec![],
             },
@@ -331,7 +346,7 @@ mod tests {
         )
         .unwrap();
         let mut store = OutputStore::new();
-        let err = import_backup(&mut store, &path, "pw").unwrap_err();
+        let err = import_backup(&mut store, &path, "pw", CHAIN_ID).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -349,7 +364,7 @@ mod tests {
         let mut src = OutputStore::new();
         src.insert(unconfirmed_output(1, 1, OutputOrigin::Change))
             .unwrap();
-        export_backup(&src, &path, "pw", 1).unwrap();
+        export_backup(&src, &path, "pw", CHAIN_ID, 1).unwrap();
 
         let err = crate::persist::load_wallet_state(&path, "pw").unwrap_err();
         assert!(
@@ -371,6 +386,7 @@ mod tests {
             BACKUP_VERSION,
             &BackupEnvelopeV2 {
                 schema_version: BACKUP_SCHEMA + 9,
+                chain_id: CHAIN_ID,
                 exported_at: 0,
                 outputs: vec![],
             },
@@ -378,7 +394,7 @@ mod tests {
         )
         .unwrap();
         let mut store = OutputStore::new();
-        let err = import_backup(&mut store, &path, "pw").unwrap_err();
+        let err = import_backup(&mut store, &path, "pw", CHAIN_ID).unwrap_err();
         assert!(
             matches!(err, BackupError::UnsupportedSchema(v) if v == BACKUP_SCHEMA + 9),
             "got {err:?}"

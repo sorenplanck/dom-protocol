@@ -1206,8 +1206,10 @@ mod tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 1, 1, 4)), 33369);
         let key = addr.to_string();
         assert_eq!(mgr.add_pending_ban_score(&key, 100), 100);
-        mgr.pending_penalties.get_mut(&key).unwrap().last_updated =
-            Instant::now() - Duration::from_secs(PENDING_PENALTY_TTL_SECS + 1);
+        mgr.pending_penalties
+            .get_mut(&reputation_key(&key))
+            .unwrap()
+            .last_updated = Instant::now() - Duration::from_secs(PENDING_PENALTY_TTL_SECS + 1);
 
         assert_eq!(mgr.pending_ban_score(&key), 0);
         mgr.reserve_inbound(addr)
