@@ -60,7 +60,10 @@ pub mod tx_sink;
 pub mod types;
 pub mod wallet_state;
 
-pub use backup::{export_backup, import_backup, BackupError, BACKUP_MAGIC};
+pub use backup::{
+    export_backup, export_full_backup, import_backup, import_full_backup, BackupError, BackupKind,
+    BACKUP_MAGIC,
+};
 pub use keychain::{
     restore_coinbase_from_seed, KeychainDeriver, KeychainError, ReceiveRequest, RestoreBlock,
 };
