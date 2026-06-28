@@ -5218,13 +5218,17 @@ mod tests {
         );
     }
 
+    fn spawn_node_run(node: Arc<DomNode>) -> JoinHandle<Result<(), DomError>> {
+        tokio::spawn(Box::pin(node.run()))
+    }
+
     #[tokio::test]
     async fn run_registers_listener_connector_future_queue_and_dandelion_tasks() {
         let dir = fresh_test_dir("runtime-registers-core-tasks");
         let mut config = regtest_node_config(&dir);
         config.p2p_listen_addr = format!("127.0.0.1:{}", free_local_port());
         let node = Arc::new(init_test_node(config));
-        let run = tokio::spawn(node.clone().run());
+        let run = spawn_node_run(node.clone());
 
         wait_for_core_runtime(&node).await;
         shutdown_and_join_run(&node, run, "core runtime").await;
@@ -5238,7 +5242,7 @@ mod tests {
         let mut config_off = regtest_node_config(&dir_off);
         config_off.p2p_listen_addr = format!("127.0.0.1:{}", free_local_port());
         let node_off = Arc::new(init_test_node(config_off));
-        let run_off = tokio::spawn(node_off.clone().run());
+        let run_off = spawn_node_run(node_off.clone());
         wait_for_supervisor(&node_off, |kinds, _, _, _| {
             !kinds.contains(&TaskKind::Miner)
                 && kinds.contains(&TaskKind::Listener)
@@ -5255,7 +5259,7 @@ mod tests {
         config_on.p2p_listen_addr = format!("127.0.0.1:{}", free_local_port());
         config_on.mine = true;
         let node_on = Arc::new(init_test_node(config_on));
-        let run_on = tokio::spawn(node_on.clone().run());
+        let run_on = spawn_node_run(node_on.clone());
         wait_for_supervisor(&node_on, |kinds, _, _, _| {
             kinds.contains(&TaskKind::Miner)
                 && kinds.contains(&TaskKind::Listener)
@@ -5274,7 +5278,7 @@ mod tests {
         let mut config = regtest_node_config(&dir);
         config.p2p_listen_addr = format!("127.0.0.1:{}", free_local_port());
         let node = Arc::new(init_test_node(config));
-        let run = tokio::spawn(node.clone().run());
+        let run = spawn_node_run(node.clone());
 
         wait_for_supervisor(&node, |_, _, status, shutdown| {
             status == SupervisorStatus::Running && !shutdown
@@ -5296,7 +5300,7 @@ mod tests {
         config.p2p_listen_addr = format!("127.0.0.1:{}", free_local_port());
         let listen_addr = config.p2p_listen_addr.clone();
         let node = Arc::new(init_test_node(config));
-        let run = tokio::spawn(node.clone().run());
+        let run = spawn_node_run(node.clone());
 
         let stream = connect_when_listener_accepts(&listen_addr).await;
         wait_for_relay_count(&node, 1).await;
@@ -7307,8 +7311,7 @@ mod tests {
         config.rpc_listen_addr = None;
         config.mine = false;
         let node = Arc::new(init_test_node(config));
-        let running = node.clone();
-        let handle = tokio::spawn(async move { running.run().await });
+        let handle = spawn_node_run(node.clone());
 
         tokio::time::timeout(RUNTIME_TEST_CONVERGENCE_TIMEOUT, async {
             loop {

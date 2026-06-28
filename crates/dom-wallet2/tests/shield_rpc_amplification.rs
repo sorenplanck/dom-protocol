@@ -14,38 +14,53 @@
 
 use dom_wallet2::{ChainSource, RpcChainSource};
 use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::sync::mpsc;
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// Minimal mock node returning a fixed `(status, body)` for any request.
-fn spawn_mock(status: u16, body: String) -> (String, mpsc::Sender<()>) {
+fn spawn_mock(status: u16, body: String) -> (String, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
-    let (tx, rx) = mpsc::channel::<()>();
-    std::thread::spawn(move || loop {
-        if rx.try_recv().is_ok() {
-            break;
-        }
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf);
-                let resp = format!(
-                    "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(resp.as_bytes());
-                let _ = stream.flush();
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(_) => break,
-        }
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("mock node accepts request");
+        read_http_headers(&mut stream);
+        let headers = format!(
+            "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(headers.as_bytes())
+            .expect("mock node writes response headers");
+        stream
+            .write_all(body.as_bytes())
+            .expect("mock node writes full response body");
+        stream.flush().expect("mock node flushes response");
+        stream
+            .shutdown(Shutdown::Write)
+            .expect("mock node shuts down write half");
     });
-    (format!("http://{addr}"), tx)
+    (format!("http://{addr}"), handle)
+}
+
+fn read_http_headers(stream: &mut TcpStream) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set mock node read timeout");
+    let mut request = Vec::with_capacity(1024);
+    let mut buf = [0u8; 512];
+    loop {
+        let n = stream.read(&mut buf).expect("mock node reads request");
+        assert_ne!(n, 0, "client closed before completing request headers");
+        request.extend_from_slice(&buf[..n]);
+        if request.windows(4).any(|w| w == b"\r\n\r\n") {
+            return;
+        }
+        assert!(
+            request.len() <= 16 * 1024,
+            "mock node request headers exceeded 16 KiB"
+        );
+    }
 }
 
 #[test]
@@ -73,14 +88,14 @@ fn rpc_buffers_large_node_body_without_cap() {
     );
     let approx_mb = body.len() as f64 / 1_048_576.0;
 
-    let (base, stop) = spawn_mock(200, body);
+    let (base, server) = spawn_mock(200, body);
     let src = RpcChainSource::new(&base, Duration::from_secs(30)).unwrap();
 
     // The client buffers + parses the whole body. It must not panic; that it
     // SUCCEEDS on a multi-MB body from one small request is the amplification
     // finding (no client-side response size cap).
     let res = src.scan_range(0, (n_blocks - 1) as u64);
-    let _ = stop.send(());
+    server.join().expect("mock node thread exits cleanly");
 
     assert!(
         res.is_ok(),
