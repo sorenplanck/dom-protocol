@@ -32,14 +32,21 @@ allow = [
     "CDLA-Permissive-2.0",
     "ISC",
     "LGPL-2.1-or-later",
-    "LicenseRef-UFL-1.0",
     "MIT",
     "MPL-2.0",
     "OFL-1.1",
+    "Ubuntu-font-1.0",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
 ]
+# `Ubuntu-font-1.0` is the SPDX id epaint_default_fonts (egui/eframe ->
+# dom-wallet-app) declares for its bundled fonts. It replaces the prior
+# `LicenseRef-UFL-1.0`, which was the wrong identifier (no crate matched it, so
+# the real `Ubuntu-font-1.0` was rejected). fuchsia-cprng 0.1.1 remains a
+# non-failing `no-license-field` warning: it ships a BSD-3-Clause LICENSE file
+# but no SPDX field, and enters the tree ONLY target-gated (fuchsia/cloudabi) via
+# rand 0.5.6 -> grin_secp256k1zkp 0.7.15, so it never compiles on the host.
 
 [bans]
 # F1 targets git-source hygiene + advisories + licenses, not version dedup.
