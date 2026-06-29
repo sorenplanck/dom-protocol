@@ -81,6 +81,19 @@ export const api = {
     invoke("save_text_file", { title, defaultName, contents }),
   readTextFile: (title) => invoke("read_text_file", { title }),
 
+  // Encrypted full-backup (.dombak). Like the M4 file commands above, the backend
+  // opens the native dialog itself, so the renderer never handles a filesystem
+  // path. The passphrase / new password cross IPC only as command arguments and
+  // are never logged. `exportBackup` resolves to true if saved / false if the
+  // user cancelled the save dialog. `importBackup` restores NON-destructively
+  // into a brand-new vault and resolves to the ImportedSummary
+  // ({ vault_path, network, outputs, pending_slates, last_reconciled_tip }) or
+  // null if the user cancelled either dialog. `targetNetwork` is one of
+  // "mainnet" | "testnet" | "regtest" (the backend validates it).
+  exportBackup: (passphrase) => invoke("export_backup_cmd", { passphrase }),
+  importBackup: (passphrase, newPassword, targetNetwork) =>
+    invoke("import_backup_cmd", { passphrase, newPassword, targetNetwork }),
+
   nodeStart: (settings) => invoke("node_start", { settings }),
   // Start when stopped, restart when running on DIFFERENT settings, no-op when
   // already running on these settings. Used on wallet open/switch so the node

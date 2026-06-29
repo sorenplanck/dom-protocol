@@ -77,8 +77,9 @@ export function renderLogin(go, onReady) {
         <div class="btn-row"><button class="btn ghost w-full" id="bLocate">Locate existing wallet</button></div>
         <div class="btn-row"><button class="btn ghost w-full" id="bCreate">Create wallet</button></div>
         <div class="btn-row"><button class="btn ghost w-full" id="bRestore">Restore wallet</button></div>
+        <div class="btn-row"><button class="btn ghost w-full" id="bRestoreBackup">Restore from backup file</button></div>
       </div>
-      <div class="warn-box">The wallet name only remembers where your encrypted wallet is stored. Your recovery phrase is the real backup.</div>
+      <div class="warn-box">The wallet name only remembers where your encrypted wallet is stored. Your recovery phrase recovers mined coins; received coins and change need the encrypted backup file — export one from the Backup screen. Keep both.</div>
     </div>`);
 
   // Populate the name suggestions from the non-sensitive registry list.
@@ -118,6 +119,7 @@ export function renderLogin(go, onReady) {
   node.querySelector("#bLocate").onclick = () => go("open");
   node.querySelector("#bCreate").onclick = () => go("create");
   node.querySelector("#bRestore").onclick = () => go("restore");
+  node.querySelector("#bRestoreBackup").onclick = () => go("restoreBackup");
   return node;
 }
 
@@ -130,12 +132,15 @@ export function renderWelcome(go) {
       <div class="card">
         <button class="btn w-full" id="bCreate">Create new wallet</button>
         <div class="btn-row"><button class="btn ghost w-full" id="bRestore">Restore from recovery phrase</button></div>
+        <div class="btn-row"><button class="btn ghost w-full" id="bRestoreBackup">Restore from backup file (.dombak)</button></div>
+        <p class="muted mt4">Two ways to recover: your <strong>recovery phrase</strong> brings back mined coins; a <strong>backup file</strong> brings back everything — including change and received funds.</p>
         <div class="btn-row"><button class="btn ghost w-full" id="bOpen">Open existing wallet</button></div>
       </div>
       <p class="muted tc">Privacy by design · Sovereign by choice</p>
     </div>`);
   node.querySelector("#bCreate").onclick = () => go("create");
   node.querySelector("#bRestore").onclick = () => go("restore");
+  node.querySelector("#bRestoreBackup").onclick = () => go("restoreBackup");
   node.querySelector("#bOpen").onclick = () => go("open");
   return node;
 }
@@ -150,7 +155,7 @@ export function renderCreate(go, onReady) {
   const node = el(`
     <div>
       <h1>Create wallet</h1>
-      <p class="sub">A new 24-word recovery phrase will be generated. Write it down — it is the only way to recover your funds.</p>
+      <p class="sub">A new 24-word recovery phrase will be generated. Write it down — it recovers your mined coins. Received coins and change also need an encrypted backup you can export later from the Backup screen. Keep both for full recovery.</p>
       <div class="card">
         <label>Wallet name</label>
         <input type="text" id="name" placeholder="e.g. Carteira 1" autocomplete="off" spellcheck="false" />
@@ -294,7 +299,7 @@ export function renderRestore(go, onReady) {
       <div class="card">
         <label>Wallet name</label>
         <input type="text" id="name" placeholder="e.g. Carteira 1" autocomplete="off" spellcheck="false" />
-        <p class="muted mt4">A friendly name for login by name. Your recovery phrase is never saved to this name — it is the real backup.</p>
+        <p class="muted mt4">A friendly name for login by name. Your recovery phrase is never saved to this name. It recovers mined coins; received coins and change need the encrypted backup file — export one from the Backup screen. Keep both.</p>
         <label>Recovery phrase</label>
         <textarea id="phrase" placeholder="word1 word2 word3 ..."></textarea>
         <label>New password</label>
@@ -349,6 +354,102 @@ export function renderRestore(go, onReady) {
   return node;
 }
 
+// ── Onboarding: restore from an encrypted backup file (.dombak) ───────────────
+// The disaster path: with only the backup file + its passphrase, restore the
+// WHOLE wallet (incl. change/received funds the recovery phrase can't rebuild)
+// into a brand-new vault. Non-destructive: never overwrites an existing wallet.
+export function renderRestoreBackup(go, onReady) {
+  const node = el(`
+    <div>
+      <h1>Restore from backup file</h1>
+      <p class="sub">Recover your whole wallet from an encrypted <code>.dombak</code> backup — including change and received funds. You'll pick the backup file, then choose where to save the restored wallet.</p>
+      <div class="card">
+        <label>Backup passphrase</label>
+        <input type="password" id="bpass" placeholder="The passphrase you set when exporting the backup" autocomplete="off" />
+        <label>New password for the restored wallet</label>
+        <input type="password" id="pw" placeholder="Encrypts the restored wallet on disk" autocomplete="new-password" />
+        <label>Confirm new password</label>
+        <input type="password" id="pw2" placeholder="Type the new password again" autocomplete="new-password" />
+        <label>Network</label>
+        <select id="net">
+          <option value="testnet">Testnet</option>
+          <option value="mainnet">Mainnet</option>
+          <option value="regtest">Regtest (local dev)</option>
+        </select>
+        <p class="muted mt4">Choose the network this backup was created on. A mismatch is refused safely, without writing anything.</p>
+        <div class="btn-row">
+          <button class="btn ghost" id="back">Back</button>
+          <button class="btn" id="go">Choose backup &amp; restore…</button>
+        </div>
+        <div class="err-text" id="err"></div>
+        <p class="muted mt4" id="status"></p>
+      </div>
+    </div>`);
+
+  const netEl = node.querySelector("#net");
+  netEl.value = settings.current.network;
+  const bpassEl = node.querySelector("#bpass");
+  const pwEl = node.querySelector("#pw");
+  const pw2El = node.querySelector("#pw2");
+  const err = node.querySelector("#err");
+  const statusEl = node.querySelector("#status");
+
+  // Friendly, secret-free messages for the two backup-specific failures, falling
+  // back to the shared humanizeError (which also sanitizes any secret) otherwise.
+  const backupErrorText = (e) => {
+    const raw = String(e && e.message ? e.message : e ?? "");
+    if (/chain id does not match/i.test(raw)) {
+      return "This backup is for a different network. Select the network the backup was created on.";
+    }
+    if (/decryption failed/i.test(raw)) {
+      return "Incorrect backup passphrase.";
+    }
+    return humanizeError(e);
+  };
+
+  node.querySelector("#back").onclick = () => go("start");
+  node.querySelector("#go").onclick = async () => {
+    err.textContent = "";
+    statusEl.textContent = "";
+    const bpass = bpassEl.value;
+    const pw = pwEl.value;
+    const pw2 = pw2El.value;
+    // Validate BEFORE any call (these keep the fields so the user can fix them).
+    if (!bpass) { err.textContent = "Enter the backup passphrase."; return; }
+    if (pw.length < 8) { err.textContent = "Use at least 8 characters for the new password."; return; }
+    if (pw !== pw2) { err.textContent = "Passwords do not match."; return; }
+    const btn = node.querySelector("#go");
+    btn.disabled = true;
+    statusEl.textContent = "Pick the backup file, then choose where to save the restored wallet…";
+    try {
+      const summary = await api.importBackup(bpass, pw, netEl.value);
+      if (!summary) {
+        // The user cancelled the file picker or the save dialog — clean state,
+        // no spurious error, fields preserved.
+        statusEl.textContent = "";
+        btn.disabled = false;
+        return;
+      }
+      // Open the freshly restored vault with its new password, then align the
+      // node to the restored wallet's network so it starts on the right chain.
+      await api.walletOpen(summary.vault_path, pw, null, false);
+      settings.current = { ...settings.current, network: summary.network };
+      savePrefs(settings.current);
+      // Secrets already handed to the backend — scrub the inputs.
+      bpassEl.value = ""; pwEl.value = ""; pw2El.value = "";
+      toast(`Restored ${summary.outputs} output(s) on ${summary.network}`);
+      onReady();
+    } catch (e) {
+      // Keep the password fields so the user can correct a wrong passphrase or
+      // a wrong network without retyping everything.
+      statusEl.textContent = "";
+      err.textContent = backupErrorText(e);
+      btn.disabled = false;
+    }
+  };
+  return node;
+}
+
 // ── Onboarding: open existing ────────────────────────────────────────────────
 export function renderOpen(go, onReady) {
   const node = el(`
@@ -363,7 +464,7 @@ export function renderOpen(go, onReady) {
         <label>Wallet name</label>
         <input type="text" id="name" placeholder="e.g. Carteira 1" autocomplete="off" spellcheck="false" />
         <div class="check"><input type="checkbox" id="remember" checked /><label>Remember this wallet for login by name</label></div>
-        <p class="muted mt4">The name only remembers where your encrypted wallet is stored. Your recovery phrase is the real backup.</p>
+        <p class="muted mt4">The name only remembers where your encrypted wallet is stored. Your recovery phrase recovers mined coins; received coins and change need the encrypted backup file — export one from the Backup screen. Keep both.</p>
         <div class="btn-row">
           <button class="btn ghost" id="back">Back</button>
           <button class="btn" id="go">Open</button>
@@ -918,6 +1019,85 @@ function fmtLine(l) {
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────
+// ── Backup & Recovery (encrypted full backup, .dombak) ────────────────────────
+// Export an encrypted snapshot that recovers EVERYTHING the recovery phrase alone
+// cannot rebuild (change / received-funds blindings). The backup passphrase is
+// its OWN secret, independent of the login password. Restore lives on the Welcome
+// screen (the disaster path, when no wallet is open) — added in PASSO 3.
+export function renderBackup() {
+  const node = el(`
+    <div class="screen">
+      <h1>Backup &amp; Recovery</h1>
+      <p class="sub">Export an encrypted backup file (<code>.dombak</code>) that can recover your whole wallet — including change and received funds your recovery phrase alone cannot rebuild.</p>
+      <div class="card">
+        <h2>Export backup</h2>
+        <div class="warn-box">The backup passphrase is a <strong>separate secret</strong> from your login password. You will need it — and only it — to restore this backup. If you lose it, the backup cannot be opened.</div>
+        <label>Backup passphrase</label>
+        <input type="password" id="bpass" placeholder="A strong secret, separate from your login password" autocomplete="new-password" />
+        <label>Confirm backup passphrase</label>
+        <input type="password" id="bpass2" placeholder="Type the backup passphrase again" autocomplete="new-password" />
+        <div class="btn-row"><button class="btn" id="doExport" disabled>Export Backup…</button></div>
+        <div class="err-text" id="berr"></div>
+        <p class="muted mt4" id="bstatus"></p>
+      </div>
+      <div class="card">
+        <h2>Restore from a backup file</h2>
+        <p class="muted">Restoring a <code>.dombak</code> file creates a new, separate wallet and is done from the welcome screen when no wallet is open. Lock this wallet to reach it.</p>
+      </div>
+    </div>`);
+
+  const pass = node.querySelector("#bpass");
+  const pass2 = node.querySelector("#bpass2");
+  const btn = node.querySelector("#doExport");
+  const errEl = node.querySelector("#berr");
+  const statusEl = node.querySelector("#bstatus");
+
+  const refresh = () => {
+    btn.disabled = !(pass.value.length > 0 && pass2.value.length > 0);
+  };
+  pass.oninput = refresh;
+  pass2.oninput = refresh;
+
+  // Best-effort scrub of the typed passphrase from the renderer after it has been
+  // handed to the backend. JS cannot zeroize, but clearing the inputs drops the
+  // strings from the DOM so the GC can reclaim them.
+  const clearFields = () => {
+    pass.value = "";
+    pass2.value = "";
+    refresh();
+  };
+
+  btn.onclick = async () => {
+    errEl.textContent = "";
+    statusEl.textContent = "";
+    const p1 = pass.value;
+    const p2 = pass2.value;
+    // Validate BEFORE any call (these keep the fields so the user can fix them).
+    if (!p1) { errEl.textContent = "Enter a backup passphrase."; return; }
+    if (p1 !== p2) { errEl.textContent = "The backup passphrases do not match."; return; }
+    btn.disabled = true;
+    statusEl.textContent = "Choose where to save the backup…";
+    try {
+      const saved = await api.exportBackup(p1);
+      clearFields(); // passphrase already handed to the backend — scrub the inputs
+      if (saved) {
+        toast("Backup saved");
+        statusEl.textContent = "Backup saved. Keep the file and its passphrase safe — and separate from each other.";
+      } else {
+        statusEl.textContent = "Export cancelled.";
+      }
+    } catch (e) {
+      clearFields();
+      statusEl.textContent = "";
+      errEl.textContent = humanizeError(e);
+    } finally {
+      refresh(); // re-disable until a fresh passphrase is typed
+    }
+  };
+
+  return node;
+}
+
 export function renderSettings(onApply) {
   const s = settings.current;
   const node = el(`
@@ -975,7 +1155,7 @@ export function renderSettings(onApply) {
       </div>
       <div class="card">
         <h2>Security</h2>
-        <p class="muted">Showing the recovery phrase is not possible after creation — by design, DOM wallets store the seed as encrypted bytes, not as recoverable words. Keep your written backup safe. <strong>No one from DOM will ever ask for your recovery phrase.</strong></p>
+        <p class="muted">Showing the recovery phrase is not possible after creation — by design, DOM wallets store the seed as encrypted bytes, not as recoverable words. Your written phrase recovers mined coins; to also recover change and received funds, export an encrypted backup from the Backup screen and keep both safe. <strong>No one from DOM will ever ask for your recovery phrase.</strong></p>
         <div class="btn-row"><button class="btn danger" id="lock">Lock wallet now</button></div>
       </div>
     </div>`);

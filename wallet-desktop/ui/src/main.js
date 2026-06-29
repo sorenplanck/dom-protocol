@@ -97,6 +97,7 @@ function gotoOnboarding(which) {
     welcome: () => S.renderWelcome(go),
     create: () => S.renderCreate(go, onReady),
     restore: () => S.renderRestore(go, onReady),
+    restoreBackup: () => S.renderRestoreBackup(go, onReady),
     open: () => S.renderOpen(go, onReady),
   };
   showGate(map[which]());
@@ -109,6 +110,7 @@ const screens = {
   receive: S.renderReceive,
   history: S.renderHistory,
   node: S.renderNode,
+  backup: S.renderBackup,
   settings: () => S.renderSettings(() => { resetIdleTimer(); }),
 };
 
