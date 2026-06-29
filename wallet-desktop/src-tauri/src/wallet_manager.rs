@@ -38,8 +38,10 @@ use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_tx::slate::Slate;
 use dom_wallet::{Bip39Seed, Network as V1Network, SeedAcceptance};
 use dom_wallet2::{
-    cancel as v2_cancel, create_send as v2_create_send, finalize_tracked as v2_finalize_tracked,
-    load_wallet_state, receive as v2_receive, restore_coinbase_from_seed, save_wallet_state,
+    cancel as v2_cancel, create_send as v2_create_send,
+    export_full_backup as v2_export_full_backup, finalize_tracked as v2_finalize_tracked,
+    import_full_backup as v2_import_full_backup, load_wallet_state, receive as v2_receive,
+    restore_coinbase_from_seed, save_wallet_state,
     submit_finalized as v2_submit_finalized, ChainSource, DerivIndex, KeychainDeriver,
     Network as V2Network, OutputOrigin, OutputStatus, ReconcileReport, RpcChainSource,
     RpcSourceError, StoredOutput, SubmitError, WalletV2State,
@@ -106,6 +108,24 @@ pub struct PendingResubmitReport {
     pub already_in_mempool: usize,
     pub retry_later: usize,
     pub failed: usize,
+}
+
+/// Outcome of restoring a full backup into a brand-new vault file. Carries NO
+/// secret material — only non-sensitive counts and the new vault's location so
+/// the UI can open it. The restored seed/blindings stay inside the saved file,
+/// never crossing back over IPC.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ImportedSummary {
+    /// Filesystem path of the freshly written vault (never the open wallet's).
+    pub vault_path: String,
+    /// Network of the restored wallet ("mainnet"/"testnet"/"regtest").
+    pub network: String,
+    /// Number of outputs recovered into the new vault.
+    pub outputs: usize,
+    /// Number of pending slates recovered.
+    pub pending_slates: usize,
+    /// Reconciliation tip carried by the backup (informational).
+    pub last_reconciled_tip: u64,
 }
 
 /// A loaded, decrypted wallet plus the material needed to re-save it. The
@@ -478,6 +498,85 @@ impl WalletManager {
         ow.save()
     }
 
+    // ── Encrypted full-backup export / import (`wallet.dombak`, schema 4) ──────
+
+    /// Export a complete, encrypted snapshot of the open wallet to `path`
+    /// (`wallet.dombak`, schema 4). Captures the seed/keychain, the whole output
+    /// store, pending slates, finalized-tx bytes and reconciliation metadata —
+    /// the change/receive blindings the seed alone cannot rebuild (design §2.7).
+    ///
+    /// `passphrase` is the BACKUP's own secret, independent of the wallet
+    /// password, so the backup can be restored on another machine. The wallet
+    /// must be unlocked. The passphrase is NEVER interpolated into an error or a
+    /// log line: only the backup-module error `Display` (which carries no secret
+    /// material) is surfaced.
+    pub async fn export_full_backup(&self, path: &Path, passphrase: &str) -> Result<()> {
+        let exported_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let guard = self.inner.lock().await;
+        let ow = self.unlocked(&guard)?;
+        v2_export_full_backup(&ow.state, path, passphrase, exported_at)
+            .map_err(|e| anyhow!("export backup: {e}"))
+    }
+
+    /// Restore a full backup into a BRAND-NEW vault file — the CONFIRMED
+    /// non-destructive policy. Works WITHOUT a wallet open: this is the disaster
+    /// case (fresh machine, no wallet) where the backup matters most. The caller
+    /// supplies the target network EXPLICITLY; nothing reads or mutates an
+    /// already-open wallet.
+    ///
+    /// `target_network` is the network the restored vault belongs to; its genesis
+    /// gives the `expected_chain_id` the backup is validated against — the
+    /// network check is NOT weakened by dropping the open-wallet dependency, the
+    /// user simply asserts the network up front. `passphrase` is the backup's
+    /// secret; `new_password` encrypts the new vault. Neither secret is
+    /// interpolated into an error or a log line.
+    ///
+    /// Errors (all surfaced via `Display`, never `{:?}` of a secret):
+    /// * the backup belongs to another chain/network (`ChainMismatch`);
+    /// * wrong passphrase / tampering (`Decryption`); wrong file kind/schema;
+    /// * the chosen new-vault path already exists (refused, never overwritten).
+    pub async fn import_full_backup_to_new_vault(
+        &self,
+        backup_path: &Path,
+        passphrase: &str,
+        new_vault_path: &Path,
+        new_password: &str,
+        target_network: V2Network,
+    ) -> Result<ImportedSummary> {
+        // The backup's chain_id is validated against the EXPLICITLY-chosen target
+        // network's genesis. No open wallet is read or required, so a disaster
+        // restore on a virgin machine works directly.
+        let expected_chain_id = genesis_chain_id(v2_to_v1_network(target_network))?;
+
+        // Decrypt + validate (schema 4, kind == WalletState, chain_id). This call
+        // returns the full state and NEVER writes to disk; the passphrase is not
+        // interpolated into the surfaced error.
+        let state = v2_import_full_backup(backup_path, passphrase, expected_chain_id)
+            .map_err(|e| anyhow!("import backup: {e}"))?;
+
+        // Write to a BRAND-NEW vault file. Refuse to overwrite an existing file:
+        // defense-in-depth on top of the native save dialog so an import can never
+        // clobber the open wallet (or any other wallet) already on disk.
+        if new_vault_path.exists() {
+            return Err(anyhow!(
+                "refusing to overwrite an existing file at the chosen vault path"
+            ));
+        }
+        save_wallet_state(&state, new_vault_path, new_password)
+            .map_err(|e| anyhow!("save restored vault: {e}"))?;
+
+        Ok(ImportedSummary {
+            vault_path: new_vault_path.to_string_lossy().to_string(),
+            network: network_str(state.network),
+            outputs: state.outputs.len(),
+            pending_slates: state.pending_slates.len(),
+            last_reconciled_tip: state.meta.last_reconciled_tip,
+        })
+    }
+
     /// Recover derivable coinbase from the seed and reconcile against the node.
     ///
     /// This is the v2 replacement for v1's `rescan_against_node`: it pages the
@@ -726,4 +825,302 @@ fn decode_hash32(value: &str) -> Result<[u8; 32]> {
     bytes
         .try_into()
         .map_err(|_| anyhow!("invalid hash: must be 32 bytes"))
+}
+
+#[cfg(test)]
+mod backup_wire_tests {
+    //! Wire tests for the full-backup export/import path through `WalletManager`.
+    //! These cover what the manager layer ADDS on top of `dom-wallet2::backup`
+    //! (which already proves format fidelity at the crate level): correct
+    //! passphrase passing, write-to-NEW-vault, the non-destructive guarantee, the
+    //! cross-chain guard, and that no secret leaks through the wire (error string,
+    //! `ImportedSummary`, or `Debug` of the restored state).
+    //!
+    //! The wallet is injected directly into the manager's `Slot` (same-module
+    //! access to the private `inner`/`OpenWallet`/`Slot`) so the tests need no
+    //! node for send/receive — the backup wire is independent of chain I/O.
+
+    use super::*;
+    use dom_wallet2::{PendingSlate, SlateLifecycle, SlateRole, SlateSecrets};
+    use tempfile::TempDir;
+
+    // Canary seed: a distinctive decimal byte (0xAB = 171) so a `Debug` LEAK of
+    // the seed would print a long "171, 171, ..." run the anti-leak test detects.
+    const SEED_CANARY: [u8; 64] = [0xAB; 64];
+    // The non-derivable receiver blinding the backup exists to protect (0xE3=227).
+    const SLATE_BLINDING: [u8; 32] = [0xE3; 32];
+    // Secret passphrases — must NEVER surface in an error or a `Debug` string.
+    const BAK_PASS: &str = "backup-pass-LEAKCANARY-Zx9";
+    const NEW_VAULT_PASS: &str = "new-vault-pass-LEAKCANARY-Qw7";
+
+    fn commit(tag: u8) -> [u8; 33] {
+        let mut c = [0u8; 33];
+        c[0] = tag;
+        c
+    }
+
+    fn out(tag: u8, value: u64, origin: OutputOrigin) -> StoredOutput {
+        StoredOutput::new_unconfirmed(commit(tag), value, [tag; 32], origin, false, None, 1000)
+    }
+
+    /// A real regtest state: seed + 2 outputs + 1 pending receiver slate. The
+    /// `chain_id` is the REAL regtest genesis so the manager's import (which
+    /// derives `expected_chain_id` from the target network) accepts it.
+    fn populated_regtest_state() -> WalletV2State {
+        let chain_id = genesis_chain_id(V1Network::Regtest).unwrap();
+        let mut state = WalletV2State::new(V2Network::Regtest, chain_id);
+        state.keychain.seed_bytes = Some(Zeroizing::new(SEED_CANARY));
+        state.keychain.seed_word_count = Some(24);
+        state.keychain.next_change_index = 3;
+        state.keychain.next_receive_index = 5;
+        state.meta.last_reconciled_tip = 42;
+        state
+            .outputs
+            .insert(out(1, 1000, OutputOrigin::Coinbase))
+            .unwrap();
+        state
+            .outputs
+            .insert(out(2, 500, OutputOrigin::Change))
+            .unwrap();
+        state.pending_slates.push(PendingSlate {
+            slate_hash: [0xB2; 32],
+            role: SlateRole::Receiver,
+            slate_bytes: vec![5, 6, 7],
+            secrets: Some(SlateSecrets::Receiver {
+                output_blinding: Zeroizing::new(SLATE_BLINDING),
+            }),
+            reserved_inputs: vec![],
+            produced_output: Some([0xC7; 33]),
+            finalized_tx: None,
+            status: SlateLifecycle::Submitted,
+        });
+        state
+    }
+
+    /// Build a manager with an UNLOCKED wallet holding `state`, injected directly
+    /// (no node needed). `path` is a placeholder; export/import never re-save the
+    /// open wallet, so it need not exist on disk.
+    async fn manager_with_open(state: WalletV2State, dir: &TempDir) -> WalletManager {
+        let manager = WalletManager::new();
+        *manager.inner.lock().await = Slot::Unlocked(Box::new(OpenWallet {
+            state,
+            path: dir.path().join("open-wallet.dat"),
+            password: Zeroizing::new("wallet-login-pass".to_string()),
+            network: V2Network::Regtest,
+        }));
+        manager
+    }
+
+    // ── T1: round-trip export → import → new vault preserves the state ─────────
+    #[tokio::test]
+    async fn t1_round_trip_to_new_vault_preserves_state() {
+        let dir = TempDir::new().unwrap();
+        let original = populated_regtest_state();
+        let manager = manager_with_open(original.clone(), &dir).await;
+
+        let dombak = dir.path().join("wallet.dombak");
+        manager.export_full_backup(&dombak, BAK_PASS).await.unwrap();
+        assert!(dombak.exists(), "backup file written");
+
+        let new_vault = dir.path().join("restored.dat");
+        let summary = manager
+            .import_full_backup_to_new_vault(
+                &dombak,
+                BAK_PASS,
+                &new_vault,
+                NEW_VAULT_PASS,
+                V2Network::Regtest,
+            )
+            .await
+            .unwrap();
+
+        // Summary reflects the recovered state (non-sensitive counts only).
+        assert_eq!(summary.outputs, 2);
+        assert_eq!(summary.pending_slates, 1);
+        assert_eq!(summary.network, "regtest");
+        assert_eq!(summary.last_reconciled_tip, 42);
+        assert_eq!(summary.vault_path, new_vault.to_string_lossy());
+
+        // The new vault decrypts with its OWN password to the same state.
+        let restored = load_wallet_state(&new_vault, NEW_VAULT_PASS).unwrap();
+        assert_eq!(restored.chain_id, original.chain_id);
+        assert_eq!(restored.outputs.len(), 2);
+        assert_eq!(restored.outputs.get(&commit(1)).unwrap().value, 1000);
+        assert_eq!(restored.outputs.get(&commit(2)).unwrap().value, 500);
+        assert_eq!(restored.keychain.seed_bytes.as_deref(), Some(&SEED_CANARY));
+        assert_eq!(restored.keychain.next_change_index, 3);
+        assert_eq!(restored.pending_slates.len(), 1);
+        match restored.pending_slates[0].secrets.as_ref() {
+            Some(SlateSecrets::Receiver { output_blinding }) => {
+                assert_eq!(**output_blinding, SLATE_BLINDING);
+            }
+            other => panic!("expected receiver secret, got {other:?}"),
+        }
+    }
+
+    // ── T2: wrong passphrase → Decryption, no file created, no leak ────────────
+    #[tokio::test]
+    async fn t2_wrong_passphrase_rejected_no_file_no_leak() {
+        let dir = TempDir::new().unwrap();
+        let manager = manager_with_open(populated_regtest_state(), &dir).await;
+        let dombak = dir.path().join("wallet.dombak");
+        manager.export_full_backup(&dombak, BAK_PASS).await.unwrap();
+
+        let new_vault = dir.path().join("restored.dat");
+        let err = manager
+            .import_full_backup_to_new_vault(
+                &dombak,
+                "WRONG-ATTEMPT-PASS",
+                &new_vault,
+                NEW_VAULT_PASS,
+                V2Network::Regtest,
+            )
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+
+        assert!(msg.contains("decryption failed"), "got: {msg}");
+        assert!(
+            !new_vault.exists(),
+            "no vault file created on wrong passphrase"
+        );
+        // Neither the (wrong) attempt nor any real secret leaks into the message.
+        assert!(!msg.contains("WRONG-ATTEMPT-PASS"), "attempt passphrase leaked");
+        assert!(!msg.contains(BAK_PASS), "backup passphrase leaked");
+        assert!(!msg.contains(NEW_VAULT_PASS), "vault passphrase leaked");
+    }
+
+    // ── T3: import is non-destructive — the open wallet is untouched ───────────
+    #[tokio::test]
+    async fn t3_import_non_destructive_open_wallet_intact() {
+        let dir = TempDir::new().unwrap();
+        // The open wallet deliberately DIFFERS from the backup so any clobber shows.
+        let chain_id = genesis_chain_id(V1Network::Regtest).unwrap();
+        let mut open_state = WalletV2State::new(V2Network::Regtest, chain_id);
+        open_state.keychain.seed_bytes = Some(Zeroizing::new([0x11; 64]));
+        open_state
+            .outputs
+            .insert(out(9, 4242, OutputOrigin::Change))
+            .unwrap();
+        let manager = manager_with_open(open_state, &dir).await;
+
+        // A DIFFERENT backup (the rich 2-output state) written via the crate fn.
+        let dombak = dir.path().join("other.dombak");
+        v2_export_full_backup(&populated_regtest_state(), &dombak, BAK_PASS, 0).unwrap();
+
+        let new_vault = dir.path().join("restored.dat");
+        let summary = manager
+            .import_full_backup_to_new_vault(
+                &dombak,
+                BAK_PASS,
+                &new_vault,
+                NEW_VAULT_PASS,
+                V2Network::Regtest,
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary.outputs, 2, "new vault got the backup's outputs");
+        assert!(new_vault.exists(), "new vault written separately");
+
+        // The OPEN wallet inside the manager is byte-for-byte unchanged.
+        let guard = manager.inner.lock().await;
+        match &*guard {
+            Slot::Unlocked(ow) => {
+                assert_eq!(ow.state.outputs.len(), 1, "open wallet outputs untouched");
+                assert!(
+                    ow.state.outputs.get(&commit(9)).is_some(),
+                    "open wallet's own output preserved"
+                );
+                assert_eq!(
+                    ow.state.keychain.seed_bytes.as_deref(),
+                    Some(&[0x11; 64]),
+                    "open wallet seed untouched"
+                );
+                assert!(
+                    ow.state.pending_slates.is_empty(),
+                    "open wallet slates untouched"
+                );
+            }
+            _ => panic!("wallet should still be unlocked after import"),
+        }
+    }
+
+    // ── T4: no secret leaks via the summary or the restored state's Debug ──────
+    #[tokio::test]
+    async fn t4_no_secret_leaks_summary_or_debug() {
+        let dir = TempDir::new().unwrap();
+        let manager = manager_with_open(populated_regtest_state(), &dir).await;
+        let dombak = dir.path().join("wallet.dombak");
+        manager.export_full_backup(&dombak, BAK_PASS).await.unwrap();
+
+        let new_vault = dir.path().join("restored.dat");
+        let summary = manager
+            .import_full_backup_to_new_vault(
+                &dombak,
+                BAK_PASS,
+                &new_vault,
+                NEW_VAULT_PASS,
+                V2Network::Regtest,
+            )
+            .await
+            .unwrap();
+
+        // (a) The summary returned over IPC carries no secret material.
+        let summary_dbg = format!("{summary:?}");
+        assert!(
+            !summary_dbg.contains("171, 171"),
+            "seed bytes leaked into the summary"
+        );
+        assert!(!summary_dbg.contains(BAK_PASS), "backup passphrase in summary");
+        assert!(
+            !summary_dbg.contains(NEW_VAULT_PASS),
+            "vault passphrase in summary"
+        );
+
+        // (b) `Debug` of the restored state redacts seed + slate secrets.
+        let restored = load_wallet_state(&new_vault, NEW_VAULT_PASS).unwrap();
+        let dump = format!("{restored:?}");
+        assert!(dump.contains("<redacted>"), "redaction marker missing");
+        assert!(
+            !dump.contains("171, 171, 171, 171"),
+            "seed leaked via Debug"
+        );
+        assert!(
+            !dump.contains("227, 227, 227, 227"),
+            "slate output blinding leaked via Debug"
+        );
+    }
+
+    // ── T5: cross-chain target rejected BEFORE any write ───────────────────────
+    #[tokio::test]
+    async fn t5_cross_chain_target_rejected_before_write() {
+        let dir = TempDir::new().unwrap();
+        let manager = manager_with_open(populated_regtest_state(), &dir).await;
+        let dombak = dir.path().join("wallet.dombak");
+        manager.export_full_backup(&dombak, BAK_PASS).await.unwrap();
+
+        let new_vault = dir.path().join("restored.dat");
+        // Assert the WRONG target network (testnet) for a regtest backup. Testnet
+        // has a finalized, distinct genesis, so this exercises the real
+        // `ChainMismatch` guard (mainnet's genesis is intentionally not finalized
+        // in this build, which would error earlier — also before any write).
+        let err = manager
+            .import_full_backup_to_new_vault(
+                &dombak,
+                BAK_PASS,
+                &new_vault,
+                NEW_VAULT_PASS,
+                V2Network::Testnet,
+            )
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+
+        assert!(msg.contains("chain id does not match"), "got: {msg}");
+        assert!(
+            !new_vault.exists(),
+            "no vault written on chain mismatch (refused before write)"
+        );
+        assert!(!msg.contains(BAK_PASS), "passphrase leaked on chain mismatch");
+    }
 }

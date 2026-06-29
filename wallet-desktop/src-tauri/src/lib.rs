@@ -27,7 +27,7 @@ use managed_storage::ManagedLayout;
 use metrics::NodeMetrics;
 use node_host::{NodeHost, NodeState};
 use settings::{NetworkKind, NodeSettings};
-use wallet_manager::{BalanceInfo, WalletManager};
+use wallet_manager::{BalanceInfo, ImportedSummary, WalletManager};
 
 /// Shared application state, available to every command via `State<AppState>`.
 pub struct AppState {
@@ -906,6 +906,107 @@ async fn read_text_file(app: tauri::AppHandle, title: String) -> Result<Option<S
         .map_err(|e| format!("io error: {e}"))
 }
 
+// ── Encrypted full-backup commands (`wallet.dombak`, schema 4) ───────────────
+
+/// Map the settings/UI network enum to the wallet-engine (`dom-wallet2`) network.
+/// Serde already validated `NetworkKind` on the way in, so any value here is one
+/// of the three real networks — there is no invalid case to handle.
+fn kind_to_v2_network(kind: NetworkKind) -> dom_wallet2::Network {
+    match kind {
+        NetworkKind::Mainnet => dom_wallet2::Network::Mainnet,
+        NetworkKind::Testnet => dom_wallet2::Network::Testnet,
+        NetworkKind::Regtest => dom_wallet2::Network::Regtest,
+    }
+}
+
+/// Export a complete encrypted backup of the open wallet. The native save dialog
+/// is opened HERE, in the backend, so the renderer never supplies a path —
+/// closing the arbitrary-file-write hole, exactly like `save_text_file`.
+///
+/// `passphrase` is the backup's OWN secret (independent of the wallet password);
+/// it is typed `Zeroizing<String>` so it is wiped on drop, and is never logged
+/// nor `{:?}`-formatted. Returns `true` if written, `false` if the user
+/// cancelled the dialog.
+#[tauri::command]
+async fn export_backup_cmd(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    passphrase: Zeroizing<String>,
+) -> Result<bool, String> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Export wallet backup")
+        .set_file_name("wallet.dombak")
+        .add_filter("DOM wallet backup", &["dombak"])
+        .blocking_save_file();
+    let path = match picked {
+        Some(fp) => fp.into_path().map_err(|e| format!("invalid path: {e}"))?,
+        None => return Ok(false),
+    };
+    state
+        .wallet
+        .export_full_backup(&path, passphrase.as_str())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Restore a full backup into a BRAND-NEW vault, non-destructively: the open
+/// wallet (if any) is never touched. Works with NO wallet open — the disaster
+/// case (fresh machine) where the backup matters most.
+///
+/// Two native dialogs are opened in the backend: first pick the `.dombak` to
+/// read, then choose where to save the new vault. The renderer never supplies a
+/// path. `target_network` is the network the user asserts the backup belongs to;
+/// serde validates it (`mainnet`/`testnet`/`regtest`) and its genesis gives the
+/// chain id the backup is checked against (a mismatch is refused before any
+/// write). `passphrase` (backup secret) and `new_password` (new vault) are both
+/// `Zeroizing<String>`; neither is logged nor `{:?}`-formatted. Returns the
+/// `ImportedSummary`, or `None` if the user cancelled either dialog.
+#[tauri::command]
+async fn import_backup_cmd(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    passphrase: Zeroizing<String>,
+    new_password: Zeroizing<String>,
+    target_network: NetworkKind,
+) -> Result<Option<ImportedSummary>, String> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Select wallet backup to import")
+        .add_filter("DOM wallet backup", &["dombak"])
+        .blocking_pick_file();
+    let backup_path = match picked {
+        Some(fp) => fp.into_path().map_err(|e| format!("invalid path: {e}"))?,
+        None => return Ok(None),
+    };
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Save restored wallet as")
+        .set_file_name("restored-wallet.dat")
+        .add_filter("DOM wallet", &["dat"])
+        .blocking_save_file();
+    let new_vault_path = match picked {
+        Some(fp) => fp.into_path().map_err(|e| format!("invalid path: {e}"))?,
+        None => return Ok(None),
+    };
+    let summary = state
+        .wallet
+        .import_full_backup_to_new_vault(
+            &backup_path,
+            passphrase.as_str(),
+            &new_vault_path,
+            new_password.as_str(),
+            kind_to_v2_network(target_network),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(summary))
+}
+
 // ── Node commands ───────────────────────────────────────────────────────────
 
 /// M2: refuse to (re)start the embedded node on a network that doesn't match
@@ -1285,6 +1386,8 @@ pub fn run() {
             make_qr_svg,
             save_text_file,
             read_text_file,
+            export_backup_cmd,
+            import_backup_cmd,
             node_start,
             node_stop,
             node_restart,
