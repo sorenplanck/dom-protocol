@@ -52,6 +52,11 @@ export const api = {
   // Persist node settings next to the open MANAGED wallet (no-op otherwise).
   managedSettingsSave: (settings) =>
     invoke("managed_settings_save", { settings }),
+  // Apply + persist the auto-backup config (toggle + optional external folder).
+  // Rejects with the reason when enabling an external destination under a weak
+  // login password (the seed would leave the machine under that password alone).
+  setAutoBackup: (settings) =>
+    invoke("set_auto_backup", { settings }),
   // Login-by-name: resolve the vault location from the local registry, then
   // unlock with the password. The renderer never handles a filesystem path.
   // Resolves to the wallet's saved node settings (or null for wallets located

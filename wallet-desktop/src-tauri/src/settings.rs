@@ -51,6 +51,18 @@ pub struct NodeSettings {
     pub miner_throttle_ms: u64,
     pub metrics_listen_addr: Option<String>,
     pub log_level: String,
+    /// Auto-backup: write an encrypted full backup (schema 4) automatically on
+    /// material fund changes. Default off. Non-sensitive: holds no password or
+    /// key — the auto-backup passphrase is derived transiently in the backend
+    /// (see `auto_backup`). Wiring lands in later steps; this is config only.
+    #[serde(default)]
+    pub auto_backup_enabled: bool,
+    /// Optional external auto-backup destination (e.g. a removable drive or a
+    /// synced folder). `None` means local-only. Enabling an external target is
+    /// gated on a strong login password because the encrypted seed then leaves
+    /// the machine under that password alone (see `auto_backup`).
+    #[serde(default)]
+    pub auto_backup_external_path: Option<String>,
 }
 
 impl Default for NodeSettings {
@@ -68,6 +80,8 @@ impl Default for NodeSettings {
             miner_throttle_ms: default_miner_throttle_ms(),
             metrics_listen_addr: Some("127.0.0.1:33371".to_string()),
             log_level: "info".to_string(),
+            auto_backup_enabled: false,
+            auto_backup_external_path: None,
         }
     }
 }
@@ -562,6 +576,8 @@ mod tests {
             miner_throttle_ms: 10,
             metrics_listen_addr: Some("127.0.0.1:33371".into()),
             log_level: "debug".into(),
+            auto_backup_enabled: false,
+            auto_backup_external_path: None,
         }
     }
 
@@ -586,6 +602,8 @@ mod tests {
             miner_throttle_ms: 10,
             metrics_listen_addr: Some("127.0.0.1:33371".into()),
             log_level: "debug".into(),
+            auto_backup_enabled: false,
+            auto_backup_external_path: None,
         }
     }
 

@@ -28,6 +28,11 @@ hex = "0.4"
 getrandom = "0.2"
 url = "2.5"
 zeroize = { version = "1.7", features = ["derive", "serde"] }
+# HKDF-SHA256 for deriving the auto-backup passphrase from the live login
+# password (domain-separated from the vault's at-rest key). Versions match the
+# protocol workspace's `hkdf`/`sha2`.
+hkdf = "0.12"
+sha2 = "0.10"
 
 # Async runtime + log capture for the embedded node.
 tokio = { version = "1.35", features = ["full"] }

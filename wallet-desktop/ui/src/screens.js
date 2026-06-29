@@ -2,7 +2,7 @@
 import {
   api, el, copy, toast, nomsToDom, domToNoms,
   pickSaveFile, pickFolder, saveTextViaDialog, savePrefs, humanizeError,
-  minerWalletDisplay, clearMinerWalletSettings, normalizeSeedPeers,
+  minerWalletDisplay, clearMinerWalletSettings, normalizeSeedPeers, events,
 } from "./api.js";
 import {
   getLogLines, clearLogs, subscribeLogs, logsToText,
@@ -11,6 +11,22 @@ import {
 // Shared, in-memory settings object (single source of truth for node config).
 // Sensitive values (passwords/phrases) are NEVER stored here.
 export const settings = { current: null };
+
+// Register the auto-backup failure listener ONCE at boot (never silent). The
+// backend emits "auto-backup-failed" { target, severity, reason } when a backup
+// write fails: a LOCAL failure is a strong error (red toast), an EXTERNAL one is
+// usually just "destination unavailable" (neutral warning toast). A backup
+// failure never affects the wallet itself — the vault save always succeeded.
+let autoBackupListenerStarted = false;
+export async function startAutoBackupNotifications() {
+  if (autoBackupListenerStarted) return;
+  autoBackupListenerStarted = true;
+  await events.listen("auto-backup-failed", (e) => {
+    const p = e.payload || {};
+    const reason = p.reason || "auto-backup failed";
+    toast(reason, p.severity === "error");
+  });
+}
 
 // Short UI toast messages.
 const MSG = {
@@ -106,6 +122,10 @@ export function renderLogin(go, onReady) {
       if (managed) {
         settings.current = { ...settings.current, ...managed };
         savePrefs(settings.current);
+        // Re-apply the saved auto-backup config to the freshly reopened wallet so
+        // it backs up again without a trip to Settings. Best-effort: the strong
+        // password was already validated when it was first enabled.
+        try { await api.setAutoBackup(settings.current); } catch {}
       }
       toast(t("walletOpened"));
       onReady();
@@ -1154,6 +1174,16 @@ export function renderSettings(onApply) {
         </div>
       </div>
       <div class="card">
+        <h2>Automatic Backup</h2>
+        <p class="muted">Keeps an encrypted backup up to date automatically, so your recovery phrase alone can restore change and received funds — not just mined coins. It refreshes only when your confirmed funds change.</p>
+        <div class="check"><input type="checkbox" id="autoBackup" /><label>Enable automatic backup</label></div>
+        <p class="muted mt4"><strong>Local backup</strong> (always on while enabled) is kept next to your wallet file. It protects against the wallet file being corrupted or deleted, but <strong>not</strong> against losing this computer.</p>
+        <label>External folder (optional — USB drive or synced cloud folder)</label>
+        <div class="copyable"><code id="autoBackupExt"></code><button class="btn ghost" id="pickAutoBackup">Choose folder</button><button class="btn ghost" id="clearAutoBackup">Remove</button></div>
+        <div class="warn-box">An external backup contains your <strong>seed</strong>, protected only by your <strong>login password</strong>. If that location is lost or compromised, your funds' safety depends on that password's strength — so a strong password is required to enable it.</div>
+        <p class="muted mt4">In-flight transactions (not yet finalized) still depend on this device's local state until they confirm; they are not covered by the confirmed-funds backup.</p>
+      </div>
+      <div class="card">
         <h2>Security</h2>
         <p class="muted">Showing the recovery phrase is not possible after creation — by design, DOM wallets store the seed as encrypted bytes, not as recoverable words. Your written phrase recovers mined coins; to also recover change and received funds, export an encrypted backup from the Backup screen and keep both safe. <strong>No one from DOM will ever ask for your recovery phrase.</strong></p>
         <div class="btn-row"><button class="btn danger" id="lock">Lock wallet now</button></div>
@@ -1201,6 +1231,51 @@ export function renderSettings(onApply) {
     savePrefs(s);
   };
   node.querySelector("#lock").onclick = async () => { await api.walletLock(); location.reload(); };
+
+  // ── Automatic Backup ────────────────────────────────────────────────────────
+  const renderAutoBackup = () => {
+    node.querySelector("#autoBackup").checked = !!s.auto_backup_enabled;
+    node.querySelector("#autoBackupExt").textContent =
+      s.auto_backup_external_path || "(none — local only)";
+  };
+  renderAutoBackup();
+  // Apply + persist the auto-backup config immediately. On failure (e.g. a weak
+  // login password rejected for an external destination), `rollback` restores the
+  // previous in-memory state and the reason is shown — nothing is persisted.
+  const applyAutoBackup = async (rollback) => {
+    try {
+      await api.setAutoBackup(s);
+      savePrefs(s);
+    } catch (e) {
+      if (rollback) rollback();
+      toast(humanizeError(e), true);
+    }
+    renderAutoBackup();
+  };
+  node.querySelector("#autoBackup").onchange = (e) => {
+    const prev = s.auto_backup_enabled;
+    s.auto_backup_enabled = e.target.checked;
+    applyAutoBackup(() => { s.auto_backup_enabled = prev; });
+  };
+  node.querySelector("#pickAutoBackup").onclick = async () => {
+    const dir = await pickFolder("Choose external backup folder");
+    if (!dir) return;
+    const prevPath = s.auto_backup_external_path;
+    const prevEnabled = s.auto_backup_enabled;
+    // Choosing an external destination implies enabling auto-backup; the backend
+    // gates it on a strong login password and rejects a weak one (we roll back).
+    s.auto_backup_external_path = dir;
+    s.auto_backup_enabled = true;
+    applyAutoBackup(() => {
+      s.auto_backup_external_path = prevPath;
+      s.auto_backup_enabled = prevEnabled;
+    });
+  };
+  node.querySelector("#clearAutoBackup").onclick = () => {
+    const prevPath = s.auto_backup_external_path;
+    s.auto_backup_external_path = null;
+    applyAutoBackup(() => { s.auto_backup_external_path = prevPath; });
+  };
 
   // Auto-lock applies immediately (no node restart needed).
   node.querySelector("#autolock").onchange = (e) => {
