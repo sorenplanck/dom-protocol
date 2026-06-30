@@ -1,165 +1,147 @@
-# DOM — Genesis Ceremony Procedure (Phase 8.5)
+# DOM — Genesis Ceremony Procedure
 
-Status: pre-launch procedure draft. Executed once at the moment
-of mainnet launch; the artefacts it produces are consensus-immutable.
+Status: pre-launch procedure. Executed once at the moment of mainnet launch; the artefacts it produces are consensus-immutable.
 
-## Purpose
+Author: Soren Planck.
 
-The genesis ceremony commits the values that every node in the
-mainnet network MUST agree on. After the ceremony, none of these
-can be changed without a hard fork:
+---
 
-* `GENESIS_TIMESTAMP_PLACEHOLDER` → actual launch Unix timestamp.
-* `GENESIS_HASH_MAINNET` → computed deterministically from the
-  ceremonial constants (see RFC-0011 §1.3).
-* The signing key of the maintainer for release-tag attestations.
-* The published artefacts (signed binaries, SBOMs, source archive
-  hashes).
+## 0. Model substitution notice (conscious, dated decision — 2026-06-29)
 
-## Pre-ceremony checklist
+This document REPLACES an earlier version that required, as hard preconditions to seal mainnet: a public adversarial testnet (≥90 days), an external fuzz campaign (≥10,000 CPU-hours), a full external audit, and a public bug bounty (≥30 days), plus a panel of named external witnesses signing the ceremony transcript.
 
-The ceremony MUST NOT proceed until every item in this list is
-green:
+Those preconditions have been **consciously and deliberately replaced** — not silently dropped, and not because they were "wrong." The DOM project adopts a different validation model, and this section records the trade openly so the historical record shows deliberation, not oversight:
 
-* [ ] All CRITICAL `RELEASE_BLOCKERS.md` entries resolved.
-* [ ] All HIGH `RELEASE_BLOCKERS.md` entries either resolved or
-      explicitly accepted with a maintainer-signed residual-risk
-      statement.
-* [ ] Phase 1.4 cross-platform CI matrix green on every host
-      (Linux x86_64 / ARM64, macOS x86_64 / ARM64, Windows x86_64).
-* [ ] Phase 8.1 public adversarial testnet stable for ≥ 90 days
-      continuous, no consensus break.
-* [ ] Phase 8.2 fuzz campaign completed (≥ 10 000 CPU-hours
-      across the documented surfaces) — campaign log archived
-      under `docs/FUZZ_CAMPAIGN.md` once authored.
-* [ ] Phase 8.3 external audit complete with all findings
-      addressed or explicit deferral.
-* [ ] Phase 8.4 bug bounty open for ≥ 30 days with no unfixed
-      CRITICAL / HIGH reports.
+- **External validation gates → internal validation via dom-shield.** DOM's pre-mainnet validation is the dom-shield detector mesh (per-vector detector tests, fuzz targets, conformance KAVs, directed-corruption probes, multi-node convergence tests) plus the green canonical gate. This trades independent external eyes for internal validation built by the same author who wrote the code. That trade is acknowledged explicitly, including its limitation: a detector written by the author tests what the author thought to test.
+- **Why the residual risk is acceptable under this model.** DOM launches as a **zero-value fair launch** (no premine, no ICO, no sale, no founder allocation; the network starts at block zero open to all). At launch nobody has entrusted funds to the chain, so the day-zero-with-funds risk that external gates most protect against is structurally lower. The residual risk that remains — a consensus bug surfacing after the coin acquires value — is covered by the **Satoshi maintenance model**: the author stays active on security while the network is young, responds quickly to issues (as Satoshi patched the 2010 value-overflow inflation in hours), and the dom-shield detectors run continuously to catch regressions.
+- **Forbidden claim.** "100% secure" / "fully audited" is forbidden in any DOM document or communication. It would be false. The honest claim is: *the most complete validation this project can perform under this model, with the maintainer accountable for what surfaces.*
 
-## Ceremony participants
+No external witnesses are required. DOM is authored under a single pseudonym (Soren Planck) for OPSEC; the integrity guarantee is **public reproducibility** (§5), not a witness panel: the source is open and the genesis hash is deterministically recomputable by anyone, so any member of the public can independently verify that the sealed genesis matches the published constants.
 
-* **Maintainer** — Soren Planck. Holds the release-signing PGP
-  key; computes and announces the genesis hash.
-* **Witnesses** — ≥ 3 independent technically-competent
-  observers, each running a full DOM node from source and
-  willing to sign the ceremony transcript. Selected before the
-  ceremony date and announced publicly ≥ 7 days in advance.
-* **Time authority** — the chosen timestamp source (e.g. RFC 3161
-  trusted timestamp service or a multi-jurisdiction time anchor).
+---
 
-## Ceremonial constants frozen at ceremony time
+## 1. Purpose
 
-Constants that MUST be updated in `dom-core/src/constants.rs`
-and committed as the final pre-launch commit:
+The genesis ceremony commits the values that every node on the mainnet network MUST agree on. After the ceremony, none of these can be changed without a hard fork:
 
-1. `GENESIS_TIMESTAMP_PLACEHOLDER` → ceremony Unix timestamp,
-   announced live + recorded by the time authority.
-2. `GENESIS_HASH_MAINNET` → SHA-256 of the genesis header bytes
-   (RFC-0011 §1.3). The header is constructed by the maintainer
-   live during the ceremony from the just-frozen timestamp +
-   the already-frozen GENESIS_MESSAGE and INITIAL_BLOCK_REWARD.
-3. `H_COMPRESSED_FINAL` — already pinned via RFC-0009 derivation;
-   re-verified by witnesses with an independent implementation.
+- `GENESIS_TIMESTAMP` → actual launch Unix timestamp.
+- `GENESIS_HASH_MAINNET` → computed deterministically from the ceremonial constants (the genesis header bytes; see §3).
+- The maintainer's release-signing key, used to attest the published release artefacts (signed binaries, source archive hashes).
+- The published artefacts themselves.
 
-The H generator independent re-derivation is the only
-ceremony-time crypto computation; the witnesses run an OpenSSL
-+ RFC9380 implementation, compare against `dom-crypto`'s
-output, and announce the match before the genesis hash is
-finalised.
+---
 
-## Ceremony steps (live, recorded, witnessed)
+## 2. Pre-ceremony checklist (current model — internal validation)
 
-1. **Quorum check** — all witnesses confirm presence and confirm
-   they are running the audited commit at HEAD.
-2. **Pre-flight verification** — every witness runs
-   `cargo test --workspace --exclude dom-integration-tests` on
-   their own host. All must report green. Output transcript
-   recorded.
-3. **Time anchor** — the chosen timestamp authority emits the
-   ceremonial Unix timestamp.
-4. **Constants commit** — maintainer updates
-   `GENESIS_TIMESTAMP_PLACEHOLDER` in `constants.rs`, runs the
-   ceremony-helper script (TBD: `scripts/genesis_ceremony.rs`)
-   that prints the resulting `GENESIS_HASH_MAINNET` to stdout.
-5. **Independent reproduction** — witnesses run the same script
-   on their hosts with the same timestamp input, announce their
-   computed `GENESIS_HASH_MAINNET`, and the maintainer compares.
-   All MUST match byte-for-byte.
-6. **Pin the genesis hash** — maintainer commits the
-   genesis-hash constant into `constants.rs`.
-7. **Build + sign release** — maintainer builds the release
-   binaries for each Phase 1.4 host, computes SHA-256 of each
-   binary, signs each hash with the release PGP key, publishes
-   the signed manifest.
-8. **Witness transcript signatures** — every witness signs the
-   ceremony transcript (the full sequence of commands and
-   outputs from step 1–7) with their own PGP key. The
-   transcript + signatures are committed into `docs/ceremony/`.
-9. **Network bootstrap** — the maintainer starts the canonical
-   seed nodes (5 mainnet seeds in `dom-wire/src/dns_seed.rs`)
-   running the signed binary. The witnesses connect their
-   nodes and confirm they reach the genesis hash via
-   independent computation.
-10. **Public announcement** — the genesis hash, ceremony
-    transcript, signed release manifest, and witness signatures
-    are published to the project website and the dom-protocol
-    GitHub repository under a new annotated tag.
+The ceremony MUST NOT proceed until every item is green, measured natively (`cargo` output is ground truth; "green" means a measured `test result: ok ... 0 failed`, never memory or a passing test name):
 
-## Post-ceremony immutability
+- [ ] **Canonical gate green.** `cargo test --workspace --exclude dom-integration-tests` → exit 0, 0 failed, 0 panics. (Last measured: 1933 passed / 0 failed / 23 ignored, 2026-06-29.)
+- [ ] **Multi-node convergence validated (Cat 5).** The integration-test convergence set — `reorg`, `ibd`, `late_join`, `two_node`, `three_node`, `mempool_relay`, `wallet_flow` — all green. This is the internal validation that substitutes for a public testnet's network-convergence exercise. (Last measured: 8 tests / 7 files, all green, 2026-06-29.)
+- [ ] **Build + lints + supply-chain green.** `cargo build --workspace` exit 0; `cargo clippy --workspace --all-targets` exit 0, no warnings; `cargo audit` exit 0; `cargo deny check` exit 0 (advisories/licenses/bans/sources ok).
+- [ ] **Testnet genesis frozen-vector reproduces natively.** `genesis_testnet_frozen_vectors` passes on the native toolchain (deterministic builder reproduces the pinned testnet genesis/roots).
+- [ ] **All RED detector findings resolved or consciously accepted.** No `#[ignore]`d RED reproducer for an unresolved bug remains unaddressed. Items accepted as defense-in-depth (not live-exploitable) are documented as such, dated, with rationale (e.g. FIX-018 / FIX-020 — reachability-traced, accepted). The only genuine RED finding (FIX-021) is code-fixed (`df8c9ae`, consensus-neutral).
+- [ ] **`#[ignore]` inventory honest.** Every remaining `#[ignore]` carries a truthful reason (static-review fact, by-design, non-attackable, or accepted defense-in-depth) — no stale/false markers (e.g. "env-blocked" on a test proven to run, or "RED" on green code).
+- [ ] **No pending consensus change in flight.** Working tree clean; all consensus-touching commits finalized and reviewed.
 
-After step 6 (`GENESIS_HASH_MAINNET` pinned), the following
-properties MUST hold forever for mainnet:
+There is NO requirement here for a public testnet, external audit, fuzz-CPU-hour quota, bug bounty, or external witnesses. Those were the previous model (§0).
 
-* No commit on `main` may modify `GENESIS_TIMESTAMP_PLACEHOLDER`,
-  `GENESIS_HASH_MAINNET`, `GENESIS_MESSAGE`, `INITIAL_BLOCK_REWARD`,
-  `HALVING_INTERVAL`, `HALVING_EPOCHS`, `MAX_SUPPLY_NOMS`,
-  `H_COMPRESSED_FINAL`, `NETWORK_MAGIC_MAINNET`, `P2P_PORT_MAINNET`.
-* Any commit changing the above is a fork by definition. The
-  network operating under the new constants is "DOM (forked
-  YYYY-MM-DD)" and is NOT the same network as mainnet.
+---
 
-The branch-protection rules on `main` (set up under Phase 8.3 /
-the audit-handover commit) include a required CODEOWNERS review
-for changes touching `dom-core/src/constants.rs` — this is the
-mechanical enforcement of the immutability.
+## 3. Ceremonial constants frozen at ceremony time
 
-## Disaster scenarios — escape hatches
+Constants updated in `dom-core/src/constants.rs` and committed as the final pre-launch commits:
 
-If the ceremony fails at any step, the published procedure is:
+1. **`GENESIS_TIMESTAMP`** → the announced launch Unix timestamp. Because DOM is a fair launch, this timestamp is **announced in advance** (§7) so that the network goes public and mining begins for everyone at the same moment — no party (including the maintainer) mines before this time. (Code symbol: `GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER` in `constants.rs`, which the finalization guard requires to be changed away from its placeholder value.)
 
-* **Step 2 / pre-flight fails** — abort, publish the failing
-  test output, fix, re-schedule the ceremony for ≥ 7 days
-  later to give witnesses time to re-verify.
-* **Step 5 / witnesses disagree** — abort. A disagreement here
-  means either the maintainer's host or one of the witnesses'
-  hosts is non-conforming. Investigate, fix, re-schedule.
-* **Step 7 / signing key not available** — abort. The release
-  PGP key MUST be present and operational at ceremony time.
-* **Step 9 / seed nodes fail to bootstrap** — abort the public
-  launch but DO NOT modify the genesis-hash constant. Investigate
-  the operational issue, redeploy the seed nodes, complete step 10
-  once they're stable.
+2. **`GENESIS_HASH_MAINNET`** → the **blake2b_256** hash of the genesis header bytes. (NOTE: the code uses `blake2b_256`, NOT SHA-256. An earlier version of this document said "SHA-256" — that was a doc-vs-code error; the code is authoritative.) The header is constructed deterministically from the just-frozen `GENESIS_TIMESTAMP` plus the already-frozen `GENESIS_MESSAGE` and `INITIAL_BLOCK_REWARD`.
 
-## Confidence
+3. **`GENESIS_MESSAGE`** → the genesis block's embedded message.
+   **[DECISION — SOREN PLANCK — non-anticipation proof]**: decide BEFORE sealing whether to embed a non-anticipation proof (a real-world headline / external reference dated on or after the announcement, Satoshi-style) in `GENESIS_MESSAGE`. This is irreversible once sealed. It strengthens the fair-launch credibility (proves the genesis was not constructed before that date) but is optional. If used, the exact text is chosen at ceremony time from a source dated on/after the public announcement. Mark here: [ ] embed non-anticipation proof / [ ] plain genesis message.
 
-* **Confirmed (in code):** the ceremony's deterministic
-  computation paths — genesis-header serialisation, SHA-256 of
-  header, H generator derivation — are all exercised by the
-  Phase 6.3 + Phase 1.4 + Phase 2.1 test suites.
-* **Likely:** the witness reproduction protocol is operationally
-  sound — depends on every witness being able to compile and
-  run the release binary from source on their chosen host.
-* **Theoretical until ceremony runs:** the social / operational
-  protocol (witness selection, time authority, transcript
-  custody) — these are documented here but only validated by
-  rehearsal at Phase 8.1 testnet launch.
+4. **H generator** → the second Pedersen generator H is NOT a pinned constant; it is **derived** at runtime by `dom-crypto`'s `h_generator::derive_h_generator()` (RFC9380 hash-to-curve, DST `"DOM:h2c:secp256k1:v6.1"`), exposed via `h_generator::h_compressed()`. It is therefore fixed by its derivation (changing the DST or derivation would change H and is a hard fork), and re-verified by recomputation (§5) — `verify_h_matches_derivation` — rather than by external witnesses.
 
-## Rehearsal
+The only ceremony-time crypto computation is the deterministic genesis-hash derivation; it is verified by independent reproduction (§5), not by a witness panel.
 
-Phase 8.1 (public adversarial testnet) is the rehearsal for the
-mainnet ceremony. The same procedure runs end-to-end with
-testnet constants; the witnesses, time authority, and signing
-key holder are all the same as the mainnet ceremony will be.
-A failed testnet ceremony is recoverable; a failed mainnet
-ceremony is not.
+---
+
+## 4. Ceremony steps (performed by the maintainer; recorded for public reproduction)
+
+1. **Pre-flight verification.** Run the §2 checklist on the native toolchain. All must be green, measured (not remembered). Record the transcript (commands + outputs). Abort if anything is red.
+
+2. **Time anchor.** Fix the ceremonial Unix timestamp = the publicly announced launch time. Record it.
+
+3. **Constants commit (timestamp).** Update `GENESIS_TIMESTAMP` (and `GENESIS_MESSAGE` per §3.3 decision) in `constants.rs`.
+
+4. **Compute the genesis hash.** Run the ceremony-helper that constructs the genesis header from the frozen constants and prints the resulting `GENESIS_HASH_MAINNET` (blake2b_256 of the header bytes) to stdout.
+   **[DECISION — SOREN PLANCK — helper]**: confirm the exact tool/command used to compute the mainnet genesis hash (the same deterministic builder path that already produces the testnet frozen vectors, pointed at mainnet constants). Code confirms the real command before this step is final.
+
+5. **Independent reproduction (public-reproducibility check).** Recompute the genesis hash from a clean checkout of the public source at the sealed commit, with the same timestamp input, and confirm it matches byte-for-byte. Because the source is open, ANY third party can perform this same recomputation after launch — that public reproducibility is the integrity guarantee (replacing the old external-witness panel).
+
+6. **Pin the genesis hash.** Commit `GENESIS_HASH_MAINNET` into `constants.rs`. The placeholder guard (`validate_mainnet_genesis_hash`, which rejects the all-zero placeholder and aliasing with testnet/regtest) must now pass with the real value.
+
+7. **Build + sign release.** Build the release binaries for each supported host, compute the hash of each binary, sign the manifest with the release key, publish the signed manifest.
+   **[DECISION — SOREN PLANCK — platforms]**: confirm which host targets are built/signed for launch (vs. build-from-source only).
+
+8. **Network bootstrap.** Start the canonical seed nodes (running the signed binary) AT the announced launch time — not before (fair launch: the maintainer's nodes/miner come up with the public network, never ahead of it).
+   **[DECISION — SOREN PLANCK — seeds]**: confirm the seed-node count and update `dom-wire/src/dns_seed.rs` accordingly. The code currently hardcodes 5 mainnet DNS seeds (`seed1..seed5.dom-protocol.org`) and an empty `MAINNET_SEED_IPS` ("to be filled after genesis"); the stated infrastructure is ~3 VPS = 2 nodes + 1 miner. The `dns_seed.rs` list and this step MUST be reconciled to the real deployment before launch.
+
+9. **Public announcement.** Publish the genesis hash, the ceremony transcript, the signed release manifest, and the recomputation instructions to the project website and the GitHub repository under a new annotated tag, so anyone can reproduce and verify.
+
+---
+
+## 5. Integrity guarantee — public reproducibility (replaces external witnesses)
+
+The integrity of the sealed genesis does NOT depend on a panel of named witnesses (incompatible with single-author pseudonymous OPSEC). It depends on **deterministic public reproducibility**:
+
+- The full source is public at the sealed commit.
+- The genesis hash is a pure deterministic function of the published, frozen constants.
+- Anyone — now or years later — can clone the source, run the same recomputation, and confirm the sealed `GENESIS_HASH_MAINNET` matches. A mismatch would be publicly detectable by anyone, which is a stronger and more durable guarantee than a one-time witness signing.
+
+This is the same property that already protects the testnet genesis (`genesis_testnet_frozen_vectors` reproduces the pinned testnet hash deterministically on any host).
+
+---
+
+## 6. Post-ceremony immutability
+
+After step 6 (`GENESIS_HASH_MAINNET` pinned), the following MUST hold forever for mainnet:
+
+- No commit on `main` may modify: `GENESIS_TIMESTAMP`, `GENESIS_HASH_MAINNET`, `GENESIS_MESSAGE`, `INITIAL_BLOCK_REWARD`, `HALVING_INTERVAL` / `HALVING_EPOCHS`, `MAX_SUPPLY_NOMS`, `TARGET_SPACING`, `NETWORK_MAGIC_MAINNET`, `P2P_PORT_MAINNET`. The derived H generator (see §3.4: `h_generator::derive_h_generator`, RFC9380 DST `"DOM:h2c:secp256k1:v6.1"`) is likewise frozen — changing its derivation or DST changes H and is equally a fork.
+- Any commit changing the above is, by definition, a fork. The network operating under the new constants is "DOM (forked YYYY-MM-DD)" and is NOT the same network as mainnet.
+
+Mechanical enforcement: the guard in `constants.rs` (the finalization guard `validate_mainnet_genesis_hash` plus the `MAINNET_GENESIS_FINALIZED` flag, which reference this ceremony) plus repository controls on changes touching `dom-core/src/constants.rs`.
+**[DECISION — SOREN PLANCK — enforcement]**: an earlier doc referenced "CODEOWNERS review under Phase 8.3" — that team/process model does not apply to a single-author repo. Decide the actual mechanical guard (the in-code finalization guard is the primary; any repo-level protection is optional).
+
+---
+
+## 7. Fair-launch timing (announcement before genesis)
+
+Because DOM is a fair launch with no premine, the **public announcement precedes the genesis**, with the exact launch date/time stated in advance. This ensures the network goes public and mining begins for everyone simultaneously, from block zero, with no head start for any party. The maintainer's seed nodes and miner (the ~3-VPS bridge that keeps the young network alive) are started AT or AFTER the announced moment — never before. The maintainer's running of a miner for early-network stability is disclosed openly in the announcement (transparency protects fair-launch credibility).
+
+---
+
+## 8. Disaster scenarios — escape hatches
+
+If the ceremony fails at any step, the procedure is:
+
+- **Pre-flight (§4.1) fails** — abort. Publish the failing output, fix, re-schedule. Do NOT seal with a red gate.
+- **Reproduction (§5) mismatch** — abort. A mismatch means a non-deterministic or non-conforming build path. Investigate, fix, re-derive. Never seal a hash that does not reproduce.
+- **Signing key unavailable (§4.7)** — abort. The release key MUST be present and operational at ceremony time.
+- **Seed nodes fail to bootstrap (§4.8)** — abort the PUBLIC launch but DO NOT modify the already-pinned genesis-hash constant. Fix the operational issue, redeploy, complete the announcement once stable.
+
+A failed pre-seal step is recoverable; a sealed mainnet genesis is not.
+
+---
+
+## 9. Rehearsal (regtest, not public testnet)
+
+The previous model rehearsed the ceremony on a public testnet. Under the current model there is no public testnet. The rehearsal is performed in **regtest** (already proven to run locally — the Cat 5 multi-node convergence set runs in regtest/FastDevOnly): the maintainer runs the deterministic genesis-hash derivation and the multi-node bootstrap end-to-end with regtest constants before the live mainnet ceremony, confirming the procedure and the recomputation path work. A failed rehearsal is recoverable; a failed mainnet ceremony is not.
+
+---
+
+## 10. Confidence (honest)
+
+- **Confirmed (in code):** the deterministic computation paths — genesis-header serialization, blake2b_256 of the header, generator derivation — are exercised by the test suites; the testnet frozen-vector reproduces natively.
+- **Confirmed (measured):** multi-node convergence (Cat 5) green; canonical gate green; supply-chain green.
+- **Validated by rehearsal (regtest), not by public testnet:** the end-to-end ceremony + bootstrap procedure.
+- **Operational, validated only when the live ceremony runs:** the real-network launch (seed nodes reachable on real IPs, the announced-time bootstrap). This is documented here; it is exercised for real only once, at launch.
+- **NOT claimed:** "100% secure" / "fully audited." Forbidden and false. The claim is the most complete validation this project performs under the stated model, with the maintainer accountable for what surfaces post-launch (Satoshi model).
