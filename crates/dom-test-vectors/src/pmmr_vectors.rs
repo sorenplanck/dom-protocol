@@ -90,7 +90,7 @@ pub fn generate_pmmr_vectors() -> Vec<(usize, Hash256)> {
             for i in 0..v.leaf_count {
                 pmmr.push(&(i as u64).to_le_bytes()).unwrap();
             }
-            (v.leaf_count, pmmr.root())
+            (v.leaf_count, pmmr.root().expect("complete PMMR has a root"))
         })
         .collect()
 }
@@ -136,7 +136,7 @@ mod tests {
                 pmmr.push(&(i as u64).to_le_bytes())
                     .expect("push must succeed");
             }
-            let computed = pmmr.root();
+            let computed = pmmr.root().expect("complete PMMR has a root");
             let computed_hex = computed.to_hex();
             assert_eq!(
                 computed_hex, vector.expected_root_hex,

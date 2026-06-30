@@ -69,7 +69,11 @@ fn main() {
             pmmr.push(&(i as u64).to_le_bytes())
                 .expect("push must succeed");
         }
-        println!("n={} root={}", v.leaf_count, pmmr.root().to_hex());
+        println!(
+            "n={} root={}",
+            v.leaf_count,
+            pmmr.root().expect("complete PMMR has a root").to_hex()
+        );
     }
     println!();
 
@@ -108,7 +112,10 @@ fn main() {
     // exercise the tagged Blake2b domain and the leaf-hash path
     // independently of the multi-leaf MMR layout.
     println!("[crypto_identities]");
-    println!("empty_pmmr_root={}", Pmmr::new().root().to_hex());
+    println!(
+        "empty_pmmr_root={}",
+        Pmmr::new().root().expect("empty PMMR has a root").to_hex()
+    );
     let one_leaf_hash = dom_pmmr::leaf_hash(1, b"DOM/cross_platform/v1");
     println!(
         "leaf_hash(1, DOM/cross_platform/v1)={}",

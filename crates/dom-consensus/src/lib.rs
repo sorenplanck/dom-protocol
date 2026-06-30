@@ -259,7 +259,11 @@ pub fn compute_block_pmmr_roots(
         }
     }
 
-    Ok((output_mmr.root(), kernel_mmr.root(), rangeproof_mmr.root()))
+    Ok((
+        output_mmr.root()?,
+        kernel_mmr.root()?,
+        rangeproof_mmr.root()?,
+    ))
 }
 
 /// Derive chain_id from network magic and genesis hash (RFC-0009 §4.1).

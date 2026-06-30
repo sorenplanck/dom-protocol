@@ -37,7 +37,7 @@ fn root_of(payloads: &[&[u8]]) -> dom_core::Hash256 {
     for p in payloads {
         pmmr.push(p).expect("push must succeed");
     }
-    pmmr.root()
+    pmmr.root().unwrap()
 }
 
 // ── (1) Silent-mutation symptom ──────────────────────────────────────────────

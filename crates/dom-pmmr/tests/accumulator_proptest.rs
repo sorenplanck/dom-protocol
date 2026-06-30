@@ -27,8 +27,8 @@ proptest! {
         for p in &payloads { b.push(p).expect("push b"); }
         prop_assert_eq!(a.leaf_count(), payloads.len() as u64);
         prop_assert_eq!(a.leaf_count(), b.leaf_count());
-        let ra = *a.root().as_bytes();
-        let rb = *b.root().as_bytes();
+        let ra = *a.root().unwrap().as_bytes();
+        let rb = *b.root().unwrap().as_bytes();
         prop_assert_eq!(ra, rb, "same payload sequence must yield the same root");
     }
 
@@ -39,7 +39,7 @@ proptest! {
         for (i, p) in payloads.iter().enumerate() {
             m.push(p).expect("push");
             prop_assert_eq!(m.leaf_count(), (i as u64) + 1, "leaf_count tracks pushes");
-            let r = *m.root().as_bytes();
+            let r = *m.root().unwrap().as_bytes();
             if let Some(pr) = prev {
                 prop_assert_ne!(pr, r, "root must change on every append");
             }

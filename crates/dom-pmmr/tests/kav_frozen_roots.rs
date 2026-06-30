@@ -37,7 +37,7 @@ fn pmmr_root(n: u64) -> [u8; 32] {
     for i in 0..n {
         pmmr.push(&i.to_le_bytes()).expect("push");
     }
-    *pmmr.root().as_bytes()
+    *pmmr.root().unwrap().as_bytes()
 }
 
 /// Frozen roots derived from the clean-room Grin-postorder reference.
