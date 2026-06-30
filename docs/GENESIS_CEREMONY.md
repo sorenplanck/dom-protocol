@@ -55,8 +55,7 @@ Constants updated in `dom-core/src/constants.rs` and committed as the final pre-
 
 2. **`GENESIS_HASH_MAINNET`** → the **blake2b_256** hash of the genesis header bytes. (NOTE: the code uses `blake2b_256`, NOT SHA-256. An earlier version of this document said "SHA-256" — that was a doc-vs-code error; the code is authoritative.) The header is constructed deterministically from the just-frozen `GENESIS_TIMESTAMP` plus the already-frozen `GENESIS_MESSAGE` and `INITIAL_BLOCK_REWARD`.
 
-3. **`GENESIS_MESSAGE`** → the genesis block's embedded message.
-   **[DECISION — SOREN PLANCK — non-anticipation proof]**: decide BEFORE sealing whether to embed a non-anticipation proof (a real-world headline / external reference dated on or after the announcement, Satoshi-style) in `GENESIS_MESSAGE`. This is irreversible once sealed. It strengthens the fair-launch credibility (proves the genesis was not constructed before that date) but is optional. If used, the exact text is chosen at ceremony time from a source dated on/after the public announcement. Mark here: [ ] embed non-anticipation proof / [ ] plain genesis message.
+3. **`GENESIS_MESSAGE`** → ALREADY SEALED. The genesis coinbase message is fixed in code as `"Not a store of value. A means of exchange."` (`constants.rs:81`, marked `[CONSENSUS]`), pinned by the KAV test `genesis_economic_constants_are_frozen` (in `dom-chain/tests/kav_genesis_chainid.rs`, which fails on any change) and restated in `genesis.rs`. This is not an open ceremony decision — the message is final; it states DOM's thesis (a means of exchange, not a store of value) and is changed only by a hard fork. No non-anticipation headline is embedded; the message stands as-is.
 
 4. **H generator** → the second Pedersen generator H is NOT a pinned constant; it is **derived** at runtime by `dom-crypto`'s `h_generator::derive_h_generator()` (RFC9380 hash-to-curve, DST `"DOM:h2c:secp256k1:v6.1"`), exposed via `h_generator::h_compressed()`. It is therefore fixed by its derivation (changing the DST or derivation would change H and is a hard fork), and re-verified by recomputation (§5) — `verify_h_matches_derivation` — rather than by external witnesses.
 
@@ -70,17 +69,17 @@ The only ceremony-time crypto computation is the deterministic genesis-hash deri
 
 2. **Time anchor.** Fix the ceremonial Unix timestamp = the publicly announced launch time. Record it.
 
-3. **Constants commit (timestamp).** Update `GENESIS_TIMESTAMP` (and `GENESIS_MESSAGE` per §3.3 decision) in `constants.rs`.
+3. **Constants commit (timestamp).** Update `GENESIS_TIMESTAMP` in `constants.rs`. This is the only ceremony-time constant edit; `GENESIS_MESSAGE` is already sealed (see §3.3).
 
 4. **Compute the genesis hash.** Run the ceremony-helper that constructs the genesis header from the frozen constants and prints the resulting `GENESIS_HASH_MAINNET` (blake2b_256 of the header bytes) to stdout.
-   **[DECISION — SOREN PLANCK — helper]**: confirm the exact tool/command used to compute the mainnet genesis hash (the same deterministic builder path that already produces the testnet frozen vectors, pointed at mainnet constants). Code confirms the real command before this step is final.
+   **Helper (already in code):** the deterministic builder is `build_genesis_coinbase` (`dom-node/src/miner.rs:182`), proven deterministic across calls by its own tests and guarded by `mainnet_genesis_guard.rs`. The same path that produces the testnet frozen vectors, pointed at mainnet constants, computes the mainnet hash. No tool decision remains; this step runs that path.
 
 5. **Independent reproduction (public-reproducibility check).** Recompute the genesis hash from a clean checkout of the public source at the sealed commit, with the same timestamp input, and confirm it matches byte-for-byte. Because the source is open, ANY third party can perform this same recomputation after launch — that public reproducibility is the integrity guarantee (replacing the old external-witness panel).
 
 6. **Pin the genesis hash.** Commit `GENESIS_HASH_MAINNET` into `constants.rs`. The placeholder guard (`validate_mainnet_genesis_hash`, which rejects the all-zero placeholder and aliasing with testnet/regtest) must now pass with the real value.
 
 7. **Build + sign release.** Build the release binaries for each supported host, compute the hash of each binary, sign the manifest with the release key, publish the signed manifest.
-   **[DECISION — SOREN PLANCK — platforms]**: confirm which host targets are built/signed for launch (vs. build-from-source only).
+   **Platforms:** the CI matrix (`.github/workflows/ci.yml`) builds and tests five hosts — `linux-x86_64`, `linux-arm64`, `macos-arm64`, `macos-x86_64` (all blocking, `experimental: false`) plus `windows-x86_64`, which is advisory (`experimental: true` / `continue-on-error`, pending LMDB stabilization). **[DECISION — SOREN PLANCK]:** the only open choice is which of those targets get *signed release binaries* vs. build-from-source only.
 
 8. **Network bootstrap.** Start the canonical seed nodes (running the signed binary) AT the announced launch time — not before (fair launch: the maintainer's nodes/miner come up with the public network, never ahead of it).
    **[DECISION — SOREN PLANCK — seeds]**: confirm the seed-node count and update `dom-wire/src/dns_seed.rs` accordingly. The code currently hardcodes 5 mainnet DNS seeds (`seed1..seed5.dom-protocol.org`) and an empty `MAINNET_SEED_IPS` ("to be filled after genesis"); the stated infrastructure is ~3 VPS = 2 nodes + 1 miner. The `dns_seed.rs` list and this step MUST be reconciled to the real deployment before launch.
@@ -109,7 +108,7 @@ After step 6 (`GENESIS_HASH_MAINNET` pinned), the following MUST hold forever fo
 - Any commit changing the above is, by definition, a fork. The network operating under the new constants is "DOM (forked YYYY-MM-DD)" and is NOT the same network as mainnet.
 
 Mechanical enforcement: the guard in `constants.rs` (the finalization guard `validate_mainnet_genesis_hash` plus the `MAINNET_GENESIS_FINALIZED` flag, which reference this ceremony) plus repository controls on changes touching `dom-core/src/constants.rs`.
-**[DECISION — SOREN PLANCK — enforcement]**: an earlier doc referenced "CODEOWNERS review under Phase 8.3" — that team/process model does not apply to a single-author repo. Decide the actual mechanical guard (the in-code finalization guard is the primary; any repo-level protection is optional).
+**Enforcement (resolved):** there is no CODEOWNERS file; for a single-author repo the in-code finalization guard (`validate_mainnet_genesis_hash` + `MAINNET_GENESIS_FINALIZED`, `constants.rs`) is the mechanical protection. The earlier "CODEOWNERS review under Phase 8.3" reference reflected a team model that does not apply here. No decision remains; any repo-level branch protection is optional hardening.
 
 ---
 
