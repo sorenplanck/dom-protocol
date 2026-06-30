@@ -5,6 +5,7 @@
 use dom_core::DomError;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{elliptic_curve::PrimeField, AffinePoint, EncodedPoint, ProjectivePoint, Scalar};
+use k256::elliptic_curve::group::prime::PrimeCurveAffine;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -95,6 +96,14 @@ impl Commitment {
         let a = self.to_projective()?;
         let b = other.to_projective()?;
         let sum: AffinePoint = (a + b).into();
+        // Fail closed on the identity (point at infinity): its compressed SEC1
+        // encoding is a single byte, never a valid 33-byte commitment. Without
+        // this guard copy_from_slice would panic (A2-006 / FABLE5-003).
+        if bool::from(sum.is_identity()) {
+            return Err(DomError::Invalid(
+                "commitment addition produced the identity point".into(),
+            ));
+        }
         let encoded = EncodedPoint::from(sum).compress();
         let mut bytes = [0u8; 33];
         bytes.copy_from_slice(encoded.as_bytes());
@@ -105,6 +114,14 @@ impl Commitment {
         let a = self.to_projective()?;
         let b = other.to_projective()?;
         let diff: AffinePoint = (a - b).into();
+        // Fail closed on the identity (point at infinity): its compressed SEC1
+        // encoding is a single byte, never a valid 33-byte commitment. Without
+        // this guard copy_from_slice would panic (A2-006 / FABLE5-003).
+        if bool::from(diff.is_identity()) {
+            return Err(DomError::Invalid(
+                "commitment subtraction produced the identity point".into(),
+            ));
+        }
         let encoded = EncodedPoint::from(diff).compress();
         let mut bytes = [0u8; 33];
         bytes.copy_from_slice(encoded.as_bytes());
