@@ -3,7 +3,7 @@
 //! Proves DISHONEST inputs are REJECTED (Err / false), complementing F4
 //! (honest inputs work). Scope here = the 3 gaps the recon found NOT already
 //! covered by tests/infinity_rejection.rs + tests/bulletproof*_adversarial.rs:
-//!   (A) bp2 verify-time value ceiling  [probe — see #[ignore] note]
+//!   (A) bp2 verify-time value ceiling  [probe in bulletproof_bp.rs, now GREEN]
 //!   (B) Scalar (keys.rs) range + LE/BE non-confusion
 //!   (C) PartialSig::from_bytes range/length
 //! Everything else (PublicKey/SecretKey/BlindingFactor/Commitment/SchnorrSignature
@@ -33,7 +33,8 @@ fn be_increment(mut b: [u8; 32]) -> [u8; 32] {
 //   bulletproof_bp::tests::probe_bp2_verify_rejects_value_above_max_provable
 // It EXECUTED and CONFIRMED inflation: bp_verify returns Ok(true) for value=2^52
 // (FIX-014, dom-shield reports/FIX-QUEUE.md). That test asserts the correct
-// defense and is deliberately RED (not #[ignore]) until FIX-014 is fixed.
+// defense and is now GREEN. FIX-014 was RESOLVED in e5f2075 (bounded aggregate
+// bp2 proof closes the inflation path; native-revalidated 2026-06-29).
 
 // ── (B) Scalar range rejection (keys.rs:26/37) ──────────────────────────────
 #[test]

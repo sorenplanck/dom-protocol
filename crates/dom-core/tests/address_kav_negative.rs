@@ -14,19 +14,19 @@ use dom_core::Address;
 // ── KAV-negativo ─────────────────────────────────────────────────────────────
 
 /// KAV-negativo. BIP-350 §"Decode" forbids MIXED-case strings: a decoder MUST
-/// reject any string that contains both upper- and lower-case characters. DOM's
-/// `Address::decode` calls `s.to_lowercase()` BEFORE decoding, which silently
-/// case-folds a mixed-case string into a valid one instead of rejecting it.
+/// reject any string that contains both upper- and lower-case characters.
+/// `Address::decode` now rejects mixed-case explicitly (address.rs:78) BEFORE
+/// the `to_lowercase()` normalization, instead of silently case-folding it.
 ///
 /// This is an address-malleability vector: a single logical address has many
 /// distinct on-the-wire spellings that all decode to the same payload, and a
 /// BIP-350-conformant peer would reject what this node accepts (consensus /
 /// interop divergence). The test asserts the CORRECT (BIP-350) behavior —
-/// rejection — so it is RED against current code and pins the exact case.
+/// rejection — and pins the exact case.
 ///
-/// STATUS: RED — NEW finding `DOM-CORE-ADDR-CASE`. See report. Marked #[ignore]
-/// so the green suite is preserved per dom-shield "discover, don't fix"; remove
-/// `#[ignore]` to reproduce the failure.
+/// STATUS: RESOLVED — DOM-CORE-ADDR-CASE: mixed-case Bech32m is now rejected
+/// before lowercasing (address.rs:78). This test is active (no #[ignore]) and
+/// GREEN; it originally exposed the finding and now guards against regression.
 #[test]
 fn mixed_case_address_is_rejected() {
     // A canonical all-lowercase address that decodes fine.
