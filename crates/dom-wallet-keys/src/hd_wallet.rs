@@ -74,23 +74,38 @@ impl ExtendedPrivKey {
         let mut mac =
             HmacSha512::new_from_slice(b"Bitcoin seed").expect("HMAC can take key of any size");
         mac.update(seed);
-        let result = mac.finalize().into_bytes();
+        let mut result = mac.finalize().into_bytes();
 
         let mut key = [0u8; 32];
         let mut chain_code = [0u8; 32];
         key.copy_from_slice(&result[..32]);
         chain_code.copy_from_slice(&result[32..]);
+        // A2-009: wipe the HMAC output (holds the master key material) once it
+        // has been copied out. `GenericArray` is not `Zeroizing`-able, so
+        // zeroize its backing slice directly (same pattern as the field zeroize).
+        result[..].zeroize();
 
         // BIP-32: the master key is invalid if IL == 0 or IL >= n. `from_slice`
         // rejects both; if invalid the seed must be discarded (we surface it).
-        SecretKey::from_slice(&key).map_err(|_| HdError::InvalidKey)?;
+        if let Err(e) = SecretKey::from_slice(&key).map_err(|_| HdError::InvalidKey) {
+            // A2-009: wipe the still-live secret intermediates on the reject path.
+            key.zeroize();
+            chain_code.zeroize();
+            return Err(e);
+        }
 
-        Ok(Self {
+        let node = Self {
             key: Zeroizing::new(key),
             chain_code,
             depth: 0,
             index: 0,
-        })
+        };
+        // A2-009 follow-up: `key` and `chain_code` are `Copy`, so the struct
+        // received its own copies; wipe the local stack copies after the move so
+        // no secret intermediate survives the function.
+        key.zeroize();
+        chain_code.zeroize();
+        Ok(node)
     }
 
     /// Derive a child key at given index.
@@ -116,29 +131,47 @@ impl ExtendedPrivKey {
         }
         mac.update(&index.to_be_bytes());
 
-        let result = mac.finalize().into_bytes();
+        let mut result = mac.finalize().into_bytes();
 
-        let mut il = [0u8; 32];
+        let mut il = Zeroizing::new([0u8; 32]);
         il.copy_from_slice(&result[..32]);
 
         // ki = (IL + kpar) mod n. `Scalar::from_be_bytes` rejects IL >= n; the
         // tweak-add rejects a zero result. Both are the BIP-32 "invalid index"
         // cases (caller should advance the index; here we surface InvalidKey).
-        let tweak = Scalar::from_be_bytes(il).map_err(|_| HdError::InvalidKey)?;
-        let child_key = parent_sk
-            .add_tweak(&tweak)
-            .map_err(|_| HdError::InvalidKey)?
-            .secret_bytes();
+        let tweak = match Scalar::from_be_bytes(*il).map_err(|_| HdError::InvalidKey) {
+            Ok(t) => t,
+            Err(e) => {
+                // A2-009: wipe the still-live HMAC output on the reject path.
+                result[..].zeroize();
+                return Err(e);
+            }
+        };
+        let mut child_key = match parent_sk.add_tweak(&tweak).map_err(|_| HdError::InvalidKey) {
+            Ok(sk) => sk.secret_bytes(),
+            Err(e) => {
+                result[..].zeroize();
+                return Err(e);
+            }
+        };
 
         let mut chain_code = [0u8; 32];
         chain_code.copy_from_slice(&result[32..]);
+        // A2-009: wipe the HMAC output once copied out (see `from_seed`).
+        result[..].zeroize();
 
-        Ok(Self {
+        let node = Self {
             key: Zeroizing::new(child_key),
             chain_code,
             depth: self.depth.saturating_add(1),
             index,
-        })
+        };
+        // A2-009 follow-up: `child_key` and `chain_code` are `Copy`, so the
+        // struct received its own copies; wipe the local stack copies after the
+        // move so no secret intermediate survives the function.
+        child_key.zeroize();
+        chain_code.zeroize();
+        Ok(node)
     }
 
     /// Derive key at a path string.
