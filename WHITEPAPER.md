@@ -1,7 +1,7 @@
 # DOM: A Peer-to-Peer Electronic Cash System
 
 **Soren Planck**
-**Version 4 — May 2026**
+**Version 4.1 — July 2026**
 
 -----
 
@@ -356,7 +356,7 @@ This minimalism is not a missing feature list. It is the feature list. Every lin
 
 ## 11. Implementation Status
 
-DOM is implemented in Rust as a workspace of 16 crates. As of May 2026:
+DOM is implemented in Rust as a workspace of 27 crates. As of July 2026:
 
 |Component                              |Status                                                |
 |---------------------------------------|------------------------------------------------------|
@@ -378,15 +378,17 @@ DOM is implemented in Rust as a workspace of 16 crates. As of May 2026:
 ### 11.1 Test Coverage
 
 ```
-Total unit tests:       238 passing, 0 failures
-Crates with tests:      13 / 16
-Clippy warnings:        0
-Format compliance:      100%
+Test functions:         2,053 (1,904 sync + 149 async), 0 known failures
+Property-based tests:   37 proptest blocks
+Fuzz targets:           58 (cargo-fuzz), across 19 crates
+Crates with tests:      26 / 27
+Clippy warnings:        0 (CI enforces -D warnings)
+Format compliance:      100% (CI enforces cargo fmt --check)
 ```
 
-### 11.2 Testnet Burn-In
+### 11.2 Private Burn-In
 
-A private testnet has been running continuously since 2026-05-19:
+A private chain has been running since 2026-05-19. Snapshot as of 2026-05:
 
 |Metric                |Value                             |
 |----------------------|----------------------------------|
@@ -396,19 +398,26 @@ A private testnet has been running continuously since 2026-05-19:
 |**Average block time**|~7.2 min (testnet easy difficulty)|
 |**Critical errors**   |0                                 |
 
-A public testnet announcement is pending completion of Phase 1 and Phase 2 security audits.
+There is no public testnet and none is planned: a public testnet would create
+insiders holding coins and infrastructure before launch. Validation happens
+before block zero, through the project's own audit software and a continuous
+private burn-in run by a single operator (see Section 12).
 
 -----
 
 ## 12. Launch
 
-DOM launches when:
+Launch is milestone-based, not calendar-based. DOM launches when:
 
-1. Phase 1 audit (consensus + crypto) is complete
-1. Phase 2 audit (storage + P2P + PoW) is complete
-1. Public testnet has run stable for 3+ months
-1. Genesis parameters are finalized
+1. The internal audit framework (dom-shield) signs off on the
+   consensus-critical surface (consensus, crypto, storage, P2P, PoW)
+1. The private burn-in has surfaced and resolved the time-dependent
+   issues that only sustained operation reveals
+1. Genesis parameters are finalized through the genesis ceremony
 1. Code is published
+
+There is no public testnet stage — mainnet starts from block zero for
+everyone (Section 11.2).
 
 The genesis coinbase contains the message:
 
@@ -418,7 +427,8 @@ No participant — including the protocol author — has any advantage at launch
 
 There is no announcement, no ICO, no airdrop, no premine, no founder allocation. DOM either succeeds as a means of exchange because people choose to use it, or it does not. The protocol does not depend on its author after launch.
 
-**Target launch:** Q3 2026, pending audit completion.
+**Target launch:** when every readiness gate is complete — no calendar
+commitment, no exceptions for marketing, deadline, or competitive pressure.
 
 -----
 
@@ -460,10 +470,11 @@ What is new is the synthesis, the launch model, and the commitment to remain a c
 |v2     |2026-05        |Minor revisions                                                                    |
 |v3     |2026-05 (mid)  |Reward = 24 DOM, Halving = 670,725, 30 epochs (placeholder values)                 |
 |**v4** |**2026-05-19** |**Reward = 33 DOM, Halving = 330,000, 55 epochs, Supply = 33M (production values)**|
+|v4.1   |2026-07-01     |Implementation status refresh (27 crates, current test counts); launch section aligned with milestone-based readiness gates (no public testnet); license set to MIT|
 
 -----
 
 **Document Owner:** Soren Planck
 **Contact:** sorenplanck@tutamail.com
 **Repository:** github.com/sorenplanck/dom-protocol
-**License:** [TBD — Choose MIT, Apache 2.0, or dual]
+**License:** MIT
