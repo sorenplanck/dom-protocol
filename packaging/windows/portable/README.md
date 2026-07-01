@@ -11,11 +11,10 @@ DOM-Portable/
   README.md
   VERSION.txt
   bin/
-    dom-wallet-app.exe
+    dom-wallet-desktop.exe
     dom-node.exe
     dom-test-runner.exe
   config/
-    app_state.example.json
     node.env.example
   data/
     wallets/
@@ -40,13 +39,26 @@ tokens, or other secrets in package config files or docs.
 
 ## Build a package
 
-From the repository root on Windows PowerShell:
+The wallet is the Tauri desktop app (`wallet-desktop/`), which builds in its
+own target directory. From the repository root on Windows PowerShell:
 
 ```powershell
+# 1. Build the desktop wallet (frontend assets are embedded in the exe).
+cd wallet-desktop; npm install; npm run tauri build; cd ..
+
+# 2. Build the node + test runner.
+cargo build --release -p dom-node -p dom-test-runner
+
+# 3. Assemble the package.
 packaging\windows\portable\build_portable.ps1 `
   -ReleaseDir target\release `
+  -WalletReleaseDir wallet-desktop\src-tauri\target\release `
   -OutputDir target\DOM-Portable
 ```
+
+The wallet exe requires the Microsoft Edge WebView2 runtime (preinstalled on
+current Windows 10/11; the Tauri installer bundles a bootstrapper — the
+portable exe assumes it is present).
 
 The build script refuses to overwrite an existing output directory unless
 `-Force` is supplied. A fresh package contains examples and empty data
@@ -57,7 +69,7 @@ directories; it does not contain a wallet.
 Run the wallet:
 
 ```powershell
-.\bin\dom-wallet-app.exe
+.\bin\dom-wallet-desktop.exe
 ```
 
 Run a local node for devnet/testnet work:

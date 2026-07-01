@@ -1,5 +1,10 @@
 param(
     [string]$ReleaseDir = "target\release",
+    # The Tauri desktop wallet builds in its own target dir (the crate is
+    # excluded from the workspace). Build it first: `npm run tauri build`
+    # from wallet-desktop/ (frontend assets are embedded in the exe via the
+    # default custom-protocol feature).
+    [string]$WalletReleaseDir = "wallet-desktop\src-tauri\target\release",
     [string]$OutputDir = "target\DOM-Portable",
     [switch]$Force
 )
@@ -20,7 +25,7 @@ if ((Test-Path -LiteralPath $OutputDir) -and $Force) {
     Remove-Item -LiteralPath $OutputDir -Recurse -Force
 }
 
-$walletExe = Join-Path $ReleaseDir "dom-wallet-app.exe"
+$walletExe = Join-Path $WalletReleaseDir "dom-wallet-desktop.exe"
 $nodeExe = Join-Path $ReleaseDir "dom-node.exe"
 $runnerExe = Join-Path $ReleaseDir "dom-test-runner.exe"
 
@@ -42,20 +47,11 @@ foreach ($dir in $dirs) {
     New-Item -ItemType Directory -Force -Path (Join-Path $OutputDir $dir) | Out-Null
 }
 
-Copy-Item -LiteralPath $walletExe -Destination (Join-Path $OutputDir "bin\dom-wallet-app.exe")
+Copy-Item -LiteralPath $walletExe -Destination (Join-Path $OutputDir "bin\dom-wallet-desktop.exe")
 Copy-Item -LiteralPath $nodeExe -Destination (Join-Path $OutputDir "bin\dom-node.exe")
 Copy-Item -LiteralPath $runnerExe -Destination (Join-Path $OutputDir "bin\dom-test-runner.exe")
 Copy-Item -LiteralPath "packaging\windows\portable\README.md" -Destination (Join-Path $OutputDir "README.md")
 Copy-Item -LiteralPath "packaging\windows\portable\layout.txt" -Destination (Join-Path $OutputDir "layout.txt")
-
-$appState = @'
-{
-  "wallet_dir": null,
-  "network": null,
-  "node_url": "http://127.0.0.1:33369"
-}
-'@
-Set-Content -LiteralPath (Join-Path $OutputDir "config\app_state.example.json") -Value $appState -Encoding UTF8
 
 $nodeEnv = @'
 # Local node environment example. Do not add wallet passwords, seed phrases,
