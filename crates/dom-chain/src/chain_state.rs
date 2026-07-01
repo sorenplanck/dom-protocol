@@ -1677,6 +1677,22 @@ fn build_utxo_updates(
         let current = store.get_utxo(commitment)?;
         match (current, desired) {
             (Some(current), Some(desired)) if current.to_bytes() == desired.to_bytes() => {}
+            // A2-001: apply_connect (the consensus layer of the reorg) has already
+            // validated this transition — apply_disconnect released the shared output to
+            // None and apply_connect re-admitted it past its duplicate-output guard. The
+            // overlay therefore encodes an approved re-homing, and build_utxo_updates only
+            // translates the overlay into store writes; it executes the approved change
+            // rather than re-judging it. Re-homing is consensus-neutral: block_height is
+            // only read for coinbase maturity (is_mature_for short-circuits to true for
+            // non-coinbase), and coinbase maturity is enforced in apply_connect and at
+            // spend time, not here. A divergence in proof or is_coinbase is NOT something
+            // apply_connect can emit, so it would signal an internal bug — that still fails
+            // closed.
+            (Some(current), Some(desired))
+                if current.proof == desired.proof && current.is_coinbase == desired.is_coinbase =>
+            {
+                out.push((*commitment, Some(desired.to_bytes())));
+            }
             (Some(current), Some(desired)) => {
                 return Err(DomError::Internal(format!(
                     "reorg utxo mismatch for existing commitment {}: current_height={} desired_height={}",

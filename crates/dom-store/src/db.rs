@@ -664,10 +664,16 @@ impl DomStore {
                 Some(entry) => match txn.get(self.db_utxos, commitment) {
                     Ok(existing) if existing == entry.as_slice() => {}
                     Ok(_) => {
-                        return Err(DomError::Internal(format!(
-                            "reorg utxo already exists with different contents: commitment={}",
-                            hex::encode(commitment)
-                        )));
+                        // A2-001: build_utxo_updates only emits a Some-update
+                        // for an existing commitment after confirming it is an
+                        // approved re-homing (same proof and is_coinbase,
+                        // differing only in block_height). Execute the overwrite;
+                        // the identity check that matters happened upstream. This
+                        // path is reorg-only — commit_block keeps NO_OVERWRITE.
+                        txn.put(self.db_utxos, commitment, entry, WriteFlags::empty())
+                            .map_err(|e| {
+                                DomError::Internal(format!("put reorg utxo (rehome): {e}"))
+                            })?;
                     }
                     Err(lmdb::Error::NotFound) => txn
                         .put(self.db_utxos, commitment, entry, WriteFlags::NO_OVERWRITE)
@@ -688,10 +694,15 @@ impl DomStore {
                 Some(hash) => match txn.get(self.db_kernels, excess) {
                     Ok(existing) if existing == hash => {}
                     Ok(_) => {
-                        return Err(DomError::Internal(format!(
-                            "reorg kernel already exists with different block: excess={}",
-                            hex::encode(excess)
-                        )));
+                        // A2-001: apply_connect's anti-replay guard already
+                        // validated this kernel migration — apply_disconnect
+                        // released the excess and apply_connect re-admitted it
+                        // past the replay check. Execute the re-homing to the new
+                        // block hash. Reorg-only; commit_block keeps NO_OVERWRITE.
+                        txn.put(self.db_kernels, excess, hash, WriteFlags::empty())
+                            .map_err(|e| {
+                                DomError::Internal(format!("put reorg kernel (rehome): {e}"))
+                            })?;
                     }
                     Err(lmdb::Error::NotFound) => txn
                         .put(self.db_kernels, excess, hash, WriteFlags::NO_OVERWRITE)
