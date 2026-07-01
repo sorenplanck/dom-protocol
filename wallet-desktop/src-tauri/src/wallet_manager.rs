@@ -36,7 +36,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_tx::slate::Slate;
-use dom_wallet::{Bip39Seed, Network as V1Network, SeedAcceptance};
+use dom_wallet::Network as V1Network;
 use dom_wallet2::{
     cancel as v2_cancel, create_send as v2_create_send,
     export_full_backup as v2_export_full_backup, finalize_tracked as v2_finalize_tracked,
@@ -45,6 +45,7 @@ use dom_wallet2::{
     ChainSource, DerivIndex, KeychainDeriver, Network as V2Network, OutputOrigin, OutputStatus,
     ReconcileReport, RpcChainSource, RpcSourceError, StoredOutput, SubmitError, WalletV2State,
 };
+use dom_wallet_keys::seed::{Bip39Seed, SeedAcceptance};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
