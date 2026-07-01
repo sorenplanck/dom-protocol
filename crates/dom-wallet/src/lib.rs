@@ -2,6 +2,20 @@
 //!
 //! A secure Mimblewimble wallet for the DOM Protocol with persistent encrypted storage.
 //!
+//! ## DEPRECATED — wallet v1 (frozen; superseded by `dom-wallet2`)
+//!
+//! This crate is the **legacy v1 wallet engine**, frozen per the migration plan
+//! (`docs/WALLET_V2_DESIGN.md` §7): it receives **critical security fixes
+//! only** and is not evolved. New user-wallet work goes to `dom-wallet2`, which
+//! exists because v1 has fund-loss defects fixed by construction in v2
+//! (WDSF-001/002: change and receive-slate blindings not persisted; rescan
+//! deleting non-derivable confirmed outputs). The remaining legitimate
+//! consumers are `dom-node` (coinbase build, canonical rescan) and the desktop
+//! shell's wallet registry — not end-user wallet flows.
+//!
+//! (Deprecation is doc-level, not `#[deprecated]`, so the remaining consumers
+//! keep building under the workspace-wide `-D warnings`.)
+//!
 //! ## Features
 //!
 //! - **Encrypted Storage:** ChaCha20Poly1305 with HKDF-derived keys from password.
