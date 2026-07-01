@@ -27,7 +27,9 @@ fn max_times_h() -> Commitment {
     let r = BlindingFactor::from_bytes([0x11u8; 32]).expect("blinding");
     let c_max = Commitment::commit(MAX_PROVABLE_VALUE, &r);
     let c_zero = Commitment::commit(0, &r);
-    c_max.sub(&c_zero).expect("MAX*H is a valid (non-identity) point")
+    c_max
+        .sub(&c_zero)
+        .expect("MAX*H is a valid (non-identity) point")
 }
 
 #[test]

@@ -3,9 +3,9 @@
 //! Pedersen commitments over secp256k1 — full arithmetic implementation.
 
 use dom_core::DomError;
+use k256::elliptic_curve::group::prime::PrimeCurveAffine;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{elliptic_curve::PrimeField, AffinePoint, EncodedPoint, ProjectivePoint, Scalar};
-use k256::elliptic_curve::group::prime::PrimeCurveAffine;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 

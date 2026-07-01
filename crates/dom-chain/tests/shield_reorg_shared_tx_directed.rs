@@ -401,12 +401,7 @@ fn a2_001_reorg_a_to_b_with_shared_tx_same_kernel_excess_must_succeed() {
 
     // THE SHARED TRANSACTION: built ONCE, cloned verbatim into a block on each
     // branch, so the kernel excess is byte-identical on A2 and B3.
-    let shared_spend = valid_spend_tx(
-        shared_cb_value,
-        shared_cb_blinding,
-        shared_cb_value - 1,
-        21,
-    );
+    let shared_spend = valid_spend_tx(shared_cb_value, shared_cb_blinding, shared_cb_value - 1, 21);
     let shared_kernel = *shared_spend.kernels[0].excess.as_bytes();
 
     // --- Branch A (canonical): A2 includes shared_spend, then A3. ---
