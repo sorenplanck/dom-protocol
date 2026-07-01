@@ -1,8 +1,8 @@
 # DOM Protocol Audit Tracker
 
 **Phase 1 Started:** 2026-05-19  
-**Current Phase:** In Progress  
-**Status:** 🔄 Consensus + Crypto Review
+**Current Phase:** Internal remediation complete — pending external audit  
+**Status:** ✅ All confirmed FABLE5 + consensus findings resolved (see Findings Tracker below). Next: external audit (Foundry). P2P not yet formally audited.
 
 ---
 
@@ -188,21 +188,36 @@ All files properly formatted
 
 ## Audit Findings Tracker
 
-### Phase 1 Findings (To Be Filled By Auditor)
+> **Note (2026-07):** The phased Phase-1/Phase-2 template that once stood here
+> was never filled by a formal phased audit. The real internal review was the
+> **FABLE5 pass** (`audit/FABLE5_SECURITY_AUDIT.md`) plus consensus-remediation
+> work. All confirmed findings are listed below with their fixing commits. The
+> former `A1-*`/`A2-*` placeholder rows were template scaffolding, not open
+> findings. The final review is the external audit (Foundry).
 
-| ID | Severity | Component | Issue | Status | Fix |
-|----|-----------| ----------|-------|--------|-----|
-| A1-001 | [pending] | consensus | [pending] | ⏳ | ⏳ |
-| A1-002 | [pending] | crypto | [pending] | ⏳ | ⏳ |
-| ... | ... | ... | ... | ⏳ | ⏳ |
+### Resolved findings (FABLE5 pass + consensus remediation)
 
-### Phase 2 Findings (Queued)
+| ID | Severity | Component | Issue | Fix (commit) |
+|----|----------|-----------|-------|--------------|
+| A2-006 / FABLE5-003 | Critical | crypto | `bp2_verify` panic→abort when `commitment == MAX_PROVABLE_VALUE·H` (identity-point complement); remote crash | `65f4cb9` (fail-closed add/sub + PoC) |
+| A2-001 | High | storage/consensus | Reorg aborted when a byte-identical tx appeared in both branches (shared output/kernel re-home rejected) | `dca906b` (approved re-home) |
+| A2-004 / FABLE5-004 | High | consensus | RandomX seed resolved from the canonical height index, not the block's own branch → partition on a cross-epoch reorg | `8cbbed2` (branch-aware seed; RFC-0011 §6) |
+| A2-005 / FABLE5-005 | Medium | consensus | MTP window computed over canonical ancestors, not the block's own branch | `513cf2e` (branch-aware MTP; RFC-0011 §7) |
+| A2-003 | High (local) | node | Orphan pool bounded only by count, not bytes | `20af0e2` (256 MB byte cap) |
+| A2-009 / FABLE5-006 | Low | wallet-keys | HD-derivation intermediates not zeroized | `2472fff` (zeroize on all paths) |
+| A2-008 | Low | node | Mempool admission TOCTOU; safety net is connect_block revalidation | `39a6036` (acknowledged / won't-fix, documented) |
+| A2-007 | — | — | Hallucinated source citation (false finding); no code defect | Closed at source (citation-verification rule) |
 
-| ID | Severity | Component | Issue | Status | Fix |
-|----|-----------| ----------|-------|--------|-----|
-| A2-001 | [pending] | storage | [pending] | ⏳ | ⏳ |
-| A2-002 | [pending] | p2p | [pending] | ⏳ | ⏳ |
-| ... | ... | ... | ... | ⏳ | ⏳ |
+### Scope not covered by an internal phased audit
+
+- **P2P was not formally audited.** It is a candidate scope for the external
+  (Foundry) audit or a future dedicated internal pass. (The `A2-002 | p2p`
+  placeholder above never corresponded to a characterized finding.)
+- **Monetary-integrity / cumulative-supply auditability** is addressed as a
+  read-only layer in **RFC-0015**, deliberately outside consensus and the block
+  header (it does not add cumulative roots to the header by design).
+- Consensus and crypto were reviewed via the Phase-1 validator table (above) and
+  the FABLE5 pass.
 
 ### Wallet v2 Hardening Notes (docs/audits/)
 
