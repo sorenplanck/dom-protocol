@@ -160,3 +160,30 @@ weight(Block) = sum(weight(tx) for tx in non_coinbase_transactions)
 ```
 
 Where `weight(tx)` uses the formulas in RFC-0010 §1.1.
+
+---
+
+## 6. RandomX Seed Branch Resolution (normative)
+
+Section "RandomX Seed Schedule" defines `randomx_seed_height(height)` and states
+that the seed is the block hash at `randomx_seed_height`. This section resolves
+an ambiguity in that phrasing: **which chain** the seed block is taken from when
+branches disagree.
+
+**Normative rule:** the RandomX seed for a block is the hash of the block at
+`randomx_seed_height(height)` **on that block's own branch** — the ancestor
+reached by walking back from the block's parent — NOT the block currently at
+that height on the canonical chain.
+
+When a block extends the canonical chain, the two coincide and the canonical
+height index MAY be used as an optimization. They diverge only for a side-branch
+block validated during a reorg that crosses an epoch boundary
+(`RANDOMX_SEED_INTERVAL`); in that case the block's own branch is authoritative.
+Using the canonical index there would validate the block against a seed from a
+competing branch, splitting consensus — a valid block rejected, or nodes
+disagreeing on validity.
+
+A divergence deeper than `MAX_REORG_DEPTH_POLICY` is rejected: such a block is
+unpromotable regardless, so the seed resolution refuses rather than falling back
+to the canonical seed.
+
