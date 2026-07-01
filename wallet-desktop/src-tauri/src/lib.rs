@@ -9,6 +9,7 @@ mod log_capture;
 mod managed_storage;
 mod metrics;
 mod node_host;
+mod registry;
 mod settings;
 mod wallet_manager;
 mod wallet_registry;
@@ -17,7 +18,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dom_wallet::{new_wallet_id, NodeRpc, NodeRpcClient, RegistryEntry, WalletRegistry};
+use crate::registry::{new_wallet_id, RegistryEntry, WalletRegistry};
+use dom_wallet::{NodeRpc, NodeRpcClient};
 use tauri::{Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tracing_subscriber::prelude::*;
