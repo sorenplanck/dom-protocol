@@ -35,6 +35,10 @@
 //! `config.json` writer in dom-wallet's `wallet_dir`), so a crash mid-write can
 //! never leave a half-written `registry.json`.
 
+// The registry API is retained verbatim from v1 (`names()` is unused by the
+// desktop today) — trimming it would fork the moved code for no gain.
+#![allow(dead_code)]
+
 use std::path::Path;
 
 use rand::RngCore;

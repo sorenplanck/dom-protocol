@@ -1851,6 +1851,54 @@ mod backup_wire_tests {
         );
     }
 
+    /// AUTO-BACKUP ENFORCEMENT: `save()` refreshes the auto-backup iff
+    /// `funds_fingerprint` moved, so the fingerprint MUST register every
+    /// output-lifecycle event — including the ones that create no output at
+    /// all (a send without change only flips its inputs to `Spent`; a reorg
+    /// only flips `Confirmed` to `Reorged`). If any transition were invisible
+    /// here, that material fund change would silently skip its auto-backup.
+    #[test]
+    fn fingerprint_registers_every_output_lifecycle_transition() {
+        let statuses = [
+            OutputStatus::Unconfirmed,
+            OutputStatus::Confirmed,
+            OutputStatus::Spent,
+            OutputStatus::Reorged,
+        ];
+        let fp_with_status = |status: OutputStatus| {
+            let mut s = populated_regtest_state();
+            s.outputs
+                .get_mut(&commit(1))
+                .expect("output 1 present")
+                .status = status;
+            funds_fingerprint(&s)
+        };
+        for (i, a) in statuses.iter().enumerate() {
+            for b in statuses.iter().skip(i + 1) {
+                assert_ne!(
+                    fp_with_status(*a),
+                    fp_with_status(*b),
+                    "a {a:?} -> {b:?} transition must read as a material funds change"
+                );
+            }
+        }
+
+        // A value difference on an otherwise identical output set is material
+        // too (a rewritten amount must never skip the backup).
+        let base = funds_fingerprint(&populated_regtest_state());
+        let mut bumped = populated_regtest_state();
+        bumped
+            .outputs
+            .get_mut(&commit(1))
+            .expect("output 1 present")
+            .value += 1;
+        assert_ne!(
+            funds_fingerprint(&bumped),
+            base,
+            "a value change must read as a material funds change"
+        );
+    }
+
     /// Under an async runtime, a material save spawns the backup OFF the reactor
     /// (`spawn_blocking`) and the awaited job writes the file.
     #[tokio::test]

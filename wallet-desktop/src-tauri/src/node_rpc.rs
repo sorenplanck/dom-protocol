@@ -48,6 +48,11 @@
 //! what the node's `submit_tx` handler decodes. Hashes on the wire
 //! are 64-char lowercase hex (32 bytes).
 
+// The full v1 client API is retained verbatim (chain tip, header lookup,
+// mempool query, UTXO lookup, …) even where the desktop does not call it yet —
+// trimming it would fork the moved code from its provenance for no gain.
+#![allow(dead_code)]
+
 use dom_consensus::transaction::Transaction;
 use dom_serialization::DomSerialize;
 use reqwest::blocking::{Client, RequestBuilder, Response};
