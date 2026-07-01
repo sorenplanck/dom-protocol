@@ -262,7 +262,7 @@ impl ChainState {
                 )));
             }
             validate_parent_timestamp_progression(header, &parent)?;
-            let ancestors = self.get_recent_timestamps(header.height.0, 11)?;
+            let ancestors = self.get_recent_timestamps(header.prev_hash, 11)?;
             validate_median_time_past(header, &ancestors)?;
             Some(parent)
         } else {
@@ -740,7 +740,7 @@ impl ChainState {
                 })?;
             let parent = BlockHeader::from_bytes(&parent_bytes)?;
             validate_parent_timestamp_progression(header, &parent)?;
-            let ancestors = self.get_recent_timestamps(header.height.0, 11)?;
+            let ancestors = self.get_recent_timestamps(header.prev_hash, 11)?;
             validate_median_time_past(header, &ancestors)?;
             self.validate_expected_target(header, &parent)?;
 
@@ -1093,22 +1093,40 @@ impl ChainState {
         Ok(timestamps)
     }
 
+    /// Collect the timestamps of the `count` blocks preceding a block whose
+    /// parent is `parent_hash`, walking the block's OWN branch (A2-005).
+    ///
+    /// Mirrors the seed-resolution rule (RFC-0011 §6, applied to MTP): the
+    /// median-time-past window is taken from the block's own ancestry, not from
+    /// whatever chain is currently canonical. Walks back from the parent via
+    /// prev_hash. For a block extending the canonical tip the parent and its
+    /// ancestors are canonical, so the collected timestamps are identical to the
+    /// previous canonical-index behaviour. For a side-branch block during a
+    /// reorg it uses the branch's own ancestors, and always finds a full window
+    /// (of length `count`, unless the chain is genuinely shorter) instead of
+    /// silently returning a short window that would disable the MTP check.
     fn get_recent_timestamps(
         &self,
-        current_height: u64,
+        parent_hash: Hash256,
         count: usize,
     ) -> Result<Vec<Timestamp>, DomError> {
         let mut timestamps = Vec::with_capacity(count);
-        let start = current_height.saturating_sub(count as u64);
-        for h in (start..current_height).rev() {
-            if let Some(hash) = self.store.get_hash_at_height(h)? {
-                if let Some(header_bytes) = self.store.get_block_header(&hash)? {
-                    if let Ok(header) = BlockHeader::from_bytes(&header_bytes) {
-                        timestamps.push(header.timestamp);
-                    }
-                }
+        let mut cursor = parent_hash;
+
+        while timestamps.len() < count {
+            // Genesis has prev_hash == ZERO; stop once we walk past the root.
+            if cursor == Hash256::ZERO {
+                break;
             }
+            let header_bytes = match self.store.get_block_header(cursor.as_bytes())? {
+                Some(b) => b,
+                None => break, // ancestry not fully present (early chain)
+            };
+            let header = BlockHeader::from_bytes(&header_bytes)?;
+            timestamps.push(header.timestamp);
+            cursor = header.prev_hash;
         }
+
         Ok(timestamps)
     }
 
@@ -2316,6 +2334,129 @@ mod randomx_seed_tests {
         assert_eq!(
             branch_aware, canonical,
             "epoch-0 branch-aware must match canonical exactly"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mtp_branch_tests {
+    //! A2-005: get_recent_timestamps must collect the median-time-past window
+    //! from the block's OWN branch (via prev_hash), not the canonical height
+    //! index. The pre-fix version used get_hash_at_height, which returned
+    //! nothing for non-canonical (side-branch) ancestors — silently yielding a
+    //! short window that disables the MTP check, and (when it did resolve)
+    //! taking timestamps from a competing branch.
+    use super::*;
+    use dom_consensus::block::ProofOfWork;
+    use dom_core::PROTOCOL_VERSION;
+    use dom_pow::CompactTarget;
+
+    const TEST_LMDB_MAP_SIZE: usize = 64 << 20;
+
+    fn chain() -> (tempfile::TempDir, ChainState) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store =
+            DomStore::open_with_map_size(dir.path(), TEST_LMDB_MAP_SIZE).expect("store");
+        let c = ChainState::open(store, Hash256::ZERO, dom_core::NETWORK_MAGIC_REGTEST)
+            .expect("chain");
+        (dir, c)
+    }
+
+    /// Build a header at height `h`, parent `prev`, with an explicit timestamp.
+    fn hdr(h: u64, prev: Hash256, ts: u64) -> (BlockHeader, Hash256) {
+        let header = BlockHeader {
+            version: PROTOCOL_VERSION,
+            height: BlockHeight(h),
+            prev_hash: prev,
+            timestamp: Timestamp(ts),
+            output_root: Hash256::ZERO,
+            kernel_root: Hash256::ZERO,
+            rangeproof_root: Hash256::ZERO,
+            total_kernel_offset: [0u8; 32],
+            target: CompactTarget(0x1f00_ffff),
+            total_difficulty: U256::one(),
+            pow: ProofOfWork {
+                nonce: h,
+                randomx_hash: Hash256::ZERO,
+            },
+        };
+        let bytes = header.to_bytes().expect("serialize");
+        let hash = compute_block_hash(&bytes);
+        (header, hash)
+    }
+
+    /// Store a header as a NON-canonical branch block (no height index) — the
+    /// exact state of a side-branch block during a reorg.
+    fn store_branch(chain: &ChainState, h: &BlockHeader, hash: Hash256) {
+        let bytes = h.to_bytes().expect("serialize");
+        chain
+            .store
+            .store_known_block(hash.as_bytes(), &bytes, &[0xCC; 4])
+            .expect("store branch");
+    }
+
+    /// A2-005: a side-branch chain of 11 blocks (NONE canonical) must still
+    /// yield a full 11-timestamp window walked via prev_hash. The pre-fix
+    /// canonical-index version would return an EMPTY window here (none of these
+    /// blocks are in the height index), disabling the MTP check for the branch.
+    #[test]
+    fn a2_005_mtp_window_walks_branch_not_canonical_index() {
+        let (_dir, chain) = chain();
+
+        // Chain 12 side-branch blocks (heights 0..=11), each with a distinct
+        // timestamp, linked by prev_hash. NONE are committed to the height index.
+        let mut prev = Hash256::ZERO;
+        let mut hashes = Vec::new();
+        for h in 0..=11u64 {
+            let ts = 1_000 + h * 100; // distinct, increasing
+            let (header, hash) = hdr(h, prev, ts);
+            store_branch(&chain, &header, hash);
+            hashes.push(hash);
+            prev = hash;
+        }
+
+        // Parent of a hypothetical block at height 12 is the height-11 tip.
+        let parent = hashes[11];
+        let window = chain
+            .get_recent_timestamps(parent, 11)
+            .expect("collect window");
+
+        // The fix walks prev_hash and finds all 11 — even though none are
+        // canonical. Pre-fix (canonical index) would find zero.
+        assert_eq!(
+            window.len(),
+            11,
+            "A2-005: MTP window must be walked from the branch, not the canonical index"
+        );
+
+        // And they must be the BRANCH's timestamps (heights 11 down to 1), in
+        // walk order (parent first).
+        let got: Vec<u64> = window.iter().map(|t| t.0).collect();
+        let want: Vec<u64> = (1..=11u64).rev().map(|h| 1_000 + h * 100).collect();
+        assert_eq!(got, want, "window must contain the branch's own timestamps");
+    }
+
+    /// A2-005 non-regression: fewer than `count` blocks in the ancestry returns
+    /// a short window (genuinely early chain), which validate_median_time_past
+    /// legitimately skips. The walk must stop cleanly at genesis (prev ZERO).
+    #[test]
+    fn a2_005_short_chain_stops_at_genesis() {
+        let (_dir, chain) = chain();
+        let mut prev = Hash256::ZERO;
+        let mut last = Hash256::ZERO;
+        for h in 0..=3u64 {
+            let (header, hash) = hdr(h, prev, 1_000 + h * 100);
+            store_branch(&chain, &header, hash);
+            prev = hash;
+            last = hash;
+        }
+        let window = chain.get_recent_timestamps(last, 11).expect("collect");
+        // Only 4 blocks exist (heights 0..=3); parent is height 3, walk yields
+        // heights 3,2,1,0 = 4 timestamps, then stops at ZERO.
+        assert_eq!(
+            window.len(),
+            4,
+            "short chain yields a short window, walk stops at genesis"
         );
     }
 }

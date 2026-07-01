@@ -187,3 +187,26 @@ A divergence deeper than `MAX_REORG_DEPTH_POLICY` is rejected: such a block is
 unpromotable regardless, so the seed resolution refuses rather than falling back
 to the canonical seed.
 
+---
+
+## 7. Median-Time-Past Branch Resolution (normative)
+
+The same branch-resolution principle as §6 applies to the median-time-past
+(MTP) window. A block's timestamp MUST exceed the median of the
+`MEDIAN_TIME_WINDOW` (11) block timestamps that precede it.
+
+**Normative rule:** the MTP window is taken from the block's OWN ancestry — the
+`MEDIAN_TIME_WINDOW` ancestors reached by walking back from the block's parent
+via `prev_hash` — NOT from whichever blocks currently occupy those heights on
+the canonical chain.
+
+When a block extends the canonical chain, the two coincide. They diverge for a
+side-branch block validated during a reorg: taking the window from the canonical
+index would (a) compute the median from a competing branch's timestamps, and
+(b) for a side-branch block whose ancestors are not in the canonical height
+index, return a short window — which silently disables the MTP check for that
+block. Both are consensus faults. Walking the block's own ancestry yields the
+correct median and always a full window (unless the chain is genuinely shorter
+than `MEDIAN_TIME_WINDOW`, in which case the check is legitimately skipped, as
+early in the chain).
+
