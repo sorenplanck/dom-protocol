@@ -262,7 +262,7 @@ impl ChainState {
                 )));
             }
             validate_parent_timestamp_progression(header, &parent)?;
-            let ancestors = self.get_recent_timestamps(header.height.0, 11)?;
+            let ancestors = self.get_recent_timestamps(header.prev_hash, 11)?;
             validate_median_time_past(header, &ancestors)?;
             Some(parent)
         } else {
@@ -270,7 +270,7 @@ impl ChainState {
         };
 
         validate_future_timestamp_with_limit(header, now, self.max_future_block_time())?;
-        let seed = self.compute_randomx_seed(header.height.0)?;
+        let seed = self.compute_randomx_seed_branch_aware(header.height.0, header.prev_hash)?;
         validate_pow_for_network(self.network_magic, header, &seed)?;
 
         if let Some(parent_header) = parent.as_ref() {
@@ -739,7 +739,7 @@ impl ChainState {
                 })?;
             let parent = BlockHeader::from_bytes(&parent_bytes)?;
             validate_parent_timestamp_progression(header, &parent)?;
-            let ancestors = self.get_recent_timestamps(header.height.0, 11)?;
+            let ancestors = self.get_recent_timestamps(header.prev_hash, 11)?;
             validate_median_time_past(header, &ancestors)?;
             self.validate_expected_target(header, &parent)?;
 
@@ -759,7 +759,7 @@ impl ChainState {
                 )));
             }
         }
-        let seed = self.compute_randomx_seed(header.height.0)?;
+        let seed = self.compute_randomx_seed_branch_aware(header.height.0, header.prev_hash)?;
         validate_pow_for_network(self.network_magic, header, &seed)?;
         Ok(())
     }
@@ -827,6 +827,92 @@ impl ChainState {
                 "RandomX seed block at height {seed_height} missing from \
                  committed store (needed for block at height {height})"
             ))),
+        }
+    }
+
+    /// Resolve the RandomX seed for a block at `height` whose parent is
+    /// `parent_hash`, using the block's OWN branch history (A2-004).
+    ///
+    /// Decided rule (RFC-0011): the seed is the block hash at
+    /// `randomx_seed_height(height)` on the block's own branch, not on whatever
+    /// chain is currently canonical. `compute_randomx_seed` (canonical index) is
+    /// correct only when the block extends the canonical chain; for a side-branch
+    /// block validated during a reorg that crosses an epoch boundary, the
+    /// canonical index can point at a different seed block, splitting consensus.
+    ///
+    /// Efficient in the common case: walks the parent chain backward only until
+    /// it reaches a block already on the canonical chain (shared prefix), then
+    /// defers to the canonical index. For a block that extends the canonical tip
+    /// this returns on the first iteration and is byte-identical to
+    /// `compute_randomx_seed`.
+    fn compute_randomx_seed_branch_aware(
+        &self,
+        height: u64,
+        parent_hash: Hash256,
+    ) -> Result<[u8; 32], DomError> {
+        let seed_height = randomx_seed_height(height);
+
+        // Case 4 - epoch 0: the seed block is the genesis (or the zero fallback
+        // before genesis is indexed). All branches share the genesis, so
+        // branch-awareness adds nothing at epoch 0; defer to the canonical
+        // resolver, which returns the genesis hash when indexed and the zero
+        // fallback otherwise — exactly matching pre-fix behaviour. The offset
+        // guarantees seed_height < height for epoch > 0, so for those epochs the
+        // seed block always lies in the parent's history; it is never the block
+        // itself.
+        if seed_height == 0 {
+            return self.compute_randomx_seed(height);
+        }
+
+        let max_walk = dom_core::MAX_REORG_DEPTH_POLICY;
+        let mut cursor = parent_hash;
+        let mut steps: u64 = 0;
+
+        loop {
+            let header_bytes =
+                self.store
+                    .get_block_header(cursor.as_bytes())?
+                    .ok_or_else(|| {
+                        DomError::Internal(format!(
+                            "randomx seed walk: missing header {}",
+                            hex::encode(cursor.as_bytes())
+                        ))
+                    })?;
+            let cursor_header = BlockHeader::from_bytes(&header_bytes)?;
+            let cursor_height = cursor_header.height.0;
+
+            // Ramo (a) - shared prefix: if this cursor is the canonical block at
+            // its height, all its ancestors are canonical too (the canonical
+            // chain is linear). Defer to the canonical index for seed_height.
+            // Covers direct extension (case 6) and branches diverging above
+            // seed_height (cases 2, 5); byte-identical to the pre-fix result.
+            if self.store.get_hash_at_height(cursor_height)? == Some(*cursor.as_bytes()) {
+                return self.compute_randomx_seed(height);
+            }
+
+            // Ramo (b) - divergent seed block: reached seed_height on the branch
+            // itself before hitting canonical. This branch's own block at
+            // seed_height is the seed (cases 1, 3).
+            if cursor_height == seed_height {
+                return Ok(*cursor.as_bytes());
+            }
+
+            // Defensive: (a) or (b) must trigger before passing below seed_height.
+            if cursor_height < seed_height {
+                return Err(DomError::Internal(format!(
+                    "randomx seed walk underran seed_height {seed_height} at height {cursor_height}"
+                )));
+            }
+
+            steps += 1;
+            if steps > max_walk {
+                // Decision B1: a divergence deeper than the reorg limit is already
+                // unpromotable; refuse rather than fall back to the canonical seed.
+                return Err(DomError::Invalid(format!(
+                    "randomx seed walk exceeded max reorg depth {max_walk} for block at height {height}"
+                )));
+            }
+            cursor = cursor_header.prev_hash;
         }
     }
 
@@ -1005,22 +1091,40 @@ impl ChainState {
         Ok(timestamps)
     }
 
+    /// Collect the timestamps of the `count` blocks preceding a block whose
+    /// parent is `parent_hash`, walking the block's OWN branch (A2-005).
+    ///
+    /// Mirrors the seed-resolution rule (RFC-0011 §6, applied to MTP): the
+    /// median-time-past window is taken from the block's own ancestry, not from
+    /// whatever chain is currently canonical. Walks back from the parent via
+    /// prev_hash. For a block extending the canonical tip the parent and its
+    /// ancestors are canonical, so the collected timestamps are identical to the
+    /// previous canonical-index behaviour. For a side-branch block during a
+    /// reorg it uses the branch's own ancestors, and always finds a full window
+    /// (of length `count`, unless the chain is genuinely shorter) instead of
+    /// silently returning a short window that would disable the MTP check.
     fn get_recent_timestamps(
         &self,
-        current_height: u64,
+        parent_hash: Hash256,
         count: usize,
     ) -> Result<Vec<Timestamp>, DomError> {
         let mut timestamps = Vec::with_capacity(count);
-        let start = current_height.saturating_sub(count as u64);
-        for h in (start..current_height).rev() {
-            if let Some(hash) = self.store.get_hash_at_height(h)? {
-                if let Some(header_bytes) = self.store.get_block_header(&hash)? {
-                    if let Ok(header) = BlockHeader::from_bytes(&header_bytes) {
-                        timestamps.push(header.timestamp);
-                    }
-                }
+        let mut cursor = parent_hash;
+
+        while timestamps.len() < count {
+            // Genesis has prev_hash == ZERO; stop once we walk past the root.
+            if cursor == Hash256::ZERO {
+                break;
             }
+            let header_bytes = match self.store.get_block_header(cursor.as_bytes())? {
+                Some(b) => b,
+                None => break, // ancestry not fully present (early chain)
+            };
+            let header = BlockHeader::from_bytes(&header_bytes)?;
+            timestamps.push(header.timestamp);
+            cursor = header.prev_hash;
         }
+
         Ok(timestamps)
     }
 
@@ -1994,6 +2098,376 @@ mod randomx_seed_tests {
         assert!(
             matches!(result, Err(DomError::Internal(_))),
             "missing epoch>0 seed block must error, got {result:?}"
+        );
+    }
+
+    /// A2-004: the RandomX seed for PoW validation is resolved by
+    /// `compute_randomx_seed` from the CANONICAL height index (get_hash_at_height),
+    /// which knows only the height — not which branch the block being validated
+    /// belongs to. `connect_block` (line ~273) and `validate_header_only`
+    /// (line ~762) both use this canonical path.
+    ///
+    /// During a reorg that crosses a RandomX epoch boundary, a side-branch block
+    /// whose OWN history has a different block at seed_height is nonetheless
+    /// validated against the canonical seed. If the branches differ at that
+    /// seed_height, the block is validated against the wrong seed — a consensus
+    /// split (a valid block rejected, or nodes disagreeing on validity).
+    ///
+    /// DECIDED RULE (Soren Planck): the seed comes from the block's OWN history,
+    /// not the canonical chain. The branch-aware path
+    /// (`compute_randomx_seed_with_batch`), already used by IBD, implements that
+    /// rule. This detector pins the divergence at the resolution level: for the
+    /// same block height at an epoch boundary, the canonical path and the
+    /// branch-aware path return DIFFERENT seeds. The fix must make connect_block
+    /// resolve the seed branch-aware; when it does, connect_block will yield the
+    /// branch-aware value for a side-branch block instead of the canonical one.
+    ///
+    /// NOTE: mechanism-level detector (documents the resolution divergence, the
+    /// root cause). It PASSES today — it asserts that the two resolution paths
+    /// diverge, which is true now. Executable documentation of A2-004, not a
+    /// red-until-fixed alarm.
+    #[test]
+    fn a2_004_seed_resolution_is_branch_blind_at_epoch_boundary() {
+        let (_dir, chain) = empty_chain();
+
+        // First block of epoch 1 is height 2048; its seed_height is 1984.
+        let height = 2048;
+        assert_eq!(randomx_seed_height(height), 1984);
+
+        // Populate the CANONICAL height index at seed_height 1984 with a known
+        // block hash (CANON). commit_block accepts opaque bytes for header/body —
+        // dom-store does not parse them — so a minimal synthetic block suffices.
+        let canon_seed_hash = [0xAAu8; 32];
+        let opaque_header = vec![0xAAu8; 64];
+        let opaque_body = vec![0xBBu8; 32];
+        chain
+            .store
+            .commit_block(
+                &canon_seed_hash,
+                1984,
+                &opaque_header,
+                &opaque_body,
+                &[],
+                &[],
+                &[],
+            )
+            .expect("commit canonical seed block at 1984");
+
+        // CANONICAL path: resolves the seed for height 2048 from the height
+        // index, yielding CANON. It receives only the height; it cannot know
+        // any branch.
+        let canonical_seed = chain
+            .compute_randomx_seed(height)
+            .expect("canonical seed resolves from the committed height index");
+        assert_eq!(
+            canonical_seed, canon_seed_hash,
+            "canonical path returns the canonical block at seed_height"
+        );
+
+        // BRANCH-AWARE path: given a batch representing a SIDE branch whose own
+        // block at 1984 is SIDE (!= CANON), it resolves the seed to SIDE — the
+        // seed from that block's own history, per the decided rule.
+        let side_seed_hash = [0xBBu8; 32];
+        let side_branch: Vec<(BlockHeader, Hash256, bool)> = vec![(
+            synth_header(1984),
+            Hash256::from_bytes(side_seed_hash),
+            false,
+        )];
+        let branch_aware_seed = chain
+            .compute_randomx_seed_with_batch(height, &side_branch)
+            .expect("branch-aware seed resolves from the side branch's own history");
+        assert_eq!(
+            branch_aware_seed, side_seed_hash,
+            "branch-aware path uses the side branch's own seed block"
+        );
+
+        // A2-004: for the SAME block height at the epoch boundary, the canonical
+        // path (which connect_block uses) and the branch-aware path (the decided
+        // rule) return DIFFERENT seeds. A side-branch block would therefore be
+        // validated against CANON when it must be validated against SIDE. The
+        // fix must make connect_block resolve the seed from the block's own
+        // history.
+        assert_ne!(
+            canonical_seed, branch_aware_seed,
+            "A2-004: connect_block's canonical seed path validates a side-branch \
+             block against the wrong seed at a RandomX epoch boundary"
+        );
+    }
+
+    /// Header at height `h` with the given prev_hash and nonce; returns
+    /// (header, hash). The nonce distinguishes same-height blocks on different
+    /// branches (canonical vs side), yielding different hashes.
+    fn header_at(h: u64, prev: Hash256, nonce: u64) -> (BlockHeader, Hash256) {
+        let mut hdr = synth_header(h);
+        hdr.prev_hash = prev;
+        hdr.pow.nonce = nonce;
+        let bytes = hdr.to_bytes().expect("serialize header");
+        let hash = compute_block_hash(&bytes);
+        (hdr, hash)
+    }
+
+    /// Insert a header as CANONICAL (populates the height index via commit_block;
+    /// body/utxo/kernel are opaque — dom-store does not parse them).
+    fn commit_canonical(chain: &ChainState, hdr: &BlockHeader, hash: Hash256) {
+        let bytes = hdr.to_bytes().expect("serialize");
+        chain
+            .store
+            .commit_block(
+                hash.as_bytes(),
+                hdr.height.0,
+                &bytes,
+                &[0xBB; 4],
+                &[],
+                &[],
+                &[],
+            )
+            .expect("commit canonical");
+    }
+
+    /// Insert a header as a BRANCH block (header+body in the store, NO height
+    /// index — exactly as connect_block does for side-chain quarantine).
+    fn store_branch(chain: &ChainState, hdr: &BlockHeader, hash: Hash256) {
+        let bytes = hdr.to_bytes().expect("serialize");
+        chain
+            .store
+            .store_known_block(hash.as_bytes(), &bytes, &[0xCC; 4])
+            .expect("store branch");
+    }
+
+    /// A2-004 FIX (main): a side-branch block whose own history has a different
+    /// seed block than canonical must be validated against ITS OWN seed, not the
+    /// canonical one. Would fail on the pre-fix canonical path; passes with the
+    /// branch-aware resolution.
+    #[test]
+    fn a2_004_fix_branch_aware_uses_own_seed() {
+        let (_dir, chain) = empty_chain();
+        assert_eq!(randomx_seed_height(2048), 1984);
+
+        // Canonical block at seed_height 1984 (CANON).
+        let (c_hdr, canon_1984) = header_at(1984, Hash256::ZERO, 0xA0);
+        commit_canonical(&chain, &c_hdr, canon_1984);
+
+        // Side branch 1984..=2047, chained; block 1984 is SIDE (!= CANON),
+        // diverging at the seed_height.
+        let (b1984_hdr, side_1984) = header_at(1984, Hash256::ZERO, 0xB0);
+        store_branch(&chain, &b1984_hdr, side_1984);
+        let mut prev = side_1984;
+        for h in 1985..=2047 {
+            let (nh, nhash) = header_at(h, prev, 0xB0);
+            store_branch(&chain, &nh, nhash);
+            prev = nhash;
+        }
+        let parent_lateral = prev; // block 2047 of the side branch
+
+        // The fix resolves the seed from the branch's own history => SIDE.
+        let branch_aware = chain
+            .compute_randomx_seed_branch_aware(2048, parent_lateral)
+            .expect("branch-aware resolves");
+        assert_eq!(
+            branch_aware,
+            *side_1984.as_bytes(),
+            "fix: side-branch block must use its OWN seed block (SIDE)"
+        );
+
+        // The canonical path (old bug) would resolve to CANON — the divergence
+        // the fix corrects.
+        let canonical = chain
+            .compute_randomx_seed(2048)
+            .expect("canonical resolves");
+        assert_eq!(canonical, *canon_1984.as_bytes());
+        assert_ne!(
+            branch_aware, canonical,
+            "A2-004: the fix diverges from the canonical path exactly where the bug was"
+        );
+    }
+
+    /// A2-004 FIX (case 6, non-regression): a block extending the canonical tip
+    /// gets the SAME seed as the canonical index. The fix must not change the
+    /// common path.
+    #[test]
+    fn a2_004_fix_direct_extension_matches_canonical() {
+        let (_dir, chain) = empty_chain();
+
+        let (c1984, canon_1984) = header_at(1984, Hash256::ZERO, 0xA0);
+        commit_canonical(&chain, &c1984, canon_1984);
+        let (c2047, canon_2047) = header_at(2047, Hash256::ZERO, 0xA7);
+        commit_canonical(&chain, &c2047, canon_2047);
+
+        // Canonical parent => ramo (a) fires on the first iteration => canonical
+        // index. Must equal compute_randomx_seed exactly.
+        let branch_aware = chain
+            .compute_randomx_seed_branch_aware(2048, canon_2047)
+            .expect("branch-aware resolves");
+        let canonical = chain
+            .compute_randomx_seed(2048)
+            .expect("canonical resolves");
+        assert_eq!(
+            branch_aware, canonical,
+            "case 6: direct extension must match the canonical seed exactly"
+        );
+        assert_eq!(branch_aware, *canon_1984.as_bytes());
+    }
+
+    /// A2-004 FIX (case 4, epoch 0): a height-1 block (seed_height 0) must
+    /// resolve to the genesis hash once genesis is indexed — NOT the zero
+    /// fallback. Regression guard for the epoch-0 blind spot: the branch-aware
+    /// resolver must match the canonical resolver at epoch 0, where all branches
+    /// share the genesis. (Before the case-4 fix, this returned [0u8; 32],
+    /// breaking PoW validation for the entire first epoch.)
+    #[test]
+    fn a2_004_fix_epoch0_resolves_genesis_not_zero() {
+        let (_dir, chain) = empty_chain();
+
+        // Before genesis is indexed: both resolvers give the zero fallback.
+        assert_eq!(randomx_seed_height(1), 0);
+        let bare = chain
+            .compute_randomx_seed_branch_aware(1, Hash256::ZERO)
+            .expect("bare epoch-0 resolves");
+        assert_eq!(bare, [0u8; 32], "before genesis is indexed, zero fallback");
+
+        // After genesis is committed (indexed at height 0):
+        let (g_hdr, genesis_hash) = header_at(0, Hash256::ZERO, 0x01);
+        commit_canonical(&chain, &g_hdr, genesis_hash);
+
+        let branch_aware = chain
+            .compute_randomx_seed_branch_aware(1, genesis_hash)
+            .expect("epoch-0 branch-aware resolves");
+        let canonical = chain
+            .compute_randomx_seed(1)
+            .expect("epoch-0 canonical resolves");
+
+        // Both must be the genesis hash, and must agree (epoch 0 has no branch
+        // divergence — all chains share the genesis).
+        assert_eq!(
+            branch_aware,
+            *genesis_hash.as_bytes(),
+            "epoch-0 seed must be the genesis hash once indexed, not zero"
+        );
+        assert_eq!(
+            branch_aware, canonical,
+            "epoch-0 branch-aware must match canonical exactly"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mtp_branch_tests {
+    //! A2-005: get_recent_timestamps must collect the median-time-past window
+    //! from the block's OWN branch (via prev_hash), not the canonical height
+    //! index. The pre-fix version used get_hash_at_height, which returned
+    //! nothing for non-canonical (side-branch) ancestors — silently yielding a
+    //! short window that disables the MTP check, and (when it did resolve)
+    //! taking timestamps from a competing branch.
+    use super::*;
+    use dom_consensus::block::ProofOfWork;
+    use dom_core::PROTOCOL_VERSION;
+    use dom_pow::CompactTarget;
+
+    const TEST_LMDB_MAP_SIZE: usize = 64 << 20;
+
+    fn chain() -> (tempfile::TempDir, ChainState) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = DomStore::open_with_map_size(dir.path(), TEST_LMDB_MAP_SIZE).expect("store");
+        let c =
+            ChainState::open(store, Hash256::ZERO, dom_core::NETWORK_MAGIC_REGTEST).expect("chain");
+        (dir, c)
+    }
+
+    /// Build a header at height `h`, parent `prev`, with an explicit timestamp.
+    fn hdr(h: u64, prev: Hash256, ts: u64) -> (BlockHeader, Hash256) {
+        let header = BlockHeader {
+            version: PROTOCOL_VERSION,
+            height: BlockHeight(h),
+            prev_hash: prev,
+            timestamp: Timestamp(ts),
+            output_root: Hash256::ZERO,
+            kernel_root: Hash256::ZERO,
+            rangeproof_root: Hash256::ZERO,
+            total_kernel_offset: [0u8; 32],
+            target: CompactTarget(0x1f00_ffff),
+            total_difficulty: U256::one(),
+            pow: ProofOfWork {
+                nonce: h,
+                randomx_hash: Hash256::ZERO,
+            },
+        };
+        let bytes = header.to_bytes().expect("serialize");
+        let hash = compute_block_hash(&bytes);
+        (header, hash)
+    }
+
+    /// Store a header as a NON-canonical branch block (no height index) — the
+    /// exact state of a side-branch block during a reorg.
+    fn store_branch(chain: &ChainState, h: &BlockHeader, hash: Hash256) {
+        let bytes = h.to_bytes().expect("serialize");
+        chain
+            .store
+            .store_known_block(hash.as_bytes(), &bytes, &[0xCC; 4])
+            .expect("store branch");
+    }
+
+    /// A2-005: a side-branch chain of 11 blocks (NONE canonical) must still
+    /// yield a full 11-timestamp window walked via prev_hash. The pre-fix
+    /// canonical-index version would return an EMPTY window here (none of these
+    /// blocks are in the height index), disabling the MTP check for the branch.
+    #[test]
+    fn a2_005_mtp_window_walks_branch_not_canonical_index() {
+        let (_dir, chain) = chain();
+
+        // Chain 12 side-branch blocks (heights 0..=11), each with a distinct
+        // timestamp, linked by prev_hash. NONE are committed to the height index.
+        let mut prev = Hash256::ZERO;
+        let mut hashes = Vec::new();
+        for h in 0..=11u64 {
+            let ts = 1_000 + h * 100; // distinct, increasing
+            let (header, hash) = hdr(h, prev, ts);
+            store_branch(&chain, &header, hash);
+            hashes.push(hash);
+            prev = hash;
+        }
+
+        // Parent of a hypothetical block at height 12 is the height-11 tip.
+        let parent = hashes[11];
+        let window = chain
+            .get_recent_timestamps(parent, 11)
+            .expect("collect window");
+
+        // The fix walks prev_hash and finds all 11 — even though none are
+        // canonical. Pre-fix (canonical index) would find zero.
+        assert_eq!(
+            window.len(),
+            11,
+            "A2-005: MTP window must be walked from the branch, not the canonical index"
+        );
+
+        // And they must be the BRANCH's timestamps (heights 11 down to 1), in
+        // walk order (parent first).
+        let got: Vec<u64> = window.iter().map(|t| t.0).collect();
+        let want: Vec<u64> = (1..=11u64).rev().map(|h| 1_000 + h * 100).collect();
+        assert_eq!(got, want, "window must contain the branch's own timestamps");
+    }
+
+    /// A2-005 non-regression: fewer than `count` blocks in the ancestry returns
+    /// a short window (genuinely early chain), which validate_median_time_past
+    /// legitimately skips. The walk must stop cleanly at genesis (prev ZERO).
+    #[test]
+    fn a2_005_short_chain_stops_at_genesis() {
+        let (_dir, chain) = chain();
+        let mut prev = Hash256::ZERO;
+        let mut last = Hash256::ZERO;
+        for h in 0..=3u64 {
+            let (header, hash) = hdr(h, prev, 1_000 + h * 100);
+            store_branch(&chain, &header, hash);
+            prev = hash;
+            last = hash;
+        }
+        let window = chain.get_recent_timestamps(last, 11).expect("collect");
+        // Only 4 blocks exist (heights 0..=3); parent is height 3, walk yields
+        // heights 3,2,1,0 = 4 timestamps, then stops at ZERO.
+        assert_eq!(
+            window.len(),
+            4,
+            "short chain yields a short window, walk stops at genesis"
         );
     }
 }

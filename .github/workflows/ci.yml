@@ -134,6 +134,43 @@ jobs:
       - name: cargo test -p dom-node --all-targets (serial shutdown/supervisor coverage)
         run: cargo test -p dom-node --all-targets -- --test-threads=1
 
+  supply-chain:
+    name: "supply chain: cargo deny + cargo audit"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + installed tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+          key: cargo-supply-chain-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-supply-chain-
+
+      - name: Install cargo-deny and cargo-audit
+        run: |
+          command -v cargo-deny >/dev/null || cargo install --locked cargo-deny
+          command -v cargo-audit >/dev/null || cargo install --locked cargo-audit
+
+      # deny.toml is the dom-shield F1 supply-chain detector: rev-pinned git
+      # sources only, frozen license set, no yanked crates. cargo audit scans
+      # Cargo.lock against the RustSec advisory database. Both were policy-only
+      # before this job; now they gate.
+      - name: cargo deny check
+        run: cargo deny check
+
+      - name: cargo audit
+        run: cargo audit
+
   release-blocker-crate-tests:
     name: "release blockers: crate tests (linux)"
     runs-on: ubuntu-latest
@@ -275,6 +312,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - fmt
+      - supply-chain
       - build-test
       - release-blocker-crate-tests
       - release-blocker-integration-tests
@@ -284,6 +322,7 @@ jobs:
       - name: Require every release-blocker job to pass
         run: |
           test "${{ needs.fmt.result }}" = "success"
+          test "${{ needs.supply-chain.result }}" = "success"
           test "${{ needs.build-test.result }}" = "success"
           test "${{ needs.release-blocker-crate-tests.result }}" = "success"
           test "${{ needs.release-blocker-integration-tests.result }}" = "success"

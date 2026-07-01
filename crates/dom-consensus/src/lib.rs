@@ -1,4 +1,3 @@
-#![allow(missing_docs)]
 //! # dom-consensus
 //!
 //! Consensus validation pipeline — orchestrated per RFC-0007 + RFC-0010.
