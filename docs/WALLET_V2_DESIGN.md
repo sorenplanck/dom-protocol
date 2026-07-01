@@ -800,6 +800,22 @@ audit) → **[NEEDS HUMAN DECISION]** on provisioning heavy CI (§9).
    `dom-wallet-app` removed/hidden from the release (closes WDSF-003).
 4. Phase D — removal of v1 from the official release (kept in history).
 
+**Status (2026-07-01):**
+
+- Phase A — ✅ done.
+- Phase B — ✅ done, stronger than planned: the desktop's user-wallet engine is
+  `dom-wallet2` unconditionally (no feature flag), driven end-to-end through
+  `RpcChainSource` (RB-WALLET2-RPC-SOURCE resolved).
+- Phase C — 🔧 partial. v2 is the desktop default and v1 is now marked
+  deprecated (doc-level, `crates/dom-wallet/src/lib.rs`). Remaining item:
+  `dom-wallet-app` still ships as the wallet UI of the **Windows portable
+  package** (`packaging/windows/portable/`) — removing/hiding it requires a
+  product decision on what replaces it there (Tauri desktop or node-only
+  package). NEEDS HUMAN DECISION.
+- Phase D — not started. v1 is still consumed by `dom-node` (coinbase build,
+  canonical rescan — a deliberate fail-closed policy) and by the desktop
+  registry/seed types; those must be re-homed before v1 can leave the release.
+
 ### 7.4 Data migration (user)
 
 - **Two complementary paths** (see §2.7 for the contract):
