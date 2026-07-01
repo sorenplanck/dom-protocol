@@ -1,6 +1,6 @@
 [package]
 name        = "dom-wallet"
-description = "DOM Protocol — Mimblewimble wallet with persistent encrypted storage"
+description = "DOM Protocol — Mimblewimble wallet with persistent encrypted storage. DEPRECATED wallet v1: frozen, critical security fixes only; superseded by dom-wallet2"
 version.workspace    = true
 edition.workspace    = true
 rust-version.workspace = true

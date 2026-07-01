@@ -1,9 +1,10 @@
-//! Desktop glue for the reused `dom_wallet::registry`.
+//! Desktop glue for the local [`crate::registry`] module.
 //!
 //! The registry itself (the `name → vault location` map, its load/save/resolve
-//! logic and security invariants) lives in `dom-wallet` and is REUSED here — no
-//! registry logic is reimplemented. This module only answers one app-specific
-//! question: *where does `registry.json` live on this OS?*
+//! logic and security invariants) lives in [`crate::registry`] — moved verbatim
+//! from `dom-wallet` v1 (Phase D re-homing), same on-disk format. This module
+//! only answers one app-specific question: *where does `registry.json` live on
+//! this OS?*
 //!
 //! ## Location
 //!
@@ -14,7 +15,7 @@
 //! - **Linux/other:** `$XDG_CONFIG_HOME/DOM Wallet/registry.json`, or
 //!   `~/.config/DOM Wallet/registry.json` when `XDG_CONFIG_HOME` is unset.
 //!
-//! The registry holds only non-sensitive metadata (see `dom_wallet::registry`);
+//! The registry holds only non-sensitive metadata (see [`crate::registry`]);
 //! it is NOT a secret store and NOT a backup. If it is deleted the user can still
 //! recover their wallet from its recovery phrase (mined coins) plus its encrypted
 //! `.dombak` backup (change and received funds, whose blindings the seed alone

@@ -501,32 +501,39 @@ Post-B5 sweep across the entire workspace produced the following observations:
 ## [MAINNET] RB-WALLET2-RPC-SOURCE — Wallet v2 chain scan transport
 
 **Severity: IMPORTANT — wallet v2 cannot sync against a live node without it**
-**Status:** 🔴 OPEN
+**Status:** ✅ RESOLVED (status re-verified against the code 2026-07-01; the
+entry below was stale — every "required to close" item is implemented and
+tested)
 
 Wallet v2 (`dom-wallet2`) reconciles its store from `ScanBlock`s via the
-`ChainSource` trait + `sync` driver (`crates/dom-wallet2/src/transport.rs`). The
-in-memory `ChainSource` is implemented and tested end-to-end; the **RPC-backed
-`RpcChainSource` is not**, because the node does not yet expose per-block
-output/input commitments over its REST RPC.
+`ChainSource` trait + `sync` driver (`crates/dom-wallet2/src/transport.rs`).
+All three closure items shipped:
 
-- The node already computes this data internally
-  (`crates/dom-node/src/wallet_scan.rs::collect_chain_scan` — per height:
-  `height`, `hash`, `output_commitments`, `input_commitments`, `fees`). It is
-  NOT surfaced via the REST RPC (`crates/dom-rpc`), which exposes only headers,
-  UTXO lookup, mempool and tx submit.
-- `/status` exposes `chain_height` but not the tip hash.
+- **Node endpoint** — `GET /chain/scan?from&to` routed in
+  `crates/dom-rpc/src/lib.rs` (`chain_scan_handler`), served by
+  `NodeHandleImpl::scan_chain` (`crates/dom-node/src/node_handle.rs`), which
+  wraps the shared per-block extractor `scan_block_at`
+  (`crates/dom-node/src/wallet_scan.rs`) so the RPC and the embedded rescan
+  can never diverge. Range clamped to `MAX_SCAN_RANGE` and the tip; response
+  carries `{tip:{height,hash}, from, to, blocks:[{height, hash,
+  output_commitments, input_commitments, fees}]}`. A busy chain answers a
+  retriable `503` via `try_lock` — the scan never waits on the chain lock
+  (pinned by `scan_chain_yields_to_busy_chain_lock`).
+- **`RpcChainSource: ChainSource + TxSink`** —
+  `crates/dom-wallet2/src/rpc_source.rs`: paging across the node's range cap,
+  `503` retry with backoff, `Unsupported` detection, `scan_for_restore`
+  carrying per-block fees, `POST /tx/submit`. Tested against a mock HTTP
+  server (paging, busy retry, restore fees, submit outcomes).
+- **Incremental sync (the optional item)** — `StoreMeta.last_reconciled_tip` /
+  `last_reconciled_hash` exist (`crates/dom-wallet2/src/types.rs`,
+  `wallet_state.rs`) and the `sync` driver's `from` parameter consumes them.
 
-Deferred deliberately to its own PR because the node is in production mining
-(touching the RPC surface of a live node warrants an isolated, reviewed change).
+The desktop wallet already runs on this path in production:
+`wallet-desktop/src-tauri/src/wallet_manager.rs` drives reconciliation and
+submission through `RpcChainSource` against the embedded node's public RPC.
 
-**Required to close:**
-- Add a node RPC endpoint exposing per-block (or per-range)
-  `{height, hash, output_commitments, input_commitments}` (+ the tip hash),
-  wrapping the existing `collect_chain_scan` logic.
-- Implement `RpcChainSource: ChainSource` in `dom-wallet2` against it.
-- (Optional) incremental sync (view B): `StoreMeta.last_reconciled_tip` +
-  a height-based `rollback_to` (design §4.4) — the `sync` `from` parameter
-  already accommodates it.
+Verified 2026-07-01: `cargo test -p dom-wallet2 -p dom-rpc` (187 tests) and
+`cargo test -p dom-node scan_chain` all green.
 
 ---
 
@@ -580,7 +587,7 @@ backup is the complete one.
 | RB-DNS-SEEDS | Bootstrap discovery | Mainnet | 🟠 OPEN (OPERATIONAL) (mechanism done; real seeds + governance pending) |
 | RB-WALLET-SLATE | Wallet slate protocol | Mainnet | 🔧 PARTIAL (interactive slate implemented+tested; residual: RFC, timeout) |
 | RB-IBD | Initial block download | Mainnet | 🔧 PARTIAL (implemented+tested; residual: RFC, hardcoded checkpoints) |
-| RB-WALLET2-RPC-SOURCE | Wallet v2 chain scan transport (node RPC endpoint + RpcChainSource) | Mainnet | 🔴 OPEN (in-memory ChainSource done; node endpoint + RPC source deferred) |
+| RB-WALLET2-RPC-SOURCE | Wallet v2 chain scan transport (node RPC endpoint + RpcChainSource) | Mainnet | ✅ RESOLVED (endpoint + RpcChainSource + incremental sync shipped and tested; desktop runs on it) |
 | RB-WALLET2-RECEIVE-RESTORE | Wallet v2 restore-from-seed of receive-requests (needs an amount source) | Mainnet | 🔴 OPEN (coinbase restore done; receive-request restore deferred) |
 
 ---

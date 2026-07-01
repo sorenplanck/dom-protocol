@@ -25,6 +25,7 @@ serde_json = "1"
 thiserror = "1"
 anyhow = "1"
 hex = "0.4"
+rand = "0.8"
 getrandom = "0.2"
 url = "2.5"
 zeroize = { version = "1.7", features = ["derive", "serde"] }
@@ -61,6 +62,9 @@ dom-config      = { path = "../../crates/dom-config" }
 # send/receive/finalize/submit/sync) — see wallet_manager.rs.
 dom-wallet      = { path = "../../crates/dom-wallet" }
 dom-wallet2     = { path = "../../crates/dom-wallet2" }
+# Seed types (Bip39Seed/SeedAcceptance) come straight from the single audited
+# source; dom-wallet's seed module is a pure re-export of it.
+dom-wallet-keys = { path = "../../crates/dom-wallet-keys" }
 dom-node        = { path = "../../crates/dom-node" }
 dom-rpc         = { path = "../../crates/dom-rpc" }
 # Slate protocol: the Slate type lives in dom-tx; (de)serialization traits

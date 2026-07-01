@@ -36,7 +36,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_tx::slate::Slate;
-use dom_wallet::{Bip39Seed, Network as V1Network, SeedAcceptance};
+use dom_wallet::Network as V1Network;
 use dom_wallet2::{
     cancel as v2_cancel, create_send as v2_create_send,
     export_full_backup as v2_export_full_backup, finalize_tracked as v2_finalize_tracked,
@@ -45,6 +45,7 @@ use dom_wallet2::{
     ChainSource, DerivIndex, KeychainDeriver, Network as V2Network, OutputOrigin, OutputStatus,
     ReconcileReport, RpcChainSource, RpcSourceError, StoredOutput, SubmitError, WalletV2State,
 };
+use dom_wallet_keys::seed::{Bip39Seed, SeedAcceptance};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -1847,6 +1848,54 @@ mod backup_wire_tests {
             funds_fingerprint(&s),
             base,
             "a new output is a funds change"
+        );
+    }
+
+    /// AUTO-BACKUP ENFORCEMENT: `save()` refreshes the auto-backup iff
+    /// `funds_fingerprint` moved, so the fingerprint MUST register every
+    /// output-lifecycle event — including the ones that create no output at
+    /// all (a send without change only flips its inputs to `Spent`; a reorg
+    /// only flips `Confirmed` to `Reorged`). If any transition were invisible
+    /// here, that material fund change would silently skip its auto-backup.
+    #[test]
+    fn fingerprint_registers_every_output_lifecycle_transition() {
+        let statuses = [
+            OutputStatus::Unconfirmed,
+            OutputStatus::Confirmed,
+            OutputStatus::Spent,
+            OutputStatus::Reorged,
+        ];
+        let fp_with_status = |status: OutputStatus| {
+            let mut s = populated_regtest_state();
+            s.outputs
+                .get_mut(&commit(1))
+                .expect("output 1 present")
+                .status = status;
+            funds_fingerprint(&s)
+        };
+        for (i, a) in statuses.iter().enumerate() {
+            for b in statuses.iter().skip(i + 1) {
+                assert_ne!(
+                    fp_with_status(*a),
+                    fp_with_status(*b),
+                    "a {a:?} -> {b:?} transition must read as a material funds change"
+                );
+            }
+        }
+
+        // A value difference on an otherwise identical output set is material
+        // too (a rewritten amount must never skip the backup).
+        let base = funds_fingerprint(&populated_regtest_state());
+        let mut bumped = populated_regtest_state();
+        bumped
+            .outputs
+            .get_mut(&commit(1))
+            .expect("output 1 present")
+            .value += 1;
+        assert_ne!(
+            funds_fingerprint(&bumped),
+            base,
+            "a value change must read as a material funds change"
         );
     }
 

@@ -36,6 +36,16 @@ for term in "${required_terms[@]}"; do
   fi
 done
 
+if ! grep -F "bin\\dom-wallet-desktop.exe" "${ROOT}/update_portable.ps1" >/dev/null; then
+  echo "update script must ship the Tauri desktop wallet (dom-wallet-desktop.exe)" >&2
+  exit 1
+fi
+
+if grep -R -F "dom-wallet-app" "${ROOT}" >/dev/null; then
+  echo "portable package must not reference the deprecated dom-wallet-app" >&2
+  exit 1
+fi
+
 if ! grep -F "data\\wallets" "${ROOT}/update_portable.ps1" >/dev/null; then
   echo "update script must reference data\\wallets backup path" >&2
   exit 1

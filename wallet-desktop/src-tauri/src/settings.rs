@@ -10,7 +10,8 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context as _, Result};
 use dom_config::{MinerThrottleConfig, NodeConfig};
-use dom_wallet::{Bip39Seed, Network as WalletNetwork, WalletDir};
+use dom_wallet::{Network as WalletNetwork, WalletDir};
+use dom_wallet_keys::seed::Bip39Seed;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_BOOTSTRAP_SEED_PEER: &str = "192.153.57.211:8443";

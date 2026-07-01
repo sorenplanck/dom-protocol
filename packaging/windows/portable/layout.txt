@@ -4,11 +4,10 @@ DOM-Portable/
   README.md
   VERSION.txt
   bin/
-    dom-wallet-app.exe
+    dom-wallet-desktop.exe
     dom-node.exe
     dom-test-runner.exe
   config/
-    app_state.example.json
     node.env.example
   data/
     wallets/

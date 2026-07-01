@@ -800,6 +800,28 @@ audit) → **[NEEDS HUMAN DECISION]** on provisioning heavy CI (§9).
    `dom-wallet-app` removed/hidden from the release (closes WDSF-003).
 4. Phase D — removal of v1 from the official release (kept in history).
 
+**Status (2026-07-01):**
+
+- Phase A — ✅ done.
+- Phase B — ✅ done, stronger than planned: the desktop's user-wallet engine is
+  `dom-wallet2` unconditionally (no feature flag), driven end-to-end through
+  `RpcChainSource` (RB-WALLET2-RPC-SOURCE resolved).
+- Phase C — 🔧 nearly done. v2 is the desktop default; v1 is marked deprecated
+  (doc-level, `crates/dom-wallet/src/lib.rs`); the Windows portable package
+  scripts now ship the Tauri desktop (`dom-wallet-desktop.exe`) instead of
+  `dom-wallet-app.exe` and the validator rejects any `dom-wallet-app`
+  reference. Remaining: (a) manual QA of the Windows Tauri artifact before the
+  first package is actually built/shipped; (b) deleting the `dom-wallet-app`
+  crate itself (nothing ships it anymore) — HUMAN DECISION on timing.
+- Phase D — in progress. The desktop's v1 surface was re-homed: seed types come
+  from `dom-wallet-keys` directly, the registry and the node RPC client moved
+  verbatim into `wallet-desktop/src-tauri/src/{registry,node_rpc}.rs`. What
+  still consumes v1: the desktop's `Network`/`WalletDir` (the miner wallet the
+  embedded node opens) and `dom-node` itself (coinbase build, canonical rescan
+  — a deliberate fail-closed policy). Recommendation on record: leave the node
+  on v1 (coinbase outputs are height-derivable, so WDSF-001/002 do not apply)
+  and read Phase D as "v1 out of user-facing wallet artifacts".
+
 ### 7.4 Data migration (user)
 
 - **Two complementary paths** (see §2.7 for the contract):
