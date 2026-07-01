@@ -270,8 +270,7 @@ impl ChainState {
         };
 
         validate_future_timestamp_with_limit(header, now, self.max_future_block_time())?;
-        let seed =
-            self.compute_randomx_seed_branch_aware(header.height.0, header.prev_hash)?;
+        let seed = self.compute_randomx_seed_branch_aware(header.height.0, header.prev_hash)?;
         validate_pow_for_network(self.network_magic, header, &seed)?;
 
         if let Some(parent_header) = parent.as_ref() {
@@ -760,8 +759,7 @@ impl ChainState {
                 )));
             }
         }
-        let seed =
-            self.compute_randomx_seed_branch_aware(header.height.0, header.prev_hash)?;
+        let seed = self.compute_randomx_seed_branch_aware(header.height.0, header.prev_hash)?;
         validate_pow_for_network(self.network_magic, header, &seed)?;
         Ok(())
     }
@@ -871,15 +869,15 @@ impl ChainState {
         let mut steps: u64 = 0;
 
         loop {
-            let header_bytes = self
-                .store
-                .get_block_header(cursor.as_bytes())?
-                .ok_or_else(|| {
-                    DomError::Internal(format!(
-                        "randomx seed walk: missing header {}",
-                        hex::encode(cursor.as_bytes())
-                    ))
-                })?;
+            let header_bytes =
+                self.store
+                    .get_block_header(cursor.as_bytes())?
+                    .ok_or_else(|| {
+                        DomError::Internal(format!(
+                            "randomx seed walk: missing header {}",
+                            hex::encode(cursor.as_bytes())
+                        ))
+                    })?;
             let cursor_header = BlockHeader::from_bytes(&header_bytes)?;
             let cursor_height = cursor_header.height.0;
 
@@ -2214,7 +2212,15 @@ mod randomx_seed_tests {
         let bytes = hdr.to_bytes().expect("serialize");
         chain
             .store
-            .commit_block(hash.as_bytes(), hdr.height.0, &bytes, &[0xBB; 4], &[], &[], &[])
+            .commit_block(
+                hash.as_bytes(),
+                hdr.height.0,
+                &bytes,
+                &[0xBB; 4],
+                &[],
+                &[],
+                &[],
+            )
             .expect("commit canonical");
     }
 
@@ -2265,7 +2271,9 @@ mod randomx_seed_tests {
 
         // The canonical path (old bug) would resolve to CANON — the divergence
         // the fix corrects.
-        let canonical = chain.compute_randomx_seed(2048).expect("canonical resolves");
+        let canonical = chain
+            .compute_randomx_seed(2048)
+            .expect("canonical resolves");
         assert_eq!(canonical, *canon_1984.as_bytes());
         assert_ne!(
             branch_aware, canonical,
@@ -2290,7 +2298,9 @@ mod randomx_seed_tests {
         let branch_aware = chain
             .compute_randomx_seed_branch_aware(2048, canon_2047)
             .expect("branch-aware resolves");
-        let canonical = chain.compute_randomx_seed(2048).expect("canonical resolves");
+        let canonical = chain
+            .compute_randomx_seed(2048)
+            .expect("canonical resolves");
         assert_eq!(
             branch_aware, canonical,
             "case 6: direct extension must match the canonical seed exactly"
@@ -2322,7 +2332,9 @@ mod randomx_seed_tests {
         let branch_aware = chain
             .compute_randomx_seed_branch_aware(1, genesis_hash)
             .expect("epoch-0 branch-aware resolves");
-        let canonical = chain.compute_randomx_seed(1).expect("epoch-0 canonical resolves");
+        let canonical = chain
+            .compute_randomx_seed(1)
+            .expect("epoch-0 canonical resolves");
 
         // Both must be the genesis hash, and must agree (epoch 0 has no branch
         // divergence — all chains share the genesis).
@@ -2355,10 +2367,9 @@ mod mtp_branch_tests {
 
     fn chain() -> (tempfile::TempDir, ChainState) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store =
-            DomStore::open_with_map_size(dir.path(), TEST_LMDB_MAP_SIZE).expect("store");
-        let c = ChainState::open(store, Hash256::ZERO, dom_core::NETWORK_MAGIC_REGTEST)
-            .expect("chain");
+        let store = DomStore::open_with_map_size(dir.path(), TEST_LMDB_MAP_SIZE).expect("store");
+        let c =
+            ChainState::open(store, Hash256::ZERO, dom_core::NETWORK_MAGIC_REGTEST).expect("chain");
         (dir, c)
     }
 
