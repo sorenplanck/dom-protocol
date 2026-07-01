@@ -1996,6 +1996,99 @@ mod randomx_seed_tests {
             "missing epoch>0 seed block must error, got {result:?}"
         );
     }
+
+    /// A2-004: the RandomX seed for PoW validation is resolved by
+    /// `compute_randomx_seed` from the CANONICAL height index (get_hash_at_height),
+    /// which knows only the height — not which branch the block being validated
+    /// belongs to. `connect_block` (line ~273) and `validate_header_only`
+    /// (line ~762) both use this canonical path.
+    ///
+    /// During a reorg that crosses a RandomX epoch boundary, a side-branch block
+    /// whose OWN history has a different block at seed_height is nonetheless
+    /// validated against the canonical seed. If the branches differ at that
+    /// seed_height, the block is validated against the wrong seed — a consensus
+    /// split (a valid block rejected, or nodes disagreeing on validity).
+    ///
+    /// DECIDED RULE (Soren Planck): the seed comes from the block's OWN history,
+    /// not the canonical chain. The branch-aware path
+    /// (`compute_randomx_seed_with_batch`), already used by IBD, implements that
+    /// rule. This detector pins the divergence at the resolution level: for the
+    /// same block height at an epoch boundary, the canonical path and the
+    /// branch-aware path return DIFFERENT seeds. The fix must make connect_block
+    /// resolve the seed branch-aware; when it does, connect_block will yield the
+    /// branch-aware value for a side-branch block instead of the canonical one.
+    ///
+    /// NOTE: mechanism-level detector (documents the resolution divergence, the
+    /// root cause). It PASSES today — it asserts that the two resolution paths
+    /// diverge, which is true now. Executable documentation of A2-004, not a
+    /// red-until-fixed alarm.
+    #[test]
+    fn a2_004_seed_resolution_is_branch_blind_at_epoch_boundary() {
+        let (_dir, chain) = empty_chain();
+
+        // First block of epoch 1 is height 2048; its seed_height is 1984.
+        let height = 2048;
+        assert_eq!(randomx_seed_height(height), 1984);
+
+        // Populate the CANONICAL height index at seed_height 1984 with a known
+        // block hash (CANON). commit_block accepts opaque bytes for header/body —
+        // dom-store does not parse them — so a minimal synthetic block suffices.
+        let canon_seed_hash = [0xAAu8; 32];
+        let opaque_header = vec![0xAAu8; 64];
+        let opaque_body = vec![0xBBu8; 32];
+        chain
+            .store
+            .commit_block(
+                &canon_seed_hash,
+                1984,
+                &opaque_header,
+                &opaque_body,
+                &[],
+                &[],
+                &[],
+            )
+            .expect("commit canonical seed block at 1984");
+
+        // CANONICAL path: resolves the seed for height 2048 from the height
+        // index, yielding CANON. It receives only the height; it cannot know
+        // any branch.
+        let canonical_seed = chain
+            .compute_randomx_seed(height)
+            .expect("canonical seed resolves from the committed height index");
+        assert_eq!(
+            canonical_seed, canon_seed_hash,
+            "canonical path returns the canonical block at seed_height"
+        );
+
+        // BRANCH-AWARE path: given a batch representing a SIDE branch whose own
+        // block at 1984 is SIDE (!= CANON), it resolves the seed to SIDE — the
+        // seed from that block's own history, per the decided rule.
+        let side_seed_hash = [0xBBu8; 32];
+        let side_branch: Vec<(BlockHeader, Hash256, bool)> = vec![(
+            synth_header(1984),
+            Hash256::from_bytes(side_seed_hash),
+            false,
+        )];
+        let branch_aware_seed = chain
+            .compute_randomx_seed_with_batch(height, &side_branch)
+            .expect("branch-aware seed resolves from the side branch's own history");
+        assert_eq!(
+            branch_aware_seed, side_seed_hash,
+            "branch-aware path uses the side branch's own seed block"
+        );
+
+        // A2-004: for the SAME block height at the epoch boundary, the canonical
+        // path (which connect_block uses) and the branch-aware path (the decided
+        // rule) return DIFFERENT seeds. A side-branch block would therefore be
+        // validated against CANON when it must be validated against SIDE. The
+        // fix must make connect_block resolve the seed from the block's own
+        // history.
+        assert_ne!(
+            canonical_seed, branch_aware_seed,
+            "A2-004: connect_block's canonical seed path validates a side-branch \
+             block against the wrong seed at a RandomX epoch boundary"
+        );
+    }
 }
 
 #[cfg(test)]
