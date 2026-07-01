@@ -44,3 +44,14 @@ dom-testnet-data/
 **/fuzz/target/
 **/fuzz/corpus/
 **/fuzz/artifacts/
+
+# build dirs alternativos (toolchain /tmp etc)
+/target-s2
+/target-s3
+/target-*
+
+# relatorios e notas de processo (OPSEC: fora do repo publico)
+/reports/
+*ETAPA*.md
+AUTO_BACKUP_*.md
+docs/FIX-014_*.md

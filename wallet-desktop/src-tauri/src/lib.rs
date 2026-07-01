@@ -4,6 +4,7 @@
 //! `dom-rpc`, …) and hosts the embedded full node. No crypto, consensus, P2P
 //! or wallet logic is reimplemented here.
 
+mod auto_backup;
 mod log_capture;
 mod managed_storage;
 mod metrics;
@@ -27,7 +28,7 @@ use managed_storage::ManagedLayout;
 use metrics::NodeMetrics;
 use node_host::{NodeHost, NodeState};
 use settings::{NetworkKind, NodeSettings};
-use wallet_manager::{BalanceInfo, WalletManager};
+use wallet_manager::{BackupEventSink, BackupTarget, BalanceInfo, ImportedSummary, WalletManager};
 
 /// Shared application state, available to every command via `State<AppState>`.
 pub struct AppState {
@@ -44,6 +45,26 @@ pub struct AppState {
     /// created/opened through the managed flow. Used to persist per-wallet node
     /// settings (mining toggle, ports) next to the wallet.
     managed: Arc<tokio::sync::Mutex<Option<ManagedLayout>>>,
+}
+
+/// Auto-backup failure sink that forwards to the frontend as an
+/// `"auto-backup-failed"` Tauri event. The payload carries the destination and a
+/// `severity` ("error" for local, "warning" for external) so the UI can pick the
+/// right toast. Emitting from any thread is fine — `AppHandle` is `Send + Sync`,
+/// and the backup runs on a `spawn_blocking` thread.
+struct TauriBackupSink {
+    app: tauri::AppHandle,
+}
+
+impl BackupEventSink for TauriBackupSink {
+    fn backup_failed(&self, target: BackupTarget, reason: String) {
+        let payload = serde_json::json!({
+            "target": target.as_str(),
+            "severity": target.severity(),
+            "reason": reason,
+        });
+        let _ = self.app.emit("auto-backup-failed", payload);
+    }
 }
 
 /// Build a `NodeRpcClient` pointed at the embedded node, authenticated with the
@@ -570,6 +591,37 @@ async fn managed_settings_save(
     Ok(())
 }
 
+/// Apply the auto-backup config (toggle + optional external folder) to the OPEN
+/// wallet and persist it next to the wallet.
+///
+/// Security: enabling an EXTERNAL destination requires a strong login password
+/// (checked on the wallet's held password — never re-transmitted). A weak
+/// password is REJECTED with the reason and nothing is applied or persisted. The
+/// LOCAL backup needs no such gate (the seed never leaves the machine). The
+/// persisted config file holds NO secret.
+#[tauri::command]
+async fn set_auto_backup(state: State<'_, AppState>, settings: NodeSettings) -> Result<(), String> {
+    settings.validate().map_err(|e| e.to_string())?;
+    let enabled = settings.auto_backup_enabled;
+    let external = settings
+        .auto_backup_external_path
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+        .map(PathBuf::from);
+    // Apply to the open wallet first: this runs the strong-password gate and
+    // rejects (before persisting) a weak password when enabling an external dest.
+    state
+        .wallet
+        .set_auto_backup(enabled, external)
+        .await
+        .map_err(|e| e.to_string())?;
+    let guard = state.managed.lock().await;
+    if let Some(layout) = guard.as_ref() {
+        managed_storage::save_node_settings(layout, &settings).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Ensure the embedded node runs with exactly these settings (start when
 /// stopped, restart when running on different settings, no-op otherwise).
 #[tauri::command]
@@ -906,6 +958,107 @@ async fn read_text_file(app: tauri::AppHandle, title: String) -> Result<Option<S
         .map_err(|e| format!("io error: {e}"))
 }
 
+// ── Encrypted full-backup commands (`wallet.dombak`, schema 4) ───────────────
+
+/// Map the settings/UI network enum to the wallet-engine (`dom-wallet2`) network.
+/// Serde already validated `NetworkKind` on the way in, so any value here is one
+/// of the three real networks — there is no invalid case to handle.
+fn kind_to_v2_network(kind: NetworkKind) -> dom_wallet2::Network {
+    match kind {
+        NetworkKind::Mainnet => dom_wallet2::Network::Mainnet,
+        NetworkKind::Testnet => dom_wallet2::Network::Testnet,
+        NetworkKind::Regtest => dom_wallet2::Network::Regtest,
+    }
+}
+
+/// Export a complete encrypted backup of the open wallet. The native save dialog
+/// is opened HERE, in the backend, so the renderer never supplies a path —
+/// closing the arbitrary-file-write hole, exactly like `save_text_file`.
+///
+/// `passphrase` is the backup's OWN secret (independent of the wallet password);
+/// it is typed `Zeroizing<String>` so it is wiped on drop, and is never logged
+/// nor `{:?}`-formatted. Returns `true` if written, `false` if the user
+/// cancelled the dialog.
+#[tauri::command]
+async fn export_backup_cmd(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    passphrase: Zeroizing<String>,
+) -> Result<bool, String> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Export wallet backup")
+        .set_file_name("wallet.dombak")
+        .add_filter("DOM wallet backup", &["dombak"])
+        .blocking_save_file();
+    let path = match picked {
+        Some(fp) => fp.into_path().map_err(|e| format!("invalid path: {e}"))?,
+        None => return Ok(false),
+    };
+    state
+        .wallet
+        .export_full_backup(&path, passphrase.as_str())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Restore a full backup into a BRAND-NEW vault, non-destructively: the open
+/// wallet (if any) is never touched. Works with NO wallet open — the disaster
+/// case (fresh machine) where the backup matters most.
+///
+/// Two native dialogs are opened in the backend: first pick the `.dombak` to
+/// read, then choose where to save the new vault. The renderer never supplies a
+/// path. `target_network` is the network the user asserts the backup belongs to;
+/// serde validates it (`mainnet`/`testnet`/`regtest`) and its genesis gives the
+/// chain id the backup is checked against (a mismatch is refused before any
+/// write). `passphrase` (backup secret) and `new_password` (new vault) are both
+/// `Zeroizing<String>`; neither is logged nor `{:?}`-formatted. Returns the
+/// `ImportedSummary`, or `None` if the user cancelled either dialog.
+#[tauri::command]
+async fn import_backup_cmd(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    passphrase: Zeroizing<String>,
+    new_password: Zeroizing<String>,
+    target_network: NetworkKind,
+) -> Result<Option<ImportedSummary>, String> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Select wallet backup to import")
+        .add_filter("DOM wallet backup", &["dombak"])
+        .blocking_pick_file();
+    let backup_path = match picked {
+        Some(fp) => fp.into_path().map_err(|e| format!("invalid path: {e}"))?,
+        None => return Ok(None),
+    };
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Save restored wallet as")
+        .set_file_name("restored-wallet.dat")
+        .add_filter("DOM wallet", &["dat"])
+        .blocking_save_file();
+    let new_vault_path = match picked {
+        Some(fp) => fp.into_path().map_err(|e| format!("invalid path: {e}"))?,
+        None => return Ok(None),
+    };
+    let summary = state
+        .wallet
+        .import_full_backup_to_new_vault(
+            &backup_path,
+            passphrase.as_str(),
+            &new_vault_path,
+            new_password.as_str(),
+            kind_to_v2_network(target_network),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(Some(summary))
+}
+
 // ── Node commands ───────────────────────────────────────────────────────────
 
 /// M2: refuse to (re)start the embedded node on a network that doesn't match
@@ -1107,6 +1260,7 @@ pub fn run() {
     };
 
     let wallet = Arc::new(WalletManager::new());
+    let wallet_for_sink = wallet.clone();
     let sweep_lock = Arc::new(tokio::sync::Mutex::new(()));
 
     let state = AppState {
@@ -1122,6 +1276,12 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(state)
         .setup(move |app| {
+            // Install the auto-backup failure sink so backup writes can notify the
+            // UI ("auto-backup-failed"). Wallets opened after this report through it.
+            wallet_for_sink.set_event_sink(Arc::new(TauriBackupSink {
+                app: app.handle().clone(),
+            }));
+
             // Pump log lines from the broadcast bus to the frontend as
             // "node-log" events. One background task for the app's lifetime.
             let handle = app.handle().clone();
@@ -1270,6 +1430,7 @@ pub fn run() {
             wallet_name_taken,
             wallet_storage_info,
             managed_settings_save,
+            set_auto_backup,
             node_ensure,
             wallet_open,
             wallet_open_by_name,
@@ -1285,6 +1446,8 @@ pub fn run() {
             make_qr_svg,
             save_text_file,
             read_text_file,
+            export_backup_cmd,
+            import_backup_cmd,
             node_start,
             node_stop,
             node_restart,

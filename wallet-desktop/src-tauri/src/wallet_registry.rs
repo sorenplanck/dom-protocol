@@ -15,8 +15,10 @@
 //!   `~/.config/DOM Wallet/registry.json` when `XDG_CONFIG_HOME` is unset.
 //!
 //! The registry holds only non-sensitive metadata (see `dom_wallet::registry`);
-//! it is NOT a secret store. If it is deleted the user can still locate or
-//! restore their wallet — the recovery phrase is the real backup.
+//! it is NOT a secret store and NOT a backup. If it is deleted the user can still
+//! recover their wallet from its recovery phrase (mined coins) plus its encrypted
+//! `.dombak` backup (change and received funds, whose blindings the seed alone
+//! cannot rebuild) — the phrase is partial recovery, the backup completes it.
 
 use std::path::PathBuf;
 

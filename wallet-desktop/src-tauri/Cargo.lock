@@ -676,6 +676,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cloudabi"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddfc5b9aa5d4507acaf872de71051dfd0e309860e88966e1051e462a077aac4f"
+dependencies = [
+ "bitflags 1.3.2",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1181,6 +1190,7 @@ version = "0.1.0"
 dependencies = [
  "blake2",
  "dom-core",
+ "grin_secp256k1zkp",
  "hex",
  "hkdf",
  "hmac",
@@ -1275,6 +1285,7 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "subtle",
  "thiserror 1.0.69",
  "tokio",
  "tower 0.4.13",
@@ -1315,7 +1326,7 @@ dependencies = [
  "dom-pmmr",
  "dom-serialization",
  "hex",
- "lmdb",
+ "lmdb-rkv",
  "thiserror 1.0.69",
  "tracing",
 ]
@@ -1395,10 +1406,12 @@ dependencies = [
  "dom-wallet2",
  "getrandom 0.2.17",
  "hex",
+ "hkdf",
  "qrcode",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",
@@ -1419,6 +1432,7 @@ dependencies = [
  "bip39",
  "hmac",
  "rand 0.8.6",
+ "secp256k1 0.28.2",
  "sha2",
  "thiserror 1.0.69",
  "zeroize",
@@ -1801,6 +1815,12 @@ dependencies = [
  "libc",
  "winapi",
 ]
+
+[[package]]
+name = "fuchsia-cprng"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06f77d526c1a601b7c4cdd98f54b5eaabffc14d5f2f0296febdc7f357c6d3ba"
 
 [[package]]
 name = "funty"
@@ -2186,6 +2206,21 @@ dependencies = [
  "rand 0.8.6",
  "smallvec",
  "spinning_top",
+]
+
+[[package]]
+name = "grin_secp256k1zkp"
+version = "0.7.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf7bb95f155b1eede2648a1b9afbba82bc3d9f2af0518b478767559a572bd973"
+dependencies = [
+ "arrayvec",
+ "cc",
+ "libc",
+ "rand 0.5.6",
+ "serde",
+ "serde_json",
+ "zeroize",
 ]
 
 [[package]]
@@ -2954,21 +2989,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
-name = "lmdb"
-version = "0.8.0"
+name = "lmdb-rkv"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b0908efb5d6496aa977d96f91413da2635a902e5e31dbef0bfb88986c248539"
+checksum = "447a296f7aca299cfbb50f4e4f3d49451549af655fb7215d7f8c0c3d64bad42b"
 dependencies = [
  "bitflags 1.3.2",
+ "byteorder",
  "libc",
- "lmdb-sys",
+ "lmdb-rkv-sys",
 ]
 
 [[package]]
-name = "lmdb-sys"
-version = "0.8.0"
+name = "lmdb-rkv-sys"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5b392838cfe8858e86fac37cf97a0e8c55cc60ba0a18365cadc33092f128ce9"
+checksum = "61b9ce6b3be08acefa3003c57b7565377432a89ec24476bbe72e11d101f852fe"
 dependencies = [
  "cc",
  "libc",
@@ -3998,6 +4034,19 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "rand"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c618c47cd3ebd209790115ab837de41425723956ad3ce2e6a7f09890947cacb9"
+dependencies = [
+ "cloudabi",
+ "fuchsia-cprng",
+ "libc",
+ "rand_core 0.3.1",
+ "winapi",
+]
+
+[[package]]
+name = "rand"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
@@ -4036,6 +4085,21 @@ dependencies = [
  "ppv-lite86",
  "rand_core 0.9.5",
 ]
+
+[[package]]
+name = "rand_core"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a6fdeb83b075e8266dcc8762c22776f6877a63111121f5f8c7411e5be7eed4b"
+dependencies = [
+ "rand_core 0.4.2",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c33a3c44ca05fa6f1807d8e6743f3824e8509beca625669633be0acbdf509dc"
 
 [[package]]
 name = "rand_core"
@@ -4502,7 +4566,7 @@ dependencies = [
 [[package]]
 name = "secp256k1-zkp"
 version = "0.11.0"
-source = "git+https://github.com/BlockstreamResearch/rust-secp256k1-zkp?branch=master#264e84adf7b06fb4d028eb2fd992f33c4d8999b7"
+source = "git+https://github.com/BlockstreamResearch/rust-secp256k1-zkp?rev=264e84adf7b06fb4d028eb2fd992f33c4d8999b7#264e84adf7b06fb4d028eb2fd992f33c4d8999b7"
 dependencies = [
  "bitcoin-private",
  "rand 0.8.6",
@@ -4513,7 +4577,7 @@ dependencies = [
 [[package]]
 name = "secp256k1-zkp-sys"
 version = "0.10.1"
-source = "git+https://github.com/BlockstreamResearch/rust-secp256k1-zkp?branch=master#264e84adf7b06fb4d028eb2fd992f33c4d8999b7"
+source = "git+https://github.com/BlockstreamResearch/rust-secp256k1-zkp?rev=264e84adf7b06fb4d028eb2fd992f33c4d8999b7#264e84adf7b06fb4d028eb2fd992f33c4d8999b7"
 dependencies = [
  "cc",
  "secp256k1-sys 0.10.1",

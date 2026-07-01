@@ -97,6 +97,7 @@ function gotoOnboarding(which) {
     welcome: () => S.renderWelcome(go),
     create: () => S.renderCreate(go, onReady),
     restore: () => S.renderRestore(go, onReady),
+    restoreBackup: () => S.renderRestoreBackup(go, onReady),
     open: () => S.renderOpen(go, onReady),
   };
   showGate(map[which]());
@@ -109,6 +110,7 @@ const screens = {
   receive: S.renderReceive,
   history: S.renderHistory,
   node: S.renderNode,
+  backup: S.renderBackup,
   settings: () => S.renderSettings(() => { resetIdleTimer(); }),
 };
 
@@ -146,6 +148,8 @@ async function boot() {
   // Start capturing node logs at boot so the buffer has history even if the
   // Node / Logs tab is opened later.
   await startLogCapture();
+  // Surface auto-backup failures (never silent): registers the global listener once.
+  await S.startAutoBackupNotifications();
   // Load default node settings from the backend, merge saved non-sensitive prefs.
   const defaults = await api.defaultSettings();
   // auto_lock_minutes is a local pref (not part of the backend NodeConfig; the

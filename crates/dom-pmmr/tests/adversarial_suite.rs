@@ -115,7 +115,7 @@ fn pmmr_root(payloads: &[&[u8]]) -> Hash256 {
     for p in payloads {
         pmmr.push(p).expect("push must succeed");
     }
-    pmmr.root()
+    pmmr.root().unwrap()
 }
 
 // ── (1) Oracle vs production cross-check ─────────────────────────────────────
@@ -177,7 +177,7 @@ fn peak_count_matches_popcount_up_to_1024() {
         // Roots match (proxy for peak alignment) — covered above. Here
         // we additionally assert popcount(n) peaks worth of structural
         // capacity by reconstructing from oracle and observing identity.
-        let r1 = pmmr.root();
+        let r1 = pmmr.root().unwrap();
         let r2 = oracle_root(&refs);
         assert_eq!(r1, r2, "root drift at n={n}");
         let expected_peaks = n.count_ones() as u64;

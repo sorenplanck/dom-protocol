@@ -4,7 +4,8 @@
 //! Drives a large number of pushes of a fuzzer-chosen small payload to
 //! exercise the merge_peaks cascade and node_count arithmetic across
 //! many peak-boundary transitions (2^k - 1, 2^k, 2^k + 1). Recomputes
-//! root() at several points. Must never panic; push may return Err.
+//! root() at several points. push may return Err; root() returns Result
+//! (FIX-021) and must be Ok on an append-built PMMR (all peaks present).
 //!
 //! The push count is capped from the first two fuzz bytes so a single
 //! input stays bounded (no unbounded-time inputs from the corpus).
@@ -31,9 +32,9 @@ fuzz_target!(|data: &[u8]| {
         }
         // Recompute the root at every peak boundary to stress bagging.
         if i.is_power_of_two() {
-            let _ = pmmr.root();
+            let _ = pmmr.root().expect("append-built PMMR has all peaks present; root() must be Ok (FIX-021)");
         }
     }
-    let _ = pmmr.root();
+    let _ = pmmr.root().expect("append-built PMMR has all peaks present; root() must be Ok (FIX-021)");
     let _ = pmmr.node_count();
 });

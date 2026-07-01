@@ -52,6 +52,11 @@ export const api = {
   // Persist node settings next to the open MANAGED wallet (no-op otherwise).
   managedSettingsSave: (settings) =>
     invoke("managed_settings_save", { settings }),
+  // Apply + persist the auto-backup config (toggle + optional external folder).
+  // Rejects with the reason when enabling an external destination under a weak
+  // login password (the seed would leave the machine under that password alone).
+  setAutoBackup: (settings) =>
+    invoke("set_auto_backup", { settings }),
   // Login-by-name: resolve the vault location from the local registry, then
   // unlock with the password. The renderer never handles a filesystem path.
   // Resolves to the wallet's saved node settings (or null for wallets located
@@ -80,6 +85,19 @@ export const api = {
   saveTextFile: (title, defaultName, contents) =>
     invoke("save_text_file", { title, defaultName, contents }),
   readTextFile: (title) => invoke("read_text_file", { title }),
+
+  // Encrypted full-backup (.dombak). Like the M4 file commands above, the backend
+  // opens the native dialog itself, so the renderer never handles a filesystem
+  // path. The passphrase / new password cross IPC only as command arguments and
+  // are never logged. `exportBackup` resolves to true if saved / false if the
+  // user cancelled the save dialog. `importBackup` restores NON-destructively
+  // into a brand-new vault and resolves to the ImportedSummary
+  // ({ vault_path, network, outputs, pending_slates, last_reconciled_tip }) or
+  // null if the user cancelled either dialog. `targetNetwork` is one of
+  // "mainnet" | "testnet" | "regtest" (the backend validates it).
+  exportBackup: (passphrase) => invoke("export_backup_cmd", { passphrase }),
+  importBackup: (passphrase, newPassword, targetNetwork) =>
+    invoke("import_backup_cmd", { passphrase, newPassword, targetNetwork }),
 
   nodeStart: (settings) => invoke("node_start", { settings }),
   // Start when stopped, restart when running on DIFFERENT settings, no-op when

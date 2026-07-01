@@ -1266,6 +1266,17 @@ impl dom_rpc::NodeHandle for DomNode {
         use dom_serialization::DomDeserialize;
         let tx = dom_consensus::Transaction::from_bytes(&tx_bytes)
             .map_err(|e| dom_rpc::RpcError::InvalidHex(format!("invalid tx: {e}")))?;
+        // A2-008: this snapshots the chain view under the chain lock, then
+        // releases it before admitting to the mempool — a benign TOCTOU window.
+        // The mempool is volatile, non-consensus relay state; a tx admitted
+        // against a stale view is never trusted downstream: connect_block
+        // re-validates every mined block against the real chain (miner.rs, the
+        // final finalize step) and rejects it if an input was spent in the gap,
+        // and each Dandelion++ peer re-validates on relay. Closing the window
+        // would require holding the chain and mempool locks jointly across
+        // admission, against the explicit lock hierarchy (see lock_order.rs) —
+        // deadlock/contention risk for no consensus benefit. Acknowledged, not
+        // fixed.
         let chain_view = {
             let chain = self
                 .chain

@@ -504,6 +504,57 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    // ── auto-backup config persistence (ETAPA 4) ──────────────────────────────
+
+    /// The two auto-backup fields persist through the real writer
+    /// (`save_node_settings`) and reload via the same serde path the app uses.
+    #[test]
+    fn auto_backup_config_persists_in_node_settings() {
+        let base = tempdir().unwrap();
+        let layout = layout_in(base.path(), "my-wallet").unwrap();
+
+        let settings = NodeSettings {
+            auto_backup_enabled: true,
+            auto_backup_external_path: Some("/media/usb/backups".to_string()),
+            ..NodeSettings::default()
+        };
+        save_node_settings(&layout, &settings).unwrap();
+
+        // Reload exactly as `load_wallet_node_layout` does (serde over the file).
+        let bytes = std::fs::read(&layout.node_config_path).unwrap();
+        let reloaded: NodeSettings = serde_json::from_slice(&bytes).unwrap();
+        assert!(reloaded.auto_backup_enabled);
+        assert_eq!(
+            reloaded.auto_backup_external_path.as_deref(),
+            Some("/media/usb/backups")
+        );
+
+        // The config file carries NO secret (it never should).
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.to_lowercase().contains("password"));
+        assert!(!text.to_lowercase().contains("passphrase"));
+    }
+
+    /// A legacy node-settings.json without the new fields still loads (serde
+    /// defaults), so existing wallets keep working.
+    #[test]
+    fn legacy_node_settings_without_auto_backup_fields_defaults() {
+        let json = r#"{
+            "network": "testnet",
+            "seed_peers": [],
+            "p2p_listen_addr": "0.0.0.0:33370",
+            "rpc_listen_addr": "127.0.0.1:33372",
+            "data_dir": "/tmp/x",
+            "miner_wallet_path": null,
+            "mine": false,
+            "metrics_listen_addr": null,
+            "log_level": "info"
+        }"#;
+        let s: NodeSettings = serde_json::from_str(json).unwrap();
+        assert!(!s.auto_backup_enabled, "defaults to off");
+        assert_eq!(s.auto_backup_external_path, None);
+    }
+
     // ── sanitize_wallet_name ──────────────────────────────────────────────────
 
     #[test]

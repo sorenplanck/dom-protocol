@@ -5,29 +5,22 @@
 //! i.e. purpose=44' (hardened), coin_type=330' (hardened), account' (hardened),
 //! then NON-hardened `change` and NON-hardened `index`.
 //!
-//! ── EXPECTED RED (FIX-001) ──────────────────────────────────────────────
-//! The implementation builds the path with this format string:
+//! ── RESOLVED (FIX-001) — fixed in 8c1c053 ───────────────────────────────
+//! `derive_blinding` originally used the format string
 //!     format!("m/44'/{}'/{}'/{}'/{}/{}", 44u32, DOM_COIN_TYPE, account, change, index)
-//! which expands to:  m/44'/44'/330'/account'/change/index
-//! — a DUPLICATED 44' level (purpose written twice), pushing coin_type/account
-//! down one level and adding a hardened level the doc does not describe.
+//! which expanded to m/44'/44'/330'/account'/change/index — a DUPLICATED 44'
+//! level (purpose written twice) that pushed coin_type/account down one level and
+//! added an undocumented hardened level. Commit 8c1c053 corrected it to
+//!     format!("m/44'/{}'/{}'/{}/{}", DOM_COIN_TYPE, account, change, index)
+//! i.e. the documented m/44'/330'/account'/change/index (hd_wallet.rs:188).
 //!
-//! Measured drift (seed = [0x5e;64], account=3, change=0, index=7):
-//!   documented m/44'/330'/3'/0/7  -> 5f31996680972ce928d8183e364f10889cdf0fcc4ca4f6b8ff004be1857876e5
-//!   derive_blinding(3,0,7)        -> 2cfc1e17e3ee52d1df1c87afbff3e514b10a8dc5e4da5f92651d627e17822ec8
-//!   (derive_blinding == m/44'/44'/330'/3'/0/7, the buggy literal path)
-//!
-//! This KAV asserts the CORRECT (documented) behaviour, so it will FAIL until
-//! the format string is fixed to "m/44'/{}'/{}'/{}/{}" with
-//! (DOM_COIN_TYPE, account, change, index). Fixing is a SEPARATE task and
-//! requires human decision (it changes a key-derivation path — any output
-//! already derived via `derive_blinding` would move). The shield only reports.
+//! This KAV asserts the documented path and is now GREEN; it guards against a
+//! regression back to the duplicated-44' form.
 //!
 //! NOTE: the wallet's production blinding helpers (`seed::coinbase_blinding`,
-//! `seed::spend_output_blinding`) do NOT call `derive_blinding`; they build
-//! their own paths. So the blast radius of FIX-001 is limited to any consumer
-//! that calls `ExtendedPrivKey::derive_blinding` directly. (Audit those before
-//! fixing.)
+//! `seed::spend_output_blinding`) build their own paths and never called the
+//! buggy one — the original blast radius was limited to direct callers of
+//! `ExtendedPrivKey::derive_blinding`.
 
 use dom_wallet_keys::ExtendedPrivKey;
 
@@ -53,6 +46,6 @@ fn derive_blinding_matches_documented_path() {
         actual.as_ref(),
         documented.key_bytes(),
         "derive_blinding must follow documented m/44'/330'/account'/change/index \
-         (FIX-001: code emits the buggy m/44'/44'/330'/account'/change/index)"
+         (FIX-001 regression guard: must NOT revert to m/44'/44'/330'/account'/change/index)"
     );
 }

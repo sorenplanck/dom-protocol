@@ -324,11 +324,26 @@ impl Pmmr {
     }
 
     /// Compute the current PMMR root by bagging all peaks.
-    pub fn root(&self) -> Hash256 {
+    pub fn root(&self) -> Result<Hash256, DomError> {
         let positions = peak_positions(self.leaf_count);
-        let peak_hashes: Vec<Hash256> =
-            positions.iter().filter_map(|&p| self.get_node(p)).collect();
-        bag_peaks(&peak_hashes)
+        let mut peak_hashes = Vec::with_capacity(positions.len());
+        for &p in &positions {
+            // FIX-021: a peak position implied by `leaf_count` MUST be present.
+            // The previous `filter_map` silently dropped a missing (e.g. pruned)
+            // peak and bagged the survivors, yielding a well-formed root over an
+            // INCOMPLETE peak set — a hidden-history / forged-shape root. Refuse
+            // to compute a root over a hole, mirroring the `set_node` guard.
+            let h = self.get_node(p).ok_or_else(|| {
+                DomError::Internal(format!(
+                    "PMMR invariant violated: missing peak at position {p} \
+                     (leaf_count={}); refusing to compute root over an incomplete \
+                     peak set",
+                    self.leaf_count
+                ))
+            })?;
+            peak_hashes.push(h);
+        }
+        Ok(bag_peaks(&peak_hashes))
     }
 
     /// Place a node hash at `pos`. The MMR is append-only; overwriting
@@ -371,8 +386,8 @@ mod tests {
     #[test]
     fn empty_pmmr_root_is_deterministic() {
         let pmmr = Pmmr::new();
-        let r1 = pmmr.root();
-        let r2 = pmmr.root();
+        let r1 = pmmr.root().unwrap();
+        let r2 = pmmr.root().unwrap();
         assert_eq!(r1, r2);
         // Must not be all-zero
         assert_ne!(r1, Hash256::ZERO);
@@ -384,19 +399,19 @@ mod tests {
         let mut pmmr = Pmmr::new();
         let pos = pmmr.push(b"leaf0").unwrap();
         let expected = leaf_hash(pos, b"leaf0");
-        assert_eq!(pmmr.root(), expected);
+        assert_eq!(pmmr.root().unwrap(), expected);
     }
 
     /// Root changes when leaf is added.
     #[test]
     fn root_changes_on_append() {
         let mut pmmr = Pmmr::new();
-        let r0 = pmmr.root();
+        let r0 = pmmr.root().unwrap();
         pmmr.push(b"leaf0").unwrap();
-        let r1 = pmmr.root();
+        let r1 = pmmr.root().unwrap();
         assert_ne!(r0, r1);
         pmmr.push(b"leaf1").unwrap();
-        let r2 = pmmr.root();
+        let r2 = pmmr.root().unwrap();
         assert_ne!(r1, r2);
     }
 
@@ -409,14 +424,14 @@ mod tests {
             for l in &leaves {
                 p.push(l).unwrap();
             }
-            p.root()
+            p.root().unwrap()
         };
         let root2 = {
             let mut p = Pmmr::new();
             for l in &leaves {
                 p.push(l).unwrap();
             }
-            p.root()
+            p.root().unwrap()
         };
         assert_eq!(root1, root2);
     }
@@ -432,7 +447,7 @@ mod tests {
             for i in 0..count {
                 pmmr.push(&i.to_le_bytes()).unwrap();
             }
-            roots.push(pmmr.root());
+            roots.push(pmmr.root().unwrap());
         }
 
         // All roots must be distinct
@@ -635,31 +650,30 @@ mod shield_internal_probes {
         }
     }
 
-    // ── directed-corruption / PROBE FIX-021 ──────────────────────────────────
+    // ── directed-corruption / GUARD FIX-021 (RESOLVED) ───────────────────────
     //
-    // `root()` collects peak hashes with `filter_map(|p| self.get_node(p))`,
-    // which SILENTLY DROPS any peak whose node is missing instead of
-    // erroring. A fresh `Pmmr` built via `push` always has every peak
-    // present, so this is unreachable through the public API today.
-    // It becomes reachable the moment pruning (which removes nodes) is
-    // added. This probe constructs that future state directly via the
-    // crate-private `nodes` field and asserts the FAIL-SAFE behavior
-    // (root must NOT silently compute over a subset of peaks).
+    // `root()` previously collected peak hashes with
+    // `filter_map(|p| self.get_node(p))`, which SILENTLY DROPPED any peak whose
+    // node was missing instead of erroring. A fresh `Pmmr` built via `push`
+    // always has every peak present, so this was unreachable through the public
+    // API; it would have become reachable the moment pruning (which removes
+    // nodes) was added — producing a root indistinguishable from a smaller,
+    // legitimately-shaped PMMR (forged-inclusion / hidden-history primitive).
     //
-    // EXPECTED OUTCOME: RED. The current code silently bags a SUBSET of
-    // peaks, producing a root that is indistinguishable from a smaller,
-    // legitimately-shaped PMMR — a forged-inclusion / hidden-history
-    // primitive once pruning exists. Recorded as FIX-021 (severity
-    // downgraded: not reachable until pruning lands). DO NOT FIX HERE.
+    // FIX-021 fix: `root()` now returns `Result` and refuses (Err) to compute
+    // over an incomplete peak set, mirroring the `set_node` overwrite guard.
+    // Consensus-neutral: every reachable PMMR (built fresh per block) has all
+    // peaks present, so production roots are unchanged. The guard below
+    // constructs the would-be-pruned state directly via the crate-private
+    // `nodes` field and asserts the fail-closed behavior.
 
-    /// FIX-021 probe — marked `#[ignore]` because it is a RED reproducer
-    /// for a latent (currently-unreachable) bug, not a passing guard.
-    /// Run explicitly with `cargo test -p dom-pmmr -- --ignored
-    /// fix021`. When this stops being RED (i.e. `root()` learns to
-    /// error/poison on a missing peak), remove the `#[ignore]`.
+    /// FIX-021 guard (RESOLVED). `root()` must REFUSE to compute over an
+    /// incomplete peak set instead of silently dropping a missing (e.g.
+    /// pruned) peak and returning a forged-shape root. This was a RED
+    /// `#[ignore]` reproducer; it is now an active green guard because
+    /// `root()` returns `Err` on a missing peak.
     #[test]
-    #[ignore = "RED reproducer for FIX-021: root() silently drops a missing peak (latent, pruning-only)"]
-    fn fix021_root_silently_drops_missing_peak() {
+    fn fix021_root_refuses_incomplete_peak_set() {
         // Build a 3-leaf PMMR: peaks at positions [3, 4] (a merged
         // subtree at 3 and a lone leaf at 4).
         let mut pmmr = Pmmr::new();
@@ -674,7 +688,8 @@ mod shield_internal_probes {
             "precondition: 3-leaf peaks are [3,4]"
         );
 
-        let full_root = pmmr.root();
+        // A complete PMMR computes a root fine.
+        assert!(pmmr.root().is_ok(), "complete 3-leaf PMMR must have a root");
 
         // Simulate a pruned node: drop the LONE leaf peak at position 4.
         // (Direct private-field manipulation — exactly the state a future
@@ -683,34 +698,14 @@ mod shield_internal_probes {
         pruned.nodes[4] = None;
         assert!(pruned.get_node(4).is_none(), "peak 4 is now missing");
 
-        let pruned_root = pruned.root();
-
-        // FAIL-SAFE expectation: a PMMR that has lost a peak it still
-        // claims (leaf_count unchanged => peak_positions still yields 4)
-        // MUST NOT silently produce a well-formed root. Either it should
-        // be impossible to compute (panic/poison), or — at minimum — the
-        // root MUST differ from a root computed over the SAME leaf_count
-        // with all peaks present, AND must not coincide with the
-        // single-peak root of just position 3.
-        //
-        // The current implementation instead returns bag_peaks([peak3])
-        // == peak3 (a single-peak identity), which is the legitimate root
-        // of a DIFFERENT, smaller PMMR shape. We assert the safe behavior
-        // and expect RED.
-        let lone_peak3 = pmmr.get_node(3).expect("peak 3 present");
-
-        assert_ne!(
-            *pruned_root.as_bytes(),
-            *lone_peak3.as_bytes(),
-            "FIX-021: root() silently dropped missing peak 4 and returned the \
-             bare peak-3 hash — a hidden-history / forged-shape root. It must \
-             instead refuse to compute a root over an incomplete peak set."
-        );
-        // Secondary check: it should also differ from the honest full root.
-        assert_ne!(
-            *pruned_root.as_bytes(),
-            *full_root.as_bytes(),
-            "FIX-021: pruned root must not masquerade as the full root"
+        // FIX-021 fix: a PMMR that has lost a peak it still claims
+        // (leaf_count unchanged => peak_positions still yields position 4)
+        // MUST NOT silently produce a well-formed root. `root()` now returns
+        // Err rather than bagging the surviving peaks into a forged-shape root.
+        assert!(
+            pruned.root().is_err(),
+            "FIX-021: root() must refuse to compute over an incomplete peak \
+             set (missing peak 4), not silently drop it into a forged-shape root"
         );
     }
 }
