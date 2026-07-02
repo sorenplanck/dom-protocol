@@ -65,7 +65,8 @@ pub use backup::{
     BACKUP_MAGIC,
 };
 pub use keychain::{
-    restore_coinbase_from_seed, KeychainDeriver, KeychainError, ReceiveRequest, RestoreBlock,
+    restore_coinbase_from_seed, restore_coinbase_from_seed_skipping_known, KeychainDeriver,
+    KeychainError, ReceiveRequest, RestoreBlock,
 };
 pub use payment::{
     cancel, create_send, finalize, finalize_tracked, receive, submit_finalized, PaymentError,

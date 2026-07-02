@@ -89,6 +89,33 @@ impl WalletV2State {
         Ok(report)
     }
 
+    /// Reconcile against blocks **already fetched** (no chain source round-trip)
+    /// and advance the reconciliation cursors, exactly like [`Self::sync`].
+    ///
+    /// This is the second consumer of a restore walk: `scan_for_restore` already
+    /// paged the full canonical view (outputs, inputs, hashes) for
+    /// [`crate::restore_coinbase_from_seed`]; converting those blocks
+    /// (`RestoreBlock → ScanBlock` via `From`) and reconciling here makes one
+    /// walk feed both, instead of paying a second full-chain fetch per cycle.
+    ///
+    /// The view-completeness contract is the caller's, same as [`Self::sync`]
+    /// with `from = 0`: `blocks` must cover `0..=tip` (an output absent from the
+    /// view is treated as reorged).
+    pub fn reconcile_from_restore_blocks(
+        &mut self,
+        blocks: &[crate::keychain::RestoreBlock],
+        now: u64,
+    ) -> ReconcileReport {
+        let scan_blocks: Vec<crate::reconcile::ScanBlock> = blocks.iter().map(Into::into).collect();
+        let view = crate::reconcile::CanonicalView::from_blocks(&scan_blocks);
+        let report = crate::reconcile::reconcile(&mut self.outputs, &view, now);
+        if let Some(tip) = report.tip {
+            self.meta.last_reconciled_tip = tip.height;
+            self.meta.last_reconciled_hash = Some(tip.hash);
+        }
+        report
+    }
+
     /// Reconcile against `source` **only if the store is at least
     /// `stale_threshold` blocks behind the source tip** — otherwise do nothing.
     ///
@@ -169,6 +196,95 @@ mod tests {
         // …and the cursors advanced to the reconciled tip.
         assert_eq!(state.meta.last_reconciled_tip, 7);
         assert_eq!(state.meta.last_reconciled_hash, Some([0x07u8; 32]));
+    }
+
+    #[test]
+    fn reconcile_from_restore_blocks_matches_sync_exactly() {
+        // Two identical states, same canonical data, two paths: `sync` (fetches
+        // via a ChainSource) vs `reconcile_from_restore_blocks` (reuses blocks
+        // already fetched by the restore walk). Statuses, report and cursors
+        // must be identical — this pins the one-walk optimization as
+        // behavior-preserving.
+        use crate::keychain::RestoreBlock;
+
+        let mut via_sync = state_with_receive();
+        let mut via_restore_blocks = state_with_receive();
+
+        let scan = ScanBlock {
+            height: 7,
+            hash: [0x07u8; 32],
+            output_commitments: vec![C_R],
+            input_commitments: vec![],
+        };
+        let src = InMemoryChainSource::with_blocks([scan]);
+        let report_sync = via_sync.sync(&src, 0, 1001).unwrap();
+
+        let restore = vec![RestoreBlock {
+            height: 7,
+            hash: [0x07u8; 32],
+            output_commitments: vec![C_R],
+            input_commitments: vec![],
+            total_fees_noms: 42, // dropped by the conversion; must not matter
+        }];
+        let report_blocks = via_restore_blocks.reconcile_from_restore_blocks(&restore, 1001);
+
+        assert_eq!(report_sync, report_blocks);
+        assert_eq!(
+            via_sync.outputs.get(&C_R).unwrap().status,
+            via_restore_blocks.outputs.get(&C_R).unwrap().status,
+        );
+        assert_eq!(
+            via_sync.meta.last_reconciled_tip,
+            via_restore_blocks.meta.last_reconciled_tip
+        );
+        assert_eq!(
+            via_sync.meta.last_reconciled_hash,
+            via_restore_blocks.meta.last_reconciled_hash
+        );
+        assert_eq!(via_restore_blocks.meta.last_reconciled_tip, 7);
+    }
+
+    #[test]
+    fn reconcile_from_restore_blocks_detects_spend_via_carried_inputs() {
+        // The reason RestoreBlock carries input_commitments: without them the
+        // restore-walk view would be blind to spends and a spent output would
+        // stay Confirmed. This pins the spend transition through the new path.
+        use crate::keychain::RestoreBlock;
+
+        let mut state = state_with_receive();
+
+        // Pass 1: C_R is created at height 2 → Confirmed. (Mirrors the two-pass
+        // shape of `transport::tests::sync_marks_spent_when_input_consumed`;
+        // the §3.1 table has no Unconfirmed→Spent edge, so create+spend seen in
+        // one first pass keeps Unconfirmed — same as the old sync path.)
+        let created = vec![RestoreBlock {
+            height: 2,
+            hash: [0x02u8; 32],
+            output_commitments: vec![C_R],
+            input_commitments: vec![],
+            total_fees_noms: 0,
+        }];
+        state.reconcile_from_restore_blocks(&created, 1001);
+        assert_eq!(
+            state.outputs.get(&C_R).unwrap().status,
+            OutputStatus::Confirmed
+        );
+
+        // Pass 2: height 3 consumes C_R → Spent (T2), seen through the carried
+        // input_commitments of the restore walk.
+        let mut spent_view = created;
+        spent_view.push(RestoreBlock {
+            height: 3,
+            hash: [0x03u8; 32],
+            output_commitments: vec![],
+            input_commitments: vec![C_R],
+            total_fees_noms: 0,
+        });
+        let report = state.reconcile_from_restore_blocks(&spent_view, 1002);
+
+        assert_eq!(report.spent, 1);
+        assert_eq!(state.outputs.get(&C_R).unwrap().status, OutputStatus::Spent);
+        assert_eq!(state.meta.last_reconciled_tip, 3);
     }
 
     #[test]

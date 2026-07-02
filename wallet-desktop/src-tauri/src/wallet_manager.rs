@@ -41,9 +41,10 @@ use dom_wallet2::{
     cancel as v2_cancel, create_send as v2_create_send,
     export_full_backup as v2_export_full_backup, finalize_tracked as v2_finalize_tracked,
     import_full_backup as v2_import_full_backup, load_wallet_state, receive as v2_receive,
-    restore_coinbase_from_seed, save_wallet_state, submit_finalized as v2_submit_finalized,
-    ChainSource, DerivIndex, KeychainDeriver, Network as V2Network, OutputOrigin, OutputStatus,
-    ReconcileReport, RpcChainSource, RpcSourceError, StoredOutput, SubmitError, WalletV2State,
+    restore_coinbase_from_seed_skipping_known, save_wallet_state,
+    submit_finalized as v2_submit_finalized, ChainSource, DerivIndex, KeychainDeriver,
+    Network as V2Network, OutputOrigin, OutputStatus, ReconcileReport, RpcChainSource,
+    RpcSourceError, StoredOutput, SubmitError, WalletV2State,
 };
 use dom_wallet_keys::seed::{Bip39Seed, SeedAcceptance};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1059,12 +1060,16 @@ impl WalletManager {
     /// Recover derivable coinbase from the seed and reconcile against the node.
     ///
     /// This is the v2 replacement for v1's `rescan_against_node`: it pages the
-    /// node's `/chain/scan` (with per-block fees) to rebuild ONLY the derivable
-    /// coinbase outputs the seed owns, inserts any that are missing, then runs a
-    /// full reconciliation (`WalletV2State::sync`) to bring every output's status
-    /// — and the `last_reconciled_tip` cursor — up to the tip. Change and
-    /// receive-slate outputs are already tracked at C0, so reconciliation alone
-    /// keeps them correct; this method adds back coinbase a restored wallet owns.
+    /// node's `/chain/scan` ONCE (with per-block fees and input commitments),
+    /// rebuilds the derivable coinbase outputs the seed owns, inserts any that
+    /// are missing, then reconciles every output's status — and the
+    /// `last_reconciled_tip` cursor — from those SAME fetched blocks
+    /// (`reconcile_from_restore_blocks`). One walk feeds both consumers; the
+    /// previous shape paid a second full-chain `sync(0)` fetch per cycle, which
+    /// doubled the RPC traffic and the node's chain-lock hold on every new
+    /// block. Change and receive-slate outputs are already tracked at C0, so
+    /// reconciliation alone keeps them correct; this method adds back coinbase
+    /// a restored wallet owns.
     ///
     /// Idempotent: already-present outputs are skipped, and reconciliation is
     /// status-only (never drops an output).
@@ -1079,22 +1084,26 @@ impl WalletManager {
         let blocks = src
             .scan_for_restore(0, tip.height)
             .map_err(|e| anyhow!("chain scan for restore: {e}"))?;
-        let coinbase = restore_coinbase_from_seed(&ow.state.keychain, &blocks, now)
-            .map_err(|e| anyhow!("restore coinbase: {e}"))?;
+        // Skipping-known variant: heights whose canonical coinbase the store
+        // already tracks are not re-derived, so the steady-state cycle pays
+        // HD-derivation CPU only for NEW blocks, not the whole chain. It
+        // returns only outputs the store lacks — insert verbatim.
+        let coinbase = restore_coinbase_from_seed_skipping_known(
+            &ow.state.keychain,
+            &blocks,
+            &ow.state.outputs,
+            now,
+        )
+        .map_err(|e| anyhow!("restore coinbase: {e}"))?;
         for out in coinbase {
-            if ow.state.outputs.get(&out.commitment).is_none() {
-                ow.state
-                    .outputs
-                    .insert(out)
-                    .map_err(|e| anyhow!("insert recovered coinbase: {e}"))?;
-                recovered += 1;
-            }
+            ow.state
+                .outputs
+                .insert(out)
+                .map_err(|e| anyhow!("insert recovered coinbase: {e}"))?;
+            recovered += 1;
         }
 
-        let report = ow
-            .state
-            .sync(&src, 0, now)
-            .map_err(|e| anyhow!("reconcile: {e}"))?;
+        let report = ow.state.reconcile_from_restore_blocks(&blocks, now);
         ow.save()?;
 
         Ok(summarize(report, recovered))

@@ -1,433 +1,359 @@
-# DOM Protocol — FABLE5 Security Audit (pré-testnet)
+# DOM Protocol — FABLE5 Security Audit (pre-testnet)
 
-**Data:** 2026-06-10
-**Auditor:** Fable 5 (revisão defensiva de robustez/hardening)
-**Modo:** read-only em código de produção; escrita autorizada apenas em
-`crates/**/tests/` (novos) e neste relatório. Nenhum arquivo de `src/` foi tocado.
-**Base:** workspace de 23 crates; `git HEAD = edc4b54`, branch `main`, working tree limpo.
+**Date:** 2026-06-30
+**Auditor:** Fable 5 (defensive robustness/hardening review, pre-testnet)
+**Branch:** `audit/fix-9-open-items` — `git HEAD = 0776c56`, working tree clean at start.
+**Mode:** read-only across all production code (`crates/**/src/**`, `Cargo.toml`,
+deploy/scripts). Writes authorized only in `crates/**/tests/` (NEW files) and in this
+report. No `src/` file was touched. No `git add/commit/push`.
+
+> **Relation to the prior pass (2026-06-10, `main` HEAD `edc4b54`):** this is a
+> re-audit against the CURRENT branch code, which already incorporates the dom-shield
+> program (FIX-005…FIX-044) and the "9 open items". The still-valid conclusions from
+> that pass (FABLE5-001 mempool admission ordering — **resolved**; FABLE5-002
+> side-chain quarantine — **bounded/intentional**) were re-verified in the code and
+> remain valid (§6). The NEW findings in this pass are **FABLE5-003 through -006**.
+
+> **STATUS UPDATE (2026-07-01, verified by execution):** all four findings below were
+> fixed on this branch AFTER this report was written, by the auditoria2 fix wave:
+>
+> | Finding | Fix commit | Verification (2026-07-01) |
+> |---|---|---|
+> | FABLE5-003 (Critical) | `65f4cb9` (A2-006) — `Commitment::add`/`sub` fail closed on the identity point (`pedersen.rs:99-122`) | PoC test `robustness_complement_identity_panic` now **GREEN** (run this date) |
+> | FABLE5-004 (High) | `8cbbed2` (A2-004) — RandomX seed resolved from the candidate block's own branch | detector test `a690397`; `cargo test -p dom-chain` green (157 tests) |
+> | FABLE5-005 (Medium) | `513cf2e` (A2-005) — MTP window taken from the block's own branch | `cargo test -p dom-chain` green |
+> | FABLE5-006 (Low) | `2472fff` (A2-009) — HD derivation intermediates zeroized on every path (`hd_wallet.rs`) | code re-read at source; wallet-keys suite green |
+>
+> **Readiness reclassification:** the FABLE5-003/-004 blockers in §1 are closed.
+> Regtest remains ready; networked deployments are no longer blocked by this report's
+> findings. Mainnet remains gated by ROADMAP_v3 Phase 9 (the authoritative launch
+> gate — note the v3 launch model has **no public testnet**: dom-shield audit +
+> sustained fuzz campaign + private burn-in + genesis ceremony). The readiness table
+> in §1 and the Status column in §2 are preserved below as the historical record of
+> what this pass found; where they say "Blocked", read them together with this block.
 
 ---
 
-## 1. Resumo executivo e classificação de prontidão
+## 1. Executive summary and readiness classification
 
-O DOM está **substancialmente endurecido**. Reexecutei a validação de base e
-revisei contra o **código real** (não contra docstrings) as três áreas de fase do
-escopo. Todos os achados das auditorias anteriores (`DOM_AUDIT_REPORT.md` e
-`FULL_PROTOCOL_AUDIT_REPORT.md`) que pude reverificar estão **corrigidos** ou
-**mitigados e bounded**, e os três fixes herdados (Noise, genesis, Pedersen/BP)
-continuam válidos com prova executável (§4).
+DOM is **substantially hardened**: the inherited fixes (Noise, genesis,
+Pedersen/Bulletproof) remain valid with executable proof (§5); monetary integrity
+holds on every consensus path (§4 PHASE 1); the network/parsing surface is well
+covered (§4 PHASE 3, **no new** high/critical finding). The prior fix program closes
+the DOM-AUDIT-001…009 and FIX-005…044 families, verified by sampling against the real
+code.
 
-Esta passada encontrou **1 achado novo de robustez** (ordering de admissão na
-mempool, confirmado por teste — FABLE5-001) e **1 observação de defesa em
-profundidade** (persistência de side-chain antes da validação contextual,
-intencional e bounded — FABLE5-002). Nenhum permite inflação, double-spend ou
-bypass de consenso. São de severidade **Baixa/Média**, classe DoS/CPU.
+This pass found **1 CRITICAL finding confirmed by an executing test** (remote node
+crash via `bp2_verify` — FABLE5-003) and **2 consensus-divergence findings** sharing
+the **same root cause** (the live `connect_block` path resolves the RandomX seed and
+MTP ancestors from the canonical height index, not from the candidate block's own
+ancestry — FABLE5-004/-005), plus **1 LOW** memory-hygiene finding (FABLE5-006).
+FABLE5-003 is a **testnet blocker**: a single peer can abort the process of every
+validating node.
 
-### Validação de base (executada nesta sessão)
+### Baseline validation (run this session)
 
-| Comando | Resultado |
+| Command | Result |
 |---|---|
 | `cargo build --workspace` | **OK** (exit 0) |
-| `cargo test --workspace` | **OK** — agregado **1173 passed, 0 failed** |
-| `cargo test -p dom-mempool --test robustness_admission_ordering` (novo) | **OK** — 3 passed |
+| `cargo test -p dom-crypto` | **OK** — `0 failed` (incl. `bulletproof_bp::differential::random_1000_match`) |
+| `cargo test -p dom-core -p dom-serialization` | **OK** — green |
+| `cargo test -p dom-crypto --test robustness_complement_identity_panic` (NEW) | **FAILS by panic** — *this is the finding* FABLE5-003 (RED by design; see §7.1) |
+| `cargo audit` (590 deps) | **OK** — no advisories |
 
-Sem testes flaky observados nesta sessão; a suíte rodou verde de ponta a ponta
-(sem os erros ambientais de LMDB/`Espaço insuficiente` que apareceram em
-auditorias anteriores rodadas em sandbox read-only).
+> **Method note on the full suite:** `cargo test --workspace` does not finish within
+> this session's budget because the heavy targets (native RandomX in
+> `dom-node`/`dom-integration-tests`) compile/run for tens of minutes on this machine
+> (consistent with `KNOWN_ISSUES.md` — IBD timeouts are RandomX throughput, not a
+> bug). I validated the crates relevant to each finding individually.
 
-### Classificação de prontidão
+### Readiness classification
 
-| Alvo | Veredito | Justificativa |
+| Target | Verdict | Justification |
 |---|---|---|
-| **Regtest** | ✅ **Pronto** | Suíte verde; isolamento por magic/chain_id; crypto ativa. |
-| **Testnet privada** | ✅ **Pronto** | Invariantes monetárias fecham; fixes herdados válidos; parsers/Noise com teto. |
-| **Testnet pública** | ✅ **Pronto** | FABLE5-001 **corrigido** (ver §11): gates baratos antes da crypto + short-circuit de replay no caminho P2P, validados por teste. |
-| **Mainnet** | ⛔ **Ainda não** | Pré-requisito operacional fora do escopo deste agente: as constantes `GENESIS_HASH_{MAINNET,TESTNET,REGTEST}` ainda são placeholders pré-launch (ver `miner.rs:525-532`) — **PRECISA DECISÃO HUMANA** (cerimônia de genesis). Além de soak/observação em testnet. |
+| **Regtest** | ✅ **Ready** | Single/local actor; FABLE5-003 is not triggered by honest actors; consensus/crypto crate suites green. |
+| **Private testnet** | ⛔ **Blocked by FABLE5-003** | The panic→abort in `bp2_verify` is reachable by **any** participant who submits a tx/block with `commitment = MAX_PROVABLE_VALUE·H`. It drops every node. Fix before any networked deploy. |
+| **Public testnet** | ⛔ **Blocked** | FABLE5-003 (trivial kill-switch) **and** assessment of FABLE5-004 (consensus partition on a deep cross-epoch reorg). |
+| **Mainnet** | ⛔ **Not yet** | Operational prerequisites: `GENESIS_HASH_MAINNET`/`NETWORK_MAGIC_MAINNET`/`GENESIS_TIMESTAMP_MAINNET` are still fail-closed placeholders (`constants.rs:451,460`, guarded by `is_placeholder_genesis_hash`/`assert_*`) → **NEEDS HUMAN DECISION** (genesis ceremony). Plus the findings above + soak. |
 
 ---
 
-## 2. Tabela de achados
+## 2. Findings table (new in this pass)
 
-| ID | Sev. | Título | Arquivo:linha | Status |
+| ID | Sev. | Title | File:line | Status |
 |---|---|---|---|---|
-| FABLE5-001 | Média | Validação criptográfica completa roda **antes** dos gates baratos (dedup/min-fee/chain-view); replay de tx válida é re-verificado por completo e a rejeição duplicada **não** pontua o peer | `dom-mempool/src/lib.rs:211-292`; `dom-consensus/src/lib.rs:81-116`; `dom-node/src/node.rs:1712-1731` | **CORRIGIDO** (confirmado por teste; ver §11) |
-| FABLE5-002 | Baixa | Bloco side-chain é persistido (`store_known_block`) após PoW+validação estática, mas **antes** da validação contextual de inputs/maturity | `dom-chain/src/chain_state.rs:347-372` | **Confirmado por leitura** (intencional, bounded) |
-| — | Info | Constantes de genesis hash ainda placeholders pré-launch | `dom-node/src/miner.rs:525-532` | **PRECISA DECISÃO HUMANA** (cerimônia) |
+| **FABLE5-003** | 🔴 **Critical** | `bp2_verify` panics→abort when `commitment == MAX_PROVABLE_VALUE·H` (the complement becomes the point at infinity; `Commitment::sub` copies a 1-byte encoding into `[0u8;33]`). Remote crash / consensus halt. | `dom-crypto/src/pedersen.rs:110` (panic); `:235-240` + `bulletproof_bp.rs:550-553` (trigger); `dom-consensus/src/transaction.rs:405,740`, `dom-slate/src/lib.rs:389` (reach) | **CONFIRMED BY TEST** (panic reproduced) |
+| **FABLE5-004** | 🟠 **High** | `connect_block` validates PoW for **every** block (incl. side-chain) with a RandomX seed taken from the **canonical height index**, not from the block's own ancestry. A deep reorg (>64) crossing a RandomX epoch boundary → consensus partition vs. nodes that sync via IBD (branch-aware). | `dom-chain/src/chain_state.rs:273` → `compute_randomx_seed` `:821-831` (`get_hash_at_height`) | **Confirmed by reading**; end-to-end exploit **NEEDS PATCH/TEST** |
+| **FABLE5-005** | 🟡 **Medium** | Same pattern: a competing block's Median-Time-Past is computed over **canonical** ancestors (`get_recent_timestamps` → `get_hash_at_height`), not the branch's own ancestors. Accept/reject divergence between branches under adversarial timestamps. | `dom-chain/src/chain_state.rs:265` → `get_recent_timestamps` `:1008-1025` | **Confirmed by reading** |
+| **FABLE5-006** | 🔵 **Low** | Secret HD-derivation intermediates are not zeroized (the HMAC `result` and the `il` tweak). Memory hygiene (cold-boot / disclosure). | `dom-wallet-keys/src/hd_wallet.rs:77,119,121` | **Confirmed by reading** |
+| — | Info | `HeadersPayload::from_bytes` is the only parser sizing `with_capacity(n)` without a remaining-bytes check (n≤2000 ⇒ ~48 KB transient; immaterial). | `dom-wire/src/message.rs:327` | Informational |
+| — | Info | Scoring asymmetry: malformed sig (`Invalid`, ban 10) vs. well-formed-but-wrong sig (`InvalidSignature`, ban 25); both pay the preceding bp_verify, ban triggers within ≤10 tx/IP. | `dom-consensus/src/lib.rs:145,156` | Informational (by design) |
+| — | Info | `IbdState::process_headers` docstring claims it validates PoW/continuity, but it only checks height continuity (real validation is `validate_ibd_headers_batch`). | `dom-chain/src/ibd.rs` | Informational (doc drift) |
 
-Reverificação dos achados anteriores (todos **fechados/mitigados**): ver §3.
+**Merit decisions:** the **fix** for FABLE5-004/-005 touches consensus validation (how
+a candidate's seed/MTP is resolved) → **NEEDS HUMAN DECISION**. The FABLE5-003 fix is
+fail-closed and does not change a consensus rule, but it lives in the crypto
+serialization layer → confirm with the crypto suite before applying.
 
 ---
 
-## 3. Reverificação dos achados das auditorias anteriores
+## 3. FABLE5-003 — CRITICAL (detailed, confirmed by test)
 
-Confirmados **pelo código** (não pelo cabeçalho dos relatórios):
+**Title:** remote node crash (panic → `abort`) in `Commitment::sub` via `bp2_verify`
+on a forged `commitment` equal to `MAX_PROVABLE_VALUE·H`.
+**Severity:** Critical (consensus liveness DoS, network-reachable).
 
-| Achado anterior | Estado atual | Evidência |
+### Description (root cause)
+`bp2_verify` (the live consensus range-proof check) derives the bounded-pair
+complement `C' = MAX_PROVABLE_VALUE·H − C` from the issuer-supplied `commitment` `C`
+(`derive_complement_commitment`, `pedersen.rs:235-240`, called at
+`bulletproof_bp.rs:550-553`). `Commitment::sub`/`add` serialize the result with:
+
+```rust
+let encoded = EncodedPoint::from(diff).compress();
+let mut bytes = [0u8; 33];
+bytes.copy_from_slice(encoded.as_bytes());   // pedersen.rs:110
+```
+
+When the result is the **point at infinity** (identity), its SEC1 compressed encoding
+is **1 byte**, and `copy_from_slice` into `[0u8;33]` **panics** on the length
+mismatch. The result is the identity exactly when `C == MAX_PROVABLE_VALUE·H` — a
+single, publicly computable curve point. `Cargo.toml:119` sets
+`[profile.release] panic = "abort"`, so the panic **aborts the whole process** in
+release.
+
+Broken defense observed: the repo **already recognizes** that the identity is
+dangerous and rejects it at the **input** boundary
+(`crates/dom-crypto/tests/infinity_rejection.rs`, `Commitment::from_compressed_bytes`
+rejects `[0;33]`). But here the identity arises **internally** in the complement
+arithmetic, where there is no such guard.
+
+### Scenario
+An attacker builds an output with `commitment = MAX_PROVABLE_VALUE·H` (the unblinded
+commitment to `2^52−1`; a valid SEC1 point accepted by `from_compressed_bytes`) and
+any 739-byte proof (passes the size gate; the panic happens **before** the FFI
+verify). On validating the tx/block — mempool admission, block validation, or
+`Slate::finalize` — any node calls `bp2_verify` and aborts. Reach in the code:
+`transaction.rs:405` (**coinbase** output), `transaction.rs:740` (normal tx output),
+`dom-slate/src/lib.rs:389` (finalize). **A single broadcast tx/block drops every
+validating node.**
+
+### Evidence (executing test)
+**New** file: `crates/dom-crypto/tests/robustness_complement_identity_panic.rs`. It
+builds `MAX·H` using only the public API (`commit(MAX,r).sub(commit(0,r))`) and calls
+`bp2_verify(MAX_H, &[0u8;739])`, asserting the correct contract (`Ok(false)|Err`).
+
+```
+$ cargo test -p dom-crypto --test robustness_complement_identity_panic -- --nocapture
+running 1 test
+thread 'bp2_verify_does_not_panic_on_max_times_h_commitment' panicked at
+crates/dom-crypto/src/pedersen.rs:110:15:
+copy_from_slice: source slice length (1) does not match destination slice length (33)
+test bp2_verify_does_not_panic_on_max_times_h_commitment ... FAILED
+test result: FAILED. 0 passed; 1 failed; ...
+```
+
+The test is **RED by design** (it encodes the correct contract and fails on the
+current bug); it converts to GREEN once the fix lands — the "RED test as finding"
+pattern already used in this repo. It was **NOT** marked `#[ignore]` (forbidden; that
+would mask the failure).
+
+### Impact
+A de-facto unauthenticated network kill-switch: the attacker's cost is ~zero (a fixed
+point + proof bytes), and the node aborts. No inflation/double-spend, but a total
+consensus halt. **Blocks any networked deploy.**
+
+### Fix (with trade-offs) — outside my write scope (src is read-only)
+1. **Fail-closed in the arithmetic:** `Commitment::add`/`sub` return `Err`
+   (`DomError::Invalid`) when the resulting point is the identity, instead of
+   serializing 1 byte. Covers all callers at once. **Recommended.**
+2. **Reject the identity complement in `derive_complement_commitment`/`bp_verify`:**
+   treat identity as `Ok(false)` (invalid proof). More local, same effect on the
+   consensus path.
+This is fail-closed robustness (the degenerate commitment is invalid anyway), **not**
+a consensus-rule change — but it lives in the crypto layer; confirm with
+`cargo test -p dom-crypto` before applying.
+
+### Missing tests (after patch)
+- The new test turns GREEN (`Ok(false)|Err`).
+- End-to-end: a block whose **coinbase** has `commitment = MAX·H` is **rejected** (not
+  crashed) by `validate_block`; a tx with output `MAX·H` is rejected at mempool
+  admission.
+- Property/fuzz: `bp2_verify(any valid point, 739B proof)` never panics.
+
+---
+
+## 4. FABLE5-004 / -005 — consensus divergence from non-branch-aware resolution (one root)
+
+**Common root:** `ChainState::connect_block` (`chain_state.rs:200`) is the entry point
+for the live relay path (`node.rs:3973` calls `c.connect_block`), the direct
+extension, and the side branch (`store_known_block` + `promote_heavier_known_tip`,
+`:391-399`). For **every** non-genesis block it validates:
+- **PoW** with `seed = compute_randomx_seed(header.height.0)` (`:273`), which reads
+  `store.get_hash_at_height(seed_height)` (`:823`) — the **canonical** block at that
+  height;
+- **MTP** with `get_recent_timestamps(header.height.0, 11)` (`:265`), which also reads
+  `get_hash_at_height(h)` (`:1016`) — the **canonical** blocks at the prior heights.
+
+Side-branch blocks are persisted by `store_known_block`, which does **not** update the
+height index. So when validating a competing block, the seed/ancestors come from the
+**canonical** branch, not the candidate's branch. The IBD path was explicitly
+hardened to be branch-aware (`compute_randomx_seed_with_batch`, `:492`;
+`collect_ibd_ancestor_timestamps`), which is evidence the resolution **should** be
+branch-aware — the asymmetry is the proof this is a gap, not a design.
+
+`apply_connect` (promotion, `:1142-1151`) re-validates inputs/maturity but **not** PoW
+or MTP — so a block must clear `connect_block`'s canonical gate **before** it can be
+stored/promoted. Nothing rescues it.
+
+### FABLE5-004 (High) — RandomX seed
+`RANDOMX_SEED_INTERVAL = 2048`, `RANDOMX_SEED_OFFSET = 64` ⇒
+`seed_height(H) = floor(H/2048)·2048 − 64`. A competing branch that (a) forks at
+height `< e·2048−64` and (b) extends to `≥ e·2048` uses, for the epoch-`e` blocks,
+**its own** block at `e·2048−64` as the seed. Minimum reorg depth ≈ 64 blocks
+(≤ `MAX_REORG_DEPTH_POLICY = 1000`). A steady-state node validates that block with the
+**canonical** seed → RandomX mismatch → `InvalidPow` → the block is **never stored** →
+the node **cannot** adopt the heavier chain. A node that obtains the same branch via
+IBD (branch-aware, sequential commit) **accepts** it. → **permanent partition**
+between IBD-synced and relay-synced nodes.
+
+### FABLE5-005 (Medium) — MTP ancestors
+For a competing block whose fork falls within the 11-block window (the common
+short-reorg case), the MTP floor is computed over **canonical** timestamps, not the
+branch's. Usually timestamps across branches are close (no flip), but a miner can
+forge timestamps that **pass** against its own branch ancestors and **fail**
+(`DomError::Invalid`, hard reject) against the canonical ones — or vice versa →
+accept divergence between nodes with different tips. `validate_parent_timestamp_progression`
+(`:264`) guarantees monotonicity against the immediate parent, but the median floor
+uses the wrong set.
+
+### Evidence
+**Confirmed by reading** the real code (every cited line verified at source):
+`connect_block:265,273`; `compute_randomx_seed:821-831` (canonical) vs
+`compute_randomx_seed_with_batch:845-871` (branch-aware); `get_recent_timestamps:1008-1025`;
+`promote_heavier_known_tip`/`apply_connect:1142-1151` (no PoW/MTP re-check); relay →
+`node.rs:3973`. I did **not** build the end-to-end test (see §8): it requires mining a
+real >64-block reorg crossing an epoch boundary with RandomX — infeasible in this
+session's budget.
+
+### Impact
+Consensus partition (network split) between node populations, no inflation. A >64-block
+reorg is rare/expensive in a healthy PoW chain, but it is **within the protocol's
+allowed limits** and adversarially inducible by a miner with enough hashpower.
+FABLE5-005 is more reachable (short reorgs) but needs adversarial timestamps for the
+flip.
+
+### Fix (with trade-offs) — **NEEDS HUMAN DECISION** (touches consensus)
+Resolve the seed and MTP ancestors by walking the **candidate block's own ancestry**
+(via `prev_hash` / the known-block store), exactly as the IBD path already does with
+`compute_randomx_seed_with_batch` — i.e., a variant of
+`compute_randomx_seed`/`get_recent_timestamps` that traverses the candidate's branch
+instead of the canonical height index. Trade-off: extra I/O per competing-block
+validation (by-hash lookups instead of by-height) and care not to introduce per-peer
+cost (side-chain storms) — combine with the existing bounds
+(`prune_retained_side_chains`, `MAX_REORG_DEPTH_POLICY`). This is a change to a
+consensus validation path → not mine to decide alone.
+
+### Missing tests (after decision)
+- `connect_block_sidechain_seed_uses_branch_not_canonical`: a competing branch that
+  crosses an epoch boundary with its own seed block ≠ canonical is **accepted** and
+  promoted (today it fails `InvalidPow`). Use a FastDevOnly target to isolate seed
+  selection.
+- `connect_block_sidechain_mtp_uses_branch_ancestors`: acceptance decided by the
+  branch's own median, not the canonical one.
+- IBD-vs-relay differential: the same cross-epoch branch drives both paths to the
+  **same** verdict.
+
+---
+
+## 5. Inherited fixes — still valid, with proof (re-verified against the real code)
+
+### 5.1 Noise frame overflow → capped fragmentation (`dom-wire/src/codec.rs`)
+**Valid.** On receive, as soon as the 4-byte prefix arrives the declared total is
+validated against `MAX_LOGICAL_MSG_BYTES` **before** any pre-allocation
+(`codec.rs:166-176`); the buffer grows by ≤ `CHUNK (65519)` per frame and overrun is
+rejected (`:178-186`). Per-frame timeout via `IDLE_TIMEOUT_SECS` (`:142`).
+**Proof:** `recv_rejects_oversized_declared_length`, `roundtrip_max_block_size`, etc.
+(`dom-wire` suite).
+
+### 5.2 Genesis state drift → create == reopen (`dom-chain`)
+**Valid.** `create_genesis_block` (`miner.rs:564-565`) persists the changeset via
+`dom_chain::genesis_canonical_changeset`, which is exactly
+`build_utxo_changeset` + `extract_kernel_excesses` (`chain_state.rs:1406-1408`) — the
+**same** helpers the reopen path uses in `ensure_canonical_utxo_set` /
+`reconstruct_canonical_utxo_set` (`:174`, `:1208-1233`). Thus `create == reopen` by
+construction.
+
+### 5.3 Unified Pedersen/Bulletproof H + sec1↔zkp bridge (`dom-crypto`)
+**Valid.** The zkp generator (`bulletproof_bp.rs:83-91`) reconstructs `0x0a/0x0b || X`
+by copying the X of Pedersen's `H_COMPRESSED_FINAL` — X is byte-for-byte equal. The
+`sec1↔zkp` bridge uses `is_square` via `FieldElement::sqrt`; the loop in `zkp_to_sec1`
+iterates over exactly the 2 prefixes (finite) and, since `−1` is a QNR mod p, exactly
+one matches. **Proof:** `dom-crypto` suite green (`0 failed`), incl. `random_1000_match`.
+
+### 5.4 FIX-014 — inflation closure via bounded aggregate proof
+**Valid.** `bp_verify` (`bulletproof_bp.rs:538-558`) requires exact size (739B),
+derives `C' = MAX_PROVABLE_VALUE·H − C`, and verifies the aggregate over `[C, C']`. A
+value `v` must satisfy `v ∈ [0,2^64)` **and** `MAX−v ∈ [0,2^64)`, forcing
+`v ≤ MAX_PROVABLE_VALUE = 2^52−1`. **Coinbase included** (`transaction.rs:405`).
+> Note: this is exactly the path where FABLE5-003 lives — the inflation fix is
+> correct, but the complement arithmetic needs fail-closed handling of the identity.
+
+### 5.5 Others (re-verified by sampling)
+- DOM-AUDIT-004 RPC `page*limit` `checked_mul` + clamp (`dom-rpc/src/lib.rs:449-462`).
+- DOM-AUDIT-006 `/status` reads the real network.
+- DOM-AUDIT-009 `commit_block` errors on `NotFound` when removing a canonical spent
+  UTXO (`dom-store/src/db.rs:516-521`) — not silent.
+- DOM-AUDIT-008 difficulty: `total_difficulty` is `U256` end-to-end; only the scalar
+  per-block increment is `u128`, with the boundary documented at 2^128/block
+  (astronomical) and a deterministic projection identical on all nodes.
+- FIX-028 `read_list` bounds by remaining bytes before alloc; FIX-035 empty token
+  rejected; FIX-041 ban reputation is IP-only.
+
+---
+
+## 6. Re-verification of the prior FABLE5 findings (2026-06-10)
+
+| Finding | Current state (code) | Evidence |
 |---|---|---|
-| DOM-AUDIT-001 (IBD self-deadlock: chain lock retido através de `purge_mempool_confirmed_inputs`) | **Corrigido** | `node.rs:~2665-2712`: guard do chain é adquirido/liberado em escopo e dropado antes de `purge_mempool_confirmed_inputs`. |
-| DOM-AUDIT-003 (eviction única deixa mempool acima do cap) | **Corrigido** | `mempool/src/lib.rs:284-298`: eviction em **loop** com guarda de progresso de peso + rejeição prévia de tx acima do cap (`:266-271`). |
-| DOM-AUDIT-004 (`page*limit` overflow no RPC) | **Corrigido** | `dom-rpc` usa `checked_mul` e retorna erro de cliente (reverificado pelo agente de fase 3). |
-| DOM-AUDIT-006 (`/status` hardcoded mainnet) | **Corrigido** | `/status` lê `handle.network()` em runtime. |
-| DOM-AUDIT-007 (parsers permissivos: Hello/Headers trailing, Addr truncado) | **Corrigido** | `message.rs`: Hello valida tamanho exato; Headers checa `pos == data.len()`; Addr (`pex.rs`) rejeita trailing. |
-| FULL-AUDIT-001 (genesis state drift create vs reopen) | **Corrigido** | `miner.rs:511-521` usa `genesis_canonical_changeset` — o **mesmo** builder do reopen (`chain_state.rs:1368-1375`). Ver §4. |
-| FULL-AUDIT-002 (mempool aceitava tx sem crypto completa) | **Corrigido** | `mempool/src/lib.rs:229` chama `dom_consensus::validate_transaction` (range proofs + Schnorr) na admissão de produção. |
-| FULL-AUDIT-003 (coinbase não verificava Bulletproof) | **Corrigido** | `transaction.rs:378-390`: `CoinbaseTransaction::validate` chama `bp_verify` na proof da coinbase. |
-| FULL-AUDIT-004 (side-chain persistida antes da validação contextual) | **Mitigado/bounded** | Persistência só após `validate_block` (PoW+crypto+balanço); retenção bounded por `prune_retained_side_chains`; promoção revalida inputs e falha fechada. Ver FABLE5-002. |
+| FABLE5-001 (crypto before the cheap gates; unscored replay) | **Resolved** | `precheck_cheap_admission_gates` before `validate_transaction` (`dom-mempool/src/lib.rs:254`); short-circuit of known replay before the chain lock (`node.rs:4244`, `mempool.contains`). |
+| FABLE5-002 (side-chain persisted before contextual validation) | **Bounded/intentional** | `connect_block:381-405`: `store_known_block` only after `validate_block` (PoW+crypto+balance); retention via `prune_retained_side_chains`; promotion fails closed. Unchanged and correct. |
 
 ---
 
-## 4. Fixes herdados — ainda válidos, com prova
+## 7. Files created in this pass
+- `crates/dom-crypto/tests/robustness_complement_identity_panic.rs` — FABLE5-003 PoC
+  (**RED by design**; it is the finding). See §7.1.
+- `audit/FABLE5_SECURITY_AUDIT.md` — this report (supersedes the 2026-06-10 pass).
 
-### 4.1 Noise frame overflow → fragmentação com teto (dom-wire/src/codec.rs)
-**Válido.** O codec fragmenta mensagens lógicas em frames `≤ CHUNK (65519)` e, na
-recepção, **valida o tamanho total declarado contra `MAX_LOGICAL_MSG_BYTES` antes
-de crescer o buffer** (`codec.rs:150-159`), além de rejeitar overrun
-(`:162-170`). Não há reassemblagem infinita: o buffer cresce no máximo `CHUNK` por
-frame e é capado. Timeout por frame em `IDLE_TIMEOUT_SECS` (`:125-135`).
-**Prova:** testes embutidos `recv_rejects_oversized_declared_length`,
-`roundtrip_max_block_size` (16 MiB), `headers_1008_roundtrip_regression`,
-`recv_is_cancel_safe_across_frames` — todos verdes na suíte.
-
-### 4.2 Genesis state drift → create == reopen (dom-chain)
-**Válido.** `create_genesis_block` (`miner.rs:511-521`) persiste o changeset via
-`dom_chain::genesis_canonical_changeset`, que é exatamente
-`build_utxo_changeset` + `extract_kernel_excesses` — os **mesmos** helpers que o
-reopen usa em `ensure_canonical_utxo_set`/`reconstruct_canonical_utxo_set`
-(`chain_state.rs:1368-1375`). Logo `create == reopen` por construção, eliminando o
-drift que causava risco de chain split na coinbase genesis.
-**Prova:** `dom-chain/tests/corruption_detection.rs` (reopen/partial-persist) e a
-suíte de `dom-node` (`create_genesis_block` ramos de create/reopen) verdes.
-
-### 4.3 Pedersen/Bulletproof H mismatch → gerador unificado + bridge sec1↔zkp
-**Válido.** Pedersen (k256) e Bulletproof (secp256k1-zkp) usam o **mesmo H**: o X
-do gerador zkp (`dom_generator()`, prefixo `0x0a || H_DOM_X`) é byte-a-byte igual
-ao `H_COMPRESSED_FINAL[1..]` do Pedersen. O bridge `sec1_to_zkp`/`zkp_to_sec1`
-usa `is_square` via `FieldElement::sqrt`; o loop em `zkp_to_sec1` é finito (2
-prefixos) e rejeita x fora da curva / prefixo zkp inválido.
-**Prova:** `pedersen_and_bulletproof_use_same_generator`,
-`h_generator_unification_byte_equality`, `roundtrip_sec1_zkp_sec1_100_samples`,
-`edge_value_blinding_bridge_roundtrip_and_prove_verify` — verdes.
+### 7.1 Note on the RED test
+The new test **fails by panic** today — that is the point: it asserts the correct
+contract (`bp2_verify` never panics) and exposes the bug. Keeping it in the tree leaves
+`cargo test -p dom-crypto` red until FABLE5-003 is fixed. Per the integrity principles,
+I did **not** mark it `#[ignore]` nor loosen the assertion. If the maintainer prefers a
+green tree before deciding the fix, removing the file is the maintainer's decision (I
+did not take it).
 
 ---
 
-## 5. Resultados por fase (código real)
+## 8. What I could NOT test (and why)
+- **Full `cargo test --workspace`:** native RandomX targets (`dom-node`,
+  `dom-integration-tests`) exceed this session's time budget (consistent with
+  `KNOWN_ISSUES.md`). Validated per crate.
+- **FABLE5-004/-005 end-to-end:** require mining a real >64-block reorg crossing a
+  RandomX epoch boundary, with adversarial timestamps — infeasible here. I proved the
+  **code behavior** (canonical vs. branch-aware selection) by reading the source; the
+  exploit is marked **NEEDS PATCH/TEST** and, for the fix, **HUMAN DECISION**.
+- **FABLE5-003 end-to-end (real block/coinbase):** I proved the panic at the
+  `bp2_verify` boundary (the function consensus calls); assembling a full block with a
+  `MAX·H` coinbase was not done — the crash point is the same function.
+- **Multi-peer network DoS with real sockets:** out of unit-test reach.
 
-### FASE 1 — Integridade monetária e de consenso — **SOUND**
-- **Equação agregada de balanço:** verificada em `block_full.rs` via
-  `dom_crypto::verify_block_balance_equation`; todos os caminhos de aceitação
-  (extensão direta, side-chain/reorg, IBD) convergem para `validate_block`. Sem
-  bypass.
-- **Coinbase = reward(height)+fees:** `transaction.rs:133-149`
-  (`validate_explicit_value`) usa `checked_add` (overflow → erro). `total_fee`
-  (`:216-221`) soma fees com `checked_add`. `block_reward` é tabela pré-computada
-  (`MAX_SUPPLY_NOMS < 2^52`), sem aritmética perigosa.
-- **Range proofs:** todo output confidencial passa por `bp_verify`, **incluindo a
-  coinbase** (`transaction.rs:378-390`). Faixa provada `[0, 2^52)`
-  (`MAX_PROVABLE_VALUE = 2^52-1`); `verify` exige `range.start == 0`.
-- **Double-spend no mesmo bloco:** `block_full.rs` rejeita inputs/outputs
-  duplicados no bloco e gasto de output criado no mesmo bloco (cut-through
-  violation).
-- **Reorg:** profundidade limitada por `MAX_REORG_DEPTH_POLICY (1000)`;
-  reconstrução do UTXO set é atômica (`apply_reorg`, uma transação LMDB).
-- **Overflow:** caminhos de peso/fee/difficulty usam `checked_*`/`saturating_*`;
-  nada perigoso sem guarda em consenso.
-
-### FASE 2 — Robustez criptográfica — **SOUND**
-- **Schnorr:** `from_bytes` rejeita R fora da curva/identidade e `s` zero/`≥ n`
-  (`schnorr.rs:56-74`, `is_scalar_valid`). Challenge inclui R(33B)+pubkey(33B)+
-  **chain_id**+message — não-maleável (R vs −R dão challenges diferentes).
-- **Nonce:** RFC6979 determinístico derivado de `sk` + `hash(msg||chain_id)` —
-  sem risco de reuso.
-- **Agregação/excess:** kernel assina com o próprio `excess` como chave; soma de
-  pontos é validada; sem MuSig2 ativo → sem rogue-key. `schnorr_add_public_keys`
-  rejeita resultado no infinito.
-- **Bulletproof:** teto `MAX_PROOF_SIZE (6144)` checado **antes** de
-  desserializar; sem alocação a partir de tamanho não validado.
-- **Domain separation:** `chain_id` entra no challenge; `derive_chain_id` difere
-  por `network_magic` → assinatura de uma rede não verifica em outra
-  (`cross_chain_replay_prevented`).
-- **Parsing de pontos:** `Commitment`/`PublicKey::from_compressed_bytes` rejeitam
-  identidade, off-curve, `x ≥ p` e encoding inválido; sem `unwrap` em entrada
-  adversarial.
-
-### FASE 3 — Robustez de rede e tratamento de entrada — **SOUND (1 achado)**
-- **Parsers `dom-wire`:** Hello/Headers/GetHeaders/GetBlockData/Block validam
-  tamanho exato e rejeitam trailing; `Vec::with_capacity` sempre após checar a
-  contagem contra limites anti-OOM.
-- **Noise:** teto de reassemblagem e timeout (ver §4.1).
-- **IBD:** headers validados em prefilter; deadlock DOM-AUDIT-001 corrigido;
-  volume de bodies bounded por `MAX_GETBLOCKDATA_HASHES` e processamento
-  incremental.
-- **Mempool:** crypto completa na admissão; eviction em loop; min-fee; conflito de
-  input detectado; reinjeção pós-reorg rejeita duplicatas. **Achado FABLE5-001:**
-  ordering dos gates (§6).
-- **Peer scoring:** invalid tx/bloco → `record_peer_violation`
-  (`PROTOCOL_VIOLATION=10`, `BAN_THRESHOLD=100`). **Lacuna:** `PolicyRejected`
-  (exceto "handshake timeout") **não** pontua (`node.rs:1712-1731`) — base do
-  FABLE5-001.
-- **Orphan/future-block:** bounded (`MAX_ORPHAN_BLOCKS=1024`,
-  future queue `MAX_QUEUE_SIZE=256`).
-- **RPC:** `page*limit` com `checked_mul`; `/status` com network real.
-
----
-
-## 6. Achado FABLE5-001 (detalhado)
-
-**Título:** Validação criptográfica completa precede os gates baratos de
-admissão; replay de transação válida é re-verificado por inteiro e a rejeição
-duplicada não é pontuada (amplificação de CPU não-banível).
-**Severidade:** Média (DoS/CPU; **não** afeta consenso).
-**Arquivos:** `dom-mempool/src/lib.rs:211-292`, `dom-consensus/src/lib.rs:81-116`,
-`dom-node/src/node.rs:1712-1731` e `:3865-3988`.
-
-### Descrição
-`accept_tx_with_chain_view` executa, **nesta ordem**:
-1. `validate_transaction` → range proofs (Bulletproof) + assinaturas Schnorr
-   (caro);
-2. `validate_tx_against_chain_view` → existência de input (barato);
-3. `accept_validated_tx` → **dedup por hash** e **min-fee** (barato).
-
-Ou seja, os gates baratos (dedup, min-fee, existência de input) só rodam **depois**
-da criptografia cara. Pior: a rejeição de duplicata é
-`DomError::PolicyRejected("transaction already in mempool")`, e
-`peer_violation_score` mapeia `PolicyRejected` (que não contenha "handshake
-timeout") para `None` → **nenhuma pontuação de ban**.
-
-### Cenário
-Um peer observa **uma** transação válida na rede e reenvia os mesmos bytes em
-loop. Cada reenvio força o nó a refazer a verificação completa do Bulletproof +
-Schnorr antes de descobrir, no passo 3, que já a possui. A rejeição não pontua o
-peer → a amplificação de CPU não é contida pela defesa de scoring. O atacante
-gasta ~nada (bytes já prontos); o nó gasta uma verificação de range proof por
-reenvio.
-
-### Evidência (teste que executa)
-Arquivo **novo**: `crates/dom-mempool/tests/robustness_admission_ordering.rs`.
-Comando e saída:
-
-```
-$ cargo test -p dom-mempool --test robustness_admission_ordering
-running 3 tests
-test robustness_crypto_runs_before_duplicate_check ... ok
-test robustness_min_fee_gate_is_behind_crypto ... ok
-test robustness_duplicate_replay_is_unscored_policy_rejection ... ok
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
-```
-
-- `robustness_crypto_runs_before_duplicate_check`: com uma tx já no pool sob hash
-  `H`, submeter **outra** tx com assinatura corrompida mas reaproveitando `H`
-  resulta em rejeição **de assinatura** (`DomError::Invalid`), e **não** em
-  "already in mempool". Prova determinística de que a crypto roda antes do dedup.
-- `robustness_duplicate_replay_is_unscored_policy_rejection`: 5 replays da mesma
-  tx válida retornam `PolicyRejected("...already in mempool")`, cujo texto **não**
-  é o único `PolicyRejected` pontuado pelo nó → não-banível.
-- `robustness_min_fee_gate_is_behind_crypto`: tx com fee abaixo do piso mas
-  assinatura/proof válidos só é barrada **no gate de fee**, i.e. depois que a
-  crypto passou.
-
-### Impacto
-Amplificação de CPU peer-facing sem contenção por ban. Mitigantes existentes:
-processamento sequencial por conexão, `IDLE_TIMEOUT`, e o atacante precisa de uma
-tx válida real para o caso não-banível. Não há risco de inflação/double-spend.
-
-### Correção (com trade-offs) — **RESOLVIDO em §11**
-> Nota (2026-06-10): as opções abaixo foram a análise original (auditoria
-> read-only). A correção foi desde então implementada e validada por teste —
-> ver **§11 (FABLE5-001 — Resolução)**. As opções 1 e 3 foram adotadas (PASSO 2 e
-> PASSO 3); a opção 2 (pontuar replay) foi **descartada** para não gerar
-> falso-positivo em corridas honestas de gossip e não enfraquecer o ban de spam.
-
-Opções (análise original):
-1. **Reordenar a admissão**: checar dedup por hash e min-fee **antes** de
-   `validate_transaction`. Barato e elimina o caso de replay. Trade-off: o
-   `tx_hash` é suprido pelo chamador; é preciso garantir que o hash usado no dedup
-   seja o hash canônico dos bytes (já é, no caminho P2P: `blake2b_256(tx_bytes)`).
-   Risco baixo; **mexe na política de admissão da mempool** → confirmar com teste.
-2. **Pontuar a rejeição de replay**: fazer o caminho P2P aplicar um pequeno score
-   a peers que reenviam tx já conhecidas (distinto de "already in mempool" legítimo
-   de corrida). Trade-off: replays honestos por corrida de gossip podem gerar
-   falso-positivo; precisa de janela/threshold.
-3. **Cache de tx-hash recentemente rejeitadas/conhecidas** no caminho P2P, antes
-   de desserializar/validar. Mais robusto, custo de memória bounded.
-**Recomendação:** opção 1 + 3. Ambas são robustez (não alteram consenso/economia),
-mas como tocam a política de admissão, marco para sua decisão e validação por
-teste antes de aplicar.
-
-### Testes faltantes (após patch)
-- Replay de tx válida é rejeitado **antes** de qualquer verificação de Bulletproof
-  (medir que o custo cai para ~O(lookup)).
-- Caminho P2P: N replays de um peer levam a score/ban dentro de um limite.
-
----
-
-## 7. Achado FABLE5-002 (defesa em profundidade)
-
-**Título:** Side-chain block persistido antes da validação contextual de inputs.
-**Severidade:** Baixa. **Status:** Confirmado por leitura; **intencional e bounded**.
-**Arquivo:** `dom-chain/src/chain_state.rs:347-372`.
-
-`connect_block`, no ramo não-extensão-direta, chama `store_known_block` **após**
-`validate_block` (PoW, crypto, balanço, range proofs, assinaturas, cut-through,
-peso) mas **antes** de checar existência/maturity de inputs contra a UTXO da
-branch — isso só ocorre na promoção (`promote_heavier_known_tip`/`apply_connect`),
-que falha fechada. O custo de poluição de storage é contido por:
-(a) cada bloco exige **PoW válido** (caro para o atacante);
-(b) `prune_retained_side_chains` (tips e comprimento bounded).
-Não há aceitação de bloco inválido. **Sem ação obrigatória pré-testnet**; vale um
-teste de "storm de side-chain inválida não retém known-block além do cap" e,
-opcionalmente, custo por-peer.
-
----
-
-## 8. O que NÃO consegui testar (e por quê)
-- **DoS de rede end-to-end real** (flood multi-peer com sockets reais): exigiria
-  harness de integração de carga; aqui validei o comportamento na fronteira da
-  mempool/parsers por teste unitário e leitura.
-- **Custo de CPU absoluto do replay** (medição de tempo): evitei asserção por
-  tempo para não introduzir teste flaky (proibido pelo princípio de integridade).
-  A ordem foi provada de forma **determinística** (erro de assinatura vs.
-  duplicata), que é mais forte que timing.
-- **Promoção de side-chain inválida sob storage real** (FABLE5-002): provei por
-  leitura o ponto de persistência; o caminho de promoção que falha fechada já é
-  coberto pela suíte existente de reorg, mas não escrevi um teste novo de retenção
-  bounded sob storm.
-- **RandomX/LMDB sob pressão de disco**: a suíte rodou verde nesta sessão; não
-  forcei condições de disco cheio.
-
-## 9. Limitações de método
-- A auditoria original foi **read-only** em produção; FABLE5-001 ficou marcado
-  "PRECISA PATCH PARA CONFIRMAR". Em sessão posterior (autorizada a tocar `src/`)
-  o fix foi **implementado e validado por teste** — ver §11.
-- Mapeamento amplo das três fases foi feito com agentes de exploração e depois
-  **reverificado no código** nos pontos críticos (genesis changeset, ordem de
-  validação da mempool, codec Noise, schnorr verify, coinbase bp_verify). Onde cito
-  linha, confirmei na fonte.
-- Decisões de mérito (cerimônia de genesis hash; alterar política de admissão da
-  mempool) estão marcadas **PRECISA DECISÃO HUMANA** e não foram tomadas.
-
----
-
-## 10. Arquivos criados na auditoria original
-- `crates/dom-mempool/tests/robustness_admission_ordering.rs` (testes de ordering)
-- `audit/FABLE5_SECURITY_AUDIT.md` (este relatório)
-
----
-
-## 11. FABLE5-001 — Resolução (2026-06-10)
-
-A correção foi implementada e validada por teste. O escopo foi decidido pelo
-**resultado do PASSO 1** (prova no caminho P2P real), não o contrário.
-
-### PASSO 1 — Prova no caminho P2P REAL (antes de qualquer fix)
-**Pergunta:** quando um peer reenvia os mesmos bytes de uma tx, o replay chega a
-`validate_transaction` (Bulletproof+Schnorr) ou é cortado antes por uma camada de
-inventory/gossip/dedup?
-
-**Achado de arquitetura (código real):** o handler `Command::Tx`
-(`dom-node/src/node.rs:3865`) chama `accept_tx_with_chain_view` **sem** nenhuma
-consulta de inventory/cache antes. Não existe handler de `Command::Inv` (cai no
-catch-all `other => ignoring`, `node.rs:4015`); o relay de tx é **push direto** de
-`Command::Tx` (Dandelion fluff/stem). Ou seja, **não há camada de dedup antes da
-validação** — a hipótese da revisão (de que o inventory poderia cortar o replay) é
-**refutada** pelo código.
-
-**Prova executável (determinística, não-timing):** teste novo
-`crates/dom-integration-tests/tests/robustness_tx_replay_p2p.rs`
-→ `robustness_p2p_tx_replay_reaches_crypto_each_time`. Sobe um node real, conecta um
-peer via Noise+Hello, e reenvia 3× a MESMA tx com **range proof válido + assinatura
-Schnorr corrompida** (garante que o `bp_verify` caro roda antes da rejeição por
-assinatura). Observável: o ban score do peer, lido via
-`PeerManager::ban_score(addr)`. Se cada replay chega à crypto, o score sobe
-`PROTOCOL_VIOLATION (10)` por envio; se houvesse dedup pré-validação, estagnaria
-em 10.
-
-```
-$ cargo test -p dom-integration-tests --test robustness_tx_replay_p2p -- --nocapture
-PASSO 1 RESULT: replay reaches crypto on the real P2P path. ban score after 3
-identical replays = 30 (= 3 × 10). No pre-validation inventory/dedup exists.
-test robustness_p2p_tx_replay_reaches_crypto_each_time ... ok
-```
-
-**Conclusão PASSO 1:** o replay **PASSA até a crypto** no caminho P2P real. Isso
-(a) confirma que FABLE5-001 era real no caminho real e (b) habilita o PASSO 3.
-
-### PASSO 2 — Reordenação dos gates de admissão (higiene)
-`Mempool::accept_tx_with_chain_view` agora chama
-`precheck_cheap_admission_gates(&tx, &tx_hash)` **antes** de `validate_transaction`
-(`dom-mempool/src/lib.rs`). Os gates hoisted são estruturais (sem crypto): dedup por
-hash, min-relay-fee e teto de peso — com as **mesmas mensagens de erro** de
-`accept_validated_tx` (que permanece como rede de segurança e para o caminho legado
-`accept_tx`). Uma tx duplicada/abaixo-do-piso é agora rejeitada **sem pagar
-Bulletproof/Schnorr**.
-
-**Sem mudança de veredito:** os gates não dependem de validade criptográfica, logo
-detectá-los mais cedo não muda o resultado binário aceita/rejeita — só a (mais
-barata) razão. Provado por testes em
-`crates/dom-mempool/tests/robustness_admission_ordering.rs` (reescrito para o estado
-corrigido):
-- `robustness_duplicate_check_runs_before_crypto` — dup-hash com assinatura quebrada
-  agora é rejeitada como "already in mempool" (dedup antes da crypto).
-- `robustness_min_fee_gate_runs_before_crypto` — tx abaixo do piso **com** assinatura
-  inválida é rejeitada pela **fee** (min-fee antes da crypto).
-- `robustness_new_invalid_tx_still_rejected_by_crypto` — tx NOVA, acima do piso,
-  não-dup, com crypto inválida **continua** rejeitada por crypto (`Invalid`) →
-  invalid real permanece criptograficamente rejeitada e peer-scoreável.
-- `robustness_valid_new_tx_still_accepted` — tx válida nova **continua aceita**.
-
-### PASSO 3 — Short-circuit de replay no caminho P2P (DECISÃO TÉCNICA)
-Como o PASSO 1 provou que o replay passa até a crypto, o cache é justificado. Após o
-PASSO 2 restava um caminho residual **não-pontuado**: um replay de tx **já no
-mempool** ainda fazia, no handler, `deserialize → chain.lock() → snapshot de UTXO`
-**antes** do dedup barato da mempool — i.e. contenção do `chain` lock sob flood de
-replays válidos.
-
-**Decisão (delegada ao agente):** em vez de uma estrutura de cache nova e separada
-(mais superfície + risco de *orphan-starvation* se cacheasse hashes ainda-não-válidos
-+ regressão de scoring se cacheasse inválidas), o handler `Command::Tx` agora faz um
-**pré-check de pertinência à mempool** (`Mempool::contains`) **antes** do chain lock.
-Justificativa:
-- Reusa o conjunto de entradas da mempool — **já bounded** por `max_weight` — em vez
-  de introduzir um LRU/anel paralelo (menos código morto, menos superfície de bug).
-- **Seguro:** só faz short-circuit de tx que estão **comprovadamente** no pool
-  (duplicatas certas); nunca afama um orphan (que nunca está no pool).
-- **Preserva o scoring:** tx inválidas/desconhecidas **não** estão no pool → seguem
-  para validação completa e peer-scoring (banimento de spam preservado). Por isso o
-  teste do PASSO 1 (tx inválida) continua válido: score chega a 30.
-- Observável por métrica nova `suppressed_duplicate_tx_relays` (espelha o padrão
-  existente `suppressed_duplicate_block_relays`).
-
-**Prova executável:** `robustness_p2p_known_tx_replay_is_short_circuited_before_validation`
-semeia o mempool do node com uma tx (sob o hash canônico que o handler computa),
-reenvia-a pelo fio e verifica que `suppressed_duplicate_tx_relays` incrementa
-(replay cortado antes da validação) e que o peer **não** é pontuado (duplicata não é
-violação).
-
-```
-test robustness_p2p_known_tx_replay_is_short_circuited_before_validation ... ok
-test robustness_p2p_tx_replay_reaches_crypto_each_time ... ok
-test result: ok. 2 passed; 0 failed; ...
-```
-
-**Residual aceito e documentado:** replays de tx **abaixo-do-piso** (que nunca entram
-no mempool) ainda incorrem em `chain.lock()` + lookups de UTXO por envio (sem crypto,
-graças ao PASSO 2). Custo ~O(lookup), ordens de magnitude abaixo do `bp_verify`
-original; não justifica cachear hashes rejeitadas (que arriscaria scoring/orphan).
-
-### Verificação final
-- `cargo build --workspace`: **OK**.
-- `cargo test --workspace`: **1180 passed, 0 failed**.
-- `cargo clippy` nos crates tocados (`-D warnings`): **limpo**.
-- `cargo fmt --check`: **OK**.
-- Nenhuma tx muda de veredito aceita↔rejeita (testes de verdict-preservation acima).
-
-### Arquivos tocados na resolução
-- `crates/dom-mempool/src/lib.rs` — `precheck_cheap_admission_gates`, `contains`.
-- `crates/dom-node/src/node.rs` — short-circuit de replay no handler `Command::Tx`.
-- `crates/dom-node/src/metrics.rs` — métrica `suppressed_duplicate_tx_relays`.
-- `crates/dom-mempool/tests/robustness_admission_ordering.rs` — reescrito p/ estado
-  corrigido (5 testes, incl. verdict-preservation).
-- `crates/dom-integration-tests/tests/robustness_tx_replay_p2p.rs` — novo (PASSO 1 +
-  PASSO 3).
-
-Decisões de mérito remanescentes inalteradas: cerimônia de `GENESIS_HASH_*` antes de
-mainnet (**PRECISA DECISÃO HUMANA**).
+## 9. Method limitations
+- Read-only on production: where the fix would touch `src/`, I described it and left
+  the decision (FABLE5-003 fail-closed; FABLE5-004/-005 consensus → **HUMAN DECISION**).
+- Broad mapping of the 3 phases via exploration agents, **re-verified in the code** at
+  the critical points (`connect_block` seed/MTP, `Commitment::sub`, bp2 complement,
+  Noise codec, genesis changeset, `bp2_verify` call sites). Where I cite a line, I
+  confirmed it at source.
+- No `git add/commit/push`; no branch/config change.
