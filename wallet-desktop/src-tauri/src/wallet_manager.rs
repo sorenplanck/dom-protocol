@@ -1059,12 +1059,16 @@ impl WalletManager {
     /// Recover derivable coinbase from the seed and reconcile against the node.
     ///
     /// This is the v2 replacement for v1's `rescan_against_node`: it pages the
-    /// node's `/chain/scan` (with per-block fees) to rebuild ONLY the derivable
-    /// coinbase outputs the seed owns, inserts any that are missing, then runs a
-    /// full reconciliation (`WalletV2State::sync`) to bring every output's status
-    /// — and the `last_reconciled_tip` cursor — up to the tip. Change and
-    /// receive-slate outputs are already tracked at C0, so reconciliation alone
-    /// keeps them correct; this method adds back coinbase a restored wallet owns.
+    /// node's `/chain/scan` ONCE (with per-block fees and input commitments),
+    /// rebuilds the derivable coinbase outputs the seed owns, inserts any that
+    /// are missing, then reconciles every output's status — and the
+    /// `last_reconciled_tip` cursor — from those SAME fetched blocks
+    /// (`reconcile_from_restore_blocks`). One walk feeds both consumers; the
+    /// previous shape paid a second full-chain `sync(0)` fetch per cycle, which
+    /// doubled the RPC traffic and the node's chain-lock hold on every new
+    /// block. Change and receive-slate outputs are already tracked at C0, so
+    /// reconciliation alone keeps them correct; this method adds back coinbase
+    /// a restored wallet owns.
     ///
     /// Idempotent: already-present outputs are skipped, and reconciliation is
     /// status-only (never drops an output).
@@ -1091,10 +1095,7 @@ impl WalletManager {
             }
         }
 
-        let report = ow
-            .state
-            .sync(&src, 0, now)
-            .map_err(|e| anyhow!("reconcile: {e}"))?;
+        let report = ow.state.reconcile_from_restore_blocks(&blocks, now);
         ow.save()?;
 
         Ok(summarize(report, recovered))

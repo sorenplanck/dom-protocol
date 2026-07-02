@@ -122,9 +122,28 @@ pub struct RestoreBlock {
     pub hash: [u8; 32],
     /// Output commitments created in this block.
     pub output_commitments: Vec<[u8; 33]>,
+    /// Commitments consumed as inputs in this block. Restore itself does not
+    /// match inputs, but carrying them lets one `/chain/scan` walk feed BOTH
+    /// restore and the reconciler ([`crate::reconcile::ScanBlock`] needs them
+    /// for spend detection) instead of paying a second full-chain fetch.
+    pub input_commitments: Vec<[u8; 33]>,
     /// Total transaction fees in this block (noms) — added to the reward for the
     /// coinbase candidate value.
     pub total_fees_noms: u64,
+}
+
+impl From<&RestoreBlock> for crate::reconcile::ScanBlock {
+    /// Project a restore block into the reconciler's view block — same walk,
+    /// two consumers. Drops only `total_fees_noms` (the reconciler does not
+    /// need it).
+    fn from(b: &RestoreBlock) -> Self {
+        Self {
+            height: b.height,
+            hash: b.hash,
+            output_commitments: b.output_commitments.clone(),
+            input_commitments: b.input_commitments.clone(),
+        }
+    }
 }
 
 /// Reconstruct the **derivable coinbase** outputs from the seed by deriving the
@@ -271,6 +290,7 @@ mod tests {
             height,
             hash: [1u8; 32],
             output_commitments: vec![coinbase_commitment, non_derivable_commitment],
+            input_commitments: vec![],
             total_fees_noms: 0,
         }];
 
@@ -315,6 +335,7 @@ mod tests {
             height,
             hash: [2u8; 32],
             output_commitments: vec![commitment],
+            input_commitments: vec![],
             total_fees_noms: fees,
         }];
         let recovered = restore_coinbase_from_seed(&k, &blocks, 1000).unwrap();

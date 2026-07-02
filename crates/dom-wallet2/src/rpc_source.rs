@@ -176,7 +176,11 @@ impl RpcChainSource {
     /// total (the reconciler does not need it). Restore *does* — the coinbase
     /// candidate value is `block_reward(height) + fees` — so this carries the
     /// `fees` field (already on the `/chain/scan` response) through into
-    /// [`RestoreBlock::total_fees_noms`]. Paging mirrors `scan_range`: the node
+    /// [`RestoreBlock::total_fees_noms`]. It ALSO carries `input_commitments`,
+    /// so the same single walk can feed the reconciler afterwards
+    /// (`RestoreBlock → ScanBlock` via `From`, then
+    /// [`crate::WalletV2State::reconcile_from_restore_blocks`]) instead of a
+    /// second full-chain `scan_range`. Paging mirrors `scan_range`: the node
     /// caps each response and reports the highest height it served, and we keep
     /// requesting `from = served_to + 1` until the requested range is covered.
     pub fn scan_for_restore(
@@ -193,6 +197,7 @@ impl RpcChainSource {
                     height: dto.height,
                     hash: decode_hash(&dto.hash)?,
                     output_commitments: decode_commitments(&dto.output_commitments)?,
+                    input_commitments: decode_commitments(&dto.input_commitments)?,
                     total_fees_noms: dto.fees,
                 });
             }
@@ -541,8 +546,9 @@ mod tests {
             .map(|h| {
                 let hash = format!("{:02x}", (h % 256) as u8).repeat(32);
                 let out = format!("{:02x}", ((h + 1) % 256) as u8).repeat(33);
+                let input = format!("{:02x}", ((h + 2) % 256) as u8).repeat(33);
                 format!(
-                    r#"{{"height":{h},"hash":"{hash}","output_commitments":["{out}"],"input_commitments":[],"fees":{}}}"#,
+                    r#"{{"height":{h},"hash":"{hash}","output_commitments":["{out}"],"input_commitments":["{input}"],"fees":{}}}"#,
                     h * 100
                 )
             })
@@ -578,6 +584,10 @@ mod tests {
         assert_eq!(blocks[3].total_fees_noms, 300);
         assert_eq!(blocks[1000].total_fees_noms, 100_000);
         assert_eq!(blocks.last().unwrap().total_fees_noms, 150_000);
+        // Input commitments survive too — the same walk must be able to feed
+        // the reconciler (spend detection) without a second full-chain fetch.
+        assert_eq!(blocks[3].input_commitments, vec![[0x05u8; 33]]);
+        assert_eq!(blocks[1000].input_commitments.len(), 1);
         let _ = stop.send(());
     }
 
