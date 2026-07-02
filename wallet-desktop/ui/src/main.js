@@ -150,6 +150,8 @@ async function boot() {
   await startLogCapture();
   // Surface auto-backup failures (never silent): registers the global listener once.
   await S.startAutoBackupNotifications();
+  // Surface background wallet-sync failures/recovery (never silent): edge-only toasts.
+  await S.startRescanNotifications();
   // Load default node settings from the backend, merge saved non-sensitive prefs.
   const defaults = await api.defaultSettings();
   // auto_lock_minutes is a local pref (not part of the backend NodeConfig; the

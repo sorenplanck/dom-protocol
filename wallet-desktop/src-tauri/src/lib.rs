@@ -1374,6 +1374,7 @@ pub fn run() {
             // pending spends, so re-running it never loses sweep-received funds.
             let rescan_node = node.clone();
             let rescan_wallet = wallet.clone();
+            let rescan_ui = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(
                     RESCAN_POLL_INTERVAL_SECS,
@@ -1381,6 +1382,11 @@ pub fn run() {
                 // Last (vault_path, tip) we successfully rescanned, to skip
                 // redundant full rescans when nothing changed.
                 let mut last_scanned: Option<(String, u64)> = None;
+                // Whether the previous attempt failed — sync failures must be
+                // VISIBLE (a silent one reads as "balance stuck, no idea why"),
+                // but only edges are emitted ("wallet-rescan-failed" /
+                // "wallet-rescan-recovered"), never a toast per 8s tick.
+                let mut failing = false;
                 loop {
                     interval.tick().await;
 
@@ -1416,8 +1422,24 @@ pub fn run() {
                                 );
                             }
                             last_scanned = Some(key);
+                            if failing {
+                                failing = false;
+                                let _ = rescan_ui.emit(
+                                    "wallet-rescan-recovered",
+                                    serde_json::json!({ "tip": summary.scanned_tip }),
+                                );
+                            }
                         }
-                        Err(e) => tracing::debug!("wallet recover skipped/failed: {e}"),
+                        Err(e) => {
+                            tracing::warn!("wallet rescan failed: {e}");
+                            if !failing {
+                                failing = true;
+                                let _ = rescan_ui.emit(
+                                    "wallet-rescan-failed",
+                                    serde_json::json!({ "reason": e.to_string() }),
+                                );
+                            }
+                        }
                     }
                 }
             });
