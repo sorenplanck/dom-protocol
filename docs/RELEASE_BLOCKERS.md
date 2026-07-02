@@ -1,8 +1,18 @@
 # DOM Release Blockers — Updated after External Audit
 
-Last reconciled against code: 2026-06-10 — see `docs/RECONCILIATION_REPORT.md`
-(the 5 `[MAINNET]` blockers below were re-verified against the real source; status
-and residuals updated to match the code, with `file:line` evidence in that report).
+Last reconciled against code: 2026-07-01 (previous reconciliation 2026-06-10 — see
+`docs/RECONCILIATION_REPORT.md`). The 2026-07-01 pass re-verified every OPEN/PARTIAL
+entry against the real source with `file:line` evidence; the items updated below:
+RB-BAN-POLICY (residual shrunk — Addr handler + per-class scores landed),
+RB-GENESIS-ANCHOR (testnet anchor frozen — resolved for testnet),
+RB-BULLETPROOFS (git pin checkbox — the pin exists and is deny.toml-enforced),
+RB-TESTNET-DEPLOY / RB-FUZZ-CAMPAIGN (superseded by ROADMAP_v3 Phase 9 — the
+launch model no longer includes a public testnet).
+
+> **Authoritative gate note (2026-07-01):** the mainnet gating criteria live in
+> `docs/ROADMAP_v3.md` Phase 9 (adopted 2026-06-19). Entries in this file that
+> predate v3 are kept as the historical record; where they conflict with
+> ROADMAP_v3, ROADMAP_v3 wins.
 
 Last updated: 2026-05-24 (post-B7 — `Network::Regtest` added; unblocks local two-miner integration tests including Doc 8 spend_e2e. Magic byte / port / maturity / RandomX-flags isolated; consensus logic unchanged. See `docs/REGTEST.md`.)
 
@@ -138,7 +148,11 @@ not Bulletproofs+ 2021, with multiple soundness bugs:
   roundtrip tests.
 - [x] Verified `MAX_SUPPLY_NOMS` proof works, value above `MAX_PROVABLE_VALUE`
   rejected, empty proofs rejected, oversized proofs capped via `MAX_PROOF_SIZE`.
-- [ ] Pin git dependency to specific commit (track in mainnet checklist).
+- [x] Pin git dependency to specific commit — DONE (re-verified 2026-07-01):
+  `Cargo.toml:51` pins `secp256k1-zkp` to rev `264e84adf7b06fb4d028eb2fd992f33c4d8999b7`;
+  `grin_secp256k1zkp = "=0.7.15"` is an exact crates.io pin (`Cargo.toml:54`);
+  enforced structurally by `deny.toml` (`required-git-spec = "rev"`, line 62;
+  `unknown-git = "deny"`, line 59) and gated in CI (`ci.yml:138` supply-chain job).
 - [ ] Generate audit-style frozen test vector at known (value, blinding, nonce)
   for independent reproduction; current tests cover correctness but not
   byte-for-byte cross-implementation reproducibility.
@@ -329,22 +343,27 @@ Scoring IS wired and enforced:
   store reputation in LMDB and reload on restart.
 - Applied as specced: `Malformed → +20`, `WRONG_CHAIN_ID → +100`.
 
-**Residual (what still differs from the spec above):**
-- **Score granularity.** `INVALID_POW(50)`, `INVALID_SIGNATURE(25)`,
-  `INVALID_TX_STRUCTURE(15)` are defined (`peer.rs:11,17,19`) but NOT mapped —
-  invalid PoW/signature/block fall into the catch-all `Invalid(_) →
-  PROTOCOL_VIOLATION(10)` (`node.rs:1729`). They ARE scored, but at +10 instead of
-  the higher per-class weights.
-- **Address flooding.** `ADDRESS_FLOODING(+30)` is not applied; `Command::Addr` has
-  no handler in the message loop (falls into `other => ignoring`, `node.rs:~4015`),
-  so there is no ADDR rate limiting.
-- **No decay/expiry for a registered peer.** Pre-registration penalties expire
-  (`PENDING_PENALTY_TTL_SECS=15min`, `crates/dom-wire/src/manager.rs:18-21`), but a
-  registered peer's `ban_score` has no time-based decay / expire timestamp — once
-  banned, it persists across restart.
+**Residual (re-verified 2026-07-01 — two of the three prior residuals are CLOSED):**
+- ~~Score granularity~~ **mostly closed:** `INVALID_POW(50)` and
+  `INVALID_SIGNATURE(25)` are now mapped (`node.rs:1914-1921` via
+  `PeerMisbehavior::InvalidPow`/`InvalidSignature`). Remaining sliver:
+  `INVALID_TX_STRUCTURE(15)` is a dead constant (`peer.rs:19`, zero references) —
+  invalid tx structure still falls into the catch-all `Invalid(_) →
+  PROTOCOL_VIOLATION(10)` (`node.rs:1922`, pinned by test `node.rs:5895-5898`).
+- ~~Address flooding~~ **CLOSED:** `Command::Addr` has a real handler in the live
+  message loop (`node.rs:4444-4482`) with flood rate limiting
+  (`MAX_ADDR_MESSAGES_PER_WINDOW=4`, `pex.rs:234-239`) and `ADDRESS_FLOODING(+30)`
+  scoring on overflow (`node.rs:4457-4467`). GetAddr responses are also
+  serve-side rate-limited (`node.rs:4416-4442`).
+- **No decay/expiry for a registered peer — still OPEN.** Pre-registration
+  penalties expire (`PENDING_PENALTY_TTL_SECS=15min`,
+  `crates/dom-wire/src/manager.rs:19`), but a registered peer's `ban_score` is a
+  monotonic `saturating_add` with no timestamp (`peer.rs:84-92`). Note: a
+  `PeerScorer` with time-based ban expiry exists (`dom-node/src/peer_scoring.rs:45-97`)
+  but is dead code — zero call sites outside its own unit tests.
 
-**Required to close:** map the per-class scores; wire `Command::Addr` + ADDR rate
-limiting (ties into RB-DNS-SEEDS); add ban decay/expire timestamp.
+**Required to close:** map (or delete) `INVALID_TX_STRUCTURE`; add ban
+decay/expire for registered peers (or wire the existing `peer_scoring` module).
 
 ---
 
@@ -582,13 +601,16 @@ backup is the complete one.
 | RB-ASERT-ARITH | ASERT 256-bit arithmetic | Testnet | ✅ RESOLVED |
 | RB-SUM-COMMITS | Balance eq identity crash | Testnet | ✅ RESOLVED |
 | RB-MAX-SUPPLY | Supply constant consistency | Testnet | ✅ RESOLVED |
-| RB-BAN-POLICY | Peer ban enforcement | Mainnet | 🔧 PARTIAL (wired+persisted; residual: score granularity, ADDR flooding, ban decay) |
+| RB-BAN-POLICY | Peer ban enforcement | Mainnet | 🔧 PARTIAL (wired+persisted; ADDR handler + PoW/sig scores landed 2026-07-01; residual: INVALID_TX_STRUCTURE dead constant, ban decay) |
 | RB-HANDSHAKE-TIMEOUT | Slowloris DoS | Mainnet | ✅ RESOLVED (10s handshake + 60s idle) |
 | RB-DNS-SEEDS | Bootstrap discovery | Mainnet | 🟠 OPEN (OPERATIONAL) (mechanism done; real seeds + governance pending) |
 | RB-WALLET-SLATE | Wallet slate protocol | Mainnet | 🔧 PARTIAL (interactive slate implemented+tested; residual: RFC, timeout) |
 | RB-IBD | Initial block download | Mainnet | 🔧 PARTIAL (implemented+tested; residual: RFC, hardcoded checkpoints) |
 | RB-WALLET2-RPC-SOURCE | Wallet v2 chain scan transport (node RPC endpoint + RpcChainSource) | Mainnet | ✅ RESOLVED (endpoint + RpcChainSource + incremental sync shipped and tested; desktop runs on it) |
 | RB-WALLET2-RECEIVE-RESTORE | Wallet v2 restore-from-seed of receive-requests (needs an amount source) | Mainnet | 🔴 OPEN (coinbase restore done; receive-request restore deferred) |
+| RB-GENESIS-ANCHOR | ASERT genesis anchor | Testnet | ✅ RESOLVED for testnet (frozen + pinned by `genesis_testnet_frozen_vectors`); mainnet anchor deferred by design to the ceremony |
+| RB-TESTNET-DEPLOY | Public adversarial testnet | Mainnet | ⚪ SUPERSEDED by ROADMAP_v3 (no public testnet; private burn-in + shield audit instead) |
+| RB-FUZZ-CAMPAIGN | Sustained fuzz campaign | Mainnet | 🔴 OPEN as ROADMAP_v3 Phase 9.2 (~44-58 targets exist; sustained execution + log pending) |
 
 ---
 
@@ -697,15 +719,24 @@ release blocker, and keep any future MuSig2 work gated to the v1.1 roadmap.
 ## [TESTNET] RB-GENESIS-ANCHOR — ASERT anchor not tracked
 
 **Severity: IMPORTANT**
-**Status:** 🔴 OPEN
+**Status:** ✅ RESOLVED for testnet (re-verified against code 2026-07-01);
+mainnet anchor deferred by design to the genesis ceremony (fail-closed).
 
 ASERT requires a static genesis anchor (height=0, timestamp, target).
-These values depend on RFC-0006 (genesis artifact, also OPEN).
 
-Without the finalized anchor, all nodes compute different ASERT difficulty
-from block 1 onward — testnet diverges immediately.
-
-Required: finalize genesis timestamp + target → freeze in RFC-0003 anchor.
+**Current state (2026-07-01):**
+- `GENESIS_TIMESTAMP_TESTNET = 1_778_642_633` frozen (`constants.rs:63`, asserted
+  at `constants.rs:651`); `GENESIS_HASH_TESTNET` is a real non-zero frozen value
+  (`constants.rs:435-438`).
+- `genesis_anchor()` derives the `AsertAnchor` deterministically from the frozen
+  genesis timestamp + the network's `genesis_target()`
+  (`crates/dom-pow/src/lib.rs:673-681`).
+- The whole testnet genesis (hash, PMMR roots, 739-byte bp2 coinbase proof, and
+  the anchor) is pinned by the regression test `genesis_testnet_frozen_vectors`
+  (`crates/dom-node/src/miner.rs:1450`).
+- Mainnet: intentionally NOT frozen — `MAINNET_GENESIS_FINALIZED = false`
+  (`constants.rs:448`) fail-closes the node until the launch ceremony freezes the
+  real values. That is the ceremony's deliverable, not a code gap.
 
 ---
 
@@ -949,7 +980,12 @@ payload caps.
 ## [MAINNET] RB-TESTNET-DEPLOY — Phase 8.1 public adversarial testnet
 
 **Severity:** CRITICAL gate — mainnet launch is blocked on this.
-**Status:** 🔴 OPEN — requires deployment + sustained operation.
+**Status:** ⚪ SUPERSEDED by ROADMAP_v3 (adopted 2026-06-19; recorded here
+2026-07-01). The v3 launch model has **no public testnet** (philosophical
+choice — no insiders): validation happens before block zero via the
+dom-shield audit (Phase 9.1/9.3), the sustained fuzz campaign (9.2), and a
+**private burn-in** run by the maintainer (9.4). See `docs/ROADMAP_v3.md`
+Phase 9. The section below is preserved as the v2-era historical record.
 
 Phase 8.1 calls for a public adversarial testnet running ≥ 90 days
 continuous without consensus break. The protocol source is
@@ -977,7 +1013,14 @@ The 90-day window is a hard minimum; longer is better.
 ## [MAINNET] RB-FUZZ-CAMPAIGN — Phase 8.2 ≥ 10 000 CPU-hour fuzz
 
 **Severity:** CRITICAL gate — mainnet launch is blocked on this.
-**Status:** 🔴 OPEN — requires sustained compute infrastructure.
+**Status:** 🔴 OPEN — carried forward into ROADMAP_v3 as Phase 9.2 (the
+sustained fuzz campaign remains a mainnet gate under v3; this entry stays
+open, tracked there). Progress since this entry was written (re-verified
+2026-07-01): the harness inventory grew from 13 to **~44-58 cargo-fuzz
+targets across 16+ crates** (`crates/*/fuzz/fuzz_targets/`), including
+`fuzz_bp2_verify.rs` (ROADMAP_v3 Phase 8.1's first target). What is still
+missing is the sustained execution itself: only a ~25 s/target smoke run is
+recorded (`docs/FUZZING.md`, 2026-05-23) — no hour-scale campaign log yet.
 
 Phase 8.2 calls for ≥ 10 000 CPU-hours of fuzz coverage across:
 
