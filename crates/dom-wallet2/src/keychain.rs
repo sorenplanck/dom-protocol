@@ -163,45 +163,104 @@ pub fn restore_coinbase_from_seed(
 ) -> Result<Vec<StoredOutput>, KeychainError> {
     let deriver = KeychainDeriver::new(keychain)?;
     let mut recovered = Vec::new();
-
     for block in blocks {
-        let blinding = deriver.coinbase_blinding(block.height)?;
-        let blinding_bytes = *blinding.as_bytes();
-        let reward = dom_core::block_reward(BlockHeight(block.height)).noms();
-        // Try the bare reward and reward+fees (a coinbase claims both).
-        let candidates: [u64; 2] = [reward, reward.saturating_add(block.total_fees_noms)];
+        match_coinbase_in_block(&deriver, block, now, &mut recovered)?;
+    }
+    Ok(recovered)
+}
 
-        for &commitment in &block.output_commitments {
-            for &value in candidates.iter() {
-                if value == 0 {
-                    continue;
-                }
-                if Commitment::commit(value, &blinding).as_bytes() == &commitment {
-                    let mut out = StoredOutput::new_unconfirmed(
-                        commitment,
-                        value,
-                        blinding_bytes,
-                        OutputOrigin::Coinbase,
-                        true,
-                        Some(DerivIndex::CoinbaseHeight(block.height)),
-                        now,
-                    );
-                    out.confirm(
-                        BlockRef {
-                            height: block.height,
-                            hash: block.hash,
-                        },
-                        now,
-                    )
-                    .expect("Unconfirmed -> Confirmed is T1, always legal");
-                    recovered.push(out);
-                    break; // first matching value wins for this commitment
-                }
-            }
+/// Like [`restore_coinbase_from_seed`], but skips the per-height derivation for
+/// blocks whose canonical coinbase the wallet ALREADY tracks in `known` — the
+/// steady-state shape for a periodic rescan cycle.
+///
+/// [`restore_coinbase_from_seed`] pays one HD derivation plus up to two Pedersen
+/// commitments per block-output on EVERY call, so a background rescan that runs
+/// it per new block spends CPU proportional to the WHOLE chain each cycle. The
+/// coinbase blinding is derived purely from the height, so if `known` holds an
+/// output with `DerivIndex::CoinbaseHeight(h)` whose commitment is present in
+/// that height's block, re-deriving at `h` can only re-find what is already
+/// tracked — skip it. A reorged height (tracked commitment no longer in the
+/// block) is NOT skipped: the re-mined coinbase can carry different fees, hence
+/// a different commitment, and must be re-derived.
+///
+/// Returns only outputs `known` does not already track, so the caller can
+/// insert the result verbatim.
+pub fn restore_coinbase_from_seed_skipping_known(
+    keychain: &KeychainV2,
+    blocks: &[RestoreBlock],
+    known: &crate::store::OutputStore,
+    now: u64,
+) -> Result<Vec<StoredOutput>, KeychainError> {
+    use std::collections::HashMap;
+
+    // height -> commitments of coinbase outputs already tracked at that height.
+    let mut tracked: HashMap<u64, Vec<[u8; 33]>> = HashMap::new();
+    for out in known.iter() {
+        if let Some(DerivIndex::CoinbaseHeight(h)) = out.derivable {
+            tracked.entry(h).or_default().push(out.commitment);
         }
     }
 
+    let deriver = KeychainDeriver::new(keychain)?;
+    let mut recovered = Vec::new();
+    for block in blocks {
+        let already_canonical = tracked
+            .get(&block.height)
+            .is_some_and(|cs| cs.iter().any(|c| block.output_commitments.contains(c)));
+        if already_canonical {
+            continue; // nothing new derivable at this height
+        }
+        match_coinbase_in_block(&deriver, block, now, &mut recovered)?;
+    }
+    // Contract: only outputs the store does not already track.
+    recovered.retain(|out| known.get(&out.commitment).is_none());
     Ok(recovered)
+}
+
+/// Derive the coinbase blinding for `block.height` and push every matching
+/// output (bare reward or reward+fees) into `recovered`, already `Confirmed`
+/// at the block. The single matcher shared by both restore entry points.
+fn match_coinbase_in_block(
+    deriver: &KeychainDeriver,
+    block: &RestoreBlock,
+    now: u64,
+    recovered: &mut Vec<StoredOutput>,
+) -> Result<(), KeychainError> {
+    let blinding = deriver.coinbase_blinding(block.height)?;
+    let blinding_bytes = *blinding.as_bytes();
+    let reward = dom_core::block_reward(BlockHeight(block.height)).noms();
+    // Try the bare reward and reward+fees (a coinbase claims both).
+    let candidates: [u64; 2] = [reward, reward.saturating_add(block.total_fees_noms)];
+
+    for &commitment in &block.output_commitments {
+        for &value in candidates.iter() {
+            if value == 0 {
+                continue;
+            }
+            if Commitment::commit(value, &blinding).as_bytes() == &commitment {
+                let mut out = StoredOutput::new_unconfirmed(
+                    commitment,
+                    value,
+                    blinding_bytes,
+                    OutputOrigin::Coinbase,
+                    true,
+                    Some(DerivIndex::CoinbaseHeight(block.height)),
+                    now,
+                );
+                out.confirm(
+                    BlockRef {
+                        height: block.height,
+                        hash: block.hash,
+                    },
+                    now,
+                )
+                .expect("Unconfirmed -> Confirmed is T1, always legal");
+                recovered.push(out);
+                break; // first matching value wins for this commitment
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -340,6 +399,95 @@ mod tests {
         }];
         let recovered = restore_coinbase_from_seed(&k, &blocks, 1000).unwrap();
         assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].value, reward + fees);
+    }
+
+    #[test]
+    fn restore_skipping_known_skips_already_tracked_heights() {
+        // Steady state: the store already tracks the canonical coinbase at
+        // height 1 → the skipping variant returns nothing new for that block
+        // (no re-derivation can find anything the store lacks).
+        let k = keychain_with_seed();
+        let deriver = KeychainDeriver::new(&k).unwrap();
+        let height = 1u64;
+        let reward = dom_core::block_reward(BlockHeight(height)).noms();
+        let cb_blinding = deriver.coinbase_blinding(height).unwrap();
+        let commitment = *Commitment::commit(reward, &cb_blinding).as_bytes();
+
+        let blocks = vec![RestoreBlock {
+            height,
+            hash: [1u8; 32],
+            output_commitments: vec![commitment],
+            input_commitments: vec![],
+            total_fees_noms: 0,
+        }];
+
+        // First pass (empty store): recovers the coinbase — differential with
+        // the non-skipping entry point (same commitment/value/status).
+        let mut store = crate::store::OutputStore::new();
+        let first = restore_coinbase_from_seed_skipping_known(&k, &blocks, &store, 1000).unwrap();
+        let baseline = restore_coinbase_from_seed(&k, &blocks, 1000).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(first[0].commitment, baseline[0].commitment);
+        assert_eq!(first[0].value, baseline[0].value);
+        assert_eq!(first[0].status, baseline[0].status);
+        store.insert(first[0].clone()).unwrap();
+
+        // Second pass (steady state): nothing new.
+        let second = restore_coinbase_from_seed_skipping_known(&k, &blocks, &store, 1001).unwrap();
+        assert!(second.is_empty(), "already-tracked height must be skipped");
+    }
+
+    #[test]
+    fn restore_skipping_known_rederives_reorged_height() {
+        // Reorg edge: the tracked commitment at height 2 is no longer in the
+        // block (the re-mined coinbase carries different fees → different
+        // commitment). The height must NOT be skipped: the new canonical
+        // coinbase is derivable and must be recovered.
+        let k = keychain_with_seed();
+        let deriver = KeychainDeriver::new(&k).unwrap();
+        let height = 2u64;
+        let reward = dom_core::block_reward(BlockHeight(height)).noms();
+        let cb_blinding = deriver.coinbase_blinding(height).unwrap();
+
+        // Old (reorged-out) coinbase: bare reward, tracked in the store.
+        let old_commitment = *Commitment::commit(reward, &cb_blinding).as_bytes();
+        let mut store = crate::store::OutputStore::new();
+        let mut old = StoredOutput::new_unconfirmed(
+            old_commitment,
+            reward,
+            *cb_blinding.as_bytes(),
+            OutputOrigin::Coinbase,
+            true,
+            Some(DerivIndex::CoinbaseHeight(height)),
+            900,
+        );
+        old.confirm(
+            BlockRef {
+                height,
+                hash: [0xAAu8; 32],
+            },
+            900,
+        )
+        .unwrap();
+        store.insert(old).unwrap();
+
+        // Re-mined block at the same height, now with fees → new commitment.
+        let fees = 137u64;
+        let new_commitment = *Commitment::commit(reward + fees, &cb_blinding).as_bytes();
+        let blocks = vec![RestoreBlock {
+            height,
+            hash: [0xBBu8; 32],
+            output_commitments: vec![new_commitment],
+            input_commitments: vec![],
+            total_fees_noms: fees,
+        }];
+
+        let recovered =
+            restore_coinbase_from_seed_skipping_known(&k, &blocks, &store, 1000).unwrap();
+        assert_eq!(recovered.len(), 1, "reorged height must be re-derived");
+        assert_eq!(recovered[0].commitment, new_commitment);
         assert_eq!(recovered[0].value, reward + fees);
     }
 

@@ -41,9 +41,10 @@ use dom_wallet2::{
     cancel as v2_cancel, create_send as v2_create_send,
     export_full_backup as v2_export_full_backup, finalize_tracked as v2_finalize_tracked,
     import_full_backup as v2_import_full_backup, load_wallet_state, receive as v2_receive,
-    restore_coinbase_from_seed, save_wallet_state, submit_finalized as v2_submit_finalized,
-    ChainSource, DerivIndex, KeychainDeriver, Network as V2Network, OutputOrigin, OutputStatus,
-    ReconcileReport, RpcChainSource, RpcSourceError, StoredOutput, SubmitError, WalletV2State,
+    restore_coinbase_from_seed_skipping_known, save_wallet_state,
+    submit_finalized as v2_submit_finalized, ChainSource, DerivIndex, KeychainDeriver,
+    Network as V2Network, OutputOrigin, OutputStatus, ReconcileReport, RpcChainSource,
+    RpcSourceError, StoredOutput, SubmitError, WalletV2State,
 };
 use dom_wallet_keys::seed::{Bip39Seed, SeedAcceptance};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1083,16 +1084,23 @@ impl WalletManager {
         let blocks = src
             .scan_for_restore(0, tip.height)
             .map_err(|e| anyhow!("chain scan for restore: {e}"))?;
-        let coinbase = restore_coinbase_from_seed(&ow.state.keychain, &blocks, now)
-            .map_err(|e| anyhow!("restore coinbase: {e}"))?;
+        // Skipping-known variant: heights whose canonical coinbase the store
+        // already tracks are not re-derived, so the steady-state cycle pays
+        // HD-derivation CPU only for NEW blocks, not the whole chain. It
+        // returns only outputs the store lacks — insert verbatim.
+        let coinbase = restore_coinbase_from_seed_skipping_known(
+            &ow.state.keychain,
+            &blocks,
+            &ow.state.outputs,
+            now,
+        )
+        .map_err(|e| anyhow!("restore coinbase: {e}"))?;
         for out in coinbase {
-            if ow.state.outputs.get(&out.commitment).is_none() {
-                ow.state
-                    .outputs
-                    .insert(out)
-                    .map_err(|e| anyhow!("insert recovered coinbase: {e}"))?;
-                recovered += 1;
-            }
+            ow.state
+                .outputs
+                .insert(out)
+                .map_err(|e| anyhow!("insert recovered coinbase: {e}"))?;
+            recovered += 1;
         }
 
         let report = ow.state.reconcile_from_restore_blocks(&blocks, now);
