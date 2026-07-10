@@ -495,7 +495,7 @@ fn cross_branch_spend_of_disconnected_only_output_is_rejected() {
     assert_eq!(canonical_tip, block_hash(&a2.header), "A2 is canonical tip");
 
     let err = chain
-        .promote_heavier_known_tip(b3_hash)
+        .promote_heavier_known_tip(b3_hash, Timestamp(2_000_000_000))
         .expect_err("promoting a branch that spends a disconnected-only output must fail");
     let msg = err.to_string();
     assert!(
@@ -552,7 +552,7 @@ fn cross_branch_respend_of_shared_prefix_utxo_succeeds() {
 
     let mut chain = open_chain(dir.path());
     chain
-        .promote_heavier_known_tip(b3_hash)
+        .promote_heavier_known_tip(b3_hash, Timestamp(2_000_000_000))
         .expect("legitimate re-spend of resurrected shared UTXO must promote");
 
     assert_eq!(chain.tip_hash, b3_hash);
@@ -642,7 +642,7 @@ fn reorg_depth_over_limit_is_rejected_on_promotion_path() {
     let side_hash = stage_side_into_open_chain(&chain, &side);
 
     let err = chain
-        .promote_heavier_known_tip(side_hash)
+        .promote_heavier_known_tip(side_hash, Timestamp(2_000_000_000))
         .expect_err("disconnect depth over MAX_REORG_DEPTH_POLICY must be rejected");
     let msg = err.to_string();
     // The reorg is refused because the ancestor is deeper than the bounded
@@ -683,7 +683,7 @@ fn reorg_depth_at_limit_passes_depth_gate() {
     let canonical_tip = chain.tip_hash;
     let side_hash = stage_side_into_open_chain(&chain, &side);
 
-    let result = chain.promote_heavier_known_tip(side_hash);
+    let result = chain.promote_heavier_known_tip(side_hash, Timestamp(2_000_000_000));
     match result {
         Ok(_) => panic!("dummy-proof side tip should not validate; expected post-gate failure"),
         Err(e) => {
@@ -756,7 +756,7 @@ fn fix019_over_cap_disconnect_is_refused_before_unbounded_collect_probe() {
     let side_hash = stage_side_into_open_chain(&chain, &side);
 
     let err = chain
-        .promote_heavier_known_tip(side_hash)
+        .promote_heavier_known_tip(side_hash, Timestamp(2_000_000_000))
         .expect_err("over-cap disconnect must be refused");
     let msg = err.to_string();
 
@@ -846,7 +846,7 @@ fn run_scenario_two_orderings(
         }
         drop(store);
         let mut chain = open_chain(dir.path());
-        chain.promote_heavier_known_tip(b_tip_hash)?;
+        chain.promote_heavier_known_tip(b_tip_hash, Timestamp(2_000_000_000))?;
         (chain.tip_hash, utxo_digest(&chain))
     };
 

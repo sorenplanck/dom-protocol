@@ -396,7 +396,7 @@ fn invariant_reorg_candidate_promotion_revalidates_economic_balance_before_state
         .expect("store invalid side block");
 
     let err = chain
-        .promote_heavier_known_tip(invalid_side_2_hash)
+        .promote_heavier_known_tip(invalid_side_2_hash, safe_now())
         .expect_err("reorg promotion must reject invalid aggregate balance");
     let msg = err.to_string();
     assert!(
@@ -524,7 +524,7 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
         .expect("store heavier side tip");
 
     let err = chain
-        .promote_heavier_known_tip(side_3_heavier_hash)
+        .promote_heavier_known_tip(side_3_heavier_hash, safe_now())
         .expect_err("promotion must reject branch-invalid input");
     let msg = err.to_string();
     assert!(

@@ -154,7 +154,7 @@ fn equal_work_sibling_does_not_reorg() {
         sib_prev = sib_tip;
     }
 
-    let result = chain.promote_heavier_known_tip(sib_tip);
+    let result = chain.promote_heavier_known_tip(sib_tip, Timestamp(2_000_000_000));
     match result {
         Err(DomError::PolicyRejected(msg)) => {
             assert!(
