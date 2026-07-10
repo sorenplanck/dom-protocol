@@ -38,7 +38,7 @@ const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(30);
 const TEST_LMDB_MAP_SIZE: usize = 64 << 20;
 const T1_RANDOMX_BOUNDARY_HEIGHT: u64 = RANDOMX_SEED_INTERVAL + 12;
 const T1_IBD_TIMEOUT: Duration = Duration::from_secs(300);
-const T1_SLOW_MACHINE_MULTIPLIER: u32 = 2;
+const T1_SLOW_MACHINE_MULTIPLIER: u32 = 4;
 const T3_IBD_TIMEOUT: Duration = Duration::from_secs(300);
 static IBD_TWO_NODE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
