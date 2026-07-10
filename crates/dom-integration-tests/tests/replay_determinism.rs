@@ -23,8 +23,25 @@ use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_integration_tests::helpers::*;
 use dom_pow::{target_to_difficulty, CompactTarget, REGTEST_TARGET_COMPACT};
 use dom_serialization::{DomDeserialize, DomSerialize};
-use dom_store::DomStore;
+use dom_store::{utxo::UtxoEntry, DomStore};
 use std::path::Path;
+
+/// The canonical coinbase UTXO add for a block, matching exactly what
+/// `reconstruct_canonical_utxo_set` derives from the block body on reopen. These
+/// fixtures used to commit with empty UTXO adds and rely on the (now removed)
+/// silent reopen heal to populate the set; FIX-020 makes a persisted-vs-canonical
+/// divergence fatal, so the commit must persist the consistent coinbase entry.
+fn coinbase_utxo_add(block: &Block) -> ([u8; 33], Vec<u8>) {
+    (
+        *block.coinbase.output.commitment.as_bytes(),
+        UtxoEntry {
+            block_height: block.header.height.0,
+            is_coinbase: true,
+            proof: block.coinbase.output.proof.clone(),
+        }
+        .to_bytes(),
+    )
+}
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -116,7 +133,7 @@ fn fresh_chain(data_dir: &str, genesis_bytes: &[u8], network_magic: u32) -> Chai
             0,
             &genesis_header_bytes,
             genesis_bytes,
-            &[],
+            &[coinbase_utxo_add(&genesis_block)],
             &[],
             &[],
         )
@@ -212,7 +229,7 @@ fn write_replay_fixture_chain(
             0,
             &genesis.header.to_bytes().expect("genesis header"),
             &genesis.to_bytes().expect("genesis block"),
-            &[],
+            &[coinbase_utxo_add(&genesis)],
             &[],
             &[],
         )
@@ -233,7 +250,7 @@ fn write_replay_fixture_chain(
             1,
             &header_bytes,
             &block_1.to_bytes().expect("tip block"),
-            &[],
+            &[coinbase_utxo_add(&block_1)],
             &[],
             &[],
         )
