@@ -18,7 +18,7 @@ use dom_store::utxo::UtxoEntry;
 use dom_store::{DomStore, METADATA_UTXO_SET_DIGEST_KEY};
 use primitive_types::U256;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use crate::reorg::{check_reorg_depth, find_common_ancestor};
 
@@ -119,10 +119,40 @@ fn coinbase_maturity_for_magic(magic: u32) -> u64 {
 }
 
 impl ChainState {
+    /// Default startup path. A divergence between the persisted UTXO set and
+    /// the canonical set reconstructed from committed block history is treated
+    /// as fatal corruption (FIX-020): the node refuses to open rather than
+    /// silently healing a possibly-tampered set. Recovery is operator-driven
+    /// via [`ChainState::open_with_utxo_repair`].
     pub fn open(
         store: DomStore,
         genesis_hash: Hash256,
         network_magic: u32,
+    ) -> Result<Self, DomError> {
+        Self::open_inner(store, genesis_hash, network_magic, false)
+    }
+
+    /// Explicit operator recovery entry point. Identical to [`ChainState::open`]
+    /// except that a divergence between the persisted UTXO set and the canonical
+    /// set reconstructed from block history is REPAIRED (the persisted set is
+    /// replaced by the canonical one) instead of being rejected as fatal
+    /// corruption. This is the opt-in the fatal error raised by
+    /// [`ChainState::open`] instructs the operator to use; it must never be the
+    /// unattended default startup path, because a node must not silently run on
+    /// a divergent UTXO set without human intervention.
+    pub fn open_with_utxo_repair(
+        store: DomStore,
+        genesis_hash: Hash256,
+        network_magic: u32,
+    ) -> Result<Self, DomError> {
+        Self::open_inner(store, genesis_hash, network_magic, true)
+    }
+
+    fn open_inner(
+        store: DomStore,
+        genesis_hash: Hash256,
+        network_magic: u32,
+        allow_utxo_repair: bool,
     ) -> Result<Self, DomError> {
         let asert_anchor = genesis_anchor(network_magic)
             .map_err(|e| DomError::Internal(format!("genesis anchor: {e}")))?;
@@ -171,7 +201,7 @@ impl ChainState {
                     }
                 }
                 rebuild_kernel_index_from_canonical_chain(&store, header.height)?;
-                ensure_canonical_utxo_set(&store, header.height)?;
+                ensure_canonical_utxo_set(&store, header.height, allow_utxo_repair)?;
                 prune_retained_side_chains(&store, header.height, hash)?;
                 (
                     Hash256::from_bytes(hash),
@@ -395,7 +425,7 @@ impl ChainState {
             )?;
             prune_retained_side_chains(&self.store, self.tip_height, *self.tip_hash.as_bytes())?;
             if extends_best_chain {
-                let reorg = self.promote_heavier_known_tip(block_hash)?;
+                let reorg = self.promote_heavier_known_tip(block_hash, now)?;
                 return Ok(ConnectResult::Reorg(reorg));
             }
             debug!(
@@ -1139,6 +1169,7 @@ impl ChainState {
     pub fn promote_heavier_known_tip(
         &mut self,
         new_tip_hash: Hash256,
+        now: Timestamp,
     ) -> Result<ReorgDelta, DomError> {
         let new_tip_header = self
             .store
@@ -1183,10 +1214,11 @@ impl ChainState {
         connect_blocks.reverse();
         let chain_id = derive_chain_id(self.network_magic, &self.genesis_hash);
         for (block_hash, block) in &connect_blocks {
+            validate_future_timestamp_with_limit(&block.header, now, self.max_future_block_time())?;
             let ctx = ValidationContext {
                 current_height: block.header.height,
                 chain_id: *chain_id.as_bytes(),
-                now: Timestamp(u64::MAX),
+                now,
             };
             validate_block(block, &ctx).map_err(|e| {
                 DomError::Invalid(format!(
@@ -1309,7 +1341,22 @@ impl ChainState {
     }
 }
 
-fn ensure_canonical_utxo_set(store: &DomStore, tip_height: BlockHeight) -> Result<(), DomError> {
+/// Verify the persisted UTXO set against the canonical set reconstructed from
+/// committed block history.
+///
+/// FIX-020 — safety contract: if the two diverge, this is either on-disk
+/// corruption (torn write, bit-rot) or deliberate tampering with the UTXO
+/// database. A node MUST NOT silently continue on a divergent set, so the
+/// default (`allow_utxo_repair == false`) refuses to open with a fatal
+/// `CHAIN_CORRUPT_SENTINEL` error logged at ERROR level. The old auto-heal
+/// (`replace_utxo_set`) remains available ONLY as an explicit operator opt-in
+/// (`allow_utxo_repair == true`, reached via `ChainState::open_with_utxo_repair`).
+/// The reconstruction logic itself is unchanged; only *when* it runs.
+fn ensure_canonical_utxo_set(
+    store: &DomStore,
+    tip_height: BlockHeight,
+    allow_utxo_repair: bool,
+) -> Result<(), DomError> {
     let canonical = reconstruct_canonical_utxo_set(store, tip_height)?;
     let canonical_digest = digest_utxo_entries(&canonical);
     let persisted = store.read_all_utxos_raw()?;
@@ -1326,8 +1373,27 @@ fn ensure_canonical_utxo_set(store: &DomStore, tip_height: BlockHeight) -> Resul
         return Ok(());
     }
 
+    if !allow_utxo_repair {
+        error!(
+            "{CHAIN_CORRUPT_SENTINEL}: persisted UTXO set diverges from canonical reconstruction on reopen \
+             (persisted_entries={}, canonical_entries={}); possible disk corruption or tampering — refusing to open",
+            persisted.len(),
+            canonical.len()
+        );
+        return Err(DomError::Internal(format!(
+            "{CHAIN_CORRUPT_SENTINEL}: persisted UTXO set diverges from the canonical set \
+             reconstructed from block history (persisted_entries={}, canonical_entries={}). \
+             This indicates disk corruption or tampering of the UTXO database. The node refuses \
+             to open on a divergent UTXO set rather than silently healing it. To rebuild the UTXO \
+             set from canonical block history, restart in the explicit operator UTXO-repair mode \
+             (ChainState::open_with_utxo_repair).",
+            persisted.len(),
+            canonical.len()
+        )));
+    }
+
     info!(
-        "Canonical UTXO reconstruction diverged on reopen; replacing persisted set (persisted_entries={}, canonical_entries={})",
+        "Operator UTXO-repair mode: persisted UTXO set diverged on reopen; rebuilding from canonical reconstruction (persisted_entries={}, canonical_entries={})",
         persisted.len(),
         canonical.len()
     );
