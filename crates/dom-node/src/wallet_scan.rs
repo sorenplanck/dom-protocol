@@ -27,7 +27,7 @@
 
 use dom_consensus::Block;
 use dom_core::DomError;
-use dom_serialization::DomDeserialize;
+use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::DomStore;
 use dom_wallet::{InMemoryChainScan, ScanBlock};
 
@@ -49,9 +49,10 @@ pub fn collect_chain_scan(
 ) -> Result<InMemoryChainScan, DomError> {
     let mut scan = InMemoryChainScan::new();
     for height in 0..=tip_height {
-        if let Some(block) = scan_block_at(store, height)? {
-            scan.insert(block);
-        }
+        // A restore against a canonical tip must not silently turn a missing
+        // canonical height into an apparently valid scan.  Missing or corrupt
+        // storage is a fail-closed error, never an empty block.
+        scan.insert(scan_canonical_block_at(store, height)?.scan);
     }
     Ok(scan)
 }
@@ -63,15 +64,53 @@ pub fn collect_chain_scan(
 /// The single per-block extractor reused by [`collect_chain_scan`] (the embedded
 /// rescan) and by the node's `/chain/scan` RPC, so the two never diverge.
 pub fn scan_block_at(store: &DomStore, height: u64) -> Result<Option<ScanBlock>, DomError> {
-    let Some(hash) = store.get_hash_at_height(height)? else {
-        return Ok(None);
-    };
-    let Some(body) = store.get_block_body(&hash)? else {
-        return Ok(None);
-    };
+    match store.get_hash_at_height(height)? {
+        Some(_) => Ok(Some(scan_canonical_block_at(store, height)?.scan)),
+        None => Ok(None),
+    }
+}
+
+/// Strict canonical scan projection used by the public RPC.  Unlike the
+/// legacy optional projection above, every height is an asserted canonical
+/// height: absent hashes/bodies, a zero hash, malformed data, an incorrect
+/// header height, or a body whose header does not hash to the height index are
+/// all errors.  This prevents wallet clients from accepting fabricated zero
+/// hashes or silently gapped evidence.
+pub struct CanonicalScanBlock {
+    pub scan: ScanBlock,
+    pub kernel_excesses: Vec<[u8; 33]>,
+}
+
+pub fn scan_canonical_block_at(
+    store: &DomStore,
+    height: u64,
+) -> Result<CanonicalScanBlock, DomError> {
+    let hash = store
+        .get_hash_at_height(height)?
+        .ok_or_else(|| DomError::Internal(format!("missing canonical hash at height {height}")))?;
+    if hash == [0u8; 32] {
+        return Err(DomError::Internal(format!(
+            "zero canonical hash at height {height}"
+        )));
+    }
+    let body = store
+        .get_block_body(&hash)?
+        .ok_or_else(|| DomError::Internal(format!("missing canonical body at height {height}")))?;
     let block = Block::from_bytes(&body).map_err(|e| {
         DomError::Internal(format!("decode canonical block at height {height}: {e}"))
     })?;
+    if block.header.height.0 != height {
+        return Err(DomError::Internal(format!(
+            "canonical body height mismatch: requested {height}, got {}",
+            block.header.height.0
+        )));
+    }
+    let header_bytes = block.header.to_bytes()?;
+    if dom_crypto::blake2b_256(&header_bytes).as_bytes() != &hash {
+        return Err(DomError::Internal(format!(
+            "canonical body hash mismatch at height {height}"
+        )));
+    }
 
     // Coinbase output first (it lives outside `transactions`), then every
     // non-coinbase output. Inputs feed the wallet's spent/unspent rebuild.
@@ -91,11 +130,31 @@ pub fn scan_block_at(store: &DomStore, height: u64) -> Result<Option<ScanBlock>,
         .total_fees()
         .map_err(|e| DomError::Internal(format!("total fees at height {height}: {e}")))?;
 
-    Ok(Some(ScanBlock {
-        height,
-        block_hash: Some(hash),
-        output_commitments,
-        input_commitments,
-        total_fees_noms,
-    }))
+    let mut kernel_excesses = Vec::with_capacity(
+        1 + block
+            .transactions
+            .iter()
+            .map(|tx| tx.kernels.len())
+            .sum::<usize>(),
+    );
+    // The coinbase kernel is consensus data and is therefore the first,
+    // deterministic confirmation identifier, followed by transaction order
+    // and each transaction's canonical kernel order.
+    kernel_excesses.push(*block.coinbase.kernel.excess.as_bytes());
+    for tx in &block.transactions {
+        for kernel in &tx.kernels {
+            kernel_excesses.push(*kernel.excess.as_bytes());
+        }
+    }
+
+    Ok(CanonicalScanBlock {
+        scan: ScanBlock {
+            height,
+            block_hash: Some(hash),
+            output_commitments,
+            input_commitments,
+            total_fees_noms,
+        },
+        kernel_excesses,
+    })
 }

@@ -4,7 +4,11 @@
 //! both Arc<DomNode> and NodeHandle are defined outside dom-node.
 
 use crate::node::{clear_persisted_mempool_snapshot, snapshot_tx_chain_view, DomNode};
-use dom_rpc::{MempoolTxInfo, NodeHandle, PeerInfo, RpcError, TxAdmission, UtxoInfo};
+use dom_core::PROTOCOL_VERSION;
+use dom_rpc::{
+    AncestryRequest, ChainAncestry, ChainIdentity, ChainTip, MempoolTxInfo, NodeHandle, PeerInfo,
+    RpcError, TxAdmission, UtxoInfo, MAX_ANCESTRY_STEPS, MAX_SCAN_RANGE,
+};
 use dom_serialization::DomDeserialize;
 use std::sync::Arc;
 
@@ -158,6 +162,101 @@ impl NodeHandle for NodeHandleImpl {
         self.0.config.network.as_str()
     }
 
+    fn chain_identity(&self) -> Result<ChainIdentity, RpcError> {
+        // One non-blocking lock protects all values in the snapshot.  Do not
+        // substitute config-only defaults if canonical storage is unavailable.
+        let c = self
+            .0
+            .chain
+            .try_lock()
+            .map_err(|_| RpcError::Overloaded("chain busy; retry".into()))?;
+        let tip_hash = *c.tip_hash.as_bytes();
+        if tip_hash == [0u8; 32] {
+            return Err(RpcError::Internal("canonical tip hash unavailable".into()));
+        }
+        let indexed_tip = c
+            .store
+            .get_hash_at_height(c.tip_height.0)
+            .map_err(|_| RpcError::Internal("canonical tip unavailable".into()))?
+            .ok_or_else(|| RpcError::Internal("canonical tip unavailable".into()))?;
+        if indexed_tip != tip_hash {
+            return Err(RpcError::Internal("canonical tip mismatch".into()));
+        }
+        let genesis_hash = c
+            .store
+            .get_hash_at_height(0)
+            .map_err(|_| RpcError::Internal("canonical genesis unavailable".into()))?
+            .unwrap_or_else(|| *c.genesis_hash.as_bytes());
+        if genesis_hash == [0u8; 32] {
+            return Err(RpcError::Internal(
+                "canonical genesis hash unavailable".into(),
+            ));
+        }
+        let chain_id = *dom_consensus::derive_chain_id(c.network_magic, &c.genesis_hash).as_bytes();
+        Ok(ChainIdentity {
+            protocol_version: PROTOCOL_VERSION,
+            network: self.0.config.network.as_str(),
+            network_magic: c.network_magic,
+            chain_id,
+            genesis_hash,
+            tip: ChainTip {
+                height: c.tip_height.0,
+                hash: tip_hash,
+            },
+            max_scan_range: MAX_SCAN_RANGE,
+        })
+    }
+
+    fn chain_ancestry(&self, request: AncestryRequest) -> Result<ChainAncestry, RpcError> {
+        if request.descendant_height < request.ancestor_height {
+            return Err(RpcError::InvalidTx(
+                "descendant_height must be at least ancestor_height".into(),
+            ));
+        }
+        let steps = request.descendant_height - request.ancestor_height;
+        if request.max_steps > MAX_ANCESTRY_STEPS || steps > request.max_steps {
+            return Err(RpcError::InvalidTx("ancestry bound exceeded".into()));
+        }
+        let c = self
+            .0
+            .chain
+            .try_lock()
+            .map_err(|_| RpcError::Overloaded("chain busy; retry".into()))?;
+        if request.descendant_height > c.tip_height.0 {
+            return Err(RpcError::InvalidTx(
+                "descendant height exceeds canonical tip".into(),
+            ));
+        }
+        let observed_ancestor_hash = c
+            .store
+            .get_hash_at_height(request.ancestor_height)
+            .map_err(|_| RpcError::Internal("canonical ancestry unavailable".into()))?
+            .ok_or_else(|| RpcError::Internal("canonical ancestry unavailable".into()))?;
+        let observed_descendant_hash = c
+            .store
+            .get_hash_at_height(request.descendant_height)
+            .map_err(|_| RpcError::Internal("canonical ancestry unavailable".into()))?
+            .ok_or_else(|| RpcError::Internal("canonical ancestry unavailable".into()))?;
+        if observed_ancestor_hash == [0u8; 32] || observed_descendant_hash == [0u8; 32] {
+            return Err(RpcError::Internal(
+                "canonical ancestry hash unavailable".into(),
+            ));
+        }
+        let ancestor_match = observed_ancestor_hash == request.ancestor_hash;
+        let descendant_match = observed_descendant_hash == request.descendant_hash;
+        Ok(ChainAncestry {
+            // Height-indexed hashes are the chain state's canonical path under
+            // this single lock; no alternate witness or finality rule exists.
+            canonical: ancestor_match && descendant_match,
+            ancestor_match,
+            descendant_match,
+            steps_checked: steps,
+            bounded: true,
+            observed_ancestor_hash,
+            observed_descendant_hash,
+        })
+    }
+
     fn get_block_header(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
         let c = self.0.chain.try_lock().ok()?;
         c.store.get_block_header(hash).ok().flatten()
@@ -178,6 +277,13 @@ impl NodeHandle for NodeHandleImpl {
             is_coinbase: entry.is_coinbase,
             is_mature: entry.is_mature(current_height),
         })
+    }
+
+    fn get_kernel_block(&self, excess: &[u8; 33]) -> Option<[u8; 32]> {
+        let c = self.0.chain.try_lock().ok()?;
+        let block_hash = c.store.get_kernel_block(excess).ok().flatten()?;
+        // Do not surface a malformed zero value as confirmation evidence.
+        (block_hash != [0u8; 32]).then_some(block_hash)
     }
 
     fn get_peers(&self) -> Vec<PeerInfo> {
@@ -397,8 +503,19 @@ impl NodeHandle for NodeHandleImpl {
             .try_lock()
             .map_err(|_| RpcError::Overloaded("chain busy; retry".into()))?;
 
+        if from > to {
+            return Err(RpcError::InvalidTx("scan from must be at most to".into()));
+        }
         let tip_height = c.tip_height.0;
         let tip_hash = *c.tip_hash.as_bytes();
+        if tip_hash == [0u8; 32]
+            || c.store
+                .get_hash_at_height(tip_height)
+                .map_err(|_| RpcError::Internal("canonical tip unavailable".into()))?
+                != Some(tip_hash)
+        {
+            return Err(RpcError::Internal("canonical tip unavailable".into()));
+        }
         // Bound the work (and the lock hold): at most MAX_SCAN_RANGE heights,
         // never past the tip. Clients page across larger ranges.
         let effective_to = scan_to_clamped(from, to, tip_height);
@@ -406,17 +523,23 @@ impl NodeHandle for NodeHandleImpl {
         let mut blocks = Vec::new();
         if from <= effective_to {
             for height in from..=effective_to {
-                if let Some(sb) = crate::wallet_scan::scan_block_at(&c.store, height)
-                    .map_err(|e| RpcError::Internal(e.to_string()))?
-                {
-                    blocks.push(dom_rpc::ScanBlockData {
-                        height: sb.height,
-                        hash: sb.block_hash.unwrap_or([0u8; 32]),
-                        output_commitments: sb.output_commitments,
-                        input_commitments: sb.input_commitments,
-                        fees: sb.total_fees_noms,
-                    });
+                let projected = crate::wallet_scan::scan_canonical_block_at(&c.store, height)
+                    .map_err(|_| RpcError::Internal("canonical scan data unavailable".into()))?;
+                let sb = projected.scan;
+                let hash = sb
+                    .block_hash
+                    .ok_or_else(|| RpcError::Internal("canonical scan hash unavailable".into()))?;
+                if hash == [0u8; 32] {
+                    return Err(RpcError::Internal("canonical scan hash unavailable".into()));
                 }
+                blocks.push(dom_rpc::ScanBlockData {
+                    height: sb.height,
+                    hash,
+                    output_commitments: sb.output_commitments,
+                    input_commitments: sb.input_commitments,
+                    fees: sb.total_fees_noms,
+                    kernel_excesses: projected.kernel_excesses,
+                });
             }
         }
 
@@ -451,7 +574,7 @@ mod tests {
     use dom_core::{Amount, KERNEL_FEAT_PLAIN, MIN_RELAY_FEE_RATE, TAG_KERNEL_MSG};
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::{bp2_prove, pedersen::Commitment, schnorr_sign, BlindingFactor, SecretKey};
-    use dom_rpc::SpendRequest;
+    use dom_rpc::{AncestryRequest, RpcError, SpendRequest};
     use dom_serialization::DomSerialize;
     use dom_store::utxo::UtxoEntry;
     use dom_wallet::{Network, OwnedOutput, Wallet, WalletDir, WALLET_DAT_NAME};
@@ -971,9 +1094,12 @@ mod tests {
         )
     }
 
-    #[test]
-    fn scan_chain_clamps_to_tip_on_idle_node() {
+    #[tokio::test]
+    async fn scan_chain_clamps_to_tip_on_initialized_node() {
         let node = fresh_node("scanchain-idle");
+        crate::miner::create_genesis_block(node.clone())
+            .await
+            .expect("create canonical genesis");
         let handle = NodeHandleImpl(node.clone());
 
         let scan = handle.scan_chain(0, 100).expect("scan ok on idle node");
@@ -983,6 +1109,47 @@ mod tests {
         assert_eq!(scan.to, 100u64.min(tip), "to is clamped to the tip");
         // Every returned block is within the served range.
         assert!(scan.blocks.iter().all(|b| b.height <= scan.to));
+        assert!(scan.blocks.iter().all(|b| b.hash != [0u8; 32]));
+        assert_eq!(scan.blocks[0].kernel_excesses.len(), 1);
+    }
+
+    #[test]
+    fn scan_chain_rejects_uninitialized_zero_tip_evidence() {
+        let node = fresh_node("scanchain-uninitialized");
+        let err = NodeHandleImpl(node)
+            .scan_chain(0, 0)
+            .expect_err("zero hash must never be emitted as scan evidence");
+        assert!(matches!(err, RpcError::Internal(message) if message.contains("canonical tip")));
+    }
+
+    #[tokio::test]
+    async fn identity_and_ancestry_use_the_validation_chain_id_snapshot() {
+        let node = fresh_node("wallet-safe-identity");
+        crate::miner::create_genesis_block(node.clone())
+            .await
+            .expect("create canonical genesis");
+        let handle = NodeHandleImpl(node.clone());
+        let identity = handle.chain_identity().expect("identity snapshot");
+        let expected_chain_id = {
+            let chain = node.chain.try_lock().expect("chain lock");
+            *dom_consensus::derive_chain_id(chain.network_magic, &chain.genesis_hash).as_bytes()
+        };
+        assert_eq!(identity.chain_id, expected_chain_id);
+        assert_eq!(identity.genesis_hash, identity.tip.hash);
+        assert_eq!(identity.tip.height, 0);
+
+        let evidence = handle
+            .chain_ancestry(AncestryRequest {
+                ancestor_height: 0,
+                ancestor_hash: identity.genesis_hash,
+                descendant_height: 0,
+                descendant_hash: identity.tip.hash,
+                max_steps: 0,
+            })
+            .expect("same-height canonical evidence");
+        assert!(evidence.canonical);
+        assert_eq!(evidence.steps_checked, 0);
+        assert!(evidence.bounded);
     }
 
     #[test]

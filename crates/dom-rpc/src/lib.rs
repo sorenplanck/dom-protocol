@@ -37,6 +37,12 @@ pub trait NodeHandle: Send + Sync + 'static {
     /// Get UTXO info by commitment (33 bytes). Returns None if spent or never created.
     fn get_utxo(&self, commitment: &[u8; 33]) -> Option<UtxoInfo>;
 
+    /// Look up a confirmed kernel excess through the node's persistent index.
+    /// Implementations must not implement this by walking the chain.
+    fn get_kernel_block(&self, _excess: &[u8; 33]) -> Option<[u8; 32]> {
+        None
+    }
+
     /// Get list of connected peers.
     fn get_peers(&self) -> Vec<PeerInfo> {
         Vec::new()
@@ -62,12 +68,66 @@ pub trait NodeHandle: Send + Sync + 'static {
     fn scan_chain(&self, _from: u64, _to: u64) -> Result<ChainScan, RpcError> {
         Err(RpcError::Internal("chain scan not supported".into()))
     }
+
+    /// A coherent snapshot of the canonical chain identity.  This is a
+    /// wallet-safe RPC value, deliberately separate from `PROTOCOL_VERSION`.
+    fn chain_identity(&self) -> Result<ChainIdentity, RpcError> {
+        Err(RpcError::Internal("chain identity not supported".into()))
+    }
+
+    /// Bounded canonical-chain source evidence.  This is not a finality proof.
+    fn chain_ancestry(&self, _request: AncestryRequest) -> Result<ChainAncestry, RpcError> {
+        Err(RpcError::Internal("chain ancestry not supported".into()))
+    }
 }
 
 /// Maximum number of heights a single [`NodeHandle::scan_chain`] / `/chain/scan`
 /// call returns. Bounds how long the chain lock is held so block connection is
 /// never stalled; clients page across larger ranges.
 pub const MAX_SCAN_RANGE: u64 = 1000;
+
+/// Version of the wallet-safe HTTP contract.  It is intentionally independent
+/// of the consensus protocol version returned by `/status`.
+pub const WALLET_SAFE_RPC_API_VERSION: u32 = 1;
+
+/// A conservative upper bound for one ancestry request.  Clients needing a
+/// longer observation must page; this endpoint never claims finality.
+pub const MAX_ANCESTRY_STEPS: u64 = 256;
+
+/// Canonical chain identity obtained atomically from the node's chain state.
+#[derive(Debug, Clone)]
+pub struct ChainIdentity {
+    pub protocol_version: u32,
+    pub network: &'static str,
+    pub network_magic: u32,
+    pub chain_id: [u8; 32],
+    pub genesis_hash: [u8; 32],
+    pub tip: ChainTip,
+    pub max_scan_range: u64,
+}
+
+/// Bounded ancestry request after strict fixed-length hash parsing.
+#[derive(Debug, Clone, Copy)]
+pub struct AncestryRequest {
+    pub ancestor_height: u64,
+    pub ancestor_hash: [u8; 32],
+    pub descendant_height: u64,
+    pub descendant_hash: [u8; 32],
+    pub max_steps: u64,
+}
+
+/// Canonical-chain source evidence.  `canonical` only describes the snapshot
+/// observed by the node; it is neither finality nor a StableView witness.
+#[derive(Debug, Clone)]
+pub struct ChainAncestry {
+    pub canonical: bool,
+    pub ancestor_match: bool,
+    pub descendant_match: bool,
+    pub steps_checked: u64,
+    pub bounded: bool,
+    pub observed_ancestor_hash: [u8; 32],
+    pub observed_descendant_hash: [u8; 32],
+}
 
 /// Canonical tip (height + hash) returned alongside a scan.
 #[derive(Debug, Clone)]
@@ -92,6 +152,9 @@ pub struct ScanBlockData {
     pub input_commitments: Vec<[u8; 33]>,
     /// Total transaction fees in this block (noms).
     pub fees: u64,
+    /// Canonical transaction-kernel excess commitments, in block order.  The
+    /// coinbase kernel is first because it is part of the consensus block.
+    pub kernel_excesses: Vec<[u8; 33]>,
 }
 
 /// Result of [`NodeHandle::scan_chain`]: the tip, the actual scanned range
@@ -312,6 +375,18 @@ struct UtxoNotFoundResponse {
     found: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct KernelFoundResponse {
+    found: bool,
+    excess: String,
+    block_hash: String,
+}
+
+#[derive(Debug, Serialize)]
+struct KernelNotFoundResponse {
+    found: bool,
+}
+
 use middleware::BearerToken;
 use std::time::Duration;
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
@@ -326,10 +401,13 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
 
     let public_routes = Router::new()
         .route("/status", get(status))
+        .route("/chain/identity", get(chain_identity_handler))
+        .route("/chain/ancestry", get(chain_ancestry_handler))
         .route("/mempool", get(mempool))
         .route("/tx/:tx_hash", get(get_tx))
         .route("/block/:height_or_hash", get(get_block))
         .route("/utxo/:commitment", get(get_utxo))
+        .route("/kernel/:excess", get(get_kernel))
         .route("/wallet/balance", get(wallet_balance_handler))
         .route("/chain/scan", get(chain_scan_handler))
         .layer(rate_limit_read);
@@ -637,6 +715,38 @@ async fn get_utxo(
     }
 }
 
+/// `GET /kernel/{excess}` uses the existing persistent kernel index.  It never
+/// scans the chain and returns only public canonical confirmation data.
+async fn get_kernel(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Path(excess_hex): Path<String>,
+) -> Result<Response, RpcError> {
+    let bytes = decode_hex(&excess_hex)?;
+    if bytes.len() != 33 {
+        return Err(RpcError::InvalidHex(
+            "kernel excess must be 33 bytes (66 hex chars)".into(),
+        ));
+    }
+    let mut excess = [0u8; 33];
+    excess.copy_from_slice(&bytes);
+    match handle.get_kernel_block(&excess) {
+        Some(block_hash) if block_hash != [0u8; 32] => Ok((
+            StatusCode::OK,
+            Json(KernelFoundResponse {
+                found: true,
+                excess: hex::encode(excess),
+                block_hash: hex::encode(block_hash),
+            }),
+        )
+            .into_response()),
+        _ => Ok((
+            StatusCode::NOT_FOUND,
+            Json(KernelNotFoundResponse { found: false }),
+        )
+            .into_response()),
+    }
+}
+
 fn submit_error(err: RpcError) -> (StatusCode, Json<SubmitTxResponse>) {
     let status = err.status_code();
     (
@@ -679,6 +789,44 @@ struct ScanQuery {
     to: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AncestryQuery {
+    ancestor_height: u64,
+    ancestor_hash: String,
+    descendant_height: u64,
+    descendant_hash: String,
+    max_steps: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ChainIdentityResponse {
+    rpc_api_version: u32,
+    protocol_version: u32,
+    network: &'static str,
+    network_magic: String,
+    chain_id: String,
+    genesis_hash: String,
+    tip_height: u64,
+    tip_hash: String,
+    max_scan_range: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ChainAncestryResponse {
+    canonical: bool,
+    ancestor_match: bool,
+    descendant_match: bool,
+    steps_checked: u64,
+    bounded: bool,
+    observed_ancestor_hash: String,
+    observed_descendant_hash: String,
+    /// This endpoint is bounded source evidence, not a finality or StableView
+    /// witness.  The explicit field keeps that safety property visible to
+    /// clients that persist raw JSON responses.
+    is_finality_proof: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct TipDto {
     height: u64,
@@ -692,6 +840,7 @@ struct ScanBlockDto {
     output_commitments: Vec<String>,
     input_commitments: Vec<String>,
     fees: u64,
+    kernel_excesses: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -721,6 +870,7 @@ async fn chain_scan_handler(
                     output_commitments: b.output_commitments.iter().map(hex::encode).collect(),
                     input_commitments: b.input_commitments.iter().map(hex::encode).collect(),
                     fees: b.fees,
+                    kernel_excesses: b.kernel_excesses.iter().map(hex::encode).collect(),
                 })
                 .collect();
             Json(ChainScanResponse {
@@ -736,6 +886,61 @@ async fn chain_scan_handler(
         }
         Err(e) => e.into_response(),
     }
+}
+
+/// `GET /chain/identity` returns one coherent, non-blocking canonical snapshot.
+async fn chain_identity_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+) -> Result<Json<ChainIdentityResponse>, RpcError> {
+    let identity = handle.chain_identity()?;
+    Ok(Json(ChainIdentityResponse {
+        rpc_api_version: WALLET_SAFE_RPC_API_VERSION,
+        protocol_version: identity.protocol_version,
+        network: identity.network,
+        network_magic: format!("{:08x}", identity.network_magic),
+        chain_id: hex::encode(identity.chain_id),
+        genesis_hash: hex::encode(identity.genesis_hash),
+        tip_height: identity.tip.height,
+        tip_hash: hex::encode(identity.tip.hash),
+        max_scan_range: identity.max_scan_range,
+    }))
+}
+
+/// `GET /chain/ancestry` supplies bounded canonical-chain source evidence; it
+/// deliberately does not make a finality claim.
+async fn chain_ancestry_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Query(q): Query<AncestryQuery>,
+) -> Result<Json<ChainAncestryResponse>, RpcError> {
+    let request = AncestryRequest {
+        ancestor_height: q.ancestor_height,
+        ancestor_hash: parse_hash_hex(&q.ancestor_hash)?,
+        descendant_height: q.descendant_height,
+        descendant_hash: parse_hash_hex(&q.descendant_hash)?,
+        max_steps: q.max_steps,
+    };
+    if request.descendant_height < request.ancestor_height {
+        return Err(RpcError::InvalidTx(
+            "descendant_height must be at least ancestor_height".into(),
+        ));
+    }
+    let steps = request.descendant_height - request.ancestor_height;
+    if request.max_steps > MAX_ANCESTRY_STEPS || steps > request.max_steps {
+        return Err(RpcError::InvalidTx(format!(
+            "ancestry range exceeds requested or maximum bound ({MAX_ANCESTRY_STEPS})"
+        )));
+    }
+    let evidence = handle.chain_ancestry(request)?;
+    Ok(Json(ChainAncestryResponse {
+        canonical: evidence.canonical,
+        ancestor_match: evidence.ancestor_match,
+        descendant_match: evidence.descendant_match,
+        steps_checked: evidence.steps_checked,
+        bounded: evidence.bounded,
+        observed_ancestor_hash: hex::encode(evidence.observed_ancestor_hash),
+        observed_descendant_hash: hex::encode(evidence.observed_descendant_hash),
+        is_finality_proof: false,
+    }))
 }
 
 async fn wallet_spend_handler(
@@ -774,6 +979,8 @@ mod tests {
         no_peers: bool,
         /// Canned chain scan for `/chain/scan` tests; `None` → unsupported.
         scan: Option<ChainScan>,
+        identity: Option<ChainIdentity>,
+        ancestry: Option<ChainAncestry>,
     }
 
     impl MockNode {
@@ -784,6 +991,8 @@ mod tests {
                 network: "regtest",
                 no_peers: false,
                 scan: None,
+                identity: None,
+                ancestry: None,
             }
         }
 
@@ -799,6 +1008,14 @@ mod tests {
             Self {
                 network,
                 ..Self::new(height)
+            }
+        }
+
+        fn with_wallet_safe_evidence(identity: ChainIdentity, ancestry: ChainAncestry) -> Self {
+            Self {
+                identity: Some(identity),
+                ancestry: Some(ancestry),
+                ..Self::new(0)
             }
         }
 
@@ -830,6 +1047,16 @@ mod tests {
                 }
                 None => Err(RpcError::Internal("chain scan not supported".into())),
             }
+        }
+        fn chain_identity(&self) -> Result<ChainIdentity, RpcError> {
+            self.identity
+                .clone()
+                .ok_or_else(|| RpcError::Internal("chain identity not supported".into()))
+        }
+        fn chain_ancestry(&self, _: AncestryRequest) -> Result<ChainAncestry, RpcError> {
+            self.ancestry
+                .clone()
+                .ok_or_else(|| RpcError::Internal("chain ancestry not supported".into()))
         }
         fn mempool_size(&self) -> usize {
             self.txs.lock().unwrap().len()
@@ -1320,6 +1547,7 @@ mod tests {
                     output_commitments: vec![[0xa1u8; 33]],
                     input_commitments: vec![],
                     fees: 0,
+                    kernel_excesses: vec![[0xc1u8; 33]],
                 },
                 ScanBlockData {
                     height: 2,
@@ -1327,6 +1555,7 @@ mod tests {
                     output_commitments: vec![[0xb2u8; 33]],
                     input_commitments: vec![[0xa1u8; 33]],
                     fees: 7,
+                    kernel_excesses: vec![[0xc2u8; 33], [0xc3u8; 33]],
                 },
             ],
         }
@@ -1358,6 +1587,128 @@ mod tests {
             j["blocks"][1]["input_commitments"][0],
             serde_json::json!("a1".repeat(33))
         );
+        assert_eq!(
+            j["blocks"][1]["kernel_excesses"],
+            serde_json::json!(["c2".repeat(33), "c3".repeat(33)])
+        );
+    }
+
+    fn canned_wallet_safe_evidence() -> (ChainIdentity, ChainAncestry) {
+        (
+            ChainIdentity {
+                protocol_version: PROTOCOL_VERSION,
+                network: "regtest",
+                network_magic: 0x5245_4754,
+                chain_id: [0x11; 32],
+                genesis_hash: [0x22; 32],
+                tip: ChainTip {
+                    height: 9,
+                    hash: [0x33; 32],
+                },
+                max_scan_range: MAX_SCAN_RANGE,
+            },
+            ChainAncestry {
+                canonical: true,
+                ancestor_match: true,
+                descendant_match: true,
+                steps_checked: 9,
+                bounded: true,
+                observed_ancestor_hash: [0x22; 32],
+                observed_descendant_hash: [0x33; 32],
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn chain_identity_is_fixed_hex_and_separate_from_protocol_version() {
+        let (identity, ancestry) = canned_wallet_safe_evidence();
+        let r = app_with(MockNode::with_wallet_safe_evidence(identity, ancestry))
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/identity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = body_json(r).await;
+        assert_eq!(body["rpc_api_version"], WALLET_SAFE_RPC_API_VERSION);
+        assert_eq!(body["protocol_version"], PROTOCOL_VERSION);
+        assert_eq!(body["network_magic"], "52454754");
+        assert_eq!(body["chain_id"], "11".repeat(32));
+        assert_eq!(body["genesis_hash"], "22".repeat(32));
+        assert_eq!(body["tip_hash"], "33".repeat(32));
+    }
+
+    #[tokio::test]
+    async fn chain_ancestry_rejects_malformed_or_unbounded_requests() {
+        let (identity, ancestry) = canned_wallet_safe_evidence();
+        let app = app_with(MockNode::with_wallet_safe_evidence(identity, ancestry));
+        let malformed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/ancestry?ancestor_height=0&ancestor_hash=bad&descendant_height=1&descendant_hash=33&max_steps=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        let unbounded = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/chain/ancestry?ancestor_height=0&ancestor_hash={}&descendant_height=999&descendant_hash={}&max_steps={}", "22".repeat(32), "33".repeat(32), MAX_ANCESTRY_STEPS))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unbounded.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn chain_ancestry_marks_evidence_as_not_finality() {
+        let (identity, ancestry) = canned_wallet_safe_evidence();
+        let r = app_with(MockNode::with_wallet_safe_evidence(identity, ancestry))
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/chain/ancestry?ancestor_height=0&ancestor_hash={}&descendant_height=9&descendant_hash={}&max_steps=9", "22".repeat(32), "33".repeat(32)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = body_json(r).await;
+        assert_eq!(body["canonical"], true);
+        assert_eq!(body["is_finality_proof"], false);
+    }
+
+    #[tokio::test]
+    async fn kernel_lookup_requires_fixed_length_excess_and_never_scans() {
+        let bad = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/kernel/abcd")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        let absent = app()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/kernel/{}", "ab".repeat(33)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_json(absent).await, serde_json::json!({"found": false}));
     }
 
     #[tokio::test]
