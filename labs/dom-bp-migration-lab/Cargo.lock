@@ -141,10 +141,12 @@ dependencies = [
  "dom-crypto",
  "grin_secp256k1zkp",
  "hex",
+ "k256",
  "rand 0.8.7",
  "serde",
  "serde_json",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]

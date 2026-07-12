@@ -12,6 +12,14 @@ immediate migration abort.
 Candidate A and Candidate B do not exist here yet. `UnavailableCandidate`
 fails closed, so it cannot accidentally accept a proof or claim recovery.
 
+## L1-B aggregate-rewind result
+
+L1-B adds a scalar-only research model for the live two-commitment aggregation.
+It is not a recovery implementation and it does not alter production. The
+model confirms the backend term `z^2*r + z^3*(-r) = z^2*(1-z)*r`; `z = 1`
+removes the only recoverable blinding term. See
+[`docs/L1B_AGGREGATE_REWIND_SPEC.md`](docs/L1B_AGGREGATE_REWIND_SPEC.md).
+
 ## Run
 
 ```bash
@@ -32,4 +40,3 @@ fork and the current backend with identical C symbols into the same process.
 
 No migration is authorized by this lab. A future candidate must first match the
 current ceiling oracle and its adversarial corpus.
-

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "purpose": "public scalar algebra assertions; no witness, nonce, or wallet secret is stored",
+  "backend": "grin_secp256k1zkp-0.7.15",
+  "algorithm": "classic Bulletproof",
+  "seed": "0xa661e6a7ee510001",
+  "case_count": 10000,
+  "curve": "secp256k1",
+  "curve_order_hex": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+  "dom": {
+    "max_provable_value": 4503599627370495,
+    "nbits": 64,
+    "n_commits": 2,
+    "proof_len": 739,
+    "blinds_relation": "[r, -r]"
+  },
+  "backend_taux": "tau1*x + tau2*x^2 + z^2*blind[0] + z^3*blind[1]",
+  "dom_blind_coefficient": "z^2*(1-z)",
+  "required_nonzero_conditions": ["x != 0", "z != 0", "z != 1"],
+  "edge_case": {
+    "z": "1",
+    "coefficient": "0",
+    "result": "blind_not_recoverable_fail_closed"
+  },
+  "metadata_layout_test_only": {
+    "length": 20,
+    "fields": [
+      "output_version:u8",
+      "network_id:u8",
+      "account:u32be",
+      "branch:u8",
+      "index:u32be",
+      "binding_digest_truncated:9bytes"
+    ]
+  }
+}
