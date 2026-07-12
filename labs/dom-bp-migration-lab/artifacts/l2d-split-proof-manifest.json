@@ -1,0 +1,25 @@
+{
+  "title": "L2-D Split Proof Feasibility Manifest",
+  "author": "Soren Planck",
+  "email": "sorenplanck@tutamail.com",
+  "status": "Laboratory / Not Production",
+  "schema_version": 1,
+  "dom_commit_observed": "165f8732e9eac13609914af98765a1bba152363b",
+  "l0_commit": "93fa9da42bfcb8cdc5c1b82dde5d6ccc5405c59a",
+  "l1b_commit": "165f8732e9eac13609914af98765a1bba152363b",
+  "backend": "grin_secp256k1zkp-0.7.15",
+  "algorithm": "classic Bulletproof",
+  "single_proof_len": 675,
+  "split_envelope_len": 1351,
+  "property_seed": "0xd052d5f117c00001",
+  "property_cases": 10000,
+  "classification": "D_SPLIT_PROOF_EQUIVALENT_AND_RECOVERABLE",
+  "test_result": "green",
+  "source_hashes": {
+    "split_proof_candidate_rs": "ceee3fde8f1e1dd3a566566f6c0b71c78954c6929feef3ae8a5e247ba36c24a2",
+    "grin_bulletproofs_header_h": "dda46d6dde88fe3507a5ee9bacccac3632e94fe65af771cadcb69f181fd33754",
+    "grin_rangeproof_impl_h": "88935a658d6912f660e4ee85cfe446f36175f0129093a69872ca1a533047f83a",
+    "dom_bulletproof_bp_rs": "ac79492ff67a547520abe2577808405bbd1a3689912c0992113823b2d8551196"
+  },
+  "generated_utc": "2026-07-12T19:10:00Z"
+}

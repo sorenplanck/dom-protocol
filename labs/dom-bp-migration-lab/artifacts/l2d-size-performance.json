@@ -1,0 +1,18 @@
+{
+  "title": "L2-D Split Proof Size and Performance Evidence",
+  "author": "Soren Planck",
+  "email": "sorenplanck@tutamail.com",
+  "status": "Laboratory / Not Production",
+  "schema_version": 1,
+  "iterations": 20,
+  "single_proof_len": 675,
+  "split_envelope_len": 1351,
+  "current_aggregate_proof_len": 739,
+  "current_generate": { "median_us": 60363, "p95_us": 63156 },
+  "current_verify": { "median_us": 7147, "p95_us": 7840 },
+  "split_generate": { "median_us": 62021, "p95_us": 65658 },
+  "split_verify": { "median_us": 8621, "p95_us": 8878 },
+  "split_recover": { "median_us": 9207, "p95_us": 9946 },
+  "command": "cargo run --release --manifest-path labs/dom-bp-migration-lab/Cargo.toml --locked --bin split-proof-perf",
+  "result": "evidence_only_no_performance_threshold_authorizes_migration"
+}
