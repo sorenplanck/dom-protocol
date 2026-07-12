@@ -29,6 +29,8 @@ impl DomSerialize for OutputCommitmentAndProof {
 }
 
 impl DomDeserialize for OutputCommitmentAndProof {
+    const MIN_SERIALIZED_SIZE: usize = 33 + 4;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let commitment_bytes = r.read_array::<33>()?;
         let proof_bytes = r.read_vec(MAX_PROOF_SIZE)?;
@@ -112,6 +114,9 @@ impl DomSerialize for Slate {
 }
 
 impl DomDeserialize for Slate {
+    const MIN_SERIALIZED_SIZE: usize =
+        2 + 32 + 8 + 8 + 8 + 4 + 1 + 33 + 33 + 32 + 1 + 1 + 1 + 1 + 1;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let version = r.read_u16()?;
         if version != CURRENT_SLATE_VERSION {

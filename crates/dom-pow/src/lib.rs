@@ -1571,6 +1571,8 @@ impl DomSerialize for CompactTarget {
 }
 
 impl DomDeserialize for CompactTarget {
+    const MIN_SERIALIZED_SIZE: usize = 4;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, dom_core::DomError> {
         Ok(CompactTarget(r.read_u32()?))
     }

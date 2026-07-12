@@ -86,6 +86,8 @@ impl DomSerialize for ProofOfWork {
 }
 
 impl DomDeserialize for ProofOfWork {
+    const MIN_SERIALIZED_SIZE: usize = 8 + 32;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         Ok(Self {
             nonce: r.read_u64()?,
@@ -115,6 +117,8 @@ impl DomSerialize for BlockHeader {
 }
 
 impl DomDeserialize for BlockHeader {
+    const MIN_SERIALIZED_SIZE: usize = 4 + 8 + 32 + 8 + 32 + 32 + 32 + 32 + 4 + 32 + 40;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         Ok(Self {
             version: r.read_u32()?,

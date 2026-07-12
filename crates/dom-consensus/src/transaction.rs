@@ -39,6 +39,8 @@ impl DomSerialize for TransactionInput {
 }
 
 impl DomDeserialize for TransactionInput {
+    const MIN_SERIALIZED_SIZE: usize = 33;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let bytes = r.read_array::<33>()?;
         Ok(Self {
@@ -63,6 +65,8 @@ impl DomSerialize for TransactionOutput {
 }
 
 impl DomDeserialize for TransactionOutput {
+    const MIN_SERIALIZED_SIZE: usize = 33 + 4;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let commitment_bytes = r.read_array::<33>()?;
         let proof = r.read_vec(dom_core::MAX_PROOF_SIZE)?;
@@ -102,6 +106,8 @@ impl DomSerialize for TransactionKernel {
 }
 
 impl DomDeserialize for TransactionKernel {
+    const MIN_SERIALIZED_SIZE: usize = 1 + 8 + 8 + 33 + 65;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         Ok(Self {
             features: r.read_u8()?,
@@ -175,6 +181,8 @@ impl DomSerialize for CoinbaseKernel {
 }
 
 impl DomDeserialize for CoinbaseKernel {
+    const MIN_SERIALIZED_SIZE: usize = 1 + 8 + 33 + 65;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let features = r.read_u8()?;
         if features != KERNEL_FEAT_COINBASE {
@@ -247,6 +255,8 @@ impl DomSerialize for Transaction {
 }
 
 impl DomDeserialize for Transaction {
+    const MIN_SERIALIZED_SIZE: usize = 4 + 4 + 4 + 32;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         Ok(Self {
             inputs: r.read_list::<TransactionInput>(MAX_INPUTS_PER_TX)?,
@@ -902,6 +912,9 @@ impl DomSerialize for CoinbaseTransaction {
 }
 
 impl DomDeserialize for CoinbaseTransaction {
+    const MIN_SERIALIZED_SIZE: usize =
+        TransactionOutput::MIN_SERIALIZED_SIZE + CoinbaseKernel::MIN_SERIALIZED_SIZE + 32;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         Ok(Self {
             output: TransactionOutput::deserialize(r)?,

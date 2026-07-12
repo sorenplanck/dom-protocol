@@ -177,6 +177,8 @@ impl DomSerialize for IbdPhase {
 }
 
 impl DomDeserialize for IbdPhase {
+    const MIN_SERIALIZED_SIZE: usize = 1;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         match r.read_u8()? {
             0 => Ok(Self::Idle),
@@ -209,6 +211,8 @@ impl DomSerialize for IbdInterruption {
 }
 
 impl DomDeserialize for IbdInterruption {
+    const MIN_SERIALIZED_SIZE: usize = 1;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         match r.read_u8()? {
             0 => Ok(Self::EmptyResponse),
@@ -267,6 +271,9 @@ impl DomSerialize for PersistedIbdState {
 }
 
 impl DomDeserialize for PersistedIbdState {
+    const MIN_SERIALIZED_SIZE: usize =
+        IbdPhase::MIN_SERIALIZED_SIZE + 4 + 8 + 8 + 8 + 8 + 8 + 32 + 1 + 1 + 4 + 4 + 4 + 4 + 8;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let phase = IbdPhase::deserialize(r)?;
         let peer_addr_bytes = r.read_vec(128)?;

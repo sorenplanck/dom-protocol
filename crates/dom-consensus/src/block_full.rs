@@ -25,6 +25,9 @@ impl DomSerialize for Block {
 }
 
 impl DomDeserialize for Block {
+    const MIN_SERIALIZED_SIZE: usize =
+        BlockHeader::MIN_SERIALIZED_SIZE + CoinbaseTransaction::MIN_SERIALIZED_SIZE + 4;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         Ok(Self {
             header: BlockHeader::deserialize(r)?,
