@@ -103,6 +103,8 @@ impl DomSerialize for PersistedMempoolState {
 }
 
 impl DomDeserialize for PersistedMempoolState {
+    const MIN_SERIALIZED_SIZE: usize = 4;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let len = r.read_u32()? as usize;
         if len > MAX_PERSISTED_MEMPOOL_ENTRIES {

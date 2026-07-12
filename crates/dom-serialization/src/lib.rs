@@ -208,8 +208,8 @@ impl<'a> Reader<'a> {
 
     /// Read a length-prefixed byte vector.
     ///
-    /// The length prefix is u32 LE. Rejects if length exceeds `max_len`.
-    /// Uses checked arithmetic — no implicit overflow.
+    /// The length prefix is u32 LE. Rejects if length exceeds `max_len`, then
+    /// consumes exactly that many bytes through the reader's checked position path.
     pub fn read_vec(&mut self, max_len: usize) -> Result<Vec<u8>, DomError> {
         let len = self.read_u32()? as usize;
         if len > max_len {
@@ -222,7 +222,10 @@ impl<'a> Reader<'a> {
 
     /// Read a length-prefixed list of deserializable items.
     ///
-    /// Rejects if count exceeds `max_count`.
+    /// Rejects if count exceeds `max_count` or if the declared item count cannot
+    /// fit in the remaining input using the type's canonical serialized minimum
+    /// item size. The budget is intentionally based on protocol wire encoding,
+    /// not Rust memory layout, so acceptance is identical across architectures.
     pub fn read_list<T: DomDeserialize>(&mut self, max_count: usize) -> Result<Vec<T>, DomError> {
         let count = self.read_u32()? as usize;
         if count > max_count {
@@ -230,14 +233,20 @@ impl<'a> Reader<'a> {
                 "list count {count} exceeds limit {max_count}"
             )));
         }
-        let min_item_size = std::mem::size_of::<T>().max(1);
+        let min_item_size = T::MIN_SERIALIZED_SIZE;
+        if min_item_size == 0 {
+            return Err(DomError::Internal(
+                "minimum serialized item size must be non-zero".into(),
+            ));
+        }
         let remaining = self.data.len().saturating_sub(self.pos);
-        let max_by_remaining = remaining
-            .checked_div(min_item_size)
-            .ok_or_else(|| DomError::Internal("minimum item size is zero".into()))?;
-        if count > max_by_remaining {
+        let required_min_bytes = count.checked_mul(min_item_size).ok_or_else(|| {
+            DomError::Malformed("list minimum serialized byte budget overflow".into())
+        })?;
+        if required_min_bytes > remaining {
             return Err(DomError::Malformed(format!(
-                "list count {count} exceeds remaining byte budget {remaining} for minimum item size {min_item_size}"
+                "list count {count} requires at least {required_min_bytes} serialized bytes, \
+                 but only {remaining} bytes remain"
             )));
         }
         let mut items = Vec::with_capacity(count);
@@ -279,6 +288,13 @@ pub trait DomSerialize {
 
 /// Canonical deserialization trait.
 pub trait DomDeserialize: Sized {
+    /// Minimum number of bytes any canonical serialized value of this type can
+    /// occupy on the wire.
+    ///
+    /// This is a protocol constant. It must not depend on Rust memory layout,
+    /// alignment, pointer width, or host ABI.
+    const MIN_SERIALIZED_SIZE: usize;
+
     /// Deserialize from a reader.
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError>;
 
@@ -302,6 +318,8 @@ impl DomSerialize for dom_core::Hash256 {
 }
 
 impl DomDeserialize for dom_core::Hash256 {
+    const MIN_SERIALIZED_SIZE: usize = 32;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let arr = r.read_array::<32>()?;
         Ok(dom_core::Hash256::from_bytes(arr))
@@ -318,6 +336,8 @@ impl DomSerialize for dom_core::BlockHeight {
 }
 
 impl DomDeserialize for dom_core::BlockHeight {
+    const MIN_SERIALIZED_SIZE: usize = 8;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         Ok(dom_core::BlockHeight(r.read_u64()?))
     }
@@ -331,6 +351,8 @@ impl DomSerialize for dom_core::Timestamp {
 }
 
 impl DomDeserialize for dom_core::Timestamp {
+    const MIN_SERIALIZED_SIZE: usize = 8;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         Ok(dom_core::Timestamp(r.read_u64()?))
     }
@@ -344,6 +366,8 @@ impl DomSerialize for dom_core::Amount {
 }
 
 impl DomDeserialize for dom_core::Amount {
+    const MIN_SERIALIZED_SIZE: usize = 8;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         dom_core::Amount::from_noms(r.read_u64()?)
     }

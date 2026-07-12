@@ -184,6 +184,8 @@ impl DomSerialize for PersistedPeerRotationState {
 }
 
 impl DomDeserialize for PersistedPeerRotationState {
+    const MIN_SERIALIZED_SIZE: usize = 8 + 4;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let next_failure_seq = r.read_u64()?;
         let len = r.read_u32()? as usize;
@@ -261,6 +263,8 @@ impl DomSerialize for PersistedPeerReputationState {
 }
 
 impl DomDeserialize for PersistedPeerReputationState {
+    const MIN_SERIALIZED_SIZE: usize = 4;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let len = r.read_u32()? as usize;
         if len > MAX_PERSISTED_PEER_REPUTATION_ENTRIES {

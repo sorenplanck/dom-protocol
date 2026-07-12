@@ -1,23 +1,19 @@
-//! fuzz-amplificação (directed + resource-limit) — `read_list` eager allocation.
+//! Regression coverage for `read_list` allocation bounds.
 //!
-//! ENUMERATED VECTOR: `Reader::read_list::<T>(max_count)` calls
-//! `Vec::with_capacity(count)` where `count` is read straight from the buffer
-//! (a u32), checked ONLY against `max_count` — never against the bytes actually
-//! remaining. A tiny buffer (just the 4-byte count prefix) can therefore declare
-//! a huge count and force an eager allocation of `count * size_of::<T>()` bytes
-//! BEFORE a single item is read. This is a memory-amplification / DoS door
-//! whenever the caller's `max_count` is large.
+//! `Reader::read_list::<T>(max_count)` rejects a declared count that cannot fit
+//! in the remaining input budget before calling `Vec::with_capacity(count)`.
+//! These directed cases verify that a tiny count-only buffer cannot force an
+//! allocation proportional to an attacker-controlled count.
 //!
 //! METHOD: a counting global allocator records the peak bytes allocated during a
 //! single `read_list` call. We feed a 4-byte buffer (count only, no item bytes)
-//! and assert the peak allocation is bounded relative to the input size. If the
-//! allocator records ~ count*size_of::<T>() bytes, the test goes RED and the case
-//! is an amplification finding (see report → FIX-QUEUE).
+//! and assert the peak allocation is bounded relative to the input size. A large
+//! allocation proportional to the declared count makes the regression test fail.
 //!
 //! No production change. This test only OBSERVES allocation behavior.
 
 use dom_core::BlockHeight;
-use dom_serialization::Reader;
+use dom_serialization::{DomDeserialize, Reader};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -25,9 +21,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 //
 // We track the LARGEST SINGLE allocation request made while armed. This is
 // exactly the signal we want: an eager `Vec::with_capacity(count)` asks the
-// allocator for one contiguous `count * size_of::<T>()` block, which shows up as
-// a single large `alloc` call. Tracking only the per-call max (never a running
-// total) sidesteps any underflow from deallocations of pre-armed allocations.
+// allocator for one contiguous block proportional to the attacker-controlled
+// count. Tracking only the per-call max (never a running total) sidesteps any
+// underflow from deallocations of pre-armed allocations.
 
 struct CountingAlloc;
 
@@ -72,6 +68,48 @@ fn measure_peak<R>(f: impl FnOnce() -> R) -> (R, usize) {
     (r, peak)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct HeapItem(Vec<u8>);
+
+impl DomDeserialize for HeapItem {
+    const MIN_SERIALIZED_SIZE: usize = 4;
+
+    fn deserialize(r: &mut Reader<'_>) -> Result<Self, dom_core::DomError> {
+        Ok(Self(r.read_vec(16)?))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Fixed4([u8; 4]);
+
+impl DomDeserialize for Fixed4 {
+    const MIN_SERIALIZED_SIZE: usize = 4;
+
+    fn deserialize(r: &mut Reader<'_>) -> Result<Self, dom_core::DomError> {
+        Ok(Self(r.read_array::<4>()?))
+    }
+}
+
+struct ZeroMinimum;
+
+impl DomDeserialize for ZeroMinimum {
+    const MIN_SERIALIZED_SIZE: usize = 0;
+
+    fn deserialize(_r: &mut Reader<'_>) -> Result<Self, dom_core::DomError> {
+        Ok(Self)
+    }
+}
+
+struct MaxMinimum;
+
+impl DomDeserialize for MaxMinimum {
+    const MIN_SERIALIZED_SIZE: usize = usize::MAX;
+
+    fn deserialize(_r: &mut Reader<'_>) -> Result<Self, dom_core::DomError> {
+        Ok(Self)
+    }
+}
+
 // ── The directed amplification probe ────────────────────────────────────────────
 //
 // STATUS: GREEN regression — `read_list` now rejects impossible counts before
@@ -85,9 +123,10 @@ fn read_list_tiny_buffer_huge_count_bounded_alloc() {
     const MAX_COUNT: usize = 200_000_000; // attacker's count is <= max_count
     let input = DECLARED.to_le_bytes(); // exactly 4 bytes
 
-    // Sanity: with_capacity(1e8) of BlockHeight would be ~800 MB.
+    // Sanity: accepting this declared count would require 800 MB of canonical
+    // BlockHeight bytes before any per-item decoding work.
     let would_be = (DECLARED as usize)
-        .checked_mul(std::mem::size_of::<BlockHeight>())
+        .checked_mul(BlockHeight::MIN_SERIALIZED_SIZE)
         .unwrap();
 
     let (res, peak) = measure_peak(|| {
@@ -113,6 +152,133 @@ fn read_list_tiny_buffer_huge_count_bounded_alloc() {
          Expected < {BOUND} bytes. read_list must validate count against remaining \
          bytes BEFORE with_capacity (e.g. cap capacity at remaining/min_item_size)."
     );
+}
+
+#[test]
+fn heap_owning_item_uses_wire_minimum_not_rust_layout() {
+    let mut input = 2u32.to_le_bytes().to_vec();
+    input.extend_from_slice(&0u32.to_le_bytes());
+    input.extend_from_slice(&0u32.to_le_bytes());
+
+    let mut r = Reader::new(&input);
+    let decoded = r
+        .read_list::<HeapItem>(2)
+        .expect("two empty heap-owning items fit the serialized byte budget");
+    r.finish().expect("all heap item bytes consumed");
+
+    assert_eq!(decoded, vec![HeapItem(Vec::new()), HeapItem(Vec::new())]);
+}
+
+#[test]
+fn exact_minimum_serialized_budget_is_accepted() {
+    let mut input = 2u32.to_le_bytes().to_vec();
+    input.extend_from_slice(&[1, 2, 3, 4]);
+    input.extend_from_slice(&[5, 6, 7, 8]);
+
+    let mut r = Reader::new(&input);
+    let decoded = r
+        .read_list::<Fixed4>(2)
+        .expect("count times minimum serialized size equals remaining budget");
+
+    assert_eq!(decoded, vec![Fixed4([1, 2, 3, 4]), Fixed4([5, 6, 7, 8])]);
+}
+
+#[test]
+fn minimum_serialized_budget_overrun_is_rejected_before_allocation() {
+    let mut input = 3u32.to_le_bytes().to_vec();
+    input.extend_from_slice(&[1, 2, 3, 4]);
+    input.extend_from_slice(&[5, 6, 7, 8]);
+
+    let (res, peak) = measure_peak(|| {
+        let mut r = Reader::new(&input);
+        r.read_list::<Fixed4>(3)
+    });
+
+    assert!(
+        res.is_err(),
+        "three Fixed4 items require 12 serialized bytes after the count prefix"
+    );
+    assert!(
+        peak < 64 * 1024,
+        "budget rejection must happen before count-proportional allocation, peak={peak}"
+    );
+}
+
+#[test]
+fn minimum_serialized_budget_multiplication_overflow_is_rejected() {
+    let input = 2u32.to_le_bytes();
+    let mut r = Reader::new(&input);
+    let res = r.read_list::<MaxMinimum>(2);
+
+    assert!(
+        res.is_err(),
+        "count times minimum serialized size overflow must be rejected"
+    );
+}
+
+#[test]
+fn zero_minimum_serialized_size_is_rejected() {
+    let input = 0u32.to_le_bytes();
+    let mut r = Reader::new(&input);
+    let res = r.read_list::<ZeroMinimum>(0);
+
+    assert!(res.is_err(), "zero minimum serialized size is invalid");
+}
+
+#[test]
+fn empty_list_is_valid_for_nonzero_minimum_item_type() {
+    let input = 0u32.to_le_bytes();
+    let mut r = Reader::new(&input);
+    let decoded = r
+        .read_list::<BlockHeight>(10)
+        .expect("empty list is valid when the item type has a nonzero minimum");
+    r.finish()
+        .expect("empty list consumes only its count prefix");
+
+    assert!(decoded.is_empty());
+}
+
+#[test]
+fn oversized_count_is_rejected_before_allocation() {
+    let input = 11u32.to_le_bytes();
+    let (res, peak) = measure_peak(|| {
+        let mut r = Reader::new(&input);
+        r.read_list::<BlockHeight>(10)
+    });
+
+    assert!(res.is_err(), "count over caller cap must be rejected");
+    assert!(
+        peak < 64 * 1024,
+        "caller-cap rejection must happen before count-proportional allocation, peak={peak}"
+    );
+}
+
+#[test]
+fn truncated_item_payload_is_rejected() {
+    let mut input = 1u32.to_le_bytes().to_vec();
+    input.extend_from_slice(&[1, 2, 3]);
+    let mut r = Reader::new(&input);
+
+    assert!(
+        r.read_list::<Fixed4>(1).is_err(),
+        "declared Fixed4 item with only three payload bytes must be rejected"
+    );
+}
+
+#[test]
+fn existing_valid_blockheight_vector_remains_accepted() {
+    let mut input = 2u32.to_le_bytes().to_vec();
+    input.extend_from_slice(&7u64.to_le_bytes());
+    input.extend_from_slice(&9u64.to_le_bytes());
+
+    let mut r = Reader::new(&input);
+    let decoded = r
+        .read_list::<BlockHeight>(2)
+        .expect("valid BlockHeight list remains accepted");
+    r.finish()
+        .expect("valid BlockHeight list consumes all bytes");
+
+    assert_eq!(decoded, vec![BlockHeight(7), BlockHeight(9)]);
 }
 
 #[test]
