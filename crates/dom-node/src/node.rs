@@ -2027,7 +2027,7 @@ async fn record_pending_peer_violation(
 async fn queue_future_block(
     queue: &Arc<crate::future_block_queue::FutureBlockQueue>,
     block: &dom_consensus::Block,
-    block_bytes: Vec<u8>,
+    _received_block_bytes: Vec<u8>,
 ) -> bool {
     use dom_serialization::DomSerialize;
 
@@ -2039,19 +2039,27 @@ async fn queue_future_block(
         }
     };
     let hash = *dom_crypto::hash::blake2b_256(&header_bytes).as_bytes();
+    let canonical_block_bytes = match block.to_bytes() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!("Could not serialise deferred block: {e}");
+            return false;
+        }
+    };
     let deferred = crate::future_block_queue::DeferredBlock {
         block_hash: hash,
         block_height: block.header.height.0,
         timestamp: block.header.timestamp.0,
         queued_at: std::time::Instant::now(),
-        block_bytes,
+        block_bytes: canonical_block_bytes,
     };
-    let admitted = queue.defer(deferred).await;
+    let admission = queue.admit(deferred).await;
+    let admitted = admission.is_admitted();
     tracing::info!(
         event = "orphan_admitted",
         block_height = block.header.height.0,
         block_hash = %hex::encode(hash),
-        action = if admitted { "queued" } else { "rejected_queue_full" },
+        action = ?admission,
         failure_class = "runtime_future_block",
         "future block queue admission decided"
     );
