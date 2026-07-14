@@ -3,19 +3,36 @@
 //! DOM addresses use a Bech32m encoding (BIP-350) with human-readable parts:
 //! - Mainnet: "dom"
 //! - Testnet: "tdom"
+//! - Regtest: "rdom"
 //!
-//! An address encodes a 33-byte compressed public key commitment.
+//! A Wallet V3 address encodes a versioned 40-byte payload:
+//! version || address_type || key_type || network_magic_le || compressed_key.
 //! Format: <hrp>1<bech32m-encoded-data><checksum>
 //!
-//! RFC-0010: Address System.
+//! RFC: DOM_RFC_WALLET_ADDRESS_FINAL.md.
 
-use crate::DomError;
+use crate::{DomError, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET};
 
 /// Human-readable part for mainnet addresses.
 pub const ADDRESS_HRP_MAINNET: &str = "dom";
 
 /// Human-readable part for testnet addresses.
 pub const ADDRESS_HRP_TESTNET: &str = "tdom";
+
+/// Human-readable part for regtest addresses.
+pub const ADDRESS_HRP_REGTEST: &str = "rdom";
+
+/// Final Wallet V3 address payload version.
+pub const ADDRESS_PAYLOAD_VERSION_V3: u8 = 1;
+
+/// Standard interactive/payment-proof address type.
+pub const ADDRESS_TYPE_STANDARD: u8 = 0;
+
+/// Compressed secp256k1 public key type.
+pub const ADDRESS_KEY_TYPE_SECP256K1_COMPRESSED: u8 = 0;
+
+/// Final Wallet V3 binary payload length.
+pub const ADDRESS_V3_PAYLOAD_LEN: usize = 1 + 1 + 1 + 4 + 33;
 
 /// Maximum address string length (hrp + separator + data + checksum).
 pub const MAX_ADDRESS_LEN: usize = 90;
@@ -41,29 +58,55 @@ const CHARSET_REV: [u8; 128] = {
 /// A DOM address.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Address {
-    /// The 33-byte compressed public key (or commitment).
+    /// The 33-byte compressed public key.
     pub payload: [u8; 33],
     /// Whether this is a mainnet or testnet address.
     pub is_mainnet: bool,
+    /// Payload format version.
+    pub version: u8,
+    /// Address type.
+    pub address_type: u8,
+    /// Public key type.
+    pub key_type: u8,
+    /// Network magic bound into the payload.
+    pub network_magic: u32,
 }
 
 impl Address {
-    /// Create an address from a 33-byte payload.
+    /// Create a mainnet or testnet address from a 33-byte public key.
     pub fn new(payload: [u8; 33], is_mainnet: bool) -> Self {
-        Self {
-            payload,
-            is_mainnet,
+        let network_magic = if is_mainnet {
+            NETWORK_MAGIC_MAINNET
+        } else {
+            NETWORK_MAGIC_TESTNET
+        };
+        Self::new_for_network(payload, network_magic)
+            .expect("mainnet/testnet constants are valid address networks")
+    }
+
+    /// Create an address for an explicit network magic.
+    pub fn new_for_network(payload: [u8; 33], network_magic: u32) -> Result<Self, DomError> {
+        validate_compressed_public_key(&payload)?;
+        if hrp_for_network_magic(network_magic).is_none() {
+            return Err(DomError::Malformed(format!(
+                "unsupported address network magic 0x{network_magic:08x}"
+            )));
         }
+        Ok(Self {
+            payload,
+            is_mainnet: network_magic == NETWORK_MAGIC_MAINNET,
+            version: ADDRESS_PAYLOAD_VERSION_V3,
+            address_type: ADDRESS_TYPE_STANDARD,
+            key_type: ADDRESS_KEY_TYPE_SECP256K1_COMPRESSED,
+            network_magic,
+        })
     }
 
     /// Encode address to Bech32m string.
     pub fn encode(&self) -> String {
-        let hrp = if self.is_mainnet {
-            ADDRESS_HRP_MAINNET
-        } else {
-            ADDRESS_HRP_TESTNET
-        };
-        bech32m_encode(hrp, &self.payload)
+        let hrp = hrp_for_network_magic(self.network_magic)
+            .expect("Address instances are constructed with supported networks");
+        bech32m_encode(hrp, &self.to_payload_bytes())
     }
 
     /// Decode a Bech32m address string.
@@ -80,15 +123,16 @@ impl Address {
         }
         let s_lower = s.to_lowercase();
         let (hrp, payload) = bech32m_decode(&s_lower)?;
-        if payload.len() != 33 {
+        if payload.len() != ADDRESS_V3_PAYLOAD_LEN {
             return Err(DomError::Malformed(format!(
-                "address payload must be 33 bytes, got {}",
-                payload.len()
+                "address payload must be {ADDRESS_V3_PAYLOAD_LEN} bytes, got {}",
+                payload.len(),
             )));
         }
-        let is_mainnet = match hrp.as_str() {
-            ADDRESS_HRP_MAINNET => true,
-            ADDRESS_HRP_TESTNET => false,
+        let hrp_network_magic = match hrp.as_str() {
+            ADDRESS_HRP_MAINNET => NETWORK_MAGIC_MAINNET,
+            ADDRESS_HRP_TESTNET => NETWORK_MAGIC_TESTNET,
+            ADDRESS_HRP_REGTEST => NETWORK_MAGIC_REGTEST,
             other => {
                 return Err(DomError::Malformed(format!(
                     "unknown address HRP: {}",
@@ -96,11 +140,40 @@ impl Address {
                 )))
             }
         };
+        let version = payload[0];
+        if version != ADDRESS_PAYLOAD_VERSION_V3 {
+            return Err(DomError::Malformed(format!(
+                "unsupported address payload version {version}"
+            )));
+        }
+        let address_type = payload[1];
+        if address_type != ADDRESS_TYPE_STANDARD {
+            return Err(DomError::Malformed(format!(
+                "unsupported address type {address_type}"
+            )));
+        }
+        let key_type = payload[2];
+        if key_type != ADDRESS_KEY_TYPE_SECP256K1_COMPRESSED {
+            return Err(DomError::Malformed(format!(
+                "unsupported address key type {key_type}"
+            )));
+        }
+        let network_magic = u32::from_le_bytes(payload[3..7].try_into().unwrap());
+        if network_magic != hrp_network_magic {
+            return Err(DomError::Malformed(
+                "address HRP does not match payload network magic".into(),
+            ));
+        }
         let mut arr = [0u8; 33];
-        arr.copy_from_slice(&payload);
+        arr.copy_from_slice(&payload[7..40]);
+        validate_compressed_public_key(&arr)?;
         Ok(Self {
             payload: arr,
-            is_mainnet,
+            is_mainnet: network_magic == NETWORK_MAGIC_MAINNET,
+            version,
+            address_type,
+            key_type,
+            network_magic,
         })
     }
 
@@ -108,15 +181,56 @@ impl Address {
     pub fn hrp(&self) -> &str {
         if self.is_mainnet {
             ADDRESS_HRP_MAINNET
+        } else if self.network_magic == NETWORK_MAGIC_REGTEST {
+            ADDRESS_HRP_REGTEST
         } else {
             ADDRESS_HRP_TESTNET
         }
+    }
+
+    /// Validate that this address belongs to the expected network.
+    pub fn validate_for_network(&self, expected_network_magic: u32) -> Result<(), DomError> {
+        if self.network_magic != expected_network_magic {
+            return Err(DomError::Malformed(
+                "address network does not match expected network".into(),
+            ));
+        }
+        validate_compressed_public_key(&self.payload)
+    }
+
+    /// Return the final Wallet V3 binary payload bytes.
+    pub fn to_payload_bytes(&self) -> [u8; ADDRESS_V3_PAYLOAD_LEN] {
+        let mut out = [0u8; ADDRESS_V3_PAYLOAD_LEN];
+        out[0] = self.version;
+        out[1] = self.address_type;
+        out[2] = self.key_type;
+        out[3..7].copy_from_slice(&self.network_magic.to_le_bytes());
+        out[7..40].copy_from_slice(&self.payload);
+        out
     }
 }
 
 impl std::fmt::Display for Address {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.encode())
+    }
+}
+
+fn hrp_for_network_magic(network_magic: u32) -> Option<&'static str> {
+    match network_magic {
+        NETWORK_MAGIC_MAINNET => Some(ADDRESS_HRP_MAINNET),
+        NETWORK_MAGIC_TESTNET => Some(ADDRESS_HRP_TESTNET),
+        NETWORK_MAGIC_REGTEST => Some(ADDRESS_HRP_REGTEST),
+        _ => None,
+    }
+}
+
+fn validate_compressed_public_key(key: &[u8; 33]) -> Result<(), DomError> {
+    match key[0] {
+        0x02 | 0x03 => Ok(()),
+        other => Err(DomError::Malformed(format!(
+            "address key is not a compressed secp256k1 public key: prefix 0x{other:02x}"
+        ))),
     }
 }
 

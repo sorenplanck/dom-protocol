@@ -167,7 +167,9 @@ fn robustness_min_fee_gate_runs_before_crypto() {
     let err = accept(&mut pool, tx, hash, input, entry).expect_err("below-floor fee rejected");
     match &err {
         DomError::PolicyRejected(msg) => assert!(
-            msg.contains("MIN_RELAY_FEE_RATE") || msg.contains("fee rate"),
+            msg.contains("MIN_RELAY_FEE_RATE")
+                || msg.contains("fee rate")
+                || msg.contains("minimum relay fee"),
             "expected fee-policy rejection BEFORE crypto, got: {msg}"
         ),
         other => panic!("expected fee PolicyRejected (min-fee runs before crypto); got {other:?}"),

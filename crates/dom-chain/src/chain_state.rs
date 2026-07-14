@@ -7,7 +7,10 @@ use dom_consensus::block::{
     validate_future_timestamp_with_limit, validate_header_syntax, validate_median_time_past,
     validate_parent_timestamp_progression, validate_pow_for_network, BlockHeader,
 };
-use dom_consensus::{derive_chain_id, validate_block, Block, Transaction, ValidationContext};
+use dom_consensus::{
+    checked_accumulated_difficulty, derive_chain_id, validate_block, Block, Transaction,
+    ValidationContext,
+};
 use dom_core::{BlockHeight, DomError, Hash256, Timestamp};
 use dom_pow::{
     compute_expected_target, genesis_anchor, pow_params_for_network, randomx_seed_height,
@@ -118,6 +121,17 @@ fn coinbase_maturity_for_magic(magic: u32) -> u64 {
     }
 }
 
+fn is_better_fork_choice_tip(
+    candidate_total_difficulty: U256,
+    candidate_hash: Hash256,
+    current_total_difficulty: U256,
+    current_hash: Hash256,
+) -> bool {
+    candidate_total_difficulty > current_total_difficulty
+        || (candidate_total_difficulty == current_total_difficulty
+            && candidate_hash.as_bytes() < current_hash.as_bytes())
+}
+
 impl ChainState {
     /// Default startup path. A divergence between the persisted UTXO set and
     /// the canonical set reconstructed from committed block history is treated
@@ -215,6 +229,8 @@ impl ChainState {
             }
         };
 
+        validate_persisted_genesis_identity(&store, genesis_hash)?;
+
         Ok(Self {
             store,
             tip_hash,
@@ -272,6 +288,7 @@ impl ChainState {
         }
 
         validate_header_syntax(header)?;
+        self.validate_genesis_identity(header, block_hash)?;
 
         let parent = if header.height != BlockHeight::GENESIS {
             let parent_bytes = self
@@ -318,7 +335,7 @@ impl ChainState {
                 .to_target()
                 .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?,
         );
-        let expected_total = parent_difficulty.saturating_add(U256::from(block_diff));
+        let expected_total = checked_accumulated_difficulty(parent_difficulty, block_diff)?;
         if header.total_difficulty != expected_total {
             return Err(DomError::Invalid(format!(
                 "total_difficulty mismatch: expected {expected_total}, got {}",
@@ -345,13 +362,18 @@ impl ChainState {
 
         let is_direct_extension =
             header.height == BlockHeight::GENESIS || header.prev_hash == self.tip_hash;
-        let extends_best_chain = header.total_difficulty > self.tip_difficulty;
+        let extends_best_chain = is_better_fork_choice_tip(
+            header.total_difficulty,
+            block_hash,
+            self.tip_difficulty,
+            self.tip_hash,
+        );
 
         if is_direct_extension {
             if !extends_best_chain {
                 return Err(DomError::Invalid(format!(
-                    "direct extension did not increase total_difficulty: new={} current={}",
-                    header.total_difficulty, self.tip_difficulty
+                    "direct extension did not improve fork choice: new_total={} current_total={} new_hash={} current_hash={}",
+                    header.total_difficulty, self.tip_difficulty, block_hash, self.tip_hash
                 )));
             }
             let (new_utxos, spent_utxos) = build_utxo_changeset(block);
@@ -497,6 +519,7 @@ impl ChainState {
 
             if !is_known {
                 validate_header_syntax(header)?;
+                self.validate_genesis_identity(header, *hash)?;
 
                 if header.height != BlockHeight::GENESIS {
                     let parent = if idx == 0 {
@@ -548,7 +571,7 @@ impl ChainState {
                         .to_target()
                         .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?,
                 );
-                let expected_total = parent_difficulty.saturating_add(U256::from(block_diff));
+                let expected_total = checked_accumulated_difficulty(parent_difficulty, block_diff)?;
                 if header.total_difficulty != expected_total {
                     return Err(DomError::Invalid(format!(
                         "total_difficulty mismatch: expected {expected_total}, got {}",
@@ -655,6 +678,7 @@ impl ChainState {
 
             if !is_known {
                 validate_header_syntax(&header)?;
+                self.validate_genesis_identity(&header, hash)?;
 
                 if header.height != BlockHeight::GENESIS {
                     let parent = if decoded_prefix.is_empty() {
@@ -719,7 +743,7 @@ impl ChainState {
                         .to_target()
                         .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?,
                 );
-                let expected_total = parent_difficulty.saturating_add(U256::from(block_diff));
+                let expected_total = checked_accumulated_difficulty(parent_difficulty, block_diff)?;
                 if header.total_difficulty != expected_total {
                     return Err(DomError::Invalid(format!(
                         "total_difficulty mismatch: expected {expected_total}, got {}",
@@ -759,6 +783,7 @@ impl ChainState {
         }
 
         validate_header_syntax(header)?;
+        self.validate_genesis_identity(header, header_hash)?;
         validate_future_timestamp_with_limit(header, now, self.max_future_block_time())?;
         if header.height != BlockHeight::GENESIS {
             let parent_bytes = self
@@ -779,9 +804,8 @@ impl ChainState {
                     .to_target()
                     .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?,
             );
-            let expected_total = parent
-                .total_difficulty
-                .saturating_add(U256::from(block_diff));
+            let expected_total =
+                checked_accumulated_difficulty(parent.total_difficulty, block_diff)?;
             if header.total_difficulty != expected_total {
                 return Err(DomError::Invalid(format!(
                     "total_difficulty mismatch: expected {expected_total}, got {}",
@@ -791,6 +815,34 @@ impl ChainState {
         }
         let seed = self.compute_randomx_seed_branch_aware(header.height.0, header.prev_hash)?;
         validate_pow_for_network(self.network_magic, header, &seed)?;
+        Ok(())
+    }
+
+    fn validate_genesis_identity(
+        &self,
+        header: &BlockHeader,
+        header_hash: Hash256,
+    ) -> Result<(), DomError> {
+        if header.height != BlockHeight::GENESIS {
+            return Ok(());
+        }
+
+        if self.genesis_hash != Hash256::ZERO && header_hash != self.genesis_hash {
+            return Err(DomError::Invalid(format!(
+                "genesis hash mismatch: expected {}, got {}",
+                self.genesis_hash, header_hash
+            )));
+        }
+
+        if let Some(existing) = self.store.get_hash_at_height(BlockHeight::GENESIS.0)? {
+            if existing != *header_hash.as_bytes() {
+                return Err(DomError::Invalid(format!(
+                    "alternate genesis block rejected: canonical genesis already exists as {}",
+                    hex::encode(existing)
+                )));
+            }
+        }
+
         Ok(())
     }
 
@@ -1182,10 +1234,15 @@ impl ChainState {
             })
             .and_then(|bytes| BlockHeader::from_bytes(&bytes))?;
 
-        if new_tip_header.total_difficulty <= self.tip_difficulty {
+        if !is_better_fork_choice_tip(
+            new_tip_header.total_difficulty,
+            new_tip_hash,
+            self.tip_difficulty,
+            self.tip_hash,
+        ) {
             return Err(DomError::PolicyRejected(format!(
-                "reorg target is not heavier: new={} current={}",
-                new_tip_header.total_difficulty, self.tip_difficulty
+                "reorg target is not heavier or tie-preferred: new_total={} current_total={} new_hash={} current_hash={}",
+                new_tip_header.total_difficulty, self.tip_difficulty, new_tip_hash, self.tip_hash
             )));
         }
 
@@ -1975,8 +2032,8 @@ fn prune_retained_side_chains(
         right
             .total_difficulty
             .cmp(&left.total_difficulty)
-            .then_with(|| right.height.cmp(&left.height))
             .then_with(|| left.hash.as_slice().cmp(right.hash.as_slice()))
+            .then_with(|| right.height.cmp(&left.height))
     });
     candidate_tips.truncate(MAX_RETAINED_SIDE_BRANCH_TIPS);
 
@@ -2053,6 +2110,27 @@ pub enum ConnectResult {
     /// Caller MUST NOT rebroadcast or re-validate. Critical for preventing
     /// relay loops (DOM-SEC-RELAY-LOOP, 2026-05-23).
     AlreadyHave,
+}
+
+fn validate_persisted_genesis_identity(
+    store: &DomStore,
+    configured_genesis_hash: Hash256,
+) -> Result<(), DomError> {
+    let Some(stored_genesis_hash) = store.get_hash_at_height(BlockHeight::GENESIS.0)? else {
+        return Ok(());
+    };
+
+    if configured_genesis_hash != Hash256::ZERO
+        && stored_genesis_hash != *configured_genesis_hash.as_bytes()
+    {
+        return Err(DomError::Invalid(format!(
+            "stored genesis hash mismatch: expected {}, got {}",
+            configured_genesis_hash,
+            hex::encode(stored_genesis_hash)
+        )));
+    }
+
+    Ok(())
 }
 
 fn compute_block_hash(header_bytes: &[u8]) -> Hash256 {

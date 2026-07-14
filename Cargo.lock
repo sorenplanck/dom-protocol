@@ -1057,6 +1057,7 @@ name = "dom-crypto"
 version = "0.1.0"
 dependencies = [
  "blake2",
+ "chacha20poly1305",
  "dom-core",
  "grin_secp256k1zkp",
  "hex",
@@ -1171,11 +1172,14 @@ dependencies = [
  "dom-rpc",
  "dom-serialization",
  "dom-store",
+ "dom-tx",
  "dom-wallet",
+ "dom-wallet-core-api",
  "dom-wire",
  "futures",
  "hex",
  "k256",
+ "lmdb-rkv",
  "primitive-types",
  "proptest",
  "rand 0.8.6",
@@ -1378,6 +1382,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-wallet-core-api"
+version = "0.1.0"
+dependencies = [
+ "dom-consensus",
+ "dom-core",
+ "hex",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "dom-wallet-crypto"
 version = "0.1.0"
 dependencies = [
@@ -1407,6 +1421,18 @@ dependencies = [
  "sha2",
  "thiserror 1.0.69",
  "zeroize",
+]
+
+[[package]]
+name = "dom-wallet-recovery"
+version = "0.1.0"
+dependencies = [
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-tx",
+ "dom-wallet-core-api",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

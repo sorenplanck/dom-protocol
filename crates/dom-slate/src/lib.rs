@@ -33,14 +33,19 @@
 use dom_consensus::transaction::{
     Transaction, TransactionInput, TransactionKernel, TransactionOutput,
 };
-use dom_consensus::{validate_balance_equation, validate_transaction_structure};
+use dom_consensus::{
+    validate_balance_equation, validate_range_proofs, validate_transaction_structure,
+};
 use dom_core::{Amount, KERNEL_FEAT_PLAIN};
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::{
-    blake2b_256_tagged, bp2_prove, bp2_verify, schnorr_add_public_keys, schnorr_aggregate_sigs,
+    blake2b_256_tagged, range_proof_prove_bytes, schnorr_add_public_keys, schnorr_aggregate_sigs,
     schnorr_partial_sign, schnorr_verify, BlindingFactor, Hash256, RangeProof, SecretKey,
 };
-use dom_tx::slate::{OutputCommitmentAndProof, Slate, CURRENT_SLATE_VERSION};
+use dom_tx::slate::{
+    OutputCommitmentAndProof, Slate, SlateEnvelope, CURRENT_SLATE_VERSION, RECOVERY_SLATE_VERSION,
+    SLATE_PHASE_FINALIZED, SLATE_PHASE_RECEIVER_RESPONSE, SLATE_PHASE_SENDER_OFFER,
+};
 use k256::elliptic_curve::PrimeField;
 use k256::Scalar;
 use rand::RngCore;
@@ -61,6 +66,18 @@ pub enum SlateError {
     #[error("slate chain_id does not match expected chain_id")]
     ChainIdMismatch,
 
+    /// The slate's network does not match the expected network.
+    #[error("slate network does not match expected network")]
+    NetworkMismatch,
+
+    /// The slate expired at the current chain height.
+    #[error("slate expired")]
+    Expired,
+
+    /// The slate phase is invalid for the requested operation.
+    #[error("unsupported slate phase {0}")]
+    UnsupportedPhase(u8),
+
     /// A receive was attempted on a slate that already carries recipient
     /// response fields.
     #[error("slate already contains recipient response fields")]
@@ -78,6 +95,85 @@ pub enum SlateError {
     /// underlying error for operator diagnostics.
     #[error("crypto error: {0}")]
     Crypto(String),
+}
+
+/// Step 2 over the final Wallet V3 envelope: validate and answer a sender offer.
+pub fn receiver_response(
+    envelope: SlateEnvelope,
+    expected_network_magic: u32,
+    expected_chain_id: &[u8; 32],
+    current_height: u64,
+) -> Result<(SlateEnvelope, [u8; 32]), SlateError> {
+    validate_envelope_context(
+        &envelope,
+        expected_network_magic,
+        expected_chain_id,
+        current_height,
+    )?;
+    if envelope.phase != SLATE_PHASE_SENDER_OFFER {
+        return Err(SlateError::UnsupportedPhase(envelope.phase));
+    }
+    let response = respond_receive(envelope.body.clone(), expected_chain_id)?;
+    let mut answered = envelope;
+    answered.phase = SLATE_PHASE_RECEIVER_RESPONSE;
+    answered.body = response.slate;
+    answered
+        .validate()
+        .map_err(|e| SlateError::Crypto(format!("slate envelope invalid: {e}")))?;
+    Ok((answered, response.recipient_output_blinding))
+}
+
+/// Step 3 over the final Wallet V3 envelope: validate and finalize a response.
+pub fn finalize_envelope(
+    envelope: SlateEnvelope,
+    sender_excess_blinding: &[u8; 32],
+    sender_nonce: &[u8; 32],
+    expected_network_magic: u32,
+    expected_chain_id: &[u8; 32],
+    current_height: u64,
+) -> Result<(SlateEnvelope, Transaction), SlateError> {
+    validate_envelope_context(
+        &envelope,
+        expected_network_magic,
+        expected_chain_id,
+        current_height,
+    )?;
+    if envelope.phase != SLATE_PHASE_RECEIVER_RESPONSE {
+        return Err(SlateError::UnsupportedPhase(envelope.phase));
+    }
+    let tx = finalize(
+        &envelope.body,
+        sender_excess_blinding,
+        sender_nonce,
+        expected_chain_id,
+    )?;
+    let mut finalized = envelope;
+    finalized.phase = SLATE_PHASE_FINALIZED;
+    finalized
+        .validate()
+        .map_err(|e| SlateError::Crypto(format!("slate envelope invalid: {e}")))?;
+    Ok((finalized, tx))
+}
+
+fn validate_envelope_context(
+    envelope: &SlateEnvelope,
+    expected_network_magic: u32,
+    expected_chain_id: &[u8; 32],
+    current_height: u64,
+) -> Result<(), SlateError> {
+    envelope
+        .validate()
+        .map_err(|e| SlateError::Crypto(format!("slate envelope invalid: {e}")))?;
+    if envelope.network_magic != expected_network_magic {
+        return Err(SlateError::NetworkMismatch);
+    }
+    if envelope.chain_id != *expected_chain_id {
+        return Err(SlateError::ChainIdMismatch);
+    }
+    if envelope.is_expired_at(current_height) {
+        return Err(SlateError::Expired);
+    }
+    Ok(())
 }
 
 /// Sender-side input descriptor for [`build_send`].
@@ -129,6 +225,18 @@ pub struct ReceiveResponse {
     pub recipient_output_blinding: [u8; 32],
 }
 
+/// Seed-derived recovery context supplied by Wallet V3 output creation.
+pub struct RecoveryBuildContext<'a> {
+    /// Opaque chain-bound recovery root.
+    pub root: &'a dom_crypto::recovery::RecoveryRoot,
+    /// Network and chain identity.
+    pub chain: dom_crypto::recovery::RecoveryChainContext,
+    /// Wallet account identifier.
+    pub account: u32,
+    /// Unique metadata index for this output.
+    pub derivation_index: u64,
+}
+
 /// Step 1: build a sender slate from selected inputs.
 ///
 /// Produces the random change output (if `change_value > 0`), the sender
@@ -146,10 +254,10 @@ pub fn build_send(
 ) -> Result<SenderSlate, SlateError> {
     let (sender_change_output, change_material, change_blinding) = if change_value > 0 {
         let change_blinding = BlindingFactor::random();
-        // Standard Bulletproof (bp2): returns proof bytes; wrap into RangeProof
-        // for the slate's OutputCommitmentAndProof field.
-        let (proof_bytes, commitment_bytes) = bp2_prove(change_value, &change_blinding)
-            .map_err(|e| SlateError::Crypto(format!("change range proof failed: {e}")))?;
+        // Final bounded aggregate range proof for the slate output.
+        let (proof_bytes, commitment_bytes) =
+            range_proof_prove_bytes(change_value, &change_blinding)
+                .map_err(|e| SlateError::Crypto(format!("change range proof failed: {e}")))?;
         let proof = RangeProof::from_bytes(proof_bytes)
             .map_err(|e| SlateError::Crypto(format!("change range proof invalid: {e}")))?;
         let change_commitment = Commitment::from_compressed_bytes(&commitment_bytes)
@@ -207,6 +315,8 @@ pub fn build_send(
         recipient_public_nonce: None,
         sender_partial_sig: None,
         recipient_partial_sig: None,
+        sender_change_recovery_capsule: Vec::new(),
+        recipient_recovery_capsule: Vec::new(),
     };
 
     Ok(SenderSlate {
@@ -215,6 +325,57 @@ pub fn build_send(
         nonce: sender_nonce,
         change: change_material,
     })
+}
+
+/// Build the sender phase using Slate recovery extension version 4. The sender
+/// change proof commits its capsule, so mutation fails final proof validation.
+pub fn build_send_recoverable(
+    inputs: &[SlateInput],
+    change_value: u64,
+    amount: u64,
+    fee: u64,
+    chain_id: [u8; 32],
+    recovery: RecoveryBuildContext<'_>,
+) -> Result<SenderSlate, SlateError> {
+    if recovery.chain.chain_id != chain_id {
+        return Err(SlateError::ChainIdMismatch);
+    }
+    let mut sender = build_send(inputs, change_value, amount, fee, chain_id)?;
+    if let (Some(change), Some(output)) = (
+        sender.change.as_ref(),
+        sender.slate.sender_change_output.as_mut(),
+    ) {
+        let blinding = BlindingFactor::from_bytes(change.blinding)
+            .map_err(|error| SlateError::Crypto(error.to_string()))?;
+        let capsule = dom_crypto::recovery::create_recovery_capsule(
+            recovery.root,
+            recovery.chain,
+            &change.commitment,
+            dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
+            change.value,
+            recovery.account,
+            recovery.derivation_index,
+            dom_crypto::recovery::OutputRecoveryDomain::Change,
+            &blinding,
+        )
+        .map_err(|error| SlateError::Crypto(error.to_string()))?;
+        let (proof, commitment) = dom_crypto::range_proof_prove_bytes_with_extra_commit(
+            change.value,
+            &blinding,
+            capsule.as_bytes(),
+        )
+        .map_err(|error| SlateError::Crypto(error.to_string()))?;
+        if commitment != change.commitment {
+            return Err(SlateError::Crypto(
+                "recoverable change proof commitment mismatch".into(),
+            ));
+        }
+        output.proof =
+            RangeProof::from_bytes(proof).map_err(|error| SlateError::Crypto(error.to_string()))?;
+        sender.slate.sender_change_recovery_capsule = capsule.as_bytes().to_vec();
+    }
+    sender.slate.version = RECOVERY_SLATE_VERSION;
+    Ok(sender)
 }
 
 /// Step 2: respond to a sender-created interactive slate.
@@ -228,6 +389,12 @@ pub fn respond_receive(
     expected_chain_id: &[u8; 32],
 ) -> Result<ReceiveResponse, SlateError> {
     validate_slate_version(&slate)?;
+    if slate.version != CURRENT_SLATE_VERSION {
+        return Err(SlateError::UnsupportedVersion(
+            slate.version,
+            CURRENT_SLATE_VERSION,
+        ));
+    }
     if slate.chain_id != *expected_chain_id {
         return Err(SlateError::ChainIdMismatch);
     }
@@ -245,9 +412,10 @@ pub fn respond_receive(
         .map_err(|e| SlateError::Crypto(format!("invalid slate fee: {e}")))?;
 
     let recipient_blinding = BlindingFactor::random();
-    // Standard Bulletproof (bp2): wrap proof bytes into RangeProof for the slate.
-    let (proof_bytes, commitment_bytes) = bp2_prove(slate.amount, &recipient_blinding)
-        .map_err(|e| SlateError::Crypto(format!("recipient range proof failed: {e}")))?;
+    // Final bounded aggregate range proof for the recipient output.
+    let (proof_bytes, commitment_bytes) =
+        range_proof_prove_bytes(slate.amount, &recipient_blinding)
+            .map_err(|e| SlateError::Crypto(format!("recipient range proof failed: {e}")))?;
     let proof = RangeProof::from_bytes(proof_bytes)
         .map_err(|e| SlateError::Crypto(format!("recipient range proof invalid: {e}")))?;
     let recipient_output = OutputCommitmentAndProof {
@@ -294,6 +462,64 @@ pub fn respond_receive(
         slate,
         recipient_output_blinding: *recipient_blinding.as_bytes(),
     })
+}
+
+/// Respond using Slate recovery extension version 4. The receiver creates and
+/// authenticates its own output recovery capsule from its seed-derived root.
+pub fn respond_receive_recoverable(
+    mut slate: Slate,
+    expected_chain_id: &[u8; 32],
+    recovery: RecoveryBuildContext<'_>,
+) -> Result<ReceiveResponse, SlateError> {
+    if slate.version != RECOVERY_SLATE_VERSION {
+        return Err(SlateError::UnsupportedVersion(
+            slate.version,
+            RECOVERY_SLATE_VERSION,
+        ));
+    }
+    if recovery.chain.chain_id != *expected_chain_id {
+        return Err(SlateError::ChainIdMismatch);
+    }
+    let sender_change_capsule = std::mem::take(&mut slate.sender_change_recovery_capsule);
+    slate.version = CURRENT_SLATE_VERSION;
+    let mut response = respond_receive(slate, expected_chain_id)?;
+    response.slate.sender_change_recovery_capsule = sender_change_capsule;
+    let recipient_blinding = BlindingFactor::from_bytes(response.recipient_output_blinding)
+        .map_err(|error| SlateError::Crypto(error.to_string()))?;
+    let output = response
+        .slate
+        .recipient_output
+        .as_mut()
+        .ok_or(SlateError::MissingRecipientField("output"))?;
+    let commitment = *output.commitment.as_bytes();
+    let capsule = dom_crypto::recovery::create_recovery_capsule(
+        recovery.root,
+        recovery.chain,
+        &commitment,
+        dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
+        response.slate.amount,
+        recovery.account,
+        recovery.derivation_index,
+        dom_crypto::recovery::OutputRecoveryDomain::Received,
+        &recipient_blinding,
+    )
+    .map_err(|error| SlateError::Crypto(error.to_string()))?;
+    let (proof, proof_commitment) = dom_crypto::range_proof_prove_bytes_with_extra_commit(
+        response.slate.amount,
+        &recipient_blinding,
+        capsule.as_bytes(),
+    )
+    .map_err(|error| SlateError::Crypto(error.to_string()))?;
+    if proof_commitment != commitment {
+        return Err(SlateError::Crypto(
+            "recoverable recipient proof commitment mismatch".into(),
+        ));
+    }
+    output.proof =
+        RangeProof::from_bytes(proof).map_err(|error| SlateError::Crypto(error.to_string()))?;
+    response.slate.recipient_recovery_capsule = capsule.as_bytes().to_vec();
+    response.slate.version = RECOVERY_SLATE_VERSION;
+    Ok(response)
 }
 
 /// Step 3: finalize a recipient-answered slate into a validated transaction.
@@ -370,7 +596,7 @@ pub fn finalize(
             .cloned()
             .map(|commitment| TransactionInput { commitment })
             .collect(),
-        outputs: slate_outputs(slate, recipient_output),
+        outputs: slate_outputs_for_finalize(slate, recipient_output)?,
         kernels: vec![TransactionKernel {
             features: KERNEL_FEAT_PLAIN,
             fee: Amount::from_noms(slate.fee)
@@ -385,15 +611,8 @@ pub fn finalize(
 
     validate_transaction_structure(&tx)
         .map_err(|e| SlateError::Crypto(format!("final slate tx structure invalid: {e}")))?;
-    for output in &tx.outputs {
-        let proof_ok = bp2_verify(output.commitment.as_bytes(), &output.proof)
-            .map_err(|e| SlateError::Crypto(format!("final slate range proof invalid: {e}")))?;
-        if !proof_ok {
-            return Err(SlateError::Crypto(
-                "final slate output range proof does not verify".into(),
-            ));
-        }
-    }
+    validate_range_proofs(&tx)
+        .map_err(|e| SlateError::Crypto(format!("final slate range proof invalid: {e}")))?;
     validate_balance_equation(&tx)
         .map_err(|e| SlateError::Crypto(format!("final slate tx balance invalid: {e}")))?;
     if !schnorr_verify(&aggregate_sig, &agg_p, chain_id, kernel_message.as_bytes())
@@ -425,7 +644,51 @@ pub fn sender_phase_slate(slate: &Slate) -> Slate {
         recipient_public_nonce: None,
         sender_partial_sig: None,
         recipient_partial_sig: None,
+        sender_change_recovery_capsule: slate.sender_change_recovery_capsule.clone(),
+        recipient_recovery_capsule: Vec::new(),
     }
+}
+
+fn slate_outputs_for_finalize(
+    slate: &Slate,
+    recipient_output: OutputCommitmentAndProof,
+) -> Result<Vec<TransactionOutput>, SlateError> {
+    if slate.version == CURRENT_SLATE_VERSION {
+        return Ok(slate_outputs(slate, recipient_output));
+    }
+    if slate.version != RECOVERY_SLATE_VERSION {
+        return Err(SlateError::UnsupportedVersion(
+            slate.version,
+            RECOVERY_SLATE_VERSION,
+        ));
+    }
+    let mut outputs = Vec::with_capacity(usize::from(slate.sender_change_output.is_some()) + 1);
+    if let Some(change) = &slate.sender_change_output {
+        let capsule = dom_crypto::recovery::RecoveryCapsule::from_bytes(
+            &slate.sender_change_recovery_capsule,
+        )
+        .map_err(|error| SlateError::Crypto(error.to_string()))?;
+        outputs.push(
+            TransactionOutput::with_recovery_capsule(
+                change.commitment.clone(),
+                change.proof.bytes.clone(),
+                &capsule,
+            )
+            .map_err(|error| SlateError::Crypto(error.to_string()))?,
+        );
+    }
+    let capsule =
+        dom_crypto::recovery::RecoveryCapsule::from_bytes(&slate.recipient_recovery_capsule)
+            .map_err(|error| SlateError::Crypto(error.to_string()))?;
+    outputs.push(
+        TransactionOutput::with_recovery_capsule(
+            recipient_output.commitment,
+            recipient_output.proof.bytes,
+            &capsule,
+        )
+        .map_err(|error| SlateError::Crypto(error.to_string()))?,
+    );
+    Ok(outputs)
 }
 
 /// Canonical plain-kernel signing message: `blake2b_256_tagged(TAG_KERNEL_MSG,
@@ -500,11 +763,19 @@ fn scalar_from_bytes(bytes: &[u8; 32]) -> Result<Scalar, SlateError> {
 }
 
 fn validate_slate_version(slate: &Slate) -> Result<(), SlateError> {
-    if slate.version != CURRENT_SLATE_VERSION {
+    if !matches!(
+        slate.version,
+        CURRENT_SLATE_VERSION | RECOVERY_SLATE_VERSION
+    ) {
         return Err(SlateError::UnsupportedVersion(
             slate.version,
-            CURRENT_SLATE_VERSION,
+            RECOVERY_SLATE_VERSION,
         ));
+    }
+    if slate.version == RECOVERY_SLATE_VERSION {
+        slate
+            .validate()
+            .map_err(|error| SlateError::Crypto(error.to_string()))?;
     }
     Ok(())
 }

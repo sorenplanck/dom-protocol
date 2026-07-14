@@ -15,7 +15,7 @@
 //! 3.  scalar validation
 //! 4.  point validation
 //! 5.  duplicate detection
-//! 6.  Bulletproofs+ range proof validation (via secp256k1-zkp)
+//! 6.  bounded aggregate Bulletproof range proof validation
 //! 7.  kernel signature validation (Schnorr via secp256k1-zkp)
 //! 8.  fee calculation
 //! 9.  weight calculation
@@ -57,7 +57,10 @@ pub use transaction::{
     TransactionInput, TransactionKernel, TransactionOutput,
 };
 
-use dom_core::{BlockHeight, DomError, PeerMisbehavior, Timestamp, MAX_BLOCK_WEIGHT};
+use dom_core::{
+    BlockHeight, DomError, PeerMisbehavior, Timestamp, MAX_BLOCK_WEIGHT, WEIGHT_OUTPUT,
+};
+use primitive_types::U256;
 
 /// Context required for transaction and block validation.
 pub struct ValidationContext {
@@ -91,7 +94,7 @@ pub fn validate_transaction(tx: &Transaction, ctx: &ValidationContext) -> Result
 
     // Step 5: duplicate detection — inside validate_transaction_structure
 
-    // Step 6: Bulletproofs+ range proof validation
+    // Step 6: bounded aggregate Bulletproof range proof validation
     validate_range_proofs(tx)?;
 
     // Step 7: Kernel signature validation (Schnorr)
@@ -113,6 +116,30 @@ pub fn validate_transaction(tx: &Transaction, ctx: &ValidationContext) -> Result
     validate_balance_equation(tx)?;
 
     Ok(())
+}
+
+/// Return the consensus block weight for one coinbase and all non-coinbase transactions.
+pub fn block_weight(
+    coinbase: &CoinbaseTransaction,
+    transactions: &[Transaction],
+) -> Result<u32, DomError> {
+    let overflow = || DomError::Invalid("block weight overflow".into());
+    let mut total = coinbase.kernel.weight();
+    total = total.checked_add(WEIGHT_OUTPUT).ok_or_else(overflow)?;
+    for tx in transactions {
+        total = total.checked_add(tx.weight()).ok_or_else(overflow)?;
+    }
+    Ok(total)
+}
+
+/// Add one block's work to the parent accumulated work without saturation.
+pub fn checked_accumulated_difficulty(
+    parent_total: U256,
+    block_difficulty: u128,
+) -> Result<U256, DomError> {
+    parent_total
+        .checked_add(U256::from(block_difficulty))
+        .ok_or_else(|| DomError::Invalid("total_difficulty overflow".into()))
 }
 
 /// Validate Schnorr signatures on all transaction kernels.
@@ -183,7 +210,7 @@ pub fn validate_block_transactions(
 ) -> Result<(), DomError> {
     // Step 8: Validate each non-coinbase transaction
     let mut actual_total_fees: u64 = 0;
-    let mut total_block_weight: u32 = 0;
+    let total_block_weight = block_weight(coinbase, transactions)?;
 
     for (i, tx) in transactions.iter().enumerate() {
         validate_transaction(tx, ctx)?;
@@ -194,10 +221,6 @@ pub fn validate_block_transactions(
         actual_total_fees = actual_total_fees
             .checked_add(tx_fees)
             .ok_or_else(|| DomError::Invalid("block total fees overflow".into()))?;
-
-        total_block_weight = total_block_weight
-            .checked_add(tx.weight())
-            .ok_or_else(|| DomError::Invalid("block weight overflow".into()))?;
     }
 
     // Step 13: Block weight check

@@ -43,7 +43,7 @@
 
 use dom_consensus::transaction::{validate_transaction_structure, Transaction};
 use dom_consensus::{validate_transaction, ValidationContext};
-use dom_core::{BlockHeight, DomError, Timestamp, MAX_BLOCK_WEIGHT, MIN_RELAY_FEE_RATE};
+use dom_core::{fee_policy, BlockHeight, DomError, Timestamp, MAX_BLOCK_WEIGHT};
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
 use dom_store::utxo::UtxoEntry;
 use std::collections::{BTreeMap, HashMap};
@@ -131,8 +131,10 @@ impl MempoolEntry {
     /// Create a mempool entry from a transaction.
     pub fn new(tx: Transaction, tx_hash: [u8; 32], received_at: u64) -> Result<Self, DomError> {
         let fee = tx.total_fee()?;
-        let weight = tx.weight();
-        let fee_rate = if weight == 0 { 0 } else { fee / weight as u64 };
+        let shape = tx.fee_shape()?;
+        let weight = tx.weight_checked()?;
+        let fee_rate = fee_policy::actual_fee_rate(fee, u64::from(weight))?.noms_per_weight_unit;
+        fee_policy::validate_minimum_fee(fee, shape)?;
         Ok(Self {
             tx,
             tx_hash,
@@ -265,15 +267,10 @@ impl Mempool {
         }
 
         let fee = tx.total_fee()?;
-        let weight = tx.weight();
-        let fee_rate = if weight == 0 { 0 } else { fee / weight as u64 };
-        if fee_rate < MIN_RELAY_FEE_RATE {
-            return Err(DomError::PolicyRejected(format!(
-                "fee rate {} < MIN_RELAY_FEE_RATE {}",
-                fee_rate, MIN_RELAY_FEE_RATE
-            )));
-        }
-        if weight as u64 > self.max_weight {
+        let shape = tx.fee_shape()?;
+        let weight = tx.weight_checked()?;
+        fee_policy::validate_minimum_fee(fee, shape)?;
+        if u64::from(weight) > self.max_weight {
             return Err(DomError::PolicyRejected(format!(
                 "tx weight {} exceeds mempool max_weight {}",
                 weight, self.max_weight
@@ -303,18 +300,10 @@ impl Mempool {
 
         let entry = MempoolEntry::new(tx, tx_hash, now_secs)?;
 
-        // Minimum relay fee check (policy)
-        if entry.fee_rate < MIN_RELAY_FEE_RATE {
-            return Err(DomError::PolicyRejected(format!(
-                "fee rate {} < MIN_RELAY_FEE_RATE {}",
-                entry.fee_rate, MIN_RELAY_FEE_RATE
-            )));
-        }
-
         // A transaction heavier than the entire pool capacity can never be
         // admitted — no amount of eviction frees enough room. Reject up front
         // so the eviction loop below always has a reachable exit (DOM-AUDIT-003).
-        if entry.weight as u64 > self.max_weight {
+        if u64::from(entry.weight) > self.max_weight {
             return Err(DomError::PolicyRejected(format!(
                 "tx weight {} exceeds mempool max_weight {}",
                 entry.weight, self.max_weight
@@ -332,7 +321,7 @@ impl Mempool {
         // we never evict a >= fee tx to admit a < fee one. The weight-progress
         // guard is a defensive backstop: if a successful eviction ever freed
         // nothing (e.g. an empty pool still over cap), stop instead of looping.
-        while self.total_weight + entry.weight as u64 > self.max_weight {
+        while self.total_weight + u64::from(entry.weight) > self.max_weight {
             let weight_before = self.total_weight;
             self.evict_lowest_fee(entry.fee_rate)?;
             if self.total_weight >= weight_before {
@@ -344,7 +333,7 @@ impl Mempool {
 
         // Invariant: after the loop the incoming tx fits within the weight cap.
         debug_assert!(
-            self.total_weight + entry.weight as u64 <= self.max_weight,
+            self.total_weight + u64::from(entry.weight) <= self.max_weight,
             "eviction loop must leave room for the incoming tx"
         );
 
@@ -353,7 +342,7 @@ impl Mempool {
             hex::encode(tx_hash),
             entry.fee_rate
         );
-        self.total_weight += entry.weight as u64;
+        self.total_weight += u64::from(entry.weight);
         self.fee_index.insert((entry.fee_rate, tx_hash), ());
         for input in &entry.tx.inputs {
             self.input_index
@@ -386,11 +375,10 @@ impl Mempool {
         let mut used_weight = 0u32;
 
         for entry in self.entries_in_block_order() {
-            let new_weight = used_weight.saturating_add(entry.weight);
-            if new_weight > max_weight {
+            if entry.weight > max_weight.saturating_sub(used_weight) {
                 continue;
             }
-            used_weight = new_weight;
+            used_weight += entry.weight;
             selected.push(entry);
         }
         selected
@@ -595,7 +583,10 @@ impl Default for Mempool {
 mod tests {
     use super::*;
     use dom_consensus::transaction::{TransactionInput, TransactionKernel, TransactionOutput};
-    use dom_core::{Amount, KERNEL_FEAT_PLAIN, TAG_KERNEL_MSG};
+    use dom_core::{
+        Amount, KERNEL_FEAT_PLAIN, MIN_RELAY_FEE_RATE, TAG_KERNEL_MSG, WEIGHT_COINBASE_KERNEL,
+        WEIGHT_OUTPUT,
+    };
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
     use dom_crypto::{bp2_prove, schnorr_sign, SecretKey};
@@ -743,6 +734,27 @@ mod tests {
     }
 
     #[test]
+    fn wallet_policy_minimum_matches_mempool_admission() {
+        let shape = dom_core::fee_policy::TransactionShape::from_counts(0, 1, 1).expect("shape");
+        let minimum = dom_core::fee_policy::fee_breakdown(shape)
+            .expect("breakdown")
+            .minimum_fee_noms;
+
+        let mut accepted_pool = Mempool::new();
+        let (accepted, accepted_hash) = make_tx(minimum);
+        accepted_pool
+            .accept_tx(accepted, accepted_hash, 0)
+            .expect("exact policy minimum is accepted");
+
+        let mut rejected_pool = Mempool::new();
+        let (rejected, rejected_hash) = make_tx(minimum - 1);
+        let error = rejected_pool
+            .accept_tx(rejected, rejected_hash, 0)
+            .expect_err("minimum minus one is rejected");
+        assert!(matches!(error, DomError::PolicyRejected(_)));
+    }
+
+    #[test]
     fn select_orders_by_fee_rate() {
         let mut pool = Mempool::new();
         let (tx_low, h_low) = make_tx(MIN_RELAY_FEE_RATE * 24); // fee_rate=1000
@@ -777,6 +789,40 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![hash_a, hash_b],
             "repeated block selection must remain stable"
+        );
+    }
+
+    #[test]
+    fn select_for_block_honors_miner_coinbase_reserved_budget() {
+        let mut pool = Mempool::new();
+        let tx_weight_budget = MAX_BLOCK_WEIGHT - WEIGHT_OUTPUT - WEIGHT_COINBASE_KERNEL;
+
+        for seed in 1..=10 {
+            let (heavy, hash) = make_tx_weighted(MIN_RELAY_FEE_RATE * 3_993 * 2, 190, seed);
+            pool.accept_tx(heavy, hash, u64::from(seed)).unwrap();
+        }
+        let (marginal, hash_marginal) = make_tx_weighted(MIN_RELAY_FEE_RATE * 66, 3, 20);
+        pool.accept_tx(marginal, hash_marginal, 20).unwrap();
+
+        let selected = pool.select_for_block(tx_weight_budget);
+        let selected_weight = selected.iter().fold(0u32, |acc, entry| {
+            acc.checked_add(entry.weight).expect("selected weight")
+        });
+        assert!(selected_weight <= tx_weight_budget);
+        assert_eq!(
+            selected_weight + WEIGHT_OUTPUT + WEIGHT_COINBASE_KERNEL,
+            MAX_BLOCK_WEIGHT - 47
+        );
+        assert_eq!(selected.len(), 10);
+        assert!(
+            !selected.iter().any(|entry| entry.tx_hash == hash_marginal),
+            "mempool selection must not fill weight that the miner reserves for coinbase"
+        );
+        assert!(
+            pool.select_for_block(MAX_BLOCK_WEIGHT)
+                .iter()
+                .any(|entry| entry.tx_hash == hash_marginal),
+            "the marginal transaction should fit only when coinbase weight is not reserved"
         );
     }
 

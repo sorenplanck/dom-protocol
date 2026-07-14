@@ -1,10 +1,10 @@
-//! Minerador DOM — loop de mineração com RandomX.
+//! DOM miner loop with RandomX.
 
 use crate::node::{reconcile_mempool_after_connect, DomNode};
 use crate::task_supervisor::ShutdownToken;
 use dom_config::MinerThrottleConfig;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
-use dom_consensus::{compute_block_pmmr_roots, derive_chain_id};
+use dom_consensus::{checked_accumulated_difficulty, compute_block_pmmr_roots, derive_chain_id};
 use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, Transaction, TransactionOutput};
 use dom_core::{
     BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, MAX_BLOCK_WEIGHT,
@@ -15,6 +15,7 @@ use dom_pow::{
     pow_validation_mode_for_network, randomx_seed_height, target_to_compact, target_to_difficulty,
     CompactTarget, PowValidationMode,
 };
+use dom_store::DomStore;
 use primitive_types::U256;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -173,6 +174,61 @@ fn build_real_coinbase(
     build_coinbase_with_blinding(height, total_tx_fees, chain_id, None, None)
 }
 
+/// Build a Wallet V3 coinbase whose value and blinding are recoverable from the
+/// seed-derived recovery root and canonical block output.
+pub fn build_seed_recoverable_coinbase(
+    height: BlockHeight,
+    total_tx_fees: u64,
+    chain_id: &[u8; 32],
+    root: &dom_crypto::recovery::RecoveryRoot,
+    chain: dom_crypto::recovery::RecoveryChainContext,
+    account: u32,
+    derivation_index: u64,
+) -> Result<CoinbaseTransaction, DomError> {
+    use dom_crypto::hash::blake2b_256_tagged;
+    use dom_crypto::keys::SecretKey;
+    use dom_crypto::pedersen::Commitment;
+    use dom_crypto::schnorr_sign;
+
+    if chain.chain_id != *chain_id {
+        return Err(DomError::Invalid(
+            "coinbase recovery chain id does not match signing chain id".into(),
+        ));
+    }
+    let explicit_value = dom_core::block_reward(height)
+        .noms()
+        .checked_add(total_tx_fees)
+        .ok_or_else(|| DomError::Invalid("coinbase value overflow".into()))?;
+    let material = dom_tx::build_recoverable_output(
+        root,
+        chain,
+        explicit_value,
+        account,
+        derivation_index,
+        dom_crypto::recovery::OutputRecoveryDomain::Coinbase,
+    )
+    .map_err(|error| DomError::Internal(format!("recoverable coinbase output: {error}")))?;
+    let excess = Commitment::commit(0, &material.blinding);
+    let mut data = Vec::with_capacity(9);
+    data.push(KERNEL_FEAT_COINBASE);
+    data.extend_from_slice(&explicit_value.to_le_bytes());
+    let kernel_message = blake2b_256_tagged(dom_core::TAG_KERNEL_MSG_COINBASE, &data);
+    let key = SecretKey::from_bytes(material.blinding.as_bytes())
+        .map_err(|error| DomError::Internal(format!("coinbase blinding as key: {error}")))?;
+    let signature = schnorr_sign(&key, kernel_message.as_bytes(), chain_id)
+        .map_err(|error| DomError::Internal(format!("coinbase sign failed: {error}")))?;
+    Ok(CoinbaseTransaction {
+        output: material.output,
+        kernel: CoinbaseKernel {
+            features: KERNEL_FEAT_COINBASE,
+            explicit_value,
+            excess,
+            excess_signature: signature.to_bytes(),
+        },
+        offset: [0u8; 32],
+    })
+}
+
 /// Build the canonical genesis coinbase using a deterministic blinding factor.
 ///
 /// The blinding is derived from `TAG_GENESIS_BLINDING` so every node produces
@@ -272,19 +328,19 @@ fn build_coinbase_with_blinding(
     // Output commitment: C = value*H + r*G
     let output_commitment = Commitment::commit(explicit_value, &blinding);
 
-    // Range proof: proves value in [0, 2^52). Yields the proof bytes (Vec<u8>).
-    // Both paths now produce a 739-byte bounded aggregate Bulletproof (bp2):
+    // Range proof: proves value in [0, MAX_PROVABLE_VALUE]. Yields proof bytes.
+    // Both paths produce the final 739-byte bounded aggregate Bulletproof:
     //   - GENESIS uses a DETERMINISTIC nonce (`Some(nonce)`) so the genesis block
-    //     is byte-reproducible across nodes (bp2_prove_with_nonce).
+    //     is byte-reproducible across nodes.
     //   - normal blocks use fresh random nonces (bp2_prove).
     let range_proof_bytes: Vec<u8> = match bulletproof_nonce {
         Some(nonce) => {
-            dom_crypto::bp2_prove_with_nonce(explicit_value, &blinding, &nonce)
+            dom_crypto::range_proof_prove_bytes_with_nonce(explicit_value, &blinding, &nonce)
                 .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?
                 .0
         }
         None => {
-            dom_crypto::bp2_prove(explicit_value, &blinding)
+            dom_crypto::range_proof_prove_bytes(explicit_value, &blinding)
                 .map_err(|e| DomError::Internal(format!("coinbase range proof failed: {e}")))?
                 .0
         }
@@ -614,6 +670,21 @@ fn aggregate_block_kernel_offset(transactions: &[Transaction]) -> [u8; 32] {
     total.to_repr().into()
 }
 
+fn resolve_mining_randomx_seed(
+    store: &DomStore,
+    candidate_height: u64,
+) -> Result<[u8; 32], DomError> {
+    let seed_height = randomx_seed_height(candidate_height);
+    match store.get_hash_at_height(seed_height)? {
+        Some(hash) => Ok(hash),
+        None if seed_height == 0 => Ok([0u8; 32]),
+        None => Err(DomError::Internal(format!(
+            "RandomX seed block at height {seed_height} missing from committed store \
+             (needed for mining block at height {candidate_height})"
+        ))),
+    }
+}
+
 pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     let (tip_hash, tip_height, tip_difficulty, parent_ts) = {
         use dom_serialization::DomDeserialize;
@@ -667,7 +738,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
         BlockHeight(new_height),
     )?;
     let block_diff = target_to_difficulty(&target);
-    let new_total_diff = tip_difficulty.saturating_add(U256::from(block_diff));
+    let new_total_diff = checked_accumulated_difficulty(tip_difficulty, block_diff)?;
     let mining_mode = MiningMode::for_network(node.config.network)?;
     let throttle = MinerThrottle::from_config(&node.config.miner_throttle);
 
@@ -679,15 +750,9 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
         throttle.describe()
     );
 
-    let seed_h = randomx_seed_height(new_height);
     let seed_hash = {
         let chain = node.chain.lock().await;
-        chain
-            .store
-            .get_hash_at_height(seed_h)
-            .ok()
-            .flatten()
-            .unwrap_or([0u8; 32])
+        resolve_mining_randomx_seed(&chain.store, new_height)?
     };
 
     // ── Mempool inclusion (DOM-PMMR-002 Phase C) ──────────────────────────────
@@ -1229,7 +1294,8 @@ mod genesis_determinism_tests {
 
     use super::{
         apply_wallet_after_mined_connect, build_genesis_coinbase, build_real_coinbase,
-        finalize_mined_block, mine_blocking, MinerThrottle,
+        build_seed_recoverable_coinbase, finalize_mined_block, mine_blocking,
+        resolve_mining_randomx_seed, MinerThrottle,
     };
     use crate::node::DomNode;
     use dom_chain::{ConnectResult, ReorgBlockDelta, ReorgDelta};
@@ -1246,10 +1312,12 @@ mod genesis_determinism_tests {
     use dom_crypto::BlindingFactor;
     use dom_pow::{
         compute_expected_target, fast_pow_hash, genesis_anchor, hash_meets_target,
-        target_to_compact, target_to_difficulty, PowValidationMode, REGTEST_TARGET_COMPACT,
+        randomx_seed_height, target_to_compact, target_to_difficulty, PowValidationMode,
+        REGTEST_TARGET_COMPACT,
     };
     use dom_serialization::DomSerialize;
     use dom_wallet::{Network, OwnedOutput, WalletDir};
+    use lmdb::{Transaction as LmdbTransaction, WriteFlags};
     use primitive_types::U256;
     use std::fs;
     use std::path::PathBuf;
@@ -1320,6 +1388,35 @@ mod genesis_determinism_tests {
 
     fn disabled_throttle() -> MinerThrottle {
         MinerThrottle::from_config(&MinerThrottleConfig::default())
+    }
+
+    fn put_raw_height_mapping(node: &DomNode, height: u64, value: &[u8]) {
+        let chain = node.chain.blocking_lock();
+        let key = height.to_le_bytes();
+        let mut txn = chain.store.env.begin_rw_txn().expect("rw txn");
+        txn.put(chain.store.db_height, &key, &value, WriteFlags::empty())
+            .expect("put height mapping");
+        txn.commit().expect("commit height mapping");
+    }
+
+    fn describe_height_mapping(node: &DomNode, height: u64) -> String {
+        let chain = node.chain.blocking_lock();
+        match chain.store.get_hash_at_height(height) {
+            Ok(Some(hash)) => format!("Some({})", hex::encode(hash)),
+            Ok(None) => "None".to_string(),
+            Err(err) => format!("Err({err})"),
+        }
+    }
+
+    fn current_tip_height(node: &DomNode) -> u64 {
+        node.chain.blocking_lock().tip_height.0
+    }
+
+    fn raw_seed_hash(tag: u8) -> [u8; 32] {
+        let mut hash = [0u8; 32];
+        hash[0] = tag;
+        hash[31] = tag ^ 0x5a;
+        hash
     }
 
     #[test]
@@ -1432,6 +1529,128 @@ mod genesis_determinism_tests {
         }
     }
 
+    #[test]
+    fn randomx_mining_seed_reachability_fails_closed_after_prefix_confirmation() {
+        const CANDIDATE_HEIGHT: u64 = 2048;
+        const SEED_HEIGHT: u64 = 1984;
+
+        assert_eq!(randomx_seed_height(0), 0);
+        assert_eq!(randomx_seed_height(CANDIDATE_HEIGHT), SEED_HEIGHT);
+
+        let epoch_zero_dir = fresh_test_dir("randomx-seed-epoch-zero");
+        let epoch_zero_node = init_test_node(regtest_config(&epoch_zero_dir));
+        let epoch_zero_seed = {
+            let chain = epoch_zero_node.chain.blocking_lock();
+            resolve_mining_randomx_seed(&chain.store, 1).expect("epoch-zero seed")
+        };
+        println!(
+            "DOM_RANDOMX_337_DIAG scenario=epoch-zero candidate_height=1 epoch=0 seed_height=0 seed_lookup={} selected_seed={} tip_height={} canonical_height_index_state={} mining_result=not-run validator_result=bootstrap-zero-accepted",
+            describe_height_mapping(&epoch_zero_node, 0),
+            hex::encode(epoch_zero_seed),
+            current_tip_height(&epoch_zero_node),
+            describe_height_mapping(&epoch_zero_node, 0),
+        );
+        assert_eq!(epoch_zero_seed, [0u8; 32]);
+        crate::test_dir::remove_test_dir(&epoch_zero_dir);
+
+        let normal_dir = fresh_test_dir("randomx-seed-normal-epoch-one");
+        let normal_node = init_test_node(regtest_config(&normal_dir));
+        let expected_seed = raw_seed_hash(0x71);
+        put_raw_height_mapping(&normal_node, SEED_HEIGHT, &expected_seed);
+        let selected_seed = {
+            let chain = normal_node.chain.blocking_lock();
+            resolve_mining_randomx_seed(&chain.store, CANDIDATE_HEIGHT)
+                .expect("normal epoch-one seed")
+        };
+        println!(
+            "DOM_RANDOMX_337_DIAG scenario=normal-epoch-one candidate_height={CANDIDATE_HEIGHT} epoch=1 seed_height={SEED_HEIGHT} seed_lookup={} selected_seed={} tip_height={} canonical_height_index_state={} mining_result=not-run validator_result=seed-bytes-match",
+            describe_height_mapping(&normal_node, SEED_HEIGHT),
+            hex::encode(selected_seed),
+            current_tip_height(&normal_node),
+            describe_height_mapping(&normal_node, SEED_HEIGHT),
+        );
+        assert_eq!(selected_seed, expected_seed);
+        crate::test_dir::remove_test_dir(&normal_dir);
+
+        let missing_dir = fresh_test_dir("randomx-seed-missing-epoch-one");
+        let missing_node = init_test_node(regtest_config(&missing_dir));
+        let missing_result = {
+            let chain = missing_node.chain.blocking_lock();
+            resolve_mining_randomx_seed(&chain.store, CANDIDATE_HEIGHT)
+        };
+        let missing_error = missing_result.expect_err("missing epoch-one seed must fail closed");
+        println!(
+            "DOM_RANDOMX_337_DIAG scenario=missing-epoch-one candidate_height={CANDIDATE_HEIGHT} epoch=1 seed_height={SEED_HEIGHT} seed_lookup={} selected_seed=blocked tip_height={} canonical_height_index_state={} mining_result=blocked-before-hashing validator_result=not-reached error={}",
+            describe_height_mapping(&missing_node, SEED_HEIGHT),
+            current_tip_height(&missing_node),
+            describe_height_mapping(&missing_node, SEED_HEIGHT),
+            missing_error,
+        );
+        assert!(
+            missing_error
+                .to_string()
+                .contains("missing from committed store"),
+            "missing seed error should identify the missing committed seed block"
+        );
+        crate::test_dir::remove_test_dir(&missing_dir);
+
+        let corrupt_dir = fresh_test_dir("randomx-seed-corrupt-height-entry");
+        let corrupt_node = init_test_node(regtest_config(&corrupt_dir));
+        put_raw_height_mapping(&corrupt_node, SEED_HEIGHT, &[0x99u8; 31]);
+        let corrupt_result = {
+            let chain = corrupt_node.chain.blocking_lock();
+            resolve_mining_randomx_seed(&chain.store, CANDIDATE_HEIGHT)
+        };
+        let corrupt_error = corrupt_result.expect_err("corrupt height index must propagate");
+        println!(
+            "DOM_RANDOMX_337_DIAG scenario=store-read-error candidate_height={CANDIDATE_HEIGHT} epoch=1 seed_height={SEED_HEIGHT} seed_lookup={} selected_seed=blocked tip_height={} canonical_height_index_state={} mining_result=blocked-before-hashing validator_result=not-reached error={}",
+            describe_height_mapping(&corrupt_node, SEED_HEIGHT),
+            current_tip_height(&corrupt_node),
+            describe_height_mapping(&corrupt_node, SEED_HEIGHT),
+            corrupt_error,
+        );
+        assert!(
+            corrupt_error.to_string().contains("corrupt height index"),
+            "DomStore read error must not be suppressed"
+        );
+        crate::test_dir::remove_test_dir(&corrupt_dir);
+
+        let dangling_dir = fresh_test_dir("randomx-seed-dangling-height");
+        let dangling_node = init_test_node(regtest_config(&dangling_dir));
+        let dangling_hash = raw_seed_hash(0x52);
+        put_raw_height_mapping(&dangling_node, SEED_HEIGHT, &dangling_hash);
+        let dangling_seed = {
+            let chain = dangling_node.chain.blocking_lock();
+            resolve_mining_randomx_seed(&chain.store, CANDIDATE_HEIGHT)
+                .expect("dangling height seed")
+        };
+        let dangling_header_lookup = {
+            let chain = dangling_node.chain.blocking_lock();
+            chain
+                .store
+                .get_block_header(&dangling_hash)
+                .expect("dangling header lookup")
+                .is_some()
+        };
+        println!(
+            "DOM_RANDOMX_337_DIAG scenario=dangling-height-mapping candidate_height={CANDIDATE_HEIGHT} epoch=1 seed_height={SEED_HEIGHT} seed_lookup={} selected_seed={} tip_height={} canonical_height_index_state={} mining_result=not-run validator_result=seed-pointer-used-header-present={}",
+            describe_height_mapping(&dangling_node, SEED_HEIGHT),
+            hex::encode(dangling_seed),
+            current_tip_height(&dangling_node),
+            describe_height_mapping(&dangling_node, SEED_HEIGHT),
+            dangling_header_lookup,
+        );
+        assert_eq!(
+            dangling_seed, dangling_hash,
+            "miner uses the height-index bytes as the seed without dereferencing the block"
+        );
+        assert!(
+            !dangling_header_lookup,
+            "test fixture must leave the mapped seed hash dangling"
+        );
+        crate::test_dir::remove_test_dir(&dangling_dir);
+    }
+
     /// Building the genesis coinbase N times for the same chain_id
     /// MUST produce byte-identical commitment, excess, and signature.
     /// A divergence here means a node restarted with the data_dir
@@ -1441,9 +1660,9 @@ mod genesis_determinism_tests {
     /// end-to-end from the deterministic builder and pins every derived value, so
     /// any future drift (proof, derivation, roots, or header hash) is caught.
     ///
-    /// The genesis coinbase now carries a 739-byte bounded aggregate Bulletproof
-    /// (`bp2_prove_with_nonce`), so `rangeproof_root` and the genesis hash changed
-    /// from the borromean era; `output_root`/`kernel_root` are unchanged (the
+    /// The genesis coinbase carries a deterministic 739-byte bounded aggregate
+    /// Bulletproof, so `rangeproof_root` and the genesis hash are pinned to that
+    /// final proof format; `output_root`/`kernel_root` are unchanged (the
     /// Pedersen commitment and kernel excess are independent of the range-proof
     /// backend). Recomputed after the bounded aggregate bp2 migration.
     #[test]
@@ -1461,19 +1680,19 @@ mod genesis_determinism_tests {
         let cid = chain_id_testnet();
         let coinbase = build_genesis_coinbase(&cid).expect("genesis coinbase");
 
-        // (1) bp2 range proof: exactly 739 bytes and self-verifies under bp2.
+        // (1) Final range proof: exactly 739 bytes and self-verifies.
         assert_eq!(
             coinbase.output.proof.len(),
             739,
             "genesis coinbase proof must be a 739-byte Bulletproof"
         );
         assert!(
-            dom_crypto::bp2_verify(
+            dom_crypto::range_proof_verify(
                 coinbase.output.commitment.as_bytes(),
                 &coinbase.output.proof
             )
-            .expect("bp2_verify"),
-            "genesis coinbase range proof must verify under bp2 (self-validation)"
+            .expect("range_proof_verify"),
+            "genesis coinbase range proof must verify"
         );
 
         // (2) PMMR roots match the pinned vectors.
@@ -1535,6 +1754,41 @@ mod genesis_determinism_tests {
         );
         let (o2, k2, r2) = compute_block_pmmr_roots(&cb2, &[]).expect("roots rebuild");
         assert_eq!((o2, k2, r2), (output_root, kernel_root, rangeproof_root));
+    }
+
+    #[test]
+    fn seed_recoverable_coinbase_validates_and_restores() {
+        let chain_id = chain_id_regtest();
+        let chain = dom_crypto::recovery::RecoveryChainContext {
+            network_magic: NETWORK_MAGIC_REGTEST,
+            chain_id,
+        };
+        let root = dom_crypto::recovery::derive_recovery_root(&[0x51; 64], chain).unwrap();
+        let coinbase =
+            build_seed_recoverable_coinbase(BlockHeight(1), 0, &chain_id, &root, chain, 0, 1)
+                .unwrap();
+        coinbase
+            .validate(BlockHeight(1), 0, &chain_id)
+            .expect("recoverable coinbase validates");
+        let capsule = coinbase.output.recovery_capsule().unwrap().unwrap();
+        let recovered = dom_crypto::recovery::recover_output_from_capsule(
+            &root,
+            chain,
+            coinbase.output.commitment.as_bytes(),
+            dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
+            dom_crypto::recovery::PublicOutputKind::Coinbase,
+            &capsule,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            recovered.value,
+            dom_core::block_reward(BlockHeight(1)).noms()
+        );
+        assert_eq!(
+            recovered.domain,
+            dom_crypto::recovery::OutputRecoveryDomain::Coinbase
+        );
     }
 
     #[test]

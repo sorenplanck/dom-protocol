@@ -204,12 +204,17 @@ pub const MAX_BLOCK_TXS: usize = 5_000;
 /// envelope. DOM's bounded aggregate Bulletproof is a FIXED 739 bytes; DOM
 /// emits exactly one proof per output, so 739 is the true maximum. 768
 /// (3*256) gives ~93 bytes (~13.8%) of defensive headroom — enough to absorb a
-/// minor format/version change without a consensus change — while still bounding
-/// the per-proof deserialization allocation ~8x tighter than the old 6144
-/// (borromean) value. Hard reset: the protocol no longer accepts the legacy
-/// ~4166-byte borromean proofs. (The legacy `bulletproof` module keeps its own
-/// cap for its tests.)
+/// minor format/version change without a consensus change, while still bounding
+/// the per-proof deserialization allocation tightly. The verifier itself
+/// accepts only the exact final 739-byte proof format.
 pub const MAX_PROOF_SIZE: usize = 768;
+
+/// [CONSENSUS] Exact Wallet V3 recovery capsule size.
+pub const RECOVERY_CAPSULE_SIZE: usize = 96;
+
+/// [CONSENSUS] Maximum length-prefixed output proof envelope. Recoverable
+/// outputs carry the 739-byte range proof followed by a 96-byte capsule.
+pub const MAX_OUTPUT_PROOF_ENVELOPE_SIZE: usize = 739 + RECOVERY_CAPSULE_SIZE;
 
 /// [CONSENSUS] Maximum serialized block size in bytes (16 MiB).
 pub const MAX_BLOCK_SERIALIZED_SIZE: usize = 16 * 1_024 * 1_024;
@@ -429,9 +434,9 @@ pub const TAG_COINBASE_BLINDING: &str = "DOM:coinbase-blinding:v1";
 ///
 /// Regenerated after the bounded aggregate bp2 migration using
 /// `TAG_GENESIS_BLINDING:v1`. The genesis coinbase now carries a 739-byte
-/// bounded aggregate Bulletproof, so `rangeproof_root` and this hash changed
-/// from the borromean era; `output_root`/`kernel_root` are unchanged. Pinned
-/// and regression-tested by `dom-node` `miner::tests::genesis_testnet_frozen_vectors`.
+/// bounded aggregate Bulletproof, so `rangeproof_root` and this hash are pinned
+/// to that final format; `output_root`/`kernel_root` are unchanged. Regression
+/// tested by `dom-node` `miner::tests::genesis_testnet_frozen_vectors`.
 pub const GENESIS_HASH_TESTNET: [u8; 32] = [
     0x2a, 0xb5, 0xe6, 0xc7, 0x36, 0x07, 0xe8, 0xbf, 0xbb, 0xec, 0x2d, 0x4c, 0xe3, 0xea, 0x14, 0x19,
     0xcd, 0xa2, 0x9a, 0xe6, 0x89, 0x2e, 0x7f, 0x1c, 0x24, 0xfa, 0xcc, 0x46, 0x5c, 0xd6, 0x58, 0x21,

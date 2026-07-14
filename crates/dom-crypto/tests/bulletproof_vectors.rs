@@ -1,7 +1,7 @@
-//! Bulletproofs+ test vectors for cross-implementation validation.
+//! Final DOM range-proof test vectors for cross-implementation validation.
 
-use dom_crypto::bulletproof::{prove, verify};
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
+use dom_crypto::range_proof::{prove, verify};
 
 #[test]
 fn vector_1_dom_exact() {

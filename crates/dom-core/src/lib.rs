@@ -17,9 +17,11 @@
 pub mod address;
 pub mod constants;
 pub mod error;
+pub mod fee_policy;
 pub mod types;
 
-pub use address::{Address, ADDRESS_HRP_MAINNET, ADDRESS_HRP_TESTNET};
+pub use address::{Address, ADDRESS_HRP_MAINNET, ADDRESS_HRP_REGTEST, ADDRESS_HRP_TESTNET};
 pub use constants::*;
 pub use error::{DomError, PeerMisbehavior};
+pub use fee_policy::*;
 pub use types::*;

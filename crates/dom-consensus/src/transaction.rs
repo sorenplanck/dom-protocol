@@ -6,10 +6,9 @@
 //! RFC-0010: Weight units, lock_height validation, coinbase maturity placement.
 
 use dom_core::{
-    Amount, BlockHeight, DomError, PeerMisbehavior, KERNEL_FEAT_COINBASE,
+    fee_policy, Amount, BlockHeight, DomError, PeerMisbehavior, KERNEL_FEAT_COINBASE,
     KERNEL_FEAT_HEIGHT_LOCKED, KERNEL_FEAT_PLAIN, MAX_INPUTS_PER_TX, MAX_KERNELS_PER_TX,
-    MAX_OUTPUTS_PER_TX, MAX_TX_WEIGHT, WEIGHT_COINBASE_KERNEL, WEIGHT_INPUT, WEIGHT_KERNEL,
-    WEIGHT_OUTPUT,
+    MAX_OUTPUTS_PER_TX, MAX_TX_WEIGHT, WEIGHT_COINBASE_KERNEL, WEIGHT_KERNEL,
 };
 use dom_crypto::pedersen::Commitment;
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
@@ -53,7 +52,65 @@ impl DomDeserialize for TransactionInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionOutput {
     pub commitment: Commitment,
+    /// Canonical output proof envelope. Legacy protocol/test outputs contain a
+    /// 739-byte proof. Wallet V3 outputs append one 96-byte recovery capsule.
     pub proof: Vec<u8>,
+}
+
+impl TransactionOutput {
+    /// Build a Wallet V3 output envelope from the unchanged range proof and a
+    /// canonical recovery capsule.
+    pub fn with_recovery_capsule(
+        commitment: Commitment,
+        proof: Vec<u8>,
+        capsule: &dom_crypto::recovery::RecoveryCapsule,
+    ) -> Result<Self, DomError> {
+        if proof.len() != dom_crypto::RANGE_PROOF_SIZE {
+            return Err(DomError::Invalid(format!(
+                "range proof length {} != {}",
+                proof.len(),
+                dom_crypto::RANGE_PROOF_SIZE
+            )));
+        }
+        let mut envelope = Vec::with_capacity(dom_core::MAX_OUTPUT_PROOF_ENVELOPE_SIZE);
+        envelope.extend_from_slice(&proof);
+        envelope.extend_from_slice(capsule.as_bytes());
+        Ok(Self {
+            commitment,
+            proof: envelope,
+        })
+    }
+
+    /// Return the unchanged 739-byte mathematical range proof.
+    pub fn range_proof_bytes(&self) -> Result<&[u8], DomError> {
+        match self.proof.len() {
+            dom_crypto::RANGE_PROOF_SIZE => Ok(&self.proof),
+            dom_core::MAX_OUTPUT_PROOF_ENVELOPE_SIZE => {
+                Ok(&self.proof[..dom_crypto::RANGE_PROOF_SIZE])
+            }
+            length => Err(DomError::Invalid(format!(
+                "noncanonical output proof envelope length {length}"
+            ))),
+        }
+    }
+
+    /// Parse the optional Wallet V3 recovery capsule.
+    pub fn recovery_capsule(
+        &self,
+    ) -> Result<Option<dom_crypto::recovery::RecoveryCapsule>, DomError> {
+        match self.proof.len() {
+            dom_crypto::RANGE_PROOF_SIZE => Ok(None),
+            dom_core::MAX_OUTPUT_PROOF_ENVELOPE_SIZE => {
+                dom_crypto::recovery::RecoveryCapsule::from_bytes(
+                    &self.proof[dom_crypto::RANGE_PROOF_SIZE..],
+                )
+                .map(Some)
+            }
+            length => Err(DomError::Invalid(format!(
+                "noncanonical output proof envelope length {length}"
+            ))),
+        }
+    }
 }
 
 impl DomSerialize for TransactionOutput {
@@ -69,7 +126,7 @@ impl DomDeserialize for TransactionOutput {
 
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let commitment_bytes = r.read_array::<33>()?;
-        let proof = r.read_vec(dom_core::MAX_PROOF_SIZE)?;
+        let proof = r.read_vec(dom_core::MAX_OUTPUT_PROOF_ENVELOPE_SIZE)?;
         Ok(Self {
             commitment: Commitment::from_compressed_bytes(&commitment_bytes)?,
             proof,
@@ -146,18 +203,18 @@ impl CoinbaseKernel {
         let expected = reward
             .checked_add(total_tx_fees)
             .ok_or_else(|| DomError::Invalid("coinbase value overflow".into()))?;
-        if expected > dom_crypto::bulletproof::MAX_PROVABLE_VALUE {
+        if expected > dom_crypto::MAX_PROVABLE_VALUE {
             return Err(DomError::Invalid(format!(
                 "coinbase expected value {} exceeds MAX_PROVABLE_VALUE {}",
                 expected,
-                dom_crypto::bulletproof::MAX_PROVABLE_VALUE
+                dom_crypto::MAX_PROVABLE_VALUE
             )));
         }
-        if self.explicit_value > dom_crypto::bulletproof::MAX_PROVABLE_VALUE {
+        if self.explicit_value > dom_crypto::MAX_PROVABLE_VALUE {
             return Err(DomError::Invalid(format!(
                 "coinbase explicit_value {} exceeds MAX_PROVABLE_VALUE {}",
                 self.explicit_value,
-                dom_crypto::bulletproof::MAX_PROVABLE_VALUE
+                dom_crypto::MAX_PROVABLE_VALUE
             )));
         }
         if self.explicit_value != expected {
@@ -230,10 +287,24 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn weight(&self) -> u32 {
-        (self.inputs.len() as u32)
-            .saturating_mul(WEIGHT_INPUT)
-            .saturating_add((self.outputs.len() as u32).saturating_mul(WEIGHT_OUTPUT))
-            .saturating_add((self.kernels.len() as u32).saturating_mul(WEIGHT_KERNEL))
+        self.weight_checked()
+            .expect("deserialized transaction count limits keep weight in u32")
+    }
+
+    pub fn fee_shape(&self) -> Result<fee_policy::TransactionShape, DomError> {
+        fee_policy::TransactionShape::from_counts(
+            self.inputs.len(),
+            self.outputs.len(),
+            self.kernels.len(),
+        )
+    }
+
+    pub fn weight_checked(&self) -> Result<u32, DomError> {
+        let weight = fee_policy::transaction_weight(self.fee_shape()?)?;
+        weight
+            .total_weight
+            .try_into()
+            .map_err(|_| DomError::Internal("transaction weight conversion overflow".into()))
     }
 
     pub fn total_fee(&self) -> Result<u64, DomError> {
@@ -299,8 +370,10 @@ pub fn validate_transaction_structure(tx: &Transaction) -> Result<(), DomError> 
                 "output {i} has empty range proof"
             )));
         }
-        if o.proof.len() > dom_core::MAX_PROOF_SIZE {
-            return Err(DomError::Invalid(format!("output {i} proof too large")));
+        if o.proof.len() > dom_core::MAX_OUTPUT_PROOF_ENVELOPE_SIZE {
+            return Err(DomError::Invalid(format!(
+                "output {i} proof envelope too large"
+            )));
         }
     }
 
@@ -349,7 +422,7 @@ pub fn validate_transaction_structure(tx: &Transaction) -> Result<(), DomError> 
     tx.total_fee()?;
 
     // Step 9: Weight
-    let w = tx.weight();
+    let w = tx.weight_checked()?;
     if w > MAX_TX_WEIGHT {
         return Err(DomError::Invalid(format!(
             "tx weight {w} > MAX_TX_WEIGHT {MAX_TX_WEIGHT}"
@@ -412,7 +485,16 @@ impl CoinbaseTransaction {
                 "coinbase output has empty range proof".into(),
             ));
         }
-        match dom_crypto::bp2_verify(self.output.commitment.as_bytes(), &self.output.proof) {
+        let proof = self.output.range_proof_bytes()?;
+        let valid = match self.output.recovery_capsule()? {
+            Some(capsule) => dom_crypto::range_proof_verify_with_extra_commit(
+                self.output.commitment.as_bytes(),
+                proof,
+                capsule.as_bytes(),
+            ),
+            None => dom_crypto::range_proof_verify(self.output.commitment.as_bytes(), proof),
+        };
+        match valid {
             Ok(true) => {}
             Ok(false) => {
                 return Err(DomError::Invalid(
@@ -465,7 +547,7 @@ impl CoinbaseTransaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dom_core::{HALVING_INTERVAL, INITIAL_BLOCK_REWARD};
+    use dom_core::{HALVING_INTERVAL, INITIAL_BLOCK_REWARD, WEIGHT_OUTPUT};
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::keys::SecretKey;
     use dom_crypto::pedersen::BlindingFactor;
@@ -501,7 +583,7 @@ mod tests {
         let explicit_value = INITIAL_BLOCK_REWARD;
         let blinding = BlindingFactor::from_bytes([9u8; 32]).unwrap();
         let output_commitment = Commitment::commit(explicit_value, &blinding);
-        let (proof, _) = dom_crypto::bp2_prove(explicit_value, &blinding).unwrap();
+        let (proof, _) = dom_crypto::range_proof_prove_bytes(explicit_value, &blinding).unwrap();
         let excess = Commitment::commit(0, &blinding);
         let kernel_message = {
             let mut data = Vec::with_capacity(9);
@@ -633,7 +715,7 @@ mod tests {
     fn coinbase_explicit_value_above_max_provable_rejected() {
         let k = CoinbaseKernel {
             features: KERNEL_FEAT_COINBASE,
-            explicit_value: dom_crypto::bulletproof::MAX_PROVABLE_VALUE + 1,
+            explicit_value: dom_crypto::MAX_PROVABLE_VALUE + 1,
             excess: g_point(),
             excess_signature: [0u8; 65],
         };
@@ -733,21 +815,27 @@ mod tests {
 
 // ── Range Proof Validation (RFC-0007 Step 6) ──────────────────────────────────
 
-/// Validate all Bulletproof range proofs in a transaction.
+/// Validate all final DOM range proofs in a transaction.
 ///
-/// RFC-0007 Step 6: Bulletproofs+ validation.
-/// Each output commitment must have a valid range proof showing
-/// the committed value is in [0, 2^52) (MAX_PROVABLE_VALUE = 2^52 − 1 noms,
-/// ≈ 45M DOM > MAX_SUPPLY_DOM; the 52-bit limit is enforced by the
-/// Bulletproof+ prove() call in dom-crypto/src/bulletproof.rs).
+/// RFC-0007 Step 6: bounded aggregate Bulletproof validation.
+/// Each output commitment must have a valid proof showing the committed value
+/// is in `[0, MAX_PROVABLE_VALUE]`, where `MAX_PROVABLE_VALUE = 2^52 - 1`.
 ///
 /// This prevents negative value outputs which would enable inflation.
 pub fn validate_range_proofs(tx: &Transaction) -> Result<(), DomError> {
     for (i, output) in tx.outputs.iter().enumerate() {
         let commitment = &output.commitment;
-        let proof_bytes = &output.proof;
+        let proof_bytes = output.range_proof_bytes()?;
+        let valid = match output.recovery_capsule()? {
+            Some(capsule) => dom_crypto::range_proof_verify_with_extra_commit(
+                commitment.as_bytes(),
+                proof_bytes,
+                capsule.as_bytes(),
+            ),
+            None => dom_crypto::range_proof_verify(commitment.as_bytes(), proof_bytes),
+        };
 
-        match dom_crypto::bp2_verify(commitment.as_bytes(), proof_bytes) {
+        match valid {
             Ok(true) => {}
             Ok(false) => {
                 return Err(DomError::Invalid(format!(
