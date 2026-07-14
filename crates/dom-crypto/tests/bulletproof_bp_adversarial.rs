@@ -1,7 +1,7 @@
 //! Adversarial SOUNDNESS suite for the standard-Bulletproof production verifier
-//! (`bp2_verify`, grin backend), mirroring the borromean
-//! `bulletproof_adversarial.rs` vectors against the bp2 API
-//! (`bp2_prove` / `bp2_prove_with_nonce` / `bp2_verify`).
+//! (`bp2_verify`, grin backend), mirroring the final range-proof API vectors
+//! against the compatibility bp2 API (`bp2_prove` / `bp2_prove_with_nonce` /
+//! `bp2_verify`).
 //!
 //! Scope is deliberately the GAPS not already covered elsewhere, to avoid
 //! duplication:
@@ -21,15 +21,14 @@
 //!   5. Out-of-range values rejected at prove-time, before any FFI.
 //!   6. `bp2_prove_with_nonce` determinism (byte-identical proofs).
 
-use dom_crypto::bulletproof::MAX_PROVABLE_VALUE;
 use dom_crypto::pedersen::BlindingFactor;
-use dom_crypto::{bp2_prove, bp2_prove_with_nonce, bp2_verify};
+use dom_crypto::{bp2_prove, bp2_prove_with_nonce, bp2_verify, MAX_PROVABLE_VALUE};
 
 /// Exact serialized length of DOM's bounded aggregate bp2 proof.
 const BP2_PROOF_LEN: usize = 739;
 
 /// Deterministic, always-valid blinding from a seed byte (non-zero, well below
-/// the curve order — same shape the borromean suite uses).
+/// the curve order.
 fn blinding(seed: u8) -> BlindingFactor {
     let mut b = [0u8; 32];
     b[31] = seed;

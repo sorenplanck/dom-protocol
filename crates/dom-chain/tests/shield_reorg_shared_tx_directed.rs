@@ -1,8 +1,8 @@
 //! dom-shield A2-001 — cross-branch reorg with a SHARED transaction.
 //!
-//! Detects A2-001: a reorg ABORTS when the SAME transaction (byte-identical
-//! kernel excess) appears in both the disconnected (canonical) branch and the
-//! reconnected (heavier) branch.
+//! Proves the A2-001 closure: a reorg succeeds when the SAME transaction
+//! (byte-identical kernel excess) appears in both the disconnected canonical
+//! branch and the reconnected heavier branch.
 //!
 //! Structure mirrors `v1_reorg_a_to_b_removes_a_state_applies_b_keeps_uniqueness`
 //! in `shield_reorg_cross_branch_directed.rs`, and reuses the same consensus-
@@ -23,10 +23,9 @@
 //! its kernel excess is indexed at A2 pre-reorg and must MIGRATE to B3 when the
 //! chain reorgs A->B.
 //!
-//! RED BY DESIGN. This test asserts the CORRECT contract — the reorg to the
-//! heavier branch B must SUCCEED and the tip must advance to B4 — but it FAILS
-//! today. That failure is the A2-001 finding, and this test is the runtime proof
-//! that promotes it from Strong to Proven. The test is NOT `#[ignore]`d.
+//! The test asserts the consensus contract: the reorg to the heavier branch B
+//! must succeed, the tip must advance to B4, and the shared transaction state
+//! must migrate to its canonical owner.
 //!
 //! REAL mechanism (verified at runtime AND against the source — the failure is
 //! NOT where A2-001 was first hypothesised; corrected below):
@@ -47,21 +46,12 @@
 //!   The output collides on `block_height` first, so the UTXO arm fails-closed
 //!   before any kernel handling is reached.
 //!
-//!   SECONDARY / MASKED (same insert-only pattern, NOT reached here): the
-//!   chain-layer `build_kernel_updates` (chain_state.rs ~line 1696) is permissive,
-//!   but the STORE-layer `apply_reorg` kernel arm is insert-only — migrating the
-//!   shared excess to a new block hash would fail at crates/dom-store/src/db.rs
-//!   (~line 692) with `DomError::Internal("reorg kernel already exists with
-//!   different block")`. That store-layer kernel error is the symptom A2-001 was
-//!   originally described against; it exists, but the UTXO mismatch above
-//!   fails-closed first and masks it. (The store has the analogous insert-only
-//!   UTXO arm too, db.rs ~line 668, "reorg utxo already exists with different
-//!   contents" — likewise downstream and masked.)
+//!   SECONDARY / MASKED in the old failure mode: the chain-layer
+//!   `build_kernel_updates` was permissive, but the store-layer `apply_reorg`
+//!   kernel arm used to reject migrating the shared excess to a new block hash.
 //!
-//! Both layers reject an in-place migration of a commitment/excess that is shared
-//! across the disconnected and reconnected branches; the correct behaviour is to
-//! let the reorg re-home it. The contract asserted below is unchanged: the reorg
-//! MUST succeed and the tip MUST advance to the heavier B.
+//! The current contract is to let the reorg re-home commitments and excesses
+//! that are shared across the disconnected and reconnected branches.
 
 mod common;
 
@@ -87,6 +77,7 @@ use dom_serialization::DomSerialize;
 use dom_store::utxo::UtxoEntry;
 use dom_store::DomStore;
 use primitive_types::U256;
+use std::collections::BTreeMap;
 
 type UtxoBytes = ([u8; 33], Vec<u8>);
 type SpentCommitment = [u8; 33];
@@ -331,9 +322,10 @@ fn kernel_excesses(block: &Block, hash: Hash256) -> Vec<([u8; 33], [u8; 32])> {
     out
 }
 
-fn commit_genesis(store: &DomStore) {
+fn commit_genesis(store: &DomStore) -> Block {
     let block = valid_coinbase_only_block(Hash256::ZERO, 0, 1, 0xA0, 0xE0);
     commit_canonical_block(store, &block);
+    block
 }
 
 fn commit_canonical_block(store: &DomStore, block: &Block) -> Hash256 {
@@ -375,6 +367,65 @@ fn open_chain(dir: &std::path::Path) -> ChainState {
     .expect("chain open")
 }
 
+fn utxo_digest(chain: &ChainState) -> [u8; 32] {
+    type B2b256 = Blake2b<U32>;
+    let mut h = B2b256::new();
+    for (k, v) in chain.store.read_all_utxos_raw().expect("read utxos") {
+        h.update((k.len() as u64).to_le_bytes());
+        h.update(&k);
+        h.update((v.len() as u64).to_le_bytes());
+        h.update(&v);
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&h.finalize());
+    out
+}
+
+fn kernel_digest(chain: &ChainState) -> [u8; 32] {
+    type B2b256 = Blake2b<U32>;
+    let mut h = B2b256::new();
+    for (k, v) in chain
+        .store
+        .read_all_kernel_index_raw()
+        .expect("read kernels")
+    {
+        h.update((k.len() as u64).to_le_bytes());
+        h.update(&k);
+        h.update((v.len() as u64).to_le_bytes());
+        h.update(&v);
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&h.finalize());
+    out
+}
+
+fn assert_raw_maps_eq(
+    actual: &BTreeMap<Vec<u8>, Vec<u8>>,
+    expected: &BTreeMap<Vec<u8>, Vec<u8>>,
+    label: &str,
+) {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{label} entry count mismatch: actual={} expected={}",
+        actual.len(),
+        expected.len()
+    );
+    for (key, expected_value) in expected {
+        let actual_value = actual
+            .get(key)
+            .unwrap_or_else(|| panic!("{label} missing key {}", hex::encode(key)));
+        assert_eq!(
+            actual_value,
+            expected_value,
+            "{label} value mismatch for key {}: actual_len={} expected_len={}",
+            hex::encode(key),
+            actual_value.len(),
+            expected_value.len()
+        );
+    }
+}
+
 // ===========================================================================
 // A2-001 — reorg A->B with a SHARED tx (same kernel excess on both branches).
 // ===========================================================================
@@ -384,9 +435,7 @@ fn open_chain(dir: &std::path::Path) -> ChainState {
 // pre-reorg and must migrate to B3 when the chain reorgs to the heavier B.
 //
 // CORRECT CONTRACT (asserted): the reorg SUCCEEDS, the tip advances to B4, and
-// the shared kernel excess migrates A2 -> B3. RED BY DESIGN: today the reorg
-// fails because `apply_reorg` is insert-only on the kernel arm and cannot
-// migrate an existing excess to a new block hash (A2-001).
+// the shared kernel excess migrates A2 -> B3.
 #[test]
 fn a2_001_reorg_a_to_b_with_shared_tx_same_kernel_excess_must_succeed() {
     let dir = tempfile::TempDir::new().expect("tempdir");
@@ -432,8 +481,7 @@ fn a2_001_reorg_a_to_b_with_shared_tx_same_kernel_excess_must_succeed() {
         "shared tx kernel must be indexed at A2 before the reorg"
     );
 
-    // ---- CORRECT CONTRACT: reorg A->B must SUCCEED. The shared kernel excess
-    // must migrate from A2 to B3. (RED BY DESIGN — fails today with A2-001.) ----
+    // Reorg A->B must succeed. The shared kernel excess must migrate from A2 to B3.
     chain
         .promote_heavier_known_tip(b4_hash, Timestamp(2_000_000_000))
         .expect("reorg A->B with shared tx must succeed");
@@ -449,5 +497,188 @@ fn a2_001_reorg_a_to_b_with_shared_tx_same_kernel_excess_must_succeed() {
             .expect("shared kernel indexed post-reorg"),
         *b3_hash.as_bytes(),
         "shared tx kernel must migrate from A2 to B3 after the reorg"
+    );
+}
+
+#[test]
+fn shared_transaction_reorg_is_restart_and_direct_construction_equivalent() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let store = open_test_store(dir.path());
+    let genesis = commit_genesis(&store);
+
+    let shared = synthetic_block(Hash256::ZERO, 1, 1, 1, 40, vec![]);
+    let shared_hash = commit_canonical_block(&store, &shared);
+    let shared_cb_value = dom_core::block_reward(BlockHeight(1)).noms();
+    let shared_cb_blinding = blinding(40);
+
+    let prefix_spend = valid_spend_tx(shared_cb_value, shared_cb_blinding, shared_cb_value - 1, 41);
+    let prefix_spend_blinding = blinding(40)
+        .add(&blinding(41))
+        .expect("prefix output blinding");
+    let prefix_spend_output = *prefix_spend.outputs[0].commitment.as_bytes();
+    let prefix_spend_kernel = *prefix_spend.kernels[0].excess.as_bytes();
+    let prefix = synthetic_block(shared_hash, 2, 2, 2, 42, vec![prefix_spend.clone()]);
+    let prefix_hash = commit_canonical_block(&store, &prefix);
+
+    let shared_after_fork = valid_spend_tx(
+        shared_cb_value - 1,
+        prefix_spend_blinding,
+        shared_cb_value - 2,
+        43,
+    );
+    let shared_after_fork_output = *shared_after_fork.outputs[0].commitment.as_bytes();
+    let shared_after_fork_kernel = *shared_after_fork.kernels[0].excess.as_bytes();
+
+    let a3 = synthetic_block(prefix_hash, 3, 3, 3, 44, vec![shared_after_fork.clone()]);
+    let a3_hash = commit_canonical_block(&store, &a3);
+    let a4 = synthetic_block(a3_hash, 4, 4, 4, 45, vec![]);
+    let a4_hash = commit_canonical_block(&store, &a4);
+
+    let b3 = synthetic_block(prefix_hash, 3, 3, 30, 46, vec![]);
+    let b3_hash = store_side_block(&store, &b3);
+    let b4 = synthetic_block(b3_hash, 4, 4, 31, 47, vec![shared_after_fork.clone()]);
+    let b4_hash = store_side_block(&store, &b4);
+    let b5 = synthetic_block(b4_hash, 5, 5, 32, 48, vec![]);
+    let b5_hash = store_side_block(&store, &b5);
+    let a5 = synthetic_block(a4_hash, 5, 6, 50, 49, vec![]);
+    let a5_hash = store_side_block(&store, &a5);
+    drop(store);
+
+    let mut chain = open_chain(dir.path());
+    assert_eq!(chain.tip_hash, a4_hash);
+    assert_eq!(
+        chain.store.get_kernel_block(&prefix_spend_kernel).unwrap(),
+        Some(*prefix_hash.as_bytes()),
+        "common-prefix transaction kernel must be owned by the prefix block"
+    );
+    assert_eq!(
+        chain
+            .store
+            .get_kernel_block(&shared_after_fork_kernel)
+            .unwrap(),
+        Some(*a3_hash.as_bytes()),
+        "post-divergence shared transaction starts on branch A"
+    );
+
+    chain
+        .promote_heavier_known_tip(b5_hash, Timestamp(2_000_000_000))
+        .expect("A->B shared transaction reorg");
+    assert_eq!(chain.tip_hash, b5_hash);
+    assert_eq!(
+        chain.store.get_kernel_block(&prefix_spend_kernel).unwrap(),
+        Some(*prefix_hash.as_bytes()),
+        "common-prefix transaction kernel must not be re-owned by the reorg"
+    );
+    assert!(
+        chain
+            .store
+            .get_utxo(&prefix_spend_output)
+            .unwrap()
+            .is_none(),
+        "common-prefix output is spent by the canonical branch after reorg"
+    );
+    assert_eq!(
+        chain
+            .store
+            .get_kernel_block(&shared_after_fork_kernel)
+            .unwrap(),
+        Some(*b4_hash.as_bytes()),
+        "post-divergence shared transaction kernel must migrate to branch B"
+    );
+    let b_shared_output = chain
+        .store
+        .get_utxo(&shared_after_fork_output)
+        .unwrap()
+        .expect("shared transaction output present on B");
+    assert_eq!(b_shared_output.block_height, 4);
+    assert!(!b_shared_output.is_coinbase);
+
+    drop(chain);
+    let reopened_b = open_chain(dir.path());
+    assert_eq!(reopened_b.tip_hash, b5_hash);
+    let reorg_b_utxos: BTreeMap<Vec<u8>, Vec<u8>> = reopened_b.store.read_all_utxos_raw().unwrap();
+    let reorg_b_kernels: BTreeMap<Vec<u8>, Vec<u8>> =
+        reopened_b.store.read_all_kernel_index_raw().unwrap();
+    let reorg_b_utxo_digest = utxo_digest(&reopened_b);
+    let reorg_b_kernel_digest = kernel_digest(&reopened_b);
+    drop(reopened_b);
+
+    let direct_dir = tempfile::TempDir::new().expect("direct tempdir");
+    let direct_store = open_test_store(direct_dir.path());
+    commit_canonical_block(&direct_store, &genesis);
+    commit_canonical_block(&direct_store, &shared);
+    commit_canonical_block(&direct_store, &prefix);
+    commit_canonical_block(&direct_store, &b3);
+    commit_canonical_block(&direct_store, &b4);
+    commit_canonical_block(&direct_store, &b5);
+    drop(direct_store);
+    let direct_b = open_chain(direct_dir.path());
+    assert_eq!(direct_b.tip_hash, b5_hash);
+    assert_raw_maps_eq(
+        &direct_b.store.read_all_utxos_raw().unwrap(),
+        &reorg_b_utxos,
+        "A->B reorg UTXO set vs direct B construction",
+    );
+    assert_raw_maps_eq(
+        &direct_b.store.read_all_kernel_index_raw().unwrap(),
+        &reorg_b_kernels,
+        "A->B reorg kernel index vs direct B construction",
+    );
+    assert_eq!(utxo_digest(&direct_b), reorg_b_utxo_digest);
+    assert_eq!(kernel_digest(&direct_b), reorg_b_kernel_digest);
+    drop(direct_b);
+
+    let mut chain = open_chain(dir.path());
+    chain
+        .promote_heavier_known_tip(a5_hash, Timestamp(2_000_000_000))
+        .expect("B->A shared transaction reorg");
+    assert_eq!(chain.tip_hash, a5_hash);
+    assert_eq!(
+        chain.store.get_kernel_block(&prefix_spend_kernel).unwrap(),
+        Some(*prefix_hash.as_bytes()),
+        "common-prefix transaction remains owned by the prefix block after B->A"
+    );
+    assert_eq!(
+        chain
+            .store
+            .get_kernel_block(&shared_after_fork_kernel)
+            .unwrap(),
+        Some(*a3_hash.as_bytes()),
+        "post-divergence shared transaction kernel must migrate back to branch A"
+    );
+    let a_shared_output = chain
+        .store
+        .get_utxo(&shared_after_fork_output)
+        .unwrap()
+        .expect("shared transaction output present on A");
+    assert_eq!(a_shared_output.block_height, 3);
+    assert!(!a_shared_output.is_coinbase);
+    assert!(
+        chain
+            .store
+            .get_kernel_block(b4.coinbase.kernel.excess.as_bytes())
+            .unwrap()
+            .is_none(),
+        "B-only kernel must be removed after reorg back to A"
+    );
+    drop(chain);
+
+    let reopened_a = open_chain(dir.path());
+    assert_eq!(reopened_a.tip_hash, a5_hash);
+    assert_eq!(
+        reopened_a
+            .store
+            .get_kernel_block(&shared_after_fork_kernel)
+            .unwrap(),
+        Some(*a3_hash.as_bytes())
+    );
+    assert_eq!(
+        reopened_a
+            .store
+            .get_utxo(&shared_after_fork_output)
+            .unwrap()
+            .expect("shared output survives B->A restart")
+            .block_height,
+        3
     );
 }

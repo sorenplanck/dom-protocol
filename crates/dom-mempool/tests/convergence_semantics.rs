@@ -231,6 +231,45 @@ fn chain_view_accepts_present_mature_inputs() {
 }
 
 #[test]
+fn chain_view_and_mempool_enforce_coinbase_maturity_boundaries() {
+    for (height, expect_ok, seed) in [(2, false, 0x11), (3, true, 0x12), (4, true, 0x13)] {
+        let (tx, hash, mut entry) = make_valid_spending_tx_from_input(
+            10_000 + MIN_RELAY_FEE_RATE * 25,
+            scalar(seed),
+            MIN_RELAY_FEE_RATE * 25,
+            seed,
+        );
+        entry.block_height = 1;
+        entry.is_coinbase = true;
+
+        let direct = validate_tx_against_chain_view(&tx, height, 2, |_| Ok(Some(entry.clone())));
+        let mut pool = Mempool::new();
+        let mempool = pool.accept_tx_with_chain_view(tx, hash, 0, height, TEST_CHAIN_ID, 2, |_| {
+            Ok(Some(entry.clone()))
+        });
+
+        if expect_ok {
+            direct.expect("direct chain-view validation should accept this boundary");
+            mempool.expect("mempool chain-view admission should accept this boundary");
+            assert!(pool.get_tx(&hash).is_some());
+        } else {
+            let direct_err =
+                direct.expect_err("direct chain-view validation must reject immature coinbase");
+            assert!(
+                matches!(direct_err, DomError::TemporarilyInvalid(ref msg) if msg.contains("immature coinbase spend")),
+                "expected direct immature-coinbase rejection, got {direct_err}"
+            );
+            let mempool_err = mempool.expect_err("mempool admission must reject immature coinbase");
+            assert!(
+                matches!(mempool_err, DomError::TemporarilyInvalid(ref msg) if msg.contains("immature coinbase spend")),
+                "expected mempool immature-coinbase rejection, got {mempool_err}"
+            );
+            assert!(pool.get_tx(&hash).is_none());
+        }
+    }
+}
+
+#[test]
 fn reinjection_with_chain_view_is_permutation_invariant() {
     let entry = UtxoEntry {
         block_height: 10,

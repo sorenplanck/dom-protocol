@@ -41,7 +41,7 @@
 //! interleave on the wire.
 
 use crate::handshake::{read_framed_cancel_safe, write_framed, ReadState, NOISE_MAX_MSG};
-use crate::message::WireMessage;
+use crate::message::{WireMessage, MAX_MESSAGE_PAYLOAD};
 use dom_core::{DomError, PeerMisbehavior, MAX_LOGICAL_MSG_BYTES};
 use snow::TransportState;
 
@@ -88,6 +88,12 @@ impl NoiseCodec {
         stream: &mut tokio::net::TcpStream,
         msg: &WireMessage,
     ) -> Result<(), DomError> {
+        if msg.payload.len() > MAX_MESSAGE_PAYLOAD {
+            return Err(DomError::Invalid(format!(
+                "outgoing payload {} bytes exceeds MAX_MESSAGE_PAYLOAD {MAX_MESSAGE_PAYLOAD}",
+                msg.payload.len()
+            )));
+        }
         let plaintext = msg.to_bytes();
         if plaintext.len() > MAX_LOGICAL_MSG_BYTES {
             return Err(DomError::Invalid(format!(

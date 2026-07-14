@@ -19,6 +19,8 @@ members = [
     "crates/dom-wallet",
     "crates/dom-wallet-crypto",
     "crates/dom-wallet-keys",
+    "crates/dom-wallet-core-api",
+    "crates/dom-wallet-recovery",
     "crates/dom-wallet2",
     "crates/dom-rpc",
     "crates/dom-test-vectors",
@@ -103,6 +105,8 @@ dom-config         = { path = "crates/dom-config" }
 dom-wallet         = { path = "crates/dom-wallet" }
 dom-wallet-crypto  = { path = "crates/dom-wallet-crypto" }
 dom-wallet-keys    = { path = "crates/dom-wallet-keys" }
+dom-wallet-core-api = { path = "crates/dom-wallet-core-api" }
+dom-wallet-recovery = { path = "crates/dom-wallet-recovery" }
 dom-wallet2        = { path = "crates/dom-wallet2" }
 dom-node           = { path = "crates/dom-node" }
 dom-rpc            = { path = "crates/dom-rpc" }

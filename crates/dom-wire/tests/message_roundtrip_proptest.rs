@@ -12,6 +12,8 @@ use dom_wire::message::{
 };
 use proptest::prelude::*;
 
+const TEST_MAGIC: u32 = 0xD0D0_0003;
+
 fn hash32() -> impl Strategy<Value = [u8; 32]> {
     proptest::array::uniform32(any::<u8>())
 }
@@ -93,4 +95,30 @@ proptest! {
         prop_assert_eq!(back.command, command);
         prop_assert_eq!(back.payload, payload);
     }
+}
+
+#[test]
+fn maximum_block_payload_survives_wire_message_roundtrip() {
+    let block_payload = BlockPayload {
+        block_bytes: vec![0x5A; dom_core::MAX_BLOCK_SERIALIZED_SIZE],
+    };
+    let payload = block_payload
+        .to_bytes()
+        .expect("maximum consensus block payload must serialize");
+    let msg = WireMessage {
+        magic: TEST_MAGIC,
+        command: Command::Block,
+        payload,
+    };
+
+    let decoded = WireMessage::from_bytes(&msg.to_bytes(), TEST_MAGIC)
+        .expect("maximum consensus block payload must survive wire framing");
+    let decoded_payload =
+        BlockPayload::from_bytes(&decoded.payload).expect("block payload must decode");
+
+    assert_eq!(decoded.command, Command::Block);
+    assert_eq!(
+        decoded_payload.block_bytes.len(),
+        dom_core::MAX_BLOCK_SERIALIZED_SIZE
+    );
 }

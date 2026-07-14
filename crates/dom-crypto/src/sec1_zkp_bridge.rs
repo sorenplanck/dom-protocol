@@ -8,9 +8,8 @@
 //! and the prefix depends solely on Y.
 //!
 //! This module owns that conversion (and the `is_square` oracle, implemented via
-//! `k256::FieldElement::sqrt`) in ONE place, so the borromean
-//! ([`crate::bulletproof`]) and standard-Bulletproof ([`crate::bulletproof_bp`])
-//! paths cannot diverge. Both call [`sec1_to_zkp`] / [`zkp_to_sec1`] here.
+//! `k256::FieldElement::sqrt`) in one place, so the final range-proof backend
+//! cannot diverge from DOM's canonical Pedersen commitment encoding.
 //!
 //! SEC1->zkp is computed directly from the point's Y. zkp->SEC1 must pick the
 //! SEC1 prefix (`0x02`/`0x03`) whose reconstructed Y reproduces the zkp prefix:
@@ -35,8 +34,7 @@ use secp256k1::PublicKey as Secp256k1PublicKey;
 
 /// THE single `is_square` oracle. Returns the libsecp zkp prefix byte for a
 /// point with the given affine Y coordinate: `0x08` if Y is a quadratic residue
-/// ("square") mod p, else `0x09`. Used by both conversion directions so the two
-/// range-proof backends share one definition.
+/// ("square") mod p, else `0x09`. Used by both conversion directions.
 fn zkp_prefix_from_y(y_bytes: &[u8; 32]) -> u8 {
     let y_field = FieldElement::from_bytes(&(*y_bytes).into())
         .expect("Y from a valid curve point is a valid field element");
@@ -70,8 +68,7 @@ pub(crate) fn sec1_to_zkp(sec1_bytes: &[u8; 33]) -> Result<[u8; 33], DomError> {
 /// mathematically necessary, not trial-and-error.
 pub(crate) fn zkp_to_sec1(zkp_bytes: &[u8; 33]) -> Result<[u8; 33], DomError> {
     let x_bytes: [u8; 32] = zkp_bytes[1..].try_into().unwrap();
-    // Validate the zkp bytes describe a real point first (consistent with the
-    // original borromean behavior).
+    // Validate the zkp bytes describe a real point first.
     let _ = secp256k1_zkp::PedersenCommitment::from_slice(zkp_bytes)
         .map_err(|e| DomError::Invalid(format!("invalid zkp: {e}")))?;
     for &prefix in &[0x02_u8, 0x03_u8] {

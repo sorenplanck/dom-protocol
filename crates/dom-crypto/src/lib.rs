@@ -12,9 +12,8 @@ pub mod keys;
 pub mod pedersen;
 pub mod schnorr;
 
-// Single source of truth for the SEC1<->zkp commitment encoding bridge, shared
-// by the borromean (`bulletproof`) and standard-Bulletproof (`bulletproof_bp`)
-// paths. Crate-private.
+// Single source of truth for the SEC1<->zkp commitment encoding bridge used by
+// the final bounded aggregate range-proof backend. Crate-private.
 mod sec1_zkp_bridge;
 
 pub use dom_core::Hash256;
@@ -26,20 +25,24 @@ pub use schnorr::{
     schnorr_add_public_keys, schnorr_aggregate_sigs, schnorr_challenge, schnorr_partial_sign,
     schnorr_sign, schnorr_verify, PartialSig, SchnorrSignature,
 };
-pub mod bulletproof;
-pub use bulletproof::{prove as bp_prove, verify as bp_verify, RangeProof};
-
-// Standard-Bulletproof backend, exported under distinct `bp2_*` names so it
-// cannot be confused with the borromean `bp_prove`/`bp_verify`.
 mod bulletproof_bp;
+pub mod range_proof;
+pub mod recovery;
 #[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub use bulletproof_bp::bp2_test_only_prove_legacy_single_with_nonce;
-/// Standard-Bulletproof (grin backend) range-proof prove/verify, exported as
-/// `bp2_prove`/`bp2_verify` (+ `bp2_prove_with_nonce` for deterministic-nonce
-/// proofs, e.g. genesis). Parallel to the borromean `bp_prove`/`bp_verify`;
-/// produces 739-byte bounded aggregate proofs bound to H_DOM and is wired into
-/// consensus as the live standard-Bulletproof path.
-pub use bulletproof_bp::{
-    bp_prove as bp2_prove, bp_prove_with_nonce as bp2_prove_with_nonce, bp_verify as bp2_verify,
+pub use range_proof::{
+    prove as range_proof_prove, prove_bytes as range_proof_prove_bytes,
+    prove_bytes_with_extra_commit as range_proof_prove_bytes_with_extra_commit,
+    prove_bytes_with_nonce as range_proof_prove_bytes_with_nonce,
+    prove_with_nonce as range_proof_prove_with_nonce, verify as range_proof_verify,
+    verify_with_extra_commit as range_proof_verify_with_extra_commit, RangeProof,
+    MAX_PROVABLE_VALUE, RANGE_PROOF_SERIALIZATION_VERSION, RANGE_PROOF_SIZE,
 };
+
+/// Compatibility alias for the final range-proof byte prover.
+pub use range_proof::prove_bytes as bp2_prove;
+/// Compatibility alias for the final deterministic range-proof byte prover.
+pub use range_proof::prove_bytes_with_nonce as bp2_prove_with_nonce;
+/// Compatibility alias for the final range-proof verifier.
+pub use range_proof::verify as bp2_verify;

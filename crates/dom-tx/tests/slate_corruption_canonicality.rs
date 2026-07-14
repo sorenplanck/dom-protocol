@@ -13,7 +13,7 @@
 //!     two-encodings-one-slate ambiguity).
 
 use dom_serialization::{DomDeserialize, DomSerialize};
-use dom_tx::slate::{OutputCommitmentAndProof, Slate};
+use dom_tx::slate::{OutputCommitmentAndProof, Slate, CURRENT_SLATE_VERSION};
 
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::{bp2_prove, BlindingFactor, PartialSig, PublicKey, RangeProof, SecretKey};
@@ -45,7 +45,7 @@ fn partial_sig(scalar_byte: u8) -> PartialSig {
 /// A maximally-populated slate (every Option = Some) for the widest layout.
 fn full_slate() -> Slate {
     Slate {
-        version: 1,
+        version: CURRENT_SLATE_VERSION,
         chain_id: [9u8; 32],
         amount: 2_000,
         fee: 20,
@@ -60,6 +60,8 @@ fn full_slate() -> Slate {
         recipient_public_nonce: Some(public_key(18)),
         sender_partial_sig: Some(partial_sig(19)),
         recipient_partial_sig: Some(partial_sig(20)),
+        sender_change_recovery_capsule: Vec::new(),
+        recipient_recovery_capsule: Vec::new(),
     }
 }
 

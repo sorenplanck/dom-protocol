@@ -56,7 +56,10 @@ impl Command {
 }
 
 /// Maximum payload size per message (prevents memory exhaustion DoS).
-pub const MAX_MESSAGE_PAYLOAD: usize = 16 * 1024 * 1024; // 16 MiB
+///
+/// A `Command::Block` payload is a [`BlockPayload`]: four bytes of block length
+/// followed by up to `MAX_BLOCK_SERIALIZED_SIZE` consensus block bytes.
+pub const MAX_MESSAGE_PAYLOAD: usize = dom_core::MAX_BLOCK_SERIALIZED_SIZE + 4;
 
 /// Wire message with framing.
 #[derive(Debug, Clone)]

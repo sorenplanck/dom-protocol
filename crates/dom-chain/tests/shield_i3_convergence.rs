@@ -389,14 +389,28 @@ fn convergence_same_canonical_tip_independent_of_arrival_order() {
         10,
         &chain_id,
     );
-    let c1 = build_coinbase_only_block(
-        *block_hash(&genesis).as_bytes(),
-        block_hash(&genesis),
-        BlockHeight(1),
-        genesis.header.total_difficulty,
-        [0u8; 32],
-        11,
-        &chain_id,
+    let mut height_1_siblings: Vec<_> = (11u8..=80)
+        .map(|seed| {
+            build_coinbase_only_block(
+                *block_hash(&genesis).as_bytes(),
+                block_hash(&genesis),
+                BlockHeight(1),
+                genesis.header.total_difficulty,
+                [0u8; 32],
+                seed,
+                &chain_id,
+            )
+        })
+        .collect();
+    height_1_siblings.sort_by(|a, b| block_hash(a).as_bytes().cmp(block_hash(b).as_bytes()));
+    let c1 = height_1_siblings.remove(0);
+    let s1 = height_1_siblings
+        .pop()
+        .expect("higher equal-work side sibling");
+    let c1_hash = block_hash(&c1);
+    assert!(
+        c1_hash.as_bytes() < block_hash(&s1).as_bytes(),
+        "fixture must keep side sibling worse than C1 under equal-work tie rule"
     );
     let c2 = build_coinbase_only_block(
         *block_hash(&genesis).as_bytes(),
@@ -417,17 +431,8 @@ fn convergence_same_canonical_tip_independent_of_arrival_order() {
         &chain_id,
     );
 
-    // A competing fork off genesis (height 1, different coinbase seed -> distinct
-    // hash and distinct, lighter side branch). Delivered to chain-B first.
-    let s1 = build_coinbase_only_block(
-        *block_hash(&genesis).as_bytes(),
-        block_hash(&genesis),
-        BlockHeight(1),
-        genesis.header.total_difficulty,
-        [0u8; 32],
-        99,
-        &chain_id,
-    );
+    // S1 is a competing fork off genesis whose equal-work hash is higher than
+    // C1, so this test exercises side-chain retention, not tie-rule promotion.
 
     // ── chain-A: canonical branch in order, no competing fork ────────────────
     let dir_a = TempDir::new().expect("tempdir A");
@@ -464,14 +469,12 @@ fn convergence_same_canonical_tip_independent_of_arrival_order() {
         chain_b.connect_block(&c1, safe_now()).expect("B c1"),
         ConnectResult::BestChain
     ));
-    // S1's parent (genesis) is no longer the tip (C1 is) -> retained as SideChain.
-    assert!(
-        matches!(
-            chain_b.connect_block(&s1, safe_now()).expect("B s1"),
-            ConnectResult::SideChain
-        ),
-        "competing fork off a non-tip parent must be quarantined, not promoted"
-    );
+    // S1's parent (genesis) is no longer the tip (C1 is), and its equal-work
+    // hash is higher than C1, so it must remain side-chain data.
+    assert!(matches!(
+        chain_b.connect_block(&s1, safe_now()).expect("B s1"),
+        ConnectResult::SideChain
+    ));
     assert!(matches!(
         chain_b.connect_block(&c2, safe_now()).expect("B c2"),
         ConnectResult::BestChain
@@ -495,27 +498,10 @@ fn convergence_same_canonical_tip_independent_of_arrival_order() {
     );
 }
 
-// ─────────── (a') out-of-order ORPHAN delivery — NOT buildable, recorded ──────
-//
-// Literal out-of-order delivery (a child block arriving BEFORE its parent) is
-// the canonical convergence case in chains with an orphan pool. DOM has none:
-// `connect_block` returns `DomError::Orphan` and FORGETS the block (no orphan
-// buffer, no re-admission API). There is therefore no public surface to deliver
-// child-before-parent and later observe convergence — building this test would
-// require a production scaffold (an orphan pool / re-injection hook).
-//
-// PRECISA DECISÃO HUMANA: adding an orphan-pool API is a consensus/networking
-// design change, out of scope for the shield (which only builds tests). This
-// `#[ignore]` records the gap honestly instead of faking coverage. The assert
-// below documents the CURRENT behavior (orphan is rejected and not retained),
-// so when/if a scaffold lands this can be promoted to a real convergence test.
 #[test]
-#[ignore = "orphan-reorder convergence needs a production orphan-pool/re-injection API; PRECISA DECISÃO HUMANA"]
-fn convergence_orphan_child_before_parent_needs_production_scaffold() {
+fn equal_work_siblings_converge_to_lower_tip_hash_across_arrival_order_and_restart() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let chain_id = regtest_chain_id();
-    let dir = TempDir::new().expect("tempdir");
-    let mut chain = open_chain(&dir.path().join("chain"));
 
     let genesis = build_coinbase_only_block(
         [0u8; 32],
@@ -523,49 +509,100 @@ fn convergence_orphan_child_before_parent_needs_production_scaffold() {
         BlockHeight::GENESIS,
         U256::zero(),
         [0u8; 32],
-        10,
+        30,
         &chain_id,
     );
-    chain.connect_block(&genesis, safe_now()).expect("genesis");
-
-    // A height-2 child whose height-1 parent has NOT been delivered.
-    let c1 = build_coinbase_only_block(
+    let sibling_a = build_coinbase_only_block(
         *block_hash(&genesis).as_bytes(),
         block_hash(&genesis),
         BlockHeight(1),
         genesis.header.total_difficulty,
         [0u8; 32],
-        11,
+        31,
         &chain_id,
     );
-    let c2_orphan = build_coinbase_only_block(
+    let sibling_b = build_coinbase_only_block(
         *block_hash(&genesis).as_bytes(),
-        block_hash(&c1),
-        BlockHeight(2),
-        c1.header.total_difficulty,
+        block_hash(&genesis),
+        BlockHeight(1),
+        genesis.header.total_difficulty,
         [0u8; 32],
-        12,
+        32,
         &chain_id,
+    );
+    assert_eq!(
+        sibling_a.header.total_difficulty, sibling_b.header.total_difficulty,
+        "siblings must carry equal accumulated work"
+    );
+    let hash_a = block_hash(&sibling_a);
+    let hash_b = block_hash(&sibling_b);
+    assert_ne!(hash_a, hash_b, "siblings must be distinct tips");
+    let expected_tip = if hash_a.as_bytes() < hash_b.as_bytes() {
+        hash_a
+    } else {
+        hash_b
+    };
+
+    let dir_ab = TempDir::new().expect("tempdir AB");
+    let mut chain_ab = open_chain(&dir_ab.path().join("chain"));
+    assert!(matches!(
+        chain_ab
+            .connect_block(&genesis, safe_now())
+            .expect("AB genesis"),
+        ConnectResult::BestChain
+    ));
+    assert!(matches!(
+        chain_ab
+            .connect_block(&sibling_a, safe_now())
+            .expect("AB sibling A"),
+        ConnectResult::BestChain
+    ));
+    let _ = chain_ab
+        .connect_block(&sibling_b, safe_now())
+        .expect("AB sibling B");
+    assert_eq!(
+        chain_ab.tip_hash, expected_tip,
+        "A-then-B arrival must select the lower equal-work tip hash"
     );
 
-    // Current behavior: child-before-parent is rejected as Orphan and forgotten.
-    let err = chain
-        .connect_block(&c2_orphan, safe_now())
-        .expect_err("child without parent must be rejected");
-    assert!(
-        matches!(err, dom_core::DomError::Orphan(_)),
-        "expected Orphan rejection, got: {err:?}"
+    let dir_ba = TempDir::new().expect("tempdir BA");
+    let mut chain_ba = open_chain(&dir_ba.path().join("chain"));
+    assert!(matches!(
+        chain_ba
+            .connect_block(&genesis, safe_now())
+            .expect("BA genesis"),
+        ConnectResult::BestChain
+    ));
+    assert!(matches!(
+        chain_ba
+            .connect_block(&sibling_b, safe_now())
+            .expect("BA sibling B"),
+        ConnectResult::BestChain
+    ));
+    let _ = chain_ba
+        .connect_block(&sibling_a, safe_now())
+        .expect("BA sibling A");
+    assert_eq!(
+        chain_ba.tip_hash, expected_tip,
+        "B-then-A arrival must select the lower equal-work tip hash"
     );
-    // And it is NOT retained: no orphan buffer to converge from later.
-    assert!(
-        chain
-            .store
-            .get_block_body(block_hash(&c2_orphan).as_bytes())
-            .expect("body lookup")
-            .is_none(),
-        "orphan must not be persisted; there is no orphan pool to converge from"
+
+    let reopened_ab = open_chain(&dir_ab.path().join("chain"));
+    let reopened_ba = open_chain(&dir_ba.path().join("chain"));
+    assert_eq!(reopened_ab.tip_hash, expected_tip);
+    assert_eq!(reopened_ba.tip_hash, expected_tip);
+    assert_eq!(
+        consensus_fingerprint(&reopened_ab),
+        consensus_fingerprint(&reopened_ba),
+        "equal-work fork choice must be restart-equivalent across opposite arrival orders"
     );
 }
+
+// ─────────── (a') out-of-order ORPHAN delivery — covered in dom-node ──────────
+//
+// Production child-before-parent convergence is exercised through live P2P
+// block ingress by `production_peer_ingress_recursively_converges_reverse_orphans`
+// in dom-node's `multinode_reordered_delivery` integration test.
 
 // ─────────────── (b) chain+reorg vs direct chain to the SAME tip ──────────────
 //
@@ -649,20 +686,17 @@ fn convergence_reorg_to_tip_matches_direct_chain_to_same_tip() {
         ConnectResult::BestChain
     ));
     assert_eq!(chain_b.tip_hash, block_hash(&l1), "B tip = L1");
-    // W1's parent (genesis) is no longer the tip (L1 is) -> retained as side branch.
+    // W1's parent (genesis) is no longer the tip (L1 is). It remains side-chain
+    // data unless the deterministic equal-work lower-hash tie rule promotes it.
+    let _ = chain_b
+        .connect_block(&w1, safe_now())
+        .expect("B w1 side or tie reorg");
+    // W2 makes the W-branch heavier than L1; if W1 already won the equal-work
+    // lower-hash tie, W2 is a direct extension, otherwise this is a reorg.
+    let reorg = chain_b.connect_block(&w2, safe_now()).expect("B w2");
     assert!(
-        matches!(
-            chain_b.connect_block(&w1, safe_now()).expect("B w1 side"),
-            ConnectResult::SideChain
-        ),
-        "competing winning branch must be quarantined until it is heavier"
-    );
-    assert_eq!(chain_b.tip_hash, block_hash(&l1), "B still on L1");
-    // W2 makes the W-branch heavier than L1 -> automatic REORG to T = W2.
-    let reorg = chain_b.connect_block(&w2, safe_now()).expect("B w2 reorg");
-    assert!(
-        matches!(reorg, ConnectResult::Reorg(_)),
-        "arrival of heavier W2 must trigger an automatic reorg, got: {reorg:?}"
+        matches!(reorg, ConnectResult::Reorg(_) | ConnectResult::BestChain),
+        "arrival of W2 must select the W branch, got: {reorg:?}"
     );
     assert_eq!(
         chain_b.tip_hash,
@@ -772,20 +806,17 @@ fn convergence_auto_reorg_with_spends_matches_direct_path_to_same_tip() {
         ConnectResult::BestChain
     ));
     assert_eq!(chain_b.tip_hash, block_hash(&decoy1), "B tip = decoy1");
-    // W1 ties decoy1 work -> retained as a side branch (quarantined).
+    // W1 ties decoy1 work. It remains side-chain data unless the deterministic
+    // equal-work lower-hash tie rule promotes it immediately.
+    let _ = chain_b
+        .connect_block(&w1, safe_now())
+        .expect("B w1 side or tie reorg");
+    // W2 selects the W-branch; if W1 already won the equal-work tie, W2 is a
+    // direct extension, otherwise this is a reorg.
+    let reorg = chain_b.connect_block(&w2, safe_now()).expect("B w2");
     assert!(
-        matches!(
-            chain_b.connect_block(&w1, safe_now()).expect("B w1 side"),
-            ConnectResult::SideChain
-        ),
-        "competing height-1 winning block must be quarantined until heavier work"
-    );
-    assert_eq!(chain_b.tip_hash, block_hash(&decoy1), "B still on decoy1");
-    // W2 makes the W-branch heavier than decoy1 -> automatic REORG to T = W2.
-    let reorg = chain_b.connect_block(&w2, safe_now()).expect("B w2 reorg");
-    assert!(
-        matches!(reorg, ConnectResult::Reorg(_)),
-        "arrival of heavier W2 must trigger an automatic reorg, got: {reorg:?}"
+        matches!(reorg, ConnectResult::Reorg(_) | ConnectResult::BestChain),
+        "arrival of W2 must select the W branch, got: {reorg:?}"
     );
     assert_eq!(
         chain_b.tip_hash,

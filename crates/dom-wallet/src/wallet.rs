@@ -2156,9 +2156,8 @@ impl Wallet {
         // Save the 33-byte SEC1 representation before output_commitment is moved into the tx.
         let output_commitment_bytes: [u8; 33] = *output_commitment.as_bytes();
 
-        // Step 5: Range proof (standard Bulletproof — bp2) proves value in [0, 2^52).
-        // bp2_prove returns the proof bytes directly (Vec<u8>).
-        let (range_proof, _) = dom_crypto::bp2_prove(explicit_value, &blinding)
+        // Step 5: Final bounded aggregate range proof proves the coinbase value.
+        let (range_proof, _) = dom_crypto::range_proof_prove_bytes(explicit_value, &blinding)
             .map_err(|e| WalletError::Crypto(format!("coinbase range proof: {e}")))?;
 
         // Step 6: Kernel excess = 0*H + r*G = r*G  (NOT same as output commitment!)

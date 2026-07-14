@@ -13,15 +13,12 @@
 //!   PoW door lives one layer up. Marked #[ignore] so it never gates the suite —
 //!   it is executable documentation, runnable on demand.
 //!
-//! PROBE offset-canonical asymmetry (may RED): the BLOCK header offset is
+//! PROBE offset-canonical boundary: the BLOCK header offset is
 //!   canonical-checked (block.rs::validate_kernel_offset_canonical, reached via
-//!   validate_block→validate_header_syntax), but a per-TRANSACTION `tx.offset`
-//!   is NOT canonical-checked inside validate_transaction (transaction.rs:~205
-//!   parses it as raw 32 bytes; the balance equation reduces it mod n). This
-//!   probe feeds tx.offset = {n, n+1, 0xFF..FF} and asserts a DETERMINISTIC
-//!   result. It does NOT assert rejection (that would be a merit decision); it
-//!   asserts the two runs over identical bytes agree — catching any
-//!   NON-DETERMINISM in the offset path.
+//!   validate_block→validate_header_syntax). The per-TRANSACTION `tx.offset`
+//!   path is rejected during the balance-equation scalar parse when it is
+//!   non-canonical. These probes feed tx.offset = {n, n+1, 0xFF..FF} and assert
+//!   deterministic fail-closed behavior.
 
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::transaction::{
@@ -32,7 +29,7 @@ use dom_consensus::{
     CoinbaseTransaction, ValidationContext,
 };
 use dom_core::{
-    Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
+    Amount, BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
     PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::hash::blake2b_256_tagged;
@@ -183,7 +180,7 @@ const SECP256K1_N: [u8; 32] = [
 
 fn n_plus_one() -> [u8; 32] {
     // n is given big-endian; tx.offset is consumed as raw 32 bytes by the balance
-    // path (FieldBytes are big-endian for k256). Build n+1 big-endian.
+    // path uses big-endian k256 FieldBytes. Build n+1 big-endian.
     let mut v = SECP256K1_N;
     for i in (0..32).rev() {
         let (s, carry) = v[i].overflowing_add(1);
@@ -196,15 +193,7 @@ fn n_plus_one() -> [u8; 32] {
 }
 
 /// PROBE: feed a per-tx `offset` that is non-canonical (== n, == n+1, == 0xFF..FF)
-/// and assert validate_transaction is DETERMINISTIC over identical bytes. Unlike
-/// the block header offset (which IS canonical-checked in validate_header_syntax),
-/// the tx offset is parsed as raw bytes and reduced mod n in the balance equation.
-/// We do NOT assert acceptance/rejection (a merit decision); we assert the result
-/// is identical across two runs — catching any non-determinism in the offset path.
-///
-/// NOTE: this MAY surface that a non-canonical tx.offset is silently accepted-or-
-/// reduced where the block header would Malformed-reject — an asymmetry recorded
-/// for the FIX-QUEUE. The determinism assertion itself is the hard guarantee.
+/// and assert validate_transaction is deterministic over identical bytes.
 #[test]
 fn probe_tx_offset_noncanonical_is_deterministic() {
     let offsets: [[u8; 32]; 3] = [
@@ -225,10 +214,21 @@ fn probe_tx_offset_noncanonical_is_deterministic() {
     }
 }
 
-/// Companion: the BLOCK header offset path DOES canonical-reject n / n+1 / 0xFF
-/// (validate_header_syntax → validate_kernel_offset_canonical). This pins the
-/// asymmetry: header offset = Malformed, tx offset = (no canonical gate). If the
-/// header check were ever removed, this is RED.
+#[test]
+fn noncanonical_tx_offset_is_rejected_by_transaction_validation() {
+    for bad_offset in [SECP256K1_N, n_plus_one(), [0xFFu8; 32]] {
+        let tx = spend_tx_with_offset(bad_offset);
+        let err =
+            validate_transaction(&tx, &ctx()).expect_err("non-canonical tx.offset must reject");
+        assert!(
+            matches!(err, DomError::Invalid(_)),
+            "expected Invalid for non-canonical tx.offset {bad_offset:02x?}, got: {err:?}"
+        );
+    }
+}
+
+/// Companion: the block header offset path canonical-rejects n / n+1 / 0xFF
+/// as `Malformed` during header syntax validation.
 #[test]
 fn probe_block_header_offset_noncanonical_is_rejected() {
     let tx = spend_tx_with_offset([0u8; 32]);

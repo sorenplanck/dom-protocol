@@ -10,7 +10,7 @@ use dom_consensus::{
 use dom_core::{Amount, DomError, KERNEL_FEAT_PLAIN, TAG_KERNEL_MSG};
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
-use dom_crypto::{bp2_prove, schnorr_sign, SecretKey};
+use dom_crypto::{range_proof_prove_bytes, schnorr_sign, SecretKey};
 use thiserror::Error;
 
 /// Errors that can occur in transaction operations.
@@ -69,6 +69,62 @@ struct BuilderInput {
 struct BuilderOutput {
     value: u64,
     blinding: BlindingFactor,
+    canonical: Option<TransactionOutput>,
+}
+
+/// Wallet V3 output material. The blinding is returned only to the wallet
+/// process; the transaction carries the commitment, proof, and encrypted
+/// recovery capsule.
+pub struct RecoverableOutputMaterial {
+    pub value: u64,
+    pub blinding: BlindingFactor,
+    pub output: TransactionOutput,
+}
+
+/// Create one canonical Wallet V3 recoverable output.
+#[allow(clippy::too_many_arguments)]
+pub fn build_recoverable_output(
+    root: &dom_crypto::recovery::RecoveryRoot,
+    chain: dom_crypto::recovery::RecoveryChainContext,
+    value: u64,
+    account: u32,
+    derivation_index: u64,
+    domain: dom_crypto::recovery::OutputRecoveryDomain,
+) -> Result<RecoverableOutputMaterial, TxError> {
+    if value > dom_crypto::MAX_PROVABLE_VALUE {
+        return Err(TxError::InvalidOutput(format!(
+            "output value {value} exceeds MAX_PROVABLE_VALUE {}",
+            dom_crypto::MAX_PROVABLE_VALUE
+        )));
+    }
+    let blinding = BlindingFactor::random();
+    let commitment = Commitment::commit(value, &blinding);
+    let capsule = dom_crypto::recovery::create_recovery_capsule(
+        root,
+        chain,
+        commitment.as_bytes(),
+        dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
+        value,
+        account,
+        derivation_index,
+        domain,
+        &blinding,
+    )
+    .map_err(|error| TxError::Crypto(format!("recovery capsule creation failed: {error}")))?;
+    let (proof, proof_commitment) =
+        dom_crypto::range_proof_prove_bytes_with_extra_commit(value, &blinding, capsule.as_bytes())
+            .map_err(|error| TxError::Crypto(format!("range proof generation failed: {error}")))?;
+    if proof_commitment != *commitment.as_bytes() {
+        return Err(TxError::Crypto(
+            "range proof constructor commitment mismatch".into(),
+        ));
+    }
+    let output = TransactionOutput::with_recovery_capsule(commitment, proof, &capsule)?;
+    Ok(RecoverableOutputMaterial {
+        value,
+        blinding,
+        output,
+    })
 }
 
 /// Builder for standard Mimblewimble spend transactions.
@@ -145,8 +201,28 @@ impl SpendBuilder {
         self.outputs.push(BuilderOutput {
             value: amount,
             blinding,
+            canonical: None,
         });
 
+        Ok(())
+    }
+
+    /// Add a canonical Wallet V3 output. Wallet V3 production code must use
+    /// this method instead of the legacy proof-only `add_output` method.
+    pub fn add_recoverable_output(
+        &mut self,
+        material: RecoverableOutputMaterial,
+    ) -> Result<(), TxError> {
+        if material.value == 0 {
+            return Err(TxError::InvalidOutput(
+                "zero-value outputs are not allowed".into(),
+            ));
+        }
+        self.outputs.push(BuilderOutput {
+            value: material.value,
+            blinding: material.blinding,
+            canonical: Some(material.output),
+        });
         Ok(())
     }
 
@@ -194,13 +270,17 @@ impl SpendBuilder {
 
         let mut tx_outputs = Vec::with_capacity(self.outputs.len());
         for output in &self.outputs {
+            if let Some(canonical) = &output.canonical {
+                tx_outputs.push(canonical.clone());
+                continue;
+            }
             // Generate commitment first
             let commitment = Commitment::commit(output.value, &output.blinding);
 
-            // Then generate range proof (standard Bulletproof — bp2). Returns
-            // the proof bytes directly (Vec<u8>), unlike borromean's RangeProof.
-            let (proof, _commitment_bytes) = bp2_prove(output.value, &output.blinding)
-                .map_err(|e| TxError::Crypto(format!("range proof generation failed: {e}")))?;
+            // Then generate the final bounded aggregate range proof bytes.
+            let (proof, _commitment_bytes) =
+                range_proof_prove_bytes(output.value, &output.blinding)
+                    .map_err(|e| TxError::Crypto(format!("range proof generation failed: {e}")))?;
 
             tx_outputs.push(TransactionOutput { commitment, proof });
         }

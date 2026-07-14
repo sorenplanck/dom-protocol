@@ -1,10 +1,10 @@
 #![allow(missing_docs)]
 
 use crate::{
-    block::validate_header_syntax, validate_block_transactions, BlockHeader, CoinbaseTransaction,
-    Transaction, ValidationContext,
+    block::validate_header_syntax, block_weight, validate_block_transactions, BlockHeader,
+    CoinbaseTransaction, Transaction, ValidationContext,
 };
-use dom_core::{DomError, MAX_BLOCK_TXS, MAX_BLOCK_WEIGHT, WEIGHT_OUTPUT};
+use dom_core::{DomError, MAX_BLOCK_TXS, MAX_BLOCK_WEIGHT};
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
 use std::collections::HashSet;
 
@@ -39,16 +39,7 @@ impl DomDeserialize for Block {
 
 impl Block {
     pub fn weight(&self) -> Result<u32, DomError> {
-        let overflow = || DomError::Invalid("block weight overflow".into());
-        let mut total: u32 = 0;
-        total = total
-            .checked_add(self.coinbase.kernel.weight())
-            .ok_or_else(overflow)?;
-        total = total.checked_add(WEIGHT_OUTPUT).ok_or_else(overflow)?;
-        for tx in &self.transactions {
-            total = total.checked_add(tx.weight()).ok_or_else(overflow)?;
-        }
-        Ok(total)
+        block_weight(&self.coinbase, &self.transactions)
     }
 
     pub fn total_fees(&self) -> Result<u64, DomError> {
@@ -195,7 +186,7 @@ mod tests {
     };
     use dom_core::{
         Amount, BlockHeight, Hash256, Timestamp, INITIAL_BLOCK_REWARD, KERNEL_FEAT_COINBASE,
-        KERNEL_FEAT_PLAIN, PROTOCOL_VERSION, WEIGHT_COINBASE_KERNEL,
+        KERNEL_FEAT_PLAIN, PROTOCOL_VERSION, WEIGHT_COINBASE_KERNEL, WEIGHT_OUTPUT,
     };
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::keys::SecretKey;

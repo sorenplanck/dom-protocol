@@ -157,11 +157,12 @@ fn deserialize_well_formed_frame_roundtrips() {
 // ---------------------------------------------------------------------------
 
 const REGTEST_GENESIS: [u8; 32] = dom_core::GENESIS_HASH_REGTEST;
+type SyntheticGenesis = (Vec<u8>, Vec<u8>, [u8; 32], [u8; 33], [u8; 33]);
 
 /// Minimal cryptographically-shaped genesis block with one coinbase output.
 /// Mirrors the synthetic builder in corruption_detection.rs, trimmed to the
 /// single block these barrier tests need.
-fn synthetic_genesis() -> (Vec<u8>, Vec<u8>, [u8; 32], [u8; 33], [u8; 33]) {
+fn synthetic_genesis() -> SyntheticGenesis {
     let mut blind = [0u8; 32];
     blind[31] = 0xE0;
     let output = Commitment::commit(50, &BlindingFactor::from_bytes(blind).expect("blind"));

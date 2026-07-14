@@ -1,0 +1,23 @@
+[package]
+name = "dom-wallet-recovery-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+dom-wallet-recovery = { path = ".." }
+dom-wallet-core-api = { path = "../../dom-wallet-core-api" }
+dom-crypto = { path = "../../dom-crypto" }
+
+[workspace]
+
+[[bin]]
+name = "fuzz_scanner_recovery_projection"
+path = "fuzz_targets/fuzz_scanner_recovery_projection.rs"
+test = false
+doc = false
+bench = false

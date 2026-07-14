@@ -146,20 +146,29 @@ fn equal_work_sibling_does_not_reorg() {
         .get_hash_at_height(2)
         .expect("h2")
         .expect("h2 exists");
-    let mut sib_prev = Hash256::from_bytes(canon_h2);
-    let mut sib_tip = sib_prev;
-    for h in 3..=5 {
-        let header = synthetic_header(sib_prev, h, 50_000 + h, h);
-        sib_tip = put_header(&chain.store, &header);
-        sib_prev = sib_tip;
+    let mut sib_tip = Hash256::ZERO;
+    for attempt in 0..10_000u64 {
+        let mut sib_prev = Hash256::from_bytes(canon_h2);
+        for h in 3..=5 {
+            let header = synthetic_header(sib_prev, h, 50_000 + attempt * 10 + h, h);
+            sib_tip = put_header(&chain.store, &header);
+            sib_prev = sib_tip;
+        }
+        if sib_tip.as_bytes() > canon_tip.as_bytes() {
+            break;
+        }
     }
+    assert!(
+        sib_tip.as_bytes() > canon_tip.as_bytes(),
+        "synthetic sibling must not be tie-preferred for this negative boundary"
+    );
 
     let result = chain.promote_heavier_known_tip(sib_tip, Timestamp(2_000_000_000));
     match result {
         Err(DomError::PolicyRejected(msg)) => {
             assert!(
                 msg.contains("not heavier"),
-                "equal-work sibling must be rejected as not-heavier, got: {msg}"
+                "equal-work sibling must be rejected as not-better, got: {msg}"
             );
         }
         other => panic!("equal-work sibling must NOT reorg, got: {other:?}"),

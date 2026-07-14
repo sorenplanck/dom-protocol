@@ -7,8 +7,8 @@
 //!   (B) Scalar (keys.rs) range + LE/BE non-confusion
 //!   (C) PartialSig::from_bytes range/length
 //! Everything else (PublicKey/SecretKey/BlindingFactor/Commitment/SchnorrSignature
-//! negatives, borromean R-07 F-01/F-02 verify-time, prove-time caps, mutation/
-//! cross/garbage) is ALREADY covered — not duplicated here.
+//! negatives, final range-proof verify-time, prove-time caps, mutation/
+//! cross/garbage) is already covered and not duplicated here.
 
 use dom_crypto::keys::{Scalar, SecretKey};
 use dom_crypto::schnorr::PartialSig;
@@ -31,10 +31,9 @@ fn be_increment(mut b: [u8; 32]) -> [u8; 32] {
 // mint a >2^52 Bulletproof (the public prove API caps at MAX_PROVABLE_VALUE). It
 // lives as a #[cfg(test)] unit test inside bulletproof_bp.rs:
 //   bulletproof_bp::tests::probe_bp2_verify_rejects_value_above_max_provable
-// It EXECUTED and CONFIRMED inflation: bp_verify returns Ok(true) for value=2^52
-// (FIX-014, dom-shield reports/FIX-QUEUE.md). That test asserts the correct
-// defense and is now GREEN. FIX-014 was RESOLVED in e5f2075 (bounded aggregate
-// bp2 proof closes the inflation path; native-revalidated 2026-06-29).
+// It executed and confirmed the pre-fix inflation path. That test asserts the
+// correct defense and is now green. FIX-014 was resolved in e5f2075; the bounded
+// aggregate proof closes the inflation path.
 
 // ── (B) Scalar range rejection (keys.rs:26/37) ──────────────────────────────
 #[test]

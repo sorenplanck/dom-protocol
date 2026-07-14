@@ -1,7 +1,7 @@
-//! Roadmap v2 Phase 2.4 — Bulletproofs+ adversarial validation suite.
+//! Final DOM range-proof adversarial validation suite.
 //!
-//! `dom-crypto::bulletproof` wraps `secp256k1-zkp`'s Bulletproofs+
-//! range-proof construction (52-bit range, value < 2^52). The
+//! `dom-crypto::range_proof` wraps the final bounded aggregate classic
+//! Bulletproof construction. The
 //! existing in-crate tests cover the happy path and a small set of
 //! edge cases. This file expands the coverage to the failure
 //! envelope the production verifier MUST reject:
@@ -34,8 +34,8 @@
 //! (`prove_with_nonce`) so individual failures are reproducible
 //! across CI runs.
 
-use dom_crypto::bulletproof::{prove, prove_with_nonce, verify, MAX_PROVABLE_VALUE};
 use dom_crypto::pedersen::BlindingFactor;
+use dom_crypto::range_proof::{prove, prove_with_nonce, verify, MAX_PROVABLE_VALUE};
 
 fn blinding(seed: u8) -> BlindingFactor {
     let mut b = [0u8; 32];
@@ -249,15 +249,11 @@ fn proof_length_envelope_enforced() {
         "empty proof bytes must surface as a parse / verify error"
     );
 
-    // Oversized: above the LEGACY borromean envelope (this module is the legacy
-    // borromean path, capped at 6144 internally; the consensus
-    // dom_core::MAX_PROOF_SIZE is now the smaller 675-byte Bulletproof envelope
-    // used by the bp2 path). One byte over the borromean cap must be rejected.
-    const LEGACY_BORROMEAN_MAX_PROOF_SIZE: usize = 6_144;
-    let oversized = vec![0u8; LEGACY_BORROMEAN_MAX_PROOF_SIZE + 1];
+    // Oversized relative to the consensus proof envelope must be rejected.
+    let oversized = vec![0u8; dom_core::MAX_PROOF_SIZE + 1];
     assert!(
         verify(&commit, &oversized).is_err(),
-        "proof above the legacy borromean envelope must be rejected"
+        "proof above the consensus envelope must be rejected"
     );
 }
 

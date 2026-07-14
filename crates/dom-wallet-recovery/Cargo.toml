@@ -1,0 +1,18 @@
+[package]
+name = "dom-wallet-recovery"
+description = "Wallet V3 seed-only canonical-chain output restoration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+dom-core.workspace = true
+dom-crypto.workspace = true
+dom-tx.workspace = true
+dom-wallet-core-api.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+dom-consensus.workspace = true

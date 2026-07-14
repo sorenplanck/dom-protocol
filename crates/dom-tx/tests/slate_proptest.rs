@@ -87,6 +87,8 @@ prop_compose! {
             recipient_public_nonce: has_recip_nonce.then(|| public_key(nonce_byte)),
             sender_partial_sig: has_sender_sig.then(|| partial_sig(sender_sig_byte)),
             recipient_partial_sig: has_recip_sig.then(|| partial_sig(recip_sig_byte)),
+            sender_change_recovery_capsule: Vec::new(),
+            recipient_recovery_capsule: Vec::new(),
         }
     }
 }

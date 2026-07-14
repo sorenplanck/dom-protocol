@@ -18,5 +18,6 @@ pub mod task_supervisor;
 #[cfg(test)]
 pub(crate) mod test_dir;
 pub mod time_health;
+pub mod wallet_core_api;
 pub mod wallet_helpers;
 pub mod wallet_scan;
