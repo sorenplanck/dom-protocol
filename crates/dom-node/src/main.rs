@@ -1,6 +1,6 @@
 //! DOM node entry point.
 
-use dom_config::NodeConfig;
+use dom_config::{parse_dom_network, Network, NodeConfig};
 use dom_node::node::DomNode;
 use std::sync::Arc;
 use tracing::info;
@@ -16,30 +16,28 @@ async fn main() -> anyhow::Result<()> {
     info!("Author: Soren Planck");
     info!("License: MIT");
 
-    // Select network via DOM_NETWORK (regtest|testnet|mainnet). Defaults to testnet.
-    // Regtest is a LOCAL dev network with a trivial PoW target — fast blocks, no real mining power
-    // needed. NEVER use regtest for anything public.
-    let mut config = match std::env::var("DOM_NETWORK").as_deref() {
-        Ok("regtest") => {
+    // Select the network before any storage, listener, RPC, metrics, mining, or
+    // peer task is initialized. A missing variable defaults to Testnet; every
+    // present value must exactly match a canonical lowercase network name.
+    let network_value = std::env::var("DOM_NETWORK").ok();
+    let network = parse_dom_network(network_value.as_deref())?;
+    let mut config = match network {
+        Network::Regtest => {
             info!("Network: REGTEST (local dev, trivial PoW)");
             NodeConfig::regtest()
         }
-        Ok("mainnet") => {
+        Network::Mainnet => {
             info!("Network: MAINNET");
             NodeConfig::mainnet()
         }
-        Ok("testnet") | Err(_) => {
-            info!("Network: testnet");
-            NodeConfig::testnet()
-        }
-        Ok(other) => {
-            info!("Unknown DOM_NETWORK={other}, defaulting to testnet");
+        Network::Testnet => {
+            info!("Network: TESTNET");
             NodeConfig::testnet()
         }
     };
 
     // Allow override of seed peers via DOM_SEED_PEERS env var (CSV of host:port).
-    // Useful for testnet privado where DNS seeds don't exist.
+    // Useful for private Testnet deployments where DNS seeds do not exist.
     if let Ok(seeds_csv) = std::env::var("DOM_SEED_PEERS") {
         let seeds: Vec<String> = seeds_csv
             .split(',')
@@ -60,9 +58,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Allow internal Prometheus metrics endpoint via DOM_METRICS_LISTEN_ADDR.
-    // Prefer loopback bindings such as 127.0.0.1:3371; metrics expose node
-    // health and topology signals and should not be public by default.
-    if let Ok(addr) = std::env::var("DOM_METRICS_LISTEN_ADDR") {
+    // Metrics remain disabled unless explicitly enabled. The value `default`
+    // selects the authoritative loopback-only service port.
+    if let Ok(requested) = std::env::var("DOM_METRICS_LISTEN_ADDR") {
+        let addr = if requested == "default" {
+            format!("127.0.0.1:{}", dom_core::METRICS_PORT)
+        } else {
+            requested
+        };
         info!("Enabling metrics listen address: {addr}");
         config.metrics_listen_addr = Some(addr);
     }
@@ -70,7 +73,12 @@ async fn main() -> anyhow::Result<()> {
     // Allow enabling the RPC server via DOM_RPC_LISTEN_ADDR.
     // The RPC exposes /status, /block, /wallet/spend (bearer-auth) etc. Prefer an internal
     // binding (127.0.0.1) or a firewalled interface; /wallet/spend is sensitive.
-    if let Ok(addr) = std::env::var("DOM_RPC_LISTEN_ADDR") {
+    if let Ok(requested) = std::env::var("DOM_RPC_LISTEN_ADDR") {
+        let addr = if requested == "default" {
+            config.network.default_rpc_listen_addr()
+        } else {
+            requested
+        };
         info!("Enabling RPC listen address: {addr}");
         config.rpc_listen_addr = Some(addr);
     }

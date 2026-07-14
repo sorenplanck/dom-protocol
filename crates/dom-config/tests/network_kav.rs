@@ -12,7 +12,7 @@
 //! collide. The unknown-variant rejection guards against a malformed/forged
 //! config silently selecting an unintended network.
 
-use dom_config::Network;
+use dom_config::{parse_dom_network, Network};
 
 // ---- magic() == canonical dom-core constants -------------------------------
 
@@ -86,6 +86,80 @@ fn default_port_testnet_matches_core_const() {
 #[test]
 fn default_port_regtest_matches_core_const() {
     assert_eq!(Network::Regtest.default_port(), dom_core::P2P_PORT_REGTEST);
+}
+
+#[test]
+fn rpc_ports_and_loopback_defaults_match_core_authority() {
+    let cases = [
+        (Network::Mainnet, 33_369, 33_372),
+        (Network::Testnet, 33_370, 33_373),
+        (Network::Regtest, 33_371, 33_374),
+    ];
+    for (network, p2p_port, rpc_port) in cases {
+        assert_eq!(network.default_port(), p2p_port);
+        assert_eq!(network.default_rpc_port(), rpc_port);
+        assert_eq!(
+            network.default_rpc_listen_addr(),
+            format!("127.0.0.1:{rpc_port}")
+        );
+        assert_ne!(p2p_port, rpc_port);
+    }
+    assert_eq!(dom_core::METRICS_PORT, 3_371);
+    assert_eq!(dom_core::EXPLORER_PORT, 8_081);
+}
+
+#[test]
+fn dom_network_parser_accepts_only_exact_canonical_values() {
+    assert_eq!(parse_dom_network(None).unwrap(), Network::Testnet);
+    assert_eq!(
+        parse_dom_network(Some("mainnet")).unwrap(),
+        Network::Mainnet
+    );
+    assert_eq!(
+        parse_dom_network(Some("testnet")).unwrap(),
+        Network::Testnet
+    );
+    assert_eq!(
+        parse_dom_network(Some("regtest")).unwrap(),
+        Network::Regtest
+    );
+
+    for invalid in [
+        "",
+        "Mainnet",
+        "TESTNET",
+        "RegTest",
+        " mainnet",
+        "testnet ",
+        " regtest ",
+        "unknown",
+    ] {
+        let error = parse_dom_network(Some(invalid)).expect_err("value must fail closed");
+        assert!(error.to_string().contains("invalid DOM_NETWORK"));
+    }
+}
+
+#[test]
+fn dom_network_is_parsed_before_node_side_effects() {
+    let startup = include_str!("../../dom-node/src/main.rs");
+    let parse = startup
+        .find("parse_dom_network(network_value.as_deref())?")
+        .expect("startup must parse DOM_NETWORK");
+    for side_effect in [
+        "DomNode::init(config)?",
+        "node.run().await?",
+        "DOM_P2P_LISTEN_ADDR",
+        "DOM_RPC_LISTEN_ADDR",
+        "DOM_METRICS_LISTEN_ADDR",
+    ] {
+        let position = startup
+            .find(side_effect)
+            .expect("startup side effect marker");
+        assert!(
+            parse < position,
+            "DOM_NETWORK must be parsed before {side_effect}"
+        );
+    }
 }
 
 // ---- Network serde: round-trip + reject unknown variant --------------------

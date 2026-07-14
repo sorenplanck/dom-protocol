@@ -875,7 +875,7 @@ impl ChainState {
             .get_block_header(self.tip_hash.as_bytes())?
             .ok_or_else(|| DomError::Internal("chain tip header missing".into()))?;
         let tip = BlockHeader::from_bytes(&tip_bytes)?;
-        let params = pow_params_for_network(self.network_magic);
+        let params = pow_params_for_network(self.network_magic)?;
         let next_height = tip
             .height
             .checked_next()
@@ -1074,7 +1074,7 @@ impl ChainState {
             .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?;
         let next_target =
             compute_expected_target(self.network_magic, child_timestamp, child_height)?;
-        let params = pow_params_for_network(self.network_magic);
+        let params = pow_params_for_network(self.network_magic)?;
         let height_delta = child_height
             .0
             .checked_sub(self.asert_anchor.height.0)

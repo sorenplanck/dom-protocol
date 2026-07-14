@@ -125,9 +125,11 @@ impl PowParams {
     }
 }
 
-/// Return the canonical PoW parameters for the given network magic.
-pub fn pow_params_for_network(network_magic: u32) -> PowParams {
-    match network_magic {
+/// Return the canonical PoW parameters for a recognized network magic.
+///
+/// Unknown identities fail closed and never inherit another network's target.
+pub fn pow_params_for_network(network_magic: u32) -> Result<PowParams, DomError> {
+    let params = match network_magic {
         NETWORK_MAGIC_TESTNET => PowParams {
             target_spacing: TARGET_SPACING,
             half_life: ASERT_HALF_LIFE,
@@ -151,13 +153,13 @@ pub fn pow_params_for_network(network_magic: u32) -> PowParams {
             genesis_target_compact: GENESIS_TARGET_COMPACT,
             max_compact_target: GENESIS_TARGET_COMPACT,
         },
-        _ => PowParams {
-            target_spacing: TARGET_SPACING,
-            half_life: ASERT_HALF_LIFE,
-            genesis_target_compact: GENESIS_TARGET_COMPACT,
-            max_compact_target: GENESIS_TARGET_COMPACT,
-        },
-    }
+        other => {
+            return Err(DomError::Invalid(format!(
+                "unknown network magic 0x{other:08x} for PoW parameters"
+            )))
+        }
+    };
+    Ok(params)
 }
 
 impl CompactTarget {
@@ -662,16 +664,16 @@ pub fn target_to_difficulty(target: &[u8; 32]) -> u128 {
 
 // ── Genesis Anchor (RFC-0006) ─────────────────────────────────────────────────
 
-/// Retorna o AsertAnchor do bloco genesis — consensus-critical.
+/// Return the consensus-critical ASERT anchor for the genesis block.
 ///
-/// Usado por todos os nos para calcular dificuldade a partir do bloco 1.
-/// Qualquer alteracao aqui e um hard fork imediato.
+/// Every node uses this anchor to calculate difficulty from block 1 onward.
+/// Any change here is an immediate hard fork.
 ///
 /// The timestamp source is centralized in
 /// `dom_core::genesis_timestamp_for_network_magic()` so all networks consume
 /// one audited mapping from network identity to genesis anchor time.
 pub fn genesis_anchor(network_magic: u32) -> Result<AsertAnchor, DomError> {
-    let params = pow_params_for_network(network_magic);
+    let params = pow_params_for_network(network_magic)?;
     let timestamp = dom_core::genesis_timestamp_for_network_magic(network_magic)?;
     Ok(AsertAnchor {
         timestamp: dom_core::Timestamp(timestamp),
@@ -691,7 +693,7 @@ pub fn compute_expected_target(
     block_timestamp: Timestamp,
     block_height: BlockHeight,
 ) -> Result<[u8; 32], DomError> {
-    let params = pow_params_for_network(network_magic);
+    let params = pow_params_for_network(network_magic)?;
     if uses_dev_fixed_target(network_magic) {
         return params.max_target();
     }
@@ -1041,9 +1043,8 @@ mod tests {
         assert_eq!(ratio, U256::from(2u8));
     }
 
-    /// Prova 1: o genesis da testnet passa validate_target_bounds (to_target
-    /// valida internamente) e exige ~131k hashes/bloco — mineável por CPU
-    /// modesta (~11.8 min a 185 h/s) sem ser trivial.
+    /// The Testnet genesis target passes bounds validation and requires roughly
+    /// 131,000 hashes per block, making it accessible without making it trivial.
     #[test]
     fn testnet_genesis_passes_bounds_and_requires_about_131k_hashes() {
         let target = CompactTarget(TESTNET_TARGET_COMPACT)
@@ -1056,12 +1057,11 @@ mod tests {
         );
     }
 
-    /// Prova 2: na testnet, max_target é estritamente MAIS FÁCIL (maior) que
-    /// o genesis_target — o clamp de apply_exponent tem espaço para o ASERT
-    /// baixar a dificuldade (antes genesis == max congelava o retarget).
+    /// Testnet's maximum target is strictly easier than its genesis target, so
+    /// ASERT has room to reduce difficulty under low hash rate.
     #[test]
     fn testnet_asert_has_headroom_to_ease() {
-        let params = pow_params_for_network(NETWORK_MAGIC_TESTNET);
+        let params = pow_params_for_network(NETWORK_MAGIC_TESTNET).unwrap();
         let genesis = params.genesis_target().unwrap();
         let max = params.max_target().unwrap();
         assert!(
@@ -1070,15 +1070,14 @@ mod tests {
         );
     }
 
-    /// Prova 3: com blocos chegando MAIS DEVAGAR que o spacing (hashrate
-    /// baixo), o retarget produz um alvo MAIS FÁCIL que o inicial — impossível
-    /// antes desta mudança, quando o clamp prendia o resultado no anchor.
+    /// Blocks arriving slower than target spacing produce an easier target than
+    /// the initial target.
     #[test]
     fn testnet_slow_blocks_ease_difficulty_below_genesis() {
-        let params = pow_params_for_network(NETWORK_MAGIC_TESTNET);
+        let params = pow_params_for_network(NETWORK_MAGIC_TESTNET).unwrap();
         let anchor = genesis_anchor(NETWORK_MAGIC_TESTNET).unwrap();
-        // Bloco 1 atrasado meia half-life (17.280s além do ideal): o ASERT
-        // deve facilitar ~sqrt(2)x — estritamente entre genesis e max.
+        // Block 1 is half a half-life late, so ASERT should ease by roughly
+        // sqrt(2), strictly between the genesis and maximum targets.
         let late = Timestamp(anchor.timestamp.0 + params.target_spacing + params.half_life / 2);
         let next = asert_next_target_with_params(&anchor, late, BlockHeight(1), &params).unwrap();
 
@@ -1092,23 +1091,56 @@ mod tests {
         assert!(eased <= max, "eased target must respect the max clamp");
     }
 
-    /// Prova 4: mainnet e regtest ficam EXATAMENTE como estavam.
+    /// Mainnet and Regtest retain their established PoW parameters.
     #[test]
     fn mainnet_and_regtest_pow_params_unchanged() {
         assert_eq!(GENESIS_TARGET_COMPACT, 0x1e00_ffff);
-        let mainnet = pow_params_for_network(NETWORK_MAGIC_MAINNET);
+        let mainnet = pow_params_for_network(NETWORK_MAGIC_MAINNET).unwrap();
         assert_eq!(mainnet.genesis_target_compact, GENESIS_TARGET_COMPACT);
         assert_eq!(mainnet.max_compact_target, GENESIS_TARGET_COMPACT);
 
-        let regtest = pow_params_for_network(NETWORK_MAGIC_REGTEST);
+        let regtest = pow_params_for_network(NETWORK_MAGIC_REGTEST).unwrap();
         assert_eq!(regtest.genesis_target_compact, REGTEST_TARGET_COMPACT);
         assert_eq!(regtest.max_compact_target, REGTEST_TARGET_COMPACT);
         assert_eq!(REGTEST_TARGET_COMPACT, MAX_COMPACT_TARGET);
     }
 
-    /// Prova 5: o alvo de testnet continua PoW REAL — exige pelo menos 2x o
-    /// piso do consenso (65.536 hashes, o mesmo do trivial de regtest) e nunca
-    /// é mais fácil que o teto compact permitido.
+    #[test]
+    fn pow_parameters_fail_closed_for_unknown_magic() {
+        for magic in [
+            0,
+            u32::MAX,
+            NETWORK_MAGIC_MAINNET.wrapping_add(1),
+            NETWORK_MAGIC_TESTNET.wrapping_add(1),
+            NETWORK_MAGIC_REGTEST.wrapping_sub(1),
+        ] {
+            let error = pow_params_for_network(magic).expect_err("unknown magic must fail");
+            assert!(error.to_string().contains("unknown network magic"));
+        }
+    }
+
+    #[test]
+    fn genesis_difficulty_is_derived_from_each_network_target() {
+        let expected = [
+            (NETWORK_MAGIC_MAINNET, 1u128),
+            (NETWORK_MAGIC_TESTNET, 2u128),
+            (NETWORK_MAGIC_REGTEST, 1u128),
+        ];
+        for (magic, difficulty) in expected {
+            let params = pow_params_for_network(magic).unwrap();
+            let target = params.genesis_target().unwrap();
+            assert_eq!(target_to_difficulty(&target), difficulty);
+        }
+    }
+
+    #[test]
+    fn no_fixed_initial_difficulty_authority_remains() {
+        let core_constants = include_str!("../../dom-core/src/constants.rs");
+        assert!(!core_constants.contains("INITIAL_DIFFICULTY"));
+    }
+
+    /// Testnet remains real proof of work: it requires at least twice the
+    /// consensus floor and never exceeds the easiest compact target.
     #[test]
     fn testnet_genesis_remains_real_pow() {
         let genesis = CompactTarget(TESTNET_TARGET_COMPACT).to_target().unwrap();
@@ -1150,7 +1182,7 @@ mod tests {
     fn public_asert_half_life_is_288_blocks() {
         assert_eq!(ASERT_HALF_LIFE_BLOCKS, 288);
         for network_magic in [NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_TESTNET] {
-            let params = pow_params_for_network(network_magic);
+            let params = pow_params_for_network(network_magic).unwrap();
             assert_eq!(params.target_spacing, TARGET_SPACING);
             assert_eq!(params.half_life / params.target_spacing, 288);
         }
@@ -1161,14 +1193,14 @@ mod tests {
         assert_eq!(ASERT_HALF_LIFE, 34_560);
         assert_eq!(ASERT_HALF_LIFE, TARGET_SPACING * ASERT_HALF_LIFE_BLOCKS);
         for network_magic in [NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_TESTNET] {
-            let params = pow_params_for_network(network_magic);
+            let params = pow_params_for_network(network_magic).unwrap();
             assert_eq!(params.half_life, 34_560);
         }
     }
 
     #[test]
     fn testnet_params_decouple_genesis_anchor_from_max_target() {
-        let params = pow_params_for_network(NETWORK_MAGIC_TESTNET);
+        let params = pow_params_for_network(NETWORK_MAGIC_TESTNET).unwrap();
         assert_eq!(params.target_spacing, TARGET_SPACING);
         assert_eq!(params.genesis_target_compact, TESTNET_TARGET_COMPACT);
         assert_eq!(params.max_compact_target, MAX_COMPACT_TARGET);
@@ -1176,7 +1208,7 @@ mod tests {
 
     #[test]
     fn public_expected_target_is_asert_compact_canonicalized() {
-        let params = pow_params_for_network(NETWORK_MAGIC_MAINNET);
+        let params = pow_params_for_network(NETWORK_MAGIC_MAINNET).unwrap();
         let anchor = genesis_anchor(NETWORK_MAGIC_MAINNET).unwrap();
         let height = BlockHeight(17);
         let timestamp = Timestamp(anchor.timestamp.0 + params.target_spacing * height.0 + 37);
@@ -1205,7 +1237,7 @@ mod tests {
 
     #[test]
     fn expected_target_large_positive_delta_clamps_to_public_max() {
-        let params = pow_params_for_network(NETWORK_MAGIC_MAINNET);
+        let params = pow_params_for_network(NETWORK_MAGIC_MAINNET).unwrap();
         let anchor = genesis_anchor(NETWORK_MAGIC_MAINNET).unwrap();
         let target = compute_expected_target(
             NETWORK_MAGIC_MAINNET,
@@ -1219,7 +1251,7 @@ mod tests {
 
     #[test]
     fn expected_target_large_negative_delta_gets_harder() {
-        let params = pow_params_for_network(NETWORK_MAGIC_MAINNET);
+        let params = pow_params_for_network(NETWORK_MAGIC_MAINNET).unwrap();
         let anchor = genesis_anchor(NETWORK_MAGIC_MAINNET).unwrap();
         let height = BlockHeight((ASERT_HALF_LIFE / TARGET_SPACING) * 4);
         let target = compute_expected_target(
@@ -1234,7 +1266,7 @@ mod tests {
 
     #[test]
     fn fast_blocks_harden_difficulty_under_asert_288() {
-        let params = pow_params_for_network(NETWORK_MAGIC_MAINNET);
+        let params = pow_params_for_network(NETWORK_MAGIC_MAINNET).unwrap();
         let anchor = genesis_anchor(NETWORK_MAGIC_MAINNET).unwrap();
         let height = BlockHeight(ASERT_HALF_LIFE_BLOCKS);
         let target = compute_expected_target(
@@ -1250,7 +1282,7 @@ mod tests {
 
     #[test]
     fn slow_blocks_ease_difficulty_under_asert_288() {
-        let params = pow_params_for_network(NETWORK_MAGIC_MAINNET);
+        let params = pow_params_for_network(NETWORK_MAGIC_MAINNET).unwrap();
         let anchor = genesis_anchor(NETWORK_MAGIC_MAINNET).unwrap();
         let height = BlockHeight(ASERT_HALF_LIFE_BLOCKS);
         let fast_target = compute_expected_target(
@@ -1584,7 +1616,7 @@ mod randomx_tests {
 
     #[test]
     fn seed_height_epoch_zero() {
-        // Blocos 0–2047: sempre usa genesis (altura 0)
+        // Blocks 0-2047 always use genesis at height 0.
         assert_eq!(randomx_seed_height(0), 0);
         assert_eq!(randomx_seed_height(1), 0);
         assert_eq!(randomx_seed_height(2047), 0);
@@ -1592,14 +1624,14 @@ mod randomx_tests {
 
     #[test]
     fn seed_height_epoch_one() {
-        // Blocos 2048–4095: seed = 2048 - 64 = 1984
+        // Blocks 2048-4095 use seed height 2048 - 64 = 1984.
         assert_eq!(randomx_seed_height(2048), 1984);
         assert_eq!(randomx_seed_height(4095), 1984);
     }
 
     #[test]
     fn seed_height_epoch_two() {
-        // Blocos 4096–6143: seed = 4096 - 64 = 4032
+        // Blocks 4096-6143 use seed height 4096 - 64 = 4032.
         assert_eq!(randomx_seed_height(4096), 4032);
     }
 
