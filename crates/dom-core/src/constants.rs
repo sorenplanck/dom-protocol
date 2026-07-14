@@ -53,9 +53,6 @@ pub const ASERT_RADIX: u64 = 1u64 << ASERT_RADIX_BITS;
 /// ASERT adjusts automatically from block 1 onward.
 pub const GENESIS_TARGET_COMPACT: u32 = 0x1e00_ffff;
 
-/// [CONSENSUS] Initial difficulty (computed from GENESIS_TARGET_COMPACT).
-pub const INITIAL_DIFFICULTY: u64 = 1;
-
 /// [CONSENSUS] Frozen testnet genesis timestamp (Unix seconds).
 ///
 /// This value is already live on the controlled testnet and must remain stable
@@ -291,6 +288,25 @@ pub const P2P_PORT_TESTNET: u16 = 33_370;
 /// Distinct from mainnet/testnet so accidental local conflicts also fail loudly.
 pub const P2P_PORT_REGTEST: u16 = 33_371;
 
+/// [NETWORK] Default loopback RPC port for Mainnet.
+///
+/// RPC is disabled unless explicitly enabled. RPC ports are intentionally
+/// distinct from every P2P port so an operator cannot accidentally direct an
+/// RPC client at the peer protocol listener.
+pub const RPC_PORT_MAINNET: u16 = 33_372;
+
+/// [NETWORK] Default loopback RPC port for Testnet.
+pub const RPC_PORT_TESTNET: u16 = 33_373;
+
+/// [NETWORK — DEV-ONLY] Default loopback RPC port for Regtest.
+pub const RPC_PORT_REGTEST: u16 = 33_374;
+
+/// [SERVICE] Default loopback metrics port when metrics are explicitly enabled.
+pub const METRICS_PORT: u16 = 3_371;
+
+/// [SERVICE] Default loopback explorer HTTP port.
+pub const EXPLORER_PORT: u16 = 8_081;
+
 /// [DEV-ONLY] Coinbase maturity on Regtest: one confirmation.
 ///
 /// Used exclusively by `Network::Regtest` codepaths so fast integration tests
@@ -423,7 +439,7 @@ pub const TAG_COINBASE_BLINDING: &str = "DOM:coinbase-blinding:v1";
 /// Canonical genesis block hash for Testnet.
 ///
 /// Derived deterministically from the canonical genesis construction path:
-/// `dom-node::miner::build_genesis_coinbase` ->
+/// `dom-chain::build_canonical_genesis` ->
 /// `dom-consensus::compute_block_pmmr_roots` ->
 /// `BlockHeader` serialization ->
 /// `dom_crypto::hash::blake2b_256(header_bytes)`.
@@ -623,6 +639,24 @@ const _: () = {
     assert!(
         P2P_PORT_REGTEST != P2P_PORT_MAINNET && P2P_PORT_REGTEST != P2P_PORT_TESTNET,
         "Regtest port must not collide with mainnet/testnet"
+    );
+    assert!(
+        RPC_PORT_MAINNET != P2P_PORT_MAINNET
+            && RPC_PORT_MAINNET != P2P_PORT_TESTNET
+            && RPC_PORT_MAINNET != P2P_PORT_REGTEST
+            && RPC_PORT_TESTNET != P2P_PORT_MAINNET
+            && RPC_PORT_TESTNET != P2P_PORT_TESTNET
+            && RPC_PORT_TESTNET != P2P_PORT_REGTEST
+            && RPC_PORT_REGTEST != P2P_PORT_MAINNET
+            && RPC_PORT_REGTEST != P2P_PORT_TESTNET
+            && RPC_PORT_REGTEST != P2P_PORT_REGTEST,
+        "RPC ports must not collide with P2P ports"
+    );
+    assert!(
+        RPC_PORT_MAINNET != RPC_PORT_TESTNET
+            && RPC_PORT_MAINNET != RPC_PORT_REGTEST
+            && RPC_PORT_TESTNET != RPC_PORT_REGTEST,
+        "RPC ports must be unique"
     );
     assert!(
         REGTEST_COINBASE_MATURITY < COINBASE_MATURITY,

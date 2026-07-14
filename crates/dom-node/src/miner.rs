@@ -11,9 +11,8 @@ use dom_core::{
     WEIGHT_COINBASE_KERNEL, WEIGHT_OUTPUT,
 };
 use dom_pow::{
-    compute_expected_target, fast_pow_hash, genesis_anchor, hash_meets_target,
-    pow_validation_mode_for_network, randomx_seed_height, target_to_compact, target_to_difficulty,
-    CompactTarget, PowValidationMode,
+    compute_expected_target, fast_pow_hash, hash_meets_target, pow_validation_mode_for_network,
+    randomx_seed_height, target_to_compact, target_to_difficulty, CompactTarget, PowValidationMode,
 };
 use dom_store::DomStore;
 use primitive_types::U256;
@@ -229,35 +228,6 @@ pub fn build_seed_recoverable_coinbase(
     })
 }
 
-/// Build the canonical genesis coinbase using a deterministic blinding factor.
-///
-/// The blinding is derived from `TAG_GENESIS_BLINDING` so every node produces
-/// the same commitment and signature for the genesis block. This is required
-/// for genesis_hash to be identical across all nodes — otherwise nodes can't
-/// agree on the chain they're on.
-fn build_genesis_coinbase(chain_id: &[u8; 32]) -> Result<CoinbaseTransaction, DomError> {
-    use dom_crypto::hash::blake2b_256_tagged;
-    use dom_crypto::pedersen::BlindingFactor;
-
-    // Derive deterministic blinding from a public tag — public knowledge,
-    // since the genesis coinbase recipient is "everyone".
-    let blinding_hash = blake2b_256_tagged(dom_core::TAG_GENESIS_BLINDING, b"");
-    let blinding = BlindingFactor::from_bytes(*blinding_hash.as_bytes())
-        .map_err(|e| DomError::Internal(format!("genesis blinding: {e}")))?;
-
-    // Derive a deterministic bulletproof nonce too, so the range proof is reproducible.
-    let nonce_hash = blake2b_256_tagged(dom_core::TAG_GENESIS_BLINDING, b"bulletproof-nonce");
-    let nonce = *nonce_hash.as_bytes();
-
-    build_coinbase_with_blinding(
-        BlockHeight::GENESIS,
-        0,
-        chain_id,
-        Some(blinding),
-        Some(nonce),
-    )
-}
-
 /// Build a byte-reproducible coinbase at an arbitrary height.
 ///
 /// **TEST-INFRASTRUCTURE API. Not part of the stable public surface.**
@@ -272,9 +242,9 @@ fn build_genesis_coinbase(chain_id: &[u8; 32]) -> Result<CoinbaseTransaction, Do
 ///
 /// This is a thin deterministic wrapper, not a new coinbase path: it only
 /// derives a deterministic `(blinding, nonce)` pair — from `TAG_GENESIS_BLINDING`
-/// keyed by height, exactly as [`build_genesis_coinbase`] derives the genesis
-/// pair — and hands them to the same `build_coinbase_with_blinding` constructor
-/// the genesis and normal paths use. It adds no coinbase-construction logic,
+/// keyed by height, following the same deterministic pattern as the canonical
+/// `dom_chain::build_canonical_genesis` authority. It then hands them to the
+/// normal `build_coinbase_with_blinding` constructor. It adds no validation logic,
 /// changes no consensus rule, and every block it produces is fully
 /// consensus-valid (and rejected by `connect_block` if it were not).
 ///
@@ -379,7 +349,7 @@ fn build_coinbase_with_blinding(
 }
 
 pub async fn mining_loop(node: Arc<DomNode>, shutdown: ShutdownToken) -> Result<(), DomError> {
-    info!("Minerador iniciado");
+    info!("Miner started");
     let _mining_active = MiningActiveGuard::new(node.metrics.clone());
     {
         if shutdown.is_shutdown() {
@@ -389,7 +359,7 @@ pub async fn mining_loop(node: Arc<DomNode>, shutdown: ShutdownToken) -> Result<
         if chain.tip_height.0 == 0 && chain.tip_hash == dom_core::Hash256::ZERO {
             drop(chain);
             if let Err(e) = create_genesis_block(node.clone()).await {
-                warn!("Genesis falhou: {e}");
+                warn!("Genesis creation failed: {e}");
                 return Err(e);
             }
         }
@@ -399,9 +369,9 @@ pub async fn mining_loop(node: Arc<DomNode>, shutdown: ShutdownToken) -> Result<
             return Ok(());
         }
         match mine_one_block(node.clone()).await {
-            Ok(h) => info!("✅ Bloco {} minerado!", h),
+            Ok(h) => info!("Block {} mined successfully", h),
             Err(e) => {
-                warn!("Mineracao falhou: {e}");
+                warn!("Mining failed: {e}");
                 tokio::select! {
                     _ = shutdown.wait() => return Ok(()),
                     _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {}
@@ -561,57 +531,17 @@ fn apply_wallet_after_mined_connect(
 #[doc(hidden)]
 pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     use dom_core::GENESIS_MESSAGE;
-    info!("Criando bloco genesis...");
-    info!("Mensagem: {}", GENESIS_MESSAGE);
-    let anchor = genesis_anchor(node.config.network.magic())?;
-
-    // Deterministic genesis coinbase — identical on every node.
+    info!("Creating genesis block...");
+    info!("Genesis message: {}", GENESIS_MESSAGE);
+    let network_magic = node.config.network.magic();
     let genesis_chain_id = chain_id_for(&node.config)?;
-    let genesis_coinbase = build_genesis_coinbase(&genesis_chain_id)?;
-
-    // Compute PMMR roots from the coinbase via the shared helper so the
-    // genesis header is byte-identical to what every validator will
-    // recompute on disk during connect_block.
-    let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&genesis_coinbase, &[])?;
-
-    let genesis_header = BlockHeader {
-        version: dom_core::PROTOCOL_VERSION,
-        prev_hash: Hash256::ZERO,
-        height: dom_core::BlockHeight::GENESIS,
-        timestamp: anchor.timestamp,
-        output_root,
-        kernel_root,
-        rangeproof_root,
-        total_kernel_offset: [0u8; 32],
-        target: CompactTarget(target_to_compact(&anchor.target)),
-        total_difficulty: U256::from(target_to_difficulty(&anchor.target)),
-        pow: ProofOfWork {
-            nonce: 0,
-            randomx_hash: Hash256::ZERO,
-        },
-    };
-    let genesis_block = Block {
-        header: genesis_header,
-        coinbase: genesis_coinbase,
-        transactions: Vec::new(),
-    };
+    let canonical = dom_chain::build_canonical_genesis(network_magic, &genesis_chain_id)?;
+    let genesis_hash = *canonical.hash.as_bytes();
+    let genesis_block = canonical.block;
 
     let mut chain = node.chain.lock().await;
-    let header_bytes = {
-        use dom_serialization::DomSerialize;
-        genesis_block
-            .header
-            .to_bytes()
-            .map_err(|e| DomError::Internal(format!("genesis serialize: {e}")))?
-    };
-    let genesis_hash = *dom_crypto::hash::blake2b_256(&header_bytes).as_bytes();
-    let genesis_body = {
-        use dom_serialization::DomSerialize;
-        genesis_block
-            .to_bytes()
-            .map_err(|e| DomError::Internal(format!("genesis body serialize: {e}")))?
-    };
+    let header_bytes = canonical.header_bytes;
+    let genesis_body = canonical.block_bytes;
     // DOM-AUDIT-001: persist the genesis coinbase into the UTXO/kernel index
     // here, identically to what the reopen path reconstructs. The genesis
     // coinbase is spendable by design, so a create that leaves these empty
@@ -630,7 +560,7 @@ pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     )?;
     chain.tip_hash = Hash256::from_bytes(genesis_hash);
     chain.tip_height = dom_core::BlockHeight::GENESIS;
-    chain.tip_difficulty = primitive_types::U256::from(target_to_difficulty(&anchor.target));
+    chain.tip_difficulty = genesis_block.header.total_difficulty;
     // NOTE: do NOT overwrite chain.genesis_hash with the computed hash here.
     // The chain_id used for kernel signatures is derived from the *constant*
     // GENESIS_HASH_{MAINNET,TESTNET,REGTEST} (see chain_id_for() and
@@ -639,7 +569,10 @@ pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     // miner/wallet signed with, and every block fails kernel-signature
     // verification. Pre-launch, set the constants to the real precomputed
     // genesis hash; until then, all sites consistently use the placeholder.
-    info!("✅ Genesis criado! hash={}", hex::encode(genesis_hash));
+    info!(
+        "Genesis created successfully: hash={}",
+        hex::encode(genesis_hash)
+    );
     Ok(())
 }
 
@@ -743,7 +676,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     let throttle = MinerThrottle::from_config(&node.config.miner_throttle);
 
     info!(
-        "Minerando bloco {} | target: {}... | mode: {:?} | throttle: {}",
+        "Mining block {} | target: {}... | mode: {:?} | throttle: {}",
         new_height,
         hex::encode(&target[0..4]),
         mining_mode,
@@ -787,7 +720,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     })?;
     if !selected_txs.is_empty() {
         info!(
-            "Bloco {}: incluindo {} tx(s) da mempool, fees totais = {} noms",
+            "Block {}: including {} mempool transaction(s), total fees = {} noms",
             new_height,
             selected_txs.len(),
             total_tx_fees
@@ -884,7 +817,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
         .map_err(|e| DomError::Internal(format!("channel: {e}")))?
         .map_err(DomError::Internal)?;
     tracing::debug!(
-        "Bloco {new_height}: nonce encontrado com {} worker(s)",
+        "Block {new_height}: nonce found with {} worker(s)",
         stats.workers
     );
     let block = Block {
@@ -1286,16 +1219,15 @@ mod genesis_determinism_tests {
     //! test slow — see RB-PMMR-001 deferred validation gaps).
     //!
     //! Coverage:
-    //!   1. `build_genesis_coinbase` is deterministic across N calls.
+    //!   1. `dom_chain::build_canonical_genesis` is deterministic across N calls.
     //!   2. The three PMMR roots over the genesis coinbase are
     //!      deterministic across N calls.
     //!   3. Different chain_ids produce different coinbases (sanity:
     //!      Mainnet vs Testnet vs Regtest genesis must NOT collide).
 
     use super::{
-        apply_wallet_after_mined_connect, build_genesis_coinbase, build_real_coinbase,
-        build_seed_recoverable_coinbase, finalize_mined_block, mine_blocking,
-        resolve_mining_randomx_seed, MinerThrottle,
+        apply_wallet_after_mined_connect, build_real_coinbase, build_seed_recoverable_coinbase,
+        finalize_mined_block, mine_blocking, resolve_mining_randomx_seed, MinerThrottle,
     };
     use crate::node::DomNode;
     use dom_chain::{ConnectResult, ReorgBlockDelta, ReorgDelta};
@@ -1303,7 +1235,7 @@ mod genesis_determinism_tests {
     use dom_consensus::block::validate_pow_for_network;
     use dom_consensus::block::{BlockHeader, ProofOfWork};
     use dom_consensus::compute_block_pmmr_roots;
-    use dom_consensus::{Block, Transaction};
+    use dom_consensus::{Block, CoinbaseTransaction, Transaction};
     use dom_core::{
         BlockHeight, Hash256, Timestamp, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST,
         NETWORK_MAGIC_TESTNET, PROTOCOL_VERSION,
@@ -1354,6 +1286,13 @@ mod genesis_determinism_tests {
             &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
         )
         .as_bytes()
+    }
+
+    fn canonical_genesis_coinbase(network_magic: u32, chain_id: &[u8; 32]) -> CoinbaseTransaction {
+        dom_chain::build_canonical_genesis(network_magic, chain_id)
+            .expect("canonical genesis")
+            .block
+            .coinbase
     }
 
     fn fresh_test_dir(label: &str) -> PathBuf {
@@ -1678,7 +1617,9 @@ mod genesis_determinism_tests {
             "2ab5e6c73607e8bfbbec2d4ce3ea1419cda29ae6892e7f1c24facc465cd65821";
 
         let cid = chain_id_testnet();
-        let coinbase = build_genesis_coinbase(&cid).expect("genesis coinbase");
+        let canonical = dom_chain::build_canonical_genesis(NETWORK_MAGIC_TESTNET, &cid)
+            .expect("canonical genesis");
+        let coinbase = &canonical.block.coinbase;
 
         // (1) Final range proof: exactly 739 bytes and self-verifies.
         assert_eq!(
@@ -1697,7 +1638,7 @@ mod genesis_determinism_tests {
 
         // (2) PMMR roots match the pinned vectors.
         let (output_root, kernel_root, rangeproof_root) =
-            compute_block_pmmr_roots(&coinbase, &[]).expect("roots");
+            compute_block_pmmr_roots(coinbase, &[]).expect("roots");
         assert_eq!(
             hex::encode(output_root.as_bytes()),
             OUTPUT_ROOT,
@@ -1716,25 +1657,7 @@ mod genesis_determinism_tests {
 
         // (3) Genesis block hash matches the pinned vector AND the source-of-truth
         //     consensus constant GENESIS_HASH_TESTNET.
-        let anchor = genesis_anchor(NETWORK_MAGIC_TESTNET).expect("anchor");
-        let header = BlockHeader {
-            version: PROTOCOL_VERSION,
-            prev_hash: Hash256::ZERO,
-            height: BlockHeight::GENESIS,
-            timestamp: anchor.timestamp,
-            output_root,
-            kernel_root,
-            rangeproof_root,
-            total_kernel_offset: [0u8; 32],
-            target: dom_pow::CompactTarget(target_to_compact(&anchor.target)),
-            total_difficulty: U256::from(target_to_difficulty(&anchor.target)),
-            pow: ProofOfWork {
-                nonce: 0,
-                randomx_hash: Hash256::ZERO,
-            },
-        };
-        let header_bytes = header.to_bytes().expect("ser");
-        let genesis_hash = *dom_crypto::hash::blake2b_256(&header_bytes).as_bytes();
+        let genesis_hash = *canonical.hash.as_bytes();
         assert_eq!(
             hex::encode(genesis_hash),
             GENESIS_HASH,
@@ -1747,7 +1670,10 @@ mod genesis_determinism_tests {
         );
 
         // (4) Byte-reproducible: rebuild and confirm identical proof + roots.
-        let cb2 = build_genesis_coinbase(&cid).expect("genesis coinbase rebuild");
+        let cb2 = dom_chain::build_canonical_genesis(NETWORK_MAGIC_TESTNET, &cid)
+            .expect("canonical genesis rebuild")
+            .block
+            .coinbase;
         assert_eq!(
             cb2.output.proof, coinbase.output.proof,
             "genesis proof not reproducible"
@@ -1793,15 +1719,18 @@ mod genesis_determinism_tests {
 
     #[test]
     fn genesis_coinbase_is_deterministic_across_runs() {
-        for cid_fn in [
-            chain_id_mainnet as fn() -> [u8; 32],
-            chain_id_testnet,
-            chain_id_regtest,
+        for (network_magic, cid_fn) in [
+            (
+                dom_core::NETWORK_MAGIC_MAINNET,
+                chain_id_mainnet as fn() -> [u8; 32],
+            ),
+            (NETWORK_MAGIC_TESTNET, chain_id_testnet),
+            (NETWORK_MAGIC_REGTEST, chain_id_regtest),
         ] {
             let cid = cid_fn();
-            let a = build_genesis_coinbase(&cid).expect("build genesis coinbase #1");
+            let a = canonical_genesis_coinbase(network_magic, &cid);
             for trial in 0..8 {
-                let b = build_genesis_coinbase(&cid).expect("build genesis coinbase #N");
+                let b = canonical_genesis_coinbase(network_magic, &cid);
                 let a_bytes = a.to_bytes().expect("serialize a");
                 let b_bytes = b.to_bytes().expect("serialize b");
                 assert_eq!(
@@ -1826,11 +1755,11 @@ mod genesis_determinism_tests {
     #[test]
     fn genesis_pmmr_roots_are_deterministic_across_runs() {
         let cid = chain_id_regtest();
-        let a = build_genesis_coinbase(&cid).expect("build genesis coinbase");
+        let a = canonical_genesis_coinbase(NETWORK_MAGIC_REGTEST, &cid);
         let (a_or, a_kr, a_rr) = compute_block_pmmr_roots(&a, &[]).expect("compute genesis roots");
 
         for trial in 0..8 {
-            let b = build_genesis_coinbase(&cid).expect("build genesis coinbase #N");
+            let b = canonical_genesis_coinbase(NETWORK_MAGIC_REGTEST, &cid);
             let (b_or, b_kr, b_rr) =
                 compute_block_pmmr_roots(&b, &[]).expect("compute genesis roots #N");
             assert_eq!(a_or, b_or, "trial {trial}: output_root drift");
@@ -1844,9 +1773,9 @@ mod genesis_determinism_tests {
     /// mainnet genesis MUST NOT replay onto testnet.
     #[test]
     fn genesis_coinbase_differs_across_networks() {
-        let m = build_genesis_coinbase(&chain_id_mainnet()).expect("mainnet");
-        let t = build_genesis_coinbase(&chain_id_testnet()).expect("testnet");
-        let r = build_genesis_coinbase(&chain_id_regtest()).expect("regtest");
+        let m = canonical_genesis_coinbase(dom_core::NETWORK_MAGIC_MAINNET, &chain_id_mainnet());
+        let t = canonical_genesis_coinbase(NETWORK_MAGIC_TESTNET, &chain_id_testnet());
+        let r = canonical_genesis_coinbase(NETWORK_MAGIC_REGTEST, &chain_id_regtest());
         assert_ne!(
             m.kernel.excess_signature, t.kernel.excess_signature,
             "mainnet and testnet genesis signatures must differ"

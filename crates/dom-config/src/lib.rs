@@ -2,7 +2,10 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
-use dom_core::{P2P_PORT_MAINNET, P2P_PORT_REGTEST, P2P_PORT_TESTNET};
+use dom_core::{
+    P2P_PORT_MAINNET, P2P_PORT_REGTEST, P2P_PORT_TESTNET, RPC_PORT_MAINNET, RPC_PORT_REGTEST,
+    RPC_PORT_TESTNET,
+};
 use serde::{Deserialize, Serialize};
 
 /// Network selection.
@@ -29,6 +32,24 @@ impl Network {
             Network::Testnet => P2P_PORT_TESTNET,
             Network::Regtest => P2P_PORT_REGTEST,
         }
+    }
+
+    /// Default loopback RPC port.
+    pub fn default_rpc_port(&self) -> u16 {
+        match self {
+            Network::Mainnet => RPC_PORT_MAINNET,
+            Network::Testnet => RPC_PORT_TESTNET,
+            Network::Regtest => RPC_PORT_REGTEST,
+        }
+    }
+
+    /// Default loopback RPC listen address.
+    ///
+    /// RPC remains disabled until an operator explicitly enables it. This
+    /// helper supplies the authoritative private binding when no custom address
+    /// is requested.
+    pub fn default_rpc_listen_addr(&self) -> String {
+        format!("127.0.0.1:{}", self.default_rpc_port())
     }
     /// Network magic bytes.
     pub fn magic(&self) -> u32 {
@@ -68,6 +89,23 @@ impl Network {
     /// banners).
     pub fn is_dev_only(&self) -> bool {
         matches!(self, Network::Regtest)
+    }
+}
+
+/// Parse the optional `DOM_NETWORK` value using the canonical startup policy.
+///
+/// A missing variable preserves the historical Testnet default. A present value
+/// must exactly match one lowercase network name; empty, mixed-case, padded, or
+/// unknown values fail closed instead of selecting another network.
+pub fn parse_dom_network(value: Option<&str>) -> Result<Network, dom_core::DomError> {
+    match value {
+        None => Ok(Network::Testnet),
+        Some("mainnet") => Ok(Network::Mainnet),
+        Some("testnet") => Ok(Network::Testnet),
+        Some("regtest") => Ok(Network::Regtest),
+        Some(other) => Err(dom_core::DomError::Invalid(format!(
+            "invalid DOM_NETWORK value {other:?}; expected mainnet, testnet, or regtest"
+        ))),
     }
 }
 
@@ -123,7 +161,9 @@ pub struct NodeConfig {
     pub wallet_password: Option<String>,
     /// Log level.
     pub log_level: String,
-    /// RPC listen address (e.g. "127.0.0.1:3370"). None = RPC disabled.
+    /// RPC listen address. `None` keeps RPC disabled. Use
+    /// [`Network::default_rpc_listen_addr`] for the authoritative loopback
+    /// address when enabling RPC without a custom binding.
     #[serde(default)]
     pub rpc_listen_addr: Option<String>,
     /// Explicit RPC bearer token for embedded callers.
@@ -132,7 +172,7 @@ pub struct NodeConfig {
     /// `DOM_RPC_TOKEN`, then `~/.dom/rpc_token`, then generate a token file.
     #[serde(default, skip_serializing)]
     pub rpc_bearer_token: Option<String>,
-    /// Prometheus metrics listen address (e.g. "127.0.0.1:3371").
+    /// Prometheus metrics listen address (for example `127.0.0.1:3371`).
     /// None = metrics endpoint disabled. Prefer loopback/internal bindings;
     /// metrics expose node health and topology signals.
     #[serde(default)]

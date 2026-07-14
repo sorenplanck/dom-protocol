@@ -354,7 +354,7 @@ fn public_next_block_target_matches_canonical_asert_helper() {
         .expect("tip lookup")
         .expect("tip header");
     let tip = BlockHeader::from_bytes(&tip_bytes).expect("tip decode");
-    let params = pow_params_for_network(NETWORK_MAGIC_TESTNET);
+    let params = pow_params_for_network(NETWORK_MAGIC_TESTNET).expect("testnet PoW parameters");
     let child_height = tip.height.checked_next().expect("next height");
     let child_timestamp = tip
         .timestamp
@@ -404,7 +404,7 @@ fn window_retarget_still_unreachable_from_mainnet_testnet() {
             .expect("tip lookup")
             .expect("tip header");
         let tip = BlockHeader::from_bytes(&tip_bytes).expect("tip decode");
-        let params = pow_params_for_network(network_magic);
+        let params = pow_params_for_network(network_magic).expect("network PoW parameters");
         let child_height = tip.height.checked_next().expect("next height");
         let child_timestamp = tip
             .timestamp
@@ -431,7 +431,7 @@ fn first_public_block_after_genesis_uses_asert_anchor_target() {
         ),
         (NETWORK_MAGIC_TESTNET, dom_core::GENESIS_TIMESTAMP_TESTNET),
     ] {
-        let params = pow_params_for_network(network_magic);
+        let params = pow_params_for_network(network_magic).expect("network PoW parameters");
         let timestamp = Timestamp(anchor_ts + params.target_spacing);
         let first_target =
             compute_expected_target(network_magic, timestamp, BlockHeight(1)).expect("target");
@@ -455,7 +455,7 @@ fn public_validator_rejects_wrong_asert_target() {
         .expect("parent header");
     let parent = BlockHeader::from_bytes(&parent).expect("parent decode");
     let child_height = parent.height.checked_next().expect("next height");
-    let params = pow_params_for_network(NETWORK_MAGIC_TESTNET);
+    let params = pow_params_for_network(NETWORK_MAGIC_TESTNET).expect("testnet PoW parameters");
     let child_timestamp = parent
         .timestamp
         .checked_add_secs(params.target_spacing)

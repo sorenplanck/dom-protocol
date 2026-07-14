@@ -4,8 +4,13 @@ use std::sync::Arc;
 use tracing::warn;
 use url::Url;
 
-const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:8081";
-const DEFAULT_NODE_URL: &str = "http://127.0.0.1:33370";
+fn default_listen_addr() -> String {
+    format!("127.0.0.1:{}", dom_core::EXPLORER_PORT)
+}
+
+fn default_node_url() -> String {
+    format!("http://127.0.0.1:{}", dom_core::RPC_PORT_TESTNET)
+}
 
 #[derive(Debug, Clone)]
 struct NodeChainProvider {
@@ -100,9 +105,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     let listen_addr =
-        std::env::var("DOM_EXPLORER_LISTEN_ADDR").unwrap_or_else(|_| DEFAULT_LISTEN_ADDR.into());
-    let node_url =
-        std::env::var("DOM_EXPLORER_NODE_URL").unwrap_or_else(|_| DEFAULT_NODE_URL.into());
+        std::env::var("DOM_EXPLORER_LISTEN_ADDR").unwrap_or_else(|_| default_listen_addr());
+    let node_url = std::env::var("DOM_EXPLORER_NODE_URL").unwrap_or_else(|_| default_node_url());
     let node_url = Url::parse(&node_url)?;
     let client = NodeRpcClient::builder(node_url)
         .user_agent(format!("dom-explorer/{}", env!("CARGO_PKG_VERSION")))
@@ -110,4 +114,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let provider = Arc::new(NodeChainProvider::new(client));
 
     ExplorerServer::new(listen_addr, provider).start().await
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn defaults_use_authoritative_service_ports() {
+        assert_eq!(
+            super::default_listen_addr(),
+            format!("127.0.0.1:{}", dom_core::EXPLORER_PORT)
+        );
+        assert_eq!(
+            super::default_node_url(),
+            format!("http://127.0.0.1:{}", dom_core::RPC_PORT_TESTNET)
+        );
+    }
 }
