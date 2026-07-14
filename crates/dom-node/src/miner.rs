@@ -537,7 +537,12 @@ pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     let genesis_chain_id = chain_id_for(&node.config)?;
     let canonical = dom_chain::build_canonical_genesis(network_magic, &genesis_chain_id)?;
     let genesis_hash = *canonical.hash.as_bytes();
-    let genesis_block = canonical.block;
+    let genesis_block = canonical.block.ok_or_else(|| {
+        DomError::Invalid(
+            "Mainnet genesis identity is integrated but remains inactive until the final ceremony"
+                .into(),
+        )
+    })?;
 
     let mut chain = node.chain.lock().await;
     let header_bytes = canonical.header_bytes;
@@ -1222,8 +1227,8 @@ mod genesis_determinism_tests {
     //!   1. `dom_chain::build_canonical_genesis` is deterministic across N calls.
     //!   2. The three PMMR roots over the genesis coinbase are
     //!      deterministic across N calls.
-    //!   3. Different chain_ids produce different coinbases (sanity:
-    //!      Mainnet vs Testnet vs Regtest genesis must NOT collide).
+    //!   3. Different legacy-network chain_ids produce different coinbases
+    //!      (sanity: Testnet and Regtest genesis must not collide).
 
     use super::{
         apply_wallet_after_mined_connect, build_real_coinbase, build_seed_recoverable_coinbase,
@@ -1258,16 +1263,6 @@ mod genesis_determinism_tests {
 
     const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
 
-    fn chain_id_mainnet() -> [u8; 32] {
-        use dom_consensus::derive_chain_id;
-        use dom_core::Hash256;
-        *derive_chain_id(
-            dom_core::NETWORK_MAGIC_MAINNET,
-            &Hash256::from_bytes(dom_core::GENESIS_HASH_MAINNET),
-        )
-        .as_bytes()
-    }
-
     fn chain_id_testnet() -> [u8; 32] {
         use dom_consensus::derive_chain_id;
         use dom_core::Hash256;
@@ -1292,6 +1287,7 @@ mod genesis_determinism_tests {
         dom_chain::build_canonical_genesis(network_magic, chain_id)
             .expect("canonical genesis")
             .block
+            .expect("legacy genesis block")
             .coinbase
     }
 
@@ -1619,7 +1615,7 @@ mod genesis_determinism_tests {
         let cid = chain_id_testnet();
         let canonical = dom_chain::build_canonical_genesis(NETWORK_MAGIC_TESTNET, &cid)
             .expect("canonical genesis");
-        let coinbase = &canonical.block.coinbase;
+        let coinbase = &canonical.block.as_ref().expect("testnet block").coinbase;
 
         // (1) Final range proof: exactly 739 bytes and self-verifies.
         assert_eq!(
@@ -1673,6 +1669,7 @@ mod genesis_determinism_tests {
         let cb2 = dom_chain::build_canonical_genesis(NETWORK_MAGIC_TESTNET, &cid)
             .expect("canonical genesis rebuild")
             .block
+            .expect("testnet block")
             .coinbase;
         assert_eq!(
             cb2.output.proof, coinbase.output.proof,
@@ -1720,11 +1717,7 @@ mod genesis_determinism_tests {
     #[test]
     fn genesis_coinbase_is_deterministic_across_runs() {
         for (network_magic, cid_fn) in [
-            (
-                dom_core::NETWORK_MAGIC_MAINNET,
-                chain_id_mainnet as fn() -> [u8; 32],
-            ),
-            (NETWORK_MAGIC_TESTNET, chain_id_testnet),
+            (NETWORK_MAGIC_TESTNET, chain_id_testnet as fn() -> [u8; 32]),
             (NETWORK_MAGIC_REGTEST, chain_id_regtest),
         ] {
             let cid = cid_fn();
@@ -1768,22 +1761,11 @@ mod genesis_determinism_tests {
         }
     }
 
-    /// Sanity: distinct chain_ids must produce distinct genesis
-    /// coinbases. This is the cross-network safety property — a
-    /// mainnet genesis MUST NOT replay onto testnet.
+    /// Distinct legacy-network chain IDs produce distinct genesis coinbases.
     #[test]
-    fn genesis_coinbase_differs_across_networks() {
-        let m = canonical_genesis_coinbase(dom_core::NETWORK_MAGIC_MAINNET, &chain_id_mainnet());
+    fn legacy_genesis_coinbase_differs_across_networks() {
         let t = canonical_genesis_coinbase(NETWORK_MAGIC_TESTNET, &chain_id_testnet());
         let r = canonical_genesis_coinbase(NETWORK_MAGIC_REGTEST, &chain_id_regtest());
-        assert_ne!(
-            m.kernel.excess_signature, t.kernel.excess_signature,
-            "mainnet and testnet genesis signatures must differ"
-        );
-        assert_ne!(
-            m.kernel.excess_signature, r.kernel.excess_signature,
-            "mainnet and regtest genesis signatures must differ"
-        );
         assert_ne!(
             t.kernel.excess_signature, r.kernel.excess_signature,
             "testnet and regtest genesis signatures must differ"

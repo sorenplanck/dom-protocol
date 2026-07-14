@@ -24,7 +24,11 @@ pub use chain_state::{
     CHAIN_CORRUPT_SENTINEL, MAX_RETAINED_SIDE_BRANCH_LENGTH, MAX_RETAINED_SIDE_BRANCH_REORG_DEPTH,
     MAX_RETAINED_SIDE_BRANCH_TIPS,
 };
-pub use genesis::{build_canonical_genesis, CanonicalGenesis};
+pub use genesis::{
+    build_canonical_genesis, canonical_genesis_inscription, validate_mainnet_genesis_identity,
+    CanonicalGenesis, GenesisInscriptionV1, MainnetGenesisIdentityV1, GENESIS_INSCRIPTION_VERSION,
+    MAINNET_GENESIS_IDENTITY_VERSION, MAX_GENESIS_INSCRIPTION_BYTES,
+};
 pub use ibd::{
     IbdControl, IbdInterruption, IbdPhase, IbdState, PersistedIbdState, IBD_SESSION_METADATA_KEY,
 };

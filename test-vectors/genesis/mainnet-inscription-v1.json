@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "inscription_version": 1,
+  "encoding": "UTF-8",
+  "display_text": "Not a store of value. A means of exchange.",
+  "byte_length": 42,
+  "utf8_hex": "4e6f7420612073746f7265206f662076616c75652e2041206d65616e73206f662065786368616e67652e",
+  "canonical_encoding_hex": "01002a4e6f7420612073746f7265206f662076616c75652e2041206d65616e73206f662065786368616e67652e",
+  "commitment_domain": "DOM:genesis-inscription:v1",
+  "commitment_algorithm": "Blake2b-256 tagged with a little-endian u16 domain-length prefix",
+  "commitment_hex": "5cd1c38c517e4ed92697aa1ff4ebbabee026d0d0112f26c460eb379f1bcf8c28",
+  "sha256_reference_hex": "e74ec2a60c62b2d1b7d2e6f7df1c56b5642e72c2e59f6a474c930350add6cda9",
+  "leading_whitespace": false,
+  "trailing_whitespace": false,
+  "trailing_newline": false
+}

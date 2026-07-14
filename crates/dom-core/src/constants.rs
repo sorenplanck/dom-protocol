@@ -74,7 +74,11 @@ pub const GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER: u64 = GENESIS_TIMESTAMP_TESTNET
 /// `ensure_network_genesis_ready()` instead.
 pub const GENESIS_TIMESTAMP_PLACEHOLDER: u64 = GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER;
 
-/// [CONSENSUS] Immutable message inscribed in the genesis coinbase.
+/// [CONSENSUS] Exact UTF-8 bytes carried by the Mainnet genesis inscription.
+///
+/// This constant is the sole source of the consensus payload. Testnet and
+/// Regtest do not serialize it. The Mainnet identity format is defined by
+/// `dom-chain`; presentation strings and documentation are not authorities.
 pub const GENESIS_MESSAGE: &str = "Not a store of value. A means of exchange.";
 
 // ── Monetary Policy ──────────────────────────────────────────────────────────
@@ -414,6 +418,10 @@ pub const TAG_BULLETPROOF: &str = "DOM:bulletproof:v1";
 pub const TAG_BP_G: &str = "DOM:bp-G:v1";
 pub const TAG_BP_H: &str = "DOM:bp-H:v1";
 pub const TAG_CHAIN_ID: &str = "DOM:chain-id:v1";
+/// Domain separator for the canonical Mainnet genesis inscription commitment.
+pub const TAG_GENESIS_INSCRIPTION: &str = "DOM:genesis-inscription:v1";
+/// Domain separator for the canonical Mainnet genesis identity envelope.
+pub const TAG_MAINNET_GENESIS_IDENTITY: &str = "DOM:mainnet-genesis-identity:v1";
 pub const TAG_MUSIG2_TRANSCRIPT: &str = "DOM:musig2-transcript:v1";
 pub const TAG_MUSIG2_NONCE: &str = "DOM:musig2-nonce:v1";
 
