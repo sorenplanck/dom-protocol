@@ -14,14 +14,10 @@
 //! comfortably under 1 GB RAM and the suite finishes in seconds.
 
 use dom_chain::ChainState;
-use dom_consensus::{
-    block::{BlockHeader, ProofOfWork},
-    Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput,
-};
+use dom_consensus::{block::BlockHeader, Block};
 use dom_core::{Hash256, Timestamp};
-use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_integration_tests::helpers::*;
-use dom_pow::{target_to_difficulty, CompactTarget, REGTEST_TARGET_COMPACT};
+use dom_pow::{CompactTarget, REGTEST_TARGET_COMPACT};
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::{utxo::UtxoEntry, DomStore};
 use std::path::Path;
@@ -142,64 +138,13 @@ fn fresh_chain(data_dir: &str, genesis_bytes: &[u8], network_magic: u32) -> Chai
     ChainState::open(store, genesis_hash, network_magic).expect("chain open")
 }
 
-fn replay_commitment(seed: u8, value: u64) -> Commitment {
-    let mut blind = [0u8; 32];
-    blind[31] = seed.max(1);
-    Commitment::commit(
-        value,
-        &BlindingFactor::from_bytes(blind).expect("deterministic blinding"),
-    )
-}
-
 fn replay_block_hash(header: &BlockHeader) -> Hash256 {
     Hash256::from_bytes(
         *dom_crypto::hash::blake2b_256(&header.to_bytes().expect("header serialize")).as_bytes(),
     )
 }
 
-fn synthetic_replay_block(
-    prev_hash: Hash256,
-    height: u64,
-    timestamp: u64,
-    total_difficulty: u64,
-    nonce_seed: u64,
-) -> Block {
-    let coinbase_commitment = replay_commitment((height as u8).wrapping_add(1), height + 1);
-    Block {
-        header: BlockHeader {
-            version: dom_core::PROTOCOL_VERSION,
-            height: dom_core::BlockHeight(height),
-            prev_hash,
-            timestamp: Timestamp(timestamp),
-            output_root: Hash256::ZERO,
-            kernel_root: Hash256::ZERO,
-            rangeproof_root: Hash256::ZERO,
-            total_kernel_offset: [0u8; 32],
-            target: CompactTarget(REGTEST_TARGET_COMPACT),
-            total_difficulty: total_difficulty.into(),
-            pow: ProofOfWork {
-                nonce: nonce_seed,
-                randomx_hash: Hash256::ZERO,
-            },
-        },
-        coinbase: CoinbaseTransaction {
-            output: TransactionOutput {
-                commitment: coinbase_commitment,
-                proof: vec![height as u8; 8],
-            },
-            kernel: CoinbaseKernel {
-                features: dom_core::KERNEL_FEAT_COINBASE,
-                explicit_value: 1,
-                excess: replay_commitment((height as u8).wrapping_add(100), 0),
-                excess_signature: [height as u8; 65],
-            },
-            offset: [0u8; 32],
-        },
-        transactions: Vec::new(),
-    }
-}
-
-fn write_replay_fixture_chain(
+async fn write_replay_fixture_chain(
     data_dir: &str,
 ) -> (
     Hash256,
@@ -212,36 +157,29 @@ fn write_replay_fixture_chain(
     std::fs::create_dir_all(data_dir).expect("mkdir replay fixture dir");
     let store = DomStore::open(Path::new(data_dir)).expect("fixture store open");
 
-    let compact = CompactTarget(REGTEST_TARGET_COMPACT);
-    let target = compact.to_target().expect("regtest target");
-    let diff = target_to_difficulty(&target) as u64;
-    let genesis = synthetic_replay_block(
-        Hash256::ZERO,
-        0,
-        dom_core::GENESIS_TIMESTAMP_PLACEHOLDER,
-        diff,
-        1,
-    );
+    let (genesis_bytes, blocks) =
+        produce_block_sequence("replay-reopen-source", free_local_port(), 1).await;
+    let genesis = Block::from_bytes(&genesis_bytes).expect("decode canonical replay genesis");
     let genesis_hash = replay_block_hash(&genesis.header);
+    assert_eq!(
+        genesis_hash,
+        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+        "replay fixture must use the finalized Regtest genesis identity"
+    );
     store
         .commit_block(
             genesis_hash.as_bytes(),
             0,
             &genesis.header.to_bytes().expect("genesis header"),
-            &genesis.to_bytes().expect("genesis block"),
+            &genesis_bytes,
             &[coinbase_utxo_add(&genesis)],
             &[],
             &[],
         )
         .expect("commit genesis fixture");
 
-    let block_1 = synthetic_replay_block(
-        genesis_hash,
-        1,
-        genesis.header.timestamp.0 + 1,
-        diff.saturating_mul(2),
-        2,
-    );
+    assert_eq!(blocks.len(), 1, "fixture source must produce one block");
+    let block_1 = Block::from_bytes(&blocks[0]).expect("decode replay fixture block");
     let block_1_hash = replay_block_hash(&block_1.header);
     let header_bytes = block_1.header.to_bytes().expect("tip header");
     store
@@ -249,7 +187,7 @@ fn write_replay_fixture_chain(
             block_1_hash.as_bytes(),
             1,
             &header_bytes,
-            &block_1.to_bytes().expect("tip block"),
+            &blocks[0],
             &[coinbase_utxo_add(&block_1)],
             &[],
             &[],
@@ -337,7 +275,7 @@ async fn replay_same_chain_reopens_to_identical_tip() {
 
     let data_dir = "/tmp/dom-replay-reopen".to_string();
     let (tip_hash, tip_height, tip_diff, network_magic, header_bytes) =
-        write_replay_fixture_chain(&data_dir);
+        write_replay_fixture_chain(&data_dir).await;
 
     let store = DomStore::open(Path::new(&data_dir)).expect("reopen store");
     let chain_reopen = ChainState::open(
