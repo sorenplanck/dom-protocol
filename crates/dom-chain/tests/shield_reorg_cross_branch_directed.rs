@@ -82,11 +82,7 @@ fn blinding(seed: u8) -> BlindingFactor {
 }
 
 fn test_chain_id() -> [u8; 32] {
-    *derive_chain_id(
-        dom_core::NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes()
+    *derive_chain_id(dom_core::NETWORK_MAGIC_REGTEST, &Hash256::ZERO).as_bytes()
 }
 
 fn kernel_message(fee: u64, lock_height: u64) -> [u8; 32] {
@@ -170,10 +166,7 @@ fn signed_coinbase(height: BlockHeight, seed: u8) -> CoinbaseTransaction {
     let (proof, _) = dom_crypto::bp2_prove(reward, &blinding).expect("coinbase proof");
     let excess = Commitment::commit(0, &blinding);
     let secret = SecretKey::from_bytes(blinding.as_bytes()).expect("coinbase secret");
-    let chain_id = derive_chain_id(
-        dom_core::NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    );
+    let chain_id = derive_chain_id(dom_core::NETWORK_MAGIC_REGTEST, &Hash256::ZERO);
     let msg = {
         let mut data = Vec::with_capacity(1 + 8);
         data.push(KERNEL_FEAT_COINBASE);
@@ -336,12 +329,10 @@ fn store_side_block(store: &DomStore, block: &Block) -> Hash256 {
 }
 
 fn open_chain(dir: &std::path::Path) -> ChainState {
-    open_test_chain(
-        dir,
-        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-        dom_core::NETWORK_MAGIC_REGTEST,
-    )
-    .expect("chain open")
+    // The directed branches have a synthetic block-zero record. Use the
+    // unpinned test identity so that fixture can reopen without relaxing the
+    // finalized Regtest identity required by production startup.
+    open_test_chain(dir, Hash256::ZERO, dom_core::NETWORK_MAGIC_REGTEST).expect("chain open")
 }
 
 /// Deterministic digest over the full persisted UTXO set (commitment+entry).

@@ -156,7 +156,6 @@ fn deserialize_well_formed_frame_roundtrips() {
 // contract with a real committed chain and a raw-byte tampered UTXO entry.
 // ---------------------------------------------------------------------------
 
-const REGTEST_GENESIS: [u8; 32] = dom_core::GENESIS_HASH_REGTEST;
 type SyntheticGenesis = (Vec<u8>, Vec<u8>, [u8; 32], [u8; 33], [u8; 33]);
 
 /// Minimal cryptographically-shaped genesis block with one coinbase output.
@@ -289,7 +288,10 @@ fn fix020_tampered_persisted_utxo_set_should_alarm_on_reopen() {
 
     let result = ChainState::open(
         open_test_store(dir.path()),
-        Hash256::from_bytes(REGTEST_GENESIS),
+        // This fixture commits a deliberately synthetic block-zero record.
+        // Hash256::ZERO selects the unpinned test identity so genesis
+        // enforcement does not mask the UTXO-corruption assertion below.
+        Hash256::ZERO,
         dom_core::NETWORK_MAGIC_REGTEST,
     );
     let msg = match result {
@@ -322,7 +324,7 @@ fn fix020_operator_repair_mode_rebuilds_canonical_utxo_set() {
     let canonical = {
         let chain = ChainState::open(
             open_test_store(dir.path()),
-            Hash256::from_bytes(REGTEST_GENESIS),
+            Hash256::ZERO,
             dom_core::NETWORK_MAGIC_REGTEST,
         )
         .expect("clean reopen");
@@ -333,7 +335,7 @@ fn fix020_operator_repair_mode_rebuilds_canonical_utxo_set() {
 
     let repaired = ChainState::open_with_utxo_repair(
         open_test_store(dir.path()),
-        Hash256::from_bytes(REGTEST_GENESIS),
+        Hash256::ZERO,
         dom_core::NETWORK_MAGIC_REGTEST,
     )
     .expect("operator repair mode must rebuild the canonical UTXO set");

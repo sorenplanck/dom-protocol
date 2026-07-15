@@ -37,20 +37,13 @@ fn scalar(seed: u8) -> BlindingFactor {
 }
 
 fn chain_id() -> [u8; 32] {
-    *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes()
+    *derive_chain_id(NETWORK_MAGIC_REGTEST, &Hash256::ZERO).as_bytes()
 }
 
 fn open_chain(path: &std::path::Path) -> ChainState {
-    open_test_chain(
-        path,
-        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-        NETWORK_MAGIC_REGTEST,
-    )
-    .expect("chain open")
+    // This fixture creates a spendable synthetic genesis for block validation;
+    // production startup always configures the frozen Regtest genesis identity.
+    open_test_chain(path, Hash256::ZERO, NETWORK_MAGIC_REGTEST).expect("chain open")
 }
 
 fn safe_now() -> Timestamp {
