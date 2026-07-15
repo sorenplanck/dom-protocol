@@ -214,8 +214,8 @@ impl ChainState {
                         )));
                     }
                 }
-                rebuild_kernel_index_from_canonical_chain(&store, header.height)?;
-                ensure_canonical_utxo_set(&store, header.height, allow_utxo_repair)?;
+                rebuild_kernel_index_from_canonical_chain(&store, header.height, network_magic)?;
+                ensure_canonical_utxo_set(&store, header.height, network_magic, allow_utxo_repair)?;
                 prune_retained_side_chains(&store, header.height, hash)?;
                 (
                     Hash256::from_bytes(hash),
@@ -250,7 +250,7 @@ impl ChainState {
     ) -> Result<ConnectResult, DomError> {
         let header = &block.header;
         let header_bytes = header.to_bytes()?;
-        let block_hash = compute_block_hash(&header_bytes);
+        let block_hash = compute_block_identifier(self.network_magic, &header_bytes)?;
 
         // DOM-SEC-RELAY-LOOP fix: early-return for already-known blocks.
         // Without this check, duplicate blocks (e.g. from relay loops between
@@ -476,7 +476,7 @@ impl ChainState {
         let mut decoded = Vec::with_capacity(raw_headers.len());
         for header_bytes in raw_headers {
             let header = BlockHeader::from_bytes(header_bytes)?;
-            let hash = compute_block_hash(header_bytes);
+            let hash = compute_block_identifier(self.network_magic, header_bytes)?;
             let is_known = self.store.get_block_header(hash.as_bytes())?.is_some();
             decoded.push((header, hash, is_known));
         }
@@ -625,7 +625,7 @@ impl ChainState {
             .enumerate()
         {
             let header = BlockHeader::from_bytes(header_bytes)?;
-            let hash = compute_block_hash(header_bytes);
+            let hash = compute_block_identifier(self.network_magic, header_bytes)?;
             let is_known = self.store.get_block_header(hash.as_bytes())?.is_some();
 
             if idx == 0 {
@@ -773,7 +773,7 @@ impl ChainState {
         // but the early-return is added as defense-in-depth for any future
         // IBD/sync codepath that adopts header-first validation.
         let header_bytes = header.to_bytes()?;
-        let header_hash = compute_block_hash(&header_bytes);
+        let header_hash = compute_block_identifier(self.network_magic, &header_bytes)?;
         if self
             .store
             .get_block_header(header_hash.as_bytes())?
@@ -825,6 +825,13 @@ impl ChainState {
     ) -> Result<(), DomError> {
         if header.height != BlockHeight::GENESIS {
             return Ok(());
+        }
+
+        if self.network_magic == dom_core::NETWORK_MAGIC_MAINNET {
+            return Err(DomError::Invalid(
+                "Mainnet genesis is accepted only through the canonical identity-envelope bootstrap path"
+                    .into(),
+            ));
         }
 
         if self.genesis_hash != Hash256::ZERO && header_hash != self.genesis_hash {
@@ -1412,9 +1419,10 @@ impl ChainState {
 fn ensure_canonical_utxo_set(
     store: &DomStore,
     tip_height: BlockHeight,
+    network_magic: u32,
     allow_utxo_repair: bool,
 ) -> Result<(), DomError> {
-    let canonical = reconstruct_canonical_utxo_set(store, tip_height)?;
+    let canonical = reconstruct_canonical_utxo_set(store, tip_height, network_magic)?;
     let canonical_digest = digest_utxo_entries(&canonical);
     let persisted = store.read_all_utxos_raw()?;
     let persisted_digest = store.get_metadata(METADATA_UTXO_SET_DIGEST_KEY)?;
@@ -1460,6 +1468,7 @@ fn ensure_canonical_utxo_set(
 fn reconstruct_canonical_utxo_set(
     store: &DomStore,
     tip_height: BlockHeight,
+    network_magic: u32,
 ) -> Result<BTreeMap<[u8; 33], Vec<u8>>, DomError> {
     let mut utxos = BTreeMap::new();
     for h in 0..=tip_height.0 {
@@ -1474,6 +1483,12 @@ fn reconstruct_canonical_utxo_set(
                 hex::encode(hash)
             ))
         })?;
+        if h == BlockHeight::GENESIS.0
+            && network_magic == dom_core::NETWORK_MAGIC_MAINNET
+            && crate::validate_mainnet_genesis_identity(&body).is_ok()
+        {
+            continue;
+        }
         let block = Block::from_bytes(&body).map_err(|e| {
             DomError::Internal(format!(
                 "{CHAIN_CORRUPT_SENTINEL}: canonical block {} body decode failed during UTXO rebuild: {e}",
@@ -1481,7 +1496,7 @@ fn reconstruct_canonical_utxo_set(
             ))
         })?;
         let header_bytes = block.header.to_bytes()?;
-        let computed = compute_block_hash(&header_bytes);
+        let computed = compute_block_identifier(network_magic, &header_bytes)?;
         if computed.as_bytes() != &hash {
             return Err(DomError::Internal(format!(
                 "{CHAIN_CORRUPT_SENTINEL}: canonical block body/header hash mismatch at height {h} during UTXO rebuild: height_index={} body_header={}",
@@ -1555,6 +1570,7 @@ fn digest_utxo_entries(utxos: &BTreeMap<[u8; 33], Vec<u8>>) -> [u8; 32] {
 fn rebuild_kernel_index_from_canonical_chain(
     store: &DomStore,
     tip_height: BlockHeight,
+    network_magic: u32,
 ) -> Result<(), DomError> {
     for h in 0..=tip_height.0 {
         let hash = store.get_hash_at_height(h)?.ok_or_else(|| {
@@ -1568,6 +1584,12 @@ fn rebuild_kernel_index_from_canonical_chain(
                 hex::encode(hash)
             ))
         })?;
+        if h == BlockHeight::GENESIS.0
+            && network_magic == dom_core::NETWORK_MAGIC_MAINNET
+            && crate::validate_mainnet_genesis_identity(&body).is_ok()
+        {
+            continue;
+        }
         let block = Block::from_bytes(&body).map_err(|e| {
             DomError::Internal(format!(
                 "{CHAIN_CORRUPT_SENTINEL}: canonical block {} body decode failed during kernel-index rebuild: {e}",
@@ -1575,7 +1597,7 @@ fn rebuild_kernel_index_from_canonical_chain(
             ))
         })?;
         let header_bytes = block.header.to_bytes()?;
-        let computed = compute_block_hash(&header_bytes);
+        let computed = compute_block_identifier(network_magic, &header_bytes)?;
         if computed.as_bytes() != &hash {
             return Err(DomError::Internal(format!(
                 "{CHAIN_CORRUPT_SENTINEL}: canonical block body/header hash mismatch at height {h}: height_index={} body_header={}",
@@ -1624,8 +1646,10 @@ fn extract_kernel_excesses(block: &Block, block_hash: Hash256) -> Vec<KernelExce
 /// duplicate. Returns `(new_utxos, spent_utxos, kernel_excesses)` in the exact
 /// shape `DomStore::commit_block` expects.
 ///
-/// `block_hash` must be the genesis block hash (Blake2b-256 of the serialized
-/// header) — the same value the reopen path recomputes via `compute_block_hash`.
+/// `block_hash` must be the canonical genesis identifier supplied by the sole
+/// genesis authority. For legacy Testnet and Regtest this is Blake2b-256 of
+/// the serialized header; Mainnet has an empty economic body and therefore
+/// does not use this coinbase changeset helper.
 pub fn genesis_canonical_changeset(
     block: &Block,
     block_hash: Hash256,
@@ -1866,6 +1890,11 @@ fn find_canonical_output_entry(
         let Some(body) = store.get_block_body(&hash)? else {
             continue;
         };
+        if height == BlockHeight::GENESIS.0
+            && crate::validate_mainnet_genesis_identity(&body).is_ok()
+        {
+            continue;
+        }
         let block = Block::from_bytes(&body).map_err(|e| {
             DomError::Internal(format!(
                 "decode canonical block {} while resurrecting {}: {e}",
@@ -2143,6 +2172,10 @@ fn compute_block_hash(header_bytes: &[u8]) -> Hash256 {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&result);
     Hash256::from_bytes(arr)
+}
+
+fn compute_block_identifier(network_magic: u32, header_bytes: &[u8]) -> Result<Hash256, DomError> {
+    crate::canonical_header_identifier(network_magic, header_bytes)
 }
 
 #[cfg(test)]

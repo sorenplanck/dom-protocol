@@ -12,9 +12,11 @@ use dom_consensus::{
     TransactionOutput,
 };
 use dom_core::{
-    BlockHeight, DomError, Hash256, GENESIS_MESSAGE, KERNEL_FEAT_COINBASE, NETWORK_MAGIC_MAINNET,
-    NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET, PROTOCOL_VERSION, TAG_GENESIS_BLINDING,
-    TAG_GENESIS_INSCRIPTION, TAG_KERNEL_MSG_COINBASE, TAG_MAINNET_GENESIS_IDENTITY,
+    BlockHeight, DomError, Hash256, GENESIS_MESSAGE, GENESIS_NONCE_MAINNET, GENESIS_NONCE_REGTEST,
+    GENESIS_POW_DIGEST_MAINNET, GENESIS_POW_DIGEST_REGTEST, KERNEL_FEAT_COINBASE,
+    NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET, PROTOCOL_VERSION,
+    TAG_GENESIS_BLINDING, TAG_GENESIS_INSCRIPTION, TAG_KERNEL_MSG_COINBASE,
+    TAG_MAINNET_GENESIS_IDENTITY,
 };
 use dom_crypto::hash::{blake2b_256, blake2b_256_tagged};
 use dom_crypto::keys::SecretKey;
@@ -34,6 +36,13 @@ pub const MAINNET_GENESIS_IDENTITY_VERSION: u8 = 0x01;
 const BLOCK_HEADER_BYTES: usize = BlockHeader::MIN_SERIALIZED_SIZE;
 const EMPTY_BODY_BYTES: [u8; 16] = [0u8; 16];
 const MAINNET_INSCRIPTION_COUNT: u8 = 1;
+// Derived once from `TAG_CHAIN_ID`, Regtest magic, and the pre-finalization
+// all-zero configured hash. Pinning this historical signing context preserves
+// the deterministic Regtest fixture while removing the hash/chain-ID cycle.
+const REGTEST_GENESIS_SIGNING_CONTEXT: [u8; 32] = [
+    0x47, 0x3d, 0x3b, 0xe0, 0xc7, 0x97, 0x55, 0x6b, 0xee, 0x04, 0xa1, 0xdd, 0xc7, 0x7f, 0x13, 0xbb,
+    0xd4, 0x3e, 0x92, 0xda, 0xec, 0xca, 0xdc, 0x34, 0xd4, 0xa5, 0xa9, 0xf2, 0xd3, 0xe6, 0x1b, 0xeb,
+];
 
 /// Versioned, length-bounded UTF-8 genesis inscription.
 ///
@@ -346,10 +355,45 @@ pub fn validate_mainnet_genesis_identity(
     MainnetGenesisIdentityV1::from_canonical_bytes(canonical_bytes)
 }
 
+/// Compute the canonical identifier for a serialized block header.
+///
+/// Mainnet height zero is identified by the tagged
+/// [`MainnetGenesisIdentityV1`] envelope so its canonical identifier commits to
+/// the inscription and empty economic body. Every other header, including the
+/// frozen Testnet genesis and all ordinary blocks, retains the existing
+/// untagged Blake2b-256 header identifier.
+pub fn canonical_header_identifier(
+    network_magic: u32,
+    header_bytes: &[u8],
+) -> Result<Hash256, DomError> {
+    let header = BlockHeader::from_bytes(header_bytes)?;
+    if network_magic == NETWORK_MAGIC_MAINNET && header.height == BlockHeight::GENESIS {
+        return MainnetGenesisIdentityV1::new(
+            header_bytes.to_vec(),
+            GenesisInscriptionV1::mainnet(),
+        )?
+        .identity_hash();
+    }
+    match network_magic {
+        NETWORK_MAGIC_MAINNET | NETWORK_MAGIC_TESTNET | NETWORK_MAGIC_REGTEST => {
+            Ok(blake2b_256(header_bytes))
+        }
+        _ => Err(DomError::Invalid(format!(
+            "unknown network magic for block identifier: 0x{network_magic:08x}"
+        ))),
+    }
+}
+
 fn construct_mainnet_identity() -> Result<CanonicalGenesis, DomError> {
     let anchor = genesis_anchor(NETWORK_MAGIC_MAINNET)?;
     let empty_root = blake2b_256_tagged(dom_core::TAG_PMMR_EMPTY, &[]);
-    let header = canonical_header(anchor, empty_root, empty_root, empty_root);
+    let header = canonical_header(
+        NETWORK_MAGIC_MAINNET,
+        anchor,
+        empty_root,
+        empty_root,
+        empty_root,
+    );
     let header_bytes = header
         .to_bytes()
         .map_err(|error| DomError::Internal(format!("genesis header serialization: {error}")))?;
@@ -371,9 +415,25 @@ fn build_legacy_canonical_genesis(
     chain_id: &[u8; 32],
 ) -> Result<CanonicalGenesis, DomError> {
     let anchor = genesis_anchor(network_magic)?;
-    let coinbase = build_genesis_coinbase(chain_id)?;
+    // Regtest's deterministic fixture predates its configured nonzero chain
+    // identity. Bind it to the pinned pre-finalization signing context so
+    // finalizing the configured Regtest hash cannot create a circular
+    // hash -> chain ID -> signature -> hash dependency. Frozen Testnet keeps
+    // its existing chain-ID-bound signature byte for byte.
+    let genesis_signing_context = if network_magic == NETWORK_MAGIC_REGTEST {
+        &REGTEST_GENESIS_SIGNING_CONTEXT
+    } else {
+        chain_id
+    };
+    let coinbase = build_genesis_coinbase(genesis_signing_context)?;
     let (output_root, kernel_root, rangeproof_root) = compute_block_pmmr_roots(&coinbase, &[])?;
-    let header = canonical_header(anchor, output_root, kernel_root, rangeproof_root);
+    let header = canonical_header(
+        network_magic,
+        anchor,
+        output_root,
+        kernel_root,
+        rangeproof_root,
+    );
     let block = Block {
         header,
         coinbase,
@@ -396,11 +456,17 @@ fn build_legacy_canonical_genesis(
 }
 
 fn canonical_header(
+    network_magic: u32,
     anchor: dom_pow::AsertAnchor,
     output_root: Hash256,
     kernel_root: Hash256,
     rangeproof_root: Hash256,
 ) -> BlockHeader {
+    let (nonce, pow_digest) = match network_magic {
+        NETWORK_MAGIC_MAINNET => (GENESIS_NONCE_MAINNET, GENESIS_POW_DIGEST_MAINNET),
+        NETWORK_MAGIC_REGTEST => (GENESIS_NONCE_REGTEST, GENESIS_POW_DIGEST_REGTEST),
+        _ => (0, [0u8; 32]),
+    };
     BlockHeader {
         version: PROTOCOL_VERSION,
         prev_hash: Hash256::ZERO,
@@ -413,8 +479,8 @@ fn canonical_header(
         target: CompactTarget(target_to_compact(&anchor.target)),
         total_difficulty: U256::from(target_to_difficulty(&anchor.target)),
         pow: ProofOfWork {
-            nonce: 0,
-            randomx_hash: Hash256::ZERO,
+            nonce,
+            randomx_hash: Hash256::from_bytes(pow_digest),
         },
     }
 }
@@ -587,6 +653,156 @@ mod tests {
             .inscription(NETWORK_MAGIC_TESTNET)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn canonical_header_identifier_matches_each_genesis_authority() {
+        for magic in [
+            NETWORK_MAGIC_MAINNET,
+            NETWORK_MAGIC_TESTNET,
+            NETWORK_MAGIC_REGTEST,
+        ] {
+            let genesis = build_canonical_genesis(magic, &configured_chain_id(magic)).unwrap();
+            assert_eq!(
+                canonical_header_identifier(magic, &genesis.header_bytes).unwrap(),
+                genesis.hash
+            );
+        }
+    }
+
+    #[test]
+    fn finalized_configured_identifiers_and_chain_ids_match_construction() {
+        let expected_chain_ids = [
+            (
+                NETWORK_MAGIC_MAINNET,
+                "f9831fadabc8a4234beab35fbb6327e84581645f33e9f75ed2ea78e8bcf1165b",
+            ),
+            (
+                NETWORK_MAGIC_TESTNET,
+                "de1168ce8fb42618c320390e9a5fada2e5fc6f69ea78a51b4a69b458653ff770",
+            ),
+            (
+                NETWORK_MAGIC_REGTEST,
+                "22384b4cbfaae306a7bdb23a822442f7e68fb51f65328697a754a9f3abd698e1",
+            ),
+        ];
+        for (magic, expected_chain_id) in expected_chain_ids {
+            let configured = configured_genesis_hash_for_network_magic(magic).unwrap();
+            let chain_id = derive_chain_id(magic, &configured);
+            let canonical = build_canonical_genesis(magic, chain_id.as_bytes()).unwrap();
+            assert_eq!(canonical.hash, configured);
+            assert_eq!(chain_id.to_hex(), expected_chain_id);
+            assert_eq!(
+                canonical_header_identifier(magic, &canonical.header_bytes).unwrap(),
+                configured
+            );
+        }
+    }
+
+    #[test]
+    fn finalized_pow_digests_match_targets_and_protocol_modes() {
+        let mainnet = build_canonical_genesis(
+            NETWORK_MAGIC_MAINNET,
+            &configured_chain_id(NETWORK_MAGIC_MAINNET),
+        )
+        .unwrap();
+        let mainnet_header = BlockHeader::from_bytes(&mainnet.header_bytes).unwrap();
+        let mainnet_target = mainnet_header.target.to_target().unwrap();
+        let mainnet_digest =
+            dom_pow::randomx_pool::randomx_hash(&[0u8; 32], &mainnet_header.pow_preimage())
+                .unwrap();
+        assert_eq!(mainnet_digest, *mainnet_header.pow.randomx_hash.as_bytes());
+        assert!(dom_pow::hash_meets_target(&mainnet_digest, &mainnet_target));
+        assert_ne!(mainnet.hash.as_bytes(), &mainnet_digest);
+
+        let regtest = build_canonical_genesis(
+            NETWORK_MAGIC_REGTEST,
+            &configured_chain_id(NETWORK_MAGIC_REGTEST),
+        )
+        .unwrap();
+        let regtest_header = BlockHeader::from_bytes(&regtest.header_bytes).unwrap();
+        let regtest_target = regtest_header.target.to_target().unwrap();
+        let regtest_digest = dom_pow::fast_pow_hash(&[0u8; 32], &regtest_header.pow_preimage());
+        assert_eq!(regtest_digest, *regtest_header.pow.randomx_hash.as_bytes());
+        assert!(dom_pow::hash_meets_target(&regtest_digest, &regtest_target));
+    }
+
+    #[test]
+    fn machine_readable_vectors_match_production_bytes() {
+        for (magic, vector) in [
+            (
+                NETWORK_MAGIC_MAINNET,
+                include_str!("../../../test-vectors/genesis/mainnet-v1.json"),
+            ),
+            (
+                NETWORK_MAGIC_TESTNET,
+                include_str!("../../../test-vectors/genesis/testnet-v1.json"),
+            ),
+            (
+                NETWORK_MAGIC_REGTEST,
+                include_str!("../../../test-vectors/genesis/regtest-v1.json"),
+            ),
+        ] {
+            let canonical = build_canonical_genesis(magic, &configured_chain_id(magic)).unwrap();
+            assert!(vector.contains(&hex::encode(&canonical.header_bytes)));
+            assert!(vector.contains(&hex::encode(&canonical.block_bytes)));
+            assert!(vector.contains(&canonical.hash.to_hex()));
+            assert!(vector.contains(&derive_chain_id(magic, &canonical.hash).to_hex()));
+        }
+    }
+
+    #[test]
+    fn network_identity_mutations_cannot_preserve_genesis_identifiers() {
+        for magic in [NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST] {
+            let canonical = build_canonical_genesis(magic, &configured_chain_id(magic)).unwrap();
+            let header = BlockHeader::from_bytes(&canonical.header_bytes).unwrap();
+            let baseline = canonical.hash;
+            for mutate in 0..10 {
+                let mut changed = header.clone();
+                match mutate {
+                    0 => changed.timestamp.0 ^= 1,
+                    1 => changed.pow.nonce ^= 1,
+                    2 => changed.version ^= 1,
+                    3 => changed.prev_hash = Hash256::from_bytes([1u8; 32]),
+                    4 => changed.target.0 ^= 1,
+                    5 => changed.total_difficulty += U256::one(),
+                    6 => changed.output_root = Hash256::from_bytes([2u8; 32]),
+                    7 => changed.kernel_root = Hash256::from_bytes([3u8; 32]),
+                    8 => changed.rangeproof_root = Hash256::from_bytes([4u8; 32]),
+                    _ => changed.pow.randomx_hash = Hash256::from_bytes([5u8; 32]),
+                }
+                let changed_bytes = changed.to_bytes().unwrap();
+                let changed_identifier = if magic == NETWORK_MAGIC_MAINNET {
+                    blake2b_256_tagged(
+                        TAG_MAINNET_GENESIS_IDENTITY,
+                        &MainnetGenesisIdentityV1::new(
+                            changed_bytes,
+                            GenesisInscriptionV1::mainnet(),
+                        )
+                        .map(|identity| identity.to_canonical_bytes().unwrap())
+                        .unwrap_or_default(),
+                    )
+                } else {
+                    blake2b_256(&changed_bytes)
+                };
+                assert_ne!(changed_identifier, baseline);
+            }
+        }
+    }
+
+    #[test]
+    fn regtest_genesis_has_no_chain_id_hash_cycle() {
+        let first = build_canonical_genesis(NETWORK_MAGIC_REGTEST, &[0u8; 32]).unwrap();
+        let pre_finalization = derive_chain_id(NETWORK_MAGIC_REGTEST, &Hash256::ZERO);
+        assert_eq!(
+            pre_finalization.as_bytes(),
+            &REGTEST_GENESIS_SIGNING_CONTEXT
+        );
+        let derived = derive_chain_id(NETWORK_MAGIC_REGTEST, &first.hash);
+        let second = build_canonical_genesis(NETWORK_MAGIC_REGTEST, derived.as_bytes()).unwrap();
+        assert_eq!(second.header_bytes, first.header_bytes);
+        assert_eq!(second.block_bytes, first.block_bytes);
+        assert_eq!(second.hash, first.hash);
     }
 
     #[test]

@@ -69,6 +69,15 @@ pub fn scan_block_at(store: &DomStore, height: u64) -> Result<Option<ScanBlock>,
     let Some(body) = store.get_block_body(&hash)? else {
         return Ok(None);
     };
+    if height == 0 && dom_chain::validate_mainnet_genesis_identity(&body).is_ok() {
+        return Ok(Some(ScanBlock {
+            height,
+            block_hash: Some(hash),
+            output_commitments: Vec::new(),
+            input_commitments: Vec::new(),
+            total_fees_noms: 0,
+        }));
+    }
     let block = Block::from_bytes(&body).map_err(|e| {
         DomError::Internal(format!("decode canonical block at height {height}: {e}"))
     })?;
