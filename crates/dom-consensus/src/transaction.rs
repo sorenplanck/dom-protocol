@@ -759,7 +759,8 @@ mod tests {
             .validate(BlockHeight(0), 0, &chain_id)
             .expect_err("invalid coinbase range proof must reject");
         assert!(
-            err.to_string().contains("range proof"),
+            err.to_string()
+                .contains("noncanonical output proof envelope length"),
             "unexpected error: {err}"
         );
     }
