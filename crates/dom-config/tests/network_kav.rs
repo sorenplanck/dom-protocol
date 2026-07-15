@@ -110,7 +110,8 @@ fn rpc_ports_and_loopback_defaults_match_core_authority() {
 
 #[test]
 fn dom_network_parser_accepts_only_exact_canonical_values() {
-    assert_eq!(parse_dom_network(None).unwrap(), Network::Testnet);
+    let missing = parse_dom_network(None).expect_err("missing value must fail closed");
+    assert!(missing.to_string().contains("DOM_NETWORK is required"));
     assert_eq!(
         parse_dom_network(Some("mainnet")).unwrap(),
         Network::Mainnet

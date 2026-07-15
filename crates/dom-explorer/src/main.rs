@@ -4,6 +4,39 @@ use std::sync::Arc;
 use tracing::warn;
 use url::Url;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupAction {
+    Run,
+    Version,
+    Help,
+}
+
+fn parse_startup_action<I>(args: I) -> Result<StartupAction, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut args = args.into_iter();
+    let _program = args.next();
+    let Some(argument) = args.next() else {
+        return Ok(StartupAction::Run);
+    };
+    if args.next().is_some() {
+        return Err("only --help or --version are accepted as command-line arguments".into());
+    }
+    match argument.as_str() {
+        "--version" | "-V" => Ok(StartupAction::Version),
+        "--help" | "-h" => Ok(StartupAction::Help),
+        _ => Err(format!("unknown argument {argument:?}; use --help")),
+    }
+}
+
+fn print_help() {
+    println!(
+        "DOM explorer {}\n\nUsage:\n  dom-explorer\n\nThe explorer listens only on loopback by default. Configure DOM_EXPLORER_LISTEN_ADDR and DOM_EXPLORER_NODE_URL for an isolated deployment.\n\nOptions:\n  -h, --help       Print help\n  -V, --version    Print version",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
 fn default_listen_addr() -> String {
     format!("127.0.0.1:{}", dom_core::EXPLORER_PORT)
 }
@@ -98,6 +131,18 @@ fn log_rpc_error(endpoint: &str, err: &RpcClientError) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match parse_startup_action(std::env::args()).map_err(std::io::Error::other)? {
+        StartupAction::Run => {}
+        StartupAction::Version => {
+            println!("dom-explorer {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        StartupAction::Help => {
+            print_help();
+            return Ok(());
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG").unwrap_or_else(|_| "dom_explorer=info".to_string()),
@@ -118,6 +163,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 #[cfg(test)]
 mod tests {
+    use super::{parse_startup_action, StartupAction};
+
     #[test]
     fn defaults_use_authoritative_service_ports() {
         assert_eq!(
@@ -128,5 +175,22 @@ mod tests {
             super::default_node_url(),
             format!("http://127.0.0.1:{}", dom_core::RPC_PORT_TESTNET)
         );
+    }
+
+    #[test]
+    fn inspection_arguments_exit_before_listener_startup() {
+        assert_eq!(
+            parse_startup_action(["dom-explorer".into(), "--version".into()]).unwrap(),
+            StartupAction::Version
+        );
+        assert_eq!(
+            parse_startup_action(["dom-explorer".into(), "--help".into()]).unwrap(),
+            StartupAction::Help
+        );
+    }
+
+    #[test]
+    fn unknown_startup_argument_fails_closed() {
+        assert!(parse_startup_action(["dom-explorer".into(), "--unknown".into()]).is_err());
     }
 }
