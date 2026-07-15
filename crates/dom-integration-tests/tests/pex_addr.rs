@@ -1,15 +1,14 @@
-//! PEX/Addr wiring — prova, no caminho P2P REAL (Noise + Hello), que:
+//! PEX/Addr wiring — proves on the real P2P path (Noise + Hello) that:
 //!
-//! 1. GetAddr é respondido com um Addr contendo os peers conhecidos (bounded
-//!    por MAX_ADDR_RESPONSE);
-//! 2. um segundo GetAddr dentro do cooldown de 10 min é SUPRIMIDO (nenhum Addr
-//!    chega antes do Pong de controle — observável determinístico de ordem, não
-//!    de timing);
-//! 3. Addr recebido alimenta o PexManager só com endereços válidos
-//!    (SocketAddr parseável);
-//! 4. flood de Addr além de MAX_ADDR_MESSAGES_PER_WINDOW incrementa o ban
-//!    score do peer em ADDRESS_FLOODING (+30) por mensagem excedente — a
-//!    progressão exata do score é a prova de que o rate-limit executa.
+//! 1. GetAddr receives an Addr containing the known peers (bounded by
+//!    MAX_ADDR_RESPONSE);
+//! 2. a second GetAddr within the 10-minute cooldown is suppressed (no Addr
+//!    arrives before the control Pong — a deterministic ordering observation,
+//!    not a timing observation);
+//! 3. a received Addr feeds the PexManager only parseable SocketAddr values;
+//! 4. an Addr flood beyond MAX_ADDR_MESSAGES_PER_WINDOW increments the peer ban
+//!    score by ADDRESS_FLOODING (+30) for each excess message — the exact score
+//!    progression proves that rate limiting runs.
 
 use dom_config::Network;
 use dom_consensus::derive_chain_id;
@@ -138,16 +137,16 @@ async fn wait_for_ban_score(
     }
 }
 
-/// 1. GetAddr → Addr com os peers do PexManager (aqui, o seed configurado), e
-/// 2. segundo GetAddr dentro do cooldown é suprimido: o Pong de controle chega
-///    sem nenhum Addr antes dele.
+/// 1. GetAddr → Addr with the PexManager peers (the configured seed here), and
+/// 2. a second GetAddr within the cooldown is suppressed: the control Pong
+///    arrives without an Addr preceding it.
 #[tokio::test]
 async fn pex_getaddr_answered_once_then_suppressed_by_cooldown() {
     init_tracing();
     let port = free_local_port();
     let mut config = test_config("pex-getaddr", port, false);
-    // Endereço sintático válido e não roteável: vira conteúdo do PEX sem que
-    // uma conexão real se estabeleça.
+    // A syntactically valid, unroutable address becomes PEX content without a
+    // real connection being established.
     config.seed_peers = vec!["10.99.77.1:33369".to_string()];
     let node = spawn_node(config).await;
 
@@ -156,13 +155,13 @@ async fn pex_getaddr_answered_once_then_suppressed_by_cooldown() {
         .await
         .expect("listener ready");
 
-    // O connector alimenta o PexManager com os seeds; espere a semeadura.
+    // The connector feeds the PexManager with seeds; wait for seeding.
     let known = wait_for_pex_known_count(&node, 1, Duration::from_secs(10)).await;
     assert!(known >= 1, "PEX seeding did not happen (known={known})");
 
     let (mut stream, mut codec) = connect_pex_peer(&node).await;
 
-    // GetAddr #1 → deve responder Addr contendo o seed.
+    // GetAddr #1 must respond with an Addr containing the seed.
     codec
         .send(&mut stream, &wire(&node, Command::GetAddr, vec![]))
         .await
@@ -180,8 +179,8 @@ async fn pex_getaddr_answered_once_then_suppressed_by_cooldown() {
         payload.entries
     );
 
-    // GetAddr #2 dentro do cooldown → suprimido. Prova por ordem: o Pong do
-    // nosso Ping de controle chega SEM nenhum Addr antes dele.
+    // GetAddr #2 within the cooldown is suppressed. The ordering proof is that
+    // the control Ping's Pong arrives with no Addr before it.
     codec
         .send(&mut stream, &wire(&node, Command::GetAddr, vec![]))
         .await
@@ -197,8 +196,8 @@ async fn pex_getaddr_answered_once_then_suppressed_by_cooldown() {
     assert_eq!(pong.payload, b"pex-ctrl".to_vec());
 }
 
-/// Addr recebido alimenta o PexManager apenas com endereços SocketAddr
-/// válidos; lixo é descartado sem crash e sem entrar no known set.
+/// A received Addr feeds the PexManager only valid SocketAddr values; invalid
+/// entries are discarded without a crash or entering the known set.
 #[tokio::test]
 async fn pex_addr_message_adds_only_valid_addresses() {
     init_tracing();
@@ -254,10 +253,10 @@ async fn pex_addr_message_adds_only_valid_addresses() {
     assert!(!addrs.iter().any(|a| a == "not_a_socket_addr"));
 }
 
-/// Flood de Addr: cada mensagem além de MAX_ADDR_MESSAGES_PER_WINDOW soma
-/// exatamente ADDRESS_FLOODING (+30). Enviamos budget+3 mensagens → score 90
-/// (3 excedentes × 30), abaixo do ban para a conexão seguir viva e o score ser
-/// consultável. A progressão exata é a prova de que o limite executa.
+/// Addr flood: each message beyond MAX_ADDR_MESSAGES_PER_WINDOW adds exactly
+/// ADDRESS_FLOODING (+30). Sending budget+3 messages yields score 90 (3 excess
+/// messages × 30), below the ban threshold so the connection remains live and
+/// the score remains observable. The exact progression proves the limit runs.
 #[tokio::test]
 async fn pex_addr_flood_scores_address_flooding() {
     init_tracing();
@@ -271,7 +270,8 @@ async fn pex_addr_flood_scores_address_flooding() {
         .expect("listener ready");
 
     let (mut stream, mut codec) = connect_pex_peer(&node).await;
-    // O nó pontua o peer pelo remote addr da conexão inbound = nosso local addr.
+    // The node scores the peer by the inbound connection's remote address, our
+    // local address.
     let peer_key = stream.local_addr().expect("local addr").to_string();
 
     let payload = AddrPayload {
@@ -303,7 +303,7 @@ async fn pex_addr_flood_scores_address_flooding() {
         "each excess Addr message must add exactly ADDRESS_FLOODING"
     );
 
-    // As mensagens dentro do budget foram processadas normalmente.
+    // Messages within the budget are still processed normally.
     let known = wait_for_pex_known_count(&node, 1, Duration::from_secs(5)).await;
     assert!(known >= 1, "in-budget Addr must still be processed");
 }
