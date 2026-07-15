@@ -81,23 +81,27 @@ fn block_reward_at_every_halving_boundary() {
     );
 }
 
-/// KAV. MAX_SUPPLY_NOMS must equal the sum over all epochs of reward*interval,
-/// recomputed independently.
+/// KAV. MAX_SUPPLY_NOMS must equal the sum over all epochs, with the
+/// economically empty height zero excluded from the first reward epoch.
 #[test]
 fn max_supply_matches_independent_sum() {
     let schedule = recompute_schedule();
     let mut total: u64 = 0;
-    for r in schedule {
+    for (epoch, r) in schedule.into_iter().enumerate() {
+        let blocks = if epoch == 0 {
+            HALVING_INTERVAL - 1
+        } else {
+            HALVING_INTERVAL
+        };
         total = total
-            .checked_add(r.checked_mul(HALVING_INTERVAL).unwrap())
+            .checked_add(r.checked_mul(blocks).unwrap())
             .expect("supply sum must not overflow");
     }
     assert_eq!(
         total, MAX_SUPPLY_NOMS,
         "recomputed supply != MAX_SUPPLY_NOMS"
     );
-    // Documented external check: just under 33M DOM.
-    assert_eq!(MAX_SUPPLY_NOMS, 3_299_999_976_900_000);
+    assert_eq!(MAX_SUPPLY_NOMS, 3_299_996_676_900_000);
 }
 
 // ── KAV-drift-congelado ──────────────────────────────────────────────────────
