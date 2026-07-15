@@ -28,6 +28,7 @@ fn recoverable_output_envelope_roundtrips_canonically() {
         96
     );
     let bytes = material.output.to_bytes().unwrap();
+    assert_eq!(bytes.len(), 872);
     let decoded = TransactionOutput::from_bytes(&bytes).unwrap();
     assert_eq!(decoded, material.output);
 }

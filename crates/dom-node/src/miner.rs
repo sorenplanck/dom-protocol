@@ -531,29 +531,38 @@ fn apply_wallet_after_mined_connect(
 #[doc(hidden)]
 pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     use dom_core::GENESIS_MESSAGE;
+    use dom_serialization::DomDeserialize;
     info!("Creating genesis block...");
     info!("Genesis message: {}", GENESIS_MESSAGE);
     let network_magic = node.config.network.magic();
     let genesis_chain_id = chain_id_for(&node.config)?;
     let canonical = dom_chain::build_canonical_genesis(network_magic, &genesis_chain_id)?;
     let genesis_hash = *canonical.hash.as_bytes();
-    let genesis_block = canonical.block.ok_or_else(|| {
-        DomError::Invalid(
-            "Mainnet genesis identity is integrated but remains inactive until the final ceremony"
-                .into(),
-        )
-    })?;
+    let configured_hash = dom_core::configured_genesis_hash_for_network_magic(network_magic)?;
+    if canonical.hash != configured_hash {
+        return Err(DomError::Invalid(format!(
+            "canonical genesis identifier mismatch: configured {configured_hash}, constructed {}",
+            canonical.hash
+        )));
+    }
+    let genesis_header = dom_consensus::BlockHeader::from_bytes(&canonical.header_bytes)?;
 
     let mut chain = node.chain.lock().await;
     let header_bytes = canonical.header_bytes;
     let genesis_body = canonical.block_bytes;
-    // DOM-AUDIT-001: persist the genesis coinbase into the UTXO/kernel index
-    // here, identically to what the reopen path reconstructs. The genesis
-    // coinbase is spendable by design, so a create that leaves these empty
-    // diverges from a reopened node (which rebuilds them) → chain-split risk.
-    // Reuse the canonical changeset builder so create == reopen by construction.
-    let (new_utxos, spent_utxos, kernel_excesses) =
-        dom_chain::genesis_canonical_changeset(&genesis_block, Hash256::from_bytes(genesis_hash));
+    // Legacy Testnet and Regtest genesis blocks persist their deterministic
+    // coinbase indexes exactly as reopen reconstruction does. Mainnet V1 has an
+    // explicitly empty economic body, so its UTXO and kernel changesets are
+    // empty by construction. Both paths keep create and reopen identical.
+    let (new_utxos, spent_utxos, kernel_excesses) = match canonical.block.as_ref() {
+        Some(genesis_block) => {
+            dom_chain::genesis_canonical_changeset(genesis_block, Hash256::from_bytes(genesis_hash))
+        }
+        None => {
+            dom_chain::validate_mainnet_genesis_identity(&genesis_body)?;
+            (Vec::new(), Vec::new(), Vec::new())
+        }
+    };
     chain.store.commit_block(
         &genesis_hash,
         0,
@@ -565,7 +574,7 @@ pub async fn create_genesis_block(node: Arc<DomNode>) -> Result<(), DomError> {
     )?;
     chain.tip_hash = Hash256::from_bytes(genesis_hash);
     chain.tip_height = dom_core::BlockHeight::GENESIS;
-    chain.tip_difficulty = genesis_block.header.total_difficulty;
+    chain.tip_difficulty = genesis_header.total_difficulty;
     // NOTE: do NOT overwrite chain.genesis_hash with the computed hash here.
     // The chain_id used for kernel signatures is derived from the *constant*
     // GENESIS_HASH_{MAINNET,TESTNET,REGTEST} (see chain_id_for() and
@@ -1858,11 +1867,22 @@ mod genesis_determinism_tests {
             super::MiningMode::TestnetConfiguredRandomX
         );
 
-        let timestamp = Timestamp(1_778_642_753);
+        let mainnet_timestamp = genesis_anchor(NETWORK_MAGIC_MAINNET)
+            .expect("Mainnet anchor")
+            .timestamp
+            .checked_add_secs(dom_core::TARGET_SPACING)
+            .expect("height-one timestamp");
+        let testnet_timestamp = genesis_anchor(NETWORK_MAGIC_TESTNET)
+            .expect("Testnet anchor")
+            .timestamp
+            .checked_add_secs(dom_core::TARGET_SPACING)
+            .expect("height-one timestamp");
         let mainnet_target =
-            compute_expected_target(NETWORK_MAGIC_MAINNET, timestamp, BlockHeight(1)).unwrap();
+            compute_expected_target(NETWORK_MAGIC_MAINNET, mainnet_timestamp, BlockHeight(1))
+                .unwrap();
         let testnet_target =
-            compute_expected_target(NETWORK_MAGIC_TESTNET, timestamp, BlockHeight(1)).unwrap();
+            compute_expected_target(NETWORK_MAGIC_TESTNET, testnet_timestamp, BlockHeight(1))
+                .unwrap();
 
         assert_ne!(target_to_compact(&mainnet_target), REGTEST_TARGET_COMPACT);
         assert_ne!(target_to_compact(&testnet_target), REGTEST_TARGET_COMPACT);
@@ -2046,12 +2066,15 @@ mod genesis_determinism_tests {
 
     #[test]
     fn miner_uses_consensus_target_not_fixed_dev_target() {
-        let timestamp = Timestamp(1_778_642_753);
         for network_magic in [
             NETWORK_MAGIC_MAINNET,
             NETWORK_MAGIC_TESTNET,
             NETWORK_MAGIC_REGTEST,
         ] {
+            let timestamp = Timestamp(
+                dom_core::genesis_timestamp_for_network_magic(network_magic).unwrap()
+                    + dom_core::TARGET_SPACING,
+            );
             let target = compute_expected_target(network_magic, timestamp, BlockHeight(1)).unwrap();
             let (header, _stats) = mine_blocking(
                 1,
@@ -2223,7 +2246,11 @@ mod genesis_determinism_tests {
     fn miner_validator_still_share_compute_expected_target() {
         use dom_core::NETWORK_MAGIC_MAINNET;
 
-        let timestamp = Timestamp(1_778_642_753);
+        let timestamp = genesis_anchor(NETWORK_MAGIC_MAINNET)
+            .expect("Mainnet anchor")
+            .timestamp
+            .checked_add_secs(dom_core::TARGET_SPACING)
+            .expect("height-one timestamp");
         let target =
             compute_expected_target(NETWORK_MAGIC_MAINNET, timestamp, BlockHeight(1)).unwrap();
         let total_difficulty = U256::from(target_to_difficulty(&target));

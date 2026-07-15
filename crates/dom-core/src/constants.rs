@@ -59,19 +59,37 @@ pub const GENESIS_TARGET_COMPACT: u32 = 0x1e00_ffff;
 /// for every testnet node forever.
 pub const GENESIS_TIMESTAMP_TESTNET: u64 = 1_778_642_633;
 
-/// [CONSENSUS] Pre-launch mainnet genesis timestamp placeholder (Unix seconds).
+/// [CONSENSUS] Historical pre-ceremony Mainnet timestamp sentinel.
 ///
-/// This is only the ceremony input placeholder. It is not sufficient to enable
-/// mainnet by itself: `GENESIS_HASH_MAINNET` must be pinned from the canonical
-/// derivation path and `MAINNET_GENESIS_FINALIZED` must be flipped in the same
-/// review set. Until then, any mainnet startup path MUST fail closed.
+/// Retained only so the readiness guard can reject an accidental rollback to
+/// the old Testnet-aliasing placeholder. It is not used for construction.
 pub const GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER: u64 = GENESIS_TIMESTAMP_TESTNET;
 
-/// [CONSENSUS] Backwards-compatible alias used by pre-existing genesis code.
-///
-/// Do not treat this alias as proof that mainnet is finalized; use
-/// `genesis_timestamp_for_network_magic()` plus
-/// `ensure_network_genesis_ready()` instead.
+/// [CONSENSUS] Final offline-ceremony Mainnet genesis timestamp (Unix seconds).
+pub const GENESIS_TIMESTAMP_MAINNET: u64 = 1_784_071_429;
+
+/// [CONSENSUS] Final offline-ceremony Regtest genesis timestamp (Unix seconds).
+pub const GENESIS_TIMESTAMP_REGTEST: u64 = GENESIS_TIMESTAMP_MAINNET;
+
+/// [CONSENSUS] Lowest valid Mainnet genesis nonce from the offline ceremony.
+pub const GENESIS_NONCE_MAINNET: u64 = 7_150;
+
+/// [CONSENSUS] Lowest valid Regtest genesis nonce from the offline ceremony.
+pub const GENESIS_NONCE_REGTEST: u64 = 0;
+
+/// [CONSENSUS] RandomX digest for the finalized Mainnet genesis header.
+pub const GENESIS_POW_DIGEST_MAINNET: [u8; 32] = [
+    0x00, 0x00, 0x03, 0xbd, 0xa0, 0xb1, 0x41, 0x65, 0x6e, 0x3a, 0x08, 0x6f, 0xbb, 0x2e, 0x01, 0x83,
+    0x21, 0xed, 0x26, 0x11, 0xc9, 0xd5, 0xa7, 0x23, 0xbf, 0x9b, 0x85, 0xcc, 0xe9, 0xba, 0xf3, 0xab,
+];
+
+/// [CONSENSUS] Fast-development PoW digest for finalized Regtest genesis.
+pub const GENESIS_POW_DIGEST_REGTEST: [u8; 32] = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x96, 0x5d, 0xe1, 0xca, 0x3c, 0xdb, 0x82, 0x26, 0xdd, 0x38, 0x7e, 0xa2, 0xa8, 0x75, 0xb6, 0x4d,
+];
+
+/// [CONSENSUS] Historical placeholder alias retained for rollback detection.
 pub const GENESIS_TIMESTAMP_PLACEHOLDER: u64 = GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER;
 
 /// [CONSENSUS] Exact UTF-8 bytes carried by the Mainnet genesis inscription.
@@ -164,14 +182,32 @@ pub const BLOCK_REWARD_TABLE: [u64; 55] = [
     0,
 ];
 
-/// [CONSENSUS] Maximum possible supply in noms.
-/// Computed deterministically: sum over all epochs of reward * HALVING_INTERVAL.
-/// Slightly less than 33,000,000 DOM due to integer truncation in late epochs.
+/// [CONSENSUS] Maximum theoretical Mainnet issuance in noms.
+///
+/// Mainnet genesis is economically empty, so epoch zero contains
+/// `HALVING_INTERVAL - 1` reward-bearing blocks (heights 1..329,999). Every
+/// later nonzero epoch contains the full interval. Checked arithmetic makes a
+/// future schedule change fail at compile time rather than wrap silently.
 pub const MAX_SUPPLY_NOMS: u64 = {
     let mut total: u64 = 0;
     let mut epoch: usize = 0;
     while epoch < 55 {
-        total += BLOCK_REWARD_TABLE[epoch] * HALVING_INTERVAL;
+        let blocks = if epoch == 0 {
+            match HALVING_INTERVAL.checked_sub(1) {
+                Some(value) => value,
+                None => panic!("HALVING_INTERVAL underflow"),
+            }
+        } else {
+            HALVING_INTERVAL
+        };
+        let issued = match BLOCK_REWARD_TABLE[epoch].checked_mul(blocks) {
+            Some(value) => value,
+            None => panic!("maximum issuance multiplication overflow"),
+        };
+        total = match total.checked_add(issued) {
+            Some(value) => value,
+            None => panic!("maximum issuance addition overflow"),
+        };
         epoch += 1;
     }
     total
@@ -466,27 +502,25 @@ pub const GENESIS_HASH_TESTNET: [u8; 32] = [
     0xcd, 0xa2, 0x9a, 0xe6, 0x89, 0x2e, 0x7f, 0x1c, 0x24, 0xfa, 0xcc, 0x46, 0x5c, 0xd6, 0x58, 0x21,
 ];
 
-/// Explicit mainnet-launch gate.
+/// Explicit Mainnet genesis-finalization gate.
 ///
-/// Keeping this `false` is the only correct state while the repository still
-/// carries placeholder mainnet genesis data. Flipping it to `true` requires the
-/// same change set to:
-/// 1. pin `GENESIS_HASH_MAINNET` from the canonical derivation path above,
-/// 2. keep `NETWORK_MAGIC_MAINNET` unchanged, and
-/// 3. record the ceremony artefacts described in `docs/GENESIS_CEREMONY.md`.
-pub const MAINNET_GENESIS_FINALIZED: bool = false;
+/// This records that the offline identity ceremony is complete. It does not
+/// activate a service, listener, peer connection, seed, or deployment.
+pub const MAINNET_GENESIS_FINALIZED: bool = true;
 
-/// Canonical genesis block hash for Mainnet — UNFINALIZED until mainnet launch.
-pub const GENESIS_HASH_MAINNET: [u8; 32] = [0u8; 32];
+/// Canonical inscription-aware genesis block identifier for Mainnet.
+pub const GENESIS_HASH_MAINNET: [u8; 32] = [
+    0x18, 0x2e, 0x10, 0xaf, 0x28, 0xe7, 0xec, 0x07, 0x2f, 0x46, 0x2e, 0x60, 0x44, 0xf5, 0x80, 0xdc,
+    0x9d, 0xd8, 0xc8, 0x66, 0xcb, 0x78, 0xdf, 0xc2, 0x93, 0xbb, 0xfa, 0xee, 0x4e, 0x93, 0x25, 0xce,
+];
 
 /// [DEV-ONLY] Canonical genesis block hash for Regtest.
 ///
-/// Deterministic placeholder — a Regtest node bootstraps its own genesis
-/// locally on first start (same path mainnet/testnet take through
-/// `create_genesis_block`). Because Regtest peers are isolated by magic
-/// byte (`NETWORK_MAGIC_REGTEST`), this value never reaches a non-Regtest
-/// validator and a zero-array placeholder is acceptable.
-pub const GENESIS_HASH_REGTEST: [u8; 32] = [0u8; 32];
+/// Final deterministic Regtest genesis block identifier.
+pub const GENESIS_HASH_REGTEST: [u8; 32] = [
+    0xfd, 0xda, 0x02, 0x7e, 0x4a, 0x46, 0xdd, 0x36, 0x67, 0x17, 0xc6, 0xe0, 0xa9, 0x76, 0xbf, 0x3e,
+    0x0a, 0x75, 0x12, 0xc5, 0xed, 0xf0, 0x84, 0x70, 0xb0, 0xdc, 0xa9, 0x9d, 0xde, 0xe3, 0xfe, 0x1f,
+];
 
 /// Returns `true` if a genesis hash is still the all-zero placeholder.
 pub const fn is_placeholder_genesis_hash(hash: &[u8; 32]) -> bool {
@@ -528,8 +562,9 @@ pub fn validate_mainnet_genesis_hash(hash: [u8; 32]) -> Result<(), DomError> {
 /// Return the configured genesis timestamp for a network magic value.
 pub fn genesis_timestamp_for_network_magic(network_magic: u32) -> Result<u64, DomError> {
     match network_magic {
-        NETWORK_MAGIC_MAINNET => Ok(GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER),
-        NETWORK_MAGIC_TESTNET | NETWORK_MAGIC_REGTEST => Ok(GENESIS_TIMESTAMP_TESTNET),
+        NETWORK_MAGIC_MAINNET => Ok(GENESIS_TIMESTAMP_MAINNET),
+        NETWORK_MAGIC_TESTNET => Ok(GENESIS_TIMESTAMP_TESTNET),
+        NETWORK_MAGIC_REGTEST => Ok(GENESIS_TIMESTAMP_REGTEST),
         other => Err(DomError::Invalid(format!(
             "unknown network magic 0x{other:08x} for genesis timestamp"
         ))),
@@ -696,10 +731,9 @@ mod genesis_tests {
     #[test]
     fn genesis_timestamps_are_fixed() {
         assert_eq!(GENESIS_TIMESTAMP_TESTNET, 1_778_642_633);
-        assert_eq!(
-            GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER, 1_778_642_633,
-            "mainnet must not drift silently before the ceremony pins the final timestamp"
-        );
+        assert_eq!(GENESIS_TIMESTAMP_MAINNET, 1_784_071_429);
+        assert_eq!(GENESIS_TIMESTAMP_REGTEST, GENESIS_TIMESTAMP_MAINNET);
+        assert_eq!(GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER, 1_778_642_633);
     }
 
     #[test]
@@ -710,10 +744,8 @@ mod genesis_tests {
     }
 
     #[test]
-    fn mainnet_guard_rejects_placeholder_hash() {
-        let err = validate_mainnet_genesis_hash(GENESIS_HASH_MAINNET).unwrap_err();
-        assert!(matches!(err, DomError::Invalid(_)));
-        assert!(err.to_string().contains("mainnet genesis is not finalized"));
+    fn mainnet_guard_accepts_finalized_hash() {
+        validate_mainnet_genesis_hash(GENESIS_HASH_MAINNET).unwrap();
     }
 
     #[test]
@@ -734,9 +766,13 @@ mod genesis_tests {
     }
 
     #[test]
-    fn startup_hash_lookup_rejects_disabled_mainnet() {
-        let err = startup_genesis_hash_for_network_magic(NETWORK_MAGIC_MAINNET).unwrap_err();
-        assert!(err.to_string().contains("mainnet genesis is not finalized"));
+    fn startup_hash_lookup_accepts_finalized_mainnet() {
+        assert_eq!(
+            startup_genesis_hash_for_network_magic(NETWORK_MAGIC_MAINNET)
+                .unwrap()
+                .as_bytes(),
+            &GENESIS_HASH_MAINNET
+        );
     }
 
     #[test]
@@ -777,6 +813,7 @@ pub const PEER_DRIFT_DISCONNECT_SECS: i64 = 90;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{block_reward, BlockHeight};
 
     #[test]
     fn reward_table_is_deterministic() {
@@ -810,8 +847,11 @@ mod tests {
 
     #[test]
     fn supply_matches_expected_value() {
-        // Pre-computed and verified externally: 3_299_999_976_900_000 noms
-        assert_eq!(MAX_SUPPLY_NOMS, 3_299_999_976_900_000);
+        assert_eq!(MAX_SUPPLY_NOMS, 3_299_996_676_900_000);
+        assert_eq!(block_reward(BlockHeight::GENESIS).noms(), 3_300_000_000);
+        assert_eq!(block_reward(BlockHeight(1)).noms(), 3_300_000_000);
+        assert_eq!(block_reward(BlockHeight(17_819_999)).noms(), 1);
+        assert_eq!(block_reward(BlockHeight(17_820_000)).noms(), 0);
     }
 
     #[test]
