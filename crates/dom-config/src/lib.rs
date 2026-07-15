@@ -94,12 +94,14 @@ impl Network {
 
 /// Parse the optional `DOM_NETWORK` value using the canonical startup policy.
 ///
-/// A missing variable preserves the historical Testnet default. A present value
-/// must exactly match one lowercase network name; empty, mixed-case, padded, or
-/// unknown values fail closed instead of selecting another network.
+/// The variable must be present and exactly match one lowercase network name.
+/// Empty, mixed-case, padded, unknown, or missing values fail closed instead of
+/// selecting a network that could create listeners or contact peers.
 pub fn parse_dom_network(value: Option<&str>) -> Result<Network, dom_core::DomError> {
     match value {
-        None => Ok(Network::Testnet),
+        None => Err(dom_core::DomError::Invalid(
+            "DOM_NETWORK is required; expected mainnet, testnet, or regtest".into(),
+        )),
         Some("mainnet") => Ok(Network::Mainnet),
         Some("testnet") => Ok(Network::Testnet),
         Some("regtest") => Ok(Network::Regtest),

@@ -5,8 +5,53 @@ use dom_node::node::DomNode;
 use std::sync::Arc;
 use tracing::info;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupAction {
+    Run,
+    Version,
+    Help,
+}
+
+fn parse_startup_action<I>(args: I) -> anyhow::Result<StartupAction>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut args = args.into_iter();
+    let _program = args.next();
+    let Some(argument) = args.next() else {
+        return Ok(StartupAction::Run);
+    };
+    if args.next().is_some() {
+        anyhow::bail!("only --help or --version are accepted as command-line arguments");
+    }
+    match argument.as_str() {
+        "--version" | "-V" => Ok(StartupAction::Version),
+        "--help" | "-h" => Ok(StartupAction::Help),
+        _ => anyhow::bail!("unknown argument {argument:?}; use --help"),
+    }
+}
+
+fn print_help() {
+    println!(
+        "DOM node {}\n\nUsage:\n  DOM_NETWORK=<mainnet|testnet|regtest> dom-node\n\nThe network must be selected explicitly before the node initializes storage, listeners, mining, or peer discovery.\n\nOptions:\n  -h, --help       Print help\n  -V, --version    Print version",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    match parse_startup_action(std::env::args())? {
+        StartupAction::Run => {}
+        StartupAction::Version => {
+            println!("dom-node {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        StartupAction::Help => {
+            print_help();
+            return Ok(());
+        }
+    }
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("DOM_LOG").unwrap_or_else(|_| "info".into()))
@@ -17,8 +62,8 @@ async fn main() -> anyhow::Result<()> {
     info!("License: MIT");
 
     // Select the network before any storage, listener, RPC, metrics, mining, or
-    // peer task is initialized. A missing variable defaults to Testnet; every
-    // present value must exactly match a canonical lowercase network name.
+    // peer task is initialized. The value must exactly match a canonical
+    // lowercase network name; a missing value fails closed.
     let network_value = std::env::var("DOM_NETWORK").ok();
     let network = parse_dom_network(network_value.as_deref())?;
     let mut config = match network {
@@ -146,4 +191,26 @@ async fn main() -> anyhow::Result<()> {
     // Run node
     node.run().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_startup_action, StartupAction};
+
+    #[test]
+    fn inspection_arguments_exit_before_node_startup() {
+        assert_eq!(
+            parse_startup_action(["dom-node".into(), "--version".into()]).unwrap(),
+            StartupAction::Version
+        );
+        assert_eq!(
+            parse_startup_action(["dom-node".into(), "--help".into()]).unwrap(),
+            StartupAction::Help
+        );
+    }
+
+    #[test]
+    fn unknown_startup_argument_fails_closed() {
+        assert!(parse_startup_action(["dom-node".into(), "--unknown".into()]).is_err());
+    }
 }
