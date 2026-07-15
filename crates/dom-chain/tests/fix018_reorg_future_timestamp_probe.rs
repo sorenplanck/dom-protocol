@@ -34,8 +34,8 @@ use dom_consensus::{
     compute_block_pmmr_roots, derive_chain_id, validate_block, Block, ValidationContext,
 };
 use dom_core::{
-    BlockHeight, DomError, Hash256, Timestamp, GENESIS_HASH_REGTEST, KERNEL_FEAT_COINBASE,
-    NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION, TAG_KERNEL_MSG_COINBASE,
+    BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, NETWORK_MAGIC_REGTEST,
+    PROTOCOL_VERSION, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::keys::SecretKey;
@@ -58,10 +58,7 @@ fn blinding(seed: u8) -> BlindingFactor {
 }
 
 fn regtest_chain_id() -> Hash256 {
-    derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(GENESIS_HASH_REGTEST),
-    )
+    derive_chain_id(NETWORK_MAGIC_REGTEST, &Hash256::ZERO)
 }
 
 fn signed_coinbase(height: BlockHeight, seed: u8) -> CoinbaseTransaction {
@@ -211,12 +208,7 @@ fn open_chain_with_reorg_fixture(
     let side_3 = coinbase_only_block_with(side_2_hash, 3, future_tip_timestamp, 4, 0x21, 21);
     let side_3_hash = store_side_block(&store, &side_3);
 
-    let chain = ChainState::open(
-        store,
-        Hash256::from_bytes(GENESIS_HASH_REGTEST),
-        NETWORK_MAGIC_REGTEST,
-    )
-    .expect("chain open");
+    let chain = ChainState::open(store, Hash256::ZERO, NETWORK_MAGIC_REGTEST).expect("chain open");
     assert_eq!(chain.tip_hash, old_tip_hash, "fixture canonical tip");
     (dir, chain, side_3_hash)
 }

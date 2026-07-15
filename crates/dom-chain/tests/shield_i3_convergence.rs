@@ -277,20 +277,14 @@ fn block_hash(block: &Block) -> Hash256 {
 }
 
 fn open_chain(dir: &Path) -> ChainState {
-    open_test_chain(
-        dir,
-        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-        NETWORK_MAGIC_REGTEST,
-    )
-    .expect("chain open")
+    // These convergence scenarios build independent synthetic block-zero
+    // records. Hash256::ZERO selects the unpinned test identity while the
+    // finalized Regtest identity remains mandatory in production startup.
+    open_test_chain(dir, Hash256::ZERO, NETWORK_MAGIC_REGTEST).expect("chain open")
 }
 
 fn regtest_chain_id() -> [u8; 32] {
-    *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes()
+    *derive_chain_id(NETWORK_MAGIC_REGTEST, &Hash256::ZERO).as_bytes()
 }
 
 fn safe_now() -> Timestamp {

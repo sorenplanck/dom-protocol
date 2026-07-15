@@ -37,20 +37,15 @@ fn scalar(seed: u8) -> BlindingFactor {
 }
 
 fn chain_id() -> [u8; 32] {
-    *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes()
+    *derive_chain_id(NETWORK_MAGIC_REGTEST, &Hash256::ZERO).as_bytes()
 }
 
 fn open_chain(path: &std::path::Path) -> ChainState {
-    let mut chain = open_test_chain(
-        path,
-        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-        NETWORK_MAGIC_REGTEST,
-    )
-    .expect("chain open");
+    // These fixtures construct a spendable synthetic height-zero block to
+    // exercise maturity. The unpinned test identity is confined to this target;
+    // production startup supplies the frozen Regtest genesis hash.
+    let mut chain =
+        open_test_chain(path, Hash256::ZERO, NETWORK_MAGIC_REGTEST).expect("chain open");
     chain.coinbase_maturity = TEST_MATURITY;
     chain
 }

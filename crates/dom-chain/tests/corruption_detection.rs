@@ -47,8 +47,6 @@ use primitive_types::U256;
 use std::collections::BTreeMap;
 use tempfile::TempDir;
 
-const REGTEST_GENESIS: [u8; 32] = dom_core::GENESIS_HASH_REGTEST;
-
 fn put_raw(store: &DomStore, db_name: &str, key: &[u8], value: &[u8]) {
     let db = match db_name {
         DB_BLOCKS => store.db_blocks,
@@ -243,11 +241,11 @@ fn make_hash(seed: u8) -> [u8; 32] {
 }
 
 fn open_chain(dir: &std::path::Path) -> Result<ChainState, dom_core::DomError> {
-    open_test_chain(
-        dir,
-        Hash256::from_bytes(REGTEST_GENESIS),
-        dom_core::NETWORK_MAGIC_REGTEST,
-    )
+    // This target persists intentionally synthetic raw blocks to exercise
+    // corruption detection. The unpinned test identity keeps reopen checks
+    // focused on the fabricated storage state; production startup is pinned
+    // to the frozen network genesis hash.
+    open_test_chain(dir, Hash256::ZERO, dom_core::NETWORK_MAGIC_REGTEST)
 }
 
 /// FIX-020: the explicit operator UTXO-repair entry point. A persisted-vs-canonical
@@ -258,7 +256,7 @@ fn open_chain(dir: &std::path::Path) -> Result<ChainState, dom_core::DomError> {
 fn open_chain_repair(dir: &std::path::Path) -> Result<ChainState, dom_core::DomError> {
     ChainState::open_with_utxo_repair(
         open_test_store(dir),
-        Hash256::from_bytes(REGTEST_GENESIS),
+        Hash256::ZERO,
         dom_core::NETWORK_MAGIC_REGTEST,
     )
 }

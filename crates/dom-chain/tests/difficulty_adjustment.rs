@@ -7,13 +7,14 @@ use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
 use dom_core::{
-    BlockHeight, Hash256, Timestamp, GENESIS_HASH_REGTEST, GENESIS_TARGET_COMPACT,
-    KERNEL_FEAT_COINBASE, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET,
+    BlockHeight, Hash256, Timestamp, GENESIS_TARGET_COMPACT, KERNEL_FEAT_COINBASE,
+    NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET,
 };
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_pow::{
-    compute_expected_target, fast_pow_hash, hash_meets_target, pow_params_for_network,
-    randomx_seed_height, target_to_difficulty, CompactTarget, REGTEST_TARGET_COMPACT,
+    compute_expected_target, fast_pow_hash, genesis_anchor, hash_meets_target,
+    pow_params_for_network, randomx_seed_height, target_to_difficulty, CompactTarget,
+    REGTEST_TARGET_COMPACT,
 };
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::utxo::UtxoEntry;
@@ -109,7 +110,10 @@ fn populate_history(
     let target = CompactTarget(GENESIS_TARGET_COMPACT);
     let mut prev_hash = Hash256::ZERO;
     let mut total_difficulty = 0u64;
-    let genesis_ts = dom_core::GENESIS_TIMESTAMP_PLACEHOLDER;
+    let genesis_ts = genesis_anchor(network_magic)
+        .expect("network genesis anchor")
+        .timestamp
+        .0;
     let mut persisted_genesis_hash = None;
 
     for height in 0..count {
@@ -236,7 +240,10 @@ fn chain_with_genesis_total_difficulty(total_difficulty: U256) -> (TempDir, Chai
     let mut genesis = synthetic_block(
         Hash256::ZERO,
         0,
-        dom_core::GENESIS_TIMESTAMP_PLACEHOLDER,
+        genesis_anchor(NETWORK_MAGIC_REGTEST)
+            .expect("Regtest genesis anchor")
+            .timestamp
+            .0,
         CompactTarget(REGTEST_TARGET_COMPACT),
         1,
         1,
@@ -256,12 +263,7 @@ fn chain_with_genesis_total_difficulty(total_difficulty: U256) -> (TempDir, Chai
             &[],
         )
         .expect("commit genesis");
-    let chain = ChainState::open(
-        store,
-        Hash256::from_bytes(GENESIS_HASH_REGTEST),
-        NETWORK_MAGIC_REGTEST,
-    )
-    .expect("chain open");
+    let chain = ChainState::open(store, genesis_hash, NETWORK_MAGIC_REGTEST).expect("chain open");
     (dir, chain, genesis_hash)
 }
 
@@ -396,6 +398,25 @@ fn public_networks_do_not_share_regtest_target() {
 #[test]
 fn window_retarget_still_unreachable_from_mainnet_testnet() {
     for network_magic in [NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_TESTNET] {
+        if network_magic == NETWORK_MAGIC_MAINNET {
+            // Mainnet startup accepts only its canonical empty genesis identity,
+            // so a synthetic persistence fixture cannot open a Mainnet
+            // ChainState. Verify the same public ASERT entry point directly.
+            let params = pow_params_for_network(network_magic).expect("network PoW parameters");
+            let anchor = genesis_anchor(network_magic).expect("network genesis anchor");
+            let child_timestamp = anchor
+                .timestamp
+                .checked_add_secs(params.target_spacing)
+                .expect("first-block timestamp");
+            let target = compute_expected_target(network_magic, child_timestamp, BlockHeight(1))
+                .expect("canonical Mainnet ASERT target");
+            let anchor_target = params.genesis_target().expect("Mainnet anchor target");
+            let canonical_anchor = CompactTarget(dom_pow::target_to_compact(&anchor_target))
+                .to_target()
+                .expect("canonical Mainnet anchor target");
+            assert_eq!(target, canonical_anchor);
+            continue;
+        }
         let dir = TempDir::new().unwrap();
         let chain = populate_history(&dir, network_magic, 1, 4);
         let tip_bytes = chain
@@ -424,15 +445,13 @@ fn window_retarget_still_unreachable_from_mainnet_testnet() {
 
 #[test]
 fn first_public_block_after_genesis_uses_asert_anchor_target() {
-    for (network_magic, anchor_ts) in [
-        (
-            NETWORK_MAGIC_MAINNET,
-            dom_core::GENESIS_TIMESTAMP_PLACEHOLDER,
-        ),
-        (NETWORK_MAGIC_TESTNET, dom_core::GENESIS_TIMESTAMP_TESTNET),
-    ] {
+    for network_magic in [NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_TESTNET] {
         let params = pow_params_for_network(network_magic).expect("network PoW parameters");
-        let timestamp = Timestamp(anchor_ts + params.target_spacing);
+        let anchor = genesis_anchor(network_magic).expect("network genesis anchor");
+        let timestamp = anchor
+            .timestamp
+            .checked_add_secs(params.target_spacing)
+            .expect("first-block timestamp");
         let first_target =
             compute_expected_target(network_magic, timestamp, BlockHeight(1)).expect("target");
         let anchor_target = params.genesis_target().expect("anchor target");

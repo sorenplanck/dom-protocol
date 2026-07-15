@@ -242,12 +242,10 @@ fn block_hash(block: &Block) -> Hash256 {
 }
 
 fn open_chain(dir: &std::path::Path) -> ChainState {
-    open_test_chain(
-        dir,
-        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-        NETWORK_MAGIC_REGTEST,
-    )
-    .expect("chain open")
+    // These direct-ingress fixtures construct their own block-zero record.
+    // Use the unpinned test identity so the canonical Regtest genesis check
+    // remains enforced for production configurations without rejecting it.
+    open_test_chain(dir, Hash256::ZERO, NETWORK_MAGIC_REGTEST).expect("chain open")
 }
 
 fn safe_now() -> Timestamp {
@@ -255,11 +253,7 @@ fn safe_now() -> Timestamp {
 }
 
 fn chain_id() -> [u8; 32] {
-    *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes()
+    *derive_chain_id(NETWORK_MAGIC_REGTEST, &Hash256::ZERO).as_bytes()
 }
 
 fn is_cut_through_rejection(msg: &str) -> bool {

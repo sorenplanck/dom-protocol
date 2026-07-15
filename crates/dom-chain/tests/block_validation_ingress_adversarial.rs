@@ -291,16 +291,39 @@ fn equal_work_canonical_and_side(
 }
 
 fn open_chain(dir: &std::path::Path) -> ChainState {
-    open_test_chain(
-        dir,
-        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-        NETWORK_MAGIC_REGTEST,
-    )
-    .expect("chain open")
+    // These adversarial fixtures deliberately construct a spendable synthetic
+    // height-zero block. Hash256::ZERO disables only the configured-genesis
+    // equality check for this isolated test chain; production startup always
+    // supplies the frozen network genesis hash.
+    open_test_chain(dir, Hash256::ZERO, NETWORK_MAGIC_REGTEST).expect("chain open")
+}
+
+fn synthetic_chain_id() -> [u8; 32] {
+    *derive_chain_id(NETWORK_MAGIC_REGTEST, &Hash256::ZERO).as_bytes()
 }
 
 fn safe_now() -> Timestamp {
     Timestamp(2_000_000_000)
+}
+
+#[test]
+fn synthetic_fixture_genesis_uses_the_unpinned_test_identity() {
+    std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+    let dir = TempDir::new().expect("tempdir");
+    let chain_id = synthetic_chain_id();
+    let genesis = build_coinbase_only_block(
+        [0u8; 32],
+        Hash256::ZERO,
+        BlockHeight::GENESIS,
+        U256::zero(),
+        [0u8; 32],
+        9,
+        &chain_id,
+    );
+
+    open_chain(dir.path())
+        .connect_block(&genesis, safe_now())
+        .expect("synthetic fixture genesis must connect to its unpinned test chain");
 }
 
 #[test]
@@ -313,11 +336,7 @@ fn invariant_direct_chain_extension_rejects_header_and_pmmr_valid_but_economical
     // for these tiny adversarial fixtures, so the test uses a small map size
     // only for fixture storage. Consensus behavior is unchanged.
     let store_dir = dir.path().join("chain");
-    let chain_id = *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes();
+    let chain_id = synthetic_chain_id();
     let mut chain = open_chain(&store_dir);
 
     let genesis = build_coinbase_only_block(
@@ -360,11 +379,7 @@ fn invariant_reorg_candidate_promotion_revalidates_economic_balance_before_state
     // Use a child store directory and the small test-only LMDB map size for
     // Windows CI fixture isolation; production map sizing remains unchanged.
     let store_dir = dir.path().join("chain");
-    let chain_id = *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes();
+    let chain_id = synthetic_chain_id();
     let mut chain = open_chain(&store_dir);
 
     let genesis = build_coinbase_only_block(
@@ -435,11 +450,7 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let dir = TempDir::new().expect("tempdir");
     let store_dir = dir.path().join("chain");
-    let chain_id = *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes();
+    let chain_id = synthetic_chain_id();
     let mut chain = open_chain(&store_dir);
 
     let genesis = build_coinbase_only_block(
@@ -574,11 +585,7 @@ fn direct_connect_rejects_replayed_kernel_with_invalid() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let dir = TempDir::new().expect("tempdir");
     let store_dir = dir.path().join("chain");
-    let chain_id = *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes();
+    let chain_id = synthetic_chain_id();
     let mut chain = open_chain(&store_dir);
 
     let genesis = build_coinbase_only_block(
@@ -638,11 +645,7 @@ fn direct_connect_rejects_duplicate_output_commitment() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let dir = TempDir::new().expect("tempdir");
     let store_dir = dir.path().join("chain");
-    let chain_id = *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes();
+    let chain_id = synthetic_chain_id();
     let mut chain = open_chain(&store_dir);
 
     let genesis = build_coinbase_only_block(
@@ -703,11 +706,7 @@ fn promote_branch_with_within_branch_double_spend_is_rejected() {
     // closed (chain_state.rs:1545 "missing input").
     let dir = tempfile::tempdir().expect("tempdir");
     let mut chain = open_chain(dir.path());
-    let chain_id = *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes();
+    let chain_id = synthetic_chain_id();
     let genesis = build_coinbase_only_block(
         [0u8; 32],
         chain.tip_hash,
