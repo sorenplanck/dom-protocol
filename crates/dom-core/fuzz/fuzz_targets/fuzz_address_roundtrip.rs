@@ -24,7 +24,14 @@ fuzz_target!(|data: &[u8]| {
     payload.copy_from_slice(&data[..33]);
     let is_mainnet = data.get(33).map(|b| b & 1 == 1).unwrap_or(true);
 
-    let addr = dom_core::Address::new(payload, is_mainnet);
+    let network_magic = if is_mainnet {
+        dom_core::NETWORK_MAGIC_MAINNET
+    } else {
+        dom_core::NETWORK_MAGIC_TESTNET
+    };
+    let Ok(addr) = dom_core::Address::new_for_network(payload, network_magic) else {
+        return;
+    };
     let s = addr.encode(); // must not panic
 
     let decoded = dom_core::Address::decode(&s).expect("encoder output must decode");
