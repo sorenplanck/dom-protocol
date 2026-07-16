@@ -53,6 +53,21 @@ pub(crate) const PROOF_NBITS: usize = 64;
 ///   2. `MAX_PROVABLE_VALUE - v`
 const PROOF_NCOMMITS: usize = 2;
 
+fn proof_has_valid_curve_points(proof: &[u8]) -> bool {
+    // The first Bulletproof section is 64 bytes of scalars followed by one
+    // parity byte and four x-only points (32 bytes each).
+    if proof.len() < 64 + 1 + 4 * 32 {
+        return false;
+    }
+    let parity = proof[64];
+    (0..4).all(|i| {
+        let mut sec1 = [0u8; 33];
+        sec1[0] = if parity & (1 << i) == 0 { 0x02 } else { 0x03 };
+        sec1[1..].copy_from_slice(&proof[65 + i * 32..97 + i * 32]);
+        secp256k1::PublicKey::from_slice(&sec1).is_ok()
+    })
+}
+
 /// Scratch arena size for grin's bulletproof FFI, per thread (reused, not
 /// per-call). Empirically the minimum for a single 64-bit proof is ~15.8 KiB to
 /// prove / ~9.2 KiB to verify (measured against grin 0.7.15); 1 MiB gives ~65x
@@ -596,6 +611,12 @@ pub fn bp_verify(commitment_sec1: &[u8; 33], proof_bytes: &[u8]) -> Result<bool,
             proof_bytes.len()
         )));
     }
+    // The classic grin proof begins with a zkp-serialized curve point.  Reject
+    // impossible prefixes before entering the C verifier: malformed proofs
+    // otherwise reach a grin early-return path that leaks its scratch frame.
+    if !proof_has_valid_curve_points(proof_bytes) {
+        return Ok(false);
+    }
     let backend = backend();
     let h_dom = h_dom_internal(backend)?;
     let complement_sec1 = derive_complement_commitment(
@@ -695,6 +716,16 @@ mod tests {
             MAX_PROVABLE_VALUE,
             result
         );
+    }
+
+    #[test]
+    fn malformed_zero_prefixed_proof_is_rejected_before_ffi() {
+        let commitment =
+            hex::decode("031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f")
+                .expect("commitment hex");
+        let commitment: [u8; 33] = commitment.try_into().expect("commitment length");
+        let proof = [0u8; SINGLE_BULLETPROOF_SIZE];
+        assert_eq!(bp_verify(&commitment, &proof), Ok(false));
     }
 
     /// DS-001 regression: `bp_verify` must reject any proof whose length is not
