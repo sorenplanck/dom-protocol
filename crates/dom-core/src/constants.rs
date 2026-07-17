@@ -11,88 +11,88 @@ use crate::{DomError, Hash256};
 
 // ── Timing & Difficulty ──────────────────────────────────────────────────────
 
-/// [CONSENSUS] Target block spacing in seconds (2 minutes).
+/// Consensus. Target block spacing in seconds (2 minutes).
 pub const TARGET_SPACING: u64 = 120;
 
-/// [CONSENSUS] Canonical target block interval in seconds.
+/// Consensus. Canonical target block interval in seconds.
 ///
 /// Alias of `TARGET_SPACING` kept for explicit retargeting codepaths and logs.
 pub const TARGET_BLOCK_TIME_SECS: u64 = TARGET_SPACING;
 
-/// [CONSENSUS] Number of blocks in the deterministic difficulty adjustment window.
+/// Consensus. Number of blocks in the deterministic difficulty adjustment window.
 pub const DIFFICULTY_ADJUSTMENT_WINDOW: u64 = 60;
 
-/// [CONSENSUS] Hardest allowed per-window adjustment factor.
+/// Consensus. Hardest allowed per-window adjustment factor.
 ///
 /// Fast blocks can make the next target at most this many times harder
 /// (numerically smaller) in one adjustment step.
 pub const MAX_DIFFICULTY_ADJUSTMENT_FACTOR_UP: u64 = 4;
 
-/// [CONSENSUS] Easiest allowed per-window adjustment factor.
+/// Consensus. Easiest allowed per-window adjustment factor.
 ///
 /// Slow blocks can make the next target at most this many times easier
 /// (numerically larger) in one adjustment step.
 pub const MAX_DIFFICULTY_ADJUSTMENT_FACTOR_DOWN: u64 = 4;
 
-/// [CONSENSUS] ASERT half-life in target-spacing blocks.
+/// Consensus. ASERT half-life in target-spacing blocks.
 pub const ASERT_HALF_LIFE_BLOCKS: u64 = 288;
 
-/// [CONSENSUS] ASERT half-life in seconds.
+/// Consensus. ASERT half-life in seconds.
 pub const ASERT_HALF_LIFE: u64 = TARGET_SPACING * ASERT_HALF_LIFE_BLOCKS;
 
-/// [CONSENSUS] Fixed-point radix bits for ASERT exponent arithmetic.
+/// Consensus. Fixed-point radix bits for ASERT exponent arithmetic.
 pub const ASERT_RADIX_BITS: u32 = 16;
 
-/// [CONSENSUS] ASERT fixed-point radix (2^16 = 65536).
+/// Consensus. ASERT fixed-point radix (2^16 = 65536).
 pub const ASERT_RADIX: u64 = 1u64 << ASERT_RADIX_BITS;
 
 // ── Genesis ──────────────────────────────────────────────────────────────────
 
-/// [CONSENSUS] Genesis PoW target compact = 0x1e00ffff.
+/// Consensus. Genesis PoW target compact = 0x1e00ffff.
 /// Calibrated for CPU solo RandomX, ~2 min per block.
 /// ASERT adjusts automatically from block 1 onward.
 pub const GENESIS_TARGET_COMPACT: u32 = 0x1e00_ffff;
 
-/// [CONSENSUS] Frozen testnet genesis timestamp (Unix seconds).
+/// Consensus. Frozen testnet genesis timestamp (Unix seconds).
 ///
 /// This value is already live on the controlled testnet and must remain stable
 /// for every testnet node forever.
 pub const GENESIS_TIMESTAMP_TESTNET: u64 = 1_778_642_633;
 
-/// [CONSENSUS] Historical pre-ceremony Mainnet timestamp sentinel.
+/// Consensus. Historical pre-ceremony Mainnet timestamp sentinel.
 ///
 /// Retained only so the readiness guard can reject an accidental rollback to
 /// the old Testnet-aliasing placeholder. It is not used for construction.
 pub const GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER: u64 = GENESIS_TIMESTAMP_TESTNET;
 
-/// [CONSENSUS] Final offline-ceremony Mainnet genesis timestamp (Unix seconds).
+/// Consensus. Final offline-ceremony Mainnet genesis timestamp (Unix seconds).
 pub const GENESIS_TIMESTAMP_MAINNET: u64 = 1_784_071_429;
 
-/// [CONSENSUS] Final offline-ceremony Regtest genesis timestamp (Unix seconds).
+/// Consensus. Final offline-ceremony Regtest genesis timestamp (Unix seconds).
 pub const GENESIS_TIMESTAMP_REGTEST: u64 = GENESIS_TIMESTAMP_MAINNET;
 
-/// [CONSENSUS] Lowest valid Mainnet genesis nonce from the offline ceremony.
+/// Consensus. Lowest valid Mainnet genesis nonce from the offline ceremony.
 pub const GENESIS_NONCE_MAINNET: u64 = 7_150;
 
-/// [CONSENSUS] Lowest valid Regtest genesis nonce from the offline ceremony.
+/// Consensus. Lowest valid Regtest genesis nonce from the offline ceremony.
 pub const GENESIS_NONCE_REGTEST: u64 = 0;
 
-/// [CONSENSUS] RandomX digest for the finalized Mainnet genesis header.
+/// Consensus. RandomX digest for the finalized Mainnet genesis header.
 pub const GENESIS_POW_DIGEST_MAINNET: [u8; 32] = [
     0x00, 0x00, 0x03, 0xbd, 0xa0, 0xb1, 0x41, 0x65, 0x6e, 0x3a, 0x08, 0x6f, 0xbb, 0x2e, 0x01, 0x83,
     0x21, 0xed, 0x26, 0x11, 0xc9, 0xd5, 0xa7, 0x23, 0xbf, 0x9b, 0x85, 0xcc, 0xe9, 0xba, 0xf3, 0xab,
 ];
 
-/// [CONSENSUS] Fast-development PoW digest for finalized Regtest genesis.
+/// Consensus. Fast-development PoW digest for finalized Regtest genesis.
 pub const GENESIS_POW_DIGEST_REGTEST: [u8; 32] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x96, 0x5d, 0xe1, 0xca, 0x3c, 0xdb, 0x82, 0x26, 0xdd, 0x38, 0x7e, 0xa2, 0xa8, 0x75, 0xb6, 0x4d,
 ];
 
-/// [CONSENSUS] Historical placeholder alias retained for rollback detection.
+/// Consensus. Historical placeholder alias retained for rollback detection.
 pub const GENESIS_TIMESTAMP_PLACEHOLDER: u64 = GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER;
 
-/// [CONSENSUS] Exact UTF-8 bytes carried by the Mainnet genesis inscription.
+/// Consensus. Exact UTF-8 bytes carried by the Mainnet genesis inscription.
 ///
 /// This constant is the sole source of the consensus payload. Testnet and
 /// Regtest do not serialize it. The Mainnet identity format is defined by
@@ -101,21 +101,21 @@ pub const GENESIS_MESSAGE: &str = "Not a store of value. A means of exchange.";
 
 // ── Monetary Policy ──────────────────────────────────────────────────────────
 
-/// [CONSENSUS] Base unit. 1 DOM = 100_000_000 noms.
+/// Consensus. Base unit. 1 DOM = 100_000_000 noms.
 pub const COIN_UNIT: u64 = 100_000_000;
 
-/// [CONSENSUS] Initial block subsidy: 33 DOM in noms.
+/// Consensus. Initial block subsidy: 33 DOM in noms.
 pub const INITIAL_BLOCK_REWARD: u64 = 33 * COIN_UNIT; // 3_300_000_000 noms
 
-/// [CONSENSUS] Blocks between each halving of the block reward.
+/// Consensus. Blocks between each halving of the block reward.
 /// 330_000 blocks ≈ 1.25 years at 2-minute block time.
 pub const HALVING_INTERVAL: u64 = 330_000;
 
-/// [CONSENSUS] Number of active halving epochs.
+/// Consensus. Number of active halving epochs.
 /// After epoch 54, reward becomes 0 (integer arithmetic floor).
 pub const HALVING_EPOCHS: u32 = 55;
 
-/// [CONSENSUS] Block reward schedule, in noms, per halving epoch.
+/// Consensus. Block reward schedule, in noms, per halving epoch.
 ///
 /// Derived deterministically via integer arithmetic:
 ///   reward(0) = 33 * COIN_UNIT
@@ -182,7 +182,7 @@ pub const BLOCK_REWARD_TABLE: [u64; 55] = [
     0,
 ];
 
-/// [CONSENSUS] Maximum theoretical Mainnet issuance in noms.
+/// Consensus. Maximum theoretical Mainnet issuance in noms.
 ///
 /// Mainnet genesis is economically empty, so epoch zero contains
 /// `HALVING_INTERVAL - 1` reward-bearing blocks (heights 1..329,999). Every
@@ -213,31 +213,31 @@ pub const MAX_SUPPLY_NOMS: u64 = {
     total
 };
 
-/// [CONSENSUS] Coinbase outputs must mature before spending.
+/// Consensus. Coinbase outputs must mature before spending.
 /// 1000 blocks ≈ 1.4 days at 2-minute block time.
 pub const COINBASE_MATURITY: u64 = 1_000;
 
 // ── Block & Transaction Limits ───────────────────────────────────────────────
 
-/// [CONSENSUS] Maximum block weight units.
+/// Consensus. Maximum block weight units.
 pub const MAX_BLOCK_WEIGHT: u32 = 40_000;
 
-/// [CONSENSUS] Maximum transaction weight units.
+/// Consensus. Maximum transaction weight units.
 pub const MAX_TX_WEIGHT: u32 = 4_000;
 
-/// [CONSENSUS] Maximum inputs per transaction.
+/// Consensus. Maximum inputs per transaction.
 pub const MAX_INPUTS_PER_TX: usize = 255;
 
-/// [CONSENSUS] Maximum outputs per transaction.
+/// Consensus. Maximum outputs per transaction.
 pub const MAX_OUTPUTS_PER_TX: usize = 255;
 
-/// [CONSENSUS] Maximum kernels per transaction.
+/// Consensus. Maximum kernels per transaction.
 pub const MAX_KERNELS_PER_TX: usize = 16;
 
-/// [CONSENSUS] Maximum transactions per block.
+/// Consensus. Maximum transactions per block.
 pub const MAX_BLOCK_TXS: usize = 5_000;
 
-/// [CONSENSUS] Maximum range-proof size in bytes — the standard Bulletproof
+/// Consensus. Maximum range-proof size in bytes — the standard Bulletproof
 /// envelope. DOM's bounded aggregate Bulletproof is a FIXED 739 bytes; DOM
 /// emits exactly one proof per output, so 739 is the true maximum. 768
 /// (3*256) gives ~93 bytes (~13.8%) of defensive headroom — enough to absorb a
@@ -246,17 +246,17 @@ pub const MAX_BLOCK_TXS: usize = 5_000;
 /// accepts only the exact final 739-byte proof format.
 pub const MAX_PROOF_SIZE: usize = 768;
 
-/// [CONSENSUS] Exact Wallet V3 recovery capsule size.
+/// Consensus. Exact Wallet V3 recovery capsule size.
 pub const RECOVERY_CAPSULE_SIZE: usize = 96;
 
-/// [CONSENSUS] Maximum length-prefixed output proof envelope. Recoverable
+/// Consensus. Maximum length-prefixed output proof envelope. Recoverable
 /// outputs carry the 739-byte range proof followed by a 96-byte capsule.
 pub const MAX_OUTPUT_PROOF_ENVELOPE_SIZE: usize = 739 + RECOVERY_CAPSULE_SIZE;
 
-/// [CONSENSUS] Maximum serialized block size in bytes (16 MiB).
+/// Consensus. Maximum serialized block size in bytes (16 MiB).
 pub const MAX_BLOCK_SERIALIZED_SIZE: usize = 16 * 1_024 * 1_024;
 
-/// [TRANSPORT] Maximum reassembled logical wire message, across Noise transport
+/// Transport. Maximum reassembled logical wire message, across Noise transport
 /// fragments. A single logical message (e.g. a full `Block`, or an IBD `Headers`
 /// batch) may exceed one Noise frame and is fragmented by the codec; this bounds
 /// the reassembly buffer. Sized to the largest legitimate message — a full Block
@@ -264,49 +264,49 @@ pub const MAX_BLOCK_SERIALIZED_SIZE: usize = 16 * 1_024 * 1_024;
 /// stream whose declared total exceeds this BEFORE allocating, as DoS defense.
 pub const MAX_LOGICAL_MSG_BYTES: usize = MAX_BLOCK_SERIALIZED_SIZE + 64 * 1_024;
 
-/// [POLICY] Maximum headers per Headers message (IBD batch size).
+/// Policy. Maximum headers per Headers message (IBD batch size).
 pub const MAX_HEADERS_PER_MSG: usize = 2_000;
 
-/// [POLICY] Maximum block hashes a GetBlockData request can list.
+/// Policy. Maximum block hashes a GetBlockData request can list.
 pub const MAX_GETBLOCKDATA_HASHES: usize = 128;
 
-/// [POLICY] Maximum block locator hashes in GetHeaders.
+/// Policy. Maximum block locator hashes in GetHeaders.
 pub const MAX_LOCATOR_HASHES: usize = 32;
 
 // ── Network & Timing Validation ──────────────────────────────────────────────
 
-/// [CONSENSUS] Maximum seconds a block timestamp may be ahead of the local
+/// Consensus. Maximum seconds a block timestamp may be ahead of the local
 /// clock before being rejected as TemporarilyInvalid. Per whitepaper §9 step 3.
 pub const MAX_FUTURE_BLOCK_TIME: u64 = 120;
 
-/// [CONSENSUS] Testnet future timestamp bound.
+/// Consensus. Testnet future timestamp bound.
 ///
 /// Tighter than mainnet to prevent fast timestamp-warped testnet mining once
 /// ASERT enforcement is active.
 pub const TESTNET_MAX_FUTURE_BLOCK_TIME: u64 = 30;
 
-/// [POLICY] Soft buffer for blocks slightly beyond MAX_FUTURE_BLOCK_TIME.
+/// Policy. Soft buffer for blocks slightly beyond MAX_FUTURE_BLOCK_TIME.
 /// Blocks with timestamp in (now+MAX_FUTURE_BLOCK_TIME, now+MAX_FUTURE_BLOCK_TIME+SOFT_BUFFER]
 /// are deferred for re-evaluation rather than immediately rejected.
 /// This reduces orphan rate from transient clock drift without changing
 /// the consensus rule (MAX_FUTURE_BLOCK_TIME remains the hard limit).
 pub const FUTURE_BLOCK_SOFT_BUFFER_SECS: u64 = 60;
 
-/// [POLICY] Testnet soft future timestamp buffer.
+/// Policy. Testnet soft future timestamp buffer.
 pub const TESTNET_FUTURE_BLOCK_SOFT_BUFFER_SECS: u64 = 15;
 
-/// [CONSENSUS] Median-time-past window size.
+/// Consensus. Median-time-past window size.
 pub const MEDIAN_TIME_WINDOW: usize = 11;
 
 // ── Protocol & Network Identity ──────────────────────────────────────────────
 
-/// [NETWORK] Protocol version.
+/// Network. Protocol version.
 pub const PROTOCOL_VERSION: u32 = 2;
 
-/// [NETWORK] Mainnet magic bytes: ASCII "DOM1" = 0x44_4F_4D_31
+/// Network. Mainnet magic bytes: ASCII "DOM1" = 0x44_4F_4D_31
 pub const NETWORK_MAGIC_MAINNET: u32 = 0x444F_4D31;
 
-/// [NETWORK] Testnet magic bytes: ASCII "DOMT" = 0x44_4F_4D_54
+/// Network. Testnet magic bytes: ASCII "DOMT" = 0x44_4F_4D_54
 pub const NETWORK_MAGIC_TESTNET: u32 = 0x444F_4D54;
 
 /// [NETWORK — DEV-ONLY] Regtest magic bytes: ASCII "DOMR" = 0x44_4F_4D_52
@@ -318,33 +318,33 @@ pub const NETWORK_MAGIC_TESTNET: u32 = 0x444F_4D54;
 /// peer dispatch path.
 pub const NETWORK_MAGIC_REGTEST: u32 = 0x444F_4D52;
 
-/// [NETWORK] Default P2P port.
+/// Network. Default P2P port.
 pub const P2P_PORT_MAINNET: u16 = 33_369;
 
-/// [NETWORK] Default P2P port for testnet.
+/// Network. Default P2P port for testnet.
 pub const P2P_PORT_TESTNET: u16 = 33_370;
 
 /// [NETWORK — DEV-ONLY] Default P2P port for Regtest.
 /// Distinct from mainnet/testnet so accidental local conflicts also fail loudly.
 pub const P2P_PORT_REGTEST: u16 = 33_371;
 
-/// [NETWORK] Default loopback RPC port for Mainnet.
+/// Network. Default loopback RPC port for Mainnet.
 ///
 /// RPC is disabled unless explicitly enabled. RPC ports are intentionally
 /// distinct from every P2P port so an operator cannot accidentally direct an
 /// RPC client at the peer protocol listener.
 pub const RPC_PORT_MAINNET: u16 = 33_372;
 
-/// [NETWORK] Default loopback RPC port for Testnet.
+/// Network. Default loopback RPC port for Testnet.
 pub const RPC_PORT_TESTNET: u16 = 33_373;
 
 /// [NETWORK — DEV-ONLY] Default loopback RPC port for Regtest.
 pub const RPC_PORT_REGTEST: u16 = 33_374;
 
-/// [SERVICE] Default loopback metrics port when metrics are explicitly enabled.
+/// Service. Default loopback metrics port when metrics are explicitly enabled.
 pub const METRICS_PORT: u16 = 3_371;
 
-/// [SERVICE] Default loopback explorer HTTP port.
+/// Service. Default loopback explorer HTTP port.
 pub const EXPLORER_PORT: u16 = 8_081;
 
 /// [DEV-ONLY] Coinbase maturity on Regtest: one confirmation.
@@ -354,20 +354,20 @@ pub const EXPLORER_PORT: u16 = 8_081;
 /// the canonical constant for Mainnet/Testnet and is unchanged.
 pub const REGTEST_COINBASE_MATURITY: u64 = 1;
 
-/// [NETWORK] Maximum user agent string length in bytes.
+/// Network. Maximum user agent string length in bytes.
 pub const MAX_USER_AGENT_BYTES: usize = 256;
 
 // ── Policy Constants (MUST NOT affect consensus validity) ────────────────────
 
-/// [POLICY] Minimum relay fee rate in noms per weight unit.
+/// Policy. Minimum relay fee rate in noms per weight unit.
 pub const MIN_RELAY_FEE_RATE: u64 = 1_000;
 
-/// [POLICY] Maximum depth of chain reorganization to accept.
+/// Policy. Maximum depth of chain reorganization to accept.
 pub const MAX_REORG_DEPTH_POLICY: u64 = 1_000;
 
 // ── ASERT Target Bounds ──────────────────────────────────────────────────────
 
-/// [CONSENSUS] Minimum PoW target (hardest difficulty).
+/// Consensus. Minimum PoW target (hardest difficulty).
 pub const MIN_TARGET_BYTES: [u8; 32] = {
     let mut b = [0u8; 32];
     b[26] = 0xff;
@@ -375,10 +375,10 @@ pub const MIN_TARGET_BYTES: [u8; 32] = {
     b
 };
 
-/// [CONSENSUS] Alias used by deterministic retargeting codepaths.
+/// Consensus. Alias used by deterministic retargeting codepaths.
 pub const MIN_ALLOWED_TARGET: [u8; 32] = MIN_TARGET_BYTES;
 
-/// [CONSENSUS] Maximum PoW target (easiest difficulty / genesis).
+/// Consensus. Maximum PoW target (easiest difficulty / genesis).
 pub const MAX_TARGET_BYTES: [u8; 32] = {
     let mut b = [0xff_u8; 32];
     b[0] = 0x00;
@@ -386,7 +386,7 @@ pub const MAX_TARGET_BYTES: [u8; 32] = {
     b
 };
 
-/// [CONSENSUS] Alias used by deterministic retargeting codepaths.
+/// Consensus. Alias used by deterministic retargeting codepaths.
 pub const MAX_ALLOWED_TARGET: [u8; 32] = MAX_TARGET_BYTES;
 
 /// Trivial PoW target for future regtest mode — ANY RandomX hash passes.
@@ -421,27 +421,27 @@ pub const REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION: [u8; 32] = MAX_TARGET
 
 // ── Kernel Features ───────────────────────────────────────────────────────────
 
-/// [CONSENSUS] Standard transaction kernel.
+/// Consensus. Standard transaction kernel.
 pub const KERNEL_FEAT_PLAIN: u8 = 0x00;
 
-/// [CONSENSUS] Coinbase kernel — block reward.
+/// Consensus. Coinbase kernel — block reward.
 pub const KERNEL_FEAT_COINBASE: u8 = 0x01;
 
-/// [CONSENSUS] Height-locked kernel — absolute timelock.
+/// Consensus. Height-locked kernel — absolute timelock.
 pub const KERNEL_FEAT_HEIGHT_LOCKED: u8 = 0x02;
 
 // ── Weight Units ──────────────────────────────────────────────────────────────
 
-/// [CONSENSUS] Weight of a single transaction input.
+/// Consensus. Weight of a single transaction input.
 pub const WEIGHT_INPUT: u32 = 1;
 
-/// [CONSENSUS] Weight of a single transaction output.
+/// Consensus. Weight of a single transaction output.
 pub const WEIGHT_OUTPUT: u32 = 21;
 
-/// [CONSENSUS] Weight of a standard transaction kernel.
+/// Consensus. Weight of a standard transaction kernel.
 pub const WEIGHT_KERNEL: u32 = 3;
 
-/// [CONSENSUS] Weight of a coinbase kernel.
+/// Consensus. Weight of a coinbase kernel.
 pub const WEIGHT_COINBASE_KERNEL: u32 = 2;
 
 // ── Cryptographic Domain Tags ────────────────────────────────────────────────
@@ -794,19 +794,19 @@ mod genesis_tests {
 
 // ── Time Discipline Thresholds ───────────────────────────────────────────────
 
-/// [POLICY] Clock drift threshold for warnings.
+/// Policy. Clock drift threshold for warnings.
 /// Nodes with drift above this should be alerted but continue operating.
 pub const CLOCK_DRIFT_WARN_SECS: i64 = 30;
 
-/// [POLICY] Clock drift threshold for critical alerts.
+/// Policy. Clock drift threshold for critical alerts.
 /// Mining should be disabled if drift exceeds this value.
 pub const CLOCK_DRIFT_ERROR_SECS: i64 = 60;
 
-/// [POLICY] Peer drift threshold for scoring penalty.
+/// Policy. Peer drift threshold for scoring penalty.
 /// Peers with timestamp drift above this trigger moderate scoring.
 pub const PEER_DRIFT_WARN_SECS: i64 = 30;
 
-/// [POLICY] Peer drift threshold for immediate disconnection.
+/// Policy. Peer drift threshold for immediate disconnection.
 /// Peers with timestamp drift above this are disconnected.
 pub const PEER_DRIFT_DISCONNECT_SECS: i64 = 90;
 
