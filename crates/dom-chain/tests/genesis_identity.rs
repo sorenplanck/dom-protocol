@@ -223,11 +223,14 @@ fn height_zero_after_genesis_exists_rejects_alternate_and_preserves_original() {
     let chain_id = *derive_chain_id(NETWORK_MAGIC_REGTEST, &configured_genesis_hash).as_bytes();
     let first = genesis_block(20, &chain_id);
     let first_hash = block_hash(&first);
-    let alternate = (21u8..=250)
-        .map(|seed| genesis_block(seed, &chain_id))
-        .find(|block| block_hash(block).as_bytes() < first_hash.as_bytes())
-        .expect("alternate lower hash genesis fixture");
+    // Genesis identity is checked before fork choice, so the rejection must not
+    // depend on the relative ordering of independently generated block hashes.
+    let alternate = genesis_block(21, &chain_id);
     let alternate_hash = block_hash(&alternate);
+    assert_ne!(
+        alternate_hash, first_hash,
+        "fixture must use a distinct genesis"
+    );
 
     let dir = TempDir::new().expect("tempdir");
     let mut chain = open_chain(dir.path(), configured_genesis_hash);
