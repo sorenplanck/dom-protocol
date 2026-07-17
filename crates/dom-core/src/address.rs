@@ -7,7 +7,7 @@
 //!
 //! A Wallet V3 address encodes a versioned 40-byte payload:
 //! version || address_type || key_type || network_magic_le || compressed_key.
-//! Format: <hrp>1<bech32m-encoded-data><checksum>
+//! Format: `<hrp>1<bech32m-encoded-data><checksum>`.
 //!
 //! RFC: DOM_RFC_WALLET_ADDRESS_FINAL.md.
 
