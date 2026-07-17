@@ -589,7 +589,7 @@ mod tests {
     };
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
-    use dom_crypto::{bp2_prove, schnorr_sign, SecretKey};
+    use dom_crypto::{bp2_prove, schnorr_sign, SecretKey, RANGE_PROOF_SIZE};
 
     const TEST_CHAIN_ID: [u8; 32] = [0x42; 32];
 
@@ -838,7 +838,9 @@ mod tests {
     fn accept_tx_with_chain_view_rejects_invalid_range_proof() {
         let fee = MIN_RELAY_FEE_RATE * 100;
         let (mut tx, hash, entry) = make_valid_chain_view_tx(fee, 0x11);
-        tx.outputs[0].proof = vec![0xAB; 100];
+        // Preserve the canonical envelope length so this reaches the range-proof
+        // verifier rather than only exercising the serialization-length guard.
+        tx.outputs[0].proof = vec![0xAB; RANGE_PROOF_SIZE];
         let mut pool = Mempool::new();
 
         let err = pool
