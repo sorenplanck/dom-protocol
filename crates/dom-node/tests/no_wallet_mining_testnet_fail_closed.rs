@@ -12,11 +12,10 @@
 //! lower-level helper.
 //!
 //! Testnet is the representative public network here:
-//!   * Mainnet cannot be exercised this way — `DomNode::init` fails closed even
-//!     earlier (`ensure_network_genesis_ready`: mainnet genesis is not
-//!     finalized), so a mainnet node cannot be constructed in a test at all.
-//!     The testnet and mainnet arms of the fix are the *same* `else` branch
-//!     (`network != Regtest`), so testnet covers the mainnet behaviour too.
+//!   * Mainnet is intentionally not constructed by this local-only test. The
+//!     testnet and mainnet arms of the fix are the *same* `else` branch
+//!     (`network != Regtest`), so testnet covers the mainnet behaviour without
+//!     activating Mainnet services.
 //!   * This lives in its own integration-test binary and deliberately does NOT
 //!     set `DOM_REGTEST_FAST_MINING`. Sibling unit tests in `miner.rs` set that
 //!     env var process-globally and never clear it; sharing a binary with them
