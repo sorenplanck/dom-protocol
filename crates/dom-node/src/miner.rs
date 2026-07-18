@@ -14,6 +14,7 @@ use dom_pow::{
     compute_expected_target, fast_pow_hash, hash_meets_target, pow_validation_mode_for_network,
     randomx_seed_height, target_to_compact, target_to_difficulty, CompactTarget, PowValidationMode,
 };
+use dom_serialization::DomDeserialize;
 use dom_store::DomStore;
 use primitive_types::U256;
 use std::sync::Arc;
@@ -623,7 +624,26 @@ fn resolve_mining_randomx_seed(
 ) -> Result<[u8; 32], DomError> {
     let seed_height = randomx_seed_height(candidate_height);
     match store.get_hash_at_height(seed_height)? {
-        Some(hash) => Ok(hash),
+        Some(hash) => {
+            let header_bytes = store.get_block_header(&hash)?.ok_or_else(|| {
+                DomError::Internal(format!(
+                    "RandomX seed height {seed_height} points to missing header {}",
+                    hex::encode(hash)
+                ))
+            })?;
+            let header = BlockHeader::from_bytes(&header_bytes).map_err(|error| {
+                DomError::Internal(format!(
+                    "RandomX seed header at height {seed_height} is malformed: {error}"
+                ))
+            })?;
+            if header.height.0 != seed_height {
+                return Err(DomError::Internal(format!(
+                    "RandomX seed height index mismatch: key {seed_height}, header {}",
+                    header.height.0
+                )));
+            }
+            Ok(hash)
+        }
         None if seed_height == 0 => Ok([0u8; 32]),
         None => Err(DomError::Internal(format!(
             "RandomX seed block at height {seed_height} missing from committed store \
@@ -1343,6 +1363,35 @@ mod genesis_determinism_tests {
         txn.commit().expect("commit height mapping");
     }
 
+    fn put_raw_seed_header(node: &DomNode, hash: &[u8; 32], bytes: &[u8]) {
+        let chain = node.chain.blocking_lock();
+        chain
+            .store
+            .store_known_block(hash, bytes, &[0u8; 4])
+            .expect("store seed header");
+    }
+
+    fn put_seed_header(node: &DomNode, height: u64, hash: &[u8; 32]) {
+        let header = BlockHeader {
+            version: PROTOCOL_VERSION,
+            prev_hash: Hash256::from_bytes([0x01; 32]),
+            height: BlockHeight(height),
+            timestamp: Timestamp(1_704_067_200 + height),
+            output_root: Hash256::ZERO,
+            kernel_root: Hash256::ZERO,
+            rangeproof_root: Hash256::ZERO,
+            total_kernel_offset: [0u8; 32],
+            target: dom_pow::CompactTarget(REGTEST_TARGET_COMPACT),
+            total_difficulty: U256::one(),
+            pow: ProofOfWork {
+                nonce: 0,
+                randomx_hash: Hash256::ZERO,
+            },
+        };
+        let bytes = header.to_bytes().expect("seed header bytes");
+        put_raw_seed_header(node, hash, &bytes);
+    }
+
     fn describe_height_mapping(node: &DomNode, height: u64) -> String {
         let chain = node.chain.blocking_lock();
         match chain.store.get_hash_at_height(height) {
@@ -1501,6 +1550,7 @@ mod genesis_determinism_tests {
         let normal_node = init_test_node(regtest_config(&normal_dir));
         let expected_seed = raw_seed_hash(0x71);
         put_raw_height_mapping(&normal_node, SEED_HEIGHT, &expected_seed);
+        put_seed_header(&normal_node, SEED_HEIGHT, &expected_seed);
         let selected_seed = {
             let chain = normal_node.chain.blocking_lock();
             resolve_mining_randomx_seed(&chain.store, CANDIDATE_HEIGHT)
@@ -1563,10 +1613,9 @@ mod genesis_determinism_tests {
         let dangling_node = init_test_node(regtest_config(&dangling_dir));
         let dangling_hash = raw_seed_hash(0x52);
         put_raw_height_mapping(&dangling_node, SEED_HEIGHT, &dangling_hash);
-        let dangling_seed = {
+        let dangling_result = {
             let chain = dangling_node.chain.blocking_lock();
             resolve_mining_randomx_seed(&chain.store, CANDIDATE_HEIGHT)
-                .expect("dangling height seed")
         };
         let dangling_header_lookup = {
             let chain = dangling_node.chain.blocking_lock();
@@ -1577,22 +1626,61 @@ mod genesis_determinism_tests {
                 .is_some()
         };
         println!(
-            "DOM_RANDOMX_337_DIAG scenario=dangling-height-mapping candidate_height={CANDIDATE_HEIGHT} epoch=1 seed_height={SEED_HEIGHT} seed_lookup={} selected_seed={} tip_height={} canonical_height_index_state={} mining_result=not-run validator_result=seed-pointer-used-header-present={}",
+            "DOM_RANDOMX_337_DIAG scenario=dangling-height-mapping candidate_height={CANDIDATE_HEIGHT} epoch=1 seed_height={SEED_HEIGHT} seed_lookup={} selected_seed=blocked tip_height={} canonical_height_index_state={} mining_result=blocked-before-hashing validator_result=seed-pointer-used-header-present={} error={}",
             describe_height_mapping(&dangling_node, SEED_HEIGHT),
-            hex::encode(dangling_seed),
             current_tip_height(&dangling_node),
             describe_height_mapping(&dangling_node, SEED_HEIGHT),
             dangling_header_lookup,
-        );
-        assert_eq!(
-            dangling_seed, dangling_hash,
-            "miner uses the height-index bytes as the seed without dereferencing the block"
+            dangling_result.as_ref().expect_err("dangling seed must fail closed"),
         );
         assert!(
             !dangling_header_lookup,
             "test fixture must leave the mapped seed hash dangling"
         );
+        assert!(
+            dangling_result
+                .expect_err("dangling seed must fail closed")
+                .to_string()
+                .contains("points to missing header"),
+            "dangling height mapping must identify the absent seed header"
+        );
         crate::test_dir::remove_test_dir(&dangling_dir);
+
+        let malformed_dir = fresh_test_dir("randomx-seed-malformed-header");
+        let malformed_node = init_test_node(regtest_config(&malformed_dir));
+        let malformed_hash = raw_seed_hash(0x53);
+        put_raw_height_mapping(&malformed_node, SEED_HEIGHT, &malformed_hash);
+        put_raw_seed_header(&malformed_node, &malformed_hash, &[0xa5; 17]);
+        let malformed_result = {
+            let chain = malformed_node.chain.blocking_lock();
+            resolve_mining_randomx_seed(&chain.store, CANDIDATE_HEIGHT)
+        };
+        assert!(
+            malformed_result
+                .expect_err("malformed seed header must fail closed")
+                .to_string()
+                .contains("is malformed"),
+            "malformed persisted seed header must be rejected before hashing"
+        );
+        crate::test_dir::remove_test_dir(&malformed_dir);
+
+        let mismatched_dir = fresh_test_dir("randomx-seed-height-mismatch");
+        let mismatched_node = init_test_node(regtest_config(&mismatched_dir));
+        let mismatched_hash = raw_seed_hash(0x54);
+        put_raw_height_mapping(&mismatched_node, SEED_HEIGHT, &mismatched_hash);
+        put_seed_header(&mismatched_node, SEED_HEIGHT - 1, &mismatched_hash);
+        let mismatched_result = {
+            let chain = mismatched_node.chain.blocking_lock();
+            resolve_mining_randomx_seed(&chain.store, CANDIDATE_HEIGHT)
+        };
+        assert!(
+            mismatched_result
+                .expect_err("mismatched seed height must fail closed")
+                .to_string()
+                .contains("height index mismatch"),
+            "persisted seed header height must match its canonical index key"
+        );
+        crate::test_dir::remove_test_dir(&mismatched_dir);
     }
 
     /// Building the genesis coinbase N times for the same chain_id
