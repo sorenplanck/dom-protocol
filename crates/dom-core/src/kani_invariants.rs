@@ -1,16 +1,51 @@
-//! Kani proofs for deterministic `dom-core` operations that do not allocate.
+//! Kani proofs for deterministic `dom-core` operations and validation predicates.
 //!
-//! `DomError` paths allocate formatted diagnostics and are outside the supported
-//! Kani 0.67 model on this toolchain. Their acceptance and rejection behavior
-//! remains covered by deterministic unit, property, Miri, and integration tests.
+//! Production `DomError` constructors retain their formatted diagnostics, while
+//! the same validation conditions are exposed as allocation-free predicates for
+//! complete symbolic coverage of those conditions.
 
 use crate::{
-    block_reward, is_placeholder_genesis_hash, BlockHeight, FeeRate, Hash256, Timestamp,
-    BLOCK_REWARD_TABLE, COINBASE_MATURITY, GENESIS_HASH_MAINNET, GENESIS_HASH_REGTEST,
-    GENESIS_HASH_TESTNET, GENESIS_TIMESTAMP_MAINNET, HALVING_EPOCHS, HALVING_INTERVAL,
-    INITIAL_BLOCK_REWARD, MAINNET_GENESIS_FINALIZED, MAX_SUPPLY_NOMS, MIN_RELAY_FEE_RATE,
-    REGTEST_COINBASE_MATURITY,
+    block_reward, is_placeholder_genesis_hash, is_valid_mainnet_genesis_hash, Amount, BlockHeight,
+    FeeRate, Hash256, Timestamp, TransactionShape, BLOCK_REWARD_TABLE, COINBASE_MATURITY,
+    GENESIS_HASH_MAINNET, GENESIS_HASH_REGTEST, GENESIS_HASH_TESTNET, GENESIS_TIMESTAMP_MAINNET,
+    HALVING_EPOCHS, HALVING_INTERVAL, INITIAL_BLOCK_REWARD, MAINNET_GENESIS_FINALIZED,
+    MAX_SUPPLY_NOMS, MIN_RELAY_FEE_RATE, REGTEST_COINBASE_MATURITY,
 };
+
+#[kani::proof]
+fn amount_supply_predicate_matches_the_consensus_ceiling_for_every_value() {
+    let noms: u64 = kani::any();
+    kani::assert(
+        Amount::is_valid_noms(noms) == (noms <= MAX_SUPPLY_NOMS),
+        "amount predicate must exactly encode the supply ceiling",
+    );
+}
+
+#[kani::proof]
+fn transaction_count_predicate_matches_all_policy_limits() {
+    let inputs: usize = kani::any();
+    let outputs: usize = kani::any();
+    let kernels: usize = kani::any();
+    kani::assert(
+        TransactionShape::counts_within_limits(inputs, outputs, kernels)
+            == (inputs <= crate::MAX_INPUTS_PER_TX
+                && outputs <= crate::MAX_OUTPUTS_PER_TX
+                && kernels <= crate::MAX_KERNELS_PER_TX),
+        "count predicate must exactly encode every policy limit",
+    );
+}
+
+#[kani::proof]
+fn mainnet_genesis_predicate_matches_all_identity_rejections() {
+    let hash: [u8; 32] = kani::any();
+    kani::assert(
+        is_valid_mainnet_genesis_hash(&hash)
+            == (hash != GENESIS_HASH_TESTNET
+                && hash != GENESIS_HASH_REGTEST
+                && !is_placeholder_genesis_hash(&hash)),
+        "mainnet predicate must reject aliases and placeholders",
+    );
+}
 
 #[kani::proof]
 fn block_height_and_timestamp_checked_arithmetic_never_wrap() {

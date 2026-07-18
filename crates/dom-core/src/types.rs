@@ -119,9 +119,15 @@ impl Amount {
     /// Maximum possible amount (total supply ceiling).
     pub const MAX: Self = Self(crate::constants::MAX_SUPPLY_NOMS);
 
+    /// Return whether raw noms are within the consensus supply ceiling.
+    #[must_use]
+    pub const fn is_valid_noms(noms: u64) -> bool {
+        noms <= crate::constants::MAX_SUPPLY_NOMS
+    }
+
     /// Construct from noms.
     pub fn from_noms(noms: u64) -> Result<Self, DomError> {
-        if noms > crate::constants::MAX_SUPPLY_NOMS {
+        if !Self::is_valid_noms(noms) {
             return Err(DomError::Invalid(format!(
                 "amount {noms} exceeds MAX_SUPPLY_NOMS"
             )));

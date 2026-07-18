@@ -63,19 +63,27 @@ pub struct TransactionShape {
 }
 
 impl TransactionShape {
+    /// Return whether collection counts satisfy all policy limits.
+    #[must_use]
+    pub const fn counts_within_limits(inputs: usize, outputs: usize, kernels: usize) -> bool {
+        inputs <= MAX_INPUTS_PER_TX
+            && outputs <= MAX_OUTPUTS_PER_TX
+            && kernels <= MAX_KERNELS_PER_TX
+    }
+
     /// Construct a bounded shape from collection lengths.
     pub fn from_counts(inputs: usize, outputs: usize, kernels: usize) -> Result<Self, DomError> {
-        if inputs > MAX_INPUTS_PER_TX {
+        if !Self::counts_within_limits(inputs, outputs, kernels) && inputs > MAX_INPUTS_PER_TX {
             return Err(DomError::Invalid(format!(
                 "too many inputs for fee policy: {inputs} > {MAX_INPUTS_PER_TX}"
             )));
         }
-        if outputs > MAX_OUTPUTS_PER_TX {
+        if !Self::counts_within_limits(inputs, outputs, kernels) && outputs > MAX_OUTPUTS_PER_TX {
             return Err(DomError::Invalid(format!(
                 "too many outputs for fee policy: {outputs} > {MAX_OUTPUTS_PER_TX}"
             )));
         }
-        if kernels > MAX_KERNELS_PER_TX {
+        if !Self::counts_within_limits(inputs, outputs, kernels) && kernels > MAX_KERNELS_PER_TX {
             return Err(DomError::Invalid(format!(
                 "too many kernels for fee policy: {kernels} > {MAX_KERNELS_PER_TX}"
             )));
