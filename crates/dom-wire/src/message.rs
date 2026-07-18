@@ -74,7 +74,7 @@ pub struct WireMessage {
 
 impl WireMessage {
     /// Serialize to bytes (before Noise encryption).
-    /// Format: magic[4 LE] + command[1] + length[4 LE] + checksum[4 LE] + payload
+    /// Format: magic (4-byte LE) + command (1 byte) + length (4-byte LE) + checksum (4-byte LE) + payload.
     pub fn to_bytes(&self) -> Vec<u8> {
         let len = self.payload.len() as u32;
         let checksum = compute_checksum(&self.payload);

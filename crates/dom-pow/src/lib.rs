@@ -36,18 +36,18 @@ pub mod randomx_pool;
 
 // ── RandomX Seed Schedule (RFC-0011) ─────────────────────────────────────────
 
-/// [CONSENSUS] RandomX seed rotation interval in blocks.
+/// Consensus-critical RandomX seed rotation interval in blocks.
 /// Seed changes every 2048 blocks (~2.8 days at 2-minute block time).
 pub const RANDOMX_SEED_INTERVAL: u64 = 2048;
 
-/// [CONSENSUS] RandomX seed lookahead offset.
+/// Consensus-critical RandomX seed lookahead offset.
 /// Seed for epoch N uses the block hash at height (N * SEED_INTERVAL - SEED_OFFSET).
 pub const RANDOMX_SEED_OFFSET: u64 = 64;
 
 // ── ASERT Fractional Table ────────────────────────────────────────────────────
 
-/// [CONSENSUS] 256-entry lookup table: table[i] = floor(2^(i/256) * 65536).
-/// Monotonically non-decreasing. table[0]=65536, table[128]=92681, table[255]=130717.
+/// Consensus-critical 256-entry lookup table: `table[i] = floor(2^(i/256) * 65536)`.
+/// Monotonically non-decreasing: `table[0]=65536`, `table[128]=92681`, and `table[255]=130717`.
 pub const ASERT_FRAC_TABLE: [u32; 256] = [
     65536, 65713, 65891, 66070, 66249, 66429, 66609, 66789, 66971, 67152, 67334, 67517, 67700,
     67883, 68067, 68252, 68437, 68623, 68809, 68995, 69182, 69370, 69558, 69747, 69936, 70125,

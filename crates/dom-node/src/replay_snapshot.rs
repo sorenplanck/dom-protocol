@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 ///
 /// Per the volatile mempool policy (RFC-0012 §1.5) the mempool is **not** part of
 /// persisted, restart-surviving state and is therefore not a field of this
-/// snapshot. The only mempool data captured is [`mempool_hashes`], an explicitly
+/// snapshot. The only mempool data captured is [`ReplaySnapshot::mempool_hashes`], an explicitly
 /// non-persisted *runtime convergence diagnostic* (see its doc comment).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplaySnapshot {

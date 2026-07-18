@@ -1,6 +1,6 @@
 //! Deterministic missing-block re-request tracking (Roadmap v2 — TASK 09).
 //!
-//! When `ChainState::connect_block` rejects a block with [`DomError::Orphan`]
+//! When `ChainState::connect_block` rejects a block with `DomError::Orphan`
 //! the node has learned that an ancestor (the block's `prev_hash`) is missing.
 //! To converge it must *re-request* that missing ancestor from peers, and then
 //! re-attempt the dependent blocks once it arrives. Doing this naively causes
@@ -262,7 +262,7 @@ impl MissingBlockTracker {
     /// in canonical order (ascending height, then hash), capped by `max_batch`.
     ///
     /// A hash is eligible when it has never been requested, or its current
-    /// exponential-backoff interval (see [`backoff_interval`]) has elapsed since
+    /// exponential-backoff interval has elapsed since
     /// its last request. Emitted hashes have their attempt count incremented and
     /// `last_requested_round` set to `round`, so a second call in the same round
     /// returns nothing for them (storm control).

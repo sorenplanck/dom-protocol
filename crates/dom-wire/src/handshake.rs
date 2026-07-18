@@ -3,7 +3,7 @@
 //! RFC-0005: transport is Noise_XX.
 //! RFC-0009 Section 4.3: chain_id bound to Noise prologue.
 //!
-//! Prologue = "DOM" || PROTOCOL_VERSION[4 LE] || NETWORK_MAGIC[4 LE] || chain_id[32]
+//! Prologue = `DOM` || protocol version (4-byte LE) || network magic (4-byte LE) || chain ID (32 bytes)
 //!
 //! Any MITM modification to the prologue causes MAC failure — detected cryptographically.
 
@@ -59,7 +59,7 @@ pub fn write_timeout_secs() -> u64 {
 
 /// Build the Noise prologue that binds chain_id to the transport.
 ///
-/// RFC-0009: prologue = "DOM" || u32_le(PROTOCOL_VERSION) || u32_le(NETWORK_MAGIC) || chain_id[32]
+/// RFC-0009: prologue = `DOM` || `u32_le(PROTOCOL_VERSION)` || `u32_le(NETWORK_MAGIC)` || chain ID (32 bytes).
 pub fn build_prologue(network_magic: u32, chain_id: &[u8; 32]) -> Vec<u8> {
     let mut prologue = Vec::with_capacity(3 + 4 + 4 + 32);
     prologue.extend_from_slice(b"DOM");
