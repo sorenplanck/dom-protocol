@@ -19,3 +19,6 @@ blake2.workspace = true
 [dev-dependencies]
 # F4-equivalent invariant: canonical compact<->target projection idempotence.
 proptest.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(kani)'] }

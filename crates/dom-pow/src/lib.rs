@@ -34,6 +34,9 @@ use std::env;
 #[allow(unsafe_code)]
 pub mod randomx_pool;
 
+#[cfg(kani)]
+mod kani_invariants;
+
 // ── RandomX Seed Schedule (RFC-0011) ─────────────────────────────────────────
 
 /// Consensus-critical RandomX seed rotation interval in blocks.
@@ -167,21 +170,41 @@ impl CompactTarget {
     pub fn to_target(&self) -> Result<[u8; 32], DomError> {
         let bits = self.0;
         let exponent = (bits >> 24) as usize;
-        let mantissa = bits & 0x007f_ffff;
-        if mantissa == 0 {
-            return Ok([0u8; 32]);
-        }
-        if bits & 0x0080_0000 != 0 {
-            return Err(DomError::Invalid("negative compact target".into()));
-        }
-        if exponent > 32 {
-            return Err(DomError::Invalid(format!(
-                "compact exponent {exponent} > 32"
-            )));
+        match classify_compact_target(bits) {
+            CompactTargetClassification::Zero => return Ok([0u8; 32]),
+            CompactTargetClassification::Negative => {
+                return Err(DomError::Invalid("negative compact target".into()));
+            }
+            CompactTargetClassification::ExponentTooLarge => {
+                return Err(DomError::Invalid(format!(
+                    "compact exponent {exponent} > 32"
+                )));
+            }
+            CompactTargetClassification::Candidate => {}
         }
         let target = compact_to_target_unchecked(bits);
         validate_target_bounds(&target)?;
         Ok(target)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactTargetClassification {
+    Zero,
+    Negative,
+    ExponentTooLarge,
+    Candidate,
+}
+
+const fn classify_compact_target(bits: u32) -> CompactTargetClassification {
+    if bits & 0x007f_ffff == 0 {
+        CompactTargetClassification::Zero
+    } else if bits & 0x0080_0000 != 0 {
+        CompactTargetClassification::Negative
+    } else if bits >> 24 > 32 {
+        CompactTargetClassification::ExponentTooLarge
+    } else {
+        CompactTargetClassification::Candidate
     }
 }
 
@@ -259,25 +282,28 @@ pub fn asert_next_target_with_params(
     block_height: BlockHeight,
     params: &PowParams,
 ) -> Result<[u8; 32], DomError> {
-    let time_diff: i64 = (block_timestamp.0 as i64)
-        .checked_sub(anchor.timestamp.0 as i64)
-        .ok_or_else(|| DomError::Invalid("time_diff overflow".into()))?;
-
-    let height_diff = block_height
-        .0
-        .checked_sub(anchor.height.0)
-        .ok_or_else(|| DomError::Invalid("height before anchor".into()))?;
-    let ideal_time: i64 = (height_diff as i64)
-        .checked_mul(params.target_spacing as i64)
-        .ok_or_else(|| DomError::Invalid("ideal_time overflow".into()))?;
-
-    let exponent_seconds: i64 = time_diff
-        .checked_sub(ideal_time)
-        .ok_or_else(|| DomError::Invalid("exponent overflow".into()))?;
+    let exponent_seconds = match classify_asert_exponent_seconds(
+        anchor.timestamp.0,
+        block_timestamp.0,
+        anchor.height.0,
+        block_height.0,
+        params.target_spacing,
+    ) {
+        AsertExponentClassification::HeightBeforeAnchor => {
+            return Err(DomError::Invalid("height before anchor".into()));
+        }
+        AsertExponentClassification::IdealTimeOverflow => {
+            return Err(DomError::Invalid("ideal_time overflow".into()));
+        }
+        AsertExponentClassification::ExponentOverflow => {
+            return Err(DomError::Invalid("exponent overflow".into()));
+        }
+        AsertExponentClassification::Valid(value) => value,
+    };
 
     // exponent_fp = exponent_seconds * 256 / HALF_LIFE (fixed-point, 256 entries per power-of-2)
     let exponent_fp: i128 = {
-        let num = (exponent_seconds as i128)
+        let num = exponent_seconds
             .checked_mul(256)
             .ok_or_else(|| DomError::Invalid("exponent_fp overflow".into()))?;
         floor_div_i128(num, params.half_life as i128)?
@@ -302,6 +328,34 @@ pub fn asert_next_target_with_params(
         frac_multiplier,
         &params.max_target()?,
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AsertExponentClassification {
+    HeightBeforeAnchor,
+    IdealTimeOverflow,
+    ExponentOverflow,
+    Valid(i128),
+}
+
+fn classify_asert_exponent_seconds(
+    anchor_timestamp: u64,
+    block_timestamp: u64,
+    anchor_height: u64,
+    block_height: u64,
+    target_spacing: u64,
+) -> AsertExponentClassification {
+    let Some(height_diff) = block_height.checked_sub(anchor_height) else {
+        return AsertExponentClassification::HeightBeforeAnchor;
+    };
+    let time_diff = i128::from(block_timestamp) - i128::from(anchor_timestamp);
+    let Some(ideal_time) = i128::from(height_diff).checked_mul(i128::from(target_spacing)) else {
+        return AsertExponentClassification::IdealTimeOverflow;
+    };
+    match time_diff.checked_sub(ideal_time) {
+        Some(value) => AsertExponentClassification::Valid(value),
+        None => AsertExponentClassification::ExponentOverflow,
+    }
 }
 
 /// Apply exponent to anchor target using CHECKED 256-bit arithmetic.
@@ -477,31 +531,45 @@ fn pow_validation_mode_for_network_inner(
     test_mode: bool,
     fast_requested: bool,
 ) -> Result<PowValidationMode, DomError> {
-    if test_mode {
-        return Ok(PowValidationMode::FastDevOnly);
-    }
-
-    // Regtest is a development-only network and ALWAYS uses the deterministic
-    // fast validation path, as a pure function of the network — never relying
-    // on process-global env state. This guarantees that any two regtest nodes
-    // agree on PoW validation regardless of start order or whether the
-    // DOM_REGTEST_FAST_MINING env var happens to be set in a given process.
-    // Mainnet/testnet are unaffected: the fast_requested guard below still
-    // rejects FastDevOnly on any non-regtest network.
-    if network_magic == NETWORK_MAGIC_REGTEST {
-        return Ok(PowValidationMode::FastDevOnly);
-    }
-
-    if fast_requested {
-        if network_magic == NETWORK_MAGIC_REGTEST {
-            return Ok(PowValidationMode::FastDevOnly);
-        }
-        return Err(DomError::Invalid(
+    match classify_pow_validation_mode(network_magic, test_mode, fast_requested) {
+        PowModeClassification::FastDevOnly => Ok(PowValidationMode::FastDevOnly),
+        PowModeClassification::RandomX => Ok(PowValidationMode::RandomX),
+        PowModeClassification::RejectFastPublic => Err(DomError::Invalid(
             "DOM_REGTEST_FAST_MINING=1 is only allowed on regtest/devtest/test mode".into(),
-        ));
+        )),
+        PowModeClassification::RejectUnknown => Err(DomError::Invalid(format!(
+            "unknown network magic 0x{network_magic:08x} for PoW validation"
+        ))),
     }
+}
 
-    Ok(PowValidationMode::RandomX)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PowModeClassification {
+    FastDevOnly,
+    RandomX,
+    RejectFastPublic,
+    RejectUnknown,
+}
+
+const fn classify_pow_validation_mode(
+    network_magic: u32,
+    test_mode: bool,
+    fast_requested: bool,
+) -> PowModeClassification {
+    let known = network_magic == NETWORK_MAGIC_MAINNET
+        || network_magic == NETWORK_MAGIC_TESTNET
+        || network_magic == NETWORK_MAGIC_REGTEST;
+    if !known {
+        return PowModeClassification::RejectUnknown;
+    }
+    if test_mode || network_magic == NETWORK_MAGIC_REGTEST {
+        return PowModeClassification::FastDevOnly;
+    }
+    if fast_requested {
+        PowModeClassification::RejectFastPublic
+    } else {
+        PowModeClassification::RandomX
+    }
 }
 
 /// Determine the validation mode for a network.
@@ -1342,6 +1410,15 @@ mod tests {
             pow_validation_mode_for_network_inner(NETWORK_MAGIC_TESTNET, false, true).is_err(),
             "DOM_REGTEST_FAST_MINING must fail closed on testnet"
         );
+        for (test_mode, fast_requested) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            assert!(
+                pow_validation_mode_for_network_inner(0xdead_beef, test_mode, fast_requested)
+                    .is_err(),
+                "unknown networks must fail closed in every mode"
+            );
+        }
     }
 
     #[test]

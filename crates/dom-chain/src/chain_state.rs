@@ -939,7 +939,26 @@ impl ChainState {
     fn compute_randomx_seed(&self, height: u64) -> Result<[u8; 32], DomError> {
         let seed_height = randomx_seed_height(height);
         match self.store.get_hash_at_height(seed_height)? {
-            Some(hash) => Ok(hash),
+            Some(hash) => {
+                let header_bytes = self.store.get_block_header(&hash)?.ok_or_else(|| {
+                    DomError::Internal(format!(
+                        "RandomX seed height {seed_height} points to missing header {}",
+                        hex::encode(hash)
+                    ))
+                })?;
+                let header = BlockHeader::from_bytes(&header_bytes).map_err(|error| {
+                    DomError::Internal(format!(
+                        "RandomX seed header at height {seed_height} is malformed: {error}"
+                    ))
+                })?;
+                if header.height.0 != seed_height {
+                    return Err(DomError::Internal(format!(
+                        "RandomX seed height index mismatch: key {seed_height}, header {}",
+                        header.height.0
+                    )));
+                }
+                Ok(hash)
+            }
             None if seed_height == 0 => Ok([0u8; 32]),
             None => Err(DomError::Internal(format!(
                 "RandomX seed block at height {seed_height} missing from \
@@ -1059,8 +1078,8 @@ impl ChainState {
         }
 
         // 2. Committed store (headers from earlier batches).
-        if let Some(hash) = self.store.get_hash_at_height(seed_height)? {
-            return Ok(hash);
+        if self.store.get_hash_at_height(seed_height)?.is_some() {
+            return self.compute_randomx_seed(height);
         }
 
         // 3. Epoch 0: genesis used as seed by convention (RFC-0011).
@@ -2278,6 +2297,40 @@ mod randomx_seed_tests {
         assert_ne!(seed, [0u8; 32], "must not fall back to zero seed");
     }
 
+    /// Focused transition matrix for the blocks immediately around two seed
+    /// intervals. The same batch resolver is used by header synchronization;
+    /// miner and branch-aware validator paths share `randomx_seed_height`.
+    #[test]
+    fn focused_randomx_seed_boundaries_select_exact_branch_hashes() {
+        let (_dir, chain) = empty_chain();
+        let genesis = Hash256::from_bytes([0x10; 32]);
+        let epoch_one = Hash256::from_bytes([0x11; 32]);
+        let epoch_two = Hash256::from_bytes([0x12; 32]);
+        let batch = vec![
+            (synth_header(0), genesis, false),
+            (synth_header(1984), epoch_one, false),
+            (synth_header(4032), epoch_two, false),
+        ];
+
+        for (candidate, expected_height, expected_hash) in [
+            (2047, 0, genesis),
+            (2048, 1984, epoch_one),
+            (2049, 1984, epoch_one),
+            (4095, 1984, epoch_one),
+            (4096, 4032, epoch_two),
+            (4097, 4032, epoch_two),
+        ] {
+            assert_eq!(randomx_seed_height(candidate), expected_height);
+            assert_eq!(
+                chain
+                    .compute_randomx_seed_with_batch(candidate, &batch)
+                    .expect("boundary seed resolves"),
+                *expected_hash.as_bytes(),
+                "candidate height {candidate} selected the wrong branch seed"
+            );
+        }
+    }
+
     /// Epoch 0 (height 100, seed_height 0): with an empty batch and an
     /// un-indexed genesis, the genesis fallback `[0u8; 32]` is correct and must
     /// NOT be promoted to an error.
@@ -2344,7 +2397,7 @@ mod randomx_seed_tests {
         // block hash (CANON). commit_block accepts opaque bytes for header/body —
         // dom-store does not parse them — so a minimal synthetic block suffices.
         let canon_seed_hash = [0xAAu8; 32];
-        let opaque_header = vec![0xAAu8; 64];
+        let opaque_header = synth_header(1984).to_bytes().expect("seed header bytes");
         let opaque_body = vec![0xBBu8; 32];
         chain
             .store

@@ -71,15 +71,9 @@ fn compact_target_deserialize_short_buffer_errors_not_panics() {
 
 // ── PROBE FIX-015: huge block_timestamp must not sign-invert ─────────────────
 
-/// `asert_next_target` computes `time_diff = block_ts as i64 - anchor_ts as i64`.
-/// A `block_timestamp` above 2^63 cast to i64 becomes negative. If that produced
-/// a silently-wrapped (and accepted) target it would be a sign-inversion bug.
-///
-/// This is a DIRECT-FN probe: in production `validate_future_timestamp` rejects
-/// such timestamps upstream, so the path is normally unreachable. We call the
-/// arithmetic directly to prove the function itself does not produce a corrupt
-/// "easy" target from a wrapped-negative time_diff — it must either error or
-/// return a clamped in-bounds target, never overflow.
+/// A far-future `u64` timestamp must remain a positive time delta throughout
+/// ASERT arithmetic. It may clamp to the easiest target, but it must never wrap
+/// through `i64` and be interpreted as an extremely early block.
 #[test]
 fn asert_huge_timestamp_does_not_sign_invert() {
     let anchor = AsertAnchor {
@@ -95,30 +89,18 @@ fn asert_huge_timestamp_does_not_sign_invert() {
     let huge = (1u64 << 63) + 12345;
     let res = asert_next_target(&anchor, Timestamp(huge), BlockHeight(1));
 
-    match res {
-        Err(_) => {
-            // Acceptable: arithmetic guarded (e.g. exponent/time_diff overflow).
-        }
-        Ok(out) => {
-            // If it returns, it must be a valid in-bounds target (the to_target /
-            // clamp path keeps it within [MIN, MAX]); it must NOT be the easiest
-            // MAX target produced by a wrapped-negative drift masquerading as a
-            // far-future block. A wrapped-negative time_diff behaves like an
-            // extremely FAST block ⇒ harder target, never the trivial floor.
-            let v = primitive_types::U256::from_big_endian(&out);
-            let max = primitive_types::U256::from_big_endian(&dom_core::MAX_TARGET_BYTES);
-            assert!(v <= max, "result escaped MAX envelope on huge timestamp");
-            // Sign-inversion would turn a 'far future' (very slow ⇒ easier) block
-            // into an easier target. The wrap makes time_diff negative (fast ⇒
-            // harder), so the result must be <= the anchor target, never easier.
-            let anchor_v = primitive_types::U256::from_big_endian(&anchor.target);
-            assert!(
-                v <= anchor_v,
-                "huge timestamp wrapped to a NEGATIVE time_diff but produced an \
-                 EASIER target than the anchor — sign inversion (FIX-015)"
-            );
-        }
-    }
+    let out = res.expect("all u64 timestamps fit the corrected i128 ASERT domain");
+    let value = primitive_types::U256::from_big_endian(&out);
+    let maximum = primitive_types::U256::from_big_endian(&dom_core::MAX_TARGET_BYTES);
+    let anchor_value = primitive_types::U256::from_big_endian(&anchor.target);
+    assert!(
+        value <= maximum,
+        "result escaped MAX envelope on huge timestamp"
+    );
+    assert!(
+        value >= anchor_value,
+        "far-future timestamp sign-inverted into a harder target"
+    );
 }
 
 // ── PROBE FIX-017: zero-mantissa target is unmineable ────────────────────────
