@@ -188,10 +188,18 @@ pub const BLOCK_REWARD_TABLE: [u64; 55] = [
 /// `HALVING_INTERVAL - 1` reward-bearing blocks (heights 1..329,999). Every
 /// later nonzero epoch contains the full interval. Checked arithmetic makes a
 /// future schedule change fail at compile time rather than wrap silently.
-pub const MAX_SUPPLY_NOMS: u64 = {
+pub const MAX_SUPPLY_NOMS: u64 = maximum_supply_from_schedule();
+
+/// Recompute the maximum Mainnet issuance from the frozen reward schedule.
+///
+/// Mainnet height zero has an economically empty body, so the first epoch has
+/// one fewer reward-bearing block than later epochs. This function is the
+/// allocation-free specification used both by the production constant and by
+/// formal verification.
+pub const fn maximum_supply_from_schedule() -> u64 {
     let mut total: u64 = 0;
     let mut epoch: usize = 0;
-    while epoch < 55 {
+    while epoch < BLOCK_REWARD_TABLE.len() {
         let blocks = if epoch == 0 {
             match HALVING_INTERVAL.checked_sub(1) {
                 Some(value) => value,
@@ -208,10 +216,13 @@ pub const MAX_SUPPLY_NOMS: u64 = {
             Some(value) => value,
             None => panic!("maximum issuance addition overflow"),
         };
-        epoch += 1;
+        epoch = match epoch.checked_add(1) {
+            Some(value) => value,
+            None => panic!("reward schedule index overflow"),
+        };
     }
     total
-};
+}
 
 /// Consensus. Coinbase outputs must mature before spending.
 /// 1000 blocks ≈ 1.4 days at 2-minute block time.

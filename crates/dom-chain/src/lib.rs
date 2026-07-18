@@ -19,6 +19,9 @@ pub mod genesis;
 pub mod ibd;
 pub mod reorg;
 
+#[cfg(kani)]
+mod kani_invariants;
+
 pub use chain_state::{
     genesis_canonical_changeset, ChainState, ConnectResult, ReorgBlockDelta, ReorgDelta,
     CHAIN_CORRUPT_SENTINEL, MAX_RETAINED_SIDE_BRANCH_LENGTH, MAX_RETAINED_SIDE_BRANCH_REORG_DEPTH,
