@@ -41,6 +41,9 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
+#[cfg(kani)]
+mod kani_invariants;
+
 use dom_consensus::transaction::{validate_transaction_structure, Transaction};
 use dom_consensus::{validate_transaction, ValidationContext};
 use dom_core::{fee_policy, BlockHeight, DomError, Timestamp, MAX_BLOCK_WEIGHT};
@@ -50,6 +53,30 @@ use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 
 const MAX_PERSISTED_MEMPOOL_ENTRIES: usize = dom_core::MAX_BLOCK_TXS * 10;
+
+/// Return whether an entry fits within a block-selection weight budget.
+pub(crate) const fn entry_fits_block_weight(
+    used_weight: u32,
+    entry_weight: u32,
+    max_weight: u32,
+) -> bool {
+    entry_weight <= max_weight.saturating_sub(used_weight)
+}
+
+/// Compare two entries in canonical block-selection order.
+///
+/// Higher fee rate wins; equal fee rates use the lexicographically lower
+/// transaction hash, eliminating hash-map iteration order from block templates.
+pub(crate) fn compare_block_selection_order(
+    left_fee_rate: u64,
+    left_hash: [u8; 32],
+    right_fee_rate: u64,
+    right_hash: [u8; 32],
+) -> std::cmp::Ordering {
+    right_fee_rate
+        .cmp(&left_fee_rate)
+        .then_with(|| left_hash.cmp(&right_hash))
+}
 
 /// A mempool entry.
 #[derive(Debug, Clone)]
@@ -375,7 +402,7 @@ impl Mempool {
         let mut used_weight = 0u32;
 
         for entry in self.entries_in_block_order() {
-            if entry.weight > max_weight.saturating_sub(used_weight) {
+            if !entry_fits_block_weight(used_weight, entry.weight, max_weight) {
                 continue;
             }
             used_weight += entry.weight;
@@ -536,9 +563,7 @@ impl Mempool {
     fn entries_in_block_order(&self) -> Vec<&MempoolEntry> {
         let mut entries: Vec<&MempoolEntry> = self.entries.values().collect();
         entries.sort_unstable_by(|a, b| {
-            b.fee_rate
-                .cmp(&a.fee_rate)
-                .then_with(|| a.tx_hash.cmp(&b.tx_hash))
+            compare_block_selection_order(a.fee_rate, a.tx_hash, b.fee_rate, b.tx_hash)
         });
         entries
     }
