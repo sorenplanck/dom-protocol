@@ -278,7 +278,7 @@ pub trait DomSerialize {
     /// Serialize into a writer.
     fn serialize(&self, w: &mut Writer) -> Result<(), DomError>;
 
-    /// Convenience: serialize to a new Vec<u8>.
+    /// Convenience: serialize to a new `Vec<u8>`.
     fn to_bytes(&self) -> Result<Vec<u8>, DomError> {
         let mut w = Writer::new();
         self.serialize(&mut w)?;

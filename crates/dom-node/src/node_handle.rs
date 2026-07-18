@@ -1,14 +1,14 @@
 //! NodeHandle implementation — bridges DomNode to the RPC layer.
 //!
 //! Uses a newtype wrapper (NodeHandleImpl) to satisfy Rust orphan rules:
-//! both Arc<DomNode> and NodeHandle are defined outside dom-node.
+//! both `Arc<DomNode>` and `NodeHandle` are defined outside `dom-node`.
 
 use crate::node::{clear_persisted_mempool_snapshot, snapshot_tx_chain_view, DomNode};
 use dom_rpc::{MempoolTxInfo, NodeHandle, PeerInfo, RpcError, TxAdmission, UtxoInfo};
 use dom_serialization::DomDeserialize;
 use std::sync::Arc;
 
-/// Newtype so we can impl the foreign NodeHandle trait for Arc<DomNode>.
+/// Newtype so we can impl the foreign `NodeHandle` trait for `Arc<DomNode>`.
 pub struct NodeHandleImpl(pub Arc<DomNode>);
 
 impl NodeHandle for NodeHandleImpl {

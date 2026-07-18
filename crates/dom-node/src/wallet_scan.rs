@@ -1,4 +1,4 @@
-//! Node-backed [`ChainScanSource`] for wallet restore / rescan.
+//! Node-backed [`dom_wallet::ChainScanSource`] for wallet restore / rescan.
 //!
 //! Deterministic restore in `dom-wallet`
 //! ([`dom_wallet::Wallet::rescan_canonical_chain`],
