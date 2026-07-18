@@ -26,5 +26,8 @@ dom-crypto.workspace      = true
 dom-pow.workspace         = true
 primitive-types.workspace = true
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
