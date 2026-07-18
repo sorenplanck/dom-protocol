@@ -23,3 +23,6 @@ proptest.workspace = true
 # #[cfg(test)] module in src/address.rs (needs the private codec) and from the
 # tests/address_kav_negative.rs envelope KAVs.
 bech32 = "0.12"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

@@ -20,6 +20,9 @@ pub mod error;
 pub mod fee_policy;
 pub mod types;
 
+#[cfg(kani)]
+mod kani_invariants;
+
 pub use address::{Address, ADDRESS_HRP_MAINNET, ADDRESS_HRP_REGTEST, ADDRESS_HRP_TESTNET};
 pub use constants::*;
 pub use error::{DomError, PeerMisbehavior};
