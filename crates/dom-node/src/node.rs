@@ -4574,7 +4574,8 @@ mod tests {
     use crate::replay_snapshot::ReplaySnapshot;
     use crate::task_supervisor::{SupervisorStatus, TaskKind};
     use dom_chain::{
-        ChainState, ConnectResult, IbdInterruption, IbdPhase, PersistedIbdState, ReorgDelta,
+        build_canonical_genesis, ChainState, ConnectResult, IbdInterruption, IbdPhase,
+        PersistedIbdState, ReorgDelta,
     };
     use dom_config::NodeConfig;
     use dom_consensus::block::{BlockHeader, ProofOfWork};
@@ -6693,20 +6694,15 @@ mod tests {
             .as_bytes()
         };
 
-        let genesis = build_coinbase_only_block(
-            [0u8; 32],
-            Hash256::ZERO,
-            BlockHeight::GENESIS,
-            U256::zero(),
-            [0u8; 32],
-            &chain_id,
-        );
-        {
-            let mut guard = chain.lock().await;
-            guard
-                .connect_block(&genesis, safe_now())
-                .expect("connect genesis");
-        }
+        let genesis = build_canonical_genesis(NETWORK_MAGIC_REGTEST, &chain_id)
+            .expect("canonical Regtest genesis")
+            .block
+            .expect("Regtest genesis has a canonical block body");
+        // Regtest's frozen genesis uses its historical signing context to avoid
+        // a genesis-hash/chain-ID signing cycle. Persist the already canonical
+        // identity directly, as production bootstrap does, then exercise
+        // `connect_block` only for the adversarial IBD block under test.
+        commit_chain_block(&chain, &genesis).await;
 
         let mut invalid_offset = [0u8; 32];
         invalid_offset[31] = 1;
