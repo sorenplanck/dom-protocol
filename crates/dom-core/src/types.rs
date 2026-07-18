@@ -125,6 +125,13 @@ impl Amount {
         noms <= crate::constants::MAX_SUPPLY_NOMS
     }
 
+    /// Construct an amount after a proof harness has constrained the value to
+    /// the production validity predicate.
+    #[cfg(kani)]
+    pub(crate) const fn from_valid_noms_for_proof(noms: u64) -> Self {
+        Self(noms)
+    }
+
     /// Construct from noms.
     pub fn from_noms(noms: u64) -> Result<Self, DomError> {
         if !Self::is_valid_noms(noms) {
@@ -140,19 +147,38 @@ impl Amount {
         self.0
     }
 
+    /// Return the valid raw sum, or `None` on integer overflow or supply-cap
+    /// overflow.
+    #[must_use]
+    pub const fn checked_add_noms(self, other: Self) -> Option<u64> {
+        match self.0.checked_add(other.0) {
+            Some(sum) if Self::is_valid_noms(sum) => Some(sum),
+            _ => None,
+        }
+    }
+
+    /// Return the raw difference, or `None` on underflow.
+    #[must_use]
+    pub const fn checked_sub_noms(self, other: Self) -> Option<u64> {
+        self.0.checked_sub(other.0)
+    }
+
     /// Checked addition.
     pub fn checked_add(self, other: Self) -> Result<Self, DomError> {
-        let sum = self
-            .0
-            .checked_add(other.0)
-            .ok_or_else(|| DomError::Invalid("amount addition overflow".into()))?;
-        Self::from_noms(sum)
+        match self.checked_add_noms(other) {
+            Some(sum) => Ok(Self(sum)),
+            None => match self.0.checked_add(other.0) {
+                None => Err(DomError::Invalid("amount addition overflow".into())),
+                Some(sum) => Err(DomError::Invalid(format!(
+                    "amount {sum} exceeds MAX_SUPPLY_NOMS"
+                ))),
+            },
+        }
     }
 
     /// Checked subtraction.
     pub fn checked_sub(self, other: Self) -> Result<Self, DomError> {
-        self.0
-            .checked_sub(other.0)
+        self.checked_sub_noms(other)
             .map(Self)
             .ok_or_else(|| DomError::Invalid("amount subtraction underflow".into()))
     }

@@ -44,6 +44,12 @@ const REGTEST_GENESIS_SIGNING_CONTEXT: [u8; 32] = [
     0xd4, 0x3e, 0x92, 0xda, 0xec, 0xca, 0xdc, 0x34, 0xd4, 0xa5, 0xa9, 0xf2, 0xd3, 0xe6, 0x1b, 0xeb,
 ];
 
+/// Return whether a candidate Mainnet economic-body encoding contains exactly
+/// four zero big-endian counts: inputs, outputs, kernels, and transactions.
+pub(crate) fn is_empty_mainnet_economic_body(body: &[u8]) -> bool {
+    body == EMPTY_BODY_BYTES
+}
+
 /// Versioned, length-bounded UTF-8 genesis inscription.
 ///
 /// Canonical encoding is `0x01 || u16_be(payload_length) || payload`. No
@@ -234,7 +240,7 @@ impl MainnetGenesisIdentityV1 {
             )));
         }
         let body = take(encoded, &mut cursor, body_length)?;
-        if body != EMPTY_BODY_BYTES {
+        if !is_empty_mainnet_economic_body(body) {
             return Err(DomError::Invalid(
                 "Mainnet genesis body must contain zero inputs, outputs, kernels, and transactions"
                     .into(),
