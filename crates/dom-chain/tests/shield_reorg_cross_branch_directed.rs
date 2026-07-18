@@ -197,7 +197,8 @@ fn synthetic_block(
     let total_fees = transactions.iter().map(|tx| tx.total_fee().unwrap()).sum();
     let coinbase = valid_coinbase(BlockHeight(height), total_fees, coinbase_seed);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &transactions).expect("pmmr roots");
+        compute_block_pmmr_roots(BlockHeight(height), &coinbase, &transactions)
+            .expect("pmmr roots");
 
     Block {
         header: BlockHeader {
@@ -230,7 +231,7 @@ fn valid_coinbase_only_block(
 ) -> Block {
     let coinbase = signed_coinbase(BlockHeight(height), coinbase_seed);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &[]).expect("pmmr roots");
+        compute_block_pmmr_roots(BlockHeight(height), &coinbase, &[]).expect("pmmr roots");
     Block {
         header: BlockHeader {
             version: PROTOCOL_VERSION,

@@ -142,7 +142,7 @@ fn probe_fix006_validate_block_ignores_zero_pow() {
     let total_fees = tx.total_fee().unwrap();
     let coinbase = build_coinbase(total_fees);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, std::slice::from_ref(&tx)).unwrap();
+        compute_block_pmmr_roots(BlockHeight(1), &coinbase, std::slice::from_ref(&tx)).unwrap();
     let block = Block {
         header: BlockHeader {
             version: PROTOCOL_VERSION,
@@ -235,7 +235,7 @@ fn probe_block_header_offset_noncanonical_is_rejected() {
     let total_fees = tx.total_fee().unwrap();
     let coinbase = build_coinbase(total_fees);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, std::slice::from_ref(&tx)).unwrap();
+        compute_block_pmmr_roots(BlockHeight(1), &coinbase, std::slice::from_ref(&tx)).unwrap();
 
     for bad_offset in [SECP256K1_N, n_plus_one(), [0xFFu8; 32]] {
         let block = Block {

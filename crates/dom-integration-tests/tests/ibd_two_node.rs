@@ -271,7 +271,8 @@ async fn prepopulate_coinbase_chain(node: &Arc<DomNode>, target_height: u64) -> 
         let coinbase =
             build_test_coinbase(BlockHeight(new_height), &chain_id).map_err(|e| e.to_string())?;
         let (output_root, kernel_root, rangeproof_root) =
-            compute_block_pmmr_roots(&coinbase, &[]).map_err(|e| e.to_string())?;
+            compute_block_pmmr_roots(BlockHeight(new_height), &coinbase, &[])
+                .map_err(|e| e.to_string())?;
         let mut header = BlockHeader {
             version: PROTOCOL_VERSION,
             prev_hash: tip_hash,

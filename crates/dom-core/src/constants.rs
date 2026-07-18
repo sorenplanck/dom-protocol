@@ -469,6 +469,10 @@ pub const TAG_CHAIN_ID: &str = "DOM:chain-id:v1";
 pub const TAG_GENESIS_INSCRIPTION: &str = "DOM:genesis-inscription:v1";
 /// Domain separator for the canonical Mainnet genesis identity envelope.
 pub const TAG_MAINNET_GENESIS_IDENTITY: &str = "DOM:mainnet-genesis-identity:v1";
+/// Domain separator for the complete canonical non-genesis block body.
+pub const TAG_BLOCK_BODY_COMMITMENT: &str = "DOM:block-body-commitment:v1";
+/// Domain separator binding the historical range-proof PMMR to the complete body.
+pub const TAG_BOUND_RANGEPROOF_ROOT: &str = "DOM:bound-rangeproof-root:v1";
 pub const TAG_MUSIG2_TRANSCRIPT: &str = "DOM:musig2-transcript:v1";
 pub const TAG_MUSIG2_NONCE: &str = "DOM:musig2-nonce:v1";
 

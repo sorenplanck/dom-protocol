@@ -347,6 +347,53 @@ mod tests {
         }
     }
 
+    fn build_valid_two_input_spend_tx() -> Transaction {
+        let first_value = 70u64;
+        let second_value = 50u64;
+        let output_value = 100u64;
+        let total_input = first_value.checked_add(second_value).expect("input sum");
+        let fee = total_input.checked_sub(output_value).expect("fee");
+        let first_blinding = scalar(31);
+        let second_blinding = scalar(32);
+        let kernel_blinding = scalar(33);
+        let input_blinding = first_blinding
+            .add(&second_blinding)
+            .expect("input blinding sum");
+        let output_blinding = input_blinding
+            .add(&kernel_blinding)
+            .expect("output blinding");
+        let output_commitment = Commitment::commit(output_value, &output_blinding);
+        let (proof, _) =
+            dom_crypto::bp2_prove(output_value, &output_blinding).expect("output proof");
+        let excess = Commitment::commit(0, &kernel_blinding);
+        let secret = SecretKey::from_bytes(kernel_blinding.as_bytes()).expect("kernel secret");
+        let signature =
+            schnorr_sign(&secret, &kernel_message(fee, 0), &[0x11; 32]).expect("kernel sig");
+
+        Transaction {
+            inputs: vec![
+                TransactionInput {
+                    commitment: Commitment::commit(first_value, &first_blinding),
+                },
+                TransactionInput {
+                    commitment: Commitment::commit(second_value, &second_blinding),
+                },
+            ],
+            outputs: vec![TransactionOutput {
+                commitment: output_commitment,
+                proof,
+            }],
+            kernels: vec![TransactionKernel {
+                features: KERNEL_FEAT_PLAIN,
+                fee: Amount::from_noms(fee).expect("fee amount"),
+                lock_height: 0,
+                excess,
+                excess_signature: signature.to_bytes(),
+            }],
+            offset: [0u8; 32],
+        }
+    }
+
     /// Sum all tx offsets as scalars mod n (aggregate block kernel offset).
     fn aggregate_tx_offsets(transactions: &[Transaction]) -> [u8; 32] {
         use k256::{elliptic_curve::PrimeField, Scalar};
@@ -368,7 +415,7 @@ mod tests {
             .sum();
         let coinbase = build_coinbase(total_fees, &[0x11; 32]);
         let (output_root, kernel_root, rangeproof_root) =
-            compute_block_pmmr_roots(&coinbase, &transactions).expect("pmmr roots");
+            compute_block_pmmr_roots(BlockHeight(1), &coinbase, &transactions).expect("pmmr roots");
         let total_kernel_offset = aggregate_tx_offsets(&transactions);
         Block {
             header: BlockHeader {
@@ -676,7 +723,7 @@ mod tests {
         let mut invalid_offset = [0u8; 32];
         invalid_offset[31] = 1;
         let (output_root, kernel_root, rangeproof_root) =
-            compute_block_pmmr_roots(&coinbase, &[]).expect("pmmr roots");
+            compute_block_pmmr_roots(BlockHeight(1), &coinbase, &[]).expect("pmmr roots");
         let block = Block {
             header: BlockHeader {
                 version: PROTOCOL_VERSION,
@@ -730,6 +777,63 @@ mod tests {
             },
         )
         .expect("fully valid block must pass all validation including aggregate balance");
+    }
+
+    /// CON-009 regression: reordering two valid inputs changes the committed
+    /// body root. A stale header must reject the changed body, while rebuilding
+    /// the header from that body produces a distinct, independently valid
+    /// canonical block.
+    #[test]
+    fn con_009_reordered_inputs_change_header_and_stale_header_rejects() {
+        let original_tx = build_valid_two_input_spend_tx();
+        let original = valid_block_with_transactions(vec![original_tx.clone()]);
+        let mut reordered = original.clone();
+        reordered.transactions[0].inputs.reverse();
+
+        assert_ne!(
+            original.to_bytes().expect("original body bytes"),
+            reordered.to_bytes().expect("reordered body bytes"),
+            "input order must change canonical block serialization"
+        );
+        let context = ValidationContext {
+            current_height: BlockHeight(1),
+            chain_id: [0x11; 32],
+            now: Timestamp(u64::MAX),
+        };
+        validate_block(&original, &context).expect("original block must validate");
+
+        let stale_error = validate_block(&reordered, &context)
+            .expect_err("a changed body under the original header must be rejected");
+        assert!(
+            matches!(stale_error, DomError::Invalid(ref message) if message.contains("rangeproof_root mismatch")),
+            "expected a committed-body root mismatch, got {stale_error:?}"
+        );
+
+        let reordered_roots = compute_block_pmmr_roots(
+            reordered.header.height,
+            &reordered.coinbase,
+            &reordered.transactions,
+        )
+        .expect("reordered roots");
+        assert_ne!(
+            (
+                original.header.output_root,
+                original.header.kernel_root,
+                original.header.rangeproof_root,
+            ),
+            reordered_roots,
+            "reordering inputs must change the complete body commitment"
+        );
+        reordered.header.output_root = reordered_roots.0;
+        reordered.header.kernel_root = reordered_roots.1;
+        reordered.header.rangeproof_root = reordered_roots.2;
+        assert_ne!(
+            original.header.to_bytes().expect("original header"),
+            reordered.header.to_bytes().expect("reordered header"),
+            "the canonical header preimage must commit input order"
+        );
+        validate_block(&reordered, &context)
+            .expect("reordered body with its own committed header must validate");
     }
 
     /// A chain of three intra-block spends (C1→C2→C3) where no cut-through was
@@ -853,7 +957,8 @@ mod tests {
             offset: [0u8; 32],
         };
         let (output_root, kernel_root, rangeproof_root) =
-            compute_block_pmmr_roots(&coinbase, std::slice::from_ref(&tx)).expect("pmmr roots");
+            compute_block_pmmr_roots(BlockHeight(1), &coinbase, std::slice::from_ref(&tx))
+                .expect("pmmr roots");
         let _ = proof; // used via cb_proof
         let block = Block {
             header: BlockHeader {
@@ -905,7 +1010,8 @@ mod tests {
         // the block's actual transaction fees are 0 — a mismatch by 7 noms.
         let coinbase = build_coinbase(7, &[0x11; 32]);
         let (output_root, kernel_root, rangeproof_root) =
-            compute_block_pmmr_roots(&coinbase, std::slice::from_ref(&tx.tx)).expect("pmmr roots");
+            compute_block_pmmr_roots(BlockHeight(1), &coinbase, std::slice::from_ref(&tx.tx))
+                .expect("pmmr roots");
         let block = Block {
             header: BlockHeader {
                 version: PROTOCOL_VERSION,

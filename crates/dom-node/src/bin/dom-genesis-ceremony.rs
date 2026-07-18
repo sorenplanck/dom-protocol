@@ -191,8 +191,11 @@ fn verify_legacy_vector(value: &serde_json::Value, network_magic: u32) -> Result
     if body != decode_hex(value, "economic_body_hex")? {
         return Err(anyhow!("legacy economic-body reproduction failed"));
     }
-    let (output_root, kernel_root, rangeproof_root) =
-        dom_consensus::compute_block_pmmr_roots(&block.coinbase, &block.transactions)?;
+    let (output_root, kernel_root, rangeproof_root) = dom_consensus::compute_block_pmmr_roots(
+        block.header.height,
+        &block.coinbase,
+        &block.transactions,
+    )?;
     if output_root != block.header.output_root
         || kernel_root != block.header.kernel_root
         || rangeproof_root != block.header.rangeproof_root

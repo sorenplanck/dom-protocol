@@ -16,11 +16,71 @@ use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
 /// Validate that a kernel features byte is a known value.
 /// Unknown feature values are consensus-invalid per RFC-0008 Section 5.
 pub fn validate_kernel_features(features: u8) -> Result<(), DomError> {
-    match features {
-        KERNEL_FEAT_PLAIN | KERNEL_FEAT_COINBASE | KERNEL_FEAT_HEIGHT_LOCKED => Ok(()),
-        other => Err(DomError::Invalid(format!(
-            "unknown kernel features 0x{other:02x}"
-        ))),
+    if is_known_kernel_features(features) {
+        Ok(())
+    } else {
+        Err(DomError::Invalid(format!(
+            "unknown kernel features 0x{features:02x}"
+        )))
+    }
+}
+
+/// Return whether a kernel feature byte is one of the three consensus values.
+pub(crate) const fn is_known_kernel_features(features: u8) -> bool {
+    features == KERNEL_FEAT_PLAIN
+        || features == KERNEL_FEAT_COINBASE
+        || features == KERNEL_FEAT_HEIGHT_LOCKED
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KernelLockClassification {
+    Canonical,
+    HeightLockedAtZero,
+    NonHeightLockedAtNonzero,
+}
+
+/// Classify the canonical relationship between kernel features and lock height.
+pub(crate) const fn classify_kernel_lock_fields(
+    features: u8,
+    lock_height: u64,
+) -> KernelLockClassification {
+    if features == KERNEL_FEAT_HEIGHT_LOCKED && lock_height == 0 {
+        KernelLockClassification::HeightLockedAtZero
+    } else if features != KERNEL_FEAT_HEIGHT_LOCKED && lock_height != 0 {
+        KernelLockClassification::NonHeightLockedAtNonzero
+    } else {
+        KernelLockClassification::Canonical
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoinbaseValueClassification {
+    Accept,
+    RewardFeeOverflow,
+    ExpectedAboveMaximum,
+    ExplicitAboveMaximum,
+    ValueMismatch,
+}
+
+/// Classify coinbase reward and fee accounting without allocation.
+pub(crate) const fn classify_coinbase_value(
+    reward: u64,
+    total_tx_fees: u64,
+    explicit_value: u64,
+    maximum_provable_value: u64,
+) -> CoinbaseValueClassification {
+    let expected = match reward.checked_add(total_tx_fees) {
+        Some(value) => value,
+        None => return CoinbaseValueClassification::RewardFeeOverflow,
+    };
+    if expected > maximum_provable_value {
+        CoinbaseValueClassification::ExpectedAboveMaximum
+    } else if explicit_value > maximum_provable_value {
+        CoinbaseValueClassification::ExplicitAboveMaximum
+    } else if explicit_value != expected {
+        CoinbaseValueClassification::ValueMismatch
+    } else {
+        CoinbaseValueClassification::Accept
     }
 }
 
@@ -200,30 +260,38 @@ impl CoinbaseKernel {
         total_tx_fees: u64,
     ) -> Result<(), DomError> {
         let reward = dom_core::block_reward(block_height).noms();
-        let expected = reward
-            .checked_add(total_tx_fees)
-            .ok_or_else(|| DomError::Invalid("coinbase value overflow".into()))?;
-        if expected > dom_crypto::MAX_PROVABLE_VALUE {
-            return Err(DomError::Invalid(format!(
-                "coinbase expected value {} exceeds MAX_PROVABLE_VALUE {}",
-                expected,
-                dom_crypto::MAX_PROVABLE_VALUE
-            )));
-        }
-        if self.explicit_value > dom_crypto::MAX_PROVABLE_VALUE {
-            return Err(DomError::Invalid(format!(
+        let expected = reward.checked_add(total_tx_fees);
+        match classify_coinbase_value(
+            reward,
+            total_tx_fees,
+            self.explicit_value,
+            dom_crypto::MAX_PROVABLE_VALUE,
+        ) {
+            CoinbaseValueClassification::Accept => Ok(()),
+            CoinbaseValueClassification::RewardFeeOverflow => {
+                Err(DomError::Invalid("coinbase value overflow".into()))
+            }
+            CoinbaseValueClassification::ExpectedAboveMaximum => {
+                let expected = expected.expect("classification excludes reward/fee overflow");
+                Err(DomError::Invalid(format!(
+                    "coinbase expected value {} exceeds MAX_PROVABLE_VALUE {}",
+                    expected,
+                    dom_crypto::MAX_PROVABLE_VALUE
+                )))
+            }
+            CoinbaseValueClassification::ExplicitAboveMaximum => Err(DomError::Invalid(format!(
                 "coinbase explicit_value {} exceeds MAX_PROVABLE_VALUE {}",
                 self.explicit_value,
                 dom_crypto::MAX_PROVABLE_VALUE
-            )));
+            ))),
+            CoinbaseValueClassification::ValueMismatch => {
+                let expected = expected.expect("classification excludes reward/fee overflow");
+                Err(DomError::Invalid(format!(
+                    "coinbase explicit_value {}: expected {} (reward={} + fees={})",
+                    self.explicit_value, expected, reward, total_tx_fees
+                )))
+            }
         }
-        if self.explicit_value != expected {
-            return Err(DomError::Invalid(format!(
-                "coinbase explicit_value {}: expected {} (reward={} + fees={})",
-                self.explicit_value, expected, reward, total_tx_fees
-            )));
-        }
-        Ok(())
     }
 }
 
@@ -385,18 +453,21 @@ pub fn validate_transaction_structure(tx: &Transaction) -> Result<(), DomError> 
                 "kernel {i}: COINBASE feature in non-coinbase transaction"
             )));
         }
-        if k.features == KERNEL_FEAT_HEIGHT_LOCKED && k.lock_height == 0 {
-            return Err(DomError::Invalid(format!(
-                "kernel {i}: HEIGHT_LOCKED with lock_height == 0"
-            )));
-        }
-        // AUDIT: non-HEIGHT_LOCKED kernels with lock_height != 0 are malleable
-        // (hash changes without semantic change) — reject them.
-        if k.features != KERNEL_FEAT_HEIGHT_LOCKED && k.lock_height != 0 {
-            return Err(DomError::Invalid(format!(
-                "kernel {i}: lock_height must be 0 for non-HEIGHT_LOCKED kernels (got {})",
-                k.lock_height
-            )));
+        match classify_kernel_lock_fields(k.features, k.lock_height) {
+            KernelLockClassification::Canonical => {}
+            KernelLockClassification::HeightLockedAtZero => {
+                return Err(DomError::Invalid(format!(
+                    "kernel {i}: HEIGHT_LOCKED with lock_height == 0"
+                )));
+            }
+            KernelLockClassification::NonHeightLockedAtNonzero => {
+                // AUDIT: non-HEIGHT_LOCKED kernels with lock_height != 0 are
+                // malleable (hash changes without semantic change) — reject them.
+                return Err(DomError::Invalid(format!(
+                    "kernel {i}: lock_height must be 0 for non-HEIGHT_LOCKED kernels (got {})",
+                    k.lock_height
+                )));
+            }
         }
     }
 

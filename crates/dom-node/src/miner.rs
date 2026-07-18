@@ -778,7 +778,7 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
     // `validate_pmmr_roots` runs during block acceptance, so the miner
     // cannot drift on iteration order.
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &selected_txs)?;
+        compute_block_pmmr_roots(BlockHeight(new_height), &coinbase, &selected_txs)?;
 
     // Aggregate kernel offset over the included transactions (coinbase
     // contributes none). The consensus balance equation requires the
@@ -1643,7 +1643,7 @@ mod genesis_determinism_tests {
 
         // (2) PMMR roots match the pinned vectors.
         let (output_root, kernel_root, rangeproof_root) =
-            compute_block_pmmr_roots(coinbase, &[]).expect("roots");
+            compute_block_pmmr_roots(BlockHeight::GENESIS, coinbase, &[]).expect("roots");
         assert_eq!(
             hex::encode(output_root.as_bytes()),
             OUTPUT_ROOT,
@@ -1684,7 +1684,8 @@ mod genesis_determinism_tests {
             cb2.output.proof, coinbase.output.proof,
             "genesis proof not reproducible"
         );
-        let (o2, k2, r2) = compute_block_pmmr_roots(&cb2, &[]).expect("roots rebuild");
+        let (o2, k2, r2) =
+            compute_block_pmmr_roots(BlockHeight::GENESIS, &cb2, &[]).expect("roots rebuild");
         assert_eq!((o2, k2, r2), (output_root, kernel_root, rangeproof_root));
     }
 
@@ -1758,12 +1759,13 @@ mod genesis_determinism_tests {
     fn genesis_pmmr_roots_are_deterministic_across_runs() {
         let cid = chain_id_regtest();
         let a = canonical_genesis_coinbase(NETWORK_MAGIC_REGTEST, &cid);
-        let (a_or, a_kr, a_rr) = compute_block_pmmr_roots(&a, &[]).expect("compute genesis roots");
+        let (a_or, a_kr, a_rr) =
+            compute_block_pmmr_roots(BlockHeight::GENESIS, &a, &[]).expect("compute genesis roots");
 
         for trial in 0..8 {
             let b = canonical_genesis_coinbase(NETWORK_MAGIC_REGTEST, &cid);
-            let (b_or, b_kr, b_rr) =
-                compute_block_pmmr_roots(&b, &[]).expect("compute genesis roots #N");
+            let (b_or, b_kr, b_rr) = compute_block_pmmr_roots(BlockHeight::GENESIS, &b, &[])
+                .expect("compute genesis roots #N");
             assert_eq!(a_or, b_or, "trial {trial}: output_root drift");
             assert_eq!(a_kr, b_kr, "trial {trial}: kernel_root drift");
             assert_eq!(a_rr, b_rr, "trial {trial}: rangeproof_root drift");
@@ -2293,7 +2295,7 @@ mod genesis_determinism_tests {
         let coinbase =
             build_real_coinbase(BlockHeight(1), 0, &chain_id_regtest()).expect("coinbase");
         let (output_root, kernel_root, rangeproof_root) =
-            compute_block_pmmr_roots(&coinbase, &[]).expect("roots");
+            compute_block_pmmr_roots(BlockHeight(1), &coinbase, &[]).expect("roots");
         let mut invalid_offset = [0u8; 32];
         invalid_offset[31] = 1;
         let (tip_hash, tip_difficulty) = {
@@ -2352,7 +2354,7 @@ mod genesis_determinism_tests {
         let coinbase =
             build_real_coinbase(BlockHeight(1), 0, &chain_id_regtest()).expect("coinbase");
         let (output_root, kernel_root, rangeproof_root) =
-            compute_block_pmmr_roots(&coinbase, &[]).expect("roots");
+            compute_block_pmmr_roots(BlockHeight(1), &coinbase, &[]).expect("roots");
         let (tip_hash, tip_difficulty) = {
             let chain = node.chain.lock().await;
             (chain.tip_hash, chain.tip_difficulty)

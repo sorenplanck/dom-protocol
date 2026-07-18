@@ -48,6 +48,9 @@ pub mod block_full;
 pub mod cutthrough;
 pub mod transaction;
 
+#[cfg(kani)]
+mod kani_invariants;
+
 pub use block::BlockHeader;
 pub use block_full::{validate_block, Block};
 pub use cutthrough::apply_cut_through;
@@ -257,7 +260,7 @@ pub fn validate_block_transactions(
 /// outputs (commitment + proof) followed by per-tx kernels in the
 /// order they appear in `transactions`. Any drift here yields blocks
 /// that fail their own root check.
-pub fn compute_block_pmmr_roots(
+fn compute_unbound_block_pmmr_roots(
     coinbase: &CoinbaseTransaction,
     transactions: &[Transaction],
 ) -> Result<(dom_core::Hash256, dom_core::Hash256, dom_core::Hash256), dom_core::DomError> {
@@ -288,6 +291,64 @@ pub fn compute_block_pmmr_roots(
     ))
 }
 
+/// Serialize the complete canonical block body without its header.
+///
+/// The encoding is exactly the body suffix used by [`Block`]: canonical
+/// coinbase followed by the length-prefixed canonical transaction list.
+pub fn canonical_block_body_bytes(
+    coinbase: &CoinbaseTransaction,
+    transactions: &[Transaction],
+) -> Result<Vec<u8>, dom_core::DomError> {
+    use dom_serialization::{DomSerialize, Writer};
+
+    let mut writer = Writer::new();
+    coinbase.serialize(&mut writer)?;
+    writer.write_list(transactions)?;
+    Ok(writer.finish())
+}
+
+/// Compute the domain-separated commitment to every canonical block-body byte.
+pub fn compute_block_body_commitment(
+    coinbase: &CoinbaseTransaction,
+    transactions: &[Transaction],
+) -> Result<dom_core::Hash256, dom_core::DomError> {
+    use dom_crypto::hash::blake2b_256_tagged;
+
+    Ok(blake2b_256_tagged(
+        dom_core::TAG_BLOCK_BODY_COMMITMENT,
+        &canonical_block_body_bytes(coinbase, transactions)?,
+    ))
+}
+
+/// Compute the three header roots for a complete block body.
+///
+/// Height zero retains the frozen historical roots exactly. For every
+/// non-genesis block, the third root binds the historical range-proof PMMR root
+/// to a domain-separated commitment over the complete canonical body. This
+/// preserves the 256-byte header format while ensuring that inputs, transaction
+/// boundaries, every kernel field, signatures, offsets, and coinbase fields are
+/// committed under the hash-collision assumption.
+pub fn compute_block_pmmr_roots(
+    block_height: BlockHeight,
+    coinbase: &CoinbaseTransaction,
+    transactions: &[Transaction],
+) -> Result<(dom_core::Hash256, dom_core::Hash256, dom_core::Hash256), dom_core::DomError> {
+    use dom_crypto::hash::blake2b_256_tagged;
+
+    let (output_root, kernel_root, rangeproof_root) =
+        compute_unbound_block_pmmr_roots(coinbase, transactions)?;
+    if block_height == BlockHeight::GENESIS {
+        return Ok((output_root, kernel_root, rangeproof_root));
+    }
+
+    let body_commitment = compute_block_body_commitment(coinbase, transactions)?;
+    let mut binding = [0u8; 64];
+    binding[..32].copy_from_slice(rangeproof_root.as_bytes());
+    binding[32..].copy_from_slice(body_commitment.as_bytes());
+    let bound_rangeproof_root = blake2b_256_tagged(dom_core::TAG_BOUND_RANGEPROOF_ROOT, &binding);
+    Ok((output_root, kernel_root, bound_rangeproof_root))
+}
+
 /// Derive chain_id from network magic and genesis hash (RFC-0009 §4.1).
 /// Validate that the three PMMR roots in the block header match the roots
 /// recomputed from the block body.
@@ -301,7 +362,7 @@ pub fn compute_block_pmmr_roots(
 /// drift on iteration order.
 pub fn validate_pmmr_roots(block: &Block) -> Result<(), dom_core::DomError> {
     let (computed_output_root, computed_kernel_root, computed_rangeproof_root) =
-        compute_block_pmmr_roots(&block.coinbase, &block.transactions)?;
+        compute_block_pmmr_roots(block.header.height, &block.coinbase, &block.transactions)?;
 
     if computed_output_root != block.header.output_root {
         return Err(dom_core::DomError::Invalid(format!(
@@ -338,7 +399,7 @@ pub fn derive_chain_id(network_magic: u32, genesis_hash: &dom_core::Hash256) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction::{TransactionKernel, TransactionOutput};
+    use crate::transaction::{TransactionInput, TransactionKernel, TransactionOutput};
     use dom_core::{Amount, BlockHeight, Timestamp, KERNEL_FEAT_PLAIN};
     use dom_crypto::pedersen::Commitment;
 
@@ -474,7 +535,7 @@ mod tests {
         Block {
             header: BlockHeader {
                 version: PROTOCOL_VERSION,
-                height: BlockHeight::GENESIS,
+                height: BlockHeight(1),
                 prev_hash: Hash256::ZERO,
                 timestamp: Timestamp(1_704_067_200),
                 output_root,
@@ -500,13 +561,13 @@ mod tests {
     #[test]
     fn compute_pmmr_roots_three_distinct_domains() {
         let coinbase = dummy_coinbase(33 * 1_000_000_000);
-        let (r1, r2, r3) = compute_block_pmmr_roots(&coinbase, &[]).unwrap();
+        let (r1, r2, r3) = compute_block_pmmr_roots(BlockHeight(1), &coinbase, &[]).unwrap();
         assert_ne!(r1, r2, "output_root and kernel_root must differ");
         assert_ne!(r1, r3, "output_root and rangeproof_root must differ");
         assert_ne!(r2, r3, "kernel_root and rangeproof_root must differ");
 
         // Determinism across calls.
-        let (r1b, r2b, r3b) = compute_block_pmmr_roots(&coinbase, &[]).unwrap();
+        let (r1b, r2b, r3b) = compute_block_pmmr_roots(BlockHeight(1), &coinbase, &[]).unwrap();
         assert_eq!(r1, r1b);
         assert_eq!(r2, r2b);
         assert_eq!(r3, r3b);
@@ -521,7 +582,9 @@ mod tests {
         let coinbase = dummy_coinbase(33 * 1_000_000_000);
         let tx1 = dummy_tx(h_point(), 0x11, 100);
 
-        let (or, kr, rr) = compute_block_pmmr_roots(&coinbase, std::slice::from_ref(&tx1)).unwrap();
+        let (or, kr, rr) =
+            compute_block_pmmr_roots(BlockHeight(1), &coinbase, std::slice::from_ref(&tx1))
+                .unwrap();
         let block = dummy_block_with(coinbase, vec![tx1], or, kr, rr);
         validate_pmmr_roots(&block).expect("helper-computed roots must satisfy the validator");
     }
@@ -534,11 +597,12 @@ mod tests {
     fn pmmr_roots_depend_on_tx_set() {
         let coinbase = dummy_coinbase(33 * 1_000_000_000);
         let (r_empty_out, r_empty_ker, r_empty_rp) =
-            compute_block_pmmr_roots(&coinbase, &[]).unwrap();
+            compute_block_pmmr_roots(BlockHeight(1), &coinbase, &[]).unwrap();
 
         let tx1 = dummy_tx(h_point(), 0x11, 100);
         let (r1_out, r1_ker, r1_rp) =
-            compute_block_pmmr_roots(&coinbase, std::slice::from_ref(&tx1)).unwrap();
+            compute_block_pmmr_roots(BlockHeight(1), &coinbase, std::slice::from_ref(&tx1))
+                .unwrap();
 
         assert_ne!(r_empty_out, r1_out);
         assert_ne!(r_empty_ker, r1_ker);
@@ -547,7 +611,8 @@ mod tests {
         // Two transactions instead of one — roots shift again.
         let tx2 = dummy_tx(h_point(), 0x22, 200);
         let (r2_out, r2_ker, r2_rp) =
-            compute_block_pmmr_roots(&coinbase, &[tx1.clone(), tx2.clone()]).unwrap();
+            compute_block_pmmr_roots(BlockHeight(1), &coinbase, &[tx1.clone(), tx2.clone()])
+                .unwrap();
         assert_ne!(r1_out, r2_out);
         assert_ne!(r1_ker, r2_ker);
         assert_ne!(r1_rp, r2_rp);
@@ -565,8 +630,10 @@ mod tests {
         let tx_a = dummy_tx(g_point(), 0x11, 100);
         let tx_b = dummy_tx(h_point(), 0x22, 200);
 
-        let forward = compute_block_pmmr_roots(&coinbase, &[tx_a.clone(), tx_b.clone()]).unwrap();
-        let reverse = compute_block_pmmr_roots(&coinbase, &[tx_b, tx_a]).unwrap();
+        let forward =
+            compute_block_pmmr_roots(BlockHeight(1), &coinbase, &[tx_a.clone(), tx_b.clone()])
+                .unwrap();
+        let reverse = compute_block_pmmr_roots(BlockHeight(1), &coinbase, &[tx_b, tx_a]).unwrap();
         assert_ne!(forward.0, reverse.0, "output_root must depend on tx order");
         assert_ne!(forward.1, reverse.1, "kernel_root must depend on tx order");
         assert_ne!(
@@ -584,7 +651,9 @@ mod tests {
         let tx1 = dummy_tx(h_point(), 0x11, 100);
 
         // Freeze header roots over the *original* tx.
-        let (or, kr, rr) = compute_block_pmmr_roots(&coinbase, std::slice::from_ref(&tx1)).unwrap();
+        let (or, kr, rr) =
+            compute_block_pmmr_roots(BlockHeight(1), &coinbase, std::slice::from_ref(&tx1))
+                .unwrap();
 
         // Mutate the rangeproof of the tx after the header is fixed.
         let mut mutated_tx = tx1;
@@ -603,5 +672,167 @@ mod tests {
             }
             other => panic!("expected Invalid(rangeproof_root mismatch), got {other:?}"),
         }
+    }
+
+    /// CON-009 production-equivalence regression. Every serialized field in
+    /// the modeled coinbase and transaction body changes the complete-body
+    /// commitment and therefore the non-genesis header roots. Equality after
+    /// mutation would require a collision in one of the domain-separated
+    /// BLAKE2b-256 commitments.
+    #[test]
+    fn con_009_every_consensus_body_field_is_committed() {
+        let mut base_tx = dummy_tx(h_point(), 0x11, 100);
+        base_tx.inputs.push(TransactionInput {
+            commitment: g_point(),
+        });
+        let base_coinbase = dummy_coinbase(33 * 1_000_000_000);
+        let base_transactions = vec![base_tx];
+        let base_bytes = canonical_block_body_bytes(&base_coinbase, &base_transactions).unwrap();
+        let base_commitment =
+            compute_block_body_commitment(&base_coinbase, &base_transactions).unwrap();
+        let base_roots =
+            compute_block_pmmr_roots(BlockHeight(1), &base_coinbase, &base_transactions).unwrap();
+
+        let mut variants: Vec<(&str, CoinbaseTransaction, Vec<Transaction>)> = Vec::new();
+
+        let mut coinbase = base_coinbase.clone();
+        coinbase.output.commitment = h_point();
+        variants.push((
+            "coinbase output commitment",
+            coinbase,
+            base_transactions.clone(),
+        ));
+        let mut coinbase = base_coinbase.clone();
+        coinbase.output.proof[0] ^= 1;
+        variants.push(("coinbase output proof", coinbase, base_transactions.clone()));
+        let mut coinbase = base_coinbase.clone();
+        coinbase.kernel.features ^= 1;
+        variants.push((
+            "coinbase kernel features",
+            coinbase,
+            base_transactions.clone(),
+        ));
+        let mut coinbase = base_coinbase.clone();
+        coinbase.kernel.explicit_value += 1;
+        variants.push((
+            "coinbase explicit value",
+            coinbase,
+            base_transactions.clone(),
+        ));
+        let mut coinbase = base_coinbase.clone();
+        coinbase.kernel.excess = g_point();
+        variants.push((
+            "coinbase kernel excess",
+            coinbase,
+            base_transactions.clone(),
+        ));
+        let mut coinbase = base_coinbase.clone();
+        coinbase.kernel.excess_signature[0] ^= 1;
+        variants.push((
+            "coinbase kernel signature",
+            coinbase,
+            base_transactions.clone(),
+        ));
+        let mut coinbase = base_coinbase.clone();
+        coinbase.offset[31] = 1;
+        variants.push(("coinbase offset", coinbase, base_transactions.clone()));
+
+        let mut transactions = base_transactions.clone();
+        transactions[0].inputs[0].commitment = h_point();
+        variants.push(("transaction input", base_coinbase.clone(), transactions));
+        let mut transactions = base_transactions.clone();
+        transactions[0].outputs[0].commitment = g_point();
+        variants.push((
+            "transaction output commitment",
+            base_coinbase.clone(),
+            transactions,
+        ));
+        let mut transactions = base_transactions.clone();
+        transactions[0].outputs[0].proof[0] ^= 1;
+        variants.push((
+            "transaction output proof",
+            base_coinbase.clone(),
+            transactions,
+        ));
+        let mut transactions = base_transactions.clone();
+        transactions[0].kernels[0].features ^= 1;
+        variants.push((
+            "transaction kernel features",
+            base_coinbase.clone(),
+            transactions,
+        ));
+        let mut transactions = base_transactions.clone();
+        transactions[0].kernels[0].fee = Amount::from_noms(101).unwrap();
+        variants.push((
+            "transaction kernel fee",
+            base_coinbase.clone(),
+            transactions,
+        ));
+        let mut transactions = base_transactions.clone();
+        transactions[0].kernels[0].lock_height = 1;
+        variants.push((
+            "transaction kernel lock height",
+            base_coinbase.clone(),
+            transactions,
+        ));
+        let mut transactions = base_transactions.clone();
+        transactions[0].kernels[0].excess = g_point();
+        variants.push((
+            "transaction kernel excess",
+            base_coinbase.clone(),
+            transactions,
+        ));
+        let mut transactions = base_transactions.clone();
+        transactions[0].kernels[0].excess_signature[0] ^= 1;
+        variants.push((
+            "transaction kernel signature",
+            base_coinbase.clone(),
+            transactions,
+        ));
+        let mut transactions = base_transactions.clone();
+        transactions[0].offset[31] = 1;
+        variants.push(("transaction offset", base_coinbase.clone(), transactions));
+        let mut transactions = base_transactions.clone();
+        transactions.push(dummy_tx(g_point(), 0x22, 200));
+        variants.push((
+            "transaction list boundary",
+            base_coinbase.clone(),
+            transactions,
+        ));
+
+        for (field, coinbase, transactions) in variants {
+            let changed_bytes = canonical_block_body_bytes(&coinbase, &transactions).unwrap();
+            assert_ne!(
+                base_bytes, changed_bytes,
+                "{field} must change canonical bytes"
+            );
+            assert_ne!(
+                base_commitment,
+                compute_block_body_commitment(&coinbase, &transactions).unwrap(),
+                "{field} must change the body commitment absent a hash collision"
+            );
+            assert_ne!(
+                base_roots,
+                compute_block_pmmr_roots(BlockHeight(1), &coinbase, &transactions).unwrap(),
+                "{field} must change the non-genesis header roots absent a hash collision"
+            );
+        }
+    }
+
+    /// Frozen height-zero vectors use their historical three roots exactly;
+    /// the complete-body binding begins at height one.
+    #[test]
+    fn frozen_genesis_roots_are_unchanged_by_non_genesis_body_binding() {
+        let coinbase = dummy_coinbase(0);
+        let historical = compute_unbound_block_pmmr_roots(&coinbase, &[]).unwrap();
+        let frozen = compute_block_pmmr_roots(BlockHeight::GENESIS, &coinbase, &[]).unwrap();
+        let height_one = compute_block_pmmr_roots(BlockHeight(1), &coinbase, &[]).unwrap();
+        assert_eq!(frozen, historical, "height-zero roots must remain frozen");
+        assert_eq!(height_one.0, historical.0);
+        assert_eq!(height_one.1, historical.1);
+        assert_ne!(
+            height_one.2, historical.2,
+            "height one must activate the complete-body binding"
+        );
     }
 }
