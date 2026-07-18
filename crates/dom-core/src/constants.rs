@@ -534,12 +534,23 @@ pub const fn is_placeholder_genesis_hash(hash: &[u8; 32]) -> bool {
     true
 }
 
+/// Return whether a candidate is valid for the finalized Mainnet identity.
+#[must_use]
+pub fn is_valid_mainnet_genesis_hash(hash: &[u8; 32]) -> bool {
+    *hash != GENESIS_HASH_TESTNET
+        && *hash != GENESIS_HASH_REGTEST
+        && !is_placeholder_genesis_hash(hash)
+}
+
 /// Validate a would-be mainnet genesis hash before allowing mainnet startup.
 ///
 /// This rejects the placeholder hash and the currently pinned non-mainnet
 /// constants so a misconfigured build cannot silently boot a "mainnet" node
 /// bound to testnet or regtest identity.
 pub fn validate_mainnet_genesis_hash(hash: [u8; 32]) -> Result<(), DomError> {
+    if is_valid_mainnet_genesis_hash(&hash) {
+        return Ok(());
+    }
     if hash == GENESIS_HASH_TESTNET {
         return Err(DomError::Invalid(
             "mainnet genesis is not finalized: GENESIS_HASH_MAINNET must not alias GENESIS_HASH_TESTNET".into(),
@@ -550,13 +561,10 @@ pub fn validate_mainnet_genesis_hash(hash: [u8; 32]) -> Result<(), DomError> {
             "mainnet genesis is not finalized: GENESIS_HASH_MAINNET must not alias GENESIS_HASH_REGTEST".into(),
         ));
     }
-    if is_placeholder_genesis_hash(&hash) {
-        return Err(DomError::Invalid(
-            "mainnet genesis is not finalized: GENESIS_HASH_MAINNET is still the zero placeholder"
-                .into(),
-        ));
-    }
-    Ok(())
+    Err(DomError::Invalid(
+        "mainnet genesis is not finalized: GENESIS_HASH_MAINNET is still the zero placeholder"
+            .into(),
+    ))
 }
 
 /// Return the configured genesis timestamp for a network magic value.
