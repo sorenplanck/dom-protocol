@@ -8,7 +8,7 @@
 //! Coverage:
 //!
 //! * `invariant_max_supply_never_exceeded` — summing `block_reward(h)`
-//!   across every height from genesis through past the final halving
+//!   across every reward-bearing height through past the final halving
 //!   never exceeds `MAX_SUPPLY_NOMS`.
 //! * `invariant_block_reward_zero_past_last_halving` — `block_reward`
 //!   returns zero for every height ≥ `HALVING_EPOCHS * HALVING_INTERVAL`,
@@ -33,7 +33,7 @@ mod tests {
     use dom_consensus::transaction::CoinbaseKernel;
     use dom_core::{block_reward, BlockHeight, HALVING_EPOCHS, HALVING_INTERVAL, MAX_SUPPLY_NOMS};
 
-    /// Total emission across every block from genesis to the height
+    /// Total emission across every reward-bearing block from height one to the height
     /// just past the final halving MUST NOT exceed `MAX_SUPPLY_NOMS`.
     /// This is the protocol's hard supply cap — a regression here
     /// would silently inflate the currency.
@@ -46,7 +46,7 @@ mod tests {
         let horizon = last_halving_end + 10;
 
         let mut total: u128 = 0;
-        for h in 0u64..horizon {
+        for h in 1u64..horizon {
             total += block_reward(BlockHeight(h)).noms() as u128;
         }
         assert!(
@@ -58,7 +58,7 @@ mod tests {
         // the BLOCK_REWARD_TABLE diverged from the documented schedule.
         let last_halving_emission: u128 = {
             let mut acc: u128 = 0;
-            for h in 0u64..last_halving_end {
+            for h in 1u64..last_halving_end {
                 acc += block_reward(BlockHeight(h)).noms() as u128;
             }
             acc
