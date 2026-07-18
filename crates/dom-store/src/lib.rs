@@ -36,6 +36,9 @@
 // unsafe allowed for lmdb API
 #![deny(missing_docs)]
 
+#[cfg(kani)]
+mod kani_invariants;
+
 pub mod block_store;
 pub mod db;
 pub mod peer_store;

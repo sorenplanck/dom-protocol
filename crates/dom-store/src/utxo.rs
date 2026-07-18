@@ -2,6 +2,19 @@
 
 use dom_core::{BlockHeight, DomError, COINBASE_MATURITY};
 
+pub(crate) const fn utxo_record_has_canonical_prefix(length: usize, coinbase_flag: u8) -> bool {
+    length >= 9 && (coinbase_flag == 0 || coinbase_flag == 1)
+}
+
+pub(crate) const fn coinbase_is_mature_at(
+    is_coinbase: bool,
+    block_height: u64,
+    current_height: u64,
+    maturity: u64,
+) -> bool {
+    !is_coinbase || current_height.saturating_sub(block_height) >= maturity
+}
+
 /// A UTXO entry stored in the LMDB utxos database.
 #[derive(Debug, Clone)]
 pub struct UtxoEntry {
@@ -28,8 +41,17 @@ impl UtxoEntry {
         if bytes.len() < 9 {
             return Err(DomError::Malformed("utxo entry too short".into()));
         }
+        if !utxo_record_has_canonical_prefix(bytes.len(), bytes[8]) {
+            return Err(DomError::Malformed(
+                "utxo entry has invalid coinbase flag".into(),
+            ));
+        }
         let block_height = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-        let is_coinbase = bytes[8] != 0;
+        let is_coinbase = match bytes[8] {
+            0 => false,
+            1 => true,
+            _ => unreachable!("canonical prefix rejects invalid coinbase flags"),
+        };
         let proof = bytes[9..].to_vec();
         Ok(Self {
             block_height,
@@ -56,10 +78,12 @@ impl UtxoEntry {
     /// rules). The only knob the caller controls is the number of
     /// confirmations required for a coinbase to be spendable.
     pub fn is_mature_for(&self, current_height: u64, maturity: u64) -> bool {
-        if !self.is_coinbase {
-            return true;
-        }
-        current_height.saturating_sub(self.block_height) >= maturity
+        coinbase_is_mature_at(
+            self.is_coinbase,
+            self.block_height,
+            current_height,
+            maturity,
+        )
     }
 }
 

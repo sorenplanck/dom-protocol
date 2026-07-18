@@ -21,32 +21,33 @@ use proptest::prelude::*;
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(1024))]
 
-    /// UtxoEntry::from_bytes is total: any byte string is a clean Err (len < 9)
-    /// or a non-panicking Ok whose proof is exactly the tail bytes[9..].
+    /// UtxoEntry::from_bytes is total: only records with the nine-byte fixed
+    /// prefix and a canonical 0/1 coinbase flag parse; every other byte string
+    /// is rejected without panicking.
     #[test]
     fn utxo_from_bytes_total_over_arbitrary_bytes(buf in proptest::collection::vec(any::<u8>(), 0..1200)) {
         match UtxoEntry::from_bytes(&buf) {
             Ok(e) => {
                 prop_assert!(buf.len() >= 9, "Ok only for >= 9 bytes");
+                prop_assert!(buf[8] <= 1, "Ok only for canonical flag bytes");
                 prop_assert_eq!(e.proof.len(), buf.len() - 9, "proof is exactly the tail");
             }
             Err(_) => {
-                prop_assert!(buf.len() < 9, "Err only for < 9 bytes");
+                prop_assert!(buf.len() < 9 || buf[8] > 1, "Err only for malformed prefix or flag");
             }
         }
     }
 
-    /// PeerAddr::from_bytes is total: any byte string is a clean Err (len < 12)
-    /// or a non-panicking Ok. (Trailing bytes past 12 are ignored — the
-    /// malleability is pinned separately in directed_corruption_store.rs.)
+    /// PeerAddr::from_bytes accepts exactly its canonical 12-byte encoding and
+    /// rejects every truncated or trailing-byte variant.
     #[test]
     fn peer_from_bytes_total_over_arbitrary_bytes(
         addr in "[a-z0-9.:]{0,40}",
         buf in proptest::collection::vec(any::<u8>(), 0..64),
     ) {
         match PeerAddr::from_bytes(addr, &buf) {
-            Ok(_) => prop_assert!(buf.len() >= 12),
-            Err(_) => prop_assert!(buf.len() < 12),
+            Ok(_) => prop_assert_eq!(buf.len(), 12),
+            Err(_) => prop_assert_ne!(buf.len(), 12),
         }
     }
 
