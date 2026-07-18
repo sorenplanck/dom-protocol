@@ -1,4 +1,4 @@
-use dom_chain::ChainState;
+use dom_chain::{build_canonical_genesis, genesis_canonical_changeset, ChainState};
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{
     compute_block_pmmr_roots, derive_chain_id, Block, CoinbaseKernel, CoinbaseTransaction,
@@ -294,12 +294,13 @@ impl HarnessNode {
         let dir = TempDir::new().expect("tempdir");
         let store =
             DomStore::open_with_map_size(dir.path(), TEST_LMDB_MAP_SIZE).expect("store open");
-        let chain = ChainState::open(
+        let mut chain = ChainState::open(
             store,
             Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
             NETWORK_MAGIC_REGTEST,
         )
         .expect("chain open");
+        bootstrap_canonical_regtest_genesis(&mut chain);
         Self {
             dir,
             chain,
@@ -401,6 +402,50 @@ fn test_chain_id() -> [u8; 32] {
         &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
     )
     .as_bytes()
+}
+
+fn canonical_regtest_fixture() -> BlockFixture {
+    let canonical = build_canonical_genesis(NETWORK_MAGIC_REGTEST, &test_chain_id())
+        .expect("canonical Regtest genesis");
+    assert_eq!(
+        canonical.hash,
+        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+        "the fixture must use the frozen Regtest genesis identity"
+    );
+    BlockFixture {
+        block: canonical.block.expect("legacy Regtest genesis block"),
+        hash: canonical.hash,
+    }
+}
+
+fn bootstrap_canonical_regtest_genesis(chain: &mut ChainState) {
+    // The frozen Regtest genesis uses its historical signing context to avoid
+    // a genesis-hash/chain-ID signing cycle. Persist it through the same
+    // canonical changeset used by production bootstrap; synthetic height-zero
+    // blocks cannot pass the configured frozen genesis guard.
+    let canonical = build_canonical_genesis(NETWORK_MAGIC_REGTEST, &test_chain_id())
+        .expect("canonical Regtest genesis");
+    let block = canonical
+        .block
+        .as_ref()
+        .expect("legacy Regtest genesis block");
+    let (new_utxos, spent_utxos, kernel_excesses) =
+        genesis_canonical_changeset(block, canonical.hash);
+    chain
+        .store
+        .commit_block(
+            canonical.hash.as_bytes(),
+            block.header.height.0,
+            &canonical.header_bytes,
+            &canonical.block_bytes,
+            &new_utxos,
+            &spent_utxos,
+            &kernel_excesses,
+        )
+        .expect("persist canonical Regtest genesis");
+    chain.tip_hash = canonical.hash;
+    chain.tip_height = block.header.height;
+    chain.tip_difficulty = block.header.total_difficulty;
 }
 
 const PRODUCTION_INGRESS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -697,7 +742,7 @@ async fn production_peer_ingress_recursively_converges_reverse_orphans() {
 fn out_of_order_child_then_parent_converges_to_normal_tip() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let chain_id = test_chain_id();
-    let genesis = fixture([0u8; 32], Hash256::ZERO, U256::zero(), 0, 10, &chain_id);
+    let genesis = canonical_regtest_fixture();
     let seed = *genesis.hash.as_bytes();
     let parent = fixture(
         seed,
@@ -734,7 +779,7 @@ fn out_of_order_child_then_parent_converges_to_normal_tip() {
 fn multi_level_orphan_delivery_converges() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let chain_id = test_chain_id();
-    let genesis = fixture([0u8; 32], Hash256::ZERO, U256::zero(), 0, 20, &chain_id);
+    let genesis = canonical_regtest_fixture();
     let seed = *genesis.hash.as_bytes();
     let parent = fixture(
         seed,
@@ -785,7 +830,7 @@ fn multi_level_orphan_delivery_converges() {
 fn duplicate_orphan_delivery_is_idempotent() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let chain_id = test_chain_id();
-    let genesis = fixture([0u8; 32], Hash256::ZERO, U256::zero(), 0, 30, &chain_id);
+    let genesis = canonical_regtest_fixture();
     let seed = *genesis.hash.as_bytes();
     let parent = fixture(
         seed,
@@ -827,7 +872,7 @@ fn duplicate_orphan_delivery_is_idempotent() {
 fn bounded_orphan_spam_is_pruned_deterministically() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let chain_id = test_chain_id();
-    let genesis = fixture([0u8; 32], Hash256::ZERO, U256::zero(), 0, 40, &chain_id);
+    let genesis = canonical_regtest_fixture();
     let seed = *genesis.hash.as_bytes();
     let parent = fixture(
         seed,
@@ -891,7 +936,7 @@ fn bounded_orphan_spam_is_pruned_deterministically() {
 fn reordered_delivery_matches_normal_delivery_deep_state() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let chain_id = test_chain_id();
-    let genesis = fixture([0u8; 32], Hash256::ZERO, U256::zero(), 0, 50, &chain_id);
+    let genesis = canonical_regtest_fixture();
     let seed = *genesis.hash.as_bytes();
     let a1 = fixture(
         seed,
@@ -943,7 +988,7 @@ fn reordered_delivery_matches_normal_delivery_deep_state() {
 fn equivalent_live_timelines_converge_to_identical_deep_snapshots() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let chain_id = test_chain_id();
-    let genesis = fixture([0u8; 32], Hash256::ZERO, U256::zero(), 0, 60, &chain_id);
+    let genesis = canonical_regtest_fixture();
     let seed = *genesis.hash.as_bytes();
     let a1 = fixture(
         seed,
