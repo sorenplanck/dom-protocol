@@ -121,7 +121,12 @@ fn coinbase_maturity_for_magic(magic: u32) -> u64 {
     }
 }
 
-fn is_better_fork_choice_tip(
+/// Return whether a candidate tip deterministically outranks the current tip.
+///
+/// Total accumulated difficulty is primary.  Equal-work candidates use the
+/// lexicographically lower canonical block identifier as the deterministic
+/// tie-breaker, so arrival order cannot influence the selected chain.
+pub(crate) fn is_better_fork_choice_tip(
     candidate_total_difficulty: U256,
     candidate_hash: Hash256,
     current_total_difficulty: U256,

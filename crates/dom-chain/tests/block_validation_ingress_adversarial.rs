@@ -490,6 +490,24 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
         .connect_block(&canonical_2, safe_now())
         .expect("canonical 2");
 
+    // Keep the canonical tip one full-work increment ahead of the invalid
+    // height-two side candidate.  The previous fixture relied on a sampled
+    // BLAKE2b ordering between equal-work blocks; the range proof is
+    // randomized, so that sampling was nondeterministic.  A strict work gap
+    // tests the intended quarantine path without depending on hash luck.
+    let canonical_3 = build_coinbase_only_block(
+        *block_hash(&genesis).as_bytes(),
+        block_hash(&canonical_2),
+        BlockHeight(3),
+        canonical_2.header.total_difficulty,
+        [0u8; 32],
+        33,
+        &chain_id,
+    );
+    chain
+        .connect_block(&canonical_3, safe_now())
+        .expect("canonical 3");
+
     let side_1_result = chain.connect_block(&side_1, safe_now()).expect("side 1");
     assert!(
         matches!(side_1_result, dom_chain::ConnectResult::SideChain),
@@ -497,29 +515,23 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
     );
 
     let canonical_1_coinbase_value = dom_core::block_reward(BlockHeight(1)).noms();
-    let canonical_2_hash = block_hash(&canonical_2);
-    let side_2_invalid = (40u8..=70)
-        .map(|seed| {
-            let invalid_against_side_branch = valid_spend_tx(
-                canonical_1_coinbase_value,
-                scalar(canonical_1_seed),
-                canonical_1_coinbase_value - dom_core::MIN_RELAY_FEE_RATE * 100,
-                seed,
-                &chain_id,
-            );
-            build_block_with_transactions(
-                *block_hash(&genesis).as_bytes(),
-                block_hash(&side_1),
-                BlockHeight(2),
-                side_1.header.total_difficulty,
-                [0u8; 32],
-                seed.saturating_add(40),
-                vec![invalid_against_side_branch],
-                &chain_id,
-            )
-        })
-        .find(|block| block_hash(block).as_bytes() > canonical_2_hash.as_bytes())
-        .expect("invalid side block worse than canonical height 2 under fork-choice tie rule");
+    let invalid_against_side_branch = valid_spend_tx(
+        canonical_1_coinbase_value,
+        scalar(canonical_1_seed),
+        canonical_1_coinbase_value - dom_core::MIN_RELAY_FEE_RATE * 100,
+        40,
+        &chain_id,
+    );
+    let side_2_invalid = build_block_with_transactions(
+        *block_hash(&genesis).as_bytes(),
+        block_hash(&side_1),
+        BlockHeight(2),
+        side_1.header.total_difficulty,
+        [0u8; 32],
+        80,
+        vec![invalid_against_side_branch],
+        &chain_id,
+    );
     let side_2_invalid_hash = block_hash(&side_2_invalid);
     let side_2_result = chain
         .connect_block(&side_2_invalid, safe_now())
@@ -537,7 +549,7 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
         "side-chain block should be persisted in quarantine"
     );
 
-    let side_3_heavier = build_coinbase_only_block(
+    let side_3 = build_coinbase_only_block(
         *block_hash(&genesis).as_bytes(),
         block_hash(&side_2_invalid),
         BlockHeight(3),
@@ -546,18 +558,37 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
         35,
         &chain_id,
     );
-    let side_3_heavier_hash = block_hash(&side_3_heavier);
+    let side_3_hash = block_hash(&side_3);
     chain
         .store
         .store_known_block(
-            side_3_heavier_hash.as_bytes(),
-            &side_3_heavier.header.to_bytes().expect("header bytes"),
-            &side_3_heavier.to_bytes().expect("block bytes"),
+            side_3_hash.as_bytes(),
+            &side_3.header.to_bytes().expect("header bytes"),
+            &side_3.to_bytes().expect("block bytes"),
+        )
+        .expect("store equal-work side block");
+
+    let side_4_heavier = build_coinbase_only_block(
+        *block_hash(&genesis).as_bytes(),
+        side_3_hash,
+        BlockHeight(4),
+        side_3.header.total_difficulty,
+        [0u8; 32],
+        36,
+        &chain_id,
+    );
+    let side_4_heavier_hash = block_hash(&side_4_heavier);
+    chain
+        .store
+        .store_known_block(
+            side_4_heavier_hash.as_bytes(),
+            &side_4_heavier.header.to_bytes().expect("header bytes"),
+            &side_4_heavier.to_bytes().expect("block bytes"),
         )
         .expect("store heavier side tip");
 
     let err = chain
-        .promote_heavier_known_tip(side_3_heavier_hash, safe_now())
+        .promote_heavier_known_tip(side_4_heavier_hash, safe_now())
         .expect_err("promotion must reject branch-invalid input");
     let msg = err.to_string();
     assert!(
@@ -566,7 +597,7 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
     );
     assert_eq!(
         chain.tip_hash,
-        block_hash(&canonical_2),
+        block_hash(&canonical_3),
         "failed promotion must leave canonical tip unchanged"
     );
 }
