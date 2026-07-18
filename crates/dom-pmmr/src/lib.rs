@@ -21,6 +21,9 @@
 use dom_core::{DomError, Hash256, TAG_PMMR_BAG, TAG_PMMR_EMPTY, TAG_PMMR_LEAF, TAG_PMMR_NODE};
 use dom_crypto::hash::blake2b_256_tagged;
 
+#[cfg(kani)]
+mod kani_invariants;
+
 // ── Position arithmetic ───────────────────────────────────────────────────────
 //
 // Convention (RFC-0004, matching Grin's `core/src/core/pmmr/pmmr.rs`):
@@ -93,12 +96,27 @@ fn node_height(pos: u64) -> u32 {
 ///
 /// Peaks are ordered left-to-right by MMR position, which is the
 /// consensus-mandated order per RFC-0004.
-fn peak_positions(leaf_count: u64) -> Vec<u64> {
+#[derive(Clone, Copy)]
+struct PeakPositions {
+    positions: [u64; 64],
+    len: usize,
+}
+
+impl PeakPositions {
+    fn as_slice(&self) -> &[u64] {
+        &self.positions[..self.len]
+    }
+}
+
+fn peak_positions_fixed(leaf_count: u64) -> Option<PeakPositions> {
+    let mut peaks = PeakPositions {
+        positions: [0; 64],
+        len: 0,
+    };
     if leaf_count == 0 {
-        return vec![];
+        return Some(peaks);
     }
 
-    let mut peaks = Vec::new();
     let mut remaining = leaf_count;
     let mut pos_offset: u64 = 0;
 
@@ -110,20 +128,14 @@ fn peak_positions(leaf_count: u64) -> Vec<u64> {
         if subtree_leaves <= remaining {
             // This peak has subtree_leaves leaves
             // Peak position in the MMR = pos_offset + (2 * subtree_leaves - 1)
-            let subtree_size = subtree_leaves
-                .checked_mul(2)
-                .and_then(|x| x.checked_sub(1))
-                .expect("subtree size overflow");
-            let peak_pos = pos_offset
-                .checked_add(subtree_size)
-                .expect("peak position overflow");
-            peaks.push(peak_pos);
-            pos_offset = pos_offset
-                .checked_add(subtree_size)
-                .expect("pos_offset overflow");
-            remaining = remaining
-                .checked_sub(subtree_leaves)
-                .expect("remaining underflow");
+            // Compute 2*n-1 without overflowing the intermediate 2*n. This
+            // keeps the single 2^63-leaf peak representable at u64::MAX.
+            let subtree_size = subtree_leaves.checked_sub(1)?.checked_add(subtree_leaves)?;
+            let peak_pos = pos_offset.checked_add(subtree_size)?;
+            peaks.positions[peaks.len] = peak_pos;
+            peaks.len += 1;
+            pos_offset = peak_pos;
+            remaining = remaining.checked_sub(subtree_leaves)?;
         }
         if bit == 0 {
             break;
@@ -131,7 +143,14 @@ fn peak_positions(leaf_count: u64) -> Vec<u64> {
         bit -= 1;
     }
 
-    peaks
+    Some(peaks)
+}
+
+fn peak_positions(leaf_count: u64) -> Vec<u64> {
+    peak_positions_fixed(leaf_count)
+        .expect("PMMR peak positions exceed the u64 position domain")
+        .as_slice()
+        .to_vec()
 }
 
 // ── Hashing ───────────────────────────────────────────────────────────────────
@@ -500,6 +519,16 @@ mod tests {
     fn peak_positions_three_leaves() {
         let peaks = peak_positions(3);
         assert_eq!(peaks.len(), 2); // one 2-tree peak + one leaf peak
+    }
+
+    #[test]
+    fn peak_position_domain_boundary_is_explicit() {
+        let largest_single_peak = peak_positions_fixed(1u64 << 63).expect("single peak fits");
+        assert_eq!(largest_single_peak.as_slice(), &[u64::MAX]);
+        assert!(
+            peak_positions_fixed((1u64 << 63) + 1).is_none(),
+            "a second peak after u64::MAX must fail instead of wrapping"
+        );
     }
 
     #[test]

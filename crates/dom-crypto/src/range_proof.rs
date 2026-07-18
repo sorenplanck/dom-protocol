@@ -21,6 +21,11 @@ pub const MAX_PROVABLE_VALUE: u64 = (1u64 << 52) - 1;
 /// Exact byte length of the final DOM range proof.
 pub const RANGE_PROOF_SIZE: usize = bulletproof_bp::SINGLE_BULLETPROOF_SIZE;
 
+/// Return whether a serialized proof has the one canonical protocol length.
+pub(crate) const fn range_proof_length_is_canonical(length: usize) -> bool {
+    length == RANGE_PROOF_SIZE
+}
+
 /// Owned serialized final DOM range proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RangeProof {
@@ -31,7 +36,7 @@ pub struct RangeProof {
 impl RangeProof {
     /// Construct a final range proof from serialized bytes.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, DomError> {
-        if bytes.len() != RANGE_PROOF_SIZE {
+        if !range_proof_length_is_canonical(bytes.len()) {
             return Err(DomError::Invalid(format!(
                 "range proof length {} != {}",
                 bytes.len(),

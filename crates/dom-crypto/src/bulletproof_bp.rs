@@ -605,9 +605,9 @@ pub fn bp_verify(commitment_sec1: &[u8; 33], proof_bytes: &[u8]) -> Result<bool,
     if proof_bytes.is_empty() {
         return Err(DomError::Malformed("range proof is empty".into()));
     }
-    if proof_bytes.len() != SINGLE_BULLETPROOF_SIZE {
+    if !crate::range_proof::range_proof_length_is_canonical(proof_bytes.len()) {
         return Err(DomError::Malformed(format!(
-            "range proof tamanho invalido: {} bytes (esperado {SINGLE_BULLETPROOF_SIZE})",
+            "invalid range proof length: {} bytes (expected {SINGLE_BULLETPROOF_SIZE})",
             proof_bytes.len()
         )));
     }
@@ -641,7 +641,7 @@ pub fn bp_verify_with_extra_commit(
             "range proof extra commitment must not be empty".into(),
         ));
     }
-    if proof_bytes.len() != SINGLE_BULLETPROOF_SIZE {
+    if !crate::range_proof::range_proof_length_is_canonical(proof_bytes.len()) {
         return Err(DomError::Malformed(format!(
             "range proof length {} != {SINGLE_BULLETPROOF_SIZE}",
             proof_bytes.len()
@@ -755,7 +755,7 @@ mod tests {
             Ok(false) => {}
             Ok(true) => panic!("all-zeros 739-byte proof must not verify true"),
             Err(e) => assert!(
-                !e.to_string().contains("tamanho invalido"),
+                !e.to_string().contains("invalid range proof length"),
                 "739-byte proof must not be rejected by the size gate, got: {e}"
             ),
         }
@@ -767,7 +767,7 @@ mod tests {
             let err = bp_verify(&commitment, &vec![0u8; len])
                 .expect_err("off-size proof must be rejected");
             assert!(
-                err.to_string().contains("tamanho invalido"),
+                err.to_string().contains("invalid range proof length"),
                 "len {len} must be rejected as size-invalid, got: {err}"
             );
         }
