@@ -301,6 +301,20 @@ fn block_at_height_200_decodes() {
 }
 
 #[test]
+fn block_at_height_accepts_node_compact_target() {
+    let server = start_mock_server(|line, _body| {
+        assert!(line.contains("/block/0"), "actual line: {line}");
+        Action::Respond(http_ok_json(
+            r#"{"height":0,"hash":"aa00000000000000000000000000000000000000000000000000000000000000","prev_hash":"0000000000000000000000000000000000000000000000000000000000000000","timestamp":1784071429,"target":"1e7fffff"}"#,
+        ))
+    });
+    let client = fast_client(&server);
+    let block = client.block_at_height(0).unwrap().unwrap();
+    assert_eq!(&block.target[..28], &[0u8; 28]);
+    assert_eq!(&block.target[28..], &[0x1e, 0x7f, 0xff, 0xff]);
+}
+
+#[test]
 fn block_at_height_404_is_ok_none_not_error() {
     let server = start_mock_server(|_l, _b| {
         Action::Respond(http_response(404, "Not Found", r#"{"found":false}"#))
