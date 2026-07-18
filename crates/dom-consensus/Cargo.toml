@@ -22,3 +22,6 @@ secp256k1.workspace = true
 k256.workspace = true
 primitive-types.workspace = true
 proptest.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

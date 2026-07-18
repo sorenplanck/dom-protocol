@@ -289,6 +289,7 @@ impl ChainState {
 
         validate_header_syntax(header)?;
         self.validate_genesis_identity(header, block_hash)?;
+        self.validate_genesis_body_identity(block)?;
 
         let parent = if header.height != BlockHeight::GENESIS {
             let parent_bytes = self
@@ -850,6 +851,34 @@ impl ChainState {
             }
         }
 
+        Ok(())
+    }
+
+    /// Require the exact frozen legacy genesis body whenever this chain is
+    /// configured with a production network identity. Synthetic tests that use
+    /// an explicitly zero or non-production genesis hash retain their local
+    /// fixture behavior.
+    fn validate_genesis_body_identity(&self, block: &Block) -> Result<(), DomError> {
+        if block.header.height != BlockHeight::GENESIS
+            || self.network_magic == dom_core::NETWORK_MAGIC_MAINNET
+        {
+            return Ok(());
+        }
+
+        let configured = dom_core::configured_genesis_hash_for_network_magic(self.network_magic)?;
+        if self.genesis_hash != configured {
+            return Ok(());
+        }
+
+        let chain_id = derive_chain_id(self.network_magic, &configured);
+        let canonical = crate::build_canonical_genesis(self.network_magic, chain_id.as_bytes())?;
+        let actual = block.to_bytes()?;
+        if actual != canonical.block_bytes {
+            return Err(DomError::Invalid(
+                "genesis body mismatch: configured network requires the exact frozen canonical body"
+                    .into(),
+            ));
+        }
         Ok(())
     }
 

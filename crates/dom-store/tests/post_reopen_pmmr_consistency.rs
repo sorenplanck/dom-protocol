@@ -130,7 +130,7 @@ fn build_consistent_block(height: u64, include_tx: bool) -> Block {
     };
 
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &txs).expect("compute roots");
+        compute_block_pmmr_roots(BlockHeight(height), &coinbase, &txs).expect("compute roots");
 
     let header = BlockHeader {
         version: PROTOCOL_VERSION,
@@ -188,7 +188,8 @@ fn assert_recomputed_roots_match_stored_header(store: &DomStore, hash: &[u8; 32]
         .expect("body present");
     let block = Block::from_bytes(&body_bytes).expect("body decodes");
     let (or, kr, rr) =
-        compute_block_pmmr_roots(&block.coinbase, &block.transactions).expect("recompute roots");
+        compute_block_pmmr_roots(block.header.height, &block.coinbase, &block.transactions)
+            .expect("recompute roots");
     assert_eq!(
         block.header.output_root, or,
         "h={height}: output_root drift on reopen — header={} recomputed={}",
@@ -310,7 +311,8 @@ fn body_mutation_post_persist_breaks_recomputed_pmmr_roots() {
         .expect("body present");
     let block = Block::from_bytes(&body).expect("decode");
     let (or, _, _) =
-        compute_block_pmmr_roots(&block.coinbase, &block.transactions).expect("recompute");
+        compute_block_pmmr_roots(block.header.height, &block.coinbase, &block.transactions)
+            .expect("recompute");
     // The body's output commitment was tampered with → output_root
     // recomputed from the body MUST differ from the header's
     // stored output_root (which was committed when output =

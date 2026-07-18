@@ -153,7 +153,7 @@ fn build_block(
         .sum();
     let coinbase = build_coinbase(height, total_fees, coinbase_seed, chain_id);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &transactions).expect("roots");
+        compute_block_pmmr_roots(height, &coinbase, &transactions).expect("roots");
     let timestamp = genesis_anchor(NETWORK_MAGIC_REGTEST)
         .expect("anchor")
         .timestamp

@@ -1,7 +1,7 @@
 mod common;
 
 use common::open_test_chain;
-use dom_chain::{ChainState, ConnectResult};
+use dom_chain::{build_canonical_genesis, ChainState, ConnectResult};
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{
     compute_block_pmmr_roots, derive_chain_id, Block, CoinbaseKernel, CoinbaseTransaction,
@@ -104,7 +104,7 @@ fn mine_fast_header(
 fn genesis_block(coinbase_seed: u8, chain_id: &[u8; 32]) -> Block {
     let coinbase = build_coinbase(BlockHeight::GENESIS, coinbase_seed, chain_id);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &[]).expect("roots");
+        compute_block_pmmr_roots(BlockHeight::GENESIS, &coinbase, &[]).expect("roots");
     let anchor = genesis_anchor(NETWORK_MAGIC_REGTEST).expect("anchor");
     let target = compute_expected_target(
         NETWORK_MAGIC_REGTEST,
@@ -165,6 +165,39 @@ fn configured_genesis_hash_rejects_alternate_height_zero_before_persistence() {
             .expect("read rejected body")
             .is_none(),
         "rejected alternate genesis must not persist a block body"
+    );
+}
+
+#[test]
+fn configured_genesis_rejects_distinct_body_under_the_frozen_header() {
+    let configured =
+        dom_core::configured_genesis_hash_for_network_magic(NETWORK_MAGIC_REGTEST).unwrap();
+    let chain_id = derive_chain_id(NETWORK_MAGIC_REGTEST, &configured);
+    let canonical = build_canonical_genesis(NETWORK_MAGIC_REGTEST, chain_id.as_bytes()).unwrap();
+    let mut altered = canonical.block.expect("legacy Regtest genesis block");
+    altered.coinbase.kernel.excess_signature[0] ^= 1;
+    assert_eq!(
+        block_hash(&altered),
+        configured,
+        "body-only mutation must retain the frozen header identifier"
+    );
+
+    let dir = TempDir::new().expect("tempdir");
+    let mut chain = open_chain(dir.path(), configured);
+    let error = chain
+        .connect_block(&altered, Timestamp(u64::MAX))
+        .expect_err("a distinct body under the frozen genesis header must be rejected");
+    assert!(
+        matches!(error, DomError::Invalid(ref message) if message.contains("genesis body mismatch")),
+        "expected exact frozen-body rejection, got {error:?}"
+    );
+    assert!(
+        chain
+            .store
+            .get_block_body(configured.as_bytes())
+            .expect("read rejected body")
+            .is_none(),
+        "the altered genesis body must not be persisted"
     );
 }
 

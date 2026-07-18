@@ -164,7 +164,7 @@ fn build_block_with_txs(
     let target = fixed_target();
     let coinbase = build_coinbase(height, 0, coinbase_seed, chain_id);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &transactions).expect("roots");
+        compute_block_pmmr_roots(height, &coinbase, &transactions).expect("roots");
     let total_difficulty = parent_total_difficulty + U256::from(target_to_difficulty(&target));
     let header = mine_fast_header(
         target,

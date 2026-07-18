@@ -23,8 +23,8 @@ use dom_consensus::transaction::{
 };
 use dom_consensus::{compute_block_pmmr_roots, CoinbaseKernel, CoinbaseTransaction};
 use dom_core::{
-    Amount, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN, MAX_SUPPLY_NOMS, TAG_KERNEL_MSG, WEIGHT_INPUT,
-    WEIGHT_KERNEL, WEIGHT_OUTPUT,
+    Amount, BlockHeight, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN, MAX_SUPPLY_NOMS, TAG_KERNEL_MSG,
+    WEIGHT_INPUT, WEIGHT_KERNEL, WEIGHT_OUTPUT,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
@@ -242,8 +242,8 @@ proptest! {
         let coinbase = dummy_coinbase(cb_seed);
         let txs: Vec<Transaction> = tx_seeds.iter().map(|&(s, f)| dummy_tx(s, f)).collect();
 
-        let miner = compute_block_pmmr_roots(&coinbase, &txs).expect("miner roots");
-        let validator = compute_block_pmmr_roots(&coinbase, &txs).expect("validator roots");
+        let miner = compute_block_pmmr_roots(BlockHeight(1), &coinbase, &txs).expect("miner roots");
+        let validator = compute_block_pmmr_roots(BlockHeight(1), &coinbase, &txs).expect("validator roots");
         prop_assert_eq!(miner, validator, "miner and validator must agree on roots");
     }
 
@@ -259,8 +259,8 @@ proptest! {
         let coinbase = dummy_coinbase(cb_seed);
         let tx_a = dummy_tx(a_seed, 0x11);
         let tx_b = dummy_tx(b_seed, 0x22);
-        let fwd = compute_block_pmmr_roots(&coinbase, &[tx_a.clone(), tx_b.clone()]).unwrap();
-        let rev = compute_block_pmmr_roots(&coinbase, &[tx_b, tx_a]).unwrap();
+        let fwd = compute_block_pmmr_roots(BlockHeight(1), &coinbase, &[tx_a.clone(), tx_b.clone()]).unwrap();
+        let rev = compute_block_pmmr_roots(BlockHeight(1), &coinbase, &[tx_b, tx_a]).unwrap();
         // a_seed != b_seed always (disjoint ranges) → bodies genuinely differ in order.
         prop_assert!(
             fwd.0 != rev.0 || fwd.1 != rev.1 || fwd.2 != rev.2,

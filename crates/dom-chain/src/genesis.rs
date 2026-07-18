@@ -432,7 +432,8 @@ fn build_legacy_canonical_genesis(
         chain_id
     };
     let coinbase = build_genesis_coinbase(genesis_signing_context)?;
-    let (output_root, kernel_root, rangeproof_root) = compute_block_pmmr_roots(&coinbase, &[])?;
+    let (output_root, kernel_root, rangeproof_root) =
+        compute_block_pmmr_roots(BlockHeight::GENESIS, &coinbase, &[])?;
     let header = canonical_header(
         network_magic,
         anchor,

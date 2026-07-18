@@ -282,7 +282,7 @@ fn block_with_transactions(transactions: Vec<Transaction>) -> Block {
         .expect("total fees");
     let coinbase = signed_coinbase(total_fees);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &transactions).expect("pmmr roots");
+        compute_block_pmmr_roots(BlockHeight(1), &coinbase, &transactions).expect("pmmr roots");
     Block {
         header: BlockHeader {
             version: PROTOCOL_VERSION,

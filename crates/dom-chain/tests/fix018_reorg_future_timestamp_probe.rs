@@ -98,7 +98,7 @@ fn coinbase_only_block_with(
 ) -> Block {
     let coinbase = signed_coinbase(BlockHeight(height), coinbase_seed);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &[]).expect("pmmr roots");
+        compute_block_pmmr_roots(BlockHeight(height), &coinbase, &[]).expect("pmmr roots");
     Block {
         header: BlockHeader {
             version: PROTOCOL_VERSION,

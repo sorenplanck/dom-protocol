@@ -67,7 +67,7 @@ fn build_coinbase(claimed_fees: u64, chain_id: &[u8; 32]) -> CoinbaseTransaction
 
 fn make_header(coinbase: &CoinbaseTransaction, total_kernel_offset: [u8; 32]) -> BlockHeader {
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(coinbase, &[]).expect("pmmr roots");
+        compute_block_pmmr_roots(BlockHeight(1), coinbase, &[]).expect("pmmr roots");
     BlockHeader {
         version: PROTOCOL_VERSION,
         height: BlockHeight(1),

@@ -4849,7 +4849,7 @@ mod tests {
     ) -> Block {
         let coinbase = build_coinbase(height, 0, chain_id);
         let (output_root, kernel_root, rangeproof_root) =
-            dom_consensus::compute_block_pmmr_roots(&coinbase, &[]).expect("roots");
+            dom_consensus::compute_block_pmmr_roots(height, &coinbase, &[]).expect("roots");
         let timestamp = genesis_anchor(NETWORK_MAGIC_REGTEST)
             .expect("anchor")
             .timestamp
