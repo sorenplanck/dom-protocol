@@ -12,7 +12,7 @@ use axum::{
 };
 use dom_core::PROTOCOL_VERSION;
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, sync::Arc};
+use std::{future::Future, net::SocketAddr, sync::Arc};
 use tracing::{error, info, warn};
 
 pub trait NodeHandle: Send + Sync + 'static {
@@ -403,6 +403,23 @@ pub async fn serve_with_token(
     listener: tokio::net::TcpListener,
     configured_token: Option<String>,
 ) -> Result<(), RpcError> {
+    serve_with_token_until_shutdown(handle, listener, configured_token, shutdown_signal()).await
+}
+
+/// Run the RPC accept loop with caller-owned graceful shutdown.
+///
+/// Embedders with a process-wide supervisor must provide its shutdown future
+/// here so the RPC service cannot consume a signal independently and appear
+/// to have exited unexpectedly to that supervisor.
+pub async fn serve_with_token_until_shutdown<F>(
+    handle: Arc<dyn NodeHandle>,
+    listener: tokio::net::TcpListener,
+    configured_token: Option<String>,
+    shutdown: F,
+) -> Result<(), RpcError>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     let token_str = token::get_or_create_token_with_config(configured_token.as_deref())
         .map_err(|e| RpcError::Internal(format!("failed to init token: {e}")))?;
     let bearer_token = Arc::new(BearerToken(token_str));
@@ -421,7 +438,7 @@ pub async fn serve_with_token(
         listener,
         router(handle, bearer_token).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(shutdown)
     .await
     .map_err(|e| RpcError::Internal(format!("server error: {e}")))?;
 
@@ -994,6 +1011,27 @@ mod tests {
         // app()'s MockNode is configured for regtest, so /status must report
         // it — never the old hardcoded "mainnet" (DOM-AUDIT-006).
         assert_eq!(body["network"], serde_json::json!("regtest"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_owned_shutdown_stops_rpc_cleanly() {
+        let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_with_token_until_shutdown(
+            Arc::new(MockNode::new(0)),
+            listener,
+            Some("test-token".to_owned()),
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        shutdown_tx.send(()).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("RPC server should honor the supervisor shutdown")
+            .expect("RPC server task should not panic");
+        assert!(result.is_ok(), "supervisor shutdown must be a clean exit");
     }
 
     #[tokio::test]

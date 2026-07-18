@@ -690,12 +690,14 @@ impl DomNode {
             supervisor
                 .spawn_critical(TaskKind::Rpc, async move {
                     trace_task_result("rpc_server", async move {
-                        tokio::select! {
-                            _ = rpc_shutdown.wait() => Ok(()),
-                            result = dom_rpc::serve_with_token(handle, listener, rpc_bearer_token) => {
-                                result.map_err(|e| format!("RPC server error: {e}"))
-                            }
-                        }
+                        dom_rpc::serve_with_token_until_shutdown(
+                            handle,
+                            listener,
+                            rpc_bearer_token,
+                            async move { rpc_shutdown.wait().await },
+                        )
+                        .await
+                        .map_err(|e| format!("RPC server error: {e}"))
                     })
                     .await
                 })
@@ -957,7 +959,13 @@ impl DomNode {
             "shutdown completed"
         );
 
-        shutdown.wait().await;
+        tokio::select! {
+            _ = shutdown.wait() => {}
+            signal = tokio::signal::ctrl_c() => {
+                signal.map_err(|e| DomError::Internal(format!("install Ctrl-C handler: {e}")))?;
+                supervisor.request_shutdown().await;
+            }
+        }
         tracing::info!(
             event = "shutdown_requested",
             reason = "shutdown_token",
