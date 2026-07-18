@@ -579,8 +579,9 @@ mod tests {
     use super::*;
     use dom_consensus::derive_chain_id;
     use dom_core::{
-        configured_genesis_hash_for_network_magic, GENESIS_HASH_TESTNET, NETWORK_MAGIC_MAINNET,
-        NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET,
+        block_reward, configured_genesis_hash_for_network_magic, BlockHeight, GENESIS_HASH_TESTNET,
+        INITIAL_BLOCK_REWARD, MAX_SUPPLY_NOMS, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST,
+        NETWORK_MAGIC_TESTNET,
     };
 
     const INSCRIPTION_HEX: &str =
@@ -812,6 +813,28 @@ mod tests {
         assert_eq!(genesis.block_bytes.len(), 357);
         let identity = validate_mainnet_genesis_identity(&genesis.block_bytes).unwrap();
         assert_eq!(identity.body_bytes(), &[0u8; 16]);
+        assert_eq!(
+            u32::from_be_bytes(identity.body_bytes()[0..4].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            u32::from_be_bytes(identity.body_bytes()[4..8].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            u32::from_be_bytes(identity.body_bytes()[8..12].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            u32::from_be_bytes(identity.body_bytes()[12..16].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            block_reward(BlockHeight::GENESIS).noms(),
+            INITIAL_BLOCK_REWARD
+        );
+        assert_eq!(block_reward(BlockHeight(1)).noms(), INITIAL_BLOCK_REWARD);
+        assert_eq!(MAX_SUPPLY_NOMS, 3_299_996_676_900_000);
         assert_eq!(identity.inscription().text(), GENESIS_MESSAGE);
         assert_eq!(
             genesis
@@ -832,7 +855,7 @@ mod tests {
             .position(|window| window == GENESIS_MESSAGE.as_bytes())
             .unwrap();
 
-        for replacement in [b'n', b'V', b'!', b' '] {
+        for replacement in *b"nV! " {
             let mut changed = canonical.clone();
             changed[phrase_offset] = replacement;
             assert!(validate_mainnet_genesis_identity(&changed).is_err());

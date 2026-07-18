@@ -71,12 +71,13 @@ mod tests {
     #[test]
     fn supply_ceiling_is_approximately_33m() {
         // Per whitepaper: ~33,000,000 DOM total supply.
-        // Real value with integer arithmetic: 32,999,999.769 DOM
+        // Height zero is economically empty. The resulting integer-arithmetic
+        // total is 32,999,966.769 DOM.
         let dom = MAX_SUPPLY_NOMS / COIN_UNIT;
         assert!(dom >= 32_000_000, "Supply should be >= 32M DOM, got {dom}");
         assert!(dom < 33_000_000, "Supply should be < 33M DOM, got {dom}");
         // Exact pre-computed value
-        assert_eq!(MAX_SUPPLY_NOMS, 3_299_999_976_900_000);
+        assert_eq!(MAX_SUPPLY_NOMS, 3_299_996_676_900_000);
     }
 
     #[test]
