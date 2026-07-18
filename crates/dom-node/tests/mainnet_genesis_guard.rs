@@ -1,51 +1,24 @@
-use dom_config::NodeConfig;
-use dom_core::DomError;
-use dom_node::node::DomNode;
-use tempfile::TempDir;
+//! Mainnet genesis readiness regression tests.
+//!
+//! These checks deliberately validate the frozen Mainnet identity without
+//! constructing or running a Mainnet node. The final campaign is local-only:
+//! readiness must not require a listener, a database, DNS, NTP, or peer I/O.
 
-const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
+use dom_core::{startup_genesis_hash_for_network_magic, Hash256, NETWORK_MAGIC_MAINNET};
 
-fn assert_mainnet_init_fails_before_storage(label: &str, mutate: impl FnOnce(&mut NodeConfig)) {
-    let temp = TempDir::new().expect("tempdir");
-    let data_dir = temp.path().join(label);
-    let mut config = NodeConfig::mainnet();
-    config.data_dir = data_dir.display().to_string();
-    mutate(&mut config);
-
-    let err = match DomNode::init_with_map_size(config, TEST_LMDB_MAP_SIZE) {
-        Ok(_) => panic!("mainnet must fail closed"),
-        Err(err) => err,
-    };
-    assert!(matches!(err, DomError::Invalid(_)));
-    assert!(
-        err.to_string().contains("mainnet genesis is not finalized"),
-        "unexpected error: {err}"
-    );
-    assert!(
-        !data_dir.exists(),
-        "mainnet readiness gate must fail before storage, listeners, RPC, or mining setup"
+#[test]
+fn finalized_mainnet_genesis_passes_the_startup_readiness_gate() {
+    assert_eq!(
+        startup_genesis_hash_for_network_magic(NETWORK_MAGIC_MAINNET)
+            .expect("finalized Mainnet genesis must be startup-ready"),
+        Hash256::from_bytes(dom_core::GENESIS_HASH_MAINNET),
     );
 }
 
 #[test]
-fn init_refuses_mainnet_when_genesis_is_unfinalized() {
-    assert_mainnet_init_fails_before_storage("dom-mainnet", |_| {});
-}
-
-#[test]
-fn init_refuses_all_mainnet_service_modes_before_startup_side_effects() {
-    assert_mainnet_init_fails_before_storage("dom-mainnet-sync", |config| {
-        config.mine = false;
-        config.rpc_listen_addr = None;
-    });
-    assert_mainnet_init_fails_before_storage("dom-mainnet-mining", |config| {
-        config.mine = true;
-    });
-    assert_mainnet_init_fails_before_storage("dom-mainnet-rpc", |config| {
-        config.rpc_listen_addr = Some("127.0.0.1:0".into());
-    });
-    assert_mainnet_init_fails_before_storage("dom-mainnet-mining-rpc", |config| {
-        config.mine = true;
-        config.rpc_listen_addr = Some("127.0.0.1:0".into());
-    });
+fn finalized_mainnet_genesis_matches_the_frozen_identity() {
+    assert_eq!(
+        Hash256::from_bytes(dom_core::GENESIS_HASH_MAINNET).to_hex(),
+        "182e10af28e7ec072f462e6044f580dc9dd8c866cb78dfc293bbfaee4e9325ce"
+    );
 }
