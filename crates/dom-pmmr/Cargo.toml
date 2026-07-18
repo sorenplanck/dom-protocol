@@ -17,3 +17,6 @@ proptest.workspace   = true
 rand.workspace       = true
 dom-core.workspace   = true
 dom-crypto.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(kani)'] }

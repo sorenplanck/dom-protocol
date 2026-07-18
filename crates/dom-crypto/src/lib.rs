@@ -26,6 +26,8 @@ pub use schnorr::{
     schnorr_sign, schnorr_verify, PartialSig, SchnorrSignature,
 };
 mod bulletproof_bp;
+#[cfg(kani)]
+mod kani_invariants;
 pub mod range_proof;
 pub mod recovery;
 #[cfg(feature = "test-helpers")]

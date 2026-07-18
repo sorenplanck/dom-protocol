@@ -43,3 +43,6 @@ secp256k1.workspace = true
 # same `expose-field` feature lets the integration test reach FieldElement.
 primitive-types.workspace = true
 k256.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(kani)'] }

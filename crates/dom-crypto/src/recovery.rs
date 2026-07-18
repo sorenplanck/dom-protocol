@@ -29,6 +29,30 @@ pub const RECOVERY_CIPHERTEXT_SIZE: usize = RECOVERY_PLAINTEXT_SIZE + RECOVERY_T
 /// Fixed canonical capsule length.
 pub const RECOVERY_CAPSULE_SIZE: usize = 2 + RECOVERY_NONCE_SIZE + 2 + RECOVERY_CIPHERTEXT_SIZE;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecoveryCapsuleFrontier {
+    WrongLength,
+    UnsupportedVersion,
+    WrongCiphertextLength,
+    Candidate,
+}
+
+pub(crate) const fn classify_recovery_capsule_frontier(
+    length: usize,
+    version: u16,
+    ciphertext_length: usize,
+) -> RecoveryCapsuleFrontier {
+    if length != RECOVERY_CAPSULE_SIZE {
+        RecoveryCapsuleFrontier::WrongLength
+    } else if version != RECOVERY_VERSION {
+        RecoveryCapsuleFrontier::UnsupportedVersion
+    } else if ciphertext_length != RECOVERY_CIPHERTEXT_SIZE {
+        RecoveryCapsuleFrontier::WrongCiphertextLength
+    } else {
+        RecoveryCapsuleFrontier::Candidate
+    }
+}
+
 /// HKDF domain separation constants frozen by the recovery RFC.
 pub const TAG_RECOVERY_ROOT: &[u8] = b"DOM:wallet-v3:recovery-root";
 /// Recovery ownership-detection root domain.
@@ -192,23 +216,34 @@ impl std::fmt::Debug for RecoveryCapsule {
 impl RecoveryCapsule {
     /// Parse canonical public framing without allocating from encoded lengths.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DomError> {
-        if bytes.len() != RECOVERY_CAPSULE_SIZE {
-            return Err(DomError::Malformed(format!(
-                "recovery capsule length {} != {RECOVERY_CAPSULE_SIZE}",
-                bytes.len()
-            )));
-        }
-        let version = u16::from_le_bytes([bytes[0], bytes[1]]);
-        if version != RECOVERY_VERSION {
-            return Err(DomError::Malformed(format!(
-                "unsupported recovery capsule version {version}"
-            )));
-        }
-        let ciphertext_len = u16::from_le_bytes([bytes[14], bytes[15]]) as usize;
-        if ciphertext_len != RECOVERY_CIPHERTEXT_SIZE {
-            return Err(DomError::Malformed(format!(
-                "recovery ciphertext length {ciphertext_len} != {RECOVERY_CIPHERTEXT_SIZE}"
-            )));
+        let version = if bytes.len() >= 2 {
+            u16::from_le_bytes([bytes[0], bytes[1]])
+        } else {
+            0
+        };
+        let ciphertext_len = if bytes.len() >= 16 {
+            u16::from_le_bytes([bytes[14], bytes[15]]) as usize
+        } else {
+            0
+        };
+        match classify_recovery_capsule_frontier(bytes.len(), version, ciphertext_len) {
+            RecoveryCapsuleFrontier::WrongLength => {
+                return Err(DomError::Malformed(format!(
+                    "recovery capsule length {} != {RECOVERY_CAPSULE_SIZE}",
+                    bytes.len()
+                )));
+            }
+            RecoveryCapsuleFrontier::UnsupportedVersion => {
+                return Err(DomError::Malformed(format!(
+                    "unsupported recovery capsule version {version}"
+                )));
+            }
+            RecoveryCapsuleFrontier::WrongCiphertextLength => {
+                return Err(DomError::Malformed(format!(
+                    "recovery ciphertext length {ciphertext_len} != {RECOVERY_CIPHERTEXT_SIZE}"
+                )));
+            }
+            RecoveryCapsuleFrontier::Candidate => {}
         }
         let mut out = [0u8; RECOVERY_CAPSULE_SIZE];
         out.copy_from_slice(bytes);
@@ -668,6 +703,26 @@ mod tests {
         let mut oversized_claim = *capsule.as_bytes();
         oversized_claim[14..16].copy_from_slice(&81u16.to_le_bytes());
         assert!(RecoveryCapsule::from_bytes(&oversized_claim).is_err());
+    }
+
+    #[test]
+    fn secret_bearing_recovery_debug_paths_are_redacted() {
+        let (root, _, commitment, capsule) = fixture();
+        assert_eq!(format!("{root:?}"), "RecoveryRoot([REDACTED])");
+        let recovered = recover_output_from_capsule(
+            &root,
+            context(),
+            commitment.as_bytes(),
+            1,
+            PublicOutputKind::Regular,
+            &capsule,
+        )
+        .expect("recovery succeeds")
+        .expect("owned output");
+        let dbg = format!("{recovered:?}");
+        assert!(dbg.contains("value: \"[REDACTED]\""));
+        assert!(dbg.contains("blinding: \"[REDACTED]\""));
+        assert!(!dbg.contains(&hex::encode([3u8; 32])));
     }
 
     #[test]

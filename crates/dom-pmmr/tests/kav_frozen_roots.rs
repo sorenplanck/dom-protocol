@@ -1,4 +1,4 @@
-//! KAV-drift-congelado / KAV-conformância + XDIFF for dom-pmmr (RFC-0004).
+//! KAV frozen-drift / KAV conformance + XDIFF for dom-pmmr (RFC-0004).
 //!
 //! Subfamily: frozen known-answer vectors for `Pmmr::root()` over the
 //! consensus-mandated leaf counts {0,1,2,3,4,7,8,15,16}.
