@@ -435,7 +435,7 @@ fn a2_001_reorg_a_to_b_with_shared_tx_same_kernel_excess_must_succeed() {
     // ---- CORRECT CONTRACT: reorg A->B must SUCCEED. The shared kernel excess
     // must migrate from A2 to B3. (RED BY DESIGN — fails today with A2-001.) ----
     chain
-        .promote_heavier_known_tip(b4_hash)
+        .promote_heavier_known_tip(b4_hash, Timestamp(2_000_000_000))
         .expect("reorg A->B with shared tx must succeed");
     assert_eq!(chain.tip_hash, b4_hash, "tip must advance to the heavier B");
     assert_eq!(chain.tip_height, BlockHeight(4));

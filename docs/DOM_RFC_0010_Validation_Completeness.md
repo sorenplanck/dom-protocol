@@ -58,17 +58,22 @@ sanity cap.
 ### 1.2 Block Weight
 
 ```
-weight(Block) = sum(weight(tx) for tx in block.transactions)
+weight(Block) = coinbase.kernel.weight()
+              + WEIGHT_OUTPUT
+              + sum(weight(tx) for tx in block.transactions)
 ```
 
-The coinbase transaction is NOT counted in block weight. Block weight is the weight
-of all non-coinbase transactions only.
+The coinbase transaction IS counted in block weight. Its contribution is fixed at
+`WEIGHT_COINBASE_KERNEL + WEIGHT_OUTPUT = 2 + 21 = 23 wu`, assuming the canonical
+coinbase shape of exactly one output and no inputs (the coinbase kernel weight is
+`WEIGHT_COINBASE_KERNEL = 2 wu`; the single output weight is `WEIGHT_OUTPUT = 21 wu`).
+The remaining terms are the full weights of the non-coinbase transactions.
 
 ### 1.3 Limits
 
 ```
 MAX_TX_WEIGHT    = 4000 wu   // single transaction limit
-MAX_BLOCK_WEIGHT = 40000 wu  // all non-coinbase transactions in a block
+MAX_BLOCK_WEIGHT = 40000 wu  // coinbase (23 wu) + all non-coinbase transactions in a block
 ```
 
 A transaction with `weight(tx) > MAX_TX_WEIGHT` is `Invalid` (consensus).

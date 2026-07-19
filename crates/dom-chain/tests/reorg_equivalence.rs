@@ -588,7 +588,7 @@ fn promote_heavier_known_tip_emits_block_level_reorg_metadata() {
 
     let mut chain = open_chain(dir.path());
     let reorg = chain
-        .promote_heavier_known_tip(alt_4_hash)
+        .promote_heavier_known_tip(alt_4_hash, Timestamp(2_000_000_000))
         .expect("reorg promotion");
 
     assert_eq!(reorg.common_ancestor_height, 1);
@@ -658,7 +658,7 @@ fn promote_heavier_known_tip_rewrites_canonical_state_and_survives_restart() {
     assert_eq!(chain.tip_hash, old_3_hash);
 
     let reorg = chain
-        .promote_heavier_known_tip(alt_4_hash)
+        .promote_heavier_known_tip(alt_4_hash, Timestamp(2_000_000_000))
         .expect("reorg promotion");
 
     assert_eq!(reorg.disconnected_txs.len(), 1);
@@ -844,7 +844,7 @@ fn retained_reorg_candidate_is_not_pruned_before_promotion() {
     }
 
     chain
-        .promote_heavier_known_tip(candidate_4_hash)
+        .promote_heavier_known_tip(candidate_4_hash, Timestamp(2_000_000_000))
         .expect("retained heavier branch must remain promotable");
     assert_eq!(chain.tip_hash, candidate_4_hash);
     assert_eq!(chain.tip_height, BlockHeight(4));
