@@ -25,6 +25,8 @@ const MAX_DUPLICATE_BLOCK_RELAYS_PER_WINDOW: u32 = 32;
 const DUPLICATE_BLOCK_RELAY_WINDOW_SECS: u64 = 30;
 /// Bound runtime memory used by outbound failure history.
 const MAX_OUTBOUND_FAILURE_TRACKERS: usize = 4_096;
+/// Bound address aliases learned for authenticated Noise PeerIds.
+const MAX_KNOWN_PEER_ALIASES: usize = 4_096;
 const MAX_PEER_ROTATION_ADDR_BYTES: usize = 256;
 const MAX_PERSISTED_PEER_REPUTATION_ENTRIES: usize = MAX_PENDING_PENALTIES;
 const MAX_OUTBOUND_FAILURE_COOLDOWN_ROUNDS: u8 = 16;
@@ -287,6 +289,14 @@ impl DomDeserialize for PersistedPeerReputationState {
 pub struct PeerManager {
     /// Connected peers: addr_string → PeerInfo.
     pub peers: HashMap<String, PeerInfo>,
+    /// Active authenticated PeerId -> canonical socket-address key.
+    active_peer_ids: HashMap<[u8; 32], String>,
+    /// Dial aliases (DNS name or socket address) -> authenticated PeerId.
+    known_peer_aliases: HashMap<String, [u8; 32]>,
+    /// Successful outbound dial alias -> (canonical key, session generation).
+    /// Cleanup consumes this ownership record and therefore cannot remove a
+    /// newer or unrelated session.
+    outbound_session_owners: HashMap<String, (String, u64)>,
     /// Inbound sockets admitted by the listener but not yet registered.
     pending_inbound: HashMap<String, PendingInbound>,
     /// Outbound dials started but not yet registered.
@@ -310,6 +320,9 @@ impl PeerManager {
     pub fn new(max_inbound: usize, min_outbound: usize) -> Self {
         Self {
             peers: HashMap::new(),
+            active_peer_ids: HashMap::new(),
+            known_peer_aliases: HashMap::new(),
+            outbound_session_owners: HashMap::new(),
             pending_inbound: HashMap::new(),
             pending_outbound: HashMap::new(),
             pending_penalties: HashMap::new(),
@@ -439,6 +452,15 @@ impl PeerManager {
                 "already connected or pending outbound peer".into(),
             ));
         }
+        if self
+            .known_peer_aliases
+            .get(addr)
+            .is_some_and(|peer_id| self.active_peer_ids.contains_key(peer_id))
+        {
+            return Err(DomError::PolicyRejected(
+                "authenticated peer identity already has an active session".into(),
+            ));
+        }
         if self.pending_ban_score(addr) >= crate::peer::ban_scores::BAN_THRESHOLD {
             return Err(DomError::PolicyRejected(
                 "pending outbound peer is banned".into(),
@@ -464,6 +486,41 @@ impl PeerManager {
     pub fn release_outbound_reservation(&mut self, addr: &str) {
         self.prune_stale_state();
         self.pending_outbound.remove(addr);
+    }
+
+    /// Remember the identity authenticated for a dial alias. Calling this even
+    /// when registration is rejected lets future connector passes suppress
+    /// repeated handshakes to another address for the same PeerId.
+    pub fn note_peer_identity(&mut self, alias: &str, peer_id: [u8; 32]) {
+        if self.known_peer_aliases.len() >= MAX_KNOWN_PEER_ALIASES
+            && !self.known_peer_aliases.contains_key(alias)
+        {
+            if let Some(stale_alias) = self
+                .known_peer_aliases
+                .iter()
+                .find(|(_, id)| !self.active_peer_ids.contains_key(*id))
+                .map(|(alias, _)| alias.clone())
+            {
+                self.known_peer_aliases.remove(&stale_alias);
+            } else {
+                return;
+            }
+        }
+        self.known_peer_aliases.insert(alias.to_string(), peer_id);
+    }
+
+    /// Bind a successful outbound registration to the task that owns it.
+    pub fn bind_outbound_session(&mut self, alias: &str, canonical_addr: &str, session_id: u64) {
+        self.outbound_session_owners
+            .insert(alias.to_string(), (canonical_addr.to_string(), session_id));
+    }
+
+    /// Remove only the session registered by this outbound dial alias.
+    pub fn remove_outbound_session(&mut self, alias: &str) -> bool {
+        let Some((canonical_addr, session_id)) = self.outbound_session_owners.remove(alias) else {
+            return false;
+        };
+        self.remove_peer_session(&canonical_addr, session_id)
     }
 
     /// Record a failed outbound attempt so future candidate ordering can
@@ -733,6 +790,14 @@ impl PeerManager {
             ));
         }
         let mut info = info;
+        if let Some(peer_id) = info.peer_id {
+            if let Some(active_addr) = self.active_peer_ids.get(&peer_id) {
+                return Err(DomError::PolicyRejected(format!(
+                    "already connected to authenticated peer identity at {active_addr}"
+                )));
+            }
+            self.note_peer_identity(&addr_str, peer_id);
+        }
         let pending_score = self.pending_penalty_score(&reputation_addr);
         if pending_score > 0 && info.add_ban_score(pending_score) {
             return Err(DomError::PolicyRejected(
@@ -751,6 +816,9 @@ impl PeerManager {
         }
         self.pending_penalties.remove(&reputation_addr);
         self.duplicate_block_relays.remove(&addr_str);
+        if let Some(peer_id) = info.peer_id {
+            self.active_peer_ids.insert(peer_id, addr_str.clone());
+        }
         self.peers.insert(addr_str, info);
         Ok(())
     }
@@ -758,7 +826,34 @@ impl PeerManager {
     /// Remove a disconnected peer.
     pub fn remove_peer(&mut self, addr: &str) {
         self.prune_stale_state();
+        self.remove_peer_inner(addr);
+    }
+
+    /// Remove a peer only when the caller owns the active session generation.
+    pub fn remove_peer_session(&mut self, addr: &str, session_id: u64) -> bool {
+        self.prune_stale_state();
+        if self
+            .peers
+            .get(addr)
+            .is_none_or(|peer| peer.session_id != session_id)
+        {
+            return false;
+        }
+        self.remove_peer_inner(addr);
+        true
+    }
+
+    fn remove_peer_inner(&mut self, addr: &str) {
         if let Some(peer) = self.peers.remove(addr) {
+            if let Some(peer_id) = peer.peer_id {
+                if self
+                    .active_peer_ids
+                    .get(&peer_id)
+                    .is_some_and(|active_addr| active_addr == addr)
+                {
+                    self.active_peer_ids.remove(&peer_id);
+                }
+            }
             if peer.outbound
                 && peer.uptime_secs() >= OUTBOUND_RECONNECT_POLICY.reset_after_stable_session_secs
             {
@@ -1063,6 +1158,48 @@ mod tests {
         assert!(mgr.reserve_outbound("203.0.113.10:33369").is_ok());
         assert!(mgr.reserve_outbound("203.0.113.10:33369").is_err());
         assert_eq!(mgr.pending_outbound_count(), 1);
+    }
+
+    #[test]
+    fn authenticated_peer_id_rejects_second_address_and_suppresses_redial() {
+        let mut mgr = PeerManager::new(125, 8);
+        let peer_id = [0x42; 32];
+        let mut first = make_peer([203, 0, 113, 10], 33369, true);
+        first.peer_id = Some(peer_id);
+        mgr.register_peer(first).expect("first identity registers");
+
+        let alias = "seed1.example:33369";
+        mgr.note_peer_identity(alias, peer_id);
+        assert!(mgr.reserve_outbound(alias).is_err());
+
+        let mut duplicate = make_peer([198, 51, 100, 20], 33369, true);
+        duplicate.peer_id = Some(peer_id);
+        let err = mgr
+            .register_peer(duplicate)
+            .expect_err("same authenticated identity must be unique");
+        assert!(matches!(
+            err,
+            DomError::PolicyRejected(ref message)
+                if message.contains("authenticated peer identity")
+        ));
+        assert_eq!(mgr.peers.len(), 1);
+    }
+
+    #[test]
+    fn outbound_cleanup_cannot_remove_session_it_does_not_own() {
+        let mut mgr = PeerManager::new(125, 8);
+        let peer = make_peer([203, 0, 113, 11], 33369, true);
+        let canonical = peer.addr.to_string();
+        let session_id = peer.session_id;
+        mgr.register_peer(peer).expect("register active session");
+
+        mgr.bind_outbound_session("seed.example:33369", &canonical, session_id + 1);
+        assert!(!mgr.remove_outbound_session("seed.example:33369"));
+        assert!(mgr.peers.contains_key(&canonical));
+
+        mgr.bind_outbound_session("seed.example:33369", &canonical, session_id);
+        assert!(mgr.remove_outbound_session("seed.example:33369"));
+        assert!(!mgr.peers.contains_key(&canonical));
     }
 
     #[test]
