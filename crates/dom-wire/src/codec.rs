@@ -53,6 +53,9 @@ const CHUNK: usize = NOISE_MAX_MSG - 16; // 65519
 pub struct NoiseCodec {
     transport: TransportState,
     network_magic: u32,
+    /// Authenticated remote Noise static key. This is the stable peer identity
+    /// available from the existing Noise XX handshake (no wire-format change).
+    peer_id: Option<[u8; 32]>,
     /// Cancel-safe per-frame read state (resumes a partially-read frame).
     read_state: ReadState,
     /// Reassembly buffer for the in-progress logical message: the decrypted
@@ -68,13 +71,22 @@ pub struct NoiseCodec {
 impl NoiseCodec {
     /// Create from a completed Noise handshake.
     pub fn new(transport: TransportState, network_magic: u32) -> Self {
+        let peer_id = transport
+            .get_remote_static()
+            .and_then(|key| <[u8; 32]>::try_from(key).ok());
         Self {
             transport,
             network_magic,
+            peer_id,
             read_state: ReadState::Idle,
             acc: Vec::new(),
             expected: None,
         }
+    }
+
+    /// Return the authenticated remote Noise static key used as PeerId.
+    pub fn peer_id(&self) -> Option<[u8; 32]> {
+        self.peer_id
     }
 
     /// Encrypt and send a logical message, fragmented across one or more Noise
@@ -140,20 +152,32 @@ impl NoiseCodec {
         &mut self,
         stream: &mut tokio::net::TcpStream,
     ) -> Result<WireMessage, DomError> {
+        self.recv_with_idle_timeout(
+            stream,
+            tokio::time::Duration::from_secs(crate::handshake::IDLE_TIMEOUT_SECS),
+        )
+        .await
+    }
+
+    /// Receive one logical message with a caller-selected per-frame idle
+    /// timeout. IBD uses a more tolerant liveness window while normal relay
+    /// sessions retain the established 60-second policy.
+    pub async fn recv_with_idle_timeout(
+        &mut self,
+        stream: &mut tokio::net::TcpStream,
+        idle_timeout: tokio::time::Duration,
+    ) -> Result<WireMessage, DomError> {
         loop {
             // The ONLY await in this loop. Cancel-safe: partial-frame progress is
             // in `self.read_state`, and whole-frame progress is in `self.acc` /
             // `self.expected`, so a dropped recv resumes here.
             let ciphertext = tokio::time::timeout(
-                tokio::time::Duration::from_secs(crate::handshake::IDLE_TIMEOUT_SECS),
+                idle_timeout,
                 read_framed_cancel_safe(stream, &mut self.read_state),
             )
             .await
             .map_err(|_| {
-                DomError::PolicyRejected(format!(
-                    "idle timeout after {}s",
-                    crate::handshake::IDLE_TIMEOUT_SECS
-                ))
+                DomError::PolicyRejected(format!("idle timeout after {}s", idle_timeout.as_secs()))
             })??;
 
             // INVARIANT: no `.await` between decrypt and the `acc` append, so the

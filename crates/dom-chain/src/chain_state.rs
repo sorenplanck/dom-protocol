@@ -674,11 +674,30 @@ impl ChainState {
                 continue;
             }
 
-            if observed_missing != prior_missing_hashes {
+            // A persisted missing-block queue is a checkpoint, not an immutable
+            // consensus fact. Between checkpoint and resume another accepted
+            // path (or an earlier body from the same resumed page) may have
+            // stored one of those blocks. Reconcile only entries that are still
+            // missing before comparing the deterministic prefix. This preserves
+            // strict order/hash checking while accepting the legitimate
+            // `observed N-1, expected N` transition.
+            let mut still_missing = Vec::with_capacity(prior_missing_hashes.len());
+            for hash in prior_missing_hashes {
+                if self.store.get_block_header(hash)?.is_none() {
+                    still_missing.push(*hash);
+                }
+            }
+            if still_missing.len() != prior_missing_hashes.len() {
+                debug!(
+                    "reconciled {} now-known hashes from persisted IBD header prefix",
+                    prior_missing_hashes.len() - still_missing.len()
+                );
+            }
+            if observed_missing != still_missing {
                 return Err(DomError::PolicyRejected(format!(
                     "persisted IBD header prefix mismatch: observed {} missing hashes, expected {}",
                     observed_missing.len(),
-                    prior_missing_hashes.len()
+                    still_missing.len()
                 )));
             }
 

@@ -129,10 +129,23 @@ impl PersistedIbdState {
     /// Returns true if this snapshot can be resumed without reconstructing
     /// in-flight round state.
     pub fn is_round_resumable(&self) -> bool {
-        self.block_cursor as usize <= self.pending_blocks.len()
-            && self.header_cursor as usize <= self.pending_headers.len()
-            && (self.pending_blocks.is_empty() || self.header_cursor == 0)
-            && (self.pending_headers.is_empty() || self.block_cursor == 0)
+        if self.block_cursor as usize > self.pending_blocks.len()
+            || self.header_cursor as usize > self.pending_headers.len()
+        {
+            return false;
+        }
+        match self.phase {
+            // During incremental header validation, `pending_blocks` is the
+            // accumulated output prefix and is therefore legitimately nonempty
+            // while `header_cursor` advances.
+            IbdPhase::HeaderSync => self.block_cursor == 0,
+            // Older valid snapshots may retain a redundant raw-header cache
+            // after transitioning to block sync. It is ignored there; only a
+            // nonzero header cursor would make the phase ambiguous.
+            IbdPhase::BlockSync | IbdPhase::Verifying => self.header_cursor == 0,
+            _ if self.pending_headers.is_empty() => self.header_cursor == 0,
+            _ => self.block_cursor == 0,
+        }
     }
 }
 

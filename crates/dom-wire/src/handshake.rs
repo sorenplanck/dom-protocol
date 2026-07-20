@@ -35,6 +35,15 @@ pub fn handshake_timeout_secs() -> u64 {
 /// Peers that send no messages for this long are disconnected.
 pub const IDLE_TIMEOUT_SECS: u64 = 60;
 
+/// Idle timeout used while an established connection is actively serving IBD.
+///
+/// IBD block bodies can be large and validation can be CPU intensive.  The
+/// normal one-minute liveness policy is appropriate for an idle relay session,
+/// but is too aggressive for a request/validate/request synchronization loop.
+/// This only changes local connection scheduling; it does not affect the wire
+/// protocol or any consensus rule.
+pub const IBD_IDLE_TIMEOUT_SECS: u64 = 5 * 60;
+
 /// Per-frame write timeout for established connections.
 ///
 /// Anti-slowloris: a peer that deliberately stops reading lets our kernel send
