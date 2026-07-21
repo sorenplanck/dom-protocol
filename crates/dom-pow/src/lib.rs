@@ -33,6 +33,7 @@ use std::env;
 
 #[allow(unsafe_code)]
 pub mod randomx_pool;
+pub use randomx_pool::MinerVm;
 
 #[cfg(kani)]
 mod kani_invariants;

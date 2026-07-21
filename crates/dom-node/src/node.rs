@@ -2745,14 +2745,16 @@ async fn refresh_peer_metrics(
     metrics: &Arc<Metrics>,
     state_events: Option<&Arc<Notify>>,
 ) {
-    let (peer_count, inbound_peers, outbound_peers) = {
+    let (peer_count, inbound_peers, outbound_peers, best_known_peer_height) = {
         let mgr = trace_lock("peers", peers).await;
         let mut peer_count = 0u64;
         let mut inbound_peers = 0u64;
         let mut outbound_peers = 0u64;
+        let mut best_known_peer_height = 0u64;
         for peer in mgr.peers.values() {
             if peer.state == dom_wire::peer::PeerState::Connected {
                 peer_count += 1;
+                best_known_peer_height = best_known_peer_height.max(peer.best_height);
                 if peer.outbound {
                     outbound_peers += 1;
                 } else {
@@ -2760,7 +2762,12 @@ async fn refresh_peer_metrics(
                 }
             }
         }
-        (peer_count, inbound_peers, outbound_peers)
+        (
+            peer_count,
+            inbound_peers,
+            outbound_peers,
+            best_known_peer_height,
+        )
     };
 
     metrics
@@ -2772,8 +2779,38 @@ async fn refresh_peer_metrics(
     metrics
         .outbound_peers
         .store(outbound_peers, std::sync::atomic::Ordering::Relaxed);
+    metrics
+        .best_known_peer_height
+        .store(best_known_peer_height, std::sync::atomic::Ordering::Relaxed);
     if let Some(state_events) = state_events {
         state_events.notify_waiters();
+    }
+}
+
+async fn note_peer_best_height(
+    peers: &Arc<Mutex<PeerManager>>,
+    metrics: &Arc<Metrics>,
+    state_events: &Arc<Notify>,
+    peer_addr: std::net::SocketAddr,
+    height: u64,
+    hash: [u8; 32],
+) {
+    let changed = {
+        let mut mgr = trace_lock("peers", peers).await;
+        match mgr.peers.get_mut(&peer_addr.to_string()) {
+            Some(peer)
+                if peer.state == dom_wire::peer::PeerState::Connected
+                    && height > peer.best_height =>
+            {
+                peer.best_height = height;
+                peer.best_hash = hash;
+                true
+            }
+            _ => false,
+        }
+    };
+    if changed {
+        refresh_peer_metrics(peers, metrics, Some(state_events)).await;
     }
 }
 
@@ -4314,6 +4351,21 @@ async fn message_loop(
                                     let mut c = chain.lock().await;
                                     c.connect_block(&block, now)
                                 };
+                                // A connected peer's runtime block announcement
+                                // may advance beyond its one-time Hello height.
+                                // Preserve the per-peer maximum so a later,
+                                // lower announcement cannot relax mining safety.
+                                if result.is_ok() || matches!(&result, Err(DomError::Orphan(_))) {
+                                    note_peer_best_height(
+                                        &svc.peers,
+                                        &svc.metrics,
+                                        &svc.state_events,
+                                        peer_addr,
+                                        height,
+                                        relay_block_hash,
+                                    )
+                                    .await;
+                                }
                                 match relay_block_action(&result) {
                                     RelayBlockAction::RelayBestChain => {
                                         if let Ok(ref connect_result) = result {
