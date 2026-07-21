@@ -104,6 +104,23 @@ pub const TESTNET_TARGET_COMPACT: u32 = 0x1e2e_ff7f;
 /// Regtest compact target. Dev-only and intentionally easy.
 pub const REGTEST_TARGET_COMPACT: u32 = MAX_COMPACT_TARGET;
 
+/// Mainnet ASERT rescue activates for the child of the last pre-rescue block.
+///
+/// The pre-rescue mainnet policy used the genesis target as both ASERT's
+/// anchor and maximum target.  That made the slow-block branch of ASERT a
+/// no-op: any target increase was immediately clamped back to genesis.  The
+/// activation anchor is the canonical mainnet block 4848, so historical block
+/// validation remains byte-for-byte unchanged.
+pub const MAINNET_ASERT_RESCUE_HEIGHT: u64 = 4_849;
+const MAINNET_ASERT_RESCUE_ANCHOR_HEIGHT: u64 = MAINNET_ASERT_RESCUE_HEIGHT - 1;
+const MAINNET_ASERT_RESCUE_ANCHOR_TIMESTAMP: u64 = 1_784_653_190;
+/// Compact target at the rescue floor.  This is 256x easier than the old
+/// mainnet ceiling but remains non-trivial RandomX work.
+pub const MAINNET_ASERT_RESCUE_MAX_COMPACT_TARGET: u32 = 0x1f00_ffff;
+/// Ten target blocks (20 minutes): a 1-hour outage relaxes by 8x, while the
+/// normal future-timestamp bound permits at most a 7.2% ease per block.
+const MAINNET_ASERT_RESCUE_HALF_LIFE: u64 = TARGET_SPACING * 10;
+
 /// Network-specific deterministic PoW parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PowParams {
@@ -166,6 +183,25 @@ pub fn pow_params_for_network(network_magic: u32) -> Result<PowParams, DomError>
     Ok(params)
 }
 
+/// Return the consensus PoW parameters at a particular child height.
+///
+/// Mainnet changes its ASERT parameters only at the explicitly anchored rescue
+/// activation.  Looking up parameters by height prevents a new binary from
+/// reinterpreting historical headers with the emergency parameters.
+pub fn pow_params_for_network_at_height(
+    network_magic: u32,
+    block_height: BlockHeight,
+) -> Result<PowParams, DomError> {
+    let mut params = pow_params_for_network(network_magic)?;
+    if network_magic == NETWORK_MAGIC_MAINNET && block_height.0 >= MAINNET_ASERT_RESCUE_HEIGHT {
+        params.half_life = MAINNET_ASERT_RESCUE_HALF_LIFE;
+        // This is still real RandomX PoW (~2^16 expected hashes), but now
+        // provides 256x headroom over the original 0x1e00ffff anchor.
+        params.max_compact_target = MAINNET_ASERT_RESCUE_MAX_COMPACT_TARGET;
+    }
+    Ok(params)
+}
+
 impl CompactTarget {
     /// Expand to 32-byte big-endian target.
     pub fn to_target(&self) -> Result<[u8; 32], DomError> {
@@ -210,13 +246,22 @@ const fn classify_compact_target(bits: u32) -> CompactTargetClassification {
 }
 
 fn validate_target_bounds(t: &[u8; 32]) -> Result<(), DomError> {
-    if target_gt(t, &MAX_TARGET_BYTES) {
+    if target_gt(t, &maximum_accepted_target()) {
         return Err(DomError::Invalid("target > MAX_TARGET".into()));
     }
     if target_lt(t, &MIN_TARGET_BYTES) {
         return Err(DomError::Invalid("target < MIN_TARGET".into()));
     }
     Ok(())
+}
+
+/// The consensus envelope accepted by the compact decoder.  The wider value
+/// is only mineable on mainnet after the height-gated ASERT rescue because
+/// `compute_expected_target` independently fixes the exact target per height.
+fn maximum_accepted_target() -> [u8; 32] {
+    let mut target = MAX_TARGET_BYTES;
+    target[1] = 0xff;
+    target
 }
 
 fn target_gt(a: &[u8; 32], b: &[u8; 32]) -> bool {
@@ -731,6 +776,36 @@ pub fn target_to_difficulty(target: &[u8; 32]) -> u128 {
     }
 }
 
+/// Per-block work at a particular network height.
+///
+/// Historical mainnet headers retain their original work numerator.  The
+/// larger numerator starts exactly with the ASERT rescue, matching the larger
+/// target envelope without rewriting total difficulty already committed in
+/// blocks 0..=4848.
+pub fn target_to_difficulty_for_network_height(
+    network_magic: u32,
+    block_height: BlockHeight,
+    target: &[u8; 32],
+) -> Result<u128, DomError> {
+    let numerator = if network_magic == NETWORK_MAGIC_MAINNET
+        && block_height.0 >= MAINNET_ASERT_RESCUE_HEIGHT
+    {
+        CompactTarget(MAINNET_ASERT_RESCUE_MAX_COMPACT_TARGET).to_target()?
+    } else {
+        MAX_TARGET_BYTES
+    };
+    let target_value = U256::from_big_endian(target);
+    if target_value.is_zero() {
+        return Ok(u128::MAX);
+    }
+    let quotient = U256::from_big_endian(&numerator) / target_value;
+    Ok(if (quotient >> 128).is_zero() {
+        quotient.low_u128().max(1)
+    } else {
+        (quotient >> 128).low_u128()
+    })
+}
+
 // ── Genesis Anchor (RFC-0006) ─────────────────────────────────────────────────
 
 /// Return the consensus-critical ASERT anchor for the genesis block.
@@ -751,6 +826,21 @@ pub fn genesis_anchor(network_magic: u32) -> Result<AsertAnchor, DomError> {
     })
 }
 
+/// Return the ASERT anchor that governs a particular block height.
+pub fn asert_anchor_for_network_height(
+    network_magic: u32,
+    block_height: BlockHeight,
+) -> Result<AsertAnchor, DomError> {
+    if network_magic == NETWORK_MAGIC_MAINNET && block_height.0 >= MAINNET_ASERT_RESCUE_HEIGHT {
+        return Ok(AsertAnchor {
+            timestamp: Timestamp(MAINNET_ASERT_RESCUE_ANCHOR_TIMESTAMP),
+            height: BlockHeight(MAINNET_ASERT_RESCUE_ANCHOR_HEIGHT),
+            target: CompactTarget(GENESIS_TARGET_COMPACT).to_target()?,
+        });
+    }
+    genesis_anchor(network_magic)
+}
+
 /// Compute the canonical expected target bytes for a block on the given network.
 ///
 /// Consensus headers store targets in compact form. ASERT itself produces a
@@ -762,18 +852,22 @@ pub fn compute_expected_target(
     block_timestamp: Timestamp,
     block_height: BlockHeight,
 ) -> Result<[u8; 32], DomError> {
-    let params = pow_params_for_network(network_magic)?;
+    let params = pow_params_for_network_at_height(network_magic, block_height)?;
     if uses_dev_fixed_target(network_magic) {
         return params.max_target();
     }
 
-    let anchor = genesis_anchor(network_magic)?;
+    let anchor = asert_anchor_for_network_height(network_magic, block_height)?;
     let raw_target = if block_height == BlockHeight::GENESIS {
         params.genesis_target()?
     } else {
         asert_next_target_with_params(&anchor, block_timestamp, block_height, &params)?
     };
-    canonicalize_compact_target(&raw_target)
+    if network_magic == NETWORK_MAGIC_MAINNET && block_height.0 >= MAINNET_ASERT_RESCUE_HEIGHT {
+        canonicalize_rescue_compact_target(&raw_target)
+    } else {
+        canonicalize_compact_target(&raw_target)
+    }
 }
 
 /// Backwards-compatible name for the canonical expected target helper.
@@ -828,6 +922,60 @@ pub fn target_to_compact(t: &[u8; 32]) -> u32 {
     }
 
     best_compact.unwrap_or_else(|| target_to_compact(&MIN_TARGET_BYTES))
+}
+
+/// Canonical compact encoding used by the mainnet ASERT rescue.
+///
+/// The legacy compact encoder writes the three-byte mantissa in the opposite
+/// byte order from `compact_to_target_unchecked`.  It happens to preserve the
+/// old fixed mainnet target, but after a target grows it rounds back down near
+/// the old ceiling and defeats ASERT's relief.  Rescue heights use this inverse
+/// of the decoder and preserve the largest valid compact target not exceeding
+/// the ASERT result.
+fn target_to_rescue_compact(t: &[u8; 32]) -> u32 {
+    let Some(first) = t.iter().position(|&byte| byte != 0) else {
+        return 0;
+    };
+
+    let mut best: Option<(u32, [u8; 32])> = None;
+    for start in 0..=first {
+        let size = (32 - start) as u32;
+        let mut mantissa = match size {
+            0 => 0,
+            1 => u32::from(t[start]),
+            2 => u32::from(t[start]) | (u32::from(t[start + 1]) << 8),
+            _ => {
+                u32::from(t[start])
+                    | (u32::from(t[start + 1]) << 8)
+                    | (u32::from(t[start + 2]) << 16)
+            }
+        };
+        // The decoder rejects the compact sign bit.  Clearing it chooses the
+        // greatest representable value in this exponent bucket below `t`.
+        mantissa &= 0x007f_ffff;
+        if mantissa == 0 {
+            continue;
+        }
+        let compact = (size << 24) | mantissa;
+        let Ok(expanded) = CompactTarget(compact).to_target() else {
+            continue;
+        };
+        if target_gt(&expanded, t) {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|(_, current)| target_gt(&expanded, current))
+        {
+            best = Some((compact, expanded));
+        }
+    }
+    best.map(|(compact, _)| compact)
+        .unwrap_or_else(|| target_to_compact(&MIN_TARGET_BYTES))
+}
+
+fn canonicalize_rescue_compact_target(raw_target: &[u8; 32]) -> Result<[u8; 32], DomError> {
+    CompactTarget(target_to_rescue_compact(raw_target)).to_target()
 }
 
 fn compact_to_target_unchecked(bits: u32) -> [u8; 32] {

@@ -13,8 +13,9 @@ use dom_consensus::{
 };
 use dom_core::{BlockHeight, DomError, Hash256, Timestamp};
 use dom_pow::{
-    compute_expected_target, genesis_anchor, pow_params_for_network, randomx_seed_height,
-    target_to_difficulty, AsertAnchor,
+    asert_anchor_for_network_height, compute_expected_target, genesis_anchor,
+    pow_params_for_network_at_height, randomx_seed_height, target_to_difficulty_for_network_height,
+    AsertAnchor,
 };
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::utxo::UtxoEntry;
@@ -335,13 +336,15 @@ impl ChainState {
             .map(|header| header.total_difficulty)
             .unwrap_or_else(U256::zero);
 
-        let block_diff = target_to_difficulty(
+        let block_diff = target_to_difficulty_for_network_height(
+            self.network_magic,
+            header.height,
             &header
                 .target
                 .to_target()
                 .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?,
         );
-        let expected_total = checked_accumulated_difficulty(parent_difficulty, block_diff)?;
+        let expected_total = checked_accumulated_difficulty(parent_difficulty, block_diff?)?;
         if header.total_difficulty != expected_total {
             return Err(DomError::Invalid(format!(
                 "total_difficulty mismatch: expected {expected_total}, got {}",
@@ -571,13 +574,16 @@ impl ChainState {
                     decoded[idx - 1].0.total_difficulty
                 };
 
-                let block_diff = target_to_difficulty(
+                let block_diff = target_to_difficulty_for_network_height(
+                    self.network_magic,
+                    header.height,
                     &header
                         .target
                         .to_target()
                         .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?,
                 );
-                let expected_total = checked_accumulated_difficulty(parent_difficulty, block_diff)?;
+                let expected_total =
+                    checked_accumulated_difficulty(parent_difficulty, block_diff?)?;
                 if header.total_difficulty != expected_total {
                     return Err(DomError::Invalid(format!(
                         "total_difficulty mismatch: expected {expected_total}, got {}",
@@ -762,13 +768,16 @@ impl ChainState {
                         .total_difficulty
                 };
 
-                let block_diff = target_to_difficulty(
+                let block_diff = target_to_difficulty_for_network_height(
+                    self.network_magic,
+                    header.height,
                     &header
                         .target
                         .to_target()
                         .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?,
                 );
-                let expected_total = checked_accumulated_difficulty(parent_difficulty, block_diff)?;
+                let expected_total =
+                    checked_accumulated_difficulty(parent_difficulty, block_diff?)?;
                 if header.total_difficulty != expected_total {
                     return Err(DomError::Invalid(format!(
                         "total_difficulty mismatch: expected {expected_total}, got {}",
@@ -823,14 +832,16 @@ impl ChainState {
             validate_median_time_past(header, &ancestors)?;
             self.validate_expected_target(header, &parent)?;
 
-            let block_diff = target_to_difficulty(
+            let block_diff = target_to_difficulty_for_network_height(
+                self.network_magic,
+                header.height,
                 &header
                     .target
                     .to_target()
                     .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?,
             );
             let expected_total =
-                checked_accumulated_difficulty(parent.total_difficulty, block_diff)?;
+                checked_accumulated_difficulty(parent.total_difficulty, block_diff?)?;
             if header.total_difficulty != expected_total {
                 return Err(DomError::Invalid(format!(
                     "total_difficulty mismatch: expected {expected_total}, got {}",
@@ -935,11 +946,11 @@ impl ChainState {
             .get_block_header(self.tip_hash.as_bytes())?
             .ok_or_else(|| DomError::Internal("chain tip header missing".into()))?;
         let tip = BlockHeader::from_bytes(&tip_bytes)?;
-        let params = pow_params_for_network(self.network_magic)?;
         let next_height = tip
             .height
             .checked_next()
             .ok_or_else(|| DomError::Invalid("block height overflow".into()))?;
+        let params = pow_params_for_network_at_height(self.network_magic, next_height)?;
         let next_timestamp = tip
             .timestamp
             .checked_add_secs(params.target_spacing)
@@ -1153,14 +1164,15 @@ impl ChainState {
             .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?;
         let next_target =
             compute_expected_target(self.network_magic, child_timestamp, child_height)?;
-        let params = pow_params_for_network(self.network_magic)?;
+        let params = pow_params_for_network_at_height(self.network_magic, child_height)?;
+        let anchor = asert_anchor_for_network_height(self.network_magic, child_height)?;
         let height_delta = child_height
             .0
-            .checked_sub(self.asert_anchor.height.0)
+            .checked_sub(anchor.height.0)
             .ok_or_else(|| DomError::Invalid("height before ASERT anchor".into()))?;
         let actual_elapsed_secs = child_timestamp
             .0
-            .checked_sub(self.asert_anchor.timestamp.0)
+            .checked_sub(anchor.timestamp.0)
             .ok_or_else(|| DomError::Invalid("timestamp before ASERT anchor".into()))?;
         let expected_elapsed_secs = params
             .target_spacing
