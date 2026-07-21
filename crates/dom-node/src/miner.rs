@@ -17,6 +17,7 @@ use dom_pow::{
 use dom_serialization::DomDeserialize;
 use dom_store::DomStore;
 use primitive_types::U256;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
@@ -26,20 +27,92 @@ struct MiningActiveGuard {
 }
 
 impl MiningActiveGuard {
-    fn new(metrics: Arc<crate::metrics::Metrics>) -> Self {
+    fn new(metrics: Arc<crate::metrics::Metrics>, template_height: u64) -> Self {
         metrics
-            .mining_active
-            .store(1, std::sync::atomic::Ordering::Relaxed);
+            .mining_template_height
+            .store(template_height, Ordering::Relaxed);
+        metrics.mining_active.store(1, Ordering::Release);
         Self { metrics }
     }
 }
 
 impl Drop for MiningActiveGuard {
     fn drop(&mut self) {
+        self.metrics.mining_active.store(0, Ordering::Release);
         self.metrics
-            .mining_active
-            .store(0, std::sync::atomic::Ordering::Relaxed);
+            .mining_template_height
+            .store(0, Ordering::Relaxed);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MiningEligibility {
+    local_height: u64,
+    best_known_peer_height: u64,
+    ibd_active: bool,
+}
+
+impl MiningEligibility {
+    fn paused_for_sync(self) -> bool {
+        self.ibd_active || self.best_known_peer_height > self.local_height
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MiningAttempt {
+    Mined(u64),
+    StaleTemplate {
+        old_parent: Hash256,
+        new_parent: Hash256,
+    },
+    PausedForSync {
+        local_height: u64,
+        best_known_peer_height: u64,
+    },
+    Shutdown,
+}
+
+struct ProvisionalCoinbase {
+    wallet: Option<Arc<tokio::sync::Mutex<dom_wallet::WalletDir>>>,
+    commitment: [u8; 33],
+    cleanup_required: bool,
+}
+
+impl ProvisionalCoinbase {
+    fn new(
+        wallet: Option<Arc<tokio::sync::Mutex<dom_wallet::WalletDir>>>,
+        coinbase: &CoinbaseTransaction,
+    ) -> Self {
+        Self {
+            wallet,
+            commitment: *coinbase.output.commitment.as_bytes(),
+            cleanup_required: true,
+        }
+    }
+
+    fn preserve(&mut self) {
+        self.cleanup_required = false;
+    }
+
+    async fn cleanup(&mut self) {
+        if !self.cleanup_required {
+            return;
+        }
+        self.cleanup_required = false;
+        if let Some(wallet) = &self.wallet {
+            wallet
+                .lock()
+                .await
+                .wallet_mut()
+                .forget_output(&self.commitment);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FinalizedBlock {
+    height: u64,
+    canonical: bool,
 }
 
 fn now_secs() -> u64 {
@@ -349,9 +422,69 @@ fn build_coinbase_with_blinding(
     })
 }
 
+async fn current_mining_eligibility(node: &DomNode) -> MiningEligibility {
+    let local_height = node.chain.lock().await.tip_height.0;
+    let best_known_peer_height = {
+        let peers = node.peers.lock().await;
+        best_known_connected_peer_height(&peers)
+    };
+    node.metrics
+        .best_known_peer_height
+        .store(best_known_peer_height, Ordering::Relaxed);
+    MiningEligibility {
+        local_height,
+        best_known_peer_height,
+        ibd_active: node.ibd_active_sessions.load(Ordering::Acquire) > 0,
+    }
+}
+
+fn best_known_connected_peer_height(peers: &dom_wire::manager::PeerManager) -> u64 {
+    peers
+        .peers
+        .values()
+        .filter(|peer| peer.state == dom_wire::peer::PeerState::Connected)
+        .map(|peer| peer.best_height)
+        .max()
+        .unwrap_or(0)
+}
+
+fn classify_template_snapshot(
+    parent: Hash256,
+    current_tip: Hash256,
+    eligibility: MiningEligibility,
+) -> Option<MiningAttempt> {
+    if current_tip != parent {
+        return Some(MiningAttempt::StaleTemplate {
+            old_parent: parent,
+            new_parent: current_tip,
+        });
+    }
+    eligibility
+        .paused_for_sync()
+        .then_some(MiningAttempt::PausedForSync {
+            local_height: eligibility.local_height,
+            best_known_peer_height: eligibility.best_known_peer_height,
+        })
+}
+
+async fn classify_template_state(node: &DomNode, parent: Hash256) -> Option<MiningAttempt> {
+    let current_tip = node.chain.lock().await.tip_hash;
+    let eligibility = current_mining_eligibility(node).await;
+    classify_template_snapshot(parent, current_tip, eligibility)
+}
+
+fn set_paused_for_sync(metrics: &crate::metrics::Metrics, paused: bool) {
+    metrics
+        .mining_paused_for_sync
+        .store(u64::from(paused), Ordering::Release);
+    if paused {
+        metrics.mining_active.store(0, Ordering::Release);
+        metrics.mining_template_height.store(0, Ordering::Relaxed);
+    }
+}
+
 pub async fn mining_loop(node: Arc<DomNode>, shutdown: ShutdownToken) -> Result<(), DomError> {
     info!("Miner started");
-    let _mining_active = MiningActiveGuard::new(node.metrics.clone());
     {
         if shutdown.is_shutdown() {
             return Ok(());
@@ -365,12 +498,69 @@ pub async fn mining_loop(node: Arc<DomNode>, shutdown: ShutdownToken) -> Result<
             }
         }
     }
+
+    // Public networks get one bounded peer-discovery window before the first
+    // template. This closes the startup race where the miner could begin at
+    // h=1 just before a configured peer's Hello announces a much higher tip.
+    // It is deliberately one-shot: a synchronized node that later loses all
+    // peers may continue under the existing peer-optional solo-mining policy.
+    if node.config.network != dom_config::Network::Regtest {
+        tokio::select! {
+            _ = shutdown.wait() => return Ok(()),
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+        }
+    }
+
+    // Fail closed if the configured network cannot derive the canonical chain
+    // identity used by wallet coinbase signatures.
+    let _ = chain_id_for(&node.config)?;
+    let mut pause_logged = false;
     loop {
         if shutdown.is_shutdown() {
             return Ok(());
         }
-        match mine_one_block(node.clone()).await {
-            Ok(h) => info!("Block {} mined successfully", h),
+        let eligibility = current_mining_eligibility(&node).await;
+        if eligibility.paused_for_sync() {
+            set_paused_for_sync(&node.metrics, true);
+            if !pause_logged {
+                info!(
+                    "mining paused for synchronization: local_height={} best_known_peer_height={} ibd_active={}",
+                    eligibility.local_height,
+                    eligibility.best_known_peer_height,
+                    eligibility.ibd_active
+                );
+                pause_logged = true;
+            }
+            tokio::select! {
+                _ = shutdown.wait() => return Ok(()),
+                _ = node.state_events.notified() => continue,
+            }
+        }
+        set_paused_for_sync(&node.metrics, false);
+        if pause_logged {
+            info!(
+                "restarting miner at height {}",
+                eligibility.local_height.saturating_add(1)
+            );
+            pause_logged = false;
+        }
+        match mine_one_attempt(node.clone(), shutdown.clone()).await {
+            Ok(MiningAttempt::Mined(h)) => info!("Block {} mined successfully", h),
+            Ok(MiningAttempt::StaleTemplate {
+                old_parent,
+                new_parent,
+            }) => {
+                info!(
+                    "mining template invalidated: canonical tip changed old_parent={} new_parent={}",
+                    old_parent, new_parent
+                );
+                let next_height = node.chain.lock().await.tip_height.0.saturating_add(1);
+                info!("restarting miner at height {next_height}");
+            }
+            Ok(MiningAttempt::PausedForSync { .. }) => {
+                set_paused_for_sync(&node.metrics, true);
+            }
+            Ok(MiningAttempt::Shutdown) => return Ok(()),
             Err(e) => {
                 warn!("Mining failed: {e}");
                 tokio::select! {
@@ -382,9 +572,11 @@ pub async fn mining_loop(node: Arc<DomNode>, shutdown: ShutdownToken) -> Result<
     }
 }
 
-async fn finalize_mined_block(node: &Arc<DomNode>, block: Block) -> Result<u64, DomError> {
+async fn finalize_mined_block(
+    node: &Arc<DomNode>,
+    block: Block,
+) -> Result<FinalizedBlock, DomError> {
     let new_height = block.header.height.0;
-    let coinbase_commitment = *block.coinbase.output.commitment.as_bytes();
 
     let connect_outcome = {
         let mut chain = node.chain.lock().await;
@@ -414,27 +606,26 @@ async fn finalize_mined_block(node: &Arc<DomNode>, block: Block) -> Result<u64, 
                 "Miner block at height {} accepted as SideChain (race with relayed block)",
                 new_height
             );
-            if let Some(ref wallet_arc) = node.wallet {
-                let mut wallet_dir = wallet_arc.lock().await;
-                wallet_dir.wallet_mut().forget_output(&coinbase_commitment);
-            }
         }
         dom_chain::ConnectResult::AlreadyHave => {
             tracing::debug!(
                 "Miner block at height {} was AlreadyHave (unusual but benign)",
                 new_height
             );
-            if let Some(ref wallet_arc) = node.wallet {
-                let mut wallet_dir = wallet_arc.lock().await;
-                wallet_dir.wallet_mut().forget_output(&coinbase_commitment);
-            }
             // Don't relay — peers already have it (somehow).
-            return Ok(new_height);
+            return Ok(FinalizedBlock {
+                height: new_height,
+                canonical: false,
+            });
         }
     }
-    node.metrics
-        .blocks_mined
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let canonical = matches!(
+        &connect_outcome,
+        dom_chain::ConnectResult::BestChain | dom_chain::ConnectResult::Reorg(_)
+    );
+    if canonical {
+        node.metrics.blocks_mined.fetch_add(1, Ordering::Relaxed);
+    }
 
     reconcile_mempool_after_connect(
         &node.chain,
@@ -479,7 +670,10 @@ async fn finalize_mined_block(node: &Arc<DomNode>, block: Block) -> Result<u64, 
     let _ = node.block_relay_tx.send(block_bytes);
     node.notify_state_changed();
 
-    Ok(new_height)
+    Ok(FinalizedBlock {
+        height: new_height,
+        canonical,
+    })
 }
 
 fn apply_wallet_after_mined_connect(
@@ -653,6 +847,38 @@ fn resolve_mining_randomx_seed(
 }
 
 pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
+    match mine_one_attempt(node.clone(), node.shutdown_token()).await? {
+        MiningAttempt::Mined(height) => Ok(height),
+        MiningAttempt::StaleTemplate {
+            old_parent,
+            new_parent,
+        } => Err(DomError::Internal(format!(
+            "mining template became stale: {old_parent} -> {new_parent}"
+        ))),
+        MiningAttempt::PausedForSync {
+            local_height,
+            best_known_peer_height,
+        } => Err(DomError::PolicyRejected(format!(
+            "mining paused for synchronization: local={local_height} peer={best_known_peer_height}"
+        ))),
+        MiningAttempt::Shutdown => Err(DomError::Internal("mining shutdown requested".into())),
+    }
+}
+
+async fn mine_one_attempt(
+    node: Arc<DomNode>,
+    shutdown: ShutdownToken,
+) -> Result<MiningAttempt, DomError> {
+    if shutdown.is_shutdown() {
+        return Ok(MiningAttempt::Shutdown);
+    }
+    let eligibility = current_mining_eligibility(&node).await;
+    if eligibility.paused_for_sync() {
+        return Ok(MiningAttempt::PausedForSync {
+            local_height: eligibility.local_height,
+            best_known_peer_height: eligibility.best_known_peer_height,
+        });
+    }
     let (tip_hash, tip_height, tip_difficulty, parent_ts) = {
         use dom_serialization::DomDeserialize;
         let chain = node.chain.lock().await;
@@ -793,41 +1019,33 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
         ));
     };
 
-    // PMMR roots over coinbase + selected mempool txs. Single source
-    // of truth: `compute_block_pmmr_roots` is the same helper that
-    // `validate_pmmr_roots` runs during block acceptance, so the miner
-    // cannot drift on iteration order.
-    let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(BlockHeight(new_height), &coinbase, &selected_txs)?;
+    let mut provisional = ProvisionalCoinbase::new(node.wallet.clone(), &coinbase);
 
-    // Aggregate kernel offset over the included transactions (coinbase
-    // contributes none). The consensus balance equation requires the
-    // header's total_kernel_offset to equal this sum; a coinbase-only
-    // block yields [0u8; 32], preserving prior behaviour.
-    let total_kernel_offset = aggregate_block_kernel_offset(&selected_txs);
+    let attempt_result: Result<(MiningAttempt, bool), DomError> = async {
+        // PMMR roots over coinbase + selected mempool txs. Single source
+        // of truth: `compute_block_pmmr_roots` is the same helper that
+        // `validate_pmmr_roots` runs during block acceptance, so the miner
+        // cannot drift on iteration order.
+        let (output_root, kernel_root, rangeproof_root) =
+            compute_block_pmmr_roots(BlockHeight(new_height), &coinbase, &selected_txs)?;
 
-    // Production-like networks mine with FLAG_FULL_MEM (~2 GB dataset +
-    // ~256 MB cache per active miner thread) for ~10× hash-rate vs the
-    // cache-only VM.
-    // RandomX hash output is identical between modes — only the prover
-    // speed differs — so consensus validation does not care which mode
-    // the miner used. Validators (dom-pow::randomx_pool) intentionally
-    // stay on the cache-only path: validation is occasional and shouldn't
-    // pay the dataset cost.
-    //
-    // Memory budget: ~2.3 GB per active miner thread in full-mem mode.
-    // Regtest uses either cache-only RandomX or explicit FastDevOnly hashing.
-    // Both paths still mine against `compute_expected_target`; the fast mode
-    // changes only the hash function and is rejected for production-like
-    // networks before mining starts.
-    let light_vm = mining_mode.light_vm();
-    let pow_mode = mining_mode.pow_mode();
-    let threads = node.config.miner_threads.max(1);
-    let (tx, rx) = tokio::sync::oneshot::channel::<Result<(BlockHeader, MiningStats), String>>();
-    std::thread::Builder::new()
-        .name(format!("miner-{}", new_height))
-        .spawn(move || {
-            let result = mine_blocking(
+        // Aggregate kernel offset over the included transactions (coinbase
+        // contributes none). The consensus balance equation requires the
+        // header's total_kernel_offset to equal this sum; a coinbase-only
+        // block yields [0u8; 32], preserving prior behaviour.
+        let total_kernel_offset = aggregate_block_kernel_offset(&selected_txs);
+
+        // Production-like networks mine with FLAG_FULL_MEM (~2 GB dataset +
+        // ~256 MB cache shared by the active workers). The externally-owned
+        // stop flag lets chain, peer and shutdown events interrupt the search.
+        let light_vm = mining_mode.light_vm();
+        let pow_mode = mining_mode.pow_mode();
+        let threads = node.config.miner_threads.max(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let mining_hashes = node.metrics.mining_hashes.clone();
+        let mut mining_task = tokio::task::spawn_blocking(move || {
+            mine_blocking_cancellable(
                 new_height,
                 tip_hash,
                 block_timestamp,
@@ -842,24 +1060,116 @@ pub async fn mine_one_block(node: Arc<DomNode>) -> Result<u64, DomError> {
                 pow_mode,
                 threads,
                 throttle,
-            );
-            let _ = tx.send(result.map_err(|e| e.to_string()));
-        })
-        .map_err(|e| DomError::Internal(format!("spawn thread: {e}")))?;
-    let (header, stats) = rx
-        .await
-        .map_err(|e| DomError::Internal(format!("channel: {e}")))?
-        .map_err(DomError::Internal)?;
-    tracing::debug!(
-        "Block {new_height}: nonce found with {} worker(s)",
-        stats.workers
-    );
-    let block = Block {
-        header,
-        coinbase,
-        transactions: selected_txs,
-    };
-    finalize_mined_block(&node, block).await
+                worker_stop,
+                mining_hashes,
+            )
+        });
+        let active_guard = MiningActiveGuard::new(node.metrics.clone(), new_height);
+
+        let mut interruption: Option<MiningAttempt> = None;
+        let mut cancellation_poll = tokio::time::interval(Duration::from_millis(100));
+        cancellation_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let work_result = loop {
+            tokio::select! {
+                joined = &mut mining_task => {
+                    break joined.map_err(|error| {
+                        DomError::Internal(format!("mining coordinator join: {error}"))
+                    })?;
+                }
+                _ = shutdown.wait() => {
+                    stop.store(true, Ordering::Release);
+                    interruption = Some(MiningAttempt::Shutdown);
+                    break mining_task.await.map_err(|error| {
+                        DomError::Internal(format!("mining coordinator join after shutdown: {error}"))
+                    })?;
+                }
+                _ = node.state_events.notified() => {
+                    if let Some(reason) = classify_template_state(&node, tip_hash).await {
+                        stop.store(true, Ordering::Release);
+                        interruption = Some(reason);
+                        break mining_task.await.map_err(|error| {
+                            DomError::Internal(format!("mining coordinator join after state change: {error}"))
+                        })?;
+                    }
+                }
+                _ = cancellation_poll.tick() => {
+                    if let Some(reason) = classify_template_state(&node, tip_hash).await {
+                        stop.store(true, Ordering::Release);
+                        interruption = Some(reason);
+                        break mining_task.await.map_err(|error| {
+                            DomError::Internal(format!("mining coordinator join after state poll: {error}"))
+                        })?;
+                    }
+                }
+            }
+        };
+        // The coordinator has returned only after joining every RandomX worker.
+        drop(active_guard);
+
+        if let Some(interruption) = interruption {
+            if matches!(interruption, MiningAttempt::StaleTemplate { .. }) {
+                node.metrics
+                    .stale_templates_cancelled
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            return Ok((interruption, false));
+        }
+
+        let (header, stats) = match work_result? {
+            MiningWork::Mined(header, stats) => (header, stats),
+            MiningWork::Cancelled(stats) => {
+                tracing::debug!(
+                    "Block {new_height}: {} worker(s) joined after cancellation",
+                    stats.joined_workers
+                );
+                return Err(DomError::Internal(
+                    "nonce search cancelled without a classified state change".into(),
+                ));
+            }
+        };
+        tracing::debug!(
+            "Block {new_height}: nonce found with {} worker(s); {} joined",
+            stats.workers,
+            stats.joined_workers
+        );
+
+        // Close the race where a valid nonce arrives just after a canonical
+        // tip notification: a known-obsolete candidate never reaches
+        // connect_block.
+        let current_tip = node.chain.lock().await.tip_hash;
+        let eligibility = current_mining_eligibility(&node).await;
+        if let Some(reason) = classify_template_snapshot(tip_hash, current_tip, eligibility) {
+            if matches!(reason, MiningAttempt::StaleTemplate { .. }) {
+                node.metrics
+                    .stale_templates_cancelled
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            return Ok((reason, false));
+        }
+        let block = Block {
+            header,
+            coinbase,
+            transactions: selected_txs,
+        };
+        let finalized = finalize_mined_block(&node, block).await?;
+        Ok((MiningAttempt::Mined(finalized.height), finalized.canonical))
+    }
+    .await;
+
+    match attempt_result {
+        Ok((attempt, true)) => {
+            provisional.preserve();
+            Ok(attempt)
+        }
+        Ok((attempt, false)) => {
+            provisional.cleanup().await;
+            Ok(attempt)
+        }
+        Err(error) => {
+            provisional.cleanup().await;
+            Err(error)
+        }
+    }
 }
 
 /// Outcome statistics of a mining run — for operator logs and tests.
@@ -868,28 +1178,14 @@ struct MiningStats {
     /// Nonce-search workers actually spawned. The deterministic FastDevOnly
     /// path searches nothing and always reports 1.
     workers: usize,
+    /// Workers whose thread/inline search has terminated before return.
+    joined_workers: usize,
 }
 
-/// RandomX cache/dataset handles that may cross thread boundaries.
-///
-/// `randomx-rs` wraps the C pointers in `Arc` but the raw pointers strip the
-/// `Send` auto-trait. The RandomX C API documents `randomx_cache` and
-/// `randomx_dataset` as immutable after initialization and safe for
-/// concurrent use by any number of VMs on any threads (one VM per thread);
-/// release happens exactly once via the inner `Arc`'s last drop, and
-/// `randomx_release_*` has no thread affinity. We therefore assert `Send` to
-/// move CLONES of the fully-initialized handles into worker threads. `Sync`
-/// is deliberately NOT asserted — each worker receives an owned clone, never
-/// a shared reference.
-#[allow(unsafe_code)]
-mod shared_rx {
-    pub(super) struct SharedCache(pub(super) randomx_rs::RandomXCache);
-    // SAFETY: see module docs — immutable after init, Arc-managed single release.
-    unsafe impl Send for SharedCache {}
-
-    pub(super) struct SharedDataset(pub(super) randomx_rs::RandomXDataset);
-    // SAFETY: see module docs.
-    unsafe impl Send for SharedDataset {}
+#[derive(Debug)]
+enum MiningWork {
+    Mined(BlockHeader, MiningStats),
+    Cancelled(MiningStats),
 }
 
 /// Immutable inputs of one worker's strided nonce search.
@@ -906,28 +1202,27 @@ struct NonceSearch {
     throttle: MinerThrottle,
 }
 
-/// Build the per-worker RandomX VM (None in fast mode). Light mode links the
-/// shared cache only; full-mem mode links the shared cache AND dataset, so N
-/// workers cost one ~2 GB dataset total, not N of them.
+/// Build the per-worker RandomX VM (None in FastDevOnly mode).
+///
+/// Called inside each worker thread: `dom_pow::MinerVm` shares the heavy
+/// RandomX state through the seed-keyed pools in `dom_pow::randomx_pool`, so
+/// N workers cost one ~2 GB dataset (full-mem) or one ~256 MB cache (light)
+/// total — the pool is also what makes the dataset survive across block
+/// templates, rebuilt only on RFC-0011 seed rotation.
 fn build_worker_vm(
     light_vm: bool,
-    flags: randomx_rs::RandomXFlag,
-    cache: Option<shared_rx::SharedCache>,
-    dataset: Option<shared_rx::SharedDataset>,
-) -> Result<Option<randomx_rs::RandomXVM>, DomError> {
-    use randomx_rs::RandomXVM;
-    let Some(shared_rx::SharedCache(cache)) = cache else {
-        return Ok(None); // fast mode: no VM
-    };
-    let vm = if light_vm {
-        // Cache-only VM. No dataset is allocated.
-        RandomXVM::new(flags, Some(cache), None)
-    } else {
-        let shared_rx::SharedDataset(dataset) =
-            dataset.ok_or_else(|| DomError::Internal("dataset missing for full-mem vm".into()))?;
-        RandomXVM::new(flags, Some(cache), Some(dataset))
+    fast_mode: bool,
+    seed_hash: &[u8; 32],
+) -> Result<Option<dom_pow::MinerVm>, DomError> {
+    if fast_mode {
+        return Ok(None); // deterministic dev hashing: no VM
     }
-    .map_err(|e| DomError::Internal(format!("vm: {e}")))?;
+    let vm = if light_vm {
+        // Cache-only VM. No dataset is allocated (regtest stays light).
+        dom_pow::MinerVm::new_light(seed_hash)?
+    } else {
+        dom_pow::MinerVm::new(seed_hash)?
+    };
     Ok(Some(vm))
 }
 
@@ -936,9 +1231,10 @@ fn build_worker_vm(
 /// `Ok(None)` when another worker won (stop flag set).
 fn search_nonces(
     params: NonceSearch,
-    vm: Option<&randomx_rs::RandomXVM>,
+    vm: Option<&dom_pow::MinerVm>,
     stop: &std::sync::atomic::AtomicBool,
     total_hashes: &std::sync::atomic::AtomicU64,
+    mining_hashes: &std::sync::atomic::AtomicU64,
 ) -> Result<Option<BlockHeader>, DomError> {
     use std::sync::atomic::Ordering;
 
@@ -966,9 +1262,10 @@ fn search_nonces(
         let hash = if params.fast_mode {
             fast_pow_hash(&params.seed_hash, &preimage)
         } else {
-            randomx_hash(vm.expect("vm"), &preimage)?
+            vm.expect("vm").hash(&preimage)?
         };
         total_hashes.fetch_add(1, Ordering::Relaxed);
+        mining_hashes.fetch_add(1, Ordering::Relaxed);
         if hash_meets_target(&hash, &params.target) {
             header.pow.randomx_hash = Hash256::from_bytes(hash);
             return Ok(Some(header));
@@ -1003,6 +1300,7 @@ fn search_nonces(
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn mine_blocking(
     new_height: u64,
@@ -1020,14 +1318,60 @@ fn mine_blocking(
     threads: usize,
     throttle: MinerThrottle,
 ) -> Result<(BlockHeader, MiningStats), DomError> {
-    use randomx_rs::{RandomXCache, RandomXDataset, RandomXFlag};
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    // Mainnet / Testnet mining sets `FLAG_FULL_MEM` for throughput
-    // (allocates the ~2 GB RandomX dataset, shared by all workers). Regtest
-    // opts out via `light_vm = true` and uses cache-only VMs (~256 MB shared).
+    let stop = Arc::new(AtomicBool::new(false));
+    let mining_hashes = Arc::new(AtomicU64::new(0));
+    match mine_blocking_cancellable(
+        new_height,
+        tip_hash,
+        block_timestamp,
+        target,
+        new_total_diff,
+        seed_hash,
+        output_root,
+        kernel_root,
+        rangeproof_root,
+        total_kernel_offset,
+        light_vm,
+        pow_mode,
+        threads,
+        throttle,
+        stop,
+        mining_hashes,
+    )? {
+        MiningWork::Mined(header, stats) => Ok((header, stats)),
+        MiningWork::Cancelled(_) => Err(DomError::Internal(
+            "nonce search cancelled without a result".into(),
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mine_blocking_cancellable(
+    new_height: u64,
+    tip_hash: Hash256,
+    block_timestamp: Timestamp,
+    target: [u8; 32],
+    new_total_diff: U256,
+    seed_hash: [u8; 32],
+    output_root: Hash256,
+    kernel_root: Hash256,
+    rangeproof_root: Hash256,
+    total_kernel_offset: [u8; 32],
+    light_vm: bool,
+    pow_mode: PowValidationMode,
+    threads: usize,
+    throttle: MinerThrottle,
+    stop: Arc<AtomicBool>,
+    mining_hashes: Arc<AtomicU64>,
+) -> Result<MiningWork, DomError> {
+    // Mainnet / Testnet mining runs RandomX fast mode via `dom_pow::MinerVm`
+    // (~2 GB dataset shared by all workers, pooled per seed and rebuilt only
+    // on RFC-0011 seed rotation — see `dom_pow::randomx_pool`). Regtest opts
+    // out via `light_vm = true` and uses cache-only VMs (~256 MB shared).
     // Regtest still performs real PoW against `REGTEST_TARGET_COMPACT` unless
     // explicit FastDevOnly hashing is enabled for tests. All paths check the
-    // same consensus target supplied by `compute_expected_target`.
+    // same consensus target supplied by `compute_expected_target`, and fast
+    // mode hashes byte-identically to the light-mode validation path.
     let fast_mode = matches!(pow_mode, PowValidationMode::FastDevOnly);
     // FastDevOnly finds its nonce deterministically without searching, so
     // extra workers add nothing and would only make the winning nonce racy
@@ -1037,27 +1381,6 @@ fn mine_blocking(
         "Starting miner h={new_height}: configured_threads={threads} workers={workers} throttle={}",
         throttle.describe()
     );
-    let flags = if light_vm {
-        RandomXFlag::get_recommended_flags()
-    } else {
-        RandomXFlag::get_recommended_flags() | RandomXFlag::FLAG_FULL_MEM
-    };
-    let cache = if fast_mode {
-        None
-    } else {
-        Some(
-            RandomXCache::new(flags, &seed_hash)
-                .map_err(|e| DomError::Internal(format!("cache: {e}")))?,
-        )
-    };
-    let dataset = if fast_mode || light_vm {
-        None
-    } else {
-        Some(
-            RandomXDataset::new(flags, cache.clone().expect("cache"), 0)
-                .map_err(|e| DomError::Internal(format!("dataset: {e}")))?,
-        )
-    };
     let template = BlockHeader {
         version: dom_core::PROTOCOL_VERSION,
         prev_hash: tip_hash,
@@ -1078,14 +1401,8 @@ fn mine_blocking(
     if workers == 1 {
         // Single worker: search inline on this thread, exactly the historical
         // behavior — no extra spawn, no cross-thread RandomX handles.
-        let stop = AtomicBool::new(false);
         let total_hashes = AtomicU64::new(0);
-        let vm = build_worker_vm(
-            light_vm,
-            flags,
-            cache.map(shared_rx::SharedCache),
-            dataset.map(shared_rx::SharedDataset),
-        )?;
+        let vm = build_worker_vm(light_vm, fast_mode, &seed_hash)?;
         let header = search_nonces(
             NonceSearch {
                 template,
@@ -1099,22 +1416,27 @@ fn mine_blocking(
             vm.as_ref(),
             &stop,
             &total_hashes,
-        )?
-        .ok_or_else(|| DomError::Internal("nonce search stopped without a result".into()))?;
-        return Ok((header, MiningStats { workers: 1 }));
+            &mining_hashes,
+        )?;
+        let stats = MiningStats {
+            workers: 1,
+            joined_workers: 1,
+        };
+        return Ok(match header {
+            Some(header) => MiningWork::Mined(header, stats),
+            None => MiningWork::Cancelled(stats),
+        });
     }
 
     // Multi-worker: N strided searchers over one shared cache/dataset, first
     // valid header wins and stops the rest.
-    let stop = Arc::new(AtomicBool::new(false));
     let total_hashes = Arc::new(AtomicU64::new(0));
     let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<BlockHeader, DomError>>();
     let mut handles = Vec::with_capacity(workers);
     for worker_id in 0..workers {
-        let cache_w = cache.clone().map(shared_rx::SharedCache);
-        let dataset_w = dataset.clone().map(shared_rx::SharedDataset);
         let stop_w = Arc::clone(&stop);
         let hashes_w = Arc::clone(&total_hashes);
+        let mining_hashes_w = Arc::clone(&mining_hashes);
         let tx_w = result_tx.clone();
         let params = NonceSearch {
             template: template.clone(),
@@ -1129,8 +1451,12 @@ fn mine_blocking(
             .name(format!("miner-{new_height}-w{worker_id}"))
             .spawn(move || {
                 info!("⛏ h={new_height} worker #{worker_id}/{workers} iniciado");
-                let outcome = build_worker_vm(light_vm, flags, cache_w, dataset_w)
-                    .and_then(|vm| search_nonces(params, vm.as_ref(), &stop_w, &hashes_w));
+                // VM built inside the worker thread: first worker on a fresh
+                // seed pays the pooled dataset build, the rest block on the
+                // pool mutex and then attach to the shared dataset.
+                let outcome = build_worker_vm(light_vm, fast_mode, &params.seed_hash).and_then(
+                    |vm| search_nonces(params, vm.as_ref(), &stop_w, &hashes_w, &mining_hashes_w),
+                );
                 match outcome {
                     Ok(Some(header)) => {
                         stop_w.store(true, Ordering::Relaxed);
@@ -1138,6 +1464,7 @@ fn mine_blocking(
                     }
                     Ok(None) => {} // another worker won
                     Err(e) => {
+                        stop_w.store(true, Ordering::Release);
                         let _ = tx_w.send(Err(e));
                     }
                 }
@@ -1172,17 +1499,34 @@ fn mine_blocking(
         }
     }
     stop.store(true, Ordering::Relaxed);
+    let mut join_failed = false;
     for handle in handles {
-        let _ = handle.join();
+        if handle.join().is_err() {
+            join_failed = true;
+        }
     }
+    if join_failed {
+        return Err(DomError::Internal("miner worker panicked".into()));
+    }
+    let stats = MiningStats {
+        workers,
+        joined_workers: workers,
+    };
     match winner {
-        Some(header) => Ok((header, MiningStats { workers })),
+        Some(header) => Ok(MiningWork::Mined(header, stats)),
+        None if stop.load(Ordering::Acquire) && last_err.is_none() => {
+            Ok(MiningWork::Cancelled(stats))
+        }
         None => Err(last_err.unwrap_or_else(|| {
             DomError::Internal("all miner workers exited without a result".into())
         })),
     }
 }
 
+/// Test-only helper: recompute a hash on an independently constructed light
+/// VM, bypassing `dom_pow`'s pools — used to prove the mining paths produce
+/// real RandomX output rather than shared-state garbage.
+#[cfg(test)]
 fn randomx_hash(vm: &randomx_rs::RandomXVM, preimage: &[u8]) -> Result<[u8; 32], DomError> {
     let v = vm
         .calculate_hash(preimage)
@@ -1237,6 +1581,289 @@ mod kernel_offset_tests {
             tx_with_offset(scalar_repr(3)),
         ];
         assert_eq!(aggregate_block_kernel_offset(&txs), scalar_repr(5));
+    }
+}
+
+#[cfg(test)]
+mod stale_template_ibd_tests {
+    use super::{
+        best_known_connected_peer_height, classify_template_snapshot, mine_blocking_cancellable,
+        set_paused_for_sync, MinerThrottle, MiningActiveGuard, MiningAttempt, MiningEligibility,
+        MiningWork, ProvisionalCoinbase,
+    };
+    use crate::metrics::Metrics;
+    use dom_config::MinerThrottleConfig;
+    use dom_core::{Hash256, Timestamp};
+    use dom_pow::PowValidationMode;
+    use dom_wallet::{Network, WalletDir};
+    use dom_wire::manager::PeerManager;
+    use dom_wire::peer::{PeerInfo, PeerState};
+    use primitive_types::U256;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn eligibility(local_height: u64, peer_height: u64, ibd_active: bool) -> MiningEligibility {
+        MiningEligibility {
+            local_height,
+            best_known_peer_height: peer_height,
+            ibd_active,
+        }
+    }
+
+    fn peer(port: u16, height: u64) -> PeerInfo {
+        let mut peer = PeerInfo::new(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port), true);
+        peer.state = PeerState::Connected;
+        peer.best_height = height;
+        peer.best_hash = [height as u8; 32];
+        peer
+    }
+
+    fn fresh_test_dir(label: &str) -> PathBuf {
+        let unique = format!(
+            "dom-miner-runtime-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    fn start_cancellable_fast_worker(
+        parent: Hash256,
+    ) -> (
+        Arc<AtomicBool>,
+        Arc<AtomicU64>,
+        std::thread::JoinHandle<Result<MiningWork, dom_core::DomError>>,
+    ) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let hashes = Arc::new(AtomicU64::new(0));
+        let worker_stop = stop.clone();
+        let worker_hashes = hashes.clone();
+        let handle = std::thread::spawn(move || {
+            mine_blocking_cancellable(
+                11,
+                parent,
+                Timestamp(1_700_000_000),
+                [0u8; 32], // no non-zero hash can satisfy this target
+                U256::one(),
+                [0u8; 32],
+                Hash256::ZERO,
+                Hash256::ZERO,
+                Hash256::ZERO,
+                [0u8; 32],
+                true,
+                PowValidationMode::FastDevOnly,
+                4,
+                MinerThrottle::from_config(&MinerThrottleConfig::default()),
+                worker_stop,
+                worker_hashes,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while hashes.load(Ordering::Acquire) == 0 {
+            assert!(Instant::now() < deadline, "worker did not become active");
+            std::thread::yield_now();
+        }
+        (stop, hashes, handle)
+    }
+
+    #[test]
+    fn miner_does_not_start_while_peer_is_ahead() {
+        let state = eligibility(0, 10, false);
+        let metrics = Metrics::new();
+        set_paused_for_sync(&metrics, state.paused_for_sync());
+
+        assert!(state.paused_for_sync());
+        assert_eq!(metrics.mining_active.load(Ordering::Acquire), 0);
+        assert_eq!(metrics.mining_paused_for_sync.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn miner_starts_when_local_reaches_best_peer_height() {
+        let state = eligibility(10, 10, false);
+        let metrics = Arc::new(Metrics::new());
+        set_paused_for_sync(&metrics, state.paused_for_sync());
+        assert!(!state.paused_for_sync());
+
+        let active = MiningActiveGuard::new(metrics.clone(), state.local_height + 1);
+        assert_eq!(metrics.mining_active.load(Ordering::Acquire), 1);
+        assert_eq!(metrics.mining_template_height.load(Ordering::Acquire), 11);
+        drop(active);
+        assert_eq!(metrics.mining_active.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn canonical_tip_change_cancels_old_template() {
+        let old_parent = Hash256::from_bytes([0x11; 32]);
+        let new_parent = Hash256::from_bytes([0x22; 32]);
+        let (stop, _hashes, handle) = start_cancellable_fast_worker(old_parent);
+
+        let reason = classify_template_snapshot(old_parent, new_parent, eligibility(10, 10, false))
+            .expect("changed canonical parent must invalidate template");
+        assert!(matches!(
+            reason,
+            MiningAttempt::StaleTemplate {
+                old_parent: old,
+                new_parent: new,
+            } if old == old_parent && new == new_parent
+        ));
+        stop.store(true, Ordering::Release);
+        let work = handle
+            .join()
+            .expect("coordinator joins")
+            .expect("worker result");
+        match work {
+            MiningWork::Cancelled(stats) => {
+                assert_eq!(stats.workers, 1);
+                assert_eq!(stats.joined_workers, stats.workers);
+            }
+            MiningWork::Mined(_, _) => panic!("impossible target must not produce a nonce"),
+        }
+        assert_eq!(10 + 1, 11, "replacement template height");
+        assert_eq!(new_parent, Hash256::from_bytes([0x22; 32]));
+    }
+
+    #[tokio::test]
+    async fn stale_template_coinbase_is_removed() {
+        let dir = fresh_test_dir("stale-coinbase");
+        let wallet = Arc::new(tokio::sync::Mutex::new(
+            WalletDir::create(
+                &dir,
+                "pw",
+                Network::Regtest,
+                &Hash256::from_bytes([0x42; 32]),
+            )
+            .expect("wallet dir"),
+        ));
+        let coinbase = wallet
+            .lock()
+            .await
+            .wallet_mut()
+            .build_coinbase(dom_core::BlockHeight(11), 0)
+            .expect("coinbase");
+        let commitment = *coinbase.output.commitment.as_bytes();
+        let mut provisional = ProvisionalCoinbase::new(Some(wallet.clone()), &coinbase);
+
+        provisional.cleanup().await;
+        provisional.cleanup().await; // exact-once cleanup is idempotent
+        assert!(!wallet
+            .lock()
+            .await
+            .wallet()
+            .outputs()
+            .any(|output| output.commitment == commitment));
+
+        drop(provisional);
+        drop(wallet);
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn accepted_coinbase_is_not_removed() {
+        let dir = fresh_test_dir("accepted-coinbase");
+        let wallet = Arc::new(tokio::sync::Mutex::new(
+            WalletDir::create(
+                &dir,
+                "pw",
+                Network::Regtest,
+                &Hash256::from_bytes([0x43; 32]),
+            )
+            .expect("wallet dir"),
+        ));
+        let coinbase = wallet
+            .lock()
+            .await
+            .wallet_mut()
+            .build_coinbase(dom_core::BlockHeight(11), 0)
+            .expect("coinbase");
+        let commitment = *coinbase.output.commitment.as_bytes();
+        let mut provisional = ProvisionalCoinbase::new(Some(wallet.clone()), &coinbase);
+
+        provisional.preserve();
+        provisional.cleanup().await;
+        assert!(wallet
+            .lock()
+            .await
+            .wallet()
+            .outputs()
+            .any(|output| output.commitment == commitment));
+
+        wallet.lock().await.wallet_mut().forget_output(&commitment);
+        drop(provisional);
+        drop(wallet);
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[test]
+    fn nonce_found_after_tip_change_is_not_submitted() {
+        let old_parent = Hash256::from_bytes([0x51; 32]);
+        let new_parent = Hash256::from_bytes([0x52; 32]);
+        let post_nonce =
+            classify_template_snapshot(old_parent, new_parent, eligibility(11, 11, false));
+        assert!(matches!(
+            post_nonce,
+            Some(MiningAttempt::StaleTemplate { .. })
+        ));
+    }
+
+    #[test]
+    fn shutdown_joins_all_mining_workers() {
+        let parent = Hash256::from_bytes([0x61; 32]);
+        let (stop, _hashes, handle) = start_cancellable_fast_worker(parent);
+        let metrics = Arc::new(Metrics::new());
+        let active = MiningActiveGuard::new(metrics.clone(), 11);
+
+        stop.store(true, Ordering::Release);
+        let work = handle
+            .join()
+            .expect("coordinator joins")
+            .expect("worker result");
+        drop(active);
+        match work {
+            MiningWork::Cancelled(stats) => assert_eq!(stats.joined_workers, stats.workers),
+            MiningWork::Mined(_, _) => panic!("shutdown worker unexpectedly mined"),
+        }
+        assert_eq!(metrics.mining_active.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn peer_height_change_without_tip_change_pauses_mining() {
+        let parent = Hash256::from_bytes([0x71; 32]);
+        let reason = classify_template_snapshot(parent, parent, eligibility(10, 12, false));
+        assert!(matches!(
+            reason,
+            Some(MiningAttempt::PausedForSync {
+                local_height: 10,
+                best_known_peer_height: 12,
+            })
+        ));
+    }
+
+    #[test]
+    fn peer_height_regression_does_not_lower_safety_reference_incorrectly() {
+        let mut peers = PeerManager::new(8, 2);
+        peers.register_peer(peer(32001, 20)).expect("high peer");
+        peers.register_peer(peer(32002, 7)).expect("low peer");
+        assert_eq!(best_known_connected_peer_height(&peers), 20);
+
+        peers.peers.get_mut("127.0.0.1:32002").unwrap().best_height = 3;
+        assert_eq!(best_known_connected_peer_height(&peers), 20);
+    }
+
+    #[test]
+    fn stale_template_is_not_reported_as_mining_failure() {
+        let old_parent = Hash256::from_bytes([0x81; 32]);
+        let new_parent = Hash256::from_bytes([0x82; 32]);
+        let outcome =
+            classify_template_snapshot(old_parent, new_parent, eligibility(10, 10, false));
+        assert!(matches!(outcome, Some(MiningAttempt::StaleTemplate { .. })));
     }
 }
 
@@ -2471,11 +3098,12 @@ mod genesis_determinism_tests {
             transactions: vec![],
         };
 
-        let height = finalize_mined_block(&node, block)
+        let finalized = finalize_mined_block(&node, block)
             .await
             .expect("valid mined block accepted");
 
-        assert_eq!(height, 1);
+        assert_eq!(finalized.height, 1);
+        assert!(finalized.canonical);
         assert_eq!(node.metrics.blocks_mined.load(Ordering::Relaxed), 1);
         assert_eq!(node.metrics.chain_height.load(Ordering::Relaxed), 1);
         assert_eq!(node.metrics.mempool_size.load(Ordering::Relaxed), 0);
