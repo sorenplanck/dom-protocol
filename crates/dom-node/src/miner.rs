@@ -12,7 +12,7 @@ use dom_core::{
 };
 use dom_pow::{
     compute_expected_target, fast_pow_hash, hash_meets_target, pow_validation_mode_for_network,
-    randomx_seed_height, target_to_compact, target_to_difficulty, CompactTarget, PowValidationMode,
+    randomx_seed_height, target_to_compact, CompactTarget, PowValidationMode,
 };
 use dom_serialization::DomDeserialize;
 use dom_store::DomStore;
@@ -930,7 +930,11 @@ async fn mine_one_attempt(
         block_timestamp,
         BlockHeight(new_height),
     )?;
-    let block_diff = target_to_difficulty(&target);
+    let block_diff = dom_pow::target_to_difficulty_for_network_height(
+        node.config.network.magic(),
+        BlockHeight(new_height),
+        &target,
+    )?;
     let new_total_diff = checked_accumulated_difficulty(tip_difficulty, block_diff)?;
     let mining_mode = MiningMode::for_network(node.config.network)?;
     let throttle = MinerThrottle::from_config(&node.config.miner_throttle);
@@ -1454,9 +1458,10 @@ fn mine_blocking_cancellable(
                 // VM built inside the worker thread: first worker on a fresh
                 // seed pays the pooled dataset build, the rest block on the
                 // pool mutex and then attach to the shared dataset.
-                let outcome = build_worker_vm(light_vm, fast_mode, &params.seed_hash).and_then(
-                    |vm| search_nonces(params, vm.as_ref(), &stop_w, &hashes_w, &mining_hashes_w),
-                );
+                let outcome =
+                    build_worker_vm(light_vm, fast_mode, &params.seed_hash).and_then(|vm| {
+                        search_nonces(params, vm.as_ref(), &stop_w, &hashes_w, &mining_hashes_w)
+                    });
                 match outcome {
                     Ok(Some(header)) => {
                         stop_w.store(true, Ordering::Relaxed);
