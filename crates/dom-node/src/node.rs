@@ -1517,11 +1517,12 @@ async fn handle_inbound(
         Ok(peer_hello) => {
             let peer_id = codec.peer_id();
             info!(
-                "Hello from {addr}: peer_id={} height={} ua={:?}",
+                "Hello from {addr}: peer_id={} height={} hash={} ua={:?}",
                 peer_id
                     .map(hex::encode)
                     .unwrap_or_else(|| "unavailable".into()),
                 peer_hello.best_height,
+                hex::encode(peer_hello.best_hash),
                 peer_hello.user_agent
             );
             // Register peer in manager so connected_peers() sees it
@@ -1549,11 +1550,16 @@ async fn handle_inbound(
                 warn!("Persisting peer reputation state after inbound registration failed: {e}");
             }
             refresh_peer_metrics(&svc.peers, &svc.metrics, Some(&svc.state_events)).await;
-            // IBD loop: if the inbound peer claims a higher chain, sync from it.
-            // Mirrors connect_outbound logic so inbound-only nodes (behind NAT
-            // who can only accept connections) still converge to the network's
-            // tip instead of remaining stuck at a stale height.
-            let our_height = chain.lock().await.tip_height.0;
+            // An inbound peer with a taller chain is a normal IBD source.
+            // For equal-height fork resolution, however, the inbound side must
+            // remain in `message_loop` to serve the outbound peer's locator.
+            // If both sides start IBD after the Hello exchange, both wait for
+            // Headers and the connection deadlocks.  The outbound side is the
+            // single deterministic requester for equal-height reconciliation.
+            let our_height = {
+                let chain = chain.lock().await;
+                chain.tip_height.0
+            };
             if peer_hello.best_height > our_height {
                 let ibd_result = tokio::select! {
                     _ = shutdown.wait() => return Some(registered_session),
@@ -1565,6 +1571,7 @@ async fn handle_inbound(
                         &svc.mempool,
                         addr,
                         peer_hello.best_height,
+                        false,
                         svc.future_block_queue.clone(),
                         svc.metrics.clone(),
                         svc.wallet.clone(),
@@ -1700,11 +1707,12 @@ async fn connect_outbound(
         Ok(peer_hello) => {
             let peer_id = codec.peer_id();
             info!(
-                "Hello from {addr}: peer_id={} height={} ua={:?}",
+                "Hello from {addr}: peer_id={} height={} hash={} ua={:?}",
                 peer_id
                     .map(hex::encode)
                     .unwrap_or_else(|| "unavailable".into()),
                 peer_hello.best_height,
+                hex::encode(peer_hello.best_hash),
                 peer_hello.user_agent
             );
             // Register peer in manager so connected_peers() sees it
@@ -1756,8 +1764,13 @@ async fn connect_outbound(
             };
 
             // IBD loop: keep syncing while peer claims to be ahead.
-            let our_height = chain.lock().await.tip_height.0;
-            if peer_hello.best_height > our_height {
+            let (our_height, our_hash) = {
+                let chain = chain.lock().await;
+                (chain.tip_height.0, *chain.tip_hash.as_bytes())
+            };
+            if let Some(fork_resolution) =
+                sync_mode_for_peer(our_height, our_hash, peer_hello.best_height, peer_hello.best_hash)
+            {
                 let ibd_result = tokio::select! {
                     _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
                     result = run_ibd_session(
@@ -1768,6 +1781,7 @@ async fn connect_outbound(
                         &svc.mempool,
                         peer_addr,
                         peer_hello.best_height,
+                        fork_resolution,
                         svc.future_block_queue.clone(),
                         svc.metrics.clone(),
                         svc.wallet.clone(),
@@ -2814,6 +2828,27 @@ async fn note_peer_best_height(
     }
 }
 
+/// Decide whether a peer's advertised tip requires a header/body sync.
+///
+/// `Some(false)` is ordinary catch-up from a taller peer. `Some(true)` is a
+/// fork-resolution round: equal height but a different authenticated tip hash.
+/// The latter is essential because height alone cannot choose between forks;
+/// chain state resolves the fetched branches by accumulated work.
+fn sync_mode_for_peer(
+    local_height: u64,
+    local_hash: [u8; 32],
+    peer_height: u64,
+    peer_hash: [u8; 32],
+) -> Option<bool> {
+    if peer_height > local_height {
+        Some(false)
+    } else if peer_height == local_height && peer_hash != local_hash {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 /// Persistent message loop after Hello exchange.
 ///
 /// Reads framed messages from the peer in a loop and dispatches by command:
@@ -3376,6 +3411,7 @@ async fn run_ibd_session(
     mempool: &Arc<Mutex<Mempool>>,
     peer_addr: std::net::SocketAddr,
     peer_best_height: u64,
+    fork_resolution: bool,
     future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
     metrics: Arc<Metrics>,
     wallet: Option<Arc<Mutex<dom_wallet::WalletDir>>>,
@@ -3399,7 +3435,19 @@ async fn run_ibd_session(
         return Ok(());
     };
     let our_height = chain.lock().await.tip_height.0;
-    let (mut ibd, persisted) = initialize_ibd_state(chain, peer_addr, peer_best_height).await?;
+    // IBD historically treated `local_height >= peer_height` as complete. That
+    // leaves equal-height forks permanent: the peers have different tips but
+    // never exchange the competing branch, so fork choice cannot compare work.
+    // A synthetic one-block target keeps the existing header/body pipeline
+    // active for exactly one fork-resolution round; the round exits below once
+    // all advertised competing blocks have been connected as side-chain or
+    // canonical data.
+    let ibd_target_height = if fork_resolution {
+        our_height.saturating_add(1)
+    } else {
+        peer_best_height
+    };
+    let (mut ibd, persisted) = initialize_ibd_state(chain, peer_addr, ibd_target_height).await?;
     let runtime = IbdRuntimeContext {
         config,
         peer_addr,
@@ -3662,6 +3710,7 @@ async fn run_ibd_session(
         phase = ?ibd.phase,
         local_height = our_height,
         remote_height = peer_best_height,
+        fork_resolution,
         remaining_blocks = peer_best_height.saturating_sub(our_height),
         progress_percent = if peer_best_height == 0 {
             100.0
@@ -3691,6 +3740,18 @@ async fn run_ibd_session(
         .await
         {
             Ok(true) => {
+                if fork_resolution {
+                    clear_persisted_ibd_state(chain).await?;
+                    let (local_height, local_hash) = {
+                        let chain = chain.lock().await;
+                        (chain.tip_height.0, *chain.tip_hash.as_bytes())
+                    };
+                    info!(
+                        "fork-resolution IBD with {peer_addr} completed: local_height={local_height} local_hash={} peer_height={peer_best_height}",
+                        hex::encode(local_hash)
+                    );
+                    return Ok(());
+                }
                 let new_height = chain.lock().await.tip_height.0;
                 match ibd.note_round_progress(new_height) {
                     dom_chain::IbdControl::Complete => {
@@ -3720,6 +3781,11 @@ async fn run_ibd_session(
                         ));
                     }
                 }
+            }
+            Ok(false) if fork_resolution => {
+                clear_persisted_ibd_state(chain).await?;
+                info!("fork-resolution IBD with {peer_addr} found no unknown competing blocks");
+                return Ok(());
             }
             Ok(false) => match ibd.note_empty_response() {
                 dom_chain::IbdControl::Complete => {
@@ -4174,6 +4240,7 @@ async fn message_loop(
                         &svc.mempool,
                         peer_addr,
                         target,
+                        false,
                         svc.future_block_queue.clone(),
                         svc.metrics.clone(),
                         svc.wallet.clone(),
@@ -4903,6 +4970,7 @@ mod tests {
         IbdRoundState, OutboundAttemptOutcome, RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY,
         MEMPOOL_METADATA_KEY, METRICS_CONTENT_TYPE, NOISE_STATIC_KEY_METADATA_KEY,
         PEER_REPUTATION_METADATA_KEY, PEER_ROTATION_METADATA_KEY,
+        sync_mode_for_peer,
     };
     use crate::future_block_queue::DeferredBlock;
     use crate::metrics::Metrics;
@@ -7906,5 +7974,16 @@ mod tests {
         assert!(node.task_supervisor.failure().await.is_none());
 
         crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[test]
+    fn equal_height_different_tip_requires_fork_resolution() {
+        let ours = [0x11; 32];
+        let theirs = [0x22; 32];
+
+        assert_eq!(sync_mode_for_peer(100, ours, 101, theirs), Some(false));
+        assert_eq!(sync_mode_for_peer(100, ours, 100, theirs), Some(true));
+        assert_eq!(sync_mode_for_peer(100, ours, 100, ours), None);
+        assert_eq!(sync_mode_for_peer(100, ours, 99, theirs), None);
     }
 }

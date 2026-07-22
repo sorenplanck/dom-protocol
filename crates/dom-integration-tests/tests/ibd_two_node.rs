@@ -746,52 +746,65 @@ async fn t3_ibd_noise_fragmentation_headers_above_one_frame_async() {
 }
 
 #[test]
-fn t4_reorg_convergence_between_divergent_nodes() {
-    run_ibd_two_node_test(6, t4_reorg_convergence_between_divergent_nodes_async());
+fn t4_equal_height_divergent_nodes_converge() {
+    run_ibd_two_node_test(6, t4_equal_height_divergent_nodes_converge_async());
 }
 
-async fn t4_reorg_convergence_between_divergent_nodes_async() {
+/// Regression for equal-height fork deadlock: before the fork-resolution IBD
+/// path, two nodes that advertised the same height but different tips never
+/// exchanged headers, so chain-state never got a chance to apply fork choice.
+async fn t4_equal_height_divergent_nodes_converge_async() {
     enable_fast_regtest_mining();
     init_tracing();
-    let mut log = TestLog::new("t4_reorg_convergence");
-    log.line("T4 covers divergent private chains converging via reorg");
+    let mut log = TestLog::new("t4_equal_height_fork_resolution");
+    log.line("T4 covers equal-height divergent private chains converging via fork-resolution IBD");
 
     let port_a = free_local_port();
     let port_b = free_local_port();
     let node_a = spawn_node(test_config("t4-a-private", port_a, false)).await;
     let node_b = spawn_node(test_config("t4-b-private", port_b, false)).await;
     mine_blocks_resilient(&node_a, 10).await.expect("A mine 10");
-    mine_blocks_resilient(&node_b, 8).await.expect("B mine 8");
-    let (_, b_old_hash) = tip(&node_b).await;
+    mine_blocks_resilient(&node_b, 10).await.expect("B mine 10");
+    let (height_a, hash_a) = tip(&node_a).await;
+    let (height_b, hash_b) = tip(&node_b).await;
+    assert_eq!(height_a, height_b, "precondition: equal height");
+    assert_ne!(hash_a, hash_b, "precondition: divergent tips");
 
-    let _task_a = start_node(node_a.clone()).await;
-    let data_dir_b = node_b.config.data_dir.clone();
-    drop(node_b);
+    // Regtest has a fixed per-block target, so equal-height branches have
+    // equal accumulated work.  ChainState's deterministic tie-breaker picks
+    // the lower tip hash.  Choosing that node as the source proves the real
+    // P2P equal-height path transfers the competing branch and converges.
+    let (source, stale, source_port, stale_port, source_hash) = if hash_a.as_bytes() < hash_b.as_bytes() {
+        (node_a, node_b, port_a, port_b, hash_a)
+    } else {
+        (node_b, node_a, port_b, port_a, hash_b)
+    };
+    let stale_old_hash = tip(&stale).await.1;
+    let stale_data_dir = stale.config.data_dir.clone();
+    let _source_task = start_node(source.clone()).await;
+    drop(stale);
 
-    let mut config_b = test_config("t4-b-reopen", port_b, false);
-    config_b.data_dir = data_dir_b;
-    config_b.seed_peers = vec![format!("127.0.0.1:{port_a}")];
-    let node_b = spawn_node(config_b).await;
-    let _task_b = start_node(node_b.clone()).await;
+    let mut stale_config = test_config("t4-stale-reopen", stale_port, false);
+    stale_config.data_dir = stale_data_dir;
+    stale_config.seed_peers = vec![format!("127.0.0.1:{source_port}")];
+    let stale = spawn_node(stale_config).await;
+    let _stale_task = start_node(stale.clone()).await;
 
-    wait_for_height(&node_b, 10, CONVERGENCE_TIMEOUT)
-        .await
-        .expect("B should reorg to A's taller chain");
-    let (h_a, hash_a) = tip(&node_a).await;
-    wait_for_tip_hash(&node_b, hash_a, CONVERGENCE_TIMEOUT).await;
-    let (h_b, hash_b) = tip(&node_b).await;
-    assert_eq!(h_a, h_b);
-    assert_eq!(hash_a, hash_b);
-    assert_ne!(hash_b, b_old_hash, "B did not change tip during reorg");
+    wait_for_tip_hash(&stale, source_hash, CONVERGENCE_TIMEOUT).await;
+    let (source_height, source_tip) = tip(&source).await;
+    let (stale_height, stale_tip) = tip(&stale).await;
+    assert_eq!(source_height, stale_height);
+    assert_eq!(source_tip, stale_tip);
+    assert_ne!(stale_tip, stale_old_hash, "stale node did not change tip during reorg");
 
-    let utxos_a = node_a
+    let utxos_a = source
         .chain
         .lock()
         .await
         .store
         .read_all_utxos_raw()
         .expect("A utxo set");
-    let utxos_b = node_b
+    let utxos_b = stale
         .chain
         .lock()
         .await
@@ -799,8 +812,8 @@ async fn t4_reorg_convergence_between_divergent_nodes_async() {
         .read_all_utxos_raw()
         .expect("B utxo set");
     assert_eq!(utxos_a, utxos_b, "UTXO sets diverged after reorg");
-    assert_no_bans(&node_a).await;
-    assert_no_bans(&node_b).await;
+    assert_no_bans(&source).await;
+    assert_no_bans(&stale).await;
 }
 
 #[test]
