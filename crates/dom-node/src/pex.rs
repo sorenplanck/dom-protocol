@@ -7,11 +7,13 @@
 //! RFC-0005 §6: Peer Discovery.
 //! Philosophy Section 12: Operational Requirements.
 
-use std::collections::{HashMap, VecDeque};
-use std::net::SocketAddr;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use dom_config::Network;
 use dom_store::PeerAddr;
+use dom_wire::message::AddrEntry;
 
 /// Maximum peers to return in a single Addr response.
 /// Same bound as the wire parser, so everything we share always decodes.
@@ -31,6 +33,9 @@ const MIN_GETADDR_TRACKED: usize = 128;
 pub struct PexManager {
     /// Known peers by address string.
     known: HashMap<String, PeerAddr>,
+    /// Addresses confirmed by a successful outbound connection.  Unconfirmed
+    /// addresses are candidates to dial, but are never re-advertised.
+    confirmed: HashSet<String>,
     /// Timestamps of last GetAddr sent to each peer.
     last_getaddr: HashMap<String, u64>,
     /// Insertion order for GetAddr cooldown tracking.
@@ -41,36 +46,125 @@ pub struct PexManager {
     getaddr_order: VecDeque<(String, u64)>,
     /// Maximum peers to track.
     max_peers: usize,
+    /// Regtest and testnet deliberately permit private/loopback addresses for
+    /// local topologies. Mainnet accepts only publicly-routable addresses.
+    allow_non_public_addrs: bool,
 }
 
 impl PexManager {
     /// Create a new PEX manager.
     pub fn new(max_peers: usize) -> Self {
+        Self::with_policy(max_peers, false)
+    }
+
+    /// Create a PEX table using the appropriate address policy for `network`.
+    pub fn for_network(max_peers: usize, network: Network) -> Self {
+        Self::with_policy(max_peers, !matches!(network, Network::Mainnet))
+    }
+
+    fn with_policy(max_peers: usize, allow_non_public_addrs: bool) -> Self {
         Self {
             known: HashMap::new(),
+            confirmed: HashSet::new(),
             last_getaddr: HashMap::new(),
             getaddr_order: VecDeque::new(),
             max_peers,
+            allow_non_public_addrs,
         }
     }
 
-    /// Add or update a known peer.
-    pub fn add_peer(&mut self, addr: String) {
-        if self.known.len() >= self.max_peers && !self.known.contains_key(&addr) {
-            return;
+    /// Add an unconfirmed candidate from configuration or discovery.
+    ///
+    /// This deliberately does not mark the address as recently seen. Only an
+    /// authenticated outbound connection may do that via [`Self::mark_connected`].
+    pub fn add_peer(&mut self, addr: String) -> bool {
+        self.add_unconfirmed(addr, 0)
+    }
+
+    /// Learn an address advertised in an `Addr` message.
+    ///
+    /// A remote timestamp can age a newly learned candidate, but can never
+    /// refresh an existing local observation or be placed in the future.
+    pub fn process_addr_message(&mut self, entries: Vec<AddrEntry>) -> usize {
+        let now = unix_now();
+        entries
+            .into_iter()
+            .filter(|entry| self.add_unconfirmed(entry.addr.clone(), entry.last_seen.min(now)))
+            .count()
+    }
+
+    /// Learn the likely listening endpoint of an authenticated inbound peer.
+    ///
+    /// The TCP source port is ephemeral, so the standard network P2P port is
+    /// used as an unconfirmed dial candidate. It is never shared until an
+    /// outbound connection succeeds.
+    pub fn learn_inbound_peer(&mut self, ip: IpAddr, p2p_port: u16) -> bool {
+        self.add_unconfirmed(SocketAddr::new(ip, p2p_port).to_string(), 0)
+    }
+
+    /// Record a successful outbound connection and make the endpoint shareable.
+    pub fn mark_connected(&mut self, addr: &str) -> bool {
+        let Ok(socket_addr) = addr.parse::<SocketAddr>() else {
+            return false;
+        };
+        if !self.accepts(socket_addr) {
+            return false;
         }
+        if self.known.len() >= self.max_peers && !self.known.contains_key(addr) {
+            return false;
+        }
+
         let now = unix_now();
         self.known
-            .entry(addr.clone())
-            .and_modify(|p| {
-                p.last_seen = now;
-                p.failures = 0;
+            .entry(addr.to_string())
+            .and_modify(|peer| {
+                peer.last_seen = now;
+                peer.failures = 0;
             })
             .or_insert(PeerAddr {
-                addr,
+                addr: addr.to_string(),
                 last_seen: now,
                 failures: 0,
             });
+        self.confirmed.insert(addr.to_string());
+        true
+    }
+
+    /// Whether a candidate has been confirmed by a successful outbound dial.
+    pub fn is_confirmed(&self, addr: &str) -> bool {
+        self.confirmed.contains(addr)
+    }
+
+    /// Inspect the recorded timestamp for tests and diagnostics.
+    pub fn last_seen(&self, addr: &str) -> Option<u64> {
+        self.known.get(addr).map(|peer| peer.last_seen)
+    }
+
+    fn add_unconfirmed(&mut self, addr: String, last_seen: u64) -> bool {
+        let Ok(socket_addr) = addr.parse::<SocketAddr>() else {
+            return false;
+        };
+        if !self.accepts(socket_addr)
+            || (self.known.len() >= self.max_peers && !self.known.contains_key(&addr))
+        {
+            return false;
+        }
+
+        match self.known.entry(addr.clone()) {
+            std::collections::hash_map::Entry::Occupied(_) => false,
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(PeerAddr {
+                    addr,
+                    last_seen,
+                    failures: 0,
+                });
+                true
+            }
+        }
+    }
+
+    fn accepts(&self, addr: SocketAddr) -> bool {
+        addr.port() != 0 && (self.allow_non_public_addrs || is_publicly_routable(addr.ip()))
     }
 
     /// Record a failed connection attempt.
@@ -83,6 +177,7 @@ impl PexManager {
     /// Remove peers that have too many failures.
     pub fn evict_dead_peers(&mut self) {
         self.known.retain(|_, p| p.is_connectable());
+        self.confirmed.retain(|addr| self.known.contains_key(addr));
     }
 
     /// Get peers suitable for sharing in Addr response.
@@ -93,7 +188,14 @@ impl PexManager {
         let mut peers: Vec<&PeerAddr> = self
             .known
             .values()
-            .filter(|p| p.is_connectable() && now.saturating_sub(p.last_seen) < MAX_PEER_AGE_SECS)
+            .filter(|p| {
+                self.confirmed.contains(&p.addr)
+                    && p.addr
+                        .parse::<SocketAddr>()
+                        .is_ok_and(|addr| self.accepts(addr))
+                    && p.is_connectable()
+                    && now.saturating_sub(p.last_seen) < MAX_PEER_AGE_SECS
+            })
             .collect();
 
         // Sort by most recently seen
@@ -145,22 +247,6 @@ impl PexManager {
     /// Peer ids are SocketAddr strings, which never start with "served/".
     fn served_key(peer_id: &str) -> String {
         format!("served/{peer_id}")
-    }
-
-    /// Process incoming Addr message — add peers to our known set.
-    pub fn process_addr_message(&mut self, addrs: Vec<String>) -> usize {
-        let mut added = 0usize;
-        for addr in addrs {
-            // Basic validation: must be parseable as SocketAddr
-            if addr.parse::<SocketAddr>().is_ok() {
-                let was_new = !self.known.contains_key(&addr);
-                self.add_peer(addr);
-                if was_new {
-                    added += 1;
-                }
-            }
-        }
-        added
     }
 
     /// Total known peers count.
@@ -226,6 +312,55 @@ impl PexManager {
             .saturating_mul(GETADDR_TRACKING_MULTIPLIER)
             .max(MIN_GETADDR_TRACKED)
     }
+}
+
+/// Whether an address is usable as a public Mainnet dial target.
+///
+/// The development networks intentionally bypass this policy so local private
+/// topologies keep working. Mainnet excludes all special-use ranges relevant to
+/// PEX poisoning, including mapped IPv4 addresses inside IPv6 notation.
+fn is_publicly_routable(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_public_ipv4(ip),
+        IpAddr::V6(ip) => is_public_ipv6(ip),
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !ip.is_loopback()
+        && !ip.is_private()
+        && !ip.is_link_local()
+        && !ip.is_multicast()
+        && !ip.is_broadcast()
+        && !ip.is_unspecified()
+        && a != 0 // 0.0.0.0/8
+        && !(a == 100 && (64..=127).contains(&b)) // RFC 6598 shared address space
+        && !(a == 198 && (b == 18 || b == 19)) // RFC 2544 benchmarking
+        && !(a == 192 && b == 0 && c == 2) // TEST-NET-1
+        && !(a == 198 && b == 51 && c == 100) // TEST-NET-2
+        && !(a == 203 && b == 0 && c == 113) // TEST-NET-3
+        && a < 240 // reserved/future-use, including limited broadcast
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return is_public_ipv4(mapped);
+    }
+    let segments = ip.segments();
+    let is_unique_local = (segments[0] & 0xfe00) == 0xfc00;
+    let is_site_local = (segments[0] & 0xffc0) == 0xfec0;
+    let is_documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
+    let is_global_unicast = (segments[0] & 0xe000) == 0x2000;
+
+    is_global_unicast
+        && !ip.is_unspecified()
+        && !ip.is_loopback()
+        && !ip.is_multicast()
+        && !ip.is_unicast_link_local()
+        && !is_unique_local
+        && !is_site_local
+        && !is_documentation
 }
 
 /// Window for counting inbound Addr messages from one peer (same as the
@@ -309,19 +444,19 @@ mod tests {
     #[test]
     fn add_and_retrieve_peer() {
         let mut pex = PexManager::new(1000);
-        pex.add_peer("127.0.0.1:33370".to_string());
+        pex.add_peer("8.8.8.8:33370".to_string());
         assert_eq!(pex.known_count(), 1);
         let peers = pex.connectable_peers();
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].addr, "127.0.0.1:33370");
+        assert_eq!(peers[0].addr, "8.8.8.8:33370");
     }
 
     #[test]
     fn failure_tracking() {
         let mut pex = PexManager::new(1000);
-        pex.add_peer("127.0.0.1:33370".to_string());
+        pex.add_peer("8.8.8.8:33370".to_string());
         for _ in 0..10 {
-            pex.record_failure("127.0.0.1:33370");
+            pex.record_failure("8.8.8.8:33370");
         }
         pex.evict_dead_peers();
         assert_eq!(pex.known_count(), 0);
@@ -503,15 +638,149 @@ mod tests {
     }
 
     #[test]
-    fn process_addr_filters_invalid() {
+    fn mainnet_filters_non_public_ipv4_and_ipv6_addresses() {
         let mut pex = PexManager::new(1000);
         let addrs = vec![
-            "127.0.0.1:33370".to_string(),  // valid
-            "not_an_addr".to_string(),      // invalid
-            "192.168.1.1:8080".to_string(), // valid
+            AddrEntry {
+                addr: "8.8.8.8:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "[2606:4700:4700::1111]:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "127.0.0.1:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "10.0.0.1:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "172.16.0.1:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "192.168.1.1:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "169.254.1.1:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "198.18.1.1:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "192.0.2.1:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "198.51.100.1:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "203.0.113.1:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "224.0.0.1:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "0.1.2.3:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "8.8.4.4:0".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "[::1]:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "[fc00::1]:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "[fe80::1]:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "[ff02::1]:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "[2001:db8::1]:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "not_an_addr".into(),
+                last_seen: 1,
+            },
         ];
         let added = pex.process_addr_message(addrs);
         assert_eq!(added, 2);
+        assert!(pex.mark_connected("8.8.8.8:33370"));
+        assert!(pex.mark_connected("[2606:4700:4700::1111]:33370"));
+        assert_eq!(pex.peers_for_sharing().len(), 2);
+    }
+
+    #[test]
+    fn development_networks_allow_private_addresses_but_not_zero_port() {
+        let mut pex = PexManager::for_network(1000, Network::Regtest);
+        let added = pex.process_addr_message(vec![
+            AddrEntry {
+                addr: "127.0.0.1:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "10.0.0.1:33370".into(),
+                last_seen: 1,
+            },
+            AddrEntry {
+                addr: "192.168.1.1:0".into(),
+                last_seen: 1,
+            },
+        ]);
+        assert_eq!(added, 2);
+    }
+
+    #[test]
+    fn addr_reannouncement_does_not_refresh_last_seen() {
+        let mut pex = PexManager::new(1000);
+        let addr = "8.8.8.8:33370";
+        assert_eq!(
+            pex.process_addr_message(vec![AddrEntry {
+                addr: addr.into(),
+                last_seen: 1,
+            }]),
+            1
+        );
+        assert_eq!(pex.last_seen(addr), Some(1));
+
+        assert_eq!(
+            pex.process_addr_message(vec![AddrEntry {
+                addr: addr.into(),
+                last_seen: u64::MAX,
+            }]),
+            0
+        );
+        assert_eq!(pex.last_seen(addr), Some(1));
+
+        assert!(pex.mark_connected(addr));
+        let locally_confirmed = pex.last_seen(addr).expect("confirmed peer timestamp");
+        assert_eq!(
+            pex.process_addr_message(vec![AddrEntry {
+                addr: addr.into(),
+                last_seen: u64::MAX,
+            }]),
+            0
+        );
+        assert_eq!(pex.last_seen(addr), Some(locally_confirmed));
     }
 
     #[test]
@@ -526,7 +795,7 @@ mod tests {
     #[test]
     fn seed_from_config() {
         let mut pex = PexManager::new(1000);
-        let seeds = vec!["seed1.dom:33369".to_string(), "seed2.dom:33369".to_string()];
+        let seeds = vec!["8.8.8.8:33369".to_string(), "1.1.1.1:33369".to_string()];
         pex.seed_from_config(&seeds);
         assert_eq!(pex.known_count(), 2);
     }
