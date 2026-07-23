@@ -4,7 +4,9 @@
 //! both `Arc<DomNode>` and `NodeHandle` are defined outside `dom-node`.
 
 use crate::node::{clear_persisted_mempool_snapshot, snapshot_tx_chain_view, DomNode};
-use dom_rpc::{MempoolTxInfo, NodeHandle, PeerInfo, RpcError, TxAdmission, UtxoInfo};
+use dom_rpc::{
+    MempoolTxInfo, NodeHandle, PeerInfo, RpcError, ShutdownFuture, TxAdmission, UtxoInfo,
+};
 use dom_serialization::DomDeserialize;
 use std::sync::Arc;
 
@@ -12,6 +14,13 @@ use std::sync::Arc;
 pub struct NodeHandleImpl(pub Arc<DomNode>);
 
 impl NodeHandle for NodeHandleImpl {
+    fn request_shutdown(&self) -> ShutdownFuture {
+        let node = Arc::clone(&self.0);
+        Box::pin(async move {
+            node.request_shutdown().await;
+        })
+    }
+
     fn chain_height(&self) -> u64 {
         match self.0.chain.try_lock() {
             Ok(c) => c.tip_height.0,
@@ -969,6 +978,19 @@ mod tests {
             )
             .expect("init node"),
         )
+    }
+
+    #[tokio::test]
+    async fn rpc_shutdown_handle_requests_node_supervisor() {
+        let node = fresh_node("rpc-shutdown-handle");
+        let handle = NodeHandleImpl(node.clone());
+
+        handle.request_shutdown().await;
+
+        assert!(
+            node.task_supervisor.is_shutdown(),
+            "the RPC handle must delegate to DomNode::request_shutdown"
+        );
     }
 
     #[test]
