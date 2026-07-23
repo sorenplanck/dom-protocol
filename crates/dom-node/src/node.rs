@@ -534,7 +534,10 @@ impl DomNode {
             task_supervisor: NodeTaskSupervisor::new(),
             state_events: Arc::new(Notify::new()),
             ibd_active_sessions: Arc::new(AtomicU64::new(0)),
-            pex: Arc::new(Mutex::new(crate::pex::PexManager::new(PEX_MAX_KNOWN_PEERS))),
+            pex: Arc::new(Mutex::new(crate::pex::PexManager::for_network(
+                PEX_MAX_KNOWN_PEERS,
+                config.network,
+            ))),
         })
     }
 
@@ -1549,6 +1552,18 @@ async fn handle_inbound(
             if let Err(e) = persist_peer_reputation_state(&chain, &svc.peers).await {
                 warn!("Persisting peer reputation state after inbound registration failed: {e}");
             }
+            // The source port of an inbound TCP connection is ephemeral. Learn
+            // the peer's IP on the standard network port as an *unconfirmed*
+            // candidate; only a later successful outbound dial makes it PEX
+            // shareable. This is deliberately compatible with the existing
+            // Hello payload, whose strict length parser cannot be extended
+            // without a protocol-version change. A future protocol revision
+            // may add an explicitly advertised listening endpoint to Hello as
+            // part of a coordinated version/handshake migration.
+            {
+                let mut pex = trace_lock("pex", &svc.pex).await;
+                pex.learn_inbound_peer(addr.ip(), config.network.default_port());
+            }
             refresh_peer_metrics(&svc.peers, &svc.metrics, Some(&svc.state_events)).await;
             // An inbound peer with a taller chain is a normal IBD source.
             // For equal-height fork resolution, however, the inbound side must
@@ -1715,19 +1730,20 @@ async fn connect_outbound(
                 hex::encode(peer_hello.best_hash),
                 peer_hello.user_agent
             );
+            let sock_addr: std::net::SocketAddr = match addr.parse() {
+                Ok(a) => a,
+                Err(_) => match stream.peer_addr() {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("Cannot determine addr for register_peer: {e}");
+                        return OutboundAttemptOutcome::RetryableFailure;
+                    }
+                },
+            };
+            let canonical_addr = sock_addr.to_string();
             // Register peer in manager so connected_peers() sees it
             {
                 use dom_wire::peer::PeerInfo;
-                let sock_addr: std::net::SocketAddr = match addr.parse() {
-                    Ok(a) => a,
-                    Err(_) => match stream.peer_addr() {
-                        Ok(a) => a,
-                        Err(e) => {
-                            warn!("Cannot determine addr for register_peer: {e}");
-                            return OutboundAttemptOutcome::RetryableFailure;
-                        }
-                    },
-                };
                 let mut peer_info = PeerInfo::new(sock_addr, true);
                 let session_id = peer_info.session_id;
                 peer_info.peer_id = peer_id;
@@ -1735,7 +1751,6 @@ async fn connect_outbound(
                 peer_info.best_height = peer_hello.best_height;
                 peer_info.best_hash = peer_hello.best_hash;
                 peer_info.user_agent = peer_hello.user_agent.clone();
-                let canonical_addr = sock_addr.to_string();
                 let mut peers = svc.peers.lock().await;
                 if let Some(peer_id) = peer_id {
                     peers.note_peer_identity(addr, peer_id);
@@ -1747,6 +1762,13 @@ async fn connect_outbound(
                     return OutboundAttemptOutcome::RetryableFailure;
                 }
                 peers.bind_outbound_session(addr, &canonical_addr, session_id);
+            }
+            // A completed Noise + Hello exchange proves this dial target is
+            // reachable. Promote it from an unconfirmed PEX candidate and only
+            // now refresh last_seen for future Addr responses.
+            {
+                let mut pex = trace_lock("pex", &svc.pex).await;
+                pex.mark_connected(&canonical_addr);
             }
             if let Err(e) = persist_peer_rotation_state(&chain, &svc.peers).await {
                 warn!("Persisting peer rotation state after outbound registration failed: {e}");
@@ -1768,9 +1790,12 @@ async fn connect_outbound(
                 let chain = chain.lock().await;
                 (chain.tip_height.0, *chain.tip_hash.as_bytes())
             };
-            if let Some(fork_resolution) =
-                sync_mode_for_peer(our_height, our_hash, peer_hello.best_height, peer_hello.best_hash)
-            {
+            if let Some(fork_resolution) = sync_mode_for_peer(
+                our_height,
+                our_hash,
+                peer_hello.best_height,
+                peer_hello.best_hash,
+            ) {
                 let ibd_result = tokio::select! {
                     _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
                     result = run_ibd_session(
@@ -4934,11 +4959,9 @@ async fn message_loop(
                                 return Err(err);
                             }
                         } else {
-                            let addrs: Vec<String> =
-                                payload.entries.into_iter().map(|e| e.addr).collect();
                             let added = {
                                 let mut px = trace_lock("pex", &svc.pex).await;
-                                px.process_addr_message(addrs)
+                                px.process_addr_message(payload.entries)
                             };
                             tracing::debug!(
                                 "PEX: learned {added} new peer address(es) from {peer_addr}"
@@ -4966,11 +4989,10 @@ mod tests {
         persist_ibd_state, persist_mempool_snapshot, persist_peer_reputation_snapshot,
         purge_mempool_confirmed_inputs, reconcile_mempool_after_connect, refresh_peer_metrics,
         relay_block_action, resolve_configured_dns_seeds, restore_peer_rotation_state,
-        serve_metrics, trace_lock, tx_hash, DeferredReplayAction, DomNode, IbdActiveGuard,
-        IbdRoundState, OutboundAttemptOutcome, RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY,
-        MEMPOOL_METADATA_KEY, METRICS_CONTENT_TYPE, NOISE_STATIC_KEY_METADATA_KEY,
-        PEER_REPUTATION_METADATA_KEY, PEER_ROTATION_METADATA_KEY,
-        sync_mode_for_peer,
+        serve_metrics, sync_mode_for_peer, trace_lock, tx_hash, DeferredReplayAction, DomNode,
+        IbdActiveGuard, IbdRoundState, OutboundAttemptOutcome, RelayBlockAction,
+        LEGACY_PEER_ROTATION_METADATA_KEY, MEMPOOL_METADATA_KEY, METRICS_CONTENT_TYPE,
+        NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY, PEER_ROTATION_METADATA_KEY,
     };
     use crate::future_block_queue::DeferredBlock;
     use crate::metrics::Metrics;

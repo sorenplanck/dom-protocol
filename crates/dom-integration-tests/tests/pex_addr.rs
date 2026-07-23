@@ -5,7 +5,7 @@
 //! 2. a second GetAddr within the 10-minute cooldown is suppressed (no Addr
 //!    arrives before the control Pong — a deterministic ordering observation,
 //!    not a timing observation);
-//! 3. a received Addr feeds the PexManager only parseable SocketAddr values;
+//! 3. a received Addr feeds the PexManager only policy-allowed SocketAddr values;
 //! 4. an Addr flood beyond MAX_ADDR_MESSAGES_PER_WINDOW increments the peer ban
 //!    score by ADDRESS_FLOODING (+30) for each excess message — the exact score
 //!    progression proves that rate limiting runs.
@@ -20,6 +20,7 @@ use dom_wire::codec::NoiseCodec;
 use dom_wire::handshake::{generate_static_keypair, perform_handshake_initiator};
 use dom_wire::message::{AddrEntry, AddrPayload, Command, HelloPayload, WireMessage};
 use dom_wire::peer::ban_scores;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,6 +67,61 @@ async fn connect_pex_peer(node: &Arc<DomNode>) -> (tokio::net::TcpStream, NoiseC
     let response = codec.recv(&mut stream).await.expect("receive hello");
     assert_eq!(response.command, Command::Hello);
 
+    (stream, codec)
+}
+
+/// Same authenticated P2P path, but with an explicit TCP source address. This
+/// lets the test model an inbound peer whose public IP is also listening on the
+/// standard P2P port.
+async fn connect_pex_peer_from(
+    node: &Arc<DomNode>,
+    source: SocketAddr,
+    private_key: [u8; 32],
+) -> (tokio::net::TcpStream, NoiseCodec) {
+    let config = node.config.clone();
+    let socket = tokio::net::TcpSocket::new_v4().expect("create source socket");
+    socket.bind(source).expect("bind source address");
+    let mut stream = socket
+        .connect(config.p2p_listen_addr.parse().expect("node listen address"))
+        .await
+        .expect("connect inbound peer");
+    let chain_id = chain_id_for(config.network);
+    let transport =
+        perform_handshake_initiator(&mut stream, &private_key, config.network.magic(), &chain_id)
+            .await
+            .expect("perform Noise handshake");
+    let mut codec = NoiseCodec::new(transport, config.network.magic());
+    let hello = HelloPayload {
+        version: PROTOCOL_VERSION,
+        network_magic: config.network.magic(),
+        chain_id,
+        best_height: 0,
+        best_hash: [0u8; 32],
+        user_agent: "dom-inbound-discovery-test".into(),
+        local_timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    };
+    codec
+        .send(
+            &mut stream,
+            &WireMessage {
+                magic: config.network.magic(),
+                command: Command::Hello,
+                payload: hello.to_bytes().expect("serialize hello"),
+            },
+        )
+        .await
+        .expect("send hello");
+    assert_eq!(
+        codec
+            .recv(&mut stream)
+            .await
+            .expect("receive hello")
+            .command,
+        Command::Hello
+    );
     (stream, codec)
 }
 
@@ -145,8 +201,9 @@ async fn pex_getaddr_answered_once_then_suppressed_by_cooldown() {
     init_tracing();
     let port = free_local_port();
     let mut config = test_config("pex-getaddr", port, false);
-    // A syntactically valid, unroutable address becomes PEX content without a
-    // real connection being established.
+    // Regtest deliberately permits private addresses. The fixture promotes the
+    // seed as if a prior outbound dial had succeeded, because unconfirmed
+    // candidates must never be re-advertised.
     config.seed_peers = vec!["10.99.77.1:33369".to_string()];
     let node = spawn_node(config).await;
 
@@ -158,6 +215,7 @@ async fn pex_getaddr_answered_once_then_suppressed_by_cooldown() {
     // The connector feeds the PexManager with seeds; wait for seeding.
     let known = wait_for_pex_known_count(&node, 1, Duration::from_secs(10)).await;
     assert!(known >= 1, "PEX seeding did not happen (known={known})");
+    assert!(node.pex.lock().await.mark_connected("10.99.77.1:33369"));
 
     let (mut stream, mut codec) = connect_pex_peer(&node).await;
 
@@ -240,8 +298,11 @@ async fn pex_addr_message_adds_only_valid_addresses() {
         .await
         .expect("send addr");
 
-    let known = wait_for_pex_known_count(&node, 2, Duration::from_secs(10)).await;
-    assert_eq!(known, 2, "exactly the two valid addresses must be added");
+    // The authenticated loopback peer itself is also learned as an
+    // unconfirmed inbound candidate on regtest, in addition to the two Addr
+    // entries below.
+    let known = wait_for_pex_known_count(&node, 3, Duration::from_secs(10)).await;
+    assert!(known >= 3, "the two valid Addr entries must be added");
     let pex = node.pex.lock().await;
     let addrs: Vec<String> = pex
         .connectable_peers()
@@ -251,6 +312,59 @@ async fn pex_addr_message_adds_only_valid_addresses() {
     assert!(addrs.contains(&"10.99.77.2:33370".to_string()));
     assert!(addrs.contains(&"10.99.77.3:33370".to_string()));
     assert!(!addrs.iter().any(|a| a == "not_a_socket_addr"));
+}
+
+/// An authenticated inbound peer is learned as `IP:default_p2p_port`, then is
+/// promoted only after node A successfully dials node B at that endpoint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn authenticated_inbound_peer_becomes_a_confirmed_pex_candidate() {
+    init_tracing();
+    let port_a = free_local_port();
+    let default_port = Network::Regtest.default_port();
+    let mut config_a = test_config("pex-inbound-a", port_a, false);
+    let mut config_b = test_config("pex-inbound-b", default_port, false);
+    config_b.p2p_listen_addr = format!("127.0.0.2:{default_port}");
+    // A needs an outbound slot so its connector validates the learned endpoint.
+    config_a.min_outbound = 1;
+    let node_a = spawn_node(config_a).await;
+    let node_b = spawn_node(config_b).await;
+
+    tokio::spawn(node_a.clone().run());
+    tokio::spawn(node_b.clone().run());
+    wait_for_listener_ready(&format!("127.0.0.1:{port_a}"), 10)
+        .await
+        .expect("node A listener ready");
+    wait_for_listener_ready(&format!("127.0.0.2:{default_port}"), 10)
+        .await
+        .expect("node B listener ready");
+
+    let (stream, codec) = connect_pex_peer_from(
+        &node_a,
+        "127.0.0.2:0".parse().expect("source address"),
+        node_b.noise_privkey,
+    )
+    .await;
+    let learned = format!("127.0.0.2:{default_port}");
+    let known = wait_for_pex_known_count(&node_a, 1, Duration::from_secs(10)).await;
+    assert!(known >= 1, "inbound peer was not learned");
+    assert!(
+        !node_a.pex.lock().await.is_confirmed(&learned),
+        "inbound heuristic must remain unconfirmed before a dial succeeds"
+    );
+    drop(codec);
+    drop(stream);
+
+    let start = std::time::Instant::now();
+    loop {
+        if node_a.pex.lock().await.is_confirmed(&learned) {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "node A did not validate learned inbound endpoint {learned}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Addr flood: each message beyond MAX_ADDR_MESSAGES_PER_WINDOW adds exactly
