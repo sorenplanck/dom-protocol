@@ -30,6 +30,7 @@ members = [
     "crates/dom-wallet-app",
     "crates/dom-test-runner",
     "crates/dom-agent-runner",
+    "crates/dom-sidecar",
 ]
 
 # Tauri desktop wallet — excluded from the workspace because it needs a
@@ -58,6 +59,7 @@ randomx-rs       = "1.4.1"
 secp256k1   = { version = "0.28", features = ["global-context", "rand-std"] }
 blake2      = { version = "0.10" }
 sha2        = { version = "0.10" }
+minisign    = "0.9.1"
 hmac        = { version = "0.12" }
 hkdf        = { version = "0.12" }
 k256        = { version = "0.13", features = ["hash2curve", "arithmetic", "serde", "expose-field"] }
@@ -110,6 +112,7 @@ dom-wallet-recovery = { path = "crates/dom-wallet-recovery" }
 dom-wallet2        = { path = "crates/dom-wallet2" }
 dom-node           = { path = "crates/dom-node" }
 dom-rpc            = { path = "crates/dom-rpc" }
+dom-sidecar        = { path = "crates/dom-sidecar" }
 axum = { version = "0.7", features = ["json"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 bip39 = { version = "2.0", features = ["rand"] }

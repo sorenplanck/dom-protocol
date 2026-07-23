@@ -1,0 +1,20 @@
+[package]
+name = "dom-sidecar"
+description = "Fail-closed DOM node sidecar release verification and promotion"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+minisign.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+reqwest = { version = "0.12", features = ["blocking"] }

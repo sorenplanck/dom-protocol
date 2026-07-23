@@ -11,6 +11,7 @@ use axum::{
     Json, Router,
 };
 use dom_core::PROTOCOL_VERSION;
+use dom_store::STORAGE_SCHEMA_VERSION_SUPPORTED;
 use serde::{Deserialize, Serialize};
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc};
 use tracing::{error, info, warn};
@@ -69,10 +70,40 @@ pub trait NodeHandle: Send + Sync + 'static {
     fn request_shutdown(&self) -> ShutdownFuture {
         Box::pin(async {})
     }
+
+    /// Identity of the selected, running chain instance.
+    fn network_info(&self) -> Result<NetworkInfoResponse, RpcError> {
+        Err(RpcError::Internal("network info not available".into()))
+    }
 }
 
 /// Type-erased asynchronous request to the node's shutdown coordinator.
 pub type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+/// Independently versioned local RPC contract.
+pub const RPC_PROTOCOL_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize)]
+struct BuildInfoResponse {
+    node_version: &'static str,
+    node_revision: &'static str,
+    build_profile: &'static str,
+    rpc_protocol_version: u32,
+    p2p_protocol_version: u32,
+    storage_schema_version_supported: u32,
+    networks_supported: [&'static str; 3],
+}
+
+/// Identity selected by a live node instance. Chain identity is authoritative
+/// for sidecar promotion; version fields alone are never sufficient.
+#[derive(Debug, Clone, Serialize)]
+pub struct NetworkInfoResponse {
+    pub network: String,
+    pub chain_id: String,
+    pub genesis_hash: String,
+    pub storage_schema_version_on_disk: u32,
+    pub height: u64,
+}
 
 /// Maximum number of heights a single [`NodeHandle::scan_chain`] / `/chain/scan`
 /// call returns. Bounds how long the chain lock is held so block connection is
@@ -351,6 +382,7 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
         .route("/wallet/balance", get(wallet_balance_handler))
         .route("/chain/scan", get(chain_scan_handler))
         .route("/build-info", get(build_info_handler))
+        .route("/network-info", get(network_info_handler))
         .route("/shutdown", post(shutdown_handler))
         .layer(rate_limit_auth_read);
 
@@ -381,8 +413,27 @@ async fn get_peers_handler(State(handle): State<Arc<dyn NodeHandle>>) -> Json<Ve
     Json(handle.get_peers())
 }
 
-async fn build_info_handler() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"commit": env!("DOM_RPC_BUILD_COMMIT")}))
+async fn build_info_handler() -> Json<BuildInfoResponse> {
+    Json(BuildInfoResponse {
+        node_version: env!("CARGO_PKG_VERSION"),
+        node_revision: env!("DOM_RPC_BUILD_COMMIT"),
+        build_profile: if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
+        rpc_protocol_version: RPC_PROTOCOL_VERSION,
+        p2p_protocol_version: PROTOCOL_VERSION,
+        storage_schema_version_supported: STORAGE_SCHEMA_VERSION_SUPPORTED,
+        networks_supported: ["mainnet", "testnet", "regtest"],
+    })
+}
+
+async fn network_info_handler(State(handle): State<Arc<dyn NodeHandle>>) -> impl IntoResponse {
+    match handle.network_info() {
+        Ok(info) => Json(info).into_response(),
+        Err(error) => error.into_response(),
+    }
 }
 
 /// Request a graceful node shutdown after authenticating a local caller.
@@ -887,6 +938,15 @@ mod tests {
         fn chain_height(&self) -> u64 {
             self.height
         }
+        fn network_info(&self) -> Result<NetworkInfoResponse, RpcError> {
+            Ok(NetworkInfoResponse {
+                network: self.network.to_owned(),
+                chain_id: "ab".repeat(32),
+                genesis_hash: "cd".repeat(32),
+                storage_schema_version_on_disk: 1,
+                height: self.height,
+            })
+        }
         fn scan_chain(&self, from: u64, to: u64) -> Result<ChainScan, RpcError> {
             match &self.scan {
                 Some(s) => {
@@ -1167,9 +1227,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authenticated.status(), StatusCode::OK);
-        assert!(body_json(authenticated).await["commit"]
+        let body = body_json(authenticated).await;
+        assert!(body["node_revision"]
             .as_str()
             .is_some_and(|commit| !commit.is_empty()));
+        assert_eq!(body["rpc_protocol_version"], RPC_PROTOCOL_VERSION);
+        assert_eq!(body["p2p_protocol_version"], PROTOCOL_VERSION);
+        assert_eq!(
+            body["storage_schema_version_supported"],
+            STORAGE_SCHEMA_VERSION_SUPPORTED
+        );
+        assert_eq!(
+            body["networks_supported"],
+            serde_json::json!(["mainnet", "testnet", "regtest"])
+        );
+    }
+
+    #[tokio::test]
+    async fn network_info_requires_bearer_and_returns_running_identity() {
+        let unauthenticated = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/network-info")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let authenticated = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/network-info")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(authenticated).await,
+            serde_json::json!({
+                "network": "regtest",
+                "chain_id": "ab".repeat(32),
+                "genesis_hash": "cd".repeat(32),
+                "storage_schema_version_on_disk": 1,
+                "height": 42,
+            })
+        );
     }
 
     #[tokio::test]

@@ -12,6 +12,8 @@ mod node_host;
 mod node_rpc;
 mod registry;
 mod settings;
+mod sidecar;
+mod sidecar_keys;
 mod wallet_manager;
 mod wallet_registry;
 

@@ -1294,6 +1294,25 @@ impl DomNode {
 }
 
 impl dom_rpc::NodeHandle for DomNode {
+    fn network_info(&self) -> Result<dom_rpc::NetworkInfoResponse, dom_rpc::RpcError> {
+        let chain = self
+            .chain
+            .try_lock()
+            .map_err(|_| dom_rpc::RpcError::Overloaded("chain busy".into()))?;
+        Ok(dom_rpc::NetworkInfoResponse {
+            network: self.config.network.as_str().to_owned(),
+            chain_id: hex::encode(
+                derive_chain_id(chain.network_magic, &chain.genesis_hash).as_bytes(),
+            ),
+            genesis_hash: hex::encode(chain.genesis_hash.as_bytes()),
+            storage_schema_version_on_disk: chain
+                .store
+                .storage_schema_version_on_disk()
+                .map_err(|e| dom_rpc::RpcError::Internal(format!("storage schema: {e}")))?,
+            height: chain.tip_height.0,
+        })
+    }
+
     fn chain_height(&self) -> u64 {
         self.chain.try_lock().map(|c| c.tip_height.0).unwrap_or(0)
     }

@@ -101,6 +101,13 @@ pub const DB_UTXOS: &str = "utxos";
 pub const DB_KERNEL_INDEX: &str = "kernel_index";
 pub const DB_PEER_ADDRS: &str = "peer_addrs";
 pub const DB_METADATA: &str = "metadata";
+/// Maximum on-disk schema this binary can open.
+///
+/// Increment only for an incompatible storage-format change. A newly created
+/// store records this value in [`METADATA_STORAGE_SCHEMA_VERSION_KEY`].
+pub const STORAGE_SCHEMA_VERSION_SUPPORTED: u32 = 1;
+/// Metadata key containing the little-endian on-disk storage schema version.
+pub const METADATA_STORAGE_SCHEMA_VERSION_KEY: &[u8] = b"storage_schema_version";
 /// Stable metadata key holding the canonical UTXO-set digest when the
 /// persisted UTXO database has been verified or rebuilt against canonical
 /// history on reopen.
@@ -168,7 +175,7 @@ impl DomStore {
             Ok(db)
         };
 
-        Ok(Self {
+        let store = Self {
             map_size,
             db_blocks: open_db(DB_BLOCKS)?,
             db_block_bodies: open_db(DB_BLOCK_BODIES)?,
@@ -179,7 +186,43 @@ impl DomStore {
             db_peers: open_db(DB_PEER_ADDRS)?,
             db_metadata: open_db(DB_METADATA)?,
             env,
-        })
+        };
+        store.initialize_storage_schema_version()?;
+        Ok(store)
+    }
+
+    fn initialize_storage_schema_version(&self) -> Result<(), DomError> {
+        match self.get_metadata(METADATA_STORAGE_SCHEMA_VERSION_KEY)? {
+            Some(bytes) => {
+                let version = u32::from_le_bytes(bytes.try_into().map_err(|_| {
+                    DomError::Internal("invalid storage schema version metadata".into())
+                })?);
+                if version > STORAGE_SCHEMA_VERSION_SUPPORTED {
+                    return Err(DomError::Invalid(format!(
+                        "storage schema {version} is newer than supported schema {STORAGE_SCHEMA_VERSION_SUPPORTED}"
+                    )));
+                }
+            }
+            // Stores created before this marker were written by the current
+            // compatible layout, so backfilling v1 is safe and durable.
+            None => self.put_metadata(
+                METADATA_STORAGE_SCHEMA_VERSION_KEY,
+                &STORAGE_SCHEMA_VERSION_SUPPORTED.to_le_bytes(),
+            )?,
+        }
+        Ok(())
+    }
+
+    /// The schema version declared by this database on disk.
+    pub fn storage_schema_version_on_disk(&self) -> Result<u32, DomError> {
+        let bytes = self
+            .get_metadata(METADATA_STORAGE_SCHEMA_VERSION_KEY)?
+            .ok_or_else(|| DomError::Internal("missing storage schema version metadata".into()))?;
+        let version =
+            u32::from_le_bytes(bytes.try_into().map_err(|_| {
+                DomError::Internal("invalid storage schema version metadata".into())
+            })?);
+        Ok(version)
     }
 
     /// Read a metadata value by stable key.

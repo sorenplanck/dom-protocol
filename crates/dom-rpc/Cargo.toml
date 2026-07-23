@@ -12,6 +12,7 @@ tower = { version = "0.4", features = ["timeout", "limit", "util"] }
 dom-core.workspace      = true
 dom-mempool.workspace   = true
 dom-consensus.workspace = true
+dom-store.workspace     = true
 dom-serialization.workspace = true
 thiserror.workspace     = true
 tokio.workspace         = true
@@ -31,4 +32,3 @@ subtle.workspace = true
 http-body-util = "0.1"
 proptest.workspace = true
 tempfile = "3"
-

@@ -5,7 +5,8 @@
 
 use crate::node::{clear_persisted_mempool_snapshot, snapshot_tx_chain_view, DomNode};
 use dom_rpc::{
-    MempoolTxInfo, NodeHandle, PeerInfo, RpcError, ShutdownFuture, TxAdmission, UtxoInfo,
+    MempoolTxInfo, NetworkInfoResponse, NodeHandle, PeerInfo, RpcError, ShutdownFuture,
+    TxAdmission, UtxoInfo,
 };
 use dom_serialization::DomDeserialize;
 use std::sync::Arc;
@@ -165,6 +166,26 @@ impl NodeHandle for NodeHandleImpl {
 
     fn network(&self) -> &'static str {
         self.0.config.network.as_str()
+    }
+
+    fn network_info(&self) -> Result<NetworkInfoResponse, RpcError> {
+        let chain = self
+            .0
+            .chain
+            .try_lock()
+            .map_err(|_| RpcError::Overloaded("chain busy".into()))?;
+        Ok(NetworkInfoResponse {
+            network: self.0.config.network.as_str().to_owned(),
+            chain_id: hex::encode(
+                dom_consensus::derive_chain_id(chain.network_magic, &chain.genesis_hash).as_bytes(),
+            ),
+            genesis_hash: hex::encode(chain.genesis_hash.as_bytes()),
+            storage_schema_version_on_disk: chain
+                .store
+                .storage_schema_version_on_disk()
+                .map_err(|e| RpcError::Internal(format!("storage schema: {e}")))?,
+            height: chain.tip_height.0,
+        })
     }
 
     fn get_block_header(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {

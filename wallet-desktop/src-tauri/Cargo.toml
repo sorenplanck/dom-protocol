@@ -67,6 +67,7 @@ dom-wallet2     = { path = "../../crates/dom-wallet2" }
 dom-wallet-keys = { path = "../../crates/dom-wallet-keys" }
 dom-node        = { path = "../../crates/dom-node" }
 dom-rpc         = { path = "../../crates/dom-rpc" }
+dom-sidecar     = { path = "../../crates/dom-sidecar" }
 # Slate protocol: the Slate type lives in dom-tx; (de)serialization traits
 # (to_bytes/from_bytes) live in dom-serialization. We only call into them.
 dom-tx          = { path = "../../crates/dom-tx" }
