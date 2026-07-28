@@ -9,8 +9,6 @@ const MAINNET_DNS_SEEDS: &[&str] = &[
     "seed1.dom-protocol.org",
     "seed2.dom-protocol.org",
     "seed3.dom-protocol.org",
-    "seed4.dom-protocol.org",
-    "seed5.dom-protocol.org",
 ];
 
 const TESTNET_DNS_SEEDS: &[&str] = &[
@@ -202,6 +200,18 @@ pub async fn resolve_seeds(mainnet: bool, port: u16, custom_seeds: &[String]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mainnet_fallback_uses_the_three_canonical_dns_seeds() {
+        assert_eq!(
+            MAINNET_DNS_SEEDS,
+            [
+                "seed1.dom-protocol.org",
+                "seed2.dom-protocol.org",
+                "seed3.dom-protocol.org",
+            ]
+        );
+    }
 
     #[test]
     fn temporary_dns_backoff_is_exponential_and_capped() {
