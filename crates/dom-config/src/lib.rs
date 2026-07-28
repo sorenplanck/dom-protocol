@@ -251,6 +251,7 @@ impl NodeConfig {
             dns_seeds: vec![
                 "seed1.dom-protocol.org".into(),
                 "seed2.dom-protocol.org".into(),
+                "seed3.dom-protocol.org".into(),
             ],
             disable_dns_seeds: false,
             seed_peers: vec![],
@@ -320,6 +321,18 @@ impl NodeConfig {
 #[cfg(test)]
 mod tests {
     use super::{Network, NodeConfig};
+
+    #[test]
+    fn mainnet_uses_the_three_canonical_dns_seeds() {
+        assert_eq!(
+            NodeConfig::mainnet().dns_seeds,
+            [
+                "seed1.dom-protocol.org",
+                "seed2.dom-protocol.org",
+                "seed3.dom-protocol.org",
+            ]
+        );
+    }
 
     #[test]
     fn network_as_str_matches_variant() {
