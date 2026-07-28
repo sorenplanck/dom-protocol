@@ -58,7 +58,9 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("DOM_WALLET_PATH is required"))?;
     let wallet_password = std::env::var("DOM_WALLET_PASSWORD")
         .map_err(|_| anyhow::anyhow!("DOM_WALLET_PASSWORD is required"))?;
-    let apply = std::env::var("DOM_RESCAN_APPLY").map(|v| v == "1").unwrap_or(false);
+    let apply = std::env::var("DOM_RESCAN_APPLY")
+        .map(|v| v == "1")
+        .unwrap_or(false);
 
     // No wallet, no mining, no listeners: chain store read + wallet repair only.
     config.wallet_path = None;
