@@ -439,6 +439,103 @@ impl NodeHandle for NodeHandleImpl {
             blocks,
         })
     }
+
+    fn scan_chain_full(&self, from: u64, to: u64) -> Result<dom_rpc::ChainScanFull, RpcError> {
+        self.scan_chain_full_with_budget(from, to, dom_rpc::FULL_SCAN_RESPONSE_SOFT_LIMIT_BYTES)
+    }
+}
+
+impl NodeHandleImpl {
+    /// `/chain/scan/full` with an explicit response budget (the production
+    /// path always passes [`dom_rpc::FULL_SCAN_RESPONSE_SOFT_LIMIT_BYTES`];
+    /// tests shrink it to exercise the truncation without gigabytes of data).
+    ///
+    /// Reuses the exact embedded Wallet V3 projection
+    /// ([`EmbeddedWalletCoreApi::load_canonical_block_locked`] +
+    /// [`EmbeddedWalletCoreApi::project_block`] with no filters) so the remote
+    /// endpoint can never diverge from what the embedded core serves — and
+    /// never filters outputs (privacy: a page always carries every output of
+    /// every served block).
+    fn scan_chain_full_with_budget(
+        &self,
+        from: u64,
+        to: u64,
+        budget_bytes: usize,
+    ) -> Result<dom_rpc::ChainScanFull, RpcError> {
+        use crate::wallet_core_api::EmbeddedWalletCoreApi;
+
+        // GOLDEN RULE: same as scan_chain — never block on the chain lock. If
+        // it is busy (mining / connecting a block), yield immediately with a
+        // retriable 503; mining always has priority over this read-only RPC.
+        let chain = self
+            .0
+            .chain
+            .try_lock()
+            .map_err(|_| RpcError::Overloaded("chain busy; retry".into()))?;
+
+        let api = EmbeddedWalletCoreApi::new(Arc::clone(&self.0));
+        let identity = api
+            .current_identity_locked(&chain)
+            .map_err(map_wallet_core_error)?;
+        // Bound the work (and the lock hold) exactly like scan_chain: at most
+        // MAX_FULL_SCAN_RANGE heights, never past the tip.
+        let mut effective_to = full_scan_to_clamped(from, to, identity.current_tip.height);
+
+        let mut blocks = Vec::new();
+        if from <= effective_to {
+            let mut wire_weight = 0usize;
+            for height in from..=effective_to {
+                let Some((hash, block)) =
+                    EmbeddedWalletCoreApi::load_canonical_block_locked(&chain, height)
+                        .map_err(map_wallet_core_error)?
+                else {
+                    if height == 0
+                        && chain.tip_height.0 == 0
+                        && chain.tip_hash == dom_core::Hash256::ZERO
+                        && blocks.is_empty()
+                    {
+                        // Empty pre-genesis chain: an empty page, not a gap
+                        // (mirrors EmbeddedWalletCoreApi::scan_range).
+                        break;
+                    }
+                    // V3 requires continuity: a canonical height with no block
+                    // is a stably-coded error, never a silent omission.
+                    return Err(RpcError::CanonicalGap(format!(
+                        "missing canonical block at height {height}"
+                    )));
+                };
+                let projected = EmbeddedWalletCoreApi::project_block(&identity, hash, block, None)
+                    .map_err(map_wallet_core_error)?;
+                wire_weight += dom_rpc::full_scan_block_wire_weight(&projected);
+                blocks.push(projected);
+                if wire_weight >= budget_bytes && height < effective_to {
+                    // Response-size clamp: at least one block is always
+                    // served; the client pages on from the returned `to + 1`.
+                    effective_to = height;
+                    break;
+                }
+            }
+        }
+
+        Ok(dom_rpc::ChainScanFull {
+            identity,
+            from,
+            to: effective_to,
+            blocks,
+        })
+    }
+}
+
+/// Map an embedded Wallet V3 error onto the RPC error contract: a busy node
+/// stays retriable (503), a canonical gap keeps its stable code, everything
+/// else is internal.
+fn map_wallet_core_error(error: dom_wallet_core_api::WalletCoreError) -> RpcError {
+    use dom_wallet_core_api::WalletCoreError;
+    match error {
+        WalletCoreError::NodeNotReady(message) => RpcError::Overloaded(message),
+        WalletCoreError::CanonicalGap(message) => RpcError::CanonicalGap(message),
+        other => RpcError::Internal(other.to_string()),
+    }
 }
 
 /// Highest height a single scan serves: `min(to, tip, from + MAX_SCAN_RANGE - 1)`.
@@ -446,6 +543,16 @@ impl NodeHandle for NodeHandleImpl {
 /// that still carries the tip.
 pub(crate) fn scan_to_clamped(from: u64, to: u64, tip: u64) -> u64 {
     let cap = from.saturating_add(dom_rpc::MAX_SCAN_RANGE - 1);
+    to.min(tip).min(cap)
+}
+
+/// Highest height a single full scan serves:
+/// `min(to, tip, from + MAX_FULL_SCAN_RANGE - 1)` — same shape as
+/// [`scan_to_clamped`], bound by [`dom_rpc::MAX_FULL_SCAN_RANGE`]. When
+/// `from > to` (or `from > tip`) the result is `< from`, i.e. an empty scan
+/// that still carries identity and tip.
+pub(crate) fn full_scan_to_clamped(from: u64, to: u64, tip: u64) -> u64 {
+    let cap = from.saturating_add(dom_rpc::MAX_FULL_SCAN_RANGE - 1);
     to.min(tip).min(cap)
 }
 
@@ -1018,6 +1125,273 @@ mod tests {
         let err = handle
             .scan_chain(0, 10)
             .expect_err("scan must not block on a held chain lock");
+        assert!(
+            matches!(err, dom_rpc::RpcError::Overloaded(ref m) if m.contains("chain busy")),
+            "expected retriable Overloaded, got {err}"
+        );
+    }
+
+    // ── /chain/scan/full (Wallet V3 remote restore/sync, node side) ─────────
+
+    use dom_crypto::recovery::{
+        create_recovery_capsule, derive_recovery_root, recover_output_from_capsule,
+        OutputRecoveryDomain, PublicOutputKind, RecoveryCapsule, RecoveryChainContext,
+        RECOVERY_VERSION,
+    };
+    use dom_wallet_core_api::{ScanRequest, ScanStart, WalletCoreApi};
+
+    #[test]
+    fn full_scan_to_clamped_caps_range_and_tip() {
+        // Capped to MAX_FULL_SCAN_RANGE blocks (0..=999).
+        assert_eq!(super::full_scan_to_clamped(0, 5000, 10_000), 999);
+        // Smaller than the cap → honoured as requested.
+        assert_eq!(super::full_scan_to_clamped(0, 5, 10_000), 5);
+        // Never past the tip.
+        assert_eq!(super::full_scan_to_clamped(0, 5000, 3), 3);
+        // Empty request (from > to) → result < from (empty scan, tip still served).
+        assert!(super::full_scan_to_clamped(5, 0, 100) < 5);
+    }
+
+    /// A committed canonical block whose coinbase output carries a REAL
+    /// authenticated recovery capsule (the exact envelope Wallet V3 restores
+    /// from), plus everything a test needs to verify recovery later.
+    struct CommittedCapsuleBlock {
+        hash: [u8; 32],
+        commitment: [u8; 33],
+        value: u64,
+    }
+
+    /// Build, serialize and commit a canonical block at `height` containing a
+    /// coinbase output with a real range proof and a real recovery capsule
+    /// derived from `seed`, then advance the in-memory tip to it.
+    fn commit_capsule_block(
+        chain: &mut dom_chain::ChainState,
+        height: u64,
+        prev_hash: [u8; 32],
+        seed: &[u8],
+    ) -> CommittedCapsuleBlock {
+        use dom_consensus::{Block, BlockHeader, CoinbaseKernel, CoinbaseTransaction};
+        use dom_core::{BlockHeight, Hash256, Timestamp};
+
+        let chain_ctx = RecoveryChainContext {
+            network_magic: chain.network_magic,
+            chain_id: *dom_consensus::derive_chain_id(chain.network_magic, &chain.genesis_hash)
+                .as_bytes(),
+        };
+        let value = dom_core::block_reward(BlockHeight(height)).noms();
+        let blinding = BlindingFactor::random();
+        let commitment = Commitment::commit(value, &blinding);
+        let commitment_bytes = *commitment.as_bytes();
+        let (proof, _) = bp2_prove(value, &blinding).expect("range proof");
+        let root = derive_recovery_root(seed, chain_ctx).expect("recovery root");
+        let capsule = create_recovery_capsule(
+            &root,
+            chain_ctx,
+            &commitment_bytes,
+            dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
+            value,
+            0,
+            height,
+            OutputRecoveryDomain::Coinbase,
+            &blinding,
+        )
+        .expect("recovery capsule");
+        let output =
+            dom_consensus::TransactionOutput::with_recovery_capsule(commitment, proof, &capsule)
+                .expect("proof envelope with capsule");
+
+        let block = Block {
+            header: BlockHeader {
+                version: dom_core::PROTOCOL_VERSION,
+                height: BlockHeight(height),
+                prev_hash: Hash256::from_bytes(prev_hash),
+                timestamp: Timestamp(1_753_660_800 + height),
+                output_root: Hash256::ZERO,
+                kernel_root: Hash256::ZERO,
+                rangeproof_root: Hash256::ZERO,
+                total_kernel_offset: [0u8; 32],
+                target: dom_pow::CompactTarget(0x207f_ffff),
+                total_difficulty: primitive_types::U256::zero(),
+                pow: dom_consensus::block::ProofOfWork {
+                    nonce: 0,
+                    randomx_hash: Hash256::ZERO,
+                },
+            },
+            coinbase: CoinbaseTransaction {
+                output,
+                kernel: CoinbaseKernel {
+                    features: dom_core::KERNEL_FEAT_COINBASE,
+                    explicit_value: value,
+                    excess: Commitment::commit(0, &blinding),
+                    excess_signature: [0u8; 65],
+                },
+                offset: [0u8; 32],
+            },
+            transactions: Vec::new(),
+        };
+        let header_bytes = block.header.to_bytes().expect("serialize header");
+        let body_bytes = block.to_bytes().expect("serialize block");
+        let hash = *dom_crypto::blake2b_256(&header_bytes).as_bytes();
+
+        chain
+            .store
+            .commit_block(&hash, height, &header_bytes, &body_bytes, &[], &[], &[])
+            .expect("commit canonical capsule block");
+        chain.tip_height = BlockHeight(height);
+        chain.tip_hash = Hash256::from_bytes(hash);
+
+        CommittedCapsuleBlock {
+            hash,
+            commitment: commitment_bytes,
+            value,
+        }
+    }
+
+    /// REGRESSION (RB-WALLET3-SCANFULL-PARITY): the data served by
+    /// `/chain/scan/full` must be byte-for-byte the ScanBlocks the embedded
+    /// `WalletCoreApi` (`scan_range`) serves for the same range — including a
+    /// REAL recovery capsule that still authenticates and recovers the output.
+    #[test]
+    fn scan_chain_full_matches_embedded_projection_with_real_capsule() {
+        let node = fresh_node("scanfull-parity");
+        let seed = b"scanfull-parity-recovery-seed";
+
+        let (genesis, tip_block) = {
+            let mut chain = node.chain.try_lock().expect("chain lock");
+            let genesis = commit_capsule_block(&mut chain, 0, [0u8; 32], seed);
+            let tip_block = commit_capsule_block(&mut chain, 1, genesis.hash, seed);
+            (genesis, tip_block)
+        };
+
+        let handle = NodeHandleImpl(node.clone());
+        let full = handle.scan_chain_full(0, 10).expect("full scan");
+        assert_eq!(full.from, 0);
+        assert_eq!(full.to, 1, "to is clamped to the tip");
+        assert_eq!(full.blocks.len(), 2, "the served range is contiguous");
+
+        // Byte-for-byte parity with the embedded Wallet V3 projection.
+        let api = crate::wallet_core_api::EmbeddedWalletCoreApi::new(node.clone());
+        let identity = api.chain_identity().expect("identity");
+        assert_eq!(full.identity, identity);
+        let embedded = api
+            .scan_range(ScanRequest {
+                network: identity.network,
+                chain_id: identity.chain_id,
+                start: ScanStart::Height(0),
+                max_blocks: dom_rpc::MAX_FULL_SCAN_RANGE,
+                stop_height: Some(10),
+                commitment_filters: Vec::new(),
+            })
+            .expect("embedded scan_range");
+        assert_eq!(
+            full.blocks, embedded.blocks,
+            "endpoint data must be byte-for-byte the embedded projection"
+        );
+        assert_eq!(full.identity.current_tip, embedded.tip);
+
+        // The served capsule is REAL: it parses, authenticates against the
+        // seed-derived root and recovers the confidential value.
+        let served = &full.blocks[1].outputs[0];
+        assert!(served.is_coinbase);
+        assert_eq!(served.commitment, tip_block.commitment);
+        assert_eq!(served.recovery_version, RECOVERY_VERSION);
+        assert_eq!(full.blocks[0].outputs[0].commitment, genesis.commitment);
+        let chain_ctx = RecoveryChainContext {
+            network_magic: identity.network_magic,
+            chain_id: identity.chain_id,
+        };
+        let root = derive_recovery_root(seed, chain_ctx).expect("recovery root");
+        let capsule =
+            RecoveryCapsule::from_bytes(&served.recovery_capsule).expect("served capsule parses");
+        let recovered = recover_output_from_capsule(
+            &root,
+            chain_ctx,
+            &served.commitment,
+            identity.range_proof_serialization_version,
+            PublicOutputKind::Coinbase,
+            &capsule,
+        )
+        .expect("recovery must not error")
+        .expect("capsule must authenticate as owned");
+        assert_eq!(recovered.value, tip_block.value);
+    }
+
+    /// REGRESSION: the soft response budget truncates the page (returning a
+    /// shorter contiguous prefix and clamping `to`) instead of serving an
+    /// unbounded response — while always serving at least one block.
+    #[test]
+    fn scan_chain_full_soft_budget_truncates_page() {
+        let node = fresh_node("scanfull-budget");
+        let seed = b"scanfull-budget-recovery-seed";
+        {
+            let mut chain = node.chain.try_lock().expect("chain lock");
+            let genesis = commit_capsule_block(&mut chain, 0, [0u8; 32], seed);
+            commit_capsule_block(&mut chain, 1, genesis.hash, seed);
+        }
+        let handle = NodeHandleImpl(node.clone());
+
+        let truncated = handle
+            .scan_chain_full_with_budget(0, 1, 1)
+            .expect("budgeted scan");
+        assert_eq!(
+            truncated.blocks.len(),
+            1,
+            "a 1-byte budget still serves at least one block"
+        );
+        assert_eq!(truncated.to, 0, "the budget clamps the served range");
+        assert_eq!(truncated.blocks[0].height, 0);
+
+        // The production budget serves the whole (tiny) range untouched.
+        let full = handle.scan_chain_full(0, 1).expect("full scan");
+        assert_eq!(full.to, 1);
+        assert_eq!(full.blocks.len(), 2);
+    }
+
+    /// REGRESSION: V3 requires continuity — a canonical height with no block
+    /// inside the served range is a stably-typed CanonicalGap error, never a
+    /// silent omission (unlike the legacy /chain/scan).
+    #[test]
+    fn scan_chain_full_reports_canonical_gap_with_stable_error() {
+        let node = fresh_node("scanfull-gap");
+        let seed = b"scanfull-gap-recovery-seed";
+        {
+            let mut chain = node.chain.try_lock().expect("chain lock");
+            // Height 1 exists, height 0 was never committed: a gap.
+            commit_capsule_block(&mut chain, 1, [0u8; 32], seed);
+        }
+        let handle = NodeHandleImpl(node.clone());
+
+        let err = handle
+            .scan_chain_full(0, 1)
+            .expect_err("a canonical gap must be an error");
+        assert!(
+            matches!(err, dom_rpc::RpcError::CanonicalGap(ref m) if m.contains("height 0")),
+            "expected CanonicalGap for height 0, got {err}"
+        );
+    }
+
+    #[test]
+    fn scan_chain_full_empty_chain_serves_identity_and_empty_page() {
+        let node = fresh_node("scanfull-empty");
+        let handle = NodeHandleImpl(node.clone());
+
+        let full = handle.scan_chain_full(0, 100).expect("scan on empty chain");
+        assert_eq!(full.to, 0, "to is clamped to the (empty) tip");
+        assert!(full.blocks.is_empty(), "pre-genesis chain has no blocks");
+        assert_eq!(full.identity.current_tip.height, 0);
+    }
+
+    #[test]
+    fn scan_chain_full_yields_to_busy_chain_lock() {
+        // GOLDEN RULE: identical to scan_chain — a busy chain must get a
+        // retriable 503 immediately; the full scan never waits on the lock.
+        let node = fresh_node("scanfull-busy");
+        let handle = NodeHandleImpl(node.clone());
+
+        let _chain_guard = node.chain.try_lock().expect("hold chain lock");
+        let err = handle
+            .scan_chain_full(0, 10)
+            .expect_err("full scan must not block on a held chain lock");
         assert!(
             matches!(err, dom_rpc::RpcError::Overloaded(ref m) if m.contains("chain busy")),
             "expected retriable Overloaded, got {err}"

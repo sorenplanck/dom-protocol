@@ -200,7 +200,10 @@ impl EmbeddedWalletCoreApi {
         }
     }
 
-    fn current_identity_locked(
+    /// Chain identity read under an already-held chain lock. Shared with the
+    /// node's `/chain/scan/full` handle so the remote endpoint reports the
+    /// exact identity the embedded Wallet V3 API reports.
+    pub(crate) fn current_identity_locked(
         &self,
         chain: &dom_chain::ChainState,
     ) -> Result<ChainIdentity, WalletCoreError> {
@@ -282,7 +285,10 @@ impl EmbeddedWalletCoreApi {
             .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))
     }
 
-    fn load_canonical_block_locked(
+    /// Load the canonical block at `height` under an already-held chain lock.
+    /// Shared with the node's `/chain/scan/full` handle — the single canonical
+    /// loader for Wallet V3 projections (embedded and remote).
+    pub(crate) fn load_canonical_block_locked(
         chain: &dom_chain::ChainState,
         height: u64,
     ) -> Result<Option<(Hash256, Block)>, WalletCoreError> {
@@ -303,7 +309,10 @@ impl EmbeddedWalletCoreApi {
         Ok(Some((Hash256::from_bytes(hash), block)))
     }
 
-    fn project_block(
+    /// Project a canonical block into the Wallet V3 [`ScanBlock`]. Shared with
+    /// the node's `/chain/scan/full` handle (with `filters = None`) so the
+    /// remote scan serves byte-for-byte the same data as the embedded API.
+    pub(crate) fn project_block(
         identity: &ChainIdentity,
         hash: Hash256,
         block: Block,

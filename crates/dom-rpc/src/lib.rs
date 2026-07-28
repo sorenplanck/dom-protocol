@@ -11,6 +11,7 @@ use axum::{
     Json, Router,
 };
 use dom_core::PROTOCOL_VERSION;
+use dom_wallet_core_api::{ChainIdentity, ScanBlock};
 use serde::{Deserialize, Serialize};
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc};
 use tracing::{error, info, warn};
@@ -61,6 +62,27 @@ pub trait NodeHandle: Send + Sync + 'static {
     /// [`RpcError::Overloaded`] immediately. Mining always has priority.
     fn scan_chain(&self, _from: u64, _to: u64) -> Result<ChainScan, RpcError> {
         Err(RpcError::Internal("chain scan not supported".into()))
+    }
+
+    /// Full-fidelity per-block chain scan for the Wallet V3 restore/sync path
+    /// (`GET /chain/scan/full`): every output with its range proof and recovery
+    /// capsule, plus inputs, kernels and coinbase metadata for the heights
+    /// `from..=to` (clamped — see [`MAX_FULL_SCAN_RANGE`] and
+    /// [`FULL_SCAN_RESPONSE_SOFT_LIMIT_BYTES`]), together with the chain
+    /// identity and tip. There is deliberately NO output filter parameter:
+    /// the server always returns every output of every block in the range
+    /// (privacy requirement — selective scanning is forbidden). Default is
+    /// unsupported, so adding this method does not break existing
+    /// implementations.
+    ///
+    /// Implementations MUST NOT block on a contended chain lock: if the chain
+    /// is busy (mining / connecting a block), return a retriable
+    /// [`RpcError::Overloaded`] immediately. Mining always has priority.
+    /// A canonical height whose block body is missing inside the served range
+    /// MUST surface as [`RpcError::CanonicalGap`] — never be silently omitted
+    /// (unlike the legacy [`NodeHandle::scan_chain`], V3 requires continuity).
+    fn scan_chain_full(&self, _from: u64, _to: u64) -> Result<ChainScanFull, RpcError> {
+        Err(RpcError::Internal("full chain scan not supported".into()))
     }
 
     /// Request the node's existing coordinated shutdown path. The RPC handler
@@ -118,6 +140,74 @@ pub struct ChainScan {
     pub to: u64,
     /// Per-block scan data for `from..=to` (heights with no block are omitted).
     pub blocks: Vec<ScanBlockData>,
+}
+
+/// Wire schema version served by `GET /chain/scan/full`. Clients must treat an
+/// unknown version as a terminal schema violation.
+pub const FULL_SCAN_SCHEMA_VERSION: u32 = 1;
+
+/// Maximum number of heights a single [`NodeHandle::scan_chain_full`] /
+/// `/chain/scan/full` call returns — same lock-hold bound as
+/// [`MAX_SCAN_RANGE`]; clients page across larger ranges from `to + 1`.
+pub const MAX_FULL_SCAN_RANGE: u64 = MAX_SCAN_RANGE;
+
+/// Soft response-size budget for one `/chain/scan/full` page, in approximate
+/// wire bytes (see [`full_scan_block_wire_weight`]).
+///
+/// The request body limit does not bound responses, and a page of
+/// [`MAX_FULL_SCAN_RANGE`] blocks carrying ~2.2 KB per output (range proof +
+/// recovery capsule) is ≥ ~2.4 MiB even when every block is coinbase-only —
+/// unbounded once blocks carry transactions. Implementations stop appending
+/// blocks once the accumulated estimate crosses this budget (always serving at
+/// least one block) and clamp the returned `to` accordingly, keeping the whole
+/// JSON response under ~8 MiB even with one oversized final block.
+pub const FULL_SCAN_RESPONSE_SOFT_LIMIT_BYTES: usize = 6 * 1024 * 1024;
+
+/// Result of [`NodeHandle::scan_chain_full`]: the chain identity (whose
+/// `current_tip` is the tip served alongside the scan), the actual served
+/// range (`to` is clamped to `min(requested_to, tip, from + 999)` — see
+/// [`MAX_FULL_SCAN_RANGE`] — and may be clamped further by
+/// [`FULL_SCAN_RESPONSE_SOFT_LIMIT_BYTES`]) and the Wallet V3 block
+/// projections. Blocks reuse the exact [`dom_wallet_core_api::ScanBlock`]
+/// projection the embedded core serves, so remote and embedded scans can
+/// never diverge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainScanFull {
+    /// Chain identity observed under the same lock as the scan.
+    pub identity: ChainIdentity,
+    /// Lowest height scanned (echo of the request).
+    pub from: u64,
+    /// Highest height scanned (clamped).
+    pub to: u64,
+    /// Per-block Wallet V3 projections for `from..=to` (contiguous; a missing
+    /// canonical block inside the range is an error, never an omission).
+    pub blocks: Vec<ScanBlock>,
+}
+
+/// Approximate JSON wire size of one projected block on `/chain/scan/full`:
+/// hex doubles the 32/33-byte identities, base64 grows the range-proof and
+/// recovery-capsule blobs by 4/3, and the envelope constants cover field names
+/// and punctuation. Deliberately leans toward over-estimating — it only has to
+/// keep a page under [`FULL_SCAN_RESPONSE_SOFT_LIMIT_BYTES`], not be exact.
+pub fn full_scan_block_wire_weight(block: &ScanBlock) -> usize {
+    const BLOCK_ENVELOPE: usize = 640;
+    const OUTPUT_ENVELOPE: usize = 224;
+    const INPUT_WEIGHT: usize = 72;
+    const KERNEL_WEIGHT: usize = 152;
+
+    let outputs: usize = block
+        .outputs
+        .iter()
+        .map(|output| {
+            OUTPUT_ENVELOPE
+                + output.range_proof.len().div_ceil(3) * 4
+                + output.recovery_capsule.len().div_ceil(3) * 4
+        })
+        .sum();
+    BLOCK_ENVELOPE
+        + outputs
+        + block.inputs.len() * INPUT_WEIGHT
+        + block.kernels.len() * KERNEL_WEIGHT
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +277,11 @@ pub enum RpcError {
     Rejected(String),
     #[error("overloaded: {0}")]
     Overloaded(String),
+    /// A canonical height inside a served scan range has no block body. V3
+    /// full scans require continuity, so this is a distinct, stably-coded
+    /// error (`code: "canonical_gap"`) rather than a generic internal failure.
+    #[error("canonical gap: {0}")]
+    CanonicalGap(String),
     #[error("internal: {0}")]
     Internal(String),
 }
@@ -197,7 +292,16 @@ impl RpcError {
             Self::InvalidHex(_) | Self::InvalidTx(_) => StatusCode::BAD_REQUEST,
             Self::Rejected(_) => StatusCode::CONFLICT,
             Self::Overloaded(_) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::CanonicalGap(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    /// Stable machine-readable code carried in the error body, when one is
+    /// pinned by a wire contract (today only `canonical_gap`).
+    fn stable_code(&self) -> Option<&'static str> {
+        match self {
+            Self::CanonicalGap(_) => Some("canonical_gap"),
+            _ => None,
         }
     }
 }
@@ -205,15 +309,21 @@ impl RpcError {
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
+    /// Stable machine-readable code; omitted for errors without one so the
+    /// legacy `{"error": …}` body shape is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'static str>,
 }
 
 impl IntoResponse for RpcError {
     fn into_response(self) -> Response {
         let status = self.status_code();
+        let code = self.stable_code();
         (
             status,
             Json(ErrorResponse {
                 error: self.to_string(),
+                code,
             }),
         )
             .into_response()
@@ -350,6 +460,7 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
     let auth_read_routes = Router::new()
         .route("/wallet/balance", get(wallet_balance_handler))
         .route("/chain/scan", get(chain_scan_handler))
+        .route("/chain/scan/full", get(chain_scan_full_handler))
         .route("/build-info", get(build_info_handler))
         .route("/shutdown", post(shutdown_handler))
         .layer(rate_limit_auth_read);
@@ -516,6 +627,7 @@ async fn mempool(
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     error: "page too large".to_owned(),
+                    code: None,
                 }),
             )
                 .into_response()
@@ -794,6 +906,163 @@ async fn chain_scan_handler(
     }
 }
 
+/// Chain identity DTO for `/chain/scan/full` (the tip travels separately).
+/// Hashes/ids are lowercase hex, matching the legacy endpoints.
+#[derive(Debug, Serialize)]
+struct FullScanIdentityDto {
+    network: &'static str,
+    network_magic: u32,
+    chain_id: String,
+    genesis_hash: String,
+    protocol_version: u32,
+    range_proof_serialization_version: u8,
+    coinbase_maturity: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct FullScanCoinbaseDto {
+    output_commitment: String,
+    explicit_value: u64,
+    kernel_excess: String,
+}
+
+/// One output on the wire. `block_height`/`block_hash` are deliberately
+/// omitted: they are redundant with the enclosing block and the client
+/// reconstructs them when rebuilding `ScanOutput`.
+#[derive(Debug, Serialize)]
+struct FullScanOutputDto {
+    /// Lowercase hex, 66 chars.
+    commitment: String,
+    /// Standard base64 with padding (RFC 4648) — ~33% smaller than hex on the
+    /// blob that dominates the payload.
+    range_proof: String,
+    /// Standard base64 with padding; empty string when the output carries no
+    /// capsule (legacy output — `recovery_version` is then 0).
+    recovery_capsule: String,
+    recovery_version: u16,
+    is_coinbase: bool,
+    output_position: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct FullScanKernelDto {
+    excess: String,
+    features: u8,
+    fee: u64,
+    lock_height: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct FullScanBlockDto {
+    height: u64,
+    block_hash: String,
+    previous_block_hash: String,
+    timestamp: u64,
+    canonical_marker: String,
+    protocol_version: u32,
+    range_proof_serialization_version: u8,
+    total_fees_noms: u64,
+    coinbase: FullScanCoinbaseDto,
+    outputs: Vec<FullScanOutputDto>,
+    /// Spent commitments, flattened (lowercase hex, 66 chars each).
+    inputs: Vec<String>,
+    kernels: Vec<FullScanKernelDto>,
+}
+
+#[derive(Debug, Serialize)]
+struct ChainScanFullResponse {
+    schema_version: u32,
+    identity: FullScanIdentityDto,
+    tip: TipDto,
+    from: u64,
+    to: u64,
+    blocks: Vec<FullScanBlockDto>,
+}
+
+fn full_scan_block_dto(block: ScanBlock) -> FullScanBlockDto {
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
+
+    FullScanBlockDto {
+        height: block.height,
+        block_hash: hex::encode(block.block_hash),
+        previous_block_hash: hex::encode(block.previous_block_hash),
+        timestamp: block.timestamp,
+        canonical_marker: hex::encode(block.canonical_marker),
+        protocol_version: block.protocol_version,
+        range_proof_serialization_version: block.range_proof_serialization_version,
+        total_fees_noms: block.total_fees_noms,
+        coinbase: FullScanCoinbaseDto {
+            output_commitment: hex::encode(block.coinbase.output_commitment),
+            explicit_value: block.coinbase.explicit_value,
+            kernel_excess: hex::encode(block.coinbase.kernel_excess),
+        },
+        outputs: block
+            .outputs
+            .into_iter()
+            .map(|output| FullScanOutputDto {
+                commitment: hex::encode(output.commitment),
+                range_proof: BASE64.encode(&output.range_proof),
+                recovery_capsule: BASE64.encode(&output.recovery_capsule),
+                recovery_version: output.recovery_version,
+                is_coinbase: output.is_coinbase,
+                output_position: output.output_position,
+            })
+            .collect(),
+        inputs: block
+            .inputs
+            .iter()
+            .map(|input| hex::encode(input.spent_commitment))
+            .collect(),
+        kernels: block
+            .kernels
+            .into_iter()
+            .map(|kernel| FullScanKernelDto {
+                excess: hex::encode(kernel.excess),
+                features: kernel.features,
+                fee: kernel.fee,
+                lock_height: kernel.lock_height,
+            })
+            .collect(),
+    }
+}
+
+/// `GET /chain/scan/full?from&to` — Wallet V3 full-fidelity scan page for a
+/// height range (clamped to [`MAX_FULL_SCAN_RANGE`], the tip, and the
+/// [`FULL_SCAN_RESPONSE_SOFT_LIMIT_BYTES`] response budget), plus the chain
+/// identity and tip. Authenticated; same operational rules as `/chain/scan`:
+/// a node without support answers the trait default error, a busy chain
+/// answers a retriable 503, and a canonical gap answers 500 with the stable
+/// `canonical_gap` code.
+async fn chain_scan_full_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Query(q): Query<ScanQuery>,
+) -> impl IntoResponse {
+    match handle.scan_chain_full(q.from, q.to) {
+        Ok(scan) => Json(ChainScanFullResponse {
+            schema_version: FULL_SCAN_SCHEMA_VERSION,
+            tip: TipDto {
+                height: scan.identity.current_tip.height,
+                hash: hex::encode(scan.identity.current_tip.hash),
+            },
+            identity: FullScanIdentityDto {
+                network: scan.identity.network.as_str(),
+                network_magic: scan.identity.network_magic,
+                chain_id: hex::encode(scan.identity.chain_id),
+                genesis_hash: hex::encode(scan.identity.genesis_hash),
+                protocol_version: scan.identity.protocol_version,
+                range_proof_serialization_version: scan.identity.range_proof_serialization_version,
+                coinbase_maturity: scan.identity.coinbase_maturity,
+            },
+            from: scan.from,
+            to: scan.to,
+            blocks: scan.blocks.into_iter().map(full_scan_block_dto).collect(),
+        })
+        .into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
 async fn wallet_spend_handler(
     State(handle): State<Arc<dyn NodeHandle>>,
     Json(req): Json<SpendRequest>,
@@ -837,6 +1106,8 @@ mod tests {
         no_peers: bool,
         /// Canned chain scan for `/chain/scan` tests; `None` → unsupported.
         scan: Option<ChainScan>,
+        /// Canned full scan for `/chain/scan/full` tests; `None` → unsupported.
+        scan_full: Option<ChainScanFull>,
         shutdown_requested: Arc<AtomicBool>,
     }
 
@@ -848,6 +1119,7 @@ mod tests {
                 network: "regtest",
                 no_peers: false,
                 scan: None,
+                scan_full: None,
                 shutdown_requested: Arc::new(AtomicBool::new(false)),
             }
         }
@@ -856,6 +1128,14 @@ mod tests {
         fn with_scan(height: u64, scan: ChainScan) -> Self {
             Self {
                 scan: Some(scan),
+                ..Self::new(height)
+            }
+        }
+
+        /// A node serving a canned Wallet V3 full scan.
+        fn with_scan_full(height: u64, scan_full: ChainScanFull) -> Self {
+            Self {
+                scan_full: Some(scan_full),
                 ..Self::new(height)
             }
         }
@@ -901,6 +1181,20 @@ mod tests {
                     Ok(out)
                 }
                 None => Err(RpcError::Internal("chain scan not supported".into())),
+            }
+        }
+        fn scan_chain_full(&self, from: u64, to: u64) -> Result<ChainScanFull, RpcError> {
+            match &self.scan_full {
+                Some(s) => {
+                    let mut out = s.clone();
+                    out.from = from;
+                    out.to = to.min(s.identity.current_tip.height);
+                    if from > out.to {
+                        out.blocks.clear();
+                    }
+                    Ok(out)
+                }
+                None => Err(RpcError::Internal("full chain scan not supported".into())),
             }
         }
         fn mempool_size(&self) -> usize {
@@ -1645,6 +1939,404 @@ mod tests {
         let j = body_json(r).await;
         assert_eq!(j["tip"]["height"], serde_json::json!(2));
         assert_eq!(j["blocks"].as_array().unwrap().len(), 0);
+    }
+
+    // ── /chain/scan/full (Wallet V3 remote restore/sync, RPC side) ──────────
+
+    use dom_wallet_core_api::{
+        BlockRef, CoinbaseScanMetadata, CoreNetwork, ScanInput, ScanKernel, ScanOutput,
+    };
+
+    /// One block at height 2 with a coinbase output carrying a capsule-sized
+    /// recovery blob and a legacy (capsule-less) tx output — the two output
+    /// shapes the V3 wire must round-trip.
+    fn canned_full_scan() -> ChainScanFull {
+        let block_hash = [0x22u8; 32];
+        ChainScanFull {
+            identity: ChainIdentity {
+                network: CoreNetwork::Regtest,
+                network_magic: dom_core::NETWORK_MAGIC_REGTEST,
+                chain_id: [0xC1u8; 32],
+                genesis_hash: [0x9Eu8; 32],
+                protocol_version: PROTOCOL_VERSION,
+                range_proof_serialization_version: 1,
+                coinbase_maturity: 1,
+                current_tip: BlockRef {
+                    height: 2,
+                    hash: [0xC2u8; 32],
+                },
+            },
+            from: 2,
+            to: 2,
+            blocks: vec![ScanBlock {
+                height: 2,
+                block_hash,
+                previous_block_hash: [0x11u8; 32],
+                timestamp: 1_753_660_800,
+                canonical_marker: block_hash,
+                outputs: vec![
+                    ScanOutput {
+                        commitment: [0xA1u8; 33],
+                        range_proof: vec![0x7Bu8; 739],
+                        recovery_capsule: vec![0x5Au8; 96],
+                        recovery_version: 1,
+                        is_coinbase: true,
+                        block_height: 2,
+                        block_hash,
+                        output_position: 0,
+                    },
+                    ScanOutput {
+                        commitment: [0xB2u8; 33],
+                        range_proof: vec![0x3Cu8; 739],
+                        recovery_capsule: Vec::new(),
+                        recovery_version: 0,
+                        is_coinbase: false,
+                        block_height: 2,
+                        block_hash,
+                        output_position: 1,
+                    },
+                ],
+                inputs: vec![ScanInput {
+                    spent_commitment: [0xD3u8; 33],
+                }],
+                kernels: vec![
+                    ScanKernel {
+                        excess: [0xE4u8; 33],
+                        features: 1,
+                        fee: 0,
+                        lock_height: 0,
+                    },
+                    ScanKernel {
+                        excess: [0xF5u8; 33],
+                        features: 0,
+                        fee: 7,
+                        lock_height: 0,
+                    },
+                ],
+                coinbase: CoinbaseScanMetadata {
+                    output_commitment: [0xA1u8; 33],
+                    explicit_value: 5_000_000_000,
+                    kernel_excess: [0xE4u8; 33],
+                },
+                total_fees_noms: 7,
+                protocol_version: PROTOCOL_VERSION,
+                range_proof_serialization_version: 1,
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn chain_scan_full_requires_bearer_and_succeeds_with_it() {
+        let unauthenticated = app_with(MockNode::with_scan_full(2, canned_full_scan()))
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/scan/full?from=2&to=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let authenticated = app_with(MockNode::with_scan_full(2, canned_full_scan()))
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/scan/full?from=2&to=2")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), StatusCode::OK);
+    }
+
+    /// Serialization pin + round-trip: every wire field decodes back into the
+    /// exact `ScanBlock` that was served, with `block_height`/`block_hash`
+    /// reconstructed from the enclosing block exactly as a client must.
+    #[tokio::test]
+    async fn chain_scan_full_serializes_v3_schema_and_round_trips() {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine as _;
+
+        let served = canned_full_scan();
+        let r = app_with(MockNode::with_scan_full(2, served.clone()))
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/scan/full?from=2&to=2")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let j = body_json(r).await;
+
+        // Envelope pins.
+        assert_eq!(
+            j["schema_version"],
+            serde_json::json!(FULL_SCAN_SCHEMA_VERSION)
+        );
+        assert_eq!(j["identity"]["network"], serde_json::json!("regtest"));
+        assert_eq!(
+            j["identity"]["network_magic"],
+            serde_json::json!(dom_core::NETWORK_MAGIC_REGTEST)
+        );
+        assert_eq!(
+            j["identity"]["chain_id"],
+            serde_json::json!("c1".repeat(32))
+        );
+        assert_eq!(
+            j["identity"]["genesis_hash"],
+            serde_json::json!("9e".repeat(32))
+        );
+        assert_eq!(j["identity"]["coinbase_maturity"], serde_json::json!(1));
+        assert_eq!(j["tip"]["height"], serde_json::json!(2));
+        assert_eq!(j["tip"]["hash"], serde_json::json!("c2".repeat(32)));
+        assert_eq!(j["from"], serde_json::json!(2));
+        assert_eq!(j["to"], serde_json::json!(2));
+
+        // Per-block pins that a partial round-trip would not catch.
+        let jb = &j["blocks"][0];
+        assert_eq!(jb["canonical_marker"], serde_json::json!("22".repeat(32)));
+        assert_eq!(
+            jb["coinbase"]["output_commitment"],
+            serde_json::json!("a1".repeat(33))
+        );
+        assert_eq!(jb["inputs"][0], serde_json::json!("d3".repeat(33)));
+        // Wire outputs deliberately omit the redundant block_height/block_hash.
+        assert!(jb["outputs"][0].get("block_height").is_none());
+        assert!(jb["outputs"][0].get("block_hash").is_none());
+        // Capsule-less legacy output: empty base64 + version 0.
+        assert_eq!(jb["outputs"][1]["recovery_capsule"], serde_json::json!(""));
+        assert_eq!(jb["outputs"][1]["recovery_version"], serde_json::json!(0));
+
+        // Full round-trip back into the served ScanBlock.
+        let decode_hex32 = |v: &Value| -> [u8; 32] {
+            hex::decode(v.as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap()
+        };
+        let decode_hex33 = |v: &Value| -> [u8; 33] {
+            hex::decode(v.as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap()
+        };
+        let block_height = jb["height"].as_u64().unwrap();
+        let block_hash = decode_hex32(&jb["block_hash"]);
+        let rebuilt = ScanBlock {
+            height: block_height,
+            block_hash,
+            previous_block_hash: decode_hex32(&jb["previous_block_hash"]),
+            timestamp: jb["timestamp"].as_u64().unwrap(),
+            canonical_marker: decode_hex32(&jb["canonical_marker"]),
+            outputs: jb["outputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| ScanOutput {
+                    commitment: decode_hex33(&o["commitment"]),
+                    range_proof: BASE64.decode(o["range_proof"].as_str().unwrap()).unwrap(),
+                    recovery_capsule: BASE64
+                        .decode(o["recovery_capsule"].as_str().unwrap())
+                        .unwrap(),
+                    recovery_version: o["recovery_version"].as_u64().unwrap() as u16,
+                    is_coinbase: o["is_coinbase"].as_bool().unwrap(),
+                    block_height,
+                    block_hash,
+                    output_position: o["output_position"].as_u64().unwrap() as u32,
+                })
+                .collect(),
+            inputs: jb["inputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| ScanInput {
+                    spent_commitment: decode_hex33(i),
+                })
+                .collect(),
+            kernels: jb["kernels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|k| ScanKernel {
+                    excess: decode_hex33(&k["excess"]),
+                    features: k["features"].as_u64().unwrap() as u8,
+                    fee: k["fee"].as_u64().unwrap(),
+                    lock_height: k["lock_height"].as_u64().unwrap(),
+                })
+                .collect(),
+            coinbase: CoinbaseScanMetadata {
+                output_commitment: decode_hex33(&jb["coinbase"]["output_commitment"]),
+                explicit_value: jb["coinbase"]["explicit_value"].as_u64().unwrap(),
+                kernel_excess: decode_hex33(&jb["coinbase"]["kernel_excess"]),
+            },
+            total_fees_noms: jb["total_fees_noms"].as_u64().unwrap(),
+            protocol_version: jb["protocol_version"].as_u64().unwrap() as u32,
+            range_proof_serialization_version: jb["range_proof_serialization_version"]
+                .as_u64()
+                .unwrap() as u8,
+        };
+        assert_eq!(rebuilt, served.blocks[0]);
+    }
+
+    #[tokio::test]
+    async fn chain_scan_full_unsupported_node_errors() {
+        // The default node (no full scan) returns the trait default error.
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/scan/full?from=0&to=2")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body_json(r).await["error"],
+            serde_json::json!("internal: full chain scan not supported")
+        );
+    }
+
+    struct FullScanBusyNode;
+    impl NodeHandle for FullScanBusyNode {
+        fn chain_height(&self) -> u64 {
+            0
+        }
+        fn mempool_size(&self) -> usize {
+            0
+        }
+        fn network(&self) -> &'static str {
+            "regtest"
+        }
+        fn mempool_tx_hashes(&self) -> Vec<[u8; 32]> {
+            vec![]
+        }
+        fn get_mempool_tx(&self, _: &[u8; 32]) -> Option<MempoolTxInfo> {
+            None
+        }
+        fn submit_tx(&self, _: Vec<u8>) -> Result<TxAdmission, RpcError> {
+            Err(RpcError::Overloaded("mempool full".to_owned()))
+        }
+        fn get_block_header(&self, _: &[u8; 32]) -> Option<Vec<u8>> {
+            None
+        }
+        fn get_block_hash_at_height(&self, _: u64) -> Option<[u8; 32]> {
+            None
+        }
+        fn get_utxo(&self, _: &[u8; 33]) -> Option<UtxoInfo> {
+            None
+        }
+        fn scan_chain_full(&self, _: u64, _: u64) -> Result<ChainScanFull, RpcError> {
+            Err(RpcError::Overloaded("chain busy; retry".into()))
+        }
+    }
+
+    /// GOLDEN RULE: a busy chain must answer `/chain/scan/full` with an
+    /// immediate, retriable 503 — never block, never a terminal error.
+    #[tokio::test]
+    async fn chain_scan_full_busy_chain_returns_retriable_503() {
+        let r = app_with(FullScanBusyNode)
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/scan/full?from=0&to=2")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(r).await;
+        assert_eq!(
+            body["error"],
+            serde_json::json!("overloaded: chain busy; retry")
+        );
+        assert!(body.get("code").is_none(), "busy has no stable code");
+    }
+
+    struct FullScanGapNode;
+    impl NodeHandle for FullScanGapNode {
+        fn chain_height(&self) -> u64 {
+            0
+        }
+        fn mempool_size(&self) -> usize {
+            0
+        }
+        fn network(&self) -> &'static str {
+            "regtest"
+        }
+        fn mempool_tx_hashes(&self) -> Vec<[u8; 32]> {
+            vec![]
+        }
+        fn get_mempool_tx(&self, _: &[u8; 32]) -> Option<MempoolTxInfo> {
+            None
+        }
+        fn submit_tx(&self, _: Vec<u8>) -> Result<TxAdmission, RpcError> {
+            Err(RpcError::Rejected("nope".to_owned()))
+        }
+        fn get_block_header(&self, _: &[u8; 32]) -> Option<Vec<u8>> {
+            None
+        }
+        fn get_block_hash_at_height(&self, _: u64) -> Option<[u8; 32]> {
+            None
+        }
+        fn get_utxo(&self, _: &[u8; 33]) -> Option<UtxoInfo> {
+            None
+        }
+        fn scan_chain_full(&self, _: u64, _: u64) -> Result<ChainScanFull, RpcError> {
+            Err(RpcError::CanonicalGap(
+                "missing canonical block at height 5".into(),
+            ))
+        }
+    }
+
+    /// A canonical gap inside the served range is a 500 carrying the STABLE
+    /// `canonical_gap` code (the V3 client maps it to `CanonicalGap`, not to a
+    /// retriable failure) — V2 silently omitted the block, V3 must not.
+    #[tokio::test]
+    async fn chain_scan_full_canonical_gap_maps_to_500_with_stable_code() {
+        let r = app_with(FullScanGapNode)
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/scan/full?from=0&to=9")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body_json(r).await,
+            serde_json::json!({
+                "error": "canonical gap: missing canonical block at height 5",
+                "code": "canonical_gap"
+            })
+        );
+    }
+
+    /// The wire-weight heuristic must upper-bound the actual serialized size
+    /// of a block DTO, otherwise the soft response budget cannot guarantee a
+    /// bounded response.
+    #[test]
+    fn full_scan_block_wire_weight_upper_bounds_serialized_dto() {
+        let scan = canned_full_scan();
+        for block in &scan.blocks {
+            let estimate = full_scan_block_wire_weight(block);
+            let actual = serde_json::to_string(&full_scan_block_dto(block.clone()))
+                .expect("serialize block dto")
+                .len();
+            assert!(
+                estimate >= actual,
+                "estimate {estimate} must be >= serialized size {actual}"
+            );
+        }
     }
 
     // ───────────────────────────────────────────────────────────────────────

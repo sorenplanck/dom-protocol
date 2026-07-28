@@ -1221,11 +1221,13 @@ name = "dom-rpc"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "dirs",
  "dom-consensus",
  "dom-core",
  "dom-mempool",
  "dom-serialization",
+ "dom-wallet-core-api",
  "governor",
  "hex",
  "http-body-util",
