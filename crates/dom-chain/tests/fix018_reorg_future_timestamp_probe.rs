@@ -1,13 +1,12 @@
 //! dom-shield PROBE — FIX-018: reorg promotion skips the future-timestamp gate.
 //!
-//! `ChainState::promote_heavier_known_tip` validates each candidate block on the
-//! promoted branch with `validate_block(block, &ctx)` where
-//! `ctx.now = Timestamp(u64::MAX)` (chain_state.rs ~line 1085). The shared
-//! `dom_consensus::validate_block` does NOT enforce the future-timestamp limit
-//! at all — that limit (`validate_future_timestamp_with_limit`) is applied only
-//! on the LIVE direct-connect path inside `ChainState::connect_block`
-//! (chain_state.rs:272) and in `validate_header_only` /
-//! `validate_ibd_headers_batch`. It is never re-applied during reorg promotion.
+//! `ChainState::promote_heavier_known_tip` used to validate each candidate block
+//! on the promoted branch with `validate_block(block, &ctx)` while pinning
+//! `ctx.now = Timestamp(u64::MAX)`. The shared `dom_consensus::validate_block`
+//! does NOT enforce the future-timestamp limit at all — that limit
+//! (`validate_future_timestamp_with_limit`) is applied by `ChainState` on the
+//! live direct-connect and header-first paths. FIX-018 pins the equivalent gate
+//! on reorg promotion.
 //!
 //! Consequence: a heavier side branch whose tip carries a timestamp arbitrarily
 //! far in the future is rejected if offered as a DIRECT extension (future-time
@@ -24,21 +23,18 @@
 //! hardened validator would either carry the future-time limit or the promotion
 //! path would re-apply it.
 //!
-//! The full end-to-end variant (store the heavier far-future branch as a side
-//! chain, then trigger promotion and observe the reorg succeed) is recorded as
-//! an #[ignore] companion below — assembling and committing a heavier multi-block
-//! branch duplicates the reorg fixtures in reorg_equivalence.rs /
-//! block_validation_ingress_adversarial.rs; the root-cause probe already pins the
-//! defect at its source. Fixing it is a consensus/validation change
-//! (PRECISA DECISÃO HUMANA), out of test-construction scope.
+//! The end-to-end tests below store heavier side branches and then trigger
+//! promotion. A far-future promoted branch must now be rejected, while a
+//! timestamp-valid branch must still promote normally.
 
+use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::transaction::{CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
 use dom_consensus::{
     compute_block_pmmr_roots, derive_chain_id, validate_block, Block, ValidationContext,
 };
 use dom_core::{
-    BlockHeight, Hash256, Timestamp, GENESIS_HASH_REGTEST, KERNEL_FEAT_COINBASE,
+    BlockHeight, DomError, Hash256, Timestamp, GENESIS_HASH_REGTEST, KERNEL_FEAT_COINBASE,
     NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::hash::blake2b_256_tagged;
@@ -46,10 +42,14 @@ use dom_crypto::keys::SecretKey;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_crypto::schnorr_sign;
 use dom_pow::CompactTarget;
+use dom_serialization::DomSerialize;
+use dom_store::utxo::UtxoEntry;
+use dom_store::DomStore;
 use primitive_types::U256;
 
 const FAR_FUTURE_TS: u64 = 1_700_000_000 + 100 * 365 * 24 * 3600; // ~100y ahead
 const REALISTIC_NOW: u64 = 1_700_000_500; // a sane wall clock near genesis era
+const TEST_LMDB_MAP_SIZE: usize = 64 << 20;
 
 fn blinding(seed: u8) -> BlindingFactor {
     let mut bytes = [0u8; 32];
@@ -91,27 +91,31 @@ fn signed_coinbase(height: BlockHeight, seed: u8) -> CoinbaseTransaction {
     }
 }
 
-fn coinbase_only_block(height: u64, timestamp: u64) -> Block {
-    let coinbase = signed_coinbase(BlockHeight(height), 0xC0);
+fn coinbase_only_block_with(
+    prev_hash: Hash256,
+    height: u64,
+    timestamp: u64,
+    total_difficulty: u64,
+    coinbase_seed: u8,
+    nonce: u64,
+) -> Block {
+    let coinbase = signed_coinbase(BlockHeight(height), coinbase_seed);
     let (output_root, kernel_root, rangeproof_root) =
         compute_block_pmmr_roots(&coinbase, &[]).expect("pmmr roots");
     Block {
         header: BlockHeader {
             version: PROTOCOL_VERSION,
             height: BlockHeight(height),
-            // Non-genesis blocks must carry a non-zero prev_hash (header syntax
-            // rule enforced inside validate_block). The exact value is
-            // irrelevant to validate_block (it does no parent lookup).
-            prev_hash: Hash256::from_bytes([0x42; 32]),
+            prev_hash,
             timestamp: Timestamp(timestamp),
             output_root,
             kernel_root,
             rangeproof_root,
             total_kernel_offset: [0u8; 32],
             target: CompactTarget(0),
-            total_difficulty: U256::from(height + 1),
+            total_difficulty: U256::from(total_difficulty),
             pow: ProofOfWork {
-                nonce: 0,
+                nonce,
                 randomx_hash: Hash256::ZERO,
             },
         },
@@ -120,12 +124,101 @@ fn coinbase_only_block(height: u64, timestamp: u64) -> Block {
     }
 }
 
+fn coinbase_only_block(height: u64, timestamp: u64) -> Block {
+    // Non-genesis blocks must carry a non-zero prev_hash (header syntax rule
+    // enforced inside validate_block). The exact value is irrelevant to
+    // validate_block because it does no parent lookup.
+    coinbase_only_block_with(
+        Hash256::from_bytes([0x42; 32]),
+        height,
+        timestamp,
+        height + 1,
+        0xC0,
+        0,
+    )
+}
+
 fn ctx_at(height: u64, now: u64) -> ValidationContext {
     ValidationContext {
         current_height: BlockHeight(height),
         chain_id: *regtest_chain_id().as_bytes(),
         now: Timestamp(now),
     }
+}
+
+fn block_hash(block: &Block) -> Hash256 {
+    Hash256::from_bytes(
+        *dom_crypto::hash::blake2b_256(&block.header.to_bytes().expect("header bytes")).as_bytes(),
+    )
+}
+
+fn commit_canonical_block(store: &DomStore, block: &Block) -> Hash256 {
+    let hash = block_hash(block);
+    let header_bytes = block.header.to_bytes().expect("header bytes");
+    let body_bytes = block.to_bytes().expect("block bytes");
+    let coinbase_entry = UtxoEntry {
+        block_height: block.header.height.0,
+        is_coinbase: true,
+        proof: block.coinbase.output.proof.clone(),
+    };
+    store
+        .commit_block(
+            hash.as_bytes(),
+            block.header.height.0,
+            &header_bytes,
+            &body_bytes,
+            &[(
+                *block.coinbase.output.commitment.as_bytes(),
+                coinbase_entry.to_bytes(),
+            )],
+            &[],
+            &[(*block.coinbase.kernel.excess.as_bytes(), *hash.as_bytes())],
+        )
+        .expect("commit canonical block");
+    hash
+}
+
+fn store_side_block(store: &DomStore, block: &Block) -> Hash256 {
+    let hash = block_hash(block);
+    store
+        .store_known_block(
+            hash.as_bytes(),
+            &block.header.to_bytes().expect("header bytes"),
+            &block.to_bytes().expect("block bytes"),
+        )
+        .expect("store side block");
+    hash
+}
+
+fn open_chain_with_reorg_fixture(
+    future_tip_timestamp: u64,
+) -> (tempfile::TempDir, ChainState, Hash256) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = DomStore::open_with_map_size(dir.path(), TEST_LMDB_MAP_SIZE).expect("store");
+
+    let genesis = coinbase_only_block_with(Hash256::ZERO, 0, REALISTIC_NOW - 300, 0, 0x10, 0);
+    let genesis_hash = commit_canonical_block(&store, &genesis);
+
+    let shared = coinbase_only_block_with(genesis_hash, 1, REALISTIC_NOW - 200, 1, 0x11, 1);
+    let shared_hash = commit_canonical_block(&store, &shared);
+
+    let old_tip = coinbase_only_block_with(shared_hash, 2, REALISTIC_NOW - 100, 2, 0x12, 2);
+    let old_tip_hash = commit_canonical_block(&store, &old_tip);
+
+    let side_2 = coinbase_only_block_with(shared_hash, 2, REALISTIC_NOW - 90, 3, 0x20, 20);
+    let side_2_hash = store_side_block(&store, &side_2);
+
+    let side_3 = coinbase_only_block_with(side_2_hash, 3, future_tip_timestamp, 4, 0x21, 21);
+    let side_3_hash = store_side_block(&store, &side_3);
+
+    let chain = ChainState::open(
+        store,
+        Hash256::from_bytes(GENESIS_HASH_REGTEST),
+        NETWORK_MAGIC_REGTEST,
+    )
+    .expect("chain open");
+    assert_eq!(chain.tip_hash, old_tip_hash, "fixture canonical tip");
+    (dir, chain, side_3_hash)
 }
 
 #[test]
@@ -157,13 +250,27 @@ fn validate_block_accepts_far_future_timestamp_under_realistic_now() {
 }
 
 #[test]
-#[ignore = "FIX-018 end-to-end: store a heavier far-future side branch and \
-observe promote_heavier_known_tip accept it while direct-connect rejects it. \
-Assembling/committing a heavier multi-block branch duplicates reorg_equivalence.rs \
-fixtures; the root-cause probe above already pins the defect. Fix is a \
-consensus/validation change (PRECISA DECISÃO HUMANA)."]
-fn fix018_reorg_promotes_far_future_branch_endtoend() {
-    // Placeholder pinned by the #[ignore] note; the runnable root-cause probe
-    // validate_block_accepts_far_future_timestamp_under_realistic_now carries
-    // the executable evidence.
+fn fix018_reorg_rejects_far_future_branch_endtoend() {
+    let (_dir, mut chain, side_tip_hash) = open_chain_with_reorg_fixture(FAR_FUTURE_TS);
+
+    let err = chain
+        .promote_heavier_known_tip(side_tip_hash, Timestamp(REALISTIC_NOW))
+        .expect_err("reorg promotion must reject far-future timestamp");
+    assert!(
+        matches!(err, DomError::TemporarilyInvalid(_)),
+        "expected future timestamp rejection, got: {err}"
+    );
+}
+
+#[test]
+fn fix018_reorg_promotes_valid_timestamp_branch_endtoend() {
+    let valid_tip_timestamp = REALISTIC_NOW - 80;
+    let (_dir, mut chain, side_tip_hash) = open_chain_with_reorg_fixture(valid_tip_timestamp);
+
+    let reorg = chain
+        .promote_heavier_known_tip(side_tip_hash, Timestamp(REALISTIC_NOW))
+        .expect("timestamp-valid reorg should promote");
+    assert_eq!(chain.tip_hash, side_tip_hash);
+    assert_eq!(chain.tip_height, BlockHeight(3));
+    assert_eq!(reorg.connected_blocks.len(), 2);
 }

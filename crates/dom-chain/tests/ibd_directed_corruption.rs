@@ -24,9 +24,21 @@
 mod common;
 
 use common::open_test_store;
-use dom_chain::PersistedIbdState;
-use dom_core::{DomError, MAX_HEADERS_PER_MSG};
-use dom_serialization::{DomDeserialize, Writer};
+use dom_chain::{ChainState, PersistedIbdState, CHAIN_CORRUPT_SENTINEL};
+use dom_consensus::block::{BlockHeader, ProofOfWork};
+use dom_consensus::{Block, CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
+use dom_core::{
+    BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, MAX_HEADERS_PER_MSG,
+    PROTOCOL_VERSION,
+};
+use dom_crypto::pedersen::{BlindingFactor, Commitment};
+use dom_pow::CompactTarget;
+use dom_serialization::{DomDeserialize, DomSerialize, Writer};
+use dom_store::utxo::UtxoEntry;
+use dom_store::{DomStore, METADATA_UTXO_SET_DIGEST_KEY};
+use lmdb::{Cursor, Transaction, WriteFlags};
+use primitive_types::U256;
+use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
 // A) Poisoned PersistedIbdState frames (raw-byte directed corruption).
@@ -132,34 +144,210 @@ fn deserialize_well_formed_frame_roundtrips() {
 }
 
 // ---------------------------------------------------------------------------
-// B) FIX-020 probe — silent UTXO-set replace on reopen.
+// B) FIX-020 — a tampered persisted UTXO set must ALARM (fatal) on reopen, and
+//    heal only under the explicit operator repair opt-in.
 //
-// This probe needs a committed canonical chain plus a tampered persisted UTXO
-// set, then a reopen, and asserts the divergence is surfaced (error/alarm)
-// rather than silently healed. Building a cryptographically valid committed
-// chain here would duplicate the heavy block-builders in
-// corruption_detection.rs / reorg_equivalence.rs. The executable assertion of
-// the SAFETY expectation lives in corruption_detection.rs's reopen tests today
-// (they prove the SILENT auto-heal happens and succeeds). The probe is recorded
-// as a documented RED gap (FIX-020) rather than a duplicated heavy fixture: the
-// production behavior in `ensure_canonical_utxo_set` (chain_state.rs ~line 1208)
-// returns Ok after `store.replace_utxo_set(...)` with only an `info!` log when
-// `persisted != canonical_raw`. There is NO error path and NO operator alarm
-// signal an integration test could assert on. Surfacing that is a code change
-// (PRECISA DECISÃO HUMANA) and is therefore out of test-construction scope.
+// The production fix lives in `ensure_canonical_utxo_set` (chain_state.rs): when
+// the persisted UTXO set diverges from the canonical reconstruction, the default
+// startup path (`ChainState::open`) now logs at ERROR and returns a fatal
+// `CHAIN_CORRUPT_SENTINEL` error instead of silently calling `replace_utxo_set`.
+// The reconstruction survives only as an explicit operator opt-in
+// (`ChainState::open_with_utxo_repair`). These two tests pin both halves of that
+// contract with a real committed chain and a raw-byte tampered UTXO entry.
 // ---------------------------------------------------------------------------
 
+const REGTEST_GENESIS: [u8; 32] = dom_core::GENESIS_HASH_REGTEST;
+
+/// Minimal cryptographically-shaped genesis block with one coinbase output.
+/// Mirrors the synthetic builder in corruption_detection.rs, trimmed to the
+/// single block these barrier tests need.
+fn synthetic_genesis() -> (Vec<u8>, Vec<u8>, [u8; 32], [u8; 33], [u8; 33]) {
+    let mut blind = [0u8; 32];
+    blind[31] = 0xE0;
+    let output = Commitment::commit(50, &BlindingFactor::from_bytes(blind).expect("blind"));
+    let mut kblind = [0u8; 32];
+    kblind[31] = 0xE1;
+    let excess = Commitment::commit(0, &BlindingFactor::from_bytes(kblind).expect("kblind"));
+
+    let header = BlockHeader {
+        version: PROTOCOL_VERSION,
+        height: BlockHeight(0),
+        prev_hash: Hash256::ZERO,
+        timestamp: Timestamp(1_704_067_200),
+        output_root: Hash256::ZERO,
+        kernel_root: Hash256::ZERO,
+        rangeproof_root: Hash256::ZERO,
+        total_kernel_offset: [0u8; 32],
+        target: CompactTarget(0x1f00_ffff),
+        total_difficulty: U256::one(),
+        pow: ProofOfWork {
+            nonce: 0xA0,
+            randomx_hash: Hash256::ZERO,
+        },
+    };
+    let header_bytes = header.to_bytes().expect("serialize header");
+    let block_hash = *dom_crypto::hash::blake2b_256(&header_bytes).as_bytes();
+    let output_bytes = *output.as_bytes();
+    let excess_bytes = *excess.as_bytes();
+    let block = Block {
+        header,
+        coinbase: CoinbaseTransaction {
+            output: TransactionOutput {
+                commitment: output,
+                proof: vec![0xAA; 8],
+            },
+            kernel: CoinbaseKernel {
+                features: KERNEL_FEAT_COINBASE,
+                explicit_value: 1,
+                excess,
+                excess_signature: [0u8; 65],
+            },
+            offset: [0u8; 32],
+        },
+        transactions: Vec::new(),
+    };
+    (
+        header_bytes,
+        block.to_bytes().expect("serialize block"),
+        block_hash,
+        output_bytes,
+        excess_bytes,
+    )
+}
+
+/// Commit the genesis block, returning the canonical coinbase output commitment.
+fn commit_genesis_chain(store: &DomStore) -> [u8; 33] {
+    let (header, body, hash, output, excess) = synthetic_genesis();
+    store
+        .commit_block(
+            &hash,
+            0,
+            &header,
+            &body,
+            &[(
+                output,
+                UtxoEntry {
+                    block_height: 0,
+                    is_coinbase: true,
+                    proof: vec![0xAA; 8],
+                }
+                .to_bytes(),
+            )],
+            &[],
+            &[(excess, hash)],
+        )
+        .expect("commit synthetic genesis");
+    output
+}
+
+fn dump_utxos(store: &DomStore) -> BTreeMap<Vec<u8>, Vec<u8>> {
+    let txn = store.env.begin_ro_txn().expect("ro txn");
+    let mut cursor = txn.open_ro_cursor(store.db_utxos).expect("cursor");
+    let mut out = BTreeMap::new();
+    for item in cursor.iter() {
+        let (k, v) = item.expect("cursor item");
+        out.insert(k.to_vec(), v.to_vec());
+    }
+    out
+}
+
+/// Overwrite a persisted UTXO entry with attacker/rot bytes and drop the
+/// digest metadata, forcing `persisted != canonical` on the next reopen.
+fn tamper_persisted_utxo(store: &DomStore, commitment: &[u8; 33]) {
+    let mut txn = store.env.begin_rw_txn().expect("rw txn");
+    txn.put(
+        store.db_utxos,
+        commitment,
+        &UtxoEntry {
+            block_height: 999,
+            is_coinbase: false,
+            proof: vec![0xAB; 8],
+        }
+        .to_bytes(),
+        WriteFlags::empty(),
+    )
+    .expect("tamper utxo");
+    match txn.del(store.db_metadata, &METADATA_UTXO_SET_DIGEST_KEY, None) {
+        Ok(()) | Err(lmdb::Error::NotFound) => {}
+        Err(e) => panic!("del digest: {e}"),
+    }
+    txn.commit().expect("commit tamper");
+}
+
+/// SAFETY barrier: a persisted UTXO set that diverges from the canonical
+/// reconstruction must make the DEFAULT reopen fail closed — never silently
+/// heal. The node must refuse to run on a possibly-tampered set.
 #[test]
-#[ignore = "FIX-020: ensure_canonical_utxo_set silently replaces a tampered \
-persisted UTXO set (info! log, returns Ok) — no error/alarm exists to assert \
-on without a production change (PRECISA DECISÃO HUMANA). Building the heavy \
-committed-chain fixture would duplicate corruption_detection.rs. Tracked as a \
-RED gap; see report."]
 fn fix020_tampered_persisted_utxo_set_should_alarm_on_reopen() {
-    // Intentionally a no-op placeholder pinned by the #[ignore] note above.
-    // The behavioral evidence is in corruption_detection.rs::
-    // reopen_rebuilds_exact_canonical_utxo_after_altered_persisted_utxo, which
-    // demonstrates the SILENT heal (success, no error) that this probe argues
-    // should instead alarm.
-    let _ = open_test_store(std::path::Path::new("."));
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    {
+        let store = open_test_store(dir.path());
+        let output = commit_genesis_chain(&store);
+        tamper_persisted_utxo(&store, &output);
+    }
+
+    let result = ChainState::open(
+        open_test_store(dir.path()),
+        Hash256::from_bytes(REGTEST_GENESIS),
+        dom_core::NETWORK_MAGIC_REGTEST,
+    );
+    let msg = match result {
+        Err(e) => format!("{e}"),
+        Ok(_) => {
+            panic!("FIX-020: default reopen on a tampered UTXO set must fail, not silently heal")
+        }
+    };
+    assert!(
+        msg.contains(CHAIN_CORRUPT_SENTINEL) && msg.contains("diverges"),
+        "divergence must surface the corruption sentinel; got: {msg}"
+    );
+    assert!(
+        msg.contains("open_with_utxo_repair"),
+        "the fatal error must instruct the operator to use the explicit repair mode; got: {msg}"
+    );
+}
+
+/// The reconstruction path is preserved as an EXPLICIT operator opt-in: opening
+/// with `open_with_utxo_repair` rebuilds the canonical UTXO set and re-persists
+/// the digest, healing the tampered entry.
+#[test]
+fn fix020_operator_repair_mode_rebuilds_canonical_utxo_set() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let output = {
+        let store = open_test_store(dir.path());
+        commit_genesis_chain(&store)
+    };
+    // Canonical snapshot captured from a clean reopen BEFORE tampering.
+    let canonical = {
+        let chain = ChainState::open(
+            open_test_store(dir.path()),
+            Hash256::from_bytes(REGTEST_GENESIS),
+            dom_core::NETWORK_MAGIC_REGTEST,
+        )
+        .expect("clean reopen");
+        dump_utxos(&chain.store)
+    };
+
+    tamper_persisted_utxo(&open_test_store(dir.path()), &output);
+
+    let repaired = ChainState::open_with_utxo_repair(
+        open_test_store(dir.path()),
+        Hash256::from_bytes(REGTEST_GENESIS),
+        dom_core::NETWORK_MAGIC_REGTEST,
+    )
+    .expect("operator repair mode must rebuild the canonical UTXO set");
+
+    assert_eq!(
+        dump_utxos(&repaired.store),
+        canonical,
+        "repair mode must restore the exact canonical UTXO set"
+    );
+    assert!(
+        repaired
+            .store
+            .get_metadata(METADATA_UTXO_SET_DIGEST_KEY)
+            .expect("digest lookup")
+            .is_some(),
+        "repair must re-persist the canonical UTXO digest"
+    );
 }

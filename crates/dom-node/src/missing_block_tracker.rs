@@ -20,10 +20,24 @@
 //!     same parent never grow the request set or reset its backoff.
 //!   * [`MissingBlockTracker::next_request_batch`] returns the missing parents
 //!     that are eligible to be (re)requested *this round*, in a single
-//!     canonical order (ascending height, then hash), bounded by `max_batch`
-//!     and an in-flight cap, with per-hash backoff so no hash is re-requested
-//!     until `backoff_rounds` have elapsed. This is what the node turns into
-//!     `GET_BLOCKS` / `GetBlockData` requests.
+//!     canonical order (ascending height, then hash), bounded by `max_batch`,
+//!     with per-hash **exponential backoff** (base doubling each attempt, capped
+//!     at a ceiling) so no hash is re-requested until its current backoff has
+//!     elapsed. This is what the node turns into `GetBlockData` requests.
+//!
+//! ## Persistent re-request (FIX orphan-convergence, part A)
+//!
+//! A parent that is genuinely missing — it was referenced by a real orphan
+//! block a peer delivered — is **never abandoned**. Earlier this tracker dropped
+//! a hash after a fixed `max_attempts`, so under a burst that evicted the
+//! buffered orphan child *and* exhausted the re-request budget, the subtree
+//! could never converge when the parent finally arrived. Now a known-missing
+//! parent stays tracked and is re-requested forever, but the interval grows
+//! exponentially up to `max_backoff_rounds`. That ceiling is the anti-DoS
+//! bound: each hash is asked at most once per `max_backoff_rounds`, so a large
+//! orphan graph cannot turn persistent re-request into a flood. The hard
+//! convergence guarantee for holes that exceed the memory caps below lives in
+//! the node's active-resync path (part D), which rebuilds the gap via IBD.
 //!   * [`MissingBlockTracker::resolve`] is called when a block arrives. It
 //!     clears that hash from the missing set and returns — in canonical order —
 //!     the dependent orphans that were waiting on it, so the node can re-feed
@@ -56,8 +70,31 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Memory bound on distinct missing parents held for re-request. Reaching it
+/// means a new missing parent is not registered here — but it is NOT lost to
+/// convergence: the node's active-resync path (part D) rebuilds any hole via
+/// IBD once it observes a peer ahead of our tip. This cap only bounds the
+/// per-hash re-request bookkeeping, never correctness.
 const MAX_TRACKED_MISSING_PARENTS: usize = 4096;
+/// Memory bound on orphans recorded as waiting on a single parent. Extra
+/// dependents beyond this are not recorded here; they still re-converge once
+/// the parent's subtree is filled (re-request part A) or rebuilt via IBD
+/// (active resync, part D), so the cap never blocks convergence.
 const MAX_DEPENDENTS_PER_PARENT: usize = 256;
+
+/// Ceiling on the exponential-backoff doubling exponent, so `1 << shift` cannot
+/// overflow and the interval saturates cleanly at `max_backoff_rounds`.
+const BACKOFF_SHIFT_CAP: u32 = 20;
+
+/// Exponential backoff interval (in rounds) for a hash requested `attempts`
+/// times: `base` after the first request, doubling each subsequent attempt,
+/// hard-capped at `ceiling`. Always at least 1 so a requested hash is never
+/// re-emitted in the same round.
+fn backoff_interval(base: u64, ceiling: u64, attempts: u32) -> u64 {
+    let shift = attempts.saturating_sub(1).min(BACKOFF_SHIFT_CAP);
+    let interval = base.saturating_mul(1u64 << shift);
+    interval.min(ceiling.max(1)).max(1)
+}
 
 /// Identifies a missing block in canonical request order: ascending height
 /// first (request ancestors before descendants), then by hash. Unknown heights
@@ -108,32 +145,61 @@ pub struct MissingBlockTracker {
     key_by_hash: BTreeMap<[u8; 32], MissingKey>,
     /// Missing parent hash -> the orphan blocks waiting on it (canonical order).
     dependents: BTreeMap<[u8; 32], BTreeSet<[u8; 32]>>,
-    /// Maximum re-request attempts per missing hash before it is dropped.
-    max_attempts: u32,
-    /// Minimum number of rounds between successive requests for the same hash.
-    backoff_rounds: u64,
+    /// First-request backoff interval, in rounds. The interval doubles each
+    /// subsequent attempt up to `max_backoff_rounds`.
+    base_backoff_rounds: u64,
+    /// Hard ceiling on the per-hash re-request interval (rounds). Bounds the
+    /// request rate of a never-abandoned parent (anti-DoS).
+    max_backoff_rounds: u64,
     /// Maximum hashes returned by a single `next_request_batch` call.
     max_batch: usize,
+    /// Monotonic re-request clock. Advanced by [`Self::advance_round`] on the
+    /// node's periodic re-request tick (a fixed cadence), never by orphan
+    /// arrival — so an orphan burst cannot shrink the effective backoff and turn
+    /// re-request into a storm.
+    round: u64,
 }
 
 impl MissingBlockTracker {
     /// Create an empty tracker.
     ///
-    /// * `max_attempts` — give up re-requesting a hash after this many emits
-    ///   (0 is treated as 1 so every missing block is requested at least once).
-    /// * `backoff_rounds` — minimum rounds between re-requests of the same hash.
+    /// * `base_backoff_rounds` — rounds before the *first* re-request of a hash;
+    ///   the interval then doubles each attempt (0 -> 1).
+    /// * `max_backoff_rounds` — ceiling on the per-hash re-request interval, so a
+    ///   never-abandoned parent is asked at most once per this many rounds
+    ///   (anti-DoS bound; 0 -> 1).
     /// * `max_batch` — cap on hashes emitted per round (storm control; 0 -> 1).
     ///
-    /// Starts empty by design — see the restart policy in the module docs.
-    pub fn new(max_attempts: u32, backoff_rounds: u64, max_batch: usize) -> Self {
+    /// A known-missing parent is **never dropped for exceeding an attempt count**
+    /// (part A): it is re-requested indefinitely with the capped exponential
+    /// backoff above. Starts empty by design — see the restart policy in the
+    /// module docs.
+    pub fn new(base_backoff_rounds: u64, max_backoff_rounds: u64, max_batch: usize) -> Self {
         MissingBlockTracker {
             missing: BTreeMap::new(),
             key_by_hash: BTreeMap::new(),
             dependents: BTreeMap::new(),
-            max_attempts: max_attempts.max(1),
-            backoff_rounds,
+            base_backoff_rounds: base_backoff_rounds.max(1),
+            max_backoff_rounds: max_backoff_rounds.max(1),
             max_batch: max_batch.max(1),
+            round: 0,
         }
+    }
+
+    /// The current re-request clock value, without advancing it. Used at orphan
+    /// ingress to request a newly-missing parent immediately (it has never been
+    /// requested, so it is eligible at any round) without perturbing the backoff
+    /// cadence of already-tracked parents.
+    pub fn current_round(&self) -> u64 {
+        self.round
+    }
+
+    /// Advance the re-request clock by one tick and return the new value. Called
+    /// on the node's periodic re-request tick; this is the only thing that moves
+    /// backoff forward, keeping the cadence independent of orphan-arrival rate.
+    pub fn advance_round(&mut self) -> u64 {
+        self.round = self.round.saturating_add(1);
+        self.round
     }
 
     /// Number of distinct missing parents currently tracked.
@@ -195,39 +261,39 @@ impl MissingBlockTracker {
     /// Return the missing-parent hashes eligible to be (re)requested at `round`,
     /// in canonical order (ascending height, then hash), capped by `max_batch`.
     ///
-    /// A hash is eligible when it has never been requested, or `backoff_rounds`
-    /// have elapsed since its last request, and it has not exceeded
-    /// `max_attempts`. Emitted hashes have their attempt count incremented and
+    /// A hash is eligible when it has never been requested, or its current
+    /// exponential-backoff interval (see [`backoff_interval`]) has elapsed since
+    /// its last request. Emitted hashes have their attempt count incremented and
     /// `last_requested_round` set to `round`, so a second call in the same round
-    /// returns nothing for them (storm control). Hashes that reach
-    /// `max_attempts` are dropped from the missing set (their dependents remain
-    /// recorded until the parent actually arrives or is explicitly resolved).
+    /// returns nothing for them (storm control).
+    ///
+    /// **A known-missing parent is never dropped here** — no attempt ceiling
+    /// abandons it (part A). It stays tracked and eligible again once its
+    /// (growing, capped) backoff elapses, until [`Self::resolve`] clears it on
+    /// the parent's arrival. This is what guarantees a subtree still converges
+    /// after its buffered orphan child was evicted under load.
     pub fn next_request_batch(&mut self, round: u64) -> Vec<[u8; 32]> {
+        let base = self.base_backoff_rounds;
+        let ceiling = self.max_backoff_rounds;
+        let max_batch = self.max_batch;
         let mut batch = Vec::new();
-        let mut exhausted: Vec<MissingKey> = Vec::new();
 
         for (key, state) in self.missing.iter_mut() {
-            if batch.len() >= self.max_batch {
+            if batch.len() >= max_batch {
                 break;
             }
             let eligible = match state.last_requested_round {
                 None => true,
-                Some(last) => round.saturating_sub(last) >= self.backoff_rounds,
+                Some(last) => {
+                    round.saturating_sub(last) >= backoff_interval(base, ceiling, state.attempts)
+                }
             };
             if !eligible {
                 continue;
             }
             batch.push(key.hash);
-            state.attempts += 1;
+            state.attempts = state.attempts.saturating_add(1);
             state.last_requested_round = Some(round);
-            if state.attempts >= self.max_attempts {
-                exhausted.push(*key);
-            }
-        }
-
-        for key in exhausted {
-            self.missing.remove(&key);
-            self.key_by_hash.remove(&key.hash);
         }
 
         batch
@@ -261,7 +327,7 @@ mod tests {
 
     #[test]
     fn missing_parent_triggers_deterministic_request() {
-        let mut t = MissingBlockTracker::new(5, 2, 16);
+        let mut t = MissingBlockTracker::new(2, 64, 16);
         let outcome = t.note_orphan(h(0x10), h(0x01), Some(5));
         assert_eq!(outcome, NoteOutcome::NewlyMissing);
         assert!(t.is_missing(&h(0x01)));
@@ -271,7 +337,7 @@ mod tests {
 
     #[test]
     fn duplicate_missing_parent_does_not_trigger_unbounded_requests() {
-        let mut t = MissingBlockTracker::new(5, 4, 16);
+        let mut t = MissingBlockTracker::new(4, 64, 16);
         assert_eq!(
             t.note_orphan(h(0x20), h(0x02), Some(7)),
             NoteOutcome::NewlyMissing
@@ -299,7 +365,7 @@ mod tests {
 
     #[test]
     fn delayed_parent_drains_dependent_path() {
-        let mut t = MissingBlockTracker::new(5, 1, 16);
+        let mut t = MissingBlockTracker::new(1, 64, 16);
         // Two orphans both waiting on the same missing parent.
         t.note_orphan(h(0xA2), h(0x01), Some(1));
         t.note_orphan(h(0xA1), h(0x01), Some(1));
@@ -318,7 +384,7 @@ mod tests {
     fn restart_policy_is_explicit_fresh_tracker_is_empty() {
         // Re-request state is runtime-only and never persisted: a fresh tracker
         // (as constructed on every startup) has nothing to request.
-        let mut t = MissingBlockTracker::new(5, 2, 16);
+        let mut t = MissingBlockTracker::new(2, 64, 16);
         assert_eq!(t.missing_len(), 0);
         assert!(t.next_request_batch(0).is_empty());
         assert!(!t.is_missing(&h(0x01)));
@@ -335,7 +401,7 @@ mod tests {
             (h(0xF3), h(0x01), Some(1)),
         ];
         let run = || {
-            let mut t = MissingBlockTracker::new(5, 2, 16);
+            let mut t = MissingBlockTracker::new(2, 64, 16);
             for (orphan, parent, height) in inserts {
                 t.note_orphan(orphan, parent, height);
             }
@@ -348,7 +414,7 @@ mod tests {
 
     #[test]
     fn ancestors_requested_before_unknown_height_parents() {
-        let mut t = MissingBlockTracker::new(5, 2, 16);
+        let mut t = MissingBlockTracker::new(2, 64, 16);
         t.note_orphan(h(0xB0), h(0x09), None); // unknown height -> sorts last
         t.note_orphan(h(0xB1), h(0x02), Some(2));
         t.note_orphan(h(0xB2), h(0x08), Some(8));
@@ -361,7 +427,7 @@ mod tests {
 
     #[test]
     fn batch_is_bounded_by_max_batch_for_storm_control() {
-        let mut t = MissingBlockTracker::new(5, 10, 2);
+        let mut t = MissingBlockTracker::new(10, 64, 2);
         for i in 1..=5u8 {
             t.note_orphan(h(0x80 + i), h(i), Some(i as u64));
         }
@@ -373,26 +439,61 @@ mod tests {
     }
 
     #[test]
-    fn max_attempts_drops_hash_after_exhaustion() {
-        // max_attempts = 2, backoff = 0 so it is eligible every round.
-        let mut t = MissingBlockTracker::new(2, 0, 16);
+    fn known_parent_is_never_dropped_and_backs_off_exponentially() {
+        // Part A: a known-missing parent is re-requested forever, with the
+        // interval doubling each attempt up to the ceiling. It is NEVER dropped
+        // for an attempt count — the old "give up after max_attempts" behavior
+        // that could strand an evicted subtree is gone.
+        let base = 2u64;
+        let ceiling = 16u64;
+        let mut t = MissingBlockTracker::new(base, ceiling, 16);
         t.note_orphan(h(0xC1), h(0x07), Some(7));
-        assert_eq!(t.next_request_batch(0), vec![h(0x07)]); // attempt 1
-        assert_eq!(t.next_request_batch(1), vec![h(0x07)]); // attempt 2 -> exhausted
-        assert!(!t.is_missing(&h(0x07)), "exhausted hash is dropped");
-        assert!(t.next_request_batch(2).is_empty());
+
+        // First request at round 0 (never requested -> eligible). attempts -> 1.
+        assert_eq!(t.next_request_batch(0), vec![h(0x07)]);
+        // Backoff after attempt 1 = base * 2^0 = 2 rounds: not eligible at 1,
+        // eligible again at 2. attempts -> 2.
+        assert!(t.next_request_batch(1).is_empty());
+        assert_eq!(t.next_request_batch(2), vec![h(0x07)]);
+        // Backoff after attempt 2 = base * 2^1 = 4 rounds: eligible at 2+4 = 6.
+        assert!(t.next_request_batch(5).is_empty());
+        assert_eq!(t.next_request_batch(6), vec![h(0x07)]);
+        // After many attempts the interval saturates at the ceiling (16), and
+        // the hash is STILL tracked and STILL re-requested — never abandoned.
+        let mut round = 6u64;
+        for _ in 0..20 {
+            round += ceiling; // always at least one ceiling-interval later
+            assert_eq!(
+                t.next_request_batch(round),
+                vec![h(0x07)],
+                "known parent must keep being re-requested indefinitely"
+            );
+        }
+        assert!(t.is_missing(&h(0x07)), "known parent is never dropped");
+    }
+
+    #[test]
+    fn backoff_interval_doubles_then_saturates_at_ceiling() {
+        // attempts 0 (never requested) is treated as immediately eligible by
+        // next_request_batch; the interval formula covers attempts >= 1.
+        assert_eq!(backoff_interval(2, 16, 1), 2); // base * 2^0
+        assert_eq!(backoff_interval(2, 16, 2), 4); // base * 2^1
+        assert_eq!(backoff_interval(2, 16, 3), 8); // base * 2^2
+        assert_eq!(backoff_interval(2, 16, 4), 16); // base * 2^3 = 16, at ceiling
+        assert_eq!(backoff_interval(2, 16, 5), 16); // saturated at ceiling
+        assert_eq!(backoff_interval(2, 16, 1000), 16); // no overflow, still capped
     }
 
     #[test]
     fn resolve_of_unrequested_hash_is_empty_and_harmless() {
-        let mut t = MissingBlockTracker::new(5, 2, 16);
+        let mut t = MissingBlockTracker::new(2, 64, 16);
         assert!(t.resolve(&h(0xEE)).is_empty());
         assert_eq!(t.missing_len(), 0);
     }
 
     #[test]
     fn distinct_missing_parents_are_capped() {
-        let mut t = MissingBlockTracker::new(5, 1, 16);
+        let mut t = MissingBlockTracker::new(1, 64, 16);
         for i in 0..(MAX_TRACKED_MISSING_PARENTS + 100) {
             let mut parent = [0u8; 32];
             parent[0..8].copy_from_slice(&(i as u64).to_le_bytes());
@@ -403,7 +504,7 @@ mod tests {
 
     #[test]
     fn dependents_per_parent_are_capped() {
-        let mut t = MissingBlockTracker::new(5, 1, 16);
+        let mut t = MissingBlockTracker::new(1, 64, 16);
         let parent = h(0xAA);
         for i in 0..(MAX_DEPENDENTS_PER_PARENT + 100) {
             let mut orphan = [0u8; 32];

@@ -452,7 +452,7 @@ fn v1_reorg_a_to_b_removes_a_state_applies_b_keeps_uniqueness() {
 
     // ---- Drive the cross-branch reorg A->B. ----
     chain
-        .promote_heavier_known_tip(b4_hash)
+        .promote_heavier_known_tip(b4_hash, Timestamp(2_000_000_000))
         .expect("reorg A->B");
     assert_eq!(chain.tip_hash, b4_hash);
     assert_eq!(chain.tip_height, BlockHeight(4));
@@ -610,7 +610,7 @@ fn v1b_reorg_a_to_b_resurrects_input_not_respent_by_b() {
     assert!(chain.store.get_utxo(&out_a).unwrap().is_some());
 
     chain
-        .promote_heavier_known_tip(b4_hash)
+        .promote_heavier_known_tip(b4_hash, Timestamp(2_000_000_000))
         .expect("reorg A->B");
     assert_eq!(chain.tip_hash, b4_hash);
 
@@ -679,14 +679,16 @@ fn v2_round_trip_promote_back_to_original_a_is_rejected_not_heavier() {
     let mut chain = open_chain(dir.path());
     assert_eq!(chain.tip_hash, a3_hash);
 
-    chain.promote_heavier_known_tip(b4_hash).expect("A->B");
+    chain
+        .promote_heavier_known_tip(b4_hash, Timestamp(2_000_000_000))
+        .expect("A->B");
     assert_eq!(chain.tip_hash, b4_hash);
 
     // Door closed: promoting back to the original A tip is rejected because it
     // is not strictly heavier than B. This is the residue-free guarantee at the
     // API boundary — a same-tip round trip cannot be forced by replay.
     let err = chain
-        .promote_heavier_known_tip(a3_hash)
+        .promote_heavier_known_tip(a3_hash, Timestamp(2_000_000_000))
         .expect_err("promote back to original A tip must be rejected (not heavier)");
     let msg = format!("{err}");
     assert!(
@@ -748,7 +750,9 @@ fn v2b_round_trip_restores_identical_a_prefix_state_no_residue() {
     let a_tip = chain.tip_hash;
 
     // A -> B.
-    chain.promote_heavier_known_tip(b4_hash).expect("A->B");
+    chain
+        .promote_heavier_known_tip(b4_hash, Timestamp(2_000_000_000))
+        .expect("A->B");
     assert_eq!(chain.tip_hash, b4_hash);
     // Mid-reorg sanity: state actually changed (otherwise the round trip is
     // vacuous).
@@ -760,7 +764,7 @@ fn v2b_round_trip_restores_identical_a_prefix_state_no_residue() {
 
     // B -> A' (A extended heavier, reusing original A blocks as prefix).
     chain
-        .promote_heavier_known_tip(a4_hash)
+        .promote_heavier_known_tip(a4_hash, Timestamp(2_000_000_000))
         .expect("B->A' (A extended heavier)");
     assert_eq!(chain.tip_hash, a4_hash, "back on the A branch");
 

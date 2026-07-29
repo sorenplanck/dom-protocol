@@ -28,6 +28,26 @@ export async function startAutoBackupNotifications() {
   });
 }
 
+// Register the wallet-rescan listeners ONCE at boot (never silent). The backend
+// emits "wallet-rescan-failed" { reason } on the ok→failed EDGE of the 8s
+// background sync loop (never per tick, so no toast spam while the node is
+// busy/unreachable) and "wallet-rescan-recovered" { tip } when a later cycle
+// succeeds again. A rescan failure never loses funds — it only means the
+// balance is stale until the next successful cycle.
+let rescanListenerStarted = false;
+export async function startRescanNotifications() {
+  if (rescanListenerStarted) return;
+  rescanListenerStarted = true;
+  await events.listen("wallet-rescan-failed", (e) => {
+    const p = e.payload || {};
+    const reason = p.reason || "unknown error";
+    toast(`Wallet sync failed: ${reason} — balance may be stale`, true);
+  });
+  await events.listen("wallet-rescan-recovered", () => {
+    toast("Wallet sync recovered", false);
+  });
+}
+
 // Short UI toast messages.
 const MSG = {
   walletCreated: "Wallet created",

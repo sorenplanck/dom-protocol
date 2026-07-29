@@ -17,8 +17,26 @@ use dom_pow::{
     randomx_seed_height, target_to_difficulty, CompactTarget, REGTEST_TARGET_COMPACT,
 };
 use dom_serialization::{DomDeserialize, DomSerialize};
+use dom_store::utxo::UtxoEntry;
 use primitive_types::U256;
 use tempfile::TempDir;
+
+/// The canonical coinbase UTXO add for a synthetic block, matching exactly what
+/// `reconstruct_canonical_utxo_set` derives from the block body on reopen. These
+/// fixtures used to commit with empty UTXO adds and rely on the (now removed)
+/// silent reopen heal to populate the set; FIX-020 makes a persisted-vs-canonical
+/// divergence fatal, so the commit must persist the consistent coinbase entry.
+fn coinbase_utxo_add(block: &Block) -> ([u8; 33], Vec<u8>) {
+    (
+        *block.coinbase.output.commitment.as_bytes(),
+        UtxoEntry {
+            block_height: block.header.height.0,
+            is_coinbase: true,
+            proof: block.coinbase.output.proof.clone(),
+        }
+        .to_bytes(),
+    )
+}
 
 fn block_hash(header: &BlockHeader) -> Hash256 {
     let bytes = header.to_bytes().expect("header serialize");
@@ -115,7 +133,7 @@ fn populate_history(
                 height,
                 &header_bytes,
                 &body_bytes,
-                &[],
+                &[coinbase_utxo_add(&block)],
                 &[],
                 &[],
             )
@@ -158,7 +176,7 @@ fn populate_history_with_timestamps(
                 height as u64,
                 &header_bytes,
                 &body_bytes,
-                &[],
+                &[coinbase_utxo_add(&block)],
                 &[],
                 &[],
             )

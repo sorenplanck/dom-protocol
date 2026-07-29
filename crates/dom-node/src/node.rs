@@ -480,7 +480,12 @@ impl DomNode {
             wallet,
             metrics,
             future_block_queue: Arc::new(crate::future_block_queue::FutureBlockQueue::new()),
-            missing_blocks: Arc::new(Mutex::new(MissingBlockTracker::new(8, 2, 16))),
+            // Part A — persistent re-request: base backoff 2 rounds, doubling to
+            // a 64-round ceiling (rounds advance on the ~2s catch-up tick), max 16
+            // hashes per batch. A known-missing parent is re-requested forever
+            // with this capped backoff, never abandoned after a fixed attempt
+            // count. See missing_block_tracker.rs.
+            missing_blocks: Arc::new(Mutex::new(MissingBlockTracker::new(2, 64, 16))),
             orphan_pool: Arc::new(Mutex::new(RuntimeOrphanPool::new(
                 DEFAULT_MAX_ORPHAN_BLOCKS,
                 DEFAULT_MAX_ORPHANS_PER_PARENT,
@@ -3698,6 +3703,11 @@ async fn message_loop(
         tokio::time::interval(tokio::time::Duration::from_secs(PEX_GETADDR_TICK_SECS));
     pex_timer.tick().await;
     let pex_peer_key = peer_addr.to_string();
+    // Part D — highest block height this peer relayed whose parent we lacked
+    // (an orphan above our tip). The catch-up tick below re-syncs toward
+    // max(peer Hello height, this) via IBD, so a live-relayed orphan hole is
+    // rebuilt even though `peer_best_height` is only refreshed at Hello.
+    let mut blocked_orphan_target: u64 = 0;
     // Inbound Addr rate limit for THIS connection: beyond the budget each
     // extra Addr message scores ADDRESS_FLOODING instead of being processed.
     let mut addr_flood = crate::pex::AddrFloodTracker::new();
@@ -3803,30 +3813,59 @@ async fn message_loop(
                 }
             }
             _ = catchup_timer.tick() => {
+                // Part A — persistent re-request tick. Advancing the tracker's
+                // clock here (and only here) is what moves per-hash backoff
+                // forward at a fixed cadence, independent of orphan-arrival rate.
+                // A known-missing parent whose buffered orphan was evicted is
+                // still pursued to convergence, with the interval growing (capped)
+                // so re-request can never become a flood.
+                let rerequest = {
+                    let mut tracker = svc.missing_blocks.lock().await;
+                    let round = tracker.advance_round();
+                    tracker.next_request_batch(round)
+                };
+                if !rerequest.is_empty() {
+                    let req = GetBlockDataPayload { hashes: rerequest };
+                    let wire = WireMessage {
+                        magic: config.network.magic(),
+                        command: Command::GetBlockData,
+                        payload: req.to_bytes()?,
+                    };
+                    if let Err(e) = codec.send(stream, &wire).await {
+                        return Err(annotate_send_err("missing-parent re-request", peer_addr, e));
+                    }
+                }
+
+                // Part D — active recovery via IBD. Re-sync when we are behind a
+                // known-higher tip but blocked by a missing intermediate block.
+                // The target is the max of the peer's Hello-advertised height and
+                // any orphan this peer relayed above our tip; the latter catches
+                // the live-relay hole that `peer_best_height` alone misses.
+                // Reuses the proven IBD path, which rebuilds the gap from our tip
+                // regardless of what the buffered orphan pool retained.
                 let our_height = chain.lock().await.tip_height.0;
                 let peer_best_height = {
                     let peers = svc.peers.lock().await;
                     peers.peer_best_height(&pex_peer_key)
                 };
-                if let Some(peer_best_height) = peer_best_height {
-                    if peer_best_height > our_height {
-                        Box::pin(run_ibd_session(
-                            stream,
-                            codec,
-                            config,
-                            &chain,
-                            &svc.mempool,
-                            peer_addr,
-                            peer_best_height,
-                            svc.future_block_queue.clone(),
-                            svc.metrics.clone(),
-                            svc.wallet.clone(),
-                            svc.state_events.clone(),
-                            block_relay_tx.clone(),
-                            svc.clone(),
-                        ))
-                        .await?;
-                    }
+                let target = peer_best_height.unwrap_or(0).max(blocked_orphan_target);
+                if target > our_height {
+                    Box::pin(run_ibd_session(
+                        stream,
+                        codec,
+                        config,
+                        &chain,
+                        &svc.mempool,
+                        peer_addr,
+                        target,
+                        svc.future_block_queue.clone(),
+                        svc.metrics.clone(),
+                        svc.wallet.clone(),
+                        svc.state_events.clone(),
+                        block_relay_tx.clone(),
+                        svc.clone(),
+                    ))
+                    .await?;
                 }
             }
             // Periodic PEX: solicit addresses while our known set is below
@@ -4129,6 +4168,19 @@ async fn message_loop(
                                                 height: block.header.height.0,
                                                 block_bytes: block_bytes.clone(),
                                             });
+                                            // Part D — this peer just relayed a block whose parent we
+                                            // lack, so it holds a chain extending past our tip. Record
+                                            // the height as a catch-up target; the periodic tick below
+                                            // triggers a robust IBD re-sync toward it, guaranteeing the
+                                            // hole is rebuilt even if the buffered orphan is later
+                                            // evicted (peer_best_height alone would miss this, as it is
+                                            // only learned at the Hello handshake).
+                                            blocked_orphan_target =
+                                                blocked_orphan_target.max(block.header.height.0);
+                                            // Part A — request the missing parent immediately at the
+                                            // current re-request clock (no clock advance, so an orphan
+                                            // burst cannot compress the backoff of other tracked
+                                            // parents). Persistent re-request continues on the tick.
                                             let requests = {
                                                 let mut tracker = svc.missing_blocks.lock().await;
                                                 tracker.note_orphan(
@@ -4136,13 +4188,15 @@ async fn message_loop(
                                                     parent_hash,
                                                     block.header.height.0.checked_sub(1),
                                                 );
-                                                tracker.next_request_batch(block.header.height.0)
+                                                let round = tracker.current_round();
+                                                tracker.next_request_batch(round)
                                             };
                                             tracing::debug!(
                                                 peer = %peer_addr,
                                                 child = %hex::encode(current_block_hash),
                                                 parent = %hex::encode(parent_hash),
                                                 ?insert_outcome,
+                                                catchup_target = blocked_orphan_target,
                                                 "Recorded orphan block and scheduled missing-parent request"
                                             );
                                             if !requests.is_empty() {
