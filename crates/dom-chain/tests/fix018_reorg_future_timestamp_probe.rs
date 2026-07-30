@@ -31,11 +31,11 @@ use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::transaction::{CoinbaseKernel, CoinbaseTransaction, TransactionOutput};
 use dom_consensus::{
-    compute_block_pmmr_roots, derive_chain_id, validate_block, Block, ValidationContext,
+    compute_block_pmmr_roots, derive_chain_id, validate_block_for_network, Block, ValidationContext,
 };
 use dom_core::{
     BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, NETWORK_MAGIC_REGTEST,
-    PROTOCOL_VERSION, TAG_KERNEL_MSG_COINBASE,
+    TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::keys::SecretKey;
@@ -101,7 +101,10 @@ fn coinbase_only_block_with(
         compute_block_pmmr_roots(BlockHeight(height), &coinbase, &[]).expect("pmmr roots");
     Block {
         header: BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: dom_core::required_block_version_for_network(
+                dom_core::NETWORK_MAGIC_REGTEST,
+                height,
+            ),
             height: BlockHeight(height),
             prev_hash,
             timestamp: Timestamp(timestamp),
@@ -222,7 +225,8 @@ fn validate_block_accepts_far_future_timestamp_under_realistic_now() {
     // validator (with now=u64::MAX), so a far-future heavier branch is
     // promotable while the same block is rejected on direct connect.
     let block = coinbase_only_block(1, FAR_FUTURE_TS);
-    let result = validate_block(&block, &ctx_at(1, REALISTIC_NOW));
+    let result =
+        validate_block_for_network(&block, &ctx_at(1, REALISTIC_NOW), NETWORK_MAGIC_REGTEST);
     assert!(
         result.is_ok(),
         "FIX-018: validate_block (the reorg-promotion validator) unexpectedly \
@@ -234,7 +238,8 @@ fn validate_block_accepts_far_future_timestamp_under_realistic_now() {
     // Sanity: the same block is valid with now ALSO far in the future, matching
     // the u64::MAX the promotion path actually passes — i.e. `now` is irrelevant
     // to validate_block's verdict, which is the crux of the gap.
-    let result_maxnow = validate_block(&block, &ctx_at(1, u64::MAX));
+    let result_maxnow =
+        validate_block_for_network(&block, &ctx_at(1, u64::MAX), NETWORK_MAGIC_REGTEST);
     assert!(
         result_maxnow.is_ok(),
         "validate_block verdict must be independent of now (it ignores future ts): {result_maxnow:?}"

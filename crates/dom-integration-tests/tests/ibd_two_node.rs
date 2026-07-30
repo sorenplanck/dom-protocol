@@ -15,7 +15,10 @@ use dom_consensus::{
     compute_block_pmmr_roots, derive_chain_id, Block, BlockHeader, CoinbaseKernel,
     CoinbaseTransaction, TransactionOutput,
 };
-use dom_core::{BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, PROTOCOL_VERSION};
+use dom_core::{
+    required_block_version_for_network, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE,
+    WIRE_PROTOCOL_VERSION,
+};
 use dom_integration_tests::helpers::*;
 use dom_node::node::DomNode;
 use dom_pow::{
@@ -274,7 +277,10 @@ async fn prepopulate_coinbase_chain(node: &Arc<DomNode>, target_height: u64) -> 
             compute_block_pmmr_roots(BlockHeight(new_height), &coinbase, &[])
                 .map_err(|e| e.to_string())?;
         let mut header = BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: required_block_version_for_network(
+                node.config.network.magic(),
+                new_height,
+            ),
             prev_hash: tip_hash,
             height: BlockHeight(new_height),
             timestamp,
@@ -357,7 +363,7 @@ async fn connect_noise_peer_with_height(
             .expect("perform Noise handshake");
     let mut codec = NoiseCodec::new(transport, config.network.magic());
     let hello = HelloPayload {
-        version: PROTOCOL_VERSION,
+        version: WIRE_PROTOCOL_VERSION,
         network_magic: config.network.magic(),
         chain_id,
         best_height,
@@ -408,7 +414,7 @@ async fn connect_noise_peer_with_height_from_ip(
             .expect("perform Noise handshake");
     let mut codec = NoiseCodec::new(transport, config.network.magic());
     let hello = HelloPayload {
-        version: PROTOCOL_VERSION,
+        version: WIRE_PROTOCOL_VERSION,
         network_magic: config.network.magic(),
         chain_id,
         best_height,

@@ -1045,12 +1045,14 @@ async fn mine_one_attempt(
         let light_vm = mining_mode.light_vm();
         let pow_mode = mining_mode.pow_mode();
         let threads = node.config.miner_threads.max(1);
+        let block_version = block_template_version(node.config.network.magic(), new_height);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let mining_hashes = node.metrics.mining_hashes.clone();
         let mut mining_task = tokio::task::spawn_blocking(move || {
             mine_blocking_cancellable(
                 new_height,
+                block_version,
                 tip_hash,
                 block_timestamp,
                 target,
@@ -1326,6 +1328,7 @@ fn mine_blocking(
     let mining_hashes = Arc::new(AtomicU64::new(0));
     match mine_blocking_cancellable(
         new_height,
+        dom_core::required_block_version(new_height),
         tip_hash,
         block_timestamp,
         target,
@@ -1352,6 +1355,7 @@ fn mine_blocking(
 #[allow(clippy::too_many_arguments)]
 fn mine_blocking_cancellable(
     new_height: u64,
+    block_version: u32,
     tip_hash: Hash256,
     block_timestamp: Timestamp,
     target: [u8; 32],
@@ -1386,7 +1390,7 @@ fn mine_blocking_cancellable(
         throttle.describe()
     );
     let template = BlockHeader {
-        version: dom_core::BLOCK_VERSION_LEGACY,
+        version: block_version,
         prev_hash: tip_hash,
         height: BlockHeight(new_height),
         timestamp: block_timestamp,
@@ -1528,6 +1532,10 @@ fn mine_blocking_cancellable(
     }
 }
 
+fn block_template_version(network_magic: u32, next_height: u64) -> u32 {
+    dom_core::required_block_version_for_network(network_magic, next_height)
+}
+
 /// Test-only helper: recompute a hash on an independently constructed light
 /// VM, bypassing `dom_pow`'s pools — used to prove the mining paths produce
 /// real RandomX output rather than shared-state garbage.
@@ -1542,6 +1550,39 @@ fn randomx_hash(vm: &randomx_rs::RandomXVM, preimage: &[u8]) -> Result<[u8; 32],
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&v);
     Ok(arr)
+}
+
+#[cfg(test)]
+mod block_version_tests {
+    use super::block_template_version;
+    use dom_core::{
+        BLOCK_VERSION_LEGACY, BLOCK_VERSION_V3, MAINNET_V3_ACTIVATION_HEIGHT,
+        NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST,
+    };
+
+    #[test]
+    fn miner_switches_automatically_at_mainnet_v3_activation() {
+        assert_eq!(
+            block_template_version(NETWORK_MAGIC_MAINNET, MAINNET_V3_ACTIVATION_HEIGHT - 1),
+            BLOCK_VERSION_LEGACY
+        );
+        assert_eq!(
+            block_template_version(NETWORK_MAGIC_MAINNET, MAINNET_V3_ACTIVATION_HEIGHT),
+            BLOCK_VERSION_V3
+        );
+    }
+
+    #[test]
+    fn regtest_genesis_remains_legacy_and_first_mined_block_is_v3() {
+        assert_eq!(
+            block_template_version(NETWORK_MAGIC_REGTEST, 0),
+            BLOCK_VERSION_LEGACY
+        );
+        assert_eq!(
+            block_template_version(NETWORK_MAGIC_REGTEST, 1),
+            BLOCK_VERSION_V3
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1654,6 +1695,7 @@ mod stale_template_ibd_tests {
         let handle = std::thread::spawn(move || {
             mine_blocking_cancellable(
                 11,
+                dom_core::BLOCK_VERSION_V3,
                 parent,
                 Timestamp(1_700_000_000),
                 [0u8; 32], // no non-zero hash can satisfy this target
@@ -1903,8 +1945,8 @@ mod genesis_determinism_tests {
     use dom_consensus::compute_block_pmmr_roots;
     use dom_consensus::{Block, CoinbaseTransaction, Transaction};
     use dom_core::{
-        BlockHeight, Hash256, Timestamp, BLOCK_VERSION_LEGACY, NETWORK_MAGIC_MAINNET,
-        NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET,
+        BlockHeight, Hash256, Timestamp, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST,
+        NETWORK_MAGIC_TESTNET,
     };
     use dom_crypto::pedersen::Commitment;
     use dom_crypto::BlindingFactor;
@@ -2005,7 +2047,7 @@ mod genesis_determinism_tests {
 
     fn put_seed_header(node: &DomNode, height: u64, hash: &[u8; 32]) {
         let header = BlockHeader {
-            version: BLOCK_VERSION_LEGACY,
+            version: dom_core::required_block_version_for_network(NETWORK_MAGIC_REGTEST, height),
             prev_hash: Hash256::from_bytes([0x01; 32]),
             height: BlockHeight(height),
             timestamp: Timestamp(1_704_067_200 + height),
@@ -2130,7 +2172,10 @@ mod genesis_determinism_tests {
         let mut nonce = 0u64;
         loop {
             let mut header = BlockHeader {
-                version: BLOCK_VERSION_LEGACY,
+                version: dom_core::required_block_version_for_network(
+                    NETWORK_MAGIC_REGTEST,
+                    height.0,
+                ),
                 prev_hash,
                 height,
                 timestamp,
@@ -2759,7 +2804,7 @@ mod genesis_determinism_tests {
             let target = compute_expected_target(config.network.magic(), timestamp, BlockHeight(1))
                 .expect("target");
             BlockHeader {
-                version: BLOCK_VERSION_LEGACY,
+                version: dom_core::required_block_version_for_network(config.network.magic(), 1),
                 prev_hash: Hash256::ZERO,
                 height: BlockHeight(1),
                 timestamp,
@@ -3221,7 +3266,10 @@ mod cadence_probe_tests {
             let mut nonce = 0u64;
             loop {
                 let header = BlockHeader {
-                    version: dom_core::BLOCK_VERSION_LEGACY,
+                    version: dom_core::required_block_version_for_network(
+                        dom_core::NETWORK_MAGIC_TESTNET,
+                        1,
+                    ),
                     prev_hash: Hash256::ZERO,
                     height: BlockHeight(1),
                     timestamp: Timestamp(now_secs()),

@@ -10,6 +10,13 @@ use dom_serialization::DomDeserialize;
 use dom_store::DomStore;
 use std::collections::HashSet;
 
+/// Rolling-finality depth enforced by the v3 node from process startup.
+///
+/// A locally established chain refuses candidates that would disconnect this
+/// many blocks or more. A shorter local chain is still bootstrapping and is not
+/// subject to the finality cut.
+pub const MAX_REORG_DEPTH: u64 = 360;
+
 /// Find the common ancestor between two chain tips.
 ///
 /// Walks both chains backward via `prev_hash` simultaneously, recording all
@@ -97,4 +104,52 @@ pub fn check_reorg_depth(disconnect_count: u64) -> Result<(), DomError> {
         )));
     }
     Ok(())
+}
+
+/// Enforce rolling finality for a locally established chain.
+///
+/// The chain is objectively established once its local tip reaches
+/// `MAX_REORG_DEPTH`. Before that point a fresh/short node may synchronize to
+/// the best valid chain without treating bootstrap as a finalized reorg.
+pub fn check_rolling_finality(
+    local_tip_height: u64,
+    disconnect_count: u64,
+) -> Result<(), DomError> {
+    if local_tip_height >= MAX_REORG_DEPTH && disconnect_count >= MAX_REORG_DEPTH {
+        return Err(DomError::PolicyRejected(format!(
+            "rolling finality rejects reorg depth {disconnect_count} at local height \
+             {local_tip_height} (maximum accepted depth is {})",
+            MAX_REORG_DEPTH - 1
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rolling_finality_accepts_depth_359() {
+        check_rolling_finality(MAX_REORG_DEPTH, MAX_REORG_DEPTH - 1)
+            .expect("depth 359 must remain reorg-eligible");
+    }
+
+    #[test]
+    fn rolling_finality_rejects_depth_360() {
+        check_rolling_finality(MAX_REORG_DEPTH, MAX_REORG_DEPTH)
+            .expect_err("depth 360 must be finalized");
+    }
+
+    #[test]
+    fn rolling_finality_rejects_depth_361() {
+        check_rolling_finality(MAX_REORG_DEPTH + 1, MAX_REORG_DEPTH + 1)
+            .expect_err("depth 361 must be finalized");
+    }
+
+    #[test]
+    fn rolling_finality_does_not_apply_to_short_bootstrap_chain() {
+        check_rolling_finality(MAX_REORG_DEPTH - 1, MAX_REORG_DEPTH - 1)
+            .expect("a short local chain must remain bootstrappable");
+    }
 }

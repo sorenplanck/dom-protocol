@@ -52,7 +52,7 @@ pub mod transaction;
 mod kani_invariants;
 
 pub use block::BlockHeader;
-pub use block_full::{validate_block, Block};
+pub use block_full::{validate_block, validate_block_for_network, Block};
 pub use cutthrough::apply_cut_through;
 pub use transaction::{
     validate_balance_equation, validate_lock_heights, validate_range_proofs,

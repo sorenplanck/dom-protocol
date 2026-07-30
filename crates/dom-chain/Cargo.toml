@@ -25,6 +25,7 @@ hex.workspace               = true
 tempfile = "3.10"
 lmdb.workspace = true
 proptest.workspace = true
+tracing-subscriber.workspace = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

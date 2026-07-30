@@ -320,6 +320,45 @@ pub const WIRE_PROTOCOL_VERSION: u32 = 2;
 /// Consensus. Block version used by the existing chain.
 pub const BLOCK_VERSION_LEGACY: u32 = 2;
 
+/// Consensus. Block version required after the v3 activation height.
+pub const BLOCK_VERSION_V3: u32 = 3;
+
+/// Consensus. Mainnet height at which block version 3 becomes mandatory.
+pub const MAINNET_V3_ACTIVATION_HEIGHT: u64 = 12_500;
+
+/// Consensus. Testnet activates v3 at its first post-genesis block.
+pub const TESTNET_V3_ACTIVATION_HEIGHT: u64 = 1;
+
+/// Consensus. Regtest activates v3 at its first post-genesis block.
+pub const REGTEST_V3_ACTIVATION_HEIGHT: u64 = 1;
+
+/// Return the block version required by Mainnet consensus at `height`.
+pub const fn required_block_version(height: u64) -> u32 {
+    if height >= MAINNET_V3_ACTIVATION_HEIGHT {
+        BLOCK_VERSION_V3
+    } else {
+        BLOCK_VERSION_LEGACY
+    }
+}
+
+/// Return the block version required by a network at `height`.
+///
+/// Testnet and Regtest keep their frozen v2 genesis identities and activate v3
+/// at the first post-genesis block so tests exercise the new rules without
+/// depending on the Mainnet activation height.
+pub const fn required_block_version_for_network(network_magic: u32, height: u64) -> u32 {
+    let activation_height = match network_magic {
+        NETWORK_MAGIC_TESTNET => TESTNET_V3_ACTIVATION_HEIGHT,
+        NETWORK_MAGIC_REGTEST => REGTEST_V3_ACTIVATION_HEIGHT,
+        _ => MAINNET_V3_ACTIVATION_HEIGHT,
+    };
+    if height >= activation_height {
+        BLOCK_VERSION_V3
+    } else {
+        BLOCK_VERSION_LEGACY
+    }
+}
+
 /// Backwards-compatible name for the P2P wire protocol version.
 ///
 /// New code must use [`WIRE_PROTOCOL_VERSION`] for networking and

@@ -8,8 +8,8 @@ use dom_consensus::block::{
     validate_parent_timestamp_progression, validate_pow_for_network, BlockHeader,
 };
 use dom_consensus::{
-    checked_accumulated_difficulty, derive_chain_id, validate_block, Block, Transaction,
-    ValidationContext,
+    checked_accumulated_difficulty, derive_chain_id, validate_block_for_network, Block,
+    Transaction, ValidationContext,
 };
 use dom_core::{BlockHeight, DomError, Hash256, Timestamp};
 use dom_pow::{
@@ -22,9 +22,9 @@ use dom_store::utxo::UtxoEntry;
 use dom_store::{DomStore, METADATA_UTXO_SET_DIGEST_KEY};
 use primitive_types::U256;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
-use crate::reorg::{check_reorg_depth, find_common_ancestor};
+use crate::reorg::{check_reorg_depth, check_rolling_finality, find_common_ancestor};
 
 /// Sentinel substring callers grep for to recognise a chainstate
 /// corruption distinctly from other `DomError::Internal` cases. When
@@ -293,7 +293,7 @@ impl ChainState {
             return Ok(ConnectResult::AlreadyHave);
         }
 
-        validate_header_syntax(header)?;
+        validate_header_syntax(header, self.network_magic)?;
         self.validate_genesis_identity(header, block_hash)?;
         self.validate_genesis_body_identity(block)?;
 
@@ -359,7 +359,7 @@ impl ChainState {
             now,
         };
 
-        validate_block(block, &ctx).map_err(|e| {
+        validate_block_for_network(block, &ctx, self.network_magic).map_err(|e| {
             DomError::Invalid(format!(
                 "block validation failed: hash={block_hash}, error={e}"
             ))
@@ -527,7 +527,7 @@ impl ChainState {
             }
 
             if !is_known {
-                validate_header_syntax(header)?;
+                validate_header_syntax(header, self.network_magic)?;
                 self.validate_genesis_identity(header, *hash)?;
 
                 if header.height != BlockHeight::GENESIS {
@@ -708,7 +708,7 @@ impl ChainState {
             }
 
             if !is_known {
-                validate_header_syntax(&header)?;
+                validate_header_syntax(&header, self.network_magic)?;
                 self.validate_genesis_identity(&header, hash)?;
 
                 if header.height != BlockHeight::GENESIS {
@@ -816,7 +816,7 @@ impl ChainState {
             return Ok(());
         }
 
-        validate_header_syntax(header)?;
+        validate_header_syntax(header, self.network_magic)?;
         self.validate_genesis_identity(header, header_hash)?;
         validate_future_timestamp_with_limit(header, now, self.max_future_block_time())?;
         if header.height != BlockHeight::GENESIS {
@@ -1325,18 +1325,6 @@ impl ChainState {
             })
             .and_then(|bytes| BlockHeader::from_bytes(&bytes))?;
 
-        if !is_better_fork_choice_tip(
-            new_tip_header.total_difficulty,
-            new_tip_hash,
-            self.tip_difficulty,
-            self.tip_hash,
-        ) {
-            return Err(DomError::PolicyRejected(format!(
-                "reorg target is not heavier or tie-preferred: new_total={} current_total={} new_hash={} current_hash={}",
-                new_tip_header.total_difficulty, self.tip_difficulty, new_tip_hash, self.tip_hash
-            )));
-        }
-
         let ancestor = find_common_ancestor(&self.store, self.tip_hash, new_tip_hash)?
             .filter(|h| *h != Hash256::ZERO)
             .ok_or_else(|| DomError::Invalid("heavier side chain has no common ancestor".into()))?;
@@ -1356,8 +1344,42 @@ impl ChainState {
             BlockHeader::from_bytes(&ancestor_bytes)?.height.0
         };
 
+        validate_branch_header_syntax(&self.store, new_tip_hash, ancestor, self.network_magic)?;
+
+        if !is_better_fork_choice_tip(
+            new_tip_header.total_difficulty,
+            new_tip_hash,
+            self.tip_difficulty,
+            self.tip_hash,
+        ) {
+            return Err(DomError::PolicyRejected(format!(
+                "reorg target is not heavier or tie-preferred: new_total={} current_total={} new_hash={} current_hash={}",
+                new_tip_header.total_difficulty, self.tip_difficulty, new_tip_hash, self.tip_hash
+            )));
+        }
+
+        let reorg_depth = self
+            .tip_height
+            .0
+            .checked_sub(ancestor_height)
+            .ok_or_else(|| DomError::Internal("reorg ancestor is above local tip".into()))?;
+        if let Err(error) = check_rolling_finality(self.tip_height.0, reorg_depth) {
+            warn!(
+                depth = reorg_depth,
+                local_tip = %self.tip_hash,
+                rejected_tip = %new_tip_hash,
+                "rolling finality rejected deep reorg"
+            );
+            return Err(error);
+        }
+        check_reorg_depth(reorg_depth)?;
         let disconnect_blocks = collect_branch_blocks(&self.store, self.tip_hash, ancestor)?;
-        check_reorg_depth(disconnect_blocks.len() as u64)?;
+        if disconnect_blocks.len() as u64 != reorg_depth {
+            return Err(DomError::Internal(format!(
+                "reorg depth mismatch: height-derived={reorg_depth}, collected={}",
+                disconnect_blocks.len()
+            )));
+        }
         let mut connect_blocks = collect_branch_blocks(&self.store, new_tip_hash, ancestor)?;
         connect_blocks.reverse();
         let chain_id = derive_chain_id(self.network_magic, &self.genesis_hash);
@@ -1368,7 +1390,7 @@ impl ChainState {
                 chain_id: *chain_id.as_bytes(),
                 now,
             };
-            validate_block(block, &ctx).map_err(|e| {
+            validate_block_for_network(block, &ctx, self.network_magic).map_err(|e| {
                 DomError::Invalid(format!(
                     "reorg candidate block validation failed: hash={}, error={e}",
                     block_hash
@@ -1771,6 +1793,30 @@ fn build_utxo_changeset(block: &Block) -> (Vec<UtxoBytes>, Vec<SpentCommitment>)
         }
     }
     (new_utxos, spent_utxos)
+}
+
+fn validate_branch_header_syntax(
+    store: &DomStore,
+    branch_tip: Hash256,
+    ancestor: Hash256,
+    network_magic: u32,
+) -> Result<(), DomError> {
+    let mut cursor = branch_tip;
+    while cursor != ancestor {
+        let header_bytes = store.get_block_header(cursor.as_bytes())?.ok_or_else(|| {
+            DomError::Internal(format!(
+                "reorg candidate header missing during validation: {cursor}"
+            ))
+        })?;
+        let header = BlockHeader::from_bytes(&header_bytes)?;
+        validate_header_syntax(&header, network_magic).map_err(|error| {
+            DomError::Invalid(format!(
+                "reorg candidate header validation failed: hash={cursor}, error={error}"
+            ))
+        })?;
+        cursor = header.prev_hash;
+    }
+    Ok(())
 }
 
 fn collect_branch_blocks(

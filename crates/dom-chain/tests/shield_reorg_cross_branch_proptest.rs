@@ -73,7 +73,7 @@ use dom_consensus::{
 };
 use dom_core::{
     Amount, BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+    TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::keys::SecretKey;
@@ -256,7 +256,10 @@ fn assemble_block(
             .expect("pmmr roots");
     Block {
         header: BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: dom_core::required_block_version_for_network(
+                dom_core::NETWORK_MAGIC_REGTEST,
+                height,
+            ),
             height: BlockHeight(height),
             prev_hash,
             timestamp: Timestamp(1_700_300_000 + height),
@@ -565,6 +568,7 @@ fn cross_branch_respend_of_shared_prefix_utxo_succeeds() {
 // ============================================================================
 
 const POLICY: u64 = dom_core::MAX_REORG_DEPTH_POLICY; // 1000
+const FINALITY: u64 = dom_chain::reorg::MAX_REORG_DEPTH; // 360
 
 /// Stage a canonical chain `genesis → shared(1) → c(2..=tip_height)` using
 /// cheap dummy coinbases. Returns (the prebuilt heavier side block attached at
@@ -659,20 +663,21 @@ fn reorg_depth_over_limit_is_rejected_on_promotion_path() {
     assert_eq!(chain.tip_height, canonical_height);
 }
 
-/// AT-LIMIT: disconnect depth = POLICY must pass `check_reorg_depth`. The
+/// LAST-ACCEPTED: disconnect depth = FINALITY - 1 must pass rolling finality.
+/// The
 /// fixture's side tip carries a dummy proof, so once the depth gate passes the
 /// promotion proceeds into `validate_block` and is rejected there for a
-/// DIFFERENT reason (invalid range proof) — NOT for depth. We assert the
-/// failure is NOT the depth-cap message, which proves the cap admitted exactly
-/// POLICY. (Building a consensus-valid 1000-deep canonical chain with real
-/// proofs would cost ~100s+; out of scope for a fast shield test. The cap
-/// boundary is what this vector targets.)
+/// DIFFERENT reason (invalid range proof) — NOT for depth.
 #[test]
 fn reorg_depth_at_limit_passes_depth_gate() {
-    // canonical_tip_height = POLICY + 1 → disconnect_depth = POLICY (at cap).
+    // canonical_tip_height = FINALITY → disconnect_depth = FINALITY - 1.
     let dir = TempDir::new().expect("tempdir");
-    let (side, disconnect_depth) = stage_depth_fixture(&dir, POLICY + 1);
-    assert_eq!(disconnect_depth, POLICY, "fixture is exactly at the cap");
+    let (side, disconnect_depth) = stage_depth_fixture(&dir, FINALITY);
+    assert_eq!(
+        disconnect_depth,
+        FINALITY - 1,
+        "fixture is the last accepted depth"
+    );
 
     let mut chain = open_chain(dir.path());
     let canonical_tip = chain.tip_hash;
@@ -684,8 +689,8 @@ fn reorg_depth_at_limit_passes_depth_gate() {
         Err(e) => {
             let msg = e.to_string();
             assert!(
-                !msg.contains("exceeds MAX_REORG_DEPTH_POLICY"),
-                "at-limit depth must pass the cap; failure must be post-gate, got: {msg}"
+                !msg.contains("rolling finality"),
+                "depth 359 must pass finality; failure must be post-gate, got: {msg}"
             );
             // It must be a block-validation failure (the depth gate let it
             // through to validate_block, where the dummy proof is rejected).

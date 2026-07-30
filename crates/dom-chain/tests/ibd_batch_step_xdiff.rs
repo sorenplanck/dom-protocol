@@ -23,7 +23,10 @@ mod common;
 use common::open_test_chain;
 use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
-use dom_core::{BlockHeight, DomError, Hash256, Timestamp, PROTOCOL_VERSION};
+use dom_core::{
+    required_block_version_for_network, BlockHeight, DomError, Hash256, Timestamp,
+    BLOCK_VERSION_LEGACY, NETWORK_MAGIC_REGTEST,
+};
 use dom_pow::CompactTarget;
 use dom_serialization::DomSerialize;
 use primitive_types::U256;
@@ -31,7 +34,7 @@ use tempfile::TempDir;
 
 fn synth_header(prev: Hash256, height: u64) -> BlockHeader {
     BlockHeader {
-        version: PROTOCOL_VERSION,
+        version: required_block_version_for_network(NETWORK_MAGIC_REGTEST, height),
         height: BlockHeight(height),
         prev_hash: prev,
         timestamp: Timestamp(1_700_000_000 + height),
@@ -152,4 +155,33 @@ fn xdiff_backwards_second_header_rejected_identically() {
     let h3_hash = dom_crypto::hash::blake2b_256(&raw(&h3));
     let h2 = synth_header(h3_hash, 2);
     assert_same_rejection(&[raw(&h3), raw(&h2)], "backwards");
+}
+
+#[test]
+fn post_activation_v2_header_is_invalid_in_batch_and_resumed_ibd() {
+    let dir = TempDir::new().expect("tempdir");
+    let chain = open_chain(dir.path());
+    let parent = synth_header(Hash256::ZERO, 0);
+    let parent_bytes = raw(&parent);
+    let parent_hash = dom_crypto::hash::blake2b_256(&parent_bytes);
+    chain
+        .store
+        .store_known_block(parent_hash.as_bytes(), &parent_bytes, &[0u8; 8])
+        .expect("store known genesis parent");
+
+    let mut invalid_v2 = synth_header(parent_hash, 1);
+    invalid_v2.version = BLOCK_VERSION_LEGACY;
+    let raws = vec![raw(&invalid_v2)];
+    let now = Timestamp(2_000_000_000);
+
+    let batch_error = chain
+        .validate_ibd_headers_batch(&raws, now)
+        .expect_err("live IBD must reject post-activation v2");
+    let step_error = run_step_to_completion(&chain, &raws, now)
+        .expect_err("resumed IBD must reject post-activation v2");
+
+    for error in [batch_error, step_error] {
+        assert!(matches!(error, DomError::Invalid(_)));
+        assert!(error.to_string().contains("invalid block version 2"));
+    }
 }
