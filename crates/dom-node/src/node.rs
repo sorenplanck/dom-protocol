@@ -1945,6 +1945,10 @@ async fn hello_exchange(
     })?
 }
 
+fn node_user_agent() -> String {
+    format!("dom-node/{}", env!("CARGO_PKG_VERSION"))
+}
+
 async fn hello_exchange_inner(
     stream: &mut tokio::net::TcpStream,
     codec: &mut dom_wire::codec::NoiseCodec,
@@ -1966,7 +1970,7 @@ async fn hello_exchange_inner(
         chain_id: *chain_id,
         best_height,
         best_hash,
-        user_agent: format!("dom-node/{}", env!("CARGO_PKG_VERSION")),
+        user_agent: node_user_agent(),
         local_timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -5284,6 +5288,11 @@ mod tests {
                 "the catch-up batch must fit inside the server response cap"
             );
         }
+    }
+
+    #[test]
+    fn hello_user_agent_tracks_workspace_package_version() {
+        assert_eq!(super::node_user_agent(), "dom-node/0.2.0");
     }
 
     #[test]

@@ -215,7 +215,7 @@ static DATASET_LARGE_PAGES_FALLBACK: Once = Once::new();
 /// targets the template's current seed. On seed rotation the old entry is
 /// dropped and the new seed's dataset is built once, shared by all workers.
 ///
-/// TODO(NUMA): on multi-socket hosts (e.g. the 2-socket EPYC miner) one
+/// TODO(NUMA, RB-RANDOMX): on multi-socket hosts (e.g. the 2-socket EPYC miner) one
 /// dataset should be allocated per NUMA node and workers pinned to their
 /// local copy; a single shared dataset cross-socket halves effective
 /// memory bandwidth. Irrelevant on single-socket machines.
@@ -302,7 +302,7 @@ impl MinerVm {
         // fallback is therefore only safe for the dataset, whose constructor
         // does check for NULL. The scratchpad is ~2 MB; the dataset dominates
         // the working set, so the hashrate cost is minor.
-        // TODO(randomx-rs): revisit if the crate ever surfaces VM alloc
+        // TODO(randomx-rs, RB-RANDOMX): revisit if the crate ever surfaces VM alloc
         // failure as an error.
         let flags = RandomXFlag::get_recommended_flags() | RandomXFlag::FLAG_FULL_MEM;
         let vm = RandomXVM::new(flags, None, Some(dataset.inner()))

@@ -277,10 +277,7 @@ async fn prepopulate_coinbase_chain(node: &Arc<DomNode>, target_height: u64) -> 
             compute_block_pmmr_roots(BlockHeight(new_height), &coinbase, &[])
                 .map_err(|e| e.to_string())?;
         let mut header = BlockHeader {
-            version: required_block_version_for_network(
-                node.config.network.magic(),
-                new_height,
-            ),
+            version: required_block_version_for_network(node.config.network.magic(), new_height),
             prev_hash: tip_hash,
             height: BlockHeight(new_height),
             timestamp,
@@ -780,11 +777,12 @@ async fn t4_equal_height_divergent_nodes_converge_async() {
     // equal accumulated work.  ChainState's deterministic tie-breaker picks
     // the lower tip hash.  Choosing that node as the source proves the real
     // P2P equal-height path transfers the competing branch and converges.
-    let (source, stale, source_port, stale_port, source_hash) = if hash_a.as_bytes() < hash_b.as_bytes() {
-        (node_a, node_b, port_a, port_b, hash_a)
-    } else {
-        (node_b, node_a, port_b, port_a, hash_b)
-    };
+    let (source, stale, source_port, stale_port, source_hash) =
+        if hash_a.as_bytes() < hash_b.as_bytes() {
+            (node_a, node_b, port_a, port_b, hash_a)
+        } else {
+            (node_b, node_a, port_b, port_a, hash_b)
+        };
     let stale_old_hash = tip(&stale).await.1;
     let stale_data_dir = stale.config.data_dir.clone();
     let _source_task = start_node(source.clone()).await;
@@ -801,7 +799,10 @@ async fn t4_equal_height_divergent_nodes_converge_async() {
     let (stale_height, stale_tip) = tip(&stale).await;
     assert_eq!(source_height, stale_height);
     assert_eq!(source_tip, stale_tip);
-    assert_ne!(stale_tip, stale_old_hash, "stale node did not change tip during reorg");
+    assert_ne!(
+        stale_tip, stale_old_hash,
+        "stale node did not change tip during reorg"
+    );
 
     let utxos_a = source
         .chain

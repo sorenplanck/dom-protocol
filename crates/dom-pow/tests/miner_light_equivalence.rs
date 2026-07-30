@@ -34,8 +34,8 @@ fn fast_mode_equals_light_mode_and_dataset_is_reused() {
     ];
 
     let miner = MinerVm::new(&SEED).expect("fast-mode miner VM");
-    let dataset_id_after_first = miner_dataset_id_for_seed(&SEED)
-        .expect("dataset must be pooled after MinerVm::new");
+    let dataset_id_after_first =
+        miner_dataset_id_for_seed(&SEED).expect("dataset must be pooled after MinerVm::new");
 
     for preimage in preimages {
         let fast = miner.hash(preimage).expect("fast-mode hash");
@@ -50,8 +50,7 @@ fn fast_mode_equals_light_mode_and_dataset_is_reused() {
     // A second VM (as a second mining worker would create) must attach to the
     // exact same pooled dataset, and hashing must still agree.
     let second_worker = MinerVm::new(&SEED).expect("second fast-mode miner VM");
-    let dataset_id_after_second =
-        miner_dataset_id_for_seed(&SEED).expect("dataset still pooled");
+    let dataset_id_after_second = miner_dataset_id_for_seed(&SEED).expect("dataset still pooled");
     assert_eq!(
         dataset_id_after_first, dataset_id_after_second,
         "second MinerVm must reuse the pooled dataset, not rebuild it"
