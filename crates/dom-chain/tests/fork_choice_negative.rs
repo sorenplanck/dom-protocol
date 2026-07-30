@@ -24,7 +24,10 @@ use common::open_test_store;
 use dom_chain::reorg::find_common_ancestor;
 use dom_chain::ChainState;
 use dom_consensus::block::{BlockHeader, ProofOfWork};
-use dom_core::{BlockHeight, DomError, Hash256, Timestamp, PROTOCOL_VERSION};
+use dom_core::{
+    required_block_version_for_network, BlockHeight, DomError, Hash256, Timestamp,
+    NETWORK_MAGIC_REGTEST,
+};
 use dom_pow::CompactTarget;
 use dom_serialization::DomSerialize;
 use dom_store::DomStore;
@@ -37,7 +40,7 @@ fn block_hash(header: &BlockHeader) -> Hash256 {
 
 fn synthetic_header(prev_hash: Hash256, height: u64, nonce_seed: u64, diff: u64) -> BlockHeader {
     BlockHeader {
-        version: PROTOCOL_VERSION,
+        version: required_block_version_for_network(NETWORK_MAGIC_REGTEST, height),
         height: BlockHeight(height),
         prev_hash,
         timestamp: Timestamp(1_700_000_000 + height),

@@ -22,7 +22,7 @@ use dom_store::DomStore;
 use dom_wallet::WalletDir;
 use dom_wire::dandelion::DandelionRouter;
 use dom_wire::manager::PeerManager;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
@@ -235,6 +235,8 @@ const PEX_TARGET_KNOWN_PEERS: usize = 64;
 /// per-peer cooldown in PexManager is the real limiter; this just paces the
 /// check).
 const PEX_GETADDR_TICK_SECS: u64 = 60;
+const CATCHUP_CHECK_INTERVAL_SECS: u64 = 2;
+const CATCHUP_MAX_HASHES_PER_TICK: usize = 16;
 /// Keep at most one requested block body outstanding during IBD. This prevents
 /// a validating node from leaving a peer blocked while its socket buffers fill
 /// with the remainder of a large response page.
@@ -249,7 +251,8 @@ const METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 const HELLO_EXCHANGE_TIMEOUT_SECS: u64 = dom_wire::handshake::HANDSHAKE_TIMEOUT_SECS;
 const PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v2";
 const LEGACY_PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v1";
-const PEER_REPUTATION_METADATA_KEY: &[u8] = b"dom/peer_reputation_state/v1";
+const PEER_REPUTATION_METADATA_KEY: &[u8] = b"dom/peer_reputation_state/v2";
+const LEGACY_PEER_REPUTATION_METADATA_KEY: &[u8] = b"dom/peer_reputation_state/v1";
 const MEMPOOL_METADATA_KEY: &[u8] = b"dom/mempool_state/v1";
 const NOISE_STATIC_KEY_METADATA_KEY: &[u8] = b"dom/noise_static_key/v1";
 
@@ -434,8 +437,17 @@ impl DomNode {
         info!("Chain tip: height={}", chain.tip_height);
 
         let mut peers = PeerManager::new(config.max_inbound, config.min_outbound);
+        peers.set_seed_ips(config.seed_peers.iter().filter_map(|seed| {
+            seed.parse::<std::net::SocketAddr>()
+                .ok()
+                .map(|addr| addr.ip())
+        }));
         restore_peer_rotation_state(&chain.store, &mut peers)?;
         restore_peer_reputation_state(&chain.store, &mut peers)?;
+        // Rewrite after restore so expired entries and migrated v1 records are
+        // removed from disk immediately instead of surviving until the next
+        // peer event.
+        persist_peer_reputation_snapshot(&chain.store, &peers.peer_reputation_state())?;
         // Volatile mempool policy (RFC-0012 §1): start empty and clear any legacy
         // on-disk mempool bytes from older builds. The mempool is never loaded
         // from disk; a restarted node re-acquires pending txs from peers.
@@ -526,7 +538,11 @@ impl DomNode {
             // hashes per batch. A known-missing parent is re-requested forever
             // with this capped backoff, never abandoned after a fixed attempt
             // count. See missing_block_tracker.rs.
-            missing_blocks: Arc::new(Mutex::new(MissingBlockTracker::new(2, 64, 16))),
+            missing_blocks: Arc::new(Mutex::new(MissingBlockTracker::new(
+                2,
+                64,
+                CATCHUP_MAX_HASHES_PER_TICK,
+            ))),
             orphan_pool: Arc::new(Mutex::new(RuntimeOrphanPool::new(
                 DEFAULT_MAX_ORPHAN_BLOCKS,
                 DEFAULT_MAX_ORPHANS_PER_PARENT,
@@ -782,6 +798,9 @@ impl DomNode {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
                     FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS,
                 ));
+                // Skip: replaying every missed maintenance tick after a stall
+                // only repeats the same bounded queue scan in a burst.
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tokio::select! {
                         _ = future_shutdown.wait() => return Ok(()),
@@ -956,6 +975,9 @@ impl DomNode {
                         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
                             STEM_CHECK_INTERVAL_SECS,
                         ));
+                        // Skip: one current timeout scan promotes every expired
+                        // stem; replaying historical ticks adds no liveness.
+                        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                         interval.tick().await; // skip first immediate tick
                         loop {
                             tokio::select! {
@@ -1155,6 +1177,7 @@ impl DomNode {
             ibd_active_sessions: self.ibd_active_sessions.clone(),
             pex: self.pex.clone(),
         };
+        let mut configured_seed_ip_cache = HashMap::<String, HashSet<std::net::IpAddr>>::new();
         loop {
             if shutdown.is_shutdown() {
                 return Ok(());
@@ -1169,6 +1192,14 @@ impl DomNode {
                     warn!("Advancing peer rotation cooldowns failed: {e}");
                 }
                 let mut addrs = resolve_configured_dns_seeds(&self.config).await;
+                let resolved_seed_ips = refresh_configured_seed_ips(
+                    &self.config.seed_peers,
+                    &mut configured_seed_ip_cache,
+                )
+                .await;
+                let mut mgr = trace_lock("peers", &self.peers).await;
+                mgr.set_seed_ips(resolved_seed_ips);
+                drop(mgr);
 
                 // Also try configured seed peers
                 addrs.extend(self.config.seed_peers.iter().cloned());
@@ -2105,15 +2136,28 @@ async fn record_peer_violation(
     };
 
     let peer_key = peer_addr.to_string();
-    let banned = {
+    let (banned, previous_score, accumulated_score) = {
         let mut mgr = trace_lock("peers", peers).await;
-        mgr.add_ban_score(&peer_key, score)
+        let previous = mgr.ban_score(&peer_key).unwrap_or(0);
+        let banned = mgr.add_ban_score(&peer_key, score);
+        let accumulated = mgr.ban_score(&peer_key).unwrap_or(previous);
+        (banned, previous, accumulated)
     };
     if let Err(e) = persist_peer_reputation_state(chain, peers).await {
         warn!("Persisting peer reputation state failed: {e}");
     }
 
-    if banned {
+    if previous_score < dom_wire::peer::ban_scores::BAN_THRESHOLD
+        && accumulated_score >= dom_wire::peer::ban_scores::BAN_THRESHOLD
+    {
+        warn!(
+            event = "peer_ban_threshold_crossed",
+            peer = %peer_addr,
+            reason = %error,
+            accumulated_score,
+            "peer reputation crossed the ban threshold"
+        );
+    } else if banned {
         warn!("Peer {peer_addr} banned after protocol violation: {error}");
     } else {
         warn!("Peer {peer_addr} protocol violation (+{score}): {error}");
@@ -2133,15 +2177,31 @@ async fn record_pending_peer_violation(
     };
 
     let peer_key = peer_addr.to_string();
-    let banned = {
+    let (banned, previous_score, accumulated_score) = {
         let mut mgr = trace_lock("peers", peers).await;
-        mgr.add_pending_ban_score(&peer_key, score) >= dom_wire::peer::ban_scores::BAN_THRESHOLD
+        let previous = mgr.pending_ban_score(&peer_key);
+        let accumulated = mgr.add_pending_ban_score(&peer_key, score);
+        (
+            accumulated >= dom_wire::peer::ban_scores::BAN_THRESHOLD,
+            previous,
+            accumulated,
+        )
     };
     if let Err(e) = persist_peer_reputation_state(chain, peers).await {
         warn!("Persisting peer reputation state failed: {e}");
     }
 
-    if banned {
+    if previous_score < dom_wire::peer::ban_scores::BAN_THRESHOLD
+        && accumulated_score >= dom_wire::peer::ban_scores::BAN_THRESHOLD
+    {
+        warn!(
+            event = "pending_peer_ban_threshold_crossed",
+            peer = %peer_addr,
+            reason = %error,
+            accumulated_score,
+            "pending peer reputation crossed the ban threshold"
+        );
+    } else if banned {
         warn!("Pending peer {peer_addr} banned after pre-registration violation: {error}");
     } else {
         warn!("Pending peer {peer_addr} violation (+{score}): {error}");
@@ -2525,9 +2585,19 @@ pub(crate) fn persist_peer_reputation_snapshot(
     use dom_serialization::DomSerialize;
 
     if snapshot.entries.is_empty() {
-        return store.delete_metadata(PEER_REPUTATION_METADATA_KEY);
+        clear_persisted_peer_reputation(store)?;
+        return Ok(());
     }
-    store.put_metadata(PEER_REPUTATION_METADATA_KEY, &snapshot.to_bytes()?)
+    store.put_metadata(PEER_REPUTATION_METADATA_KEY, &snapshot.to_bytes()?)?;
+    store.delete_metadata(LEGACY_PEER_REPUTATION_METADATA_KEY)
+}
+
+/// Delete every known peer-reputation metadata version.
+///
+/// Used by the offline `dom-peer-reputation-clear` maintenance tool.
+pub fn clear_persisted_peer_reputation(store: &DomStore) -> Result<(), DomError> {
+    store.delete_metadata(PEER_REPUTATION_METADATA_KEY)?;
+    store.delete_metadata(LEGACY_PEER_REPUTATION_METADATA_KEY)
 }
 
 pub(crate) fn load_peer_rotation_snapshot(
@@ -2572,7 +2642,22 @@ pub(crate) fn load_peer_reputation_snapshot(
                 })?;
             Ok(Some(snapshot))
         }
-        None => Ok(None),
+        None => match store.get_metadata(LEGACY_PEER_REPUTATION_METADATA_KEY)? {
+            Some(bytes) => {
+                let snapshot =
+                    dom_wire::manager::PersistedPeerReputationState::from_legacy_bytes(&bytes)
+                        .map_err(|e| {
+                            DomError::Invalid(format!(
+                                "legacy peer reputation snapshot decode failed: {e}"
+                            ))
+                        })?;
+                // v1 did not retain age. Its entries migrate expired rather
+                // than acquiring a fresh 15-minute lifetime on every restart.
+                store.delete_metadata(LEGACY_PEER_REPUTATION_METADATA_KEY)?;
+                Ok(Some(snapshot))
+            }
+            None => Ok(None),
+        },
     }
 }
 
@@ -2672,6 +2757,44 @@ pub(crate) async fn resolve_configured_dns_seeds(config: &NodeConfig) -> Vec<Str
     let is_mainnet = config.network == dom_config::Network::Mainnet;
     let port = config.network.default_port();
     dom_wire::dns_seed::resolve_seeds(is_mainnet, port, &config.dns_seeds).await
+}
+
+/// Resolve the current IP identities of explicit `DOM_SEED_PEERS` entries.
+///
+/// `seed_peers` may be hostnames, so resolve them on each connector pass. A
+/// successful lookup replaces that hostname's cached IPs; a transient failure
+/// retains its last successful result. Public DNS-seed candidates are not
+/// included in this immunity set.
+async fn refresh_configured_seed_ips(
+    configured_seed_peers: &[String],
+    cache: &mut HashMap<String, HashSet<std::net::IpAddr>>,
+) -> HashSet<std::net::IpAddr> {
+    cache.retain(|seed, _| configured_seed_peers.contains(seed));
+    for seed in configured_seed_peers {
+        if let Ok(addr) = seed.parse::<std::net::SocketAddr>() {
+            cache.insert(seed.clone(), HashSet::from([addr.ip()]));
+            continue;
+        }
+        match tokio::net::lookup_host(seed).await {
+            Ok(addrs) => {
+                let resolved = addrs.map(|addr| addr.ip()).collect::<HashSet<_>>();
+                if !resolved.is_empty() {
+                    // A successful refresh replaces this hostname's prior IPs,
+                    // so immunity follows real DNS changes.
+                    cache.insert(seed.clone(), resolved);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event = "configured_seed_resolution_failed",
+                    seed = %seed,
+                    error = %error,
+                    "keeping the last resolved seed immunity set"
+                );
+            }
+        }
+    }
+    cache.values().flatten().copied().collect()
 }
 
 async fn persist_peer_rotation_state(
@@ -2976,11 +3099,30 @@ async fn initialize_ibd_state(
     let peer_key = peer_addr.to_string();
     let (tip_height, tip_hash, persisted) = {
         let chain = chain.lock().await;
-        (
-            chain.tip_height.0,
-            *chain.tip_hash.as_bytes(),
-            dom_chain::PersistedIbdState::load(&chain.store)?,
-        )
+        let persisted = match dom_chain::PersistedIbdState::load(&chain.store) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                // This metadata is local orchestration state, never peer input.
+                // Discard corruption/incompatible checkpoints and restart from
+                // the canonical local tip without routing the error into peer
+                // reputation.
+                tracing::warn!(
+                    event = "ibd_checkpoint_discarded",
+                    reason = %error,
+                    local_tip_height = chain.tip_height.0,
+                    "invalid local IBD checkpoint discarded"
+                );
+                if let Err(clear_error) = dom_chain::PersistedIbdState::clear(&chain.store) {
+                    tracing::warn!(
+                        event = "ibd_checkpoint_clear_failed",
+                        reason = %clear_error,
+                        "failed to delete invalid local IBD checkpoint"
+                    );
+                }
+                None
+            }
+        };
+        (chain.tip_height.0, *chain.tip_hash.as_bytes(), persisted)
     };
 
     let Some(snapshot) = persisted else {
@@ -4070,6 +4212,18 @@ async fn build_headers_response(
     Ok(out)
 }
 
+fn getblockdata_hashes_to_serve(hashes: &[[u8; 32]]) -> &[[u8; 32]] {
+    &hashes[..hashes.len().min(dom_core::MAX_GETBLOCKDATA_SERVE_HASHES)]
+}
+
+fn catchup_interval() -> tokio::time::Interval {
+    let mut timer = tokio::time::interval(tokio::time::Duration::from_secs(
+        CATCHUP_CHECK_INTERVAL_SECS,
+    ));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    timer
+}
+
 async fn message_loop(
     conn: PeerConn<'_>,
     config: &NodeConfig,
@@ -4093,14 +4247,16 @@ async fn message_loop(
     };
 
     const PING_INTERVAL_SECS: u64 = 30;
-    const CATCHUP_CHECK_INTERVAL_SECS: u64 = 2;
     let mut ping_timer =
         tokio::time::interval(tokio::time::Duration::from_secs(PING_INTERVAL_SECS));
+    // Skip: a delayed connection needs one current liveness probe, never a
+    // burst of historical pings.
+    ping_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Skip the immediate first tick.
     ping_timer.tick().await;
-    let mut catchup_timer = tokio::time::interval(tokio::time::Duration::from_secs(
-        CATCHUP_CHECK_INTERVAL_SECS,
-    ));
+    let mut catchup_timer = catchup_interval();
+    // Skip: IBD can occupy this select arm for minutes. Replaying every missed
+    // tick would advance the re-request clock in a burst and flood the seed.
     catchup_timer.tick().await;
 
     // PEX (RFC-0005 §6): periodically consider asking this peer for addresses.
@@ -4108,6 +4264,8 @@ async fn message_loop(
     // limit; this timer only paces the check.
     let mut pex_timer =
         tokio::time::interval(tokio::time::Duration::from_secs(PEX_GETADDR_TICK_SECS));
+    // Skip: PEX has its own cooldown; historical checks have no useful work.
+    pex_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     pex_timer.tick().await;
     let pex_peer_key = peer_addr.to_string();
     // Part D — highest block height this peer relayed whose parent we lacked
@@ -4124,6 +4282,10 @@ async fn message_loop(
     // (each connection has its own limiter). GetAddr/Addr are excluded here
     // (they have their own limiters above).
     let mut msg_rate = crate::msg_rate_limit::MessageRateLimiter::from_env();
+    // Block bodies explicitly requested by this connection are sync responses,
+    // not unsolicited relay traffic. This set makes that distinction before
+    // the per-category limiter decides whether an overflow may affect score.
+    let mut outstanding_sync_blocks = HashSet::<[u8; 32]>::new();
 
     loop {
         tokio::select! {
@@ -4232,6 +4394,7 @@ async fn message_loop(
                     tracker.next_request_batch(round)
                 };
                 if !rerequest.is_empty() {
+                    outstanding_sync_blocks.extend(rerequest.iter().copied());
                     let req = GetBlockDataPayload { hashes: rerequest };
                     let wire = WireMessage {
                         magic: config.network.magic(),
@@ -4312,13 +4475,16 @@ async fn message_loop(
                         return Err(e);
                     }
                 };
-                // Anti-flood: per-category inbound rate limit (before the
-                // potentially expensive handler runs). Overflow scores a
-                // low-severity PROTOCOL_VIOLATION and drops THIS message; a
-                // peer that keeps overflowing crosses the ban threshold (~10
-                // windows) and is disconnected. Honest sync/relay flows stay
-                // well under the budgets (see msg_rate_limit).
-                if !msg_rate.allow(msg.command) {
+                // Anti-flood: sync request/response overflow is paced and
+                // dropped without reputation damage. Other categories may
+                // score only their first excess in each fixed window.
+                let requested_block_response =
+                    msg.command == Command::Block && !outstanding_sync_blocks.is_empty();
+                if let crate::msg_rate_limit::RateLimitDecision::Throttle {
+                    category,
+                    score_violation,
+                } = msg_rate.check(msg.command, requested_block_response)
+                {
                     let err = DomError::peer_misbehavior(
                         PeerMisbehavior::MessageRateLimit,
                         format!(
@@ -4327,12 +4493,20 @@ async fn message_loop(
                             dom_wire::peer::ban_scores::PROTOCOL_VIOLATION,
                         ),
                     );
-                    if record_peer_violation(&chain, &svc.peers, peer_addr, &err).await {
+                    if category == crate::msg_rate_limit::RateCategory::Sync {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            crate::msg_rate_limit::SYNC_THROTTLE_DELAY_MS,
+                        ))
+                        .await;
+                    } else if score_violation
+                        && record_peer_violation(&chain, &svc.peers, peer_addr, &err).await
+                    {
                         return Err(err);
                     }
                     tracing::debug!(
-                        "rate-limited {:?} from {peer_addr}; dropping message",
-                        msg.command
+                        ?category,
+                        score_violation,
+                        "rate-limited {:?} from {peer_addr}; dropping message", msg.command
                     );
                     continue;
                 }
@@ -4412,6 +4586,7 @@ async fn message_loop(
                             .as_secs();
                         let now = dom_core::Timestamp(now_secs);
                         let current_block_hash = block_hash(&block)?;
+                        outstanding_sync_blocks.remove(&current_block_hash);
 
                         // Doc 4.5 mitigation 1: soft buffer for future blocks
                         use dom_consensus::block::{
@@ -4636,6 +4811,8 @@ async fn message_loop(
                                                 "Recorded orphan block and scheduled missing-parent request"
                                             );
                                             if !requests.is_empty() {
+                                                outstanding_sync_blocks
+                                                    .extend(requests.iter().copied());
                                                 let req = GetBlockDataPayload { hashes: requests };
                                                 let wire = WireMessage {
                                                     magic: config.network.magic(),
@@ -4880,7 +5057,15 @@ async fn message_loop(
                                 return Err(e);
                             }
                         };
-                        for hash in &req.hashes {
+                        if req.hashes.len() > dom_core::MAX_GETBLOCKDATA_SERVE_HASHES {
+                            tracing::debug!(
+                                peer = %peer_addr,
+                                requested = req.hashes.len(),
+                                served_cap = dom_core::MAX_GETBLOCKDATA_SERVE_HASHES,
+                                "GetBlockData request truncated to the serve cap"
+                            );
+                        }
+                        for hash in getblockdata_hashes_to_serve(&req.hashes) {
                             let body = {
                                 let c = chain.lock().await;
                                 c.store.get_block_body(hash)?
@@ -4980,17 +5165,20 @@ async fn message_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        annotate_send_err, bind_metrics_listener, clear_persisted_mempool_snapshot,
+        annotate_send_err, bind_metrics_listener, catchup_interval,
+        clear_persisted_mempool_snapshot, clear_persisted_peer_reputation,
         continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
-        decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
-        is_write_timeout, load_mempool_snapshot, load_or_create_noise_static_key,
-        load_peer_reputation_snapshot, load_peer_rotation_snapshot,
-        parse_persisted_noise_static_key, peer_violation_score, pending_peer_violation_score,
-        persist_ibd_state, persist_mempool_snapshot, persist_peer_reputation_snapshot,
-        purge_mempool_confirmed_inputs, reconcile_mempool_after_connect, refresh_peer_metrics,
+        decode_relay_block, deferred_replay_action, getblockdata_hashes_to_serve, ibd_now,
+        initialize_ibd_state, is_write_timeout, load_mempool_snapshot,
+        load_or_create_noise_static_key, load_peer_reputation_snapshot,
+        load_peer_rotation_snapshot, parse_persisted_noise_static_key, peer_violation_score,
+        pending_peer_violation_score, persist_ibd_state, persist_mempool_snapshot,
+        persist_peer_reputation_snapshot, purge_mempool_confirmed_inputs,
+        reconcile_mempool_after_connect, record_peer_violation, refresh_peer_metrics,
         relay_block_action, resolve_configured_dns_seeds, restore_peer_rotation_state,
         serve_metrics, sync_mode_for_peer, trace_lock, tx_hash, DeferredReplayAction, DomNode,
         IbdActiveGuard, IbdRoundState, OutboundAttemptOutcome, RelayBlockAction,
+        CATCHUP_MAX_HASHES_PER_TICK, LEGACY_PEER_REPUTATION_METADATA_KEY,
         LEGACY_PEER_ROTATION_METADATA_KEY, MEMPOOL_METADATA_KEY, METRICS_CONTENT_TYPE,
         NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY, PEER_ROTATION_METADATA_KEY,
     };
@@ -5033,15 +5221,79 @@ mod tests {
     use dom_wire::peer::{PeerInfo, PeerState};
     use primitive_types::U256;
     use std::fs;
+    use std::io::{self, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
     use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::sync::{Mutex, Notify};
     use tokio::task::JoinHandle;
+
+    #[derive(Clone, Default)]
+    struct TestLogBuffer(Arc<StdMutex<Vec<u8>>>);
+
+    struct TestLogWriter(Arc<StdMutex<Vec<u8>>>);
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TestLogBuffer {
+        type Writer = TestLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            TestLogWriter(self.0.clone())
+        }
+    }
+
+    impl Write for TestLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer lock")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl TestLogBuffer {
+        fn contents(&self) -> String {
+            String::from_utf8(self.0.lock().expect("log buffer lock").clone())
+                .expect("UTF-8 tracing output")
+        }
+    }
+
+    #[tokio::test]
+    async fn missed_catchup_ticks_skip_burst_and_fit_sync_budget() {
+        let timer = catchup_interval();
+        assert_eq!(
+            timer.missed_tick_behavior(),
+            tokio::time::MissedTickBehavior::Skip,
+            "a long IBD must collapse missed catch-up ticks into one current tick"
+        );
+        const {
+            assert!(
+                CATCHUP_MAX_HASHES_PER_TICK <= crate::msg_rate_limit::SYNC_PER_WINDOW as usize,
+                "one post-IBD catch-up tick must fit inside the sync limiter budget"
+            );
+            assert!(
+                CATCHUP_MAX_HASHES_PER_TICK <= dom_core::MAX_GETBLOCKDATA_SERVE_HASHES,
+                "the catch-up batch must fit inside the server response cap"
+            );
+        }
+    }
+
+    #[test]
+    fn getblockdata_handler_caps_bodies_per_request() {
+        let hashes = vec![[7u8; 32]; dom_core::MAX_GETBLOCKDATA_HASHES];
+        assert_eq!(
+            getblockdata_hashes_to_serve(&hashes).len(),
+            dom_core::MAX_GETBLOCKDATA_SERVE_HASHES
+        );
+    }
 
     /// When `disable_dns_seeds` is set the outbound connector must contribute
     /// NO DNS-resolved bootstrap candidates — neither the configured DNS seeds
@@ -6154,6 +6406,57 @@ mod tests {
     }
 
     #[test]
+    fn expired_peer_penalty_reintegrates_after_node_restart_without_data_dir_reset() {
+        let dir = fresh_test_dir("peer-reputation-expired-restart");
+        let store = open_test_store(&dir);
+        let addr = "10.0.0.46:33369";
+        let snapshot = PersistedPeerReputationState {
+            entries: vec![dom_wire::manager::PersistedPeerReputation {
+                addr: addr.into(),
+                score: ban_scores::BAN_THRESHOLD,
+                expires_at_unix_secs: 0,
+            }],
+        };
+        persist_peer_reputation_snapshot(&store, &snapshot).expect("persist expired reputation");
+        drop(store);
+
+        let node = init_test_node(regtest_node_config(&dir));
+        let mut peers = node.peers.try_lock().expect("peer lock");
+        assert_eq!(peers.pending_ban_score(addr), 0);
+        let mut peer = PeerInfo::new(addr.parse().expect("peer addr"), true);
+        peer.state = PeerState::Connected;
+        peers
+            .register_peer(peer)
+            .expect("expired score must not be renewed on restart");
+        drop(peers);
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[test]
+    fn reputation_cleanup_removes_current_and_legacy_metadata() {
+        let dir = fresh_test_dir("peer-reputation-clear-tool");
+        let store = open_test_store(&dir);
+        store
+            .put_metadata(PEER_REPUTATION_METADATA_KEY, b"current")
+            .expect("write current reputation");
+        store
+            .put_metadata(LEGACY_PEER_REPUTATION_METADATA_KEY, b"legacy")
+            .expect("write legacy reputation");
+
+        clear_persisted_peer_reputation(&store).expect("clear all reputation metadata");
+
+        assert!(store
+            .get_metadata(PEER_REPUTATION_METADATA_KEY)
+            .expect("read current")
+            .is_none());
+        assert!(store
+            .get_metadata(LEGACY_PEER_REPUTATION_METADATA_KEY)
+            .expect("read legacy")
+            .is_none());
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[test]
     fn wrong_network_ban_score_survives_restart() {
         let dir = fresh_test_dir("peer-reputation-wrong-network");
         let store = open_test_store(&dir);
@@ -6161,6 +6464,7 @@ mod tests {
             entries: vec![dom_wire::manager::PersistedPeerReputation {
                 addr: "10.0.0.44:33369".into(),
                 score: ban_scores::WRONG_CHAIN_ID,
+                expires_at_unix_secs: u64::MAX,
             }],
         };
         persist_peer_reputation_snapshot(&store, &snapshot).expect("persist peer reputation");
@@ -6214,6 +6518,7 @@ mod tests {
             entries: vec![dom_wire::manager::PersistedPeerReputation {
                 addr: "10.0.0.45:33369".into(),
                 score: 20,
+                expires_at_unix_secs: u64::MAX,
             }],
         };
         persist_peer_reputation_snapshot(&store, &snapshot).expect("persist peer reputation");
@@ -6320,6 +6625,50 @@ mod tests {
             peer_violation_score(&DomError::Malformed("bad frame".into())),
             Some(ban_scores::MALFORMED_MESSAGE)
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn abusive_peer_still_bans_and_threshold_warn_contains_reason() {
+        let dir = fresh_test_dir("peer-threshold-warn");
+        let node = init_test_node(regtest_node_config(&dir));
+        let peer_addr: SocketAddr = "127.0.0.2:33369".parse().expect("peer addr");
+        let mut peer = PeerInfo::new(peer_addr, false);
+        peer.state = PeerState::Connected;
+        node.peers
+            .lock()
+            .await
+            .register_peer(peer)
+            .expect("register abusive test peer");
+
+        let logs = TestLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(logs.clone())
+            .finish();
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let error = DomError::Malformed("repeated malformed abuse".into());
+
+        for attempt in 0..5 {
+            let banned = record_peer_violation(&node.chain, &node.peers, peer_addr, &error).await;
+            assert_eq!(
+                banned,
+                attempt == 4,
+                "five malformed-message penalties must still reach the threshold"
+            );
+        }
+
+        let output = logs.contents();
+        assert!(output.contains("peer_ban_threshold_crossed"), "{output}");
+        assert!(output.contains(&format!("peer={peer_addr}")), "{output}");
+        assert!(
+            output.contains("reason=Malformed: repeated malformed abuse"),
+            "{output}"
+        );
+        assert!(output.contains("accumulated_score=100"), "{output}");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -7565,6 +7914,63 @@ mod tests {
         assert_eq!(ibd.best_peer_height, 2);
         assert_eq!(ibd.retry_attempts, 0, "new peer gets a fresh retry budget");
         assert_eq!(ibd.last_interruption, None);
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn inconsistent_local_ibd_checkpoint_is_discarded_without_peer_penalty() {
+        let dir = fresh_test_dir("ibd-local-checkpoint-discard");
+        let node = init_test_node(regtest_node_config(&dir));
+        let (local_height, local_hash) = {
+            let chain = node.chain.lock().await;
+            (chain.tip_height.0, *chain.tip_hash.as_bytes())
+        };
+        let inconsistent = PersistedIbdState {
+            phase: IbdPhase::BlockSync,
+            peer_addr: "127.0.0.1:33369".into(),
+            start_height: 10_394,
+            best_peer_height: 10_500,
+            headers_height: 10_500,
+            blocks_height: 10_226,
+            last_progress_height: 10_500,
+            checkpoint_tip_hash: local_hash,
+            retry_attempts: 0,
+            last_interruption: None,
+            pending_blocks: Vec::new(),
+            pending_headers: Vec::new(),
+            block_cursor: 0,
+            header_cursor: 0,
+            header_cursor_height: 10_500,
+        };
+        {
+            let chain = node.chain.lock().await;
+            inconsistent
+                .save(&chain.store)
+                .expect("persist inconsistent local checkpoint");
+        }
+
+        let peer_addr = "127.0.0.1:33369".parse().expect("peer addr");
+        let (ibd, resumed) =
+            initialize_ibd_state(&node.chain, peer_addr, local_height.saturating_add(10))
+                .await
+                .expect("local checkpoint corruption must not escape as a peer error");
+
+        assert!(resumed.is_none());
+        assert_eq!(ibd.start_height, local_height);
+        {
+            let chain = node.chain.lock().await;
+            assert!(PersistedIbdState::load(&chain.store)
+                .expect("load after discard")
+                .is_none());
+        }
+        assert_eq!(
+            node.peers
+                .lock()
+                .await
+                .pending_ban_score(&peer_addr.to_string()),
+            0,
+            "local checkpoint errors must never affect peer reputation"
+        );
         crate::test_dir::remove_test_dir(&dir);
     }
 

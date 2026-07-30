@@ -35,4 +35,5 @@ pub use genesis::{
 };
 pub use ibd::{
     IbdControl, IbdInterruption, IbdPhase, IbdState, PersistedIbdState, IBD_SESSION_METADATA_KEY,
+    LEGACY_IBD_SESSION_METADATA_KEY,
 };
