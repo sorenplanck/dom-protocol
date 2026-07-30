@@ -2,7 +2,7 @@
 //! path (Noise handshake + Hello + `message_loop`):
 //!
 //! 1. flooding one category past its per-window budget scores the peer
-//!    `PROTOCOL_VIOLATION (+10)` per excess message — the exact score
+//!    `PROTOCOL_VIOLATION (+10)` at most once per window — the exact score
 //!    progression proves the limiter executes inside `message_loop`;
 //! 2. a flood on ONE connection does NOT consume another peer's budget (each
 //!    connection has its own limiter);
@@ -112,9 +112,9 @@ async fn wait_for_ban_score(
     }
 }
 
-/// Flood `Pong` past the Cheap budget: each excess message scores exactly
-/// PROTOCOL_VIOLATION (+10). A second, quiet peer is NOT penalized — proving the
-/// limiter is per-connection.
+/// Flood `Pong` past the Cheap budget: the window scores exactly one
+/// PROTOCOL_VIOLATION (+10). A second, quiet peer is NOT penalized — proving
+/// the limiter is per-connection.
 #[tokio::test]
 async fn message_flood_scores_per_excess_without_affecting_other_peers() {
     init_tracing();
@@ -148,9 +148,9 @@ async fn message_flood_scores_per_excess_without_affecting_other_peers() {
             .unwrap_or_else(|e| panic!("send pong #{i} failed: {e:?}"));
     }
 
-    // 3 excess × PROTOCOL_VIOLATION(10) = 30, below BAN_THRESHOLD(100) so the
-    // connection stays alive and the score is observable.
-    let expected = excess * ban_scores::PROTOCOL_VIOLATION;
+    // Excess is scored at most once per category/window. The remaining
+    // over-budget messages are dropped without multiplying reputation damage.
+    let expected = ban_scores::PROTOCOL_VIOLATION;
     let score = wait_for_ban_score(&node, &flooder_key, expected, Duration::from_secs(10))
         .await
         .unwrap_or_else(|got| {
@@ -158,7 +158,7 @@ async fn message_flood_scores_per_excess_without_affecting_other_peers() {
         });
     assert_eq!(
         score, expected,
-        "each excess message must add exactly PROTOCOL_VIOLATION"
+        "one window may add at most one PROTOCOL_VIOLATION"
     );
 
     // The quiet peer must be untouched by the flood on the other connection.

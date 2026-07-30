@@ -9,7 +9,7 @@
 use crate::peer::{PeerInfo, PeerState};
 use dom_core::DomError;
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -112,7 +112,7 @@ struct PendingOutbound {
 #[derive(Debug, Clone, Copy)]
 struct PendingPenalty {
     score: u32,
-    last_updated: Instant,
+    expires_at_unix_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -157,6 +157,8 @@ pub struct PersistedPeerReputation {
     pub addr: String,
     /// Saturating ban score tracked for restart-safe policy enforcement.
     pub score: u32,
+    /// Wall-clock expiry retained across restarts.
+    pub expires_at_unix_secs: u64,
 }
 
 /// Bounded deterministic peer-reputation snapshot.
@@ -259,6 +261,7 @@ impl DomSerialize for PersistedPeerReputationState {
         for entry in &self.entries {
             w.write_vec(entry.addr.as_bytes())?;
             w.write_u32(entry.score);
+            w.write_u64(entry.expires_at_unix_secs);
         }
         Ok(())
     }
@@ -279,8 +282,41 @@ impl DomDeserialize for PersistedPeerReputationState {
             let addr = String::from_utf8(r.read_vec(MAX_PEER_ROTATION_ADDR_BYTES)?)
                 .map_err(|e| DomError::Malformed(format!("peer reputation addr utf8: {e}")))?;
             let score = r.read_u32()?;
-            entries.push(PersistedPeerReputation { addr, score });
+            let expires_at_unix_secs = r.read_u64()?;
+            entries.push(PersistedPeerReputation {
+                addr,
+                score,
+                expires_at_unix_secs,
+            });
         }
+        Ok(Self { entries })
+    }
+}
+
+impl PersistedPeerReputationState {
+    /// Decode the v1 score-only snapshot. Its entries intentionally migrate as
+    /// expired: v1 did not persist age, so restoring it with a fresh runtime
+    /// timestamp would renew every penalty indefinitely across restarts.
+    pub fn from_legacy_bytes(bytes: &[u8]) -> Result<Self, DomError> {
+        let mut r = Reader::new(bytes);
+        let len = r.read_u32()? as usize;
+        if len > MAX_PERSISTED_PEER_REPUTATION_ENTRIES {
+            return Err(DomError::Malformed(format!(
+                "peer reputation entry count {len} exceeds limit {MAX_PERSISTED_PEER_REPUTATION_ENTRIES}"
+            )));
+        }
+        let mut entries = Vec::with_capacity(len);
+        for _ in 0..len {
+            let addr = String::from_utf8(r.read_vec(MAX_PEER_ROTATION_ADDR_BYTES)?)
+                .map_err(|e| DomError::Malformed(format!("peer reputation addr utf8: {e}")))?;
+            let score = r.read_u32()?;
+            entries.push(PersistedPeerReputation {
+                addr,
+                score,
+                expires_at_unix_secs: 0,
+            });
+        }
+        r.finish()?;
         Ok(Self { entries })
     }
 }
@@ -303,6 +339,10 @@ pub struct PeerManager {
     pending_outbound: HashMap<String, PendingOutbound>,
     /// Penalties accumulated before a peer is fully registered.
     pending_penalties: HashMap<String, PendingPenalty>,
+    /// Expiry of scores currently attached to connected peer objects.
+    connected_penalty_expirations: HashMap<String, u64>,
+    /// Current DNS/config resolution of trusted bootstrap seed IPs.
+    seed_ips: HashSet<IpAddr>,
     /// Runtime-only duplicate block relay counters for connected peers.
     duplicate_block_relays: HashMap<String, DuplicateRelayTracker>,
     /// Deterministic outbound failure history used to rotate repeated failures.
@@ -326,6 +366,8 @@ impl PeerManager {
             pending_inbound: HashMap::new(),
             pending_outbound: HashMap::new(),
             pending_penalties: HashMap::new(),
+            connected_penalty_expirations: HashMap::new(),
+            seed_ips: HashSet::new(),
             duplicate_block_relays: HashMap::new(),
             outbound_failures: HashMap::new(),
             outbound_failure_seq: 0,
@@ -374,6 +416,22 @@ impl PeerManager {
             .count()
     }
 
+    /// Replace the currently trusted bootstrap IP set after DNS resolution.
+    ///
+    /// Callers refresh this on every seed-resolution pass so DNS changes do not
+    /// leave stale addresses permanently immune.
+    pub fn set_seed_ips<I>(&mut self, seed_ips: I)
+    where
+        I: IntoIterator<Item = IpAddr>,
+    {
+        self.seed_ips = seed_ips.into_iter().collect();
+    }
+
+    /// Return whether an IP belongs to the latest resolved bootstrap seed set.
+    pub fn is_seed_ip(&self, ip: IpAddr) -> bool {
+        self.seed_ips.contains(&ip)
+    }
+
     /// Check if we need more outbound connections.
     pub fn needs_outbound(&self) -> bool {
         self.outbound_count() + self.pending_outbound_count() < self.target_outbound_count()
@@ -419,7 +477,9 @@ impl PeerManager {
                 "already connected or pending inbound peer".into(),
             ));
         }
-        if self.pending_ban_score(&addr_str) >= crate::peer::ban_scores::BAN_THRESHOLD {
+        if !self.is_seed_ip(addr.ip())
+            && self.pending_ban_score(&addr_str) >= crate::peer::ban_scores::BAN_THRESHOLD
+        {
             return Err(DomError::PolicyRejected(
                 "pending inbound peer is banned".into(),
             ));
@@ -461,7 +521,11 @@ impl PeerManager {
                 "authenticated peer identity already has an active session".into(),
             ));
         }
-        if self.pending_ban_score(addr) >= crate::peer::ban_scores::BAN_THRESHOLD {
+        let is_seed = addr
+            .parse::<SocketAddr>()
+            .ok()
+            .is_some_and(|socket| self.is_seed_ip(socket.ip()));
+        if !is_seed && self.pending_ban_score(addr) >= crate::peer::ban_scores::BAN_THRESHOLD {
             return Err(DomError::PolicyRejected(
                 "pending outbound peer is banned".into(),
             ));
@@ -696,27 +760,45 @@ impl PeerManager {
     /// Snapshot connected and pending peer reputation for restart-safe
     /// persistence. Stronger scores are retained when the bounded cap is hit.
     pub fn peer_reputation_state(&self) -> PersistedPeerReputationState {
-        let mut merged = HashMap::<String, u32>::new();
+        let now = unix_now();
+        let mut merged = HashMap::<String, (u32, u64)>::new();
         for (addr, peer) in &self.peers {
             if peer.ban_score > 0 {
+                let expires_at = self
+                    .connected_penalty_expirations
+                    .get(addr)
+                    .copied()
+                    .unwrap_or_else(|| penalty_expiry(now));
                 merged
                     .entry(reputation_key(addr))
-                    .and_modify(|score| *score = score.saturating_add(peer.ban_score))
-                    .or_insert(peer.ban_score);
+                    .and_modify(|(score, expiry)| {
+                        *score = score.saturating_add(peer.ban_score);
+                        *expiry = (*expiry).max(expires_at);
+                    })
+                    .or_insert((peer.ban_score, expires_at));
             }
         }
         for (addr, penalty) in &self.pending_penalties {
             if penalty.score > 0 && !penalty_is_stale(*penalty) {
                 merged
                     .entry(addr.clone())
-                    .and_modify(|score| *score = score.saturating_add(penalty.score))
-                    .or_insert(penalty.score);
+                    .and_modify(|(score, expiry)| {
+                        *score = score.saturating_add(penalty.score);
+                        *expiry = (*expiry).max(penalty.expires_at_unix_secs);
+                    })
+                    .or_insert((penalty.score, penalty.expires_at_unix_secs));
             }
         }
 
         let mut entries: Vec<PersistedPeerReputation> = merged
             .into_iter()
-            .map(|(addr, score)| PersistedPeerReputation { addr, score })
+            .map(
+                |(addr, (score, expires_at_unix_secs))| PersistedPeerReputation {
+                    addr,
+                    score,
+                    expires_at_unix_secs,
+                },
+            )
             .collect();
         entries.sort_by(|left, right| {
             right
@@ -743,7 +825,7 @@ impl PeerManager {
             )));
         }
 
-        let now = Instant::now();
+        let now = unix_now();
         let mut restored = HashMap::with_capacity(snapshot.entries.len());
         let mut previous_addr: Option<&str> = None;
         for entry in &snapshot.entries {
@@ -760,6 +842,9 @@ impl PeerManager {
                     "peer reputation snapshot contains zero-score entry".into(),
                 ));
             }
+            if entry.expires_at_unix_secs <= now {
+                continue;
+            }
             let reputation_addr = reputation_key(&entry.addr);
             if restored.contains_key(&reputation_addr) {
                 return Err(DomError::Invalid(
@@ -770,7 +855,7 @@ impl PeerManager {
                 reputation_addr,
                 PendingPenalty {
                     score: entry.score,
-                    last_updated: now,
+                    expires_at_unix_secs: entry.expires_at_unix_secs,
                 },
             );
         }
@@ -799,7 +884,15 @@ impl PeerManager {
             self.note_peer_identity(&addr_str, peer_id);
         }
         let pending_score = self.pending_penalty_score(&reputation_addr);
-        if pending_score > 0 && info.add_ban_score(pending_score) {
+        let is_seed = self.is_seed_ip(info.addr.ip());
+        let pending_expiry = self
+            .pending_penalties
+            .get(&reputation_addr)
+            .map(|penalty| penalty.expires_at_unix_secs);
+        if pending_score > 0 && !is_seed && info.add_ban_score(pending_score) {
+            // A rejected registration must consume the pending entry instead
+            // of renewing it on every reconnect attempt.
+            self.pending_penalties.remove(&reputation_addr);
             return Err(DomError::PolicyRejected(
                 "pending peer penalties exceeded ban threshold".into(),
             ));
@@ -815,6 +908,14 @@ impl PeerManager {
             self.pending_outbound.remove(&addr_str);
         }
         self.pending_penalties.remove(&reputation_addr);
+        if pending_score > 0 && !is_seed {
+            if let Some(expires_at) = pending_expiry {
+                self.connected_penalty_expirations
+                    .insert(addr_str.clone(), expires_at);
+            }
+        } else {
+            self.connected_penalty_expirations.remove(&addr_str);
+        }
         self.duplicate_block_relays.remove(&addr_str);
         if let Some(peer_id) = info.peer_id {
             self.active_peer_ids.insert(peer_id, addr_str.clone());
@@ -860,9 +961,14 @@ impl PeerManager {
                 self.clear_outbound_failure(addr);
             }
             if peer.ban_score > 0 {
-                let _ = self.add_pending_ban_score(addr, peer.ban_score);
+                let expires_at = self
+                    .connected_penalty_expirations
+                    .remove(addr)
+                    .unwrap_or_else(|| penalty_expiry(unix_now()));
+                self.add_pending_ban_score_with_expiry(addr, peer.ban_score, expires_at);
             }
         }
+        self.connected_penalty_expirations.remove(addr);
         self.pending_inbound.remove(addr);
         self.pending_outbound.remove(addr);
         self.duplicate_block_relays.remove(addr);
@@ -874,7 +980,13 @@ impl PeerManager {
     /// transitions into the banned state.
     pub fn add_ban_score(&mut self, addr: &str, score: u32) -> bool {
         match self.peers.get_mut(addr) {
-            Some(peer) => peer.add_ban_score(score),
+            Some(peer) => {
+                if score > 0 {
+                    self.connected_penalty_expirations
+                        .insert(addr.to_string(), penalty_expiry(unix_now()));
+                }
+                peer.add_ban_score(score)
+            }
             None => false,
         }
     }
@@ -882,7 +994,7 @@ impl PeerManager {
     /// Add a penalty score for a peer that has not yet been registered.
     pub fn add_pending_ban_score(&mut self, addr: &str, score: u32) -> u32 {
         self.prune_stale_state();
-        let now = Instant::now();
+        let expires_at = penalty_expiry(unix_now());
         let reputation_addr = reputation_key(addr);
         let updated_score = {
             let entry = self
@@ -890,14 +1002,36 @@ impl PeerManager {
                 .entry(reputation_addr)
                 .or_insert(PendingPenalty {
                     score: 0,
-                    last_updated: now,
+                    expires_at_unix_secs: expires_at,
                 });
             entry.score = entry.score.saturating_add(score);
-            entry.last_updated = now;
+            entry.expires_at_unix_secs = expires_at;
             entry.score
         };
         self.enforce_pending_penalty_bound();
         updated_score
+    }
+
+    fn add_pending_ban_score_with_expiry(
+        &mut self,
+        addr: &str,
+        score: u32,
+        expires_at_unix_secs: u64,
+    ) {
+        if expires_at_unix_secs <= unix_now() || score == 0 {
+            return;
+        }
+        let reputation_addr = reputation_key(addr);
+        let entry = self
+            .pending_penalties
+            .entry(reputation_addr)
+            .or_insert(PendingPenalty {
+                score: 0,
+                expires_at_unix_secs,
+            });
+        entry.score = entry.score.saturating_add(score);
+        entry.expires_at_unix_secs = entry.expires_at_unix_secs.max(expires_at_unix_secs);
+        self.enforce_pending_penalty_bound();
     }
 
     /// Inspect the current ban score for a peer.
@@ -1014,10 +1148,10 @@ impl PeerManager {
         }
 
         let overflow = self.pending_penalties.len() - MAX_PENDING_PENALTIES;
-        let mut oldest: Vec<(String, Instant)> = self
+        let mut oldest: Vec<(String, u64)> = self
             .pending_penalties
             .iter()
-            .map(|(addr, penalty)| (addr.clone(), penalty.last_updated))
+            .map(|(addr, penalty)| (addr.clone(), penalty.expires_at_unix_secs))
             .collect();
         oldest.sort_by(|(left_addr, left_ts), (right_addr, right_ts)| {
             left_ts
@@ -1070,7 +1204,18 @@ fn outbound_reservation_is_stale(pending: PendingOutbound) -> bool {
 }
 
 fn penalty_is_stale(pending: PendingPenalty) -> bool {
-    pending.last_updated.elapsed() >= Duration::from_secs(PENDING_PENALTY_TTL_SECS)
+    pending.expires_at_unix_secs <= unix_now()
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn penalty_expiry(now: u64) -> u64 {
+    now.saturating_add(PENDING_PENALTY_TTL_SECS)
 }
 
 /// Reservations older than this are treated as dead handshakes and ignored.
@@ -1311,7 +1456,43 @@ mod tests {
         peer.state = PeerState::Connected;
         assert!(mgr.register_peer(peer).is_err());
         assert!(mgr.ban_score(&addr).is_none());
-        assert_eq!(mgr.pending_ban_score(&addr), 100);
+        assert_eq!(
+            mgr.pending_ban_score(&addr),
+            0,
+            "registration rejection must consume the pending penalty"
+        );
+    }
+
+    #[test]
+    fn resolved_seed_ip_registers_even_above_pending_ban_threshold() {
+        let mut mgr = PeerManager::new(125, 8);
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
+        let addr = SocketAddr::new(ip, 33369);
+        mgr.set_seed_ips([ip]);
+        assert_eq!(
+            mgr.add_pending_ban_score(&addr.to_string(), crate::peer::ban_scores::BAN_THRESHOLD),
+            crate::peer::ban_scores::BAN_THRESHOLD
+        );
+
+        let mut peer = PeerInfo::new(addr, true);
+        peer.state = PeerState::Connected;
+        mgr.register_peer(peer)
+            .expect("resolved bootstrap seed must be reintegrated");
+
+        assert_eq!(mgr.pending_ban_score(&addr.to_string()), 0);
+        assert_eq!(mgr.ban_score(&addr.to_string()), Some(0));
+    }
+
+    #[test]
+    fn refreshed_seed_resolution_replaces_stale_ip_immunity() {
+        let mut mgr = PeerManager::new(125, 8);
+        let old_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 11));
+        let new_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 12));
+        mgr.set_seed_ips([old_ip]);
+        assert!(mgr.is_seed_ip(old_ip));
+        mgr.set_seed_ips([new_ip]);
+        assert!(!mgr.is_seed_ip(old_ip));
+        assert!(mgr.is_seed_ip(new_ip));
     }
 
     #[test]
@@ -1350,7 +1531,7 @@ mod tests {
         mgr.pending_penalties
             .get_mut(&reputation_key(&key))
             .unwrap()
-            .last_updated = Instant::now() - Duration::from_secs(PENDING_PENALTY_TTL_SECS + 1);
+            .expires_at_unix_secs = unix_now().saturating_sub(1);
 
         assert_eq!(mgr.pending_ban_score(&key), 0);
         mgr.reserve_inbound(addr)
@@ -1741,10 +1922,12 @@ mod tests {
                 PersistedPeerReputation {
                     addr: "10.0.0.10:33369".into(),
                     score: 25,
+                    expires_at_unix_secs: penalty_expiry(unix_now()),
                 },
                 PersistedPeerReputation {
                     addr: "10.0.0.20:33369".into(),
                     score: crate::peer::ban_scores::BAN_THRESHOLD,
+                    expires_at_unix_secs: penalty_expiry(unix_now()),
                 },
             ],
         };
@@ -1761,16 +1944,63 @@ mod tests {
     }
 
     #[test]
+    fn expired_persisted_penalty_reintegrates_after_restart() {
+        let addr = "198.51.100.80:33369";
+        let snapshot = PersistedPeerReputationState {
+            entries: vec![PersistedPeerReputation {
+                addr: addr.into(),
+                score: crate::peer::ban_scores::BAN_THRESHOLD,
+                expires_at_unix_secs: unix_now().saturating_sub(1),
+            }],
+        };
+        let bytes = snapshot.to_bytes().expect("serialize persisted reputation");
+        let decoded =
+            PersistedPeerReputationState::from_bytes(&bytes).expect("decode after restart");
+        let mut restarted = PeerManager::new(125, 8);
+        restarted
+            .restore_peer_reputation_state(&decoded)
+            .expect("restore expired reputation");
+
+        assert_eq!(restarted.pending_ban_score(addr), 0);
+        let mut peer = PeerInfo::new(addr.parse().expect("socket"), true);
+        peer.state = PeerState::Connected;
+        restarted
+            .register_peer(peer)
+            .expect("expired persisted penalty must not renew on restart");
+    }
+
+    #[test]
+    fn legacy_score_only_reputation_migrates_expired() {
+        let mut writer = Writer::new();
+        writer.write_u32(1);
+        writer
+            .write_vec(b"198.51.100.81:33369")
+            .expect("legacy addr");
+        writer.write_u32(crate::peer::ban_scores::BAN_THRESHOLD);
+
+        let snapshot =
+            PersistedPeerReputationState::from_legacy_bytes(&writer.finish()).expect("migrate v1");
+        assert_eq!(snapshot.entries[0].expires_at_unix_secs, 0);
+        let mut restarted = PeerManager::new(125, 8);
+        restarted
+            .restore_peer_reputation_state(&snapshot)
+            .expect("restore migrated reputation");
+        assert_eq!(restarted.pending_ban_score("198.51.100.81:33369"), 0);
+    }
+
+    #[test]
     fn restoring_peer_reputation_rejects_unordered_snapshot() {
         let snapshot = PersistedPeerReputationState {
             entries: vec![
                 PersistedPeerReputation {
                     addr: "10.0.0.20:33369".into(),
                     score: 10,
+                    expires_at_unix_secs: penalty_expiry(unix_now()),
                 },
                 PersistedPeerReputation {
                     addr: "10.0.0.10:33369".into(),
                     score: 20,
+                    expires_at_unix_secs: penalty_expiry(unix_now()),
                 },
             ],
         };

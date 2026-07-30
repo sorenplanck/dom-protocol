@@ -58,6 +58,7 @@ fn craft_frame(
     header_cursor: u32,
 ) -> Vec<u8> {
     let mut w = Writer::new();
+    w.write_u8(2); // persisted IBD format version
     w.write_u8(phase_tag); // IbdPhase
     w.write_vec(b"127.0.0.1:1").expect("peer"); // peer_addr
     w.write_u64(0); // start_height

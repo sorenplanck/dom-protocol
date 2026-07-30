@@ -39,6 +39,11 @@ pub const TX_PER_WINDOW: u32 = 600;
 /// by PoW cost and the duplicate-relay window.
 pub const BLOCK_PER_WINDOW: u32 = 600;
 
+/// Delay applied to excess synchronization traffic before dropping the
+/// over-budget message. This paces a queued burst without converting an honest
+/// IBD/catch-up flow into peer reputation damage.
+pub const SYNC_THROTTLE_DELAY_MS: u64 = 50;
+
 /// Cost/volume category a command is rate-limited under. `None` (via
 /// [`category_for`]) means "not policed by this limiter".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +56,21 @@ pub enum RateCategory {
     Tx,
     /// Block.
     Block,
+}
+
+/// Result of observing one inbound message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitDecision {
+    /// Process the message normally.
+    Allow,
+    /// Drop/pause the message. At most the first excess in a non-sync window
+    /// requests a reputation point; sync traffic never does.
+    Throttle {
+        /// Effective traffic category, including requested block responses.
+        category: RateCategory,
+        /// Whether this is the first scoreable excess in the current window.
+        score_violation: bool,
+    },
 }
 
 /// Map a command to its rate category, or `None` when it must not be policed
@@ -133,16 +153,23 @@ fn env_override(key: &str, default: u64) -> u64 {
 struct Window {
     start: u64,
     count: u32,
+    excess_reported: bool,
 }
 
 impl Window {
-    fn allow_at(&mut self, now: u64, limit: u32, window_secs: u64) -> bool {
+    fn observe_at(&mut self, now: u64, limit: u32, window_secs: u64) -> (bool, bool) {
         if now.saturating_sub(self.start) >= window_secs {
             self.start = now;
             self.count = 0;
+            self.excess_reported = false;
         }
         self.count = self.count.saturating_add(1);
-        self.count <= limit
+        if self.count <= limit {
+            return (true, false);
+        }
+        let first_excess = !self.excess_reported;
+        self.excess_reported = true;
+        (false, first_excess)
     }
 }
 
@@ -182,8 +209,31 @@ impl MessageRateLimiter {
 
     /// Clock-injected variant for deterministic tests.
     pub fn allow_at(&mut self, cmd: Command, now: u64) -> bool {
-        let Some(cat) = category_for(cmd) else {
-            return true;
+        matches!(self.check_at(cmd, false, now), RateLimitDecision::Allow)
+    }
+
+    /// Observe a message using the wall clock.
+    ///
+    /// `requested_block_response` reclassifies a `Block` that answers an
+    /// outstanding local `GetBlockData` as synchronization traffic.
+    pub fn check(&mut self, cmd: Command, requested_block_response: bool) -> RateLimitDecision {
+        self.check_at(cmd, requested_block_response, unix_now())
+    }
+
+    /// Clock-injected decision variant for deterministic tests.
+    pub fn check_at(
+        &mut self,
+        cmd: Command,
+        requested_block_response: bool,
+        now: u64,
+    ) -> RateLimitDecision {
+        let category = if cmd == Command::Block && requested_block_response {
+            Some(RateCategory::Sync)
+        } else {
+            category_for(cmd)
+        };
+        let Some(cat) = category else {
+            return RateLimitDecision::Allow;
         };
         let limit = self.cfg.budget(cat);
         let window = self.cfg.window_secs;
@@ -193,7 +243,15 @@ impl MessageRateLimiter {
             RateCategory::Tx => &mut self.tx,
             RateCategory::Block => &mut self.block,
         };
-        slot.allow_at(now, limit, window)
+        let (allowed, first_excess) = slot.observe_at(now, limit, window);
+        if allowed {
+            RateLimitDecision::Allow
+        } else {
+            RateLimitDecision::Throttle {
+                category: cat,
+                score_violation: cat != RateCategory::Sync && first_excess,
+            }
+        }
     }
 }
 
@@ -255,6 +313,94 @@ mod tests {
         assert!(!rl.allow_at(Command::Block, 1_000));
         // A new window restores the full budget.
         assert!(rl.allow_at(Command::Block, 1_000 + RATE_WINDOW_SECS));
+    }
+
+    #[test]
+    fn sync_overflow_throttles_without_reputation_score() {
+        let mut limiter = MessageRateLimiter::with_config(RateLimitConfig {
+            window_secs: 10,
+            cheap: 1,
+            sync: 1,
+            tx: 1,
+            block: 1,
+        });
+        assert_eq!(
+            limiter.check_at(Command::GetBlockData, false, 1_000),
+            RateLimitDecision::Allow
+        );
+        for _ in 0..32 {
+            assert_eq!(
+                limiter.check_at(Command::GetBlockData, false, 1_000),
+                RateLimitDecision::Throttle {
+                    category: RateCategory::Sync,
+                    score_violation: false,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn requested_block_response_uses_sync_policy() {
+        let mut limiter = MessageRateLimiter::with_config(RateLimitConfig {
+            window_secs: 10,
+            cheap: 1,
+            sync: 1,
+            tx: 1,
+            block: 1,
+        });
+        assert_eq!(
+            limiter.check_at(Command::Block, true, 1_000),
+            RateLimitDecision::Allow
+        );
+        assert_eq!(
+            limiter.check_at(Command::Block, true, 1_000),
+            RateLimitDecision::Throttle {
+                category: RateCategory::Sync,
+                score_violation: false,
+            }
+        );
+    }
+
+    #[test]
+    fn non_sync_overflow_scores_at_most_once_per_window() {
+        let mut limiter = MessageRateLimiter::with_config(RateLimitConfig {
+            window_secs: 10,
+            cheap: 1,
+            sync: 1,
+            tx: 1,
+            block: 1,
+        });
+        assert_eq!(
+            limiter.check_at(Command::Pong, false, 1_000),
+            RateLimitDecision::Allow
+        );
+        assert_eq!(
+            limiter.check_at(Command::Pong, false, 1_000),
+            RateLimitDecision::Throttle {
+                category: RateCategory::Cheap,
+                score_violation: true,
+            }
+        );
+        for _ in 0..32 {
+            assert_eq!(
+                limiter.check_at(Command::Pong, false, 1_000),
+                RateLimitDecision::Throttle {
+                    category: RateCategory::Cheap,
+                    score_violation: false,
+                }
+            );
+        }
+        assert_eq!(
+            limiter.check_at(Command::Pong, false, 1_010),
+            RateLimitDecision::Allow
+        );
+        assert_eq!(
+            limiter.check_at(Command::Pong, false, 1_010),
+            RateLimitDecision::Throttle {
+                category: RateCategory::Cheap,
+                score_violation: true,
+            }
+        );
     }
 
     #[test]

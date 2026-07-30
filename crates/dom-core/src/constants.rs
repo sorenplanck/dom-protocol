@@ -281,6 +281,9 @@ pub const MAX_HEADERS_PER_MSG: usize = 2_000;
 /// Policy. Maximum block hashes a GetBlockData request can list.
 pub const MAX_GETBLOCKDATA_HASHES: usize = 128;
 
+/// Policy. Maximum block bodies served for one GetBlockData request.
+pub const MAX_GETBLOCKDATA_SERVE_HASHES: usize = 16;
+
 /// Policy. Maximum block locator hashes in GetHeaders.
 pub const MAX_LOCATOR_HASHES: usize = 32;
 

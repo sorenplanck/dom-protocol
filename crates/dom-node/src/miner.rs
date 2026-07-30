@@ -1074,6 +1074,8 @@ async fn mine_one_attempt(
 
         let mut interruption: Option<MiningAttempt> = None;
         let mut cancellation_poll = tokio::time::interval(Duration::from_millis(100));
+        // Skip: after coordinator starvation, one current cancellation check is
+        // sufficient; replaying missed polls cannot improve responsiveness.
         cancellation_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let work_result = loop {
             tokio::select! {
