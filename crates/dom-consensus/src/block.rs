@@ -4,7 +4,7 @@
 //! DOM_RFC_0007_Validation_Order.md — Block validation steps 1-7.
 
 use dom_core::{
-    BlockHeight, DomError, Hash256, PeerMisbehavior, Timestamp, BLOCK_VERSION_LEGACY,
+    required_block_version_for_network, BlockHeight, DomError, Hash256, PeerMisbehavior, Timestamp,
     FUTURE_BLOCK_SOFT_BUFFER_SECS, MAX_FUTURE_BLOCK_TIME, MEDIAN_TIME_WINDOW,
 };
 use dom_pow::CompactTarget;
@@ -222,12 +222,13 @@ impl DomDeserialize for BlockHeader {
 }
 
 /// Validate block header syntax (step 2 of RFC-0007 block validation).
-pub fn validate_header_syntax(header: &BlockHeader) -> Result<(), DomError> {
+pub fn validate_header_syntax(header: &BlockHeader, network_magic: u32) -> Result<(), DomError> {
     // Version check
-    if header.version != BLOCK_VERSION_LEGACY {
+    let required_version = required_block_version_for_network(network_magic, header.height.0);
+    if header.version != required_version {
         return Err(DomError::Invalid(format!(
-            "unsupported block version: {} (expected {})",
-            header.version, BLOCK_VERSION_LEGACY
+            "invalid block version {} at height {} (required {})",
+            header.version, header.height.0, required_version
         )));
     }
     match classify_header_link(header.height.0, header.prev_hash == Hash256::ZERO) {
@@ -443,6 +444,9 @@ pub fn validate_pow_for_network(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dom_core::{
+        BLOCK_VERSION_LEGACY, BLOCK_VERSION_V3, MAINNET_V3_ACTIVATION_HEIGHT, NETWORK_MAGIC_MAINNET,
+    };
 
     fn dummy_header() -> BlockHeader {
         BlockHeader {
@@ -465,21 +469,47 @@ mod tests {
 
     #[test]
     fn genesis_header_valid_syntax() {
-        assert!(validate_header_syntax(&dummy_header()).is_ok());
+        assert!(validate_header_syntax(&dummy_header(), NETWORK_MAGIC_MAINNET).is_ok());
     }
 
     #[test]
     fn genesis_nonzero_prev_hash_rejected() {
         let mut h = dummy_header();
         h.prev_hash = Hash256::from_bytes([0x01u8; 32]);
-        assert!(validate_header_syntax(&h).is_err());
+        assert!(validate_header_syntax(&h, NETWORK_MAGIC_MAINNET).is_err());
     }
 
     #[test]
     fn wrong_version_rejected() {
         let mut h = dummy_header();
         h.version = 99;
-        assert!(validate_header_syntax(&h).is_err());
+        assert!(validate_header_syntax(&h, NETWORK_MAGIC_MAINNET).is_err());
+    }
+
+    #[test]
+    fn mainnet_v3_activation_boundary_is_bidirectional() {
+        let mut header = dummy_header();
+
+        header.height = BlockHeight(MAINNET_V3_ACTIVATION_HEIGHT - 1);
+        header.prev_hash = Hash256::from_bytes([1; 32]);
+        header.version = BLOCK_VERSION_LEGACY;
+        assert!(validate_header_syntax(&header, NETWORK_MAGIC_MAINNET).is_ok());
+
+        header.version = BLOCK_VERSION_V3;
+        assert!(matches!(
+            validate_header_syntax(&header, NETWORK_MAGIC_MAINNET),
+            Err(DomError::Invalid(_))
+        ));
+
+        header.height = BlockHeight(MAINNET_V3_ACTIVATION_HEIGHT);
+        header.version = BLOCK_VERSION_V3;
+        assert!(validate_header_syntax(&header, NETWORK_MAGIC_MAINNET).is_ok());
+
+        header.version = BLOCK_VERSION_LEGACY;
+        assert!(matches!(
+            validate_header_syntax(&header, NETWORK_MAGIC_MAINNET),
+            Err(DomError::Invalid(_))
+        ));
     }
 
     #[test]
@@ -497,6 +527,23 @@ mod tests {
         let bytes = h.to_bytes().unwrap();
         let h2 = BlockHeader::from_bytes(&bytes).unwrap();
         assert_eq!(h, h2);
+    }
+
+    #[test]
+    fn v2_and_v3_headers_share_the_same_serialized_layout() {
+        use dom_serialization::DomSerialize;
+
+        let legacy = dummy_header();
+        let mut v3 = legacy.clone();
+        v3.version = BLOCK_VERSION_V3;
+        let legacy_bytes = legacy.to_bytes().unwrap();
+        let v3_bytes = v3.to_bytes().unwrap();
+
+        assert_eq!(legacy_bytes.len(), BlockHeader::MIN_SERIALIZED_SIZE);
+        assert_eq!(legacy_bytes.len(), v3_bytes.len());
+        assert_eq!(&legacy_bytes[..4], &BLOCK_VERSION_LEGACY.to_le_bytes());
+        assert_eq!(&v3_bytes[..4], &BLOCK_VERSION_V3.to_le_bytes());
+        assert_eq!(&legacy_bytes[4..], &v3_bytes[4..]);
     }
 
     #[test]

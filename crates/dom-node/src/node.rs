@@ -5011,9 +5011,9 @@ mod tests {
     };
     use dom_core::PeerMisbehavior;
     use dom_core::{
-        Amount, BlockHeight, DomError, Hash256, Timestamp, BLOCK_VERSION_LEGACY,
-        KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN, MAX_BLOCK_SERIALIZED_SIZE, MIN_RELAY_FEE_RATE,
-        NETWORK_MAGIC_REGTEST, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+        Amount, BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
+        MAX_BLOCK_SERIALIZED_SIZE, MIN_RELAY_FEE_RATE, NETWORK_MAGIC_REGTEST, TAG_KERNEL_MSG,
+        TAG_KERNEL_MSG_COINBASE,
     };
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::keys::SecretKey;
@@ -5233,7 +5233,10 @@ mod tests {
         let mut nonce = 0u64;
         loop {
             let mut header = BlockHeader {
-                version: BLOCK_VERSION_LEGACY,
+                version: dom_core::required_block_version_for_network(
+                    NETWORK_MAGIC_REGTEST,
+                    height.0,
+                ),
                 height,
                 prev_hash,
                 timestamp,

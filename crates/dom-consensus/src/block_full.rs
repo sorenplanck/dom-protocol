@@ -55,7 +55,16 @@ impl Block {
 }
 
 pub fn validate_block(block: &Block, ctx: &ValidationContext) -> Result<(), DomError> {
-    validate_header_syntax(&block.header)?;
+    validate_block_for_network(block, ctx, dom_core::NETWORK_MAGIC_MAINNET)
+}
+
+/// Validate a complete block under the block-version schedule for `network_magic`.
+pub fn validate_block_for_network(
+    block: &Block,
+    ctx: &ValidationContext,
+    network_magic: u32,
+) -> Result<(), DomError> {
+    validate_header_syntax(&block.header, network_magic)?;
 
     let block_weight = block.weight()?;
     if block_weight > MAX_BLOCK_WEIGHT {

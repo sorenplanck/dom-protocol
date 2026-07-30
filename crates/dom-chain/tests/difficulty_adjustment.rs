@@ -58,6 +58,7 @@ fn commitment(seed: u8, value: u64) -> Commitment {
 }
 
 fn synthetic_block(
+    network_magic: u32,
     prev_hash: Hash256,
     height: u64,
     timestamp: u64,
@@ -68,7 +69,7 @@ fn synthetic_block(
     let coinbase_commitment = commitment((height as u8).wrapping_add(1), height + 1);
     Block {
         header: BlockHeader {
-            version: dom_core::PROTOCOL_VERSION,
+            version: dom_core::required_block_version_for_network(network_magic, height),
             height: BlockHeight(height),
             prev_hash,
             timestamp: Timestamp(timestamp),
@@ -120,6 +121,7 @@ fn populate_history(
         let timestamp = genesis_ts + spacing_secs.saturating_mul(height);
         total_difficulty = total_difficulty.saturating_add(1);
         let block = synthetic_block(
+            network_magic,
             prev_hash,
             height,
             timestamp,
@@ -171,6 +173,7 @@ fn populate_history_with_timestamps(
     for (height, timestamp) in timestamps.iter().copied().enumerate() {
         total_difficulty = total_difficulty.saturating_add(U256::from(block_diff));
         let block = synthetic_block(
+            network_magic,
             prev_hash,
             height as u64,
             timestamp,
@@ -238,6 +241,7 @@ fn chain_with_genesis_total_difficulty(total_difficulty: U256) -> (TempDir, Chai
     let dir = TempDir::new().unwrap();
     let store = open_test_store(dir.path());
     let mut genesis = synthetic_block(
+        NETWORK_MAGIC_REGTEST,
         Hash256::ZERO,
         0,
         genesis_anchor(NETWORK_MAGIC_REGTEST)
@@ -280,7 +284,10 @@ fn child_header_with_total(
         .expect("parent header");
     let parent = BlockHeader::from_bytes(&parent_bytes).expect("parent decode");
     let mut header = BlockHeader {
-        version: dom_core::PROTOCOL_VERSION,
+        version: dom_core::required_block_version_for_network(
+            NETWORK_MAGIC_REGTEST,
+            parent.height.0 + 1,
+        ),
         height: parent.height.checked_next().expect("next height"),
         prev_hash: parent_hash,
         timestamp: parent
@@ -487,7 +494,10 @@ fn public_validator_rejects_wrong_asert_target() {
     assert_ne!(wrong_target, expected);
 
     let header = BlockHeader {
-        version: dom_core::PROTOCOL_VERSION,
+        version: dom_core::required_block_version_for_network(
+            NETWORK_MAGIC_TESTNET,
+            child_height.0,
+        ),
         height: child_height,
         prev_hash: chain.tip_hash,
         timestamp: child_timestamp,
@@ -529,7 +539,10 @@ fn validate_header_only_rejects_non_increasing_parent_timestamp() {
     let child_height = parent.height.checked_next().expect("next height");
     let target = CompactTarget(REGTEST_TARGET_COMPACT);
     let header = BlockHeader {
-        version: dom_core::PROTOCOL_VERSION,
+        version: dom_core::required_block_version_for_network(
+            NETWORK_MAGIC_REGTEST,
+            child_height.0,
+        ),
         height: child_height,
         prev_hash: chain.tip_hash,
         timestamp: parent.timestamp,
@@ -572,7 +585,10 @@ fn validate_header_only_rejects_median_time_past_violation() {
     let child_timestamp = Timestamp(parent.timestamp.0 + 1);
     let target = CompactTarget(REGTEST_TARGET_COMPACT);
     let header = BlockHeader {
-        version: dom_core::PROTOCOL_VERSION,
+        version: dom_core::required_block_version_for_network(
+            NETWORK_MAGIC_REGTEST,
+            child_height.0,
+        ),
         height: child_height,
         prev_hash: chain.tip_hash,
         timestamp: child_timestamp,
@@ -614,7 +630,10 @@ fn validate_header_only_rejects_total_difficulty_mismatch() {
         .expect("next timestamp");
     let target = CompactTarget(REGTEST_TARGET_COMPACT);
     let header = BlockHeader {
-        version: dom_core::PROTOCOL_VERSION,
+        version: dom_core::required_block_version_for_network(
+            NETWORK_MAGIC_REGTEST,
+            child_height.0,
+        ),
         height: child_height,
         prev_hash: chain.tip_hash,
         timestamp: child_timestamp,

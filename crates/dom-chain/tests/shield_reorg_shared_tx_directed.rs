@@ -66,7 +66,7 @@ use dom_consensus::{
 };
 use dom_core::{
     Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+    TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::keys::SecretKey;
@@ -224,7 +224,10 @@ fn synthetic_block(
 
     Block {
         header: BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: dom_core::required_block_version_for_network(
+                dom_core::NETWORK_MAGIC_REGTEST,
+                height,
+            ),
             height: BlockHeight(height),
             prev_hash,
             timestamp: Timestamp(1_700_100_000 + height),
@@ -256,7 +259,10 @@ fn valid_coinbase_only_block(
         compute_block_pmmr_roots(BlockHeight(height), &coinbase, &[]).expect("pmmr roots");
     Block {
         header: BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: dom_core::required_block_version_for_network(
+                dom_core::NETWORK_MAGIC_REGTEST,
+                height,
+            ),
             height: BlockHeight(height),
             prev_hash,
             timestamp: Timestamp(1_700_200_000 + height),

@@ -27,7 +27,7 @@ use dom_consensus::{
 };
 use dom_core::{
     Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    MIN_RELAY_FEE_RATE, NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION, TAG_KERNEL_MSG_COINBASE,
+    MIN_RELAY_FEE_RATE, NETWORK_MAGIC_REGTEST, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::{
     hash::blake2b_256_tagged,
@@ -125,7 +125,7 @@ fn mine_fast_header(
     let mut nonce = 0u64;
     loop {
         let mut header = BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: dom_core::required_block_version_for_network(NETWORK_MAGIC_REGTEST, height.0),
             height,
             prev_hash,
             timestamp,
