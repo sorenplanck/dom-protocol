@@ -10,7 +10,7 @@ use crate::node::{clear_persisted_mempool_snapshot, snapshot_tx_chain_view, DomN
 use dom_config::Network;
 use dom_consensus::{derive_chain_id, Block, Transaction};
 use dom_core::{
-    fee_policy, DomError, Hash256, MAX_TX_WEIGHT, MIN_RELAY_FEE_RATE, PROTOCOL_VERSION,
+    fee_policy, DomError, Hash256, MAX_TX_WEIGHT, MIN_RELAY_FEE_RATE, WIRE_PROTOCOL_VERSION,
 };
 use dom_crypto::hash::blake2b_256;
 use dom_serialization::{DomDeserialize, DomSerialize};
@@ -210,7 +210,7 @@ impl EmbeddedWalletCoreApi {
             network_magic: chain.network_magic,
             chain_id: *chain_id.as_bytes(),
             genesis_hash: *chain.genesis_hash.as_bytes(),
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: WIRE_PROTOCOL_VERSION,
             range_proof_serialization_version: dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
             coinbase_maturity: chain.coinbase_maturity,
             current_tip: BlockRef {

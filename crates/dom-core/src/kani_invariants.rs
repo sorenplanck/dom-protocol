@@ -13,8 +13,8 @@ use crate::{
     INITIAL_BLOCK_REWARD, MAINNET_GENESIS_FINALIZED, MAX_BLOCK_SERIALIZED_SIZE,
     MAX_GETBLOCKDATA_HASHES, MAX_HEADERS_PER_MSG, MAX_INPUTS_PER_TX, MAX_KERNELS_PER_TX,
     MAX_LOCATOR_HASHES, MAX_OUTPUTS_PER_TX, MAX_SUPPLY_NOMS, MIN_RELAY_FEE_RATE,
-    NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET, PROTOCOL_VERSION,
-    RECOVERY_CAPSULE_SIZE, REGTEST_COINBASE_MATURITY,
+    NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET, RECOVERY_CAPSULE_SIZE,
+    REGTEST_COINBASE_MATURITY, WIRE_PROTOCOL_VERSION,
 };
 
 #[kani::proof]
@@ -216,7 +216,10 @@ fn frozen_consensus_constants_and_genesis_identity_hold() {
             && NETWORK_MAGIC_TESTNET != NETWORK_MAGIC_REGTEST,
         "network magic values must be pairwise distinct",
     );
-    kani::assert(PROTOCOL_VERSION == 2, "wire protocol version is frozen");
+    kani::assert(
+        WIRE_PROTOCOL_VERSION == 2,
+        "wire protocol version is frozen",
+    );
     kani::assert(FEE_POLICY_VERSION == 1, "fee policy version is frozen");
     kani::assert(
         RECOVERY_CAPSULE_SIZE == 96,

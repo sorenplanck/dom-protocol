@@ -311,8 +311,20 @@ pub const MEDIAN_TIME_WINDOW: usize = 11;
 
 // ── Protocol & Network Identity ──────────────────────────────────────────────
 
-/// Network. Protocol version.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// Network. P2P wire protocol version.
+///
+/// This version is committed to the Noise prologue and exchanged in `Hello`.
+/// It is deliberately independent from block-version consensus rules.
+pub const WIRE_PROTOCOL_VERSION: u32 = 2;
+
+/// Consensus. Block version used by the existing chain.
+pub const BLOCK_VERSION_LEGACY: u32 = 2;
+
+/// Backwards-compatible name for the P2P wire protocol version.
+///
+/// New code must use [`WIRE_PROTOCOL_VERSION`] for networking and
+/// [`BLOCK_VERSION_LEGACY`] for block construction or validation.
+pub const PROTOCOL_VERSION: u32 = WIRE_PROTOCOL_VERSION;
 
 /// Network. Mainnet magic bytes: ASCII "DOM1" = 0x44_4F_4D_31
 pub const NETWORK_MAGIC_MAINNET: u32 = 0x444F_4D31;
