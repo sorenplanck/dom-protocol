@@ -54,7 +54,9 @@ const N: u64 = 10;
 /// PMMR roots, or canonical UTXO/kernel state changes this digest and fails CI.
 // CON-009: re-pinned after non-genesis headers began binding the complete
 // canonical block body into the third root. The frozen genesis is unchanged.
-const PINNED_DIGEST: &str = "4565f28da0e0454ddc145f20987357a44fd133639051169494a6619131f1d249";
+// Hard fork v3: re-pinned because Regtest post-genesis headers now carry the
+// required block version 3. The frozen Regtest genesis remains unchanged.
+const PINNED_DIGEST: &str = "32fdbff37ab89ad991272e178dc5196c258c6f01f9dc8328bdda63fad672fe53";
 
 /// Build a deterministic Regtest chain of `N` blocks past genesis using the real
 /// production construction path, then return a canonical byte dump of its state:
@@ -129,7 +131,10 @@ async fn build_and_dump_canonical_state(tag: &str, port: u16) -> Vec<u8> {
             .unwrap_or([0u8; 32]);
 
         let mut header = BlockHeader {
-            version: dom_core::PROTOCOL_VERSION,
+            version: dom_core::required_block_version_for_network(
+                dom_core::NETWORK_MAGIC_REGTEST,
+                height,
+            ),
             height: BlockHeight(height),
             prev_hash,
             timestamp: Timestamp(genesis_ts + height),

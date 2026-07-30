@@ -965,7 +965,7 @@ fn target_to_rescue_compact(t: &[u8; 32]) -> u32 {
         }
         if best
             .as_ref()
-            .is_none_or(|(_, current)| target_gt(&expanded, current))
+            .map_or(true, |(_, current)| target_gt(&expanded, current))
         {
             best = Some((compact, expanded));
         }

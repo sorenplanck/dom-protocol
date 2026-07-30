@@ -1191,6 +1191,9 @@ struct MiningStats {
 }
 
 #[derive(Debug)]
+// Keep the mined header inline: this short-lived worker result is consumed
+// immediately, and boxing it would add an allocation to every successful block.
+#[allow(clippy::large_enum_variant)]
 enum MiningWork {
     Mined(BlockHeader, MiningStats),
     Cancelled(MiningStats),
