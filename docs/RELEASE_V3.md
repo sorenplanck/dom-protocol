@@ -17,6 +17,24 @@
 same P2P handshake, but legacy nodes will not follow the valid Mainnet chain
 after height 12,500.
 
+## Network synchronization fixes
+
+corrige seeds sendo banidos durante a sincronização inicial (rajada de
+re-requisições após IBD longa); penalidades de peer passam a expirar de fato;
+erros locais deixam de penalizar peers.
+
+- Timers de catch-up descartam ticks perdidos em vez de reproduzi-los em rajada.
+- Tráfego excedente de sincronização recebe pacing/throttle sem pontos de ban.
+- Respostas a `GetBlockData` explicitamente solicitado são classificadas como
+  sync, não como relay espontâneo.
+- O handler serve no máximo 16 corpos por requisição.
+- IPs atualmente resolvidos dos seeds configurados nunca são recusados pelo
+  limiar de reputação e são atualizados após nova resolução DNS.
+- O checkpoint `ibd_session/v2` migra o formato legado; checkpoint local
+  inconsistente é descartado e a sincronização reinicia do tip local.
+- A ferramenta offline
+  `dom-peer-reputation-clear <node-data-dir>` remove reputação persistida v1/v2.
+
 ## Required release notice
 
 > Hard fork at height 12,500; v2 nodes will not follow the chain after that
