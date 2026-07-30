@@ -4,8 +4,8 @@
 //! DOM_RFC_0007_Validation_Order.md — Block validation steps 1-7.
 
 use dom_core::{
-    BlockHeight, DomError, Hash256, PeerMisbehavior, Timestamp, FUTURE_BLOCK_SOFT_BUFFER_SECS,
-    MAX_FUTURE_BLOCK_TIME, MEDIAN_TIME_WINDOW, PROTOCOL_VERSION,
+    BlockHeight, DomError, Hash256, PeerMisbehavior, Timestamp, BLOCK_VERSION_LEGACY,
+    FUTURE_BLOCK_SOFT_BUFFER_SECS, MAX_FUTURE_BLOCK_TIME, MEDIAN_TIME_WINDOW,
 };
 use dom_pow::CompactTarget;
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
@@ -224,10 +224,10 @@ impl DomDeserialize for BlockHeader {
 /// Validate block header syntax (step 2 of RFC-0007 block validation).
 pub fn validate_header_syntax(header: &BlockHeader) -> Result<(), DomError> {
     // Version check
-    if header.version != PROTOCOL_VERSION {
+    if header.version != BLOCK_VERSION_LEGACY {
         return Err(DomError::Invalid(format!(
             "unsupported block version: {} (expected {})",
-            header.version, PROTOCOL_VERSION
+            header.version, BLOCK_VERSION_LEGACY
         )));
     }
     match classify_header_link(header.height.0, header.prev_hash == Hash256::ZERO) {
@@ -446,7 +446,7 @@ mod tests {
 
     fn dummy_header() -> BlockHeader {
         BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: BLOCK_VERSION_LEGACY,
             height: BlockHeight::GENESIS,
             prev_hash: Hash256::ZERO,
             timestamp: Timestamp(1_704_067_200),

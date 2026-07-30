@@ -1386,7 +1386,7 @@ fn mine_blocking_cancellable(
         throttle.describe()
     );
     let template = BlockHeader {
-        version: dom_core::PROTOCOL_VERSION,
+        version: dom_core::BLOCK_VERSION_LEGACY,
         prev_hash: tip_hash,
         height: BlockHeight(new_height),
         timestamp: block_timestamp,
@@ -1903,8 +1903,8 @@ mod genesis_determinism_tests {
     use dom_consensus::compute_block_pmmr_roots;
     use dom_consensus::{Block, CoinbaseTransaction, Transaction};
     use dom_core::{
-        BlockHeight, Hash256, Timestamp, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST,
-        NETWORK_MAGIC_TESTNET, PROTOCOL_VERSION,
+        BlockHeight, Hash256, Timestamp, BLOCK_VERSION_LEGACY, NETWORK_MAGIC_MAINNET,
+        NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET,
     };
     use dom_crypto::pedersen::Commitment;
     use dom_crypto::BlindingFactor;
@@ -2005,7 +2005,7 @@ mod genesis_determinism_tests {
 
     fn put_seed_header(node: &DomNode, height: u64, hash: &[u8; 32]) {
         let header = BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: BLOCK_VERSION_LEGACY,
             prev_hash: Hash256::from_bytes([0x01; 32]),
             height: BlockHeight(height),
             timestamp: Timestamp(1_704_067_200 + height),
@@ -2130,7 +2130,7 @@ mod genesis_determinism_tests {
         let mut nonce = 0u64;
         loop {
             let mut header = BlockHeader {
-                version: PROTOCOL_VERSION,
+                version: BLOCK_VERSION_LEGACY,
                 prev_hash,
                 height,
                 timestamp,
@@ -2759,7 +2759,7 @@ mod genesis_determinism_tests {
             let target = compute_expected_target(config.network.magic(), timestamp, BlockHeight(1))
                 .expect("target");
             BlockHeader {
-                version: PROTOCOL_VERSION,
+                version: BLOCK_VERSION_LEGACY,
                 prev_hash: Hash256::ZERO,
                 height: BlockHeight(1),
                 timestamp,
@@ -3221,7 +3221,7 @@ mod cadence_probe_tests {
             let mut nonce = 0u64;
             loop {
                 let header = BlockHeader {
-                    version: dom_core::PROTOCOL_VERSION,
+                    version: dom_core::BLOCK_VERSION_LEGACY,
                     prev_hash: Hash256::ZERO,
                     height: BlockHeight(1),
                     timestamp: Timestamp(now_secs()),

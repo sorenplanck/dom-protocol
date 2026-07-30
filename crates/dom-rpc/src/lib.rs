@@ -10,7 +10,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use dom_core::PROTOCOL_VERSION;
+use dom_core::WIRE_PROTOCOL_VERSION;
 use serde::{Deserialize, Serialize};
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc};
 use tracing::{error, info, warn};
@@ -491,7 +491,7 @@ async fn health() -> Json<HealthResponse> {
 
 async fn status(State(handle): State<Arc<dyn NodeHandle>>) -> Json<StatusResponse> {
     Json(StatusResponse {
-        version: PROTOCOL_VERSION,
+        version: WIRE_PROTOCOL_VERSION,
         chain_height: handle.chain_height(),
         mempool_size: handle.mempool_size(),
         network: handle.network(),
@@ -1071,7 +1071,7 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let body = body_json(r).await;
-        assert_eq!(body["version"], serde_json::json!(PROTOCOL_VERSION));
+        assert_eq!(body["version"], serde_json::json!(WIRE_PROTOCOL_VERSION));
         // app()'s MockNode is configured for regtest, so /status must report
         // it — never the old hardcoded "mainnet" (DOM-AUDIT-006).
         assert_eq!(body["network"], serde_json::json!("regtest"));

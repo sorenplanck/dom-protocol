@@ -661,7 +661,7 @@ mod tests {
     #[test]
     fn hello_payload_roundtrip() {
         let hello = HelloPayload {
-            version: dom_core::PROTOCOL_VERSION,
+            version: dom_core::WIRE_PROTOCOL_VERSION,
             network_magic: dom_core::NETWORK_MAGIC_MAINNET,
             chain_id: [0xCCu8; 32],
             best_height: 12345,
@@ -678,7 +678,7 @@ mod tests {
 
     fn hello_payload_for_tests() -> HelloPayload {
         HelloPayload {
-            version: dom_core::PROTOCOL_VERSION,
+            version: dom_core::WIRE_PROTOCOL_VERSION,
             network_magic: dom_core::NETWORK_MAGIC_MAINNET,
             chain_id: [0xCCu8; 32],
             best_height: 12345,
