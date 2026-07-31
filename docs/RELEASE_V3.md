@@ -117,6 +117,18 @@ The remaining-time estimate must be recalculated from the current observer
 height immediately before publishing. At the target cadence, each remaining
 block represents approximately two minutes.
 
+## Release assets
+
+The proposed release tag is `v0.2.0`. Publish these assets together:
+
+- `dom-node-0.2.0-linux-x86_64`;
+- `dom-node-0.2.0-linux-x86_64.minisig`;
+- `dom-node-0.2.0-linux-x86_64.sha256`;
+- this `RELEASE_V3.md` file as both the release body and an attached artifact.
+
+The complete publication and infrastructure-update procedure is in
+`docs/RELEASE_V3_RUNBOOK.md`.
+
 ## Upgrade
 
 Stop the current node, replace it with the signed 0.2.0 release binary, and
