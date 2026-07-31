@@ -51,8 +51,8 @@ seed2.dom-protocol.org -> 64.177.121.62
 The release binary must run on the Ubuntu 22.04 infrastructure
 (`GLIBC 2.35`). Do not publish a binary built directly on a newer workstation:
 that artifact may acquire a `GLIBC_2.38` dependency and fail before `main`.
-Build in the pinned Debian Bullseye container, then test the result in an
-Ubuntu 22.04 container.
+Build in the pinned Ubuntu 22.04 container, then test the result in clean
+Ubuntu 22.04 and Debian 12 containers.
 
 ```bash
 cd /home/leonardov/dom-release
@@ -63,25 +63,32 @@ export DOM_BUILD_COMMIT="$(git rev-parse HEAD)"
 test "${#DOM_BUILD_COMMIT}" -eq 40
 
 docker run --rm \
+  -e DEBIAN_FRONTEND=noninteractive \
   -e DOM_BUILD_COMMIT="$DOM_BUILD_COMMIT" \
-  -v "$PWD:/src:ro" \
-  -v "$PWD/target/release-compatible:/out" \
-  rust:1.82-bullseye \
+  -v "$PWD:/src" \
+  -w /src \
+  ubuntu:22.04 \
   bash -lc '
+    set -euo pipefail
     apt-get update
-    apt-get install -y --no-install-recommends build-essential cmake pkg-config libclang-dev clang
-    cp -a /src /build
-    cd /build
-    CARGO_TARGET_DIR=/cargo-target cargo build --locked --release -p dom-node --bin dom-node
-    install -m 0755 /cargo-target/release/dom-node /out/dom-node
+    apt-get install -y --no-install-recommends \
+      curl ca-certificates build-essential pkg-config libssl-dev \
+      cmake git clang libclang-dev
+    curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+    . /root/.cargo/env
+    cargo build --locked --release -p dom-node --bin dom-node
   '
 
-install -m 0755 target/release-compatible/dom-node "$RELEASE_ASSET"
 "$RELEASE_ASSET" --version
 
 docker run --rm \
   -v "$RELEASE_ASSET:/usr/local/bin/dom-node:ro" \
   ubuntu:22.04 \
+  /usr/local/bin/dom-node --version
+
+docker run --rm \
+  -v "$RELEASE_ASSET:/usr/local/bin/dom-node:ro" \
+  debian:12-slim \
   /usr/local/bin/dom-node --version
 
 sha256sum "$RELEASE_ASSET" | tee "$RELEASE_SHA256_FILE"
