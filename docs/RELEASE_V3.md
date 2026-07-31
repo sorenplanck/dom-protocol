@@ -119,12 +119,14 @@ block represents approximately two minutes.
 
 ## Release assets
 
-The proposed release tag is `v0.2.0`. Publish these assets together:
+The release tag is `v0.2.0`. The draft is created with:
 
-- `dom-node-0.2.0-linux-x86_64`;
-- `dom-node-0.2.0-linux-x86_64.minisig`;
-- `dom-node-0.2.0-linux-x86_64.sha256`;
-- this `RELEASE_V3.md` file as both the release body and an attached artifact.
+- `dom-node`;
+- `dom-node.sha256`.
+
+**Operator signature pending:** `dom-node.minisig` must be generated and
+uploaded by the release operator before the draft is published. The Minisign
+private key is not handled by the build or publication agent.
 
 The complete publication and infrastructure-update procedure is in
 `docs/RELEASE_V3_RUNBOOK.md`.

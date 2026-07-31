@@ -13,8 +13,7 @@ cd /home/leonardov/dom-release
 
 export RELEASE_BRANCH=release/mainnet
 export RELEASE_TAG=v0.2.0
-export RELEASE_NAME=dom-node-0.2.0-linux-x86_64
-export RELEASE_ASSET="$PWD/dist/$RELEASE_NAME"
+export RELEASE_ASSET="$PWD/target/release/dom-node"
 export RELEASE_SHA256_FILE="$RELEASE_ASSET.sha256"
 export RELEASE_SIGNATURE="$RELEASE_ASSET.minisig"
 export RELEASE_NOTES="$PWD/docs/RELEASE_V3.md"
@@ -33,9 +32,7 @@ export SEED1_UNIT=dom-mainnet.service
 export SEED2_UNIT=dom-mainnet.service
 export OBSERVER_UNIT=dom-mainnet.service
 export REMOTE_BINARY=/usr/local/bin/dom-node
-export REMOTE_ASSET=/tmp/dom-node-0.2.0-linux-x86_64
-
-export MINISIGN_SECRET_KEY="${MINISIGN_SECRET_KEY:?export the notebook Minisign secret-key path}"
+export REMOTE_ASSET=/tmp/dom-node-v0.2.0
 
 test "$OBSERVER_SSH" != 'root@REPLACE_WITH_OBSERVER_HOST'
 test "$(git branch --show-current)" = "$RELEASE_BRANCH"
@@ -49,7 +46,13 @@ seed1.dom-protocol.org -> 66.42.127.141
 seed2.dom-protocol.org -> 64.177.121.62
 ```
 
-## 2. Final local build and assets
+## 2. Final compatible build and unsigned assets
+
+The release binary must run on the Ubuntu 22.04 infrastructure
+(`GLIBC 2.35`). Do not publish a binary built directly on a newer workstation:
+that artifact may acquire a `GLIBC_2.38` dependency and fail before `main`.
+Build in the pinned Debian Bullseye container, then test the result in an
+Ubuntu 22.04 container.
 
 ```bash
 cd /home/leonardov/dom-release
@@ -58,20 +61,33 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 export DOM_BUILD_COMMIT="$(git rev-parse HEAD)"
 test "${#DOM_BUILD_COMMIT}" -eq 40
-DOM_BUILD_COMMIT="$DOM_BUILD_COMMIT" cargo build --release -p dom-node --bin dom-node
 
-mkdir -p dist
-install -m 0755 target/release/dom-node "$RELEASE_ASSET"
+docker run --rm \
+  -e DOM_BUILD_COMMIT="$DOM_BUILD_COMMIT" \
+  -v "$PWD:/src:ro" \
+  -v "$PWD/target/release-compatible:/out" \
+  rust:1.82-bullseye \
+  bash -lc '
+    apt-get update
+    apt-get install -y --no-install-recommends build-essential cmake pkg-config libclang-dev clang
+    cp -a /src /build
+    cd /build
+    CARGO_TARGET_DIR=/cargo-target cargo build --locked --release -p dom-node --bin dom-node
+    install -m 0755 /cargo-target/release/dom-node /out/dom-node
+  '
+
+install -m 0755 target/release-compatible/dom-node "$RELEASE_ASSET"
 "$RELEASE_ASSET" --version
 
+docker run --rm \
+  -v "$RELEASE_ASSET:/usr/local/bin/dom-node:ro" \
+  ubuntu:22.04 \
+  /usr/local/bin/dom-node --version
+
 sha256sum "$RELEASE_ASSET" | tee "$RELEASE_SHA256_FILE"
-minisign -Sm "$RELEASE_ASSET" \
-  -s "$MINISIGN_SECRET_KEY" \
-  -t "DOM Protocol 0.2.0 Mainnet hard fork v3"
 
 test -s "$RELEASE_ASSET"
 test -s "$RELEASE_SHA256_FILE"
-test -s "$RELEASE_SIGNATURE"
 test -s "$RELEASE_NOTES"
 ```
 
@@ -111,19 +127,27 @@ test "$(git rev-parse HEAD)" = "$(git rev-parse origin/release/mainnet)"
 test -z "$(git tag --list v0.2.0)"
 
 git tag -a v0.2.0 \
-  -m "DOM Protocol 0.2.0 — Mainnet hard fork v3 at height 12500"
+  -m "DOM Protocol 0.2.0 — hard fork v3 + correções de rede"
 git show --no-patch --decorate v0.2.0
-git push origin v0.2.0
+git push origin refs/tags/v0.2.0
 ```
 
-## 5. Create the GitHub release
+Confirm that the branch and tag both resolve to the intended commit:
 
-Attach all four release artifacts:
+```bash
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/release/mainnet)"
+test "$(git rev-list -n 1 v0.2.0)" = "$(git rev-parse HEAD)"
+git rev-parse HEAD
+```
 
-1. `dom-node-0.2.0-linux-x86_64`
-2. `dom-node-0.2.0-linux-x86_64.minisig`
-3. `dom-node-0.2.0-linux-x86_64.sha256`
-4. `docs/RELEASE_V3.md`
+The final command prints the exact revision that Wallet V3 must pin.
+
+## 5. Create the unsigned draft GitHub release
+
+Create the draft with these two unsigned artifacts:
+
+1. `dom-node`
+2. `dom-node.sha256`
 
 Use the same release notes as the GitHub release body:
 
@@ -131,20 +155,31 @@ Use the same release notes as the GitHub release body:
 cd /home/leonardov/dom-release
 
 gh release create v0.2.0 \
-  "$RELEASE_ASSET" \
-  "$RELEASE_SIGNATURE" \
-  "$RELEASE_SHA256_FILE" \
-  "$RELEASE_NOTES" \
-  --title "DOM Protocol 0.2.0 — Mainnet hard fork v3" \
+  --draft \
+  --title "DOM Protocol 0.2.0" \
   --notes-file "$RELEASE_NOTES" \
-  --verify-tag
+  "$RELEASE_ASSET" \
+  "$RELEASE_SHA256_FILE"
 ```
 
-Record the published URL:
+Record the draft URL:
 
 ```bash
-gh release view v0.2.0 --json url,tagName,name,assets
+gh release view v0.2.0 --json url,isDraft,tagName,name,assets
 ```
+
+The operator signs the exact uploaded `dom-node` file. Codex must neither
+request nor handle the Minisign private key. After signing, the operator adds
+the detached signature without replacing the binary:
+
+```bash
+minisign -Sm "$RELEASE_ASSET"
+test -s "$RELEASE_SIGNATURE"
+gh release upload v0.2.0 "$RELEASE_SIGNATURE"
+```
+
+Verify all three assets, then publish the draft in the GitHub UI. The expected
+final asset set is `dom-node`, `dom-node.sha256`, and `dom-node.minisig`.
 
 ## 6. Remote preflight — no changes
 
@@ -191,7 +226,8 @@ ssh "$SEED1_SSH" \
    sudo systemctl is-active '$SEED1_UNIT'
    '$REMOTE_BINARY' --version
    sha256sum '$REMOTE_BINARY'
-   curl -fsS http://127.0.0.1:18080/status"
+   curl -fsS http://127.0.0.1:3371/metrics |
+     grep -E '^(dom_chain_height|dom_best_known_peer_height|dom_peer_count) '"
 ```
 
 Observe seed1 before touching seed2:
@@ -225,7 +261,8 @@ ssh "$SEED2_SSH" \
    sudo systemctl is-active '$SEED2_UNIT'
    '$REMOTE_BINARY' --version
    sha256sum '$REMOTE_BINARY'
-   curl -fsS http://127.0.0.1:18080/status"
+   curl -fsS http://127.0.0.1:3371/metrics |
+     grep -E '^(dom_chain_height|dom_best_known_peer_height|dom_peer_count) '"
 ```
 
 Observe seed2 before touching the observer:
@@ -258,7 +295,8 @@ ssh "$OBSERVER_SSH" \
    sudo systemctl is-active '$OBSERVER_UNIT'
    '$REMOTE_BINARY' --version
    sha256sum '$REMOTE_BINARY'
-   curl -fsS http://127.0.0.1:18080/status"
+   curl -fsS http://127.0.0.1:3371/metrics |
+     grep -E '^(dom_chain_height|dom_best_known_peer_height|dom_peer_count) '"
 ```
 
 Observe the observer:
@@ -271,25 +309,54 @@ ssh "$OBSERVER_SSH" \
 
 Confirm that its height agrees with both seeds.
 
-## 10. Rollback
+## 10. Explicit rollback per machine
 
 Rollback one host at a time. Do not roll back after Mainnet reaches height
 12,500, because the legacy binary cannot follow valid v3 blocks.
 
-For a host and unit selected explicitly:
+### Seed1 rollback
 
 ```bash
-export ROLLBACK_SSH="$SEED1_SSH"
-export ROLLBACK_UNIT="$SEED1_UNIT"
-
-ssh "$ROLLBACK_SSH" \
+ssh "$SEED1_SSH" \
   "set -euo pipefail
    sudo test -x '$REMOTE_BINARY.bak'
-   sudo systemctl stop '$ROLLBACK_UNIT'
+   sudo systemctl stop '$SEED1_UNIT'
    sudo cp --preserve=mode,timestamps '$REMOTE_BINARY.bak' '$REMOTE_BINARY'
-   sudo systemctl start '$ROLLBACK_UNIT'
-   sudo systemctl is-active '$ROLLBACK_UNIT'
-   '$REMOTE_BINARY' --version"
+   sudo systemctl start '$SEED1_UNIT'
+   sudo systemctl is-active '$SEED1_UNIT'
+   '$REMOTE_BINARY' --version
+   curl -fsS http://127.0.0.1:3371/metrics |
+     grep -E '^(dom_chain_height|dom_best_known_peer_height|dom_peer_count) '"
+```
+
+### Seed2 rollback
+
+```bash
+ssh "$SEED2_SSH" \
+  "set -euo pipefail
+   sudo test -x '$REMOTE_BINARY.bak'
+   sudo systemctl stop '$SEED2_UNIT'
+   sudo cp --preserve=mode,timestamps '$REMOTE_BINARY.bak' '$REMOTE_BINARY'
+   sudo systemctl start '$SEED2_UNIT'
+   sudo systemctl is-active '$SEED2_UNIT'
+   '$REMOTE_BINARY' --version
+   curl -fsS http://127.0.0.1:3371/metrics |
+     grep -E '^(dom_chain_height|dom_best_known_peer_height|dom_peer_count) '"
+```
+
+### Observer rollback
+
+```bash
+ssh "$OBSERVER_SSH" \
+  "set -euo pipefail
+   sudo test -x '$REMOTE_BINARY.bak'
+   sudo systemctl stop '$OBSERVER_UNIT'
+   sudo cp --preserve=mode,timestamps '$REMOTE_BINARY.bak' '$REMOTE_BINARY'
+   sudo systemctl start '$OBSERVER_UNIT'
+   sudo systemctl is-active '$OBSERVER_UNIT'
+   '$REMOTE_BINARY' --version
+   curl -fsS http://127.0.0.1:3371/metrics |
+     grep -E '^(dom_chain_height|dom_best_known_peer_height|dom_peer_count) '"
 ```
 
 ## 11. Activation monitoring
