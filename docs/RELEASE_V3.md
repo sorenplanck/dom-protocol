@@ -124,6 +124,16 @@ The release tag is `v0.2.0`. The draft is created with:
 - `dom-node`;
 - `dom-node.sha256`.
 
+Official Linux x86-64 artifact:
+
+```text
+SHA-256: 6cbe8618a7b560ef5d62832e724805f81410fea779e5bc0dcf3c07a4d5e8969d
+```
+
+The artifact was built on Ubuntu 22.04 and requires at most GLIBC 2.34. It was
+executed successfully in clean Ubuntu 22.04 and Debian 12 containers, then
+validated on the Mainnet seed before replacing the release asset.
+
 **Operator signature pending:** `dom-node.minisig` must be generated and
 uploaded by the release operator before the draft is published. The Minisign
 private key is not handled by the build or publication agent.
