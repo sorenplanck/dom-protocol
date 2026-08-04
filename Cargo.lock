@@ -980,7 +980,9 @@ dependencies = [
  "dom-crypto",
  "dom-serialization",
  "hex",
+ "rand_core 0.6.4",
  "thiserror 1.0.69",
+ "zeroize",
 ]
 
 [[package]]
