@@ -19,13 +19,86 @@ fn purpose_registry_is_closed_and_versioned() {
     assert_eq!(PurposeV1::Refund.to_byte(), 1);
     assert_eq!(PurposeV1::ClaimAdaptor.to_byte(), 2);
     assert_eq!(PurposeV1::Funding.to_byte(), 3);
+    assert_eq!(PurposeV1::Sponsor.to_byte(), 4);
     for value in 0u8..=u8::MAX {
         assert_eq!(
             PurposeV1::try_from(value).is_ok(),
-            (1..=3).contains(&value),
+            (1..=4).contains(&value),
             "purpose 0x{value:02x}"
         );
     }
+    assert_eq!(
+        PurposeV1::try_from(4).expect("Sponsor is a codec value"),
+        PurposeV1::Sponsor
+    );
+    assert!(PurposeV1::Sponsor.require_strict_phase1().is_err());
+    for purpose in [
+        PurposeV1::Refund,
+        PurposeV1::ClaimAdaptor,
+        PurposeV1::Funding,
+    ] {
+        assert_eq!(
+            purpose.require_strict_phase1().expect("authorized purpose"),
+            purpose
+        );
+    }
+}
+
+#[test]
+fn sponsor_roundtrips_in_codecs_but_cannot_enter_strict_crypto() {
+    let key = public_key(1);
+    let commitment = NonceCommitmentV1::new(PurposeV1::Sponsor, 7, [8; 32]);
+    assert_eq!(
+        NonceCommitmentV1::from_bytes(&commitment.to_bytes())
+            .expect("Sponsor commitment codec")
+            .purpose(),
+        PurposeV1::Sponsor
+    );
+    let reveal = NonceRevealV1::new(PurposeV1::Sponsor, 7, key.clone(), key.clone());
+    assert_eq!(
+        NonceRevealV1::from_bytes(&reveal.to_bytes())
+            .expect("Sponsor reveal codec")
+            .purpose(),
+        PurposeV1::Sponsor
+    );
+    assert!(nonce_commitment_hash_v1(
+        &[1; 32],
+        &[2; 32],
+        &[3; 32],
+        PurposeV1::Sponsor,
+        &[4; 32],
+        &key,
+        &key,
+        None,
+    )
+    .is_err());
+
+    let mut scalar = [0u8; 32];
+    scalar[31] = 1;
+    let partial = PartialSignatureV1::new(
+        PurposeV1::Sponsor,
+        7,
+        [8; 32],
+        PartialSig::from_bytes(&scalar).expect("one is canonical"),
+    );
+    assert_eq!(
+        PartialSignatureV1::from_bytes(&partial.to_bytes())
+            .expect("Sponsor partial codec")
+            .purpose(),
+        PurposeV1::Sponsor
+    );
+    assert!(partial
+        .verify_bound(
+            PurposeV1::Sponsor,
+            &[8; 32],
+            &key,
+            &key,
+            &key,
+            &key,
+            &[9; 32],
+            &[10; 32],
+        )
+        .is_err());
 }
 
 #[test]

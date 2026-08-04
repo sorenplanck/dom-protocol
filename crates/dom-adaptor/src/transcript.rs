@@ -51,6 +51,7 @@ impl BindingFactorV1 {
 }
 
 fn validate_adaptor_grammar(purpose: PurposeV1, adaptor_point: Option<&PublicKey>) -> Result<()> {
+    purpose.require_strict_phase1()?;
     match (purpose, adaptor_point) {
         (PurposeV1::ClaimAdaptor, Some(_)) | (PurposeV1::Funding | PurposeV1::Refund, None) => {
             Ok(())
@@ -61,6 +62,7 @@ fn validate_adaptor_grammar(purpose: PurposeV1, adaptor_point: Option<&PublicKey
         (PurposeV1::Funding | PurposeV1::Refund, Some(_)) => Err(AdaptorError::InvalidTranscript(
             "FundingV1 and RefundV1 omit the adaptor point",
         )),
+        (PurposeV1::Sponsor, _) => unreachable!("strict Phase 1 policy rejected Sponsor"),
     }
 }
 

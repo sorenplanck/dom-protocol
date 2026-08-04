@@ -3,7 +3,7 @@
 use crate::error::{exact_array, AdaptorError, Result};
 use dom_crypto::{schnorr_challenge, scriptless_verify_bound_partial, PartialSig, PublicKey};
 
-/// Closed and versioned purpose registry for G1a v1.
+/// Closed and versioned purpose registry from Master Specification Appendix E.6.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum PurposeV1 {
@@ -13,12 +13,25 @@ pub enum PurposeV1 {
     ClaimAdaptor = 0x02,
     /// Funding signature.
     Funding = 0x03,
+    /// Sponsor codec value; strict Phase 1 execution is not yet authorized.
+    Sponsor = 0x04,
 }
 
 impl PurposeV1 {
     /// Return the frozen one-byte purpose encoding.
     pub const fn to_byte(self) -> u8 {
         self as u8
+    }
+
+    /// Enforce the currently authorized strict Phase 1 signing purposes.
+    ///
+    /// Sponsor is part of the canonical codec registry but has no authorized
+    /// Phase 1 signing flow. Recognizing its byte must never activate it.
+    pub fn require_strict_phase1(self) -> Result<Self> {
+        match self {
+            Self::Refund | Self::ClaimAdaptor | Self::Funding => Ok(self),
+            Self::Sponsor => Err(AdaptorError::PurposeNotAuthorized(self.to_byte())),
+        }
     }
 }
 
@@ -30,6 +43,7 @@ impl TryFrom<u8> for PurposeV1 {
             0x01 => Ok(Self::Refund),
             0x02 => Ok(Self::ClaimAdaptor),
             0x03 => Ok(Self::Funding),
+            0x04 => Ok(Self::Sponsor),
             other => Err(AdaptorError::UnknownPurpose(other)),
         }
     }
@@ -257,6 +271,8 @@ impl PartialSignatureV1 {
         chain_id: &[u8; 32],
         kernel_message: &[u8],
     ) -> Result<bool> {
+        self.purpose.require_strict_phase1()?;
+        expected_purpose.require_strict_phase1()?;
         if self.purpose != expected_purpose {
             return Err(AdaptorError::InvalidTranscript(
                 "partial signature purpose does not match the session",
