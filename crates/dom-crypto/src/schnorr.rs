@@ -108,7 +108,7 @@ pub fn schnorr_challenge(
     blake2b_256_tagged(TAG_KERNEL_SIG, &data)
 }
 
-fn scalar_from_bytes(bytes: &[u8; 32]) -> Option<Scalar> {
+pub(crate) fn scalar_from_bytes(bytes: &[u8; 32]) -> Option<Scalar> {
     let fb = k256::FieldBytes::from(*bytes);
     let ct = Scalar::from_repr(fb);
     if ct.is_some().into() {
@@ -118,7 +118,7 @@ fn scalar_from_bytes(bytes: &[u8; 32]) -> Option<Scalar> {
     }
 }
 
-fn projective_to_compressed(p: &ProjectivePoint) -> [u8; 33] {
+pub(crate) fn projective_to_compressed(p: &ProjectivePoint) -> [u8; 33] {
     let affine: k256::AffinePoint = (*p).into();
     let encoded = k256::EncodedPoint::from(affine).compress();
     let mut out = [0u8; 33];
@@ -260,7 +260,7 @@ pub fn schnorr_verify(
     Ok(sg == r_point + cp)
 }
 
-fn compressed_to_projective(bytes: &[u8; 33]) -> Result<ProjectivePoint, DomError> {
+pub(crate) fn compressed_to_projective(bytes: &[u8; 33]) -> Result<ProjectivePoint, DomError> {
     #[allow(unused_imports)]
     use k256::elliptic_curve::group::GroupEncoding;
     let encoded = k256::EncodedPoint::from_bytes(bytes)
