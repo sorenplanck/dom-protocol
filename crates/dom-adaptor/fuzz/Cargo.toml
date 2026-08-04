@@ -31,4 +31,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "nonce_derivation"
+path = "fuzz_targets/nonce_derivation.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

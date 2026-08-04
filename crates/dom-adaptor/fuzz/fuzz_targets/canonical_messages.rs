@@ -2,7 +2,7 @@
 //! Fuzz all currently implemented canonical G1a message and primitive parsers.
 
 use dom_adaptor::{
-    ContractKindV1, CoreAdaptorPreSignatureV1, DirectionV1, ExposurePermitV1,
+    validate_exposure_permit_record_v1, ContractKindV1, CoreAdaptorPreSignatureV1, DirectionV1,
     NonceCommitmentV1, NonceRevealV1, PartialSignatureV1, PurposeV1, SessionContextV1,
     SigningPhaseV1, TrustedChainIdV1,
 };
@@ -22,7 +22,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = NonceRevealV1::from_bytes(data);
     let _ = PartialSignatureV1::from_bytes(data);
     let _ = CoreAdaptorPreSignatureV1::from_bytes(data);
-    let _ = ExposurePermitV1::from_durable_bytes(data);
+    let _ = validate_exposure_permit_record_v1(data);
     let _ = PublicKey::from_compressed_bytes(data);
     let _ = PartialSig::from_bytes(data);
     let _ = SchnorrSignature::from_bytes(data);
