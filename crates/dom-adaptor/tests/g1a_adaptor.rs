@@ -1,6 +1,6 @@
 //! Production-boundary tests using the frozen SCAD0 corpus and real DOM verifier.
 
-use dom_adaptor::{AdaptorPreSignatureV1, AdaptorSecret};
+use dom_adaptor::{AdaptorPreSignatureV1, AdaptorSecret, CoreAdaptorPreSignatureV1};
 use dom_consensus::{validate_kernel_signatures, Transaction, TransactionKernel};
 use dom_crypto::{PartialSig, PublicKey, SchnorrSignature};
 use dom_serialization::DomDeserialize;
@@ -161,6 +161,35 @@ fn pre_signature_parser_is_exact_and_fail_closed() {
     assert!(mutated_transcript
         .verify(&[0x22; 32], &[0x33; 32], &signing_key, &CHAIN_ID, &MESSAGE,)
         .is_err());
+}
+
+#[test]
+fn core_and_session_bound_pre_signatures_have_distinct_exact_lengths() {
+    let line = include_str!("../../dom-consensus/tests/fixtures/scad0_adaptor_vectors_v1.txt")
+        .lines()
+        .find(|line| line.starts_with("V01|"))
+        .expect("V01 exists");
+    let fields = line.split('|').collect::<Vec<_>>();
+    let kernel = TransactionKernel::from_bytes(&hex::decode(fields[4]).expect("kernel hex"))
+        .expect("kernel");
+    let signature = SchnorrSignature::from_bytes(&kernel.excess_signature).expect("signature");
+    let pre = AdaptorPreSignatureV1::new(
+        [0x22; 32],
+        PublicKey::from_compressed_bytes(&decode_array::<33>(fields[2])).expect("T"),
+        PublicKey::from_compressed_bytes(signature.r_compressed()).expect("R_hat"),
+        PartialSig::from_bytes(&decode_array::<32>(fields[3])).expect("s_hat"),
+        [0x33; 32],
+    );
+    let core = pre.core_bytes();
+    assert_eq!(core.len(), 65);
+    assert_eq!(pre.to_bytes().len(), 162);
+    assert_eq!(
+        CoreAdaptorPreSignatureV1::from_bytes(&core)
+            .expect("canonical core")
+            .to_bytes(),
+        core
+    );
+    assert!(CoreAdaptorPreSignatureV1::from_bytes(&pre.to_bytes()).is_err());
 }
 
 #[test]

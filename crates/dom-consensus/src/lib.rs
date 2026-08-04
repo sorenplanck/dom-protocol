@@ -55,6 +55,7 @@ pub use block::BlockHeader;
 pub use block_full::{validate_block, validate_block_for_network, Block};
 pub use cutthrough::apply_cut_through;
 pub use transaction::{
+    scriptless_kernel_message_digest_v1, scriptless_transaction_template_bytes_v1,
     validate_balance_equation, validate_lock_heights, validate_range_proofs,
     validate_transaction_structure, CoinbaseKernel, CoinbaseTransaction, Transaction,
     TransactionInput, TransactionKernel, TransactionOutput,

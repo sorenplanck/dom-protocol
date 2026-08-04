@@ -9,14 +9,18 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = []
+fuzzing = []
+
 [dependencies]
 dom-core.workspace = true
 dom-crypto.workspace = true
+dom-consensus.workspace = true
 thiserror.workspace = true
 rand_core.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-dom-consensus.workspace = true
 dom-serialization.workspace = true
 hex.workspace = true

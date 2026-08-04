@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 
 [dependencies.dom-adaptor]
 path = ".."
+features = ["fuzzing"]
 
 [dependencies.dom-crypto]
 path = "../../dom-crypto"
