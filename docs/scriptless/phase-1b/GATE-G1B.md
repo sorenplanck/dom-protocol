@@ -45,5 +45,20 @@ Closing G1b does not close G1a. Production requires both gates.
 | Restore and quarantine | fail-closed behavior defined | separate Wallet branch has Linux tests | Windows/macOS and end-to-end rollback matrix |
 | Ordinary-transaction isolation | architectural boundary defined | separate Wallet crate has no consumers | integration-time negative call-path proof |
 
+## 2026-08-04 safety-boundary correction
+
+ADR-3SNV-0002 and the contract API now require the irreversible nonce
+tombstone to be durable before any public bytes are returned. Witness
+authorization alone is non-exporting; exact retries are available only from a
+consumed record. The semantic purpose projection recognizes Refund,
+ClaimAdaptor, Funding, and Sponsor, but exposes no competing byte codec;
+Sponsor is rejected by strict V1 execution policy.
+
+This input correction closes no additional checklist item. Wallet persistence,
+production encryption, the signed remote witness, the complete crash matrix,
+independent review, and platform execution remain required. ADR-3SNV-0003
+records why production witness implementation is blocked rather than
+provisional.
+
 The checked trait item is supported by a public compile-tested API and unit
 tests. It does not imply that any persistence, witness, or budget item is closed.

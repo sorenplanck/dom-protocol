@@ -64,3 +64,41 @@ the primary anticipated API conflict.
 
 No official repository was modified. No DL2P material was imported. No push,
 merge, release, publication, consensus change, or remote mutation occurred.
+
+## G1b completion mission update — 2026-08-04
+
+Status remains **PARTIAL / G1b NOT APPROVED**.
+
+The contract now enforces consume-before-export at its type boundary:
+
+- `authorize_exposure` persists a verified receipt but returns no bytes;
+- `consume` must durably remove nonce material and write a terminal tombstone
+  before returning `ConsumedExposure`;
+- `retry_public_material` is post-consumption only and returns the exact
+  previously committed bytes;
+- abort semantics distinguish `AbortedBeforePublicMaterial`,
+  `ConsumedOnAbort`, and conservative `Burned`;
+- the purpose projection names Refund, ClaimAdaptor, Funding, and Sponsor while
+  deliberately defining no second wire codec; Sponsor fails strict V1 policy.
+
+ADR-3SNV-0002 accepts this ordering. ADR-3SNV-0003 blocks production witness
+wire/client/service work because the authentication and byte-layout inputs are
+not frozen and Wallet has no approved service signing/key-lifecycle boundary.
+No provisional protocol or local-file fallback was added.
+
+Focused Linux validation after the correction:
+
+```text
+cargo test -p dom-adaptor --locked
+  PASS: 6 tests total
+cargo clippy -p dom-adaptor --all-targets --locked -- -D warnings
+  PASS
+cargo fmt --all --check
+  PASS
+git diff --check
+  PASS
+```
+
+Windows, macOS, sanitizers, production witness interoperability, and complete
+fault injection were not executed. No production functionality outside the
+new unpublished contract changed.
