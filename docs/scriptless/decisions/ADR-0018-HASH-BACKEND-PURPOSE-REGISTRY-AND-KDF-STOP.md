@@ -4,6 +4,10 @@ Status: **ACCEPTED** for the hash backend and `PurposeV1` registry. **BLOCKED**
 for `SessionContextV1`, secret two-nonce derivation, and dependent signing
 operations.
 
+The blocked portion records the evidence available at this decision's time.
+It is superseded by ratified NAR-001 and accepted ADR-0019; the hash and
+`PurposeV1` decisions remain active and compatible.
+
 ## Context
 
 The Phase 1 completion mission requires one canonical DOM tagged-hash backend,
@@ -125,4 +129,3 @@ Downstream code could confuse codec acceptance with Sponsor authorization.
 Every strict cryptographic entry point must therefore reject Sponsor before
 hashing or scalar arithmetic. The unresolved direction/phase registry remains
 a normative blocker and must stay visible.
-
