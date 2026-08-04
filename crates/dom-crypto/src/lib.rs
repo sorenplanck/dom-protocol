@@ -27,9 +27,9 @@ pub use schnorr::{
     schnorr_sign, schnorr_verify, PartialSig, SchnorrSignature,
 };
 pub use scriptless::{
-    scriptless_adapt_signature, scriptless_bind_public_nonces, scriptless_extract_adaptor_secret,
-    scriptless_verify_bound_partial, scriptless_verify_final_signature,
-    scriptless_verify_pre_signature, ScriptlessSecretScalar,
+    scalar_from_wide_be, scriptless_adapt_signature, scriptless_bind_public_nonces,
+    scriptless_extract_adaptor_secret, scriptless_verify_bound_partial,
+    scriptless_verify_final_signature, scriptless_verify_pre_signature, ScriptlessSecretScalar,
 };
 mod bulletproof_bp;
 #[cfg(kani)]

@@ -11,7 +11,9 @@ use crate::schnorr::{
 };
 use crate::{schnorr_challenge, schnorr_verify, PartialSig, SchnorrSignature};
 use dom_core::DomError;
+use k256::elliptic_curve::bigint::U512;
 use k256::elliptic_curve::group::Group;
+use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::PrimeField;
 use k256::ProjectivePoint;
 use subtle::{Choice, ConstantTimeEq};
@@ -27,8 +29,9 @@ pub struct ScriptlessSecretScalar([u8; 32]);
 
 impl ScriptlessSecretScalar {
     /// Parse canonical big-endian secret scalar bytes.
-    pub fn from_be_bytes(bytes: [u8; 32]) -> Result<Self, DomError> {
+    pub fn from_be_bytes(mut bytes: [u8; 32]) -> Result<Self, DomError> {
         if !is_scalar_valid(&bytes) {
+            bytes.zeroize();
             return Err(DomError::Invalid(
                 "scriptless secret scalar is zero or >= n".into(),
             ));
@@ -47,6 +50,29 @@ impl ScriptlessSecretScalar {
     pub(crate) fn as_be_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+}
+
+/// Reduce an exact 512-bit big-endian integer modulo the secp256k1 group order.
+///
+/// This is the only generic arithmetic extension authorized for the secret
+/// two-nonce KDF. It delegates to `k256`'s constant-time `Reduce<U512>` inside
+/// `dom-crypto`; callers never receive generic scalar arithmetic. A zero result
+/// is rejected. The input is borrowed and remains the caller's responsibility
+/// to zeroize after this function returns.
+pub fn scalar_from_wide_be(input: &[u8; 64]) -> Option<ScriptlessSecretScalar> {
+    let mut wide = k256::WideBytes::default();
+    wide.copy_from_slice(input);
+    let mut reduced = <k256::Scalar as Reduce<U512>>::reduce_bytes(&wide);
+    wide.zeroize();
+
+    if bool::from(reduced.is_zero()) {
+        reduced.zeroize();
+        return None;
+    }
+
+    let bytes: [u8; 32] = reduced.to_repr().into();
+    reduced.zeroize();
+    ScriptlessSecretScalar::from_be_bytes(bytes).ok()
 }
 
 impl ConstantTimeEq for ScriptlessSecretScalar {
@@ -298,5 +324,30 @@ mod tests {
     fn scriptless_secret_scalar_rejects_boundaries() {
         assert!(ScriptlessSecretScalar::from_be_bytes([0u8; 32]).is_err());
         assert!(ScriptlessSecretScalar::from_be_bytes([0xFF; 32]).is_err());
+    }
+
+    #[test]
+    fn wide_scalar_reduction_is_big_endian_and_rejects_zero() {
+        assert!(scalar_from_wide_be(&[0u8; 64]).is_none());
+
+        let mut one = [0u8; 64];
+        one[63] = 1;
+        let reduced_one = scalar_from_wide_be(&one).expect("one remains one");
+        assert_eq!(reduced_one.as_be_bytes(), &scalar_bytes(1));
+
+        let order = secp256k1::constants::CURVE_ORDER;
+        let mut exact_order = [0u8; 64];
+        exact_order[32..].copy_from_slice(&order);
+        assert!(scalar_from_wide_be(&exact_order).is_none());
+
+        let mut order_plus_one = exact_order;
+        order_plus_one[63] = order_plus_one[63].checked_add(1).expect("order low byte");
+        let reduced = scalar_from_wide_be(&order_plus_one).expect("n + 1 reduces to one");
+        assert_eq!(reduced.as_be_bytes(), &scalar_bytes(1));
+
+        let mut high_bit = [0u8; 64];
+        high_bit[0] = 0x80;
+        let high = scalar_from_wide_be(&high_bit).expect("2^511 has a nonzero residue");
+        assert_ne!(high.as_be_bytes(), &[0u8; 32]);
     }
 }
