@@ -469,6 +469,10 @@ pub trait NonceVault {
     type Permit: VaultExposurePermit;
 
     /// Reserves nonce slots and charges configured budgets atomically.
+    ///
+    /// The implementation must reject a zero or lifetime-reused session ID.
+    /// Session IDs remain permanently claimed across abort, consume, epoch
+    /// rotation, restart, backup, restore, and compaction.
     fn reserve(&mut self, request: ReservationRequest)
         -> Result<NonceReservation, NonceVaultError>;
 
@@ -520,6 +524,8 @@ pub enum NonceVaultError {
     IdempotencyConflict,
     /// The requested reservation does not exist.
     ReservationNotFound,
+    /// The session ID was already claimed by the lifetime tombstone set.
+    SessionIdReused,
     /// The requested transition is not monotonic from the current state.
     InvalidTransition,
     /// A configured budget was exhausted.
@@ -554,6 +560,7 @@ impl fmt::Display for NonceVaultError {
             Self::InvalidPermit => "invalid one-shot exposure permit",
             Self::IdempotencyConflict => "idempotency key conflicts with prior inputs",
             Self::ReservationNotFound => "nonce reservation not found",
+            Self::SessionIdReused => "Scriptless session identifier was already used",
             Self::InvalidTransition => "invalid nonce reservation transition",
             Self::BudgetExhausted(_) => "configured nonce session budget exhausted",
             Self::WitnessUnavailable => "remote witness unavailable",
