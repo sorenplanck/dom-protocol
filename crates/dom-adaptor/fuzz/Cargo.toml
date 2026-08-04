@@ -1,0 +1,33 @@
+[package]
+name = "dom-adaptor-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-adaptor]
+path = ".."
+
+[dependencies.dom-crypto]
+path = "../../dom-crypto"
+
+[[bin]]
+name = "canonical_messages"
+path = "fuzz_targets/canonical_messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "adaptor_pre_signature"
+path = "fuzz_targets/adaptor_pre_signature.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
