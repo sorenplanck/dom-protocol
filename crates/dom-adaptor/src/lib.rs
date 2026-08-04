@@ -31,9 +31,10 @@ pub use nonce::{
 pub use nonce_vault::{
     AbortRequest, BudgetScope, CommitPublicMaterialRequest, ConsumeReason, ConsumeRequest,
     CounterpartyBucket, ExposureAuthorizationRequest, ExposureBytes, ExposureKindV1,
-    ExposurePermitV1, IdempotencyKey, NonceReservation, NonceVault, NonceVaultError, ParticipantId,
-    Purpose, PurposeV1, ReservationNonceId, ReservationRequest, ReservationState, RestoreState,
-    RetryRequest, SessionId, TemplateHash, VaultKeyId, VaultReceipt,
+    ExposurePermitBindingV1, IdempotencyKey, NonceReservation, NonceVault, NonceVaultError,
+    ParticipantId, Purpose, PurposeV1, ReservationNonceId, ReservationRequest, ReservationState,
+    RestoreState, RetryRequest, SessionId, TemplateHash, VaultExposurePermit, VaultKeyId,
+    VaultReceipt,
 };
 pub use permit::{exposure_outbound_digest_v1, validate_exposure_permit_record_v1, ExposureKindV1};
 pub use session::{
