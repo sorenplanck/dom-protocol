@@ -350,4 +350,90 @@ mod tests {
         let high = scalar_from_wide_be(&high_bit).expect("2^511 has a nonzero residue");
         assert_ne!(high.as_be_bytes(), &[0u8; 32]);
     }
+
+    #[test]
+    fn ten_thousand_deterministic_adapt_extract_cycles_pass_real_verifier() {
+        let chain_id = [0xA5; 32];
+
+        for case in 0u32..10_000 {
+            let signing_value = ((case % 251) + 1) as u8;
+            let nonce_value = (((case * 7) % 251) + 1) as u8;
+            let adaptor_value = (((case * 13) % 251) + 1) as u8;
+            let signing_secret =
+                scalar_from_bytes(&scalar_bytes(signing_value)).expect("canonical signing scalar");
+            let signing_key = point_from_scalar(signing_value);
+            let nonce =
+                scalar_from_bytes(&scalar_bytes(nonce_value)).expect("canonical nonce scalar");
+            let adaptor_secret = ScriptlessSecretScalar::from_be_bytes(scalar_bytes(adaptor_value))
+                .expect("canonical adaptor scalar");
+            let adaptor_point = adaptor_secret.public_key();
+            let aggregate_nonce_hat_point = ProjectivePoint::GENERATOR * nonce
+                + compressed_to_projective(&adaptor_point.to_compressed_bytes())
+                    .expect("canonical adaptor point");
+            assert!(
+                !bool::from(aggregate_nonce_hat_point.is_identity()),
+                "case {case} must not produce the identity aggregate nonce"
+            );
+            let aggregate_nonce_hat = PublicKey::from_compressed_bytes(&projective_to_compressed(
+                &aggregate_nonce_hat_point,
+            ))
+            .expect("canonical aggregate nonce");
+            let message = case.to_le_bytes();
+            let challenge_bytes = *schnorr_challenge(
+                &aggregate_nonce_hat.to_compressed_bytes(),
+                &signing_key,
+                &chain_id,
+                &message,
+            )
+            .as_bytes();
+            let challenge = scalar_from_bytes(&challenge_bytes)
+                .unwrap_or_else(|| panic!("case {case} challenge must be canonical"));
+            let scalar_hat_value = nonce + challenge * signing_secret;
+            assert!(
+                !bool::from(scalar_hat_value.is_zero()),
+                "case {case} pre-signature scalar must not be zero"
+            );
+            let scalar_hat_bytes: [u8; 32] = scalar_hat_value.to_repr().into();
+            let scalar_hat = PartialSig::from_bytes(&scalar_hat_bytes)
+                .unwrap_or_else(|error| panic!("case {case} pre-signature: {error}"));
+
+            assert!(
+                scriptless_verify_pre_signature(
+                    &scalar_hat,
+                    &aggregate_nonce_hat,
+                    &signing_key,
+                    &adaptor_point,
+                    &chain_id,
+                    &message,
+                )
+                .unwrap_or_else(|error| panic!("case {case} pre-signature verify: {error}")),
+                "case {case} pre-signature equation"
+            );
+            let final_signature =
+                scriptless_adapt_signature(&scalar_hat, &aggregate_nonce_hat, &adaptor_secret)
+                    .unwrap_or_else(|error| panic!("case {case} adaptation: {error}"));
+            assert!(
+                scriptless_verify_final_signature(
+                    &final_signature,
+                    &signing_key,
+                    &chain_id,
+                    &message,
+                )
+                .unwrap_or_else(|error| panic!("case {case} final verification: {error}")),
+                "case {case} final signature"
+            );
+            let extracted = scriptless_extract_adaptor_secret(
+                &final_signature,
+                &scalar_hat,
+                &aggregate_nonce_hat,
+                &adaptor_point,
+            )
+            .unwrap_or_else(|error| panic!("case {case} extraction: {error}"));
+            assert_eq!(
+                extracted.public_key(),
+                adaptor_point,
+                "case {case} extract(adapt(presign)) must recover t"
+            );
+        }
+    }
 }
