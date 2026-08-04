@@ -418,9 +418,9 @@ pub fn scriptless_aggregate_partial_scalars(
             "cannot aggregate an empty partial signature set".into(),
         ));
     }
-    let mut sum = k256::Scalar::ZERO;
+    let mut sum = Zeroizing::new(k256::Scalar::ZERO);
     for partial in partials {
-        sum += scalar_from_bytes(&partial.to_bytes())
+        *sum += scalar_from_bytes(&partial.to_bytes())
             .ok_or_else(|| DomError::Invalid("partial signature scalar is invalid".into()))?;
     }
     if bool::from(sum.is_zero()) {

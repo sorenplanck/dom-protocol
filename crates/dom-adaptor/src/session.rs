@@ -199,30 +199,27 @@ pub fn generate_session_id_v1<R: SessionIdRegistryV1>(
             "initiator participant ID must be nonzero",
         ));
     }
-    let mut initiator_nonce = Zeroizing::new([0u8; 32]);
-    OsRng
-        .try_fill_bytes(initiator_nonce.as_mut())
-        .map_err(|_| AdaptorError::RandomnessFailure)?;
-    if initiator_nonce.iter().all(|byte| *byte == 0) {
-        return Err(AdaptorError::RandomnessFailure);
+    loop {
+        let mut initiator_nonce = Zeroizing::new([0u8; 32]);
+        OsRng
+            .try_fill_bytes(initiator_nonce.as_mut())
+            .map_err(|_| AdaptorError::RandomnessFailure)?;
+        if initiator_nonce.iter().all(|byte| *byte == 0) {
+            continue;
+        }
+        let session_id = session_id_from_nonce_v1(
+            chain_id,
+            initiator_participant_id,
+            contract_kind,
+            &initiator_nonce,
+        );
+        if session_id == [0u8; 32] {
+            continue;
+        }
+        if registry.register_unique_session_id(&session_id)? {
+            return Ok(session_id);
+        }
     }
-    let session_id = session_id_from_nonce_v1(
-        chain_id,
-        initiator_participant_id,
-        contract_kind,
-        &initiator_nonce,
-    );
-    if session_id == [0u8; 32] {
-        return Err(AdaptorError::InvalidContext(
-            "derived session ID must be nonzero",
-        ));
-    }
-    if !registry.register_unique_session_id(&session_id)? {
-        return Err(AdaptorError::InvalidContext(
-            "session ID was already used by the local participant",
-        ));
-    }
-    Ok(session_id)
 }
 
 fn session_id_from_nonce_v1(
@@ -344,10 +341,15 @@ mod tests {
 
     #[test]
     fn session_generation_requires_durable_uniqueness_registration() {
-        struct Registry(bool);
+        struct Registry(usize);
         impl SessionIdRegistryV1 for Registry {
             fn register_unique_session_id(&mut self, _session_id: &[u8; 32]) -> Result<bool> {
-                Ok(self.0)
+                if self.0 == 0 {
+                    Ok(true)
+                } else {
+                    self.0 -= 1;
+                    Ok(false)
+                }
             }
         }
 
@@ -356,21 +358,21 @@ mod tests {
             &chain,
             &[8; 32],
             ContractKindV1::WitnessOrTimeout,
-            &mut Registry(true),
+            &mut Registry(0),
         )
         .is_ok());
         assert!(generate_session_id_v1(
             &chain,
             &[8; 32],
             ContractKindV1::WitnessOrTimeout,
-            &mut Registry(false),
+            &mut Registry(1),
         )
-        .is_err());
+        .is_ok());
         assert!(generate_session_id_v1(
             &chain,
             &[0; 32],
             ContractKindV1::WitnessOrTimeout,
-            &mut Registry(true),
+            &mut Registry(0),
         )
         .is_err());
     }
