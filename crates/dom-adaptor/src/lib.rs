@@ -13,6 +13,6 @@ mod nonce_vault;
 pub use nonce_vault::{
     AbortRequest, BudgetScope, CommitPublicMaterialRequest, ConsumeReason, ConsumeRequest,
     CounterpartyBucket, ExposureAuthorizationRequest, ExposureBytes, IdempotencyKey,
-    NonceReservation, NonceVault, NonceVaultError, Purpose, ReservationRequest, ReservationState,
-    RestoreState, RetryRequest, SessionId, VaultKeyId, VaultReceipt,
+    NonceReservation, NonceVault, NonceVaultError, Purpose, PurposeV1, ReservationRequest,
+    ReservationState, RestoreState, RetryRequest, SessionId, VaultKeyId, VaultReceipt,
 };

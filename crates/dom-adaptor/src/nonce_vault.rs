@@ -67,24 +67,47 @@ opaque_identifier!(
 ///
 /// This enum deliberately has no byte codec. The canonical wire discriminants
 /// belong to G1a `PurposeV1`; integration must use an exhaustive conversion.
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Purpose {
+pub enum PurposeV1 {
     /// Refund transaction construction.
-    RefundV1,
+    Refund = 0x01,
     /// Adaptor claim transaction construction.
-    ClaimAdaptorV1,
+    ClaimAdaptor = 0x02,
     /// Funding transaction construction.
-    FundingV1,
+    Funding = 0x03,
     /// Sponsor codec value, rejected by strict V1 execution policy.
-    SponsorV1,
+    Sponsor = 0x04,
 }
 
-impl Purpose {
+impl PurposeV1 {
     /// Returns whether strict V1 policy currently permits this purpose.
     pub const fn is_strict_v1_authorized(self) -> bool {
-        !matches!(self, Self::SponsorV1)
+        !matches!(self, Self::Sponsor)
+    }
+
+    /// Returns the ratified V1 discriminant.
+    pub const fn to_byte(self) -> u8 {
+        self as u8
     }
 }
+
+impl TryFrom<u8> for PurposeV1 {
+    type Error = NonceVaultError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x01 => Ok(Self::Refund),
+            0x02 => Ok(Self::ClaimAdaptor),
+            0x03 => Ok(Self::Funding),
+            0x04 => Ok(Self::Sponsor),
+            _ => Err(NonceVaultError::UnsupportedPurpose),
+        }
+    }
+}
+
+/// Backward-compatible semantic name for the canonical V1 purpose registry.
+pub type Purpose = PurposeV1;
 
 /// Scope in which a configured budget prevented a reservation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -322,6 +345,8 @@ pub enum NonceVaultError {
     InvalidIdentifier,
     /// Public material was empty.
     EmptyPublicMaterial,
+    /// A purpose byte is not in the ratified closed V1 registry.
+    UnsupportedPurpose,
     /// An idempotency key was reused for different inputs.
     IdempotencyConflict,
     /// The requested reservation does not exist.
@@ -355,6 +380,7 @@ impl fmt::Display for NonceVaultError {
         let message = match self {
             Self::InvalidIdentifier => "invalid empty vault identifier",
             Self::EmptyPublicMaterial => "empty public material",
+            Self::UnsupportedPurpose => "unsupported PurposeV1 discriminant",
             Self::IdempotencyConflict => "idempotency key conflicts with prior inputs",
             Self::ReservationNotFound => "nonce reservation not found",
             Self::InvalidTransition => "invalid nonce reservation transition",
@@ -406,15 +432,32 @@ mod tests {
     #[test]
     fn purpose_set_is_closed() {
         let purposes = [
-            Purpose::RefundV1,
-            Purpose::ClaimAdaptorV1,
-            Purpose::FundingV1,
-            Purpose::SponsorV1,
+            PurposeV1::Refund,
+            PurposeV1::ClaimAdaptor,
+            PurposeV1::Funding,
+            PurposeV1::Sponsor,
         ];
         assert_eq!(purposes.len(), 4);
         assert!(purposes[..3]
             .iter()
             .all(|purpose| purpose.is_strict_v1_authorized()));
-        assert!(!Purpose::SponsorV1.is_strict_v1_authorized());
+        assert!(!PurposeV1::Sponsor.is_strict_v1_authorized());
+        for (byte, purpose) in [
+            (1, PurposeV1::Refund),
+            (2, PurposeV1::ClaimAdaptor),
+            (3, PurposeV1::Funding),
+            (4, PurposeV1::Sponsor),
+        ] {
+            assert_eq!(PurposeV1::try_from(byte), Ok(purpose));
+            assert_eq!(purpose.to_byte(), byte);
+        }
+        assert_eq!(
+            PurposeV1::try_from(0),
+            Err(NonceVaultError::UnsupportedPurpose)
+        );
+        assert_eq!(
+            PurposeV1::try_from(5),
+            Err(NonceVaultError::UnsupportedPurpose)
+        );
     }
 }
