@@ -1,10 +1,18 @@
-//! Phase 1 integration boundary for DOM Scriptless Contracts.
+//! DOM Scriptless Contracts integration boundaries.
 //!
-//! This bootstrap contains no cryptographic or vault implementation and exposes
-//! no provisional production API. Curve arithmetic, point parsing, challenges,
-//! Schnorr signing, canonical serialization, hashing and verification will be
-//! imported from the authoritative DOM crates after the normative inputs and
-//! frozen vectors satisfy Gate G1.
+//! Cryptographic operations remain owned by DOM's authoritative cryptographic
+//! crates. This crate also owns the storage-independent Nonce Vault contract;
+//! durable implementations belong to wallet software and must fail closed when
+//! witness or rollback evidence is incomplete.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+mod nonce_vault;
+
+pub use nonce_vault::{
+    AbortRequest, BudgetScope, CommitPublicMaterialRequest, ConsumeReason, ConsumeRequest,
+    CounterpartyBucket, ExposureAuthorizationRequest, ExposureBytes, IdempotencyKey,
+    NonceReservation, NonceVault, NonceVaultError, Purpose, ReservationRequest, ReservationState,
+    RestoreState, RetryRequest, SessionId, VaultKeyId, VaultReceipt,
+};
