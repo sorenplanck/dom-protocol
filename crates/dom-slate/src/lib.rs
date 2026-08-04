@@ -36,7 +36,7 @@ use dom_consensus::transaction::{
 use dom_consensus::{
     validate_balance_equation, validate_range_proofs, validate_transaction_structure,
 };
-use dom_core::{Amount, KERNEL_FEAT_PLAIN};
+use dom_core::{Amount, KERNEL_FEAT_HEIGHT_LOCKED, KERNEL_FEAT_PLAIN};
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::{
     blake2b_256_tagged, range_proof_prove_bytes, schnorr_add_public_keys, schnorr_aggregate_sigs,
@@ -252,6 +252,25 @@ pub fn build_send(
     fee: u64,
     chain_id: [u8; 32],
 ) -> Result<SenderSlate, SlateError> {
+    build_send_with_lock_height(inputs, change_value, amount, fee, chain_id, 0)
+}
+
+/// Step 1 with an explicit absolute `lock_height` (O-03).
+///
+/// `lock_height == 0` produces exactly the historical PLAIN-kernel slate, so
+/// [`build_send`] is a thin delegation and no existing behaviour changes.
+/// A non-zero `lock_height` makes every downstream step
+/// ([`respond_receive`], [`finalize`]) sign and emit a
+/// `KERNEL_FEAT_HEIGHT_LOCKED` kernel carrying that height — see
+/// [`slate_kernel_features`].
+pub fn build_send_with_lock_height(
+    inputs: &[SlateInput],
+    change_value: u64,
+    amount: u64,
+    fee: u64,
+    chain_id: [u8; 32],
+    lock_height: u64,
+) -> Result<SenderSlate, SlateError> {
     let (sender_change_output, change_material, change_blinding) = if change_value > 0 {
         let change_blinding = BlindingFactor::random();
         // Final bounded aggregate range proof for the slate output.
@@ -300,7 +319,7 @@ pub fn build_send(
         chain_id,
         amount,
         fee,
-        lock_height: 0,
+        lock_height,
         sender_inputs: inputs
             .iter()
             .map(|i| Commitment::from_compressed_bytes(&i.commitment))
@@ -442,7 +461,7 @@ pub fn respond_receive(
         recipient_public_excess.clone(),
     ])
     .map_err(|e| SlateError::Crypto(format!("aggregate public excess failed: {e}")))?;
-    let kernel_message = plain_kernel_message(slate.fee, slate.lock_height)?;
+    let kernel_message = slate_kernel_message(slate.fee, slate.lock_height)?;
     let recipient_partial_sig = schnorr_partial_sign(
         &recipient_excess_key,
         &recipient_nonce_key,
@@ -570,7 +589,7 @@ pub fn finalize(
         recipient_public_excess.clone(),
     ])
     .map_err(|e| SlateError::Crypto(format!("aggregate excess failed: {e}")))?;
-    let kernel_message = plain_kernel_message(slate.fee, slate.lock_height)?;
+    let kernel_message = slate_kernel_message(slate.fee, slate.lock_height)?;
 
     let sender_excess_key = SecretKey::from_bytes(sender_excess_blinding)
         .map_err(|e| SlateError::Crypto(format!("sender excess key invalid: {e}")))?;
@@ -598,7 +617,7 @@ pub fn finalize(
             .collect(),
         outputs: slate_outputs_for_finalize(slate, recipient_output)?,
         kernels: vec![TransactionKernel {
-            features: KERNEL_FEAT_PLAIN,
+            features: slate_kernel_features(slate.lock_height),
             fee: Amount::from_noms(slate.fee)
                 .map_err(|e| SlateError::Crypto(format!("invalid kernel fee: {e}")))?,
             lock_height: slate.lock_height,
@@ -693,10 +712,41 @@ fn slate_outputs_for_finalize(
 
 /// Canonical plain-kernel signing message: `blake2b_256_tagged(TAG_KERNEL_MSG,
 /// feature || fee_le || lock_height_le)`.
+///
+/// NOTE (O-03): this helper always stamps `KERNEL_FEAT_PLAIN`, so for
+/// `lock_height != 0` it produces a message no valid transaction can ever
+/// carry (consensus rejects PLAIN kernels with a non-zero lock_height).
+/// Slate signing now goes through [`slate_kernel_message`]; this function is
+/// kept byte-for-byte identical because `kav_drift_kernel_message` freezes it.
 pub fn plain_kernel_message(fee: u64, lock_height: u64) -> Result<Hash256, SlateError> {
     Amount::from_noms(fee).map_err(|e| SlateError::Crypto(format!("invalid kernel fee: {e}")))?;
     let mut data = Vec::with_capacity(1 + 8 + 8);
     data.push(KERNEL_FEAT_PLAIN);
+    data.extend_from_slice(&fee.to_le_bytes());
+    data.extend_from_slice(&lock_height.to_le_bytes());
+    Ok(blake2b_256_tagged(dom_core::TAG_KERNEL_MSG, &data))
+}
+
+/// Kernel feature byte implied by a slate's `lock_height` (O-03).
+///
+/// This is the wallet-side mirror of the consensus invariant in
+/// `dom_consensus::validate_transaction_structure`: HEIGHT_LOCKED requires a
+/// non-zero lock_height, and every other feature requires lock_height == 0.
+pub fn slate_kernel_features(lock_height: u64) -> u8 {
+    if lock_height == 0 {
+        KERNEL_FEAT_PLAIN
+    } else {
+        KERNEL_FEAT_HEIGHT_LOCKED
+    }
+}
+
+/// Canonical slate kernel signing message, feature byte derived from
+/// `lock_height` (O-03). Byte-identical to [`plain_kernel_message`] whenever
+/// `lock_height == 0`.
+pub fn slate_kernel_message(fee: u64, lock_height: u64) -> Result<Hash256, SlateError> {
+    Amount::from_noms(fee).map_err(|e| SlateError::Crypto(format!("invalid kernel fee: {e}")))?;
+    let mut data = Vec::with_capacity(1 + 8 + 8);
+    data.push(slate_kernel_features(lock_height));
     data.extend_from_slice(&fee.to_le_bytes());
     data.extend_from_slice(&lock_height.to_le_bytes());
     Ok(blake2b_256_tagged(dom_core::TAG_KERNEL_MSG, &data))

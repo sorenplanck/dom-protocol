@@ -231,10 +231,11 @@ impl SpendBuilder {
         self.fee = fee;
     }
 
-    /// Optional lock height for future extension.
+    /// Absolute lock height for the emitted kernel (O-03).
     ///
-    /// This implementation emits plain kernels only, so non-zero lock heights
-    /// are rejected in `build()`.
+    /// `0` (the default) emits a PLAIN kernel — the historical behaviour.
+    /// Any non-zero value emits a `KERNEL_FEAT_HEIGHT_LOCKED` kernel that
+    /// consensus refuses (`TemporarilyInvalid`) until the tip reaches it.
     pub fn lock_height(&mut self, lock_height: u64) {
         self.lock_height = lock_height;
     }
@@ -294,7 +295,12 @@ impl SpendBuilder {
         let excess_blinding = self.compute_kernel_excess_blinding(&offset)?;
         let excess = Commitment::commit(0, &excess_blinding);
 
-        let kernel_message = kernel_message(KERNEL_FEAT_PLAIN, self.fee, 0)?;
+        // O-03: the feature byte is derived from `lock_height`, mirroring the
+        // consensus invariant (HEIGHT_LOCKED ⇔ lock_height != 0). The signed
+        // message and the emitted kernel MUST agree on that byte or the
+        // Schnorr verification in `validate_kernel_signatures` fails.
+        let features = kernel_features_for_lock_height(self.lock_height);
+        let kernel_message = kernel_message(features, self.fee, self.lock_height)?;
         let signing_key = SecretKey::from_bytes(excess_blinding.as_bytes())
             .map_err(|e| TxError::Crypto(format!("invalid kernel signing key: {e}")))?;
 
@@ -302,10 +308,10 @@ impl SpendBuilder {
             .map_err(|e| TxError::Crypto(format!("kernel Schnorr signature failed: {e}")))?;
 
         let kernel = TransactionKernel {
-            features: KERNEL_FEAT_PLAIN,
+            features,
             fee: Amount::from_noms(self.fee)
                 .map_err(|e| TxError::InvalidFee(format!("invalid fee amount: {e}")))?,
-            lock_height: 0,
+            lock_height: self.lock_height,
             excess,
             excess_signature: sig.to_bytes(),
         };
@@ -336,12 +342,9 @@ impl SpendBuilder {
             ));
         }
 
-        if self.lock_height != 0 {
-            return Err(TxError::InvalidTransaction(
-                "SpendBuilder currently emits plain kernels; lock_height must be zero".into(),
-            ));
-        }
-
+        // O-03: the historical fail-closed guard ("SpendBuilder currently emits
+        // plain kernels; lock_height must be zero") is lifted — `build()` now
+        // emits KERNEL_FEAT_HEIGHT_LOCKED for a non-zero lock_height.
         Amount::from_noms(self.fee)
             .map_err(|e| TxError::InvalidFee(format!("invalid fee amount: {e}")))?;
 
@@ -386,6 +389,18 @@ where
     values
         .into_iter()
         .try_fold(0u64, |acc, v| acc.checked_add(v).ok_or("u64 overflow"))
+}
+
+/// Kernel feature byte implied by an absolute `lock_height` (O-03).
+/// Mirrors `dom_consensus::validate_transaction_structure`'s invariant:
+/// HEIGHT_LOCKED requires lock_height != 0, and any other feature requires
+/// lock_height == 0.
+pub fn kernel_features_for_lock_height(lock_height: u64) -> u8 {
+    if lock_height == 0 {
+        KERNEL_FEAT_PLAIN
+    } else {
+        dom_core::KERNEL_FEAT_HEIGHT_LOCKED
+    }
 }
 
 fn kernel_message(features: u8, fee: u64, lock_height: u64) -> Result<dom_core::Hash256, TxError> {
@@ -611,11 +626,13 @@ mod tests {
         );
     }
 
-    // Non-zero lock_height is rejected in build() — SpendBuilder only emits
-    // PLAIN kernels, so a "height-locked" spend dressed as a plain kernel must
-    // not be silently downgraded.
+    // O-03: a non-zero lock_height must NEVER be silently downgraded into a
+    // PLAIN kernel. The historical guard achieved that by rejecting the build
+    // outright; the builder now emits a HEIGHT_LOCKED kernel instead. The
+    // invariant being defended is unchanged and is asserted directly: the
+    // feature bit MUST be stamped whenever lock_height != 0.
     #[test]
-    fn kav_neg_rejects_nonzero_lock_height_as_plain_kernel() {
+    fn kav_neg_nonzero_lock_height_is_never_a_plain_kernel() {
         let input_bf = BlindingFactor::random();
         let output_bf = BlindingFactor::random();
         let mut builder = SpendBuilder::new(&[2u8; 32]);
@@ -626,29 +643,66 @@ mod tests {
         builder.fee(100);
         builder.lock_height(144);
 
-        let err = builder.build().unwrap_err().to_string();
-        assert!(
-            err.contains("lock_height must be zero"),
-            "non-zero lock_height must be rejected for plain kernels, got: {err}"
+        let tx = builder.build().expect("height-locked build must succeed");
+        assert_eq!(
+            tx.kernels[0].features,
+            dom_core::KERNEL_FEAT_HEIGHT_LOCKED,
+            "lock_height != 0 must stamp the HEIGHT_LOCKED feature bit"
+        );
+        assert_eq!(tx.kernels[0].lock_height, 144);
+        assert_ne!(
+            tx.kernels[0].features, KERNEL_FEAT_PLAIN,
+            "a locked spend must never be downgraded to a plain kernel"
         );
     }
 
-    // Even when fee makes inputs == outputs + fee, a non-zero lock height
-    // still must NOT silently set kernel.lock_height: the build is rejected
-    // before any kernel is emitted. (Defends against a future relaxation that
-    // forgets to also stamp the kernel feature bit.)
+    // O-03: the same guarantee when fee makes inputs == outputs + fee exactly.
+    // The kernel feature bit and the signed message must agree — a mismatch
+    // would fail `validate_kernel_signatures`, so a successful structural +
+    // signature check here proves both were derived from the same lock_height.
     #[test]
-    fn kav_neg_balanced_but_locked_still_rejected() {
+    fn kav_balanced_locked_kernel_stamps_feature_and_signs_over_it() {
         let input_bf = BlindingFactor::random();
         let output_bf = BlindingFactor::random();
-        let mut builder = SpendBuilder::new(&[3u8; 32]);
+        let chain_id = [3u8; 32];
+        let mut builder = SpendBuilder::new(&chain_id);
         builder
             .add_inputs(vec![TestInput::new(500, &input_bf)])
             .unwrap();
         builder.add_output(500, output_bf).unwrap();
         builder.fee(0);
         builder.lock_height(1);
-        assert!(builder.build().is_err());
+        let tx = builder.build().expect("balanced locked build");
+        let k = &tx.kernels[0];
+        assert_eq!(k.features, dom_core::KERNEL_FEAT_HEIGHT_LOCKED);
+        assert_eq!(k.lock_height, 1);
+
+        // The signature must verify against the message built from the SAME
+        // (features, fee, lock_height) triple.
+        let msg = kernel_message(k.features, k.fee.noms(), k.lock_height).unwrap();
+        let sig = dom_crypto::SchnorrSignature::from_bytes(&k.excess_signature).expect("sig");
+        let pk = dom_crypto::PublicKey::from_compressed_bytes(k.excess.as_bytes()).expect("pk");
+        assert!(
+            schnorr_verify(&sig, &pk, &chain_id, msg.as_bytes()).expect("verify"),
+            "kernel signature must cover the HEIGHT_LOCKED feature byte and lock_height"
+        );
+    }
+
+    // Consensus still refuses a lock_height==0 kernel that claims HEIGHT_LOCKED.
+    // The builder can never produce one (feature is derived from lock_height),
+    // which is exactly the malleability guard `classify_kernel_lock_fields`
+    // enforces on the consensus side.
+    #[test]
+    fn kav_builder_cannot_emit_height_locked_at_zero() {
+        assert_eq!(
+            kernel_features_for_lock_height(0),
+            KERNEL_FEAT_PLAIN,
+            "lock_height 0 must never claim HEIGHT_LOCKED"
+        );
+        assert_eq!(
+            kernel_features_for_lock_height(1),
+            dom_core::KERNEL_FEAT_HEIGHT_LOCKED
+        );
     }
 
     // -- invariant: balance enforced by build() --------------------------
