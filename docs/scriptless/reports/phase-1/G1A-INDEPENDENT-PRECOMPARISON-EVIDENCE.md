@@ -1,8 +1,11 @@
 # G1a independent pre-comparison evidence
 
-Date: 2026-08-04  
-Status: **COMMITTED EVIDENCE PENDING CROSS-IMPLEMENTATION COMPARISON**  
-Branch: `test/phase-1-independent-vectors-ratified`  
+Date: 2026-08-04
+
+Status: **COMMITTED EVIDENCE PENDING CROSS-IMPLEMENTATION COMPARISON**
+
+Branch: `test/phase-1-independent-vectors-ratified`
+
 Baseline: `6062f9adb6ddd1812c41b2fb66b9ec69a249f324`
 
 ## Independence statement
@@ -91,7 +94,7 @@ python3 test-vectors/scriptless/two-nonce/independent/ratified-v1/generate_refer
 The vector manifest is
 `test-vectors/scriptless/two-nonce/independent/ratified-v1/MANIFEST.sha256`
 with SHA-256
-`a7e8a4db10c88682e8eced2269a85aec5ffda599d5474835d10855c283b35575`.
+`7a9e6383e173a59fccccbf127f68e846f4e263b6f8611a604d9bc5f535081bce`.
 
 ## Supplemental adaptor evidence
 

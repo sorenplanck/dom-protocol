@@ -1,3 +1,3 @@
-a2ad956b6873e1df9970aafcdd820797d54a8d7af6aae2f0faec6429e08ddf1f  test-vectors/scriptless/two-nonce/independent/ratified-v1/README.md
+7a35bcaaed9f564f4bc1ea64631ae82ab14a4490cd645a7a63a785f5c3d142ce  test-vectors/scriptless/two-nonce/independent/ratified-v1/README.md
 af3c503c46159eefae338c749f8aa95fe2cf13bc825f5fb7d3b5d44051871413  test-vectors/scriptless/two-nonce/independent/ratified-v1/generate_reference.py
 753c3976d3171c0f7f83ae2fab0e1ee98ce2ac68cbd37347b9af06725ae2a633  test-vectors/scriptless/two-nonce/independent/ratified-v1/reference_outputs_v1.json
