@@ -551,10 +551,9 @@ mod tests {
                         covered.remove(&parity);
                         continue;
                     }
-                    let scalar_hat = PartialSig::from_bytes(
-                        &<[u8; 32]>::from(scalar_hat_value.to_repr()),
-                    )
-                    .expect("s_hat");
+                    let scalar_hat =
+                        PartialSig::from_bytes(&<[u8; 32]>::from(scalar_hat_value.to_repr()))
+                            .expect("s_hat");
                     assert!(scriptless_verify_pre_signature(
                         &scalar_hat,
                         &aggregate_nonce_hat,

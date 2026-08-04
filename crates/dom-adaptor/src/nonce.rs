@@ -5,9 +5,10 @@ use crate::{
     SessionContextV1,
 };
 use dom_crypto::{
-    schnorr_challenge, scriptless_add_public_points, scriptless_aggregate_partial_scalars,
-    scriptless_derive_secret_nonce_pair_v1, scriptless_sign_bound_partial, Hash256, PartialSig,
-    PublicKey, ScriptlessSecretScalar,
+    schnorr_aggregate_sigs, schnorr_challenge, scriptless_add_public_points,
+    scriptless_aggregate_partial_scalars, scriptless_derive_secret_nonce_pair_v1,
+    scriptless_sign_bound_partial, scriptless_verify_final_signature, Hash256, PartialSig,
+    PublicKey, SchnorrSignature, ScriptlessSecretScalar,
 };
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
@@ -326,6 +327,41 @@ pub fn aggregate_partial_signatures_v1(
     scriptless_aggregate_partial_scalars(&scalars).map_err(Into::into)
 }
 
+/// Finalize a Funding or Refund partial aggregate into the unchanged 65-byte
+/// DOM Schnorr signature and verify it through the authoritative verifier.
+#[allow(clippy::too_many_arguments)]
+pub fn finalize_plain_signature_v1(
+    partials: &[PartialSignatureV1],
+    purpose: PurposeV1,
+    template_hash: &[u8; 32],
+    aggregate_nonce: &PublicKey,
+    aggregate_signing_key: &PublicKey,
+    chain_id: &[u8; 32],
+    kernel_message_digest: &[u8; 32],
+) -> Result<SchnorrSignature> {
+    match purpose {
+        PurposeV1::Funding | PurposeV1::Refund => {}
+        PurposeV1::ClaimAdaptor | PurposeV1::Sponsor => {
+            return Err(AdaptorError::InvalidTranscript(
+                "plain finalization is restricted to Funding and Refund",
+            ));
+        }
+    }
+    let aggregate = aggregate_partial_signatures_v1(partials, purpose, template_hash)?;
+    let signature = schnorr_aggregate_sigs(&[aggregate], aggregate_nonce)?;
+    if !scriptless_verify_final_signature(
+        &signature,
+        aggregate_signing_key,
+        chain_id,
+        kernel_message_digest,
+    )? {
+        return Err(AdaptorError::VerificationFailed(
+            "aggregated plain DOM Schnorr signature",
+        ));
+    }
+    Ok(signature)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,9 +510,8 @@ mod tests {
             aux: &[u8; 32],
             context_bytes: &[u8],
         ) -> PublicNoncePairV1 {
-            let (first, second) =
-                scriptless_derive_secret_nonce_pair_v1(share, aux, context_bytes)
-                    .expect("fixture does not reduce to zero");
+            let (first, second) = scriptless_derive_secret_nonce_pair_v1(share, aux, context_bytes)
+                .expect("fixture does not reduce to zero");
             PublicNoncePairV1 {
                 first: first.public_key(),
                 second: second.public_key(),
@@ -511,7 +546,11 @@ mod tests {
             changed[offset] = value;
             let changed = derive_public(&share, &[9; 32], &changed);
             assert_ne!(changed.first(), base.first(), "first nonce offset {offset}");
-            assert_ne!(changed.second(), base.second(), "second nonce offset {offset}");
+            assert_ne!(
+                changed.second(),
+                base.second(),
+                "second nonce offset {offset}"
+            );
         }
 
         let changed_aux = derive_public(&share, &[10; 32], &canonical);
@@ -555,6 +594,28 @@ mod tests {
             pair.authorize(wrong).err().expect("mismatch"),
             AdaptorError::AuthorizationMismatch
         );
+    }
+
+    #[test]
+    fn production_derivation_uses_fresh_operating_system_randomness() {
+        let share = secret(0x07);
+        let context = context(
+            &share,
+            0,
+            PurposeV1::Refund,
+            DirectionV1::Initiator,
+            SigningPhaseV1::SigNonceCommit,
+            [1; 32],
+        );
+        let first = SecretNoncePairV1::derive(context.clone(), &share, reservation(30))
+            .expect("first OS-random pair")
+            .commitment()
+            .expect("first commitment");
+        let second = SecretNoncePairV1::derive(context, &share, reservation(30))
+            .expect("second OS-random pair")
+            .commitment()
+            .expect("second commitment");
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -728,5 +789,121 @@ mod tests {
             )
             .expect("extracted secret");
         assert_eq!(extracted.public_point(), adaptor_secret.public_point());
+    }
+
+    #[test]
+    fn funding_and_refund_two_nonce_workflows_pass_real_dom_verifier() {
+        for (case, purpose) in [PurposeV1::Funding, PurposeV1::Refund]
+            .into_iter()
+            .enumerate()
+        {
+            let share_a = secret(0x07);
+            let share_b = small_secret(0x03);
+            let session_id = [30 + case as u8; 32];
+            let context_a = context(
+                &share_a,
+                0,
+                purpose,
+                DirectionV1::Initiator,
+                SigningPhaseV1::SigPartial,
+                session_id,
+            );
+            let context_b = context(
+                &share_b,
+                1,
+                purpose,
+                DirectionV1::Initiator,
+                SigningPhaseV1::SigPartial,
+                session_id,
+            );
+            let reservation_a = reservation(40 + case as u8 * 4);
+            let reservation_b = reservation(42 + case as u8 * 4);
+            let authorized_a = SecretNoncePairV1::derive_with_aux_for_test(
+                context_a.clone(),
+                &share_a,
+                reservation_a.clone(),
+                [50 + case as u8; 32],
+            )
+            .expect("pair A")
+            .authorize(permit(&context_a, &reservation_a))
+            .expect("authorize A");
+            let authorized_b = SecretNoncePairV1::derive_with_aux_for_test(
+                context_b.clone(),
+                &share_b,
+                reservation_b.clone(),
+                [60 + case as u8; 32],
+            )
+            .expect("pair B")
+            .authorize(permit(&context_b, &reservation_b))
+            .expect("authorize B");
+            let public_a = authorized_a.public_nonces().clone();
+            let public_b = authorized_b.public_nonces().clone();
+            let participants = vec![
+                ParticipantPublicNoncesV1 {
+                    participant_index: 0,
+                    signing_key: share_a.public_key(),
+                    first_nonce: public_a.first().clone(),
+                    second_nonce: public_a.second().clone(),
+                },
+                ParticipantPublicNoncesV1 {
+                    participant_index: 1,
+                    signing_key: share_b.public_key(),
+                    first_nonce: public_b.first().clone(),
+                    second_nonce: public_b.second().clone(),
+                },
+            ];
+            let binding_factor = binding_factor_v1(
+                &BindingContextV1 {
+                    chain_id: *context_a.chain_id(),
+                    session_id: *context_a.session_id(),
+                    purpose,
+                    template_hash: *context_a.template_hash(),
+                },
+                &participants,
+                None,
+            )
+            .expect("binding factor");
+            let bound_a = public_a.bind(&binding_factor).expect("bound A");
+            let bound_b = public_b.bind(&binding_factor).expect("bound B");
+            let aggregate_nonce =
+                aggregate_public_nonces_v1(&[bound_a, bound_b]).expect("aggregate nonce");
+            let aggregate_key =
+                schnorr_add_public_keys(&[share_a.public_key(), share_b.public_key()])
+                    .expect("aggregate key");
+            let partial_a = authorized_a
+                .sign_partial(
+                    &binding_factor,
+                    &aggregate_nonce,
+                    &aggregate_key,
+                    &share_a,
+                    context_a.chain_id(),
+                    context_a.message_digest(),
+                )
+                .expect("partial A");
+            let partial_b = authorized_b
+                .sign_partial(
+                    &binding_factor,
+                    &aggregate_nonce,
+                    &aggregate_key,
+                    &share_b,
+                    context_b.chain_id(),
+                    context_b.message_digest(),
+                )
+                .expect("partial B");
+            let signature = finalize_plain_signature_v1(
+                &[partial_a, partial_b],
+                purpose,
+                context_a.template_hash(),
+                &aggregate_nonce,
+                &aggregate_key,
+                context_a.chain_id(),
+                context_a.message_digest(),
+            )
+            .expect("real DOM signature");
+            assert_eq!(
+                signature.r_compressed(),
+                &aggregate_nonce.to_compressed_bytes()
+            );
+        }
     }
 }
