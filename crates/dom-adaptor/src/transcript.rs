@@ -118,6 +118,13 @@ pub fn binding_factor_v1(
             "participants must have unique strictly increasing indexes",
         ));
     }
+    if participants.windows(2).any(|pair| {
+        pair[0].signing_key.to_compressed_bytes() >= pair[1].signing_key.to_compressed_bytes()
+    }) {
+        return Err(AdaptorError::InvalidTranscript(
+            "participant signing keys must follow the canonical signing roster",
+        ));
+    }
     for (position, participant) in participants.iter().enumerate() {
         for other in &participants[position + 1..] {
             if participant.signing_key == other.signing_key {

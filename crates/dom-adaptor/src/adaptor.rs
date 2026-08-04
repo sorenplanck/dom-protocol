@@ -7,6 +7,37 @@ use dom_crypto::{
     SchnorrSignature, ScriptlessSecretScalar,
 };
 
+/// Canonical 65-byte cryptographic adaptor pre-signature core `R_hat || s_hat`.
+///
+/// This is distinct from the 162-byte session-bound transport object. The
+/// type intentionally implements neither `Clone` nor `Debug`.
+pub struct CoreAdaptorPreSignatureV1 {
+    aggregate_nonce_hat: PublicKey,
+    scalar_hat: PartialSig,
+}
+
+impl CoreAdaptorPreSignatureV1 {
+    /// Exact canonical encoded length.
+    pub const ENCODED_LEN: usize = 65;
+
+    /// Parse exact core bytes with canonical point and scalar rejection.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let bytes = exact_array::<{ Self::ENCODED_LEN }>("CoreAdaptorPreSignatureV1", bytes)?;
+        Ok(Self {
+            aggregate_nonce_hat: PublicKey::from_compressed_bytes(&bytes[..33])?,
+            scalar_hat: PartialSig::from_bytes(&bytes[33..])?,
+        })
+    }
+
+    /// Serialize exact `R_hat || s_hat` bytes.
+    pub fn to_bytes(&self) -> [u8; Self::ENCODED_LEN] {
+        let mut bytes = [0u8; Self::ENCODED_LEN];
+        bytes[..33].copy_from_slice(&self.aggregate_nonce_hat.to_compressed_bytes());
+        bytes[33..].copy_from_slice(&self.scalar_hat.to_bytes());
+        bytes
+    }
+}
+
 /// Opaque adaptor secret with zeroization and no cloning, debug output, or
 /// generic serialization.
 pub struct AdaptorSecret(ScriptlessSecretScalar);
@@ -76,6 +107,33 @@ impl AdaptorPreSignatureV1 {
             scalar_hat,
             transcript_hash,
         ))
+    }
+
+    /// Parse and validate the 162-byte object against an immutable Claim session.
+    pub fn from_bytes_for_session(bytes: &[u8], context: &crate::SessionContextV1) -> Result<Self> {
+        if context.purpose() != crate::PurposeV1::ClaimAdaptor {
+            return Err(AdaptorError::InvalidTranscript(
+                "session-bound adaptor pre-signature requires ClaimAdaptor",
+            ));
+        }
+        let parsed = Self::from_bytes(bytes)?;
+        if parsed.claim_template_hash() != context.template_hash()
+            || parsed.transcript_hash() != context.transcript_hash()
+            || context.adaptor_point() != Some(parsed.adaptor_point())
+        {
+            return Err(AdaptorError::InvalidTranscript(
+                "adaptor pre-signature fields differ from the Claim session",
+            ));
+        }
+        Ok(parsed)
+    }
+
+    /// Return the distinct 65-byte cryptographic core.
+    pub fn core_bytes(&self) -> [u8; CoreAdaptorPreSignatureV1::ENCODED_LEN] {
+        let mut bytes = [0u8; CoreAdaptorPreSignatureV1::ENCODED_LEN];
+        bytes[..33].copy_from_slice(&self.aggregate_nonce_hat.to_compressed_bytes());
+        bytes[33..].copy_from_slice(&self.scalar_hat.to_bytes());
+        bytes
     }
 
     /// Serialize the exact canonical pre-signature payload.

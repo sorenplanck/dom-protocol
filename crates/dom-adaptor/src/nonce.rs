@@ -1,8 +1,8 @@
 //! Opaque one-shot secret two-nonce ownership and participant signing.
 
 use crate::{
-    nonce_commitment_hash_v1, AdaptorError, BindingFactorV1, PartialSignatureV1, PurposeV1, Result,
-    SessionContextV1,
+    nonce_commitment_hash_v1, AdaptorError, BindingFactorV1, ExposureKindV1, ExposurePermitV1,
+    PartialSignatureV1, PurposeV1, Result, SessionContextV1,
 };
 use dom_crypto::{
     schnorr_aggregate_sigs, schnorr_challenge, scriptless_add_public_points,
@@ -54,50 +54,6 @@ impl NonceReservationBindingV1 {
     /// Return the digest of the outbound canonical bytes.
     pub const fn outbound_digest(&self) -> &[u8; 32] {
         &self.outbound_digest
-    }
-}
-
-/// One-shot authorization produced only after the G1b vault durably records
-/// the matching exposure authorization and irreversible consume tombstone.
-///
-/// This type intentionally implements neither `Clone` nor `Copy`; integration
-/// must move one permit into one nonce pair. Construction is the stable G1b
-/// contract boundary and does not itself perform persistence.
-pub struct SigningPermitV1 {
-    nonce_id: [u8; 32],
-    session_id: [u8; 32],
-    participant_id: [u8; 32],
-    purpose: PurposeV1,
-    template_hash: [u8; 32],
-    outbound_digest: [u8; 32],
-}
-
-impl SigningPermitV1 {
-    /// Materialize a permit after the vault has durably authorized these exact
-    /// bytes. Calling this constructor before durable G1b authorization is a
-    /// contract violation audited at the Wallet integration boundary.
-    pub fn from_durable_vault_authorization(
-        nonce_id: [u8; 32],
-        session_id: [u8; 32],
-        participant_id: [u8; 32],
-        purpose: PurposeV1,
-        template_hash: [u8; 32],
-        outbound_digest: [u8; 32],
-    ) -> Result<Self> {
-        purpose.require_strict_phase1()?;
-        if nonce_id == [0u8; 32] || session_id == [0u8; 32] || participant_id == [0u8; 32] {
-            return Err(AdaptorError::InvalidContext(
-                "permit identifiers must be nonzero",
-            ));
-        }
-        Ok(Self {
-            nonce_id,
-            session_id,
-            participant_id,
-            purpose,
-            template_hash,
-            outbound_digest,
-        })
     }
 }
 
@@ -203,13 +159,14 @@ impl SecretNoncePairV1 {
     }
 
     /// Consume this pre-authorization pair and bind it to one durable permit.
-    pub fn authorize(self, permit: SigningPermitV1) -> Result<AuthorizedSecretNoncePairV1> {
-        let matches = permit.nonce_id == *self.reservation.nonce_id()
-            && permit.session_id == *self.context.session_id()
-            && permit.participant_id == *self.reservation.participant_id()
-            && permit.purpose == self.context.purpose()
-            && permit.template_hash == *self.context.template_hash()
-            && permit.outbound_digest == *self.reservation.outbound_digest();
+    pub fn authorize(self, permit: ExposurePermitV1) -> Result<AuthorizedSecretNoncePairV1> {
+        let matches = permit.exposure_kind() == ExposureKindV1::NonceReveal
+            && permit.reservation_nonce_id() == self.reservation.nonce_id()
+            && permit.session_id() == self.context.session_id()
+            && permit.participant_id() == self.reservation.participant_id()
+            && permit.purpose() == self.context.purpose()
+            && permit.template_hash() == self.context.template_hash()
+            && permit.outbound_digest() == self.reservation.outbound_digest();
         if !matches {
             return Err(AdaptorError::AuthorizationMismatch);
         }
@@ -235,7 +192,7 @@ impl SecretNoncePairV1 {
 /// operation are now available. Partial signing consumes this value.
 pub struct AuthorizedSecretNoncePairV1 {
     pair: SecretNoncePairV1,
-    _permit: SigningPermitV1,
+    _permit: ExposurePermitV1,
 }
 
 impl AuthorizedSecretNoncePairV1 {
@@ -426,16 +383,30 @@ mod tests {
     fn permit(
         context: &SessionContextV1,
         reservation: &NonceReservationBindingV1,
-    ) -> SigningPermitV1 {
-        SigningPermitV1::from_durable_vault_authorization(
-            *reservation.nonce_id(),
-            *context.session_id(),
-            *reservation.participant_id(),
-            context.purpose(),
-            *context.template_hash(),
-            *reservation.outbound_digest(),
-        )
-        .expect("permit")
+    ) -> ExposurePermitV1 {
+        permit_with_nonce(context, reservation, *reservation.nonce_id())
+    }
+
+    fn permit_with_nonce(
+        context: &SessionContextV1,
+        reservation: &NonceReservationBindingV1,
+        nonce_id: [u8; 32],
+    ) -> ExposurePermitV1 {
+        let mut bytes = [0u8; ExposurePermitV1::ENCODED_LEN];
+        bytes[..8].copy_from_slice(b"DOMEXPV1");
+        bytes[8..10].copy_from_slice(&1u16.to_le_bytes());
+        bytes[10] = ExposureKindV1::NonceReveal.to_byte();
+        bytes[11..43].fill(0x91);
+        bytes[43..75].copy_from_slice(&nonce_id);
+        bytes[75..107].copy_from_slice(context.session_id());
+        bytes[107..139].copy_from_slice(reservation.participant_id());
+        bytes[139] = context.purpose().to_byte();
+        bytes[140..172].copy_from_slice(context.template_hash());
+        bytes[172..204].copy_from_slice(reservation.outbound_digest());
+        bytes[204..212].copy_from_slice(&1u64.to_le_bytes());
+        bytes[212..220].copy_from_slice(&2u64.to_le_bytes());
+        bytes[220..252].fill(0x92);
+        ExposurePermitV1::from_durable_bytes(&bytes).expect("permit")
     }
 
     #[test]
@@ -581,15 +552,7 @@ mod tests {
         )
         .expect("pair");
         assert_ne!(pair.commitment().expect("commitment"), Hash256::ZERO);
-        let wrong = SigningPermitV1::from_durable_vault_authorization(
-            [99; 32],
-            *context.session_id(),
-            *binding.participant_id(),
-            context.purpose(),
-            *context.template_hash(),
-            *binding.outbound_digest(),
-        )
-        .expect("structurally valid wrong permit");
+        let wrong = permit_with_nonce(&context, &binding, [99; 32]);
         assert_eq!(
             pair.authorize(wrong).err().expect("mismatch"),
             AdaptorError::AuthorizationMismatch

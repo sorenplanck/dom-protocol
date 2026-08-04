@@ -1,6 +1,6 @@
 //! Ratified closed registries and canonical SessionContextV1 encoding.
 
-use crate::{AdaptorError, PurposeV1, Result};
+use crate::{AdaptorError, PurposeV1, Result, TrustedChainIdV1};
 use dom_crypto::{PublicKey, ScriptlessSecretScalar};
 
 /// Ratified V1 direction registry, stable by protocol role.
@@ -127,7 +127,7 @@ impl SessionContextV1 {
     pub const MAX_PARTICIPANTS: usize = 16;
 
     /// Validate all ratified invariants and construct an immutable context.
-    pub fn new(
+    pub(crate) fn new(
         inputs: SessionContextInputsV1,
         signing_share: &ScriptlessSecretScalar,
     ) -> Result<Self> {
@@ -226,10 +226,25 @@ impl SessionContextV1 {
         })
     }
 
+    /// Construct a production context only after matching the authoritative
+    /// local chain adapter output.
+    pub fn from_trusted_chain(
+        inputs: SessionContextInputsV1,
+        trusted_chain_id: &TrustedChainIdV1,
+        signing_share: &ScriptlessSecretScalar,
+    ) -> Result<Self> {
+        if &inputs.chain_id != trusted_chain_id.as_bytes() {
+            return Err(AdaptorError::InvalidContext(
+                "context chain ID differs from the trusted local chain",
+            ));
+        }
+        Self::new(inputs, signing_share)
+    }
+
     /// Parse exact canonical bytes and re-run every semantic validation.
     pub fn from_bytes(
         bytes: &[u8],
-        trusted_chain_id: &[u8; 32],
+        trusted_chain_id: &TrustedChainIdV1,
         signing_share: &ScriptlessSecretScalar,
     ) -> Result<Self> {
         if bytes.len() < 179 {
@@ -248,7 +263,7 @@ impl SessionContextV1 {
         let chain_id: [u8; 32] = bytes[2..34]
             .try_into()
             .expect("fixed offsets provide 32 bytes");
-        if &chain_id != trusted_chain_id {
+        if &chain_id != trusted_chain_id.as_bytes() {
             return Err(AdaptorError::InvalidContext(
                 "context chain ID differs from the trusted local chain",
             ));
@@ -494,7 +509,8 @@ mod tests {
         assert_eq!(&encoded[66..70], &[0x01, 0x01, 0x00, 0x01]);
         assert_eq!(&encoded[166..176], &[0, 0, 0, 0, 0, 0, 0, 0, 2, 0]);
         assert_eq!(encoded[244], 0x00);
-        let parsed = SessionContextV1::from_bytes(&encoded, &[0xaa; 32], &signing_share)
+        let trusted = TrustedChainIdV1::from_signed_fixture([0xaa; 32]);
+        let parsed = SessionContextV1::from_bytes(&encoded, &trusted, &signing_share)
             .expect("canonical roundtrip");
         assert_eq!(parsed.to_bytes(), encoded);
     }
@@ -544,15 +560,24 @@ mod tests {
             .to_bytes();
         for length in 0..encoded.len() {
             assert!(
-                SessionContextV1::from_bytes(&encoded[..length], &[0xaa; 32], &signing_share)
-                    .is_err(),
+                SessionContextV1::from_bytes(
+                    &encoded[..length],
+                    &TrustedChainIdV1::from_signed_fixture([0xaa; 32]),
+                    &signing_share,
+                )
+                .is_err(),
                 "truncation {length}"
             );
         }
         for (offset, value) in [(0, 2), (66, 0), (67, 3), (68, 6), (69, 0)] {
             let mut mutated = encoded.clone();
             mutated[offset] = value;
-            assert!(SessionContextV1::from_bytes(&mutated, &[0xaa; 32], &signing_share).is_err());
+            assert!(SessionContextV1::from_bytes(
+                &mutated,
+                &TrustedChainIdV1::from_signed_fixture([0xaa; 32]),
+                &signing_share,
+            )
+            .is_err());
         }
     }
 }
