@@ -2,7 +2,7 @@
 
 ## Autoridade normativa
 
-A precedência é: Especificação Mestra v1.0, Relatório Consolidado, Cronograma de Implementação e, por último, código/fixtures/testes congelados. Os documentos normativos estão pendentes de localização e nenhuma lacuna será preenchida por inferência.
+A precedência é: Especificação Mestra v1.0, Relatório Consolidado v1, Cronograma de Implementação v1 e, por último, código/fixtures/testes congelados. Os três documentos fornecidos pelo operador estão registrados em [`source-guides/NORMATIVE-SOURCES.md`](source-guides/NORMATIVE-SOURCES.md), com cópias byte-idênticas e hashes locais. Lacunas continuam sem preenchimento por inferência.
 
 ## Código autoritativo
 

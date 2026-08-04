@@ -9,7 +9,7 @@ Esta árvore documenta e controla o desenvolvimento isolado do DOM Scriptless Co
 3. Cronograma de Implementação.
 4. Código, fixtures e testes congelados.
 
-Os três primeiros documentos não foram localizados na busca limitada até profundidade 3 em `/home/leonardov`. Decisões dependentes deles permanecem bloqueadas; consulte `source-guides/ARQUIVOS-PENDENTES.md`.
+Os três primeiros documentos foram fornecidos pelo operador e estão registrados, com proveniência, cópias byte-idênticas e SHA-256, em [`source-guides/NORMATIVE-SOURCES.md`](source-guides/NORMATIVE-SOURCES.md). A [revisão comparativa](reports/phase-1/NORMATIVE-REVIEW.md) e a [matriz de inputs G1a](phase-1a/NORMATIVE-INPUT-MATRIX.md) distinguem decisões congeladas de propostas, ambiguidades e ausências.
 
 ## Gates
 

@@ -4,7 +4,7 @@ G1a exige fontes independentes e congelamento byte a byte. O código sob teste n
 
 ## SCAD0
 
-Existe uma cópia byte-idêntica de oito vetores candidatos em [`test-vectors/scriptless/scad0/DOM_SCAD0_8_VETORES_2026-08-03.txt`](../../../test-vectors/scriptless/scad0/DOM_SCAD0_8_VETORES_2026-08-03.txt), registrada pelo [`MANIFEST.sha256`](../../../test-vectors/scriptless/MANIFEST.sha256). Sua presença não fecha o item: ainda são necessárias classificação normativa, revisão independente e evidência de origem.
+Existe uma cópia byte-idêntica de oito vetores em [`test-vectors/scriptless/scad0/DOM_SCAD0_8_VETORES_2026-08-03.txt`](../../../test-vectors/scriptless/scad0/DOM_SCAD0_8_VETORES_2026-08-03.txt), registrada pelo [`MANIFEST.sha256`](../../../test-vectors/scriptless/MANIFEST.sha256). O Relatório Consolidado §2.1 identifica o extrato de oito vetores pelo mesmo SHA-256 abreviado (`e99ad8a3…eaa4b`); a cópia local tem SHA-256 completo `e99ad8a32edc3db52941e6729c032893d2b864ab995821debf574468b7beaa4b`. Sua presença e correlação documental não fecham G1a: ainda faltam implementação, execução no crate isolado, vetores independentes de dois nonces e revisão formal.
 
 ## Ainda pendente
 
