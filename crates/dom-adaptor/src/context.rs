@@ -475,8 +475,13 @@ mod tests {
             assert_eq!(phase.to_le_bytes(), value.to_le_bytes());
             assert_eq!(SigningPhaseV1::try_from(value).expect("registered"), phase);
         }
-        assert!(SigningPhaseV1::try_from(0x0000).is_err());
-        assert!(SigningPhaseV1::try_from(0x0106).is_err());
+        for value in 0u16..=u16::MAX {
+            assert_eq!(
+                SigningPhaseV1::try_from(value).is_ok(),
+                (0x0100..=0x0105).contains(&value),
+                "signing phase 0x{value:04x}"
+            );
+        }
     }
 
     #[test]
