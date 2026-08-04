@@ -1,0 +1,12 @@
+[package]
+name = "dom-adaptor"
+description = "DOM Scriptless Contracts adaptor-signature integration boundary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
