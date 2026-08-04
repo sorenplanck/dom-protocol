@@ -326,14 +326,9 @@ impl ConsumedExposure {
     }
 }
 
-/// One-shot NAR-002 capability for one exact staged public artifact.
-///
-/// This type intentionally implements neither Clone, Copy, Debug, Display nor
-/// generic serialization traits. The Wallet may issue it only after the exact
-/// outbound bytes, semantic journal entry, verified applied receipt, receipt
-/// record, receipt-chain hash, and spent permit ID are durable. For a partial
-/// signature, the nonce-secret tombstone must also already be durable.
-pub struct ExposurePermitV1 {
+/// Canonical public binding carried by an opaque Wallet-owned permit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExposurePermitBindingV1 {
     permit_id: IdempotencyKey,
     reservation_id: ReservationNonceId,
     session_id: SessionId,
@@ -347,10 +342,10 @@ pub struct ExposurePermitV1 {
     receipt_chain_hash: [u8; 32],
 }
 
-impl ExposurePermitV1 {
-    /// Issues a capability from already-durable, verified Wallet evidence.
+impl ExposurePermitBindingV1 {
+    /// Validates the fields bound by a durable Wallet permit.
     #[allow(clippy::too_many_arguments)]
-    pub fn issue_after_durability(
+    pub fn new(
         permit_id: IdempotencyKey,
         reservation_id: ReservationNonceId,
         session_id: SessionId,
@@ -384,7 +379,7 @@ impl ExposurePermitV1 {
         })
     }
 
-    /// Returns the exact 252-byte persistence representation.
+    /// Returns the exact 252-byte canonical binding representation.
     pub fn persistence_bytes(&self) -> [u8; 252] {
         let mut bytes = [0u8; 252];
         let mut cursor = 0;
@@ -417,21 +412,17 @@ impl ExposurePermitV1 {
         )
         .as_bytes()
     }
+}
 
-    /// Returns the bound reservation identifier.
-    pub const fn reservation_id(&self) -> &ReservationNonceId {
-        &self.reservation_id
-    }
-
-    /// Returns the bound exposure kind.
-    pub const fn exposure_kind(&self) -> ExposureKindV1 {
-        self.exposure_kind
-    }
-
-    /// Returns the exact bound outbound digest.
-    pub const fn outbound_digest(&self) -> &[u8; 32] {
-        &self.outbound_digest
-    }
+/// Opaque one-shot permit issued only by a durable [`NonceVault`].
+///
+/// Production signing code accepts the associated permit type of its configured
+/// vault implementation, never canonical bytes or a caller-selected parser. A
+/// Wallet implementation keeps its permit constructor private and must not
+/// implement Clone, Copy, Debug, Display, or generic serialization for it.
+pub trait VaultExposurePermit {
+    /// Returns the immutable canonical binding for exhaustive comparison.
+    fn binding(&self) -> &ExposurePermitBindingV1;
 }
 
 impl fmt::Debug for ConsumedExposure {
@@ -474,6 +465,8 @@ pub trait VaultReceipt {
 pub trait NonceVault {
     /// Receipt type produced by the configured witness verifier.
     type Receipt: VaultReceipt;
+    /// Wallet-owned opaque one-shot permit type.
+    type Permit: VaultExposurePermit;
 
     /// Reserves nonce slots and charges configured budgets atomically.
     fn reserve(&mut self, request: ReservationRequest)
@@ -494,10 +487,10 @@ pub trait NonceVault {
         &mut self,
         request: ExposureAuthorizationRequest,
         receipt: Self::Receipt,
-    ) -> Result<ExposurePermitV1, NonceVaultError>;
+    ) -> Result<Self::Permit, NonceVaultError>;
 
     /// Consumes a one-shot permit and releases only its exact bound bytes.
-    fn export(&mut self, permit: ExposurePermitV1) -> Result<ConsumedExposure, NonceVaultError>;
+    fn export(&mut self, permit: Self::Permit) -> Result<ConsumedExposure, NonceVaultError>;
 
     /// Irreversibly aborts a reservation without refunding budget.
     fn abort(
