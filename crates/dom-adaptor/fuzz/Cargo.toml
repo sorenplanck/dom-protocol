@@ -12,10 +12,11 @@ libfuzzer-sys = "0.4"
 
 [dependencies.dom-adaptor]
 path = ".."
-features = ["fuzzing"]
+features = ["fuzzing", "test-helpers"]
 
 [dependencies.dom-crypto]
 path = "../../dom-crypto"
+features = ["test-helpers"]
 
 [[bin]]
 name = "canonical_messages"

@@ -30,9 +30,11 @@ pub use scriptless::{
     scalar_from_wide_be, scriptless_adapt_signature, scriptless_add_public_points,
     scriptless_aggregate_partial_scalars, scriptless_bind_public_nonces,
     scriptless_extract_adaptor_secret, scriptless_verify_bound_partial,
-    scriptless_verify_final_signature, scriptless_verify_pre_signature,
-    ScriptlessNonceDerivationV1, ScriptlessSecretNoncePairV1, ScriptlessSecretScalar,
+    scriptless_verify_final_signature, scriptless_verify_pre_signature, ScriptlessSecretScalar,
 };
+#[cfg(feature = "test-helpers")]
+#[doc(hidden)]
+pub use scriptless::{ScriptlessNonceDerivationV1, ScriptlessSecretNoncePairV1};
 mod bulletproof_bp;
 #[cfg(kani)]
 mod kani_invariants;
