@@ -7,3 +7,9 @@ Inclui o esquema de dois nonces com binding, transcript canônico, purposes Fund
 G1a e G1b são gates independentes. Depois da aprovação formal de G1a, a Fase 2 pode avançar somente em regtest e sem fundos reais. G1a isoladamente nunca autoriza produção; produção exige G1a **e** G1b aprovados.
 
 Fora do escopo: Nonce Vault, armazenamento, orçamento, journal, âncora, testemunha, restauração, consenso, wire e qualquer implementação DL2P.
+
+Mapa técnico: [`DOM-BACKEND-INVENTORY.md`](DOM-BACKEND-INVENTORY.md). Freeze:
+[`FROZEN-CRYPTO-PARAMETERS.md`](FROZEN-CRYPTO-PARAMETERS.md). O esquema de dois
+nonces permanece bloqueado nos pontos declarados em
+[`TWO-NONCE-SCHEME.md`](TWO-NONCE-SCHEME.md); isso impede implementação completa,
+mas não invalida os parâmetros DOM já congelados.

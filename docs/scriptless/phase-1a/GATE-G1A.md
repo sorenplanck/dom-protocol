@@ -23,3 +23,20 @@ Estado: **NÃO APROVADO**. Este checklist controla exclusivamente G1a. A existê
 - [ ] Fuzz dos parsers e operações de G1a concluído sem panic.
 
 Fechar G1a não fecha G1b e não autoriza fundos reais ou produção.
+
+## Estado do freeze versus estado do gate
+
+| Área | Input | Implementação | Teste DOM | Validação independente |
+|---|---|---|---|---|
+| Perfil DOM, scalar/ponto/hash | congelado por ADR-0009/0010 | pendente | backend existente mapeado | parcial em KAVs |
+| Purpose Funding/Claim/Refund | congelado por ADR-0012 | pendente | pendente | pendente |
+| Adaptor `s=s_hat+t` | congelado por EM/RC/SCAD0 | pendente em `dom-adaptor` | 8 kernels passam no teste rastreado DOM | vetores externos pendentes |
+| Transcript de challenge | congelado por código DOM/ADR-0014 | pendente | backend existente | KAVs DOM existentes |
+| Transcript de dois nonces | construção/binding congelados; derivação bloqueada | não iniciado | pendente | pendente |
+| Binding/hash-to-scalar | congelado por ADR-0013 | não iniciado | AUTO-CHECK parcial | esquema independente pendente |
+| Tipos secretos/CT/zeroização | política congelada | pendente | pendente | auditoria pendente |
+
+Nenhuma caixa acima é marcada porque nenhum requisito completo reúne input,
+implementação, teste correspondente e validação exigida. Consulte
+[`NORMATIVE-INPUT-MATRIX.md`](NORMATIVE-INPUT-MATRIX.md) e
+[`FROZEN-CRYPTO-PARAMETERS.md`](FROZEN-CRYPTO-PARAMETERS.md).

@@ -11,3 +11,8 @@ A precedência é: Especificação Mestra v1.0, Relatório Consolidado v1, Crono
 - Laboratório: `/home/leonardov/dom-scriptless-lab`, evidência não autoritativa.
 
 DL2P e seus artefatos não são fontes deste projeto. O arquivo SCAD0 importado é fixture congelada candidata e sua presença não aprova G1a.
+
+O mapeamento arquivo/símbolo do backend no commit-base está em
+[`phase-1a/DOM-BACKEND-INVENTORY.md`](phase-1a/DOM-BACKEND-INVENTORY.md). O probe
+oficial não rastreado foi apenas inspecionado como evidência não autoritativa;
+não foi copiado nem convertido em implementação.

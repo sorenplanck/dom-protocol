@@ -1,9 +1,35 @@
-# Domínios de hash e purposes de G1a
+# Registro de domínios e purposes de G1a
 
-Este é o documento autoritativo para G1a sobre domínios e purposes. O registro deverá ser fechado, canônico e versionado, com separação inequívoca para Funding, Claim e Refund e uso exclusivo de `blake2b_256_tagged` da DOM.
+O framing de todas as tags é o de `dom_crypto::blake2b_256_tagged`; nenhuma
+instância BLAKE2b paralela é permitida.
 
-As fontes normativas fornecidas pelo operador congelam BLAKE2b-256 com digest nativo de 32 bytes e exigem delegação ao challenge/hash autoritativo da DOM, mas a Especificação Mestra §3.4 declara que framing, personalization, salt/key, hash-to-scalar e várias tags propostas ainda dependem de freeze e vetores diferenciais. O Apêndice E também marca seus códigos e layouts como propostos para freeze. A [matriz normativa](NORMATIVE-INPUT-MATRIX.md) registra esses estados sem promover propostas a decisões.
+| Tag ASCII exata | Uso | Origem | Estado |
+|---|---|---|---|
+| `DOM:kernel-sig:v1` | challenge final DOM | código `TAG_KERNEL_SIG` + EM | CONGELADO |
+| `DOM:kernel-msg:v1` | mensagem de kernel | código `TAG_KERNEL_MSG` | CONGELADO |
+| `DOM:scriptless-nonce-commit:v1` | commitment de nonces públicos | EM §§3.4/6.6 + ADR-0011 | CONGELADO para o layout descrito |
+| `DOM:scriptless-sig-nonce-bind:v1` | binding coletivo | EM §§3.4/6.6 + ADR-0011/0013 | CONGELADO |
+| `DOM:scriptless-transcript:v1` | hash acumulado de sessão | EM §§3.4/8.4 | tag/fórmula conhecidos; discriminantes BLOQUEADOS |
 
-Não é permitido inferir valores do DL2P, de modelos antigos ou do código sob teste.
+Tags candidatas de Bulletproof, transporte, autenticação e sessão presentes na
+EM não são promovidas por esta missão porque não pertencem ao núcleo G1a
+imediato.
 
-Estado: **algoritmo-base consistente; framing, registro final, bytes de purpose e vetores ainda exigem decisão/congelamento; nenhum item de gate concluído**.
+## Purposes v1
+
+| Nome canônico | Byte | Uso | Origem | Estado |
+|---|---:|---|---|---|
+| `RefundV1` | `0x01` | assinatura de refund | EM Ap. E §E.6 + ADR-0012 | CONGELADO |
+| `ClaimAdaptorV1` | `0x02` | pré-assinatura adaptor de claim | EM Ap. E §E.6 + ADR-0012 | CONGELADO |
+| `FundingV1` | `0x03` | assinatura de funding | EM Ap. E §E.6 + ADR-0012 | CONGELADO |
+| Sponsor | `0x04` | reservado, fora de G1a | EM Ap. E §E.6 | NÃO IMPLEMENTAR |
+
+Outros bytes são inválidos. A separação entre os três purposes ocorre pelo
+discriminante obrigatório dentro do preimage de uma tag versionada, não por
+tags improvisadas. Famílias de nonce são distintas por `(key, purpose)`.
+
+## Bloqueios
+
+- derivação byte-exata dos dois nonces secretos;
+- códigos do transcript de Fase 3-SM;
+- vetores independentes do esquema completo.

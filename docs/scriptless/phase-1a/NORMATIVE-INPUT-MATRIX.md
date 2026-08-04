@@ -1,53 +1,51 @@
-# Matriz de inputs normativos de G1a
+# Matriz de inputs normativos de G1a — freeze pré-implementação
 
-Data: 2026-08-04
-Resultado: inputs classificados; **nenhum item de G1a aprovado por esta matriz**.
+Data: 2026-08-04. Resultado: inputs solucionáveis congelados; bloqueios não
+foram preenchidos. **Esta matriz não aprova G1a.**
 
-## Estados
+Estados: `CONGELADO`, `CONSISTENTE`, `AMBÍGUO`, `AUSENTE`, `CONFLITANTE` e
+`EXIGE DECISÃO`. Origem: EM = Especificação Mestra; RC = Relatório Consolidado;
+CR = Cronograma.
 
-- **CONGELADO** — decisão normativa explícita e inequívoca no seu escopo indicado.
-- **CONSISTENTE** — fontes concordam na direção/requisito, mas ainda falta evidência de freeze byte a byte.
-- **AMBÍGUO** — o item agrega partes com graus diferentes de definição ou admite mais de uma leitura.
-- **AUSENTE** — as três fontes importadas não especificam o requisito.
-- **CONFLITANTE** — fontes dão instruções incompatíveis.
-- **EXIGE DECISÃO** — a própria fonte marca proposta, bloqueio ou dependência de medição/evidência antes do freeze.
+| Input | Estado | Definição/evidência rastreável | Pendência de implementação/validação |
+|---|---|---|---|
+| Curva | CONGELADO | secp256k1; EM §§3.1–3.2; `dom-crypto`; ADR-0009 | implementar só via backend DOM |
+| Grupo/ordem | CONGELADO | `n=FFFFFFFF…D0364141`; `schnorr.rs`; KAV negativo | testes G1a |
+| Codificação de pontos | CONGELADO | SEC1 comprimido 33, prefixo 02/03; `PublicKey`; ADR-0010 | mutações/fuzz |
+| Identidade/infinito/subgrupo | CONGELADO | rejeitar; parser secp256k1, cofactor 1 | corpus negativo G1a |
+| Representação de scalars | CONGELADO | wire Schnorr BE 32 `[1,n-1]`; `keys::Scalar` interno LE; ADR-0010 | conversões explícitas/testes |
+| Hash | CONGELADO | BLAKE2b nativo 32, sem key/salt/personalization; `hash.rs` + KAV | tags G1a vetorizadas |
+| Framing tagged | CONGELADO | `u16_le(tag_len)||tag||data`; `blake2b_256_tagged` | enum fechado no código futuro |
+| Tags/domínios G1a | CONGELADO PARCIAL | três tags Scriptless exatas da EM; ADR-0011 | transcript cumulativo e hash→scalar bloqueados |
+| Purposes | CONGELADO | Refund=01, ClaimAdaptor=02, Funding=03; ADR-0012 | enum/testes; Sponsor reservado |
+| Transcript de challenge | CONGELADO | `R33||X33||chain32||message`; `schnorr_challenge` | chamar API real |
+| Transcript de commitment | CONGELADO | campos/tamanhos e T condicional; EM §6.6/ADR-0013 | implementação/vetores |
+| Transcript de binding | CONGELADO | body, ordem e digest BE sem redução/retry; ADR-0013 | implementação/vetores independentes |
+| Transcript acumulado | EXIGE DECISÃO | fórmula EM §8.4 | hash inicial e códigos direction/phase ausentes; Fase 3-SM |
+| Ordem dos campos | CONGELADO PARCIAL | layouts E.6 promovidos por ADR-0011; listas count u32 LE | wire completo de sessão fora deste freeze |
+| Esquema de dois nonces | CONGELADO PARCIAL | equação e binding aceitos; EM §6.6/ADR-0013 | derivação secreta, API DOM e vetores independentes |
+| Nonce binding | CONGELADO | preimage, scalar mapping e invalid handling definidos | implementação/testes |
+| Challenge | CONGELADO | challenge kernel DOM, tag `DOM:kernel-sig:v1` | integração/testes |
+| Equações adaptor | CONGELADO | `R_hat=R+T`, `s=s_hat+t`, `t=s-s_hat`; EM/RC/SCAD0 | implementação G1a |
+| Equações dois nonces | CONSISTENTE | EM §6.6, sem conflito | validação independente pendente |
+| Adaptação/extração | CONGELADO | EM §§1.1/6.3; RC §2.1; SCAD0 | vetores independentes |
+| Serialização G1a | CONGELADO PARCIAL | E.6 + ADR-0010/0011; kernel DOM intacto | campos bloqueados não codificados |
+| Rejeição malformada | CONGELADO | tamanhos, canonicidade e range no backend DOM | mutações/fuzz pendentes |
+| Zeroização | CONSISTENTE | EM §§3.1/5.5/20; `zeroize` na DOM | cobertura de novos tipos/caminhos |
+| Constant-time | CONGELADO POR ADR | `subtle` e helpers DOM são baseline; nenhuma comparação secreta comum | auditoria/testes G1a |
+| Tipos secretos | CONGELADO POR ADR | opacos, sem Debug/Clone/serde; EM + ADR-0009 | implementar e auditar |
+| Vetores independentes | AUSENTE | SCAD0 correlacionado disponível | dois nonces/transcript/partials independentes faltam |
+| Integração verificador DOM | CONGELADO | `schnorr_verify` + `validate_kernel_signatures`; ADR-0014 | testes da implementação |
+| API aritmética DOM | EXIGE DECISÃO | necessidade comprovada; operações hoje privadas | extensão estreita em `dom-crypto`, sem backend paralelo |
 
-Abreviações: **EM** = Especificação Mestra v1.0 R1; **RC** = Relatório Consolidado; **CR** = Cronograma. Consulte a [revisão completa](../reports/phase-1/NORMATIVE-REVIEW.md).
+## Bloqueios que permanecem legítimos
 
-## Matriz
+1. Derivação/KDF byte-exata dos nonces secretos com aux randomness, contexto e
+   chave, sem nonce fornecido pela aplicação.
+2. Vetores independentes do esquema de dois nonces.
+3. API pública mínima de aritmética em `dom-crypto`, a implementar sem backend
+   paralelo depois da revisão da derivação.
+4. Hash inicial e discriminantes do transcript da Fase 3-SM.
 
-| Input | Estado | O que os documentos permitem afirmar | Pendência antes do freeze/implementação | Fonte identificável |
-|---|---|---|---|---|
-| Curva | CONSISTENTE | usar exclusivamente o grupo/backend já autoritativo da DOM; evidências referem secp256k1/SEC1 | localizar e congelar crate, tipos e funções reais no commit-base; nenhuma biblioteca paralela | EM §§3.1–3.2, 6.1; RC §2.1 |
-| Codificação de pontos | CONSISTENTE | SEC1 comprimido de 33 bytes, ambas paridades, rejeição de identidade e reserialização idêntica | congelar parser/funções reais e vetores completos no crate DOM | EM §3.2; RC §2.1 |
-| Representação de scalars | EXIGE DECISÃO | zero e não canônicos são rejeitados | endianness, bytes canônicos, conversão interna, ordem `q`, redução e zero/retry dependem do backend real | EM §§3.1, 3.4 e 15.2 |
-| Hash | CONGELADO | BLAKE2b nativo com saída de 32 bytes; não BLAKE2s nem BLAKE2b-512 truncado; sem dialeto paralelo | identificar adapter autoritativo e comprovar equivalência; este freeze não cobre framing | EM §3.4 |
-| Tags e domínios | EXIGE DECISÃO | tags ASCII, case-sensitive, versionadas e centralizadas são exigidas; lista candidata existe | framing, personalization, salt/key, registro final e vetores diferenciais; lista ainda é proposta | EM §3.4 e §21/O-10 |
-| Purposes | EXIGE DECISÃO | Funding, Claim e Refund precisam de famílias de nonce separadas | congelar enum/bytes/versão e resolver o `sponsor` proposto fora do escopo G1a | EM Apêndice E §E.6; CR “FASE 1” |
-| Transcript | EXIGE DECISÃO | evolução vincula hash anterior, digest, direção e fase; lotes ordenam por participante | encoding completo, transcript inicial, todos os campos e vetores byte a byte | EM §8.4 e §15.2 |
-| Ordem dos campos | EXIGE DECISÃO | campos fixos/variáveis e listas têm disciplina proposta; participantes usam ordem estável | layouts do Apêndice E são explicitamente propostos para freeze | EM §3.4 e Apêndice E, introdução |
-| Esquema de dois nonces | EXIGE DECISÃO | dois nonces com binding são defesa obrigatória contra sessões paralelas | validar composição e equações contra DOM, congelar vetores independentes | EM §6.6; RC §5; CR “FASE 1” |
-| Nonce binding | EXIGE DECISÃO | deve vincular chain, sessão, purpose, template, chaves/nonces ordenados e adaptor point | tag, preimage, hash→scalar, comportamento de zero e vetores não congelados | EM §§3.4 e 6.6 |
-| Challenge | CONSISTENTE | usar byte a byte o challenge nativo do kernel DOM sobre a mensagem real; nenhuma tag Scriptless | congelar arquivo:função, inputs exatos e vetores diferenciais no commit-base | EM §§3.4, 6.2–6.3; RC §2.1 |
-| Equações de assinatura | AMBÍGUO | convenção adaptor simples é explícita; equação parcial de dois nonces é proposta | separar formalmente equação adaptor já confirmada da composição agregada ainda bloqueada | EM §§1.1, 6.3 e 6.6; RC §§2.1 e 5 |
-| Adaptação | CONGELADO | `R_hat=R+T`, `s=s_hat+t`, segredo deve satisfazer `tG=T`, assinatura final passa no verificador DOM | implementar somente após os demais inputs e vetores; gate continua aberto | EM §§1.1 e 6.3; RC §2.1 |
-| Extração | CONGELADO | `t=s−s_hat`, exigir nonce byte-idêntico, assinatura final válida e `tG=T` | implementar/testar casos de fronteira e paridade no crate isolado | EM §6.3 e Apêndice E §E.6; RC §2.1 |
-| Rejeição de entradas malformadas | CONSISTENTE | tamanhos exatos; ponto inválido/identidade/não canônico e scalar zero/fora da ordem falham fechados | vincular erros e parser ao backend DOM e congelar corpus/mutações | EM §§3.1–3.2 e 15.2 |
-| Zeroização | CONSISTENTE | nonces, shares e segredos temporários são zeroizados; consumo/tombstone precede exportação | provar cobertura de todos os caminhos, inclusive erro/crash | EM §§3.1, 5.5, 6.1, 10.2 e 20 |
-| Constant-time | AUSENTE | nenhuma regra explícita encontrada nas três fontes | decisão normativa e comprovação para comparações de material secreto; requisito local de G1a permanece | revisão integral de EM/RC/CR |
-| Restrições de tipos secretos | CONSISTENTE | secrets não devem expor bytes crus; `Debug`, `Clone`, serde/log são proibidos para material secreto salvo fronteira explícita | congelar tipos e auditoria de traits no crate | EM §§3.1, 5.5, 19 e 20 |
-| Vetores independentes | AUSENTE | SCAD0 de oito vetores é identificado e correlacionado por hash; vetores canônicos são exigidos | fonte independente para dois nonces, binding, transcript, partials e agregação não foi fornecida | EM §15.2; RC §§2.1/4.1; CR “FASE 1” |
-| Integração com verificador DOM | CONGELADO | assinatura final deve usar o formato/challenge/verificador real da DOM, sem reimplementação | criar adapter e testes no crate; a evidência de laboratório não conclui G1a | EM §§6.1–6.3 e 14.1; RC §2.1 |
-
-## Resultado de prontidão
-
-Os inputs já congelados/consistentes delimitam o trabalho, mas os itens `EXIGE DECISÃO`, `AMBÍGUO` e `AUSENTE` impedem iniciar uma implementação criptográfica sem inventar bytes ou políticas. A próxima missão normativa deve:
-
-1. mapear as funções autoritativas DOM no commit-base;
-2. congelar scalar encoding e hash/tag framing por vetores diferenciais;
-3. fechar purposes e transcript;
-4. obter vetores independentes do esquema de dois nonces;
-5. formalizar constant-time;
-6. registrar errata/versionamento que incorpore a divisão G1a/G1b.
-
-Até lá, [`GATE-G1A.md`](GATE-G1A.md) permanece integralmente aberto.
+Os itens 1–3 bloqueiam a conclusão da implementação G1a. O item 4 bloqueia a
+integração com a máquina de estados, não o núcleo criptográfico isolado.

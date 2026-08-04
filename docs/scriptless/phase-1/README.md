@@ -7,6 +7,14 @@ A Fase 1 foi dividida formalmente em dois gates independentes pelo [ADR-0005](..
 
 Produção exige G1a **e** G1b. A Fase 2 pode avançar após G1a somente em regtest e sem fundos reais.
 
+A colisão de nomenclatura normativa está resolvida pelo
+[ADR-0015](../decisions/ADR-0015-PHASE-3-NOMENCLATURE.md):
+
+- **Fase 3-SNV/G1b** = Store e Nonce Vault da Especificação Mestra;
+- **Fase 3-SM** = sessão, transporte e máquina de estados do Cronograma.
+
+Novos documentos não usam “Fase 3” sem o sufixo.
+
 Os arquivos restantes nesta pasta são índices/redirecionamentos mantidos para compatibilidade com links do bootstrap. Eles não são fontes normativas concorrentes.
 
 | Caminho legado | Fonte autoritativa atual |

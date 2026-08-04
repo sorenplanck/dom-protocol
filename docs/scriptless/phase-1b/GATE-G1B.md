@@ -30,3 +30,18 @@ Estado: **NÃO APROVADO**. Este checklist controla exclusivamente G1b. Documenta
 - [ ] Demonstração de que transações comuns não consultam orçamento, âncora ou testemunha.
 
 Fechar G1b não fecha G1a. Produção exige ambos formalmente aprovados.
+
+## Estado do freeze versus estado do gate
+
+| Área | Contrato documentado | Implementação | Testes/matriz |
+|---|---|---|---|
+| Direção de dependência/trait | sim, ADR-0002/0016 e interface semântica | pendente | pendente |
+| Store transacional/journal | modelo consolidado | pendente na Wallet | crash matrix pendente |
+| Budgets | semântica congelada; números não escolhidos | pendente | medição pendente |
+| Witness/receipt | baseline e metadados permitidos definidos | protocolo byte a byte pendente | interoperabilidade pendente |
+| Restore/quarentena | comportamento fail-closed definido | pendente | rollback/restore pendente |
+| Isolamento de transações comuns | boundary definido | demonstração pendente | teste de ausência de chamadas pendente |
+
+Documentação de fronteira não fecha caixas. Consulte
+[`IMPLEMENTATION-BOUNDARY.md`](IMPLEMENTATION-BOUNDARY.md) e
+[`CRASH-RECOVERY-MODEL.md`](CRASH-RECOVERY-MODEL.md).

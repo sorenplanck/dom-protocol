@@ -7,3 +7,8 @@ G1a e G1b são gates independentes. G1b não redefine a criptografia de G1a. Pro
 Sessões adaptor exigem conectividade e receipt durável da testemunha antes da exportação de material. Transações comuns da Wallet não usam orçamento, âncora ou testemunha e não podem ser bloqueadas pela indisponibilidade desse serviço.
 
 Fora do escopo: valores numéricos arbitrários, fallback silencioso para arquivo local, mudança de consenso/wire e qualquer componente DL2P.
+
+Este escopo também é denominado **Fase 3-SNV/G1b**, conforme ADR-0015, para
+distingui-lo da Fase 3-SM do Cronograma. O contrato entregue ao segundo agente
+começa em [`IMPLEMENTATION-BOUNDARY.md`](IMPLEMENTATION-BOUNDARY.md); nenhum
+backend de vault foi implementado nesta missão.

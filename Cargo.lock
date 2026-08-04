@@ -974,6 +974,9 @@ dependencies = [
 [[package]]
 name = "dom-adaptor"
 version = "0.2.0"
+dependencies = [
+ "dom-crypto",
+]
 
 [[package]]
 name = "dom-agent-runner"

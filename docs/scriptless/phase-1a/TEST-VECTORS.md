@@ -17,3 +17,14 @@ Existe uma cópia byte-idêntica de oito vetores em [`test-vectors/scriptless/sc
 - corpus de fuzz independente.
 
 Nenhum vetor pode ser reformado, normalizado ou regenerado silenciosamente.
+
+## AUTO-CHECK do backend
+
+O arquivo
+[`DOM_G1A_BACKEND_FREEZE_V1.txt`](../../../test-vectors/scriptless/hash-domains/DOM_G1A_BACKEND_FREEZE_V1.txt)
+adiciona somente checks determinísticos do framing, hash e challenge já
+autoritativos. Os digests esperados foram calculados com Python `hashlib` e são
+comparados ao `dom-crypto` pelo probe test-only. Ele não contém dois nonces,
+pré-assinatura ou prova independente do esquema G1a e não fecha item do gate.
+
+Plano completo: [`TEST-VECTOR-PLAN.md`](TEST-VECTOR-PLAN.md).
