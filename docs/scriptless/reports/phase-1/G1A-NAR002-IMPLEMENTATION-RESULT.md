@@ -1,6 +1,6 @@
 # G1a NAR-002 implementation result
 
-Status: **G1a NOT APPROVED — IMPLEMENTATION READY FOR INDEPENDENT COMPARISON**
+Status: **G1a NOT APPROVED — CROSS-CRATE AUTHORIZATION BLOCKER**
 
 Date: 2026-08-04
 
@@ -73,6 +73,17 @@ DOM verifier.
 
 ## Explicitly open requirements
 
+- **Code/integration blocker:** `dom-crypto` must expose the opaque
+  OS-randomized nonce-pair operations to the separate `dom-adaptor` crate.
+  Rust has no friend-crate visibility, so another production crate can call
+  the same public `derive_pair`, `public_keys`, and consuming partial-sign
+  methods without presenting a G1b authorization. One-shot ownership prevents
+  nonce reuse but does not enforce consume-before-export. This cannot be
+  closed by a Cargo feature, hidden documentation, a downstream-implemented
+  trait, or parseable permit bytes. The authoritative lower boundary must
+  verify a ratified signed G1b receipt/capability, or private arithmetic and the
+  durable authorization facade must be deliberately co-located during
+  integration.
 - Agent 2 independent output commit and byte-by-byte intermediate comparison;
 - independent constant-time and zeroization review;
 - durable G1b issuance of separate commitment, reveal, and partial permits;
@@ -104,6 +115,20 @@ Correction commits:
 - `1bb46ce` — `fix(scriptless): use ratified transcript update tag`
 - `1cd4a20` — `fix(scriptless): seal nonce derivation and exposure lifecycle`
 - `f4d35b9` — `test(scriptless): fuzz sealed nonce boundaries`
+- `e9fc073` — `fix(scriptless): close session retry and scalar cleanup`
+
+The code comparison HEAD is
+`e9fc0736d5b77331236919c71a8985e7320aab05`. Independent comparison must cite
+that exact code HEAD. The previously reported 311-field byte-perfect
+comparison targeted `f4d35b968c563ce1bc09c269da90095240c33442`; the later
+commit changes session collision retry and scalar cleanup, not normative
+cryptographic bytes, but evidence is not silently carried forward.
+
+The repository `preflight.sh` and `verify-isolation.sh` scripts reject a linked
+worktree path by design because they require the coordinator clone path. Their
+executions here returned 4 and 1 respectively; this is recorded rather than
+misreported as success. `phase1-gate.sh` returned 1 as required for an open
+gate.
 
 ## Safety confirmation
 

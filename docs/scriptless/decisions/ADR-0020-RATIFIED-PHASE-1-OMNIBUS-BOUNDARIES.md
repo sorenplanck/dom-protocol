@@ -101,6 +101,13 @@ still has no direct `k256` dependency.
 
 ## Risks
 
+- **OPEN BLOCKER:** cross-crate Rust visibility cannot make a `dom-crypto`
+  operation callable by `dom-adaptor` but uncallable by every other production
+  crate. The public opaque nonce-pair path is one-shot, but durable
+  consume-before-export requires a cryptographically authenticated G1b
+  capability at the authoritative lower boundary. This ADR does not treat a
+  Cargo feature, hidden API, parseable record, or caller-implemented trait as a
+  security boundary.
 - Incorrect G1b permit issuance could still violate lifecycle safety even when
   the 252-byte permit parses correctly.
 - Self-generated tests do not satisfy the independent-vector gate.
