@@ -1,6 +1,6 @@
 # G1a NAR-002 implementation result
 
-Status: **G1a NOT APPROVED — CROSS-CRATE AUTHORIZATION BLOCKER**
+Status: **G1a NOT APPROVED — G1b AUTHORIZATION INTEGRATION BLOCKER**
 
 Date: 2026-08-04
 
@@ -63,8 +63,14 @@ history:
    usable identifier.
 
 The crate-sealed authorization code is intentionally not a production G1b
-implementation. It becomes reachable only through deliberate integration with
-the durable Wallet vault and witness boundary.
+implementation. Raw nonce derivation, public nonce derivation, and partial
+signing are therefore quarantined behind the non-default `test-helpers`
+feature in both `dom-crypto` and `dom-adaptor`. Default production feature
+resolution cannot reach those APIs. The helper feature preserves deterministic
+and OS-randomized evidence only; it is not a production authorization boundary
+and must not be enabled in release feature resolution. Production use remains
+blocked until deliberate integration with the durable Wallet vault and witness
+boundary.
 
 The existing production paths retain all three purpose equations: ClaimAdaptor
 uses the aggregate nonce plus adaptor point, while Funding and Refund use the
@@ -73,17 +79,14 @@ DOM verifier.
 
 ## Explicitly open requirements
 
-- **Code/integration blocker:** `dom-crypto` must expose the opaque
-  OS-randomized nonce-pair operations to the separate `dom-adaptor` crate.
-  Rust has no friend-crate visibility, so another production crate can call
-  the same public `derive_pair`, `public_keys`, and consuming partial-sign
-  methods without presenting a G1b authorization. One-shot ownership prevents
-  nonce reuse but does not enforce consume-before-export. This cannot be
-  closed by a Cargo feature, hidden documentation, a downstream-implemented
-  trait, or parseable permit bytes. The authoritative lower boundary must
-  verify a ratified signed G1b receipt/capability, or private arithmetic and the
-  durable authorization facade must be deliberately co-located during
-  integration.
+- **Code/integration blocker:** the default build now fails closed by omitting
+  all raw nonce-pair derivation, public-export, and partial-signing APIs. Rust
+  has no friend-crate visibility, so merely exposing those operations from
+  `dom-crypto` would let another production crate bypass G1b. The quarantined
+  helper-only implementation cannot serve production. Integration must either
+  place the private arithmetic behind the durable authorization facade or make
+  the authoritative lower boundary verify a ratified unforgeable G1b
+  capability before any exposure or partial signing.
 - Agent 2 independent output commit and byte-by-byte intermediate comparison;
 - independent constant-time and zeroization review;
 - durable G1b issuance of separate commitment, reveal, and partial permits;
@@ -102,6 +105,14 @@ No independent output was inspected while preparing this branch.
 | `cargo test -p dom-adaptor --locked` | PASS: 28 tests, including all eight SCAD0 fixtures |
 | `cargo test -p dom-consensus scriptless_template_projection --locked` | PASS: authoritative projection test |
 | `cargo check -p dom-adaptor --locked` | PASS |
+| `cargo check -p dom-crypto --no-default-features --locked` | PASS: raw nonce lifecycle APIs omitted |
+| `cargo check -p dom-adaptor --no-default-features --locked` | PASS: production boundary remains fail-closed |
+| `cargo clippy -p dom-crypto --no-default-features --locked -- -D warnings` | PASS |
+| `cargo clippy -p dom-adaptor --all-targets --no-default-features --locked -- -D warnings` | PASS |
+| `cargo test -p dom-crypto --lib scriptless --features test-helpers --locked` | PASS: 6 tests, including 10,000 real-verifier cycles |
+| `cargo check --manifest-path crates/dom-adaptor/fuzz/Cargo.toml --locked` | PASS: evidence-only helper feature is explicit |
+| `cargo doc -p dom-crypto --no-default-features --no-deps --locked` plus generated-HTML symbol search | PASS: quarantined types and signing method absent from default public API |
+| `cargo tree -p dom-adaptor -e features,no-dev --locked` plus `test-helpers` search | PASS: helper feature absent from the default production graph |
 | `sha256sum --check docs/scriptless/source-guides/normative/MANIFEST.sha256` | PASS |
 | Minisign verification of NAR-001, NAR-002, and KAT V2 | PASS |
 | `cargo +nightly fuzz check --fuzz-dir crates/dom-adaptor/fuzz` | PASS: all persistent targets compile with ASan instrumentation |
@@ -116,13 +127,15 @@ Correction commits:
 - `1cd4a20` — `fix(scriptless): seal nonce derivation and exposure lifecycle`
 - `f4d35b9` — `test(scriptless): fuzz sealed nonce boundaries`
 - `e9fc073` — `fix(scriptless): close session retry and scalar cleanup`
+- `f821937` — `fix(scriptless): quarantine nonce exports pending G1b`
 
 The code comparison HEAD is
-`e9fc0736d5b77331236919c71a8985e7320aab05`. Independent comparison must cite
+`f821937a8ff1712d5f9bafd58f152b82073538f2`. Independent comparison must cite
 that exact code HEAD. The previously reported 311-field byte-perfect
 comparison targeted `f4d35b968c563ce1bc09c269da90095240c33442`; the later
-commit changes session collision retry and scalar cleanup, not normative
-cryptographic bytes, but evidence is not silently carried forward.
+commits change session collision retry, scalar cleanup, and default API
+availability, not normative cryptographic bytes, but evidence is not silently
+carried forward.
 
 The repository `preflight.sh` and `verify-isolation.sh` scripts reject a linked
 worktree path by design because they require the coordinator clone path. Their
