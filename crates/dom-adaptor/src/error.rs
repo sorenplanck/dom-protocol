@@ -18,9 +18,12 @@ pub enum AdaptorError {
         /// Supplied length.
         actual: usize,
     },
-    /// A purpose byte is outside the closed G1a v1 registry.
-    #[error("unknown G1a v1 purpose 0x{0:02x}")]
+    /// A purpose byte is outside the closed Scriptless v1 registry.
+    #[error("unknown Scriptless v1 purpose 0x{0:02x}")]
     UnknownPurpose(u8),
+    /// A recognized codec purpose is not authorized by strict Phase 1 policy.
+    #[error("Scriptless v1 purpose 0x{0:02x} is not authorized for strict Phase 1 execution")]
+    PurposeNotAuthorized(u8),
     /// Transcript fields violate a frozen structural invariant.
     #[error("invalid transcript: {0}")]
     InvalidTranscript(&'static str),
