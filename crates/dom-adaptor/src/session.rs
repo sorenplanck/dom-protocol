@@ -11,7 +11,7 @@ const SESSION_ID_TAG_V1: &str = "DOM:scriptless-session-id:v1";
 const TEMPLATE_TAG_V1: &str = "DOM:scriptless-template:v1";
 const TRANSCRIPT_INIT_TAG_V1: &str = "DOM:scriptless-transcript-init:v1";
 const SESSION_MESSAGE_TAG_V1: &str = "DOM:scriptless-message:v1";
-const TRANSCRIPT_UPDATE_TAG_V1: &str = "DOM:scriptless-transcript-update:v1";
+const TRANSCRIPT_UPDATE_TAG_V1: &str = "DOM:scriptless-transcript:v1";
 
 /// Chain identifier obtained only from the authoritative DOM chain adapter.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -280,19 +280,30 @@ mod tests {
         let first =
             initial_transcript_hash_v1(&chain, &[8; 32], ContractKindV1::WitnessOrTimeout, &roster);
         let digest = session_message_digest_v1(b"canonical unsigned DSC1 bytes");
+        let initiator = advance_transcript_hash_v1(
+            &first,
+            &digest,
+            DirectionV1::Initiator,
+            crate::SigningPhaseV1::SigNonceCommit,
+        );
         assert_ne!(
-            advance_transcript_hash_v1(
-                &first,
-                &digest,
-                DirectionV1::Initiator,
-                crate::SigningPhaseV1::SigNonceCommit,
-            ),
+            initiator,
             advance_transcript_hash_v1(
                 &first,
                 &digest,
                 DirectionV1::Responder,
                 crate::SigningPhaseV1::SigNonceCommit,
             )
+        );
+        let mut exact_body = [0u8; 67];
+        exact_body[..32].copy_from_slice(&first);
+        exact_body[32..64].copy_from_slice(&digest);
+        exact_body[64] = DirectionV1::Initiator.to_byte();
+        exact_body[65..].copy_from_slice(&crate::SigningPhaseV1::SigNonceCommit.to_le_bytes());
+        assert_eq!(
+            initiator,
+            *blake2b_256_tagged("DOM:scriptless-transcript:v1", &exact_body).as_bytes(),
+            "NAR-002 section 8.2 tag and body must remain byte-exact",
         );
     }
 }
