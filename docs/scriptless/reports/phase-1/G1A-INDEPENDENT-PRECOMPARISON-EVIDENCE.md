@@ -94,7 +94,7 @@ python3 test-vectors/scriptless/two-nonce/independent/ratified-v1/generate_refer
 The vector manifest is
 `test-vectors/scriptless/two-nonce/independent/ratified-v1/MANIFEST.sha256`
 with SHA-256
-`3413190f616314497cda1e5a9e19de18efd33c713c6eb85683f38210570e09e6`.
+`aeef6a336e74854449be8aa84d7b4b07ff25c7726ed21800ddd6c3aaa573855d`.
 
 ## Supplemental adaptor evidence
 
