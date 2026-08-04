@@ -47,4 +47,3 @@ vector. Such a supplemental vector requires separately identified input bytes
 and must remain distinct from outputs derived exclusively from the signed KAT.
 
 No comparison with production G1a was performed before the evidence commit.
-
