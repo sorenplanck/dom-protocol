@@ -102,3 +102,69 @@ git diff --check
 Windows, macOS, sanitizers, production witness interoperability, and complete
 fault injection were not executed. No production functionality outside the
 new unpublished contract changed.
+
+## Ratified contract update — 2026-08-04
+
+Status remains **PARTIAL / G1b NOT APPROVED**. This section supersedes the
+earlier witness-input blocker description: signed operator-ratified NAR-001,
+NAR-002, ADR-SNV-001, and ADR-SNV-002 inputs were imported and used to define
+the exact current boundary.
+
+### DOM contract commits
+
+- `5cae068` imports the ratified assignment and signature evidence;
+- `2b91614` defines the ratified lifecycle, exact IDs, closed purpose and
+  exposure registries, typed terminal states, and canonical permit binding;
+- `18a4880` makes the permit an implementation-owned associated type so an
+  application cannot fabricate or parse a production authorization; and
+- `04b113467df9470fd880af9ce5f47b4e77f728b1` requires nonzero lifetime-unique
+  session IDs across abort, consume, epoch rotation, restart, restore, and
+  compaction.
+
+The canonical contract requires three distinct durable authorizations for
+nonce commitment, nonce reveal, and participant partial signature. The Wallet
+owns the opaque permit implementation. `dom-adaptor` exposes only the immutable
+binding required for conformance and does not provide a public permit parser or
+constructor. The Wallet production branch implements exact spent-permit resend
+without recomputation and preserves lifetime ID tombstones and budgets across
+successor epochs.
+
+### Current validation
+
+```text
+cargo test -p dom-adaptor --locked --offline
+  PASS: 3 contract unit tests, 3 preimplementation probes, and doc tests
+cargo fmt --all --check
+  PASS
+git diff --check
+  PASS before the contract commit
+```
+
+The coordinator-path control scripts intentionally reject this independent
+worktree: `preflight.sh` exited 4 because the path is not the coordinator clone,
+and `verify-isolation.sh` and `phase1-gate.sh` each exited 1. Those exits are
+recorded, not treated as gate success; the coordinator must execute the scripts
+from its own branch after any conditional integration review.
+
+The isolated Wallet branch independently reports 29 passing unit tests, one
+compile-fail doctest, all-target/all-feature compilation and clippy, the exact
+TLS witness endpoints, ratified lifecycle completion, and focused Linux crash
+cuts. Those results do not constitute a published cross-repository conformance
+integration and do not close the remaining gate items.
+
+### Remaining gate blockers
+
+- complete process-death and storage-fault injection at every durable cut
+  point, rather than the executed focused Linux corruption cuts;
+- Windows and macOS execution;
+- measured and accepted numeric production budgets, retry limits, timeouts,
+  and retention policy;
+- residual witness timing and sequence privacy measurement;
+- conformance against one published DOM revision without an absolute or local
+  production path dependency;
+- complete ordinary-Wallet runtime and frontend isolation evidence; and
+- final combined G1a/G1b integration review, which is outside this branch.
+
+No Phase 3-SM code, adaptor cryptography, consensus change, existing wire
+change, persisted-block change, official-repository modification, DL2P import,
+push, merge, release, publication, or production activation occurred.
