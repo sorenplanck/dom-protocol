@@ -1354,6 +1354,15 @@ impl dom_rpc::NodeHandle for DomNode {
             fee,
             fee_rate: if weight > 0 { fee / weight as u64 } else { 0 },
             weight,
+            kernels: entry
+                .tx
+                .kernels
+                .iter()
+                .map(|kernel| dom_rpc::KernelInfo {
+                    features: kernel.features,
+                    lock_height: kernel.lock_height,
+                })
+                .collect(),
         })
     }
 
@@ -1466,6 +1475,25 @@ impl dom_rpc::NodeHandle for DomNode {
     fn get_block_header(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
         let chain = self.chain.try_lock().ok()?;
         chain.store.get_block_header(hash).ok()?
+    }
+
+    fn get_block_kernels(&self, hash: &[u8; 32]) -> Option<Vec<dom_rpc::KernelInfo>> {
+        use dom_serialization::DomDeserialize;
+
+        let chain = self.chain.try_lock().ok()?;
+        let body = chain.store.get_block_body(hash).ok()??;
+        let block = dom_consensus::Block::from_bytes(&body).ok()?;
+        Some(
+            block
+                .transactions
+                .iter()
+                .flat_map(|tx| tx.kernels.iter())
+                .map(|kernel| dom_rpc::KernelInfo {
+                    features: kernel.features,
+                    lock_height: kernel.lock_height,
+                })
+                .collect(),
+        )
     }
 
     fn get_block_hash_at_height(&self, height: u64) -> Option<[u8; 32]> {
