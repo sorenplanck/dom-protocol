@@ -23,6 +23,7 @@ The private signing key was not opened, hashed, copied, logged, or used by the v
 | `docs/scriptless/source-guides/normative/amendments/ADR-SNV-002-vault-record-kind-registry.en.md` | `29266c4468d97cb7a1e185561f2e140f08fb914d43d0ad5deef1aa7b07c209c5` | `55f55316948bc7eb434455275c6135972ebd84707e1e29bbabbdab6d8baec540` | `2026-08-04T17:23:07-03:00` | valid, exit 0 |
 | `docs/scriptless/source-guides/normative/amendments/NAR-002-phase-1-omnibus-normative-closure.en.md` | `b726c2e576833f843d0065a1e823e649ab9e7e28fd9cfedb0e6e06e6b1be87f5` | `fd1f1155e48190913e0fae10770afcdac5bf01e4bc410a663327fce3881c64c2` | `2026-08-04T18:15:39-03:00` | valid, exit 0 |
 | `docs/scriptless/source-guides/normative/amendments/ADR-P1-001-integrated-g1a-g1b-authorization-boundary.en.md` | `e35c39e74f9af61e19ecda8e1ca503f37a7fc04c6e2a0f40f5d96bf6a20d1596` | `1c584fb8cb5b697ef1540c37b5354ea676aac36afdcac5b5d3f7fe49096cdd98` | `2026-08-04T20:44:26-03:00` | valid, exit 0 |
+| `test-vectors/scriptless/two-nonce/kat_two_party_adaptor_inputs_v1.en.json` | `5e5063e819e7d64514039905c3c9fed0cb98c39f36c370fdb4c413751a08fac9` | `2f0fc550cda61ffb9377f1ce0055fbe9196bc9bcdf0406eb868cda89ce8df7ed` | trusted timestamp `1785875781` | valid, exit 0 |
 
 ## Command
 
@@ -32,7 +33,7 @@ Each artifact was verified independently with:
 minisign -Vm <artifact> -P RWTwnDDKlXoZdG3obVRiLPfVRHr17E0Fj2GN8IZ2rBkipRZvIIW6PLJ3
 ```
 
-For all six artifacts, Minisign reported:
+For all seven artifacts, Minisign reported:
 
 ```text
 Signature and comment signature verified
@@ -51,13 +52,14 @@ The detached signatures satisfy the ratification condition printed in each candi
 - ADR-P1-001 is an effective integrated G1a/G1b nonce-authority,
   one-shot-exposure, and encrypted nonce-secret record decision;
 - the KAT input fixture is frozen as an authenticated input-only fixture;
+- the supplemental two-party adaptor input fixture is frozen as an authenticated input-only fixture;
 - any later byte modification requires a new signature and a manifest update;
 - ratification freezes inputs but does not by itself approve G1a, G1b, Phase 1, production activation, or real-funds use.
 
 ## Integrity and scope
 
-The five signed normative contents and the signed KAT input fixture retain their
-exact pre-signing review hashes. Their detached signatures are tracked
+The five signed normative contents and the two signed input fixtures retain
+their exact pre-signing review hashes. Their detached signatures are tracked
 separately in the normative/vector manifests. No official repository was
 modified, and no push, merge, release, publication, consensus change, wire
 change, DL2P import, or real-funds authorization occurred during verification.

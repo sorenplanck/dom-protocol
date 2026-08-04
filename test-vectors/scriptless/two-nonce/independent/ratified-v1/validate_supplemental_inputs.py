@@ -173,8 +173,8 @@ def main() -> int:
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
     if fixture["status"] != "FINAL CANDIDATE — EFFECTIVE ONLY AFTER VALID DETACHED RATIFICATION":
         raise ValueError("fixture must remain an unsigned final candidate")
-    if Path(str(fixture_path) + ".minisig").exists():
-        raise ValueError("candidate validator refuses an unexpected signature sidecar")
+    if not Path(str(fixture_path) + ".minisig").is_file():
+        raise ValueError("ratified supplemental fixture signature sidecar is missing")
     if fixture["curve"]["order_n_be32"] != reference.N.to_bytes(32, "big").hex():
         raise ValueError("fixture group order differs from secp256k1")
 
