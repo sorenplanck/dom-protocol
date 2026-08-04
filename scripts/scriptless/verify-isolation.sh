@@ -2,13 +2,13 @@
 set -Eeuo pipefail
 
 repo="$(git rev-parse --show-toplevel 2>/dev/null)" || {
-  echo "erro: execute dentro de um repositório Git" >&2
+  echo "error: run this script inside a Git repository" >&2
   exit 2
 }
 repo_real="$(realpath "$repo")"
 case "$repo_real" in
   /home/leonardov/dom-release|/home/leonardov/dom-protocol|/home/leonardov/dom-wallet-v3)
-    echo "RECUSADO: fonte oficial somente leitura: $repo_real" >&2
+    echo "REFUSED: read-only official source: $repo_real" >&2
     exit 3
     ;;
 esac
@@ -21,12 +21,16 @@ echo "== verify-isolation $(date --iso-8601=seconds) =="
 dom_source=/home/leonardov/dom-release
 wallet_source=/home/leonardov/dom-wallet-v3
 dom_base=769822562565f18ef55423dc992e7aa661206b4a
-wallet_base=abb573168be75b23269343559e4e94e28e9d33e7
+wallet_previous_base=abb573168be75b23269343559e4e94e28e9d33e7
+wallet_base=1868e61bc39eca223d794348d70e48668ad06708
+wallet_tree=5c572e4b5d083dbb7caa0ca608c0d2864add9f6c
 
 [[ "$(git -C "$dom_source" rev-parse HEAD)" == "$dom_base" ]]
 [[ "$(git -C "$dom_source" branch --show-current)" == "release/mainnet" ]]
 [[ "$(git -C "$wallet_source" rev-parse HEAD)" == "$wallet_base" ]]
+[[ "$(git -C "$wallet_source" rev-parse 'HEAD^{tree}')" == "$wallet_tree" ]]
 [[ "$(git -C "$wallet_source" branch --show-current)" == "redesign/restore-remote-scan" ]]
+rg -qx 'version = "0.3.2"' "$wallet_source/Cargo.toml"
 
 dom_status="$(git -C "$dom_source" status --porcelain=v1 --untracked-files=all)"
 wallet_status="$(git -C "$wallet_source" status --porcelain=v1 --untracked-files=all)"
@@ -46,10 +50,19 @@ wallet_clone=/home/leonardov/dom-scriptless-dev/dom-wallet-v3-scriptless
 [[ ! -e "$wallet_clone/reports/MISSAO_2_HEIGHT_LOCKED_RPC_2026-08-04.md" ]]
 
 [[ "$(git rev-parse 'baseline/scriptless-2026-08-04^{commit}')" == "$dom_base" ]]
-[[ "$(git -C "$wallet_clone" rev-parse 'baseline/scriptless-wallet-2026-08-04^{commit}')" == "$wallet_base" ]]
+[[ "$(git -C "$wallet_clone" rev-parse 'baseline/scriptless-wallet-2026-08-04^{commit}')" == "$wallet_previous_base" ]]
+[[ "$(git -C "$wallet_clone" rev-parse 'baseline/scriptless-wallet-v0.3.2-2026-08-04^{commit}')" == "$wallet_base" ]]
+[[ "$(git -C "$wallet_clone" rev-parse HEAD)" == "$wallet_base" ]]
+[[ "$(git -C "$wallet_clone" rev-parse 'HEAD^{tree}')" == "$wallet_tree" ]]
+[[ "$(git -C "$wallet_clone" branch --show-current)" == "feat/scriptless-integration" ]]
+git -C "$wallet_clone" diff --quiet
+git -C "$wallet_clone" diff --cached --quiet
 [[ "$(git config --get core.hooksPath)" == ".githooks" ]]
 [[ "$(git -C "$wallet_clone" config --get core.hooksPath)" == ".githooks" ]]
 [[ -x "$repo/.githooks/pre-push" && -x "$wallet_clone/.githooks/pre-push" ]]
+printf '%s  %s\n' \
+  07e168fa9713045f3dd5180393663607023671f884da3535a0188d1aa517c29b \
+  "$wallet_clone/.githooks/pre-push" | sha256sum --check
 ! git remote | rg -x origin
 ! git -C "$wallet_clone" remote | rg -x origin
 
@@ -58,7 +71,7 @@ for checked_repo in "$repo" "$wallet_clone"; do
     [[ "$(git -C "$checked_repo" remote get-url --push "$remote")" == "no_push://push-disabled" ]]
   done < <(git -C "$checked_repo" remote)
   if find "$checked_repo/.git/objects" -type f -links +1 -print -quit | rg .; then
-    echo "erro: objeto Git com hardlink em $checked_repo" >&2
+    echo "error: hardlinked Git object found in $checked_repo" >&2
     exit 6
   fi
 done
