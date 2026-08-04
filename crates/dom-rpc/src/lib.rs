@@ -31,6 +31,13 @@ pub trait NodeHandle: Send + Sync + 'static {
     /// Get block header bytes by hash. Returns None if not found.
     fn get_block_header(&self, hash: &[u8; 32]) -> Option<Vec<u8>>;
 
+    /// Get the regular transaction kernel metadata for a block. The default
+    /// keeps third-party/mock handles source-compatible while node handles
+    /// backed by a full block store expose the read-only projection.
+    fn get_block_kernels(&self, _hash: &[u8; 32]) -> Option<Vec<KernelInfo>> {
+        None
+    }
+
     /// Get block hash at a given height. Returns None if height unknown.
     fn get_block_hash_at_height(&self, height: u64) -> Option<[u8; 32]>;
 
@@ -147,6 +154,14 @@ pub struct MempoolTxInfo {
     pub fee: u64,
     pub fee_rate: u64,
     pub weight: u32,
+    pub kernels: Vec<KernelInfo>,
+}
+
+/// Read-only transaction-kernel fields needed to diagnose height locks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct KernelInfo {
+    pub features: u8,
+    pub lock_height: u64,
 }
 
 /// Outcome of admitting a transaction to the node (`submit_tx`).
@@ -254,6 +269,8 @@ struct MempoolResponse {
     page: usize,
     limit: usize,
     tx_hashes: Vec<String>,
+    /// Additive detailed view; `tx_hashes` remains for existing consumers.
+    transactions: Vec<TxSummaryResponse>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,6 +304,16 @@ struct TxFoundResponse {
     fee: u64,
     fee_rate: u64,
     weight: u32,
+    kernels: Vec<KernelInfo>,
+}
+
+#[derive(Debug, Serialize)]
+struct TxSummaryResponse {
+    tx_hash: String,
+    fee: u64,
+    fee_rate: u64,
+    weight: u32,
+    kernels: Vec<KernelInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -301,6 +328,7 @@ struct BlockHeaderResponse {
     prev_hash: String,
     timestamp: u64,
     target: String,
+    kernels: Vec<KernelInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -525,12 +553,24 @@ async fn mempool(
     let all_hashes = handle.mempool_tx_hashes();
     let total = all_hashes.len();
 
-    let tx_hashes = all_hashes
+    let page_hashes = all_hashes
         .into_iter()
         .skip(offset)
         .take(limit)
-        .map(hex::encode)
         .collect::<Vec<_>>();
+
+    let tx_hashes = page_hashes.iter().map(hex::encode).collect::<Vec<_>>();
+    let transactions = page_hashes
+        .iter()
+        .filter_map(|hash| handle.get_mempool_tx(hash))
+        .map(|info| TxSummaryResponse {
+            tx_hash: hex::encode(info.tx_hash),
+            fee: info.fee,
+            fee_rate: info.fee_rate,
+            weight: info.weight,
+            kernels: info.kernels,
+        })
+        .collect();
 
     let count = tx_hashes.len();
 
@@ -540,6 +580,7 @@ async fn mempool(
         page,
         limit,
         tx_hashes,
+        transactions,
     })
     .into_response()
 }
@@ -603,6 +644,7 @@ async fn get_tx(
                 fee: info.fee,
                 fee_rate: info.fee_rate,
                 weight: info.weight,
+                kernels: info.kernels,
             }),
         )
             .into_response())
@@ -648,6 +690,7 @@ async fn get_block(
                     prev_hash: hex::encode(header.prev_hash.as_bytes()),
                     timestamp: header.timestamp.0,
                     target: hex::encode(header.target.0.to_be_bytes()),
+                    kernels: handle.get_block_kernels(&hash).unwrap_or_default(),
                 }),
             )
                 .into_response())
@@ -929,6 +972,7 @@ mod tests {
                     fee: 0,
                     fee_rate: 0,
                     weight: 0,
+                    kernels: Vec::new(),
                 },
             );
             Ok(TxAdmission {
@@ -1257,6 +1301,83 @@ mod tests {
         assert_eq!(body["count"], serde_json::json!(0));
         assert_eq!(body["total"], serde_json::json!(0));
         assert_eq!(body["page"], serde_json::json!(0));
+        assert_eq!(body["transactions"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn tx_and_mempool_expose_height_locked_kernel_fields() {
+        let node = MockNode::new(0);
+        let hash = [0xabu8; 32];
+        node.txs.lock().unwrap().insert(
+            hash,
+            MempoolTxInfo {
+                tx_hash: hash,
+                fee: 7,
+                fee_rate: 2,
+                weight: 3,
+                kernels: vec![KernelInfo {
+                    features: dom_core::KERNEL_FEAT_HEIGHT_LOCKED,
+                    lock_height: 4242,
+                }],
+            },
+        );
+        let app = app_with(node);
+
+        let tx = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/tx/{}", hex::encode(hash)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let tx_body = body_json(tx).await;
+        assert_eq!(
+            tx_body["kernels"],
+            serde_json::json!([{"features": 2, "lock_height": 4242}])
+        );
+
+        let mempool = app
+            .oneshot(
+                Request::builder()
+                    .uri("/mempool")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mempool_body = body_json(mempool).await;
+        assert_eq!(
+            mempool_body["tx_hashes"],
+            serde_json::json!([hex::encode(hash)])
+        );
+        assert_eq!(
+            mempool_body["transactions"][0]["kernels"],
+            tx_body["kernels"]
+        );
+    }
+
+    #[test]
+    fn block_response_serializes_kernel_fields_additively() {
+        let response = BlockHeaderResponse {
+            height: 1,
+            hash: "11".repeat(32),
+            prev_hash: "00".repeat(32),
+            timestamp: 123,
+            target: "1f00ffff".to_owned(),
+            kernels: vec![KernelInfo {
+                features: dom_core::KERNEL_FEAT_HEIGHT_LOCKED,
+                lock_height: 99,
+            }],
+        };
+        let body = serde_json::to_value(response).unwrap();
+        assert_eq!(
+            body["kernels"],
+            serde_json::json!([{"features": 2, "lock_height": 99}])
+        );
+        assert_eq!(body["height"], 1);
     }
 
     #[tokio::test]
@@ -1272,6 +1393,7 @@ mod tests {
                     fee: 0,
                     fee_rate: 0,
                     weight: 0,
+                    kernels: Vec::new(),
                 },
             );
         }
@@ -1341,6 +1463,7 @@ mod tests {
                     fee: 0,
                     fee_rate: 0,
                     weight: 0,
+                    kernels: Vec::new(),
                 },
             );
         }

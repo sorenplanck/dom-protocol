@@ -5,7 +5,8 @@
 
 use crate::node::{clear_persisted_mempool_snapshot, snapshot_tx_chain_view, DomNode};
 use dom_rpc::{
-    MempoolTxInfo, NodeHandle, PeerInfo, RpcError, ShutdownFuture, TxAdmission, UtxoInfo,
+    KernelInfo, MempoolTxInfo, NodeHandle, PeerInfo, RpcError, ShutdownFuture, TxAdmission,
+    UtxoInfo,
 };
 use dom_serialization::DomDeserialize;
 use std::sync::Arc;
@@ -50,6 +51,15 @@ impl NodeHandle for NodeHandleImpl {
             fee: entry.fee,
             fee_rate: entry.fee_rate,
             weight: entry.weight,
+            kernels: entry
+                .tx
+                .kernels
+                .iter()
+                .map(|kernel| KernelInfo {
+                    features: kernel.features,
+                    lock_height: kernel.lock_height,
+                })
+                .collect(),
         })
     }
 
@@ -170,6 +180,25 @@ impl NodeHandle for NodeHandleImpl {
     fn get_block_header(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
         let c = self.0.chain.try_lock().ok()?;
         c.store.get_block_header(hash).ok().flatten()
+    }
+
+    fn get_block_kernels(&self, hash: &[u8; 32]) -> Option<Vec<KernelInfo>> {
+        use dom_consensus::Block;
+
+        let c = self.0.chain.try_lock().ok()?;
+        let body = c.store.get_block_body(hash).ok()??;
+        let block = Block::from_bytes(&body).ok()?;
+        Some(
+            block
+                .transactions
+                .iter()
+                .flat_map(|tx| tx.kernels.iter())
+                .map(|kernel| KernelInfo {
+                    features: kernel.features,
+                    lock_height: kernel.lock_height,
+                })
+                .collect(),
+        )
     }
 
     fn get_block_hash_at_height(&self, height: u64) -> Option<[u8; 32]> {
