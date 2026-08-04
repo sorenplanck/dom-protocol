@@ -4,6 +4,13 @@ Date: 2026-08-04
 
 Status: **PRE-COMPARISON EVIDENCE COMPLETE — REAL DOM VERIFIER EXECUTION DEFERRED**
 
+Post-barrier note: the deferred comparison was later executed against final
+production code commit `f821937a8ff1712d5f9bafd58f152b82073538f2` without
+changing this pre-comparison artifact. All 311 named intermediates matched and
+all three final signatures passed the real DOM verifier. See
+`G1A-PRODUCTION-COMPARISON-EVIDENCE.md` and
+`G1A-INDEPENDENT-CRYPTOGRAPHIC-REVIEW.md`.
+
 Branch: `test/phase-1-independent-vectors-ratified`
 
 Independent baseline: `6062f9adb6ddd1812c41b2fb66b9ec69a249f324`
