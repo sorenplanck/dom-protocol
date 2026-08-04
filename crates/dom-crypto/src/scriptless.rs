@@ -5,6 +5,7 @@
 //! canonical SEC1 and big-endian scalar formats, and does not define nonce
 //! derivation or persistence policy.
 
+use crate::hash::blake2b_256_tagged;
 use crate::keys::PublicKey;
 use crate::schnorr::{
     compressed_to_projective, is_scalar_valid, projective_to_compressed, scalar_from_bytes,
@@ -17,7 +18,11 @@ use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::PrimeField;
 use k256::ProjectivePoint;
 use subtle::{Choice, ConstantTimeEq};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
+const SECRET_NONCE_AUX_TAG_V1: &str = "DOM:scriptless-secret-nonce-aux:v1";
+const SECRET_NONCE_SEED_TAG_V1: &str = "DOM:scriptless-secret-nonce-seed:v1";
+const SECRET_NONCE_WIDE_TAG_V1: &str = "DOM:scriptless-secret-nonce-wide:v1";
 
 /// A canonical, nonzero secp256k1 scalar held as secret material.
 ///
@@ -73,6 +78,70 @@ pub fn scalar_from_wide_be(input: &[u8; 64]) -> Option<ScriptlessSecretScalar> {
     let bytes: [u8; 32] = reduced.to_repr().into();
     reduced.zeroize();
     ScriptlessSecretScalar::from_be_bytes(bytes).ok()
+}
+
+/// Derive the ratified V1 secret two-nonce pair through DOM's tagged-hash and
+/// constant-time scalar-reduction boundaries.
+///
+/// `canonical_context_v1` must already have passed the validation and exact
+/// encoding rules defined by NAR-001. The caller owns and must zeroize the
+/// borrowed auxiliary randomness after the complete derivation or retry loop.
+/// A `None` result means at least one wide reduction produced zero; the caller
+/// may retry only by incrementing the context retry counter before public
+/// material exists.
+pub fn scriptless_derive_secret_nonce_pair_v1(
+    signing_share: &ScriptlessSecretScalar,
+    aux_rand_32: &[u8; 32],
+    canonical_context_v1: &[u8],
+) -> Option<(ScriptlessSecretScalar, ScriptlessSecretScalar)> {
+    let mut mask_hash = blake2b_256_tagged(SECRET_NONCE_AUX_TAG_V1, aux_rand_32);
+    let mask = Zeroizing::new(*mask_hash.as_bytes());
+    mask_hash.zeroize();
+
+    let mut masked_signing_share = Zeroizing::new([0u8; 32]);
+    for ((output, secret), mask_byte) in masked_signing_share
+        .iter_mut()
+        .zip(signing_share.as_be_bytes())
+        .zip(mask.iter())
+    {
+        *output = *secret ^ *mask_byte;
+    }
+
+    let mut seed_input = Zeroizing::new(Vec::with_capacity(
+        32usize.checked_add(canonical_context_v1.len())?,
+    ));
+    seed_input.extend_from_slice(masked_signing_share.as_ref());
+    seed_input.extend_from_slice(canonical_context_v1);
+    let mut seed_hash = blake2b_256_tagged(SECRET_NONCE_SEED_TAG_V1, seed_input.as_ref());
+    let seed = Zeroizing::new(*seed_hash.as_bytes());
+    seed_hash.zeroize();
+
+    fn expand(seed: &[u8; 32], index: u8) -> Zeroizing<[u8; 64]> {
+        let mut input = Zeroizing::new([0u8; 34]);
+        input[..32].copy_from_slice(seed);
+        input[32] = index;
+
+        input[33] = 0;
+        let mut first = blake2b_256_tagged(SECRET_NONCE_WIDE_TAG_V1, input.as_ref());
+        input[33] = 1;
+        let mut second = blake2b_256_tagged(SECRET_NONCE_WIDE_TAG_V1, input.as_ref());
+
+        let mut wide = Zeroizing::new([0u8; 64]);
+        wide[..32].copy_from_slice(first.as_bytes());
+        wide[32..].copy_from_slice(second.as_bytes());
+        first.zeroize();
+        second.zeroize();
+        wide
+    }
+
+    let wide_first = expand(&seed, 0x01);
+    let wide_second = expand(&seed, 0x02);
+    let first = scalar_from_wide_be(&wide_first);
+    let second = scalar_from_wide_be(&wide_second);
+    match (first, second) {
+        (Some(first), Some(second)) => Some((first, second)),
+        _ => None,
+    }
 }
 
 impl ConstantTimeEq for ScriptlessSecretScalar {
@@ -193,6 +262,84 @@ pub fn scriptless_bind_public_nonces(
         ));
     }
     PublicKey::from_compressed_bytes(&projective_to_compressed(&bound))
+}
+
+/// Add canonical public points and reject an empty set or identity result.
+pub fn scriptless_add_public_points(points: &[PublicKey]) -> Result<PublicKey, DomError> {
+    if points.is_empty() {
+        return Err(DomError::Malformed(
+            "cannot aggregate an empty Scriptless point set".into(),
+        ));
+    }
+    let mut sum = ProjectivePoint::IDENTITY;
+    for point in points {
+        sum += compressed_to_projective(&point.to_compressed_bytes())?;
+    }
+    if bool::from(sum.is_identity()) {
+        return Err(DomError::Invalid(
+            "aggregated Scriptless point is the point at infinity".into(),
+        ));
+    }
+    PublicKey::from_compressed_bytes(&projective_to_compressed(&sum))
+}
+
+/// Produce `k1 + b*k2 + e*x` for a participant through the authoritative DOM
+/// scalar boundary.
+///
+/// One-shot ownership is enforced by the `dom-adaptor` wrapper that consumes
+/// its opaque nonce pair before calling this operation.
+pub fn scriptless_sign_bound_partial(
+    first_nonce: &ScriptlessSecretScalar,
+    second_nonce: &ScriptlessSecretScalar,
+    binding_factor: &PartialSig,
+    challenge_be: &[u8; 32],
+    signing_share: &ScriptlessSecretScalar,
+) -> Result<PartialSig, DomError> {
+    if !is_scalar_valid(challenge_be) {
+        return Err(DomError::Invalid(
+            "partial signature challenge is zero or >= n".into(),
+        ));
+    }
+    let first = scalar_from_bytes(first_nonce.as_be_bytes())
+        .ok_or_else(|| DomError::Invalid("first secret nonce is invalid".into()))?;
+    let second = scalar_from_bytes(second_nonce.as_be_bytes())
+        .ok_or_else(|| DomError::Invalid("second secret nonce is invalid".into()))?;
+    let binding = scalar_from_bytes(&binding_factor.to_bytes())
+        .ok_or_else(|| DomError::Invalid("binding factor is invalid".into()))?;
+    let challenge = scalar_from_bytes(challenge_be)
+        .ok_or_else(|| DomError::Invalid("partial signature challenge is invalid".into()))?;
+    let share = scalar_from_bytes(signing_share.as_be_bytes())
+        .ok_or_else(|| DomError::Invalid("signing share is invalid".into()))?;
+    let partial = first + binding * second + challenge * share;
+    if bool::from(partial.is_zero()) {
+        return Err(DomError::Invalid(
+            "participant partial signature is zero".into(),
+        ));
+    }
+    PartialSig::from_bytes(&<[u8; 32]>::from(partial.to_repr()))
+}
+
+/// Aggregate participant partial scalars without constructing a final
+/// signature or changing the aggregate nonce.
+pub fn scriptless_aggregate_partial_scalars(
+    partials: &[PartialSig],
+) -> Result<PartialSig, DomError> {
+    if partials.is_empty() {
+        return Err(DomError::Malformed(
+            "cannot aggregate an empty partial signature set".into(),
+        ));
+    }
+    let mut sum = k256::Scalar::ZERO;
+    for partial in partials {
+        sum += scalar_from_bytes(&partial.to_bytes())
+            .ok_or_else(|| DomError::Invalid("partial signature scalar is invalid".into()))?;
+    }
+    if bool::from(sum.is_zero()) {
+        return Err(DomError::Invalid(
+            "aggregated pre-signature scalar is zero".into(),
+        ));
+    }
+    PartialSig::from_bytes(&<[u8; 32]>::from(sum.to_repr()))
 }
 
 /// Verify `s_i*G == R_i + e*X_i` for a bound partial signature.
@@ -349,6 +496,99 @@ mod tests {
         high_bit[0] = 0x80;
         let high = scalar_from_wide_be(&high_bit).expect("2^511 has a nonzero residue");
         assert_ne!(high.as_be_bytes(), &[0u8; 32]);
+    }
+
+    #[test]
+    fn all_sixteen_sec1_parity_combinations_preserve_exact_dom_encoding() {
+        use std::collections::BTreeSet;
+
+        let chain_id = [0xA5; 32];
+        let message = [0x5A; 32];
+        let mut covered = BTreeSet::new();
+
+        'outer: for signing_value in 1u8..=24 {
+            for nonce_value in 1u8..=24 {
+                for adaptor_value in 1u8..=24 {
+                    let signing_secret =
+                        scalar_from_bytes(&scalar_bytes(signing_value)).expect("x");
+                    let signing_key = point_from_scalar(signing_value);
+                    let nonce = scalar_from_bytes(&scalar_bytes(nonce_value)).expect("k");
+                    let nonce_point = point_from_scalar(nonce_value);
+                    let adaptor_secret =
+                        ScriptlessSecretScalar::from_be_bytes(scalar_bytes(adaptor_value))
+                            .expect("t");
+                    let adaptor_point = adaptor_secret.public_key();
+                    let aggregate_nonce_hat_point = ProjectivePoint::GENERATOR * nonce
+                        + compressed_to_projective(&adaptor_point.to_compressed_bytes())
+                            .expect("T");
+                    if bool::from(aggregate_nonce_hat_point.is_identity()) {
+                        continue;
+                    }
+                    let aggregate_nonce_hat = PublicKey::from_compressed_bytes(
+                        &projective_to_compressed(&aggregate_nonce_hat_point),
+                    )
+                    .expect("R_hat");
+                    let parity = (
+                        signing_key.to_compressed_bytes()[0],
+                        nonce_point.to_compressed_bytes()[0],
+                        adaptor_point.to_compressed_bytes()[0],
+                        aggregate_nonce_hat.to_compressed_bytes()[0],
+                    );
+                    if !covered.insert(parity) {
+                        continue;
+                    }
+
+                    let challenge_bytes = *schnorr_challenge(
+                        &aggregate_nonce_hat.to_compressed_bytes(),
+                        &signing_key,
+                        &chain_id,
+                        &message,
+                    )
+                    .as_bytes();
+                    let challenge = scalar_from_bytes(&challenge_bytes).expect("challenge");
+                    let scalar_hat_value = nonce + challenge * signing_secret;
+                    if bool::from(scalar_hat_value.is_zero()) {
+                        covered.remove(&parity);
+                        continue;
+                    }
+                    let scalar_hat = PartialSig::from_bytes(
+                        &<[u8; 32]>::from(scalar_hat_value.to_repr()),
+                    )
+                    .expect("s_hat");
+                    assert!(scriptless_verify_pre_signature(
+                        &scalar_hat,
+                        &aggregate_nonce_hat,
+                        &signing_key,
+                        &adaptor_point,
+                        &chain_id,
+                        &message,
+                    )
+                    .expect("pre-signature"));
+                    let signature = scriptless_adapt_signature(
+                        &scalar_hat,
+                        &aggregate_nonce_hat,
+                        &adaptor_secret,
+                    )
+                    .expect("adaptation");
+                    assert_eq!(
+                        signature.r_compressed(),
+                        &aggregate_nonce_hat.to_compressed_bytes(),
+                        "R_hat SEC1 bytes must be preserved without normalization"
+                    );
+                    assert!(scriptless_verify_final_signature(
+                        &signature,
+                        &signing_key,
+                        &chain_id,
+                        &message,
+                    )
+                    .expect("real DOM verifier"));
+                    if covered.len() == 16 {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        assert_eq!(covered.len(), 16, "all four-bit SEC1 parity cases");
     }
 
     #[test]
