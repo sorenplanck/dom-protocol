@@ -10,6 +10,9 @@ Independent baseline: `6062f9adb6ddd1812c41b2fb66b9ec69a249f324`
 
 Normative-import HEAD before this evidence: `2b94653962850cd1f71ac727e43d39445dc3aafe`
 
+Pre-comparison evidence commit:
+`3486a863ba922e2b7a4fc52e5ded988c6d32de87`
+
 ## Independence statement
 
 The complete reference implementation and all expected output bytes were
@@ -125,8 +128,8 @@ returned exit 0. No Python bytecode cache was created in the evidence directory.
 ## Gate boundary
 
 - Independent complete output generation: **complete**.
-- Independent output committed before production inspection: **required next
-  repository action**.
+- Independent output committed before production inspection: **yes, commit
+  `3486a863ba922e2b7a4fc52e5ded988c6d32de87`**.
 - Production G1a inspected: **no**.
 - Cross-implementation comparison performed: **no**.
 - Real DOM Rust verifier executed against these frozen bytes: **no, deferred by
