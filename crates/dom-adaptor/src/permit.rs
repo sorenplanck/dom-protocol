@@ -1,4 +1,8 @@
 //! Exact NAR-002 durable exposure-permit boundary.
+#![allow(
+    dead_code,
+    reason = "parsed permits are records, while authorization capability remains crate-sealed"
+)]
 
 use crate::{error::exact_array, AdaptorError, PurposeV1, Result};
 use dom_crypto::{blake2b_256_tagged, Hash256};
@@ -51,7 +55,7 @@ impl TryFrom<u8> for ExposureKindV1 {
 ///
 /// The type intentionally implements no cloning, copying, debugging, display,
 /// equality, ordering, or generic serialization.
-pub struct ExposurePermitV1 {
+pub(crate) struct ExposurePermitV1 {
     exposure_kind: ExposureKindV1,
     permit_id: [u8; 32],
     reservation_nonce_id: [u8; 32],
@@ -67,14 +71,14 @@ pub struct ExposurePermitV1 {
 
 impl ExposurePermitV1 {
     /// Exact canonical encoded length.
-    pub const ENCODED_LEN: usize = 252;
+    pub(crate) const ENCODED_LEN: usize = 252;
     /// Exact magic bytes.
-    pub const MAGIC: [u8; 8] = *b"DOMEXPV1";
+    pub(crate) const MAGIC: [u8; 8] = *b"DOMEXPV1";
     /// Exact version.
-    pub const VERSION: u16 = 1;
+    pub(crate) const VERSION: u16 = 1;
 
     /// Parse a permit issued by the durable G1b boundary.
-    pub fn from_durable_bytes(bytes: &[u8]) -> Result<Self> {
+    pub(crate) fn from_durable_bytes(bytes: &[u8]) -> Result<Self> {
         let bytes = exact_array::<{ Self::ENCODED_LEN }>("ExposurePermitV1", bytes)?;
         if bytes[..8] != Self::MAGIC {
             return Err(AdaptorError::InvalidContext(
@@ -117,7 +121,7 @@ impl ExposurePermitV1 {
     }
 
     /// Return exact canonical bytes for audit and digest verification.
-    pub fn to_bytes(&self) -> [u8; Self::ENCODED_LEN] {
+    pub(crate) fn to_bytes(&self) -> [u8; Self::ENCODED_LEN] {
         let mut bytes = [0u8; Self::ENCODED_LEN];
         bytes[..8].copy_from_slice(&Self::MAGIC);
         bytes[8..10].copy_from_slice(&Self::VERSION.to_le_bytes());
@@ -136,7 +140,7 @@ impl ExposurePermitV1 {
     }
 
     /// Compute the assigned permit digest over all 252 bytes.
-    pub fn digest(&self) -> Hash256 {
+    pub(crate) fn digest(&self) -> Hash256 {
         blake2b_256_tagged(PERMIT_DIGEST_TAG_V1, &self.to_bytes())
     }
 
@@ -161,6 +165,15 @@ impl ExposurePermitV1 {
     pub(crate) const fn outbound_digest(&self) -> &[u8; 32] {
         &self.outbound_digest
     }
+}
+
+/// Validate exact durable permit record bytes without creating an
+/// authorization capability.
+///
+/// Parsing is intentionally separate from authorization. A successful result
+/// does not grant access to any secret nonce or public artifact.
+pub fn validate_exposure_permit_record_v1(bytes: &[u8]) -> Result<()> {
+    ExposurePermitV1::from_durable_bytes(bytes).map(|_| ())
 }
 
 /// Compute the exact digest bound into an exposure permit.

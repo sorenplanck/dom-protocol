@@ -24,13 +24,13 @@ pub use error::{AdaptorError, Result};
 pub use messages::{NonceCommitmentV1, NonceRevealV1, PartialSignatureV1, PurposeV1};
 pub use nonce::{
     aggregate_partial_signatures_v1, aggregate_public_nonces_v1, finalize_plain_signature_v1,
-    AuthorizedSecretNoncePairV1, NonceReservationBindingV1, PublicNoncePairV1, SecretNoncePairV1,
+    PublicNoncePairV1,
 };
-pub use permit::{exposure_outbound_digest_v1, ExposureKindV1, ExposurePermitV1};
+pub use permit::{exposure_outbound_digest_v1, validate_exposure_permit_record_v1, ExposureKindV1};
 pub use session::{
     advance_transcript_hash_v1, canonical_template_v1, generate_session_id_v1,
     initial_transcript_hash_v1, session_message_digest_v1, ContractKindV1, ParticipantIdentityV1,
-    ParticipantRosterV1, TrustedChainIdV1,
+    ParticipantRosterV1, SessionIdRegistryV1, TrustedChainIdV1,
 };
 pub use transcript::{
     binding_factor_v1, nonce_commitment_hash_v1, BindingContextV1, BindingFactorV1,

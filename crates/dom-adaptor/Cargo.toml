@@ -22,5 +22,6 @@ rand_core.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+dom-crypto = { workspace = true, features = ["test-helpers"] }
 dom-serialization.workspace = true
 hex.workspace = true
