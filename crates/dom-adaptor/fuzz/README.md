@@ -1,8 +1,10 @@
 # G1a parser fuzzing
 
 These persistent targets exercise the public, fixed-width G1a parsers and the
-authoritative DOM point/scalar/signature parsers. They do not implement the
-blocked canonical session context or secret two-nonce KDF.
+authoritative DOM point/scalar/signature parsers. `canonical_messages` also
+exercises the bounded `SessionContextV1` decoder and the closed purpose,
+direction, and signing-phase registries. Secret nonce material is never a fuzz
+input and is not written to the corpus.
 
 Run a bounded local campaign with:
 
