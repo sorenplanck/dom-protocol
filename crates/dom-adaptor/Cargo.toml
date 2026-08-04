@@ -10,6 +10,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+dom-crypto = { path = "../dom-crypto" }
 
 [dev-dependencies]
 dom-crypto = { path = "../dom-crypto" }
