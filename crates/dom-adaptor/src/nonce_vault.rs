@@ -1,40 +1,27 @@
 //! Storage-independent contract for a durable, rollback-resistant Nonce Vault.
 
 use core::fmt;
+use dom_crypto::blake2b_256_tagged;
 use std::error::Error;
-use std::hash::{Hash, Hasher};
 
 macro_rules! opaque_identifier {
     ($name:ident, $description:literal) => {
         #[doc = $description]
-        #[derive(Clone, Eq)]
-        pub struct $name(Box<[u8]>);
+        #[derive(Clone, Eq, Hash, PartialEq)]
+        pub struct $name([u8; 32]);
 
         impl $name {
             #[doc = "Constructs the identifier, rejecting an empty representation."]
-            pub fn from_bytes(bytes: impl Into<Box<[u8]>>) -> Result<Self, NonceVaultError> {
-                let bytes = bytes.into();
-                if bytes.is_empty() {
+            pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, NonceVaultError> {
+                if bytes.iter().all(|byte| *byte == 0) {
                     return Err(NonceVaultError::InvalidIdentifier);
                 }
                 Ok(Self(bytes))
             }
 
             #[doc = "Returns the local opaque representation."]
-            pub fn as_bytes(&self) -> &[u8] {
+            pub fn as_bytes(&self) -> &[u8; 32] {
                 &self.0
-            }
-        }
-
-        impl PartialEq for $name {
-            fn eq(&self, other: &Self) -> bool {
-                self.0 == other.0
-            }
-        }
-
-        impl Hash for $name {
-            fn hash<H: Hasher>(&self, state: &mut H) {
-                self.0.hash(state);
             }
         }
 
@@ -49,6 +36,18 @@ macro_rules! opaque_identifier {
 opaque_identifier!(
     VaultKeyId,
     "Opaque local identifier for a signing key budget."
+);
+opaque_identifier!(
+    ReservationNonceId,
+    "Stable identifier for one charged nonce reservation."
+);
+opaque_identifier!(
+    ParticipantId,
+    "Stable protocol participant identity bound by an exposure permit."
+);
+opaque_identifier!(
+    TemplateHash,
+    "Canonical contract-template hash bound by an exposure permit."
 );
 opaque_identifier!(
     SessionId,
@@ -128,11 +127,11 @@ pub enum ReservationState {
     /// Budget and nonce slots are durably reserved.
     Reserved,
     /// Exact public bytes are durably committed and cannot change.
-    PublicCommitmentStored,
-    /// A verified witness receipt is durable and exposure is permitted.
-    ExportAuthorized,
-    /// The nonce and budget are irreversibly consumed.
-    Consumed,
+    CommitmentAuthorized,
+    /// Exact nonce reveal is durably authorized by the witness.
+    RevealAuthorized,
+    /// Secret nonce material is destroyed and the partial is authorized.
+    ConsumedPartialAuthorized,
     /// No public material existed when the reservation was aborted.
     AbortedBeforePublicMaterial,
     /// Public material may have existed, so abort burned the nonce.
@@ -161,26 +160,82 @@ pub enum ConsumeReason {
     CrashRecovery,
 }
 
+/// Closed NAR-002 public-exposure registry.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExposureKindV1 {
+    /// Exact 35-byte `SigNonceCommitV1`.
+    NonceCommitment = 0x01,
+    /// Exact 69-byte `SigNonceRevealV1`.
+    NonceReveal = 0x02,
+    /// Exact 67-byte `PartialSignatureV1`.
+    PartialSignature = 0x03,
+}
+
+impl ExposureKindV1 {
+    /// Returns the exact canonical byte length.
+    pub const fn canonical_length(self) -> usize {
+        match self {
+            Self::NonceCommitment => 35,
+            Self::NonceReveal => 69,
+            Self::PartialSignature => 67,
+        }
+    }
+}
+
+impl TryFrom<u8> for ExposureKindV1 {
+    type Error = NonceVaultError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::NonceCommitment),
+            2 => Ok(Self::NonceReveal),
+            3 => Ok(Self::PartialSignature),
+            _ => Err(NonceVaultError::UnsupportedExposureKind),
+        }
+    }
+}
+
 /// Public material whose exact bytes must be persisted before exposure.
 ///
 /// The representation is deliberately opaque: this contract does not define a
 /// witness wire protocol or a cryptographic transcript.
 #[derive(Clone, Eq, PartialEq)]
-pub struct ExposureBytes(Box<[u8]>);
+pub struct ExposureBytes {
+    kind: ExposureKindV1,
+    bytes: Box<[u8]>,
+}
 
 impl ExposureBytes {
     /// Creates an opaque byte-exact exposure value.
-    pub fn from_bytes(bytes: impl Into<Box<[u8]>>) -> Result<Self, NonceVaultError> {
+    pub fn from_bytes(
+        kind: ExposureKindV1,
+        bytes: impl Into<Box<[u8]>>,
+    ) -> Result<Self, NonceVaultError> {
         let bytes = bytes.into();
-        if bytes.is_empty() {
-            return Err(NonceVaultError::EmptyPublicMaterial);
+        if bytes.len() != kind.canonical_length() {
+            return Err(NonceVaultError::InvalidPublicMaterial);
         }
-        Ok(Self(bytes))
+        Ok(Self { kind, bytes })
+    }
+
+    /// Returns the closed exposure kind.
+    pub const fn kind(&self) -> ExposureKindV1 {
+        self.kind
     }
 
     /// Returns the exact committed bytes.
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        &self.bytes
+    }
+
+    /// Computes the exact stage-bound NAR-002 outbound digest.
+    pub fn outbound_digest(&self) -> [u8; 32] {
+        let mut preimage = Vec::with_capacity(5 + self.bytes.len());
+        preimage.push(self.kind as u8);
+        preimage.extend_from_slice(&(self.bytes.len() as u32).to_le_bytes());
+        preimage.extend_from_slice(&self.bytes);
+        *blake2b_256_tagged("DOM:scriptless-vault-outbound:v1", &preimage).as_bytes()
     }
 }
 
@@ -194,7 +249,7 @@ impl fmt::Debug for ExposureBytes {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NonceReservation {
     /// Stable local reservation identifier.
-    pub reservation_id: IdempotencyKey,
+    pub reservation_id: ReservationNonceId,
     /// Current monotonic lifecycle state.
     pub state: ReservationState,
 }
@@ -202,6 +257,8 @@ pub struct NonceReservation {
 /// Request to reserve nonce material and charge all applicable budgets.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReservationRequest {
+    /// Stable nonce identifier charged exactly once.
+    pub reservation_id: ReservationNonceId,
     /// Signing-key budget owner.
     pub key_id: VaultKeyId,
     /// Local adaptor session.
@@ -210,6 +267,10 @@ pub struct ReservationRequest {
     pub counterparty: CounterpartyBucket,
     /// Closed protocol purpose.
     pub purpose: Purpose,
+    /// Protocol participant bound to every exposure permit.
+    pub participant_id: ParticipantId,
+    /// Canonical contract template hash.
+    pub template_hash: TemplateHash,
     /// Idempotency key for this logical reservation.
     pub request_id: IdempotencyKey,
 }
@@ -218,7 +279,7 @@ pub struct ReservationRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitPublicMaterialRequest {
     /// Reservation being advanced.
-    pub reservation_id: IdempotencyKey,
+    pub reservation_id: ReservationNonceId,
     /// Idempotency key for this commit operation.
     pub request_id: IdempotencyKey,
     /// Exact bytes that every retry must return.
@@ -229,23 +290,25 @@ pub struct CommitPublicMaterialRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExposureAuthorizationRequest {
     /// Reservation being advanced.
-    pub reservation_id: IdempotencyKey,
+    pub reservation_id: ReservationNonceId,
     /// Idempotency key bound by the witness receipt.
     pub request_id: IdempotencyKey,
+    /// Exact public artifact already durably staged by the Wallet.
+    pub exposure: ExposureBytes,
 }
 
 /// Request to retrieve already-authorized byte-exact material.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetryRequest {
     /// Reservation whose previously committed bytes are requested.
-    pub reservation_id: IdempotencyKey,
+    pub reservation_id: ReservationNonceId,
 }
 
 /// Request to irreversibly consume a reservation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConsumeRequest {
     /// Reservation being consumed.
-    pub reservation_id: IdempotencyKey,
+    pub reservation_id: ReservationNonceId,
     /// Idempotency key for this terminal operation.
     pub request_id: IdempotencyKey,
     /// Conservative reason for consumption.
@@ -263,6 +326,114 @@ impl ConsumedExposure {
     }
 }
 
+/// One-shot NAR-002 capability for one exact staged public artifact.
+///
+/// This type intentionally implements neither Clone, Copy, Debug, Display nor
+/// generic serialization traits. The Wallet may issue it only after the exact
+/// outbound bytes, semantic journal entry, verified applied receipt, receipt
+/// record, receipt-chain hash, and spent permit ID are durable. For a partial
+/// signature, the nonce-secret tombstone must also already be durable.
+pub struct ExposurePermitV1 {
+    permit_id: IdempotencyKey,
+    reservation_id: ReservationNonceId,
+    session_id: SessionId,
+    participant_id: ParticipantId,
+    purpose: PurposeV1,
+    template_hash: TemplateHash,
+    outbound_digest: [u8; 32],
+    exposure_kind: ExposureKindV1,
+    epoch: u64,
+    semantic_revision: u64,
+    receipt_chain_hash: [u8; 32],
+}
+
+impl ExposurePermitV1 {
+    /// Issues a capability from already-durable, verified Wallet evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_after_durability(
+        permit_id: IdempotencyKey,
+        reservation_id: ReservationNonceId,
+        session_id: SessionId,
+        participant_id: ParticipantId,
+        purpose: PurposeV1,
+        template_hash: TemplateHash,
+        outbound_digest: [u8; 32],
+        exposure_kind: ExposureKindV1,
+        epoch: u64,
+        semantic_revision: u64,
+        receipt_chain_hash: [u8; 32],
+    ) -> Result<Self, NonceVaultError> {
+        if outbound_digest.iter().all(|byte| *byte == 0)
+            || receipt_chain_hash.iter().all(|byte| *byte == 0)
+            || epoch == 0
+        {
+            return Err(NonceVaultError::InvalidPermit);
+        }
+        Ok(Self {
+            permit_id,
+            reservation_id,
+            session_id,
+            participant_id,
+            purpose,
+            template_hash,
+            outbound_digest,
+            exposure_kind,
+            epoch,
+            semantic_revision,
+            receipt_chain_hash,
+        })
+    }
+
+    /// Returns the exact 252-byte persistence representation.
+    pub fn persistence_bytes(&self) -> [u8; 252] {
+        let mut bytes = [0u8; 252];
+        let mut cursor = 0;
+        append(&mut bytes, &mut cursor, b"DOMEXPV1");
+        append(&mut bytes, &mut cursor, &1u16.to_le_bytes());
+        append(&mut bytes, &mut cursor, &[self.exposure_kind as u8]);
+        append(&mut bytes, &mut cursor, self.permit_id.as_bytes());
+        append(&mut bytes, &mut cursor, self.reservation_id.as_bytes());
+        append(&mut bytes, &mut cursor, self.session_id.as_bytes());
+        append(&mut bytes, &mut cursor, self.participant_id.as_bytes());
+        append(&mut bytes, &mut cursor, &[self.purpose as u8]);
+        append(&mut bytes, &mut cursor, self.template_hash.as_bytes());
+        append(&mut bytes, &mut cursor, &self.outbound_digest);
+        append(&mut bytes, &mut cursor, &self.epoch.to_le_bytes());
+        append(
+            &mut bytes,
+            &mut cursor,
+            &self.semantic_revision.to_le_bytes(),
+        );
+        append(&mut bytes, &mut cursor, &self.receipt_chain_hash);
+        debug_assert_eq!(cursor, bytes.len());
+        bytes
+    }
+
+    /// Computes the canonical permit digest.
+    pub fn digest(&self) -> [u8; 32] {
+        *blake2b_256_tagged(
+            "DOM:scriptless-vault-exposure-permit:v1",
+            &self.persistence_bytes(),
+        )
+        .as_bytes()
+    }
+
+    /// Returns the bound reservation identifier.
+    pub const fn reservation_id(&self) -> &ReservationNonceId {
+        &self.reservation_id
+    }
+
+    /// Returns the bound exposure kind.
+    pub const fn exposure_kind(&self) -> ExposureKindV1 {
+        self.exposure_kind
+    }
+
+    /// Returns the exact bound outbound digest.
+    pub const fn outbound_digest(&self) -> &[u8; 32] {
+        &self.outbound_digest
+    }
+}
+
 impl fmt::Debug for ConsumedExposure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ConsumedExposure([redacted])")
@@ -273,9 +444,11 @@ impl fmt::Debug for ConsumedExposure {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AbortRequest {
     /// Reservation being aborted.
-    pub reservation_id: IdempotencyKey,
+    pub reservation_id: ReservationNonceId,
     /// Idempotency key for this terminal operation.
     pub request_id: IdempotencyKey,
+    /// Whether any public material may have existed before abort.
+    pub public_material_may_have_existed: bool,
 }
 
 /// Receipt accepted by a production witness verifier.
@@ -285,6 +458,9 @@ pub struct AbortRequest {
 pub trait VaultReceipt {
     /// Returns the idempotency key covered by the receipt.
     fn request_id(&self) -> &IdempotencyKey;
+
+    /// Returns the applied receipt-chain hash.
+    fn receipt_chain_hash(&self) -> &[u8; 32];
 
     /// Returns the opaque bytes that the wallet must persist durably.
     fn persistence_bytes(&self) -> &[u8];
@@ -304,35 +480,31 @@ pub trait NonceVault {
         -> Result<NonceReservation, NonceVaultError>;
 
     /// Persists exact public bytes before any exposure can be authorized.
-    fn commit_public_material(
+    fn stage_public_material(
         &mut self,
         request: CommitPublicMaterialRequest,
     ) -> Result<NonceReservation, NonceVaultError>;
 
-    /// Persists a verified witness receipt and permits exposure atomically.
+    /// Persists a verified applied receipt and issues a one-shot permit.
+    ///
+    /// Commitment, reveal, and partial stages are distinct. Partial
+    /// authorization additionally destroys the encrypted nonce secret and
+    /// durably records its irreversible tombstone before returning.
     fn authorize_exposure(
         &mut self,
         request: ExposureAuthorizationRequest,
         receipt: Self::Receipt,
-    ) -> Result<NonceReservation, NonceVaultError>;
+    ) -> Result<ExposurePermitV1, NonceVaultError>;
 
-    /// Returns the exact previously committed bytes only after consumption.
-    ///
-    /// Implementations must reject this call while the reservation is merely
-    /// export-authorized. The first export is performed by [`Self::consume`].
-    fn retry_public_material(
-        &self,
-        request: RetryRequest,
-    ) -> Result<ConsumedExposure, NonceVaultError>;
-
-    /// Irreversibly consumes secret material before returning public bytes.
-    ///
-    /// The implementation must durably write the tombstone and exact outbound
-    /// bytes before this method succeeds. An error returns no exportable bytes.
-    fn consume(&mut self, request: ConsumeRequest) -> Result<ConsumedExposure, NonceVaultError>;
+    /// Consumes a one-shot permit and releases only its exact bound bytes.
+    fn export(&mut self, permit: ExposurePermitV1) -> Result<ConsumedExposure, NonceVaultError>;
 
     /// Irreversibly aborts a reservation without refunding budget.
-    fn abort(&mut self, request: AbortRequest) -> Result<NonceReservation, NonceVaultError>;
+    fn abort(
+        &mut self,
+        request: AbortRequest,
+        receipt: Self::Receipt,
+    ) -> Result<NonceReservation, NonceVaultError>;
 
     /// Returns whether adaptor operations are available after reconciliation.
     fn restore_state(&self) -> RestoreState;
@@ -344,9 +516,13 @@ pub enum NonceVaultError {
     /// An opaque identifier was empty.
     InvalidIdentifier,
     /// Public material was empty.
-    EmptyPublicMaterial,
+    InvalidPublicMaterial,
     /// A purpose byte is not in the ratified closed V1 registry.
     UnsupportedPurpose,
+    /// An exposure byte is outside the closed NAR-002 registry.
+    UnsupportedExposureKind,
+    /// A one-shot permit field or durable binding is invalid.
+    InvalidPermit,
     /// An idempotency key was reused for different inputs.
     IdempotencyConflict,
     /// The requested reservation does not exist.
@@ -379,8 +555,10 @@ impl fmt::Display for NonceVaultError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::InvalidIdentifier => "invalid empty vault identifier",
-            Self::EmptyPublicMaterial => "empty public material",
+            Self::InvalidPublicMaterial => "invalid canonical public material",
             Self::UnsupportedPurpose => "unsupported PurposeV1 discriminant",
+            Self::UnsupportedExposureKind => "unsupported ExposureKindV1 discriminant",
+            Self::InvalidPermit => "invalid one-shot exposure permit",
             Self::IdempotencyConflict => "idempotency key conflicts with prior inputs",
             Self::ReservationNotFound => "nonce reservation not found",
             Self::InvalidTransition => "invalid nonce reservation transition",
@@ -401,18 +579,24 @@ impl fmt::Display for NonceVaultError {
 
 impl Error for NonceVaultError {}
 
+fn append<const N: usize>(output: &mut [u8; N], cursor: &mut usize, bytes: &[u8]) {
+    output[*cursor..*cursor + bytes.len()].copy_from_slice(bytes);
+    *cursor += bytes.len();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn identifier<T>(constructor: impl FnOnce(Box<[u8]>) -> Result<T, NonceVaultError>) -> T {
-        constructor(vec![7; 8].into_boxed_slice()).expect("non-empty test identifier")
+    fn identifier<T>(constructor: impl FnOnce([u8; 32]) -> Result<T, NonceVaultError>) -> T {
+        constructor([7; 32]).expect("nonzero test identifier")
     }
 
     #[test]
     fn identifiers_and_exposure_are_redacted() {
         let session = identifier(SessionId::from_bytes);
-        let exposure = ExposureBytes::from_bytes(vec![1, 2, 3]).expect("public bytes");
+        let exposure = ExposureBytes::from_bytes(ExposureKindV1::NonceCommitment, vec![1; 35])
+            .expect("public bytes");
         assert_eq!(format!("{session:?}"), "SessionId([redacted])");
         assert_eq!(format!("{exposure:?}"), "ExposureBytes([redacted])");
     }
@@ -420,12 +604,12 @@ mod tests {
     #[test]
     fn empty_opaque_values_fail_closed() {
         assert_eq!(
-            IdempotencyKey::from_bytes(Vec::<u8>::new()),
+            IdempotencyKey::from_bytes([0; 32]),
             Err(NonceVaultError::InvalidIdentifier)
         );
         assert_eq!(
-            ExposureBytes::from_bytes(Vec::<u8>::new()),
-            Err(NonceVaultError::EmptyPublicMaterial)
+            ExposureBytes::from_bytes(ExposureKindV1::NonceCommitment, Vec::<u8>::new()),
+            Err(NonceVaultError::InvalidPublicMaterial)
         );
     }
 
