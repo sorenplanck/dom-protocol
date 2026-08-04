@@ -17,6 +17,7 @@ use k256::elliptic_curve::group::Group;
 use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::PrimeField;
 use k256::ProjectivePoint;
+use rand::{rngs::OsRng, RngCore};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -46,8 +47,9 @@ impl ScriptlessSecretScalar {
 
     /// Derive the canonical compressed public point `secret * G`.
     pub fn public_key(&self) -> PublicKey {
-        let scalar = scalar_from_bytes(&self.0).expect("secret scalar is already validated");
-        let compressed = projective_to_compressed(&(ProjectivePoint::GENERATOR * scalar));
+        let scalar =
+            Zeroizing::new(scalar_from_bytes(&self.0).expect("secret scalar is already validated"));
+        let compressed = projective_to_compressed(&(ProjectivePoint::GENERATOR * *scalar));
         PublicKey::from_compressed_bytes(&compressed)
             .expect("a nonzero generator multiple is a canonical public key")
     }
@@ -89,7 +91,7 @@ pub fn scalar_from_wide_be(input: &[u8; 64]) -> Option<ScriptlessSecretScalar> {
 /// A `None` result means at least one wide reduction produced zero; the caller
 /// may retry only by incrementing the context retry counter before public
 /// material exists.
-pub fn scriptless_derive_secret_nonce_pair_v1(
+fn derive_secret_nonce_pair_v1(
     signing_share: &ScriptlessSecretScalar,
     aux_rand_32: &[u8; 32],
     canonical_context_v1: &[u8],
@@ -144,6 +146,79 @@ pub fn scriptless_derive_secret_nonce_pair_v1(
     }
 }
 
+/// Opaque operating-system-randomized nonce derivation state.
+///
+/// Production callers cannot supply or observe the auxiliary randomness. The
+/// same private auxiliary value is retained only across the pre-export retry
+/// loop and is zeroized when this value is dropped.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct ScriptlessNonceDerivationV1 {
+    aux_rand_32: [u8; 32],
+}
+
+/// Opaque one-shot secret nonce pair.
+///
+/// The type intentionally implements no cloning, copying, debugging, display,
+/// equality, ordering, or serialization. Signing consumes the complete pair.
+pub struct ScriptlessSecretNoncePairV1 {
+    first: ScriptlessSecretScalar,
+    second: ScriptlessSecretScalar,
+}
+
+impl ScriptlessSecretNoncePairV1 {
+    /// Derive both canonical public nonce points.
+    pub fn public_keys(&self) -> (PublicKey, PublicKey) {
+        (self.first.public_key(), self.second.public_key())
+    }
+
+    /// Consume the pair and produce exactly one bound partial signature.
+    pub fn sign_bound_partial(
+        self,
+        binding_factor: &PartialSig,
+        challenge_be: &[u8; 32],
+        signing_share: &ScriptlessSecretScalar,
+    ) -> Result<PartialSig, DomError> {
+        sign_bound_partial_once(
+            &self.first,
+            &self.second,
+            binding_factor,
+            challenge_be,
+            signing_share,
+        )
+    }
+}
+
+impl ScriptlessNonceDerivationV1 {
+    /// Acquire fresh auxiliary randomness from the operating-system CSPRNG.
+    pub fn from_os_rng() -> Result<Self, DomError> {
+        let mut aux_rand_32 = [0u8; 32];
+        OsRng.try_fill_bytes(&mut aux_rand_32).map_err(|_| {
+            aux_rand_32.zeroize();
+            DomError::Internal("operating-system CSPRNG failed".into())
+        })?;
+        Ok(Self { aux_rand_32 })
+    }
+
+    /// Derive one pair for an already validated canonical context encoding.
+    /// A zero reduction returns `None` so the owning pre-export retry loop can
+    /// increment its checked counter and call this method again.
+    pub fn derive_pair(
+        &self,
+        signing_share: &ScriptlessSecretScalar,
+        canonical_context_v1: &[u8],
+    ) -> Option<ScriptlessSecretNoncePairV1> {
+        derive_secret_nonce_pair_v1(signing_share, &self.aux_rand_32, canonical_context_v1)
+            .map(|(first, second)| ScriptlessSecretNoncePairV1 { first, second })
+    }
+
+    /// Build deterministic derivation state for authenticated tests only.
+    #[cfg(feature = "test-helpers")]
+    #[doc(hidden)]
+    pub fn from_aux_for_test(aux_rand_32: [u8; 32]) -> Self {
+        Self { aux_rand_32 }
+    }
+}
+
 impl ConstantTimeEq for ScriptlessSecretScalar {
     fn ct_eq(&self, other: &Self) -> Choice {
         self.0.ct_eq(&other.0)
@@ -195,11 +270,15 @@ pub fn scriptless_adapt_signature(
     aggregate_nonce_hat: &PublicKey,
     adaptor_secret: &ScriptlessSecretScalar,
 ) -> Result<SchnorrSignature, DomError> {
-    let s_hat = scalar_from_bytes(&scalar_hat.to_bytes())
-        .ok_or_else(|| DomError::Invalid("pre-signature scalar is invalid".into()))?;
-    let t = scalar_from_bytes(adaptor_secret.as_be_bytes())
-        .ok_or_else(|| DomError::Invalid("adaptor secret is invalid".into()))?;
-    let adapted = s_hat + t;
+    let s_hat = Zeroizing::new(
+        scalar_from_bytes(&scalar_hat.to_bytes())
+            .ok_or_else(|| DomError::Invalid("pre-signature scalar is invalid".into()))?,
+    );
+    let t = Zeroizing::new(
+        scalar_from_bytes(adaptor_secret.as_be_bytes())
+            .ok_or_else(|| DomError::Invalid("adaptor secret is invalid".into()))?,
+    );
+    let adapted = Zeroizing::new(*s_hat + *t);
     if bool::from(adapted.is_zero()) {
         return Err(DomError::Invalid("adapted signature scalar is zero".into()));
     }
@@ -226,11 +305,15 @@ pub fn scriptless_extract_adaptor_secret(
     let signature_bytes = final_signature.to_bytes();
     let mut final_scalar_bytes = [0u8; 32];
     final_scalar_bytes.copy_from_slice(&signature_bytes[33..]);
-    let final_scalar = scalar_from_bytes(&final_scalar_bytes)
-        .ok_or_else(|| DomError::Invalid("final signature scalar is invalid".into()))?;
-    let pre_scalar = scalar_from_bytes(&scalar_hat.to_bytes())
-        .ok_or_else(|| DomError::Invalid("pre-signature scalar is invalid".into()))?;
-    let extracted = final_scalar - pre_scalar;
+    let final_scalar = Zeroizing::new(
+        scalar_from_bytes(&final_scalar_bytes)
+            .ok_or_else(|| DomError::Invalid("final signature scalar is invalid".into()))?,
+    );
+    let pre_scalar = Zeroizing::new(
+        scalar_from_bytes(&scalar_hat.to_bytes())
+            .ok_or_else(|| DomError::Invalid("pre-signature scalar is invalid".into()))?,
+    );
+    let extracted = Zeroizing::new(*final_scalar - *pre_scalar);
     if bool::from(extracted.is_zero()) {
         return Err(DomError::Invalid("extracted adaptor secret is zero".into()));
     }
@@ -288,7 +371,7 @@ pub fn scriptless_add_public_points(points: &[PublicKey]) -> Result<PublicKey, D
 ///
 /// One-shot ownership is enforced by the `dom-adaptor` wrapper that consumes
 /// its opaque nonce pair before calling this operation.
-pub fn scriptless_sign_bound_partial(
+fn sign_bound_partial_once(
     first_nonce: &ScriptlessSecretScalar,
     second_nonce: &ScriptlessSecretScalar,
     binding_factor: &PartialSig,
@@ -300,17 +383,23 @@ pub fn scriptless_sign_bound_partial(
             "partial signature challenge is zero or >= n".into(),
         ));
     }
-    let first = scalar_from_bytes(first_nonce.as_be_bytes())
-        .ok_or_else(|| DomError::Invalid("first secret nonce is invalid".into()))?;
-    let second = scalar_from_bytes(second_nonce.as_be_bytes())
-        .ok_or_else(|| DomError::Invalid("second secret nonce is invalid".into()))?;
+    let first = Zeroizing::new(
+        scalar_from_bytes(first_nonce.as_be_bytes())
+            .ok_or_else(|| DomError::Invalid("first secret nonce is invalid".into()))?,
+    );
+    let second = Zeroizing::new(
+        scalar_from_bytes(second_nonce.as_be_bytes())
+            .ok_or_else(|| DomError::Invalid("second secret nonce is invalid".into()))?,
+    );
     let binding = scalar_from_bytes(&binding_factor.to_bytes())
         .ok_or_else(|| DomError::Invalid("binding factor is invalid".into()))?;
     let challenge = scalar_from_bytes(challenge_be)
         .ok_or_else(|| DomError::Invalid("partial signature challenge is invalid".into()))?;
-    let share = scalar_from_bytes(signing_share.as_be_bytes())
-        .ok_or_else(|| DomError::Invalid("signing share is invalid".into()))?;
-    let partial = first + binding * second + challenge * share;
+    let share = Zeroizing::new(
+        scalar_from_bytes(signing_share.as_be_bytes())
+            .ok_or_else(|| DomError::Invalid("signing share is invalid".into()))?,
+    );
+    let partial = Zeroizing::new(*first + binding * *second + challenge * *share);
     if bool::from(partial.is_zero()) {
         return Err(DomError::Invalid(
             "participant partial signature is zero".into(),

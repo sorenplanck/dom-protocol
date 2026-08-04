@@ -80,17 +80,22 @@ impl ParticipantIdentityV1 {
         identity_public_key: PublicKey,
         signing_public_key: PublicKey,
         direction: DirectionV1,
-    ) -> Self {
+    ) -> Result<Self> {
         let mut body = [0u8; 65];
         body[..32].copy_from_slice(chain_id.as_bytes());
         body[32..].copy_from_slice(&identity_public_key.to_compressed_bytes());
         let participant_id = *blake2b_256_tagged(PARTICIPANT_TAG_V1, &body).as_bytes();
-        Self {
+        if participant_id == [0u8; 32] {
+            return Err(AdaptorError::InvalidContext(
+                "derived participant ID must be nonzero",
+            ));
+        }
+        Ok(Self {
             participant_id,
             identity_public_key,
             signing_public_key,
             direction,
-        }
+        })
     }
 
     /// Return the participant identifier.
@@ -171,12 +176,29 @@ impl ParticipantRosterV1 {
     }
 }
 
-/// Generate a fresh nonzero session identifier with the NAR-002 framing.
-pub fn generate_session_id_v1(
+/// Storage-owned permanent session-ID uniqueness boundary.
+///
+/// Implementations must durably reject every identifier used previously for
+/// the lifetime of the local participant identity. An in-memory registry is
+/// not a production implementation of this contract.
+pub trait SessionIdRegistryV1 {
+    /// Durably register a never-before-used identifier before it is returned.
+    fn register_unique_session_id(&mut self, session_id: &[u8; 32]) -> Result<bool>;
+}
+
+/// Generate and durably register a fresh nonzero session identifier with the
+/// NAR-002 framing.
+pub fn generate_session_id_v1<R: SessionIdRegistryV1>(
     chain_id: &TrustedChainIdV1,
     initiator_participant_id: &[u8; 32],
     contract_kind: ContractKindV1,
+    registry: &mut R,
 ) -> Result<[u8; 32]> {
+    if initiator_participant_id == &[0u8; 32] {
+        return Err(AdaptorError::InvalidContext(
+            "initiator participant ID must be nonzero",
+        ));
+    }
     let mut initiator_nonce = Zeroizing::new([0u8; 32]);
     OsRng
         .try_fill_bytes(initiator_nonce.as_mut())
@@ -184,12 +206,23 @@ pub fn generate_session_id_v1(
     if initiator_nonce.iter().all(|byte| *byte == 0) {
         return Err(AdaptorError::RandomnessFailure);
     }
-    Ok(session_id_from_nonce_v1(
+    let session_id = session_id_from_nonce_v1(
         chain_id,
         initiator_participant_id,
         contract_kind,
         &initiator_nonce,
-    ))
+    );
+    if session_id == [0u8; 32] {
+        return Err(AdaptorError::InvalidContext(
+            "derived session ID must be nonzero",
+        ));
+    }
+    if !registry.register_unique_session_id(&session_id)? {
+        return Err(AdaptorError::InvalidContext(
+            "session ID was already used by the local participant",
+        ));
+    }
+    Ok(session_id)
 }
 
 fn session_id_from_nonce_v1(
@@ -272,8 +305,10 @@ mod tests {
     fn participant_mapping_and_transcript_are_ordered_and_domain_separated() {
         let chain = TrustedChainIdV1::from_signed_fixture([7; 32]);
         let mut entries = vec![
-            ParticipantIdentityV1::new(&chain, point(2), point(4), DirectionV1::Responder),
-            ParticipantIdentityV1::new(&chain, point(1), point(3), DirectionV1::Initiator),
+            ParticipantIdentityV1::new(&chain, point(2), point(4), DirectionV1::Responder)
+                .expect("participant"),
+            ParticipantIdentityV1::new(&chain, point(1), point(3), DirectionV1::Initiator)
+                .expect("participant"),
         ];
         entries.sort_by_key(|entry| *entry.participant_id());
         let roster = ParticipantRosterV1::new(entries).expect("roster");
@@ -305,5 +340,38 @@ mod tests {
             *blake2b_256_tagged("DOM:scriptless-transcript:v1", &exact_body).as_bytes(),
             "NAR-002 section 8.2 tag and body must remain byte-exact",
         );
+    }
+
+    #[test]
+    fn session_generation_requires_durable_uniqueness_registration() {
+        struct Registry(bool);
+        impl SessionIdRegistryV1 for Registry {
+            fn register_unique_session_id(&mut self, _session_id: &[u8; 32]) -> Result<bool> {
+                Ok(self.0)
+            }
+        }
+
+        let chain = TrustedChainIdV1::from_signed_fixture([7; 32]);
+        assert!(generate_session_id_v1(
+            &chain,
+            &[8; 32],
+            ContractKindV1::WitnessOrTimeout,
+            &mut Registry(true),
+        )
+        .is_ok());
+        assert!(generate_session_id_v1(
+            &chain,
+            &[8; 32],
+            ContractKindV1::WitnessOrTimeout,
+            &mut Registry(false),
+        )
+        .is_err());
+        assert!(generate_session_id_v1(
+            &chain,
+            &[0; 32],
+            ContractKindV1::WitnessOrTimeout,
+            &mut Registry(true),
+        )
+        .is_err());
     }
 }

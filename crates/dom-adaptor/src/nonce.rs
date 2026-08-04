@@ -1,33 +1,32 @@
 //! Opaque one-shot secret two-nonce ownership and participant signing.
+#![allow(
+    dead_code,
+    reason = "NAR-002 keeps secret/export capabilities crate-sealed until G1b integration"
+)]
 
+use crate::permit::ExposurePermitV1;
 use crate::{
-    nonce_commitment_hash_v1, AdaptorError, BindingFactorV1, ExposureKindV1, ExposurePermitV1,
-    PartialSignatureV1, PurposeV1, Result, SessionContextV1,
+    exposure_outbound_digest_v1, nonce_commitment_hash_v1, AdaptorError, BindingFactorV1,
+    ExposureKindV1, NonceCommitmentV1, NonceRevealV1, PartialSignatureV1, PurposeV1, Result,
+    SessionContextV1,
 };
 use dom_crypto::{
     schnorr_aggregate_sigs, schnorr_challenge, scriptless_add_public_points,
-    scriptless_aggregate_partial_scalars, scriptless_derive_secret_nonce_pair_v1,
-    scriptless_sign_bound_partial, scriptless_verify_final_signature, Hash256, PartialSig,
-    PublicKey, SchnorrSignature, ScriptlessSecretScalar,
+    scriptless_aggregate_partial_scalars, scriptless_verify_final_signature, Hash256, PartialSig,
+    PublicKey, SchnorrSignature, ScriptlessNonceDerivationV1, ScriptlessSecretNoncePairV1,
+    ScriptlessSecretScalar,
 };
-use rand_core::{OsRng, RngCore};
-use zeroize::Zeroizing;
 
 /// Public identifiers durably bound to a reserved nonce before derivation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NonceReservationBindingV1 {
+pub(crate) struct NonceReservationBindingV1 {
     nonce_id: [u8; 32],
     participant_id: [u8; 32],
-    outbound_digest: [u8; 32],
 }
 
 impl NonceReservationBindingV1 {
     /// Construct a reservation binding from nonzero canonical identifiers.
-    pub fn new(
-        nonce_id: [u8; 32],
-        participant_id: [u8; 32],
-        outbound_digest: [u8; 32],
-    ) -> Result<Self> {
+    pub(crate) fn new(nonce_id: [u8; 32], participant_id: [u8; 32]) -> Result<Self> {
         if nonce_id == [0u8; 32] {
             return Err(AdaptorError::InvalidContext("nonce ID must be nonzero"));
         }
@@ -39,21 +38,16 @@ impl NonceReservationBindingV1 {
         Ok(Self {
             nonce_id,
             participant_id,
-            outbound_digest,
         })
     }
 
     /// Return the nonce identifier.
-    pub const fn nonce_id(&self) -> &[u8; 32] {
+    pub(crate) const fn nonce_id(&self) -> &[u8; 32] {
         &self.nonce_id
     }
     /// Return the participant identifier.
-    pub const fn participant_id(&self) -> &[u8; 32] {
+    pub(crate) const fn participant_id(&self) -> &[u8; 32] {
         &self.participant_id
-    }
-    /// Return the digest of the outbound canonical bytes.
-    pub const fn outbound_digest(&self) -> &[u8; 32] {
-        &self.outbound_digest
     }
 }
 
@@ -85,51 +79,45 @@ impl PublicNoncePairV1 {
 /// equality, ordering, or generic serialization. Its scalar fields zeroize on
 /// drop. No public nonce accessor exists before authorization.
 pub struct SecretNoncePairV1 {
-    first: ScriptlessSecretScalar,
-    second: ScriptlessSecretScalar,
+    secret_pair: ScriptlessSecretNoncePairV1,
     public: PublicNoncePairV1,
     context: SessionContextV1,
     reservation: NonceReservationBindingV1,
     effective_retry_counter: u64,
+    commitment_exported: bool,
 }
 
 impl SecretNoncePairV1 {
     /// Derive a fresh pair from the operating-system CSPRNG.
-    pub fn derive(
+    pub(crate) fn derive(
         context: SessionContextV1,
         signing_share: &ScriptlessSecretScalar,
         reservation: NonceReservationBindingV1,
     ) -> Result<Self> {
-        let mut aux_rand_32 = Zeroizing::new([0u8; 32]);
-        OsRng
-            .try_fill_bytes(aux_rand_32.as_mut())
+        let derivation = ScriptlessNonceDerivationV1::from_os_rng()
             .map_err(|_| AdaptorError::RandomnessFailure)?;
-        Self::derive_owned_aux(context, signing_share, reservation, &aux_rand_32)
+        Self::derive_with_state(context, signing_share, reservation, &derivation)
     }
 
-    fn derive_owned_aux(
+    fn derive_with_state(
         context: SessionContextV1,
         signing_share: &ScriptlessSecretScalar,
         reservation: NonceReservationBindingV1,
-        aux_rand_32: &[u8; 32],
+        derivation: &ScriptlessNonceDerivationV1,
     ) -> Result<Self> {
         let mut retry_counter = context.retry_counter();
         loop {
             let context_bytes = context.encode_with_retry_counter(retry_counter);
-            if let Some((first, second)) =
-                scriptless_derive_secret_nonce_pair_v1(signing_share, aux_rand_32, &context_bytes)
-            {
-                let public = PublicNoncePairV1 {
-                    first: first.public_key(),
-                    second: second.public_key(),
-                };
+            if let Some(secret_pair) = derivation.derive_pair(signing_share, &context_bytes) {
+                let (first, second) = secret_pair.public_keys();
+                let public = PublicNoncePairV1 { first, second };
                 return Ok(Self {
-                    first,
-                    second,
+                    secret_pair,
                     public,
                     context,
                     reservation,
                     effective_retry_counter: retry_counter,
+                    commitment_exported: false,
                 });
             }
             retry_counter = retry_counter
@@ -140,12 +128,12 @@ impl SecretNoncePairV1 {
 
     /// Return the retry counter that produced this pair. This is public state,
     /// not nonce material.
-    pub const fn effective_retry_counter(&self) -> u64 {
+    pub(crate) const fn effective_retry_counter(&self) -> u64 {
         self.effective_retry_counter
     }
 
     /// Compute the public nonce commitment without exposing either point.
-    pub fn commitment(&self) -> Result<Hash256> {
+    fn commitment_hash(&self) -> Result<Hash256> {
         nonce_commitment_hash_v1(
             self.context.chain_id(),
             self.context.session_id(),
@@ -158,21 +146,69 @@ impl SecretNoncePairV1 {
         )
     }
 
-    /// Consume this pre-authorization pair and bind it to one durable permit.
-    pub fn authorize(self, permit: ExposurePermitV1) -> Result<AuthorizedSecretNoncePairV1> {
-        let matches = permit.exposure_kind() == ExposureKindV1::NonceReveal
+    fn commitment_payload(&self) -> Result<NonceCommitmentV1> {
+        Ok(NonceCommitmentV1::new(
+            self.context.purpose(),
+            self.context.participant_index(),
+            *self.commitment_hash()?.as_bytes(),
+        ))
+    }
+
+    /// Export exactly one commitment after a matching durable permit.
+    pub(crate) fn export_commitment(
+        &mut self,
+        permit: ExposurePermitV1,
+    ) -> Result<NonceCommitmentV1> {
+        if self.commitment_exported {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
+        let payload = self.commitment_payload()?;
+        let digest =
+            exposure_outbound_digest_v1(ExposureKindV1::NonceCommitment, &payload.to_bytes())?;
+        if !self.permit_matches(&permit, ExposureKindV1::NonceCommitment, digest.as_bytes()) {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
+        self.commitment_exported = true;
+        Ok(payload)
+    }
+
+    fn permit_matches(
+        &self,
+        permit: &ExposurePermitV1,
+        kind: ExposureKindV1,
+        outbound_digest: &[u8; 32],
+    ) -> bool {
+        permit.exposure_kind() == kind
             && permit.reservation_nonce_id() == self.reservation.nonce_id()
             && permit.session_id() == self.context.session_id()
             && permit.participant_id() == self.reservation.participant_id()
             && permit.purpose() == self.context.purpose()
             && permit.template_hash() == self.context.template_hash()
-            && permit.outbound_digest() == self.reservation.outbound_digest();
-        if !matches {
+            && permit.outbound_digest() == outbound_digest
+    }
+
+    /// Consume this pre-authorization pair and bind it to one durable permit.
+    pub(crate) fn authorize_reveal(
+        self,
+        permit: ExposurePermitV1,
+    ) -> Result<AuthorizedSecretNoncePairV1> {
+        if !self.commitment_exported {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
+        let reveal = NonceRevealV1::new(
+            self.context.purpose(),
+            self.context.participant_index(),
+            self.public.first.clone(),
+            self.public.second.clone(),
+        );
+        let digest = exposure_outbound_digest_v1(ExposureKindV1::NonceReveal, &reveal.to_bytes())?;
+        if !self.permit_matches(&permit, ExposureKindV1::NonceReveal, digest.as_bytes()) {
             return Err(AdaptorError::AuthorizationMismatch);
         }
         Ok(AuthorizedSecretNoncePairV1 {
             pair: self,
             _permit: permit,
+            reveal: Some(reveal),
         })
     }
 
@@ -183,8 +219,8 @@ impl SecretNoncePairV1 {
         reservation: NonceReservationBindingV1,
         aux_rand_32: [u8; 32],
     ) -> Result<Self> {
-        let aux_rand_32 = Zeroizing::new(aux_rand_32);
-        Self::derive_owned_aux(context, signing_share, reservation, &aux_rand_32)
+        let derivation = ScriptlessNonceDerivationV1::from_aux_for_test(aux_rand_32);
+        Self::derive_with_state(context, signing_share, reservation, &derivation)
     }
 }
 
@@ -193,17 +229,24 @@ impl SecretNoncePairV1 {
 pub struct AuthorizedSecretNoncePairV1 {
     pair: SecretNoncePairV1,
     _permit: ExposurePermitV1,
+    reveal: Option<NonceRevealV1>,
 }
 
 impl AuthorizedSecretNoncePairV1 {
     /// Export the exact authorized public nonce pair.
-    pub const fn public_nonces(&self) -> &PublicNoncePairV1 {
-        &self.pair.public
+    pub(crate) fn take_public_nonces(&mut self) -> Result<PublicNoncePairV1> {
+        self.reveal
+            .take()
+            .map(|reveal| PublicNoncePairV1 {
+                first: reveal.first().clone(),
+                second: reveal.second().clone(),
+            })
+            .ok_or(AdaptorError::AuthorizationMismatch)
     }
 
     /// Consume the nonce pair and produce exactly one participant-bound partial.
     #[allow(clippy::too_many_arguments)]
-    pub fn sign_partial(
+    pub(crate) fn sign_partial(
         self,
         binding_factor: &BindingFactorV1,
         aggregate_nonce_hat: &PublicKey,
@@ -211,7 +254,10 @@ impl AuthorizedSecretNoncePairV1 {
         signing_share: &ScriptlessSecretScalar,
         chain_id: &[u8; 32],
         kernel_message_digest: &[u8; 32],
-    ) -> Result<PartialSignatureV1> {
+    ) -> Result<PreparedPartialSignatureV1> {
+        if self.reveal.is_some() {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
         if chain_id != self.pair.context.chain_id()
             || kernel_message_digest != self.pair.context.message_digest()
         {
@@ -231,19 +277,52 @@ impl AuthorizedSecretNoncePairV1 {
             kernel_message_digest,
         );
         let binding = PartialSig::from_bytes(&binding_factor.to_be_bytes())?;
-        let partial = scriptless_sign_bound_partial(
-            &self.pair.first,
-            &self.pair.second,
+        let partial = self.pair.secret_pair.sign_bound_partial(
             &binding,
             challenge.as_bytes(),
             signing_share,
         )?;
-        Ok(PartialSignatureV1::new(
-            self.pair.context.purpose(),
-            self.pair.context.participant_index(),
-            *self.pair.context.template_hash(),
-            partial,
-        ))
+        Ok(PreparedPartialSignatureV1 {
+            partial: PartialSignatureV1::new(
+                self.pair.context.purpose(),
+                self.pair.context.participant_index(),
+                *self.pair.context.template_hash(),
+                partial,
+            ),
+            nonce_id: *self.pair.reservation.nonce_id(),
+            session_id: *self.pair.context.session_id(),
+            participant_id: *self.pair.reservation.participant_id(),
+        })
+    }
+}
+
+/// Prepared partial signature that remains unexportable until a distinct
+/// durable partial-signature permit is consumed.
+pub(crate) struct PreparedPartialSignatureV1 {
+    partial: PartialSignatureV1,
+    nonce_id: [u8; 32],
+    session_id: [u8; 32],
+    participant_id: [u8; 32],
+}
+
+impl PreparedPartialSignatureV1 {
+    pub(crate) fn outbound_digest(&self) -> Result<Hash256> {
+        exposure_outbound_digest_v1(ExposureKindV1::PartialSignature, &self.partial.to_bytes())
+    }
+
+    pub(crate) fn authorize_export(self, permit: ExposurePermitV1) -> Result<PartialSignatureV1> {
+        let digest = self.outbound_digest()?;
+        let matches = permit.exposure_kind() == ExposureKindV1::PartialSignature
+            && permit.reservation_nonce_id() == &self.nonce_id
+            && permit.session_id() == &self.session_id
+            && permit.participant_id() == &self.participant_id
+            && permit.purpose() == self.partial.purpose()
+            && permit.template_hash() == self.partial.template_hash()
+            && permit.outbound_digest() == digest.as_bytes();
+        if !matches {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
+        Ok(self.partial)
     }
 }
 
@@ -377,36 +456,106 @@ mod tests {
     }
 
     fn reservation(byte: u8) -> NonceReservationBindingV1 {
-        NonceReservationBindingV1::new([byte; 32], [byte + 1; 32], [byte + 2; 32]).expect("binding")
+        NonceReservationBindingV1::new([byte; 32], [byte + 1; 32]).expect("binding")
     }
 
     fn permit(
         context: &SessionContextV1,
         reservation: &NonceReservationBindingV1,
+        kind: ExposureKindV1,
+        outbound_digest: [u8; 32],
     ) -> ExposurePermitV1 {
-        permit_with_nonce(context, reservation, *reservation.nonce_id())
+        permit_with_nonce(
+            context,
+            reservation,
+            kind,
+            outbound_digest,
+            *reservation.nonce_id(),
+        )
     }
 
     fn permit_with_nonce(
         context: &SessionContextV1,
         reservation: &NonceReservationBindingV1,
+        kind: ExposureKindV1,
+        outbound_digest: [u8; 32],
         nonce_id: [u8; 32],
     ) -> ExposurePermitV1 {
         let mut bytes = [0u8; ExposurePermitV1::ENCODED_LEN];
         bytes[..8].copy_from_slice(b"DOMEXPV1");
         bytes[8..10].copy_from_slice(&1u16.to_le_bytes());
-        bytes[10] = ExposureKindV1::NonceReveal.to_byte();
+        bytes[10] = kind.to_byte();
         bytes[11..43].fill(0x91);
         bytes[43..75].copy_from_slice(&nonce_id);
         bytes[75..107].copy_from_slice(context.session_id());
         bytes[107..139].copy_from_slice(reservation.participant_id());
         bytes[139] = context.purpose().to_byte();
         bytes[140..172].copy_from_slice(context.template_hash());
-        bytes[172..204].copy_from_slice(reservation.outbound_digest());
+        bytes[172..204].copy_from_slice(&outbound_digest);
         bytes[204..212].copy_from_slice(&1u64.to_le_bytes());
         bytes[212..220].copy_from_slice(&2u64.to_le_bytes());
         bytes[220..252].fill(0x92);
         ExposurePermitV1::from_durable_bytes(&bytes).expect("permit")
+    }
+
+    fn authorize_reveal_for_test(
+        mut pair: SecretNoncePairV1,
+        context: &SessionContextV1,
+        reservation: &NonceReservationBindingV1,
+    ) -> (AuthorizedSecretNoncePairV1, PublicNoncePairV1) {
+        let commitment = pair.commitment_payload().expect("commitment");
+        let commitment_digest =
+            exposure_outbound_digest_v1(ExposureKindV1::NonceCommitment, &commitment.to_bytes())
+                .expect("commitment digest");
+        pair.export_commitment(permit(
+            context,
+            reservation,
+            ExposureKindV1::NonceCommitment,
+            *commitment_digest.as_bytes(),
+        ))
+        .expect("commitment authorization");
+
+        let reveal = NonceRevealV1::new(
+            context.purpose(),
+            context.participant_index(),
+            pair.public.first.clone(),
+            pair.public.second.clone(),
+        );
+        let reveal_digest =
+            exposure_outbound_digest_v1(ExposureKindV1::NonceReveal, &reveal.to_bytes())
+                .expect("reveal digest");
+        let mut authorized = pair
+            .authorize_reveal(permit(
+                context,
+                reservation,
+                ExposureKindV1::NonceReveal,
+                *reveal_digest.as_bytes(),
+            ))
+            .expect("reveal authorization");
+        let public = authorized.take_public_nonces().expect("one reveal");
+        assert_eq!(
+            authorized
+                .take_public_nonces()
+                .expect_err("second reveal must fail"),
+            AdaptorError::AuthorizationMismatch
+        );
+        (authorized, public)
+    }
+
+    fn authorize_partial_for_test(
+        prepared: PreparedPartialSignatureV1,
+        context: &SessionContextV1,
+        reservation: &NonceReservationBindingV1,
+    ) -> PartialSignatureV1 {
+        let digest = prepared.outbound_digest().expect("partial digest");
+        prepared
+            .authorize_export(permit(
+                context,
+                reservation,
+                ExposureKindV1::PartialSignature,
+                *digest.as_bytes(),
+            ))
+            .expect("partial authorization")
     }
 
     #[test]
@@ -425,11 +574,7 @@ mod tests {
         let pair =
             SecretNoncePairV1::derive_with_aux_for_test(base.clone(), &share, binding.clone(), aux)
                 .expect("base pair");
-        let public = pair
-            .authorize(permit(&base, &binding))
-            .expect("authorized")
-            .public_nonces()
-            .clone();
+        let (_, public) = authorize_reveal_for_test(pair, &base, &binding);
 
         let variants = [
             context(
@@ -459,17 +604,14 @@ mod tests {
         ];
         for (index, variant) in variants.into_iter().enumerate() {
             let binding = reservation(20 + index as u8);
-            let variant_public = SecretNoncePairV1::derive_with_aux_for_test(
+            let pair = SecretNoncePairV1::derive_with_aux_for_test(
                 variant.clone(),
                 &share,
                 binding.clone(),
                 aux,
             )
-            .expect("variant pair")
-            .authorize(permit(&variant, &binding))
-            .expect("authorized")
-            .public_nonces()
-            .clone();
+            .expect("variant pair");
+            let (_, variant_public) = authorize_reveal_for_test(pair, &variant, &binding);
             assert_ne!(variant_public, public, "variant {index}");
         }
     }
@@ -481,12 +623,12 @@ mod tests {
             aux: &[u8; 32],
             context_bytes: &[u8],
         ) -> PublicNoncePairV1 {
-            let (first, second) = scriptless_derive_secret_nonce_pair_v1(share, aux, context_bytes)
+            let derivation = ScriptlessNonceDerivationV1::from_aux_for_test(*aux);
+            let pair = derivation
+                .derive_pair(share, context_bytes)
                 .expect("fixture does not reduce to zero");
-            PublicNoncePairV1 {
-                first: first.public_key(),
-                second: second.public_key(),
-            }
+            let (first, second) = pair.public_keys();
+            PublicNoncePairV1 { first, second }
         }
 
         let share = secret(0x07);
@@ -544,19 +686,119 @@ mod tests {
             [1; 32],
         );
         let binding = reservation(10);
-        let pair = SecretNoncePairV1::derive_with_aux_for_test(
+        let uncommitted = SecretNoncePairV1::derive_with_aux_for_test(
+            context.clone(),
+            &share,
+            binding.clone(),
+            [8; 32],
+        )
+        .expect("uncommitted pair");
+        let premature_reveal = NonceRevealV1::new(
+            context.purpose(),
+            context.participant_index(),
+            uncommitted.public.first.clone(),
+            uncommitted.public.second.clone(),
+        );
+        let premature_digest =
+            exposure_outbound_digest_v1(ExposureKindV1::NonceReveal, &premature_reveal.to_bytes())
+                .expect("premature digest");
+        assert_eq!(
+            uncommitted
+                .authorize_reveal(permit(
+                    &context,
+                    &binding,
+                    ExposureKindV1::NonceReveal,
+                    *premature_digest.as_bytes(),
+                ))
+                .err()
+                .expect("reveal before commitment"),
+            AdaptorError::AuthorizationMismatch
+        );
+        let mut pair = SecretNoncePairV1::derive_with_aux_for_test(
             context.clone(),
             &share,
             binding.clone(),
             [9; 32],
         )
         .expect("pair");
-        assert_ne!(pair.commitment().expect("commitment"), Hash256::ZERO);
-        let wrong = permit_with_nonce(&context, &binding, [99; 32]);
+        let commitment = pair.commitment_payload().expect("commitment");
+        let commitment_digest =
+            exposure_outbound_digest_v1(ExposureKindV1::NonceCommitment, &commitment.to_bytes())
+                .expect("commitment digest");
+        pair.export_commitment(permit(
+            &context,
+            &binding,
+            ExposureKindV1::NonceCommitment,
+            *commitment_digest.as_bytes(),
+        ))
+        .expect("commitment export");
         assert_eq!(
-            pair.authorize(wrong).err().expect("mismatch"),
+            pair.export_commitment(permit(
+                &context,
+                &binding,
+                ExposureKindV1::NonceCommitment,
+                *commitment_digest.as_bytes(),
+            ))
+            .expect_err("second commitment export"),
             AdaptorError::AuthorizationMismatch
         );
+        let reveal = NonceRevealV1::new(
+            context.purpose(),
+            context.participant_index(),
+            pair.public.first.clone(),
+            pair.public.second.clone(),
+        );
+        let reveal_digest =
+            exposure_outbound_digest_v1(ExposureKindV1::NonceReveal, &reveal.to_bytes())
+                .expect("reveal digest");
+        let wrong = permit_with_nonce(
+            &context,
+            &binding,
+            ExposureKindV1::NonceReveal,
+            *reveal_digest.as_bytes(),
+            [99; 32],
+        );
+        assert_eq!(
+            pair.authorize_reveal(wrong).err().expect("mismatch"),
+            AdaptorError::AuthorizationMismatch
+        );
+
+        let mut scalar_bytes = [0u8; 32];
+        scalar_bytes[31] = 1;
+        let make_prepared = || PreparedPartialSignatureV1 {
+            partial: PartialSignatureV1::new(
+                context.purpose(),
+                context.participant_index(),
+                *context.template_hash(),
+                PartialSig::from_bytes(&scalar_bytes).expect("partial scalar"),
+            ),
+            nonce_id: *binding.nonce_id(),
+            session_id: *context.session_id(),
+            participant_id: *binding.participant_id(),
+        };
+        let prepared = make_prepared();
+        let partial_digest = prepared.outbound_digest().expect("partial digest");
+        let wrong_kind = permit(
+            &context,
+            &binding,
+            ExposureKindV1::NonceReveal,
+            *partial_digest.as_bytes(),
+        );
+        assert_eq!(
+            prepared
+                .authorize_export(wrong_kind)
+                .err()
+                .expect("wrong partial permit kind"),
+            AdaptorError::AuthorizationMismatch
+        );
+        assert!(make_prepared()
+            .authorize_export(permit(
+                &context,
+                &binding,
+                ExposureKindV1::PartialSignature,
+                *partial_digest.as_bytes(),
+            ))
+            .is_ok());
     }
 
     #[test]
@@ -572,11 +814,11 @@ mod tests {
         );
         let first = SecretNoncePairV1::derive(context.clone(), &share, reservation(30))
             .expect("first OS-random pair")
-            .commitment()
+            .commitment_hash()
             .expect("first commitment");
         let second = SecretNoncePairV1::derive(context, &share, reservation(30))
             .expect("second OS-random pair")
-            .commitment()
+            .commitment_hash()
             .expect("second commitment");
         assert_ne!(first, second);
     }
@@ -617,14 +859,10 @@ mod tests {
             [10; 32],
         )
         .expect("pair B");
-        let authorized_a = pair_a
-            .authorize(permit(&context_a, &reservation_a))
-            .expect("authorize A");
-        let authorized_b = pair_b
-            .authorize(permit(&context_b, &reservation_b))
-            .expect("authorize B");
-        let public_a = authorized_a.public_nonces().clone();
-        let public_b = authorized_b.public_nonces().clone();
+        let (authorized_a, public_a) =
+            authorize_reveal_for_test(pair_a, &context_a, &reservation_a);
+        let (authorized_b, public_b) =
+            authorize_reveal_for_test(pair_b, &context_b, &reservation_b);
         let adaptor_secret = AdaptorSecret::from_be_bytes({
             let mut value = [0u8; 32];
             value[31] = 5;
@@ -665,7 +903,7 @@ mod tests {
             aggregate_public_nonces_v1(&[aggregate_nonce, adaptor_point.clone()]).expect("R_hat");
         let aggregate_key = schnorr_add_public_keys(&[share_a.public_key(), share_b.public_key()])
             .expect("aggregate key");
-        let partial_a = authorized_a
+        let prepared_a = authorized_a
             .sign_partial(
                 &binding_factor,
                 &aggregate_nonce_hat,
@@ -674,8 +912,8 @@ mod tests {
                 context_a.chain_id(),
                 context_a.message_digest(),
             )
-            .expect("partial A");
-        let partial_b = authorized_b
+            .expect("prepared partial A");
+        let prepared_b = authorized_b
             .sign_partial(
                 &binding_factor,
                 &aggregate_nonce_hat,
@@ -684,7 +922,9 @@ mod tests {
                 context_b.chain_id(),
                 context_b.message_digest(),
             )
-            .expect("partial B");
+            .expect("prepared partial B");
+        let partial_a = authorize_partial_for_test(prepared_a, &context_a, &reservation_a);
+        let partial_b = authorize_partial_for_test(prepared_b, &context_b, &reservation_b);
         assert!(partial_a
             .verify_bound(
                 PurposeV1::ClaimAdaptor,
@@ -781,26 +1021,24 @@ mod tests {
             );
             let reservation_a = reservation(40 + case as u8 * 4);
             let reservation_b = reservation(42 + case as u8 * 4);
-            let authorized_a = SecretNoncePairV1::derive_with_aux_for_test(
+            let pair_a = SecretNoncePairV1::derive_with_aux_for_test(
                 context_a.clone(),
                 &share_a,
                 reservation_a.clone(),
                 [50 + case as u8; 32],
             )
-            .expect("pair A")
-            .authorize(permit(&context_a, &reservation_a))
-            .expect("authorize A");
-            let authorized_b = SecretNoncePairV1::derive_with_aux_for_test(
+            .expect("pair A");
+            let pair_b = SecretNoncePairV1::derive_with_aux_for_test(
                 context_b.clone(),
                 &share_b,
                 reservation_b.clone(),
                 [60 + case as u8; 32],
             )
-            .expect("pair B")
-            .authorize(permit(&context_b, &reservation_b))
-            .expect("authorize B");
-            let public_a = authorized_a.public_nonces().clone();
-            let public_b = authorized_b.public_nonces().clone();
+            .expect("pair B");
+            let (authorized_a, public_a) =
+                authorize_reveal_for_test(pair_a, &context_a, &reservation_a);
+            let (authorized_b, public_b) =
+                authorize_reveal_for_test(pair_b, &context_b, &reservation_b);
             let participants = vec![
                 ParticipantPublicNoncesV1 {
                     participant_index: 0,
@@ -833,7 +1071,7 @@ mod tests {
             let aggregate_key =
                 schnorr_add_public_keys(&[share_a.public_key(), share_b.public_key()])
                     .expect("aggregate key");
-            let partial_a = authorized_a
+            let prepared_a = authorized_a
                 .sign_partial(
                     &binding_factor,
                     &aggregate_nonce,
@@ -842,8 +1080,8 @@ mod tests {
                     context_a.chain_id(),
                     context_a.message_digest(),
                 )
-                .expect("partial A");
-            let partial_b = authorized_b
+                .expect("prepared partial A");
+            let prepared_b = authorized_b
                 .sign_partial(
                     &binding_factor,
                     &aggregate_nonce,
@@ -852,7 +1090,9 @@ mod tests {
                     context_b.chain_id(),
                     context_b.message_digest(),
                 )
-                .expect("partial B");
+                .expect("prepared partial B");
+            let partial_a = authorize_partial_for_test(prepared_a, &context_a, &reservation_a);
+            let partial_b = authorize_partial_for_test(prepared_b, &context_b, &reservation_b);
             let signature = finalize_plain_signature_v1(
                 &[partial_a, partial_b],
                 purpose,

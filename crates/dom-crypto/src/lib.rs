@@ -29,9 +29,9 @@ pub use schnorr::{
 pub use scriptless::{
     scalar_from_wide_be, scriptless_adapt_signature, scriptless_add_public_points,
     scriptless_aggregate_partial_scalars, scriptless_bind_public_nonces,
-    scriptless_derive_secret_nonce_pair_v1, scriptless_extract_adaptor_secret,
-    scriptless_sign_bound_partial, scriptless_verify_bound_partial,
-    scriptless_verify_final_signature, scriptless_verify_pre_signature, ScriptlessSecretScalar,
+    scriptless_extract_adaptor_secret, scriptless_verify_bound_partial,
+    scriptless_verify_final_signature, scriptless_verify_pre_signature,
+    ScriptlessNonceDerivationV1, ScriptlessSecretNoncePairV1, ScriptlessSecretScalar,
 };
 mod bulletproof_bp;
 #[cfg(kani)]
