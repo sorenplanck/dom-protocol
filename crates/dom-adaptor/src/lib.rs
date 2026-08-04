@@ -1,10 +1,11 @@
-//! Production cryptographic boundary for DOM Scriptless Contracts.
+//! Integrated cryptographic and durable-authority boundary for DOM Scriptless Contracts.
 //!
 //! The crate reuses DOM's authoritative hash, canonical point/scalar parsers,
 //! challenge, arithmetic, and verifier. NAR-001 ratifies the canonical context
 //! and secret two-nonce derivation implemented here with opaque, one-shot
-//! ownership. Persistence and nonce lifecycle policy belong to the G1b
-//! `NonceVault` boundary and are not implemented by this G1a module.
+//! ownership. This crate also owns the storage-independent Nonce Vault
+//! contract; durable implementations belong to wallet software and must fail
+//! closed when witness or rollback evidence is incomplete.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -14,6 +15,7 @@ mod context;
 mod error;
 mod messages;
 mod nonce;
+mod nonce_vault;
 mod permit;
 mod session;
 mod transcript;
@@ -25,6 +27,12 @@ pub use messages::{NonceCommitmentV1, NonceRevealV1, PartialSignatureV1, Purpose
 pub use nonce::{
     aggregate_partial_signatures_v1, aggregate_public_nonces_v1, finalize_plain_signature_v1,
     PublicNoncePairV1,
+};
+pub use nonce_vault::{
+    AbortRequest, BudgetScope, CommitPublicMaterialRequest, ConsumeReason, ConsumeRequest,
+    CounterpartyBucket, ExposureAuthorizationRequest, ExposureBytes, IdempotencyKey,
+    NonceReservation, NonceVault, NonceVaultError, Purpose, ReservationRequest, ReservationState,
+    RestoreState, RetryRequest, SessionId, VaultKeyId, VaultReceipt,
 };
 pub use permit::{exposure_outbound_digest_v1, validate_exposure_permit_record_v1, ExposureKindV1};
 pub use session::{

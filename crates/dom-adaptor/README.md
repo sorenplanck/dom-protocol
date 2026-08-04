@@ -1,8 +1,9 @@
 # dom-adaptor
 
-`dom-adaptor` is the Phase 1/G1a integration boundary for DOM Scriptless
+`dom-adaptor` is the integrated Phase 1 G1a/G1b semantic boundary for DOM Scriptless
 Contracts. Its production code depends on `dom-crypto` for every cryptographic
-primitive and does not depend directly on `k256`.
+primitive, does not depend directly on `k256`, and does not depend on Wallet,
+storage, witness, transport, or application crates.
 
 The current implementation provides:
 
