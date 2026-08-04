@@ -1,47 +1,49 @@
-# Gate G1b — vault, orçamento e rollback
+# Gate G1b — vault, budgets, and rollback resistance
 
-Estado: **NÃO APROVADO**. Este checklist controla exclusivamente G1b. Documentação não constitui implementação ou evidência de fechamento. Nenhum valor numérico de orçamento é escolhido aqui.
+Status: **NOT APPROVED**. This checklist controls G1b only. Documentation or a
+contract interface does not prove a production implementation. No numeric
+budget value is selected here.
 
-- [ ] Trait do Nonce Vault definido no `dom-adaptor` sem dependência da Wallet V3.
-- [ ] Implementação transacional e persistente localizada na Wallet V3.
-- [ ] Reserva de nonces durável antes de qualquer exposição de material de sessão.
-- [ ] Consumo de nonces durável e irreversível em sucesso, aborto, crash e retry.
-- [ ] Orçamento global por chave medido, congelado e aplicado.
-- [ ] Orçamento secundário por contraparte medido, congelado e aplicado.
-- [ ] Limite de sessões concorrentes medido, congelado e aplicado.
-- [ ] Limite por janela medido, congelado e aplicado.
-- [ ] Abortos consomem orçamento e nunca o devolvem.
-- [ ] Journal append-only encadeado e validado em reabertura.
-- [ ] Âncora monotônica independente de backup e estado restaurável.
-- [ ] Testemunha remota adotada como baseline portátil, sem fallback silencioso local.
-- [ ] Receipts assinados validados e persistidos antes da exportação de material.
-- [ ] Retry idempotente comprovado para reserva, avanço e receipt.
-- [ ] Crash recovery comprovado em todos os boundaries duráveis.
-- [ ] Rollback, fork e divergência detectados e tratados sem ressurreição.
-- [ ] Restauração incapaz de ressuscitar nonce, sessão ou orçamento consumido.
-- [ ] Restauração em outro dispositivo começa em `RESTORE_QUARANTINED`.
-- [ ] Rotação de chave/identidade pseudônima e encerramento de época especificados e testados.
-- [ ] Matriz Windows, Linux e macOS executada para persistência, crash e restore.
-- [ ] Modo de testemunha auto-hospedada entregue como requisito do produto.
-- [ ] Testemunha recebe somente cadeia pseudônima, atualização monotônica e dados mínimos de receipt.
-- [ ] Testemunha não recebe identidade, contrato, valor, endereço, purpose ou hash de transação.
-- [ ] Vazamento residual de cadeia pseudônima de atualizações e horários documentado e testado.
-- [ ] Sessões adaptor bloqueiam exportação enquanto conectividade/receipt não estiverem disponíveis.
-- [ ] Demonstração de que transações comuns não consultam orçamento, âncora ou testemunha.
+- [x] The Nonce Vault trait is defined in `dom-adaptor` without a Wallet V3 dependency.
+- [ ] A transactional persistent implementation is integrated in Wallet V3.
+- [ ] Nonce reservation is durable before any session material is exposed.
+- [ ] Nonce consumption is durable and irreversible across success, abort, crash, and retry.
+- [ ] A measured and frozen global per-key budget is enforced.
+- [ ] A measured and frozen secondary counterparty budget is enforced.
+- [ ] A measured and frozen concurrent-session limit is enforced.
+- [ ] A measured and frozen rolling-window limit is enforced.
+- [ ] Aborts consume budget and never refund it.
+- [ ] A chained append-only journal is validated at reopen.
+- [ ] A monotonic anchor independent of backups is deployed.
+- [ ] The remote witness is the portable baseline, with no silent local-file fallback.
+- [ ] Signed receipts are validated and durable before material export.
+- [ ] Reservation, anchor advancement, and receipt retry are proven idempotent.
+- [ ] Crash recovery is proven at every durable boundary.
+- [ ] Rollback, fork, and divergence are detected without resurrection.
+- [ ] Restore cannot resurrect consumed nonce, session, or budget state.
+- [ ] Restore on another device starts in `RESTORE_QUARANTINED`.
+- [ ] Pseudonymous key rotation and epoch closure are specified and tested.
+- [ ] Persistence, crash, and restore matrices pass on Windows, Linux, and macOS.
+- [ ] A self-hosted witness mode is delivered as a product requirement.
+- [ ] The witness receives only a pseudonymous chain, monotonic updates, and minimal receipt data.
+- [ ] The witness receives no identity, contract, value, address, purpose, or transaction hash.
+- [ ] Residual pseudonymous update timing and sequence leakage is documented and tested.
+- [ ] Adaptor sessions block export while connectivity or a receipt is unavailable.
+- [ ] Ordinary transactions are proven not to consult budgets, anchors, or the witness.
 
-Fechar G1b não fecha G1a. Produção exige ambos formalmente aprovados.
+Closing G1b does not close G1a. Production requires both gates.
 
-## Estado do freeze versus estado do gate
+## Current evidence
 
-| Área | Contrato documentado | Implementação | Testes/matriz |
+| Area | Input/contract | Implementation | Validation still required |
 |---|---|---|---|
-| Direção de dependência/trait | sim, ADR-0002/0016 e interface semântica | pendente | pendente |
-| Store transacional/journal | modelo consolidado | pendente na Wallet | crash matrix pendente |
-| Budgets | semântica congelada; números não escolhidos | pendente | medição pendente |
-| Witness/receipt | baseline e metadados permitidos definidos | protocolo byte a byte pendente | interoperabilidade pendente |
-| Restore/quarentena | comportamento fail-closed definido | pendente | rollback/restore pendente |
-| Isolamento de transações comuns | boundary definido | demonstração pendente | teste de ausência de chamadas pendente |
+| Dependency direction and trait | `dom-adaptor::NonceVault`, `crates/dom-adaptor/src/nonce_vault.rs`, ADR-0002/0016 | storage-independent contract committed in `3f91b4a8e594db47c1d600ae6057958cb2e92a07` | Wallet adapter against a future authoritative DOM pin |
+| Lifecycle and typed errors | reserve, commit, authorize, retry, consume, abort, restore state | contract only | persistent conformance suite |
+| Transactional store and journal | model frozen | implemented only on the separate Wallet branch | cross-repository integration and platform matrix |
+| Budgets | semantics frozen; values deliberately absent | parameterized only on the Wallet branch | measurement and formal freeze |
+| Witness and receipts | semantic boundary defined | production wire/authentication remains blocked | signed-receipt interoperability and self-hosted service |
+| Restore and quarantine | fail-closed behavior defined | separate Wallet branch has Linux tests | Windows/macOS and end-to-end rollback matrix |
+| Ordinary-transaction isolation | architectural boundary defined | separate Wallet crate has no consumers | integration-time negative call-path proof |
 
-Documentação de fronteira não fecha caixas. Consulte
-[`IMPLEMENTATION-BOUNDARY.md`](IMPLEMENTATION-BOUNDARY.md) e
-[`CRASH-RECOVERY-MODEL.md`](CRASH-RECOVERY-MODEL.md).
+The checked trait item is supported by a public compile-tested API and unit
+tests. It does not imply that any persistence, witness, or budget item is closed.
