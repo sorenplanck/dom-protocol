@@ -1,35 +1,40 @@
-# Registro de domínios e purposes de G1a
+# G1a hash domains and purposes
 
-O framing de todas as tags é o de `dom_crypto::blake2b_256_tagged`; nenhuma
-instância BLAKE2b paralela é permitida.
+Every tag uses `dom_crypto::blake2b_256_tagged`; no parallel BLAKE2b
+instantiation is permitted. The authoritative backend is
+`crates/dom-crypto/src/hash.rs::blake2b_256_tagged`: native unkeyed
+`Blake2b<U32>`, no salt or personalization, over
+`u16_le(tag_length) || tag_ascii || data`.
 
-| Tag ASCII exata | Uso | Origem | Estado |
+| Exact ASCII tag | Use | Source | Status |
 |---|---|---|---|
-| `DOM:kernel-sig:v1` | challenge final DOM | código `TAG_KERNEL_SIG` + EM | CONGELADO |
-| `DOM:kernel-msg:v1` | mensagem de kernel | código `TAG_KERNEL_MSG` | CONGELADO |
-| `DOM:scriptless-nonce-commit:v1` | commitment de nonces públicos | EM §§3.4/6.6 + ADR-0011 | CONGELADO para o layout descrito |
-| `DOM:scriptless-sig-nonce-bind:v1` | binding coletivo | EM §§3.4/6.6 + ADR-0011/0013 | CONGELADO |
-| `DOM:scriptless-transcript:v1` | hash acumulado de sessão | EM §§3.4/8.4 | tag/fórmula conhecidos; discriminantes BLOQUEADOS |
+| `DOM:kernel-sig:v1` | final DOM challenge | `TAG_KERNEL_SIG`, Master Specification | FROZEN |
+| `DOM:kernel-msg:v1` | DOM kernel message | `TAG_KERNEL_MSG` | FROZEN |
+| `DOM:scriptless-nonce-commit:v1` | public nonce commitment | Master Specification sections 3.4/6.6, ADR-0011 | FROZEN for the documented layout |
+| `DOM:scriptless-sig-nonce-bind:v1` | collective binding | Master Specification sections 3.4/6.6, ADR-0011/0013 | FROZEN |
+| `DOM:scriptless-transcript:v1` | cumulative session transcript | Master Specification sections 3.4/8.4 | tag/formula known; discriminants BLOCKED |
 
-Tags candidatas de Bulletproof, transporte, autenticação e sessão presentes na
-EM não são promovidas por esta missão porque não pertencem ao núcleo G1a
-imediato.
+The mission-provided nonce KDF tag strings are recorded in ADR-0018 but are
+not registered for production use while canonical context bytes remain
+blocked. Candidate Bulletproof, transport, authentication, and session tags
+are not promoted by this mission.
 
 ## Purposes v1
 
-| Nome canônico | Byte | Uso | Origem | Estado |
+| Canonical name | Byte | Use | Source | Status |
 |---|---:|---|---|---|
-| `RefundV1` | `0x01` | assinatura de refund | EM Ap. E §E.6 + ADR-0012 | CONGELADO |
-| `ClaimAdaptorV1` | `0x02` | pré-assinatura adaptor de claim | EM Ap. E §E.6 + ADR-0012 | CONGELADO |
-| `FundingV1` | `0x03` | assinatura de funding | EM Ap. E §E.6 + ADR-0012 | CONGELADO |
-| Sponsor | `0x04` | reservado, fora de G1a | EM Ap. E §E.6 | NÃO IMPLEMENTAR |
+| `Refund` | `0x01` | refund signature | Master Specification Appendix E.6, ADR-0018 | FROZEN |
+| `ClaimAdaptor` | `0x02` | claim adaptor pre-signature | Master Specification Appendix E.6, ADR-0018 | FROZEN |
+| `Funding` | `0x03` | funding signature | Master Specification Appendix E.6, ADR-0018 | FROZEN |
+| `Sponsor` | `0x04` | sponsor codec value | Master Specification Appendix E.6, ADR-0018 | FROZEN codec; strict execution rejected |
 
-Outros bytes são inválidos. A separação entre os três purposes ocorre pelo
-discriminante obrigatório dentro do preimage de uma tag versionada, não por
-tags improvisadas. Famílias de nonce são distintas por `(key, purpose)`.
+All other bytes are invalid. Purpose separation uses the mandatory byte inside
+a versioned tagged preimage, not improvised per-purpose tags. Sponsor codec
+acceptance does not authorize Sponsor signing.
 
-## Bloqueios
+## Blockers
 
-- derivação byte-exata dos dois nonces secretos;
-- códigos do transcript de Fase 3-SM;
-- vetores independentes do esquema completo.
+- exact `DirectionV1` byte assignments;
+- exact `PhaseV1` byte assignments;
+- complete canonical context and therefore exact secret two-nonce derivation;
+- independent vectors for the complete scheme.

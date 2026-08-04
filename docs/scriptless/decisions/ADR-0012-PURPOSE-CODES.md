@@ -1,41 +1,57 @@
-# ADR-0012 — códigos e versionamento de purposes
+# ADR-0012 — Purpose codes and versioning
 
-Status: **ACEITA** para G1a v1; Sponsor fica reservado e fora de escopo.
+Status: **SUPERSEDED IN PART BY ADR-0018**. The byte assignments remain
+accepted; ADR-0018 corrects Sponsor codec handling and the strict execution
+policy.
 
-## Contexto
+## Context
 
-Funding, Claim e Refund precisam de discriminantes binários estáveis. A EM
-propõe uma tabela inequívoca; esta ADR formaliza os três valores necessários.
+Funding, claim-adaptor, refund, and sponsor flows require stable binary
+discriminants. Master Specification Appendix E.6 provides an unambiguous V1
+table.
 
-## Evidência
+## Evidence
 
-- **DOCUMENTO NORMATIVO:** EM Apêndice E §E.6 propõe `refund=1`,
-  `claim_adaptor=2`, `funding=3`, `sponsor=4`; EM §§3.4 e 6.6 exige purpose no
-  binding; Cronograma Fase 1 exige famílias separadas.
-- **ADR DE ENGENHARIA:** esta ADR promove somente os três valores de G1a para o
-  perfil versionado v1.
+- **NORMATIVE DOCUMENT:** Master Specification Appendix E.6 assigns
+  `refund=1`, `claim_adaptor=2`, `funding=3`, and `sponsor=4`; sections 3.4 and
+  6.6 bind the purpose into Scriptless transcripts.
+- **MISSION DECISION:** the complete four-value codec registry is authoritative;
+  strict Phase 1 execution supports Funding, ClaimAdaptor, and Refund while
+  rejecting Sponsor until an authorized Sponsor flow exists.
 
-## Decisão
+## Decision
 
-`RefundV1=0x01`, `ClaimAdaptorV1=0x02` e `FundingV1=0x03`. `0x04` é reservado a
-Sponsor, não implementado por G1a. Demais valores são inválidos. O byte purpose
-é obrigatório nos preimages indicados; valores distintos fornecem separação
-lógica dentro da tag versionada. Alterar a tabela exige nova versão/domínio.
+The byte assignments are `Refund=0x01`, `ClaimAdaptor=0x02`,
+`Funding=0x03`, and `Sponsor=0x04`. All other bytes are invalid. The purpose
+byte is mandatory in the defined preimages and provides logical separation
+inside a versioned tag. Changing the table requires a new versioned type.
 
-## Alternativas consideradas
+Sponsor is recognized by the codec but rejected by strict Phase 1 execution
+policy. Codec recognition does not authorize a Sponsor flow.
 
-Strings, ordem alfabética e três tags sem discriminante foram rejeitadas por
-não corresponderem ao layout proposto e ampliarem o registro.
+## Erratum
 
-## Consequências
+Any earlier Phase 1 plan assigning `Funding=0x01`, calling `ClaimAdaptor`
+merely `Claim`, or rejecting `Sponsor=0x04` as an unknown codec value is
+incompatible with Appendix E.6 and is superseded.
 
-Há bytes fechados para os três purposes, mas a ausência de adaptor point em
-Funding/Refund continua bloqueada no transcript geral.
+## Alternatives considered
 
-## Compatibilidade
+Strings, alphabetical order, three tags without a discriminant, and a fallback
+variant were rejected because they do not match the authoritative table.
 
-Não toca wire/consenso; é formato off-chain novo e versionado.
+## Consequences
 
-## Riscos
+The V1 codec is closed over four exact bytes. Exhaustive matches will fail to
+compile when a future source change adds a variant. Strict G1a entry points
+must separately enforce Sponsor policy.
 
-Confundir Claim genérico com `claim_adaptor` ou ativar Sponsor implicitamente.
+## Compatibility
+
+This is a new versioned off-chain format. It does not change consensus or any
+existing DOM wire format.
+
+## Risks
+
+The primary risk is confusing codec recognition with flow authorization or
+using the generic name `Claim` instead of `ClaimAdaptor`.
