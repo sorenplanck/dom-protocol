@@ -63,15 +63,27 @@ opaque_identifier!(
     "Caller-generated key that makes one logical vault operation idempotent."
 );
 
-/// Closed and versioned purpose set for the first scriptless-contract profile.
+/// Storage-facing projection of the closed `PurposeV1` registry.
+///
+/// This enum deliberately has no byte codec. The canonical wire discriminants
+/// belong to G1a `PurposeV1`; integration must use an exhaustive conversion.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Purpose {
-    /// Funding transaction construction.
-    FundingV1,
-    /// Adaptor claim transaction construction.
-    ClaimV1,
     /// Refund transaction construction.
     RefundV1,
+    /// Adaptor claim transaction construction.
+    ClaimAdaptorV1,
+    /// Funding transaction construction.
+    FundingV1,
+    /// Sponsor codec value, rejected by strict V1 execution policy.
+    SponsorV1,
+}
+
+impl Purpose {
+    /// Returns whether strict V1 policy currently permits this purpose.
+    pub const fn is_strict_v1_authorized(self) -> bool {
+        !matches!(self, Self::SponsorV1)
+    }
 }
 
 /// Scope in which a configured budget prevented a reservation.
@@ -93,13 +105,17 @@ pub enum ReservationState {
     /// Budget and nonce slots are durably reserved.
     Reserved,
     /// Exact public bytes are durably committed and cannot change.
-    PublicMaterialCommitted,
+    PublicCommitmentStored,
     /// A verified witness receipt is durable and exposure is permitted.
-    ExposureAuthorized,
+    ExportAuthorized,
     /// The nonce and budget are irreversibly consumed.
     Consumed,
-    /// The reservation was aborted and remains irreversibly charged.
-    Aborted,
+    /// No public material existed when the reservation was aborted.
+    AbortedBeforePublicMaterial,
+    /// Public material may have existed, so abort burned the nonce.
+    ConsumedOnAbort,
+    /// Ambiguous restore conservatively burned the nonce.
+    Burned,
 }
 
 /// Capability state after normal startup or restoration.
@@ -213,6 +229,23 @@ pub struct ConsumeRequest {
     pub reason: ConsumeReason,
 }
 
+/// Public bytes returned only after the nonce tombstone is durable.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ConsumedExposure(ExposureBytes);
+
+impl ConsumedExposure {
+    /// Returns the exact committed bytes for first send or idempotent resend.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl fmt::Debug for ConsumedExposure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ConsumedExposure([redacted])")
+    }
+}
+
 /// Request to abort while retaining every charged budget unit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AbortRequest {
@@ -260,14 +293,20 @@ pub trait NonceVault {
         receipt: Self::Receipt,
     ) -> Result<NonceReservation, NonceVaultError>;
 
-    /// Returns the exact previously committed bytes only after authorization.
+    /// Returns the exact previously committed bytes only after consumption.
+    ///
+    /// Implementations must reject this call while the reservation is merely
+    /// export-authorized. The first export is performed by [`Self::consume`].
     fn retry_public_material(
         &self,
         request: RetryRequest,
-    ) -> Result<ExposureBytes, NonceVaultError>;
+    ) -> Result<ConsumedExposure, NonceVaultError>;
 
-    /// Irreversibly consumes secret material and writes a tombstone.
-    fn consume(&mut self, request: ConsumeRequest) -> Result<NonceReservation, NonceVaultError>;
+    /// Irreversibly consumes secret material before returning public bytes.
+    ///
+    /// The implementation must durably write the tombstone and exact outbound
+    /// bytes before this method succeeds. An error returns no exportable bytes.
+    fn consume(&mut self, request: ConsumeRequest) -> Result<ConsumedExposure, NonceVaultError>;
 
     /// Irreversibly aborts a reservation without refunding budget.
     fn abort(&mut self, request: AbortRequest) -> Result<NonceReservation, NonceVaultError>;
@@ -366,7 +405,16 @@ mod tests {
 
     #[test]
     fn purpose_set_is_closed() {
-        let purposes = [Purpose::FundingV1, Purpose::ClaimV1, Purpose::RefundV1];
-        assert_eq!(purposes.len(), 3);
+        let purposes = [
+            Purpose::RefundV1,
+            Purpose::ClaimAdaptorV1,
+            Purpose::FundingV1,
+            Purpose::SponsorV1,
+        ];
+        assert_eq!(purposes.len(), 4);
+        assert!(purposes[..3]
+            .iter()
+            .all(|purpose| purpose.is_strict_v1_authorized()));
+        assert!(!Purpose::SponsorV1.is_strict_v1_authorized());
     }
 }
