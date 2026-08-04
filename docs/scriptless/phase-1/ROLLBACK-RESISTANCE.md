@@ -1,7 +1,5 @@
-# Resistência a rollback
+# Resistência a rollback — redirecionamento
 
-O estado local deve usar journal append-only encadeado e uma âncora monotônica independente do backup. A testemunha remota é a baseline portátil; uma implantação auto-hospedada deve existir no desenho.
+A fonte autoritativa de G1b é [phase-1b/ROLLBACK-RESISTANCE.md](../phase-1b/ROLLBACK-RESISTANCE.md), complementada por [REMOTE-WITNESS.md](../phase-1b/REMOTE-WITNESS.md) e [RESTORE-QUARANTINE.md](../phase-1b/RESTORE-QUARANTINE.md).
 
-Antes de exportar qualquer material de uma sessão adaptor, o avanço da âncora precisa produzir receipt durável. Retrocesso, fork ou divergência levam a `RESTORE_QUARANTINED`, sem reutilização de nonce ou recuperação de orçamento.
-
-A validação G1b deve congelar uma matriz que cubra crash em cada boundary, retry idempotente, rollback local, backup anterior, restauração, indisponibilidade/divergência da testemunha e recuperação sem ressurreição. A obrigação online se limita a sessões adaptor; transações comuns não leem nem avançam a âncora.
+Journal encadeado, âncora monotônica, receipt durável, testemunha auto-hospedada, quarentena e isolamento das transações comuns permanecem requisitos abertos.

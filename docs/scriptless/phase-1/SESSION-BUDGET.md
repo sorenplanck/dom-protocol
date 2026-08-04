@@ -1,5 +1,5 @@
-# Orçamento de sessões
+# Orçamento de sessões — redirecionamento
 
-G1b exige orçamento global por chave, orçamento secundário por contraparte, limite simultâneo e limite por janela. Abortos consomem orçamento e nunca o devolvem. Backup ou restauração não podem aumentar orçamento nem reviver uma sessão consumida.
+A fonte autoritativa de G1b é [phase-1b/SESSION-BUDGET.md](../phase-1b/SESSION-BUDGET.md).
 
-Nenhum valor numérico é escolhido neste bootstrap. Limites, janela, unidade de contabilização e política de rotação são decisões pendentes de medição, análise normativa e congelamento em fixture/teste independente.
+Orçamento global/por contraparte, concorrência, janela e abortos continuam requisitos abertos. Nenhum valor numérico foi escolhido.

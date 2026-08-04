@@ -18,13 +18,24 @@ echo "== phase1-gate $(date --iso-8601=seconds) =="
 
 sha256sum --check test-vectors/scriptless/MANIFEST.sha256
 [[ "$(rg -c '^VECTOR_BEGIN id=V[0-9]{2} ' test-vectors/scriptless/scad0/DOM_SCAD0_8_VETORES_2026-08-03.txt)" -eq 8 ]]
-pending="$(rg -c '^- \[ \]' docs/scriptless/phase-1/GATE-G1.md)"
-echo "Itens pendentes no Gate G1: $pending"
 
-if [[ "$pending" -gt 0 ]]; then
-  echo "GATE G1 NÃO APROVADO: requisitos G1a/G1b permanecem pendentes." >&2
+gate_g1a=docs/scriptless/phase-1a/GATE-G1A.md
+gate_g1b=docs/scriptless/phase-1b/GATE-G1B.md
+[[ -f "$gate_g1a" && -f "$gate_g1b" ]]
+
+pending_g1a="$(rg -c '^- \[ \]' "$gate_g1a" || true)"
+pending_g1b="$(rg -c '^- \[ \]' "$gate_g1b" || true)"
+pending_g1a="${pending_g1a:-0}"
+pending_g1b="${pending_g1b:-0}"
+
+echo "Pendências G1a: $pending_g1a"
+echo "Pendências G1b: $pending_g1b"
+
+if [[ "$pending_g1a" -gt 0 || "$pending_g1b" -gt 0 ]]; then
+  [[ "$pending_g1a" -eq 0 ]] || echo "G1a NÃO APROVADO" >&2
+  [[ "$pending_g1b" -eq 0 ]] || echo "G1b NÃO APROVADO" >&2
+  echo "FASE 1 NÃO APROVADA: produção exige G1a E G1b sem pendências e formalmente aprovados." >&2
   exit 1
 fi
 
-echo "erro: o bootstrap não está autorizado a declarar G1 aprovado" >&2
-exit 2
+echo "Checklists G1a e G1b sem pendências abertas; confirmar evidências e aprovações formais separadas."
