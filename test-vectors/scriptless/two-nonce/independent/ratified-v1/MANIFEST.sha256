@@ -1,4 +1,5 @@
-9e182e2cab449a6d7b848b01e0b2a7c1c70a3953aa54070b1160bf217d8b27a4  test-vectors/scriptless/two-nonce/independent/ratified-v1/README.md
+5f8e47f4b518fb09fc7cf7e26cd9bcaffe08f924729827a4b86b9133cd1d4894  test-vectors/scriptless/two-nonce/independent/ratified-v1/README.md
+4d4df3e5d47f53c4acf1ce1b2c9e16ddb0a57c6bb43c7612ff5440433a6d63f0  test-vectors/scriptless/two-nonce/independent/ratified-v1/compare_production.rs
 af3c503c46159eefae338c749f8aa95fe2cf13bc825f5fb7d3b5d44051871413  test-vectors/scriptless/two-nonce/independent/ratified-v1/generate_reference.py
 753c3976d3171c0f7f83ae2fab0e1ee98ce2ac68cbd37347b9af06725ae2a633  test-vectors/scriptless/two-nonce/independent/ratified-v1/reference_outputs_v1.json
 6516c951a29887e367116f696290aa6d54834c294716389febbf63d774ecd073  test-vectors/scriptless/two-nonce/independent/ratified-v1/validate_supplemental_inputs.py

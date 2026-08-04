@@ -69,3 +69,19 @@ after the pre-comparison evidence commit, as required by NAR-002 §11.7. This
 directory does not claim that deferred evidence before it is actually run.
 
 No comparison with production G1a was performed before the evidence commit.
+
+## Post-barrier production comparison
+
+`compare_production.rs` is the exact external comparison harness used only
+after commit `3486a863ba922e2b7a4fc52e5ded988c6d32de87` had frozen the independent
+implementation and outputs. It must be compiled outside production with the
+explicit non-default `dom-adaptor/fuzzing`, `dom-adaptor/test-helpers`, and
+`dom-crypto/test-helpers` features. Those features expose synthetic chain and
+quarantined nonce evidence APIs; they are forbidden in release resolution.
+
+Against production G1a code commit
+`f821937a8ff1712d5f9bafd58f152b82073538f2`, the harness compared 311 named
+intermediate values without changing the frozen output. All values matched.
+Refund, ClaimAdaptor, and Funding final signatures each passed the unchanged
+real DOM verifier. The detailed command, feature boundary, and audit result are
+recorded in `docs/scriptless/reports/phase-1/G1A-PRODUCTION-COMPARISON-EVIDENCE.md`.
