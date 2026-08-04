@@ -1,0 +1,1016 @@
+{
+  "artifact": "DOM Scriptless Contracts independent KDF V1 reference outputs",
+  "status": "PRE-COMPARISON INDEPENDENT EVIDENCE",
+  "normative_source": "Ratified NAR-001 and signed input-only KAT V2",
+  "implementation_boundary": {
+    "language": "CPython",
+    "language_version": "3.12.3",
+    "dependencies": "Python standard library only; hashlib.blake2b and bounded pure-Python secp256k1 arithmetic",
+    "generator_sha256": "af3c503c46159eefae338c749f8aa95fe2cf13bc825f5fb7d3b5d44051871413",
+    "production_dom_code_imported": false,
+    "production_g1a_inspected": false
+  },
+  "source_integrity": {
+    "input_path": "test-vectors/scriptless/two-nonce/kat_inputs_v2.en.json",
+    "input_sha256": "55642208968863a7b2c4773a82d9774f95f2a3b604b80a876d0bf031396b2a7d",
+    "nar_sha256": "eee087c808aeb4e6e745a5311d17ca5a63c5b5e5568218d20b1cbcdd7b6206dc",
+    "minisign_key_id": "74197A95CA309CF0"
+  },
+  "hash_definition": {
+    "digest": "native BLAKE2b-256",
+    "framing": "u16_le(len(tag_ascii)) || tag_ascii || data",
+    "key": null,
+    "salt": null,
+    "personalization": null
+  },
+  "curve": {
+    "name": "secp256k1",
+    "order_n_be32": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+    "point_encoding": "33-byte canonical compressed SEC1"
+  },
+  "counts": {
+    "accepted": 16,
+    "rejected": 20
+  },
+  "accepted_cases": [
+    {
+      "name": "B1-refund-initiator-commit",
+      "source": "base_case",
+      "result": "accept",
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010001ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "effective_retry_counter_u64_le": "0000000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310909090909090909090909090909090909090909090909090909090909090909",
+        "mask": "fca02162d50f9076d0d542a759b74d86cd94fc00a1c86789e04b5fe64281e458",
+        "masked_signing_share": "fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a7631fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010001ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "seed": "4906b7deeaa3f4d15b8b0e710ed38af8fdc5777a77fe2acf63cd4c25ec8ad8bf",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76314906b7deeaa3f4d15b8b0e710ed38af8fdc5777a77fe2acf63cd4c25ec8ad8bf0100",
+        "k1_wide_digest_0": "4253bb844a048daf0680ced6e6bf6b1ed33f5ab4ab13e6b37bfaed446494ef6c",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76314906b7deeaa3f4d15b8b0e710ed38af8fdc5777a77fe2acf63cd4c25ec8ad8bf0101",
+        "k1_wide_digest_1": "32608369da8c11550afa882d7276525db32c858eade1b06582a3e5ce1712ca73",
+        "W_1": "4253bb844a048daf0680ced6e6bf6b1ed33f5ab4ab13e6b37bfaed446494ef6c32608369da8c11550afa882d7276525db32c858eade1b06582a3e5ce1712ca73",
+        "k1_be32": "10833df173dc65f5e040fe6ca5c72ca2f55d78e7a92bd4df31e469207fb36703",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76314906b7deeaa3f4d15b8b0e710ed38af8fdc5777a77fe2acf63cd4c25ec8ad8bf0200",
+        "k2_wide_digest_0": "ff26fb780588d85295a40ea990bd90a70f3a25da897be98694a41377593d9574",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76314906b7deeaa3f4d15b8b0e710ed38af8fdc5777a77fe2acf63cd4c25ec8ad8bf0201",
+        "k2_wide_digest_1": "798bc47165f85606e9d0ece5ac1334e0e66fc25d82a0220d45b353183a5a747a",
+        "W_2": "ff26fb780588d85295a40ea990bd90a70f3a25da897be98694a41377593d9574798bc47165f85606e9d0ece5ac1334e0e66fc25d82a0220d45b353183a5a747a",
+        "k2_be32": "e8f87d2ef6e2d54bc209d5d22c832b7831728922661913fd9b83f77143d09943",
+        "R_i1_sec1": "03bb05f148451aa5ef63380515ca29c2a6f356ab07e4fb4b6198ae713511fddcde",
+        "R_i2_sec1": "036307ac07a7bb7e06fc3f303f1cf10708c591a2b114a5bfa91366e541d81bd5c3"
+      }
+    },
+    {
+      "name": "B2-claim-adaptor-initiator-commit",
+      "source": "base_case",
+      "result": "accept",
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa020202020202020202020202020202020202020202020202020202020202020202010001ababababababababababababababababababababababababababababababababbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbccdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000001022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "effective_retry_counter_u64_le": "0000000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310909090909090909090909090909090909090909090909090909090909090909",
+        "mask": "fca02162d50f9076d0d542a759b74d86cd94fc00a1c86789e04b5fe64281e458",
+        "masked_signing_share": "fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a7631fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa020202020202020202020202020202020202020202020202020202020202020202010001ababababababababababababababababababababababababababababababababbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbccdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000001022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "seed": "86ad981318b3c7c1ac1a008cebd0136f14078db64e4468b80c57b7a0e69314af",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763186ad981318b3c7c1ac1a008cebd0136f14078db64e4468b80c57b7a0e69314af0100",
+        "k1_wide_digest_0": "f324014a6a66ca299b4bbce68f6775b4f4e12f0bae9219e8aa767b61b158b2d6",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763186ad981318b3c7c1ac1a008cebd0136f14078db64e4468b80c57b7a0e69314af0101",
+        "k1_wide_digest_1": "301966dd809f2d2c702c88ca0a76f824a88d78d847ef82ec776586a5e5c8e271",
+        "W_1": "f324014a6a66ca299b4bbce68f6775b4f4e12f0bae9219e8aa767b61b158b2d6301966dd809f2d2c702c88ca0a76f824a88d78d847ef82ec776586a5e5c8e271",
+        "k1_be32": "1e05dda25f33e1b6fef3eff625c39ef7a25c7bb84a9eea0be50dbd8b0a161387",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763186ad981318b3c7c1ac1a008cebd0136f14078db64e4468b80c57b7a0e69314af0200",
+        "k2_wide_digest_0": "ffd9c8b7c678d4ccfedf8bcf0608ff78af7e8bed9211a3963d6dd7c343b0f685",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763186ad981318b3c7c1ac1a008cebd0136f14078db64e4468b80c57b7a0e69314af0201",
+        "k2_wide_digest_1": "bbbcddda35c482640204da78266043d75b551cf0ad5011cf211070985572889c",
+        "W_2": "ffd9c8b7c678d4ccfedf8bcf0608ff78af7e8bed9211a3963d6dd7c343b0f685bbbcddda35c482640204da78266043d75b551cf0ad5011cf211070985572889c",
+        "k2_be32": "9ba6429027be27e1401e4d809d330f823df35bf2dc4834a8b40c78b055e5738c",
+        "R_i1_sec1": "03c3af1f3b34b30c7fbb8199e683de0ae0e07763497e93cc8eb3d9a665cc86758c",
+        "R_i2_sec1": "0202a3478430bf73fca7f3a99192690d6c24642d6cba695fef9426766467ea4297"
+      }
+    },
+    {
+      "name": "B3-funding-initiator-commit",
+      "source": "base_case",
+      "result": "accept",
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa030303030303030303030303030303030303030303030303030303030303030303010001acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdcececececececececececececececececececececececececececececececece0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "effective_retry_counter_u64_le": "0000000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310909090909090909090909090909090909090909090909090909090909090909",
+        "mask": "fca02162d50f9076d0d542a759b74d86cd94fc00a1c86789e04b5fe64281e458",
+        "masked_signing_share": "fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a7631fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa030303030303030303030303030303030303030303030303030303030303030303010001acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdcececececececececececececececececececececececececececececececece0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "seed": "1f4fba4397fac6f658b2aa5b6d84e8d52ab0d1fbe286162686e4ac6ab871451f",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76311f4fba4397fac6f658b2aa5b6d84e8d52ab0d1fbe286162686e4ac6ab871451f0100",
+        "k1_wide_digest_0": "df66965a529a8db794ee13b80811360fd94a8c122d0b2bda2d47f19e077613e4",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76311f4fba4397fac6f658b2aa5b6d84e8d52ab0d1fbe286162686e4ac6ab871451f0101",
+        "k1_wide_digest_1": "495b958f228d5c85f25ef5fe088de3f420ce1bf6d0039502e9d9362bec2f13b5",
+        "W_1": "df66965a529a8db794ee13b80811360fd94a8c122d0b2bda2d47f19e077613e4495b958f228d5c85f25ef5fe088de3f420ce1bf6d0039502e9d9362bec2f13b5",
+        "k1_be32": "9b00b44a44bc5de000173938ab4d6e96ecf2ed14241489b6944c815801ef3102",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76311f4fba4397fac6f658b2aa5b6d84e8d52ab0d1fbe286162686e4ac6ab871451f0200",
+        "k2_wide_digest_0": "ce910a2c613819ccafd666a1f30a8b0687a8f5a9d095d828bb7d2816191cddd8",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76311f4fba4397fac6f658b2aa5b6d84e8d52ab0d1fbe286162686e4ac6ab871451f0201",
+        "k2_wide_digest_1": "b2f4bb57ee09767226f54b700a46e0e3983cc7431d19d7626422fa1bc42bd753",
+        "W_2": "ce910a2c613819ccafd666a1f30a8b0687a8f5a9d095d828bb7d2816191cddd8b2f4bb57ee09767226f54b700a46e0e3983cc7431d19d7626422fa1bc42bd753",
+        "k2_be32": "2ea382ff33acb9a239faf9e33d108b6d67d3bceb3160f17e804b0153f1a1023f",
+        "R_i1_sec1": "03b10247ad56eacd89ec9d4247db9e06529f2a5db813d92e2ecea88002aaee6239",
+        "R_i2_sec1": "02f2146980a4705cda07f6e519b5a6e97f93b34eaa8de16e4f3cf4dc553bc16c0c"
+      }
+    },
+    {
+      "name": "P1-direction-responder",
+      "source": "accepted_mutation",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "direction_u8": "02"
+      },
+      "result": "accept",
+      "changed_outputs_relative_to_base": [
+        "canonical_context_bytes",
+        "seed_tag_input_bytes",
+        "seed",
+        "k1_wide_digest_0_tag_input_bytes",
+        "k1_wide_digest_0",
+        "k1_wide_digest_1_tag_input_bytes",
+        "k1_wide_digest_1",
+        "W_1",
+        "k1_be32",
+        "k2_wide_digest_0_tag_input_bytes",
+        "k2_wide_digest_0",
+        "k2_wide_digest_1_tag_input_bytes",
+        "k2_wide_digest_1",
+        "W_2",
+        "k2_be32",
+        "R_i1_sec1",
+        "R_i2_sec1"
+      ],
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101020001ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "effective_retry_counter_u64_le": "0000000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310909090909090909090909090909090909090909090909090909090909090909",
+        "mask": "fca02162d50f9076d0d542a759b74d86cd94fc00a1c86789e04b5fe64281e458",
+        "masked_signing_share": "fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a7631fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101020001ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "seed": "70879c2e1ad798b9e4fbd9829ca1648d6b9c3eedc2019340f7dd7e3055aa2e7e",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763170879c2e1ad798b9e4fbd9829ca1648d6b9c3eedc2019340f7dd7e3055aa2e7e0100",
+        "k1_wide_digest_0": "dca92fef1bf98db1ca57145b216785950251d3fe8e635b6e2f90a6e284ff1a5b",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763170879c2e1ad798b9e4fbd9829ca1648d6b9c3eedc2019340f7dd7e3055aa2e7e0101",
+        "k1_wide_digest_1": "01e3cd86e5d1d651cea0538c339c30ea2ab43b479ecf863dc4aa77173ee43acb",
+        "W_1": "dca92fef1bf98db1ca57145b216785950251d3fe8e635b6e2f90a6e284ff1a5b01e3cd86e5d1d651cea0538c339c30ea2ab43b479ecf863dc4aa77173ee43acb",
+        "k1_be32": "1e3b1b382dc567997c05873dd3514f45cc9f8b425f978cf1efbbddfd31c446f5",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763170879c2e1ad798b9e4fbd9829ca1648d6b9c3eedc2019340f7dd7e3055aa2e7e0200",
+        "k2_wide_digest_0": "99fae1d739fba052a367142cb29a970064fdf598ea118de1e6ee15dc8be946ad",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763170879c2e1ad798b9e4fbd9829ca1648d6b9c3eedc2019340f7dd7e3055aa2e7e0201",
+        "k2_wide_digest_1": "42cb8ef3d66ef0ba34876336ad7d65bb6d3eba3e8318498b2c154c32f2a48240",
+        "W_2": "99fae1d739fba052a367142cb29a970064fdf598ea118de1e6ee15dc8be946ad42cb8ef3d66ef0ba34876336ad7d65bb6d3eba3e8318498b2c154c32f2a48240",
+        "k2_be32": "e45ef26f66567a2645c23a10a3f7813fb9f59bb0caae5b80cd866bd9adc81fa4",
+        "R_i1_sec1": "02c0db76cc0a9a5c7e6dc7a14a4127b4c0ccf8ca716d2fb88fe8349e176eaa9612",
+        "R_i2_sec1": "0218605b74b023bd214ea3a6bd8babf6d09e7aba8ca018a8fd2d9d57ae1bf7dc52"
+      }
+    },
+    {
+      "name": "P2-phase-reveal",
+      "source": "accepted_mutation",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "signing_phase_u16_le": "0101"
+      },
+      "result": "accept",
+      "changed_outputs_relative_to_base": [
+        "canonical_context_bytes",
+        "seed_tag_input_bytes",
+        "seed",
+        "k1_wide_digest_0_tag_input_bytes",
+        "k1_wide_digest_0",
+        "k1_wide_digest_1_tag_input_bytes",
+        "k1_wide_digest_1",
+        "W_1",
+        "k1_be32",
+        "k2_wide_digest_0_tag_input_bytes",
+        "k2_wide_digest_0",
+        "k2_wide_digest_1_tag_input_bytes",
+        "k2_wide_digest_1",
+        "W_2",
+        "k2_be32",
+        "R_i1_sec1",
+        "R_i2_sec1"
+      ],
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010101ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "effective_retry_counter_u64_le": "0000000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310909090909090909090909090909090909090909090909090909090909090909",
+        "mask": "fca02162d50f9076d0d542a759b74d86cd94fc00a1c86789e04b5fe64281e458",
+        "masked_signing_share": "fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a7631fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010101ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "seed": "f483abcb2651ba6113c29fe5ef46689ae9e5321351a71f51712ed08a7e3ef978",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631f483abcb2651ba6113c29fe5ef46689ae9e5321351a71f51712ed08a7e3ef9780100",
+        "k1_wide_digest_0": "0eba75749ce68c158796f0290ba36718d313bb5a0c287626278c7d38f1772de3",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631f483abcb2651ba6113c29fe5ef46689ae9e5321351a71f51712ed08a7e3ef9780101",
+        "k1_wide_digest_1": "30bc015d2f5df8e27b2bc7745fa43363f39167a5810d12b92ffcb86c428069db",
+        "W_1": "0eba75749ce68c158796f0290ba36718d313bb5a0c287626278c7d38f1772de330bc015d2f5df8e27b2bc7745fa43363f39167a5810d12b92ffcb86c428069db",
+        "k1_be32": "b60f456196252efb5ea117378696c97a3b741052a06cd25744adebdc2d0c983e",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631f483abcb2651ba6113c29fe5ef46689ae9e5321351a71f51712ed08a7e3ef9780200",
+        "k2_wide_digest_0": "e03c0ca032a7fa18186c6e4af899fc7d7c6bbab57e67af59f3de82abf8f66157",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631f483abcb2651ba6113c29fe5ef46689ae9e5321351a71f51712ed08a7e3ef9780201",
+        "k2_wide_digest_1": "7b1ab4d6513436bc10f31b6fed8e6d8177ea0be1b710e4f0bcfc41ee6e16c0fa",
+        "W_2": "e03c0ca032a7fa18186c6e4af899fc7d7c6bbab57e67af59f3de82abf8f661577b1ab4d6513436bc10f31b6fed8e6d8177ea0be1b710e4f0bcfc41ee6e16c0fa",
+        "k2_be32": "34fec6618545739b3afcd7e411b02d020047286450f04053ec1b7aac6f5ed926",
+        "R_i1_sec1": "025ff96fa484a8fdf292d9ecf34ae73729b42963539731a070f0e9d3f698718cdf",
+        "R_i2_sec1": "0393a92eb8dd00389a74d5204d703190e7febf74e205f41a81365eff88e43800ff"
+      }
+    },
+    {
+      "name": "P3-phase-binding",
+      "source": "accepted_mutation",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "signing_phase_u16_le": "0201"
+      },
+      "result": "accept",
+      "changed_outputs_relative_to_base": [
+        "canonical_context_bytes",
+        "seed_tag_input_bytes",
+        "seed",
+        "k1_wide_digest_0_tag_input_bytes",
+        "k1_wide_digest_0",
+        "k1_wide_digest_1_tag_input_bytes",
+        "k1_wide_digest_1",
+        "W_1",
+        "k1_be32",
+        "k2_wide_digest_0_tag_input_bytes",
+        "k2_wide_digest_0",
+        "k2_wide_digest_1_tag_input_bytes",
+        "k2_wide_digest_1",
+        "W_2",
+        "k2_be32",
+        "R_i1_sec1",
+        "R_i2_sec1"
+      ],
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010201ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "effective_retry_counter_u64_le": "0000000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310909090909090909090909090909090909090909090909090909090909090909",
+        "mask": "fca02162d50f9076d0d542a759b74d86cd94fc00a1c86789e04b5fe64281e458",
+        "masked_signing_share": "fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a7631fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010201ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "seed": "7a292caab57380752b768be0e417b467b3877d62a55c07a4dc3ea4cea693ad3a",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76317a292caab57380752b768be0e417b467b3877d62a55c07a4dc3ea4cea693ad3a0100",
+        "k1_wide_digest_0": "67981072d10269322e1131db6e069e388bc4076f4d16b8b70f03b4e97a99058f",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76317a292caab57380752b768be0e417b467b3877d62a55c07a4dc3ea4cea693ad3a0101",
+        "k1_wide_digest_1": "4b6886229959609e4c56fde154566532b684fd8d32a8c59d770e8403da800fb8",
+        "W_1": "67981072d10269322e1131db6e069e388bc4076f4d16b8b70f03b4e97a99058f4b6886229959609e4c56fde154566532b684fd8d32a8c59d770e8403da800fb8",
+        "k1_be32": "e5f9689db795851be76809937b63a86efe8211356e2b9d9d5bf26683adf7557e",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76317a292caab57380752b768be0e417b467b3877d62a55c07a4dc3ea4cea693ad3a0200",
+        "k2_wide_digest_0": "098464d9c189b896a9fd9c46bd3ea0e261e5f1e191f54fe86323dbb699c5f3ed",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76317a292caab57380752b768be0e417b467b3877d62a55c07a4dc3ea4cea693ad3a0201",
+        "k2_wide_digest_1": "9263e1e3fd553f377f52f048d8cce881a53db0946faa3d3380cbe63a1327117e",
+        "W_2": "098464d9c189b896a9fd9c46bd3ea0e261e5f1e191f54fe86323dbb699c5f3ed9263e1e3fd553f377f52f048d8cce881a53db0946faa3d3380cbe63a1327117e",
+        "k2_be32": "40b9ad0e49ab68daf8709056db49b3df49e799b356e2bc9fec4b36c409adcc75",
+        "R_i1_sec1": "039856ba9224a921fcccb293465cdcf344d27a742e4fca6806334d39799c62c6fe",
+        "R_i2_sec1": "024b4599f3d4cc163f1a06d3c1fecb8a325266bf21fee718ffe6638f07587ee672"
+      }
+    },
+    {
+      "name": "P4-phase-partial",
+      "source": "accepted_mutation",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "signing_phase_u16_le": "0301"
+      },
+      "result": "accept",
+      "changed_outputs_relative_to_base": [
+        "canonical_context_bytes",
+        "seed_tag_input_bytes",
+        "seed",
+        "k1_wide_digest_0_tag_input_bytes",
+        "k1_wide_digest_0",
+        "k1_wide_digest_1_tag_input_bytes",
+        "k1_wide_digest_1",
+        "W_1",
+        "k1_be32",
+        "k2_wide_digest_0_tag_input_bytes",
+        "k2_wide_digest_0",
+        "k2_wide_digest_1_tag_input_bytes",
+        "k2_wide_digest_1",
+        "W_2",
+        "k2_be32",
+        "R_i1_sec1",
+        "R_i2_sec1"
+      ],
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010301ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "effective_retry_counter_u64_le": "0000000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310909090909090909090909090909090909090909090909090909090909090909",
+        "mask": "fca02162d50f9076d0d542a759b74d86cd94fc00a1c86789e04b5fe64281e458",
+        "masked_signing_share": "fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a7631fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010301ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "seed": "5cff4e90386845b97415fc5f0aa7f8fe8e6d6bb6439a082ffc971a621cce284b",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76315cff4e90386845b97415fc5f0aa7f8fe8e6d6bb6439a082ffc971a621cce284b0100",
+        "k1_wide_digest_0": "c9e50b32fb5618fec7b16bf78ad5978af069a46094e4b0af8a96eaf513325397",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76315cff4e90386845b97415fc5f0aa7f8fe8e6d6bb6439a082ffc971a621cce284b0101",
+        "k1_wide_digest_1": "0f9469e94c9b6320660d3fad0b3f1fc547ad79543afab1a391a4d4a3774702f9",
+        "W_1": "c9e50b32fb5618fec7b16bf78ad5978af069a46094e4b0af8a96eaf5133253970f9469e94c9b6320660d3fad0b3f1fc547ad79543afab1a391a4d4a3774702f9",
+        "k1_be32": "9e14ff7d4fa598f29ba14b4c19a2a3ff0f8e64360cb1fd7eb1e77659c944f557",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76315cff4e90386845b97415fc5f0aa7f8fe8e6d6bb6439a082ffc971a621cce284b0200",
+        "k2_wide_digest_0": "13028d07f9c2a81e9ea7fdefac8d1cf1fe0e80d276d0f053d5d4d8cbaaf72264",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76315cff4e90386845b97415fc5f0aa7f8fe8e6d6bb6439a082ffc971a621cce284b0201",
+        "k2_wide_digest_1": "a3e55372d99148563c0585b5c2d444d719228888271b0b46a255a092a47fc28b",
+        "W_2": "13028d07f9c2a81e9ea7fdefac8d1cf1fe0e80d276d0f053d5d4d8cbaaf72264a3e55372d99148563c0585b5c2d444d719228888271b0b46a255a092a47fc28b",
+        "k2_be32": "9c7342a90b2159f96333c5d30404b9a4eeae99a63e137ddcf2739ce6909b0c48",
+        "R_i1_sec1": "02f32dcbc618af47ce9dcff033f9611455cdde6f2f3e4facea47cb1371fbf4a77a",
+        "R_i2_sec1": "038cb9e1db499f682f14b21a213275553409f7e2d0fba67673b2a41498b1c2dd5b"
+      }
+    },
+    {
+      "name": "P5-phase-adapt",
+      "source": "accepted_mutation",
+      "base_case": "B2-claim-adaptor-initiator-commit",
+      "replacements": {
+        "signing_phase_u16_le": "0401"
+      },
+      "result": "accept",
+      "changed_outputs_relative_to_base": [
+        "canonical_context_bytes",
+        "seed_tag_input_bytes",
+        "seed",
+        "k1_wide_digest_0_tag_input_bytes",
+        "k1_wide_digest_0",
+        "k1_wide_digest_1_tag_input_bytes",
+        "k1_wide_digest_1",
+        "W_1",
+        "k1_be32",
+        "k2_wide_digest_0_tag_input_bytes",
+        "k2_wide_digest_0",
+        "k2_wide_digest_1_tag_input_bytes",
+        "k2_wide_digest_1",
+        "W_2",
+        "k2_be32",
+        "R_i1_sec1",
+        "R_i2_sec1"
+      ],
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa020202020202020202020202020202020202020202020202020202020202020202010401ababababababababababababababababababababababababababababababababbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbccdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000001022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "effective_retry_counter_u64_le": "0000000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310909090909090909090909090909090909090909090909090909090909090909",
+        "mask": "fca02162d50f9076d0d542a759b74d86cd94fc00a1c86789e04b5fe64281e458",
+        "masked_signing_share": "fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a7631fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa020202020202020202020202020202020202020202020202020202020202020202010401ababababababababababababababababababababababababababababababababbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbccdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000001022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "seed": "84c87e21f2bc67a25676c8d629aff9fdeb43560b5c77a34f791605c79ba0943c",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763184c87e21f2bc67a25676c8d629aff9fdeb43560b5c77a34f791605c79ba0943c0100",
+        "k1_wide_digest_0": "193bc9b68996829b64189ee272a9c27c825dce62a9a327103e561a32775268ec",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763184c87e21f2bc67a25676c8d629aff9fdeb43560b5c77a34f791605c79ba0943c0101",
+        "k1_wide_digest_1": "7c2602a8dd4b4358a616a69353b5232cf7582695ac7399989e96680cee450730",
+        "W_1": "193bc9b68996829b64189ee272a9c27c825dce62a9a327103e561a32775268ec7c2602a8dd4b4358a616a69353b5232cf7582695ac7399989e96680cee450730",
+        "k1_be32": "217875f85a37441a3badcbc2d52468ab0a5845bf8a37d962711f20844b6d7492",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763184c87e21f2bc67a25676c8d629aff9fdeb43560b5c77a34f791605c79ba0943c0200",
+        "k2_wide_digest_0": "31ad3b2d0db126971b34470c1ef68c16f797c03ca579d26ab5b7df50c5f62991",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763184c87e21f2bc67a25676c8d629aff9fdeb43560b5c77a34f791605c79ba0943c0201",
+        "k2_wide_digest_1": "7bacde51693c20097aae8126ac7fa46b7a4dec41b095045aa137550a5f205824",
+        "W_2": "31ad3b2d0db126971b34470c1ef68c16f797c03ca579d26ab5b7df50c5f629917bacde51693c20097aae8126ac7fa46b7a4dec41b095045aa137550a5f205824",
+        "k2_be32": "4db750ebe5a2361edc0cbfb317c334600d385b473f95d7ef73779a01d9cce8a9",
+        "R_i1_sec1": "02cdc91b329291d8c40dead0bb645d028c8acfc8768068db92c5c75ef73441ceb0",
+        "R_i2_sec1": "03734837b3e7615b963fc35ffe54c075164d2c91fca13e38c74a6b9ca2f1d1b4a8"
+      }
+    },
+    {
+      "name": "P6-phase-extract",
+      "source": "accepted_mutation",
+      "base_case": "B2-claim-adaptor-initiator-commit",
+      "replacements": {
+        "signing_phase_u16_le": "0501"
+      },
+      "result": "accept",
+      "changed_outputs_relative_to_base": [
+        "canonical_context_bytes",
+        "seed_tag_input_bytes",
+        "seed",
+        "k1_wide_digest_0_tag_input_bytes",
+        "k1_wide_digest_0",
+        "k1_wide_digest_1_tag_input_bytes",
+        "k1_wide_digest_1",
+        "W_1",
+        "k1_be32",
+        "k2_wide_digest_0_tag_input_bytes",
+        "k2_wide_digest_0",
+        "k2_wide_digest_1_tag_input_bytes",
+        "k2_wide_digest_1",
+        "W_2",
+        "k2_be32",
+        "R_i1_sec1",
+        "R_i2_sec1"
+      ],
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa020202020202020202020202020202020202020202020202020202020202020202010501ababababababababababababababababababababababababababababababababbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbccdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000001022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "effective_retry_counter_u64_le": "0000000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310909090909090909090909090909090909090909090909090909090909090909",
+        "mask": "fca02162d50f9076d0d542a759b74d86cd94fc00a1c86789e04b5fe64281e458",
+        "masked_signing_share": "fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a7631fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa020202020202020202020202020202020202020202020202020202020202020202010501ababababababababababababababababababababababababababababababababbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbccdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000001022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "seed": "5d2511ddd36c49c0af6257e99d292e69f9492eb3591ff27ac9c109661792296e",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76315d2511ddd36c49c0af6257e99d292e69f9492eb3591ff27ac9c109661792296e0100",
+        "k1_wide_digest_0": "0e614e5efbd08d5125b50efc85395b34f1303fdb9daa382a7645ab3515e773fd",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76315d2511ddd36c49c0af6257e99d292e69f9492eb3591ff27ac9c109661792296e0101",
+        "k1_wide_digest_1": "e394e0f7be2510d94d6296f43c9d2929b9334aa273af2373a9e03cc7b4744ad3",
+        "W_1": "0e614e5efbd08d5125b50efc85395b34f1303fdb9daa382a7645ab3515e773fde394e0f7be2510d94d6296f43c9d2929b9334aa273af2373a9e03cc7b4744ad3",
+        "k1_be32": "e9fa161f6d12a502edefd9e1a4d0d6f689413c3f552a5aecedc4b0fbd58a0b43",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76315d2511ddd36c49c0af6257e99d292e69f9492eb3591ff27ac9c109661792296e0200",
+        "k2_wide_digest_0": "7580ac9a039d73a11a02b2ed4e274191e8decc970b8df8f1559fb9a15848bb09",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76315d2511ddd36c49c0af6257e99d292e69f9492eb3591ff27ac9c109661792296e0201",
+        "k2_wide_digest_1": "9bd9d84a07551df7470c3b31a1bd1bca9eda87ad1f96b37f8996f1b67c194132",
+        "W_2": "7580ac9a039d73a11a02b2ed4e274191e8decc970b8df8f1559fb9a15848bb099bd9d84a07551df7470c3b31a1bd1bca9eda87ad1f96b37f8996f1b67c194132",
+        "k2_be32": "85b12bafa8d6ee88270dfa541aef62346061ae74484a56b5f8fe0da2278407bb",
+        "R_i1_sec1": "034c3601295cbe305df0bccd605154941629acd948a3ee5500a6f2545da0d0dcbf",
+        "R_i2_sec1": "035786e50aacbfeee8b05459258b44f475ff18ad5747bf0506a0ebefbd4c8b5103"
+      }
+    },
+    {
+      "name": "P7-aux-changed",
+      "source": "accepted_mutation",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "aux_rand_32": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+      },
+      "result": "accept",
+      "changed_outputs_relative_to_base": [
+        "aux_tag_input_bytes",
+        "mask",
+        "masked_signing_share",
+        "seed_tag_input_bytes",
+        "seed",
+        "k1_wide_digest_0_tag_input_bytes",
+        "k1_wide_digest_0",
+        "k1_wide_digest_1_tag_input_bytes",
+        "k1_wide_digest_1",
+        "W_1",
+        "k1_be32",
+        "k2_wide_digest_0_tag_input_bytes",
+        "k2_wide_digest_0",
+        "k2_wide_digest_1_tag_input_bytes",
+        "k2_wide_digest_1",
+        "W_2",
+        "k2_be32",
+        "R_i1_sec1",
+        "R_i2_sec1"
+      ],
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010001ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "effective_retry_counter_u64_le": "0000000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        "mask": "6506037edbdd5e6d68d58bd0661b07ba83ce82a4312f9a19d966668f1e7da4d1",
+        "masked_signing_share": "62010479dcda596a6fd28cd7611c00bd84c985a336289d1ede616188197aa3d6",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a763162010479dcda596a6fd28cd7611c00bd84c985a336289d1ede616188197aa3d60100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010001ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "seed": "25c051c6977e2e8a8ab63366da56b237e9fe4616984cb12615356d21fb4db710",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763125c051c6977e2e8a8ab63366da56b237e9fe4616984cb12615356d21fb4db7100100",
+        "k1_wide_digest_0": "29325bd4b9e04b05c99573669cf50e9f917eb702e899b6559f32ba626c590bb1",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763125c051c6977e2e8a8ab63366da56b237e9fe4616984cb12615356d21fb4db7100101",
+        "k1_wide_digest_1": "9f2497bab6a566344dfcf02c4c6f9ff750b943c236269ef49b4d2581651abc59",
+        "W_1": "29325bd4b9e04b05c99573669cf50e9f917eb702e899b6559f32ba626c590bb19f2497bab6a566344dfcf02c4c6f9ff750b943c236269ef49b4d2581651abc59",
+        "k1_be32": "bcad7249dfb1473ab3159b32b1c5731f013abcf115507fdebcb20fdbde704df4",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763125c051c6977e2e8a8ab63366da56b237e9fe4616984cb12615356d21fb4db7100200",
+        "k2_wide_digest_0": "9585e91b9e4fca7336f59d4a4426d38ceb95a36cd2e2744f62a71d2d3f2538c2",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763125c051c6977e2e8a8ab63366da56b237e9fe4616984cb12615356d21fb4db7100201",
+        "k2_wide_digest_1": "2f641d6d0dcdab57c688522096b83987c0247b21038df690c8f4158c30ef3c4b",
+        "W_2": "9585e91b9e4fca7336f59d4a4426d38ceb95a36cd2e2744f62a71d2d3f2538c22f641d6d0dcdab57c688522096b83987c0247b21038df690c8f4158c30ef3c4b",
+        "k2_be32": "87dd7bc1be6ae1e72d57be5902067e473746eca509d619492c796ef52d7bb851",
+        "R_i1_sec1": "03c4d07a3ea135f51d6f7cf068da55fe87332b89c4492d5f2f7774529fdfafa961",
+        "R_i2_sec1": "0354f1d33bd769fb41e5431d93629ade85a688e9e34251b4dcd5fac48cee940cf4"
+      }
+    },
+    {
+      "name": "P8-session-changed",
+      "source": "accepted_mutation",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "session_id_32": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "result": "accept",
+      "changed_outputs_relative_to_base": [
+        "canonical_context_bytes",
+        "seed_tag_input_bytes",
+        "seed",
+        "k1_wide_digest_0_tag_input_bytes",
+        "k1_wide_digest_0",
+        "k1_wide_digest_1_tag_input_bytes",
+        "k1_wide_digest_1",
+        "W_1",
+        "k1_be32",
+        "k2_wide_digest_0_tag_input_bytes",
+        "k2_wide_digest_0",
+        "k2_wide_digest_1_tag_input_bytes",
+        "k2_wide_digest_1",
+        "W_2",
+        "k2_be32",
+        "R_i1_sec1",
+        "R_i2_sec1"
+      ],
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa111111111111111111111111111111111111111111111111111111111111111101010001ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "effective_retry_counter_u64_le": "0000000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310909090909090909090909090909090909090909090909090909090909090909",
+        "mask": "fca02162d50f9076d0d542a759b74d86cd94fc00a1c86789e04b5fe64281e458",
+        "masked_signing_share": "fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a7631fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa111111111111111111111111111111111111111111111111111111111111111101010001ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "seed": "5e1ed1ffd1b55b04fcb92e1e43ffb6cf489f1d1c8ece53c808c37ed92b0cfaf2",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76315e1ed1ffd1b55b04fcb92e1e43ffb6cf489f1d1c8ece53c808c37ed92b0cfaf20100",
+        "k1_wide_digest_0": "ac7d7dd3e517056876aeca06fd4937d7f6542e45169e9cbe6875c3473453ac70",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76315e1ed1ffd1b55b04fcb92e1e43ffb6cf489f1d1c8ece53c808c37ed92b0cfaf20101",
+        "k1_wide_digest_1": "5ce162a7b774b6fcf5fffd0300ccce69a2fe7589ca4a87a90bbf68cbdc169a94",
+        "W_1": "ac7d7dd3e517056876aeca06fd4937d7f6542e45169e9cbe6875c3473453ac705ce162a7b774b6fcf5fffd0300ccce69a2fe7589ca4a87a90bbf68cbdc169a94",
+        "k1_be32": "5a6e3ed61f4c8bc8bf73df26114bccb33dd771f0b35273915d04adeb7fd694d8",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76315e1ed1ffd1b55b04fcb92e1e43ffb6cf489f1d1c8ece53c808c37ed92b0cfaf20200",
+        "k2_wide_digest_0": "6b5ccca88e4b92e2d85f0d1aa53b65ff5cf915f3a9b09ab7055c247695215c89",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76315e1ed1ffd1b55b04fcb92e1e43ffb6cf489f1d1c8ece53c808c37ed92b0cfaf20201",
+        "k2_wide_digest_1": "de3b8d0040dabad5be4be44472227dc699342fc322995aa927c1766f3a1512f3",
+        "W_2": "6b5ccca88e4b92e2d85f0d1aa53b65ff5cf915f3a9b09ab7055c247695215c89de3b8d0040dabad5be4be44472227dc699342fc322995aa927c1766f3a1512f3",
+        "k2_be32": "7c65749f1133032adcb7daa1024b61bc49d36ee8fe3ca9eccd20d4c1dfe0bf06",
+        "R_i1_sec1": "0213626426ad0c7e6dea1ac40f3bda131a7822a1db72780d268b44805abee9f83b",
+        "R_i2_sec1": "03470a058d664c61285acca7d168be1987a992e2f045bfc4cad11409261aa0cbd5"
+      }
+    },
+    {
+      "name": "P9-template-changed",
+      "source": "accepted_mutation",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "template_hash_32": "1212121212121212121212121212121212121212121212121212121212121212"
+      },
+      "result": "accept",
+      "changed_outputs_relative_to_base": [
+        "canonical_context_bytes",
+        "seed_tag_input_bytes",
+        "seed",
+        "k1_wide_digest_0_tag_input_bytes",
+        "k1_wide_digest_0",
+        "k1_wide_digest_1_tag_input_bytes",
+        "k1_wide_digest_1",
+        "W_1",
+        "k1_be32",
+        "k2_wide_digest_0_tag_input_bytes",
+        "k2_wide_digest_0",
+        "k2_wide_digest_1_tag_input_bytes",
+        "k2_wide_digest_1",
+        "W_2",
+        "k2_be32",
+        "R_i1_sec1",
+        "R_i2_sec1"
+      ],
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0101010101010101010101010101010101010101010101010101010101010101010100011212121212121212121212121212121212121212121212121212121212121212ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "effective_retry_counter_u64_le": "0000000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310909090909090909090909090909090909090909090909090909090909090909",
+        "mask": "fca02162d50f9076d0d542a759b74d86cd94fc00a1c86789e04b5fe64281e458",
+        "masked_signing_share": "fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a7631fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0101010101010101010101010101010101010101010101010101010101010101010100011212121212121212121212121212121212121212121212121212121212121212ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "seed": "762ba05f1921b4f6b74b8994345bf79c377725ab18c256f4d7b3645bc8c61b2d",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631762ba05f1921b4f6b74b8994345bf79c377725ab18c256f4d7b3645bc8c61b2d0100",
+        "k1_wide_digest_0": "b23186b1ed83424678a5be38e360955ceca3c0934f175c4a8d2367fc89c94acb",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631762ba05f1921b4f6b74b8994345bf79c377725ab18c256f4d7b3645bc8c61b2d0101",
+        "k1_wide_digest_1": "b740879c2528d35cdea7c642fa7db07a1205e43eae90a4bded729fb9e9278056",
+        "W_1": "b23186b1ed83424678a5be38e360955ceca3c0934f175c4a8d2367fc89c94acbb740879c2528d35cdea7c642fa7db07a1205e43eae90a4bded729fb9e9278056",
+        "k1_be32": "c15098c24ad0edba602c491bba4cd7e7b1339e007858a8bd50f57bbd5b0b5e3c",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631762ba05f1921b4f6b74b8994345bf79c377725ab18c256f4d7b3645bc8c61b2d0200",
+        "k2_wide_digest_0": "24ccded29d720cf4c795ba4ec8f90059f7b5720fe6dccc3ccdd07b01214b5d04",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631762ba05f1921b4f6b74b8994345bf79c377725ab18c256f4d7b3645bc8c61b2d0201",
+        "k2_wide_digest_1": "de78107104ad038707293d513989140f805cfce71274c9621d464ce70166fb11",
+        "W_2": "24ccded29d720cf4c795ba4ec8f90059f7b5720fe6dccc3ccdd07b01214b5d04de78107104ad038707293d513989140f805cfce71274c9621d464ce70166fb11",
+        "k2_be32": "52e737a8f5e5067cd339baf874d85d5e5cc39f9f4aafddc6135d46a6417a4fd1",
+        "R_i1_sec1": "02ca26c750499954d877da81daa90f4815b20029780c2ff6726b33ec3e8f4ff207",
+        "R_i2_sec1": "02d894cd0578a0a2185168901c4b36c170e076ea1d03603172fc3203c8f2c28b0d"
+      }
+    },
+    {
+      "name": "P10-message-changed",
+      "source": "accepted_mutation",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "message_digest_32": "1313131313131313131313131313131313131313131313131313131313131313"
+      },
+      "result": "accept",
+      "changed_outputs_relative_to_base": [
+        "canonical_context_bytes",
+        "seed_tag_input_bytes",
+        "seed",
+        "k1_wide_digest_0_tag_input_bytes",
+        "k1_wide_digest_0",
+        "k1_wide_digest_1_tag_input_bytes",
+        "k1_wide_digest_1",
+        "W_1",
+        "k1_be32",
+        "k2_wide_digest_0_tag_input_bytes",
+        "k2_wide_digest_0",
+        "k2_wide_digest_1_tag_input_bytes",
+        "k2_wide_digest_1",
+        "W_2",
+        "k2_be32",
+        "R_i1_sec1",
+        "R_i2_sec1"
+      ],
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010001cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc1313131313131313131313131313131313131313131313131313131313131313eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "effective_retry_counter_u64_le": "0000000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310909090909090909090909090909090909090909090909090909090909090909",
+        "mask": "fca02162d50f9076d0d542a759b74d86cd94fc00a1c86789e04b5fe64281e458",
+        "masked_signing_share": "fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a7631fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010001cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc1313131313131313131313131313131313131313131313131313131313131313eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "seed": "99d6687d0e7463bb40a322d7fb3568e83795386e53fcb1216e55183bbe35b155",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763199d6687d0e7463bb40a322d7fb3568e83795386e53fcb1216e55183bbe35b1550100",
+        "k1_wide_digest_0": "a6c7b50f244f47ac221514589fdc26796dddca0bab3363916c0e08368c04065b",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763199d6687d0e7463bb40a322d7fb3568e83795386e53fcb1216e55183bbe35b1550101",
+        "k1_wide_digest_1": "7a0a09beafe22e06f6cd5f6a9f8683582d08f7ac37fff36755684d6d89c1dde1",
+        "W_1": "a6c7b50f244f47ac221514589fdc26796dddca0bab3363916c0e08368c04065b7a0a09beafe22e06f6cd5f6a9f8683582d08f7ac37fff36755684d6d89c1dde1",
+        "k1_be32": "1f6cba5057e9fd9cf780e162627447aa4df080eb99a330d21c05c2f4e7c58257",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763199d6687d0e7463bb40a322d7fb3568e83795386e53fcb1216e55183bbe35b1550200",
+        "k2_wide_digest_0": "8f376fc0b152050aaf3e3143e3f1f841a045877ed15a60f155902682de6e6f8e",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a763199d6687d0e7463bb40a322d7fb3568e83795386e53fcb1216e55183bbe35b1550201",
+        "k2_wide_digest_1": "7f58568a74b415ad545fd30d2f5c5c8ecb10920560a61e05e6b2ecb2bfaeae1a",
+        "W_2": "8f376fc0b152050aaf3e3143e3f1f841a045877ed15a60f155902682de6e6f8e7f58568a74b415ad545fd30d2f5c5c8ecb10920560a61e05e6b2ecb2bfaeae1a",
+        "k2_be32": "33f123acab3136ab701b1e1d30507d48c1a193d70be6b72bf710db3f82fae131",
+        "R_i1_sec1": "0389839343355c95569571bf80c1b1b71a3a81f1923e2a9693d916b692c7475dd7",
+        "R_i2_sec1": "03d5259c93085d020745d03773e7301960fa971d0f3ba851634149717bcc099ffb"
+      }
+    },
+    {
+      "name": "P11-transcript-changed",
+      "source": "accepted_mutation",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "transcript_hash_32": "1414141414141414141414141414141414141414141414141414141414141414"
+      },
+      "result": "accept",
+      "changed_outputs_relative_to_base": [
+        "canonical_context_bytes",
+        "seed_tag_input_bytes",
+        "seed",
+        "k1_wide_digest_0_tag_input_bytes",
+        "k1_wide_digest_0",
+        "k1_wide_digest_1_tag_input_bytes",
+        "k1_wide_digest_1",
+        "W_1",
+        "k1_be32",
+        "k2_wide_digest_0_tag_input_bytes",
+        "k2_wide_digest_0",
+        "k2_wide_digest_1_tag_input_bytes",
+        "k2_wide_digest_1",
+        "W_2",
+        "k2_be32",
+        "R_i1_sec1",
+        "R_i2_sec1"
+      ],
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010001ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd14141414141414141414141414141414141414141414141414141414141414140000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "effective_retry_counter_u64_le": "0000000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310909090909090909090909090909090909090909090909090909090909090909",
+        "mask": "fca02162d50f9076d0d542a759b74d86cd94fc00a1c86789e04b5fe64281e458",
+        "masked_signing_share": "fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a7631fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010001ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd14141414141414141414141414141414141414141414141414141414141414140000000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "seed": "b6c6ec6b4ffdc88c4ae53fe2921ca61b17c18c83b38ec55d81399f0f08e057f9",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631b6c6ec6b4ffdc88c4ae53fe2921ca61b17c18c83b38ec55d81399f0f08e057f90100",
+        "k1_wide_digest_0": "b647d0d2320c002fbd25844e53a8a3ce9f1ae60bbf8f33154cf263e4f80983eb",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631b6c6ec6b4ffdc88c4ae53fe2921ca61b17c18c83b38ec55d81399f0f08e057f90101",
+        "k1_wide_digest_1": "bd369f429cb8026e1ceb9d0360eccc3ec9f8d0eea370aeb1ae2691830fd872eb",
+        "W_1": "b647d0d2320c002fbd25844e53a8a3ce9f1ae60bbf8f33154cf263e4f80983ebbd369f429cb8026e1ceb9d0360eccc3ec9f8d0eea370aeb1ae2691830fd872eb",
+        "k1_be32": "e4bb8a516362159ab37eea1a97e165a712b5308473765c236d2f001b93e80817",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631b6c6ec6b4ffdc88c4ae53fe2921ca61b17c18c83b38ec55d81399f0f08e057f90200",
+        "k2_wide_digest_0": "e636ee6b93feec808f138c63d63bab5ce5cde8a157c29665a5dbd629679aa948",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631b6c6ec6b4ffdc88c4ae53fe2921ca61b17c18c83b38ec55d81399f0f08e057f90201",
+        "k2_wide_digest_1": "3a2afb542488d1ddf2a1903cfe7b408573eb9e8121f4dfe1baa8a5e692e4a940",
+        "W_2": "e636ee6b93feec808f138c63d63bab5ce5cde8a157c29665a5dbd629679aa9483a2afb542488d1ddf2a1903cfe7b408573eb9e8121f4dfe1baa8a5e692e4a940",
+        "k2_be32": "43e6110f790d261329ceff51d0743b28773feedda902b6c4a5d4b0f536274cda",
+        "R_i1_sec1": "03dca73884e65608382953f3cab403a2709d6dc87e7def7daf76e20ed87a38cfa0",
+        "R_i2_sec1": "03fa5e0ae99d77438c265c7d8f03e72c6fa54ecd36a93678268d758c56e6c23dbd"
+      }
+    },
+    {
+      "name": "P12-retry-counter-one",
+      "source": "accepted_mutation",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "retry_counter_u64_le": "0100000000000000"
+      },
+      "result": "accept",
+      "changed_outputs_relative_to_base": [
+        "canonical_context_bytes",
+        "effective_retry_counter_u64_le",
+        "seed_tag_input_bytes",
+        "seed",
+        "k1_wide_digest_0_tag_input_bytes",
+        "k1_wide_digest_0",
+        "k1_wide_digest_1_tag_input_bytes",
+        "k1_wide_digest_1",
+        "W_1",
+        "k1_be32",
+        "k2_wide_digest_0_tag_input_bytes",
+        "k2_wide_digest_0",
+        "k2_wide_digest_1_tag_input_bytes",
+        "k2_wide_digest_1",
+        "W_2",
+        "k2_be32",
+        "R_i1_sec1",
+        "R_i2_sec1"
+      ],
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010001ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0100000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "effective_retry_counter_u64_le": "0100000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310909090909090909090909090909090909090909090909090909090909090909",
+        "mask": "fca02162d50f9076d0d542a759b74d86cd94fc00a1c86789e04b5fe64281e458",
+        "masked_signing_share": "fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a7631fba72665d2089771d7d245a05eb04a81ca93fb07a6cf608ee74c58e14586e35f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa010101010101010101010101010101010101010101010101010101010101010101010001ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0100000000000000020002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9000000",
+        "seed": "f9b9805f6950c3d8ed4c7bfe5dbe341098ac0625315a5d781f89d1c6a59ccbc1",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631f9b9805f6950c3d8ed4c7bfe5dbe341098ac0625315a5d781f89d1c6a59ccbc10100",
+        "k1_wide_digest_0": "22c725c51b627f34a231485bd8fa89dbfbe2e1874f22c6b3b7d88fe8b166d492",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631f9b9805f6950c3d8ed4c7bfe5dbe341098ac0625315a5d781f89d1c6a59ccbc10101",
+        "k1_wide_digest_1": "d2ebfcaa91bf6a9f77aadbfddcccf4938aedbcba9ff5e69ffc2f8b29ef7821a3",
+        "W_1": "22c725c51b627f34a231485bd8fa89dbfbe2e1874f22c6b3b7d88fe8b166d492d2ebfcaa91bf6a9f77aadbfddcccf4938aedbcba9ff5e69ffc2f8b29ef7821a3",
+        "k1_be32": "a3468f284bf0eb64b40e3157104f5341fda70f42e9f64e6cbb61019fbc673639",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631f9b9805f6950c3d8ed4c7bfe5dbe341098ac0625315a5d781f89d1c6a59ccbc10200",
+        "k2_wide_digest_0": "eca93dce22ae23ab2a21cdbcc37ab5f4cc4486ddf9e7c7eb3ed01527cf314853",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a7631f9b9805f6950c3d8ed4c7bfe5dbe341098ac0625315a5d781f89d1c6a59ccbc10201",
+        "k2_wide_digest_1": "d989f5bac31410054c1f43dbbdff9ea7525dc2d8451eac03c8d2ee094f6c2f69",
+        "W_2": "eca93dce22ae23ab2a21cdbcc37ab5f4cc4486ddf9e7c7eb3ed01527cf314853d989f5bac31410054c1f43dbbdff9ea7525dc2d8451eac03c8d2ee094f6c2f69",
+        "k2_be32": "213daa23ba96596744976652de56161a818fa176b4846a741e7961b0990acbf3",
+        "R_i1_sec1": "027ac23a853f27dacd956389e93f8712784e74a2f026246e966d12e0df335b522b",
+        "R_i2_sec1": "02ccf2222e962ae23af751963a974f7893d5f351e914ada72e06b81968812546f3"
+      }
+    },
+    {
+      "name": "P13-signing-share-eight",
+      "source": "accepted_mutation",
+      "base_case": "B2-claim-adaptor-initiator-commit",
+      "replacements": {
+        "signing_share_be32": "0808080808080808080808080808080808080808080808080808080808080808",
+        "signing_public_key_sec1": "03f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b",
+        "participant_public_keys_sec1": [
+          "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+          "03f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b"
+        ],
+        "participant_index_u16_le": "0100"
+      },
+      "result": "accept",
+      "changed_outputs_relative_to_base": [
+        "canonical_context_bytes",
+        "masked_signing_share",
+        "seed_tag_input_bytes",
+        "seed",
+        "k1_wide_digest_0_tag_input_bytes",
+        "k1_wide_digest_0",
+        "k1_wide_digest_1_tag_input_bytes",
+        "k1_wide_digest_1",
+        "W_1",
+        "k1_be32",
+        "k2_wide_digest_0_tag_input_bytes",
+        "k2_wide_digest_0",
+        "k2_wide_digest_1_tag_input_bytes",
+        "k2_wide_digest_1",
+        "W_2",
+        "k2_be32",
+        "R_i1_sec1",
+        "R_i2_sec1"
+      ],
+      "outputs": {
+        "canonical_context_bytes": "0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa020202020202020202020202020202020202020202020202020202020202020202010001ababababababababababababababababababababababababababababababababbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbccdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd0000000000000000020002f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f903f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b010001022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "effective_retry_counter_u64_le": "0000000000000000",
+        "aux_tag_input_bytes": "2200444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d6175783a76310909090909090909090909090909090909090909090909090909090909090909",
+        "mask": "fca02162d50f9076d0d542a759b74d86cd94fc00a1c86789e04b5fe64281e458",
+        "masked_signing_share": "f4a8296add07987ed8dd4aaf51bf458ec59cf408a9c06f81e84357ee4a89ec50",
+        "seed_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d736565643a7631f4a8296add07987ed8dd4aaf51bf458ec59cf408a9c06f81e84357ee4a89ec500100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa020202020202020202020202020202020202020202020202020202020202020202010001ababababababababababababababababababababababababababababababababbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbccdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd0000000000000000020002f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f903f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b010001022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "seed": "6858725e79420d40660d45288d6ff81063daa76719b19fece1250e9362d58c77",
+        "k1_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76316858725e79420d40660d45288d6ff81063daa76719b19fece1250e9362d58c770100",
+        "k1_wide_digest_0": "501d54b04b343131f7b2a523bfdeb230cde2b0a73acc4a621b3990432a13691a",
+        "k1_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76316858725e79420d40660d45288d6ff81063daa76719b19fece1250e9362d58c770101",
+        "k1_wide_digest_1": "ad8cd47137081593bcde8c2e29a67bee7e902b265c956e279d501fdb052152aa",
+        "W_1": "501d54b04b343131f7b2a523bfdeb230cde2b0a73acc4a621b3990432a13691aad8cd47137081593bcde8c2e29a67bee7e902b265c956e279d501fdb052152aa",
+        "k1_be32": "037b42856cc9fc8ae3b385b0ce5a5e1ddaa6e17df2b558b6876d4b323049a0af",
+        "k2_wide_digest_0_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76316858725e79420d40660d45288d6ff81063daa76719b19fece1250e9362d58c770200",
+        "k2_wide_digest_0": "86de4f20d3ba6a8df3ea28cab6e206e2a5c1bb11b1bf6a62b07838d7210eacaa",
+        "k2_wide_digest_1_tag_input_bytes": "2300444f4d3a7363726970746c6573732d7365637265742d6e6f6e63652d776964653a76316858725e79420d40660d45288d6ff81063daa76719b19fece1250e9362d58c770201",
+        "k2_wide_digest_1": "20760b7ea856d96d072052a4c5883aeeffeb7aa888b0cd371644146265551256",
+        "W_2": "86de4f20d3ba6a8df3ea28cab6e206e2a5c1bb11b1bf6a62b07838d7210eacaa20760b7ea856d96d072052a4c5883aeeffeb7aa888b0cd371644146265551256",
+        "k2_be32": "25d05040f4e40822cb59d9af5a65a1b657c7a4c7634d1043b38aa6df61074fa7",
+        "R_i1_sec1": "0359c98687760003c6b63ec5eecc07814ff13d5e44b13abda78b9c81b121257a19",
+        "R_i2_sec1": "02a71c3c01d64231565be89e782050d1c4b1a417d692e1d7d5d0ebdb32ab8268e9"
+      }
+    }
+  ],
+  "rejected_cases": [
+    {
+      "name": "N1-purpose-zero",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "purpose_u8": "00"
+      },
+      "result": "reject",
+      "rejection_code": "unknown_purpose",
+      "detail": "unknown PurposeV1 discriminant"
+    },
+    {
+      "name": "N2-purpose-sponsor-strict-phase1",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "purpose_u8": "04"
+      },
+      "result": "reject",
+      "rejection_code": "sponsor_policy",
+      "detail": "Sponsor is codec-valid but rejected by strict Phase 1 derivation"
+    },
+    {
+      "name": "N3-purpose-unknown",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "purpose_u8": "05"
+      },
+      "result": "reject",
+      "rejection_code": "unknown_purpose",
+      "detail": "unknown PurposeV1 discriminant"
+    },
+    {
+      "name": "N4-direction-invalid",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "direction_u8": "03"
+      },
+      "result": "reject",
+      "rejection_code": "unknown_direction",
+      "detail": "unknown DirectionV1 discriminant"
+    },
+    {
+      "name": "N5-base-phase-outside-signing-subregistry",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "signing_phase_u16_le": "0000"
+      },
+      "result": "reject",
+      "rejection_code": "unknown_signing_phase",
+      "detail": "value is outside the closed SigningPhaseV1 subregistry"
+    },
+    {
+      "name": "N6-session-zero",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "session_id_32": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "result": "reject",
+      "rejection_code": "zero_session_id",
+      "detail": "session_id must be nonzero"
+    },
+    {
+      "name": "N7-participant-duplicate",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "participant_public_keys_sec1": [
+          "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+          "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f"
+        ]
+      },
+      "result": "reject",
+      "rejection_code": "duplicate_participant",
+      "detail": "participant roster contains a duplicate"
+    },
+    {
+      "name": "N8-participant-unsorted",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "participant_public_keys_sec1": [
+          "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+          "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f"
+        ],
+        "participant_index_u16_le": "0100"
+      },
+      "result": "reject",
+      "rejection_code": "unsorted_participant_roster",
+      "detail": "participant roster is not strictly ascending bytewise"
+    },
+    {
+      "name": "N9-participant-invalid-prefix",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "participant_public_keys_sec1": [
+          "ff989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+          "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+        ]
+      },
+      "result": "reject",
+      "rejection_code": "invalid_point",
+      "detail": "participant_public_keys_sec1[0] is not a 33-byte compressed SEC1 point"
+    },
+    {
+      "name": "N10-participant-index-out-of-range",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "participant_index_u16_le": "0200"
+      },
+      "result": "reject",
+      "rejection_code": "participant_index_out_of_range",
+      "detail": "participant index is outside the roster"
+    },
+    {
+      "name": "N11-claim-adaptor-identity",
+      "base_case": "B2-claim-adaptor-initiator-commit",
+      "replacements": {
+        "adaptor_point_sec1": "000000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "result": "reject",
+      "rejection_code": "invalid_point",
+      "detail": "adaptor_point_sec1 is not a 33-byte compressed SEC1 point"
+    },
+    {
+      "name": "N12-secret-public-key-mismatch",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "signing_share_be32": "0808080808080808080808080808080808080808080808080808080808080808"
+      },
+      "result": "reject",
+      "rejection_code": "signing_key_mismatch",
+      "detail": "signing_share*G does not equal signing_public_key"
+    },
+    {
+      "name": "N13-claim-missing-adaptor",
+      "base_case": "B2-claim-adaptor-initiator-commit",
+      "replacements": {
+        "adaptor_presence_u8": "00",
+        "adaptor_point_sec1": null,
+        "adaptor_secret_be32": null
+      },
+      "result": "reject",
+      "rejection_code": "claim_requires_adaptor",
+      "detail": "ClaimAdaptor requires a canonical adaptor point"
+    },
+    {
+      "name": "N14-refund-unexpected-adaptor",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "adaptor_presence_u8": "01",
+        "adaptor_point_sec1": "022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "adaptor_secret_be32": "0000000000000000000000000000000000000000000000000000000000000005"
+      },
+      "result": "reject",
+      "rejection_code": "unexpected_adaptor",
+      "detail": "this purpose does not authorize an adaptor point"
+    },
+    {
+      "name": "N15-funding-unexpected-adaptor",
+      "base_case": "B3-funding-initiator-commit",
+      "replacements": {
+        "adaptor_presence_u8": "01",
+        "adaptor_point_sec1": "022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "adaptor_secret_be32": "0000000000000000000000000000000000000000000000000000000000000005"
+      },
+      "result": "reject",
+      "rejection_code": "unexpected_adaptor",
+      "detail": "this purpose does not authorize an adaptor point"
+    },
+    {
+      "name": "N16-signing-share-zero",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "signing_share_be32": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "result": "reject",
+      "rejection_code": "invalid_signing_scalar",
+      "detail": "signing share must be in [1,n-1]"
+    },
+    {
+      "name": "N17-signing-share-equal-group-order",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "signing_share_be32": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"
+      },
+      "result": "reject",
+      "rejection_code": "invalid_signing_scalar",
+      "detail": "signing share must be in [1,n-1]"
+    },
+    {
+      "name": "N18-adaptor-presence-invalid",
+      "base_case": "B2-claim-adaptor-initiator-commit",
+      "replacements": {
+        "adaptor_presence_u8": "02"
+      },
+      "result": "reject",
+      "rejection_code": "invalid_adaptor_presence",
+      "detail": "adaptor presence must be 0x00 or 0x01"
+    },
+    {
+      "name": "N19-context-version-unknown",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "context_version_u16_le": "0200"
+      },
+      "result": "reject",
+      "rejection_code": "unknown_context_version",
+      "detail": "SessionContextV1 version must be 0x0001"
+    },
+    {
+      "name": "N20-chain-id-zero",
+      "base_case": "B1-refund-initiator-commit",
+      "replacements": {
+        "chain_id_32": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "result": "reject",
+      "rejection_code": "untrusted_chain_id",
+      "detail": "chain_id does not equal the fixture's trusted chain adapter value"
+    }
+  ],
+  "supplemental_full_adaptor_evidence": {
+    "generated": false,
+    "reason": "The signed input fixture supplies one local nonce derivation per case but no complete multi-party nonce inputs. Creating the missing participant inputs would be a supplemental construction, not an output derived solely from the signed fixture."
+  }
+}
