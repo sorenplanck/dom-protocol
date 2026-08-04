@@ -29,7 +29,8 @@ approve G1a, integrate G1b, or authorize production use.
 - authoritative `DOMSCTT1` template projection in `dom-consensus`;
 - exact template and unchanged kernel-message digest adapters;
 - transcript initialization, session-message digest, and update functions with
-  NAR-002 names and framing;
+  NAR-002 names and framing, including the exact update tag
+  `DOM:scriptless-transcript:v1`;
 - canonical signing-roster ordering in collective binding;
 - exact closed exposure-kind registry and 252-byte exposure permit;
 - exact outbound digest framing and permit digest;
@@ -37,7 +38,33 @@ approve G1a, integrate G1b, or authorize production use.
   pre-signature;
 - session-bound ClaimAdaptor validation; and
 - persistent fuzz parsing for the new closed registries, core pre-signature,
-  context, and permit.
+  context, permit record, and OS-randomized nonce derivation.
+
+## Independent-audit corrections
+
+Review of the first NAR-002 implementation commit found four safety-relevant
+API issues and one exact-tag error. They were corrected without rewriting
+history:
+
+1. the transcript update tag was corrected to the exact signed NAR-002 value
+   and protected by a literal independent-body test;
+2. public permit parsing now returns validation only and cannot materialize an
+   authorization capability;
+3. commitment, reveal, and partial signature each require a distinct matching
+   one-shot permit, and public export APIs remain crate-sealed pending G1b;
+4. the production KDF owns OS CSPRNG input; deterministic auxiliary input is
+   available only through the non-default `test-helpers` feature;
+5. the authoritative nonce pair is opaque and its only partial-sign operation
+   consumes the pair, removing the shared-reference double-sign path;
+6. secret `k256::Scalar` temporaries in public-key derivation, signing,
+   adaptation, and extraction are guarded by `Zeroizing` RAII; and
+7. session generation rejects zero participant/session IDs and requires an
+   injected storage-owned permanent uniqueness registry before returning a
+   usable identifier.
+
+The crate-sealed authorization code is intentionally not a production G1b
+implementation. It becomes reachable only through deliberate integration with
+the durable Wallet vault and witness boundary.
 
 The existing production paths retain all three purpose equations: ClaimAdaptor
 uses the aggregate nonce plus adaptor point, while Funding and Refund use the
@@ -61,14 +88,22 @@ No independent output was inspected while preparing this branch.
 
 | Command | Result |
 |---|---|
-| `cargo test -p dom-adaptor --locked` | PASS: 27 tests, including all eight SCAD0 fixtures |
+| `cargo test -p dom-adaptor --locked` | PASS: 28 tests, including all eight SCAD0 fixtures |
 | `cargo test -p dom-consensus scriptless_template_projection --locked` | PASS: authoritative projection test |
 | `cargo check -p dom-adaptor --locked` | PASS |
 | `sha256sum --check docs/scriptless/source-guides/normative/MANIFEST.sha256` | PASS |
 | Minisign verification of NAR-001, NAR-002, and KAT V2 | PASS |
+| `cargo +nightly fuzz check --fuzz-dir crates/dom-adaptor/fuzz` | PASS: all persistent targets compile with ASan instrumentation |
+| `cargo +nightly fuzz run nonce_derivation --fuzz-dir crates/dom-adaptor/fuzz -- -max_total_time=10 -print_final_stats=1` | PASS: 147,167 executions, zero crashes, peak RSS 114 MiB |
 
 The complete focused validation commands and final commit IDs are appended
 after the final validation run.
+
+Correction commits:
+
+- `1bb46ce` — `fix(scriptless): use ratified transcript update tag`
+- `1cd4a20` — `fix(scriptless): seal nonce derivation and exposure lifecycle`
+- `f4d35b9` — `test(scriptless): fuzz sealed nonce boundaries`
 
 ## Safety confirmation
 

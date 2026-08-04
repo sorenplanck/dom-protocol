@@ -36,6 +36,12 @@ NAR-002 is the byte authority for the following G1a boundaries:
 - participant identifiers, session identifiers, contract kind, protocol
   roster ordering, signing-roster mapping, and transcript domains use the
   exact NAR-002 tags and framing;
+- transcript updates use the exact tag `DOM:scriptless-transcript:v1` from
+  NAR-002 section 8.2; the rejected unratified string
+  `DOM:scriptless-transcript-update:v1` has no alias;
+- a usable session ID is returned only after a storage-owned registry durably
+  accepts it as never used; zero participant IDs and zero derived identifiers
+  fail closed;
 - complete transaction-template bytes are projected by `dom-consensus` while
   omitting only existing signature bytes; no existing DOM serialization is
   changed;
@@ -49,6 +55,12 @@ NAR-002 is the byte authority for the following G1a boundaries:
 - durable exposure permits are exactly 252 bytes and separately identify
   commitment, reveal, and partial-signature exposures; each permit binds the
   exact outbound digest; and
+- permit record parsing grants no capability: commitment, reveal, and partial
+  export paths remain crate-sealed until integrated G1b code supplies durable
+  witness-backed authorization;
+- the nonce derivation boundary owns OS randomness, deterministic auxiliary
+  input exists only under `test-helpers`, and an opaque nonce pair is consumed
+  by partial signing; and
 - degenerate scalars and identity aggregate points fail closed before public
   exposure.
 
@@ -62,6 +74,10 @@ NAR-002 is the byte authority for the following G1a boundaries:
   rejected because it removes required session binding.
 - Keeping the earlier six-field in-memory signing permit was rejected because
   it was not the ratified 252-byte G1b contract.
+- Returning a capability from a public byte parser was rejected because an
+  arbitrary caller could fabricate otherwise well-formed permit bytes.
+- A shared-reference partial-signing primitive was rejected because it permits
+  safe nonce reuse.
 
 ## Consequences
 
@@ -70,6 +86,11 @@ NAR-002 boundaries. Durable issuance of three exposure permits, witness
 receipts, nonce tombstones, and consume-before-export remain G1b responsibilities
 and must be proven at integration. Independent intermediate vector comparison
 also remains outside this branch.
+
+All local `k256::Scalar` copies carrying nonce, signing-share, adaptor-secret,
+or extracted-secret material are owned by `Zeroizing` RAII guards. The opaque
+nonce-pair signing method consumes `self`, so early return also retires both
+secret nonces.
 
 ## Compatibility
 
