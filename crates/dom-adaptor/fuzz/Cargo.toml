@@ -51,4 +51,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "dsc1_signing_round"
+path = "fuzz_targets/dsc1_signing_round.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
