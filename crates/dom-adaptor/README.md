@@ -16,6 +16,10 @@ The current implementation provides:
 - the ratified secret two-nonce KDF through DOM's authoritative hash and scalar boundaries;
 - opaque pre-authorization and authorized one-shot nonce-pair ownership;
 - participant-bound partial signing, verification, and aggregation;
+- a vault-backed recovery surface whose abort operations consume every live
+  signer state and whose restore status is delegated read-only;
+- exact restart resend by public `PermitIdV1`, closed artifact kind, and trusted
+  adaptor outbound digest, returning only a canonical typed artifact;
 - closed, versioned Funding, Claim Adaptor, and Refund purposes;
 - canonical fixed-width commitment, reveal, partial-signature, and adaptor
   pre-signature payloads;
@@ -32,5 +36,14 @@ they do not authorize production use or replace external security review.
 This crate also defines the storage-independent G1b lifecycle, permit, and
 one-shot signer contracts. Durable persistence belongs to the independent DOM
 Contracts application and must not be implemented by the ordinary DOM Wallet.
+The public permit ID is only a restart lookup key: it carries no live export
+capability and authorizes nothing by itself. `VaultBackedSignerV1` exposes no
+vault extraction, mutable vault accessor, trait-object plugin boundary, or raw
+resend output. A concrete vault must reopen and validate its retained spent
+authority before returning an exact resend candidate.
+
 Neither G1a nor G1b is unilaterally adjudicated by this crate, and production
-remains unauthorized until every applicable gate has executed evidence.
+remains unauthorized until every applicable gate has executed evidence. This
+recovery revision also requires separate review, public commitment, and a new
+DOM Contracts dependency pin before NAR-DC-P1-003 recovery conformance can be
+treated as closed.
