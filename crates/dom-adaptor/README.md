@@ -18,9 +18,11 @@ The current implementation provides:
 - participant-bound partial signing, verification, and aggregation;
 - a vault-backed recovery surface whose abort operations consume every live
   signer state and whose restore status is delegated read-only;
-- request-authorized exact resend while the trusted signer retains the complete
-  nonce identity, closed artifact kind, and canonical outbound digest, returning
-  only a canonical typed artifact;
+- request-authorized exact resend that first obtains a Store-owned recovered
+  spent-artifact snapshot, binds its complete nonce identity, closed kind, and
+  canonical outbound digest, and then returns only a canonical typed artifact;
+- a single-operation Store-owned retained-reservation snapshot contract whose
+  handles expose no fragmented public getters;
 - closed, versioned Funding, Claim Adaptor, and Refund purposes;
 - canonical fixed-width commitment, reveal, partial-signature, and adaptor
   pre-signature payloads;
@@ -44,11 +46,12 @@ resend output. A concrete vault must reopen and validate its retained spent
 authority before returning an exact resend candidate.
 
 Neither G1a nor G1b is unilaterally adjudicated by this crate, and production
-remains unauthorized until every applicable gate has executed evidence. This
-recovery revision also requires separate review, public commitment, and a new
-DOM Contracts dependency pin before NAR-DC-P1-003 recovery conformance can be
-treated as closed. Production accepted-session construction, post-restart
-resend identity rehydration, and an atomic retained-handle snapshot remain
-blocked on a signed interface amendment. The source-shaped signing-session
-constructor is quarantined to tests/fuzzing, and the production API fails
-closed instead of inferring any of these authorities.
+remains unauthorized until every applicable gate has executed evidence. The
+NAR-DC-P1-006 semantic interfaces for accepted-session authority, atomic
+reservation snapshots, and Store-owned restart resend recovery are ratified
+and implemented here. Their concrete DOM Contracts Store/session providers,
+independent review, public commitment, and immutable dependency pin remain
+separate gates. The accepted-session production entry is intentionally absent
+until that concrete provider conforms. Source-shaped signing-session
+construction remains quarantined to tests/fuzzing, and the production API
+fails closed instead of inferring acceptance authority.
