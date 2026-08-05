@@ -1,0 +1,2150 @@
+{
+  "exhaustive_single_bit": {
+    "method": "Flip each of the eight individual bits at every byte offset, changing only one artifact at a time.",
+    "proof": {
+      "accepted": [],
+      "bytes": 65,
+      "mutations_rejected": 520,
+      "mutations_tested": 520,
+      "per_byte": [
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not a 33-byte compressed SEC1 encoding"
+          ],
+          "offset": 0,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 1,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 2,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 3,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 4,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 5,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 6,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 7,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 8,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 9,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 10,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 11,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 12,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 13,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 14,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 15,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 16,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 17,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 18,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 19,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 20,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 21,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 22,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 23,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 24,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 25,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 26,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 27,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 28,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 29,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "point is not on secp256k1"
+          ],
+          "offset": 30,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 31,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 32,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 33,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 34,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 35,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 36,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 37,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 38,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 39,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 40,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 41,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 42,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 43,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 44,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 45,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 46,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 47,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 48,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 49,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 50,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 51,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 52,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 53,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 54,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 55,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 56,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 57,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 58,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 59,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 60,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 61,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 62,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 63,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch"
+          ],
+          "offset": 64,
+          "rejected_bit_mask": "ff"
+        }
+      ]
+    },
+    "statement": {
+      "accepted": [],
+      "bytes": 202,
+      "mutations_rejected": 1616,
+      "mutations_tested": 1616,
+      "per_byte": [
+        {
+          "distinct_rejection_reasons": [
+            "statement magic mismatch"
+          ],
+          "offset": 0,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "statement magic mismatch"
+          ],
+          "offset": 1,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "statement magic mismatch"
+          ],
+          "offset": 2,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "statement magic mismatch"
+          ],
+          "offset": 3,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "statement version mismatch"
+          ],
+          "offset": 4,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "statement version mismatch"
+          ],
+          "offset": 5,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 6,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 7,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 8,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 9,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 10,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 11,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 12,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 13,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 14,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 15,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 16,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 17,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 18,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 19,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 20,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 21,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 22,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 23,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 24,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 25,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 26,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 27,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 28,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 29,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 30,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 31,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 32,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 33,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 34,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 35,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 36,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "chain_id does not match expected context"
+          ],
+          "offset": 37,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 38,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 39,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 40,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 41,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 42,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 43,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 44,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 45,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 46,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 47,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 48,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 49,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 50,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 51,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 52,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 53,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 54,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 55,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 56,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 57,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 58,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 59,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 60,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 61,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 62,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 63,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 64,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 65,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 66,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 67,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 68,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "session_id does not match expected context"
+          ],
+          "offset": 69,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 70,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 71,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 72,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 73,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 74,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 75,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 76,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 77,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 78,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 79,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 80,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 81,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 82,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 83,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 84,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 85,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 86,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 87,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 88,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 89,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 90,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 91,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 92,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 93,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 94,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 95,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 96,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 97,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 98,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 99,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 100,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index"
+          ],
+          "offset": 101,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "role is not registered"
+          ],
+          "offset": 102,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant identifier does not match roster index",
+            "participant index is outside roster"
+          ],
+          "offset": 103,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "participant index is outside roster"
+          ],
+          "offset": 104,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not a 33-byte compressed SEC1 encoding"
+          ],
+          "offset": 105,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 106,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 107,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 108,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 109,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 110,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 111,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 112,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 113,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 114,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 115,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 116,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 117,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 118,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 119,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 120,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 121,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 122,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 123,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 124,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 125,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 126,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 127,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 128,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 129,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 130,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 131,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 132,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 133,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 134,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 135,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 136,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "Schnorr verification equation mismatch",
+            "point is not on secp256k1"
+          ],
+          "offset": 137,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 138,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 139,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 140,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 141,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 142,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 143,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 144,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 145,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 146,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 147,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 148,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 149,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 150,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 151,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 152,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 153,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 154,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 155,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 156,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 157,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 158,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 159,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 160,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 161,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 162,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 163,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 164,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 165,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 166,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 167,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 168,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "terms_hash does not match expected context"
+          ],
+          "offset": 169,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 170,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 171,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 172,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 173,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 174,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 175,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 176,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 177,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 178,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 179,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 180,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 181,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 182,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 183,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 184,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 185,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 186,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 187,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 188,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 189,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 190,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 191,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 192,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 193,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 194,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 195,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 196,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 197,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 198,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 199,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 200,
+          "rejected_bit_mask": "ff"
+        },
+        {
+          "distinct_rejection_reasons": [
+            "recovery_binding_hash does not match expected context"
+          ],
+          "offset": 201,
+          "rejected_bit_mask": "ff"
+        }
+      ]
+    },
+    "total_mutations_rejected": 2136,
+    "total_mutations_tested": 2136
+  },
+  "targeted": {
+    "cases": [
+      {
+        "accepted": false,
+        "description": "Remove the last statement byte.",
+        "name": "statement_truncated",
+        "result": "statement length is not exactly 202"
+      },
+      {
+        "accepted": false,
+        "description": "Append one trailing statement byte.",
+        "name": "statement_trailing",
+        "result": "statement length is not exactly 202"
+      },
+      {
+        "accepted": false,
+        "description": "Flip one bit in DSPO magic.",
+        "name": "bad_magic",
+        "result": "statement magic mismatch"
+      },
+      {
+        "accepted": false,
+        "description": "Flip one bit in the little-endian version.",
+        "name": "bad_version",
+        "result": "statement version mismatch"
+      },
+      {
+        "accepted": false,
+        "description": "Replace chain_id with zero.",
+        "name": "zero_chain_id",
+        "result": "chain_id is zero"
+      },
+      {
+        "accepted": false,
+        "description": "Flip one bit in chain_id.",
+        "name": "wrong_chain_id",
+        "result": "chain_id does not match expected context"
+      },
+      {
+        "accepted": false,
+        "description": "Replace session_id with zero.",
+        "name": "zero_session_id",
+        "result": "session_id is zero"
+      },
+      {
+        "accepted": false,
+        "description": "Flip one bit in session_id.",
+        "name": "wrong_session_id",
+        "result": "session_id does not match expected context"
+      },
+      {
+        "accepted": false,
+        "description": "Replace participant_id with zero.",
+        "name": "zero_participant_id",
+        "result": "participant_id is zero"
+      },
+      {
+        "accepted": false,
+        "description": "Use the other roster participant at index zero.",
+        "name": "wrong_participant_id",
+        "result": "participant identifier does not match roster index"
+      },
+      {
+        "accepted": false,
+        "description": "Set role to unregistered zero.",
+        "name": "invalid_role",
+        "result": "role is not registered"
+      },
+      {
+        "accepted": false,
+        "description": "Change Initiator to Responder.",
+        "name": "role_mismatch",
+        "result": "role does not match expected context"
+      },
+      {
+        "accepted": false,
+        "description": "Change index zero to one without changing participant_id.",
+        "name": "index_roster_mismatch",
+        "result": "participant identifier does not match roster index"
+      },
+      {
+        "accepted": false,
+        "description": "Set index equal to roster length.",
+        "name": "index_out_of_range",
+        "result": "participant index is outside roster"
+      },
+      {
+        "accepted": false,
+        "description": "Replace share point with a non-SEC1 all-zero surrogate.",
+        "name": "invalid_share_point",
+        "result": "point is not a 33-byte compressed SEC1 encoding"
+      },
+      {
+        "accepted": false,
+        "description": "Replace 7G with the valid point 8G.",
+        "name": "wrong_valid_share_point",
+        "result": "Schnorr verification equation mismatch"
+      },
+      {
+        "accepted": false,
+        "description": "Replace terms_hash with zero.",
+        "name": "zero_terms_hash",
+        "result": "terms_hash is zero"
+      },
+      {
+        "accepted": false,
+        "description": "Flip one bit in terms_hash.",
+        "name": "wrong_terms_hash",
+        "result": "terms_hash does not match expected context"
+      },
+      {
+        "accepted": false,
+        "description": "Replace recovery binding hash with zero.",
+        "name": "zero_recovery_binding",
+        "result": "recovery_binding_hash is zero"
+      },
+      {
+        "accepted": false,
+        "description": "Flip one bit in recovery binding hash.",
+        "name": "wrong_recovery_binding",
+        "result": "recovery_binding_hash does not match expected context"
+      },
+      {
+        "accepted": false,
+        "description": "Remove the last proof byte.",
+        "name": "proof_truncated",
+        "result": "proof length is not exactly 65"
+      },
+      {
+        "accepted": false,
+        "description": "Append one trailing proof byte.",
+        "name": "proof_trailing",
+        "result": "proof length is not exactly 65"
+      },
+      {
+        "accepted": false,
+        "description": "Replace A with a non-SEC1 all-zero surrogate.",
+        "name": "invalid_nonce_commitment",
+        "result": "point is not a 33-byte compressed SEC1 encoding"
+      },
+      {
+        "accepted": false,
+        "description": "Replace 9G with the valid point 10G.",
+        "name": "wrong_valid_nonce_commitment",
+        "result": "Schnorr verification equation mismatch"
+      },
+      {
+        "accepted": false,
+        "description": "Set the structurally permitted response to zero; the equation still fails.",
+        "name": "zero_response",
+        "result": "Schnorr verification equation mismatch"
+      },
+      {
+        "accepted": false,
+        "description": "Set response bytes equal to group order q.",
+        "name": "noncanonical_response_q",
+        "result": "response scalar is noncanonical"
+      },
+      {
+        "accepted": false,
+        "description": "Increment response modulo q.",
+        "name": "wrong_canonical_response",
+        "result": "Schnorr verification equation mismatch"
+      },
+      {
+        "accepted": false,
+        "description": "Supply a duplicate participant roster.",
+        "name": "duplicate_roster",
+        "result": "roster contains a duplicate participant"
+      },
+      {
+        "accepted": false,
+        "description": "Supply a nonascending participant roster.",
+        "name": "descending_roster",
+        "result": "roster is not ascending"
+      },
+      {
+        "accepted": false,
+        "description": "Verify the Initiator statement in a Responder context.",
+        "name": "expected_role_mismatch",
+        "result": "role does not match expected context"
+      },
+      {
+        "accepted": false,
+        "description": "Verify index zero when index one is expected.",
+        "name": "expected_index_mismatch",
+        "result": "participant index does not match expected context"
+      }
+    ],
+    "cases_rejected": 31,
+    "cases_tested": 31
+  }
+}

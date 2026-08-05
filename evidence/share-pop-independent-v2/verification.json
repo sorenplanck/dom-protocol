@@ -1,0 +1,13 @@
+{
+  "accepted": true,
+  "equation": "zG == A + cR_i",
+  "lhs_equals_rhs": true,
+  "lhs_zG_compressed": "02ec5a4a067f8ea4c7add372fd8a9f4c5209bea05a00ee082f89bf77805cb89661",
+  "rearranged_left_compressed": "03acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe",
+  "rearranged_right_A_compressed": "03acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe",
+  "rearranged_sides_equal": true,
+  "response_zero_codec_policy": "zero is parsed as canonical; acceptance still requires the equation",
+  "result": "accepted",
+  "rhs_A_plus_cR_i_compressed": "02ec5a4a067f8ea4c7add372fd8a9f4c5209bea05a00ee082f89bf77805cb89661",
+  "verifier_equivalent_equation": "zG + (q-c)R_i == A"
+}

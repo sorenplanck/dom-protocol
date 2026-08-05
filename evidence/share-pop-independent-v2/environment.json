@@ -1,0 +1,11 @@
+{
+  "cryptography_version": "41.0.7",
+  "elliptic_curve_backend": "OpenSSL EC API through cryptography.hazmat.bindings",
+  "generator_language": "Python",
+  "hash_implementation": "Python standard-library hashlib.blake2b(digest_size=32)",
+  "hashlib_blake2b_module": "_blake2",
+  "openssl_version": "OpenSSL 3.0.13 30 Jan 2024",
+  "python_full_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+  "python_implementation": "CPython",
+  "python_version": "3.12.3"
+}
