@@ -64,6 +64,17 @@
 //! use dom_adaptor::SigningRoundSessionRequestV1;
 //! ```
 //!
+//! A caller-defined implementation of the semantic accepted-session view
+//! cannot invoke a production round constructor; that entry remains absent:
+//!
+//! ```compile_fail
+//! use dom_adaptor::{AcceptedSigningSessionV1, SigningShareV1,
+//!     ValidatedSigningRoundStateV1};
+//! fn start<S: AcceptedSigningSessionV1>(session: S, share: &SigningShareV1) {
+//!     let _round = ValidatedSigningRoundStateV1::from_accepted_session(session, share);
+//! }
+//! ```
+//!
 //! The persistent DSC1 fuzz harness is unavailable in ordinary builds:
 //!
 //! ```compile_fail
@@ -94,16 +105,20 @@
 //!
 //! ```compile_fail
 //! use dom_adaptor::{NonceVaultV1, ReservationLookupCustodyV1, VaultBackedSignerV1};
-//! fn escape<V: NonceVaultV1, C: ReservationLookupCustodyV1>(
-//!     signer: &mut VaultBackedSignerV1<V, C>) {
+//! use dom_adaptor::SigningSessionAuthorityV1;
+//! fn escape<V: NonceVaultV1, C: ReservationLookupCustodyV1,
+//!           S: SigningSessionAuthorityV1>(
+//!     signer: &mut VaultBackedSignerV1<V, C, S>) {
 //!     let _vault = signer.vault_mut();
 //! }
 //! ```
 //!
 //! ```compile_fail
 //! use dom_adaptor::{NonceVaultV1, ReservationLookupCustodyV1, VaultBackedSignerV1};
-//! fn escape<V: NonceVaultV1, C: ReservationLookupCustodyV1>(
-//!     signer: VaultBackedSignerV1<V, C>) {
+//! use dom_adaptor::SigningSessionAuthorityV1;
+//! fn escape<V: NonceVaultV1, C: ReservationLookupCustodyV1,
+//!           S: SigningSessionAuthorityV1>(
+//!     signer: VaultBackedSignerV1<V, C, S>) {
 //!     let _vault = signer.into_inner();
 //! }
 //! ```
@@ -192,9 +207,9 @@ pub use share_pop::{
     prove_share_knowledge_v1, verify_share_knowledge_v1, SharePoPStatementV1, ShareProofV1,
 };
 pub use signing_round::{
-    AcceptedMessageDispositionV1, ValidatedAcceptedSessionMessageV1, ValidatedCommitmentRoundV1,
-    ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1, ValidatedRevealRoundV1,
-    ValidatedSigningRoundStateV1,
+    AcceptedMessageDispositionV1, AcceptedSigningSessionV1, SigningSessionAuthorityV1,
+    ValidatedAcceptedSessionMessageV1, ValidatedCommitmentRoundV1, ValidatedDerivationBaseV1,
+    ValidatedResendAuthorizationV1, ValidatedRevealRoundV1, ValidatedSigningRoundStateV1,
 };
 
 #[cfg(fuzzing)]

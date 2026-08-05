@@ -7,11 +7,11 @@ use crate::{
     NonceVaultError, NonceVaultV1, PartialSignatureV1, PreparedExposureV1, PublicNoncePairV1,
     ResendProtocolStageV1, ResendRequestV1, ReservationContextBindingV1, ReservationLiveStageV1,
     ReservationLookupCustodyV1, ReservationRequestLookupV1, ReservationResumeRequestV1,
-    ReservationResumeResultV1, RestoreState, SessionContextV1, SigningShareV1,
-    SpentArtifactDescriptorV1, TerminalReservationV1, TrustedChainIdV1, ValidatedCommitmentRoundV1,
-    ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1, ValidatedRevealRoundV1,
-    VaultArtifactPersistencePermitV1, VaultExportedArtifactV1, VaultReservationHandleV1,
-    VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
+    ReservationResumeResultV1, RestoreState, SessionContextV1, SigningSessionAuthorityV1,
+    SigningShareV1, SpentArtifactDescriptorV1, TerminalReservationV1, TrustedChainIdV1,
+    ValidatedCommitmentRoundV1, ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1,
+    ValidatedRevealRoundV1, VaultArtifactPersistencePermitV1, VaultExportedArtifactV1,
+    VaultReservationHandleV1, VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
 };
 use core::fmt;
 use dom_crypto::{schnorr_challenge, PartialSig};
@@ -193,13 +193,15 @@ impl ResentArtifactV1 {
 }
 
 /// High-level signer owning one statically selected vault, custody store, and share.
-pub struct VaultBackedSignerV1<Vault, Custody>
+pub struct VaultBackedSignerV1<Vault, Custody, Sessions>
 where
     Vault: NonceVaultV1,
     Custody: ReservationLookupCustodyV1,
+    Sessions: SigningSessionAuthorityV1,
 {
     vault: Vault,
     custody: Custody,
+    _sessions: Sessions,
     trusted_chain_id: TrustedChainIdV1,
     signing_share: SigningShareV1,
 }
@@ -212,21 +214,24 @@ type SignerResult<Vault, Custody, Value> = core::result::Result<
     >,
 >;
 
-impl<Vault, Custody> VaultBackedSignerV1<Vault, Custody>
+impl<Vault, Custody, Sessions> VaultBackedSignerV1<Vault, Custody, Sessions>
 where
     Vault: NonceVaultV1,
     Custody: ReservationLookupCustodyV1,
+    Sessions: SigningSessionAuthorityV1,
 {
     /// Bind all security-critical dependencies statically at the composition root.
     pub fn new(
         vault: Vault,
         custody: Custody,
+        sessions: Sessions,
         trusted_chain_id: TrustedChainIdV1,
         signing_share: SigningShareV1,
     ) -> Self {
         Self {
             vault,
             custody,
+            _sessions: sessions,
             trusted_chain_id,
             signing_share,
         }

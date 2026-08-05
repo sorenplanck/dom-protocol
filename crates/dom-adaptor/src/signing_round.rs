@@ -4,14 +4,14 @@ use crate::vault_operation::{CommitmentEntryV1, RevealEntryV1};
 use crate::{
     advance_transcript_hash_v1, aggregate_public_nonces_v1, binding_factor_v1,
     nonce_commitment_hash_v1, session_message_digest_v1, AdaptorError, BindingContextV1,
-    BindingFactorV1, NonceCommitmentV1, NonceRevealV1, PartialSignatureV1,
+    BindingFactorV1, ContractKindV1, NonceCommitmentV1, NonceRevealV1, PartialSignatureV1,
     ParticipantPublicNoncesV1, ParticipantRosterV1, ProtocolCommitmentSetV1, ProtocolRevealSetV1,
     PurposeV1, ResendProtocolStageV1, Result, SessionContextV1, SigningPhaseV1,
     StageComputationRequestV1, TrustedChainIdV1,
 };
 #[cfg(any(test, fuzzing))]
 use crate::{
-    canonical_template_v1, initial_transcript_hash_v1, ContractKindV1, ParticipantIdentityV1,
+    canonical_template_v1, initial_transcript_hash_v1, ParticipantIdentityV1,
     SessionContextInputsV1, SigningShareV1,
 };
 use dom_crypto::{schnorr_verify, PublicKey, SchnorrSignature};
@@ -23,6 +23,46 @@ const KIND_NONCE_COMMITMENT: u8 = 0x0c;
 const KIND_NONCE_REVEAL: u8 = 0x0d;
 const KIND_PARTIAL_SIGNATURE: u8 = 0x0e;
 const MAX_PENDING_SIGNING_MESSAGES: usize = 6;
+
+/// Statically selected DOM Contracts authority for accepted signing sessions.
+///
+/// The trait intentionally exposes no caller-driven lookup or construction
+/// method. A later DOM Contracts composition root owns the concrete authority
+/// and the private constructor of its associated accepted-session handle.
+pub trait SigningSessionAuthorityV1: Sized {
+    /// Redacted error reported by the trusted session store.
+    type Error: core::error::Error + Send + Sync + 'static;
+    /// Opaque one-shot session accepted by that exact static authority.
+    type AcceptedSession: AcceptedSigningSessionV1;
+}
+
+/// Immutable semantic view of one durably accepted signing session.
+///
+/// Implementations belong to the statically selected DOM Contracts session
+/// store. The default production build deliberately exposes no constructor or
+/// signing-round entry that accepts this trait generically.
+pub trait AcceptedSigningSessionV1 {
+    /// Return the chain ID authenticated by the local chain adapter.
+    fn trusted_chain_id(&self) -> &TrustedChainIdV1;
+    /// Return the lifetime-unique accepted session identifier.
+    fn session_id(&self) -> &[u8; 32];
+    /// Return the closed accepted contract kind.
+    fn contract_kind(&self) -> ContractKindV1;
+    /// Return the strict accepted Phase 1 purpose.
+    fn purpose(&self) -> PurposeV1;
+    /// Return the immutable accepted two-party roster.
+    fn roster(&self) -> &ParticipantRosterV1;
+    /// Return the immutable accepted DOM transaction template.
+    fn transaction_template(&self) -> &dom_consensus::Transaction;
+    /// Return the accepted kernel index in the transaction template.
+    fn kernel_index(&self) -> usize;
+    /// Return the accepted adaptor point, when the purpose requires it.
+    fn adaptor_point(&self) -> Option<&PublicKey>;
+    /// Return the transcript hash retained by the accepted-session store.
+    fn initial_transcript_hash(&self) -> &[u8; 32];
+    /// Iterate complete accepted DSC1 envelopes in canonical replay order.
+    fn accepted_signing_messages(&self) -> impl Iterator<Item = &[u8]>;
+}
 
 /// Result of supplying one authenticated DSC1 message to the round owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -476,6 +516,55 @@ struct PartialPublicInputsV1 {
 }
 
 impl ValidatedSigningRoundStateV1 {
+    /// Build and replay a trusted accepted session only for crate tests and fuzzing.
+    ///
+    /// The method is deliberately absent from production builds until DOM
+    /// Contracts supplies the concrete statically selected session authority.
+    #[cfg(any(test, fuzzing))]
+    pub(crate) fn from_accepted_session<Session>(
+        session: Session,
+        signing_share: &SigningShareV1,
+    ) -> Result<Self>
+    where
+        Session: AcceptedSigningSessionV1,
+    {
+        let request = SigningRoundSessionRequestV1::new(
+            *session.session_id(),
+            session.contract_kind(),
+            session.purpose(),
+            session.roster().clone(),
+            session.transaction_template().clone(),
+            session.kernel_index(),
+            session.adaptor_point().cloned(),
+        )?;
+        let bootstrap = ValidatedSigningRoundBootstrapV1::from_session_request(
+            *session.trusted_chain_id(),
+            request,
+            signing_share,
+        )?;
+        if bootstrap.base_context.transcript_hash() != session.initial_transcript_hash() {
+            return Err(AdaptorError::InvalidTranscript(
+                "accepted-session initial transcript mismatch",
+            ));
+        }
+        let mut state = Self::from_bootstrap(bootstrap, signing_share)?;
+        let mut count = 0usize;
+        for message in session.accepted_signing_messages() {
+            count = count.checked_add(1).ok_or(AdaptorError::InvalidTranscript(
+                "accepted replay length overflow",
+            ))?;
+            if count > MAX_PENDING_SIGNING_MESSAGES
+                || state.accept_message(message)? != AcceptedMessageDispositionV1::Advanced
+                || !state.pending.is_empty()
+            {
+                return Err(AdaptorError::InvalidTranscript(
+                    "accepted-session replay is not a canonical bounded prefix",
+                ));
+            }
+        }
+        Ok(state)
+    }
+
     #[cfg(any(test, fuzzing))]
     pub(crate) fn from_bootstrap(
         bootstrap: ValidatedSigningRoundBootstrapV1,
@@ -1433,6 +1522,150 @@ mod tests {
             }],
             offset: [0x2a; 32],
         }
+    }
+
+    struct TestAcceptedSession {
+        chain: TrustedChainIdV1,
+        session_id: [u8; 32],
+        roster: ParticipantRosterV1,
+        transaction: Transaction,
+        initial_transcript: [u8; 32],
+        messages: Vec<Vec<u8>>,
+    }
+
+    impl AcceptedSigningSessionV1 for TestAcceptedSession {
+        fn trusted_chain_id(&self) -> &TrustedChainIdV1 {
+            &self.chain
+        }
+
+        fn session_id(&self) -> &[u8; 32] {
+            &self.session_id
+        }
+
+        fn contract_kind(&self) -> ContractKindV1 {
+            ContractKindV1::WitnessOrTimeout
+        }
+
+        fn purpose(&self) -> PurposeV1 {
+            PurposeV1::Refund
+        }
+
+        fn roster(&self) -> &ParticipantRosterV1 {
+            &self.roster
+        }
+
+        fn transaction_template(&self) -> &Transaction {
+            &self.transaction
+        }
+
+        fn kernel_index(&self) -> usize {
+            0
+        }
+
+        fn adaptor_point(&self) -> Option<&PublicKey> {
+            None
+        }
+
+        fn initial_transcript_hash(&self) -> &[u8; 32] {
+            &self.initial_transcript
+        }
+
+        fn accepted_signing_messages(&self) -> impl Iterator<Item = &[u8]> {
+            self.messages.iter().map(Vec::as_slice)
+        }
+    }
+
+    struct TestSessionAuthority;
+
+    impl SigningSessionAuthorityV1 for TestSessionAuthority {
+        type Error = std::io::Error;
+        type AcceptedSession = TestAcceptedSession;
+    }
+
+    fn fresh_accepted_session() -> (TestAcceptedSession, SigningShareV1) {
+        let chain = TrustedChainIdV1::from_signed_fixture([0x71; 32]);
+        let identity_a = SecretKey::from_bytes(&[0x72; 32]).expect("identity secret");
+        let identity_b = SecretKey::from_bytes(&[0x73; 32]).expect("identity secret");
+        let share_a = SigningShareV1::from_be_bytes([0x74; 32]).expect("signing share");
+        let share_b = SigningShareV1::from_be_bytes([0x75; 32]).expect("signing share");
+        let mut entries = vec![
+            ParticipantIdentityV1::new(
+                &chain,
+                identity_a.public_key(),
+                share_a.public_key().clone(),
+                DirectionV1::Initiator,
+            )
+            .expect("participant"),
+            ParticipantIdentityV1::new(
+                &chain,
+                identity_b.public_key(),
+                share_b.public_key().clone(),
+                DirectionV1::Responder,
+            )
+            .expect("participant"),
+        ];
+        entries.sort_by_key(|entry| *entry.participant_id());
+        let roster = ParticipantRosterV1::new(entries).expect("roster");
+        let mut signing_keys: Vec<_> = roster
+            .entries()
+            .iter()
+            .map(|entry| entry.signing_public_key().clone())
+            .collect();
+        signing_keys.sort_by_key(PublicKey::to_compressed_bytes);
+        let transaction = transaction_for_signing_keys(&signing_keys);
+        let session_id = [0x76; 32];
+        let initial_transcript = initial_transcript_hash_v1(
+            &chain,
+            &session_id,
+            ContractKindV1::WitnessOrTimeout,
+            &roster,
+        );
+        let local_share = if roster.entries()[0].signing_public_key() == share_a.public_key() {
+            share_a
+        } else {
+            share_b
+        };
+        (
+            TestAcceptedSession {
+                chain,
+                session_id,
+                roster,
+                transaction,
+                initial_transcript,
+                messages: Vec::new(),
+            },
+            local_share,
+        )
+    }
+
+    #[test]
+    fn accepted_session_authority_is_static_and_fresh_replay_is_empty() {
+        fn assert_static_authority<Authority: SigningSessionAuthorityV1>() {}
+        assert_static_authority::<TestSessionAuthority>();
+        let (session, local_share) = fresh_accepted_session();
+        let state = ValidatedSigningRoundStateV1::from_accepted_session(session, &local_share)
+            .expect("accepted session");
+        assert!(state.commitments.is_empty());
+        assert!(state.reveals.is_empty());
+        assert!(state.partials.is_empty());
+        assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn accepted_session_rejects_mutated_initial_transcript_and_replay() {
+        let (mut session, local_share) = fresh_accepted_session();
+        session.initial_transcript[0] ^= 1;
+        assert!(
+            ValidatedSigningRoundStateV1::from_accepted_session(session, &local_share).is_err()
+        );
+
+        let (mut session, local_share) = fresh_accepted_session();
+        session
+            .messages
+            .push(b"not a complete DSC1 envelope".to_vec());
+        assert!(
+            ValidatedSigningRoundStateV1::from_accepted_session(session, &local_share).is_err()
+        );
     }
 
     struct CommitmentFixture {
