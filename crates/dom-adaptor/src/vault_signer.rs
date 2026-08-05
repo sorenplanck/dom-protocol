@@ -8,10 +8,10 @@ use crate::{
     ResendProtocolStageV1, ResendRequestV1, ReservationContextBindingV1, ReservationLiveStageV1,
     ReservationLookupCustodyV1, ReservationRequestLookupV1, ReservationResumeRequestV1,
     ReservationResumeResultV1, RestoreState, SessionContextV1, SigningSessionAuthorityV1,
-    SigningShareV1, SpentArtifactDescriptorV1, TerminalReservationV1, TrustedChainIdV1,
-    ValidatedCommitmentRoundV1, ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1,
-    ValidatedRevealRoundV1, VaultArtifactPersistencePermitV1, VaultExportedArtifactV1,
-    VaultReservationHandleV1, VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
+    SigningShareV1, TerminalReservationV1, TrustedChainIdV1, ValidatedCommitmentRoundV1,
+    ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1, ValidatedRevealRoundV1,
+    VaultArtifactPersistencePermitV1, VaultExportedArtifactV1, VaultReservationSnapshotV1,
+    VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1, VaultSpentArtifactSnapshotV1,
 };
 use core::fmt;
 use dom_crypto::{schnorr_challenge, PartialSig};
@@ -104,6 +104,7 @@ impl<VaultError, CustodyError> From<dom_core::DomError>
 pub struct ReservedNonceV1<Handle> {
     handle: Handle,
     request_lookup: ReservationRequestLookupV1,
+    reservation_nonce_id: crate::ReservationNonceId,
     context: SessionContextV1,
     participant_id: [u8; 32],
     context_binding_digest: [u8; 32],
@@ -113,10 +114,11 @@ pub struct ReservedNonceV1<Handle> {
 pub struct CommitmentExportedV1<Handle> {
     handle: Handle,
     request_lookup: ReservationRequestLookupV1,
+    reservation_nonce_id: crate::ReservationNonceId,
     context: SessionContextV1,
     participant_id: [u8; 32],
     context_binding_digest: [u8; 32],
-    nonce_identity: Option<crate::NonceIdentityV1>,
+    nonce_identity: crate::NonceIdentityV1,
     permit_id: crate::PermitIdV1,
 }
 
@@ -131,10 +133,11 @@ impl<Handle> CommitmentExportedV1<Handle> {
 pub struct RevealExportedV1<Handle> {
     handle: Handle,
     request_lookup: ReservationRequestLookupV1,
+    reservation_nonce_id: crate::ReservationNonceId,
     context: SessionContextV1,
     participant_id: [u8; 32],
     context_binding_digest: [u8; 32],
-    nonce_identity: Option<crate::NonceIdentityV1>,
+    nonce_identity: crate::NonceIdentityV1,
     permit_id: crate::PermitIdV1,
 }
 
@@ -271,16 +274,22 @@ where
             .vault
             .claim_fresh_reservation(request)
             .map_err(VaultBackedSignerError::Vault)?;
-        validate_live_handle(
-            &handle,
+        let snapshot = self
+            .vault
+            .snapshot_reservation(&handle)
+            .map_err(VaultBackedSignerError::Vault)?;
+        validate_live_snapshot(
+            &snapshot,
             &expected_lookup,
             &expected_binding,
             ReservationLiveStageV1::PreDerivation,
             None,
         )?;
+        let reservation_nonce_id = snapshot.reservation_nonce_id().clone();
         Ok(ReservedNonceV1 {
             handle,
             request_lookup: expected_lookup,
+            reservation_nonce_id,
             context,
             participant_id,
             context_binding_digest: expected_binding,
@@ -331,19 +340,24 @@ where
                 Ok(ReservationResumeResultV1::Terminal(terminal))
             }
             ReservationResumeResultV1::Live(handle) => {
-                let snapshot = snapshot_live_handle(&handle)?;
+                let snapshot = self
+                    .vault
+                    .snapshot_reservation(&handle)
+                    .map_err(VaultBackedSignerError::Vault)?;
                 validate_live_snapshot(
                     &snapshot,
                     &request_lookup,
                     &binding_digest,
-                    snapshot.stage,
-                    snapshot.final_retry_counter,
+                    snapshot.live_stage(),
+                    snapshot.final_retry_counter(),
                 )?;
-                let state = match snapshot.stage {
+                let reservation_nonce_id = snapshot.reservation_nonce_id().clone();
+                let state = match snapshot.live_stage() {
                     ReservationLiveStageV1::PreDerivation => {
                         ResumedReservationV1::PreDerivation(ReservedNonceV1 {
                             handle,
                             request_lookup,
+                            reservation_nonce_id,
                             context,
                             participant_id,
                             context_binding_digest: binding_digest,
@@ -352,44 +366,54 @@ where
                     ReservationLiveStageV1::AfterCommitment => {
                         let resumed_context = context.with_retry_counter(
                             snapshot
-                                .final_retry_counter
+                                .final_retry_counter()
                                 .ok_or(NonceVaultError::CorruptState)?,
                         );
                         let permit_id = snapshot
-                            .spent_commitment
-                            .as_ref()
+                            .spent_commitment()
                             .ok_or(NonceVaultError::CorruptState)?
                             .permit_id()
+                            .clone();
+                        let nonce_identity = snapshot
+                            .spent_commitment()
+                            .ok_or(NonceVaultError::CorruptState)?
+                            .nonce_identity()
                             .clone();
                         ResumedReservationV1::AfterCommitment(CommitmentExportedV1 {
                             handle,
                             request_lookup,
+                            reservation_nonce_id,
                             context: resumed_context,
                             participant_id,
                             context_binding_digest: binding_digest,
-                            nonce_identity: None,
+                            nonce_identity,
                             permit_id,
                         })
                     }
                     ReservationLiveStageV1::AfterReveal => {
                         let resumed_context = context.with_retry_counter(
                             snapshot
-                                .final_retry_counter
+                                .final_retry_counter()
                                 .ok_or(NonceVaultError::CorruptState)?,
                         );
                         let permit_id = snapshot
-                            .spent_reveal
-                            .as_ref()
+                            .spent_reveal()
                             .ok_or(NonceVaultError::CorruptState)?
                             .permit_id()
+                            .clone();
+                        let nonce_identity = snapshot
+                            .spent_reveal()
+                            .ok_or(NonceVaultError::CorruptState)?
+                            .nonce_identity()
                             .clone();
                         ResumedReservationV1::AfterReveal(RevealExportedV1 {
                             handle,
                             request_lookup,
+                            reservation_nonce_id,
                             context: resumed_context,
                             participant_id,
                             context_binding_digest: binding_digest,
-                            nonce_identity: None,
+                            nonce_identity,
                             permit_id,
                         })
                     }
@@ -423,7 +447,7 @@ where
             .begin_nonce_derivation(&mut state.handle, request)
             .map_err(VaultBackedSignerError::Vault)?;
         let transfer = NonceSecretTransferV1::from_nonce_pair(
-            *state.handle.reservation_nonce_id().as_bytes(),
+            *state.reservation_nonce_id.as_bytes(),
             state.participant_id,
             &effective_context,
             pair,
@@ -446,7 +470,7 @@ where
             )
             .map_err(VaultBackedSignerError::Vault)?;
         let pair = transfer.into_validated_pair(
-            state.handle.reservation_nonce_id().as_bytes(),
+            state.reservation_nonce_id.as_bytes(),
             &state.participant_id,
             &effective_context,
             &self.trusted_chain_id,
@@ -494,7 +518,10 @@ where
             return Err(VaultBackedSignerError::AuthorizedArtifactMismatch);
         }
         let permit_id = authorized.permit_id().clone();
-        let snapshot = snapshot_live_handle(&state.handle)?;
+        let snapshot = self
+            .vault
+            .snapshot_reservation(&state.handle)
+            .map_err(VaultBackedSignerError::Vault)?;
         validate_live_snapshot(
             &snapshot,
             &state.request_lookup,
@@ -516,10 +543,11 @@ where
             CommitmentExportedV1 {
                 handle: state.handle,
                 request_lookup: state.request_lookup,
+                reservation_nonce_id: state.reservation_nonce_id,
                 context: effective_context,
                 participant_id: state.participant_id,
                 context_binding_digest: state.context_binding_digest,
-                nonce_identity: Some(nonce_identity),
+                nonce_identity,
                 permit_id,
             },
             parsed,
@@ -550,7 +578,7 @@ where
             )
             .map_err(VaultBackedSignerError::Vault)?;
         let pair = transfer.into_validated_pair(
-            state.handle.reservation_nonce_id().as_bytes(),
+            state.reservation_nonce_id.as_bytes(),
             &state.participant_id,
             &stage_context,
             &self.trusted_chain_id,
@@ -563,8 +591,18 @@ where
             first,
             second,
         );
-        let prior = state
-            .handle
+        let prior_snapshot = self
+            .vault
+            .snapshot_reservation(&state.handle)
+            .map_err(VaultBackedSignerError::Vault)?;
+        validate_live_snapshot(
+            &prior_snapshot,
+            &state.request_lookup,
+            &state.context_binding_digest,
+            ReservationLiveStageV1::AfterCommitment,
+            Some(stage_context.retry_counter()),
+        )?;
+        let prior = prior_snapshot
             .spent_commitment()
             .ok_or(NonceVaultError::CorruptState)?;
         let commitment =
@@ -574,10 +612,9 @@ where
             &persistence_permit,
             &operation_evidence.validated_view(),
             reveal.clone(),
-            &prior,
+            prior,
             commitment,
         )?;
-        drop(prior);
         let persisted = self
             .vault
             .persist_computed_artifact(&mut state.handle, persistence_permit, prepared)
@@ -596,7 +633,10 @@ where
             return Err(VaultBackedSignerError::AuthorizedArtifactMismatch);
         }
         let permit_id = authorized.permit_id().clone();
-        let snapshot = snapshot_live_handle(&state.handle)?;
+        let snapshot = self
+            .vault
+            .snapshot_reservation(&state.handle)
+            .map_err(VaultBackedSignerError::Vault)?;
         validate_live_snapshot(
             &snapshot,
             &state.request_lookup,
@@ -615,10 +655,11 @@ where
             RevealExportedV1 {
                 handle: state.handle,
                 request_lookup: state.request_lookup,
+                reservation_nonce_id: state.reservation_nonce_id,
                 context: stage_context,
                 participant_id: state.participant_id,
                 context_binding_digest: state.context_binding_digest,
-                nonce_identity: Some(nonce_identity),
+                nonce_identity,
                 permit_id,
             },
             parsed,
@@ -647,7 +688,7 @@ where
             )
             .map_err(VaultBackedSignerError::Vault)?;
         let pair = transfer.into_validated_pair(
-            state.handle.reservation_nonce_id().as_bytes(),
+            state.reservation_nonce_id.as_bytes(),
             &state.participant_id,
             signing_inputs.context(),
             &self.trusted_chain_id,
@@ -671,7 +712,7 @@ where
         let expected_partial_bytes = partial.to_bytes();
         let nonce_identity = persistence_permit.nonce_identity().clone();
         let request_lookup = state.request_lookup;
-        let reservation_nonce_id = state.handle.reservation_nonce_id().clone();
+        let reservation_nonce_id = state.reservation_nonce_id;
         let prepared = PreparedExposureV1::partial_signature(
             &persistence_permit,
             &operation_evidence.validated_view(),
@@ -720,11 +761,8 @@ where
     ) -> SignerResult<Vault, Custody, ResentArtifactV1> {
         self.resend_bound(
             state.request_lookup.clone(),
-            state.handle.reservation_nonce_id().clone(),
-            state
-                .nonce_identity
-                .clone()
-                .ok_or(NonceVaultError::CorruptState)?,
+            state.reservation_nonce_id.clone(),
+            state.nonce_identity.clone(),
             state.context_binding_digest,
             state.permit_id.clone(),
             authority,
@@ -740,11 +778,8 @@ where
     ) -> SignerResult<Vault, Custody, ResentArtifactV1> {
         self.resend_bound(
             state.request_lookup.clone(),
-            state.handle.reservation_nonce_id().clone(),
-            state
-                .nonce_identity
-                .clone()
-                .ok_or(NonceVaultError::CorruptState)?,
+            state.reservation_nonce_id.clone(),
+            state.nonce_identity.clone(),
             state.context_binding_digest,
             state.permit_id.clone(),
             authority,
@@ -873,93 +908,51 @@ fn prepare_private_nonce_derivation_attempt(
     Ok((effective_context, pair, request))
 }
 
-struct LiveHandleSnapshotV1 {
-    request_lookup: ReservationRequestLookupV1,
-    context_binding_digest: [u8; 32],
-    stage: ReservationLiveStageV1,
-    final_retry_counter: Option<u64>,
-    spent_commitment: Option<SpentArtifactDescriptorV1>,
-    spent_reveal: Option<SpentArtifactDescriptorV1>,
-}
-
-fn snapshot_live_handle<Handle: VaultReservationHandleV1>(
-    handle: &Handle,
-) -> core::result::Result<LiveHandleSnapshotV1, NonceVaultError> {
-    let request_lookup = handle.request_lookup().clone();
-    let context_binding_digest = *handle.reservation_context_binding_digest();
-    let stage = handle.live_stage();
-    let final_retry_counter = handle.final_retry_counter();
-    let spent_commitment = handle
-        .spent_commitment()
-        .map(|view| SpentArtifactDescriptorV1::from_view(&view))
-        .transpose()?;
-    let spent_reveal = handle
-        .spent_reveal()
-        .map(|view| SpentArtifactDescriptorV1::from_view(&view))
-        .transpose()?;
-    Ok(LiveHandleSnapshotV1 {
-        request_lookup,
-        context_binding_digest,
-        stage,
-        final_retry_counter,
-        spent_commitment,
-        spent_reveal,
-    })
-}
-
-fn validate_live_handle<Handle: VaultReservationHandleV1>(
-    handle: &Handle,
+fn validate_live_snapshot<Snapshot>(
+    snapshot: &Snapshot,
     request_lookup: &ReservationRequestLookupV1,
     context_binding_digest: &[u8; 32],
     expected_stage: ReservationLiveStageV1,
     expected_retry_counter: Option<u64>,
-) -> core::result::Result<(), NonceVaultError> {
-    let snapshot = snapshot_live_handle(handle)?;
-    validate_live_snapshot(
-        &snapshot,
-        request_lookup,
-        context_binding_digest,
-        expected_stage,
-        expected_retry_counter,
-    )
-}
-
-fn validate_live_snapshot(
-    snapshot: &LiveHandleSnapshotV1,
-    request_lookup: &ReservationRequestLookupV1,
-    context_binding_digest: &[u8; 32],
-    expected_stage: ReservationLiveStageV1,
-    expected_retry_counter: Option<u64>,
-) -> core::result::Result<(), NonceVaultError> {
-    if &snapshot.request_lookup != request_lookup
-        || &snapshot.context_binding_digest != context_binding_digest
-        || snapshot.stage != expected_stage
-        || snapshot.final_retry_counter != expected_retry_counter
+) -> core::result::Result<(), NonceVaultError>
+where
+    Snapshot: VaultReservationSnapshotV1,
+{
+    if snapshot.request_lookup() != request_lookup
+        || snapshot.reservation_context_binding_digest() != context_binding_digest
+        || snapshot.live_stage() != expected_stage
+        || snapshot.final_retry_counter() != expected_retry_counter
     {
         return Err(NonceVaultError::CorruptState);
     }
     match expected_stage {
         ReservationLiveStageV1::PreDerivation
-            if snapshot.final_retry_counter.is_none()
-                && snapshot.spent_commitment.is_none()
-                && snapshot.spent_reveal.is_none() => {}
+            if snapshot.final_retry_counter().is_none()
+                && snapshot.spent_commitment().is_none()
+                && snapshot.spent_reveal().is_none() => {}
         ReservationLiveStageV1::AfterCommitment
-            if snapshot.final_retry_counter.is_some()
-                && snapshot
-                    .spent_commitment
-                    .as_ref()
-                    .is_some_and(|spent| spent.kind() == ExposureKindV1::NonceCommitment)
-                && snapshot.spent_reveal.is_none() => {}
+            if snapshot.final_retry_counter().is_some()
+                && snapshot.spent_commitment().is_some_and(|spent| {
+                    spent.kind() == ExposureKindV1::NonceCommitment
+                        && spent.adaptor_outbound_digest() != &[0; 32]
+                        && spent.nonce_identity().bound_digest() == context_binding_digest
+                })
+                && snapshot.spent_reveal().is_none() => {}
         ReservationLiveStageV1::AfterReveal
-            if snapshot.final_retry_counter.is_some()
-                && snapshot
-                    .spent_commitment
-                    .as_ref()
-                    .is_some_and(|spent| spent.kind() == ExposureKindV1::NonceCommitment)
-                && snapshot
-                    .spent_reveal
-                    .as_ref()
-                    .is_some_and(|spent| spent.kind() == ExposureKindV1::NonceReveal) => {}
+            if snapshot.final_retry_counter().is_some()
+                && snapshot.spent_commitment().is_some_and(|spent| {
+                    spent.kind() == ExposureKindV1::NonceCommitment
+                        && spent.adaptor_outbound_digest() != &[0; 32]
+                        && spent.nonce_identity().bound_digest() == context_binding_digest
+                })
+                && snapshot.spent_reveal().is_some_and(|spent| {
+                    spent.kind() == ExposureKindV1::NonceReveal
+                        && spent.adaptor_outbound_digest() != &[0; 32]
+                        && spent.nonce_identity().bound_digest() == context_binding_digest
+                        && snapshot.spent_commitment().is_some_and(|commitment| {
+                            commitment.nonce_identity() == spent.nonce_identity()
+                        })
+                }) => {}
         _ => return Err(NonceVaultError::CorruptState),
     }
     Ok(())
@@ -976,15 +969,18 @@ fn validate_exported_artifact(
     Ok(authorized)
 }
 
-fn validate_spent_projection(
-    snapshot: &LiveHandleSnapshotV1,
+fn validate_spent_projection<Snapshot>(
+    snapshot: &Snapshot,
     kind: ExposureKindV1,
     permit_id: &crate::PermitIdV1,
     outbound_digest: &[u8; 32],
-) -> core::result::Result<(), NonceVaultError> {
+) -> core::result::Result<(), NonceVaultError>
+where
+    Snapshot: VaultReservationSnapshotV1,
+{
     let spent = match kind {
-        ExposureKindV1::NonceCommitment => snapshot.spent_commitment.as_ref(),
-        ExposureKindV1::NonceReveal => snapshot.spent_reveal.as_ref(),
+        ExposureKindV1::NonceCommitment => snapshot.spent_commitment(),
+        ExposureKindV1::NonceReveal => snapshot.spent_reveal(),
         ExposureKindV1::PartialSignature => return Err(NonceVaultError::InvalidTransition),
     }
     .ok_or(NonceVaultError::CorruptState)?;
@@ -1022,8 +1018,6 @@ fn nonce_commitment_from_reveal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::cell::Cell;
-
     fn nonce_derivation_context() -> (SigningShareV1, SessionContextV1) {
         let signing_share = SigningShareV1::from_be_bytes([0x41; 32]).expect("signing share");
         let remote_share = SigningShareV1::from_be_bytes([0x42; 32]).expect("remote share");
@@ -1059,48 +1053,49 @@ mod tests {
     }
 
     struct TestSpentArtifact {
+        nonce_identity: crate::NonceIdentityV1,
         permit_id: crate::PermitIdV1,
         kind: ExposureKindV1,
         digest: [u8; 32],
     }
 
-    struct TestSpentView<'a>(&'a TestSpentArtifact);
+    impl crate::VaultSpentArtifactSnapshotV1 for TestSpentArtifact {
+        fn nonce_identity(&self) -> &crate::NonceIdentityV1 {
+            &self.nonce_identity
+        }
 
-    impl crate::VaultSpentArtifactViewV1 for TestSpentView<'_> {
         fn permit_id(&self) -> &crate::PermitIdV1 {
-            &self.0.permit_id
+            &self.permit_id
         }
 
         fn kind(&self) -> ExposureKindV1 {
-            self.0.kind
+            self.kind
         }
 
         fn adaptor_outbound_digest(&self) -> &[u8; 32] {
-            &self.0.digest
+            &self.digest
         }
     }
 
-    struct ChangingStageHandle {
+    struct TestReservationSnapshot {
         reservation_nonce_id: crate::ReservationNonceId,
         request_lookup: ReservationRequestLookupV1,
         context_binding_digest: [u8; 32],
-        stage_reads: Cell<usize>,
-        first_stage: ReservationLiveStageV1,
-        later_stage: ReservationLiveStageV1,
+        stage: ReservationLiveStageV1,
         final_retry_counter: Option<u64>,
         commitment: Option<TestSpentArtifact>,
         reveal: Option<TestSpentArtifact>,
     }
 
-    impl VaultReservationHandleV1 for ChangingStageHandle {
-        type SpentArtifactView<'a> = TestSpentView<'a>;
-
-        fn reservation_nonce_id(&self) -> &crate::ReservationNonceId {
-            &self.reservation_nonce_id
-        }
+    impl VaultReservationSnapshotV1 for TestReservationSnapshot {
+        type SpentArtifact = TestSpentArtifact;
 
         fn request_lookup(&self) -> &ReservationRequestLookupV1 {
             &self.request_lookup
+        }
+
+        fn reservation_nonce_id(&self) -> &crate::ReservationNonceId {
+            &self.reservation_nonce_id
         }
 
         fn reservation_context_binding_digest(&self) -> &[u8; 32] {
@@ -1108,49 +1103,47 @@ mod tests {
         }
 
         fn live_stage(&self) -> ReservationLiveStageV1 {
-            let reads = self.stage_reads.get();
-            self.stage_reads.set(reads + 1);
-            if reads == 0 {
-                self.first_stage
-            } else {
-                self.later_stage
-            }
+            self.stage
         }
 
         fn final_retry_counter(&self) -> Option<u64> {
             self.final_retry_counter
         }
 
-        fn spent_commitment(&self) -> Option<Self::SpentArtifactView<'_>> {
-            self.commitment.as_ref().map(TestSpentView)
+        fn spent_commitment(&self) -> Option<&Self::SpentArtifact> {
+            self.commitment.as_ref()
         }
 
-        fn spent_reveal(&self) -> Option<Self::SpentArtifactView<'_>> {
-            self.reveal.as_ref().map(TestSpentView)
+        fn spent_reveal(&self) -> Option<&Self::SpentArtifact> {
+            self.reveal.as_ref()
         }
     }
 
-    fn changing_handle(
-        first_stage: ReservationLiveStageV1,
-        later_stage: ReservationLiveStageV1,
-        reveal: bool,
-    ) -> ChangingStageHandle {
-        ChangingStageHandle {
+    fn test_snapshot(stage: ReservationLiveStageV1, reveal: bool) -> TestReservationSnapshot {
+        let nonce_identity = crate::NonceIdentityV1::new(
+            crate::SessionId::from_bytes([8; 32]).expect("session ID"),
+            crate::ParticipantId::from_bytes([9; 32]).expect("participant ID"),
+            crate::PurposeV1::Refund,
+            [3; 32],
+            1,
+        )
+        .expect("nonce identity");
+        TestReservationSnapshot {
             reservation_nonce_id: crate::ReservationNonceId::from_bytes([1; 32])
                 .expect("reservation ID"),
             request_lookup: ReservationRequestLookupV1::from_bytes([2; 32])
                 .expect("request lookup"),
             context_binding_digest: [3; 32],
-            stage_reads: Cell::new(0),
-            first_stage,
-            later_stage,
+            stage,
             final_retry_counter: Some(7),
             commitment: Some(TestSpentArtifact {
+                nonce_identity: nonce_identity.clone(),
                 permit_id: crate::PermitIdV1::from_bytes([4; 32]).expect("permit ID"),
                 kind: ExposureKindV1::NonceCommitment,
                 digest: [5; 32],
             }),
             reveal: reveal.then(|| TestSpentArtifact {
+                nonce_identity,
                 permit_id: crate::PermitIdV1::from_bytes([6; 32]).expect("permit ID"),
                 kind: ExposureKindV1::NonceReveal,
                 digest: [7; 32],
@@ -1159,38 +1152,29 @@ mod tests {
     }
 
     #[test]
-    fn live_projection_snapshots_stage_once_before_validation_and_dispatch() {
-        let handle = changing_handle(
-            ReservationLiveStageV1::AfterCommitment,
-            ReservationLiveStageV1::AfterReveal,
-            false,
+    fn owned_snapshot_validates_as_one_coherent_dispatch_projection() {
+        let snapshot = test_snapshot(ReservationLiveStageV1::AfterCommitment, false);
+        assert_eq!(
+            snapshot.live_stage(),
+            ReservationLiveStageV1::AfterCommitment
         );
-        let snapshot = snapshot_live_handle(&handle).expect("coherent snapshot");
-        assert_eq!(handle.stage_reads.get(), 1);
-        assert_eq!(snapshot.stage, ReservationLiveStageV1::AfterCommitment);
         validate_live_snapshot(
             &snapshot,
-            &handle.request_lookup,
-            &handle.context_binding_digest,
+            &snapshot.request_lookup,
+            &snapshot.context_binding_digest,
             ReservationLiveStageV1::AfterCommitment,
             Some(7),
         )
         .expect("valid snapshot");
-        assert_eq!(handle.stage_reads.get(), 1);
     }
 
     #[test]
     fn live_projection_rejects_presence_table_inconsistency() {
-        let handle = changing_handle(
-            ReservationLiveStageV1::AfterCommitment,
-            ReservationLiveStageV1::AfterCommitment,
-            true,
-        );
-        let snapshot = snapshot_live_handle(&handle).expect("snapshot");
+        let snapshot = test_snapshot(ReservationLiveStageV1::AfterCommitment, true);
         assert!(validate_live_snapshot(
             &snapshot,
-            &handle.request_lookup,
-            &handle.context_binding_digest,
+            &snapshot.request_lookup,
+            &snapshot.context_binding_digest,
             ReservationLiveStageV1::AfterCommitment,
             Some(7),
         )
@@ -1198,37 +1182,49 @@ mod tests {
     }
 
     #[test]
-    fn live_projection_rejects_wrong_retry_and_spent_kinds() {
-        let handle = changing_handle(
-            ReservationLiveStageV1::AfterCommitment,
-            ReservationLiveStageV1::AfterCommitment,
-            false,
-        );
-        let snapshot = snapshot_live_handle(&handle).expect("snapshot");
+    fn live_projection_rejects_wrong_retry_spent_kind_and_identity() {
+        let snapshot = test_snapshot(ReservationLiveStageV1::AfterCommitment, false);
         assert!(validate_live_snapshot(
             &snapshot,
-            &handle.request_lookup,
-            &handle.context_binding_digest,
+            &snapshot.request_lookup,
+            &snapshot.context_binding_digest,
             ReservationLiveStageV1::AfterCommitment,
             Some(8),
         )
         .is_err());
 
-        let mut wrong_kind = changing_handle(
-            ReservationLiveStageV1::AfterCommitment,
-            ReservationLiveStageV1::AfterCommitment,
-            false,
-        );
+        let mut wrong_kind = test_snapshot(ReservationLiveStageV1::AfterCommitment, false);
         wrong_kind
             .commitment
             .as_mut()
             .expect("commitment descriptor")
             .kind = ExposureKindV1::NonceReveal;
-        let snapshot = snapshot_live_handle(&wrong_kind).expect("snapshot");
         assert!(validate_live_snapshot(
-            &snapshot,
+            &wrong_kind,
             &wrong_kind.request_lookup,
             &wrong_kind.context_binding_digest,
+            ReservationLiveStageV1::AfterCommitment,
+            Some(7),
+        )
+        .is_err());
+
+        let mut wrong_identity = test_snapshot(ReservationLiveStageV1::AfterCommitment, false);
+        wrong_identity
+            .commitment
+            .as_mut()
+            .expect("commitment descriptor")
+            .nonce_identity = crate::NonceIdentityV1::new(
+            crate::SessionId::from_bytes([8; 32]).expect("session ID"),
+            crate::ParticipantId::from_bytes([9; 32]).expect("participant ID"),
+            crate::PurposeV1::Refund,
+            [0x55; 32],
+            1,
+        )
+        .expect("mutated identity");
+        assert!(validate_live_snapshot(
+            &wrong_identity,
+            &wrong_identity.request_lookup,
+            &wrong_identity.context_binding_digest,
             ReservationLiveStageV1::AfterCommitment,
             Some(7),
         )

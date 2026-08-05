@@ -436,24 +436,34 @@ impl fmt::Debug for NonceIdentityV1 {
 /// Non-authoritative descriptor for one exact current-generation spent artifact.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SpentArtifactDescriptorV1 {
+    nonce_identity: NonceIdentityV1,
     permit_id: PermitIdV1,
     kind: ExposureKindV1,
     adaptor_outbound_digest: [u8; 32],
 }
 
 impl SpentArtifactDescriptorV1 {
-    pub(crate) fn from_view(view: &impl VaultSpentArtifactViewV1) -> Result<Self, NonceVaultError> {
-        let permit_id = view.permit_id().clone();
-        let kind = view.kind();
-        let adaptor_outbound_digest = *view.adaptor_outbound_digest();
-        if adaptor_outbound_digest == [0; 32] {
+    pub(crate) fn from_snapshot(
+        snapshot: &impl VaultSpentArtifactSnapshotV1,
+    ) -> Result<Self, NonceVaultError> {
+        let nonce_identity = snapshot.nonce_identity().clone();
+        let permit_id = snapshot.permit_id().clone();
+        let kind = snapshot.kind();
+        let adaptor_outbound_digest = *snapshot.adaptor_outbound_digest();
+        if adaptor_outbound_digest == [0; 32] || nonce_identity.bound_digest() == &[0; 32] {
             return Err(NonceVaultError::InvalidPermit);
         }
         Ok(Self {
+            nonce_identity,
             permit_id,
             kind,
             adaptor_outbound_digest,
         })
+    }
+
+    /// Return the complete current-generation nonce identity.
+    pub const fn nonce_identity(&self) -> &NonceIdentityV1 {
+        &self.nonce_identity
     }
 
     /// Return the public spent-permit lookup.
@@ -489,8 +499,10 @@ pub enum ReservationLiveStageV1 {
     AfterReveal,
 }
 
-/// Read-only view of one exact current-generation spent artifact.
-pub trait VaultSpentArtifactViewV1 {
+/// Store-owned snapshot of one exact current-generation spent artifact.
+pub trait VaultSpentArtifactSnapshotV1 {
+    /// Return the complete current-generation nonce identity.
+    fn nonce_identity(&self) -> &NonceIdentityV1;
     /// Return the public non-authoritative permit lookup.
     fn permit_id(&self) -> &PermitIdV1;
     /// Return the closed artifact kind.
@@ -706,7 +718,7 @@ impl PreparedExposureV1 {
         permit: &impl VaultArtifactPersistencePermitV1,
         operation: &crate::ValidatedVaultComputationViewV1<'_>,
         reveal: NonceRevealV1,
-        prior_view: &impl VaultSpentArtifactViewV1,
+        prior_snapshot: &impl VaultSpentArtifactSnapshotV1,
         prior_commitment: NonceCommitmentV1,
     ) -> core::result::Result<Self, PreparedExposureValidationError> {
         let binding = PreparedArtifactBindingV1::from_permit(permit, operation)?;
@@ -717,7 +729,7 @@ impl PreparedExposureV1 {
             evidence: PreparedExposureEvidenceV1::Reveal {
                 context: operation.context().clone(),
                 reveal,
-                prior_descriptor: SpentArtifactDescriptorV1::from_view(prior_view)?,
+                prior_descriptor: SpentArtifactDescriptorV1::from_snapshot(prior_snapshot)?,
                 prior_commitment,
             },
         };
@@ -795,6 +807,7 @@ impl PreparedExposureV1 {
                     || reveal.purpose() != context.purpose()
                     || reveal.participant_index() != context.participant_index()
                     || prior_descriptor.kind() != ExposureKindV1::NonceCommitment
+                    || prior_descriptor.nonce_identity() != &self.binding.nonce_identity
                     || prior_commitment.purpose() != context.purpose()
                     || prior_commitment.participant_index() != context.participant_index()
                 {
@@ -1080,21 +1093,19 @@ impl ResendRequestV1 {
     }
 }
 
-/// Read-only public identity of a live store-owned reservation handle.
+/// One coherent Store-owned projection of a retained live reservation.
 ///
-/// The handle itself remains opaque and is held only inside signer state. This
-/// view exposes the non-secret reservation identifier needed to encode the
-/// canonical sealed nonce record; it grants no storage or export authority.
-pub trait VaultReservationHandleV1 {
-    /// Borrowed descriptor type returned for a current-generation spent artifact.
-    type SpentArtifactView<'a>: VaultSpentArtifactViewV1
-    where
-        Self: 'a;
+/// Concrete implementations construct this owned value under the retained
+/// lock. It is non-authoritative: every later Store operation must revalidate
+/// its handle and current durable head independently.
+pub trait VaultReservationSnapshotV1 {
+    /// Store-owned spent-artifact snapshot type.
+    type SpentArtifact: VaultSpentArtifactSnapshotV1;
 
-    /// Return the store-generated lifetime-unique reservation identifier.
-    fn reservation_nonce_id(&self) -> &ReservationNonceId;
     /// Return the public request lookup retained for restart recovery.
     fn request_lookup(&self) -> &ReservationRequestLookupV1;
+    /// Return the store-generated lifetime-unique reservation identifier.
+    fn reservation_nonce_id(&self) -> &ReservationNonceId;
     /// Return the complete canonical reservation-context binding digest.
     fn reservation_context_binding_digest(&self) -> &[u8; 32];
     /// Return the exact authenticated live stage reconstructed by the Store.
@@ -1102,9 +1113,9 @@ pub trait VaultReservationHandleV1 {
     /// Return the final signer-owned retry counter after nonce derivation, if known.
     fn final_retry_counter(&self) -> Option<u64>;
     /// Return the exact current-generation spent commitment, when present.
-    fn spent_commitment(&self) -> Option<Self::SpentArtifactView<'_>>;
+    fn spent_commitment(&self) -> Option<&Self::SpentArtifact>;
     /// Return the exact current-generation spent reveal, when present.
-    fn spent_reveal(&self) -> Option<Self::SpentArtifactView<'_>>;
+    fn spent_reveal(&self) -> Option<&Self::SpentArtifact>;
 }
 
 /// Durable computation stage for one exact signer-selected attempt.
@@ -1167,7 +1178,9 @@ pub trait NonceVaultV1: Sized {
     /// DOM Contracts store-specific typed failure with redacted observability.
     type Error: Error + Send + Sync + 'static;
     /// Opaque reservation handle owned by the concrete vault.
-    type ReservationHandle: VaultReservationHandleV1;
+    type ReservationHandle;
+    /// Owned coherent projection created atomically under the retained lock.
+    type ReservationSnapshot: VaultReservationSnapshotV1;
     /// Opaque one-shot proof that the nonce-derivation attempt is durable.
     type DerivationAttemptPermit;
     /// Opaque one-shot authority for the first sealed-secret open.
@@ -1195,6 +1208,12 @@ pub trait NonceVaultV1: Sized {
         &mut self,
         request: crate::ReservationResumeRequestV1,
     ) -> core::result::Result<ReservationResumeResultV1<Self::ReservationHandle>, Self::Error>;
+
+    /// Atomically snapshot one retained live reservation under Store authority.
+    fn snapshot_reservation(
+        &mut self,
+        reservation: &Self::ReservationHandle,
+    ) -> core::result::Result<Self::ReservationSnapshot, Self::Error>;
 
     /// Durably mark the unique final-retry attempt after private KDF selection.
     fn begin_nonce_derivation(

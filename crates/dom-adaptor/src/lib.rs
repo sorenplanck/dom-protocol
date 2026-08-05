@@ -130,6 +130,13 @@
 //! fn install(_vault: &dyn NonceVaultV1) {}
 //! ```
 //!
+//! Reservation handles are fully opaque. The removed fragmented getter view
+//! cannot be imported by a downstream caller:
+//!
+//! ```compile_fail
+//! use dom_adaptor::VaultReservationHandleV1;
+//! ```
+//!
 //! The safe cancellation route accepts no caller-selected terminal reason:
 //!
 //! ```compile_fail
@@ -191,7 +198,7 @@ pub use nonce_vault::{
     ReservationResumeResultV1, ReservationState, RestoreState, SessionId,
     SpentArtifactDescriptorV1, TemplateHash, TerminalReservationV1,
     ValidatedPreparedExposureViewV1, VaultArtifactPersistencePermitV1, VaultComputationStageV1,
-    VaultExportedArtifactV1, VaultKeyId, VaultReservationHandleV1, VaultSpentArtifactViewV1,
+    VaultExportedArtifactV1, VaultKeyId, VaultReservationSnapshotV1, VaultSpentArtifactSnapshotV1,
 };
 pub use permit::{exposure_outbound_digest_v1, validate_exposure_permit_record_v1, ExposureKindV1};
 pub use reservation_binding::{
