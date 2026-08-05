@@ -1,0 +1,13 @@
+[package]
+name = "dom-share-pop-production-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+dom-adaptor = { path = "../../../../../crates/dom-adaptor" }
+dom-crypto = { path = "../../../../../crates/dom-crypto" }
+hex = "0.4"
+serde_json = "1.0"

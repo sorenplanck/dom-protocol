@@ -22,6 +22,15 @@ reference outputs are independent evidence only because their implementation
 and expected bytes were frozen before comparison with the Rust production
 implementation.
 
+## Share PoK authority-input conflict
+
+The frozen `share-pop/independent-v1` reference is retained as negative
+provenance evidence, not as a conformant expected-output set. It selected the
+lower-precedence Master Specification Share PoK text before discovering the
+separately stored, signed NAR-DC-P1-001 assignment. Production follows the
+higher-precedence record. See the English external review report before using
+any Share PoK artifact from that directory.
+
 ## Frozen historical instructions
 
 The immutable independent-set README records the feature names and report path

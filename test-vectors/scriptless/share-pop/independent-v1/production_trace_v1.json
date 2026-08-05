@@ -1,0 +1,143 @@
+{
+  "authoritative_assignment": {
+    "minisign_sha256": "2f19ec266f05e440cb5de2b91bc4295b93b2629170adbf6d020505ebb2311ffc",
+    "path": "/home/leonardov/dom-scriptless-dev/dom-contracts/docs/specifications/normative/NAR-DC-P1-001-omnibus-gap-closure.en.md",
+    "relevant_sections": "5.1 through 5.5",
+    "sha256": "88586449d577038ac98e9463250821ed9b3d1e6c94f5b11abfaf036a93eec655",
+    "signature_verified": true
+  },
+  "cases": [
+    {
+      "attempted_inputs": {
+        "chain_id_32": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "participant_id_32": "c07141ea606c145a73e3fdbd20ed429025cb88b83cf214a1a8a36d620aa827b8",
+        "recovery_binding_hash_32": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "role_u8": 1,
+        "session_id_32": "0101010101010101010101010101010101010101010101010101010101010101",
+        "share_point_sec1_33": "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+        "terms_hash_32": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "case_id": "SP1-initiator-index-zero",
+      "challenge_counter_u32_le": "00000000",
+      "challenge_digest_0_32": "fc9924d40d75aac6b827f1641400effb01e4d366b40c43111f1c6660b38a84b3",
+      "challenge_digest_0_data_bytes": "00b2c2e4fc0c02030fe1ad54b92a21adefc54cac0eef83fc2d4c5c3286c664d9e902989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f0256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b292096700000000",
+      "challenge_digest_0_tagged_input_bytes": "2500444f4d3a7363726970746c6573732d73686172652d706f702d6368616c6c656e67653a763100b2c2e4fc0c02030fe1ad54b92a21adefc54cac0eef83fc2d4c5c3286c664d9e902989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f0256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b292096700000000",
+      "challenge_digest_1_32": "cd8df03f9fb6aede3403341e5f5f26aa3a8a8112c9a3592bc1bf78c3f418837a",
+      "challenge_digest_1_data_bytes": "01b2c2e4fc0c02030fe1ad54b92a21adefc54cac0eef83fc2d4c5c3286c664d9e902989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f0256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b292096700000000",
+      "challenge_digest_1_tagged_input_bytes": "2500444f4d3a7363726970746c6573732d73686172652d706f702d6368616c6c656e67653a763101b2c2e4fc0c02030fe1ad54b92a21adefc54cac0eef83fc2d4c5c3286c664d9e902989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f0256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b292096700000000",
+      "challenge_input_bytes": "b2c2e4fc0c02030fe1ad54b92a21adefc54cac0eef83fc2d4c5c3286c664d9e902989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f0256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b292096700000000",
+      "challenge_preimage_bytes": "b2c2e4fc0c02030fe1ad54b92a21adefc54cac0eef83fc2d4c5c3286c664d9e902989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f0256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b2920967",
+      "challenge_reduced_be32": "6fee39639915d2d728de47ecfbf6bf44b0e2637769aad0ba910252655fab4804",
+      "challenge_wide_digest_64": "fc9924d40d75aac6b827f1641400effb01e4d366b40c43111f1c6660b38a84b3cd8df03f9fb6aede3403341e5f5f26aa3a8a8112c9a3592bc1bf78c3f418837a",
+      "construction": {
+        "accepted": true,
+        "first_rejection": null
+      },
+      "context_digest_32": "b2c2e4fc0c02030fe1ad54b92a21adefc54cac0eef83fc2d4c5c3286c664d9e9",
+      "participant_index_u16": 0,
+      "participant_roster": [
+        "c07141ea606c145a73e3fdbd20ed429025cb88b83cf214a1a8a36d620aa827b8",
+        "c8324097723644e5a773c4c6e1040818a397d9907c94dd02031dff9df1ed0f5d"
+      ],
+      "pop_nonce_point_sec1_33": "0256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b2920967",
+      "proof_bytes": "0256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b292096792b6ee062370b0e4ac1820b7be86921b16f90e1130dfc4132efa8fc5d7491c90",
+      "proof_length": 65,
+      "response_be32": "92b6ee062370b0e4ac1820b7be86921b16f90e1130dfc4132efa8fc5d7491c90",
+      "share_point_sec1_33": "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+      "statement_bytes": "4453504f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0101010101010101010101010101010101010101010101010101010101010101c07141ea606c145a73e3fdbd20ed429025cb88b83cf214a1a8a36d620aa827b801000002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6fbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "statement_length": 202,
+      "statement_tagged_input_bytes": "1b00444f4d3a7363726970746c6573732d73686172652d706f703a76314453504f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0101010101010101010101010101010101010101010101010101010101010101c07141ea606c145a73e3fdbd20ed429025cb88b83cf214a1a8a36d620aa827b801000002989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6fbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "verification": {
+        "accepted": true,
+        "first_rejection": null
+      }
+    },
+    {
+      "attempted_inputs": {
+        "chain_id_32": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "participant_id_32": "c8324097723644e5a773c4c6e1040818a397d9907c94dd02031dff9df1ed0f5d",
+        "recovery_binding_hash_32": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "role_u8": 2,
+        "session_id_32": "4242424242424242424242424242424242424242424242424242424242424242",
+        "share_point_sec1_33": "03f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b",
+        "terms_hash_32": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "case_id": "SP2-responder-index-one",
+      "challenge_counter_u32_le": "00000000",
+      "challenge_digest_0_32": "4fd863aafece57dfdff3d99698ac6320afd8409098adfccd3e25f04524af8696",
+      "challenge_digest_0_data_bytes": "00b69bb6e363fee3b71ff4fc2ad77a492899033eddc6c916d27e143385f588548403f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b03f76a39d05686e34a4420897e359371836145dd3973e3982568b60f8433adde6e00000000",
+      "challenge_digest_0_tagged_input_bytes": "2500444f4d3a7363726970746c6573732d73686172652d706f702d6368616c6c656e67653a763100b69bb6e363fee3b71ff4fc2ad77a492899033eddc6c916d27e143385f588548403f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b03f76a39d05686e34a4420897e359371836145dd3973e3982568b60f8433adde6e00000000",
+      "challenge_digest_1_32": "5945966d3b3eadadcbda0aa870be6d2c4f25270d547268dfd820e8ea689c6aaa",
+      "challenge_digest_1_data_bytes": "01b69bb6e363fee3b71ff4fc2ad77a492899033eddc6c916d27e143385f588548403f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b03f76a39d05686e34a4420897e359371836145dd3973e3982568b60f8433adde6e00000000",
+      "challenge_digest_1_tagged_input_bytes": "2500444f4d3a7363726970746c6573732d73686172652d706f702d6368616c6c656e67653a763101b69bb6e363fee3b71ff4fc2ad77a492899033eddc6c916d27e143385f588548403f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b03f76a39d05686e34a4420897e359371836145dd3973e3982568b60f8433adde6e00000000",
+      "challenge_input_bytes": "b69bb6e363fee3b71ff4fc2ad77a492899033eddc6c916d27e143385f588548403f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b03f76a39d05686e34a4420897e359371836145dd3973e3982568b60f8433adde6e00000000",
+      "challenge_preimage_bytes": "b69bb6e363fee3b71ff4fc2ad77a492899033eddc6c916d27e143385f588548403f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b03f76a39d05686e34a4420897e359371836145dd3973e3982568b60f8433adde6e",
+      "challenge_reduced_be32": "38be7993573dfd3785241d24057e52657a67223da264beb1fdb9ad265b7daf4a",
+      "challenge_wide_digest_64": "4fd863aafece57dfdff3d99698ac6320afd8409098adfccd3e25f04524af86965945966d3b3eadadcbda0aa870be6d2c4f25270d547268dfd820e8ea689c6aaa",
+      "construction": {
+        "accepted": true,
+        "first_rejection": null
+      },
+      "context_digest_32": "b69bb6e363fee3b71ff4fc2ad77a492899033eddc6c916d27e143385f5885484",
+      "participant_index_u16": 1,
+      "participant_roster": [
+        "c07141ea606c145a73e3fdbd20ed429025cb88b83cf214a1a8a36d620aa827b8",
+        "c8324097723644e5a773c4c6e1040818a397d9907c94dd02031dff9df1ed0f5d"
+      ],
+      "pop_nonce_point_sec1_33": "03f76a39d05686e34a4420897e359371836145dd3973e3982568b60f8433adde6e",
+      "proof_bytes": "03f76a39d05686e34a4420897e359371836145dd3973e3982568b60f8433adde6e1576595282ad2125ec85d9d379c2e252195cdeeff960274ea4344bffb1c76897",
+      "proof_length": 65,
+      "response_be32": "1576595282ad2125ec85d9d379c2e252195cdeeff960274ea4344bffb1c76897",
+      "share_point_sec1_33": "03f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b",
+      "statement_bytes": "4453504f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4242424242424242424242424242424242424242424242424242424242424242c8324097723644e5a773c4c6e1040818a397d9907c94dd02031dff9df1ed0f5d02010003f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661bddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "statement_length": 202,
+      "statement_tagged_input_bytes": "1b00444f4d3a7363726970746c6573732d73686172652d706f703a76314453504f0100aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4242424242424242424242424242424242424242424242424242424242424242c8324097723644e5a773c4c6e1040818a397d9907c94dd02031dff9df1ed0f5d02010003f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661bddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "verification": {
+        "accepted": true,
+        "first_rejection": null
+      }
+    },
+    {
+      "attempted_inputs": {
+        "chain_id_32": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "participant_id_32": "1111111111111111111111111111111111111111111111111111111111111111",
+        "recovery_binding_hash_32": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "role_u8": 1,
+        "session_id_32": "fefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe",
+        "share_point_sec1_33": "0379be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "terms_hash_32": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "case_id": "SP3-edge-scalars-index-fifteen",
+      "construction": {
+        "accepted": false,
+        "first_rejection": "share PoK terms hash must be nonzero"
+      },
+      "participant_index_u16": 15,
+      "participant_roster": [
+        "0101010101010101010101010101010101010101010101010101010101010101",
+        "0202020202020202020202020202020202020202020202020202020202020202",
+        "0303030303030303030303030303030303030303030303030303030303030303",
+        "0404040404040404040404040404040404040404040404040404040404040404",
+        "0505050505050505050505050505050505050505050505050505050505050505",
+        "0606060606060606060606060606060606060606060606060606060606060606",
+        "0707070707070707070707070707070707070707070707070707070707070707",
+        "0808080808080808080808080808080808080808080808080808080808080808",
+        "0909090909090909090909090909090909090909090909090909090909090909",
+        "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+        "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+        "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+        "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+        "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+        "1111111111111111111111111111111111111111111111111111111111111111"
+      ]
+    }
+  ],
+  "fixture": "Inspected Rust Share PoK production-profile trace v1",
+  "production_challenge_expansion": "d0 = H_tag(challenge_tag, 0x00 || context || R || A || retry_counter_u32_le); d1 uses 0x01; c = BE512(d0 || d1) mod n; retry on c=0",
+  "production_challenge_tag_ascii": "DOM:scriptless-share-pop-challenge:v1",
+  "production_context_tag_ascii": "DOM:scriptless-share-pop:v1",
+  "production_source": "crates/dom-adaptor/src/share_pop.rs at starting HEAD 67fe11c441c2b7801b6f70809ab58caa4804c22a",
+  "production_statement_layout": "DSPO || version_u16_le || chain_id_32 || session_id_32 || participant_id_32 || role_u8 || participant_index_u16_le || share_point_R_sec1_33 || terms_hash_32 || recovery_binding_hash_32",
+  "warning": "WARNING: PUBLIC AND INSECURE TEST VECTORS ONLY. All scalar values, nonce scalars, and proof material are intentionally public and MUST NEVER be used for production keys, nonces, wallets, funds, signing, or randomness."
+}
