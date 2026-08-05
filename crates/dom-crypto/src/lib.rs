@@ -11,6 +11,7 @@ pub mod hash;
 pub mod keys;
 pub mod pedersen;
 pub mod schnorr;
+pub mod scriptless;
 
 // Single source of truth for the SEC1<->zkp commitment encoding bridge used by
 // the final bounded aggregate range-proof backend. Crate-private.
@@ -24,6 +25,11 @@ pub use pedersen::{verify_block_balance_equation, BlindingFactor, BlindingFactor
 pub use schnorr::{
     schnorr_add_public_keys, schnorr_aggregate_sigs, schnorr_challenge, schnorr_partial_sign,
     schnorr_sign, schnorr_verify, PartialSig, SchnorrSignature,
+};
+pub use scriptless::{
+    scriptless_adapt_signature, scriptless_bind_public_nonces, scriptless_extract_adaptor_secret,
+    scriptless_verify_bound_partial, scriptless_verify_final_signature,
+    scriptless_verify_pre_signature, ScriptlessSecretScalar,
 };
 mod bulletproof_bp;
 #[cfg(kani)]

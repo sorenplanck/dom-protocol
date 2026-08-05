@@ -1,42 +1,47 @@
-# Gate G1a — criptografia pura
+# Gate G1a — pure cryptography
 
-Estado: **NÃO APROVADO**. Este checklist controla exclusivamente G1a. A existência de documentação, esqueleto ou fixture candidata não conclui item algum; cada fechamento exige evidência independente congelada e revisão formal.
+Status: **NOT APPROVED**. This checklist controls G1a only. Documentation,
+implemented code, or implementation-generated tests do not by themselves close
+a requirement. Independent frozen evidence and formal review remain required
+where the gate specifies them.
 
-- [ ] Adaptor signatures especificadas e implementadas somente sobre primitivas autoritativas da DOM.
-- [ ] Esquema de dois nonces com binding especificado e congelado.
-- [ ] Transcript canônico, incluindo binding, partials e agregação, congelado byte a byte.
-- [ ] Purposes Funding, Claim e Refund fechados e versionados.
-- [ ] Separação de domínio comprovada entre os três purposes.
-- [ ] Registro canônico e versionado de domínios de hash congelado.
-- [ ] Uso exclusivo do hash autoritativo da DOM por meio de `blake2b_256_tagged`.
-- [ ] Ausência comprovada de BLAKE2b, challenge, parser ou verificador paralelo.
-- [ ] Comparações constant-time aplicadas a todo material secreto relevante.
-- [ ] Zeroização comprovada de nonces, shares e segredos em todos os caminhos.
-- [ ] Tipos secretos sem `Debug`, clonagem ou serialização genérica indevida.
-- [ ] Oito vetores SCAD0 congelados e revisados byte a byte.
-- [ ] Vetores independentes congelados para o esquema de dois nonces.
-- [ ] Adaptação e extração congeladas em vetores independentes.
-- [ ] Assinatura final verificada pelo verificador real da DOM.
-- [ ] Scalars malformados e de fronteira rejeitados sem ambiguity ou panic.
-- [ ] Pontos malformados, identidade e encodings não canônicos rejeitados.
-- [ ] Mutação de todos os campos críticos coberta por testes negativos.
-- [ ] Fuzz dos parsers e operações de G1a concluído sem panic.
+- [ ] Adaptor signatures are specified and implemented only over authoritative DOM primitives.
+- [ ] The two-nonce scheme with binding is specified and frozen.
+- [ ] The canonical transcript, including binding, partials, and aggregation, is frozen byte-for-byte.
+- [ ] Funding, Claim, and Refund purposes are closed and versioned.
+- [ ] Domain separation between all three purposes is demonstrated.
+- [ ] The canonical versioned hash-domain registry is frozen.
+- [ ] The authoritative DOM hash is used exclusively through `blake2b_256_tagged`.
+- [ ] Absence of a parallel BLAKE2b, challenge, parser, or verifier is independently confirmed.
+- [ ] Constant-time operations cover all relevant secret material.
+- [ ] Zeroization of nonces, shares, and secrets is demonstrated on every path.
+- [ ] Secret types have no inappropriate `Debug`, cloning, or generic serialization.
+- [ ] Eight SCAD0 vectors are frozen and reviewed byte-for-byte.
+- [ ] Independent vectors for the two-nonce scheme are frozen.
+- [ ] Adaptation and extraction are frozen in independent vectors.
+- [ ] The final signature is verified by the real DOM verifier.
+- [ ] Malformed and boundary scalars are rejected without ambiguity or panic.
+- [ ] Malformed points, identity, and noncanonical encodings are rejected.
+- [ ] Mutation of every critical field is covered by negative tests.
+- [ ] Parser and G1a-operation fuzzing completes without panic.
 
-Fechar G1a não fecha G1b e não autoriza fundos reais ou produção.
+Closing G1a does not close G1b or authorize real funds or production use.
 
-## Estado do freeze versus estado do gate
+## Implementation evidence versus gate evidence
 
-| Área | Input | Implementação | Teste DOM | Validação independente |
-|---|---|---|---|---|
-| Perfil DOM, scalar/ponto/hash | congelado por ADR-0009/0010 | pendente | backend existente mapeado | parcial em KAVs |
-| Purpose Funding/Claim/Refund | congelado por ADR-0012 | pendente | pendente | pendente |
-| Adaptor `s=s_hat+t` | congelado por EM/RC/SCAD0 | pendente em `dom-adaptor` | 8 kernels passam no teste rastreado DOM | vetores externos pendentes |
-| Transcript de challenge | congelado por código DOM/ADR-0014 | pendente | backend existente | KAVs DOM existentes |
-| Transcript de dois nonces | construção/binding congelados; derivação bloqueada | não iniciado | pendente | pendente |
-| Binding/hash-to-scalar | congelado por ADR-0013 | não iniciado | AUTO-CHECK parcial | esquema independente pendente |
-| Tipos secretos/CT/zeroização | política congelada | pendente | pendente | auditoria pendente |
+| Area | Frozen input | Production implementation | Executed evidence | Independent validation | Gate state |
+|---|---|---|---|---|---|
+| DOM curve/scalar/point/hash profile | ADR-0009/0010 | reused from `dom-crypto` | backend KAVs and parser tests | partial existing KAV coverage | open pending review/audit |
+| Purposes | ADR-0012 | `PurposeV1` closed enum | exhaustive 256-byte registry test | normative table, no second implementation | open |
+| Hash framing and commitment | ADR-0011/0012 | `nonce_commitment_hash_v1` | critical-field differential tests | Python-frozen tagged vectors cover backend framing | open pending complete transcript |
+| Collective binding | ADR-0013 | `binding_factor_v1`, `BindingFactorV1` | exact frozen binding digest and grammar/order negatives | hash byte vector is independent; full scheme is not | open |
+| Bound partial verification | ADR-0013/0017 | `PartialSignatureV1::verify_bound` and `dom_crypto::scriptless_verify_bound_partial` | authoritative DOM challenge test | independent aggregation vectors absent | open |
+| Adaptor verify/adapt/extract | EM/RC, ADR-0014/0017 | `AdaptorPreSignatureV1` and `dom-crypto::scriptless` | all eight SCAD0 records and negative mutations | SCAD0 provenance remains correlated | open |
+| Real final verifier | ADR-0014 | unchanged `schnorr_verify`; test-only consensus wrapper | all eight final kernels pass `validate_kernel_signatures` | consensus path is authoritative | implemented/tested; gate remains open with adaptor row |
+| Secret handling | ADR-0009/0017 | opaque non-Clone/non-Debug `AdaptorSecret` and `ScriptlessSecretScalar`, `ZeroizeOnDrop` | compile-time API shape and behavior tests | dedicated audit absent | open |
+| Parsers | ADR-0010/0011 | exact fixed-width fail-closed parsers | bounded panic/malformed/mutation tests | persistent fuzz campaign absent | open |
+| Secret two-nonce derivation | blocked by ADR-0013 | deliberately absent | none | no independent vectors | blocked/open |
 
-Nenhuma caixa acima é marcada porque nenhum requisito completo reúne input,
-implementação, teste correspondente e validação exigida. Consulte
-[`NORMATIVE-INPUT-MATRIX.md`](NORMATIVE-INPUT-MATRIX.md) e
-[`FROZEN-CRYPTO-PARAMETERS.md`](FROZEN-CRYPTO-PARAMETERS.md).
+No checklist box is marked complete in this implementation branch. A checked
+box requires a separate gate review that cites the exact code, test command,
+fixture provenance, and independent evidence.

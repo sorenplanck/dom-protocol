@@ -10,6 +10,11 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+dom-core.workspace = true
+dom-crypto.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-dom-crypto = { path = "../dom-crypto" }
+dom-consensus.workspace = true
+dom-serialization.workspace = true
+hex.workspace = true

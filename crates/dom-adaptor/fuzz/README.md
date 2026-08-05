@@ -1,3 +1,7 @@
 # Fuzzing
 
-Fuzz targets are deferred until the relevant parsers and APIs are normatively frozen. Gate G1 requires malformed scalar/point coverage, mutation of every critical field and panic-free fuzzing. This directory is documentation only and is not a second Cargo workspace.
+Bounded panic probes cover every fixed-width parser in the normal test suite.
+A persistent fuzz campaign remains required before G1a approval. Future fuzz
+targets must cover malformed scalars and points, every critical transcript
+field, pre-signature verification, adaptation, and extraction. Corpus inputs
+created by the implementation under test are not independent vectors.
