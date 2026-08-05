@@ -51,11 +51,24 @@
 //! fn confuse(lookup: ReservationRequestLookupV1) -> PermitIdV1 { lookup.into() }
 //! ```
 //!
-//! The opaque signing-round bootstrap cannot be assembled by application code:
+//! The signer-owned signing-round bootstrap is not part of the public API:
 //!
 //! ```compile_fail
 //! use dom_adaptor::ValidatedSigningRoundBootstrapV1;
-//! let _bootstrap = ValidatedSigningRoundBootstrapV1 { /* private fields */ };
+//! ```
+//!
+//! The public source request cannot inject a precomputed transcript or digest
+//! through a struct literal because all fields remain private:
+//!
+//! ```compile_fail
+//! use dom_adaptor::SigningRoundSessionRequestV1;
+//! let _request = SigningRoundSessionRequestV1 { /* private fields */ };
+//! ```
+//!
+//! The persistent DSC1 fuzz harness is unavailable in ordinary builds:
+//!
+//! ```compile_fail
+//! use dom_adaptor::fuzz_dsc1_signing_round_acceptance_v1;
 //! ```
 //!
 //! Sealer/import capabilities cannot be constructed by downstream callers:
@@ -180,10 +193,14 @@ pub use share_pop::{
     prove_share_knowledge_v1, verify_share_knowledge_v1, SharePoPStatementV1, ShareProofV1,
 };
 pub use signing_round::{
-    AcceptedMessageDispositionV1, ValidatedAcceptedSessionMessageV1, ValidatedCommitmentRoundV1,
-    ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1, ValidatedRevealRoundV1,
-    ValidatedSigningRoundBootstrapV1, ValidatedSigningRoundStateV1,
+    AcceptedMessageDispositionV1, SigningRoundSessionRequestV1, ValidatedAcceptedSessionMessageV1,
+    ValidatedCommitmentRoundV1, ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1,
+    ValidatedRevealRoundV1, ValidatedSigningRoundStateV1,
 };
+
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub use signing_round::fuzz_dsc1_signing_round_acceptance_v1;
 pub use signing_share::SigningShareV1;
 pub use transcript::{
     binding_factor_v1, nonce_commitment_hash_v1, BindingContextV1, BindingFactorV1,

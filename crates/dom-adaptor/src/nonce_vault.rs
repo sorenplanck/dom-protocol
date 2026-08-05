@@ -442,14 +442,17 @@ pub struct SpentArtifactDescriptorV1 {
 }
 
 impl SpentArtifactDescriptorV1 {
-    fn from_view(view: &impl VaultSpentArtifactViewV1) -> Result<Self, NonceVaultError> {
-        if view.adaptor_outbound_digest() == &[0; 32] {
+    pub(crate) fn from_view(view: &impl VaultSpentArtifactViewV1) -> Result<Self, NonceVaultError> {
+        let permit_id = view.permit_id().clone();
+        let kind = view.kind();
+        let adaptor_outbound_digest = *view.adaptor_outbound_digest();
+        if adaptor_outbound_digest == [0; 32] {
             return Err(NonceVaultError::InvalidPermit);
         }
         Ok(Self {
-            permit_id: view.permit_id().clone(),
-            kind: view.kind(),
-            adaptor_outbound_digest: *view.adaptor_outbound_digest(),
+            permit_id,
+            kind,
+            adaptor_outbound_digest,
         })
     }
 
