@@ -383,6 +383,65 @@ impl Transaction {
     }
 }
 
+/// Build the exact non-signature transaction-template projection assigned by
+/// NAR-002. This is an off-chain Scriptless adapter and does not alter DOM
+/// transaction serialization or consensus validation.
+pub fn scriptless_transaction_template_bytes_v1(tx: &Transaction) -> Result<Vec<u8>, DomError> {
+    if tx.inputs.len() > MAX_INPUTS_PER_TX
+        || tx.outputs.len() > MAX_OUTPUTS_PER_TX
+        || tx.kernels.len() > MAX_KERNELS_PER_TX
+    {
+        return Err(DomError::Invalid(
+            "Scriptless template exceeds transaction count limits".into(),
+        ));
+    }
+    let input_count = u32::try_from(tx.inputs.len())
+        .map_err(|_| DomError::Invalid("Scriptless input count exceeds u32".into()))?;
+    let output_count = u32::try_from(tx.outputs.len())
+        .map_err(|_| DomError::Invalid("Scriptless output count exceeds u32".into()))?;
+    let kernel_count = u32::try_from(tx.kernels.len())
+        .map_err(|_| DomError::Invalid("Scriptless kernel count exceeds u32".into()))?;
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"DOMSCTT1");
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&input_count.to_le_bytes());
+    for input in &tx.inputs {
+        bytes.extend_from_slice(input.commitment.as_bytes());
+    }
+    bytes.extend_from_slice(&output_count.to_le_bytes());
+    for output in &tx.outputs {
+        if output.proof.len() > dom_core::MAX_OUTPUT_PROOF_ENVELOPE_SIZE {
+            return Err(DomError::Invalid(
+                "Scriptless output proof exceeds canonical envelope limit".into(),
+            ));
+        }
+        let proof_len = u32::try_from(output.proof.len())
+            .map_err(|_| DomError::Invalid("Scriptless output proof exceeds u32".into()))?;
+        bytes.extend_from_slice(output.commitment.as_bytes());
+        bytes.extend_from_slice(&proof_len.to_le_bytes());
+        bytes.extend_from_slice(&output.proof);
+    }
+    bytes.extend_from_slice(&kernel_count.to_le_bytes());
+    for kernel in &tx.kernels {
+        bytes.push(kernel.features);
+        bytes.extend_from_slice(&kernel.fee.noms().to_le_bytes());
+        bytes.extend_from_slice(&kernel.lock_height.to_le_bytes());
+        bytes.extend_from_slice(kernel.excess.as_bytes());
+    }
+    bytes.extend_from_slice(&tx.offset);
+    Ok(bytes)
+}
+
+/// Return the unchanged authoritative DOM kernel-message digest.
+pub fn scriptless_kernel_message_digest_v1(kernel: &TransactionKernel) -> dom_core::Hash256 {
+    let mut body = [0u8; 17];
+    body[0] = kernel.features;
+    body[1..9].copy_from_slice(&kernel.fee.noms().to_le_bytes());
+    body[9..17].copy_from_slice(&kernel.lock_height.to_le_bytes());
+    dom_crypto::blake2b_256_tagged(dom_core::TAG_KERNEL_MSG, &body)
+}
+
 impl DomSerialize for Transaction {
     fn serialize(&self, w: &mut Writer) -> Result<(), DomError> {
         w.write_list(&self.inputs)?;
@@ -687,6 +746,35 @@ mod tests {
             kernels: vec![plain_kernel(1000)],
             offset: [0u8; 32],
         }
+    }
+
+    #[test]
+    fn scriptless_template_projection_omits_only_existing_signature_bytes() {
+        let tx = minimal_tx();
+        let canonical = scriptless_transaction_template_bytes_v1(&tx).expect("template");
+        assert_eq!(&canonical[..8], b"DOMSCTT1");
+        assert_eq!(&canonical[8..10], &1u16.to_le_bytes());
+
+        let mut signature_only = tx.clone();
+        signature_only.kernels[0].excess_signature.fill(0x5a);
+        assert_eq!(
+            scriptless_transaction_template_bytes_v1(&signature_only).expect("signature variant"),
+            canonical
+        );
+
+        let mut fee_mutation = tx;
+        fee_mutation.kernels[0].fee = dom_core::Amount::from_noms(
+            fee_mutation.kernels[0]
+                .fee
+                .noms()
+                .checked_add(1)
+                .expect("fee"),
+        )
+        .expect("amount");
+        assert_ne!(
+            scriptless_transaction_template_bytes_v1(&fee_mutation).expect("fee variant"),
+            canonical
+        );
     }
 
     #[test]
