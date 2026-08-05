@@ -212,10 +212,11 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
             .vault
             .authorize_exposure(&mut state.handle, prepared)
             .map_err(VaultBackedSignerError::Vault)?;
-        let authorized = self
+        let exported = self
             .vault
             .export(permit)
             .map_err(VaultBackedSignerError::Vault)?;
+        let authorized = crate::AuthorizedExposureV1::from_vault_export(&exported)?;
         if authorized.kind() != ExposureKindV1::NonceCommitment || authorized.as_bytes() != expected
         {
             return Err(VaultBackedSignerError::AuthorizedArtifactMismatch);
@@ -267,10 +268,11 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
             .vault
             .authorize_exposure(&mut state.handle, prepared)
             .map_err(VaultBackedSignerError::Vault)?;
-        let authorized = self
+        let exported = self
             .vault
             .export(permit)
             .map_err(VaultBackedSignerError::Vault)?;
+        let authorized = crate::AuthorizedExposureV1::from_vault_export(&exported)?;
         if authorized.kind() != ExposureKindV1::NonceReveal || authorized.as_bytes() != expected {
             return Err(VaultBackedSignerError::AuthorizedArtifactMismatch);
         }
@@ -359,10 +361,11 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
             .vault
             .authorize_exposure(&mut state.handle, prepared)
             .map_err(VaultBackedSignerError::Vault)?;
-        let authorized = self
+        let exported = self
             .vault
             .export(permit)
             .map_err(VaultBackedSignerError::Vault)?;
+        let authorized = crate::AuthorizedExposureV1::from_vault_export(&exported)?;
         if authorized.kind() != ExposureKindV1::PartialSignature
             || authorized.as_bytes() != expected
         {

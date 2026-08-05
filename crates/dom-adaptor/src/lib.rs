@@ -36,7 +36,7 @@ pub use nonce_vault::{
     ExposurePermitBindingV1, IdempotencyKey, NonceReservation, NonceVaultError, NonceVaultV1,
     ParticipantId, PermitIdV1, PreparedExposureV1, Purpose, ReservationIntentV1,
     ReservationNonceId, ReservationRequestV1, ReservationState, RestoreState, SecretOpenStageV1,
-    SessionId, TemplateHash, TerminalReservationV1, VaultKeyId,
+    SessionId, TemplateHash, TerminalReservationV1, VaultExportedArtifactV1, VaultKeyId,
 };
 pub use permit::{exposure_outbound_digest_v1, validate_exposure_permit_record_v1, ExposureKindV1};
 pub use session::{

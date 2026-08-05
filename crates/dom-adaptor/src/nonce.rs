@@ -4,7 +4,9 @@
     reason = "NAR-002 keeps secret/export capabilities crate-sealed until G1b integration"
 )]
 
+#[cfg(any(test, feature = "test-helpers"))]
 use crate::permit::ExposurePermitV1;
+#[cfg(any(test, feature = "test-helpers"))]
 use crate::{
     exposure_outbound_digest_v1, nonce_commitment_hash_v1, ExposureKindV1, NonceCommitmentV1,
     NonceRevealV1, SessionContextV1,
@@ -14,6 +16,7 @@ use dom_crypto::{
     schnorr_aggregate_sigs, scriptless_add_public_points, scriptless_aggregate_partial_scalars,
     scriptless_verify_final_signature, PartialSig, PublicKey, SchnorrSignature,
 };
+#[cfg(any(test, feature = "test-helpers"))]
 use dom_crypto::{
     schnorr_challenge, Hash256, ScriptlessNonceDerivationV1, ScriptlessSecretNoncePairV1,
     ScriptlessSecretScalar,
@@ -21,11 +24,13 @@ use dom_crypto::{
 
 /// Public identifiers durably bound to a reserved nonce before derivation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) struct NonceReservationBindingV1 {
     nonce_id: [u8; 32],
     participant_id: [u8; 32],
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl NonceReservationBindingV1 {
     /// Construct a reservation binding from nonzero canonical identifiers.
     pub(crate) fn new(nonce_id: [u8; 32], participant_id: [u8; 32]) -> Result<Self> {
@@ -83,6 +88,7 @@ impl PublicNoncePairV1 {
 /// This type deliberately implements no cloning, copying, debugging, display,
 /// equality, ordering, or generic serialization. Its scalar fields zeroize on
 /// drop. No public nonce accessor exists before authorization.
+#[cfg(any(test, feature = "test-helpers"))]
 pub struct SecretNoncePairV1 {
     secret_pair: ScriptlessSecretNoncePairV1,
     public: PublicNoncePairV1,
@@ -92,6 +98,7 @@ pub struct SecretNoncePairV1 {
     commitment_exported: bool,
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl SecretNoncePairV1 {
     /// Derive a fresh pair from the operating-system CSPRNG.
     pub(crate) fn derive(
@@ -231,12 +238,14 @@ impl SecretNoncePairV1 {
 
 /// Opaque pair after durable authorization; public export and one partial-sign
 /// operation are now available. Partial signing consumes this value.
+#[cfg(any(test, feature = "test-helpers"))]
 pub struct AuthorizedSecretNoncePairV1 {
     pair: SecretNoncePairV1,
     _permit: ExposurePermitV1,
     reveal: Option<NonceRevealV1>,
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl AuthorizedSecretNoncePairV1 {
     /// Export the exact authorized public nonce pair.
     pub(crate) fn take_public_nonces(&mut self) -> Result<PublicNoncePairV1> {
@@ -303,6 +312,7 @@ impl AuthorizedSecretNoncePairV1 {
 
 /// Prepared partial signature that remains unexportable until a distinct
 /// durable partial-signature permit is consumed.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) struct PreparedPartialSignatureV1 {
     partial: PartialSignatureV1,
     nonce_id: [u8; 32],
@@ -310,6 +320,7 @@ pub(crate) struct PreparedPartialSignatureV1 {
     participant_id: [u8; 32],
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl PreparedPartialSignatureV1 {
     pub(crate) fn outbound_digest(&self) -> Result<Hash256> {
         exposure_outbound_digest_v1(ExposureKindV1::PartialSignature, &self.partial.to_bytes())

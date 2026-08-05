@@ -300,6 +300,43 @@ pub struct ExposurePermitBindingV1 {
 }
 
 impl ExposurePermitBindingV1 {
+    /// Exact canonical persisted record length.
+    pub const ENCODED_LEN: usize = 252;
+
+    /// Parse the canonical durable record without creating authorization authority.
+    pub fn from_persistence_bytes(bytes: &[u8]) -> Result<Self, NonceVaultError> {
+        if bytes.len() != Self::ENCODED_LEN
+            || &bytes[..8] != b"DOMEXPV1"
+            || u16::from_le_bytes([bytes[8], bytes[9]]) != 1
+        {
+            return Err(NonceVaultError::InvalidPermit);
+        }
+        let exposure_kind = ExposureKindV1::try_from(bytes[10])
+            .map_err(|_| NonceVaultError::UnsupportedExposureKind)?;
+        let purpose =
+            PurposeV1::try_from(bytes[139]).map_err(|_| NonceVaultError::UnsupportedPurpose)?;
+        if !purpose.is_strict_v1_authorized() {
+            return Err(NonceVaultError::UnsupportedPurpose);
+        }
+        Self::new(
+            IdempotencyKey::from_bytes(bytes[11..43].try_into().expect("fixed permit ID"))?,
+            ReservationNonceId::from_bytes(
+                bytes[43..75].try_into().expect("fixed reservation ID"),
+            )?,
+            SessionId::from_bytes(bytes[75..107].try_into().expect("fixed session ID"))?,
+            ParticipantId::from_bytes(bytes[107..139].try_into().expect("fixed participant ID"))?,
+            purpose,
+            TemplateHash::from_bytes(bytes[140..172].try_into().expect("fixed template hash"))?,
+            bytes[172..204].try_into().expect("fixed outbound digest"),
+            exposure_kind,
+            u64::from_le_bytes(bytes[204..212].try_into().expect("fixed epoch")),
+            u64::from_le_bytes(bytes[212..220].try_into().expect("fixed revision")),
+            bytes[220..252]
+                .try_into()
+                .expect("fixed receipt-chain hash"),
+        )
+    }
+
     /// Validates the fields bound by a durable Wallet permit.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -337,8 +374,8 @@ impl ExposurePermitBindingV1 {
     }
 
     /// Returns the exact 252-byte canonical binding representation.
-    pub fn persistence_bytes(&self) -> [u8; 252] {
-        let mut bytes = [0u8; 252];
+    pub fn persistence_bytes(&self) -> [u8; Self::ENCODED_LEN] {
+        let mut bytes = [0u8; Self::ENCODED_LEN];
         let mut cursor = 0;
         append(&mut bytes, &mut cursor, b"DOMEXPV1");
         append(&mut bytes, &mut cursor, &1u16.to_le_bytes());
@@ -369,6 +406,61 @@ impl ExposurePermitBindingV1 {
         )
         .as_bytes()
     }
+
+    /// Return the one-shot permit identifier.
+    pub const fn permit_id(&self) -> &IdempotencyKey {
+        &self.permit_id
+    }
+
+    /// Return the reservation identifier.
+    pub const fn reservation_id(&self) -> &ReservationNonceId {
+        &self.reservation_id
+    }
+
+    /// Return the bound session identifier.
+    pub const fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    /// Return the bound participant identifier.
+    pub const fn participant_id(&self) -> &ParticipantId {
+        &self.participant_id
+    }
+
+    /// Return the closed purpose.
+    pub const fn purpose(&self) -> PurposeV1 {
+        self.purpose
+    }
+
+    /// Return the template hash.
+    pub const fn template_hash(&self) -> &TemplateHash {
+        &self.template_hash
+    }
+
+    /// Return the exact outbound digest.
+    pub const fn outbound_digest(&self) -> &[u8; 32] {
+        &self.outbound_digest
+    }
+
+    /// Return the closed exposure kind.
+    pub const fn exposure_kind(&self) -> ExposureKindV1 {
+        self.exposure_kind
+    }
+
+    /// Return the vault epoch.
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Return the semantic revision.
+    pub const fn semantic_revision(&self) -> u64 {
+        self.semantic_revision
+    }
+
+    /// Return the applied receipt-chain hash.
+    pub const fn receipt_chain_hash(&self) -> &[u8; 32] {
+        &self.receipt_chain_hash
+    }
 }
 
 /// Canonical V1 reservation request consumed by the trusted vault.
@@ -397,13 +489,13 @@ impl PreparedExposureV1 {
 pub struct AuthorizedExposureV1(ExposureBytes);
 
 impl AuthorizedExposureV1 {
-    /// Construct from byte-identical persisted output after durable permit spend.
-    ///
-    /// This constructor grants no signing capability. The production Wallet
-    /// implementation must call it only after completing its ratified durable
-    /// order and returns the value directly from [`NonceVaultV1::export`].
-    pub fn from_persisted(exposure: ExposureBytes) -> Self {
-        Self(exposure)
+    pub(crate) fn from_vault_export(
+        exported: &impl VaultExportedArtifactV1,
+    ) -> Result<Self, NonceVaultError> {
+        Ok(Self(ExposureBytes::from_bytes(
+            exported.kind(),
+            exported.as_bytes(),
+        )?))
     }
 
     /// Return the authorized public artifact kind.
@@ -415,6 +507,18 @@ impl AuthorizedExposureV1 {
     pub fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()
     }
+}
+
+/// Read-only view of exact persisted output owned by a concrete Wallet vault.
+///
+/// The concrete production type has a private constructor and is returned only
+/// after durable permit spend. `dom-adaptor` wraps its public bytes only inside
+/// the integrated signer.
+pub trait VaultExportedArtifactV1 {
+    /// Return the closed exposure kind.
+    fn kind(&self) -> ExposureKindV1;
+    /// Borrow the exact byte-identical persisted artifact.
+    fn as_bytes(&self) -> &[u8];
 }
 
 /// Fail-closed reason for terminally aborting a reservation.
@@ -462,6 +566,8 @@ pub trait NonceVaultV1 {
     type ReservationHandle;
     /// Opaque one-shot capability with a private Wallet constructor.
     type ExposurePermit;
+    /// Wallet-owned output produced only after durable permit spend.
+    type ExportedArtifact: VaultExportedArtifactV1;
 
     /// Durably reserve, charge, seal, journal, witness, and persist a nonce slot.
     fn reserve(
@@ -493,13 +599,13 @@ pub trait NonceVaultV1 {
     fn export(
         &mut self,
         permit: Self::ExposurePermit,
-    ) -> core::result::Result<AuthorizedExposureV1, Self::Error>;
+    ) -> core::result::Result<Self::ExportedArtifact, Self::Error>;
 
     /// Return only the exact persisted bytes bound to an already-spent permit.
     fn resend_exported(
         &self,
         permit_id: PermitIdV1,
-    ) -> core::result::Result<AuthorizedExposureV1, Self::Error>;
+    ) -> core::result::Result<Self::ExportedArtifact, Self::Error>;
 
     /// Irreversibly abort or burn without refunding any charged budget.
     fn abort(

@@ -4,9 +4,14 @@
     reason = "parsed permits are records, while authorization capability remains crate-sealed"
 )]
 
-use crate::{error::exact_array, AdaptorError, PurposeV1, Result};
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::error::exact_array;
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::PurposeV1;
+use crate::{AdaptorError, Result};
 use dom_crypto::{blake2b_256_tagged, Hash256};
 
+#[cfg(any(test, feature = "test-helpers"))]
 const PERMIT_DIGEST_TAG_V1: &str = "DOM:scriptless-vault-exposure-permit:v1";
 const OUTBOUND_DIGEST_TAG_V1: &str = "DOM:scriptless-vault-outbound:v1";
 
@@ -55,6 +60,7 @@ impl TryFrom<u8> for ExposureKindV1 {
 ///
 /// The type intentionally implements no cloning, copying, debugging, display,
 /// equality, ordering, or generic serialization.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) struct ExposurePermitV1 {
     exposure_kind: ExposureKindV1,
     permit_id: [u8; 32],
@@ -69,6 +75,7 @@ pub(crate) struct ExposurePermitV1 {
     receipt_chain_hash: [u8; 32],
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl ExposurePermitV1 {
     /// Exact canonical encoded length.
     pub(crate) const ENCODED_LEN: usize = 252;
@@ -173,7 +180,9 @@ impl ExposurePermitV1 {
 /// Parsing is intentionally separate from authorization. A successful result
 /// does not grant access to any secret nonce or public artifact.
 pub fn validate_exposure_permit_record_v1(bytes: &[u8]) -> Result<()> {
-    ExposurePermitV1::from_durable_bytes(bytes).map(|_| ())
+    crate::ExposurePermitBindingV1::from_persistence_bytes(bytes)
+        .map(|_| ())
+        .map_err(|_| AdaptorError::InvalidContext("invalid exposure permit record"))
 }
 
 /// Compute the exact digest bound into an exposure permit.
