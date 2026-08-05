@@ -277,6 +277,11 @@ impl PreparedFreshReservationV1 {
         self.request.context_binding().digest()
     }
 
+    /// Return the lifetime-unique session retained with the lookup custody record.
+    pub const fn session_id(&self) -> &SessionId {
+        self.request.session_id()
+    }
+
     pub(crate) fn into_request(
         self,
         custody: impl DurableReservationLookupV1,

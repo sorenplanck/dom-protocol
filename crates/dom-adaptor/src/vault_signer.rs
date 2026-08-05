@@ -486,6 +486,22 @@ where
             return Err(VaultBackedSignerError::AuthorizedArtifactMismatch);
         }
         let permit_id = authorized.permit_id().clone();
+        validate_live_handle(
+            &state.handle,
+            state.handle.request_lookup(),
+            &state.context_binding_digest,
+            ReservationLiveStageV1::AfterCommitment,
+        )?;
+        validate_spent_projection(
+            &state.handle,
+            ExposureKindV1::NonceCommitment,
+            &permit_id,
+            crate::exposure_outbound_digest_v1(
+                ExposureKindV1::NonceCommitment,
+                authorized.as_bytes(),
+            )?
+            .as_bytes(),
+        )?;
         Ok((
             CommitmentExportedV1 {
                 handle: state.handle,
@@ -569,6 +585,19 @@ where
             return Err(VaultBackedSignerError::AuthorizedArtifactMismatch);
         }
         let permit_id = authorized.permit_id().clone();
+        validate_live_handle(
+            &state.handle,
+            state.handle.request_lookup(),
+            &state.context_binding_digest,
+            ReservationLiveStageV1::AfterReveal,
+        )?;
+        validate_spent_projection(
+            &state.handle,
+            ExposureKindV1::NonceReveal,
+            &permit_id,
+            crate::exposure_outbound_digest_v1(ExposureKindV1::NonceReveal, authorized.as_bytes())?
+                .as_bytes(),
+        )?;
         Ok((
             RevealExportedV1 {
                 handle: state.handle,
@@ -844,6 +873,27 @@ fn validate_exported_artifact(
         return Err(NonceVaultError::InvalidPublicMaterial);
     }
     Ok(authorized)
+}
+
+fn validate_spent_projection<Handle: VaultReservationHandleV1>(
+    handle: &Handle,
+    kind: ExposureKindV1,
+    permit_id: &crate::PermitIdV1,
+    outbound_digest: &[u8; 32],
+) -> core::result::Result<(), NonceVaultError> {
+    let spent = match kind {
+        ExposureKindV1::NonceCommitment => handle.spent_commitment(),
+        ExposureKindV1::NonceReveal => handle.spent_reveal(),
+        ExposureKindV1::PartialSignature => return Err(NonceVaultError::InvalidTransition),
+    }
+    .ok_or(NonceVaultError::CorruptState)?;
+    if spent.kind() != kind
+        || spent.permit_id() != permit_id
+        || spent.adaptor_outbound_digest() != outbound_digest
+    {
+        return Err(NonceVaultError::CorruptState);
+    }
+    Ok(())
 }
 
 fn nonce_commitment_from_reveal(
