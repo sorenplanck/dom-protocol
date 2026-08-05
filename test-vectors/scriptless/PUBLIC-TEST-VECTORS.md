@@ -21,3 +21,15 @@ Running a generator does not make its outputs independent. The committed
 reference outputs are independent evidence only because their implementation
 and expected bytes were frozen before comparison with the Rust production
 implementation.
+
+## Frozen historical instructions
+
+The immutable independent-set README records the feature names and report path
+used by the original post-barrier comparison environment. Those historical
+instructions are not commands for this publication branch: `dom-adaptor`
+intentionally exposes no `fuzzing` or `test-helpers` feature, and the
+machine-specific comparison report is deliberately excluded. The committed
+crate-local comparison adapter is compiled only under `cfg(test)`, reads the
+unchanged frozen output, and asserts all 311 checkpoints through the public
+production boundary. The current Cargo manifests, not the frozen historical
+instructions, define the supported build graph.
