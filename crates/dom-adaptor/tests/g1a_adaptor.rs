@@ -147,6 +147,20 @@ fn pre_signature_parser_is_exact_and_fail_closed() {
     zero_scalar[98..130].fill(0);
     assert!(AdaptorPreSignatureV1::from_bytes(&zero_scalar).is_err());
 
+    let order = hex::decode("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141")
+        .expect("secp256k1 group order");
+    let mut order_scalar = bytes;
+    order_scalar[98..130].copy_from_slice(&order);
+    assert!(AdaptorPreSignatureV1::from_bytes(&order_scalar).is_err());
+
+    let mut order_plus_one = order;
+    order_plus_one[31] = order_plus_one[31]
+        .checked_add(1)
+        .expect("group-order low byte can be incremented");
+    let mut order_plus_one_scalar = bytes;
+    order_plus_one_scalar[98..130].copy_from_slice(&order_plus_one);
+    assert!(AdaptorPreSignatureV1::from_bytes(&order_plus_one_scalar).is_err());
+
     let mut mutated_template = bytes;
     mutated_template[0] ^= 1;
     let mutated_template =

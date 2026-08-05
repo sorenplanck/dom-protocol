@@ -588,7 +588,23 @@ mod tests {
     #[test]
     fn scriptless_secret_scalar_rejects_boundaries() {
         assert!(ScriptlessSecretScalar::from_be_bytes([0u8; 32]).is_err());
+
+        let order = secp256k1::constants::CURVE_ORDER;
+        assert!(ScriptlessSecretScalar::from_be_bytes(order).is_err());
+
+        let mut order_plus_one = order;
+        order_plus_one[31] = order_plus_one[31]
+            .checked_add(1)
+            .expect("group-order low byte can be incremented");
+        assert!(ScriptlessSecretScalar::from_be_bytes(order_plus_one).is_err());
         assert!(ScriptlessSecretScalar::from_be_bytes([0xFF; 32]).is_err());
+
+        let mut high_bit = [0u8; 32];
+        high_bit[0] = 0x80;
+        assert!(
+            ScriptlessSecretScalar::from_be_bytes(high_bit).is_ok(),
+            "a high-bit scalar below the group order remains canonical"
+        );
     }
 
     #[test]
