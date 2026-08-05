@@ -1,0 +1,52 @@
+{
+  "fixture": "DOM G1a Share PoK independent inputs v1",
+  "warning": "WARNING: PUBLIC AND INSECURE TEST VECTORS ONLY. All scalar values, nonce scalars, and proof material are intentionally public and MUST NEVER be used for production keys, nonces, wallets, funds, signing, or randomness.",
+  "challenge_expansion": "suffix-counter-00-01",
+  "source_chain": {
+    "nar_002_sha256": "b726c2e576833f843d0065a1e823e649ab9e7e28fd9cfedb0e6e06e6b1be87f5",
+    "nar_001_sha256": "eee087c808aeb4e6e745a5311d17ca5a63c5b5e5568218d20b1cbcdd7b6206dc",
+    "master_specification_docx_sha256": "5ad366d6b5c01c88bc88d4e9c016b447c32f24fbc24a32fa8b6946d7ff5dd6b5",
+    "signed_two_nonce_input_sha256": "55642208968863a7b2c4773a82d9774f95f2a3b604b80a876d0bf031396b2a7d"
+  },
+  "cases": [
+    {
+      "case_id": "SP1-initiator-index-zero",
+      "chain_id_32": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "session_id_32": "0101010101010101010101010101010101010101010101010101010101010101",
+      "participant_id_32": "c07141ea606c145a73e3fdbd20ed429025cb88b83cf214a1a8a36d620aa827b8",
+      "role_u8": 1,
+      "participant_index_u16": 0,
+      "terms_hash_32": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "capsule_hash_32": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "public_insecure_share_scalar_be32": "0707070707070707070707070707070707070707070707070707070707070707",
+      "known_public_share_sec1_33": "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+      "public_insecure_pop_nonce_scalar_be32": "0909090909090909090909090909090909090909090909090909090909090909"
+    },
+    {
+      "case_id": "SP2-responder-index-one",
+      "chain_id_32": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "session_id_32": "4242424242424242424242424242424242424242424242424242424242424242",
+      "participant_id_32": "c8324097723644e5a773c4c6e1040818a397d9907c94dd02031dff9df1ed0f5d",
+      "role_u8": 2,
+      "participant_index_u16": 1,
+      "terms_hash_32": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "capsule_hash_32": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "public_insecure_share_scalar_be32": "0808080808080808080808080808080808080808080808080808080808080808",
+      "known_public_share_sec1_33": "03f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b",
+      "public_insecure_pop_nonce_scalar_be32": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+    },
+    {
+      "case_id": "SP3-edge-scalars-index-fifteen",
+      "chain_id_32": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "session_id_32": "fefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe",
+      "participant_id_32": "1111111111111111111111111111111111111111111111111111111111111111",
+      "role_u8": 1,
+      "participant_index_u16": 15,
+      "terms_hash_32": "0000000000000000000000000000000000000000000000000000000000000000",
+      "capsule_hash_32": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "public_insecure_share_scalar_be32": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140",
+      "known_public_share_sec1_33": "0379be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "public_insecure_pop_nonce_scalar_be32": "0000000000000000000000000000000000000000000000000000000000000001"
+    }
+  ]
+}
