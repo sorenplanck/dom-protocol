@@ -167,13 +167,15 @@ current-generation identity, preferably in the atomic snapshot above.
 
 ## Executed validation
 
-All commands below executed in the isolated DOM worktree on Linux. The final
-full-suite row is updated after the documentation commit and clean-HEAD rerun.
+All commands below executed in the isolated DOM worktree on Linux at committed
+HEAD `9d364c6a3e65f3f8d1c2ab2a7281ca74873a3d59`.
 
 | Command | Exit | Result |
 |---|---:|---|
+| `cargo metadata --no-deps --format-version 1 --locked` | 0 | Passed. |
 | `cargo fmt --all -- --check` | 0 | Passed. |
 | `cargo check -p dom-adaptor --all-targets --locked` | 0 | Passed. |
+| `cargo test -p dom-adaptor --locked` | 0 | Passed: 44 unit tests, 4 adaptor integration tests, 7 transcript integration tests, 3 freeze probes, and 16 compile-fail documentation tests; 74 total, 0 failed. |
 | Focused semantic-failure test | 0 | 1 passed, 0 failed. |
 | Focused vault-signer tests | 0 | 4 passed, 0 failed. |
 | `cargo clippy -p dom-adaptor --all-targets --locked -- -D warnings` | 0 | Passed with warnings denied. |
