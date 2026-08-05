@@ -1,0 +1,54 @@
+[package]
+name = "dom-adaptor-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dom-adaptor]
+path = ".."
+
+[dependencies.dom-crypto]
+path = "../../dom-crypto"
+
+[[bin]]
+name = "canonical_messages"
+path = "fuzz_targets/canonical_messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "adaptor_pre_signature"
+path = "fuzz_targets/adaptor_pre_signature.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "canonical_context"
+path = "fuzz_targets/canonical_context.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "share_pop"
+path = "fuzz_targets/share_pop.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bulletproof_mpc"
+path = "fuzz_targets/bulletproof_mpc.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
