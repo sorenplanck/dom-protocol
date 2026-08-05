@@ -36,6 +36,7 @@ use dom_core::DomError;
 use rand::RngCore;
 use secp256k1zkp::{constants, ffi};
 use std::ptr;
+use zeroize::Zeroizing;
 
 /// Serialized byte length of DOM's bounded aggregate Bulletproof:
 /// one proof over `(v, MAX_PROVABLE_VALUE - v)`, both as 64-bit commitments.
@@ -146,6 +147,15 @@ mod raw_ffi {
             input33: *const c_uchar,
         ) -> c_int;
 
+        /// Parse one canonical compressed SEC1 public key into the backend
+        /// representation used by the multiparty prover phases.
+        pub(crate) fn secp256k1_ec_pubkey_parse(
+            ctx: *const Context,
+            output: *mut PublicKey,
+            input: *const c_uchar,
+            input_len: size_t,
+        ) -> c_int;
+
         /// grin classic Bulletproof rangeproof prover (single 64-bit value path).
         ///
         /// SAFETY: see module note. `proof` writable for `*plen` bytes; on
@@ -218,27 +228,36 @@ struct Backend {
 unsafe impl Send for Backend {}
 unsafe impl Sync for Backend {}
 
-static SHARED: std::sync::OnceLock<Backend> = std::sync::OnceLock::new();
+static SHARED: std::sync::OnceLock<Result<Backend, &'static str>> = std::sync::OnceLock::new();
 
 /// Lazily initialize and return the process-wide shared backend.
-fn backend() -> &'static Backend {
-    SHARED.get_or_init(|| {
-        // SAFETY: standard grin constructors; both results checked non-null. The
-        // shim cannot operate without a context/generators, so failure panics.
+fn backend() -> Result<&'static Backend, DomError> {
+    let initialized = SHARED.get_or_init(|| {
+        // SAFETY: standard grin constructors; both results are checked before
+        // their pointers can enter `Backend`. Initialization failure remains a
+        // typed fail-closed error instead of aborting the process.
         unsafe {
             let ctx = ffi::secp256k1_context_create(
                 ffi::SECP256K1_START_SIGN | ffi::SECP256K1_START_VERIFY,
             );
-            assert!(!ctx.is_null(), "grin context_create returned null");
+            if ctx.is_null() {
+                return Err("grin context_create returned null");
+            }
             let gens = ffi::secp256k1_bulletproof_generators_create(
                 ctx,
                 constants::GENERATOR_G.as_ptr(),
                 N_GENERATORS,
             );
-            assert!(!gens.is_null(), "grin generators_create returned null");
-            Backend { ctx, gens }
+            if gens.is_null() {
+                ffi::secp256k1_context_destroy(ctx);
+                return Err("grin generators_create returned null");
+            }
+            Ok(Backend { ctx, gens })
         }
-    })
+    });
+    initialized
+        .as_ref()
+        .map_err(|message| DomError::Internal((*message).into()))
 }
 
 /// Owns one grin scratch space, created and destroyed PER FFI CALL.
@@ -258,11 +277,15 @@ impl ScratchHandle {
     /// Drop (destroy), this gives create+destroy per call — grin's own usage
     /// pattern (pedersen.rs). A reused scratch can leak a frame when the FFI
     /// returns early on a malformed proof, accumulating until SEGV (DS-001).
-    fn new(backend: &Backend) -> Self {
+    fn new(backend: &Backend) -> Result<Self, DomError> {
         // SAFETY: backend.ctx is live for the process lifetime; SCRATCH_SIZE > 0.
         let s = unsafe { ffi::secp256k1_scratch_space_create(backend.ctx, SCRATCH_SIZE) };
-        assert!(!s.is_null(), "grin scratch_space_create returned null");
-        ScratchHandle(s)
+        if s.is_null() {
+            return Err(DomError::Internal(
+                "grin scratch_space_create returned null".into(),
+            ));
+        }
+        Ok(ScratchHandle(s))
     }
 }
 
@@ -342,7 +365,7 @@ fn prove_raw_values_with_nonces(
     // DS-001: fresh scratch per call, destroyed on scope exit (Drop) — same
     // create+destroy-per-call discipline the verify path uses, so the prove path
     // can never reuse (and thus poison) a scratch arena across calls.
-    let scratch = ScratchHandle::new(backend);
+    let scratch = ScratchHandle::new(backend)?;
     // SAFETY: shared ctx/gens are live for the process lifetime; `scratch` is a
     // freshly-created arena exclusive to this call; all pointers are valid for
     // the call (proof writable for plen; blind/value_gen/nonces fixed lengths).
@@ -455,7 +478,7 @@ fn verify_raw(
     }
     // DS-001: fresh scratch per call, destroyed on scope exit (Drop), so a frame
     // the FFI may leak on a malformed proof cannot accumulate into a later SEGV.
-    let scratch = ScratchHandle::new(backend);
+    let scratch = ScratchHandle::new(backend)?;
     // SAFETY: shared ctx/gens are live for the process lifetime; `scratch` is a
     // freshly-created arena exclusive to this call; proof readable for
     // proof.len(); ci is a valid internal commitment.
@@ -492,7 +515,7 @@ pub fn bp_prove(value: u64, blinding: &BlindingFactor) -> Result<(Vec<u8>, [u8; 
             "value {value} > MAX_PROVABLE_VALUE {MAX_PROVABLE_VALUE}"
         )));
     }
-    let backend = backend();
+    let backend = backend()?;
     let h_dom = h_dom_internal(backend)?;
     let blind = blinding.as_bytes();
     let zkp = commit_zkp(backend, value, blind, &h_dom)?;
@@ -518,7 +541,7 @@ pub fn bp_prove_with_extra_commit(
             "range proof extra commitment must not be empty".into(),
         ));
     }
-    let backend = backend();
+    let backend = backend()?;
     let h_dom = h_dom_internal(backend)?;
     let blind = blinding.as_bytes();
     let zkp = commit_zkp(backend, value, blind, &h_dom)?;
@@ -558,7 +581,7 @@ pub fn bp_prove_with_nonce(
     let rewind = *crate::blake2b_256_tagged(TAG_BP2_REWIND_NONCE, nonce_bytes).as_bytes();
     let private = *crate::blake2b_256_tagged(TAG_BP2_PRIVATE_NONCE, nonce_bytes).as_bytes();
 
-    let backend = backend();
+    let backend = backend()?;
     let h_dom = h_dom_internal(backend)?;
     let blind = blinding.as_bytes();
     let zkp = commit_zkp(backend, value, blind, &h_dom)?;
@@ -580,7 +603,7 @@ pub fn bp2_test_only_prove_legacy_single_with_nonce(
     blinding: &BlindingFactor,
     nonce: &[u8; 32],
 ) -> Result<(Vec<u8>, [u8; 33]), DomError> {
-    let backend = backend();
+    let backend = backend()?;
     let h_dom = h_dom_internal(backend)?;
     let zkp = commit_zkp(backend, value, blinding.as_bytes(), &h_dom)?;
     let sec1 = zkp_to_sec1(&zkp)?;
@@ -617,7 +640,7 @@ pub fn bp_verify(commitment_sec1: &[u8; 33], proof_bytes: &[u8]) -> Result<bool,
     if !proof_has_valid_curve_points(proof_bytes) {
         return Ok(false);
     }
-    let backend = backend();
+    let backend = backend()?;
     let h_dom = h_dom_internal(backend)?;
     let complement_sec1 = derive_complement_commitment(
         &crate::pedersen::Commitment::from_compressed_bytes(commitment_sec1)?,
@@ -647,7 +670,7 @@ pub fn bp_verify_with_extra_commit(
             proof_bytes.len()
         )));
     }
-    let backend = backend();
+    let backend = backend()?;
     let h_dom = h_dom_internal(backend)?;
     let complement_sec1 = derive_complement_commitment(
         &crate::pedersen::Commitment::from_compressed_bytes(commitment_sec1)?,
@@ -660,13 +683,835 @@ pub fn bp_verify_with_extra_commit(
     verify_raw(backend, &commits, proof_bytes, &h_dom, extra_commit)
 }
 
+/// Public first-round points produced by the pinned collaborative backend.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BulletproofMpcRound1Output {
+    t_one: [u8; 33],
+    t_two: [u8; 33],
+}
+
+impl BulletproofMpcRound1Output {
+    /// Return canonical compressed `T1`.
+    pub const fn t_one(&self) -> &[u8; 33] {
+        &self.t_one
+    }
+
+    /// Return canonical compressed `T2`.
+    pub const fn t_two(&self) -> &[u8; 33] {
+        &self.t_two
+    }
+}
+
+/// One-shot private state between collaborative Bulletproof rounds one and two.
+///
+/// This type deliberately implements no clone, copy, debug, display, equality,
+/// ordering, or generic serialization.
+pub struct BulletproofMpcRound1State {
+    value: u64,
+    blind_pair: Zeroizing<[[u8; 32]; PROOF_NCOMMITS]>,
+    commitments: [[u8; 33]; PROOF_NCOMMITS],
+    common_nonce: Zeroizing<[u8; 32]>,
+    private_nonce: Zeroizing<[u8; 32]>,
+    extra_commit: [u8; 32],
+}
+
+/// One-shot private state accepted only by the final backend phase.
+///
+/// This type deliberately implements no clone, copy, debug, display, equality,
+/// ordering, or generic serialization.
+pub struct BulletproofMpcFinalizeState {
+    state: BulletproofMpcRound1State,
+    t_one: ffi::PublicKey,
+    t_two: ffi::PublicKey,
+}
+
+fn mpc_internal_commitments(
+    backend: &Backend,
+    commitments: &[[u8; 33]; PROOF_NCOMMITS],
+) -> Result<[[u8; 64]; PROOF_NCOMMITS], DomError> {
+    let mut parsed = [[0u8; 64]; PROOF_NCOMMITS];
+    for (index, commitment) in commitments.iter().enumerate() {
+        let zkp = sec1_to_zkp(commitment)?;
+        // SAFETY: the shared context is live, the output slot is writable for
+        // 64 bytes, and `zkp` is an exact parsed commitment encoding.
+        if unsafe {
+            ffi::secp256k1_pedersen_commitment_parse(
+                backend.ctx,
+                parsed[index].as_mut_ptr(),
+                zkp.as_ptr(),
+            )
+        } != 1
+        {
+            return Err(DomError::Invalid(
+                "collaborative Bulletproof commitment parsing failed".into(),
+            ));
+        }
+    }
+    Ok(parsed)
+}
+
+fn mpc_parse_public_key(backend: &Backend, bytes: &[u8; 33]) -> Result<ffi::PublicKey, DomError> {
+    // Validate through the authoritative Rust-facing parser before crossing
+    // the FFI boundary, including canonical byte-exact re-encoding.
+    let canonical = crate::PublicKey::from_compressed_bytes(bytes)?;
+    if canonical.to_compressed_bytes() != *bytes {
+        return Err(DomError::Invalid(
+            "collaborative Bulletproof point is noncanonical".into(),
+        ));
+    }
+    let mut point = ffi::PublicKey::new();
+    // SAFETY: the backend context is live, output is writable for one public
+    // key, and `bytes` is readable for its exact 33-byte length.
+    if unsafe {
+        raw_ffi::secp256k1_ec_pubkey_parse(backend.ctx, &mut point, bytes.as_ptr(), bytes.len())
+    } != 1
+    {
+        return Err(DomError::Invalid(
+            "collaborative Bulletproof point parsing failed".into(),
+        ));
+    }
+    Ok(point)
+}
+
+fn mpc_serialize_public_key(
+    backend: &Backend,
+    point: &ffi::PublicKey,
+) -> Result<[u8; 33], DomError> {
+    let mut bytes = [0u8; 33];
+    let mut length = bytes.len();
+    // SAFETY: output is writable for 33 bytes and `point` is a live backend
+    // public key returned by the pinned prover.
+    let result = unsafe {
+        ffi::secp256k1_ec_pubkey_serialize(
+            backend.ctx,
+            bytes.as_mut_ptr(),
+            &mut length,
+            point,
+            ffi::SECP256K1_SER_COMPRESSED,
+        )
+    };
+    if result != 1 || length != bytes.len() {
+        return Err(DomError::Internal(
+            "collaborative Bulletproof point serialization failed".into(),
+        ));
+    }
+    crate::PublicKey::from_compressed_bytes(&bytes)?;
+    Ok(bytes)
+}
+
+/// Execute the pinned backend's collaborative first phase.
+///
+/// `common_nonce` is the ratified joint nonce and `private_nonce` is a fresh,
+/// independent nonzero scalar. Both are consumed into the returned one-shot
+/// state. The caller is responsible for deriving them under the higher-level
+/// protocol; this function defines no network or storage format.
+pub fn bulletproof_mpc_round1(
+    value: u64,
+    blinding: BlindingFactor,
+    aggregate_commitment: [u8; 33],
+    common_nonce: Zeroizing<[u8; 32]>,
+    private_nonce: Zeroizing<[u8; 32]>,
+    extra_commit: [u8; 32],
+) -> Result<(BulletproofMpcRound1State, BulletproofMpcRound1Output), DomError> {
+    let complement_value = MAX_PROVABLE_VALUE
+        .checked_sub(value)
+        .ok_or_else(|| DomError::Invalid("value exceeds MAX_PROVABLE_VALUE".into()))?;
+    let aggregate = crate::pedersen::Commitment::from_compressed_bytes(&aggregate_commitment)?;
+    let complement = derive_complement_commitment(&aggregate, MAX_PROVABLE_VALUE)?;
+    let commitments = [aggregate_commitment, *complement.as_bytes()];
+    let blind_pair = Zeroizing::new([*blinding.as_bytes(), negate_blinding(blinding.as_bytes())?]);
+    if !crate::scriptless::scalar_bytes_are_canonical(&common_nonce, false)
+        || !crate::scriptless::scalar_bytes_are_canonical(&private_nonce, false)
+    {
+        return Err(DomError::Invalid(
+            "collaborative Bulletproof nonce is zero or noncanonical".into(),
+        ));
+    }
+
+    let backend = backend()?;
+    let value_gen = h_dom_internal(backend)?;
+    let internal = mpc_internal_commitments(backend, &commitments)?;
+    let commitment_ptrs = [internal[0].as_ptr(), internal[1].as_ptr()];
+    let blind_ptrs = [blind_pair[0].as_ptr(), blind_pair[1].as_ptr()];
+    let values = [value, complement_value];
+    let mut t_one = ffi::PublicKey::new();
+    let mut t_two = ffi::PublicKey::new();
+    let scratch = ScratchHandle::new(backend)?;
+    // SAFETY: fixed arrays outlive the call, scratch is exclusive, and the
+    // output pointers reference initialized FFI public-key storage.
+    let result = unsafe {
+        raw_ffi::secp256k1_bulletproof_rangeproof_prove(
+            backend.ctx,
+            scratch.0,
+            backend.gens,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut t_one,
+            &mut t_two,
+            values.as_ptr(),
+            ptr::null(),
+            blind_ptrs.as_ptr(),
+            commitment_ptrs.as_ptr(),
+            PROOF_NCOMMITS,
+            value_gen.as_ptr(),
+            PROOF_NBITS,
+            common_nonce.as_ptr(),
+            private_nonce.as_ptr(),
+            extra_commit.as_ptr(),
+            extra_commit.len(),
+            ptr::null(),
+        )
+    };
+    if result != 1 {
+        return Err(DomError::Internal(
+            "collaborative Bulletproof round 1 failed".into(),
+        ));
+    }
+    let output = BulletproofMpcRound1Output {
+        t_one: mpc_serialize_public_key(backend, &t_one)?,
+        t_two: mpc_serialize_public_key(backend, &t_two)?,
+    };
+    Ok((
+        BulletproofMpcRound1State {
+            value,
+            blind_pair,
+            commitments,
+            common_nonce,
+            private_nonce,
+            extra_commit,
+        },
+        output,
+    ))
+}
+
+/// Consume round-one state and execute the pinned backend's second phase.
+pub fn bulletproof_mpc_round2(
+    state: BulletproofMpcRound1State,
+    aggregate_t_one: &[u8; 33],
+    aggregate_t_two: &[u8; 33],
+) -> Result<(BulletproofMpcFinalizeState, Zeroizing<[u8; 32]>), DomError> {
+    let backend = backend()?;
+    let value_gen = h_dom_internal(backend)?;
+    let internal = mpc_internal_commitments(backend, &state.commitments)?;
+    let commitment_ptrs = [internal[0].as_ptr(), internal[1].as_ptr()];
+    let blind_ptrs = [state.blind_pair[0].as_ptr(), state.blind_pair[1].as_ptr()];
+    let values = [state.value, MAX_PROVABLE_VALUE - state.value];
+    let mut t_one = mpc_parse_public_key(backend, aggregate_t_one)?;
+    let mut t_two = mpc_parse_public_key(backend, aggregate_t_two)?;
+    let mut tau_x = Zeroizing::new([0u8; 32]);
+    let scratch = ScratchHandle::new(backend)?;
+    // SAFETY: inputs satisfy the round-one invariants, aggregate T1/T2 were
+    // parsed canonically, and `tau_x` is writable for exactly 32 bytes.
+    let result = unsafe {
+        raw_ffi::secp256k1_bulletproof_rangeproof_prove(
+            backend.ctx,
+            scratch.0,
+            backend.gens,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            tau_x.as_mut_ptr(),
+            &mut t_one,
+            &mut t_two,
+            values.as_ptr(),
+            ptr::null(),
+            blind_ptrs.as_ptr(),
+            commitment_ptrs.as_ptr(),
+            PROOF_NCOMMITS,
+            value_gen.as_ptr(),
+            PROOF_NBITS,
+            state.common_nonce.as_ptr(),
+            state.private_nonce.as_ptr(),
+            state.extra_commit.as_ptr(),
+            state.extra_commit.len(),
+            ptr::null(),
+        )
+    };
+    if result != 1 || !crate::scriptless::scalar_bytes_are_canonical(&tau_x, true) {
+        return Err(DomError::Internal(
+            "collaborative Bulletproof round 2 failed".into(),
+        ));
+    }
+    Ok((
+        BulletproofMpcFinalizeState {
+            state,
+            t_one,
+            t_two,
+        },
+        tau_x,
+    ))
+}
+
+/// Add ordered canonical round-two shares modulo the secp256k1 group order.
+pub fn bulletproof_mpc_aggregate_tau_x(
+    shares: Vec<Zeroizing<[u8; 32]>>,
+) -> Result<Zeroizing<[u8; 32]>, DomError> {
+    if shares.is_empty() {
+        return Err(DomError::Malformed(
+            "collaborative Bulletproof tau_x set is empty".into(),
+        ));
+    }
+    let mut sum = Zeroizing::new(k256::Scalar::ZERO);
+    for share in shares {
+        let scalar = crate::schnorr::scalar_from_bytes(&share).ok_or_else(|| {
+            DomError::Invalid("collaborative Bulletproof tau_x is noncanonical".into())
+        })?;
+        *sum += scalar;
+    }
+    Ok(Zeroizing::new(sum.to_bytes().into()))
+}
+
+/// Consume final-phase state, create exactly one 739-byte proof, and verify it
+/// through the unchanged DOM backend before returning it.
+pub fn bulletproof_mpc_finalize(
+    mut state: BulletproofMpcFinalizeState,
+    mut aggregate_tau_x: Zeroizing<[u8; 32]>,
+) -> Result<Vec<u8>, DomError> {
+    if !crate::scriptless::scalar_bytes_are_canonical(&aggregate_tau_x, true) {
+        return Err(DomError::Invalid(
+            "collaborative Bulletproof aggregate tau_x is noncanonical".into(),
+        ));
+    }
+    let backend = backend()?;
+    let value_gen = h_dom_internal(backend)?;
+    let internal = mpc_internal_commitments(backend, &state.state.commitments)?;
+    let commitment_ptrs = [internal[0].as_ptr(), internal[1].as_ptr()];
+    let blind_ptrs = [
+        state.state.blind_pair[0].as_ptr(),
+        state.state.blind_pair[1].as_ptr(),
+    ];
+    let values = [state.state.value, MAX_PROVABLE_VALUE - state.state.value];
+    let mut proof = [0u8; constants::MAX_PROOF_SIZE];
+    let mut proof_length = proof.len();
+    let scratch = ScratchHandle::new(backend)?;
+    // SAFETY: every pointer references fixed live storage for the complete
+    // call; tau_x and T1/T2 came from the checked preceding phases.
+    let result = unsafe {
+        raw_ffi::secp256k1_bulletproof_rangeproof_prove(
+            backend.ctx,
+            scratch.0,
+            backend.gens,
+            proof.as_mut_ptr(),
+            &mut proof_length,
+            aggregate_tau_x.as_mut_ptr(),
+            &mut state.t_one,
+            &mut state.t_two,
+            values.as_ptr(),
+            ptr::null(),
+            blind_ptrs.as_ptr(),
+            commitment_ptrs.as_ptr(),
+            PROOF_NCOMMITS,
+            value_gen.as_ptr(),
+            PROOF_NBITS,
+            state.state.common_nonce.as_ptr(),
+            state.state.private_nonce.as_ptr(),
+            state.state.extra_commit.as_ptr(),
+            state.state.extra_commit.len(),
+            ptr::null(),
+        )
+    };
+    if result != 1 || proof_length != SINGLE_BULLETPROOF_SIZE {
+        return Err(DomError::Internal(format!(
+            "collaborative Bulletproof finalization returned {proof_length} bytes"
+        )));
+    }
+    let proof = proof[..proof_length].to_vec();
+    if !bp_verify_with_extra_commit(
+        &state.state.commitments[0],
+        &proof,
+        &state.state.extra_commit,
+    )? {
+        return Err(DomError::Invalid(
+            "collaborative Bulletproof failed the unchanged DOM verifier".into(),
+        ));
+    }
+    Ok(proof)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pedersen::Commitment;
+    use k256::elliptic_curve::PrimeField;
+    use zeroize::{Zeroize, Zeroizing};
 
     const MATRIX_VALUES: [u64; 4] = [1, 42, 1_000_000, 4_503_599_627_370_495]; // last = 2^52 - 1
     const TEST_BLIND: [u8; 32] = [0x11u8; 32];
+
+    const BP_STATEMENT_TAG: &str = "DOM:scriptless-bp-statement:v1";
+    const BP_NO_RECOVERY_TAG: &str = "DOM:scriptless-bp-no-recovery:v1";
+    const BP_COMMON_COMMIT_TAG: &str = "DOM:scriptless-bp-common-commit:v1";
+    const BP_COMMON_JOINT_TAG: &str = "DOM:scriptless-bp-common-joint:v1";
+    const BP_COMMON_NONCE_TAG: &str = "DOM:scriptless-bp-common-nonce:v1";
+
+    struct MpcRoundOne {
+        t_one: ffi::PublicKey,
+        t_two: ffi::PublicKey,
+    }
+
+    fn internal_commitments(
+        backend: &Backend,
+        commitments: &[[u8; 33]; PROOF_NCOMMITS],
+    ) -> Result<[[u8; 64]; PROOF_NCOMMITS], DomError> {
+        let mut parsed = [[0u8; 64]; PROOF_NCOMMITS];
+        for (index, commitment) in commitments.iter().enumerate() {
+            let zkp = sec1_to_zkp(commitment)?;
+            // SAFETY: the shared context is live, the output slot is writable
+            // for 64 bytes, and `zkp` is an exact 33-byte serialized commitment.
+            if unsafe {
+                ffi::secp256k1_pedersen_commitment_parse(
+                    backend.ctx,
+                    parsed[index].as_mut_ptr(),
+                    zkp.as_ptr(),
+                )
+            } != 1
+            {
+                return Err(DomError::Invalid(
+                    "MPC aggregate commitment parsing failed".into(),
+                ));
+            }
+        }
+        Ok(parsed)
+    }
+
+    fn mpc_round_one(
+        backend: &Backend,
+        values: &[u64; PROOF_NCOMMITS],
+        blinds: &[[u8; 32]; PROOF_NCOMMITS],
+        commitments: &[[u8; 33]; PROOF_NCOMMITS],
+        value_gen: &[u8; 64],
+        common_nonce: &[u8; 32],
+        private_nonce: &[u8; 32],
+        extra_commit: &[u8],
+    ) -> Result<MpcRoundOne, DomError> {
+        let internal = internal_commitments(backend, commitments)?;
+        let commitment_ptrs = [internal[0].as_ptr(), internal[1].as_ptr()];
+        let blind_ptrs = [blinds[0].as_ptr(), blinds[1].as_ptr()];
+        let mut t_one = ffi::PublicKey::new();
+        let mut t_two = ffi::PublicKey::new();
+        let scratch = ScratchHandle::new(backend)?;
+        // SAFETY: all fixed arrays outlive the call, the scratch is exclusive,
+        // and first-phase output pointers reference initialized FFI public keys.
+        let result = unsafe {
+            raw_ffi::secp256k1_bulletproof_rangeproof_prove(
+                backend.ctx,
+                scratch.0,
+                backend.gens,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut t_one,
+                &mut t_two,
+                values.as_ptr(),
+                ptr::null(),
+                blind_ptrs.as_ptr(),
+                commitment_ptrs.as_ptr(),
+                PROOF_NCOMMITS,
+                value_gen.as_ptr(),
+                PROOF_NBITS,
+                common_nonce.as_ptr(),
+                private_nonce.as_ptr(),
+                extra_commit.as_ptr(),
+                extra_commit.len(),
+                ptr::null(),
+            )
+        };
+        if result != 1 {
+            return Err(DomError::Internal("Bulletproof MPC round 1 failed".into()));
+        }
+        Ok(MpcRoundOne { t_one, t_two })
+    }
+
+    fn combine_public_keys(
+        backend: &Backend,
+        points: &[ffi::PublicKey],
+    ) -> Result<ffi::PublicKey, DomError> {
+        let pointers: Vec<*const ffi::PublicKey> = points.iter().map(core::ptr::from_ref).collect();
+        let mut sum = ffi::PublicKey::new();
+        // SAFETY: every pointer references a live parsed FFI public key and the
+        // output is writable for exactly one FFI public key.
+        if unsafe {
+            ffi::secp256k1_ec_pubkey_combine(
+                backend.ctx,
+                &mut sum,
+                pointers.as_ptr(),
+                i32::try_from(pointers.len()).expect("participant count is at most 16"),
+            )
+        } != 1
+        {
+            return Err(DomError::Invalid(
+                "Bulletproof MPC point aggregation failed".into(),
+            ));
+        }
+        Ok(sum)
+    }
+
+    fn serialize_public_key(
+        backend: &Backend,
+        point: &ffi::PublicKey,
+    ) -> Result<[u8; 33], DomError> {
+        let mut bytes = [0u8; 33];
+        let mut length = bytes.len();
+        // SAFETY: the output buffer is writable for 33 bytes and `point` is a
+        // live FFI public key returned by the pinned prover or combiner.
+        let result = unsafe {
+            ffi::secp256k1_ec_pubkey_serialize(
+                backend.ctx,
+                bytes.as_mut_ptr(),
+                &mut length,
+                point,
+                ffi::SECP256K1_SER_COMPRESSED,
+            )
+        };
+        if result != 1 || length != 33 {
+            return Err(DomError::Internal(
+                "Bulletproof MPC point serialization failed".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+
+    fn mpc_round_two(
+        backend: &Backend,
+        values: &[u64; PROOF_NCOMMITS],
+        blinds: &[[u8; 32]; PROOF_NCOMMITS],
+        commitments: &[[u8; 33]; PROOF_NCOMMITS],
+        value_gen: &[u8; 64],
+        common_nonce: &[u8; 32],
+        private_nonce: &[u8; 32],
+        extra_commit: &[u8],
+        t_one: &mut ffi::PublicKey,
+        t_two: &mut ffi::PublicKey,
+    ) -> Result<Zeroizing<[u8; 32]>, DomError> {
+        let internal = internal_commitments(backend, commitments)?;
+        let commitment_ptrs = [internal[0].as_ptr(), internal[1].as_ptr()];
+        let blind_ptrs = [blinds[0].as_ptr(), blinds[1].as_ptr()];
+        let mut tau_x = Zeroizing::new([0u8; 32]);
+        let scratch = ScratchHandle::new(backend)?;
+        // SAFETY: inputs satisfy the same invariants as round one; aggregate
+        // T1/T2 are valid combined FFI public keys and tau_x is writable.
+        let result = unsafe {
+            raw_ffi::secp256k1_bulletproof_rangeproof_prove(
+                backend.ctx,
+                scratch.0,
+                backend.gens,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                tau_x.as_mut_ptr(),
+                t_one,
+                t_two,
+                values.as_ptr(),
+                ptr::null(),
+                blind_ptrs.as_ptr(),
+                commitment_ptrs.as_ptr(),
+                PROOF_NCOMMITS,
+                value_gen.as_ptr(),
+                PROOF_NBITS,
+                common_nonce.as_ptr(),
+                private_nonce.as_ptr(),
+                extra_commit.as_ptr(),
+                extra_commit.len(),
+                ptr::null(),
+            )
+        };
+        if result != 1 {
+            return Err(DomError::Internal("Bulletproof MPC round 2 failed".into()));
+        }
+        Ok(tau_x)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mpc_finalize(
+        backend: &Backend,
+        values: &[u64; PROOF_NCOMMITS],
+        blinds: &[[u8; 32]; PROOF_NCOMMITS],
+        commitments: &[[u8; 33]; PROOF_NCOMMITS],
+        value_gen: &[u8; 64],
+        common_nonce: &[u8; 32],
+        private_nonce: &[u8; 32],
+        extra_commit: &[u8],
+        tau_x: &mut [u8; 32],
+        t_one: &mut ffi::PublicKey,
+        t_two: &mut ffi::PublicKey,
+    ) -> Result<Vec<u8>, DomError> {
+        let internal = internal_commitments(backend, commitments)?;
+        let commitment_ptrs = [internal[0].as_ptr(), internal[1].as_ptr()];
+        let blind_ptrs = [blinds[0].as_ptr(), blinds[1].as_ptr()];
+        let mut proof = [0u8; constants::MAX_PROOF_SIZE];
+        let mut proof_length = proof.len();
+        let scratch = ScratchHandle::new(backend)?;
+        // SAFETY: every pointer references a fixed live buffer for the complete
+        // call; aggregate tau_x/T1/T2 came from the preceding checked phases.
+        let result = unsafe {
+            raw_ffi::secp256k1_bulletproof_rangeproof_prove(
+                backend.ctx,
+                scratch.0,
+                backend.gens,
+                proof.as_mut_ptr(),
+                &mut proof_length,
+                tau_x.as_mut_ptr(),
+                t_one,
+                t_two,
+                values.as_ptr(),
+                ptr::null(),
+                blind_ptrs.as_ptr(),
+                commitment_ptrs.as_ptr(),
+                PROOF_NCOMMITS,
+                value_gen.as_ptr(),
+                PROOF_NBITS,
+                common_nonce.as_ptr(),
+                private_nonce.as_ptr(),
+                extra_commit.as_ptr(),
+                extra_commit.len(),
+                ptr::null(),
+            )
+        };
+        if result != 1 || proof_length != SINGLE_BULLETPROOF_SIZE {
+            return Err(DomError::Internal(format!(
+                "Bulletproof MPC finalization failed or returned {proof_length} bytes"
+            )));
+        }
+        Ok(proof[..proof_length].to_vec())
+    }
+
+    fn scalar_add_all(scalars: &[Zeroizing<[u8; 32]>]) -> Zeroizing<[u8; 32]> {
+        let mut sum = Zeroizing::new(k256::Scalar::ZERO);
+        for scalar in scalars {
+            let bytes: [u8; 32] = scalar
+                .as_ref()
+                .try_into()
+                .expect("tau_x has an exact scalar length");
+            let parsed = k256::Scalar::from_repr(bytes.into());
+            assert!(
+                bool::from(parsed.is_some()),
+                "backend returned canonical tau_x"
+            );
+            *sum += parsed.unwrap();
+        }
+        Zeroizing::new(sum.to_bytes().into())
+    }
+
+    fn wide_nonce(tag: &str, input: &[u8]) -> Zeroizing<[u8; 32]> {
+        let mut counter = 0u32;
+        loop {
+            let mut body = Zeroizing::new(Vec::with_capacity(1 + input.len() + 4));
+            body.push(0);
+            body.extend_from_slice(input);
+            body.extend_from_slice(&counter.to_le_bytes());
+            let mut first = crate::blake2b_256_tagged(tag, body.as_ref());
+            body[0] = 1;
+            let mut second = crate::blake2b_256_tagged(tag, body.as_ref());
+            let mut wide = Zeroizing::new([0u8; 64]);
+            wide[..32].copy_from_slice(first.as_bytes());
+            wide[32..].copy_from_slice(second.as_bytes());
+            first.zeroize();
+            second.zeroize();
+            if let Some(scalar) = crate::scriptless::scalar_from_wide_be(&wide) {
+                return scalar;
+            }
+            counter = counter
+                .checked_add(1)
+                .expect("test counter does not overflow");
+        }
+    }
+
+    fn collaborative_proof(participant_count: usize) -> (Vec<u8>, [u8; 33]) {
+        assert!((2..=16).contains(&participant_count));
+        let backend = backend().expect("backend");
+        let h_dom = h_dom_internal(backend).expect("H_DOM");
+        let value = 42u64;
+        let values = [value, MAX_PROVABLE_VALUE - value];
+        let mut aggregate_blind = BlindingFactor::from_bytes({
+            let mut bytes = [0u8; 32];
+            bytes[31] = 1;
+            bytes
+        })
+        .expect("first blind");
+        let mut blind_shares = Vec::with_capacity(participant_count);
+        let mut commitment_shares = Vec::with_capacity(participant_count);
+        for index in 0..participant_count {
+            let mut bytes = [0u8; 32];
+            bytes[31] = u8::try_from(index + 1).expect("at most sixteen participants");
+            let blind = BlindingFactor::from_bytes(bytes).expect("small blind");
+            if index > 0 {
+                aggregate_blind = aggregate_blind.add(&blind).expect("nonzero blind sum");
+            }
+            commitment_shares.push(Commitment::commit(
+                if index == 0 { value } else { 0 },
+                &blind,
+            ));
+            blind_shares.push(blind);
+        }
+        let aggregate_commitment = commitment_shares[1..]
+            .iter()
+            .try_fold(commitment_shares[0].clone(), |sum, share| sum.add(share))
+            .expect("commitment sum");
+        assert!(aggregate_commitment.verify(value, &aggregate_blind));
+        let complement = derive_complement_commitment(&aggregate_commitment, MAX_PROVABLE_VALUE)
+            .expect("complement");
+        let commitments = [*aggregate_commitment.as_bytes(), *complement.as_bytes()];
+
+        let participant_ids: Vec<[u8; 32]> = (0..participant_count)
+            .map(|index| [u8::try_from(index + 1).expect("bounded participant"); 32])
+            .collect();
+        let recovery = *crate::blake2b_256_tagged(BP_NO_RECOVERY_TAG, &[]).as_bytes();
+        let mut statement = Vec::with_capacity(187 + 65 * participant_count);
+        statement.extend_from_slice(b"DSBP");
+        statement.extend_from_slice(&1u16.to_le_bytes());
+        statement.extend_from_slice(&[0x11; 32]);
+        statement.extend_from_slice(&[0x22; 32]);
+        statement.push(u8::try_from(participant_count).expect("bounded participant count"));
+        for participant in &participant_ids {
+            statement.extend_from_slice(participant);
+        }
+        statement.extend_from_slice(&value.to_le_bytes());
+        statement.extend_from_slice(&MAX_PROVABLE_VALUE.to_le_bytes());
+        statement.extend_from_slice(&crate::h_compressed().expect("H_DOM"));
+        statement.push(u8::try_from(participant_count).expect("bounded share count"));
+        for commitment in &commitment_shares {
+            statement.extend_from_slice(commitment.as_bytes());
+        }
+        statement.extend_from_slice(aggregate_commitment.as_bytes());
+        statement.extend_from_slice(&recovery);
+        statement.push(64);
+        assert_eq!(statement.len(), 187 + 65 * participant_count);
+        let statement_hash = *crate::blake2b_256_tagged(BP_STATEMENT_TAG, &statement).as_bytes();
+
+        let q_values: Vec<[u8; 32]> = (0..participant_count)
+            .map(|index| [0x40 + u8::try_from(index).expect("bounded participant"); 32])
+            .collect();
+        for ((participant, q), expected_index) in participant_ids
+            .iter()
+            .zip(&q_values)
+            .zip(0..participant_count)
+        {
+            let mut input = Vec::with_capacity(96);
+            input.extend_from_slice(&statement_hash);
+            input.extend_from_slice(participant);
+            input.extend_from_slice(q);
+            let commitment = crate::blake2b_256_tagged(BP_COMMON_COMMIT_TAG, &input);
+            assert_ne!(
+                commitment.as_bytes(),
+                &[0u8; 32],
+                "commitment {expected_index}"
+            );
+        }
+        let mut joint_input = Vec::with_capacity(33 + 64 * participant_count);
+        joint_input.extend_from_slice(&statement_hash);
+        joint_input.push(u8::try_from(participant_count).expect("bounded participant count"));
+        for (participant, q) in participant_ids.iter().zip(&q_values) {
+            joint_input.extend_from_slice(participant);
+            joint_input.extend_from_slice(q);
+        }
+        let joint = crate::blake2b_256_tagged(BP_COMMON_JOINT_TAG, &joint_input);
+        let mut nonce_input = Vec::with_capacity(64);
+        nonce_input.extend_from_slice(&statement_hash);
+        nonce_input.extend_from_slice(joint.as_bytes());
+        let common_nonce = wide_nonce(BP_COMMON_NONCE_TAG, &nonce_input);
+
+        let mut round_one = Vec::with_capacity(participant_count);
+        let mut local_blind_pairs = Vec::with_capacity(participant_count);
+        let mut private_nonces = Vec::with_capacity(participant_count);
+        for (index, blind) in blind_shares.iter().enumerate() {
+            let pair = [
+                *blind.as_bytes(),
+                negate_blinding(blind.as_bytes()).expect("negative"),
+            ];
+            let mut private_nonce = [0u8; 32];
+            private_nonce[31] = 0x20 + u8::try_from(index).expect("bounded participant");
+            round_one.push(
+                mpc_round_one(
+                    backend,
+                    &values,
+                    &pair,
+                    &commitments,
+                    &h_dom,
+                    &common_nonce,
+                    &private_nonce,
+                    &recovery,
+                )
+                .expect("round one"),
+            );
+            local_blind_pairs.push(pair);
+            private_nonces.push(Zeroizing::new(private_nonce));
+        }
+        let mut t_one = combine_public_keys(
+            backend,
+            &round_one
+                .iter()
+                .map(|round| round.t_one)
+                .collect::<Vec<_>>(),
+        )
+        .expect("T1 sum");
+        let mut t_two = combine_public_keys(
+            backend,
+            &round_one
+                .iter()
+                .map(|round| round.t_two)
+                .collect::<Vec<_>>(),
+        )
+        .expect("T2 sum");
+        let t_one_bytes = serialize_public_key(backend, &t_one).expect("T1 serialization");
+        let t_two_bytes = serialize_public_key(backend, &t_two).expect("T2 serialization");
+        assert!(secp256k1::PublicKey::from_slice(&t_one_bytes).is_ok());
+        assert!(secp256k1::PublicKey::from_slice(&t_two_bytes).is_ok());
+
+        let tau_shares: Vec<_> = local_blind_pairs
+            .iter()
+            .zip(&private_nonces)
+            .map(|(pair, private_nonce)| {
+                mpc_round_two(
+                    backend,
+                    &values,
+                    pair,
+                    &commitments,
+                    &h_dom,
+                    &common_nonce,
+                    private_nonce,
+                    &recovery,
+                    &mut t_one,
+                    &mut t_two,
+                )
+                .expect("round two")
+            })
+            .collect();
+        let mut tau_x = scalar_add_all(&tau_shares);
+        let proof = mpc_finalize(
+            backend,
+            &values,
+            &local_blind_pairs[0],
+            &commitments,
+            &h_dom,
+            &common_nonce,
+            &private_nonces[0],
+            &recovery,
+            &mut tau_x,
+            &mut t_one,
+            &mut t_two,
+        )
+        .expect("finalization");
+        assert_eq!(proof.len(), SINGLE_BULLETPROOF_SIZE);
+        assert!(
+            bp_verify_with_extra_commit(aggregate_commitment.as_bytes(), &proof, &recovery)
+                .expect("real DOM verifier")
+        );
+        (proof, *aggregate_commitment.as_bytes())
+    }
+
+    #[test]
+    fn ratified_collaborative_bulletproof_mpc_harness() {
+        for participant_count in [2usize, 3, 16] {
+            let (proof, commitment) = collaborative_proof(participant_count);
+            assert_eq!(proof.len(), 739);
+            assert!(!matches!(bp_verify(&commitment, &proof), Ok(true)));
+        }
+        let first = collaborative_proof(2);
+        let second = collaborative_proof(2);
+        assert_eq!(
+            first, second,
+            "fixed MPC harness inputs must be deterministic"
+        );
+    }
 
     fn legacy_single_proof(value: u64, blind: &[u8; 32], nonce: &[u8; 32]) -> (Vec<u8>, [u8; 33]) {
         let bf = BlindingFactor::from_bytes(*blind).expect("blind");
@@ -929,7 +1774,7 @@ mod tests {
         let ser = h_dom_zkp_serialized().expect("H_DOM serialize");
         assert_eq!(ser.len(), 33);
         assert!(ser[0] == 0x0a || ser[0] == 0x0b);
-        let backend = backend();
+        let backend = backend().expect("backend");
         let g = h_dom_internal(backend).expect("H_DOM parse");
         assert!(g.iter().any(|&b| b != 0));
         assert_eq!(SINGLE_BULLETPROOF_SIZE, 739);
@@ -941,7 +1786,7 @@ mod tests {
     #[test]
     fn binding_matrix_in_crate() {
         let blind = BlindingFactor::from_bytes(TEST_BLIND).expect("blind");
-        let backend = backend();
+        let backend = backend().expect("backend");
         let h_dom = h_dom_internal(backend).expect("H_DOM");
         let h_def: [u8; 64] = constants::GENERATOR_H;
         assert_ne!(h_dom, h_def, "H_DOM must differ from grin's default H");
@@ -1032,7 +1877,7 @@ mod tests {
     #[test]
     fn negative_generator_rejected() {
         let blind = BlindingFactor::from_bytes(TEST_BLIND).unwrap();
-        let backend = backend();
+        let backend = backend().expect("backend");
         let h_dom = h_dom_internal(backend).unwrap();
         let pr_dom = prove_raw(backend, 42, blind.as_bytes(), &h_dom, &[]).unwrap();
         let c_dom_pair = commit_pair_with_gen(backend, 42, blind.as_bytes(), &h_dom);
@@ -1118,7 +1963,7 @@ mod tests {
 
     #[test]
     fn forged_second_commitment_is_rejected() {
-        let backend = backend();
+        let backend = backend().expect("backend");
         let h_dom = h_dom_internal(backend).expect("h_dom");
         let value = 42u64;
         let nonce = [0x44; 32];
@@ -1232,7 +2077,7 @@ mod differential {
 
     #[test]
     fn fixed_and_edges() {
-        let backend = backend();
+        let backend = backend().expect("backend");
         let h_dom = h_dom_internal(backend).expect("H_DOM");
 
         // The shared-backend shim path must match the public bp_prove wrapper byte-for-byte.
@@ -1294,7 +2139,7 @@ mod differential {
 
     #[test]
     fn random_1000_match() {
-        let backend = backend();
+        let backend = backend().expect("backend");
         let h_dom = h_dom_internal(backend).expect("H_DOM");
         let mut rng = StdRng::seed_from_u64(SEED);
 
