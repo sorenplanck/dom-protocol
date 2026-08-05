@@ -314,13 +314,15 @@ where
             .map_err(VaultBackedSignerError::Vault)?;
         validate_live_snapshot(
             &snapshot,
-            &expected_lookup,
-            &expected_binding,
-            context.session_id(),
-            &participant_id,
-            context.purpose(),
-            ReservationLiveStageV1::PreDerivation,
-            None,
+            ExpectedLiveSnapshotV1 {
+                request_lookup: &expected_lookup,
+                context_binding_digest: &expected_binding,
+                session_id: context.session_id(),
+                participant_id: &participant_id,
+                purpose: context.purpose(),
+                stage: ReservationLiveStageV1::PreDerivation,
+                retry_counter: None,
+            },
         )?;
         let reservation_nonce_id = snapshot.reservation_nonce_id().clone();
         Ok(ReservedNonceV1 {
@@ -383,13 +385,15 @@ where
                     .map_err(VaultBackedSignerError::Vault)?;
                 validate_live_snapshot(
                     &snapshot,
-                    &request_lookup,
-                    &binding_digest,
-                    context.session_id(),
-                    &participant_id,
-                    context.purpose(),
-                    snapshot.live_stage(),
-                    snapshot.final_retry_counter(),
+                    ExpectedLiveSnapshotV1 {
+                        request_lookup: &request_lookup,
+                        context_binding_digest: &binding_digest,
+                        session_id: context.session_id(),
+                        participant_id: &participant_id,
+                        purpose: context.purpose(),
+                        stage: snapshot.live_stage(),
+                        retry_counter: snapshot.final_retry_counter(),
+                    },
                 )?;
                 let reservation_nonce_id = snapshot.reservation_nonce_id().clone();
                 let state = match snapshot.live_stage() {
@@ -551,13 +555,15 @@ where
             .map_err(VaultBackedSignerError::Vault)?;
         validate_live_snapshot(
             &snapshot,
-            &state.request_lookup,
-            &state.context_binding_digest,
-            effective_context.session_id(),
-            &state.participant_id,
-            effective_context.purpose(),
-            ReservationLiveStageV1::AfterCommitment,
-            Some(effective_context.retry_counter()),
+            ExpectedLiveSnapshotV1 {
+                request_lookup: &state.request_lookup,
+                context_binding_digest: &state.context_binding_digest,
+                session_id: effective_context.session_id(),
+                participant_id: &state.participant_id,
+                purpose: effective_context.purpose(),
+                stage: ReservationLiveStageV1::AfterCommitment,
+                retry_counter: Some(effective_context.retry_counter()),
+            },
         )?;
         validate_spent_projection(
             &snapshot,
@@ -626,13 +632,15 @@ where
             .map_err(VaultBackedSignerError::Vault)?;
         validate_live_snapshot(
             &prior_snapshot,
-            &state.request_lookup,
-            &state.context_binding_digest,
-            stage_context.session_id(),
-            &state.participant_id,
-            stage_context.purpose(),
-            ReservationLiveStageV1::AfterCommitment,
-            Some(stage_context.retry_counter()),
+            ExpectedLiveSnapshotV1 {
+                request_lookup: &state.request_lookup,
+                context_binding_digest: &state.context_binding_digest,
+                session_id: stage_context.session_id(),
+                participant_id: &state.participant_id,
+                purpose: stage_context.purpose(),
+                stage: ReservationLiveStageV1::AfterCommitment,
+                retry_counter: Some(stage_context.retry_counter()),
+            },
         )?;
         let prior = prior_snapshot
             .spent_commitment()
@@ -670,13 +678,15 @@ where
             .map_err(VaultBackedSignerError::Vault)?;
         validate_live_snapshot(
             &snapshot,
-            &state.request_lookup,
-            &state.context_binding_digest,
-            stage_context.session_id(),
-            &state.participant_id,
-            stage_context.purpose(),
-            ReservationLiveStageV1::AfterReveal,
-            Some(stage_context.retry_counter()),
+            ExpectedLiveSnapshotV1 {
+                request_lookup: &state.request_lookup,
+                context_binding_digest: &state.context_binding_digest,
+                session_id: stage_context.session_id(),
+                participant_id: &state.participant_id,
+                purpose: stage_context.purpose(),
+                stage: ReservationLiveStageV1::AfterReveal,
+                retry_counter: Some(stage_context.retry_counter()),
+            },
         )?;
         validate_spent_projection(
             &snapshot,
@@ -938,27 +948,31 @@ fn prepare_private_nonce_derivation_attempt(
     Ok((effective_context, pair, request))
 }
 
+struct ExpectedLiveSnapshotV1<'a> {
+    request_lookup: &'a ReservationRequestLookupV1,
+    context_binding_digest: &'a [u8; 32],
+    session_id: &'a [u8; 32],
+    participant_id: &'a [u8; 32],
+    purpose: crate::PurposeV1,
+    stage: ReservationLiveStageV1,
+    retry_counter: Option<u64>,
+}
+
 fn validate_live_snapshot<Snapshot>(
     snapshot: &Snapshot,
-    request_lookup: &ReservationRequestLookupV1,
-    context_binding_digest: &[u8; 32],
-    expected_session_id: &[u8; 32],
-    expected_participant_id: &[u8; 32],
-    expected_purpose: crate::PurposeV1,
-    expected_stage: ReservationLiveStageV1,
-    expected_retry_counter: Option<u64>,
+    expected: ExpectedLiveSnapshotV1<'_>,
 ) -> core::result::Result<(), NonceVaultError>
 where
     Snapshot: VaultReservationSnapshotV1,
 {
-    if snapshot.request_lookup() != request_lookup
-        || snapshot.reservation_context_binding_digest() != context_binding_digest
-        || snapshot.live_stage() != expected_stage
-        || snapshot.final_retry_counter() != expected_retry_counter
+    if snapshot.request_lookup() != expected.request_lookup
+        || snapshot.reservation_context_binding_digest() != expected.context_binding_digest
+        || snapshot.live_stage() != expected.stage
+        || snapshot.final_retry_counter() != expected.retry_counter
     {
         return Err(NonceVaultError::CorruptState);
     }
-    match expected_stage {
+    match expected.stage {
         ReservationLiveStageV1::PreDerivation
             if snapshot.final_retry_counter().is_none()
                 && snapshot.spent_commitment().is_none()
@@ -970,10 +984,10 @@ where
                         && spent.adaptor_outbound_digest() != &[0; 32]
                         && spent_identity_matches(
                             spent,
-                            context_binding_digest,
-                            expected_session_id,
-                            expected_participant_id,
-                            expected_purpose,
+                            expected.context_binding_digest,
+                            expected.session_id,
+                            expected.participant_id,
+                            expected.purpose,
                         )
                 })
                 && snapshot.spent_reveal().is_none() => {}
@@ -984,10 +998,10 @@ where
                         && spent.adaptor_outbound_digest() != &[0; 32]
                         && spent_identity_matches(
                             spent,
-                            context_binding_digest,
-                            expected_session_id,
-                            expected_participant_id,
-                            expected_purpose,
+                            expected.context_binding_digest,
+                            expected.session_id,
+                            expected.participant_id,
+                            expected.purpose,
                         )
                 })
                 && snapshot.spent_reveal().is_some_and(|spent| {
@@ -995,10 +1009,10 @@ where
                         && spent.adaptor_outbound_digest() != &[0; 32]
                         && spent_identity_matches(
                             spent,
-                            context_binding_digest,
-                            expected_session_id,
-                            expected_participant_id,
-                            expected_purpose,
+                            expected.context_binding_digest,
+                            expected.session_id,
+                            expected.participant_id,
+                            expected.purpose,
                         )
                         && snapshot.spent_commitment().is_some_and(|commitment| {
                             commitment.nonce_identity() == spent.nonce_identity()
@@ -1243,13 +1257,15 @@ mod tests {
         );
         validate_live_snapshot(
             &snapshot,
-            &snapshot.request_lookup,
-            &snapshot.context_binding_digest,
-            &[8; 32],
-            &[9; 32],
-            crate::PurposeV1::Refund,
-            ReservationLiveStageV1::AfterCommitment,
-            Some(7),
+            ExpectedLiveSnapshotV1 {
+                request_lookup: &snapshot.request_lookup,
+                context_binding_digest: &snapshot.context_binding_digest,
+                session_id: &[8; 32],
+                participant_id: &[9; 32],
+                purpose: crate::PurposeV1::Refund,
+                stage: ReservationLiveStageV1::AfterCommitment,
+                retry_counter: Some(7),
+            },
         )
         .expect("valid snapshot");
     }
@@ -1259,13 +1275,15 @@ mod tests {
         let snapshot = test_snapshot(ReservationLiveStageV1::AfterCommitment, true);
         assert!(validate_live_snapshot(
             &snapshot,
-            &snapshot.request_lookup,
-            &snapshot.context_binding_digest,
-            &[8; 32],
-            &[9; 32],
-            crate::PurposeV1::Refund,
-            ReservationLiveStageV1::AfterCommitment,
-            Some(7),
+            ExpectedLiveSnapshotV1 {
+                request_lookup: &snapshot.request_lookup,
+                context_binding_digest: &snapshot.context_binding_digest,
+                session_id: &[8; 32],
+                participant_id: &[9; 32],
+                purpose: crate::PurposeV1::Refund,
+                stage: ReservationLiveStageV1::AfterCommitment,
+                retry_counter: Some(7),
+            },
         )
         .is_err());
     }
@@ -1275,13 +1293,15 @@ mod tests {
         let snapshot = test_snapshot(ReservationLiveStageV1::AfterCommitment, false);
         assert!(validate_live_snapshot(
             &snapshot,
-            &snapshot.request_lookup,
-            &snapshot.context_binding_digest,
-            &[8; 32],
-            &[9; 32],
-            crate::PurposeV1::Refund,
-            ReservationLiveStageV1::AfterCommitment,
-            Some(8),
+            ExpectedLiveSnapshotV1 {
+                request_lookup: &snapshot.request_lookup,
+                context_binding_digest: &snapshot.context_binding_digest,
+                session_id: &[8; 32],
+                participant_id: &[9; 32],
+                purpose: crate::PurposeV1::Refund,
+                stage: ReservationLiveStageV1::AfterCommitment,
+                retry_counter: Some(8),
+            },
         )
         .is_err());
 
@@ -1293,13 +1313,15 @@ mod tests {
             .kind = ExposureKindV1::NonceReveal;
         assert!(validate_live_snapshot(
             &wrong_kind,
-            &wrong_kind.request_lookup,
-            &wrong_kind.context_binding_digest,
-            &[8; 32],
-            &[9; 32],
-            crate::PurposeV1::Refund,
-            ReservationLiveStageV1::AfterCommitment,
-            Some(7),
+            ExpectedLiveSnapshotV1 {
+                request_lookup: &wrong_kind.request_lookup,
+                context_binding_digest: &wrong_kind.context_binding_digest,
+                session_id: &[8; 32],
+                participant_id: &[9; 32],
+                purpose: crate::PurposeV1::Refund,
+                stage: ReservationLiveStageV1::AfterCommitment,
+                retry_counter: Some(7),
+            },
         )
         .is_err());
 
@@ -1312,13 +1334,15 @@ mod tests {
                 .nonce_identity = identity;
             assert!(validate_live_snapshot(
                 &snapshot,
-                &snapshot.request_lookup,
-                &snapshot.context_binding_digest,
-                &[8; 32],
-                &[9; 32],
-                crate::PurposeV1::Refund,
-                ReservationLiveStageV1::AfterCommitment,
-                Some(7),
+                ExpectedLiveSnapshotV1 {
+                    request_lookup: &snapshot.request_lookup,
+                    context_binding_digest: &snapshot.context_binding_digest,
+                    session_id: &[8; 32],
+                    participant_id: &[9; 32],
+                    purpose: crate::PurposeV1::Refund,
+                    stage: ReservationLiveStageV1::AfterCommitment,
+                    retry_counter: Some(7),
+                },
             )
             .is_err());
         };
