@@ -200,3 +200,150 @@ fn validate_context_length(context: &[u8]) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DirectionV1, PurposeV1, SessionContextInputsV1, SigningPhaseV1};
+    use dom_crypto::PublicKey;
+
+    fn scalar(value: u8) -> ScriptlessSecretScalar {
+        let mut bytes = [0u8; 32];
+        bytes[31] = value;
+        ScriptlessSecretScalar::from_be_bytes(bytes).expect("canonical test scalar")
+    }
+
+    fn context(participants: u8, purpose: PurposeV1) -> (SessionContextV1, ScriptlessSecretScalar) {
+        let share = scalar(1);
+        let mut roster: Vec<PublicKey> = (1..=participants)
+            .map(|value| scalar(value).public_key())
+            .collect();
+        roster.sort_by_key(PublicKey::to_compressed_bytes);
+        let participant_index = roster
+            .iter()
+            .position(|point| point == &share.public_key())
+            .expect("local key in roster") as u16;
+        let context = SessionContextV1::new(
+            SessionContextInputsV1 {
+                chain_id: [1; 32],
+                session_id: [2; 32],
+                purpose,
+                direction: DirectionV1::Initiator,
+                signing_phase: SigningPhaseV1::SigNonceCommit,
+                template_hash: [3; 32],
+                message_digest: [4; 32],
+                transcript_hash: [5; 32],
+                retry_counter: 0,
+                participant_public_keys: roster,
+                participant_index,
+                adaptor_point: (purpose == PurposeV1::ClaimAdaptor)
+                    .then(|| scalar(31).public_key()),
+            },
+            &share,
+        )
+        .expect("valid test context");
+        (context, share)
+    }
+
+    fn record_bytes(
+        participants: u8,
+        purpose: PurposeV1,
+    ) -> (Vec<u8>, SessionContextV1, ScriptlessSecretScalar) {
+        let (context, share) = context(participants, purpose);
+        let pair = ScriptlessSecretNoncePairV1::from_be_bytes(scalar_bytes(21), scalar_bytes(22))
+            .expect("nonce pair");
+        let transfer = NonceSecretTransferV1::from_nonce_pair([7; 32], [8; 32], &context, pair)
+            .expect("record");
+        let bytes = transfer
+            .seal_with::<_, core::convert::Infallible>(|bytes| Ok(bytes.to_vec()))
+            .expect("infallible capture");
+        (bytes, context, share)
+    }
+
+    fn scalar_bytes(value: u8) -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        bytes[31] = value;
+        bytes
+    }
+
+    #[test]
+    fn exact_minimum_and_maximum_records_roundtrip() {
+        for (participants, purpose, expected_len) in [
+            (2, PurposeV1::Funding, 387),
+            (16, PurposeV1::ClaimAdaptor, 882),
+        ] {
+            let (bytes, context, share) = record_bytes(participants, purpose);
+            assert_eq!(bytes.len(), expected_len);
+            let transfer = NonceSecretTransferV1::from_decrypted_plaintext(Zeroizing::new(bytes))
+                .expect("strict structural record");
+            let pair = transfer
+                .into_validated_pair(
+                    &[7; 32],
+                    &[8; 32],
+                    &context,
+                    &TrustedChainIdV1::from_signed_fixture([1; 32]),
+                    &share,
+                )
+                .expect("semantic record");
+            let (first, second) = pair.public_keys();
+            assert_eq!(first, scalar(21).public_key());
+            assert_eq!(second, scalar(22).public_key());
+        }
+    }
+
+    #[test]
+    fn truncation_extension_and_closed_fields_fail() {
+        let (bytes, _, _) = record_bytes(2, PurposeV1::Funding);
+        for length in 0..bytes.len() {
+            assert!(
+                NonceSecretTransferV1::from_decrypted_plaintext(Zeroizing::new(
+                    bytes[..length].to_vec(),
+                ))
+                .is_err()
+            );
+        }
+        let mut extension = bytes.clone();
+        extension.push(0);
+        assert!(
+            NonceSecretTransferV1::from_decrypted_plaintext(Zeroizing::new(extension)).is_err()
+        );
+        for (offset, replacement) in [(0, b'X'), (8, 2), (74, 0xff)] {
+            let mut mutation = bytes.clone();
+            mutation[offset] = replacement;
+            assert!(
+                NonceSecretTransferV1::from_decrypted_plaintext(Zeroizing::new(mutation)).is_err()
+            );
+        }
+        for range in [10..42, 42..74] {
+            let mut mutation = bytes.clone();
+            mutation[range].fill(0);
+            assert!(
+                NonceSecretTransferV1::from_decrypted_plaintext(Zeroizing::new(mutation)).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_binding_and_scalar_mutations_fail_closed() {
+        let (bytes, context, share) = record_bytes(2, PurposeV1::Funding);
+        let trusted = TrustedChainIdV1::from_signed_fixture([1; 32]);
+        for (reservation, participant) in [([9; 32], [8; 32]), ([7; 32], [9; 32])] {
+            let transfer =
+                NonceSecretTransferV1::from_decrypted_plaintext(Zeroizing::new(bytes.clone()))
+                    .expect("structural record");
+            assert!(transfer
+                .into_validated_pair(&reservation, &participant, &context, &trusted, &share)
+                .is_err());
+        }
+        for scalar_start in [bytes.len() - 64, bytes.len() - 32] {
+            let mut mutation = bytes.clone();
+            mutation[scalar_start..scalar_start + 32].fill(0);
+            let transfer =
+                NonceSecretTransferV1::from_decrypted_plaintext(Zeroizing::new(mutation))
+                    .expect("structural record");
+            assert!(transfer
+                .into_validated_pair(&[7; 32], &[8; 32], &context, &trusted, &share)
+                .is_err());
+        }
+    }
+}

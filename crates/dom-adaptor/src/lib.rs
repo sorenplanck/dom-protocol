@@ -6,6 +6,35 @@
 //! ownership. This crate also owns the storage-independent Nonce Vault
 //! contract; durable implementations belong to wallet software and must fail
 //! closed when witness or rollback evidence is incomplete.
+//!
+//! Default downstream code cannot import a reusable secret nonce owner:
+//!
+//! ```compile_fail
+//! use dom_adaptor::SecretNoncePairV1;
+//! ```
+//!
+//! It cannot call deterministic/raw nonce derivation or raw reveal/signing:
+//!
+//! ```compile_fail
+//! use dom_adaptor::{derive_secret_nonce_pair_v1, raw_nonce_reveal_v1,
+//!     raw_partial_sign_v1};
+//! ```
+//!
+//! Durable request identifiers cannot be supplied by the application:
+//!
+//! ```compile_fail
+//! use dom_adaptor::ReservationRequestV1;
+//! let _request = ReservationRequestV1 { /* private fields */ };
+//! ```
+//!
+//! Prepared and authorized values have no public constructors. Parsing a
+//! 252-byte durable record never yields either capability:
+//!
+//! ```compile_fail
+//! use dom_adaptor::{AuthorizedExposureV1, PreparedExposureV1};
+//! let prepared = PreparedExposureV1(/* private */);
+//! let authorized = AuthorizedExposureV1::from_persisted(prepared);
+//! ```
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
