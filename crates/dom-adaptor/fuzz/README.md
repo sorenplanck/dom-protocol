@@ -14,6 +14,10 @@ partial verification. Its harness entry point exists only under cargo-fuzz's
 `cfg(fuzzing)` build; there is no Cargo feature that can expose it in release
 resolution.
 
+`nar006_runtime_bindings` mutates the complete recovered nonce identity,
+artifact kind, and outbound digest used by the private restart-resend request
+constructor. It does not open a secret or return outbound artifact bytes.
+
 Multi-parser targets consume a dedicated selector byte before passing the
 remaining payload to a parser, so every canonical magic prefix remains
 reachable. The fuzz package uses only production constructors and does not
@@ -25,6 +29,7 @@ Run a bounded local campaign with:
 cargo fuzz run canonical_messages -- -max_total_time=60
 cargo fuzz run adaptor_pre_signature -- -max_total_time=60
 cargo fuzz run dsc1_signing_round -- -max_total_time=60
+cargo fuzz run nar006_runtime_bindings -- -max_total_time=60
 ```
 
 Passing a bounded campaign is evidence only for that platform and duration. It

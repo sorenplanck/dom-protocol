@@ -6,8 +6,8 @@ use crate::{
     nonce_commitment_hash_v1, session_message_digest_v1, AdaptorError, BindingContextV1,
     BindingFactorV1, ContractKindV1, NonceCommitmentV1, NonceRevealV1, PartialSignatureV1,
     ParticipantPublicNoncesV1, ParticipantRosterV1, ProtocolCommitmentSetV1, ProtocolRevealSetV1,
-    PurposeV1, ResendProtocolStageV1, Result, SessionContextV1, SigningPhaseV1,
-    StageComputationRequestV1, TrustedChainIdV1,
+    PurposeV1, ResendProtocolStageV1, ReservationRequestLookupV1, Result, SessionContextV1,
+    SessionId, SigningPhaseV1, StageComputationRequestV1, TrustedChainIdV1,
 };
 #[cfg(any(test, fuzzing))]
 use crate::{
@@ -903,9 +903,11 @@ impl ValidatedSigningRoundStateV1 {
     }
 
     /// Consume current trusted protocol evidence for one exact local resend.
-    pub fn authorize_local_resend(
+    pub(crate) fn authorize_local_resend(
         &mut self,
         protocol_stage: ResendProtocolStageV1,
+        request_lookup: &ReservationRequestLookupV1,
+        reservation_context_binding_digest: &[u8; 32],
     ) -> Result<ValidatedResendAuthorizationV1> {
         let stage_index = match protocol_stage {
             ResendProtocolStageV1::Commitment => 0,
@@ -933,7 +935,15 @@ impl ValidatedSigningRoundStateV1 {
         .ok_or(AdaptorError::AuthorizationMismatch)?;
         let digest = crate::exposure_outbound_digest_v1(protocol_stage.exposure_kind(), bytes)?;
         self.resend_authority_issued[stage_index] = true;
-        ValidatedResendAuthorizationV1::new(protocol_stage, *digest.as_bytes())
+        ValidatedResendAuthorizationV1::new(
+            request_lookup.clone(),
+            *reservation_context_binding_digest,
+            SessionId::from_bytes(*self.base_context.session_id())
+                .map_err(|_| AdaptorError::AuthorizationMismatch)?,
+            self.base_context.purpose(),
+            protocol_stage,
+            *digest.as_bytes(),
+        )
     }
 
     fn commitment_set(&self) -> Result<ProtocolCommitmentSetV1> {
@@ -1087,28 +1097,66 @@ impl ValidatedPartialSigningInputsV1 {
 
 /// Opaque one-shot protocol authority for one exact already-recorded resend.
 pub struct ValidatedResendAuthorizationV1 {
+    request_lookup: ReservationRequestLookupV1,
+    reservation_context_binding_digest: [u8; 32],
+    session_id: SessionId,
+    purpose: PurposeV1,
     protocol_stage: ResendProtocolStageV1,
     adaptor_outbound_digest: [u8; 32],
 }
 
 impl ValidatedResendAuthorizationV1 {
     pub(crate) fn new(
+        request_lookup: ReservationRequestLookupV1,
+        reservation_context_binding_digest: [u8; 32],
+        session_id: SessionId,
+        purpose: PurposeV1,
         protocol_stage: ResendProtocolStageV1,
         adaptor_outbound_digest: [u8; 32],
     ) -> Result<Self> {
-        if adaptor_outbound_digest == [0; 32] {
+        if reservation_context_binding_digest == [0; 32]
+            || adaptor_outbound_digest == [0; 32]
+            || !purpose.is_strict_v1_authorized()
+        {
             return Err(AdaptorError::InvalidTranscript("zero resend digest"));
         }
         Ok(Self {
+            request_lookup,
+            reservation_context_binding_digest,
+            session_id,
+            purpose,
             protocol_stage,
             adaptor_outbound_digest,
         })
     }
 
-    pub(crate) const fn protocol_stage(&self) -> ResendProtocolStageV1 {
+    /// Return the exact Store-owned request lookup accepted for this session.
+    pub const fn request_lookup(&self) -> &ReservationRequestLookupV1 {
+        &self.request_lookup
+    }
+
+    /// Return the exact reservation-context binding digest.
+    pub const fn reservation_context_binding_digest(&self) -> &[u8; 32] {
+        &self.reservation_context_binding_digest
+    }
+
+    /// Return the accepted lifetime-unique session identifier.
+    pub const fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    /// Return the accepted strict Phase 1 purpose.
+    pub const fn purpose(&self) -> PurposeV1 {
+        self.purpose
+    }
+
+    /// Return the exact accepted protocol stage.
+    pub const fn protocol_stage(&self) -> ResendProtocolStageV1 {
         self.protocol_stage
     }
-    pub(crate) const fn adaptor_outbound_digest(&self) -> &[u8; 32] {
+
+    /// Return the exact nonzero adaptor-domain outbound digest.
+    pub const fn adaptor_outbound_digest(&self) -> &[u8; 32] {
         &self.adaptor_outbound_digest
     }
 }
@@ -1130,6 +1178,58 @@ fn complete_message_bytes(message: &ValidatedAcceptedSessionMessageV1, candidate
 #[cfg(fuzzing)]
 pub fn fuzz_dsc1_signing_round_acceptance_v1(data: &[u8]) {
     let _ = fuzz_dsc1_signing_round_acceptance_inner(data);
+}
+
+#[cfg(fuzzing)]
+struct FuzzAcceptedSigningSessionV1 {
+    trusted_chain_id: TrustedChainIdV1,
+    session_id: [u8; 32],
+    roster: ParticipantRosterV1,
+    transaction_template: dom_consensus::Transaction,
+    initial_transcript_hash: [u8; 32],
+}
+
+#[cfg(fuzzing)]
+impl AcceptedSigningSessionV1 for FuzzAcceptedSigningSessionV1 {
+    fn trusted_chain_id(&self) -> &TrustedChainIdV1 {
+        &self.trusted_chain_id
+    }
+
+    fn session_id(&self) -> &[u8; 32] {
+        &self.session_id
+    }
+
+    fn contract_kind(&self) -> ContractKindV1 {
+        ContractKindV1::WitnessOrTimeout
+    }
+
+    fn purpose(&self) -> PurposeV1 {
+        PurposeV1::Refund
+    }
+
+    fn roster(&self) -> &ParticipantRosterV1 {
+        &self.roster
+    }
+
+    fn transaction_template(&self) -> &dom_consensus::Transaction {
+        &self.transaction_template
+    }
+
+    fn kernel_index(&self) -> usize {
+        0
+    }
+
+    fn adaptor_point(&self) -> Option<&PublicKey> {
+        None
+    }
+
+    fn initial_transcript_hash(&self) -> &[u8; 32] {
+        &self.initial_transcript_hash
+    }
+
+    fn accepted_signing_messages(&self) -> impl Iterator<Item = &[u8]> {
+        core::iter::empty()
+    }
 }
 
 #[cfg(fuzzing)]
@@ -1185,21 +1285,21 @@ fn fuzz_dsc1_signing_round_acceptance_inner(data: &[u8]) -> Result<()> {
     } else {
         &share_b
     };
-    let request = SigningRoundSessionRequestV1::new(
-        [0x16; 32],
+    let session_id = [0x16; 32];
+    let initial_transcript_hash = initial_transcript_hash_v1(
+        &trusted_chain,
+        &session_id,
         ContractKindV1::WitnessOrTimeout,
-        PurposeV1::Refund,
+        &roster,
+    );
+    let accepted = FuzzAcceptedSigningSessionV1 {
+        trusted_chain_id: trusted_chain,
+        session_id,
         roster,
         transaction_template,
-        0,
-        None,
-    )?;
-    let bootstrap = ValidatedSigningRoundBootstrapV1::from_session_request(
-        trusted_chain,
-        request,
-        local_share,
-    )?;
-    let mut state = ValidatedSigningRoundStateV1::from_bootstrap(bootstrap, local_share)?;
+        initial_transcript_hash,
+    };
+    let mut state = ValidatedSigningRoundStateV1::from_accepted_session(accepted, local_share)?;
     let selector = data.first().copied().unwrap_or(0);
     let arbitrary = data.get(1..).unwrap_or_default();
     let _ = state.accept_message(arbitrary);
@@ -1836,6 +1936,43 @@ mod tests {
             state,
             messages: messages.try_into().expect("two commitment messages"),
         }
+    }
+
+    #[test]
+    fn resend_authority_binds_store_lookup_session_purpose_stage_and_digest_once() {
+        let mut fixture = commitment_fixture();
+        let messages = fixture.messages.clone();
+        for message in &messages {
+            fixture
+                .state
+                .accept_message(message)
+                .expect("accepted commitment");
+        }
+        let lookup = ReservationRequestLookupV1::from_bytes([0x61; 32]).expect("lookup");
+        let binding = [0x62; 32];
+        let authorization = fixture
+            .state
+            .authorize_local_resend(ResendProtocolStageV1::Commitment, &lookup, &binding)
+            .expect("resend authorization");
+        assert_eq!(authorization.request_lookup(), &lookup);
+        assert_eq!(authorization.reservation_context_binding_digest(), &binding);
+        assert_eq!(
+            authorization.session_id().as_bytes(),
+            fixture.state.base_context.session_id()
+        );
+        assert_eq!(
+            authorization.purpose(),
+            fixture.state.base_context.purpose()
+        );
+        assert_eq!(
+            authorization.protocol_stage(),
+            ResendProtocolStageV1::Commitment
+        );
+        assert_ne!(authorization.adaptor_outbound_digest(), &[0; 32]);
+        assert!(fixture
+            .state
+            .authorize_local_resend(ResendProtocolStageV1::Commitment, &lookup, &binding)
+            .is_err());
     }
 
     #[test]

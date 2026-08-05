@@ -10,7 +10,7 @@ use crate::{
     ReservationResumeResultV1, RestoreState, SessionContextV1, SigningSessionAuthorityV1,
     SigningShareV1, TerminalReservationV1, TrustedChainIdV1, ValidatedCommitmentRoundV1,
     ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1, ValidatedRevealRoundV1,
-    VaultArtifactPersistencePermitV1, VaultExportedArtifactV1, VaultReservationSnapshotV1,
+    ValidatedSigningRoundStateV1, VaultExportedArtifactV1, VaultReservationSnapshotV1,
     VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1, VaultSpentArtifactSnapshotV1,
 };
 use core::fmt;
@@ -118,7 +118,6 @@ pub struct CommitmentExportedV1<Handle> {
     context: SessionContextV1,
     participant_id: [u8; 32],
     context_binding_digest: [u8; 32],
-    nonce_identity: crate::NonceIdentityV1,
     permit_id: crate::PermitIdV1,
 }
 
@@ -126,6 +125,18 @@ impl<Handle> CommitmentExportedV1<Handle> {
     /// Return the public non-authoritative lookup for the exported commitment.
     pub const fn permit_id(&self) -> &crate::PermitIdV1 {
         &self.permit_id
+    }
+
+    /// Consume trusted protocol evidence for this exact commitment resend.
+    pub fn authorize_resend(
+        &self,
+        round: &mut ValidatedSigningRoundStateV1,
+    ) -> crate::Result<ValidatedResendAuthorizationV1> {
+        round.authorize_local_resend(
+            ResendProtocolStageV1::Commitment,
+            &self.request_lookup,
+            &self.context_binding_digest,
+        )
     }
 }
 
@@ -137,7 +148,6 @@ pub struct RevealExportedV1<Handle> {
     context: SessionContextV1,
     participant_id: [u8; 32],
     context_binding_digest: [u8; 32],
-    nonce_identity: crate::NonceIdentityV1,
     permit_id: crate::PermitIdV1,
 }
 
@@ -146,21 +156,45 @@ impl<Handle> RevealExportedV1<Handle> {
     pub const fn permit_id(&self) -> &crate::PermitIdV1 {
         &self.permit_id
     }
+
+    /// Consume trusted protocol evidence for this exact nonce-reveal resend.
+    pub fn authorize_resend(
+        &self,
+        round: &mut ValidatedSigningRoundStateV1,
+    ) -> crate::Result<ValidatedResendAuthorizationV1> {
+        round.authorize_local_resend(
+            ResendProtocolStageV1::Reveal,
+            &self.request_lookup,
+            &self.context_binding_digest,
+        )
+    }
 }
 
 /// Terminal marker after exactly one partial-signature export.
 pub struct PartialExportedTerminalV1 {
     permit_id: crate::PermitIdV1,
     request_lookup: ReservationRequestLookupV1,
-    reservation_nonce_id: crate::ReservationNonceId,
-    nonce_identity: crate::NonceIdentityV1,
     context_binding_digest: [u8; 32],
+    session_id: crate::SessionId,
+    purpose: crate::PurposeV1,
 }
 
 impl PartialExportedTerminalV1 {
     /// Return the public non-authoritative lookup for the exported partial.
     pub const fn permit_id(&self) -> &crate::PermitIdV1 {
         &self.permit_id
+    }
+
+    /// Consume trusted protocol evidence for this exact terminal partial resend.
+    pub fn authorize_resend(
+        &self,
+        round: &mut ValidatedSigningRoundStateV1,
+    ) -> crate::Result<ValidatedResendAuthorizationV1> {
+        round.authorize_local_resend(
+            ResendProtocolStageV1::PartialSignature,
+            &self.request_lookup,
+            &self.context_binding_digest,
+        )
     }
 }
 
@@ -282,6 +316,9 @@ where
             &snapshot,
             &expected_lookup,
             &expected_binding,
+            context.session_id(),
+            &participant_id,
+            context.purpose(),
             ReservationLiveStageV1::PreDerivation,
             None,
         )?;
@@ -348,6 +385,9 @@ where
                     &snapshot,
                     &request_lookup,
                     &binding_digest,
+                    context.session_id(),
+                    &participant_id,
+                    context.purpose(),
                     snapshot.live_stage(),
                     snapshot.final_retry_counter(),
                 )?;
@@ -374,11 +414,6 @@ where
                             .ok_or(NonceVaultError::CorruptState)?
                             .permit_id()
                             .clone();
-                        let nonce_identity = snapshot
-                            .spent_commitment()
-                            .ok_or(NonceVaultError::CorruptState)?
-                            .nonce_identity()
-                            .clone();
                         ResumedReservationV1::AfterCommitment(CommitmentExportedV1 {
                             handle,
                             request_lookup,
@@ -386,7 +421,6 @@ where
                             context: resumed_context,
                             participant_id,
                             context_binding_digest: binding_digest,
-                            nonce_identity,
                             permit_id,
                         })
                     }
@@ -401,11 +435,6 @@ where
                             .ok_or(NonceVaultError::CorruptState)?
                             .permit_id()
                             .clone();
-                        let nonce_identity = snapshot
-                            .spent_reveal()
-                            .ok_or(NonceVaultError::CorruptState)?
-                            .nonce_identity()
-                            .clone();
                         ResumedReservationV1::AfterReveal(RevealExportedV1 {
                             handle,
                             request_lookup,
@@ -413,7 +442,6 @@ where
                             context: resumed_context,
                             participant_id,
                             context_binding_digest: binding_digest,
-                            nonce_identity,
                             permit_id,
                         })
                     }
@@ -493,7 +521,6 @@ where
             effective_context.participant_index(),
             *commitment_hash.as_bytes(),
         );
-        let nonce_identity = persistence_permit.nonce_identity().clone();
         let prepared = PreparedExposureV1::commitment(
             &persistence_permit,
             &operation_evidence.validated_view(),
@@ -526,6 +553,9 @@ where
             &snapshot,
             &state.request_lookup,
             &state.context_binding_digest,
+            effective_context.session_id(),
+            &state.participant_id,
+            effective_context.purpose(),
             ReservationLiveStageV1::AfterCommitment,
             Some(effective_context.retry_counter()),
         )?;
@@ -547,7 +577,6 @@ where
                 context: effective_context,
                 participant_id: state.participant_id,
                 context_binding_digest: state.context_binding_digest,
-                nonce_identity,
                 permit_id,
             },
             parsed,
@@ -599,6 +628,9 @@ where
             &prior_snapshot,
             &state.request_lookup,
             &state.context_binding_digest,
+            stage_context.session_id(),
+            &state.participant_id,
+            stage_context.purpose(),
             ReservationLiveStageV1::AfterCommitment,
             Some(stage_context.retry_counter()),
         )?;
@@ -607,7 +639,6 @@ where
             .ok_or(NonceVaultError::CorruptState)?;
         let commitment =
             nonce_commitment_from_reveal(&stage_context, &state.participant_id, &reveal)?;
-        let nonce_identity = persistence_permit.nonce_identity().clone();
         let prepared = PreparedExposureV1::reveal(
             &persistence_permit,
             &operation_evidence.validated_view(),
@@ -641,6 +672,9 @@ where
             &snapshot,
             &state.request_lookup,
             &state.context_binding_digest,
+            stage_context.session_id(),
+            &state.participant_id,
+            stage_context.purpose(),
             ReservationLiveStageV1::AfterReveal,
             Some(stage_context.retry_counter()),
         )?;
@@ -659,7 +693,6 @@ where
                 context: stage_context,
                 participant_id: state.participant_id,
                 context_binding_digest: state.context_binding_digest,
-                nonce_identity,
                 permit_id,
             },
             parsed,
@@ -710,9 +743,7 @@ where
             scalar,
         );
         let expected_partial_bytes = partial.to_bytes();
-        let nonce_identity = persistence_permit.nonce_identity().clone();
         let request_lookup = state.request_lookup;
-        let reservation_nonce_id = state.reservation_nonce_id;
         let prepared = PreparedExposureV1::partial_signature(
             &persistence_permit,
             &operation_evidence.validated_view(),
@@ -745,9 +776,9 @@ where
             PartialExportedTerminalV1 {
                 permit_id,
                 request_lookup,
-                reservation_nonce_id,
-                nonce_identity,
                 context_binding_digest: state.context_binding_digest,
+                session_id: crate::SessionId::from_bytes(*state.context.session_id())?,
+                purpose: state.context.purpose(),
             },
             partial,
         ))
@@ -759,15 +790,15 @@ where
         state: &CommitmentExportedV1<Vault::ReservationHandle>,
         authority: ValidatedResendAuthorizationV1,
     ) -> SignerResult<Vault, Custody, ResentArtifactV1> {
-        self.resend_bound(
-            state.request_lookup.clone(),
-            state.reservation_nonce_id.clone(),
-            state.nonce_identity.clone(),
-            state.context_binding_digest,
-            state.permit_id.clone(),
-            authority,
+        validate_resend_state_binding(
+            &authority,
+            &state.request_lookup,
+            &state.context_binding_digest,
+            state.context.session_id(),
+            state.context.purpose(),
             ResendProtocolStageV1::Commitment,
-        )
+        )?;
+        self.resend_bound(authority, ResendProtocolStageV1::Commitment)
     }
 
     /// Resend an exact reveal without accepting caller-provided binding fields.
@@ -776,15 +807,15 @@ where
         state: &RevealExportedV1<Vault::ReservationHandle>,
         authority: ValidatedResendAuthorizationV1,
     ) -> SignerResult<Vault, Custody, ResentArtifactV1> {
-        self.resend_bound(
-            state.request_lookup.clone(),
-            state.reservation_nonce_id.clone(),
-            state.nonce_identity.clone(),
-            state.context_binding_digest,
-            state.permit_id.clone(),
-            authority,
+        validate_resend_state_binding(
+            &authority,
+            &state.request_lookup,
+            &state.context_binding_digest,
+            state.context.session_id(),
+            state.context.purpose(),
             ResendProtocolStageV1::Reveal,
-        )
+        )?;
+        self.resend_bound(authority, ResendProtocolStageV1::Reveal)
     }
 
     /// Resend an exact terminal partial without caller-provided binding fields.
@@ -793,40 +824,39 @@ where
         state: &PartialExportedTerminalV1,
         authority: ValidatedResendAuthorizationV1,
     ) -> SignerResult<Vault, Custody, ResentArtifactV1> {
-        self.resend_bound(
-            state.request_lookup.clone(),
-            state.reservation_nonce_id.clone(),
-            state.nonce_identity.clone(),
-            state.context_binding_digest,
-            state.permit_id.clone(),
-            authority,
+        validate_resend_state_binding(
+            &authority,
+            &state.request_lookup,
+            &state.context_binding_digest,
+            state.session_id.as_bytes(),
+            state.purpose,
             ResendProtocolStageV1::PartialSignature,
-        )
+        )?;
+        self.resend_bound(authority, ResendProtocolStageV1::PartialSignature)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Recover and resend an exact accepted artifact after process restart.
+    pub fn resend_after_restart(
+        &mut self,
+        authority: ValidatedResendAuthorizationV1,
+    ) -> SignerResult<Vault, Custody, ResentArtifactV1> {
+        let stage = authority.protocol_stage();
+        self.resend_bound(authority, stage)
+    }
+
     fn resend_bound(
         &mut self,
-        request_lookup: ReservationRequestLookupV1,
-        reservation_nonce_id: crate::ReservationNonceId,
-        nonce_identity: crate::NonceIdentityV1,
-        context_binding_digest: [u8; 32],
-        permit_id: crate::PermitIdV1,
         authority: ValidatedResendAuthorizationV1,
         required_stage: ResendProtocolStageV1,
     ) -> SignerResult<Vault, Custody, ResentArtifactV1> {
         if authority.protocol_stage() != required_stage {
             return Err(AdaptorError::AuthorizationMismatch.into());
         }
-        let request = ResendRequestV1::new(
-            request_lookup,
-            reservation_nonce_id,
-            nonce_identity,
-            context_binding_digest,
-            permit_id,
-            authority.protocol_stage(),
-            *authority.adaptor_outbound_digest(),
-        )?;
+        let recovered = self
+            .vault
+            .recover_spent_artifact(&authority)
+            .map_err(VaultBackedSignerError::Vault)?;
+        let request = ResendRequestV1::from_recovered(authority, &recovered)?;
         let expected_kind = request.protocol_stage().exposure_kind();
         let expected_digest = *request.adaptor_outbound_digest();
         let exported = self
@@ -912,6 +942,9 @@ fn validate_live_snapshot<Snapshot>(
     snapshot: &Snapshot,
     request_lookup: &ReservationRequestLookupV1,
     context_binding_digest: &[u8; 32],
+    expected_session_id: &[u8; 32],
+    expected_participant_id: &[u8; 32],
+    expected_purpose: crate::PurposeV1,
     expected_stage: ReservationLiveStageV1,
     expected_retry_counter: Option<u64>,
 ) -> core::result::Result<(), NonceVaultError>
@@ -935,7 +968,13 @@ where
                 && snapshot.spent_commitment().is_some_and(|spent| {
                     spent.kind() == ExposureKindV1::NonceCommitment
                         && spent.adaptor_outbound_digest() != &[0; 32]
-                        && spent.nonce_identity().bound_digest() == context_binding_digest
+                        && spent_identity_matches(
+                            spent,
+                            context_binding_digest,
+                            expected_session_id,
+                            expected_participant_id,
+                            expected_purpose,
+                        )
                 })
                 && snapshot.spent_reveal().is_none() => {}
         ReservationLiveStageV1::AfterReveal
@@ -943,17 +982,61 @@ where
                 && snapshot.spent_commitment().is_some_and(|spent| {
                     spent.kind() == ExposureKindV1::NonceCommitment
                         && spent.adaptor_outbound_digest() != &[0; 32]
-                        && spent.nonce_identity().bound_digest() == context_binding_digest
+                        && spent_identity_matches(
+                            spent,
+                            context_binding_digest,
+                            expected_session_id,
+                            expected_participant_id,
+                            expected_purpose,
+                        )
                 })
                 && snapshot.spent_reveal().is_some_and(|spent| {
                     spent.kind() == ExposureKindV1::NonceReveal
                         && spent.adaptor_outbound_digest() != &[0; 32]
-                        && spent.nonce_identity().bound_digest() == context_binding_digest
+                        && spent_identity_matches(
+                            spent,
+                            context_binding_digest,
+                            expected_session_id,
+                            expected_participant_id,
+                            expected_purpose,
+                        )
                         && snapshot.spent_commitment().is_some_and(|commitment| {
                             commitment.nonce_identity() == spent.nonce_identity()
                         })
                 }) => {}
         _ => return Err(NonceVaultError::CorruptState),
+    }
+    Ok(())
+}
+
+fn spent_identity_matches(
+    spent: &impl VaultSpentArtifactSnapshotV1,
+    context_binding_digest: &[u8; 32],
+    expected_session_id: &[u8; 32],
+    expected_participant_id: &[u8; 32],
+    expected_purpose: crate::PurposeV1,
+) -> bool {
+    spent.nonce_identity().bound_digest() == context_binding_digest
+        && spent.nonce_identity().session_id().as_bytes() == expected_session_id
+        && spent.nonce_identity().participant_id().as_bytes() == expected_participant_id
+        && spent.nonce_identity().purpose() == expected_purpose
+}
+
+fn validate_resend_state_binding(
+    authority: &ValidatedResendAuthorizationV1,
+    request_lookup: &ReservationRequestLookupV1,
+    context_binding_digest: &[u8; 32],
+    session_id: &[u8; 32],
+    purpose: crate::PurposeV1,
+    required_stage: ResendProtocolStageV1,
+) -> core::result::Result<(), AdaptorError> {
+    if authority.request_lookup() != request_lookup
+        || authority.reservation_context_binding_digest() != context_binding_digest
+        || authority.session_id().as_bytes() != session_id
+        || authority.purpose() != purpose
+        || authority.protocol_stage() != required_stage
+    {
+        return Err(AdaptorError::AuthorizationMismatch);
     }
     Ok(())
 }
@@ -1162,6 +1245,9 @@ mod tests {
             &snapshot,
             &snapshot.request_lookup,
             &snapshot.context_binding_digest,
+            &[8; 32],
+            &[9; 32],
+            crate::PurposeV1::Refund,
             ReservationLiveStageV1::AfterCommitment,
             Some(7),
         )
@@ -1175,6 +1261,9 @@ mod tests {
             &snapshot,
             &snapshot.request_lookup,
             &snapshot.context_binding_digest,
+            &[8; 32],
+            &[9; 32],
+            crate::PurposeV1::Refund,
             ReservationLiveStageV1::AfterCommitment,
             Some(7),
         )
@@ -1188,6 +1277,9 @@ mod tests {
             &snapshot,
             &snapshot.request_lookup,
             &snapshot.context_binding_digest,
+            &[8; 32],
+            &[9; 32],
+            crate::PurposeV1::Refund,
             ReservationLiveStageV1::AfterCommitment,
             Some(8),
         )
@@ -1203,32 +1295,69 @@ mod tests {
             &wrong_kind,
             &wrong_kind.request_lookup,
             &wrong_kind.context_binding_digest,
+            &[8; 32],
+            &[9; 32],
+            crate::PurposeV1::Refund,
             ReservationLiveStageV1::AfterCommitment,
             Some(7),
         )
         .is_err());
 
-        let mut wrong_identity = test_snapshot(ReservationLiveStageV1::AfterCommitment, false);
-        wrong_identity
-            .commitment
-            .as_mut()
-            .expect("commitment descriptor")
-            .nonce_identity = crate::NonceIdentityV1::new(
-            crate::SessionId::from_bytes([8; 32]).expect("session ID"),
-            crate::ParticipantId::from_bytes([9; 32]).expect("participant ID"),
-            crate::PurposeV1::Refund,
-            [0x55; 32],
-            1,
-        )
-        .expect("mutated identity");
-        assert!(validate_live_snapshot(
-            &wrong_identity,
-            &wrong_identity.request_lookup,
-            &wrong_identity.context_binding_digest,
-            ReservationLiveStageV1::AfterCommitment,
-            Some(7),
-        )
-        .is_err());
+        let rejects_identity = |identity: crate::NonceIdentityV1| {
+            let mut snapshot = test_snapshot(ReservationLiveStageV1::AfterCommitment, false);
+            snapshot
+                .commitment
+                .as_mut()
+                .expect("commitment descriptor")
+                .nonce_identity = identity;
+            assert!(validate_live_snapshot(
+                &snapshot,
+                &snapshot.request_lookup,
+                &snapshot.context_binding_digest,
+                &[8; 32],
+                &[9; 32],
+                crate::PurposeV1::Refund,
+                ReservationLiveStageV1::AfterCommitment,
+                Some(7),
+            )
+            .is_err());
+        };
+        for identity in [
+            crate::NonceIdentityV1::new(
+                crate::SessionId::from_bytes([0x55; 32]).expect("mutated session"),
+                crate::ParticipantId::from_bytes([9; 32]).expect("participant ID"),
+                crate::PurposeV1::Refund,
+                [3; 32],
+                1,
+            )
+            .expect("mutated identity"),
+            crate::NonceIdentityV1::new(
+                crate::SessionId::from_bytes([8; 32]).expect("session ID"),
+                crate::ParticipantId::from_bytes([0x56; 32]).expect("mutated participant"),
+                crate::PurposeV1::Refund,
+                [3; 32],
+                1,
+            )
+            .expect("mutated identity"),
+            crate::NonceIdentityV1::new(
+                crate::SessionId::from_bytes([8; 32]).expect("session ID"),
+                crate::ParticipantId::from_bytes([9; 32]).expect("participant ID"),
+                crate::PurposeV1::Funding,
+                [3; 32],
+                1,
+            )
+            .expect("mutated identity"),
+            crate::NonceIdentityV1::new(
+                crate::SessionId::from_bytes([8; 32]).expect("session ID"),
+                crate::ParticipantId::from_bytes([9; 32]).expect("participant ID"),
+                crate::PurposeV1::Refund,
+                [0x57; 32],
+                1,
+            )
+            .expect("mutated identity"),
+        ] {
+            rejects_identity(identity);
+        }
     }
 
     #[test]

@@ -1022,7 +1022,6 @@ impl ResendProtocolStageV1 {
 /// revalidate its private spent-artifact authority before returning bytes.
 pub struct ResendRequestV1 {
     request_lookup: ReservationRequestLookupV1,
-    reservation_nonce_id: ReservationNonceId,
     nonce_identity: NonceIdentityV1,
     reservation_context_binding_digest: [u8; 32],
     permit_id: PermitIdV1,
@@ -1031,24 +1030,29 @@ pub struct ResendRequestV1 {
 }
 
 impl ResendRequestV1 {
-    pub(crate) fn new(
-        request_lookup: ReservationRequestLookupV1,
-        reservation_nonce_id: ReservationNonceId,
-        nonce_identity: NonceIdentityV1,
-        reservation_context_binding_digest: [u8; 32],
-        permit_id: PermitIdV1,
-        protocol_stage: ResendProtocolStageV1,
-        adaptor_outbound_digest: [u8; 32],
+    pub(crate) fn from_recovered(
+        authorization: crate::ValidatedResendAuthorizationV1,
+        recovered: &impl VaultSpentArtifactSnapshotV1,
     ) -> core::result::Result<Self, NonceVaultError> {
+        let request_lookup = authorization.request_lookup().clone();
+        let nonce_identity = recovered.nonce_identity().clone();
+        let reservation_context_binding_digest =
+            *authorization.reservation_context_binding_digest();
+        let permit_id = recovered.permit_id().clone();
+        let protocol_stage = authorization.protocol_stage();
+        let adaptor_outbound_digest = *authorization.adaptor_outbound_digest();
         if reservation_context_binding_digest == [0; 32]
             || adaptor_outbound_digest == [0; 32]
             || nonce_identity.bound_digest() != &reservation_context_binding_digest
+            || nonce_identity.session_id() != authorization.session_id()
+            || nonce_identity.purpose() != authorization.purpose()
+            || recovered.kind() != protocol_stage.exposure_kind()
+            || recovered.adaptor_outbound_digest() != &adaptor_outbound_digest
         {
             return Err(NonceVaultError::InvalidPermit);
         }
         Ok(Self {
             request_lookup,
-            reservation_nonce_id,
             nonce_identity,
             reservation_context_binding_digest,
             permit_id,
@@ -1060,11 +1064,6 @@ impl ResendRequestV1 {
     /// Return the public reservation-request lookup.
     pub const fn request_lookup(&self) -> &ReservationRequestLookupV1 {
         &self.request_lookup
-    }
-
-    /// Return the Store-generated reservation identifier.
-    pub const fn reservation_nonce_id(&self) -> &ReservationNonceId {
-        &self.reservation_nonce_id
     }
 
     /// Return the complete canonical nonce identity.
@@ -1195,6 +1194,8 @@ pub trait NonceVaultV1: Sized {
     type ExposurePermit;
     /// DOM Contracts store-owned output produced only after durable permit spend.
     type ExportedArtifact: VaultExportedArtifactV1;
+    /// Store-owned non-exporting descriptor recovered from the current durable head.
+    type RecoveredSpentArtifact: VaultSpentArtifactSnapshotV1;
 
     /// Durably claim the lifetime session/reservation IDs and charge every
     /// applicable budget before any nonce secret is generated.
@@ -1286,6 +1287,12 @@ pub trait NonceVaultV1: Sized {
         &mut self,
         permit: Self::ExposurePermit,
     ) -> core::result::Result<Self::ExportedArtifact, Self::Error>;
+
+    /// Recover one exact spent descriptor without returning bytes or authority.
+    fn recover_spent_artifact(
+        &mut self,
+        authorization: &crate::ValidatedResendAuthorizationV1,
+    ) -> core::result::Result<Self::RecoveredSpentArtifact, Self::Error>;
 
     /// Return only the exact persisted bytes bound to an already-spent permit.
     fn resend_exported(
@@ -1383,6 +1390,106 @@ fn append<const N: usize>(output: &mut [u8; N], cursor: &mut usize, bytes: &[u8]
     *cursor += bytes.len();
 }
 
+#[cfg(fuzzing)]
+struct FuzzRecoveredSpentArtifactV1 {
+    nonce_identity: NonceIdentityV1,
+    permit_id: PermitIdV1,
+    kind: ExposureKindV1,
+    digest: [u8; 32],
+}
+
+#[cfg(fuzzing)]
+impl VaultSpentArtifactSnapshotV1 for FuzzRecoveredSpentArtifactV1 {
+    fn nonce_identity(&self) -> &NonceIdentityV1 {
+        &self.nonce_identity
+    }
+
+    fn permit_id(&self) -> &PermitIdV1 {
+        &self.permit_id
+    }
+
+    fn kind(&self) -> ExposureKindV1 {
+        self.kind
+    }
+
+    fn adaptor_outbound_digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+}
+
+/// Fuzz-only NAR-006 recovered-descriptor binding harness.
+///
+/// This symbol is selected only by cargo-fuzz's `cfg(fuzzing)` build and is
+/// absent from production feature resolution.
+#[cfg(fuzzing)]
+pub fn fuzz_nar006_runtime_bindings_v1(data: &[u8]) {
+    fn field(data: &[u8], start: usize, fallback: u8) -> [u8; 32] {
+        let mut value = [fallback; 32];
+        if let Some(bytes) = data.get(start..start.saturating_add(32)) {
+            if bytes.len() == 32 {
+                value.copy_from_slice(bytes);
+            }
+        }
+        value[0] |= 1;
+        value
+    }
+
+    let selector = data.first().copied().unwrap_or_default();
+    let session = SessionId::from_bytes(field(data, 1, 0x11));
+    let participant = ParticipantId::from_bytes(field(data, 33, 0x12));
+    let lookup = ReservationRequestLookupV1::from_bytes(field(data, 65, 0x13));
+    let permit = PermitIdV1::from_bytes(field(data, 97, 0x14));
+    let (Ok(session), Ok(participant), Ok(lookup), Ok(permit)) =
+        (session, participant, lookup, permit)
+    else {
+        return;
+    };
+    let binding = field(data, 129, 0x15);
+    let digest = field(data, 161, 0x16);
+    let Ok(authorization) = crate::ValidatedResendAuthorizationV1::new(
+        lookup,
+        binding,
+        session.clone(),
+        PurposeV1::Refund,
+        ResendProtocolStageV1::Commitment,
+        digest,
+    ) else {
+        return;
+    };
+    let mut recovered = FuzzRecoveredSpentArtifactV1 {
+        nonce_identity: match NonceIdentityV1::new(
+            session,
+            participant,
+            PurposeV1::Refund,
+            binding,
+            1,
+        ) {
+            Ok(identity) => identity,
+            Err(_) => return,
+        },
+        permit_id: permit,
+        kind: ExposureKindV1::NonceCommitment,
+        digest,
+    };
+    match selector % 4 {
+        1 => recovered.kind = ExposureKindV1::NonceReveal,
+        2 => recovered.digest[0] ^= 1,
+        3 => {
+            if let Ok(identity) = NonceIdentityV1::new(
+                SessionId::from_bytes([0x41; 32]).expect("fixed nonzero session"),
+                recovered.nonce_identity.participant_id().clone(),
+                PurposeV1::Refund,
+                binding,
+                1,
+            ) {
+                recovered.nonce_identity = identity;
+            }
+        }
+        _ => {}
+    }
+    let _ = ResendRequestV1::from_recovered(authorization, &recovered);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1451,6 +1558,107 @@ mod tests {
             4,
         )
         .is_err());
+    }
+
+    struct TestRecoveredSpentArtifact {
+        nonce_identity: NonceIdentityV1,
+        permit_id: PermitIdV1,
+        kind: ExposureKindV1,
+        digest: [u8; 32],
+    }
+
+    impl VaultSpentArtifactSnapshotV1 for TestRecoveredSpentArtifact {
+        fn nonce_identity(&self) -> &NonceIdentityV1 {
+            &self.nonce_identity
+        }
+
+        fn permit_id(&self) -> &PermitIdV1 {
+            &self.permit_id
+        }
+
+        fn kind(&self) -> ExposureKindV1 {
+            self.kind
+        }
+
+        fn adaptor_outbound_digest(&self) -> &[u8; 32] {
+            &self.digest
+        }
+    }
+
+    fn recovered_resend_fixture() -> (
+        crate::ValidatedResendAuthorizationV1,
+        TestRecoveredSpentArtifact,
+    ) {
+        let session = SessionId::from_bytes([0x21; 32]).expect("session");
+        let binding = [0x22; 32];
+        let digest = [0x23; 32];
+        let authorization = crate::ValidatedResendAuthorizationV1::new(
+            ReservationRequestLookupV1::from_bytes([0x24; 32]).expect("request lookup"),
+            binding,
+            session.clone(),
+            PurposeV1::Refund,
+            ResendProtocolStageV1::Commitment,
+            digest,
+        )
+        .expect("authorization");
+        let recovered = TestRecoveredSpentArtifact {
+            nonce_identity: NonceIdentityV1::new(
+                session,
+                ParticipantId::from_bytes([0x25; 32]).expect("participant"),
+                PurposeV1::Refund,
+                binding,
+                7,
+            )
+            .expect("nonce identity"),
+            permit_id: PermitIdV1::from_bytes([0x26; 32]).expect("permit"),
+            kind: ExposureKindV1::NonceCommitment,
+            digest,
+        };
+        (authorization, recovered)
+    }
+
+    #[test]
+    fn recovered_resend_binds_complete_identity_kind_and_digest() {
+        let (authorization, recovered) = recovered_resend_fixture();
+        let request = ResendRequestV1::from_recovered(authorization, &recovered)
+            .expect("bound resend request");
+        assert_eq!(request.nonce_identity(), recovered.nonce_identity());
+        assert_eq!(request.permit_id(), recovered.permit_id());
+        assert_eq!(request.protocol_stage(), ResendProtocolStageV1::Commitment);
+        assert_eq!(request.adaptor_outbound_digest(), &recovered.digest);
+    }
+
+    #[test]
+    fn recovered_resend_rejects_mutated_identity_kind_and_digest() {
+        let (authorization, mut recovered) = recovered_resend_fixture();
+        recovered.kind = ExposureKindV1::NonceReveal;
+        assert!(ResendRequestV1::from_recovered(authorization, &recovered).is_err());
+
+        let (authorization, mut recovered) = recovered_resend_fixture();
+        recovered.digest[0] ^= 1;
+        assert!(ResendRequestV1::from_recovered(authorization, &recovered).is_err());
+
+        let (authorization, mut recovered) = recovered_resend_fixture();
+        recovered.nonce_identity = NonceIdentityV1::new(
+            SessionId::from_bytes([0x31; 32]).expect("mutated session"),
+            ParticipantId::from_bytes([0x25; 32]).expect("participant"),
+            PurposeV1::Refund,
+            [0x22; 32],
+            7,
+        )
+        .expect("mutated identity");
+        assert!(ResendRequestV1::from_recovered(authorization, &recovered).is_err());
+
+        let (authorization, mut recovered) = recovered_resend_fixture();
+        recovered.nonce_identity = NonceIdentityV1::new(
+            SessionId::from_bytes([0x21; 32]).expect("session"),
+            ParticipantId::from_bytes([0x25; 32]).expect("participant"),
+            PurposeV1::Funding,
+            [0x22; 32],
+            7,
+        )
+        .expect("mutated identity");
+        assert!(ResendRequestV1::from_recovered(authorization, &recovered).is_err());
     }
 
     #[test]

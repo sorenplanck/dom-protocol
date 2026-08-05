@@ -137,6 +137,18 @@
 //! use dom_adaptor::VaultReservationHandleV1;
 //! ```
 //!
+//! A recovered Store descriptor cannot be converted into resend authority by
+//! downstream code; the private request constructor is signer-owned:
+//!
+//! ```compile_fail
+//! use dom_adaptor::{ResendRequestV1, ValidatedResendAuthorizationV1,
+//!     VaultSpentArtifactSnapshotV1};
+//! fn forge<S: VaultSpentArtifactSnapshotV1>(
+//!     authority: ValidatedResendAuthorizationV1, spent: &S) {
+//!     let _request = ResendRequestV1::from_recovered(authority, spent);
+//! }
+//! ```
+//!
 //! The safe cancellation route accepts no caller-selected terminal reason:
 //!
 //! ```compile_fail
@@ -219,6 +231,9 @@ pub use signing_round::{
     ValidatedResendAuthorizationV1, ValidatedRevealRoundV1, ValidatedSigningRoundStateV1,
 };
 
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub use nonce_vault::fuzz_nar006_runtime_bindings_v1;
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub use signing_round::fuzz_dsc1_signing_round_acceptance_v1;
