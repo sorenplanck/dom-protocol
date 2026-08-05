@@ -18,6 +18,46 @@ pub struct NonceSecretTransferV1 {
     plaintext: Zeroizing<Vec<u8>>,
 }
 
+/// One-shot authority to transfer plaintext into the trusted Wallet sealer.
+///
+/// Only the integrated signer can construct this non-cloneable capability.
+pub struct VaultSecretSealCapabilityV1 {
+    _private: (),
+}
+
+impl VaultSecretSealCapabilityV1 {
+    pub(crate) const fn new() -> Self {
+        Self { _private: () }
+    }
+
+    /// Consume the authority and opaque transfer into one zeroizing buffer.
+    pub fn into_plaintext(self, secret: NonceSecretTransferV1) -> Zeroizing<Vec<u8>> {
+        secret.plaintext
+    }
+}
+
+/// One-shot authority to import opened plaintext from the trusted Wallet sealer.
+///
+/// Only the integrated signer can construct this non-cloneable capability.
+pub struct VaultSecretImportCapabilityV1 {
+    _private: (),
+}
+
+impl VaultSecretImportCapabilityV1 {
+    pub(crate) const fn new() -> Self {
+        Self { _private: () }
+    }
+
+    /// Consume Wallet-owned decrypted plaintext into an opaque validated transfer.
+    pub fn import(self, mut plaintext: Zeroizing<Vec<u8>>) -> Result<NonceSecretTransferV1> {
+        if let Err(error) = validate_structural_bytes(&plaintext) {
+            plaintext.zeroize();
+            return Err(error);
+        }
+        Ok(NonceSecretTransferV1 { plaintext })
+    }
+}
+
 impl NonceSecretTransferV1 {
     /// Minimum exact record length (`n = 2`, no adaptor point).
     pub const MIN_ENCODED_LEN: usize = 387;
@@ -52,31 +92,6 @@ impl NonceSecretTransferV1 {
         plaintext.extend_from_slice(scalars.as_ref());
         validate_structural_bytes(&plaintext)?;
         Ok(Self { plaintext })
-    }
-
-    /// Accept an owned decrypted buffer from the approved Wallet sealer.
-    ///
-    /// Structural validation happens before ownership is accepted. Semantic
-    /// context and scalar validation happens when the signer consumes this
-    /// transfer for its one partial attempt.
-    pub fn from_decrypted_plaintext(mut plaintext: Zeroizing<Vec<u8>>) -> Result<Self> {
-        if let Err(error) = validate_structural_bytes(&plaintext) {
-            plaintext.zeroize();
-            return Err(error);
-        }
-        Ok(Self { plaintext })
-    }
-
-    /// Transfer the plaintext by value into the trusted Wallet sealer call.
-    ///
-    /// The callback receives a temporary borrow only for the duration of the
-    /// approved sealing operation. The buffer is zeroized before this method
-    /// returns, including when the callback returns an error or unwinds.
-    pub fn seal_with<T, E>(
-        self,
-        sealer: impl FnOnce(&[u8]) -> core::result::Result<T, E>,
-    ) -> core::result::Result<T, E> {
-        sealer(&self.plaintext)
     }
 
     pub(crate) fn into_validated_pair(
@@ -248,15 +263,13 @@ mod tests {
     fn record_bytes(
         participants: u8,
         purpose: PurposeV1,
-    ) -> (Vec<u8>, SessionContextV1, ScriptlessSecretScalar) {
+    ) -> (Zeroizing<Vec<u8>>, SessionContextV1, ScriptlessSecretScalar) {
         let (context, share) = context(participants, purpose);
         let pair = ScriptlessSecretNoncePairV1::from_be_bytes(scalar_bytes(21), scalar_bytes(22))
             .expect("nonce pair");
         let transfer = NonceSecretTransferV1::from_nonce_pair([7; 32], [8; 32], &context, pair)
             .expect("record");
-        let bytes = transfer
-            .seal_with::<_, core::convert::Infallible>(|bytes| Ok(bytes.to_vec()))
-            .expect("infallible capture");
+        let bytes = VaultSecretSealCapabilityV1::new().into_plaintext(transfer);
         (bytes, context, share)
     }
 
@@ -274,7 +287,8 @@ mod tests {
         ] {
             let (bytes, context, share) = record_bytes(participants, purpose);
             assert_eq!(bytes.len(), expected_len);
-            let transfer = NonceSecretTransferV1::from_decrypted_plaintext(Zeroizing::new(bytes))
+            let transfer = VaultSecretImportCapabilityV1::new()
+                .import(bytes)
                 .expect("strict structural record");
             let pair = transfer
                 .into_validated_pair(
@@ -295,31 +309,28 @@ mod tests {
     fn truncation_extension_and_closed_fields_fail() {
         let (bytes, _, _) = record_bytes(2, PurposeV1::Funding);
         for length in 0..bytes.len() {
-            assert!(
-                NonceSecretTransferV1::from_decrypted_plaintext(Zeroizing::new(
-                    bytes[..length].to_vec(),
-                ))
-                .is_err()
-            );
+            assert!(VaultSecretImportCapabilityV1::new()
+                .import(Zeroizing::new(bytes[..length].to_vec()))
+                .is_err());
         }
         let mut extension = bytes.clone();
         extension.push(0);
-        assert!(
-            NonceSecretTransferV1::from_decrypted_plaintext(Zeroizing::new(extension)).is_err()
-        );
+        assert!(VaultSecretImportCapabilityV1::new()
+            .import(extension)
+            .is_err());
         for (offset, replacement) in [(0, b'X'), (8, 2), (74, 0xff)] {
             let mut mutation = bytes.clone();
             mutation[offset] = replacement;
-            assert!(
-                NonceSecretTransferV1::from_decrypted_plaintext(Zeroizing::new(mutation)).is_err()
-            );
+            assert!(VaultSecretImportCapabilityV1::new()
+                .import(mutation)
+                .is_err());
         }
         for range in [10..42, 42..74] {
             let mut mutation = bytes.clone();
             mutation[range].fill(0);
-            assert!(
-                NonceSecretTransferV1::from_decrypted_plaintext(Zeroizing::new(mutation)).is_err()
-            );
+            assert!(VaultSecretImportCapabilityV1::new()
+                .import(mutation)
+                .is_err());
         }
     }
 
@@ -328,9 +339,9 @@ mod tests {
         let (bytes, context, share) = record_bytes(2, PurposeV1::Funding);
         let trusted = TrustedChainIdV1::from_signed_fixture([1; 32]);
         for (reservation, participant) in [([9; 32], [8; 32]), ([7; 32], [9; 32])] {
-            let transfer =
-                NonceSecretTransferV1::from_decrypted_plaintext(Zeroizing::new(bytes.clone()))
-                    .expect("structural record");
+            let transfer = VaultSecretImportCapabilityV1::new()
+                .import(bytes.clone())
+                .expect("structural record");
             assert!(transfer
                 .into_validated_pair(&reservation, &participant, &context, &trusted, &share)
                 .is_err());
@@ -338,9 +349,9 @@ mod tests {
         for scalar_start in [bytes.len() - 64, bytes.len() - 32] {
             let mut mutation = bytes.clone();
             mutation[scalar_start..scalar_start + 32].fill(0);
-            let transfer =
-                NonceSecretTransferV1::from_decrypted_plaintext(Zeroizing::new(mutation))
-                    .expect("structural record");
+            let transfer = VaultSecretImportCapabilityV1::new()
+                .import(mutation)
+                .expect("structural record");
             assert!(transfer
                 .into_validated_pair(&[7; 32], &[8; 32], &context, &trusted, &share)
                 .is_err());

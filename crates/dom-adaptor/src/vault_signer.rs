@@ -5,7 +5,8 @@ use crate::{
     ExposureBytes, ExposureKindV1, IdempotencyKey, NonceCommitmentV1, NonceRevealV1,
     NonceSecretTransferV1, NonceVaultV1, PartialSignatureV1, PreparedExposureV1, PublicNoncePairV1,
     ReservationIntentV1, ReservationNonceId, ReservationRequestV1, SecretOpenStageV1,
-    SessionContextV1, SessionId, TrustedChainIdV1,
+    SessionContextV1, SessionId, TrustedChainIdV1, VaultSecretImportCapabilityV1,
+    VaultSecretSealCapabilityV1,
 };
 use core::fmt;
 use dom_crypto::{
@@ -187,7 +188,12 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
         )?;
         let handle = self
             .vault
-            .reserve(request, secret, commitment)
+            .reserve(
+                request,
+                secret,
+                VaultSecretSealCapabilityV1::new(),
+                commitment,
+            )
             .map_err(VaultBackedSignerError::Vault)?;
         Ok(ReservedNonceV1 {
             handle,
@@ -242,7 +248,11 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
     ) -> SignerResult<V, RevealExportResult<V::ReservationHandle>> {
         let transfer = self
             .vault
-            .open_secret(&mut state.handle, SecretOpenStageV1::NonceReveal)
+            .open_secret(
+                &mut state.handle,
+                SecretOpenStageV1::NonceReveal,
+                VaultSecretImportCapabilityV1::new(),
+            )
             .map_err(VaultBackedSignerError::Vault)?;
         let pair = transfer.into_validated_pair(
             &state.reservation_nonce_id,
@@ -308,7 +318,11 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
         }
         let transfer = self
             .vault
-            .open_secret(&mut state.handle, SecretOpenStageV1::PartialAttempt)
+            .open_secret(
+                &mut state.handle,
+                SecretOpenStageV1::PartialAttempt,
+                VaultSecretImportCapabilityV1::new(),
+            )
             .map_err(VaultBackedSignerError::Vault)?;
         let pair = transfer.into_validated_pair(
             &state.reservation_nonce_id,

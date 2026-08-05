@@ -35,6 +35,26 @@
 //! let prepared = PreparedExposureV1(/* private */);
 //! let authorized = AuthorizedExposureV1::from_persisted(prepared);
 //! ```
+//!
+//! Sealer/import capabilities cannot be constructed by downstream callers:
+//!
+//! ```compile_fail
+//! use dom_adaptor::{VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1};
+//! let _seal = VaultSecretSealCapabilityV1::new();
+//! let _import = VaultSecretImportCapabilityV1::new();
+//! ```
+//!
+//! A capability is consumed by its first use and cannot be reused:
+//!
+//! ```compile_fail
+//! use dom_adaptor::{NonceSecretTransferV1, VaultSecretSealCapabilityV1};
+//! fn reuse(cap: VaultSecretSealCapabilityV1,
+//!          first: NonceSecretTransferV1,
+//!          second: NonceSecretTransferV1) {
+//!     let _ = cap.into_plaintext(first);
+//!     let _ = cap.into_plaintext(second);
+//! }
+//! ```
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -59,7 +79,9 @@ pub use nonce::{
     aggregate_partial_signatures_v1, aggregate_public_nonces_v1, finalize_plain_signature_v1,
     PublicNoncePairV1,
 };
-pub use nonce_secret_record::NonceSecretTransferV1;
+pub use nonce_secret_record::{
+    NonceSecretTransferV1, VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
+};
 pub use nonce_vault::{
     AbortReasonV1, AuthorizedExposureV1, BudgetScope, CounterpartyBucket, ExposureBytes,
     ExposurePermitBindingV1, IdempotencyKey, NonceReservation, NonceVaultError, NonceVaultV1,

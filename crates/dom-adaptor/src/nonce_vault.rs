@@ -574,6 +574,7 @@ pub trait NonceVaultV1 {
         &mut self,
         request: ReservationRequestV1,
         secret: crate::NonceSecretTransferV1,
+        seal_capability: crate::VaultSecretSealCapabilityV1,
         commitment: crate::NonceCommitmentV1,
     ) -> core::result::Result<Self::ReservationHandle, Self::Error>;
 
@@ -593,6 +594,7 @@ pub trait NonceVaultV1 {
         &mut self,
         reservation: &mut Self::ReservationHandle,
         stage: SecretOpenStageV1,
+        import_capability: crate::VaultSecretImportCapabilityV1,
     ) -> core::result::Result<crate::NonceSecretTransferV1, Self::Error>;
 
     /// Durably spend the capability before releasing the persisted artifact.
