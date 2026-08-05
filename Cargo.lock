@@ -972,6 +972,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-adaptor"
+version = "0.2.0"
+dependencies = [
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-serialization",
+ "hex",
+ "rand_core 0.6.4",
+ "serde_json",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "dom-agent-runner"
 version = "0.2.0"
 dependencies = [
