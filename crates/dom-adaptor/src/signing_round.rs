@@ -261,6 +261,34 @@ impl ValidatedAcceptedSessionMessageV1 {
     }
 }
 
+/// Opaque bootstrap produced only by the trusted session-state adapter.
+pub struct ValidatedSigningRoundBootstrapV1 {
+    trusted_chain_id: TrustedChainIdV1,
+    base_context: SessionContextV1,
+    roster: ParticipantRosterV1,
+    local_protocol_index: u16,
+    next_sender_sequences: [u64; 2],
+}
+
+impl ValidatedSigningRoundBootstrapV1 {
+    #[cfg(test)]
+    pub(crate) fn from_test_inputs(
+        trusted_chain_id: TrustedChainIdV1,
+        base_context: SessionContextV1,
+        roster: ParticipantRosterV1,
+        local_protocol_index: u16,
+        next_sender_sequences: [u64; 2],
+    ) -> Self {
+        Self {
+            trusted_chain_id,
+            base_context,
+            roster,
+            local_protocol_index,
+            next_sender_sequences,
+        }
+    }
+}
+
 /// Opaque trusted owner of accepted signing-round transcript state.
 pub struct ValidatedSigningRoundStateV1 {
     trusted_chain_id: TrustedChainIdV1,
@@ -282,15 +310,26 @@ pub struct ValidatedSigningRoundStateV1 {
     closed: bool,
 }
 
+struct PartialPublicInputsV1 {
+    context: SessionContextV1,
+    binding_factor: BindingFactorV1,
+    effective_nonces: Vec<PublicKey>,
+    aggregate_nonce_hat: PublicKey,
+    aggregate_signing_key: PublicKey,
+}
+
 impl ValidatedSigningRoundStateV1 {
-    pub(crate) fn new(
-        trusted_chain_id: TrustedChainIdV1,
-        base_context: SessionContextV1,
-        roster: ParticipantRosterV1,
-        local_protocol_index: u16,
+    pub(crate) fn from_bootstrap(
+        bootstrap: ValidatedSigningRoundBootstrapV1,
         signing_share: &SigningShareV1,
-        next_sender_sequences: [u64; 2],
     ) -> Result<Self> {
+        let ValidatedSigningRoundBootstrapV1 {
+            trusted_chain_id,
+            base_context,
+            roster,
+            local_protocol_index,
+            next_sender_sequences,
+        } = bootstrap;
         if trusted_chain_id.as_bytes() != base_context.chain_id()
             || base_context.signing_phase() != SigningPhaseV1::SigNonceCommit
             || base_context.retry_counter() != 0
@@ -414,6 +453,9 @@ impl ValidatedSigningRoundStateV1 {
             if let AcceptedPayloadV1::Reveal(reveal) = &message.payload {
                 self.verify_reveal(protocol_index, reveal)?;
             }
+            if let AcceptedPayloadV1::Partial(partial) = &message.payload {
+                self.verify_partial(protocol_index, partial)?;
+            }
             self.current_transcript = advance_transcript_hash_v1(
                 &self.current_transcript,
                 &message.digest,
@@ -463,6 +505,83 @@ impl ValidatedSigningRoundStateV1 {
         Ok(())
     }
 
+    fn verify_partial(&self, protocol_index: usize, partial: &PartialSignatureV1) -> Result<()> {
+        let inputs = self.partial_public_inputs()?;
+        let participant_index = partial.participant_index();
+        if usize::from(participant_index) >= inputs.effective_nonces.len()
+            || self
+                .roster
+                .signing_index(self.roster.entries()[protocol_index].participant_id())?
+                != participant_index
+            || !partial.verify_bound(
+                inputs.context.purpose(),
+                inputs.context.template_hash(),
+                &inputs.effective_nonces[usize::from(participant_index)],
+                &inputs.context.participant_public_keys()[usize::from(participant_index)],
+                &inputs.aggregate_nonce_hat,
+                &inputs.aggregate_signing_key,
+                inputs.context.chain_id(),
+                inputs.context.message_digest(),
+            )?
+        {
+            return Err(AdaptorError::VerificationFailed(
+                "accepted participant partial signature",
+            ));
+        }
+        Ok(())
+    }
+
+    fn partial_public_inputs(&self) -> Result<PartialPublicInputsV1> {
+        let context = self.base_context.with_stage_and_transcript(
+            SigningPhaseV1::SigPartial,
+            self.reveal_transcript
+                .ok_or(AdaptorError::AuthorizationMismatch)?,
+        )?;
+        let mut public_nonces = Vec::with_capacity(2);
+        for message in &self.reveals {
+            let reveal = match &message.payload {
+                AcceptedPayloadV1::Reveal(value) => value,
+                _ => return Err(AdaptorError::InvalidTranscript("missing nonce reveal")),
+            };
+            public_nonces.push(ParticipantPublicNoncesV1 {
+                participant_index: reveal.participant_index(),
+                signing_key: context.participant_public_keys()
+                    [usize::from(reveal.participant_index())]
+                .clone(),
+                first_nonce: reveal.first().clone(),
+                second_nonce: reveal.second().clone(),
+            });
+        }
+        public_nonces.sort_by_key(|entry| entry.participant_index);
+        let binding_factor = binding_factor_v1(
+            &BindingContextV1 {
+                chain_id: *context.chain_id(),
+                session_id: *context.session_id(),
+                purpose: context.purpose(),
+                template_hash: *context.template_hash(),
+            },
+            &public_nonces,
+            context.adaptor_point(),
+        )?;
+        let effective_nonces: Vec<PublicKey> = public_nonces
+            .iter()
+            .map(|entry| binding_factor.bind_public_nonces(&entry.first_nonce, &entry.second_nonce))
+            .collect::<Result<_>>()?;
+        let aggregate_nonce = aggregate_public_nonces_v1(&effective_nonces)?;
+        let aggregate_nonce_hat = match context.adaptor_point() {
+            Some(point) => aggregate_public_nonces_v1(&[aggregate_nonce, point.clone()])?,
+            None => aggregate_nonce,
+        };
+        let aggregate_signing_key = aggregate_public_nonces_v1(context.participant_public_keys())?;
+        Ok(PartialPublicInputsV1 {
+            context,
+            binding_factor,
+            effective_nonces,
+            aggregate_nonce_hat,
+            aggregate_signing_key,
+        })
+    }
+
     /// Consume the unique derivation authority before any commitment is accepted.
     pub fn take_derivation_base(&mut self) -> Result<ValidatedDerivationBaseV1> {
         if self.derivation_authority_issued || !self.commitments.is_empty() {
@@ -505,57 +624,17 @@ impl ValidatedSigningRoundStateV1 {
         self.reveal_authority_issued = true;
         let commitments = self.commitment_set()?;
         let reveals = self.reveal_prefix(2)?;
-        let context = self.base_context.with_stage_and_transcript(
-            SigningPhaseV1::SigPartial,
-            self.reveal_transcript
-                .ok_or(AdaptorError::AuthorizationMismatch)?,
-        )?;
-        let mut public_nonces = Vec::with_capacity(2);
-        for message in &self.reveals {
-            let reveal = match &message.payload {
-                AcceptedPayloadV1::Reveal(value) => value,
-                _ => return Err(AdaptorError::InvalidTranscript("missing nonce reveal")),
-            };
-            public_nonces.push(ParticipantPublicNoncesV1 {
-                participant_index: reveal.participant_index(),
-                signing_key: context.participant_public_keys()
-                    [usize::from(reveal.participant_index())]
-                .clone(),
-                first_nonce: reveal.first().clone(),
-                second_nonce: reveal.second().clone(),
-            });
-        }
-        public_nonces.sort_by_key(|entry| entry.participant_index);
-        let binding_factor = binding_factor_v1(
-            &BindingContextV1 {
-                chain_id: *context.chain_id(),
-                session_id: *context.session_id(),
-                purpose: context.purpose(),
-                template_hash: *context.template_hash(),
-            },
-            &public_nonces,
-            context.adaptor_point(),
-        )?;
-        let effective_nonces: Vec<PublicKey> = public_nonces
-            .iter()
-            .map(|entry| binding_factor.bind_public_nonces(&entry.first_nonce, &entry.second_nonce))
-            .collect::<Result<_>>()?;
+        let inputs = self.partial_public_inputs()?;
         let local_effective_nonce =
-            effective_nonces[usize::from(context.participant_index())].clone();
-        let aggregate_nonce = aggregate_public_nonces_v1(&effective_nonces)?;
-        let aggregate_nonce_hat = match context.adaptor_point() {
-            Some(point) => aggregate_public_nonces_v1(&[aggregate_nonce, point.clone()])?,
-            None => aggregate_nonce,
-        };
-        let aggregate_signing_key = aggregate_public_nonces_v1(context.participant_public_keys())?;
+            inputs.effective_nonces[usize::from(inputs.context.participant_index())].clone();
         Ok(ValidatedRevealRoundV1 {
-            context,
+            context: inputs.context,
             commitments,
             reveals,
-            binding_factor,
+            binding_factor: inputs.binding_factor,
             local_effective_nonce,
-            aggregate_nonce_hat,
-            aggregate_signing_key,
+            aggregate_nonce_hat: inputs.aggregate_nonce_hat,
+            aggregate_signing_key: inputs.aggregate_signing_key,
         })
     }
 
@@ -815,6 +894,7 @@ mod tests {
         assert!(ValidatedAcceptedSessionMessageV1::parse(b"DSC1", &chain, &roster).is_err());
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn signed_envelope(
         chain: &[u8; 32],
         session: &[u8; 32],
@@ -908,15 +988,15 @@ mod tests {
             &signing_shares[0],
         )
         .expect("context");
-        let mut state = ValidatedSigningRoundStateV1::new(
+        let bootstrap = ValidatedSigningRoundBootstrapV1::from_test_inputs(
             chain,
             context.clone(),
             roster.clone(),
             local_protocol_index as u16,
-            &signing_shares[0],
             [0, 0],
-        )
-        .expect("round state");
+        );
+        let mut state = ValidatedSigningRoundStateV1::from_bootstrap(bootstrap, &signing_shares[0])
+            .expect("round state");
         let _derivation = state.take_derivation_base().expect("derivation authority");
 
         let nonce_secrets = [

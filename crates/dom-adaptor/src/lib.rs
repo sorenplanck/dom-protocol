@@ -28,11 +28,11 @@
 //! use dom_adaptor::{BpCommonNonceShareV1, BpLocalBlindingV1, BpRound2ShareV1};
 //! ```
 //!
-//! Durable request identifiers cannot be supplied by the application:
+//! A fresh reservation cannot be constructed from caller-selected identifiers:
 //!
 //! ```compile_fail
-//! use dom_adaptor::ReservationRequestV1;
-//! let _request = ReservationRequestV1 { /* private fields */ };
+//! use dom_adaptor::FreshReservationRequestV1;
+//! let _request = FreshReservationRequestV1(/* private */);
 //! ```
 //!
 //! Prepared and authorized values have no public constructors. Parsing a
@@ -41,7 +41,21 @@
 //! ```compile_fail
 //! use dom_adaptor::{AuthorizedExposureV1, PreparedExposureV1};
 //! let prepared = PreparedExposureV1(/* private */);
-//! let authorized = AuthorizedExposureV1::from_persisted(prepared);
+//! let authorized = AuthorizedExposureV1::from_vault_export(&prepared);
+//! ```
+//!
+//! Request lookup and permit lookup are distinct types with no conversion:
+//!
+//! ```compile_fail
+//! use dom_adaptor::{PermitIdV1, ReservationRequestLookupV1};
+//! fn confuse(lookup: ReservationRequestLookupV1) -> PermitIdV1 { lookup.into() }
+//! ```
+//!
+//! The opaque signing-round bootstrap cannot be assembled by application code:
+//!
+//! ```compile_fail
+//! use dom_adaptor::ValidatedSigningRoundBootstrapV1;
+//! let _bootstrap = ValidatedSigningRoundBootstrapV1 { /* private fields */ };
 //! ```
 //!
 //! Sealer/import capabilities cannot be constructed by downstream callers:
@@ -67,15 +81,17 @@
 //! The vault-backed signer cannot release or mutably expose its concrete vault:
 //!
 //! ```compile_fail
-//! use dom_adaptor::{NonceVaultV1, VaultBackedSignerV1};
-//! fn escape<V: NonceVaultV1>(signer: &mut VaultBackedSignerV1<V>) {
+//! use dom_adaptor::{NonceVaultV1, ReservationLookupCustodyV1, VaultBackedSignerV1};
+//! fn escape<V: NonceVaultV1, C: ReservationLookupCustodyV1>(
+//!     signer: &mut VaultBackedSignerV1<V, C>) {
 //!     let _vault = signer.vault_mut();
 //! }
 //! ```
 //!
 //! ```compile_fail
-//! use dom_adaptor::{NonceVaultV1, VaultBackedSignerV1};
-//! fn escape<V: NonceVaultV1>(signer: VaultBackedSignerV1<V>) {
+//! use dom_adaptor::{NonceVaultV1, ReservationLookupCustodyV1, VaultBackedSignerV1};
+//! fn escape<V: NonceVaultV1, C: ReservationLookupCustodyV1>(
+//!     signer: VaultBackedSignerV1<V, C>) {
 //!     let _vault = signer.into_inner();
 //! }
 //! ```
@@ -83,34 +99,14 @@
 //! The vault composition boundary does not admit a trait-object plugin:
 //!
 //! ```compile_fail
-//! use dom_adaptor::{ExposureKindV1, NonceVaultError, NonceVaultV1,
-//!     PermitIdV1, VaultExportedArtifactV1};
-//! struct Artifact(PermitIdV1);
-//! impl VaultExportedArtifactV1 for Artifact {
-//!     fn permit_id(&self) -> &PermitIdV1 { &self.0 }
-//!     fn kind(&self) -> ExposureKindV1 { ExposureKindV1::NonceCommitment }
-//!     fn as_bytes(&self) -> &[u8] { &[] }
-//! }
-//! type Plugin = dyn NonceVaultV1<
-//!     Error = NonceVaultError,
-//!     ReservationHandle = (),
-//!     ComputationPermit = (),
-//!     ExposurePermit = (),
-//!     ExportedArtifact = Artifact,
-//! >;
-//! fn install(_vault: &Plugin) {}
+//! use dom_adaptor::NonceVaultV1;
+//! fn install(_vault: &dyn NonceVaultV1) {}
 //! ```
 //!
-//! Aborting consumes the live signer state, so it cannot be reused:
+//! The safe cancellation route accepts no caller-selected terminal reason:
 //!
 //! ```compile_fail
-//! use dom_adaptor::{AbortReasonV1, NonceVaultV1, ReservedNonceV1,
-//!     VaultBackedSignerV1};
-//! fn reuse<V: NonceVaultV1>(signer: &mut VaultBackedSignerV1<V>,
-//!                           state: ReservedNonceV1<V::ReservationHandle>) {
-//!     let _ = signer.abort_reserved(state, AbortReasonV1::BeforePublicMaterial);
-//!     let _ = signer.abort_reserved(state, AbortReasonV1::BeforePublicMaterial);
-//! }
+//! use dom_adaptor::AbortReasonV1;
 //! ```
 //!
 //! Validated resend output is a closed typed artifact, not a raw-byte escape:
@@ -186,7 +182,7 @@ pub use share_pop::{
 pub use signing_round::{
     AcceptedMessageDispositionV1, ValidatedAcceptedSessionMessageV1, ValidatedCommitmentRoundV1,
     ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1, ValidatedRevealRoundV1,
-    ValidatedSigningRoundStateV1,
+    ValidatedSigningRoundBootstrapV1, ValidatedSigningRoundStateV1,
 };
 pub use signing_share::SigningShareV1;
 pub use transcript::{

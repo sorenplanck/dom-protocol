@@ -9,9 +9,10 @@ use crate::{
     ReservationLookupCustodyV1, ReservationRequestLookupV1, ReservationResumeRequestV1,
     ReservationResumeResultV1, RestoreState, SessionContextV1, SigningShareV1,
     TerminalReservationV1, TrustedChainIdV1, ValidatedCommitmentRoundV1, ValidatedDerivationBaseV1,
-    ValidatedResendAuthorizationV1, ValidatedRevealRoundV1, ValidatedSigningRoundStateV1,
-    VaultArtifactPersistencePermitV1, VaultExportedArtifactV1, VaultReservationHandleV1,
-    VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1, VaultSpentArtifactViewV1,
+    ValidatedResendAuthorizationV1, ValidatedRevealRoundV1, ValidatedSigningRoundBootstrapV1,
+    ValidatedSigningRoundStateV1, VaultArtifactPersistencePermitV1, VaultExportedArtifactV1,
+    VaultReservationHandleV1, VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
+    VaultSpentArtifactViewV1,
 };
 use core::fmt;
 use dom_crypto::{schnorr_challenge, PartialSig};
@@ -232,20 +233,10 @@ where
     /// Construct the opaque signing-round owner from validated canonical inputs.
     pub fn begin_signing_round(
         &self,
-        context: SessionContextV1,
-        roster: crate::ParticipantRosterV1,
-        local_protocol_index: u16,
-        next_sender_sequences: [u64; 2],
+        bootstrap: ValidatedSigningRoundBootstrapV1,
     ) -> SignerResult<Vault, Custody, ValidatedSigningRoundStateV1> {
-        ValidatedSigningRoundStateV1::new(
-            self.trusted_chain_id,
-            context,
-            roster,
-            local_protocol_index,
-            &self.signing_share,
-            next_sender_sequences,
-        )
-        .map_err(Into::into)
+        ValidatedSigningRoundStateV1::from_bootstrap(bootstrap, &self.signing_share)
+            .map_err(Into::into)
     }
 
     /// Delegate the reconciled read-only recovery state of the concrete vault.

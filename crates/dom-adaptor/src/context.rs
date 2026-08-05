@@ -387,6 +387,10 @@ impl SessionContextV1 {
             && self.participant_index == later.participant_index
             && self.adaptor_point == later.adaptor_point
             && self.signing_phase == SigningPhaseV1::SigNonceCommit
+            && matches!(
+                later.signing_phase,
+                SigningPhaseV1::SigNonceReveal | SigningPhaseV1::SigPartial
+            )
     }
 
     pub(crate) fn encode_with_retry_counter(&self, retry_counter: u64) -> Vec<u8> {
