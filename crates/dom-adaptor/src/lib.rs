@@ -134,11 +134,14 @@ mod nonce;
 mod nonce_secret_record;
 mod nonce_vault;
 mod permit;
+mod reservation_binding;
 mod secret_nonce;
 mod session;
 mod share_pop;
+mod signing_round;
 mod signing_share;
 mod transcript;
+mod vault_operation;
 mod vault_signer;
 
 #[cfg(test)]
@@ -157,14 +160,21 @@ pub use nonce_secret_record::{
     NonceSecretTransferV1, VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
 };
 pub use nonce_vault::{
-    AbortReasonV1, AuthorizedExposureV1, BudgetScope, CounterpartyBucket, ExposureBytes,
-    ExposurePermitBindingV1, IdempotencyKey, NonceReservation, NonceVaultError, NonceVaultV1,
-    ParticipantId, PermitIdV1, PreparedExposureV1, Purpose, ReservationIntentV1,
-    ReservationNonceId, ReservationRequestV1, ReservationState, RestoreState, SessionId,
-    TemplateHash, TerminalReservationV1, VaultComputationStageV1, VaultExportedArtifactV1,
-    VaultKeyId,
+    validate_prepared_exposure_v1, AuthorizedExposureV1, BudgetScope, CounterpartyBucket,
+    ExposureBytes, ExposurePermitBindingV1, NonceIdentityV1, NonceReservation, NonceVaultError,
+    NonceVaultV1, ParticipantId, PermitIdV1, PreparedExposureV1, PreparedExposureValidationError,
+    ProcessComputationBindingIdV1, Purpose, ResendProtocolStageV1, ResendRequestV1,
+    ReservationLiveStageV1, ReservationNonceId, ReservationRequestLookupV1,
+    ReservationResumeResultV1, ReservationState, RestoreState, SessionId,
+    SpentArtifactDescriptorV1, TemplateHash, TerminalReservationV1,
+    ValidatedPreparedExposureViewV1, VaultArtifactPersistencePermitV1, VaultComputationStageV1,
+    VaultExportedArtifactV1, VaultKeyId, VaultReservationHandleV1, VaultSpentArtifactViewV1,
 };
 pub use permit::{exposure_outbound_digest_v1, validate_exposure_permit_record_v1, ExposureKindV1};
+pub use reservation_binding::{
+    DurableReservationLookupV1, FreshReservationRequestV1, PreparedFreshReservationV1,
+    ReservationContextBindingV1, ReservationLookupCustodyV1, ReservationResumeRequestV1,
+};
 pub use session::{
     advance_transcript_hash_v1, canonical_template_v1, generate_session_id_v1,
     initial_transcript_hash_v1, session_message_digest_v1, ContractKindV1, ParticipantIdentityV1,
@@ -173,10 +183,20 @@ pub use session::{
 pub use share_pop::{
     prove_share_knowledge_v1, verify_share_knowledge_v1, SharePoPStatementV1, ShareProofV1,
 };
+pub use signing_round::{
+    AcceptedMessageDispositionV1, ValidatedAcceptedSessionMessageV1, ValidatedCommitmentRoundV1,
+    ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1, ValidatedRevealRoundV1,
+    ValidatedSigningRoundStateV1,
+};
 pub use signing_share::SigningShareV1;
 pub use transcript::{
     binding_factor_v1, nonce_commitment_hash_v1, BindingContextV1, BindingFactorV1,
     ParticipantPublicNoncesV1,
+};
+pub use vault_operation::{
+    NonceDerivationRequestV1, ProtocolCommitmentSetV1, ProtocolRevealSetV1,
+    StageComputationRequestV1, ValidatedVaultComputationViewV1, PROTOCOL_COMMITMENT_SET_LEN,
+    PROTOCOL_REVEAL_ENTRY_LEN, PROTOCOL_REVEAL_SET_MIN_LEN,
 };
 pub use vault_signer::{
     CommitmentExportedV1, PartialExportedTerminalV1, ResentArtifactV1, ReservedNonceV1,
