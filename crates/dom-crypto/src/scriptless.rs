@@ -5,7 +5,7 @@
 //! canonical SEC1 and big-endian scalar formats, and does not define nonce
 //! derivation or persistence policy.
 
-#[cfg(feature = "test-helpers")]
+#[cfg(feature = "scriptless-integrated")]
 use crate::hash::blake2b_256_tagged;
 use crate::keys::PublicKey;
 use crate::schnorr::{
@@ -18,16 +18,16 @@ use k256::elliptic_curve::group::Group;
 use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::PrimeField;
 use k256::ProjectivePoint;
-#[cfg(feature = "test-helpers")]
+#[cfg(feature = "scriptless-integrated")]
 use rand::{rngs::OsRng, RngCore};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-#[cfg(feature = "test-helpers")]
+#[cfg(feature = "scriptless-integrated")]
 const SECRET_NONCE_AUX_TAG_V1: &str = "DOM:scriptless-secret-nonce-aux:v1";
-#[cfg(feature = "test-helpers")]
+#[cfg(feature = "scriptless-integrated")]
 const SECRET_NONCE_SEED_TAG_V1: &str = "DOM:scriptless-secret-nonce-seed:v1";
-#[cfg(feature = "test-helpers")]
+#[cfg(feature = "scriptless-integrated")]
 const SECRET_NONCE_WIDE_TAG_V1: &str = "DOM:scriptless-secret-nonce-wide:v1";
 
 /// A canonical, nonzero secp256k1 scalar held as secret material.
@@ -96,7 +96,7 @@ pub fn scalar_from_wide_be(input: &[u8; 64]) -> Option<ScriptlessSecretScalar> {
 /// A `None` result means at least one wide reduction produced zero; the caller
 /// may retry only by incrementing the context retry counter before public
 /// material exists.
-#[cfg(feature = "test-helpers")]
+#[cfg(feature = "scriptless-integrated")]
 fn derive_secret_nonce_pair_v1(
     signing_share: &ScriptlessSecretScalar,
     aux_rand_32: &[u8; 32],
@@ -152,30 +152,27 @@ fn derive_secret_nonce_pair_v1(
     }
 }
 
-/// Opaque operating-system-randomized nonce derivation state for test evidence.
+/// Opaque operating-system-randomized nonce derivation state for the integrated signer.
 ///
-/// This type is excluded from default production builds because G1b durable
-/// authorization must own the production nonce lifecycle. The same private
-/// auxiliary value is retained only across the pre-export retry loop and is
-/// zeroized when this value is dropped.
+/// The same private auxiliary value is retained only across the pre-export
+/// retry loop and is zeroized when this value is dropped.
 #[derive(Zeroize, ZeroizeOnDrop)]
-#[cfg(feature = "test-helpers")]
+#[cfg(feature = "scriptless-integrated")]
 pub struct ScriptlessNonceDerivationV1 {
     aux_rand_32: [u8; 32],
 }
 
-/// Opaque one-shot secret nonce pair for test evidence.
+/// Opaque one-shot secret nonce pair for the integrated signer.
 ///
 /// The type intentionally implements no cloning, copying, debugging, display,
 /// equality, ordering, or serialization. Signing consumes the complete pair.
-/// This type is absent from default production builds until G1b integration.
-#[cfg(feature = "test-helpers")]
+#[cfg(feature = "scriptless-integrated")]
 pub struct ScriptlessSecretNoncePairV1 {
     first: ScriptlessSecretScalar,
     second: ScriptlessSecretScalar,
 }
 
-#[cfg(feature = "test-helpers")]
+#[cfg(feature = "scriptless-integrated")]
 impl ScriptlessSecretNoncePairV1 {
     /// Derive both canonical public nonce points.
     pub fn public_keys(&self) -> (PublicKey, PublicKey) {
@@ -197,9 +194,28 @@ impl ScriptlessSecretNoncePairV1 {
             signing_share,
         )
     }
+
+    /// Consume canonical nonce bytes produced by the approved encrypted-record decoder.
+    pub fn from_be_bytes(first: [u8; 32], second: [u8; 32]) -> Result<Self, DomError> {
+        Ok(Self {
+            first: ScriptlessSecretScalar::from_be_bytes(first)?,
+            second: ScriptlessSecretScalar::from_be_bytes(second)?,
+        })
+    }
+
+    /// Consume the pair into one zeroizing canonical record buffer.
+    ///
+    /// This narrow bridge exists only for `dom-adaptor`'s ratified encrypted
+    /// nonce-record codec. It is not a reusable nonce export API.
+    pub fn into_record_scalars(self) -> Zeroizing<[u8; 64]> {
+        let mut bytes = Zeroizing::new([0u8; 64]);
+        bytes[..32].copy_from_slice(self.first.as_be_bytes());
+        bytes[32..].copy_from_slice(self.second.as_be_bytes());
+        bytes
+    }
 }
 
-#[cfg(feature = "test-helpers")]
+#[cfg(feature = "scriptless-integrated")]
 impl ScriptlessNonceDerivationV1 {
     /// Acquire fresh auxiliary randomness from the operating-system CSPRNG.
     pub fn from_os_rng() -> Result<Self, DomError> {
@@ -383,7 +399,7 @@ pub fn scriptless_add_public_points(points: &[PublicKey]) -> Result<PublicKey, D
 ///
 /// One-shot ownership is enforced by the `dom-adaptor` wrapper that consumes
 /// its opaque nonce pair before calling this operation.
-#[cfg(feature = "test-helpers")]
+#[cfg(feature = "scriptless-integrated")]
 fn sign_bound_partial_once(
     first_nonce: &ScriptlessSecretScalar,
     second_nonce: &ScriptlessSecretScalar,

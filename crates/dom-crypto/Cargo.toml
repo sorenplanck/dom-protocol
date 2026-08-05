@@ -9,7 +9,8 @@ license.workspace    = true
 
 [features]
 default = []
-test-helpers = []
+scriptless-integrated = []
+test-helpers = ["scriptless-integrated"]
 
 [dependencies]
 dom-core.workspace   = true

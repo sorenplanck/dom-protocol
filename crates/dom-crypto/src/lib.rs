@@ -32,8 +32,7 @@ pub use scriptless::{
     scriptless_extract_adaptor_secret, scriptless_verify_bound_partial,
     scriptless_verify_final_signature, scriptless_verify_pre_signature, ScriptlessSecretScalar,
 };
-#[cfg(feature = "test-helpers")]
-#[doc(hidden)]
+#[cfg(feature = "scriptless-integrated")]
 pub use scriptless::{ScriptlessNonceDerivationV1, ScriptlessSecretNoncePairV1};
 mod bulletproof_bp;
 #[cfg(kani)]

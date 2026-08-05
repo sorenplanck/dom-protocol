@@ -18,7 +18,7 @@ test-helpers = ["dom-crypto/test-helpers"]
 
 [dependencies]
 dom-core.workspace = true
-dom-crypto.workspace = true
+dom-crypto = { workspace = true, features = ["scriptless-integrated"] }
 dom-consensus.workspace = true
 thiserror.workspace = true
 rand_core.workspace = true

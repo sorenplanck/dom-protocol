@@ -11,7 +11,7 @@ const PERMIT_DIGEST_TAG_V1: &str = "DOM:scriptless-vault-exposure-permit:v1";
 const OUTBOUND_DIGEST_TAG_V1: &str = "DOM:scriptless-vault-outbound:v1";
 
 /// Closed exposure-kind registry for independently authorized public artifacts.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ExposureKindV1 {
     /// Canonical 35-byte nonce commitment.

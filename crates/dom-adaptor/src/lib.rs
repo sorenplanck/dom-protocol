@@ -15,10 +15,12 @@ mod context;
 mod error;
 mod messages;
 mod nonce;
+mod nonce_secret_record;
 mod nonce_vault;
 mod permit;
 mod session;
 mod transcript;
+mod vault_signer;
 
 pub use adaptor::{AdaptorPreSignatureV1, AdaptorSecret, CoreAdaptorPreSignatureV1};
 pub use context::{DirectionV1, SessionContextInputsV1, SessionContextV1, SigningPhaseV1};
@@ -28,13 +30,13 @@ pub use nonce::{
     aggregate_partial_signatures_v1, aggregate_public_nonces_v1, finalize_plain_signature_v1,
     PublicNoncePairV1,
 };
+pub use nonce_secret_record::NonceSecretTransferV1;
 pub use nonce_vault::{
-    AbortRequest, BudgetScope, CommitPublicMaterialRequest, ConsumeReason, ConsumeRequest,
-    CounterpartyBucket, ExposureAuthorizationRequest, ExposureBytes, ExposureKindV1,
-    ExposurePermitBindingV1, IdempotencyKey, NonceReservation, NonceVault, NonceVaultError,
-    ParticipantId, Purpose, PurposeV1, ReservationNonceId, ReservationRequest, ReservationState,
-    RestoreState, RetryRequest, SessionId, TemplateHash, VaultExposurePermit, VaultKeyId,
-    VaultReceipt,
+    AbortReasonV1, AuthorizedExposureV1, BudgetScope, CounterpartyBucket, ExposureBytes,
+    ExposurePermitBindingV1, IdempotencyKey, NonceReservation, NonceVaultError, NonceVaultV1,
+    ParticipantId, PermitIdV1, PreparedExposureV1, Purpose, ReservationIntentV1,
+    ReservationNonceId, ReservationRequestV1, ReservationState, RestoreState, SecretOpenStageV1,
+    SessionId, TemplateHash, TerminalReservationV1, VaultKeyId,
 };
 pub use permit::{exposure_outbound_digest_v1, validate_exposure_permit_record_v1, ExposureKindV1};
 pub use session::{
@@ -45,4 +47,8 @@ pub use session::{
 pub use transcript::{
     binding_factor_v1, nonce_commitment_hash_v1, BindingContextV1, BindingFactorV1,
     ParticipantPublicNoncesV1,
+};
+pub use vault_signer::{
+    CommitmentExportedV1, PartialExportedTerminalV1, ReservedNonceV1, RevealExportedV1,
+    VaultBackedSignerError, VaultBackedSignerV1,
 };

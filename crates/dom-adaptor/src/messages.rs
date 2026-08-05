@@ -23,6 +23,11 @@ impl PurposeV1 {
         self as u8
     }
 
+    /// Return whether the strict Phase 1 policy authorizes execution.
+    pub const fn is_strict_v1_authorized(self) -> bool {
+        !matches!(self, Self::Sponsor)
+    }
+
     /// Enforce the currently authorized strict Phase 1 signing purposes.
     ///
     /// Sponsor is part of the canonical codec registry but has no authorized

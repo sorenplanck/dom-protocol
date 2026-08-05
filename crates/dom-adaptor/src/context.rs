@@ -355,6 +355,12 @@ impl SessionContextV1 {
         self.encode_with_retry_counter(self.retry_counter)
     }
 
+    pub(crate) fn with_retry_counter(&self, retry_counter: u64) -> Self {
+        let mut context = self.clone();
+        context.retry_counter = retry_counter;
+        context
+    }
+
     pub(crate) fn encode_with_retry_counter(&self, retry_counter: u64) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(
             179 + self.participant_public_keys.len() * 33
