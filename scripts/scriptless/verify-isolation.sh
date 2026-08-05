@@ -12,9 +12,10 @@ case "$repo_real" in
     exit 3
     ;;
 esac
-[[ "$repo_real" == "/home/leonardov/dom-scriptless-dev/dom-scriptless-contracts" ]]
+common_git_dir="$(realpath "$(git rev-parse --git-common-dir)")"
+[[ "$common_git_dir" == "/home/leonardov/dom-scriptless-dev/dom-scriptless-contracts/.git" ]]
 
-log="$(realpath "$repo/../logs")/verify-isolation.log"
+log=/home/leonardov/dom-scriptless-dev/logs/verify-isolation.log
 exec > >(tee -a "$log") 2>&1
 echo "== verify-isolation $(date --iso-8601=seconds) =="
 
@@ -70,7 +71,12 @@ for checked_repo in "$repo" "$wallet_clone"; do
   while IFS= read -r remote; do
     [[ "$(git -C "$checked_repo" remote get-url --push "$remote")" == "no_push://push-disabled" ]]
   done < <(git -C "$checked_repo" remote)
-  if find "$checked_repo/.git/objects" -type f -links +1 -print -quit | rg .; then
+  checked_common_git_dir="$(git -C "$checked_repo" rev-parse --git-common-dir)"
+  if [[ "$checked_common_git_dir" != /* ]]; then
+    checked_common_git_dir="$checked_repo/$checked_common_git_dir"
+  fi
+  checked_common_git_dir="$(realpath "$checked_common_git_dir")"
+  if find "$checked_common_git_dir/objects" -type f -links +1 -print -quit | rg .; then
     echo "error: hardlinked Git object found in $checked_repo" >&2
     exit 6
   fi

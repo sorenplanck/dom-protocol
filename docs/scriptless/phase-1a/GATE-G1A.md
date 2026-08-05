@@ -8,7 +8,7 @@ where the gate specifies them.
 - [ ] Adaptor signatures are specified and implemented only over authoritative DOM primitives.
 - [ ] The two-nonce scheme with binding is specified and frozen.
 - [ ] The canonical transcript, including binding, partials, and aggregation, is frozen byte-for-byte.
-- [ ] Funding, Claim, and Refund purposes are closed and versioned.
+- [ ] Funding, ClaimAdaptor, and Refund purposes are closed and versioned.
 - [ ] Domain separation between all three purposes is demonstrated.
 - [ ] The canonical versioned hash-domain registry is frozen.
 - [ ] The authoritative DOM hash is used exclusively through `blake2b_256_tagged`.
@@ -40,7 +40,7 @@ Closing G1a does not close G1b or authorize real funds or production use.
 | Real final verifier | ADR-0014 | unchanged `schnorr_verify`; test-only consensus wrapper | all eight final kernels pass `validate_kernel_signatures` | consensus path is authoritative | implemented/tested; gate remains open with adaptor row |
 | Secret handling | ADR-0009/0017 | opaque non-Clone/non-Debug `AdaptorSecret` and `ScriptlessSecretScalar`, `ZeroizeOnDrop` | compile-time API shape and behavior tests | dedicated audit absent | open |
 | Parsers | ADR-0010/0011 | exact fixed-width fail-closed parsers | bounded panic/malformed/mutation tests | persistent fuzz campaign absent | open |
-| Secret two-nonce derivation | blocked by ADR-0013 | deliberately absent | none | no independent vectors | blocked/open |
+| Secret two-nonce derivation | NAR-001 and ADR-P1-001 | integrated OS-randomized KDF and one-shot owner | KDF mutation and 10,000-cycle tests | 311-field comparison exists; integrated revalidation pending | open pending integrated evidence |
 
 No checklist box is marked complete in this implementation branch. A checked
 box requires a separate gate review that cites the exact code, test command,

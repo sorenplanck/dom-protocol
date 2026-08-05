@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 repo="$(git rev-parse --show-toplevel 2>/dev/null)" || {
-  echo "erro: execute dentro de um repositório Git" >&2
+  echo "error: run this script inside a Git repository" >&2
   exit 2
 }
 repo_real="$(realpath "$repo")"
@@ -12,12 +12,14 @@ case "$repo_real" in
     exit 3
     ;;
 esac
-if [[ "$repo_real" != "/home/leonardov/dom-scriptless-dev/dom-scriptless-contracts" ]]; then
-  echo "erro: clone DOM Scriptless Contracts inesperado: $repo_real" >&2
+common_git_dir="$(realpath "$(git rev-parse --git-common-dir)")"
+expected_common_git_dir=/home/leonardov/dom-scriptless-dev/dom-scriptless-contracts/.git
+if [[ "$common_git_dir" != "$expected_common_git_dir" ]]; then
+  echo "error: unexpected DOM Scriptless Contracts clone or worktree: $repo_real" >&2
   exit 4
 fi
 
-log_dir="$(realpath "$repo/../logs")"
+log_dir=/home/leonardov/dom-scriptless-dev/logs
 log="$log_dir/preflight.log"
 exec > >(tee -a "$log") 2>&1
 
@@ -40,7 +42,7 @@ while IFS= read -r remote; do
 done < <(git remote)
 
 if rg -n 'unsafe[[:space:]]*\{|todo!\(|unimplemented!\(' crates/dom-adaptor; then
-  echo "erro: construção proibida em dom-adaptor" >&2
+  echo "error: prohibited construction in dom-adaptor" >&2
   exit 5
 fi
 
