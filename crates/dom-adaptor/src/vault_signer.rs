@@ -400,3 +400,212 @@ fn random_nonzero_id<E>() -> core::result::Result<[u8; 32], VaultBackedSignerErr
     }
     Ok(bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        aggregate_public_nonces_v1, binding_factor_v1, AbortReasonV1, CounterpartyBucket,
+        NonceVaultError, ParticipantId, ParticipantPublicNoncesV1, PurposeV1, RestoreState,
+        TemplateHash, TerminalReservationV1, VaultExportedArtifactV1, VaultKeyId,
+        VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
+    };
+    use dom_crypto::{schnorr_add_public_keys, ScriptlessSecretScalar};
+    use zeroize::Zeroizing;
+
+    struct TestHandle;
+    struct TestPermit(ExposureBytes);
+    struct TestExport(ExposureBytes);
+
+    impl VaultExportedArtifactV1 for TestExport {
+        fn kind(&self) -> ExposureKindV1 {
+            self.0.kind()
+        }
+
+        fn as_bytes(&self) -> &[u8] {
+            self.0.as_bytes()
+        }
+    }
+
+    struct TestVault {
+        plaintext: Option<Zeroizing<Vec<u8>>>,
+    }
+
+    impl NonceVaultV1 for TestVault {
+        type Error = NonceVaultError;
+        type ReservationHandle = TestHandle;
+        type ExposurePermit = TestPermit;
+        type ExportedArtifact = TestExport;
+
+        fn reserve(
+            &mut self,
+            _request: ReservationRequestV1,
+            secret: NonceSecretTransferV1,
+            seal_capability: VaultSecretSealCapabilityV1,
+            _commitment: NonceCommitmentV1,
+        ) -> core::result::Result<Self::ReservationHandle, Self::Error> {
+            self.plaintext = Some(seal_capability.into_plaintext(secret));
+            Ok(TestHandle)
+        }
+
+        fn authorize_exposure(
+            &mut self,
+            _reservation: &mut Self::ReservationHandle,
+            artifact: PreparedExposureV1,
+        ) -> core::result::Result<Self::ExposurePermit, Self::Error> {
+            Ok(TestPermit(artifact.exposure().clone()))
+        }
+
+        fn open_secret(
+            &mut self,
+            _reservation: &mut Self::ReservationHandle,
+            _stage: SecretOpenStageV1,
+            import_capability: VaultSecretImportCapabilityV1,
+        ) -> core::result::Result<NonceSecretTransferV1, Self::Error> {
+            let opened = Zeroizing::new(
+                self.plaintext
+                    .as_ref()
+                    .ok_or(NonceVaultError::ReservationNotFound)?
+                    .to_vec(),
+            );
+            import_capability
+                .import(opened)
+                .map_err(|_| NonceVaultError::CorruptState)
+        }
+
+        fn export(
+            &mut self,
+            permit: Self::ExposurePermit,
+        ) -> core::result::Result<Self::ExportedArtifact, Self::Error> {
+            Ok(TestExport(permit.0))
+        }
+
+        fn resend_exported(
+            &self,
+            _permit_id: crate::PermitIdV1,
+        ) -> core::result::Result<Self::ExportedArtifact, Self::Error> {
+            Err(NonceVaultError::ReservationNotFound)
+        }
+
+        fn abort(
+            &mut self,
+            _reservation: Self::ReservationHandle,
+            _reason: AbortReasonV1,
+        ) -> core::result::Result<TerminalReservationV1, Self::Error> {
+            Err(NonceVaultError::InvalidTransition)
+        }
+
+        fn restore_state(&self) -> RestoreState {
+            RestoreState::Operational
+        }
+    }
+
+    fn scalar(value: u8) -> ScriptlessSecretScalar {
+        let mut bytes = [0u8; 32];
+        bytes[31] = value;
+        ScriptlessSecretScalar::from_be_bytes(bytes).expect("canonical scalar")
+    }
+
+    #[test]
+    fn vault_backed_type_state_exports_commit_reveal_and_partial() {
+        let local_share = scalar(3);
+        let remote_share = scalar(5);
+        let mut roster = vec![local_share.public_key(), remote_share.public_key()];
+        roster.sort_by_key(PublicKey::to_compressed_bytes);
+        let local_index = roster
+            .iter()
+            .position(|key| key == &local_share.public_key())
+            .expect("local roster member") as u16;
+        let context = SessionContextV1::new(
+            crate::SessionContextInputsV1 {
+                chain_id: [1; 32],
+                session_id: [2; 32],
+                purpose: PurposeV1::Funding,
+                direction: crate::DirectionV1::Initiator,
+                signing_phase: crate::SigningPhaseV1::SigNonceCommit,
+                template_hash: [3; 32],
+                message_digest: [4; 32],
+                transcript_hash: [5; 32],
+                retry_counter: 0,
+                participant_public_keys: roster.clone(),
+                participant_index: local_index,
+                adaptor_point: None,
+            },
+            &local_share,
+        )
+        .expect("context");
+        let intent = ReservationIntentV1::new(
+            VaultKeyId::from_bytes([6; 32]).expect("key ID"),
+            CounterpartyBucket::from_bytes([7; 32]).expect("bucket"),
+            PurposeV1::Funding,
+            ParticipantId::from_bytes([8; 32]).expect("participant"),
+            TemplateHash::from_bytes([3; 32]).expect("template"),
+        )
+        .expect("intent");
+        let trusted = TrustedChainIdV1::from_signed_fixture([1; 32]);
+        let mut signer = VaultBackedSignerV1::new(TestVault { plaintext: None });
+        let reserved = signer
+            .reserve(intent, context.clone(), &local_share)
+            .expect("reserve");
+        let (commitment_state, commitment) = signer
+            .export_commitment(reserved)
+            .expect("commitment export");
+        assert_eq!(commitment.purpose(), PurposeV1::Funding);
+        let (reveal_state, reveal) = signer
+            .export_reveal(commitment_state, &trusted, &local_share)
+            .expect("reveal export");
+
+        let remote_first = scalar(11).public_key();
+        let remote_second = scalar(13).public_key();
+        let local_nonces = reveal_state.public_nonces.clone();
+        let mut participants = Vec::with_capacity(2);
+        for (index, signing_key) in roster.iter().enumerate() {
+            let (first_nonce, second_nonce) = if index as u16 == local_index {
+                (local_nonces.first().clone(), local_nonces.second().clone())
+            } else {
+                (remote_first.clone(), remote_second.clone())
+            };
+            participants.push(ParticipantPublicNoncesV1 {
+                participant_index: index as u16,
+                signing_key: signing_key.clone(),
+                first_nonce,
+                second_nonce,
+            });
+        }
+        let binding = binding_factor_v1(
+            &crate::BindingContextV1 {
+                chain_id: [1; 32],
+                session_id: [2; 32],
+                purpose: PurposeV1::Funding,
+                template_hash: [3; 32],
+            },
+            &participants,
+            None,
+        )
+        .expect("binding");
+        let effective: Vec<PublicKey> = participants
+            .iter()
+            .map(|entry| {
+                binding
+                    .bind_public_nonces(&entry.first_nonce, &entry.second_nonce)
+                    .expect("effective nonce")
+            })
+            .collect();
+        let aggregate_nonce = aggregate_public_nonces_v1(&effective).expect("aggregate nonce");
+        let aggregate_key = schnorr_add_public_keys(&roster).expect("aggregate key");
+        let (_terminal, partial) = signer
+            .sign_and_export_partial(
+                reveal_state,
+                &trusted,
+                &binding,
+                &aggregate_nonce,
+                &aggregate_key,
+                &local_share,
+                &[4; 32],
+            )
+            .expect("partial export");
+        assert_eq!(partial.purpose(), PurposeV1::Funding);
+        assert_eq!(partial.participant_index(), local_index);
+        assert_eq!(reveal.purpose(), PurposeV1::Funding);
+    }
+}
