@@ -485,27 +485,38 @@ impl PreparedExposureV1 {
     }
 }
 
-/// Public bytes released only after the DOM Contracts store durably spent a permit.
-pub struct AuthorizedExposureV1(ExposureBytes);
+/// Public lookup identity and bytes released after durable permit spend.
+///
+/// The permit ID is a non-authoritative restart lookup key. This value carries
+/// neither the consumed live permit nor authority to recreate one.
+pub struct AuthorizedExposureV1 {
+    permit_id: PermitIdV1,
+    exposure: ExposureBytes,
+}
 
 impl AuthorizedExposureV1 {
     pub(crate) fn from_vault_export(
         exported: &impl VaultExportedArtifactV1,
     ) -> Result<Self, NonceVaultError> {
-        Ok(Self(ExposureBytes::from_bytes(
-            exported.kind(),
-            exported.as_bytes(),
-        )?))
+        Ok(Self {
+            permit_id: exported.permit_id().clone(),
+            exposure: ExposureBytes::from_bytes(exported.kind(), exported.as_bytes())?,
+        })
+    }
+
+    /// Return the public restart lookup identifier without export authority.
+    pub const fn permit_id(&self) -> &PermitIdV1 {
+        &self.permit_id
     }
 
     /// Return the authorized public artifact kind.
     pub const fn kind(&self) -> ExposureKindV1 {
-        self.0.kind()
+        self.exposure.kind()
     }
 
     /// Borrow the exact persisted public bytes for first send or exact resend.
     pub fn as_bytes(&self) -> &[u8] {
-        self.0.as_bytes()
+        self.exposure.as_bytes()
     }
 }
 
@@ -515,6 +526,10 @@ impl AuthorizedExposureV1 {
 /// after durable permit spend. `dom-adaptor` wraps its public bytes only inside
 /// the integrated signer.
 pub trait VaultExportedArtifactV1 {
+    /// Return the public restart lookup identifier for this spent export.
+    ///
+    /// The identifier is not a live permit and grants no export authority.
+    fn permit_id(&self) -> &PermitIdV1;
     /// Return the closed exposure kind.
     fn kind(&self) -> ExposureKindV1;
     /// Borrow the exact byte-identical persisted artifact.
@@ -563,7 +578,7 @@ pub struct TerminalReservationV1 {
 /// witness-success Boolean, storage-success Boolean, raw permit, or witness key
 /// from its caller. Production selects one concrete implementation statically;
 /// trait objects are not the production composition boundary.
-pub trait NonceVaultV1 {
+pub trait NonceVaultV1: Sized {
     /// DOM Contracts store-specific typed failure with redacted observability.
     type Error: Error + Send + Sync + 'static;
     /// Opaque reservation handle owned by the concrete vault.

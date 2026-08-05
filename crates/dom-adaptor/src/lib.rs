@@ -63,6 +63,64 @@
 //!     let _ = cap.into_plaintext(second);
 //! }
 //! ```
+//!
+//! The vault-backed signer cannot release or mutably expose its concrete vault:
+//!
+//! ```compile_fail
+//! use dom_adaptor::{NonceVaultV1, VaultBackedSignerV1};
+//! fn escape<V: NonceVaultV1>(signer: &mut VaultBackedSignerV1<V>) {
+//!     let _vault = signer.vault_mut();
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use dom_adaptor::{NonceVaultV1, VaultBackedSignerV1};
+//! fn escape<V: NonceVaultV1>(signer: VaultBackedSignerV1<V>) {
+//!     let _vault = signer.into_inner();
+//! }
+//! ```
+//!
+//! The vault composition boundary does not admit a trait-object plugin:
+//!
+//! ```compile_fail
+//! use dom_adaptor::{ExposureKindV1, NonceVaultError, NonceVaultV1,
+//!     PermitIdV1, VaultExportedArtifactV1};
+//! struct Artifact(PermitIdV1);
+//! impl VaultExportedArtifactV1 for Artifact {
+//!     fn permit_id(&self) -> &PermitIdV1 { &self.0 }
+//!     fn kind(&self) -> ExposureKindV1 { ExposureKindV1::NonceCommitment }
+//!     fn as_bytes(&self) -> &[u8] { &[] }
+//! }
+//! type Plugin = dyn NonceVaultV1<
+//!     Error = NonceVaultError,
+//!     ReservationHandle = (),
+//!     ComputationPermit = (),
+//!     ExposurePermit = (),
+//!     ExportedArtifact = Artifact,
+//! >;
+//! fn install(_vault: &Plugin) {}
+//! ```
+//!
+//! Aborting consumes the live signer state, so it cannot be reused:
+//!
+//! ```compile_fail
+//! use dom_adaptor::{AbortReasonV1, NonceVaultV1, ReservedNonceV1,
+//!     VaultBackedSignerV1};
+//! fn reuse<V: NonceVaultV1>(signer: &mut VaultBackedSignerV1<V>,
+//!                           state: ReservedNonceV1<V::ReservationHandle>) {
+//!     let _ = signer.abort_reserved(state, AbortReasonV1::BeforePublicMaterial);
+//!     let _ = signer.abort_reserved(state, AbortReasonV1::BeforePublicMaterial);
+//! }
+//! ```
+//!
+//! Validated resend output is a closed typed artifact, not a raw-byte escape:
+//!
+//! ```compile_fail
+//! use dom_adaptor::ResentArtifactV1;
+//! fn raw(artifact: ResentArtifactV1) {
+//!     let _bytes = artifact.as_bytes();
+//! }
+//! ```
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -121,8 +179,8 @@ pub use transcript::{
     ParticipantPublicNoncesV1,
 };
 pub use vault_signer::{
-    CommitmentExportedV1, PartialExportedTerminalV1, ReservedNonceV1, RevealExportedV1,
-    VaultBackedSignerError, VaultBackedSignerV1,
+    CommitmentExportedV1, PartialExportedTerminalV1, ResentArtifactV1, ReservedNonceV1,
+    RevealExportedV1, VaultBackedSignerError, VaultBackedSignerV1,
 };
 
 #[cfg(test)]

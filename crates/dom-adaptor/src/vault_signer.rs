@@ -2,12 +2,13 @@
 
 use crate::secret_nonce::SecretNonceDerivationV1;
 use crate::{
-    exposure_outbound_digest_v1, nonce_commitment_hash_v1, AdaptorError, BindingFactorV1,
-    ExposureBytes, ExposureKindV1, IdempotencyKey, NonceCommitmentV1, NonceRevealV1,
-    NonceSecretTransferV1, NonceVaultV1, PartialSignatureV1, PreparedExposureV1, PublicNoncePairV1,
-    ReservationIntentV1, ReservationNonceId, ReservationRequestV1, SessionContextV1, SessionId,
-    SigningShareV1, TrustedChainIdV1, VaultComputationStageV1, VaultSecretImportCapabilityV1,
-    VaultSecretSealCapabilityV1,
+    exposure_outbound_digest_v1, nonce_commitment_hash_v1, AbortReasonV1, AdaptorError,
+    BindingFactorV1, ExposureBytes, ExposureKindV1, IdempotencyKey, NonceCommitmentV1,
+    NonceRevealV1, NonceSecretTransferV1, NonceVaultV1, PartialSignatureV1, PermitIdV1,
+    PreparedExposureV1, PublicNoncePairV1, ReservationIntentV1, ReservationNonceId,
+    ReservationRequestV1, RestoreState, SessionContextV1, SessionId, SigningShareV1,
+    TerminalReservationV1, TrustedChainIdV1, VaultComputationStageV1,
+    VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
 };
 use core::fmt;
 use dom_crypto::{schnorr_challenge, PartialSig, PublicKey};
@@ -85,6 +86,14 @@ pub struct CommitmentExportedV1<H> {
     context: SessionContextV1,
     reservation_nonce_id: [u8; 32],
     participant_id: [u8; 32],
+    permit_id: PermitIdV1,
+}
+
+impl<H> CommitmentExportedV1<H> {
+    /// Return the public lookup ID for the exported commitment.
+    pub const fn permit_id(&self) -> &PermitIdV1 {
+        &self.permit_id
+    }
 }
 
 /// State after durable authorization and exact nonce-reveal export.
@@ -94,11 +103,49 @@ pub struct RevealExportedV1<H> {
     reservation_nonce_id: [u8; 32],
     participant_id: [u8; 32],
     public_nonces: PublicNoncePairV1,
+    permit_id: PermitIdV1,
+}
+
+impl<H> RevealExportedV1<H> {
+    /// Return the public lookup ID for the exported nonce reveal.
+    pub const fn permit_id(&self) -> &PermitIdV1 {
+        &self.permit_id
+    }
 }
 
 /// Terminal marker after exactly one partial-signature export.
 pub struct PartialExportedTerminalV1 {
-    _private: (),
+    permit_id: PermitIdV1,
+}
+
+impl PartialExportedTerminalV1 {
+    /// Return the public lookup ID for the exported partial signature.
+    pub const fn permit_id(&self) -> &PermitIdV1 {
+        &self.permit_id
+    }
+}
+
+/// Closed typed result of a validated restart resend lookup.
+///
+/// No variant contains a live permit, vault handle, or untyped byte buffer.
+pub enum ResentArtifactV1 {
+    /// Exact canonical nonce commitment.
+    NonceCommitment(NonceCommitmentV1),
+    /// Exact canonical two-nonce reveal.
+    NonceReveal(NonceRevealV1),
+    /// Exact canonical participant partial signature.
+    PartialSignature(PartialSignatureV1),
+}
+
+impl ResentArtifactV1 {
+    /// Return the closed kind of the exact typed artifact.
+    pub const fn kind(&self) -> ExposureKindV1 {
+        match self {
+            Self::NonceCommitment(_) => ExposureKindV1::NonceCommitment,
+            Self::NonceReveal(_) => ExposureKindV1::NonceReveal,
+            Self::PartialSignature(_) => ExposureKindV1::PartialSignature,
+        }
+    }
 }
 
 /// High-level signer owning one statically selected concrete vault type.
@@ -120,6 +167,93 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
     /// Bind the signer to one concrete production vault at the composition root.
     pub fn new(vault: V) -> Self {
         Self { vault }
+    }
+
+    /// Delegate the reconciled read-only recovery state of the concrete vault.
+    pub fn restore_state(&self) -> RestoreState {
+        self.vault.restore_state()
+    }
+
+    /// Abort a reservation before any high-level public artifact was exported.
+    ///
+    /// The state and concrete reservation handle are consumed even if the
+    /// durable vault reports an error.
+    pub fn abort_reserved(
+        &mut self,
+        state: ReservedNonceV1<V::ReservationHandle>,
+        reason: AbortReasonV1,
+    ) -> SignerResult<V, TerminalReservationV1> {
+        self.vault
+            .abort(state.handle, reason)
+            .map_err(VaultBackedSignerError::Vault)
+    }
+
+    /// Abort after commitment export, conservatively preserving public exposure.
+    pub fn abort_after_commitment(
+        &mut self,
+        state: CommitmentExportedV1<V::ReservationHandle>,
+        reason: AbortReasonV1,
+    ) -> SignerResult<V, TerminalReservationV1> {
+        self.vault
+            .abort(state.handle, public_material_abort_reason(reason))
+            .map_err(VaultBackedSignerError::Vault)
+    }
+
+    /// Abort after reveal export, conservatively burning the complete nonce pair.
+    pub fn abort_after_reveal(
+        &mut self,
+        state: RevealExportedV1<V::ReservationHandle>,
+        reason: AbortReasonV1,
+    ) -> SignerResult<V, TerminalReservationV1> {
+        self.vault
+            .abort(state.handle, public_material_abort_reason(reason))
+            .map_err(VaultBackedSignerError::Vault)
+    }
+
+    /// Reopen and validate one exact already-spent artifact for restart resend.
+    ///
+    /// The public lookup ID grants no authority by itself. The concrete vault
+    /// must revalidate its retained authority before returning an artifact, and
+    /// this boundary then checks the returned ID, closed kind, trusted adaptor
+    /// outbound digest, canonical length, strict purpose, and typed codec.
+    pub fn resend_exported(
+        &self,
+        permit_id: PermitIdV1,
+        expected_kind: ExposureKindV1,
+        expected_outbound_digest: [u8; 32],
+    ) -> SignerResult<V, ResentArtifactV1> {
+        if expected_outbound_digest == [0; 32] {
+            return Err(VaultBackedSignerError::AuthorizedArtifactMismatch);
+        }
+        let exported = self
+            .vault
+            .resend_exported(permit_id.clone())
+            .map_err(VaultBackedSignerError::Vault)?;
+        let authorized = crate::AuthorizedExposureV1::from_vault_export(&exported)?;
+        if authorized.permit_id() != &permit_id || authorized.kind() != expected_kind {
+            return Err(VaultBackedSignerError::AuthorizedArtifactMismatch);
+        }
+        let actual_digest = exposure_outbound_digest_v1(expected_kind, authorized.as_bytes())?;
+        if actual_digest.as_bytes() != &expected_outbound_digest {
+            return Err(VaultBackedSignerError::AuthorizedArtifactMismatch);
+        }
+        match expected_kind {
+            ExposureKindV1::NonceCommitment => {
+                let artifact = NonceCommitmentV1::from_bytes(authorized.as_bytes())?;
+                artifact.purpose().require_strict_phase1()?;
+                Ok(ResentArtifactV1::NonceCommitment(artifact))
+            }
+            ExposureKindV1::NonceReveal => {
+                let artifact = NonceRevealV1::from_bytes(authorized.as_bytes())?;
+                artifact.purpose().require_strict_phase1()?;
+                Ok(ResentArtifactV1::NonceReveal(artifact))
+            }
+            ExposureKindV1::PartialSignature => {
+                let artifact = PartialSignatureV1::from_bytes(authorized.as_bytes())?;
+                artifact.purpose().require_strict_phase1()?;
+                Ok(ResentArtifactV1::PartialSignature(artifact))
+            }
+        }
     }
 
     /// Derive, seal, charge, witness, and durably reserve one nonce pair.
@@ -234,6 +368,7 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
         {
             return Err(VaultBackedSignerError::AuthorizedArtifactMismatch);
         }
+        let permit_id = authorized.permit_id().clone();
         let commitment = NonceCommitmentV1::from_bytes(authorized.as_bytes())?;
         Ok((
             CommitmentExportedV1 {
@@ -241,6 +376,7 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
                 context: state.context,
                 reservation_nonce_id: state.reservation_nonce_id,
                 participant_id: state.participant_id,
+                permit_id,
             },
             commitment,
         ))
@@ -297,6 +433,7 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
         if authorized.kind() != ExposureKindV1::NonceReveal || authorized.as_bytes() != expected {
             return Err(VaultBackedSignerError::AuthorizedArtifactMismatch);
         }
+        let permit_id = authorized.permit_id().clone();
         let reveal = NonceRevealV1::from_bytes(authorized.as_bytes())?;
         Ok((
             RevealExportedV1 {
@@ -305,6 +442,7 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
                 reservation_nonce_id: state.reservation_nonce_id,
                 participant_id: state.participant_id,
                 public_nonces,
+                permit_id,
             },
             reveal,
         ))
@@ -400,8 +538,19 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
         {
             return Err(VaultBackedSignerError::AuthorizedArtifactMismatch);
         }
+        let permit_id = authorized.permit_id().clone();
         let partial = PartialSignatureV1::from_bytes(authorized.as_bytes())?;
-        Ok((PartialExportedTerminalV1 { _private: () }, partial))
+        Ok((PartialExportedTerminalV1 { permit_id }, partial))
+    }
+}
+
+const fn public_material_abort_reason(reason: AbortReasonV1) -> AbortReasonV1 {
+    match reason {
+        AbortReasonV1::BeforePublicMaterial | AbortReasonV1::PublicMaterialMayHaveExisted => {
+            AbortReasonV1::PublicMaterialMayHaveExisted
+        }
+        AbortReasonV1::CrashAmbiguity => AbortReasonV1::CrashAmbiguity,
+        AbortReasonV1::RestoreAmbiguity => AbortReasonV1::RestoreAmbiguity,
     }
 }
 
@@ -428,24 +577,51 @@ mod tests {
     use dom_crypto::schnorr_add_public_keys;
     use zeroize::Zeroizing;
 
-    struct TestHandle;
+    struct TestHandle(ReservationNonceId);
     struct TestComputationPermit(VaultComputationStageV1);
-    struct TestPermit(ExposureBytes);
-    struct TestExport(ExposureBytes);
+    struct TestPermit {
+        permit_id: PermitIdV1,
+        exposure: ExposureBytes,
+    }
+    struct TestExport {
+        permit_id: PermitIdV1,
+        exposure: ExposureBytes,
+    }
 
     impl VaultExportedArtifactV1 for TestExport {
+        fn permit_id(&self) -> &PermitIdV1 {
+            &self.permit_id
+        }
+
         fn kind(&self) -> ExposureKindV1 {
-            self.0.kind()
+            self.exposure.kind()
         }
 
         fn as_bytes(&self) -> &[u8] {
-            self.0.as_bytes()
+            self.exposure.as_bytes()
         }
     }
 
     struct TestVault {
         plaintext: Option<Zeroizing<Vec<u8>>>,
         events: Vec<&'static str>,
+        exports: Vec<(PermitIdV1, ExposureBytes)>,
+        next_permit: u8,
+        restore_state: RestoreState,
+        resend_returned_id: Option<PermitIdV1>,
+    }
+
+    impl TestVault {
+        fn new() -> Self {
+            Self {
+                plaintext: None,
+                events: Vec::new(),
+                exports: Vec::new(),
+                next_permit: 1,
+                restore_state: RestoreState::Operational,
+                resend_returned_id: None,
+            }
+        }
     }
 
     impl NonceVaultV1 for TestVault {
@@ -457,10 +633,10 @@ mod tests {
 
         fn claim_reservation(
             &mut self,
-            _request: ReservationRequestV1,
+            request: ReservationRequestV1,
         ) -> core::result::Result<Self::ReservationHandle, Self::Error> {
             self.events.push("claim");
-            Ok(TestHandle)
+            Ok(TestHandle(request.reservation_id().clone()))
         }
 
         fn begin_computation(
@@ -498,7 +674,16 @@ mod tests {
             artifact: PreparedExposureV1,
         ) -> core::result::Result<Self::ExposurePermit, Self::Error> {
             self.events.push("authorize");
-            Ok(TestPermit(artifact.exposure().clone()))
+            let mut permit_id = [0u8; 32];
+            permit_id[31] = self.next_permit;
+            self.next_permit = self
+                .next_permit
+                .checked_add(1)
+                .ok_or(NonceVaultError::CounterOverflow)?;
+            Ok(TestPermit {
+                permit_id: PermitIdV1::from_bytes(permit_id)?,
+                exposure: artifact.exposure().clone(),
+            })
         }
 
         fn open_secret(
@@ -530,26 +715,63 @@ mod tests {
             permit: Self::ExposurePermit,
         ) -> core::result::Result<Self::ExportedArtifact, Self::Error> {
             self.events.push("export");
-            Ok(TestExport(permit.0))
+            self.exports
+                .push((permit.permit_id.clone(), permit.exposure.clone()));
+            Ok(TestExport {
+                permit_id: permit.permit_id,
+                exposure: permit.exposure,
+            })
         }
 
         fn resend_exported(
             &self,
-            _permit_id: crate::PermitIdV1,
+            permit_id: crate::PermitIdV1,
         ) -> core::result::Result<Self::ExportedArtifact, Self::Error> {
-            Err(NonceVaultError::ReservationNotFound)
+            let (_, exposure) = self
+                .exports
+                .iter()
+                .find(|(candidate, _)| candidate == &permit_id)
+                .ok_or(NonceVaultError::ReservationNotFound)?;
+            Ok(TestExport {
+                permit_id: self
+                    .resend_returned_id
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or(permit_id),
+                exposure: exposure.clone(),
+            })
         }
 
         fn abort(
             &mut self,
-            _reservation: Self::ReservationHandle,
-            _reason: AbortReasonV1,
+            reservation: Self::ReservationHandle,
+            reason: AbortReasonV1,
         ) -> core::result::Result<TerminalReservationV1, Self::Error> {
-            Err(NonceVaultError::InvalidTransition)
+            self.events.push(match reason {
+                AbortReasonV1::BeforePublicMaterial => "abort:before-public",
+                AbortReasonV1::PublicMaterialMayHaveExisted => "abort:public",
+                AbortReasonV1::CrashAmbiguity => "abort:crash",
+                AbortReasonV1::RestoreAmbiguity => "abort:restore",
+            });
+            let state = match reason {
+                AbortReasonV1::BeforePublicMaterial => {
+                    crate::ReservationState::AbortedBeforePublicMaterial
+                }
+                AbortReasonV1::PublicMaterialMayHaveExisted => {
+                    crate::ReservationState::ConsumedOnAbort
+                }
+                AbortReasonV1::CrashAmbiguity | AbortReasonV1::RestoreAmbiguity => {
+                    crate::ReservationState::Burned
+                }
+            };
+            Ok(TerminalReservationV1 {
+                reservation_id: reservation.0,
+                state,
+            })
         }
 
         fn restore_state(&self) -> RestoreState {
-            RestoreState::Operational
+            self.restore_state
         }
     }
 
@@ -561,6 +783,35 @@ mod tests {
 
     fn point(secret: &SigningShareV1) -> PublicKey {
         secret.public_key().clone()
+    }
+
+    fn test_context() -> SessionContextV1 {
+        let local_share = scalar(3);
+        let remote_share = scalar(5);
+        let mut roster = vec![point(&local_share), point(&remote_share)];
+        roster.sort_by_key(PublicKey::to_compressed_bytes);
+        let local_index = roster
+            .iter()
+            .position(|key| key == &point(&local_share))
+            .expect("local roster member") as u16;
+        SessionContextV1::new(
+            crate::SessionContextInputsV1 {
+                chain_id: [1; 32],
+                session_id: [2; 32],
+                purpose: PurposeV1::Funding,
+                direction: crate::DirectionV1::Initiator,
+                signing_phase: crate::SigningPhaseV1::SigNonceCommit,
+                template_hash: [3; 32],
+                message_digest: [4; 32],
+                transcript_hash: [5; 32],
+                retry_counter: 0,
+                participant_public_keys: roster,
+                participant_index: local_index,
+                adaptor_point: None,
+            },
+            &local_share,
+        )
+        .expect("context")
     }
 
     struct SecretBearingVaultError;
@@ -586,6 +837,65 @@ mod tests {
         assert_eq!(display, "vault operation failed (details redacted)");
         assert!(!debug.contains("DO_NOT_LEAK_VAULT_SECRET"));
         assert!(!display.contains("DO_NOT_LEAK_VAULT_SECRET"));
+    }
+
+    #[test]
+    fn every_live_state_aborts_terminally_and_restore_state_delegates() {
+        let context = test_context();
+        let first_id = ReservationNonceId::from_bytes([0x11; 32]).expect("reservation ID");
+        let second_id = ReservationNonceId::from_bytes([0x12; 32]).expect("reservation ID");
+        let third_id = ReservationNonceId::from_bytes([0x13; 32]).expect("reservation ID");
+        let mut vault = TestVault::new();
+        vault.restore_state = RestoreState::RestoreQuarantined;
+        let mut signer = VaultBackedSignerV1::new(vault);
+        assert_eq!(signer.restore_state(), RestoreState::RestoreQuarantined);
+
+        let reserved = ReservedNonceV1 {
+            handle: TestHandle(first_id.clone()),
+            context: context.clone(),
+            reservation_nonce_id: *first_id.as_bytes(),
+            participant_id: [0x21; 32],
+            commitment: NonceCommitmentV1::new(PurposeV1::Funding, 0, [0x31; 32]),
+        };
+        let terminal = signer
+            .abort_reserved(reserved, AbortReasonV1::BeforePublicMaterial)
+            .expect("reserved abort");
+        assert_eq!(terminal.reservation_id, first_id);
+        assert_eq!(
+            terminal.state,
+            crate::ReservationState::AbortedBeforePublicMaterial
+        );
+
+        let commitment_exported = CommitmentExportedV1 {
+            handle: TestHandle(second_id.clone()),
+            context: context.clone(),
+            reservation_nonce_id: *second_id.as_bytes(),
+            participant_id: [0x22; 32],
+            permit_id: PermitIdV1::from_bytes([0x41; 32]).expect("permit ID"),
+        };
+        let terminal = signer
+            .abort_after_commitment(commitment_exported, AbortReasonV1::BeforePublicMaterial)
+            .expect("commitment abort");
+        assert_eq!(terminal.reservation_id, second_id);
+        assert_eq!(terminal.state, crate::ReservationState::ConsumedOnAbort);
+
+        let reveal_exported = RevealExportedV1 {
+            handle: TestHandle(third_id.clone()),
+            context,
+            reservation_nonce_id: *third_id.as_bytes(),
+            participant_id: [0x23; 32],
+            public_nonces: PublicNoncePairV1::new(point(&scalar(11)), point(&scalar(13))),
+            permit_id: PermitIdV1::from_bytes([0x42; 32]).expect("permit ID"),
+        };
+        let terminal = signer
+            .abort_after_reveal(reveal_exported, AbortReasonV1::CrashAmbiguity)
+            .expect("reveal abort");
+        assert_eq!(terminal.reservation_id, third_id);
+        assert_eq!(terminal.state, crate::ReservationState::Burned);
+        assert_eq!(
+            signer.vault.events,
+            ["abort:before-public", "abort:public", "abort:crash"]
+        );
     }
 
     #[test]
@@ -625,20 +935,19 @@ mod tests {
         )
         .expect("intent");
         let trusted = TrustedChainIdV1::from_signed_fixture([1; 32]);
-        let mut signer = VaultBackedSignerV1::new(TestVault {
-            plaintext: None,
-            events: Vec::new(),
-        });
+        let mut signer = VaultBackedSignerV1::new(TestVault::new());
         let reserved = signer
             .reserve(intent, context.clone(), &local_share)
             .expect("reserve");
         let (commitment_state, commitment) = signer
             .export_commitment(reserved)
             .expect("commitment export");
+        let commitment_permit_id = commitment_state.permit_id().clone();
         assert_eq!(commitment.purpose(), PurposeV1::Funding);
         let (reveal_state, reveal) = signer
             .export_reveal(commitment_state, &trusted, &local_share)
             .expect("reveal export");
+        let reveal_permit_id = reveal_state.permit_id().clone();
 
         let remote_first = point(&scalar(11));
         let remote_second = point(&scalar(13));
@@ -678,7 +987,7 @@ mod tests {
             .collect();
         let aggregate_nonce = aggregate_public_nonces_v1(&effective).expect("aggregate nonce");
         let aggregate_key = schnorr_add_public_keys(&roster).expect("aggregate key");
-        let (_terminal, partial) = signer
+        let (terminal, partial) = signer
             .sign_and_export_partial(
                 reveal_state,
                 &trusted,
@@ -689,9 +998,131 @@ mod tests {
                 &[4; 32],
             )
             .expect("partial export");
+        let partial_permit_id = terminal.permit_id().clone();
         assert_eq!(partial.purpose(), PurposeV1::Funding);
         assert_eq!(partial.participant_index(), local_index);
         assert_eq!(reveal.purpose(), PurposeV1::Funding);
+        assert_ne!(commitment_permit_id, reveal_permit_id);
+        assert_ne!(reveal_permit_id, partial_permit_id);
+
+        let commitment_digest =
+            exposure_outbound_digest_v1(ExposureKindV1::NonceCommitment, &commitment.to_bytes())
+                .expect("commitment digest");
+        let resent = signer
+            .resend_exported(
+                commitment_permit_id.clone(),
+                ExposureKindV1::NonceCommitment,
+                *commitment_digest.as_bytes(),
+            )
+            .expect("commitment resend");
+        match resent {
+            ResentArtifactV1::NonceCommitment(value) => {
+                assert_eq!(value.to_bytes(), commitment.to_bytes());
+            }
+            _ => panic!("closed resend kind must match commitment"),
+        }
+
+        let reveal_digest =
+            exposure_outbound_digest_v1(ExposureKindV1::NonceReveal, &reveal.to_bytes())
+                .expect("reveal digest");
+        let resent = signer
+            .resend_exported(
+                reveal_permit_id.clone(),
+                ExposureKindV1::NonceReveal,
+                *reveal_digest.as_bytes(),
+            )
+            .expect("reveal resend");
+        match resent {
+            ResentArtifactV1::NonceReveal(value) => {
+                assert_eq!(value.to_bytes(), reveal.to_bytes());
+            }
+            _ => panic!("closed resend kind must match reveal"),
+        }
+
+        let partial_digest =
+            exposure_outbound_digest_v1(ExposureKindV1::PartialSignature, &partial.to_bytes())
+                .expect("partial digest");
+        let resent = signer
+            .resend_exported(
+                partial_permit_id,
+                ExposureKindV1::PartialSignature,
+                *partial_digest.as_bytes(),
+            )
+            .expect("partial resend");
+        match resent {
+            ResentArtifactV1::PartialSignature(value) => {
+                assert_eq!(value.to_bytes(), partial.to_bytes());
+            }
+            _ => panic!("closed resend kind must match partial"),
+        }
+
+        assert!(matches!(
+            signer.resend_exported(
+                commitment_permit_id.clone(),
+                ExposureKindV1::NonceReveal,
+                *reveal_digest.as_bytes(),
+            ),
+            Err(VaultBackedSignerError::AuthorizedArtifactMismatch)
+        ));
+        assert!(matches!(
+            signer.resend_exported(
+                commitment_permit_id.clone(),
+                ExposureKindV1::NonceCommitment,
+                [0x99; 32],
+            ),
+            Err(VaultBackedSignerError::AuthorizedArtifactMismatch)
+        ));
+        signer.vault.resend_returned_id =
+            Some(PermitIdV1::from_bytes([0x55; 32]).expect("mismatched permit ID"));
+        assert!(matches!(
+            signer.resend_exported(
+                commitment_permit_id.clone(),
+                ExposureKindV1::NonceCommitment,
+                *commitment_digest.as_bytes(),
+            ),
+            Err(VaultBackedSignerError::AuthorizedArtifactMismatch)
+        ));
+        signer.vault.resend_returned_id = None;
+        assert!(matches!(
+            signer.resend_exported(
+                commitment_permit_id,
+                ExposureKindV1::NonceCommitment,
+                [0; 32],
+            ),
+            Err(VaultBackedSignerError::AuthorizedArtifactMismatch)
+        ));
+        assert!(matches!(
+            signer.resend_exported(
+                PermitIdV1::from_bytes([0x56; 32]).expect("unknown permit ID"),
+                ExposureKindV1::NonceCommitment,
+                *commitment_digest.as_bytes(),
+            ),
+            Err(VaultBackedSignerError::Vault(
+                NonceVaultError::ReservationNotFound
+            ))
+        ));
+        let sponsor_permit_id = PermitIdV1::from_bytes([0x66; 32]).expect("Sponsor permit ID");
+        let sponsor_bytes =
+            NonceCommitmentV1::new(PurposeV1::Sponsor, local_index, [0x77; 32]).to_bytes();
+        signer.vault.exports.push((
+            sponsor_permit_id.clone(),
+            ExposureBytes::from_bytes(ExposureKindV1::NonceCommitment, sponsor_bytes)
+                .expect("Sponsor is codec-recognized"),
+        ));
+        let sponsor_digest =
+            exposure_outbound_digest_v1(ExposureKindV1::NonceCommitment, &sponsor_bytes)
+                .expect("Sponsor codec digest");
+        assert!(matches!(
+            signer.resend_exported(
+                sponsor_permit_id,
+                ExposureKindV1::NonceCommitment,
+                *sponsor_digest.as_bytes(),
+            ),
+            Err(VaultBackedSignerError::Adaptor(
+                AdaptorError::PurposeNotAuthorized(0x04)
+            ))
+        ));
+        assert_eq!(signer.restore_state(), RestoreState::Operational);
         assert_eq!(
             signer.vault.events,
             [
