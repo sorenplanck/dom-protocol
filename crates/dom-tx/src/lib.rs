@@ -417,6 +417,8 @@ fn kernel_message(features: u8, fee: u64, lock_height: u64) -> Result<dom_core::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dom_consensus::{validate_transaction, ValidationContext};
+    use dom_core::{BlockHeight, Timestamp};
     use dom_crypto::schnorr_verify;
 
     #[derive(Clone)]
@@ -460,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn build_exact_spend_transaction() {
+    fn build_exact_spend_transaction_passes_full_consensus() {
         let chain_id = [7u8; 32];
 
         let input_bf = BlindingFactor::random();
@@ -490,6 +492,16 @@ mod tests {
             dom_crypto::PublicKey::from_compressed_bytes(tx.kernels[0].excess.as_bytes()).unwrap();
 
         assert!(schnorr_verify(&sig, &pk, &chain_id, msg.as_bytes()).unwrap());
+
+        validate_transaction(
+            &tx,
+            &ValidationContext {
+                current_height: BlockHeight(0),
+                chain_id,
+                now: Timestamp(0),
+            },
+        )
+        .expect("exact 1-in/1-out spend must pass the complete consensus pipeline");
     }
 
     #[test]
