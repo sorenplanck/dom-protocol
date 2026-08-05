@@ -359,6 +359,40 @@ impl SessionContextV1 {
         context
     }
 
+    pub(crate) fn with_stage_and_transcript(
+        &self,
+        signing_phase: SigningPhaseV1,
+        transcript_hash: [u8; 32],
+    ) -> Result<Self> {
+        if transcript_hash == [0; 32] {
+            return Err(AdaptorError::InvalidTranscript(
+                "stage transcript hash must be nonzero",
+            ));
+        }
+        let mut context = self.clone();
+        context.signing_phase = signing_phase;
+        context.transcript_hash = transcript_hash;
+        Ok(context)
+    }
+
+    pub(crate) fn is_same_nonce_reservation(&self, later: &Self) -> bool {
+        self.chain_id == later.chain_id
+            && self.session_id == later.session_id
+            && self.purpose == later.purpose
+            && self.direction == later.direction
+            && self.template_hash == later.template_hash
+            && self.message_digest == later.message_digest
+            && self.retry_counter == later.retry_counter
+            && self.participant_public_keys == later.participant_public_keys
+            && self.participant_index == later.participant_index
+            && self.adaptor_point == later.adaptor_point
+            && self.signing_phase == SigningPhaseV1::SigNonceCommit
+            && matches!(
+                later.signing_phase,
+                SigningPhaseV1::SigNonceReveal | SigningPhaseV1::SigPartial
+            )
+    }
+
     pub(crate) fn encode_with_retry_counter(&self, retry_counter: u64) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(
             179 + self.participant_public_keys.len() * 33

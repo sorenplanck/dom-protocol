@@ -1,0 +1,381 @@
+//! Complete reservation authority binding for the two-party Phase 1 profile.
+
+use crate::{
+    AdaptorError, ContractKindV1, CounterpartyBucket, ParticipantId, ParticipantRosterV1,
+    PurposeV1, ReservationRequestLookupV1, Result, SessionContextV1, SessionId, SigningPhaseV1,
+    SigningShareV1, TemplateHash, VaultKeyId,
+};
+use dom_crypto::blake2b_256_tagged;
+use rand_core::{OsRng, RngCore};
+use std::error::Error;
+
+const CONTEXT_BINDING_MAGIC: &[u8; 8] = b"DOMNVCT1";
+const CONTEXT_BINDING_TAG_V1: &str = "DOM:contracts-vault-reservation-context:v1";
+const BUDGET_KEY_TAG_V1: &str = "DOM:scriptless-vault-budget-key:v1";
+const COUNTERPARTY_TAG_V1: &str = "DOM:scriptless-vault-counterparty:v1";
+const CONTEXT_BINDING_FIXED_PREFIX_LEN: usize = 16;
+const PROTOCOL_ROSTER_ENTRY_LEN: usize = 101;
+const PROTOCOL_ROSTER_LEN: usize = 2 * PROTOCOL_ROSTER_ENTRY_LEN;
+const CONTEXT_BINDING_TRAILER_LEN: usize = 2 + PROTOCOL_ROSTER_LEN + 2 + 32;
+
+/// Complete canonical reservation context and protocol-roster binding.
+///
+/// The type is constructed only by the safe signer from a validated context,
+/// roster, local signing share, and trusted protocol position.
+pub struct ReservationContextBindingV1 {
+    bytes: Vec<u8>,
+    digest: [u8; 32],
+    local_participant_id: [u8; 32],
+    remote_participant_id: [u8; 32],
+}
+
+impl ReservationContextBindingV1 {
+    pub(crate) fn new(
+        context: &SessionContextV1,
+        roster: &ParticipantRosterV1,
+        local_protocol_roster_index: u16,
+        signing_share: &SigningShareV1,
+    ) -> Result<Self> {
+        if context.signing_phase() != SigningPhaseV1::SigNonceCommit
+            || context.retry_counter() != 0
+            || roster.entries().len() != 2
+            || local_protocol_roster_index > 1
+            || context.participant_public_keys().len() != 2
+        {
+            return Err(AdaptorError::InvalidContext(
+                "reservation binding requires the two-party derivation-base context",
+            ));
+        }
+        context.purpose().require_strict_phase1()?;
+
+        let local_position = usize::from(local_protocol_roster_index);
+        let local = &roster.entries()[local_position];
+        let remote = &roster.entries()[1 - local_position];
+        let local_g1a_index = roster.signing_index(local.participant_id())?;
+        if local.direction() != context.direction()
+            || local_g1a_index != context.participant_index()
+            || local.signing_public_key() != signing_share.public_key()
+            || local.signing_public_key()
+                != &context.participant_public_keys()[usize::from(context.participant_index())]
+        {
+            return Err(AdaptorError::InvalidContext(
+                "local protocol roster mapping does not match the signing context",
+            ));
+        }
+        for entry in roster.entries() {
+            let signing_index = roster.signing_index(entry.participant_id())?;
+            if signing_index > 1
+                || entry.signing_public_key()
+                    != &context.participant_public_keys()[usize::from(signing_index)]
+            {
+                return Err(AdaptorError::InvalidContext(
+                    "protocol and signing rosters are not a one-to-one mapping",
+                ));
+            }
+        }
+
+        let context_bytes = context.to_bytes();
+        if !matches!(context_bytes.len(), 245 | 278) {
+            return Err(AdaptorError::InvalidContext(
+                "reservation context length is outside the two-party profile",
+            ));
+        }
+        let total_len = CONTEXT_BINDING_FIXED_PREFIX_LEN
+            .checked_add(context_bytes.len())
+            .and_then(|length| length.checked_add(CONTEXT_BINDING_TRAILER_LEN))
+            .ok_or(AdaptorError::InvalidContext(
+                "reservation context-binding length overflow",
+            ))?;
+        let mut bytes = Vec::with_capacity(total_len);
+        bytes.extend_from_slice(CONTEXT_BINDING_MAGIC);
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&ContractKindV1::WitnessOrTimeout.to_le_bytes());
+        bytes.extend_from_slice(
+            &u32::try_from(context_bytes.len())
+                .map_err(|_| AdaptorError::InvalidContext("context length overflow"))?
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(&context_bytes);
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        for entry in roster.entries() {
+            bytes.extend_from_slice(entry.participant_id());
+            bytes.extend_from_slice(&entry.identity_public_key().to_compressed_bytes());
+            bytes.extend_from_slice(&entry.signing_public_key().to_compressed_bytes());
+            bytes.push(entry.direction().to_byte());
+            bytes.extend_from_slice(&roster.signing_index(entry.participant_id())?.to_le_bytes());
+        }
+        bytes.extend_from_slice(&local_protocol_roster_index.to_le_bytes());
+        let digest = *blake2b_256_tagged(CONTEXT_BINDING_TAG_V1, &bytes).as_bytes();
+        if digest == [0; 32] {
+            return Err(AdaptorError::InvalidTranscript(
+                "zero reservation context-binding digest",
+            ));
+        }
+        bytes.extend_from_slice(&digest);
+        debug_assert_eq!(bytes.len(), total_len);
+        Ok(Self {
+            bytes,
+            digest,
+            local_participant_id: *local.participant_id(),
+            remote_participant_id: *remote.participant_id(),
+        })
+    }
+
+    /// Return the complete canonical binding bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Return the digest stored at the end of the canonical binding.
+    pub const fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+
+    /// Return the exact local protocol participant identifier.
+    pub const fn local_participant_id(&self) -> &[u8; 32] {
+        &self.local_participant_id
+    }
+
+    /// Return the exact remote protocol participant identifier.
+    pub const fn remote_participant_id(&self) -> &[u8; 32] {
+        &self.remote_participant_id
+    }
+}
+
+struct ReservationRequestFieldsV1 {
+    key_id: VaultKeyId,
+    session_id: SessionId,
+    counterparty: CounterpartyBucket,
+    purpose: PurposeV1,
+    participant_id: ParticipantId,
+    template_hash: TemplateHash,
+    request_lookup: ReservationRequestLookupV1,
+    context_binding: ReservationContextBindingV1,
+}
+
+fn derive_request_fields(
+    context: &SessionContextV1,
+    signing_share: &SigningShareV1,
+    request_lookup: ReservationRequestLookupV1,
+    context_binding: ReservationContextBindingV1,
+) -> Result<ReservationRequestFieldsV1> {
+    if context.chain_id() == &[0; 32]
+        || context_binding.local_participant_id() == &[0; 32]
+        || context_binding.remote_participant_id() == &[0; 32]
+    {
+        return Err(AdaptorError::InvalidContext(
+            "reservation request contains an empty trusted binding",
+        ));
+    }
+    let mut budget_key_preimage = [0u8; 65];
+    budget_key_preimage[..32].copy_from_slice(context.chain_id());
+    budget_key_preimage[32..].copy_from_slice(&signing_share.public_key().to_compressed_bytes());
+    let key_id = VaultKeyId::from_bytes(
+        *blake2b_256_tagged(BUDGET_KEY_TAG_V1, &budget_key_preimage).as_bytes(),
+    )
+    .map_err(|_| AdaptorError::InvalidContext("derived budget key ID is zero"))?;
+
+    let mut counterparty_preimage = [0u8; 64];
+    counterparty_preimage[..32].copy_from_slice(context.chain_id());
+    counterparty_preimage[32..].copy_from_slice(context_binding.remote_participant_id());
+    let counterparty = CounterpartyBucket::from_bytes(
+        *blake2b_256_tagged(COUNTERPARTY_TAG_V1, &counterparty_preimage).as_bytes(),
+    )
+    .map_err(|_| AdaptorError::InvalidContext("derived counterparty bucket is zero"))?;
+
+    Ok(ReservationRequestFieldsV1 {
+        key_id,
+        session_id: SessionId::from_bytes(*context.session_id())
+            .map_err(|_| AdaptorError::InvalidContext("session ID is zero"))?,
+        counterparty,
+        purpose: context.purpose(),
+        participant_id: ParticipantId::from_bytes(*context_binding.local_participant_id())
+            .map_err(|_| AdaptorError::InvalidContext("participant ID is zero"))?,
+        template_hash: TemplateHash::from_bytes(*context.template_hash())
+            .map_err(|_| AdaptorError::InvalidContext("template hash is zero"))?,
+        request_lookup,
+        context_binding,
+    })
+}
+
+/// Opaque one-shot request for fresh reservation creation.
+pub struct FreshReservationRequestV1(ReservationRequestFieldsV1);
+
+impl FreshReservationRequestV1 {
+    /// Return the trusted signing-key budget owner.
+    pub const fn key_id(&self) -> &VaultKeyId {
+        &self.0.key_id
+    }
+    /// Return the lifetime-unique session identifier.
+    pub const fn session_id(&self) -> &SessionId {
+        &self.0.session_id
+    }
+    /// Return the trusted counterparty budget bucket.
+    pub const fn counterparty(&self) -> &CounterpartyBucket {
+        &self.0.counterparty
+    }
+    /// Return the strict Phase 1 purpose.
+    pub const fn purpose(&self) -> PurposeV1 {
+        self.0.purpose
+    }
+    /// Return the local participant identifier.
+    pub const fn participant_id(&self) -> &ParticipantId {
+        &self.0.participant_id
+    }
+    /// Return the canonical template hash.
+    pub const fn template_hash(&self) -> &TemplateHash {
+        &self.0.template_hash
+    }
+    /// Return the internally generated public retry lookup identifier.
+    pub const fn request_lookup(&self) -> &ReservationRequestLookupV1 {
+        &self.0.request_lookup
+    }
+    /// Return the complete validated canonical context binding.
+    pub const fn context_binding(&self) -> &ReservationContextBindingV1 {
+        &self.0.context_binding
+    }
+}
+
+/// Private pre-claim state retaining the request and its non-authoritative lookup.
+pub struct PreparedFreshReservationV1 {
+    request: FreshReservationRequestV1,
+}
+
+impl PreparedFreshReservationV1 {
+    pub(crate) fn new(
+        context: &SessionContextV1,
+        signing_share: &SigningShareV1,
+        context_binding: ReservationContextBindingV1,
+    ) -> Result<Self> {
+        let request_lookup = loop {
+            let mut bytes = [0u8; 32];
+            OsRng
+                .try_fill_bytes(&mut bytes)
+                .map_err(|_| AdaptorError::RandomnessFailure)?;
+            if bytes != [0; 32] {
+                break ReservationRequestLookupV1::from_bytes(bytes)
+                    .map_err(|_| AdaptorError::RandomnessFailure)?;
+            }
+        };
+        Ok(Self {
+            request: FreshReservationRequestV1(derive_request_fields(
+                context,
+                signing_share,
+                request_lookup,
+                context_binding,
+            )?),
+        })
+    }
+
+    /// Return the public lookup that trusted session storage must retain first.
+    pub const fn request_lookup(&self) -> &ReservationRequestLookupV1 {
+        self.request.request_lookup()
+    }
+
+    /// Return the exact context-binding digest that must be retained with the lookup.
+    pub const fn context_binding_digest(&self) -> &[u8; 32] {
+        self.request.context_binding().digest()
+    }
+
+    /// Return the lifetime-unique session retained with the lookup custody record.
+    pub const fn session_id(&self) -> &SessionId {
+        self.request.session_id()
+    }
+
+    pub(crate) fn into_request(
+        self,
+        custody: impl DurableReservationLookupV1,
+    ) -> Result<FreshReservationRequestV1> {
+        if custody.request_lookup() != self.request.request_lookup()
+            || custody.context_binding_digest() != self.request.context_binding().digest()
+            || custody.session_id() != self.request.session_id()
+        {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
+        Ok(self.request)
+    }
+}
+
+/// Opaque one-shot evidence that trusted session storage retained the lookup.
+pub trait DurableReservationLookupV1 {
+    /// Return the exact retained lookup.
+    fn request_lookup(&self) -> &ReservationRequestLookupV1;
+    /// Return the exact retained context-binding digest.
+    fn context_binding_digest(&self) -> &[u8; 32];
+    /// Return the lifetime-unique session identifier.
+    fn session_id(&self) -> &SessionId;
+}
+
+/// Trusted session-store custody boundary invoked before vault admission.
+pub trait ReservationLookupCustodyV1: Sized {
+    /// Redacted durable-storage failure.
+    type Error: Error + Send + Sync + 'static;
+    /// Opaque one-shot result of durable commit and reread.
+    type DurableLookup: DurableReservationLookupV1;
+
+    /// Persist and reread the exact lookup and binding before Store admission.
+    fn persist_prepared_lookup(
+        &mut self,
+        prepared: &PreparedFreshReservationV1,
+    ) -> core::result::Result<Self::DurableLookup, Self::Error>;
+
+    /// Irreversibly abandon a custody record that resolved to no vault occurrence.
+    fn abandon_before_vault_claim(
+        &mut self,
+        lookup: &ReservationRequestLookupV1,
+        session_id: &SessionId,
+        context_binding_digest: &[u8; 32],
+    ) -> core::result::Result<(), Self::Error>;
+}
+
+/// Opaque one-shot request for exact reservation retry or restart lookup.
+pub struct ReservationResumeRequestV1(ReservationRequestFieldsV1);
+
+impl ReservationResumeRequestV1 {
+    pub(crate) fn from_trusted_state(
+        context: &SessionContextV1,
+        signing_share: &SigningShareV1,
+        request_lookup: ReservationRequestLookupV1,
+        context_binding: ReservationContextBindingV1,
+    ) -> Result<Self> {
+        Ok(Self(derive_request_fields(
+            context,
+            signing_share,
+            request_lookup,
+            context_binding,
+        )?))
+    }
+
+    /// Return the public retry lookup identifier.
+    pub const fn request_lookup(&self) -> &ReservationRequestLookupV1 {
+        &self.0.request_lookup
+    }
+    /// Return the trusted signing-key budget owner.
+    pub const fn key_id(&self) -> &VaultKeyId {
+        &self.0.key_id
+    }
+    /// Return the lifetime-unique session identifier.
+    pub const fn session_id(&self) -> &SessionId {
+        &self.0.session_id
+    }
+    /// Return the trusted counterparty budget bucket.
+    pub const fn counterparty(&self) -> &CounterpartyBucket {
+        &self.0.counterparty
+    }
+    /// Return the strict Phase 1 purpose.
+    pub const fn purpose(&self) -> PurposeV1 {
+        self.0.purpose
+    }
+    /// Return the local participant identifier.
+    pub const fn participant_id(&self) -> &ParticipantId {
+        &self.0.participant_id
+    }
+    /// Return the canonical template hash.
+    pub const fn template_hash(&self) -> &TemplateHash {
+        &self.0.template_hash
+    }
+    /// Return the complete validated canonical context binding.
+    pub const fn context_binding(&self) -> &ReservationContextBindingV1 {
+        &self.0.context_binding
+    }
+}

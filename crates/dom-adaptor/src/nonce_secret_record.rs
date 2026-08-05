@@ -119,7 +119,9 @@ impl NonceSecretTransferV1 {
             trusted_chain_id,
             signing_share,
         )?;
-        if parsed_context.to_bytes() != expected_context.to_bytes() {
+        if parsed_context.to_bytes() != expected_context.to_bytes()
+            && !parsed_context.is_same_nonce_reservation(expected_context)
+        {
             return Err(AdaptorError::AuthorizationMismatch);
         }
         let first = exact_array::<32>(
