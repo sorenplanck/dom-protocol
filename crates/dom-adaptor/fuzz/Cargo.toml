@@ -12,11 +12,10 @@ libfuzzer-sys = "0.4"
 
 [dependencies.dom-adaptor]
 path = ".."
-features = ["fuzzing", "test-helpers"]
+features = ["fuzzing"]
 
 [dependencies.dom-crypto]
 path = "../../dom-crypto"
-features = ["test-helpers"]
 
 [[bin]]
 name = "canonical_messages"
@@ -33,8 +32,22 @@ doc = false
 bench = false
 
 [[bin]]
-name = "nonce_derivation"
-path = "fuzz_targets/nonce_derivation.rs"
+name = "canonical_context"
+path = "fuzz_targets/canonical_context.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "share_pop"
+path = "fuzz_targets/share_pop.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bulletproof_mpc"
+path = "fuzz_targets/bulletproof_mpc.rs"
 test = false
 doc = false
 bench = false

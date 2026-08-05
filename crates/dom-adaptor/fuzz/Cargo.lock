@@ -255,7 +255,9 @@ dependencies = [
  "dom-consensus",
  "dom-core",
  "dom-crypto",
+ "rand_core 0.6.4",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]
