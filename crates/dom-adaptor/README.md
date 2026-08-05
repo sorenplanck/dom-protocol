@@ -18,8 +18,9 @@ The current implementation provides:
 - participant-bound partial signing, verification, and aggregation;
 - a vault-backed recovery surface whose abort operations consume every live
   signer state and whose restore status is delegated read-only;
-- exact restart resend by public `PermitIdV1`, closed artifact kind, and trusted
-  adaptor outbound digest, returning only a canonical typed artifact;
+- request-authorized exact resend while the trusted signer retains the complete
+  nonce identity, closed artifact kind, and canonical outbound digest, returning
+  only a canonical typed artifact;
 - closed, versioned Funding, Claim Adaptor, and Refund purposes;
 - canonical fixed-width commitment, reveal, partial-signature, and adaptor
   pre-signature payloads;
@@ -46,4 +47,8 @@ Neither G1a nor G1b is unilaterally adjudicated by this crate, and production
 remains unauthorized until every applicable gate has executed evidence. This
 recovery revision also requires separate review, public commitment, and a new
 DOM Contracts dependency pin before NAR-DC-P1-003 recovery conformance can be
-treated as closed.
+treated as closed. Production accepted-session construction, post-restart
+resend identity rehydration, and an atomic retained-handle snapshot remain
+blocked on a signed interface amendment. The source-shaped signing-session
+constructor is quarantined to tests/fuzzing, and the production API fails
+closed instead of inferring any of these authorities.
