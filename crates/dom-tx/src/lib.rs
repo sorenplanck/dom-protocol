@@ -481,6 +481,11 @@ mod tests {
         assert_eq!(tx.outputs.len(), 1);
         assert_eq!(tx.kernels.len(), 1);
         assert_eq!(tx.kernels[0].fee.noms(), 100);
+        assert_eq!(
+            tx.outputs[0].range_proof_bytes().unwrap().len(),
+            dom_crypto::RANGE_PROOF_SIZE
+        );
+        assert_eq!(dom_crypto::RANGE_PROOF_SIZE, 739);
 
         validate_transaction_structure(&tx).unwrap();
         validate_balance_equation(&tx).unwrap();
