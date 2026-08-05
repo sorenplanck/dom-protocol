@@ -57,12 +57,11 @@
 //! use dom_adaptor::ValidatedSigningRoundBootstrapV1;
 //! ```
 //!
-//! The public source request cannot inject a precomputed transcript or digest
-//! through a struct literal because all fields remain private:
+//! The unratified source-shaped signing-session request is not part of the
+//! production API:
 //!
 //! ```compile_fail
 //! use dom_adaptor::SigningRoundSessionRequestV1;
-//! let _request = SigningRoundSessionRequestV1 { /* private fields */ };
 //! ```
 //!
 //! The persistent DSC1 fuzz harness is unavailable in ordinary builds:
@@ -193,9 +192,9 @@ pub use share_pop::{
     prove_share_knowledge_v1, verify_share_knowledge_v1, SharePoPStatementV1, ShareProofV1,
 };
 pub use signing_round::{
-    AcceptedMessageDispositionV1, SigningRoundSessionRequestV1, ValidatedAcceptedSessionMessageV1,
-    ValidatedCommitmentRoundV1, ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1,
-    ValidatedRevealRoundV1, ValidatedSigningRoundStateV1,
+    AcceptedMessageDispositionV1, ValidatedAcceptedSessionMessageV1, ValidatedCommitmentRoundV1,
+    ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1, ValidatedRevealRoundV1,
+    ValidatedSigningRoundStateV1,
 };
 
 #[cfg(fuzzing)]

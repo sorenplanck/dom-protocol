@@ -1107,11 +1107,17 @@ pub trait VaultReservationHandleV1 {
     fn spent_reveal(&self) -> Option<Self::SpentArtifactView<'_>>;
 }
 
-/// Durable computation stage that must be recorded before any corresponding
-/// secret generation, secret open, or private computation.
+/// Durable computation stage for one exact signer-selected attempt.
+///
+/// The ordering authority is
+/// `NAR-DC-P1-004-live-store-layout-and-runtime-closure.en.md` section 8.3
+/// (whose hash is incorporated by signed NAR-DC-P1-005 section 1). Initial
+/// nonce KDF and zero-result retry selection occur privately first; the final
+/// retry is then durably recorded before sealing or any public computation.
+/// Reveal and partial stages are recorded before opening the sealed secret.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VaultComputationStageV1 {
-    /// Charged reservation exists and nonce derivation is about to begin.
+    /// Private KDF selected the final retry; its durable attempt precedes sealing.
     NonceDerivation,
     /// Reveal computation is about to open the encrypted nonce record.
     NonceReveal,
@@ -1190,7 +1196,7 @@ pub trait NonceVaultV1: Sized {
         request: crate::ReservationResumeRequestV1,
     ) -> core::result::Result<ReservationResumeResultV1<Self::ReservationHandle>, Self::Error>;
 
-    /// Durably mark the unique nonce-derivation attempt.
+    /// Durably mark the unique final-retry attempt after private KDF selection.
     fn begin_nonce_derivation(
         &mut self,
         reservation: &mut Self::ReservationHandle,

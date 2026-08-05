@@ -7,12 +7,11 @@ use crate::{
     NonceVaultError, NonceVaultV1, PartialSignatureV1, PreparedExposureV1, PublicNoncePairV1,
     ResendProtocolStageV1, ResendRequestV1, ReservationContextBindingV1, ReservationLiveStageV1,
     ReservationLookupCustodyV1, ReservationRequestLookupV1, ReservationResumeRequestV1,
-    ReservationResumeResultV1, RestoreState, SessionContextV1, SigningRoundSessionRequestV1,
-    SigningShareV1, SpentArtifactDescriptorV1, TerminalReservationV1, TrustedChainIdV1,
-    ValidatedCommitmentRoundV1, ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1,
-    ValidatedRevealRoundV1, ValidatedSigningRoundStateV1, VaultArtifactPersistencePermitV1,
-    VaultExportedArtifactV1, VaultReservationHandleV1, VaultSecretImportCapabilityV1,
-    VaultSecretSealCapabilityV1,
+    ReservationResumeResultV1, RestoreState, SessionContextV1, SigningShareV1,
+    SpentArtifactDescriptorV1, TerminalReservationV1, TrustedChainIdV1, ValidatedCommitmentRoundV1,
+    ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1, ValidatedRevealRoundV1,
+    VaultArtifactPersistencePermitV1, VaultExportedArtifactV1, VaultReservationHandleV1,
+    VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
 };
 use core::fmt;
 use dom_crypto::{schnorr_challenge, PartialSig};
@@ -233,21 +232,6 @@ where
         }
     }
 
-    /// Construct the opaque signing-round owner from validated canonical inputs.
-    pub fn begin_signing_round(
-        &self,
-        request: SigningRoundSessionRequestV1,
-    ) -> SignerResult<Vault, Custody, ValidatedSigningRoundStateV1> {
-        let bootstrap =
-            crate::signing_round::ValidatedSigningRoundBootstrapV1::from_session_request(
-                self.trusted_chain_id,
-                request,
-                &self.signing_share,
-            )?;
-        ValidatedSigningRoundStateV1::from_bootstrap(bootstrap, &self.signing_share)
-            .map_err(Into::into)
-    }
-
     /// Delegate the reconciled read-only recovery state of the concrete vault.
     pub fn restore_state(&self) -> RestoreState {
         self.vault.restore_state()
@@ -287,6 +271,7 @@ where
             &expected_lookup,
             &expected_binding,
             ReservationLiveStageV1::PreDerivation,
+            None,
         )?;
         Ok(ReservedNonceV1 {
             handle,
@@ -347,6 +332,7 @@ where
                     &request_lookup,
                     &binding_digest,
                     snapshot.stage,
+                    snapshot.final_retry_counter,
                 )?;
                 let state = match snapshot.stage {
                     ReservationLiveStageV1::PreDerivation => {
@@ -359,6 +345,11 @@ where
                         })
                     }
                     ReservationLiveStageV1::AfterCommitment => {
+                        let resumed_context = context.with_retry_counter(
+                            snapshot
+                                .final_retry_counter
+                                .ok_or(NonceVaultError::CorruptState)?,
+                        );
                         let permit_id = snapshot
                             .spent_commitment
                             .as_ref()
@@ -368,7 +359,7 @@ where
                         ResumedReservationV1::AfterCommitment(CommitmentExportedV1 {
                             handle,
                             request_lookup,
-                            context,
+                            context: resumed_context,
                             participant_id,
                             context_binding_digest: binding_digest,
                             nonce_identity: None,
@@ -376,6 +367,11 @@ where
                         })
                     }
                     ReservationLiveStageV1::AfterReveal => {
+                        let resumed_context = context.with_retry_counter(
+                            snapshot
+                                .final_retry_counter
+                                .ok_or(NonceVaultError::CorruptState)?,
+                        );
                         let permit_id = snapshot
                             .spent_reveal
                             .as_ref()
@@ -385,7 +381,7 @@ where
                         ResumedReservationV1::AfterReveal(RevealExportedV1 {
                             handle,
                             request_lookup,
-                            context,
+                            context: resumed_context,
                             participant_id,
                             context_binding_digest: binding_digest,
                             nonce_identity: None,
@@ -410,19 +406,12 @@ where
             NonceCommitmentV1,
         ),
     > {
-        let derivation = SecretNonceDerivationV1::from_os_rng()?;
-        let mut retry = state.context.retry_counter();
-        let (effective_context, pair) = loop {
-            let candidate = state.context.with_retry_counter(retry);
-            if let Some(pair) = derivation.derive_pair(&self.signing_share, &candidate.to_bytes()) {
-                break (candidate, pair);
-            }
-            retry = retry
-                .checked_add(1)
-                .ok_or(AdaptorError::RetryCounterOverflow)?;
-        };
-        let request =
-            NonceDerivationRequestV1::new(state.context_binding_digest, effective_context.clone())?;
+        let (effective_context, pair, request) = prepare_private_nonce_derivation_attempt(
+            SecretNonceDerivationV1::from_os_rng()?,
+            &self.signing_share,
+            &state.context,
+            state.context_binding_digest,
+        )?;
         let operation_evidence = request.evidence();
         let attempt = self
             .vault
@@ -506,6 +495,7 @@ where
             &state.request_lookup,
             &state.context_binding_digest,
             ReservationLiveStageV1::AfterCommitment,
+            Some(effective_context.retry_counter()),
         )?;
         validate_spent_projection(
             &snapshot,
@@ -607,6 +597,7 @@ where
             &state.request_lookup,
             &state.context_binding_digest,
             ReservationLiveStageV1::AfterReveal,
+            Some(stage_context.retry_counter()),
         )?;
         validate_spent_projection(
             &snapshot,
@@ -852,6 +843,31 @@ where
     }
 }
 
+fn prepare_private_nonce_derivation_attempt(
+    derivation: SecretNonceDerivationV1,
+    signing_share: &SigningShareV1,
+    base_context: &SessionContextV1,
+    context_binding_digest: [u8; 32],
+) -> crate::Result<(
+    SessionContextV1,
+    crate::secret_nonce::SecretNoncePairV1,
+    NonceDerivationRequestV1,
+)> {
+    let mut retry = base_context.retry_counter();
+    let (effective_context, pair) = loop {
+        let candidate = base_context.with_retry_counter(retry);
+        if let Some(pair) = derivation.derive_pair(signing_share, &candidate.to_bytes()) {
+            break (candidate, pair);
+        }
+        retry = retry
+            .checked_add(1)
+            .ok_or(AdaptorError::RetryCounterOverflow)?;
+    };
+    drop(derivation);
+    let request = NonceDerivationRequestV1::new(context_binding_digest, effective_context.clone())?;
+    Ok((effective_context, pair, request))
+}
+
 struct LiveHandleSnapshotV1 {
     request_lookup: ReservationRequestLookupV1,
     context_binding_digest: [u8; 32],
@@ -891,6 +907,7 @@ fn validate_live_handle<Handle: VaultReservationHandleV1>(
     request_lookup: &ReservationRequestLookupV1,
     context_binding_digest: &[u8; 32],
     expected_stage: ReservationLiveStageV1,
+    expected_retry_counter: Option<u64>,
 ) -> core::result::Result<(), NonceVaultError> {
     let snapshot = snapshot_live_handle(handle)?;
     validate_live_snapshot(
@@ -898,6 +915,7 @@ fn validate_live_handle<Handle: VaultReservationHandleV1>(
         request_lookup,
         context_binding_digest,
         expected_stage,
+        expected_retry_counter,
     )
 }
 
@@ -906,10 +924,12 @@ fn validate_live_snapshot(
     request_lookup: &ReservationRequestLookupV1,
     context_binding_digest: &[u8; 32],
     expected_stage: ReservationLiveStageV1,
+    expected_retry_counter: Option<u64>,
 ) -> core::result::Result<(), NonceVaultError> {
     if &snapshot.request_lookup != request_lookup
         || &snapshot.context_binding_digest != context_binding_digest
         || snapshot.stage != expected_stage
+        || snapshot.final_retry_counter != expected_retry_counter
     {
         return Err(NonceVaultError::CorruptState);
     }
@@ -920,12 +940,21 @@ fn validate_live_snapshot(
                 && snapshot.spent_reveal.is_none() => {}
         ReservationLiveStageV1::AfterCommitment
             if snapshot.final_retry_counter.is_some()
-                && snapshot.spent_commitment.is_some()
+                && snapshot
+                    .spent_commitment
+                    .as_ref()
+                    .is_some_and(|spent| spent.kind() == ExposureKindV1::NonceCommitment)
                 && snapshot.spent_reveal.is_none() => {}
         ReservationLiveStageV1::AfterReveal
             if snapshot.final_retry_counter.is_some()
-                && snapshot.spent_commitment.is_some()
-                && snapshot.spent_reveal.is_some() => {}
+                && snapshot
+                    .spent_commitment
+                    .as_ref()
+                    .is_some_and(|spent| spent.kind() == ExposureKindV1::NonceCommitment)
+                && snapshot
+                    .spent_reveal
+                    .as_ref()
+                    .is_some_and(|spent| spent.kind() == ExposureKindV1::NonceReveal) => {}
         _ => return Err(NonceVaultError::CorruptState),
     }
     Ok(())
@@ -989,6 +1018,40 @@ fn nonce_commitment_from_reveal(
 mod tests {
     use super::*;
     use core::cell::Cell;
+
+    fn nonce_derivation_context() -> (SigningShareV1, SessionContextV1) {
+        let signing_share = SigningShareV1::from_be_bytes([0x41; 32]).expect("signing share");
+        let remote_share = SigningShareV1::from_be_bytes([0x42; 32]).expect("remote share");
+        let mut participant_public_keys = vec![
+            signing_share.public_key().clone(),
+            remote_share.public_key().clone(),
+        ];
+        participant_public_keys.sort_by_key(dom_crypto::PublicKey::to_compressed_bytes);
+        let participant_index = participant_public_keys
+            .iter()
+            .position(|key| key == signing_share.public_key())
+            .and_then(|index| u16::try_from(index).ok())
+            .expect("participant index");
+        let context = SessionContextV1::new(
+            crate::SessionContextInputsV1 {
+                chain_id: [0x43; 32],
+                session_id: [0x44; 32],
+                purpose: crate::PurposeV1::Refund,
+                direction: crate::DirectionV1::Initiator,
+                signing_phase: crate::SigningPhaseV1::SigNonceCommit,
+                template_hash: [0x45; 32],
+                message_digest: [0x46; 32],
+                transcript_hash: [0x47; 32],
+                retry_counter: 9,
+                participant_public_keys,
+                participant_index,
+                adaptor_point: None,
+            },
+            &signing_share,
+        )
+        .expect("nonce derivation context");
+        (signing_share, context)
+    }
 
     struct TestSpentArtifact {
         permit_id: crate::PermitIdV1,
@@ -1105,6 +1168,7 @@ mod tests {
             &handle.request_lookup,
             &handle.context_binding_digest,
             ReservationLiveStageV1::AfterCommitment,
+            Some(7),
         )
         .expect("valid snapshot");
         assert_eq!(handle.stage_reads.get(), 1);
@@ -1123,7 +1187,73 @@ mod tests {
             &handle.request_lookup,
             &handle.context_binding_digest,
             ReservationLiveStageV1::AfterCommitment,
+            Some(7),
         )
         .is_err());
+    }
+
+    #[test]
+    fn live_projection_rejects_wrong_retry_and_spent_kinds() {
+        let handle = changing_handle(
+            ReservationLiveStageV1::AfterCommitment,
+            ReservationLiveStageV1::AfterCommitment,
+            false,
+        );
+        let snapshot = snapshot_live_handle(&handle).expect("snapshot");
+        assert!(validate_live_snapshot(
+            &snapshot,
+            &handle.request_lookup,
+            &handle.context_binding_digest,
+            ReservationLiveStageV1::AfterCommitment,
+            Some(8),
+        )
+        .is_err());
+
+        let mut wrong_kind = changing_handle(
+            ReservationLiveStageV1::AfterCommitment,
+            ReservationLiveStageV1::AfterCommitment,
+            false,
+        );
+        wrong_kind
+            .commitment
+            .as_mut()
+            .expect("commitment descriptor")
+            .kind = ExposureKindV1::NonceReveal;
+        let snapshot = snapshot_live_handle(&wrong_kind).expect("snapshot");
+        assert!(validate_live_snapshot(
+            &snapshot,
+            &wrong_kind.request_lookup,
+            &wrong_kind.context_binding_digest,
+            ReservationLiveStageV1::AfterCommitment,
+            Some(7),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn private_kdf_finishes_before_the_final_retry_request_is_constructed() {
+        let (signing_share, context) = nonce_derivation_context();
+        let context_binding_digest = [0x48; 32];
+        let (effective_context, pair, request) = prepare_private_nonce_derivation_attempt(
+            SecretNonceDerivationV1::from_aux_for_test([0x49; 32]),
+            &signing_share,
+            &context,
+            context_binding_digest,
+        )
+        .expect("private derivation and request");
+        assert_eq!(effective_context.retry_counter(), 9);
+        assert_eq!(
+            request.validated_view().effective_retry_counter(),
+            effective_context.retry_counter()
+        );
+        assert_eq!(
+            request
+                .validated_view()
+                .reservation_context_binding_digest(),
+            &context_binding_digest
+        );
+        let scalars = pair.into_record_scalars();
+        assert_ne!(&scalars[..32], &[0; 32]);
+        assert_ne!(&scalars[32..], &[0; 32]);
     }
 }

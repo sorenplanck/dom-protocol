@@ -6,10 +6,13 @@ exercises the bounded `SessionContextV1` decoder and the closed purpose,
 direction, and signing-phase registries. Secret nonce material is never a fuzz
 input and is not written to the corpus.
 
-`dsc1_signing_round` exercises the exact DSC1 envelope parser plus bounded
-accepted-round sequencing, ancestry, idempotence, and equivocation handling.
-Its harness entry point exists only under cargo-fuzz's `cfg(fuzzing)` build;
-there is no Cargo feature that can expose it in release resolution.
+`dsc1_signing_round` first submits arbitrary bytes to the exact DSC1 envelope
+parser, then drives fuzz-selected structured actions over authenticated canonical
+commitment, reveal, and partial envelopes. The actions cover ordering,
+buffering, ancestry, idempotence, equivocation, semantic reveal failure, and
+partial verification. Its harness entry point exists only under cargo-fuzz's
+`cfg(fuzzing)` build; there is no Cargo feature that can expose it in release
+resolution.
 
 Multi-parser targets consume a dedicated selector byte before passing the
 remaining payload to a parser, so every canonical magic prefix remains

@@ -3,12 +3,16 @@
 use crate::vault_operation::{CommitmentEntryV1, RevealEntryV1};
 use crate::{
     advance_transcript_hash_v1, aggregate_public_nonces_v1, binding_factor_v1,
-    canonical_template_v1, initial_transcript_hash_v1, nonce_commitment_hash_v1,
-    session_message_digest_v1, AdaptorError, BindingContextV1, BindingFactorV1, ContractKindV1,
-    NonceCommitmentV1, NonceRevealV1, PartialSignatureV1, ParticipantIdentityV1,
+    nonce_commitment_hash_v1, session_message_digest_v1, AdaptorError, BindingContextV1,
+    BindingFactorV1, NonceCommitmentV1, NonceRevealV1, PartialSignatureV1,
     ParticipantPublicNoncesV1, ParticipantRosterV1, ProtocolCommitmentSetV1, ProtocolRevealSetV1,
-    PurposeV1, ResendProtocolStageV1, Result, SessionContextInputsV1, SessionContextV1,
-    SigningPhaseV1, SigningShareV1, StageComputationRequestV1, TrustedChainIdV1,
+    PurposeV1, ResendProtocolStageV1, Result, SessionContextV1, SigningPhaseV1,
+    StageComputationRequestV1, TrustedChainIdV1,
+};
+#[cfg(any(test, fuzzing))]
+use crate::{
+    canonical_template_v1, initial_transcript_hash_v1, ContractKindV1, ParticipantIdentityV1,
+    SessionContextInputsV1, SigningShareV1,
 };
 use dom_crypto::{schnorr_verify, PublicKey, SchnorrSignature};
 
@@ -271,13 +275,13 @@ impl ValidatedAcceptedSessionMessageV1 {
     }
 }
 
-/// One-shot non-authoritative source values for a fresh signing round.
+/// Test/evidence-only non-authoritative source values for a fresh signing round.
 ///
-/// The request deliberately carries the complete transaction template rather
-/// than caller-computed template, kernel-message, transcript, participant, or
-/// index digests. The safe signer consumes it and recomputes every derived
-/// value through the authoritative DOM and validated session boundaries.
-pub struct SigningRoundSessionRequestV1 {
+/// This type is deliberately absent from ordinary builds. A production
+/// constructor remains blocked until a signed accepted-session authority
+/// freezes session uniqueness, accepted terms, and transcript ancestry.
+#[cfg(any(test, fuzzing))]
+pub(crate) struct SigningRoundSessionRequestV1 {
     session_id: [u8; 32],
     contract_kind: ContractKindV1,
     purpose: PurposeV1,
@@ -287,13 +291,9 @@ pub struct SigningRoundSessionRequestV1 {
     adaptor_point: Option<PublicKey>,
 }
 
+#[cfg(any(test, fuzzing))]
 impl SigningRoundSessionRequestV1 {
-    /// Collect the complete source objects needed by the trusted signer.
-    ///
-    /// This constructor accepts no digest, transcript, local index, sequence,
-    /// capability, or persistence result. Those values are recomputed or fixed
-    /// only when the request is consumed by `VaultBackedSignerV1`.
-    pub fn new(
+    pub(crate) fn new(
         session_id: [u8; 32],
         contract_kind: ContractKindV1,
         purpose: PurposeV1,
@@ -326,6 +326,7 @@ impl SigningRoundSessionRequestV1 {
 }
 
 /// Opaque bootstrap produced only inside the trusted signer boundary.
+#[cfg(any(test, fuzzing))]
 pub(crate) struct ValidatedSigningRoundBootstrapV1 {
     trusted_chain_id: TrustedChainIdV1,
     base_context: SessionContextV1,
@@ -333,6 +334,7 @@ pub(crate) struct ValidatedSigningRoundBootstrapV1 {
     local_protocol_index: u16,
 }
 
+#[cfg(any(test, fuzzing))]
 impl ValidatedSigningRoundBootstrapV1 {
     pub(crate) fn from_session_request(
         trusted_chain_id: TrustedChainIdV1,
@@ -474,6 +476,7 @@ struct PartialPublicInputsV1 {
 }
 
 impl ValidatedSigningRoundStateV1 {
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn from_bootstrap(
         bootstrap: ValidatedSigningRoundBootstrapV1,
         signing_share: &SigningShareV1,
@@ -619,11 +622,14 @@ impl ValidatedSigningRoundStateV1 {
                 ));
             }
             let message = self.pending.remove(position);
-            if let AcceptedPayloadV1::Reveal(reveal) = &message.payload {
-                self.verify_reveal(protocol_index, reveal)?;
-            }
-            if let AcceptedPayloadV1::Partial(partial) = &message.payload {
-                self.verify_partial(protocol_index, partial)?;
+            let semantic_result = match &message.payload {
+                AcceptedPayloadV1::Reveal(reveal) => self.verify_reveal(protocol_index, reveal),
+                AcceptedPayloadV1::Partial(partial) => self.verify_partial(protocol_index, partial),
+                AcceptedPayloadV1::Commitment(_) => Ok(()),
+            };
+            if let Err(error) = semantic_result {
+                self.closed = true;
+                return Err(error);
             }
             self.current_transcript = advance_transcript_hash_v1(
                 &self.current_transcript,
@@ -1042,7 +1048,7 @@ fn fuzz_dsc1_signing_round_acceptance_inner(data: &[u8]) -> Result<()> {
     use dom_consensus::{Transaction, TransactionKernel};
     use dom_core::{Amount, Hash256};
     use dom_crypto::pedersen::Commitment;
-    use dom_crypto::SecretKey;
+    use dom_crypto::{schnorr_challenge, PartialSig, SecretKey};
 
     let trusted_chain =
         TrustedChainIdV1::from_authenticated_genesis(0x5343_465a, &Hash256::from_bytes([0x41; 32]));
@@ -1105,7 +1111,236 @@ fn fuzz_dsc1_signing_round_acceptance_inner(data: &[u8]) -> Result<()> {
         local_share,
     )?;
     let mut state = ValidatedSigningRoundStateV1::from_bootstrap(bootstrap, local_share)?;
-    let _ = state.accept_message(data);
+    let selector = data.first().copied().unwrap_or(0);
+    let arbitrary = data.get(1..).unwrap_or_default();
+    let _ = state.accept_message(arbitrary);
+    if state.closed {
+        return Ok(());
+    }
+
+    let nonce_pairs = [
+        (
+            SigningShareV1::from_be_bytes([0x21; 32])?,
+            SigningShareV1::from_be_bytes([0x22; 32])?,
+        ),
+        (
+            SigningShareV1::from_be_bytes([0x23; 32])?,
+            SigningShareV1::from_be_bytes([0x24; 32])?,
+        ),
+    ];
+    let identity_secret = |participant: &ParticipantIdentityV1| {
+        if participant.identity_public_key() == &identity_a.public_key() {
+            &identity_a
+        } else {
+            &identity_b
+        }
+    };
+    let mut predecessor = state.current_transcript;
+    let mut commitments = Vec::with_capacity(2);
+    for (protocol_index, participant) in state.roster.entries().iter().enumerate() {
+        let signing_index = state.roster.signing_index(participant.participant_id())?;
+        let digest = nonce_commitment_hash_v1(
+            state.base_context.chain_id(),
+            state.base_context.session_id(),
+            participant.participant_id(),
+            state.base_context.purpose(),
+            state.base_context.template_hash(),
+            nonce_pairs[protocol_index].0.public_key(),
+            nonce_pairs[protocol_index].1.public_key(),
+            state.base_context.adaptor_point(),
+        )?;
+        let payload = NonceCommitmentV1::new(
+            state.base_context.purpose(),
+            signing_index,
+            *digest.as_bytes(),
+        )
+        .to_bytes();
+        let message = fuzz_signed_envelope(
+            state.base_context.chain_id(),
+            state.base_context.session_id(),
+            participant.participant_id(),
+            0,
+            &predecessor,
+            KIND_NONCE_COMMITMENT,
+            &payload,
+            identity_secret(participant),
+        )?;
+        predecessor = advance_transcript_hash_v1(
+            &predecessor,
+            &session_message_digest_v1(&message[..message.len() - SIGNATURE_LEN]),
+            participant.direction(),
+            SigningPhaseV1::SigNonceCommit,
+        );
+        commitments.push(message);
+    }
+    let commitment_order = if selector & 1 == 0 { [0, 1] } else { [1, 0] };
+    for index in commitment_order {
+        let _ = state.accept_message(&commitments[index]);
+    }
+    if selector & 2 != 0 {
+        let _ = state.accept_message(&commitments[0]);
+    }
+    if selector & 4 != 0 {
+        let mut equivocation = commitments[0].clone();
+        let payload_last = equivocation.len() - SIGNATURE_LEN - 1;
+        equivocation[payload_last] ^= data.get(1).copied().unwrap_or(1) | 1;
+        fuzz_resign_envelope(
+            &mut equivocation,
+            identity_secret(&state.roster.entries()[0]),
+            state.base_context.chain_id(),
+        )?;
+        let _ = state.accept_message(&equivocation);
+        return Ok(());
+    }
+
+    let mut reveals = Vec::with_capacity(2);
+    for (protocol_index, participant) in state.roster.entries().iter().enumerate() {
+        let signing_index = state.roster.signing_index(participant.participant_id())?;
+        let (first, second) = if selector & 16 != 0 && protocol_index == 0 {
+            (
+                SigningShareV1::from_be_bytes([0x31; 32])?
+                    .public_key()
+                    .clone(),
+                SigningShareV1::from_be_bytes([0x32; 32])?
+                    .public_key()
+                    .clone(),
+            )
+        } else {
+            (
+                nonce_pairs[protocol_index].0.public_key().clone(),
+                nonce_pairs[protocol_index].1.public_key().clone(),
+            )
+        };
+        let payload =
+            NonceRevealV1::new(state.base_context.purpose(), signing_index, first, second)
+                .to_bytes();
+        let message = fuzz_signed_envelope(
+            state.base_context.chain_id(),
+            state.base_context.session_id(),
+            participant.participant_id(),
+            1,
+            &predecessor,
+            KIND_NONCE_REVEAL,
+            &payload,
+            identity_secret(participant),
+        )?;
+        predecessor = advance_transcript_hash_v1(
+            &predecessor,
+            &session_message_digest_v1(&message[..message.len() - SIGNATURE_LEN]),
+            participant.direction(),
+            SigningPhaseV1::SigNonceReveal,
+        );
+        reveals.push(message);
+    }
+    let reveal_order = if selector & 8 == 0 { [0, 1] } else { [1, 0] };
+    for index in reveal_order {
+        let _ = state.accept_message(&reveals[index]);
+    }
+    if state.closed || state.reveals.len() != 2 {
+        return Ok(());
+    }
+    if selector & 32 != 0 {
+        let _ = state.accept_message(&reveals[0]);
+    }
+    if selector & 64 == 0 {
+        return Ok(());
+    }
+
+    let participant = &state.roster.entries()[0];
+    let participant_share = if participant.signing_public_key() == share_a.public_key() {
+        &share_a
+    } else {
+        &share_b
+    };
+    let inputs = state.partial_public_inputs()?;
+    let challenge = schnorr_challenge(
+        &inputs.aggregate_nonce_hat.to_compressed_bytes(),
+        &inputs.aggregate_signing_key,
+        state.base_context.chain_id(),
+        state.base_context.message_digest(),
+    );
+    let binding = PartialSig::from_bytes(&inputs.binding_factor.to_be_bytes())?;
+    let nonce_pair = crate::secret_nonce::SecretNoncePairV1::from_be_bytes(
+        *nonce_pairs[0].0.as_be_bytes(),
+        *nonce_pairs[0].1.as_be_bytes(),
+    )?;
+    let partial =
+        nonce_pair.sign_bound_partial(&binding, challenge.as_bytes(), participant_share)?;
+    let payload = PartialSignatureV1::new(
+        state.base_context.purpose(),
+        state.roster.signing_index(participant.participant_id())?,
+        *state.base_context.template_hash(),
+        partial,
+    )
+    .to_bytes();
+    let mut message = fuzz_signed_envelope(
+        state.base_context.chain_id(),
+        state.base_context.session_id(),
+        participant.participant_id(),
+        2,
+        &predecessor,
+        KIND_PARTIAL_SIGNATURE,
+        &payload,
+        identity_secret(participant),
+    )?;
+    if selector & 128 != 0 {
+        let payload_last = message.len() - SIGNATURE_LEN - 1;
+        message[payload_last] ^= data.get(2).copied().unwrap_or(1) | 1;
+        fuzz_resign_envelope(
+            &mut message,
+            identity_secret(participant),
+            state.base_context.chain_id(),
+        )?;
+    }
+    let _ = state.accept_message(&message);
+    Ok(())
+}
+
+#[cfg(fuzzing)]
+#[allow(clippy::too_many_arguments)]
+fn fuzz_signed_envelope(
+    chain_id: &[u8; 32],
+    session_id: &[u8; 32],
+    sender_id: &[u8; 32],
+    sequence: u64,
+    predecessor: &[u8; 32],
+    kind: u8,
+    payload: &[u8],
+    identity_secret: &dom_crypto::SecretKey,
+) -> Result<Vec<u8>> {
+    let payload_len = u32::try_from(payload.len())
+        .map_err(|_| AdaptorError::InvalidContext("DSC1 fuzz payload length overflow"))?;
+    let mut bytes = Vec::with_capacity(FIXED_ENVELOPE_LEN + payload.len());
+    bytes.extend_from_slice(b"DSC1");
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.push(kind);
+    bytes.push(0);
+    bytes.extend_from_slice(chain_id);
+    bytes.extend_from_slice(session_id);
+    bytes.extend_from_slice(sender_id);
+    bytes.extend_from_slice(&sequence.to_le_bytes());
+    bytes.extend_from_slice(predecessor);
+    bytes.extend_from_slice(&payload_len.to_le_bytes());
+    bytes.extend_from_slice(payload);
+    let digest = session_message_digest_v1(&bytes);
+    let signature = dom_crypto::schnorr_sign(identity_secret, &digest, chain_id)?;
+    bytes.extend_from_slice(&signature.to_bytes());
+    Ok(bytes)
+}
+
+#[cfg(fuzzing)]
+fn fuzz_resign_envelope(
+    bytes: &mut [u8],
+    identity_secret: &dom_crypto::SecretKey,
+    chain_id: &[u8; 32],
+) -> Result<()> {
+    let signature_offset = bytes
+        .len()
+        .checked_sub(SIGNATURE_LEN)
+        .ok_or(AdaptorError::InvalidContext("DSC1 fuzz envelope truncated"))?;
+    let digest = session_message_digest_v1(&bytes[..signature_offset]);
+    let signature = dom_crypto::schnorr_sign(identity_secret, &digest, chain_id)?;
+    bytes[signature_offset..].copy_from_slice(&signature.to_bytes());
     Ok(())
 }
 
@@ -1227,6 +1462,26 @@ mod tests {
         fn sender_secret(&self, message: &[u8]) -> &SecretKey {
             &self.identity_secrets[self.sender_secret_index(message)]
         }
+
+        fn protocol_identity_secret(&self, protocol_index: usize) -> &SecretKey {
+            let identity_key = self.roster.entries()[protocol_index].identity_public_key();
+            self.identity_secrets
+                .iter()
+                .find(|secret| &secret.public_key() == identity_key)
+                .expect("protocol identity secret")
+        }
+    }
+
+    fn protocol_nonce_pair(protocol_index: usize) -> (SigningShareV1, SigningShareV1) {
+        let (first, second) = match protocol_index {
+            0 => ([0x15; 32], [0x16; 32]),
+            1 => ([0x17; 32], [0x18; 32]),
+            _ => panic!("two-party protocol index"),
+        };
+        (
+            SigningShareV1::from_be_bytes(first).expect("first nonce"),
+            SigningShareV1::from_be_bytes(second).expect("second nonce"),
+        )
     }
 
     fn commitment_fixture() -> CommitmentFixture {
@@ -1770,6 +2025,186 @@ mod tests {
         assert!(fixture.state.accept_message(&equivocation).is_err());
         assert!(fixture.state.closed);
         assert!(fixture.state.accept_message(&fixture.messages[1]).is_err());
+    }
+
+    #[test]
+    fn semantic_reveal_and_partial_failures_permanently_close_the_logical_slot() {
+        let mut reveal_fixture = commitment_fixture();
+        for message in &reveal_fixture.messages {
+            assert_eq!(
+                reveal_fixture
+                    .state
+                    .accept_message(message)
+                    .expect("accepted commitment"),
+                AcceptedMessageDispositionV1::Advanced,
+            );
+        }
+        let participant = &reveal_fixture.roster.entries()[0];
+        let signing_index = reveal_fixture
+            .roster
+            .signing_index(participant.participant_id())
+            .expect("signing index");
+        let predecessor = reveal_fixture.state.current_transcript;
+        let wrong_pair = (
+            SigningShareV1::from_be_bytes([0x21; 32]).expect("wrong nonce"),
+            SigningShareV1::from_be_bytes([0x22; 32]).expect("wrong nonce"),
+        );
+        let wrong_reveal = NonceRevealV1::new(
+            PurposeV1::Refund,
+            signing_index,
+            wrong_pair.0.public_key().clone(),
+            wrong_pair.1.public_key().clone(),
+        )
+        .to_bytes();
+        let wrong_message = signed_envelope(
+            reveal_fixture.state.base_context.chain_id(),
+            reveal_fixture.state.base_context.session_id(),
+            participant.participant_id(),
+            1,
+            &predecessor,
+            KIND_NONCE_REVEAL,
+            &wrong_reveal,
+            reveal_fixture.protocol_identity_secret(0),
+        );
+        assert!(ValidatedAcceptedSessionMessageV1::parse(
+            &wrong_message,
+            &reveal_fixture.chain,
+            &reveal_fixture.roster,
+        )
+        .is_ok());
+        assert!(reveal_fixture.state.accept_message(&wrong_message).is_err());
+        assert!(reveal_fixture.state.closed);
+
+        let correct_pair = protocol_nonce_pair(0);
+        let correct_reveal = NonceRevealV1::new(
+            PurposeV1::Refund,
+            signing_index,
+            correct_pair.0.public_key().clone(),
+            correct_pair.1.public_key().clone(),
+        )
+        .to_bytes();
+        let corrected_message = signed_envelope(
+            reveal_fixture.state.base_context.chain_id(),
+            reveal_fixture.state.base_context.session_id(),
+            participant.participant_id(),
+            1,
+            &predecessor,
+            KIND_NONCE_REVEAL,
+            &correct_reveal,
+            reveal_fixture.protocol_identity_secret(0),
+        );
+        assert!(reveal_fixture
+            .state
+            .accept_message(&corrected_message)
+            .is_err());
+
+        let mut partial_fixture = commitment_fixture();
+        for message in &partial_fixture.messages {
+            partial_fixture
+                .state
+                .accept_message(message)
+                .expect("accepted commitment");
+        }
+        for protocol_index in 0..2 {
+            let participant = &partial_fixture.roster.entries()[protocol_index];
+            let signing_index = partial_fixture
+                .roster
+                .signing_index(participant.participant_id())
+                .expect("signing index");
+            let pair = protocol_nonce_pair(protocol_index);
+            let payload = NonceRevealV1::new(
+                PurposeV1::Refund,
+                signing_index,
+                pair.0.public_key().clone(),
+                pair.1.public_key().clone(),
+            )
+            .to_bytes();
+            let message = signed_envelope(
+                partial_fixture.state.base_context.chain_id(),
+                partial_fixture.state.base_context.session_id(),
+                participant.participant_id(),
+                1,
+                &partial_fixture.state.current_transcript,
+                KIND_NONCE_REVEAL,
+                &payload,
+                partial_fixture.protocol_identity_secret(protocol_index),
+            );
+            partial_fixture
+                .state
+                .accept_message(&message)
+                .expect("accepted reveal");
+        }
+        let inputs = partial_fixture
+            .state
+            .partial_public_inputs()
+            .expect("partial inputs");
+        let challenge = schnorr_challenge(
+            &inputs.aggregate_nonce_hat.to_compressed_bytes(),
+            &inputs.aggregate_signing_key,
+            partial_fixture.state.base_context.chain_id(),
+            partial_fixture.state.base_context.message_digest(),
+        );
+        let binding =
+            PartialSig::from_bytes(&inputs.binding_factor.to_be_bytes()).expect("binding scalar");
+        let participant = &partial_fixture.roster.entries()[0];
+        let signing_share = [[0x13; 32], [0x14; 32]]
+            .into_iter()
+            .map(|bytes| SigningShareV1::from_be_bytes(bytes).expect("signing share"))
+            .find(|share| share.public_key() == participant.signing_public_key())
+            .expect("participant signing share");
+        let nonce_pair = protocol_nonce_pair(0);
+        let nonce_pair = crate::secret_nonce::SecretNoncePairV1::from_be_bytes(
+            *nonce_pair.0.as_be_bytes(),
+            *nonce_pair.1.as_be_bytes(),
+        )
+        .expect("nonce pair");
+        let partial = nonce_pair
+            .sign_bound_partial(&binding, challenge.as_bytes(), &signing_share)
+            .expect("partial scalar");
+        let payload = PartialSignatureV1::new(
+            PurposeV1::Refund,
+            partial_fixture
+                .roster
+                .signing_index(participant.participant_id())
+                .expect("signing index"),
+            *partial_fixture.state.base_context.template_hash(),
+            partial,
+        )
+        .to_bytes();
+        let correct_message = signed_envelope(
+            partial_fixture.state.base_context.chain_id(),
+            partial_fixture.state.base_context.session_id(),
+            participant.participant_id(),
+            2,
+            &partial_fixture.state.current_transcript,
+            KIND_PARTIAL_SIGNATURE,
+            &payload,
+            partial_fixture.protocol_identity_secret(0),
+        );
+        let mut wrong_message = correct_message.clone();
+        let scalar_last_byte = wrong_message.len() - SIGNATURE_LEN - 1;
+        wrong_message[scalar_last_byte] ^= 1;
+        let identity_secret = partial_fixture.sender_secret(&wrong_message);
+        resign_envelope(
+            &mut wrong_message,
+            identity_secret,
+            partial_fixture.chain.as_bytes(),
+        );
+        assert!(ValidatedAcceptedSessionMessageV1::parse(
+            &wrong_message,
+            &partial_fixture.chain,
+            &partial_fixture.roster,
+        )
+        .is_ok());
+        assert!(partial_fixture
+            .state
+            .accept_message(&wrong_message)
+            .is_err());
+        assert!(partial_fixture.state.closed);
+        assert!(partial_fixture
+            .state
+            .accept_message(&correct_message)
+            .is_err());
     }
 
     #[test]
