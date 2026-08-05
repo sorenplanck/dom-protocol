@@ -1,0 +1,92 @@
+id	area	attack	expected_result	required_evidence
+API-001	secret-api	Import the production secret nonce-pair type from a default downstream build	Compilation fails because no public default-build path exports the type	External compile-fail diagnostic tied to the intended symbol
+API-002	secret-api	Call raw nonce derivation from a default downstream build	Compilation fails because derivation is absent from release resolution	External compile-fail diagnostic plus release feature metadata
+API-003	secret-api	Supply deterministic auxiliary randomness in a default downstream build	Compilation fails because deterministic randomness is test-only	External compile-fail diagnostic plus feature graph
+API-004	secret-api	Obtain raw public nonce points directly from a live secret pair	Compilation fails because only the vault-backed state transition can prepare the typed reveal	External compile-fail diagnostic
+API-005	secret-api	Call raw partial signing from a default downstream build	Compilation fails because partial signing is not a public escape hatch	External compile-fail diagnostic
+API-006	secret-api	Clone a secret nonce pair	Compilation fails because Clone is not implemented	External compile-fail diagnostic
+API-007	secret-api	Format a secret nonce pair with Debug or Display	Compilation fails because neither trait is implemented	External compile-fail diagnostics for both traits
+API-008	secret-api	Serialize or deserialize a secret nonce pair	Compilation fails because generic serialization traits are absent	External compile-fail diagnostic and dependency/source review
+API-009	capability	Construct an exposure capability through a public constructor	Compilation fails because no public constructor exists	External compile-fail diagnostic
+API-010	capability	Convert a 252-byte permit record into an exposure capability	Compilation fails because syntax cannot become authority	External compile-fail diagnostic and constructor trace
+API-011	capability	Deserialize an exposure capability	Compilation fails because no byte or Serde conversion exists	External compile-fail diagnostic
+API-012	capability	Clone or copy an exposure capability	Compilation fails because Clone and Copy are absent	External compile-fail diagnostics
+API-013	capability	Debug, display, serialize, or deserialize an exposure capability	Compilation fails for every attempted trait	External compile-fail diagnostics
+API-014	capability	Use one capability for two exports	Compilation fails by move semantics or the second use is unreachable	External compile-fail diagnostic tied to moved value
+API-015	capability	Use a capability with another vault instance	The type or runtime binding rejects it before export	Compile-fail evidence when encoded in types, otherwise fail-closed runtime evidence
+API-016	capability	Use a capability for different artifact bytes	Authorization fails and no bytes are returned	Runtime negative test with durable state inspection
+API-017	capability	Forge authorization with a permit digest	Compilation fails or authorization rejects it before export	Compile-fail or fail-closed runtime evidence
+API-018	caller-input	Provide a witness receipt through an application-facing API	Compilation fails because no such parameter exists	Public API inventory and compile-fail attempt
+API-019	caller-input	Provide witness-accepted=true through an application-facing API	Compilation fails because no Boolean authority exists	Public API inventory and compile-fail attempt
+API-020	caller-input	Provide storage-success=true or sync-success=true	Compilation fails because no Boolean durability authority exists	Public API inventory and compile-fail attempt
+API-021	caller-input	Provide a witness key through an operation call	Compilation fails because keys are pinned in trusted composition	Public API inventory and compile-fail attempt
+API-022	caller-input	Provide k1, k2, a raw nonce, or a raw partial through the application API	Compilation fails for every raw secret or raw partial route	Public API inventory and compile-fail attempts
+API-023	composition	Replace the production vault at runtime with Box dyn NonceVaultV1	Compilation or composition review proves the production root has no replacement surface	Feature graph, constructor trace, and compile-fail attempt
+API-024	composition	Enable skip-vault, skip-witness, skip-persist, or equivalent feature	No such production feature or code path exists	Cargo metadata and source search
+REG-001	registries	Parse an unknown PurposeV1 byte	Parsing fails closed for every undefined byte class	Exhaustive property test
+REG-002	registries	Parse an unknown DirectionV1 byte	Parsing fails closed for every undefined byte class	Exhaustive property test
+REG-003	registries	Parse an unknown SigningPhaseV1 u16	Parsing fails closed for every tested undefined class and boundaries	Property test over bounded representative and boundary values
+REG-004	registries	Parse an unknown ExposureKindV1 byte	Parsing fails closed for every undefined byte class	Exhaustive property test
+REG-005	registries	Execute Sponsor in strict Phase 1	Codec accepts 0x04 and policy rejects execution before nonce reservation	Runtime policy test with zero vault initialization
+REG-006	registries	Introduce a second semantic registry in Wallet	Review finds only canonical DOM authority or total temporary conformance mapping outside production	Type/source inventory and exhaustive conversion tests
+SEC-001	secret-record	Decode a record shorter than the context-derived exact length	Decode fails before scalar reconstruction and leaves no secret state	Truncation test for every byte boundary
+SEC-002	secret-record	Decode a record with trailing bytes	Decode fails closed	Extension tests for representative and maximum lengths
+SEC-003	secret-record	Set context_length below, above, or inconsistent with canonical context	Decode fails before allocation beyond the fixed bound	Boundary tests and allocation review
+SEC-004	secret-record	Mutate magic, schema, reservation ID, participant ID, or closed context field	Authentication or semantic validation fails and no nonce owner is returned	Field mutation matrix
+SEC-005	secret-record	Encode scalar zero, group order, greater than order, or noncanonical width	Decode fails through the authoritative exact-scalar parser	Boundary vectors and parser trace
+SEC-006	secret-record	Mismatch record reservation ID with AAD, journal, index, tombstone, or request	Open or semantic validation fails closed	Cross-binding mutation matrix
+SEC-007	secret-record	Mismatch participant, chain, session, purpose, template, direction, phase, transcript, message, index, signing key, or adaptor	Open or semantic validation fails closed before exposure	Cross-binding mutation matrix
+SEC-008	secret-record	Mutate every AAD or sealed-envelope field	AEAD authentication or strict envelope validation fails closed	Mutation matrix using approved Wallet sealer
+SEC-009	secret-record	Reopen a record whose recomputed public nonces, commitment, or persisted reveal differ	Validation fails and reservation burns or quarantines; no export occurs	Runtime corruption tests with terminal state inspection
+SEC-010	secret-record	Observe plaintext through Clone, Debug, Display, Serde, logs, errors, temp files, or reports	No reusable plaintext is observable through any route	Compile-fail traits, source search, log capture, crash artifact scan
+PER-001	permit	Parse a permit shorter or longer than exactly 252 bytes	Parsing fails closed	Every truncation plus representative extensions
+PER-002	permit	Mutate permit magic, version, exposure kind, IDs, purpose, template, digest, epoch, revision, or receipt-chain hash	Authorization fails before export	Field mutation matrix
+PER-003	permit	Use a valid permit at the wrong lifecycle stage	Authorization fails and state does not regress	Runtime lifecycle negative test
+PER-004	permit	Use a spent permit for a new artifact	Permanent conflict; no export or recomputation	Restart-aware runtime test
+PER-005	permit	Resend an exact spent permit and immutable artifact	Exact persisted bytes are returned without cryptographic or witness advancement	Runtime counters plus byte equality
+PER-006	permit	Reuse a permit ID with different bytes	Permanent idempotency conflict	Runtime negative test across restart
+DUR-001	durability	Return commitment before durable permit-spent state	Impossible at every injected cut	Real process-death matrix with durable-state inspection
+DUR-002	durability	Return reveal before durable permit-spent state	Impossible at every injected cut	Real process-death matrix with durable-state inspection
+DUR-003	durability	Return partial before secret deletion, tombstone, synchronization, and durable permit-spent state	Impossible at every injected cut	Real process-death matrix with durable-state inspection
+DUR-004	durability	Crash after partial-attempt marker but before durable canonical partial	Recovery burns or quarantines and never recomputes	Real subprocess death and reopen
+DUR-005	durability	Lose response after remote acceptance	Recovery resends the exact persisted request and artifact without new nonce or budget charge	Remote-ahead recovery test with byte capture
+DUR-006	durability	Retry an exported artifact	No KDF, decryption, point derivation, partial computation, witness advance, budget charge, or new permit creation occurs	Instrumented runtime counters and byte equality
+DUR-007	durability	Abort before any public authorization	Terminal AbortedBeforePublicMaterial; budget remains charged	Runtime lifecycle and ledger inspection
+DUR-008	durability	Abort after public material may have existed	Terminal ConsumedOnAbort or Burned; secret destroyed; budget remains charged	Runtime lifecycle and ledger inspection
+DUR-009	durability	Crash at every journal append, file sync, directory sync, staging write, rename, witness, receipt, spend, artifact, secret deletion, tombstone, and return boundary	Recovery yields no export or exact authorized resend; never reuse or refund	Complete real-process cut matrix
+RST-001	restore	Restore an older backup omitting a consumed nonce	Union restores tombstone and consumed state; nonce never revives	Backup/restore integration test
+RST-002	restore	Restore a nonterminal ambiguous reservation	State begins quarantined and burns or remains quarantined until proven safe	Restore integration test
+RST-003	restore	Present remote-ahead, invalid local-ahead, fork, or same-sequence divergence	Vault remains quarantined and records evidence; no exposure	Four independent runtime cases
+RST-004	restore	Rotate epoch or pseudonym after consumption	Lifetime IDs, tombstones, and budget charges remain; no identifier reuse	Successor-epoch integration test
+RST-005	restore	Move wall clock backward	Vault quarantines or retains rolling-window charges; no reset or refund	Clock-injection test
+BUD-001	budgets	Abort, crash, timeout, restore, compaction, or rotation after charge	No event refunds or resets any charged budget	Ledger property tests across all terminal causes
+BUD-002	budgets	Start adaptor subsystem without ratified operational policy	Adaptor initialization fails closed while ordinary Wallet remains usable	Composition/runtime test
+BUD-003	budgets	Supply arbitrary per-operation budget values	Application API cannot override trusted composition policy	Public API review and compile-fail attempt
+WIT-001	witness	Start a production adaptor session without TLS 1.3 authenticated witness	Adaptor session fails closed and no local fallback is selected	Transport/runtime test and configuration review
+WIT-002	witness	Replay an identical request after lost response	Witness returns the byte-identical signed receipt or recoverable exact state	Integration test with captured bytes
+WIT-003	witness	Replay an identifier with conflicting content	Permanent conflict and no state advance	Witness service integration test
+WIT-004	witness	Present invalid signature, wrong key, wrong predecessor, remote-ahead divergence, or equivocation	Receipt verification fails and vault quarantines before exposure	Mutation and divergence matrix
+WIT-005	witness	Send oversized, truncated, extended, reordered, unknown-kind, or noncanonical message	Bounded parser rejects before state mutation	Parser tests and fuzz campaign
+WIT-006	witness	Enable a local-file or unauthenticated fallback	No production fallback exists	Feature/config/source inspection plus outage test
+WIT-007	witness	Observe forbidden identity, contract, value, address, purpose, transaction hash, preimage, signing key, session, journal, permit, or artifact content	Captured witness traffic contains none of the prohibited fields	Wire capture and structural decoder report
+WIT-008	witness	Inspect health or readiness endpoints	Endpoints reveal no vault, session, reservation, participant, or receipt identifiers	HTTP integration tests and response capture
+WAL-001	ordinary-wallet	Create or open an ordinary Wallet while witness is unavailable	Operation succeeds with zero vault initialization and zero witness connections	Instrumented runtime test
+WAL-002	ordinary-wallet	Restore, scan, sync, or follow tip while witness is unavailable	Every operation succeeds with zero subsystem reachability	Instrumented runtime tests
+WAL-003	ordinary-wallet	Receive, plain-send, finalize, submit, rebroadcast, cancel, shutdown, or restart while witness is unavailable	Every operation succeeds with zero subsystem reachability	Instrumented runtime tests
+WAL-004	ordinary-wallet	Build and run the normal frontend without Scriptless configuration	Install, test, typecheck, and production build succeed without subsystem initialization	Frontend commands plus runtime factory counters where available
+WAL-005	ordinary-wallet	Reach vault types from an ordinary Wallet dependency path	Reverse dependency, feature graph, and source call graph show no reachability	Cargo metadata analysis and source search
+CRY-001	crypto	Compare integrated production with the frozen independent outputs	All 311 named intermediate values match byte for byte	Unchanged external comparison harness and frozen vector hash
+CRY-002	crypto	Verify Refund, ClaimAdaptor, and Funding final signatures	All three exact 65-byte signatures pass the unchanged real DOM verifier	Fresh integrated harness output
+CRY-003	crypto	Mutate any bound cryptographic context field	Verification or parsing fails at the appropriate boundary	Field mutation/property matrix
+CRY-004	crypto	Attempt nonce or capability reuse in safe Rust	Second use is impossible by type/state and durable state rejects replay	Compile-fail plus restart-aware runtime evidence
+CRY-005	crypto	Inspect zeroization and secret-dependent control flow	No unguarded copy, secret-dependent branch, or non-authoritative secret arithmetic exists	Source review plus sanitizer/compiler-visible evidence as actually executed
+DEP-001	dependencies	Resolve default and release features for dom-adaptor	No direct k256, Wallet, transport, database, witness, DL2P, or test-helper dependency	Cargo metadata and cargo tree evidence
+DEP-002	dependencies	Resolve ordinary Wallet production features	No ordinary crate initializes or enables Scriptless vault or witness	Cargo metadata reverse-dependency and feature graph evidence
+DEP-003	dependencies	Search manifests for absolute or sibling-worktree paths	No production manifest or lockfile contains machine-local paths	Source search and package metadata
+DEP-004	dependencies	Search integrated changes for unsafe code	No new unsafe code exists in the integrated boundary	Source search and review
+DEP-005	dependencies	Compare consensus, L1 wire, persisted blocks, genesis, network magic, PoW, and DL2P surfaces with the ratified base	No integrated delta touches any prohibited surface	Path diff, semantic review, and regression tests
+OBS-001	observability	Trigger every typed error with secret-bearing state loaded	Logs, errors, Debug, Display, panic output, and metrics reveal no secret or prohibited identifiers	Captured output and redaction review
+OBS-002	observability	Kill fuzz or fault subprocesses while secret state exists	Crash artifacts, corpus, logs, and reports contain no plaintext secret material	Artifact scanning and manual review
+PLT-001	platform	Execute the complete applicable durability matrix on Linux	Every required Linux cut has executed evidence	Linux command log, artifact hashes, and results
+PLT-002	platform	Execute the complete applicable durability matrix on Windows	No approval credit unless a real Windows runner executes it	Windows command log and runner identity, or explicit NOT EXECUTED
+PLT-003	platform	Execute the complete applicable durability matrix on macOS	No approval credit unless a real macOS runner executes it	macOS command log and runner identity, or explicit NOT EXECUTED
