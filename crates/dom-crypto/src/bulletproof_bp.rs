@@ -36,7 +36,7 @@ use dom_core::DomError;
 use rand::RngCore;
 use secp256k1zkp::{constants, ffi};
 use std::ptr;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Serialized byte length of DOM's bounded aggregate Bulletproof:
 /// one proof over `(v, MAX_PROVABLE_VALUE - v)`, both as 64-bit commitments.
@@ -953,12 +953,37 @@ pub fn bulletproof_mpc_aggregate_tau_x(
     }
     let mut sum = Zeroizing::new(k256::Scalar::ZERO);
     for share in shares {
-        let scalar = crate::schnorr::scalar_from_bytes(&share).ok_or_else(|| {
-            DomError::Invalid("collaborative Bulletproof tau_x is noncanonical".into())
-        })?;
-        *sum += scalar;
+        let scalar = MpcTauXShareScalar::parse(&share)?;
+        *sum += scalar.as_scalar();
     }
     Ok(Zeroizing::new(sum.to_bytes().into()))
+}
+
+/// Private, non-copying owner for a parsed participant `tau_x` share.
+///
+/// `k256::Scalar` is itself `Copy`; keeping it behind this private owner and
+/// passing it to aggregation only by reference makes retirement explicit and
+/// guarantees zeroization on success, error, and unwind paths.
+struct MpcTauXShareScalar(k256::Scalar);
+
+impl MpcTauXShareScalar {
+    fn parse(bytes: &[u8; 32]) -> Result<Self, DomError> {
+        crate::schnorr::scalar_from_bytes(bytes)
+            .map(Self)
+            .ok_or_else(|| {
+                DomError::Invalid("collaborative Bulletproof tau_x is noncanonical".into())
+            })
+    }
+
+    const fn as_scalar(&self) -> &k256::Scalar {
+        &self.0
+    }
+}
+
+impl Drop for MpcTauXShareScalar {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
 }
 
 /// Consume final-phase state, create exactly one 739-byte proof, and verify it
