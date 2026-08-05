@@ -1,0 +1,27 @@
+PRODUCTION_COMMIT_ACTUAL	67fe11c441c2b7801b6f70809ab58caa4804c22a
+PRODUCTION_UNIT_TEST	share_pop::tests::deterministic_proof_roundtrips_and_mutations_fail	PASS
+MATCH	share_point	bytes=33
+MATCH	nonce_commitment	bytes=33
+MATCH	statement	bytes=202
+MATCH	context_preimage	bytes=231
+MATCH	context_digest	bytes=32
+MATCH	challenge_input	bytes=102
+MATCH	challenge_counter_u32_le	bytes=4
+MATCH	challenge_d0_data	bytes=103
+MATCH	challenge_d0_preimage	bytes=142
+MATCH	challenge_d0	bytes=32
+MATCH	challenge_d1_data	bytes=103
+MATCH	challenge_d1_preimage	bytes=142
+MATCH	challenge_d1	bytes=32
+MATCH	challenge_wide	bytes=64
+MATCH	challenge_reduced_scalar	bytes=32
+MATCH	response	bytes=32
+MATCH	proof	bytes=65
+MATCH	proof_codec_roundtrip	bytes=65
+MATCH	verification_equation	true
+MATCH	production_profile_verification	true
+MATCH	zero_response_is_codec_canonical	true
+MATCH	group_order_response_is_rejected	true
+MATCH	all_1616_statement_one_bit_mutations_rejected	true
+MATCH	all_520_proof_one_bit_mutations_rejected	true
+PRODUCTION_COMPARISON_COMPLETE	matched_checks=24	statement_mutations=1616	proof_mutations=520	discrepancies=0
