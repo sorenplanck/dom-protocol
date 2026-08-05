@@ -288,14 +288,15 @@ pub fn advance_transcript_hash_v1(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dom_crypto::ScriptlessSecretScalar;
+    use crate::SigningShareV1;
 
     fn point(value: u8) -> PublicKey {
         let mut bytes = [0u8; 32];
         bytes[31] = value;
-        ScriptlessSecretScalar::from_be_bytes(bytes)
+        SigningShareV1::from_be_bytes(bytes)
             .expect("fixture scalar")
             .public_key()
+            .clone()
     }
 
     #[test]

@@ -12,13 +12,10 @@ publish = false
 [features]
 default = []
 fuzzing = []
-# Evidence-only access to quarantined nonce lifecycle APIs. Production users
-# must not enable this feature; G1b integration will provide the durable gate.
-test-helpers = ["dom-crypto/test-helpers"]
 
 [dependencies]
 dom-core.workspace = true
-dom-crypto = { workspace = true, features = ["scriptless-integrated"] }
+dom-crypto.workspace = true
 dom-consensus.workspace = true
 thiserror.workspace = true
 rand_core.workspace = true
@@ -28,3 +25,4 @@ zeroize.workspace = true
 dom-crypto = { workspace = true, features = ["test-helpers"] }
 dom-serialization.workspace = true
 hex.workspace = true
+serde_json.workspace = true

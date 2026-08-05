@@ -1,7 +1,8 @@
 //! Ratified encrypted nonce-secret plaintext boundary.
 
-use crate::{AdaptorError, Result, SessionContextV1, TrustedChainIdV1};
-use dom_crypto::{ScriptlessSecretNoncePairV1, ScriptlessSecretScalar};
+use crate::error::exact_array;
+use crate::secret_nonce::SecretNoncePairV1;
+use crate::{AdaptorError, Result, SessionContextV1, SigningShareV1, TrustedChainIdV1};
 use zeroize::{Zeroize, Zeroizing};
 
 const MAGIC: &[u8; 8] = b"DOMSNSEC";
@@ -18,7 +19,7 @@ pub struct NonceSecretTransferV1 {
     plaintext: Zeroizing<Vec<u8>>,
 }
 
-/// One-shot authority to transfer plaintext into the trusted Wallet sealer.
+/// One-shot authority to transfer plaintext into the trusted DOM Contracts sealer.
 ///
 /// Only the integrated signer can construct this non-cloneable capability.
 pub struct VaultSecretSealCapabilityV1 {
@@ -36,7 +37,7 @@ impl VaultSecretSealCapabilityV1 {
     }
 }
 
-/// One-shot authority to import opened plaintext from the trusted Wallet sealer.
+/// One-shot authority to import plaintext opened by the DOM Contracts sealer.
 ///
 /// Only the integrated signer can construct this non-cloneable capability.
 pub struct VaultSecretImportCapabilityV1 {
@@ -48,7 +49,7 @@ impl VaultSecretImportCapabilityV1 {
         Self { _private: () }
     }
 
-    /// Consume Wallet-owned decrypted plaintext into an opaque validated transfer.
+    /// Consume DOM Contracts store-owned plaintext into an opaque validated transfer.
     pub fn import(self, mut plaintext: Zeroizing<Vec<u8>>) -> Result<NonceSecretTransferV1> {
         if let Err(error) = validate_structural_bytes(&plaintext) {
             plaintext.zeroize();
@@ -68,7 +69,7 @@ impl NonceSecretTransferV1 {
         reservation_nonce_id: [u8; 32],
         participant_id: [u8; 32],
         context: &SessionContextV1,
-        pair: ScriptlessSecretNoncePairV1,
+        pair: SecretNoncePairV1,
     ) -> Result<Self> {
         if reservation_nonce_id == [0; 32] || participant_id == [0; 32] {
             return Err(AdaptorError::InvalidContext(
@@ -100,19 +101,18 @@ impl NonceSecretTransferV1 {
         expected_participant_id: &[u8; 32],
         expected_context: &SessionContextV1,
         trusted_chain_id: &TrustedChainIdV1,
-        signing_share: &ScriptlessSecretScalar,
-    ) -> Result<ScriptlessSecretNoncePairV1> {
+        signing_share: &SigningShareV1,
+    ) -> Result<SecretNoncePairV1> {
         validate_structural_bytes(&self.plaintext)?;
         if &self.plaintext[10..42] != expected_reservation_nonce_id
             || &self.plaintext[42..74] != expected_participant_id
         {
             return Err(AdaptorError::AuthorizationMismatch);
         }
-        let context_len = u32::from_le_bytes(
-            self.plaintext[74..78]
-                .try_into()
-                .expect("validated fixed context-length field"),
-        ) as usize;
+        let context_len = u32::from_le_bytes(exact_array::<4>(
+            "NonceSecretRecordV1 context length",
+            &self.plaintext[74..78],
+        )?) as usize;
         let context_end = FIXED_PREFIX_LEN + context_len;
         let parsed_context = SessionContextV1::from_bytes(
             &self.plaintext[FIXED_PREFIX_LEN..context_end],
@@ -122,13 +122,15 @@ impl NonceSecretTransferV1 {
         if parsed_context.to_bytes() != expected_context.to_bytes() {
             return Err(AdaptorError::AuthorizationMismatch);
         }
-        let first: [u8; 32] = self.plaintext[context_end..context_end + 32]
-            .try_into()
-            .expect("validated first scalar width");
-        let second: [u8; 32] = self.plaintext[context_end + 32..context_end + 64]
-            .try_into()
-            .expect("validated second scalar width");
-        ScriptlessSecretNoncePairV1::from_be_bytes(first, second).map_err(Into::into)
+        let first = exact_array::<32>(
+            "NonceSecretRecordV1 first scalar",
+            &self.plaintext[context_end..context_end + 32],
+        )?;
+        let second = exact_array::<32>(
+            "NonceSecretRecordV1 second scalar",
+            &self.plaintext[context_end + 32..context_end + 64],
+        )?;
+        SecretNoncePairV1::from_be_bytes(first, second)
     }
 }
 
@@ -157,11 +159,10 @@ fn validate_structural_bytes(bytes: &[u8]) -> Result<()> {
             "nonce secret record identifiers must be nonzero",
         ));
     }
-    let context_len = u32::from_le_bytes(
-        bytes[74..78]
-            .try_into()
-            .expect("fixed context-length field"),
-    ) as usize;
+    let context_len = u32::from_le_bytes(exact_array::<4>(
+        "NonceSecretRecordV1 context length",
+        &bytes[74..78],
+    )?) as usize;
     let expected_total = FIXED_PREFIX_LEN
         .checked_add(context_len)
         .and_then(|value| value.checked_add(SCALAR_BYTES_LEN))
@@ -222,21 +223,25 @@ mod tests {
     use crate::{DirectionV1, PurposeV1, SessionContextInputsV1, SigningPhaseV1};
     use dom_crypto::PublicKey;
 
-    fn scalar(value: u8) -> ScriptlessSecretScalar {
+    fn scalar(value: u8) -> SigningShareV1 {
         let mut bytes = [0u8; 32];
         bytes[31] = value;
-        ScriptlessSecretScalar::from_be_bytes(bytes).expect("canonical test scalar")
+        SigningShareV1::from_be_bytes(bytes).expect("canonical test scalar")
     }
 
-    fn context(participants: u8, purpose: PurposeV1) -> (SessionContextV1, ScriptlessSecretScalar) {
+    fn point(secret: &SigningShareV1) -> PublicKey {
+        secret.public_key().clone()
+    }
+
+    fn context(participants: u8, purpose: PurposeV1) -> (SessionContextV1, SigningShareV1) {
         let share = scalar(1);
         let mut roster: Vec<PublicKey> = (1..=participants)
-            .map(|value| scalar(value).public_key())
+            .map(|value| point(&scalar(value)))
             .collect();
         roster.sort_by_key(PublicKey::to_compressed_bytes);
         let participant_index = roster
             .iter()
-            .position(|point| point == &share.public_key())
+            .position(|candidate| candidate == &point(&share))
             .expect("local key in roster") as u16;
         let context = SessionContextV1::new(
             SessionContextInputsV1 {
@@ -251,8 +256,7 @@ mod tests {
                 retry_counter: 0,
                 participant_public_keys: roster,
                 participant_index,
-                adaptor_point: (purpose == PurposeV1::ClaimAdaptor)
-                    .then(|| scalar(31).public_key()),
+                adaptor_point: (purpose == PurposeV1::ClaimAdaptor).then(|| point(&scalar(31))),
             },
             &share,
         )
@@ -263,9 +267,9 @@ mod tests {
     fn record_bytes(
         participants: u8,
         purpose: PurposeV1,
-    ) -> (Zeroizing<Vec<u8>>, SessionContextV1, ScriptlessSecretScalar) {
+    ) -> (Zeroizing<Vec<u8>>, SessionContextV1, SigningShareV1) {
         let (context, share) = context(participants, purpose);
-        let pair = ScriptlessSecretNoncePairV1::from_be_bytes(scalar_bytes(21), scalar_bytes(22))
+        let pair = SecretNoncePairV1::from_be_bytes(scalar_bytes(21), scalar_bytes(22))
             .expect("nonce pair");
         let transfer = NonceSecretTransferV1::from_nonce_pair([7; 32], [8; 32], &context, pair)
             .expect("record");
@@ -299,9 +303,9 @@ mod tests {
                     &share,
                 )
                 .expect("semantic record");
-            let (first, second) = pair.public_keys();
-            assert_eq!(first, scalar(21).public_key());
-            assert_eq!(second, scalar(22).public_key());
+            let (first, second) = pair.public_keys().expect("public nonce pair");
+            assert_eq!(first, point(&scalar(21)));
+            assert_eq!(second, point(&scalar(22)));
         }
     }
 

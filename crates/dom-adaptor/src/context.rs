@@ -1,7 +1,8 @@
 //! Ratified closed registries and canonical SessionContextV1 encoding.
 
-use crate::{AdaptorError, PurposeV1, Result, TrustedChainIdV1};
-use dom_crypto::{PublicKey, ScriptlessSecretScalar};
+use crate::error::exact_array;
+use crate::{AdaptorError, PurposeV1, Result, SigningShareV1, TrustedChainIdV1};
+use dom_crypto::PublicKey;
 
 /// Ratified V1 direction registry, stable by protocol role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -129,7 +130,7 @@ impl SessionContextV1 {
     /// Validate all ratified invariants and construct an immutable context.
     pub(crate) fn new(
         inputs: SessionContextInputsV1,
-        signing_share: &ScriptlessSecretScalar,
+        signing_share: &SigningShareV1,
     ) -> Result<Self> {
         if inputs.chain_id == [0u8; 32] {
             return Err(AdaptorError::InvalidContext("chain ID must be nonzero"));
@@ -176,9 +177,9 @@ impl SessionContextV1 {
         let matches = inputs
             .participant_public_keys
             .iter()
-            .filter(|candidate| **candidate == local_key)
+            .filter(|candidate| *candidate == local_key)
             .count();
-        if matches != 1 || inputs.participant_public_keys[participant_index] != local_key {
+        if matches != 1 || &inputs.participant_public_keys[participant_index] != local_key {
             return Err(AdaptorError::InvalidContext(
                 "signing share must match exactly one roster key at participant_index",
             ));
@@ -231,7 +232,7 @@ impl SessionContextV1 {
     pub fn from_trusted_chain(
         inputs: SessionContextInputsV1,
         trusted_chain_id: &TrustedChainIdV1,
-        signing_share: &ScriptlessSecretScalar,
+        signing_share: &SigningShareV1,
     ) -> Result<Self> {
         if &inputs.chain_id != trusted_chain_id.as_bytes() {
             return Err(AdaptorError::InvalidContext(
@@ -245,7 +246,7 @@ impl SessionContextV1 {
     pub fn from_bytes(
         bytes: &[u8],
         trusted_chain_id: &TrustedChainIdV1,
-        signing_share: &ScriptlessSecretScalar,
+        signing_share: &SigningShareV1,
     ) -> Result<Self> {
         if bytes.len() < 179 {
             return Err(AdaptorError::InvalidLength {
@@ -260,9 +261,7 @@ impl SessionContextV1 {
                 "context version must be exactly V1",
             ));
         }
-        let chain_id: [u8; 32] = bytes[2..34]
-            .try_into()
-            .expect("fixed offsets provide 32 bytes");
+        let chain_id = exact_array::<32>("SessionContextV1 chain ID", &bytes[2..34])?;
         if &chain_id != trusted_chain_id.as_bytes() {
             return Err(AdaptorError::InvalidContext(
                 "context chain ID differs from the trusted local chain",
@@ -316,34 +315,33 @@ impl SessionContextV1 {
         Self::new(
             SessionContextInputsV1 {
                 chain_id,
-                session_id: bytes[34..66]
-                    .try_into()
-                    .expect("fixed offsets provide 32 bytes"),
+                session_id: exact_array::<32>("SessionContextV1 session ID", &bytes[34..66])?,
                 purpose: PurposeV1::try_from(bytes[66])?,
                 direction: DirectionV1::try_from(bytes[67])?,
                 signing_phase: SigningPhaseV1::try_from(u16::from_le_bytes([
                     bytes[68], bytes[69],
                 ]))?,
-                template_hash: bytes[70..102]
-                    .try_into()
-                    .expect("fixed offsets provide 32 bytes"),
-                message_digest: bytes[102..134]
-                    .try_into()
-                    .expect("fixed offsets provide 32 bytes"),
-                transcript_hash: bytes[134..166]
-                    .try_into()
-                    .expect("fixed offsets provide 32 bytes"),
-                retry_counter: u64::from_le_bytes(
-                    bytes[166..174]
-                        .try_into()
-                        .expect("fixed offsets provide 8 bytes"),
-                ),
+                template_hash: exact_array::<32>(
+                    "SessionContextV1 template hash",
+                    &bytes[70..102],
+                )?,
+                message_digest: exact_array::<32>(
+                    "SessionContextV1 message digest",
+                    &bytes[102..134],
+                )?,
+                transcript_hash: exact_array::<32>(
+                    "SessionContextV1 transcript hash",
+                    &bytes[134..166],
+                )?,
+                retry_counter: u64::from_le_bytes(exact_array::<8>(
+                    "SessionContextV1 retry counter",
+                    &bytes[166..174],
+                )?),
                 participant_public_keys: roster,
-                participant_index: u16::from_le_bytes(
-                    bytes[roster_end..roster_end + 2]
-                        .try_into()
-                        .expect("fixed offsets provide 2 bytes"),
-                ),
+                participant_index: u16::from_le_bytes(exact_array::<2>(
+                    "SessionContextV1 participant index",
+                    &bytes[roster_end..roster_end + 2],
+                )?),
                 adaptor_point,
             },
             signing_share,
@@ -445,8 +443,8 @@ impl SessionContextV1 {
 mod tests {
     use super::*;
 
-    fn secret(byte: u8) -> ScriptlessSecretScalar {
-        ScriptlessSecretScalar::from_be_bytes([byte; 32]).expect("fixture scalar is canonical")
+    fn secret(byte: u8) -> SigningShareV1 {
+        SigningShareV1::from_be_bytes([byte; 32]).expect("fixture scalar is canonical")
     }
 
     fn point(hex_value: &str) -> PublicKey {

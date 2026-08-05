@@ -62,7 +62,9 @@ fn validate_adaptor_grammar(purpose: PurposeV1, adaptor_point: Option<&PublicKey
         (PurposeV1::Funding | PurposeV1::Refund, Some(_)) => Err(AdaptorError::InvalidTranscript(
             "FundingV1 and RefundV1 omit the adaptor point",
         )),
-        (PurposeV1::Sponsor, _) => unreachable!("strict Phase 1 policy rejected Sponsor"),
+        (PurposeV1::Sponsor, _) => Err(AdaptorError::PurposeNotAuthorized(
+            PurposeV1::Sponsor.to_byte(),
+        )),
     }
 }
 

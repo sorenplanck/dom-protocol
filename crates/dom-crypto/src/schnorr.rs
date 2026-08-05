@@ -345,6 +345,10 @@ pub(crate) fn is_scalar_valid(bytes: &[u8; 32]) -> bool {
     bool::from(nonzero & lt_n)
 }
 
+pub(crate) fn is_scalar_canonical_allow_zero(bytes: &[u8; 32]) -> bool {
+    bool::from(bytes_lt_ct(bytes, &SECP256K1_N))
+}
+
 /// Constant-time: returns Choice(1) iff `bytes` is all-zero.
 fn bytes_eq_zero_ct(bytes: &[u8; 32]) -> Choice {
     bytes.as_ref().ct_eq(&[0u8; 32] as &[u8])

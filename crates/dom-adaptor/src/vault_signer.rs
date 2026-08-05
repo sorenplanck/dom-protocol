@@ -1,17 +1,16 @@
 //! Non-bypassable high-level G1a/G1b signer composition.
 
+use crate::secret_nonce::SecretNonceDerivationV1;
 use crate::{
     exposure_outbound_digest_v1, nonce_commitment_hash_v1, AdaptorError, BindingFactorV1,
     ExposureBytes, ExposureKindV1, IdempotencyKey, NonceCommitmentV1, NonceRevealV1,
     NonceSecretTransferV1, NonceVaultV1, PartialSignatureV1, PreparedExposureV1, PublicNoncePairV1,
-    ReservationIntentV1, ReservationNonceId, ReservationRequestV1, SecretOpenStageV1,
-    SessionContextV1, SessionId, TrustedChainIdV1, VaultSecretImportCapabilityV1,
+    ReservationIntentV1, ReservationNonceId, ReservationRequestV1, SessionContextV1, SessionId,
+    SigningShareV1, TrustedChainIdV1, VaultComputationStageV1, VaultSecretImportCapabilityV1,
     VaultSecretSealCapabilityV1,
 };
 use core::fmt;
-use dom_crypto::{
-    schnorr_challenge, PartialSig, PublicKey, ScriptlessNonceDerivationV1, ScriptlessSecretScalar,
-};
+use dom_crypto::{schnorr_challenge, PartialSig, PublicKey};
 use rand_core::{OsRng, RngCore};
 use std::error::Error;
 
@@ -21,29 +20,29 @@ pub enum VaultBackedSignerError<E> {
     Adaptor(AdaptorError),
     /// Storage-independent vault contract validation failure.
     Contract(crate::NonceVaultError),
-    /// Failure reported by the statically selected concrete Wallet vault.
+    /// Failure reported by the statically selected DOM Contracts vault store.
     Vault(E),
     /// The vault returned bytes other than the exact prepared persisted artifact.
     AuthorizedArtifactMismatch,
 }
 
-impl<E: fmt::Debug> fmt::Debug for VaultBackedSignerError<E> {
+impl<E> fmt::Debug for VaultBackedSignerError<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Adaptor(error) => formatter.debug_tuple("Adaptor").field(error).finish(),
             Self::Contract(error) => formatter.debug_tuple("Contract").field(error).finish(),
-            Self::Vault(error) => formatter.debug_tuple("Vault").field(error).finish(),
+            Self::Vault(_) => formatter.write_str("Vault(Redacted)"),
             Self::AuthorizedArtifactMismatch => formatter.write_str("AuthorizedArtifactMismatch"),
         }
     }
 }
 
-impl<E: fmt::Display> fmt::Display for VaultBackedSignerError<E> {
+impl<E> fmt::Display for VaultBackedSignerError<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Adaptor(error) => error.fmt(formatter),
             Self::Contract(error) => error.fmt(formatter),
-            Self::Vault(error) => error.fmt(formatter),
+            Self::Vault(_) => formatter.write_str("vault operation failed (details redacted)"),
             Self::AuthorizedArtifactMismatch => {
                 formatter.write_str("vault returned a different authorized artifact")
             }
@@ -51,7 +50,7 @@ impl<E: fmt::Display> fmt::Display for VaultBackedSignerError<E> {
     }
 }
 
-impl<E: Error + 'static> Error for VaultBackedSignerError<E> {}
+impl<E: 'static> Error for VaultBackedSignerError<E> {}
 
 impl<E> From<AdaptorError> for VaultBackedSignerError<E> {
     fn from(error: AdaptorError) -> Self {
@@ -128,7 +127,7 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
         &mut self,
         intent: ReservationIntentV1,
         context: SessionContextV1,
-        signing_share: &ScriptlessSecretScalar,
+        signing_share: &SigningShareV1,
     ) -> SignerResult<V, ReservedNonceV1<V::ReservationHandle>> {
         context.purpose().require_strict_phase1()?;
         if intent.purpose != context.purpose()
@@ -138,6 +137,8 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
         }
 
         let reservation_id = ReservationNonceId::from_bytes(random_nonzero_id::<V::Error>()?)?;
+        let reservation_nonce_id = *reservation_id.as_bytes();
+        let participant_id = *intent.participant_id.as_bytes();
         let request_id = IdempotencyKey::from_bytes(random_nonzero_id::<V::Error>()?)?;
         let request = ReservationRequestV1::new(
             reservation_id,
@@ -150,8 +151,16 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
             request_id,
         );
 
-        let derivation = ScriptlessNonceDerivationV1::from_os_rng()
-            .map_err(|_| AdaptorError::RandomnessFailure)?;
+        let mut handle = self
+            .vault
+            .claim_reservation(request)
+            .map_err(VaultBackedSignerError::Vault)?;
+        let derivation_attempt = self
+            .vault
+            .begin_computation(&mut handle, VaultComputationStageV1::NonceDerivation)
+            .map_err(VaultBackedSignerError::Vault)?;
+
+        let derivation = SecretNonceDerivationV1::from_os_rng()?;
         let mut retry_counter = context.retry_counter();
         let (effective_context, pair) = loop {
             let candidate = context.with_retry_counter(retry_counter);
@@ -162,11 +171,11 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
                 .checked_add(1)
                 .ok_or(AdaptorError::RetryCounterOverflow)?;
         };
-        let (first, second) = pair.public_keys();
+        let (first, second) = pair.public_keys()?;
         let commitment_hash = nonce_commitment_hash_v1(
             effective_context.chain_id(),
             effective_context.session_id(),
-            request.participant_id().as_bytes(),
+            &participant_id,
             effective_context.purpose(),
             effective_context.template_hash(),
             &first,
@@ -178,18 +187,16 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
             effective_context.participant_index(),
             *commitment_hash.as_bytes(),
         );
-        let reservation_nonce_id = *request.reservation_id().as_bytes();
-        let participant_id = *request.participant_id().as_bytes();
         let secret = NonceSecretTransferV1::from_nonce_pair(
             reservation_nonce_id,
             participant_id,
             &effective_context,
             pair,
         )?;
-        let handle = self
-            .vault
-            .reserve(
-                request,
+        self.vault
+            .store_reserved_secret(
+                &mut handle,
+                derivation_attempt,
                 secret,
                 VaultSecretSealCapabilityV1::new(),
                 commitment,
@@ -244,13 +251,17 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
         &mut self,
         mut state: CommitmentExportedV1<V::ReservationHandle>,
         trusted_chain_id: &TrustedChainIdV1,
-        signing_share: &ScriptlessSecretScalar,
+        signing_share: &SigningShareV1,
     ) -> SignerResult<V, RevealExportResult<V::ReservationHandle>> {
+        let attempt = self
+            .vault
+            .begin_computation(&mut state.handle, VaultComputationStageV1::NonceReveal)
+            .map_err(VaultBackedSignerError::Vault)?;
         let transfer = self
             .vault
             .open_secret(
                 &mut state.handle,
-                SecretOpenStageV1::NonceReveal,
+                attempt,
                 VaultSecretImportCapabilityV1::new(),
             )
             .map_err(VaultBackedSignerError::Vault)?;
@@ -261,7 +272,7 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
             trusted_chain_id,
             signing_share,
         )?;
-        let (first, second) = pair.public_keys();
+        let (first, second) = pair.public_keys()?;
         let public_nonces = PublicNoncePairV1::new(first.clone(), second.clone());
         let reveal = NonceRevealV1::new(
             state.context.purpose(),
@@ -308,7 +319,7 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
         binding_factor: &BindingFactorV1,
         aggregate_nonce_hat: &PublicKey,
         aggregate_signing_key: &PublicKey,
-        signing_share: &ScriptlessSecretScalar,
+        signing_share: &SigningShareV1,
         kernel_message_digest: &[u8; 32],
     ) -> SignerResult<V, PartialExportResult> {
         if trusted_chain_id.as_bytes() != state.context.chain_id()
@@ -316,11 +327,15 @@ impl<V: NonceVaultV1> VaultBackedSignerV1<V> {
         {
             return Err(AdaptorError::AuthorizationMismatch.into());
         }
+        let attempt = self
+            .vault
+            .begin_computation(&mut state.handle, VaultComputationStageV1::PartialAttempt)
+            .map_err(VaultBackedSignerError::Vault)?;
         let transfer = self
             .vault
             .open_secret(
                 &mut state.handle,
-                SecretOpenStageV1::PartialAttempt,
+                attempt,
                 VaultSecretImportCapabilityV1::new(),
             )
             .map_err(VaultBackedSignerError::Vault)?;
@@ -410,10 +425,11 @@ mod tests {
         TemplateHash, TerminalReservationV1, VaultExportedArtifactV1, VaultKeyId,
         VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
     };
-    use dom_crypto::{schnorr_add_public_keys, ScriptlessSecretScalar};
+    use dom_crypto::schnorr_add_public_keys;
     use zeroize::Zeroizing;
 
     struct TestHandle;
+    struct TestComputationPermit(VaultComputationStageV1);
     struct TestPermit(ExposureBytes);
     struct TestExport(ExposureBytes);
 
@@ -429,23 +445,51 @@ mod tests {
 
     struct TestVault {
         plaintext: Option<Zeroizing<Vec<u8>>>,
+        events: Vec<&'static str>,
     }
 
     impl NonceVaultV1 for TestVault {
         type Error = NonceVaultError;
         type ReservationHandle = TestHandle;
+        type ComputationPermit = TestComputationPermit;
         type ExposurePermit = TestPermit;
         type ExportedArtifact = TestExport;
 
-        fn reserve(
+        fn claim_reservation(
             &mut self,
             _request: ReservationRequestV1,
+        ) -> core::result::Result<Self::ReservationHandle, Self::Error> {
+            self.events.push("claim");
+            Ok(TestHandle)
+        }
+
+        fn begin_computation(
+            &mut self,
+            _reservation: &mut Self::ReservationHandle,
+            stage: VaultComputationStageV1,
+        ) -> core::result::Result<Self::ComputationPermit, Self::Error> {
+            self.events.push(match stage {
+                VaultComputationStageV1::NonceDerivation => "begin:derivation",
+                VaultComputationStageV1::NonceReveal => "begin:reveal",
+                VaultComputationStageV1::PartialAttempt => "begin:partial",
+            });
+            Ok(TestComputationPermit(stage))
+        }
+
+        fn store_reserved_secret(
+            &mut self,
+            _reservation: &mut Self::ReservationHandle,
+            attempt: Self::ComputationPermit,
             secret: NonceSecretTransferV1,
             seal_capability: VaultSecretSealCapabilityV1,
             _commitment: NonceCommitmentV1,
-        ) -> core::result::Result<Self::ReservationHandle, Self::Error> {
+        ) -> core::result::Result<(), Self::Error> {
+            if attempt.0 != VaultComputationStageV1::NonceDerivation {
+                return Err(NonceVaultError::InvalidTransition);
+            }
+            self.events.push("store-secret");
             self.plaintext = Some(seal_capability.into_plaintext(secret));
-            Ok(TestHandle)
+            Ok(())
         }
 
         fn authorize_exposure(
@@ -453,15 +497,23 @@ mod tests {
             _reservation: &mut Self::ReservationHandle,
             artifact: PreparedExposureV1,
         ) -> core::result::Result<Self::ExposurePermit, Self::Error> {
+            self.events.push("authorize");
             Ok(TestPermit(artifact.exposure().clone()))
         }
 
         fn open_secret(
             &mut self,
             _reservation: &mut Self::ReservationHandle,
-            _stage: SecretOpenStageV1,
+            attempt: Self::ComputationPermit,
             import_capability: VaultSecretImportCapabilityV1,
         ) -> core::result::Result<NonceSecretTransferV1, Self::Error> {
+            if !matches!(
+                attempt.0,
+                VaultComputationStageV1::NonceReveal | VaultComputationStageV1::PartialAttempt
+            ) {
+                return Err(NonceVaultError::InvalidTransition);
+            }
+            self.events.push("open-secret");
             let opened = Zeroizing::new(
                 self.plaintext
                     .as_ref()
@@ -477,6 +529,7 @@ mod tests {
             &mut self,
             permit: Self::ExposurePermit,
         ) -> core::result::Result<Self::ExportedArtifact, Self::Error> {
+            self.events.push("export");
             Ok(TestExport(permit.0))
         }
 
@@ -500,21 +553,50 @@ mod tests {
         }
     }
 
-    fn scalar(value: u8) -> ScriptlessSecretScalar {
+    fn scalar(value: u8) -> SigningShareV1 {
         let mut bytes = [0u8; 32];
         bytes[31] = value;
-        ScriptlessSecretScalar::from_be_bytes(bytes).expect("canonical scalar")
+        SigningShareV1::from_be_bytes(bytes).expect("canonical scalar")
+    }
+
+    fn point(secret: &SigningShareV1) -> PublicKey {
+        secret.public_key().clone()
+    }
+
+    struct SecretBearingVaultError;
+
+    impl fmt::Debug for SecretBearingVaultError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("DO_NOT_LEAK_VAULT_SECRET")
+        }
+    }
+
+    impl fmt::Display for SecretBearingVaultError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("DO_NOT_LEAK_VAULT_SECRET")
+        }
+    }
+
+    #[test]
+    fn vault_errors_are_redacted_from_debug_and_display() {
+        let error = VaultBackedSignerError::Vault(SecretBearingVaultError);
+        let debug = format!("{error:?}");
+        let display = format!("{error}");
+        assert_eq!(debug, "Vault(Redacted)");
+        assert_eq!(display, "vault operation failed (details redacted)");
+        assert!(!debug.contains("DO_NOT_LEAK_VAULT_SECRET"));
+        assert!(!display.contains("DO_NOT_LEAK_VAULT_SECRET"));
     }
 
     #[test]
     fn vault_backed_type_state_exports_commit_reveal_and_partial() {
         let local_share = scalar(3);
         let remote_share = scalar(5);
-        let mut roster = vec![local_share.public_key(), remote_share.public_key()];
+        let mut roster = vec![point(&local_share), point(&remote_share)];
         roster.sort_by_key(PublicKey::to_compressed_bytes);
         let local_index = roster
             .iter()
-            .position(|key| key == &local_share.public_key())
+            .position(|key| key == &point(&local_share))
             .expect("local roster member") as u16;
         let context = SessionContextV1::new(
             crate::SessionContextInputsV1 {
@@ -543,7 +625,10 @@ mod tests {
         )
         .expect("intent");
         let trusted = TrustedChainIdV1::from_signed_fixture([1; 32]);
-        let mut signer = VaultBackedSignerV1::new(TestVault { plaintext: None });
+        let mut signer = VaultBackedSignerV1::new(TestVault {
+            plaintext: None,
+            events: Vec::new(),
+        });
         let reserved = signer
             .reserve(intent, context.clone(), &local_share)
             .expect("reserve");
@@ -555,8 +640,8 @@ mod tests {
             .export_reveal(commitment_state, &trusted, &local_share)
             .expect("reveal export");
 
-        let remote_first = scalar(11).public_key();
-        let remote_second = scalar(13).public_key();
+        let remote_first = point(&scalar(11));
+        let remote_second = point(&scalar(13));
         let local_nonces = reveal_state.public_nonces.clone();
         let mut participants = Vec::with_capacity(2);
         for (index, signing_key) in roster.iter().enumerate() {
@@ -607,5 +692,23 @@ mod tests {
         assert_eq!(partial.purpose(), PurposeV1::Funding);
         assert_eq!(partial.participant_index(), local_index);
         assert_eq!(reveal.purpose(), PurposeV1::Funding);
+        assert_eq!(
+            signer.vault.events,
+            [
+                "claim",
+                "begin:derivation",
+                "store-secret",
+                "authorize",
+                "export",
+                "begin:reveal",
+                "open-secret",
+                "authorize",
+                "export",
+                "begin:partial",
+                "open-secret",
+                "authorize",
+                "export",
+            ]
+        );
     }
 }

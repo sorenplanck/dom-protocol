@@ -4,14 +4,14 @@
     reason = "parsed permits are records, while authorization capability remains crate-sealed"
 )]
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use crate::error::exact_array;
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use crate::PurposeV1;
 use crate::{AdaptorError, Result};
 use dom_crypto::{blake2b_256_tagged, Hash256};
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 const PERMIT_DIGEST_TAG_V1: &str = "DOM:scriptless-vault-exposure-permit:v1";
 const OUTBOUND_DIGEST_TAG_V1: &str = "DOM:scriptless-vault-outbound:v1";
 
@@ -60,7 +60,7 @@ impl TryFrom<u8> for ExposureKindV1 {
 ///
 /// The type intentionally implements no cloning, copying, debugging, display,
 /// equality, ordering, or generic serialization.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub(crate) struct ExposurePermitV1 {
     exposure_kind: ExposureKindV1,
     permit_id: [u8; 32],
@@ -75,7 +75,7 @@ pub(crate) struct ExposurePermitV1 {
     receipt_chain_hash: [u8; 32],
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl ExposurePermitV1 {
     /// Exact canonical encoded length.
     pub(crate) const ENCODED_LEN: usize = 252;
@@ -100,18 +100,31 @@ impl ExposurePermitV1 {
         let exposure_kind = ExposureKindV1::try_from(bytes[10])?;
         let permit = Self {
             exposure_kind,
-            permit_id: bytes[11..43].try_into().expect("fixed permit ID"),
-            reservation_nonce_id: bytes[43..75].try_into().expect("fixed nonce ID"),
-            session_id: bytes[75..107].try_into().expect("fixed session ID"),
-            participant_id: bytes[107..139].try_into().expect("fixed participant ID"),
+            permit_id: exact_array::<32>("ExposurePermitV1 permit ID", &bytes[11..43])?,
+            reservation_nonce_id: exact_array::<32>(
+                "ExposurePermitV1 reservation nonce ID",
+                &bytes[43..75],
+            )?,
+            session_id: exact_array::<32>("ExposurePermitV1 session ID", &bytes[75..107])?,
+            participant_id: exact_array::<32>("ExposurePermitV1 participant ID", &bytes[107..139])?,
             purpose: PurposeV1::try_from(bytes[139])?,
-            template_hash: bytes[140..172].try_into().expect("fixed template hash"),
-            outbound_digest: bytes[172..204].try_into().expect("fixed outbound digest"),
-            epoch: u64::from_le_bytes(bytes[204..212].try_into().expect("fixed epoch")),
-            semantic_revision: u64::from_le_bytes(
-                bytes[212..220].try_into().expect("fixed revision"),
-            ),
-            receipt_chain_hash: bytes[220..252].try_into().expect("fixed receipt hash"),
+            template_hash: exact_array::<32>("ExposurePermitV1 template hash", &bytes[140..172])?,
+            outbound_digest: exact_array::<32>(
+                "ExposurePermitV1 outbound digest",
+                &bytes[172..204],
+            )?,
+            epoch: u64::from_le_bytes(exact_array::<8>(
+                "ExposurePermitV1 epoch",
+                &bytes[204..212],
+            )?),
+            semantic_revision: u64::from_le_bytes(exact_array::<8>(
+                "ExposurePermitV1 semantic revision",
+                &bytes[212..220],
+            )?),
+            receipt_chain_hash: exact_array::<32>(
+                "ExposurePermitV1 receipt chain hash",
+                &bytes[220..252],
+            )?,
         };
         permit.purpose.require_strict_phase1()?;
         if permit.permit_id == [0; 32]

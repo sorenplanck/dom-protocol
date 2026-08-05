@@ -283,7 +283,7 @@ impl ReservationIntentV1 {
     }
 }
 
-/// Canonical public binding carried by an opaque Wallet-owned permit.
+/// Canonical public binding carried by an opaque DOM Contracts store permit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExposurePermitBindingV1 {
     permit_id: IdempotencyKey,
@@ -319,25 +319,21 @@ impl ExposurePermitBindingV1 {
             return Err(NonceVaultError::UnsupportedPurpose);
         }
         Self::new(
-            IdempotencyKey::from_bytes(bytes[11..43].try_into().expect("fixed permit ID"))?,
-            ReservationNonceId::from_bytes(
-                bytes[43..75].try_into().expect("fixed reservation ID"),
-            )?,
-            SessionId::from_bytes(bytes[75..107].try_into().expect("fixed session ID"))?,
-            ParticipantId::from_bytes(bytes[107..139].try_into().expect("fixed participant ID"))?,
+            IdempotencyKey::from_bytes(permit_field(&bytes[11..43])?)?,
+            ReservationNonceId::from_bytes(permit_field(&bytes[43..75])?)?,
+            SessionId::from_bytes(permit_field(&bytes[75..107])?)?,
+            ParticipantId::from_bytes(permit_field(&bytes[107..139])?)?,
             purpose,
-            TemplateHash::from_bytes(bytes[140..172].try_into().expect("fixed template hash"))?,
-            bytes[172..204].try_into().expect("fixed outbound digest"),
+            TemplateHash::from_bytes(permit_field(&bytes[140..172])?)?,
+            permit_field(&bytes[172..204])?,
             exposure_kind,
-            u64::from_le_bytes(bytes[204..212].try_into().expect("fixed epoch")),
-            u64::from_le_bytes(bytes[212..220].try_into().expect("fixed revision")),
-            bytes[220..252]
-                .try_into()
-                .expect("fixed receipt-chain hash"),
+            u64::from_le_bytes(permit_field(&bytes[204..212])?),
+            u64::from_le_bytes(permit_field(&bytes[212..220])?),
+            permit_field(&bytes[220..252])?,
         )
     }
 
-    /// Validates the fields bound by a durable Wallet permit.
+    /// Validates the fields bound by a durable DOM Contracts store permit.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         permit_id: IdempotencyKey,
@@ -463,6 +459,10 @@ impl ExposurePermitBindingV1 {
     }
 }
 
+fn permit_field<const N: usize>(bytes: &[u8]) -> Result<[u8; N], NonceVaultError> {
+    bytes.try_into().map_err(|_| NonceVaultError::InvalidPermit)
+}
+
 /// Canonical V1 reservation request consumed by the trusted vault.
 pub type ReservationRequestV1 = ReservationRequest;
 
@@ -485,7 +485,7 @@ impl PreparedExposureV1 {
     }
 }
 
-/// Public bytes released only after the Wallet has durably spent a permit.
+/// Public bytes released only after the DOM Contracts store durably spent a permit.
 pub struct AuthorizedExposureV1(ExposureBytes);
 
 impl AuthorizedExposureV1 {
@@ -509,7 +509,7 @@ impl AuthorizedExposureV1 {
     }
 }
 
-/// Read-only view of exact persisted output owned by a concrete Wallet vault.
+/// Read-only view of exact persisted output owned by the DOM Contracts vault store.
 ///
 /// The concrete production type has a private constructor and is returned only
 /// after durable permit spend. `dom-adaptor` wraps its public bytes only inside
@@ -534,12 +534,15 @@ pub enum AbortReasonV1 {
     RestoreAmbiguity,
 }
 
-/// The only two operations allowed to reopen an encrypted nonce secret.
+/// Durable computation stage that must be recorded before any corresponding
+/// secret generation, secret open, or private computation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SecretOpenStageV1 {
-    /// Read-only reopen used to derive and persist the nonce reveal.
+pub enum VaultComputationStageV1 {
+    /// Charged reservation exists and nonce derivation is about to begin.
+    NonceDerivation,
+    /// Reveal computation is about to open the encrypted nonce record.
     NonceReveal,
-    /// One-shot reopen after a durable partial-attempt marker.
+    /// Partial-signature computation is about to open the record exactly once.
     PartialAttempt,
 }
 
@@ -552,7 +555,8 @@ pub struct TerminalReservationV1 {
     pub state: ReservationState,
 }
 
-/// Storage-independent lifecycle authority implemented by the reviewed Wallet.
+/// Storage-independent lifecycle authority implemented by the reviewed,
+/// independent DOM Contracts store, not by the ordinary DOM Wallet.
 ///
 /// Implementations own witness exchange, receipt verification, persistence,
 /// synchronization, tombstones, and budgets. No method accepts a receipt,
@@ -560,23 +564,44 @@ pub struct TerminalReservationV1 {
 /// from its caller. Production selects one concrete implementation statically;
 /// trait objects are not the production composition boundary.
 pub trait NonceVaultV1 {
-    /// Wallet-specific typed failure with redacted observability.
+    /// DOM Contracts store-specific typed failure with redacted observability.
     type Error: Error + Send + Sync + 'static;
     /// Opaque reservation handle owned by the concrete vault.
     type ReservationHandle;
-    /// Opaque one-shot capability with a private Wallet constructor.
+    /// Opaque one-shot proof that the requested computation attempt is durable.
+    type ComputationPermit;
+    /// Opaque one-shot capability with a private DOM Contracts store constructor.
     type ExposurePermit;
-    /// Wallet-owned output produced only after durable permit spend.
+    /// DOM Contracts store-owned output produced only after durable permit spend.
     type ExportedArtifact: VaultExportedArtifactV1;
 
-    /// Durably reserve, charge, seal, journal, witness, and persist a nonce slot.
-    fn reserve(
+    /// Durably claim the lifetime session/reservation IDs and charge every
+    /// applicable budget before any nonce secret is generated.
+    fn claim_reservation(
         &mut self,
         request: ReservationRequestV1,
+    ) -> core::result::Result<Self::ReservationHandle, Self::Error>;
+
+    /// Durably mark exactly one computation attempt and return an opaque
+    /// one-shot permit. The permit is required by every secret-producing or
+    /// secret-opening operation below.
+    fn begin_computation(
+        &mut self,
+        reservation: &mut Self::ReservationHandle,
+        stage: VaultComputationStageV1,
+    ) -> core::result::Result<Self::ComputationPermit, Self::Error>;
+
+    /// Seal and durably attach the first derived pair and exact commitment to
+    /// an already charged reservation. The derivation-attempt permit is
+    /// consumed and cannot authorize another pair.
+    fn store_reserved_secret(
+        &mut self,
+        reservation: &mut Self::ReservationHandle,
+        attempt: Self::ComputationPermit,
         secret: crate::NonceSecretTransferV1,
         seal_capability: crate::VaultSecretSealCapabilityV1,
         commitment: crate::NonceCommitmentV1,
-    ) -> core::result::Result<Self::ReservationHandle, Self::Error>;
+    ) -> core::result::Result<(), Self::Error>;
 
     /// Stage exact bytes, obtain and verify the witness receipt, and issue one capability.
     fn authorize_exposure(
@@ -585,15 +610,15 @@ pub trait NonceVaultV1 {
         artifact: PreparedExposureV1,
     ) -> core::result::Result<Self::ExposurePermit, Self::Error>;
 
-    /// Open the sealed record for one stage under Wallet-owned durability rules.
+    /// Open the sealed record under DOM Contracts store durability rules.
     ///
-    /// `PartialAttempt` requires the irreversible attempt marker before
-    /// decryption. Recovery after an incomplete partial attempt burns or
-    /// quarantines the reservation and never calls this method again.
+    /// The opaque attempt proves that the matching stage marker was durable
+    /// before decryption. Recovery after an incomplete attempt burns or
+    /// quarantines the reservation and never creates another permit.
     fn open_secret(
         &mut self,
         reservation: &mut Self::ReservationHandle,
-        stage: SecretOpenStageV1,
+        attempt: Self::ComputationPermit,
         import_capability: crate::VaultSecretImportCapabilityV1,
     ) -> core::result::Result<crate::NonceSecretTransferV1, Self::Error>;
 

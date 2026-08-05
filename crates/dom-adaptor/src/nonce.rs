@@ -4,33 +4,32 @@
     reason = "NAR-002 keeps secret/export capabilities crate-sealed until G1b integration"
 )]
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 use crate::permit::ExposurePermitV1;
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
+use crate::secret_nonce::{SecretNonceDerivationV1, SecretNoncePairV1 as CoreSecretNoncePairV1};
+#[cfg(test)]
 use crate::{
     exposure_outbound_digest_v1, nonce_commitment_hash_v1, ExposureKindV1, NonceCommitmentV1,
-    NonceRevealV1, SessionContextV1,
+    NonceRevealV1, SessionContextV1, SigningShareV1,
 };
 use crate::{AdaptorError, BindingFactorV1, PartialSignatureV1, PurposeV1, Result};
 use dom_crypto::{
     schnorr_aggregate_sigs, scriptless_add_public_points, scriptless_aggregate_partial_scalars,
     scriptless_verify_final_signature, PartialSig, PublicKey, SchnorrSignature,
 };
-#[cfg(any(test, feature = "test-helpers"))]
-use dom_crypto::{
-    schnorr_challenge, Hash256, ScriptlessNonceDerivationV1, ScriptlessSecretNoncePairV1,
-    ScriptlessSecretScalar,
-};
+#[cfg(test)]
+use dom_crypto::{schnorr_challenge, Hash256};
 
 /// Public identifiers durably bound to a reserved nonce before derivation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub(crate) struct NonceReservationBindingV1 {
     nonce_id: [u8; 32],
     participant_id: [u8; 32],
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl NonceReservationBindingV1 {
     /// Construct a reservation binding from nonzero canonical identifiers.
     pub(crate) fn new(nonce_id: [u8; 32], participant_id: [u8; 32]) -> Result<Self> {
@@ -88,9 +87,9 @@ impl PublicNoncePairV1 {
 /// This type deliberately implements no cloning, copying, debugging, display,
 /// equality, ordering, or generic serialization. Its scalar fields zeroize on
 /// drop. No public nonce accessor exists before authorization.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub struct SecretNoncePairV1 {
-    secret_pair: ScriptlessSecretNoncePairV1,
+    secret_pair: CoreSecretNoncePairV1,
     public: PublicNoncePairV1,
     context: SessionContextV1,
     reservation: NonceReservationBindingV1,
@@ -98,30 +97,29 @@ pub struct SecretNoncePairV1 {
     commitment_exported: bool,
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl SecretNoncePairV1 {
     /// Derive a fresh pair from the operating-system CSPRNG.
     pub(crate) fn derive(
         context: SessionContextV1,
-        signing_share: &ScriptlessSecretScalar,
+        signing_share: &SigningShareV1,
         reservation: NonceReservationBindingV1,
     ) -> Result<Self> {
-        let derivation = ScriptlessNonceDerivationV1::from_os_rng()
-            .map_err(|_| AdaptorError::RandomnessFailure)?;
+        let derivation = SecretNonceDerivationV1::from_os_rng()?;
         Self::derive_with_state(context, signing_share, reservation, &derivation)
     }
 
     fn derive_with_state(
         context: SessionContextV1,
-        signing_share: &ScriptlessSecretScalar,
+        signing_share: &SigningShareV1,
         reservation: NonceReservationBindingV1,
-        derivation: &ScriptlessNonceDerivationV1,
+        derivation: &SecretNonceDerivationV1,
     ) -> Result<Self> {
         let mut retry_counter = context.retry_counter();
         loop {
             let context_bytes = context.encode_with_retry_counter(retry_counter);
             if let Some(secret_pair) = derivation.derive_pair(signing_share, &context_bytes) {
-                let (first, second) = secret_pair.public_keys();
+                let (first, second) = secret_pair.public_keys()?;
                 let public = PublicNoncePairV1 { first, second };
                 return Ok(Self {
                     secret_pair,
@@ -227,25 +225,25 @@ impl SecretNoncePairV1 {
     #[cfg(test)]
     fn derive_with_aux_for_test(
         context: SessionContextV1,
-        signing_share: &ScriptlessSecretScalar,
+        signing_share: &SigningShareV1,
         reservation: NonceReservationBindingV1,
         aux_rand_32: [u8; 32],
     ) -> Result<Self> {
-        let derivation = ScriptlessNonceDerivationV1::from_aux_for_test(aux_rand_32);
+        let derivation = SecretNonceDerivationV1::from_aux_for_test(aux_rand_32);
         Self::derive_with_state(context, signing_share, reservation, &derivation)
     }
 }
 
 /// Opaque pair after durable authorization; public export and one partial-sign
 /// operation are now available. Partial signing consumes this value.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub struct AuthorizedSecretNoncePairV1 {
     pair: SecretNoncePairV1,
     _permit: ExposurePermitV1,
     reveal: Option<NonceRevealV1>,
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl AuthorizedSecretNoncePairV1 {
     /// Export the exact authorized public nonce pair.
     pub(crate) fn take_public_nonces(&mut self) -> Result<PublicNoncePairV1> {
@@ -265,7 +263,7 @@ impl AuthorizedSecretNoncePairV1 {
         binding_factor: &BindingFactorV1,
         aggregate_nonce_hat: &PublicKey,
         aggregate_signing_key: &PublicKey,
-        signing_share: &ScriptlessSecretScalar,
+        signing_share: &SigningShareV1,
         chain_id: &[u8; 32],
         kernel_message_digest: &[u8; 32],
     ) -> Result<PreparedPartialSignatureV1> {
@@ -280,7 +278,7 @@ impl AuthorizedSecretNoncePairV1 {
         let local_key = signing_share.public_key();
         if self.pair.context.participant_public_keys()
             [usize::from(self.pair.context.participant_index())]
-            != local_key
+            != *local_key
         {
             return Err(AdaptorError::AuthorizationMismatch);
         }
@@ -312,7 +310,7 @@ impl AuthorizedSecretNoncePairV1 {
 
 /// Prepared partial signature that remains unexportable until a distinct
 /// durable partial-signature permit is consumed.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 pub(crate) struct PreparedPartialSignatureV1 {
     partial: PartialSignatureV1,
     nonce_id: [u8; 32],
@@ -320,7 +318,7 @@ pub(crate) struct PreparedPartialSignatureV1 {
     participant_id: [u8; 32],
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl PreparedPartialSignatureV1 {
     pub(crate) fn outbound_digest(&self) -> Result<Hash256> {
         exposure_outbound_digest_v1(ExposureKindV1::PartialSignature, &self.partial.to_bytes())
@@ -423,31 +421,35 @@ mod tests {
     };
     use dom_crypto::schnorr_add_public_keys;
 
-    fn secret(byte: u8) -> ScriptlessSecretScalar {
-        ScriptlessSecretScalar::from_be_bytes([byte; 32]).expect("fixture scalar is canonical")
+    fn secret(byte: u8) -> SigningShareV1 {
+        SigningShareV1::from_be_bytes([byte; 32]).expect("fixture scalar is canonical")
     }
 
-    fn small_secret(value: u8) -> ScriptlessSecretScalar {
+    fn small_secret(value: u8) -> SigningShareV1 {
         let mut bytes = [0u8; 32];
         bytes[31] = value;
-        ScriptlessSecretScalar::from_be_bytes(bytes).expect("small scalar is canonical")
+        SigningShareV1::from_be_bytes(bytes).expect("small scalar is canonical")
+    }
+
+    fn point(secret: &SigningShareV1) -> PublicKey {
+        secret.public_key().clone()
     }
 
     fn context(
-        share: &ScriptlessSecretScalar,
+        share: &SigningShareV1,
         participant_index: u16,
         purpose: PurposeV1,
         direction: DirectionV1,
         phase: SigningPhaseV1,
         session_id: [u8; 32],
     ) -> SessionContextV1 {
-        let first_key = secret(0x07).public_key();
-        let second_key = small_secret(0x03).public_key();
+        let first_key = secret(0x07).public_key().clone();
+        let second_key = small_secret(0x03).public_key().clone();
         let mut roster = vec![first_key, second_key];
         roster.sort_by_key(|key| key.to_compressed_bytes());
         let actual_index = roster
             .iter()
-            .position(|key| *key == share.public_key())
+            .position(|key| *key == point(share))
             .expect("share is in roster") as u16;
         assert_eq!(participant_index, actual_index);
         SessionContextV1::new(
@@ -464,7 +466,7 @@ mod tests {
                 participant_public_keys: roster,
                 participant_index,
                 adaptor_point: (purpose == PurposeV1::ClaimAdaptor)
-                    .then(|| small_secret(0x05).public_key()),
+                    .then(|| small_secret(0x05).public_key().clone()),
             },
             share,
         )
@@ -635,15 +637,15 @@ mod tests {
     #[test]
     fn ratified_kdf_separates_nonce_index_aux_share_and_context_fields() {
         fn derive_public(
-            share: &ScriptlessSecretScalar,
+            share: &SigningShareV1,
             aux: &[u8; 32],
             context_bytes: &[u8],
         ) -> PublicNoncePairV1 {
-            let derivation = ScriptlessNonceDerivationV1::from_aux_for_test(*aux);
+            let derivation = SecretNonceDerivationV1::from_aux_for_test(*aux);
             let pair = derivation
                 .derive_pair(share, context_bytes)
                 .expect("fixture does not reduce to zero");
-            let (first, second) = pair.public_keys();
+            let (first, second) = pair.public_keys().expect("public nonce pair");
             PublicNoncePairV1 { first, second }
         }
 
@@ -885,17 +887,17 @@ mod tests {
             value
         })
         .expect("adaptor secret");
-        let adaptor_point = adaptor_secret.public_point();
+        let adaptor_point = adaptor_secret.public_point().expect("adaptor point");
         let participants = vec![
             ParticipantPublicNoncesV1 {
                 participant_index: 0,
-                signing_key: share_a.public_key(),
+                signing_key: point(&share_a),
                 first_nonce: public_a.first().clone(),
                 second_nonce: public_a.second().clone(),
             },
             ParticipantPublicNoncesV1 {
                 participant_index: 1,
-                signing_key: share_b.public_key(),
+                signing_key: point(&share_b),
                 first_nonce: public_b.first().clone(),
                 second_nonce: public_b.second().clone(),
             },
@@ -917,8 +919,8 @@ mod tests {
             aggregate_public_nonces_v1(&[bound_a.clone(), bound_b.clone()]).expect("R");
         let aggregate_nonce_hat =
             aggregate_public_nonces_v1(&[aggregate_nonce, adaptor_point.clone()]).expect("R_hat");
-        let aggregate_key = schnorr_add_public_keys(&[share_a.public_key(), share_b.public_key()])
-            .expect("aggregate key");
+        let aggregate_key =
+            schnorr_add_public_keys(&[point(&share_a), point(&share_b)]).expect("aggregate key");
         let prepared_a = authorized_a
             .sign_partial(
                 &binding_factor,
@@ -946,7 +948,7 @@ mod tests {
                 PurposeV1::ClaimAdaptor,
                 context_a.template_hash(),
                 &bound_a,
-                &share_a.public_key(),
+                &point(&share_a),
                 &aggregate_nonce_hat,
                 &aggregate_key,
                 context_a.chain_id(),
@@ -958,7 +960,7 @@ mod tests {
                 PurposeV1::ClaimAdaptor,
                 context_b.template_hash(),
                 &bound_b,
-                &share_b.public_key(),
+                &point(&share_b),
                 &aggregate_nonce_hat,
                 &aggregate_key,
                 context_b.chain_id(),
@@ -1007,7 +1009,10 @@ mod tests {
                 context_a.message_digest(),
             )
             .expect("extracted secret");
-        assert_eq!(extracted.public_point(), adaptor_secret.public_point());
+        assert_eq!(
+            extracted.public_point().expect("extracted point"),
+            adaptor_secret.public_point().expect("adaptor point")
+        );
     }
 
     #[test]
@@ -1058,13 +1063,13 @@ mod tests {
             let participants = vec![
                 ParticipantPublicNoncesV1 {
                     participant_index: 0,
-                    signing_key: share_a.public_key(),
+                    signing_key: point(&share_a),
                     first_nonce: public_a.first().clone(),
                     second_nonce: public_a.second().clone(),
                 },
                 ParticipantPublicNoncesV1 {
                     participant_index: 1,
-                    signing_key: share_b.public_key(),
+                    signing_key: point(&share_b),
                     first_nonce: public_b.first().clone(),
                     second_nonce: public_b.second().clone(),
                 },
@@ -1084,9 +1089,8 @@ mod tests {
             let bound_b = public_b.bind(&binding_factor).expect("bound B");
             let aggregate_nonce =
                 aggregate_public_nonces_v1(&[bound_a, bound_b]).expect("aggregate nonce");
-            let aggregate_key =
-                schnorr_add_public_keys(&[share_a.public_key(), share_b.public_key()])
-                    .expect("aggregate key");
+            let aggregate_key = schnorr_add_public_keys(&[point(&share_a), point(&share_b)])
+                .expect("aggregate key");
             let prepared_a = authorized_a
                 .sign_partial(
                     &binding_factor,

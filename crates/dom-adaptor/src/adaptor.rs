@@ -4,7 +4,7 @@ use crate::error::{exact_array, AdaptorError, Result};
 use dom_crypto::{
     scriptless_adapt_signature, scriptless_extract_adaptor_secret,
     scriptless_verify_final_signature, scriptless_verify_pre_signature, PartialSig, PublicKey,
-    SchnorrSignature, ScriptlessSecretScalar,
+    SchnorrSignature, SecretScalar,
 };
 
 /// Canonical 65-byte cryptographic adaptor pre-signature core `R_hat || s_hat`.
@@ -40,19 +40,19 @@ impl CoreAdaptorPreSignatureV1 {
 
 /// Opaque adaptor secret with zeroization and no cloning, debug output, or
 /// generic serialization.
-pub struct AdaptorSecret(ScriptlessSecretScalar);
+pub struct AdaptorSecret(SecretScalar);
 
 impl AdaptorSecret {
     /// Parse a canonical 32-byte big-endian adaptor scalar.
     pub fn from_be_bytes(bytes: [u8; 32]) -> Result<Self> {
-        ScriptlessSecretScalar::from_be_bytes(bytes)
+        SecretScalar::from_be_bytes(bytes)
             .map(Self)
             .map_err(Into::into)
     }
 
     /// Derive the adaptor point `T = t*G`.
-    pub fn public_point(&self) -> PublicKey {
-        self.0.public_key()
+    pub fn public_point(&self) -> Result<PublicKey> {
+        self.0.public_key().map_err(Into::into)
     }
 }
 
@@ -187,7 +187,7 @@ impl AdaptorPreSignatureV1 {
         chain_id: &[u8; 32],
         kernel_message: &[u8],
     ) -> Result<SchnorrSignature> {
-        if secret.public_point() != self.adaptor_point {
+        if secret.public_point()? != self.adaptor_point {
             return Err(AdaptorError::VerificationFailed(
                 "adaptor secret does not match the committed point",
             ));

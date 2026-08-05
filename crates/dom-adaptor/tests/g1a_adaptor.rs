@@ -32,7 +32,11 @@ fn all_eight_scad0_vectors_verify_adapt_extract_and_pass_consensus() {
             .unwrap_or_else(|error| panic!("{id} secret: {error}"));
         let adaptor_point = PublicKey::from_compressed_bytes(&decode_array::<33>(fields[2]))
             .unwrap_or_else(|error| panic!("{id} adaptor point: {error}"));
-        assert_eq!(secret.public_point(), adaptor_point, "{id} t*G == T");
+        assert_eq!(
+            secret.public_point().expect("adaptor point"),
+            adaptor_point,
+            "{id} t*G == T"
+        );
         let scalar_hat = PartialSig::from_bytes(&decode_array::<32>(fields[3]))
             .unwrap_or_else(|error| panic!("{id} scalar_hat: {error}"));
         let kernel = TransactionKernel::from_bytes(&hex::decode(fields[4]).expect("kernel hex"))
@@ -84,8 +88,8 @@ fn all_eight_scad0_vectors_verify_adapt_extract_and_pass_consensus() {
             )
             .unwrap_or_else(|error| panic!("{id} extraction: {error}"));
         assert_eq!(
-            extracted.public_point(),
-            secret.public_point(),
+            extracted.public_point().expect("extracted point"),
+            secret.public_point().expect("adaptor point"),
             "{id} extracted point"
         );
 

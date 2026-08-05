@@ -5,11 +5,10 @@
 //! canonical SEC1 and big-endian scalar formats, and does not define nonce
 //! derivation or persistence policy.
 
-#[cfg(feature = "scriptless-integrated")]
-use crate::hash::blake2b_256_tagged;
 use crate::keys::PublicKey;
 use crate::schnorr::{
-    compressed_to_projective, is_scalar_valid, projective_to_compressed, scalar_from_bytes,
+    compressed_to_projective, is_scalar_canonical_allow_zero, is_scalar_valid,
+    projective_to_compressed, scalar_from_bytes,
 };
 use crate::{schnorr_challenge, schnorr_verify, PartialSig, SchnorrSignature};
 use dom_core::DomError;
@@ -18,17 +17,8 @@ use k256::elliptic_curve::group::Group;
 use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::PrimeField;
 use k256::ProjectivePoint;
-#[cfg(feature = "scriptless-integrated")]
-use rand::{rngs::OsRng, RngCore};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
-
-#[cfg(feature = "scriptless-integrated")]
-const SECRET_NONCE_AUX_TAG_V1: &str = "DOM:scriptless-secret-nonce-aux:v1";
-#[cfg(feature = "scriptless-integrated")]
-const SECRET_NONCE_SEED_TAG_V1: &str = "DOM:scriptless-secret-nonce-seed:v1";
-#[cfg(feature = "scriptless-integrated")]
-const SECRET_NONCE_WIDE_TAG_V1: &str = "DOM:scriptless-secret-nonce-wide:v1";
 
 /// A canonical, nonzero secp256k1 scalar held as secret material.
 ///
@@ -36,30 +26,29 @@ const SECRET_NONCE_WIDE_TAG_V1: &str = "DOM:scriptless-secret-nonce-wide:v1";
 /// implements neither `Clone`, `Debug`, nor generic serialization. It is
 /// zeroized on drop. Construction validates the canonical interval `[1,n-1]`.
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub struct ScriptlessSecretScalar([u8; 32]);
+pub struct SecretScalar([u8; 32]);
 
-impl ScriptlessSecretScalar {
+impl SecretScalar {
     /// Parse canonical big-endian secret scalar bytes.
     pub fn from_be_bytes(mut bytes: [u8; 32]) -> Result<Self, DomError> {
         if !is_scalar_valid(&bytes) {
             bytes.zeroize();
-            return Err(DomError::Invalid(
-                "scriptless secret scalar is zero or >= n".into(),
-            ));
+            return Err(DomError::Invalid("secret scalar is zero or >= n".into()));
         }
         Ok(Self(bytes))
     }
 
     /// Derive the canonical compressed public point `secret * G`.
-    pub fn public_key(&self) -> PublicKey {
-        let scalar =
-            Zeroizing::new(scalar_from_bytes(&self.0).expect("secret scalar is already validated"));
+    pub fn public_key(&self) -> Result<PublicKey, DomError> {
+        let scalar = Zeroizing::new(
+            scalar_from_bytes(&self.0)
+                .ok_or_else(|| DomError::Invalid("secret scalar is noncanonical".into()))?,
+        );
         let compressed = projective_to_compressed(&(ProjectivePoint::GENERATOR * *scalar));
         PublicKey::from_compressed_bytes(&compressed)
-            .expect("a nonzero generator multiple is a canonical public key")
     }
 
-    pub(crate) fn as_be_bytes(&self) -> &[u8; 32] {
+    fn as_be_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
@@ -71,7 +60,7 @@ impl ScriptlessSecretScalar {
 /// `dom-crypto`; callers never receive generic scalar arithmetic. A zero result
 /// is rejected. The input is borrowed and remains the caller's responsibility
 /// to zeroize after this function returns.
-pub fn scalar_from_wide_be(input: &[u8; 64]) -> Option<ScriptlessSecretScalar> {
+pub fn scalar_from_wide_be(input: &[u8; 64]) -> Option<Zeroizing<[u8; 32]>> {
     let mut wide = k256::WideBytes::default();
     wide.copy_from_slice(input);
     let mut reduced = <k256::Scalar as Reduce<U512>>::reduce_bytes(&wide);
@@ -82,175 +71,83 @@ pub fn scalar_from_wide_be(input: &[u8; 64]) -> Option<ScriptlessSecretScalar> {
         return None;
     }
 
-    let bytes: [u8; 32] = reduced.to_repr().into();
+    let bytes = Zeroizing::new(reduced.to_repr().into());
     reduced.zeroize();
-    ScriptlessSecretScalar::from_be_bytes(bytes).ok()
+    Some(bytes)
 }
 
-/// Derive the ratified V1 secret two-nonce pair through DOM's tagged-hash and
-/// constant-time scalar-reduction boundaries.
+/// Return whether bytes are a canonical secp256k1 scalar encoding.
 ///
-/// `canonical_context_v1` must already have passed the validation and exact
-/// encoding rules defined by NAR-001. The caller owns and must zeroize the
-/// borrowed auxiliary randomness after the complete derivation or retry loop.
-/// A `None` result means at least one wide reduction produced zero; the caller
-/// may retry only by incrementing the context retry counter before public
-/// material exists.
-#[cfg(feature = "scriptless-integrated")]
-fn derive_secret_nonce_pair_v1(
-    signing_share: &ScriptlessSecretScalar,
-    aux_rand_32: &[u8; 32],
-    canonical_context_v1: &[u8],
-) -> Option<(ScriptlessSecretScalar, ScriptlessSecretScalar)> {
-    let mut mask_hash = blake2b_256_tagged(SECRET_NONCE_AUX_TAG_V1, aux_rand_32);
-    let mask = Zeroizing::new(*mask_hash.as_bytes());
-    mask_hash.zeroize();
-
-    let mut masked_signing_share = Zeroizing::new([0u8; 32]);
-    for ((output, secret), mask_byte) in masked_signing_share
-        .iter_mut()
-        .zip(signing_share.as_be_bytes())
-        .zip(mask.iter())
-    {
-        *output = *secret ^ *mask_byte;
-    }
-
-    let mut seed_input = Zeroizing::new(Vec::with_capacity(
-        32usize.checked_add(canonical_context_v1.len())?,
-    ));
-    seed_input.extend_from_slice(masked_signing_share.as_ref());
-    seed_input.extend_from_slice(canonical_context_v1);
-    let mut seed_hash = blake2b_256_tagged(SECRET_NONCE_SEED_TAG_V1, seed_input.as_ref());
-    let seed = Zeroizing::new(*seed_hash.as_bytes());
-    seed_hash.zeroize();
-
-    fn expand(seed: &[u8; 32], index: u8) -> Zeroizing<[u8; 64]> {
-        let mut input = Zeroizing::new([0u8; 34]);
-        input[..32].copy_from_slice(seed);
-        input[32] = index;
-
-        input[33] = 0;
-        let mut first = blake2b_256_tagged(SECRET_NONCE_WIDE_TAG_V1, input.as_ref());
-        input[33] = 1;
-        let mut second = blake2b_256_tagged(SECRET_NONCE_WIDE_TAG_V1, input.as_ref());
-
-        let mut wide = Zeroizing::new([0u8; 64]);
-        wide[..32].copy_from_slice(first.as_bytes());
-        wide[32..].copy_from_slice(second.as_bytes());
-        first.zeroize();
-        second.zeroize();
-        wide
-    }
-
-    let wide_first = expand(&seed, 0x01);
-    let wide_second = expand(&seed, 0x02);
-    let first = scalar_from_wide_be(&wide_first);
-    let second = scalar_from_wide_be(&wide_second);
-    match (first, second) {
-        (Some(first), Some(second)) => Some((first, second)),
-        _ => None,
+/// The caller selects whether zero is part of the accepted domain. No
+/// reduction or normalization is performed.
+pub fn scalar_bytes_are_canonical(bytes: &[u8; 32], allow_zero: bool) -> bool {
+    if allow_zero {
+        is_scalar_canonical_allow_zero(bytes)
+    } else {
+        is_scalar_valid(bytes)
     }
 }
 
-/// Opaque operating-system-randomized nonce derivation state for the integrated signer.
-///
-/// The same private auxiliary value is retained only across the pre-export
-/// retry loop and is zeroized when this value is dropped.
-#[derive(Zeroize, ZeroizeOnDrop)]
-#[cfg(feature = "scriptless-integrated")]
-pub struct ScriptlessNonceDerivationV1 {
-    aux_rand_32: [u8; 32],
-}
-
-/// Opaque one-shot secret nonce pair for the integrated signer.
-///
-/// The type intentionally implements no cloning, copying, debugging, display,
-/// equality, ordering, or serialization. Signing consumes the complete pair.
-#[cfg(feature = "scriptless-integrated")]
-pub struct ScriptlessSecretNoncePairV1 {
-    first: ScriptlessSecretScalar,
-    second: ScriptlessSecretScalar,
-}
-
-#[cfg(feature = "scriptless-integrated")]
-impl ScriptlessSecretNoncePairV1 {
-    /// Derive both canonical public nonce points.
-    pub fn public_keys(&self) -> (PublicKey, PublicKey) {
-        (self.first.public_key(), self.second.public_key())
-    }
-
-    /// Consume the pair and produce exactly one bound partial signature.
-    pub fn sign_bound_partial(
-        self,
-        binding_factor: &PartialSig,
-        challenge_be: &[u8; 32],
-        signing_share: &ScriptlessSecretScalar,
-    ) -> Result<PartialSig, DomError> {
-        sign_bound_partial_once(
-            &self.first,
-            &self.second,
-            binding_factor,
-            challenge_be,
-            signing_share,
-        )
-    }
-
-    /// Consume canonical nonce bytes produced by the approved encrypted-record decoder.
-    pub fn from_be_bytes(first: [u8; 32], second: [u8; 32]) -> Result<Self, DomError> {
-        Ok(Self {
-            first: ScriptlessSecretScalar::from_be_bytes(first)?,
-            second: ScriptlessSecretScalar::from_be_bytes(second)?,
-        })
-    }
-
-    /// Consume the pair into one zeroizing canonical record buffer.
-    ///
-    /// This narrow bridge exists only for `dom-adaptor`'s ratified encrypted
-    /// nonce-record codec. It is not a reusable nonce export API.
-    pub fn into_record_scalars(self) -> Zeroizing<[u8; 64]> {
-        let mut bytes = Zeroizing::new([0u8; 64]);
-        bytes[..32].copy_from_slice(self.first.as_be_bytes());
-        bytes[32..].copy_from_slice(self.second.as_be_bytes());
-        bytes
-    }
-}
-
-#[cfg(feature = "scriptless-integrated")]
-impl ScriptlessNonceDerivationV1 {
-    /// Acquire fresh auxiliary randomness from the operating-system CSPRNG.
-    pub fn from_os_rng() -> Result<Self, DomError> {
-        let mut aux_rand_32 = [0u8; 32];
-        OsRng.try_fill_bytes(&mut aux_rand_32).map_err(|_| {
-            aux_rand_32.zeroize();
-            DomError::Internal("operating-system CSPRNG failed".into())
-        })?;
-        Ok(Self { aux_rand_32 })
-    }
-
-    /// Derive one pair for an already validated canonical context encoding.
-    /// A zero reduction returns `None` so the owning pre-export retry loop can
-    /// increment its checked counter and call this method again.
-    pub fn derive_pair(
-        &self,
-        signing_share: &ScriptlessSecretScalar,
-        canonical_context_v1: &[u8],
-    ) -> Option<ScriptlessSecretNoncePairV1> {
-        derive_secret_nonce_pair_v1(signing_share, &self.aux_rand_32, canonical_context_v1)
-            .map(|(first, second)| ScriptlessSecretNoncePairV1 { first, second })
-    }
-
-    /// Build deterministic derivation state for authenticated tests only.
-    #[cfg(feature = "test-helpers")]
-    #[doc(hidden)]
-    pub fn from_aux_for_test(aux_rand_32: [u8; 32]) -> Self {
-        Self { aux_rand_32 }
-    }
-}
-
-impl ConstantTimeEq for ScriptlessSecretScalar {
+impl ConstantTimeEq for SecretScalar {
     fn ct_eq(&self, other: &Self) -> Choice {
         self.0.ct_eq(&other.0)
     }
+}
+
+/// Derive a public point from canonical nonzero secret scalar bytes.
+pub fn secret_scalar_public_key(secret_be: &[u8; 32]) -> Result<PublicKey, DomError> {
+    let scalar = Zeroizing::new(
+        scalar_from_bytes(secret_be)
+            .ok_or_else(|| DomError::Invalid("secret scalar is noncanonical".into()))?,
+    );
+    let compressed = projective_to_compressed(&(ProjectivePoint::GENERATOR * *scalar));
+    PublicKey::from_compressed_bytes(&compressed)
+}
+
+/// Accumulate `accumulator + coefficient*multiplicand` in constant time.
+///
+/// The accumulator is replaced only after every input has passed canonical
+/// parsing. All byte buffers remain caller-owned and compiler-visibly
+/// zeroizing where required by the caller.
+pub fn secret_scalar_mul_add_assign(
+    accumulator_be: &mut Zeroizing<[u8; 32]>,
+    multiplicand_be: &[u8; 32],
+    coefficient_be: &[u8; 32],
+) -> Result<(), DomError> {
+    let accumulator = Zeroizing::new(
+        scalar_from_bytes(accumulator_be)
+            .ok_or_else(|| DomError::Invalid("accumulator scalar is noncanonical".into()))?,
+    );
+    let multiplicand = Zeroizing::new(
+        scalar_from_bytes(multiplicand_be)
+            .ok_or_else(|| DomError::Invalid("multiplicand scalar is noncanonical".into()))?,
+    );
+    let coefficient = scalar_from_bytes(coefficient_be)
+        .ok_or_else(|| DomError::Invalid("scalar coefficient is noncanonical".into()))?;
+    let result = Zeroizing::new(*accumulator + coefficient * *multiplicand);
+    *accumulator_be = Zeroizing::new(result.to_repr().into());
+    Ok(())
+}
+
+/// Verify the generic Schnorr relation `zG == A + cX`.
+pub fn verify_scalar_response(
+    response_be: &[u8; 32],
+    commitment: &PublicKey,
+    challenge_be: &[u8; 32],
+    statement_point: &PublicKey,
+) -> Result<bool, DomError> {
+    let response = scalar_from_bytes(response_be)
+        .ok_or_else(|| DomError::Invalid("response scalar is noncanonical".into()))?;
+    if !is_scalar_valid(challenge_be) {
+        return Err(DomError::Invalid(
+            "challenge scalar is zero or noncanonical".into(),
+        ));
+    }
+    let challenge = scalar_from_bytes(challenge_be)
+        .ok_or_else(|| DomError::Invalid("challenge scalar is noncanonical".into()))?;
+    let commitment = compressed_to_projective(&commitment.to_compressed_bytes())?;
+    let statement = compressed_to_projective(&statement_point.to_compressed_bytes())?;
+    Ok(ProjectivePoint::GENERATOR * response == commitment + statement * challenge)
 }
 
 /// Verify the DOM adaptor pre-signature equation.
@@ -296,7 +193,7 @@ pub fn scriptless_verify_pre_signature(
 pub fn scriptless_adapt_signature(
     scalar_hat: &PartialSig,
     aggregate_nonce_hat: &PublicKey,
-    adaptor_secret: &ScriptlessSecretScalar,
+    adaptor_secret: &SecretScalar,
 ) -> Result<SchnorrSignature, DomError> {
     let s_hat = Zeroizing::new(
         scalar_from_bytes(&scalar_hat.to_bytes())
@@ -323,7 +220,7 @@ pub fn scriptless_extract_adaptor_secret(
     scalar_hat: &PartialSig,
     aggregate_nonce_hat: &PublicKey,
     adaptor_point: &PublicKey,
-) -> Result<ScriptlessSecretScalar, DomError> {
+) -> Result<SecretScalar, DomError> {
     if final_signature.r_compressed() != &aggregate_nonce_hat.to_compressed_bytes() {
         return Err(DomError::Invalid(
             "final signature nonce differs from the pre-signature nonce".into(),
@@ -347,8 +244,8 @@ pub fn scriptless_extract_adaptor_secret(
     }
 
     let bytes: [u8; 32] = extracted.to_repr().into();
-    let secret = ScriptlessSecretScalar::from_be_bytes(bytes)?;
-    if secret.public_key() != *adaptor_point {
+    let secret = SecretScalar::from_be_bytes(bytes)?;
+    if secret.public_key()? != *adaptor_point {
         return Err(DomError::Invalid(
             "extracted scalar does not match the adaptor point".into(),
         ));
@@ -392,49 +289,6 @@ pub fn scriptless_add_public_points(points: &[PublicKey]) -> Result<PublicKey, D
         ));
     }
     PublicKey::from_compressed_bytes(&projective_to_compressed(&sum))
-}
-
-/// Produce `k1 + b*k2 + e*x` for a participant through the authoritative DOM
-/// scalar boundary.
-///
-/// One-shot ownership is enforced by the `dom-adaptor` wrapper that consumes
-/// its opaque nonce pair before calling this operation.
-#[cfg(feature = "scriptless-integrated")]
-fn sign_bound_partial_once(
-    first_nonce: &ScriptlessSecretScalar,
-    second_nonce: &ScriptlessSecretScalar,
-    binding_factor: &PartialSig,
-    challenge_be: &[u8; 32],
-    signing_share: &ScriptlessSecretScalar,
-) -> Result<PartialSig, DomError> {
-    if !is_scalar_valid(challenge_be) {
-        return Err(DomError::Invalid(
-            "partial signature challenge is zero or >= n".into(),
-        ));
-    }
-    let first = Zeroizing::new(
-        scalar_from_bytes(first_nonce.as_be_bytes())
-            .ok_or_else(|| DomError::Invalid("first secret nonce is invalid".into()))?,
-    );
-    let second = Zeroizing::new(
-        scalar_from_bytes(second_nonce.as_be_bytes())
-            .ok_or_else(|| DomError::Invalid("second secret nonce is invalid".into()))?,
-    );
-    let binding = scalar_from_bytes(&binding_factor.to_bytes())
-        .ok_or_else(|| DomError::Invalid("binding factor is invalid".into()))?;
-    let challenge = scalar_from_bytes(challenge_be)
-        .ok_or_else(|| DomError::Invalid("partial signature challenge is invalid".into()))?;
-    let share = Zeroizing::new(
-        scalar_from_bytes(signing_share.as_be_bytes())
-            .ok_or_else(|| DomError::Invalid("signing share is invalid".into()))?,
-    );
-    let partial = Zeroizing::new(*first + binding * *second + challenge * *share);
-    if bool::from(partial.is_zero()) {
-        return Err(DomError::Invalid(
-            "participant partial signature is zero".into(),
-        ));
-    }
-    PartialSig::from_bytes(&<[u8; 32]>::from(partial.to_repr()))
 }
 
 /// Aggregate participant partial scalars without constructing a final
@@ -516,8 +370,8 @@ mod tests {
         let signing_secret = scalar_from_bytes(&scalar_bytes(7)).expect("x");
         let signing_key = point_from_scalar(7);
         let nonce = scalar_from_bytes(&scalar_bytes(11)).expect("k");
-        let adaptor_secret = ScriptlessSecretScalar::from_be_bytes(scalar_bytes(13)).expect("t");
-        let adaptor_point = adaptor_secret.public_key();
+        let adaptor_secret = SecretScalar::from_be_bytes(scalar_bytes(13)).expect("t");
+        let adaptor_point = adaptor_secret.public_key().expect("T");
         let aggregate_nonce_hat_point = ProjectivePoint::GENERATOR * nonce
             + compressed_to_projective(&adaptor_point.to_compressed_bytes()).expect("T");
         let aggregate_nonce_hat =
@@ -587,22 +441,22 @@ mod tests {
 
     #[test]
     fn scriptless_secret_scalar_rejects_boundaries() {
-        assert!(ScriptlessSecretScalar::from_be_bytes([0u8; 32]).is_err());
+        assert!(SecretScalar::from_be_bytes([0u8; 32]).is_err());
 
         let order = secp256k1::constants::CURVE_ORDER;
-        assert!(ScriptlessSecretScalar::from_be_bytes(order).is_err());
+        assert!(SecretScalar::from_be_bytes(order).is_err());
 
         let mut order_plus_one = order;
         order_plus_one[31] = order_plus_one[31]
             .checked_add(1)
             .expect("group-order low byte can be incremented");
-        assert!(ScriptlessSecretScalar::from_be_bytes(order_plus_one).is_err());
-        assert!(ScriptlessSecretScalar::from_be_bytes([0xFF; 32]).is_err());
+        assert!(SecretScalar::from_be_bytes(order_plus_one).is_err());
+        assert!(SecretScalar::from_be_bytes([0xFF; 32]).is_err());
 
         let mut high_bit = [0u8; 32];
         high_bit[0] = 0x80;
         assert!(
-            ScriptlessSecretScalar::from_be_bytes(high_bit).is_ok(),
+            SecretScalar::from_be_bytes(high_bit).is_ok(),
             "a high-bit scalar below the group order remains canonical"
         );
     }
@@ -614,7 +468,7 @@ mod tests {
         let mut one = [0u8; 64];
         one[63] = 1;
         let reduced_one = scalar_from_wide_be(&one).expect("one remains one");
-        assert_eq!(reduced_one.as_be_bytes(), &scalar_bytes(1));
+        assert_eq!(reduced_one.as_ref(), &scalar_bytes(1));
 
         let order = secp256k1::constants::CURVE_ORDER;
         let mut exact_order = [0u8; 64];
@@ -624,12 +478,12 @@ mod tests {
         let mut order_plus_one = exact_order;
         order_plus_one[63] = order_plus_one[63].checked_add(1).expect("order low byte");
         let reduced = scalar_from_wide_be(&order_plus_one).expect("n + 1 reduces to one");
-        assert_eq!(reduced.as_be_bytes(), &scalar_bytes(1));
+        assert_eq!(reduced.as_ref(), &scalar_bytes(1));
 
         let mut high_bit = [0u8; 64];
         high_bit[0] = 0x80;
         let high = scalar_from_wide_be(&high_bit).expect("2^511 has a nonzero residue");
-        assert_ne!(high.as_be_bytes(), &[0u8; 32]);
+        assert_ne!(high.as_ref(), &[0u8; 32]);
     }
 
     #[test]
@@ -649,9 +503,8 @@ mod tests {
                     let nonce = scalar_from_bytes(&scalar_bytes(nonce_value)).expect("k");
                     let nonce_point = point_from_scalar(nonce_value);
                     let adaptor_secret =
-                        ScriptlessSecretScalar::from_be_bytes(scalar_bytes(adaptor_value))
-                            .expect("t");
-                    let adaptor_point = adaptor_secret.public_key();
+                        SecretScalar::from_be_bytes(scalar_bytes(adaptor_value)).expect("t");
+                    let adaptor_point = adaptor_secret.public_key().expect("T");
                     let aggregate_nonce_hat_point = ProjectivePoint::GENERATOR * nonce
                         + compressed_to_projective(&adaptor_point.to_compressed_bytes())
                             .expect("T");
@@ -737,9 +590,11 @@ mod tests {
             let signing_key = point_from_scalar(signing_value);
             let nonce =
                 scalar_from_bytes(&scalar_bytes(nonce_value)).expect("canonical nonce scalar");
-            let adaptor_secret = ScriptlessSecretScalar::from_be_bytes(scalar_bytes(adaptor_value))
+            let adaptor_secret = SecretScalar::from_be_bytes(scalar_bytes(adaptor_value))
                 .expect("canonical adaptor scalar");
-            let adaptor_point = adaptor_secret.public_key();
+            let adaptor_point = adaptor_secret
+                .public_key()
+                .expect("canonical adaptor point");
             let aggregate_nonce_hat_point = ProjectivePoint::GENERATOR * nonce
                 + compressed_to_projective(&adaptor_point.to_compressed_bytes())
                     .expect("canonical adaptor point");
@@ -803,7 +658,7 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("case {case} extraction: {error}"));
             assert_eq!(
-                extracted.public_key(),
+                extracted.public_key().expect("extracted point"),
                 adaptor_point,
                 "case {case} extract(adapt(presign)) must recover t"
             );

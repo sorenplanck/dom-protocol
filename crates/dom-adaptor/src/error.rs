@@ -48,6 +48,9 @@ pub enum AdaptorError {
     /// The nonce retry counter overflowed before public export.
     #[error("secret nonce retry counter overflow")]
     RetryCounterOverflow,
+    /// A checked proof challenge counter exhausted its complete domain.
+    #[error("proof challenge counter overflow")]
+    ChallengeCounterOverflow,
     /// A durable authorization permit does not match the reserved nonce.
     #[error("durable signing authorization does not match the nonce reservation")]
     AuthorizationMismatch,
