@@ -29,6 +29,7 @@ INPUTS_PATH = ROOT / "inputs_v1.json"
 OUTPUTS_PATH = ROOT / "expected_outputs_v1.json"
 MANIFEST_PATH = ROOT / "MANIFEST.sha256"
 MANIFEST_MEMBERS = (
+    ".gitignore",
     "README.md",
     "expected_outputs_v1.json",
     "generate_reference.py",
