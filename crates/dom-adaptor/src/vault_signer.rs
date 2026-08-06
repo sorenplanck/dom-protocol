@@ -2,16 +2,17 @@
 
 use crate::secret_nonce::SecretNonceDerivationV1;
 use crate::{
-    nonce_commitment_hash_v1, AdaptorError, AuthorizedExposureV1, ExposureKindV1,
-    NonceCommitmentV1, NonceDerivationRequestV1, NonceRevealV1, NonceSecretTransferV1,
-    NonceVaultError, NonceVaultV1, PartialSignatureV1, PreparedExposureV1, PublicNoncePairV1,
-    ResendProtocolStageV1, ResendRequestV1, ReservationContextBindingV1, ReservationLiveStageV1,
-    ReservationLookupCustodyV1, ReservationRequestLookupV1, ReservationResumeRequestV1,
-    ReservationResumeResultV1, RestoreState, SessionContextV1, SigningSessionAuthorityV1,
-    SigningShareV1, TerminalReservationV1, TrustedChainIdV1, ValidatedCommitmentRoundV1,
-    ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1, ValidatedRevealRoundV1,
-    ValidatedSigningRoundStateV1, VaultExportedArtifactV1, VaultReservationSnapshotV1,
-    VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1, VaultSpentArtifactSnapshotV1,
+    nonce_commitment_hash_v1, AcceptedSigningSessionV1, AdaptorError, AuthorizedExposureV1,
+    ExposureKindV1, NonceCommitmentV1, NonceDerivationRequestV1, NonceRevealV1,
+    NonceSecretTransferV1, NonceVaultError, NonceVaultV1, PartialSignatureV1, PreparedExposureV1,
+    PublicNoncePairV1, ResendProtocolStageV1, ResendRequestV1, ReservationContextBindingV1,
+    ReservationLiveStageV1, ReservationLookupCustodyV1, ReservationRequestLookupV1,
+    ReservationResumeRequestV1, ReservationResumeResultV1, RestoreState, SessionContextV1,
+    SigningSessionAuthorityV1, SigningShareV1, TerminalReservationV1, TrustedChainIdV1,
+    ValidatedCommitmentRoundV1, ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1,
+    ValidatedRevealRoundV1, ValidatedSigningRoundStateV1, VaultExportedArtifactV1,
+    VaultReservationSnapshotV1, VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
+    VaultSpentArtifactSnapshotV1,
 };
 use core::fmt;
 use dom_crypto::{schnorr_challenge, PartialSig};
@@ -277,6 +278,29 @@ where
     /// Delegate the reconciled read-only recovery state of the concrete vault.
     pub fn restore_state(&self) -> RestoreState {
         self.vault.restore_state()
+    }
+
+    /// Consume one accepted session from the statically selected authority.
+    ///
+    /// This is the sole production composition seam ratified by P1-007. It
+    /// recomputes the canonical context and replays the accepted transcript
+    /// before returning any stage authority. Validation failure consumes and
+    /// drops the handle without invoking the vault or creating a reservation.
+    pub fn begin_accepted_signing_round(
+        &mut self,
+        accepted_session: Sessions::AcceptedSession,
+    ) -> core::result::Result<
+        ValidatedSigningRoundStateV1,
+        VaultBackedSignerError<Vault::Error, Custody::Error>,
+    > {
+        if accepted_session.trusted_chain_id() != &self.trusted_chain_id {
+            return Err(AdaptorError::InvalidContext(
+                "accepted session trusted chain does not match the signer",
+            )
+            .into());
+        }
+        ValidatedSigningRoundStateV1::from_accepted_session(accepted_session, &self.signing_share)
+            .map_err(Into::into)
     }
 
     /// Durably retain request lookup custody and then claim one fresh reservation.
@@ -1409,5 +1433,515 @@ mod tests {
         let scalars = pair.into_record_scalars();
         assert_ne!(&scalars[..32], &[0; 32]);
         assert_ne!(&scalars[32..], &[0; 32]);
+    }
+
+    #[derive(Debug)]
+    struct SeamTestError;
+
+    impl fmt::Display for SeamTestError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("test boundary is unavailable")
+        }
+    }
+
+    impl Error for SeamTestError {}
+
+    struct NeverSpent;
+
+    impl crate::VaultSpentArtifactSnapshotV1 for NeverSpent {
+        fn nonce_identity(&self) -> &crate::NonceIdentityV1 {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn permit_id(&self) -> &crate::PermitIdV1 {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn kind(&self) -> ExposureKindV1 {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn adaptor_outbound_digest(&self) -> &[u8; 32] {
+            unreachable!("test boundary is not invoked")
+        }
+    }
+
+    struct NeverSnapshot;
+
+    impl VaultReservationSnapshotV1 for NeverSnapshot {
+        type SpentArtifact = NeverSpent;
+
+        fn request_lookup(&self) -> &ReservationRequestLookupV1 {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn reservation_nonce_id(&self) -> &crate::ReservationNonceId {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn reservation_context_binding_digest(&self) -> &[u8; 32] {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn live_stage(&self) -> ReservationLiveStageV1 {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn final_retry_counter(&self) -> Option<u64> {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn spent_commitment(&self) -> Option<&Self::SpentArtifact> {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn spent_reveal(&self) -> Option<&Self::SpentArtifact> {
+            unreachable!("test boundary is not invoked")
+        }
+    }
+
+    struct NeverPersistencePermit;
+
+    impl crate::VaultArtifactPersistencePermitV1 for NeverPersistencePermit {
+        fn reservation_nonce_id(&self) -> &crate::ReservationNonceId {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn nonce_identity(&self) -> &crate::NonceIdentityV1 {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn reservation_context_binding_digest(&self) -> &[u8; 32] {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn derivation_attempt_digest(&self) -> &[u8; 32] {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn operation_input_digest(&self) -> &[u8; 32] {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn effective_retry_counter(&self) -> u64 {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn phase(&self) -> crate::SigningPhaseV1 {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn exposure_kind(&self) -> ExposureKindV1 {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn exposure_sequence(&self) -> u64 {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn expected_lifecycle_revision(&self) -> u64 {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn stage_context_digest(&self) -> &[u8; 32] {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn process_computation_binding_id(&self) -> &crate::ProcessComputationBindingIdV1 {
+            unreachable!("test boundary is not invoked")
+        }
+    }
+
+    struct NeverExported;
+
+    impl VaultExportedArtifactV1 for NeverExported {
+        fn permit_id(&self) -> &crate::PermitIdV1 {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn kind(&self) -> ExposureKindV1 {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn as_bytes(&self) -> &[u8] {
+            unreachable!("test boundary is not invoked")
+        }
+    }
+
+    struct SeamTestVault;
+
+    impl NonceVaultV1 for SeamTestVault {
+        type Error = SeamTestError;
+        type ReservationHandle = ();
+        type ReservationSnapshot = NeverSnapshot;
+        type DerivationAttemptPermit = ();
+        type InitialSecretOpenPermit = ();
+        type StageComputationPermit = ();
+        type ArtifactPersistencePermit = NeverPersistencePermit;
+        type PersistedExposureHandle = ();
+        type ExposurePermit = ();
+        type ExportedArtifact = NeverExported;
+        type RecoveredSpentArtifact = NeverSpent;
+
+        fn claim_fresh_reservation(
+            &mut self,
+            _request: crate::FreshReservationRequestV1,
+        ) -> core::result::Result<Self::ReservationHandle, Self::Error> {
+            Err(SeamTestError)
+        }
+
+        fn resume_claimed_reservation(
+            &mut self,
+            _request: ReservationResumeRequestV1,
+        ) -> core::result::Result<ReservationResumeResultV1<Self::ReservationHandle>, Self::Error>
+        {
+            Err(SeamTestError)
+        }
+
+        fn snapshot_reservation(
+            &mut self,
+            _reservation: &Self::ReservationHandle,
+        ) -> core::result::Result<Self::ReservationSnapshot, Self::Error> {
+            Err(SeamTestError)
+        }
+
+        fn begin_nonce_derivation(
+            &mut self,
+            _reservation: &mut Self::ReservationHandle,
+            _request: NonceDerivationRequestV1,
+        ) -> core::result::Result<Self::DerivationAttemptPermit, Self::Error> {
+            Err(SeamTestError)
+        }
+
+        fn seal_derived_secret(
+            &mut self,
+            _reservation: &mut Self::ReservationHandle,
+            _attempt: Self::DerivationAttemptPermit,
+            _secret: NonceSecretTransferV1,
+            _seal_capability: VaultSecretSealCapabilityV1,
+        ) -> core::result::Result<Self::InitialSecretOpenPermit, Self::Error> {
+            Err(SeamTestError)
+        }
+
+        fn open_sealed_secret_for_commitment(
+            &mut self,
+            _reservation: &mut Self::ReservationHandle,
+            _permit: Self::InitialSecretOpenPermit,
+            _import_capability: VaultSecretImportCapabilityV1,
+        ) -> core::result::Result<
+            (NonceSecretTransferV1, Self::ArtifactPersistencePermit),
+            Self::Error,
+        > {
+            Err(SeamTestError)
+        }
+
+        fn begin_stage_computation(
+            &mut self,
+            _reservation: &mut Self::ReservationHandle,
+            _request: crate::StageComputationRequestV1,
+        ) -> core::result::Result<Self::StageComputationPermit, Self::Error> {
+            Err(SeamTestError)
+        }
+
+        fn open_secret_for_stage(
+            &mut self,
+            _reservation: &mut Self::ReservationHandle,
+            _permit: Self::StageComputationPermit,
+            _import_capability: VaultSecretImportCapabilityV1,
+        ) -> core::result::Result<
+            (NonceSecretTransferV1, Self::ArtifactPersistencePermit),
+            Self::Error,
+        > {
+            Err(SeamTestError)
+        }
+
+        fn persist_computed_artifact(
+            &mut self,
+            _reservation: &mut Self::ReservationHandle,
+            _permit: Self::ArtifactPersistencePermit,
+            _artifact: PreparedExposureV1,
+        ) -> core::result::Result<Self::PersistedExposureHandle, Self::Error> {
+            Err(SeamTestError)
+        }
+
+        fn authorize_persisted_exposure(
+            &mut self,
+            _reservation: &mut Self::ReservationHandle,
+            _persisted: Self::PersistedExposureHandle,
+        ) -> core::result::Result<Self::ExposurePermit, Self::Error> {
+            Err(SeamTestError)
+        }
+
+        fn export(
+            &mut self,
+            _permit: Self::ExposurePermit,
+        ) -> core::result::Result<Self::ExportedArtifact, Self::Error> {
+            Err(SeamTestError)
+        }
+
+        fn recover_spent_artifact(
+            &mut self,
+            _authorization: &ValidatedResendAuthorizationV1,
+        ) -> core::result::Result<Self::RecoveredSpentArtifact, Self::Error> {
+            Err(SeamTestError)
+        }
+
+        fn resend_exported(
+            &mut self,
+            _request: ResendRequestV1,
+        ) -> core::result::Result<Self::ExportedArtifact, Self::Error> {
+            Err(SeamTestError)
+        }
+
+        fn cancel_reservation(
+            &mut self,
+            _reservation: Self::ReservationHandle,
+        ) -> core::result::Result<TerminalReservationV1, Self::Error> {
+            Err(SeamTestError)
+        }
+
+        fn restore_state(&self) -> RestoreState {
+            RestoreState::RestoreQuarantined
+        }
+    }
+
+    struct NeverDurableLookup;
+
+    impl crate::DurableReservationLookupV1 for NeverDurableLookup {
+        fn request_lookup(&self) -> &ReservationRequestLookupV1 {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn context_binding_digest(&self) -> &[u8; 32] {
+            unreachable!("test boundary is not invoked")
+        }
+
+        fn session_id(&self) -> &crate::SessionId {
+            unreachable!("test boundary is not invoked")
+        }
+    }
+
+    struct SeamTestCustody;
+
+    impl ReservationLookupCustodyV1 for SeamTestCustody {
+        type Error = SeamTestError;
+        type DurableLookup = NeverDurableLookup;
+
+        fn persist_prepared_lookup(
+            &mut self,
+            _prepared: &crate::PreparedFreshReservationV1,
+        ) -> core::result::Result<Self::DurableLookup, Self::Error> {
+            Err(SeamTestError)
+        }
+
+        fn abandon_before_vault_claim(
+            &mut self,
+            _lookup: &ReservationRequestLookupV1,
+            _session_id: &crate::SessionId,
+            _context_binding_digest: &[u8; 32],
+        ) -> core::result::Result<(), Self::Error> {
+            Err(SeamTestError)
+        }
+    }
+
+    struct SeamAcceptedSession {
+        chain: TrustedChainIdV1,
+        session_id: [u8; 32],
+        purpose: crate::PurposeV1,
+        roster: crate::ParticipantRosterV1,
+        transaction: dom_consensus::Transaction,
+        initial_transcript: [u8; 32],
+    }
+
+    impl AcceptedSigningSessionV1 for SeamAcceptedSession {
+        fn trusted_chain_id(&self) -> &TrustedChainIdV1 {
+            &self.chain
+        }
+
+        fn session_id(&self) -> &[u8; 32] {
+            &self.session_id
+        }
+
+        fn contract_kind(&self) -> crate::ContractKindV1 {
+            crate::ContractKindV1::WitnessOrTimeout
+        }
+
+        fn purpose(&self) -> crate::PurposeV1 {
+            self.purpose
+        }
+
+        fn roster(&self) -> &crate::ParticipantRosterV1 {
+            &self.roster
+        }
+
+        fn transaction_template(&self) -> &dom_consensus::Transaction {
+            &self.transaction
+        }
+
+        fn kernel_index(&self) -> usize {
+            0
+        }
+
+        fn adaptor_point(&self) -> Option<&dom_crypto::PublicKey> {
+            None
+        }
+
+        fn initial_transcript_hash(&self) -> &[u8; 32] {
+            &self.initial_transcript
+        }
+
+        fn accepted_signing_messages(&self) -> impl Iterator<Item = &[u8]> {
+            core::iter::empty()
+        }
+    }
+
+    struct SeamSessionAuthority;
+
+    impl SigningSessionAuthorityV1 for SeamSessionAuthority {
+        type Error = SeamTestError;
+        type AcceptedSession = SeamAcceptedSession;
+    }
+
+    struct SeamTestSessionStore;
+
+    impl SeamTestSessionStore {
+        fn issue() -> (SeamAcceptedSession, SigningShareV1) {
+            use dom_consensus::{Transaction, TransactionKernel};
+            use dom_core::Amount;
+            use dom_crypto::pedersen::Commitment;
+            use dom_crypto::SecretKey;
+
+            let chain = TrustedChainIdV1::from_signed_fixture([0x81; 32]);
+            let identity_a = SecretKey::from_bytes(&[0x82; 32]).expect("identity secret");
+            let identity_b = SecretKey::from_bytes(&[0x83; 32]).expect("identity secret");
+            let share_a = SigningShareV1::from_be_bytes([0x84; 32]).expect("signing share");
+            let share_b = SigningShareV1::from_be_bytes([0x85; 32]).expect("signing share");
+            let mut entries = vec![
+                crate::ParticipantIdentityV1::new(
+                    &chain,
+                    identity_a.public_key(),
+                    share_a.public_key().clone(),
+                    crate::DirectionV1::Initiator,
+                )
+                .expect("participant"),
+                crate::ParticipantIdentityV1::new(
+                    &chain,
+                    identity_b.public_key(),
+                    share_b.public_key().clone(),
+                    crate::DirectionV1::Responder,
+                )
+                .expect("participant"),
+            ];
+            entries.sort_by_key(|entry| *entry.participant_id());
+            let roster = crate::ParticipantRosterV1::new(entries).expect("roster");
+            let mut signing_keys: Vec<_> = roster
+                .entries()
+                .iter()
+                .map(|entry| entry.signing_public_key().clone())
+                .collect();
+            signing_keys.sort_by_key(dom_crypto::PublicKey::to_compressed_bytes);
+            let aggregate =
+                crate::aggregate_public_nonces_v1(&signing_keys).expect("aggregate key");
+            let transaction = Transaction {
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                kernels: vec![TransactionKernel {
+                    features: 0,
+                    fee: Amount::ZERO,
+                    lock_height: 0,
+                    excess: Commitment::from_compressed_bytes(&aggregate.to_compressed_bytes())
+                        .expect("aggregate excess"),
+                    excess_signature: [0; 65],
+                }],
+                offset: [0x86; 32],
+            };
+            let session_id = [0x87; 32];
+            let initial_transcript = crate::initial_transcript_hash_v1(
+                &chain,
+                &session_id,
+                crate::ContractKindV1::WitnessOrTimeout,
+                &roster,
+            );
+            let local_share = if roster.entries()[0].signing_public_key() == share_a.public_key() {
+                share_a
+            } else {
+                share_b
+            };
+            (
+                SeamAcceptedSession {
+                    chain,
+                    session_id,
+                    purpose: crate::PurposeV1::Refund,
+                    roster,
+                    transaction,
+                    initial_transcript,
+                },
+                local_share,
+            )
+        }
+    }
+
+    fn seam_signer(
+        chain: TrustedChainIdV1,
+        signing_share: SigningShareV1,
+    ) -> VaultBackedSignerV1<SeamTestVault, SeamTestCustody, SeamSessionAuthority> {
+        VaultBackedSignerV1::new(
+            SeamTestVault,
+            SeamTestCustody,
+            SeamSessionAuthority,
+            chain,
+            signing_share,
+        )
+    }
+
+    #[test]
+    fn public_associated_session_entry_starts_one_validated_round() {
+        let (session, signing_share) = SeamTestSessionStore::issue();
+        let chain = *session.trusted_chain_id();
+        let mut signer = seam_signer(chain, signing_share);
+        let mut round = signer
+            .begin_accepted_signing_round(session)
+            .expect("accepted signing round");
+        round
+            .take_derivation_base()
+            .expect("one derivation authority");
+        assert!(round.take_derivation_base().is_err());
+    }
+
+    #[test]
+    fn public_associated_session_entry_rejects_wrong_signer_chain() {
+        let (session, signing_share) = SeamTestSessionStore::issue();
+        let mut signer = seam_signer(
+            TrustedChainIdV1::from_signed_fixture([0x88; 32]),
+            signing_share,
+        );
+        assert!(signer.begin_accepted_signing_round(session).is_err());
+    }
+
+    #[test]
+    fn public_associated_session_entry_rejects_mutated_transcript() {
+        let (mut session, signing_share) = SeamTestSessionStore::issue();
+        let chain = *session.trusted_chain_id();
+        session.initial_transcript[0] ^= 1;
+        let mut signer = seam_signer(chain, signing_share);
+        assert!(signer.begin_accepted_signing_round(session).is_err());
+    }
+
+    #[test]
+    fn public_associated_session_entry_rejects_zero_session() {
+        let (mut session, signing_share) = SeamTestSessionStore::issue();
+        let chain = *session.trusted_chain_id();
+        session.session_id = [0; 32];
+        let mut signer = seam_signer(chain, signing_share);
+        assert!(signer.begin_accepted_signing_round(session).is_err());
+    }
+
+    #[test]
+    fn public_associated_session_entry_rejects_unsupported_purpose() {
+        let (mut session, signing_share) = SeamTestSessionStore::issue();
+        let chain = *session.trusted_chain_id();
+        session.purpose = crate::PurposeV1::Sponsor;
+        let mut signer = seam_signer(chain, signing_share);
+        assert!(signer.begin_accepted_signing_round(session).is_err());
     }
 }

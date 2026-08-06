@@ -64,15 +64,46 @@
 //! use dom_adaptor::SigningRoundSessionRequestV1;
 //! ```
 //!
-//! A caller-defined implementation of the semantic accepted-session view
-//! cannot invoke a production round constructor; that entry remains absent:
+//! A generic accepted-session implementation cannot invoke the associated-type
+//! production entry:
 //!
 //! ```compile_fail
-//! use dom_adaptor::{AcceptedSigningSessionV1, SigningShareV1,
-//!     ValidatedSigningRoundStateV1};
-//! fn start<S: AcceptedSigningSessionV1>(session: S, share: &SigningShareV1) {
-//!     let _round = ValidatedSigningRoundStateV1::from_accepted_session(session, share);
+//! use dom_adaptor::{AcceptedSigningSessionV1, NonceVaultV1,
+//!     ReservationLookupCustodyV1, SigningSessionAuthorityV1, VaultBackedSignerV1};
+//! fn start<V, C, S, T>(signer: &mut VaultBackedSignerV1<V, C, S>, session: T)
+//! where
+//!     V: NonceVaultV1,
+//!     C: ReservationLookupCustodyV1,
+//!     S: SigningSessionAuthorityV1,
+//!     T: AcceptedSigningSessionV1,
+//! {
+//!     let _round = signer.begin_accepted_signing_round(session);
 //! }
+//! ```
+//!
+//! An accepted-session handle is consumed by the production entry and cannot
+//! start a second signing round:
+//!
+//! ```compile_fail
+//! use dom_adaptor::{NonceVaultV1, ReservationLookupCustodyV1,
+//!     SigningSessionAuthorityV1, VaultBackedSignerV1};
+//! fn reuse<V, C, S>(signer: &mut VaultBackedSignerV1<V, C, S>,
+//!                   session: S::AcceptedSession)
+//! where
+//!     V: NonceVaultV1,
+//!     C: ReservationLookupCustodyV1,
+//!     S: SigningSessionAuthorityV1,
+//! {
+//!     let _first = signer.begin_accepted_signing_round(session);
+//!     let _second = signer.begin_accepted_signing_round(session);
+//! }
+//! ```
+//!
+//! The internal accepted-session replay helper remains unnameable downstream:
+//!
+//! ```compile_fail
+//! use dom_adaptor::ValidatedSigningRoundStateV1;
+//! let _ = ValidatedSigningRoundStateV1::from_accepted_session;
 //! ```
 //!
 //! The persistent DSC1 fuzz harness is unavailable in ordinary builds:
@@ -249,7 +280,7 @@ pub use vault_operation::{
 };
 pub use vault_signer::{
     CommitmentExportedV1, PartialExportedTerminalV1, ResentArtifactV1, ReservedNonceV1,
-    RevealExportedV1, VaultBackedSignerError, VaultBackedSignerV1,
+    ResumedReservationV1, RevealExportedV1, VaultBackedSignerError, VaultBackedSignerV1,
 };
 
 #[cfg(test)]

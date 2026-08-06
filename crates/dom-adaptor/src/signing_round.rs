@@ -3,16 +3,13 @@
 use crate::vault_operation::{CommitmentEntryV1, RevealEntryV1};
 use crate::{
     advance_transcript_hash_v1, aggregate_public_nonces_v1, binding_factor_v1,
-    nonce_commitment_hash_v1, session_message_digest_v1, AdaptorError, BindingContextV1,
-    BindingFactorV1, ContractKindV1, NonceCommitmentV1, NonceRevealV1, PartialSignatureV1,
+    canonical_template_v1, initial_transcript_hash_v1, nonce_commitment_hash_v1,
+    session_message_digest_v1, AdaptorError, BindingContextV1, BindingFactorV1, ContractKindV1,
+    NonceCommitmentV1, NonceRevealV1, PartialSignatureV1, ParticipantIdentityV1,
     ParticipantPublicNoncesV1, ParticipantRosterV1, ProtocolCommitmentSetV1, ProtocolRevealSetV1,
-    PurposeV1, ResendProtocolStageV1, ReservationRequestLookupV1, Result, SessionContextV1,
-    SessionId, SigningPhaseV1, StageComputationRequestV1, TrustedChainIdV1,
-};
-#[cfg(any(test, fuzzing))]
-use crate::{
-    canonical_template_v1, initial_transcript_hash_v1, ParticipantIdentityV1,
-    SessionContextInputsV1, SigningShareV1,
+    PurposeV1, ResendProtocolStageV1, ReservationRequestLookupV1, Result, SessionContextInputsV1,
+    SessionContextV1, SessionId, SigningPhaseV1, SigningShareV1, StageComputationRequestV1,
+    TrustedChainIdV1,
 };
 use dom_crypto::{schnorr_verify, PublicKey, SchnorrSignature};
 
@@ -317,9 +314,9 @@ impl ValidatedAcceptedSessionMessageV1 {
 
 /// Test/evidence-only non-authoritative source values for a fresh signing round.
 ///
-/// This type is deliberately absent from ordinary builds. A production
-/// constructor remains blocked until a signed accepted-session authority
-/// freezes session uniqueness, accepted terms, and transcript ancestry.
+/// This source-shaped helper is deliberately absent from ordinary builds.
+/// Production consumes only the accepted-session handle associated with the
+/// statically selected session authority.
 #[cfg(any(test, fuzzing))]
 pub(crate) struct SigningRoundSessionRequestV1 {
     session_id: [u8; 32],
@@ -366,7 +363,6 @@ impl SigningRoundSessionRequestV1 {
 }
 
 /// Opaque bootstrap produced only inside the trusted signer boundary.
-#[cfg(any(test, fuzzing))]
 pub(crate) struct ValidatedSigningRoundBootstrapV1 {
     trusted_chain_id: TrustedChainIdV1,
     base_context: SessionContextV1,
@@ -374,8 +370,41 @@ pub(crate) struct ValidatedSigningRoundBootstrapV1 {
     local_protocol_index: u16,
 }
 
-#[cfg(any(test, fuzzing))]
+struct SigningRoundComponentsV1 {
+    trusted_chain_id: TrustedChainIdV1,
+    session_id: [u8; 32],
+    contract_kind: ContractKindV1,
+    purpose: PurposeV1,
+    roster: ParticipantRosterV1,
+    transaction_template: dom_consensus::Transaction,
+    kernel_index: usize,
+    adaptor_point: Option<PublicKey>,
+}
+
 impl ValidatedSigningRoundBootstrapV1 {
+    fn from_accepted_session<Session>(
+        session: &Session,
+        signing_share: &SigningShareV1,
+    ) -> Result<Self>
+    where
+        Session: AcceptedSigningSessionV1,
+    {
+        Self::from_components(
+            SigningRoundComponentsV1 {
+                trusted_chain_id: *session.trusted_chain_id(),
+                session_id: *session.session_id(),
+                contract_kind: session.contract_kind(),
+                purpose: session.purpose(),
+                roster: session.roster().clone(),
+                transaction_template: session.transaction_template().clone(),
+                kernel_index: session.kernel_index(),
+                adaptor_point: session.adaptor_point().cloned(),
+            },
+            signing_share,
+        )
+    }
+
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn from_session_request(
         trusted_chain_id: TrustedChainIdV1,
         request: SigningRoundSessionRequestV1,
@@ -390,6 +419,35 @@ impl ValidatedSigningRoundBootstrapV1 {
             kernel_index,
             adaptor_point,
         } = request;
+        Self::from_components(
+            SigningRoundComponentsV1 {
+                trusted_chain_id,
+                session_id,
+                contract_kind,
+                purpose,
+                roster,
+                transaction_template,
+                kernel_index,
+                adaptor_point,
+            },
+            signing_share,
+        )
+    }
+
+    fn from_components(
+        components: SigningRoundComponentsV1,
+        signing_share: &SigningShareV1,
+    ) -> Result<Self> {
+        let SigningRoundComponentsV1 {
+            trusted_chain_id,
+            session_id,
+            contract_kind,
+            purpose,
+            roster,
+            transaction_template,
+            kernel_index,
+            adaptor_point,
+        } = components;
         if roster.entries().len() != 2
             || roster
                 .entries()
@@ -516,11 +574,7 @@ struct PartialPublicInputsV1 {
 }
 
 impl ValidatedSigningRoundStateV1 {
-    /// Build and replay a trusted accepted session only for crate tests and fuzzing.
-    ///
-    /// The method is deliberately absent from production builds until DOM
-    /// Contracts supplies the concrete statically selected session authority.
-    #[cfg(any(test, fuzzing))]
+    /// Build and replay a trusted accepted session behind the static signer entry.
     pub(crate) fn from_accepted_session<Session>(
         session: Session,
         signing_share: &SigningShareV1,
@@ -528,20 +582,8 @@ impl ValidatedSigningRoundStateV1 {
     where
         Session: AcceptedSigningSessionV1,
     {
-        let request = SigningRoundSessionRequestV1::new(
-            *session.session_id(),
-            session.contract_kind(),
-            session.purpose(),
-            session.roster().clone(),
-            session.transaction_template().clone(),
-            session.kernel_index(),
-            session.adaptor_point().cloned(),
-        )?;
-        let bootstrap = ValidatedSigningRoundBootstrapV1::from_session_request(
-            *session.trusted_chain_id(),
-            request,
-            signing_share,
-        )?;
+        let bootstrap =
+            ValidatedSigningRoundBootstrapV1::from_accepted_session(&session, signing_share)?;
         if bootstrap.base_context.transcript_hash() != session.initial_transcript_hash() {
             return Err(AdaptorError::InvalidTranscript(
                 "accepted-session initial transcript mismatch",
@@ -565,7 +607,6 @@ impl ValidatedSigningRoundStateV1 {
         Ok(state)
     }
 
-    #[cfg(any(test, fuzzing))]
     pub(crate) fn from_bootstrap(
         bootstrap: ValidatedSigningRoundBootstrapV1,
         signing_share: &SigningShareV1,
