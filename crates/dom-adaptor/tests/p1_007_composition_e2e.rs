@@ -4,16 +4,17 @@ use dom_adaptor::{
     advance_transcript_hash_v1, aggregate_public_nonces_v1, initial_transcript_hash_v1,
     session_message_digest_v1, validate_prepared_exposure_v1, AcceptedMessageDispositionV1,
     AcceptedSigningSessionV1, ContractKindV1, DurableReservationLookupV1, ExposureKindV1,
-    FreshReservationRequestV1, NonceDerivationRequestV1, NonceIdentityV1, NonceVaultV1,
-    ParticipantId, ParticipantIdentityV1, ParticipantRosterV1, PermitIdV1, PreparedExposureV1,
-    ProcessComputationBindingIdV1, PurposeV1, ResendRequestV1, ResentArtifactV1,
-    ReservationLiveStageV1, ReservationLookupCustodyV1, ReservationNonceId,
+    FreshReservationRequestV1, NonceDerivationRequestV1, NonceIdentityV1, NonceVaultError,
+    NonceVaultV1, ParticipantId, ParticipantIdentityV1, ParticipantRosterV1, PermitIdV1,
+    PreparedExposureV1, ProcessComputationBindingIdV1, PurposeV1, ResendRequestV1,
+    ResentArtifactV1, ReservationLiveStageV1, ReservationLookupCustodyV1, ReservationNonceId,
     ReservationRequestLookupV1, ReservationResumeRequestV1, ReservationResumeResultV1,
     ReservationState, RestoreState, SessionId, SigningPhaseV1, SigningSessionAuthorityV1,
     SigningShareV1, StageComputationRequestV1, TerminalReservationV1, TrustedChainIdV1,
-    ValidatedResendAuthorizationV1, VaultArtifactPersistencePermitV1, VaultBackedSignerV1,
-    VaultComputationStageV1, VaultExportedArtifactV1, VaultReservationSnapshotV1,
-    VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1, VaultSpentArtifactSnapshotV1,
+    ValidatedResendAuthorizationV1, VaultArtifactPersistencePermitV1, VaultBackedSignerError,
+    VaultBackedSignerV1, VaultComputationStageV1, VaultExportedArtifactV1,
+    VaultReservationSnapshotV1, VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
+    VaultSpentArtifactSnapshotV1,
 };
 use dom_consensus::{Transaction, TransactionKernel};
 use dom_core::{Amount, Hash256};
@@ -21,6 +22,7 @@ use dom_crypto::pedersen::Commitment;
 use dom_crypto::{schnorr_sign, PublicKey, SecretKey};
 use std::error::Error;
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use zeroize::Zeroizing;
 
@@ -229,19 +231,41 @@ struct TestRecord {
 #[derive(Clone)]
 struct TestVault {
     state: Arc<Mutex<Option<TestRecord>>>,
+    resume_outcome: Arc<Mutex<ResumeOutcome>>,
+    resume_calls: Arc<AtomicUsize>,
     reservation_byte: u8,
+}
+
+#[derive(Clone, Copy)]
+enum ResumeOutcome {
+    Recorded,
+    Terminal(ReservationState),
+    Live,
+    RetryNotFound,
+    StoreError,
 }
 
 impl TestVault {
     fn new(reservation_byte: u8) -> Self {
         Self {
             state: Arc::new(Mutex::new(None)),
+            resume_outcome: Arc::new(Mutex::new(ResumeOutcome::Recorded)),
+            resume_calls: Arc::new(AtomicUsize::new(0)),
             reservation_byte,
         }
     }
 
     fn restarted(&self) -> Self {
         self.clone()
+    }
+
+    fn set_resume_outcome(&self, outcome: ResumeOutcome) -> Result<(), TestBoundaryError> {
+        *lock(&self.resume_outcome)? = outcome;
+        Ok(())
+    }
+
+    fn resume_calls(&self) -> usize {
+        self.resume_calls.load(Ordering::SeqCst)
     }
 
     fn record(guard: &mut Option<TestRecord>) -> Result<&mut TestRecord, TestBoundaryError> {
@@ -354,6 +378,8 @@ impl NonceVaultV1 for TestVault {
         &mut self,
         request: ReservationResumeRequestV1,
     ) -> Result<ReservationResumeResultV1<Self::ReservationHandle>, Self::Error> {
+        self.resume_calls.fetch_add(1, Ordering::SeqCst);
+        let outcome = *lock(&self.resume_outcome)?;
         let mut state = lock(&self.state)?;
         let record = Self::record(&mut state)?;
         if record.lookup != *request.request_lookup()
@@ -364,15 +390,28 @@ impl NonceVaultV1 for TestVault {
         {
             return Err(TestBoundaryError("resume binding mismatch"));
         }
-        if record.terminal {
-            return Ok(ReservationResumeResultV1::Terminal(TerminalReservationV1 {
-                reservation_id: record.reservation_id.clone(),
-                state: ReservationState::ConsumedPartialAuthorized,
-            }));
+        match outcome {
+            ResumeOutcome::StoreError => Err(TestBoundaryError("injected resume failure")),
+            ResumeOutcome::RetryNotFound => Ok(ReservationResumeResultV1::RetryNotFound),
+            ResumeOutcome::Live => Ok(ReservationResumeResultV1::Live(
+                record.reservation_id.clone(),
+            )),
+            ResumeOutcome::Terminal(state) => {
+                Ok(ReservationResumeResultV1::Terminal(TerminalReservationV1 {
+                    reservation_id: record.reservation_id.clone(),
+                    state,
+                }))
+            }
+            ResumeOutcome::Recorded if record.terminal => {
+                Ok(ReservationResumeResultV1::Terminal(TerminalReservationV1 {
+                    reservation_id: record.reservation_id.clone(),
+                    state: ReservationState::ConsumedPartialAuthorized,
+                }))
+            }
+            ResumeOutcome::Recorded => Ok(ReservationResumeResultV1::Live(
+                record.reservation_id.clone(),
+            )),
         }
-        Ok(ReservationResumeResultV1::Live(
-            record.reservation_id.clone(),
-        ))
     }
 
     fn snapshot_reservation(
@@ -654,12 +693,16 @@ impl NonceVaultV1 for TestVault {
 #[derive(Clone)]
 struct TestCustody {
     retained: Arc<Mutex<Option<TestDurableLookup>>>,
+    abandon_calls: Arc<AtomicUsize>,
+    abandon_failure: Arc<Mutex<bool>>,
 }
 
 impl TestCustody {
     fn new() -> Self {
         Self {
             retained: Arc::new(Mutex::new(None)),
+            abandon_calls: Arc::new(AtomicUsize::new(0)),
+            abandon_failure: Arc::new(Mutex::new(true)),
         }
     }
 
@@ -672,6 +715,15 @@ impl TestCustody {
             .as_ref()
             .map(|value| value.lookup.clone())
             .ok_or(TestBoundaryError("retained lookup missing"))
+    }
+
+    fn set_abandon_failure(&self, failure: bool) -> Result<(), TestBoundaryError> {
+        *lock(&self.abandon_failure)? = failure;
+        Ok(())
+    }
+
+    fn abandon_calls(&self) -> usize {
+        self.abandon_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -719,7 +771,12 @@ impl ReservationLookupCustodyV1 for TestCustody {
         _session_id: &SessionId,
         _context_binding_digest: &[u8; 32],
     ) -> Result<(), Self::Error> {
-        Err(TestBoundaryError("unexpected retry abandonment"))
+        self.abandon_calls.fetch_add(1, Ordering::SeqCst);
+        if *lock(&self.abandon_failure)? {
+            Err(TestBoundaryError("injected custody abandonment failure"))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -729,6 +786,7 @@ struct TestAcceptedSession {
     roster: ParticipantRosterV1,
     transaction: Transaction,
     transcript: [u8; 32],
+    accepted_messages: Vec<Vec<u8>>,
 }
 
 impl AcceptedSigningSessionV1 for TestAcceptedSession {
@@ -769,7 +827,7 @@ impl AcceptedSigningSessionV1 for TestAcceptedSession {
     }
 
     fn accepted_signing_messages(&self) -> impl Iterator<Item = &[u8]> {
-        core::iter::empty()
+        self.accepted_messages.iter().map(Vec::as_slice)
     }
 }
 
@@ -879,6 +937,18 @@ impl SessionFixture {
             roster: self.roster.clone(),
             transaction: self.transaction.clone(),
             transcript: self.transcript,
+            accepted_messages: Vec::new(),
+        }
+    }
+
+    fn accepted_with_messages(&self, accepted_messages: Vec<Vec<u8>>) -> TestAcceptedSession {
+        TestAcceptedSession {
+            chain: self.chain,
+            session_id: self.session_id,
+            roster: self.roster.clone(),
+            transaction: self.transaction.clone(),
+            transcript: self.transcript,
+            accepted_messages,
         }
     }
 
@@ -939,6 +1009,228 @@ fn signer(
         fixture.chain,
         fixture.share(participant),
     )
+}
+
+type TestSigner = VaultBackedSignerV1<TestVault, TestCustody, TestSessionAuthority>;
+
+struct PartialRestartHarness {
+    fixture: SessionFixture,
+    vault: TestVault,
+    custody: TestCustody,
+    lookup: ReservationRequestLookupV1,
+    accepted_prefix: Vec<Vec<u8>>,
+    expected_partial: [u8; 67],
+}
+
+impl PartialRestartHarness {
+    fn restarted_with_prefix(
+        &self,
+        prefix: Vec<Vec<u8>>,
+    ) -> Result<(TestSigner, dom_adaptor::ValidatedSigningRoundStateV1), TestBoundaryError> {
+        let mut signer = signer(
+            self.vault.restarted(),
+            self.custody.restarted(),
+            &self.fixture,
+            0,
+        );
+        let round = signer
+            .begin_accepted_signing_round(self.fixture.accepted_with_messages(prefix))
+            .map_err(|_| TestBoundaryError("accepted-prefix replay failed"))?;
+        Ok((signer, round))
+    }
+
+    fn restarted_after_reveals(
+        &self,
+    ) -> Result<(TestSigner, dom_adaptor::ValidatedSigningRoundStateV1), TestBoundaryError> {
+        self.restarted_with_prefix(self.accepted_prefix[..4].to_vec())
+    }
+}
+
+fn build_partial_restart_harness() -> PartialRestartHarness {
+    let fixture = SessionFixture::new();
+    let vaults = [TestVault::new(0xa1), TestVault::new(0xa2)];
+    let custody = [TestCustody::new(), TestCustody::new()];
+    let mut signers = [
+        signer(vaults[0].clone(), custody[0].clone(), &fixture, 0),
+        signer(vaults[1].clone(), custody[1].clone(), &fixture, 1),
+    ];
+    let mut rounds = [
+        signers[0]
+            .begin_accepted_signing_round(fixture.accepted())
+            .expect("accepted round A"),
+        signers[1]
+            .begin_accepted_signing_round(fixture.accepted())
+            .expect("accepted round B"),
+    ];
+    let derivation_a = rounds[0].take_derivation_base().expect("derivation A");
+    let derivation_b = rounds[1].take_derivation_base().expect("derivation B");
+    let reserved_a = signers[0].claim_fresh(derivation_a).expect("claim A");
+    let reserved_b = signers[1].claim_fresh(derivation_b).expect("claim B");
+    let (commitment_state_a, commitment_a) = signers[0]
+        .derive_and_export_commitment(reserved_a)
+        .expect("commitment A");
+    let (commitment_state_b, commitment_b) = signers[1]
+        .derive_and_export_commitment(reserved_b)
+        .expect("commitment B");
+
+    let mut transcript = fixture.transcript;
+    let (commitment_message_a, next) = signed_message(
+        &fixture,
+        0,
+        0,
+        transcript,
+        KIND_COMMITMENT,
+        SigningPhaseV1::SigNonceCommit,
+        &commitment_a.to_bytes(),
+    );
+    transcript = next;
+    let (commitment_message_b, next) = signed_message(
+        &fixture,
+        1,
+        0,
+        transcript,
+        KIND_COMMITMENT,
+        SigningPhaseV1::SigNonceCommit,
+        &commitment_b.to_bytes(),
+    );
+    transcript = next;
+    for round in &mut rounds {
+        round
+            .accept_message(&commitment_message_a)
+            .expect("accept commitment A");
+        round
+            .accept_message(&commitment_message_b)
+            .expect("accept commitment B");
+    }
+
+    let reveal_authority_a = rounds[0]
+        .take_commitment_round()
+        .expect("reveal authority A");
+    let (reveal_state_a, reveal_a) = signers[0]
+        .export_reveal(commitment_state_a, reveal_authority_a)
+        .expect("reveal A");
+    let (reveal_message_a, next) = signed_message(
+        &fixture,
+        0,
+        1,
+        transcript,
+        KIND_REVEAL,
+        SigningPhaseV1::SigNonceReveal,
+        &reveal_a.to_bytes(),
+    );
+    transcript = next;
+    for round in &mut rounds {
+        round
+            .accept_message(&reveal_message_a)
+            .expect("accept reveal A");
+    }
+    let reveal_authority_b = rounds[1]
+        .take_commitment_round()
+        .expect("reveal authority B");
+    let (reveal_state_b, reveal_b) = signers[1]
+        .export_reveal(commitment_state_b, reveal_authority_b)
+        .expect("reveal B");
+    let (reveal_message_b, next) = signed_message(
+        &fixture,
+        1,
+        1,
+        transcript,
+        KIND_REVEAL,
+        SigningPhaseV1::SigNonceReveal,
+        &reveal_b.to_bytes(),
+    );
+    transcript = next;
+    for round in &mut rounds {
+        round
+            .accept_message(&reveal_message_b)
+            .expect("accept reveal B");
+    }
+
+    let partial_authority_a = rounds[0].take_reveal_round().expect("partial authority A");
+    let (_terminal_a, partial_a) = signers[0]
+        .sign_and_export_partial(reveal_state_a, partial_authority_a)
+        .expect("partial A");
+    let (partial_message_a, next) = signed_message(
+        &fixture,
+        0,
+        2,
+        transcript,
+        KIND_PARTIAL,
+        SigningPhaseV1::SigPartial,
+        &partial_a.to_bytes(),
+    );
+    transcript = next;
+    for round in &mut rounds {
+        round
+            .accept_message(&partial_message_a)
+            .expect("accept partial A");
+    }
+    let partial_authority_b = rounds[1].take_reveal_round().expect("partial authority B");
+    let (_terminal_b, partial_b) = signers[1]
+        .sign_and_export_partial(reveal_state_b, partial_authority_b)
+        .expect("partial B");
+    let (partial_message_b, _) = signed_message(
+        &fixture,
+        1,
+        2,
+        transcript,
+        KIND_PARTIAL,
+        SigningPhaseV1::SigPartial,
+        &partial_b.to_bytes(),
+    );
+    for round in &mut rounds {
+        round
+            .accept_message(&partial_message_b)
+            .expect("accept partial B");
+    }
+
+    let lookup = custody[0].lookup().expect("partial restart lookup");
+    let expected_partial = partial_a.to_bytes();
+    drop(signers);
+    drop(rounds);
+    PartialRestartHarness {
+        fixture,
+        vault: vaults[0].clone(),
+        custody: custody[0].clone(),
+        lookup,
+        accepted_prefix: vec![
+            commitment_message_a,
+            commitment_message_b,
+            reveal_message_a,
+            reveal_message_b,
+            partial_message_a,
+            partial_message_b,
+        ],
+        expected_partial,
+    }
+}
+
+fn resign_message(fixture: &SessionFixture, sender_index: usize, bytes: &mut [u8]) {
+    const SIGNATURE_LEN: usize = 65;
+    let unsigned_len = bytes
+        .len()
+        .checked_sub(SIGNATURE_LEN)
+        .expect("signed DSC1 envelope");
+    let digest = session_message_digest_v1(&bytes[..unsigned_len]);
+    let signature = schnorr_sign(
+        &fixture.identity(sender_index),
+        &digest,
+        fixture.chain.as_bytes(),
+    )
+    .expect("replacement transport signature");
+    bytes[unsigned_len..].copy_from_slice(&signature.to_bytes());
+}
+
+fn assert_partial_restart_preparation_rejected_without_store(
+    harness: &PartialRestartHarness,
+    signer: &mut TestSigner,
+    round: &mut dom_adaptor::ValidatedSigningRoundStateV1,
+) {
+    let calls_before = harness.vault.resume_calls();
+    assert!(signer
+        .authorize_partial_resend_after_restart(round, harness.lookup.clone())
+        .is_err());
+    assert_eq!(harness.vault.resume_calls(), calls_before);
 }
 
 #[test]
@@ -1140,4 +1432,296 @@ fn public_associated_session_seam_drives_complete_signer_lifecycle() {
         _ => panic!("wrong resent partial kind"),
     }
     assert!(terminal_a.authorize_resend(&mut rounds[0]).is_err());
+}
+
+#[test]
+fn p1_009_partial_restart_resend_is_byte_identical_and_one_shot() {
+    let harness = build_partial_restart_harness();
+    let (mut signer, mut round) = harness
+        .restarted_with_prefix(harness.accepted_prefix.clone())
+        .expect("complete accepted prefix");
+    let calls_before = harness.vault.resume_calls();
+    let authority = signer
+        .authorize_partial_resend_after_restart(&mut round, harness.lookup.clone())
+        .expect("partial restart authority");
+    assert_eq!(harness.vault.resume_calls(), calls_before + 1);
+    match signer
+        .resend_after_restart(authority)
+        .expect("partial restart resend")
+    {
+        ResentArtifactV1::PartialSignature(partial) => {
+            assert_eq!(partial.to_bytes(), harness.expected_partial)
+        }
+        _ => panic!("wrong restarted artifact kind"),
+    }
+    assert!(signer
+        .authorize_partial_resend_after_restart(&mut round, harness.lookup.clone())
+        .is_err());
+    assert_eq!(harness.vault.resume_calls(), calls_before + 1);
+
+    let (mut second_signer, mut second_round) = harness
+        .restarted_with_prefix(harness.accepted_prefix.clone())
+        .expect("second process accepted prefix");
+    let second_authority = second_signer
+        .authorize_partial_resend_after_restart(&mut second_round, harness.lookup.clone())
+        .expect("second process partial restart authority");
+    match second_signer
+        .resend_after_restart(second_authority)
+        .expect("second process partial restart resend")
+    {
+        ResentArtifactV1::PartialSignature(partial) => {
+            assert_eq!(partial.to_bytes(), harness.expected_partial)
+        }
+        _ => panic!("wrong second-process artifact kind"),
+    }
+    assert_eq!(harness.vault.resume_calls(), calls_before + 2);
+}
+
+#[test]
+fn p1_009_nonmatching_terminal_states_each_make_one_store_call() {
+    let harness = build_partial_restart_harness();
+    for state in [
+        ReservationState::Reserved,
+        ReservationState::CommitmentAuthorized,
+        ReservationState::RevealAuthorized,
+        ReservationState::AbortedBeforePublicMaterial,
+        ReservationState::ConsumedOnAbort,
+        ReservationState::Burned,
+    ] {
+        harness
+            .vault
+            .set_resume_outcome(ResumeOutcome::Terminal(state))
+            .expect("terminal outcome");
+        let (mut signer, mut round) = harness
+            .restarted_with_prefix(harness.accepted_prefix.clone())
+            .expect("complete accepted prefix");
+        let calls_before = harness.vault.resume_calls();
+        assert!(matches!(
+            signer.authorize_partial_resend_after_restart(&mut round, harness.lookup.clone()),
+            Err(VaultBackedSignerError::Contract(
+                NonceVaultError::InvalidTransition
+            ))
+        ));
+        assert_eq!(harness.vault.resume_calls(), calls_before + 1);
+    }
+}
+
+#[test]
+fn p1_009_live_store_result_is_rejected_after_one_store_call() {
+    let harness = build_partial_restart_harness();
+    harness
+        .vault
+        .set_resume_outcome(ResumeOutcome::Live)
+        .expect("live outcome");
+    let (mut signer, mut round) = harness
+        .restarted_with_prefix(harness.accepted_prefix.clone())
+        .expect("complete accepted prefix");
+    let calls_before = harness.vault.resume_calls();
+    assert!(matches!(
+        signer.authorize_partial_resend_after_restart(&mut round, harness.lookup.clone()),
+        Err(VaultBackedSignerError::Contract(
+            NonceVaultError::InvalidTransition
+        ))
+    ));
+    assert_eq!(harness.vault.resume_calls(), calls_before + 1);
+}
+
+#[test]
+fn p1_009_retry_not_found_abandons_once_and_preserves_error_mapping() {
+    let harness = build_partial_restart_harness();
+    harness
+        .vault
+        .set_resume_outcome(ResumeOutcome::RetryNotFound)
+        .expect("retry-not-found outcome");
+    harness
+        .custody
+        .set_abandon_failure(false)
+        .expect("successful abandonment");
+    let (mut signer, mut round) = harness
+        .restarted_with_prefix(harness.accepted_prefix.clone())
+        .expect("complete accepted prefix");
+    let calls_before = harness.vault.resume_calls();
+    let abandonment_before = harness.custody.abandon_calls();
+    assert!(matches!(
+        signer.authorize_partial_resend_after_restart(&mut round, harness.lookup.clone()),
+        Err(VaultBackedSignerError::Contract(
+            NonceVaultError::ReservationNotFound
+        ))
+    ));
+    assert_eq!(harness.vault.resume_calls(), calls_before + 1);
+    assert_eq!(harness.custody.abandon_calls(), abandonment_before + 1);
+
+    harness
+        .custody
+        .set_abandon_failure(true)
+        .expect("failing abandonment");
+    let (mut failing_signer, mut failing_round) = harness
+        .restarted_with_prefix(harness.accepted_prefix.clone())
+        .expect("complete accepted prefix");
+    let calls_before = harness.vault.resume_calls();
+    let abandonment_before = harness.custody.abandon_calls();
+    assert!(matches!(
+        failing_signer
+            .authorize_partial_resend_after_restart(&mut failing_round, harness.lookup.clone(),),
+        Err(VaultBackedSignerError::Custody(_))
+    ));
+    assert_eq!(harness.vault.resume_calls(), calls_before + 1);
+    assert_eq!(harness.custody.abandon_calls(), abandonment_before + 1);
+}
+
+#[test]
+fn p1_009_store_error_and_wrong_lookup_never_fallback() {
+    let harness = build_partial_restart_harness();
+    harness
+        .vault
+        .set_resume_outcome(ResumeOutcome::StoreError)
+        .expect("Store error outcome");
+    let (mut signer, mut round) = harness
+        .restarted_with_prefix(harness.accepted_prefix.clone())
+        .expect("complete accepted prefix");
+    let calls_before = harness.vault.resume_calls();
+    assert!(matches!(
+        signer.authorize_partial_resend_after_restart(&mut round, harness.lookup.clone()),
+        Err(VaultBackedSignerError::Vault(_))
+    ));
+    assert_eq!(harness.vault.resume_calls(), calls_before + 1);
+    harness
+        .vault
+        .set_resume_outcome(ResumeOutcome::Terminal(
+            ReservationState::ConsumedPartialAuthorized,
+        ))
+        .expect("terminal success outcome");
+    assert!(signer
+        .authorize_partial_resend_after_restart(&mut round, harness.lookup.clone())
+        .is_err());
+    assert_eq!(harness.vault.resume_calls(), calls_before + 1);
+
+    let (mut wrong_signer, mut wrong_round) = harness
+        .restarted_with_prefix(harness.accepted_prefix.clone())
+        .expect("complete accepted prefix");
+    let wrong_lookup =
+        ReservationRequestLookupV1::from_bytes([0xee; 32]).expect("wrong request lookup");
+    let calls_before = harness.vault.resume_calls();
+    let abandonment_before = harness.custody.abandon_calls();
+    assert!(matches!(
+        wrong_signer.authorize_partial_resend_after_restart(&mut wrong_round, wrong_lookup),
+        Err(VaultBackedSignerError::Vault(_))
+    ));
+    assert_eq!(harness.vault.resume_calls(), calls_before + 1);
+    assert_eq!(harness.custody.abandon_calls(), abandonment_before);
+}
+
+#[test]
+fn p1_009_missing_local_partial_fails_before_store() {
+    let harness = build_partial_restart_harness();
+    let (mut signer, mut round) = harness
+        .restarted_after_reveals()
+        .expect("accepted reveal prefix");
+    assert_partial_restart_preparation_rejected_without_store(&harness, &mut signer, &mut round);
+}
+
+#[test]
+fn p1_009_mutated_authenticated_local_partial_fails_before_store() {
+    const PAYLOAD_OFFSET: usize = 148;
+    let harness = build_partial_restart_harness();
+    let (mut signer, mut round) = harness
+        .restarted_after_reveals()
+        .expect("accepted reveal prefix");
+    let mut mutated = harness.accepted_prefix[4].clone();
+    mutated[PAYLOAD_OFFSET + 66] ^= 1;
+    resign_message(&harness.fixture, 0, &mut mutated);
+    assert!(round.accept_message(&mutated).is_err());
+    assert_partial_restart_preparation_rejected_without_store(&harness, &mut signer, &mut round);
+}
+
+#[test]
+fn p1_009_reordered_partial_prefix_fails_before_store() {
+    let harness = build_partial_restart_harness();
+    let (mut signer, mut round) = harness
+        .restarted_after_reveals()
+        .expect("accepted reveal prefix");
+    assert_eq!(
+        round
+            .accept_message(&harness.accepted_prefix[5])
+            .expect("early remote partial"),
+        AcceptedMessageDispositionV1::Buffered
+    );
+    assert_partial_restart_preparation_rejected_without_store(&harness, &mut signer, &mut round);
+}
+
+#[test]
+fn p1_009_authenticated_partial_equivocation_fails_before_store() {
+    const PAYLOAD_OFFSET: usize = 148;
+    let harness = build_partial_restart_harness();
+    let (mut signer, mut round) = harness
+        .restarted_with_prefix(harness.accepted_prefix.clone())
+        .expect("complete accepted prefix");
+    let mut equivocation = harness.accepted_prefix[4].clone();
+    equivocation[PAYLOAD_OFFSET + 3] ^= 1;
+    resign_message(&harness.fixture, 0, &mut equivocation);
+    assert!(round.accept_message(&equivocation).is_err());
+    assert_partial_restart_preparation_rejected_without_store(&harness, &mut signer, &mut round);
+}
+
+#[test]
+fn p1_009_cross_session_partial_fails_before_store() {
+    const SESSION_OFFSET: usize = 40;
+    let harness = build_partial_restart_harness();
+    let (mut signer, mut round) = harness
+        .restarted_after_reveals()
+        .expect("accepted reveal prefix");
+    let mut cross_session = harness.accepted_prefix[4].clone();
+    cross_session[SESSION_OFFSET] ^= 1;
+    resign_message(&harness.fixture, 0, &mut cross_session);
+    assert!(round.accept_message(&cross_session).is_err());
+    assert_partial_restart_preparation_rejected_without_store(&harness, &mut signer, &mut round);
+}
+
+#[test]
+fn p1_009_cross_purpose_partial_fails_before_store() {
+    const PAYLOAD_OFFSET: usize = 148;
+    let harness = build_partial_restart_harness();
+    let (mut signer, mut round) = harness
+        .restarted_after_reveals()
+        .expect("accepted reveal prefix");
+    let mut cross_purpose = harness.accepted_prefix[4].clone();
+    cross_purpose[PAYLOAD_OFFSET] = PurposeV1::Funding.to_byte();
+    resign_message(&harness.fixture, 0, &mut cross_purpose);
+    assert!(round.accept_message(&cross_purpose).is_err());
+    assert_partial_restart_preparation_rejected_without_store(&harness, &mut signer, &mut round);
+}
+
+#[test]
+fn p1_009_cross_roster_partial_fails_before_store() {
+    const SENDER_PARTICIPANT_OFFSET: usize = 72;
+    let harness = build_partial_restart_harness();
+    let (mut signer, mut round) = harness
+        .restarted_after_reveals()
+        .expect("accepted reveal prefix");
+    let mut cross_roster = harness.accepted_prefix[4].clone();
+    cross_roster[SENDER_PARTICIPANT_OFFSET..SENDER_PARTICIPANT_OFFSET + 32].fill(0xa5);
+    resign_message(&harness.fixture, 0, &mut cross_roster);
+    assert!(round.accept_message(&cross_roster).is_err());
+    assert_partial_restart_preparation_rejected_without_store(&harness, &mut signer, &mut round);
+}
+
+#[test]
+fn p1_009_wrong_local_index_partial_fails_before_store() {
+    const PAYLOAD_OFFSET: usize = 148;
+    let harness = build_partial_restart_harness();
+    let (mut signer, mut round) = harness
+        .restarted_after_reveals()
+        .expect("accepted reveal prefix");
+    let mut wrong_index = harness.accepted_prefix[4].clone();
+    let original_index = u16::from_le_bytes(
+        wrong_index[PAYLOAD_OFFSET + 1..PAYLOAD_OFFSET + 3]
+            .try_into()
+            .expect("partial signing index"),
+    );
+    let wrong_signing_index = if original_index == 0 { 1_u16 } else { 0_u16 };
+    wrong_index[PAYLOAD_OFFSET + 1..PAYLOAD_OFFSET + 3]
+        .copy_from_slice(&wrong_signing_index.to_le_bytes());
+    resign_message(&harness.fixture, 0, &mut wrong_index);
+    assert!(round.accept_message(&wrong_index).is_err());
+    assert_partial_restart_preparation_rejected_without_store(&harness, &mut signer, &mut round);
 }

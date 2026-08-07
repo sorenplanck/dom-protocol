@@ -7,12 +7,12 @@ use crate::{
     NonceSecretTransferV1, NonceVaultError, NonceVaultV1, PartialSignatureV1, PreparedExposureV1,
     PublicNoncePairV1, ResendProtocolStageV1, ResendRequestV1, ReservationContextBindingV1,
     ReservationLiveStageV1, ReservationLookupCustodyV1, ReservationRequestLookupV1,
-    ReservationResumeRequestV1, ReservationResumeResultV1, RestoreState, SessionContextV1,
-    SigningSessionAuthorityV1, SigningShareV1, TerminalReservationV1, TrustedChainIdV1,
-    ValidatedCommitmentRoundV1, ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1,
-    ValidatedRevealRoundV1, ValidatedSigningRoundStateV1, VaultExportedArtifactV1,
-    VaultReservationSnapshotV1, VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
-    VaultSpentArtifactSnapshotV1,
+    ReservationResumeRequestV1, ReservationResumeResultV1, ReservationState, RestoreState,
+    SessionContextV1, SigningSessionAuthorityV1, SigningShareV1, TerminalReservationV1,
+    TrustedChainIdV1, ValidatedCommitmentRoundV1, ValidatedDerivationBaseV1,
+    ValidatedResendAuthorizationV1, ValidatedRevealRoundV1, ValidatedSigningRoundStateV1,
+    VaultExportedArtifactV1, VaultReservationSnapshotV1, VaultSecretImportCapabilityV1,
+    VaultSecretSealCapabilityV1, VaultSpentArtifactSnapshotV1,
 };
 use core::fmt;
 use dom_crypto::{schnorr_challenge, PartialSig};
@@ -867,6 +867,42 @@ where
             ResendProtocolStageV1::PartialSignature,
         )?;
         self.resend_bound(authority, ResendProtocolStageV1::PartialSignature)
+    }
+
+    /// Authorize one exact terminal-partial resend after process restart.
+    pub fn authorize_partial_resend_after_restart(
+        &mut self,
+        round: &mut ValidatedSigningRoundStateV1,
+        request_lookup: ReservationRequestLookupV1,
+    ) -> SignerResult<Vault, Custody, ValidatedResendAuthorizationV1> {
+        let prepared =
+            round.prepare_partial_resend_after_restart(&self.signing_share, request_lookup)?;
+        let (resume_request, authorization) = prepared.into_parts();
+        match self.vault.resume_claimed_reservation(resume_request) {
+            Err(error) => Err(VaultBackedSignerError::Vault(error)),
+            Ok(ReservationResumeResultV1::Terminal(terminal))
+                if terminal.state == ReservationState::ConsumedPartialAuthorized =>
+            {
+                Ok(authorization)
+            }
+            Ok(ReservationResumeResultV1::RetryNotFound) => {
+                self.custody
+                    .abandon_before_vault_claim(
+                        authorization.request_lookup(),
+                        authorization.session_id(),
+                        authorization.reservation_context_binding_digest(),
+                    )
+                    .map_err(VaultBackedSignerError::Custody)?;
+                Err(VaultBackedSignerError::Contract(
+                    NonceVaultError::ReservationNotFound,
+                ))
+            }
+            Ok(ReservationResumeResultV1::Terminal(_)) | Ok(ReservationResumeResultV1::Live(_)) => {
+                Err(VaultBackedSignerError::Contract(
+                    NonceVaultError::InvalidTransition,
+                ))
+            }
+        }
     }
 
     /// Recover and resend an exact accepted artifact after process restart.

@@ -203,6 +203,85 @@
 //!     let _bytes = artifact.as_bytes();
 //! }
 //! ```
+//!
+//! Partial-restart preparation remains crate-private:
+//!
+//! ```compile_fail
+//! use dom_adaptor::PreparedPartialRestartResendV1;
+//! ```
+//!
+//! ```compile_fail
+//! use dom_adaptor::signing_round::PreparedPartialRestartResendV1;
+//! fn split(prepared: PreparedPartialRestartResendV1) {
+//!     let _ = prepared.into_parts();
+//! }
+//! ```
+//!
+//! Downstream callers cannot invoke the crate-private round preparation:
+//!
+//! ```compile_fail
+//! use dom_adaptor::{ReservationRequestLookupV1, SigningShareV1,
+//!     ValidatedSigningRoundStateV1};
+//! fn prepare(round: &mut ValidatedSigningRoundStateV1, share: &SigningShareV1,
+//!            lookup: ReservationRequestLookupV1) {
+//!     let _ = round.prepare_partial_resend_after_restart(share, lookup);
+//! }
+//! ```
+//!
+//! The opaque resend authority cannot be constructed or cloned downstream:
+//!
+//! ```compile_fail
+//! use dom_adaptor::ValidatedResendAuthorizationV1;
+//! fn clone_authority(authority: ValidatedResendAuthorizationV1) {
+//!     let _ = authority.clone();
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use dom_adaptor::ValidatedResendAuthorizationV1;
+//! fn serialize_authority(authority: ValidatedResendAuthorizationV1) {
+//!     let _ = authority.to_bytes();
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use dom_adaptor::ValidatedResendAuthorizationV1;
+//! fn serialize(authority: &ValidatedResendAuthorizationV1) {
+//!     let _ = serde_json::to_vec(authority);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use dom_adaptor::ValidatedResendAuthorizationV1;
+//! fn deserialize(bytes: &[u8]) {
+//!     let _: ValidatedResendAuthorizationV1 = serde_json::from_slice(bytes).unwrap();
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use dom_adaptor::ValidatedResendAuthorizationV1;
+//! fn raw_conversion(authority: ValidatedResendAuthorizationV1) {
+//!     let _: Vec<u8> = authority.into();
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use dom_adaptor::ValidatedResendAuthorizationV1;
+//! fn reuse_authority(authority: ValidatedResendAuthorizationV1) {
+//!     drop(authority);
+//!     drop(authority);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use dom_adaptor::{PurposeV1, ResendProtocolStageV1, ReservationRequestLookupV1,
+//!     SessionId, ValidatedResendAuthorizationV1};
+//! fn forge(lookup: ReservationRequestLookupV1, session: SessionId) {
+//!     let _ = ValidatedResendAuthorizationV1::new(
+//!         lookup, [1; 32], session, PurposeV1::Refund,
+//!         ResendProtocolStageV1::PartialSignature, [2; 32]);
+//! }
+//! ```
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

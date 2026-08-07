@@ -7,9 +7,9 @@ use crate::{
     session_message_digest_v1, AdaptorError, BindingContextV1, BindingFactorV1, ContractKindV1,
     NonceCommitmentV1, NonceRevealV1, PartialSignatureV1, ParticipantIdentityV1,
     ParticipantPublicNoncesV1, ParticipantRosterV1, ProtocolCommitmentSetV1, ProtocolRevealSetV1,
-    PurposeV1, ResendProtocolStageV1, ReservationRequestLookupV1, Result, SessionContextInputsV1,
-    SessionContextV1, SessionId, SigningPhaseV1, SigningShareV1, StageComputationRequestV1,
-    TrustedChainIdV1,
+    PurposeV1, ResendProtocolStageV1, ReservationContextBindingV1, ReservationRequestLookupV1,
+    ReservationResumeRequestV1, Result, SessionContextInputsV1, SessionContextV1, SessionId,
+    SigningPhaseV1, SigningShareV1, StageComputationRequestV1, TrustedChainIdV1,
 };
 use dom_crypto::{schnorr_verify, PublicKey, SchnorrSignature};
 
@@ -943,6 +943,36 @@ impl ValidatedSigningRoundStateV1 {
         })
     }
 
+    /// Prepare one exact terminal-partial resend after process restart.
+    pub(crate) fn prepare_partial_resend_after_restart(
+        &mut self,
+        signing_share: &SigningShareV1,
+        request_lookup: ReservationRequestLookupV1,
+    ) -> Result<PreparedPartialRestartResendV1> {
+        let binding = ReservationContextBindingV1::new(
+            &self.base_context,
+            &self.roster,
+            self.local_protocol_index,
+            signing_share,
+        )?;
+        let binding_digest = *binding.digest();
+        let resume_request = ReservationResumeRequestV1::from_trusted_state(
+            &self.base_context,
+            signing_share,
+            request_lookup.clone(),
+            binding,
+        )?;
+        let authorization = self.authorize_local_resend(
+            ResendProtocolStageV1::PartialSignature,
+            &request_lookup,
+            &binding_digest,
+        )?;
+        Ok(PreparedPartialRestartResendV1 {
+            resume_request,
+            authorization,
+        })
+    }
+
     /// Consume current trusted protocol evidence for one exact local resend.
     pub(crate) fn authorize_local_resend(
         &mut self,
@@ -950,6 +980,9 @@ impl ValidatedSigningRoundStateV1 {
         request_lookup: &ReservationRequestLookupV1,
         reservation_context_binding_digest: &[u8; 32],
     ) -> Result<ValidatedResendAuthorizationV1> {
+        if self.closed && protocol_stage == ResendProtocolStageV1::PartialSignature {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
         let stage_index = match protocol_stage {
             ResendProtocolStageV1::Commitment => 0,
             ResendProtocolStageV1::Reveal => 1,
@@ -1133,6 +1166,19 @@ impl ValidatedPartialSigningInputsV1 {
     }
     pub(crate) const fn aggregate_signing_key(&self) -> &PublicKey {
         &self.aggregate_signing_key
+    }
+}
+
+/// Crate-private one-shot preparation for an exact terminal-partial restart resend.
+pub(crate) struct PreparedPartialRestartResendV1 {
+    resume_request: ReservationResumeRequestV1,
+    authorization: ValidatedResendAuthorizationV1,
+}
+
+impl PreparedPartialRestartResendV1 {
+    /// Consume the preparation into its Store request and protocol authority.
+    pub(crate) fn into_parts(self) -> (ReservationResumeRequestV1, ValidatedResendAuthorizationV1) {
+        (self.resume_request, self.authorization)
     }
 }
 
@@ -2270,6 +2316,177 @@ mod tests {
         let mut forged = commitment_messages[0].clone();
         *forged.last_mut().expect("signature byte") ^= 1;
         assert!(ValidatedAcceptedSessionMessageV1::parse(&forged, &chain, &roster).is_err());
+    }
+
+    fn completed_partial_round_fixture() -> (ValidatedSigningRoundStateV1, SigningShareV1) {
+        let mut fixture = commitment_fixture();
+        let commitment_messages = fixture.messages.clone();
+        fixture
+            .state
+            .take_derivation_base()
+            .expect("derivation authority");
+        for message in &commitment_messages {
+            fixture
+                .state
+                .accept_message(message)
+                .expect("accepted commitment");
+        }
+        fixture
+            .state
+            .take_commitment_round()
+            .expect("commitment round");
+
+        let signing_shares = [
+            SigningShareV1::from_be_bytes([0x13; 32]).expect("signing share"),
+            SigningShareV1::from_be_bytes([0x14; 32]).expect("signing share"),
+        ];
+        let mut predecessor = fixture.state.current_transcript;
+        for protocol_index in 0..fixture.roster.entries().len() {
+            let participant = &fixture.roster.entries()[protocol_index];
+            let signing_index = fixture
+                .roster
+                .signing_index(participant.participant_id())
+                .expect("signing index");
+            let nonce_pair = protocol_nonce_pair(protocol_index);
+            let payload = NonceRevealV1::new(
+                PurposeV1::Refund,
+                signing_index,
+                nonce_pair.0.public_key().clone(),
+                nonce_pair.1.public_key().clone(),
+            )
+            .to_bytes();
+            let message = signed_envelope(
+                fixture.state.base_context.chain_id(),
+                fixture.state.base_context.session_id(),
+                participant.participant_id(),
+                1,
+                &predecessor,
+                KIND_NONCE_REVEAL,
+                &payload,
+                fixture.protocol_identity_secret(protocol_index),
+            );
+            let digest = session_message_digest_v1(&message[..message.len() - SIGNATURE_LEN]);
+            predecessor = advance_transcript_hash_v1(
+                &predecessor,
+                &digest,
+                participant.direction(),
+                SigningPhaseV1::SigNonceReveal,
+            );
+            fixture
+                .state
+                .accept_message(&message)
+                .expect("accepted reveal");
+        }
+        fixture.state.take_reveal_round().expect("reveal round");
+
+        let inputs = fixture
+            .state
+            .partial_public_inputs()
+            .expect("partial inputs");
+        let challenge = schnorr_challenge(
+            &inputs.aggregate_nonce_hat.to_compressed_bytes(),
+            &inputs.aggregate_signing_key,
+            fixture.state.base_context.chain_id(),
+            fixture.state.base_context.message_digest(),
+        );
+        let binding =
+            PartialSig::from_bytes(&inputs.binding_factor.to_be_bytes()).expect("binding scalar");
+        for protocol_index in 0..fixture.roster.entries().len() {
+            let participant = &fixture.roster.entries()[protocol_index];
+            let signing_index = fixture
+                .roster
+                .signing_index(participant.participant_id())
+                .expect("signing index");
+            let signing_share = signing_shares
+                .iter()
+                .find(|share| share.public_key() == participant.signing_public_key())
+                .expect("participant signing share");
+            let nonce_pair = protocol_nonce_pair(protocol_index);
+            let secret_pair = crate::secret_nonce::SecretNoncePairV1::from_be_bytes(
+                *nonce_pair.0.as_be_bytes(),
+                *nonce_pair.1.as_be_bytes(),
+            )
+            .expect("nonce pair");
+            let partial = secret_pair
+                .sign_bound_partial(&binding, challenge.as_bytes(), signing_share)
+                .expect("partial scalar");
+            let payload = PartialSignatureV1::new(
+                PurposeV1::Refund,
+                signing_index,
+                *fixture.state.base_context.template_hash(),
+                partial,
+            )
+            .to_bytes();
+            let message = signed_envelope(
+                fixture.state.base_context.chain_id(),
+                fixture.state.base_context.session_id(),
+                participant.participant_id(),
+                2,
+                &predecessor,
+                KIND_PARTIAL_SIGNATURE,
+                &payload,
+                fixture.protocol_identity_secret(protocol_index),
+            );
+            let digest = session_message_digest_v1(&message[..message.len() - SIGNATURE_LEN]);
+            predecessor = advance_transcript_hash_v1(
+                &predecessor,
+                &digest,
+                participant.direction(),
+                SigningPhaseV1::SigPartial,
+            );
+            fixture
+                .state
+                .accept_message(&message)
+                .expect("accepted partial");
+        }
+
+        let local_public_key = fixture.roster.entries()
+            [usize::from(fixture.state.local_protocol_index)]
+        .signing_public_key();
+        let local_share = signing_shares
+            .into_iter()
+            .find(|share| share.public_key() == local_public_key)
+            .expect("local signing share");
+        (fixture.state, local_share)
+    }
+
+    #[test]
+    fn partial_restart_preparation_binds_exact_request_and_partial_once() {
+        let (mut state, local_share) = completed_partial_round_fixture();
+        let lookup =
+            ReservationRequestLookupV1::from_bytes([0x53; 32]).expect("partial restart lookup");
+        let local_index = usize::from(state.local_protocol_index);
+        let expected_digest = crate::exposure_outbound_digest_v1(
+            crate::ExposureKindV1::PartialSignature,
+            state.partials[local_index].payload_bytes(),
+        )
+        .expect("accepted local partial digest");
+        let prepared = state
+            .prepare_partial_resend_after_restart(&local_share, lookup.clone())
+            .expect("partial restart preparation");
+        let (resume_request, authorization) = prepared.into_parts();
+        assert_eq!(resume_request.request_lookup(), &lookup);
+        assert_eq!(authorization.request_lookup(), &lookup);
+        assert_eq!(
+            authorization.reservation_context_binding_digest(),
+            resume_request.context_binding().digest()
+        );
+        assert_eq!(
+            authorization.session_id().as_bytes(),
+            state.base_context.session_id()
+        );
+        assert_eq!(authorization.purpose(), state.base_context.purpose());
+        assert_eq!(
+            authorization.protocol_stage(),
+            ResendProtocolStageV1::PartialSignature
+        );
+        assert_eq!(
+            authorization.adaptor_outbound_digest(),
+            expected_digest.as_bytes()
+        );
+        assert!(state
+            .prepare_partial_resend_after_restart(&local_share, lookup)
+            .is_err());
     }
 
     #[test]
