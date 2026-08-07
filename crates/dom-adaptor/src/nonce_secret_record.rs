@@ -65,6 +65,8 @@ impl VaultSecretImportCapabilityV1 {
 /// structural success or failure: it cannot create an import capability,
 /// transfer, nonce pair, or signing authorization. The supplied plaintext is
 /// compiler-visibly zeroized before this function returns on every path.
+/// Passing this audit does not validate scalar canonicity or semantic binding;
+/// the capability-gated import path must still perform those checks before use.
 pub fn audit_nonce_secret_plaintext_v1(mut plaintext: Zeroizing<Vec<u8>>) -> Result<()> {
     validate_and_zeroize_plaintext(&mut plaintext)
 }
@@ -414,5 +416,25 @@ mod tests {
         invalid[0] ^= 1;
         assert!(validate_and_zeroize_plaintext(&mut invalid).is_err());
         assert!(invalid.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn structural_store_audit_does_not_authorize_invalid_scalar_payloads() {
+        let (bytes, context, share) = record_bytes(2, PurposeV1::Funding);
+        let trusted = TrustedChainIdV1::from_signed_fixture([1; 32]);
+        let scalar_start = bytes.len() - SCALAR_BYTES_LEN;
+
+        for replacement in [[0u8; 32], [0xffu8; 32]] {
+            let mut mutation = bytes.clone();
+            mutation[scalar_start..scalar_start + 32].copy_from_slice(&replacement);
+
+            assert!(audit_nonce_secret_plaintext_v1(mutation.clone()).is_ok());
+            let transfer = VaultSecretImportCapabilityV1::new()
+                .import(mutation)
+                .expect("structurally valid record");
+            assert!(transfer
+                .into_validated_pair(&[7; 32], &[8; 32], &context, &trusted, &share)
+                .is_err());
+        }
     }
 }
