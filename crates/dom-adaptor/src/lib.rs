@@ -132,6 +132,15 @@
 //! }
 //! ```
 //!
+//! Store audit cannot be confused with a secret transfer or import authority:
+//!
+//! ```compile_fail
+//! use dom_adaptor::{audit_nonce_secret_plaintext_v1, NonceSecretTransferV1};
+//! use zeroize::Zeroizing;
+//! let plaintext = Zeroizing::new(vec![0_u8; 387]);
+//! let _: NonceSecretTransferV1 = audit_nonce_secret_plaintext_v1(plaintext);
+//! ```
+//!
 //! The vault-backed signer cannot release or mutably expose its concrete vault:
 //!
 //! ```compile_fail
@@ -230,7 +239,8 @@ pub use nonce::{
     PublicNoncePairV1,
 };
 pub use nonce_secret_record::{
-    NonceSecretTransferV1, VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
+    audit_nonce_secret_plaintext_v1, NonceSecretTransferV1, VaultSecretImportCapabilityV1,
+    VaultSecretSealCapabilityV1,
 };
 pub use nonce_vault::{
     validate_prepared_exposure_v1, AuthorizedExposureV1, BudgetScope, CounterpartyBucket,

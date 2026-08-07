@@ -59,6 +59,16 @@ impl VaultSecretImportCapabilityV1 {
     }
 }
 
+/// Audit one decrypted `NonceSecretRecordV1` plaintext for canonical structure.
+///
+/// This is a consuming, no-export Store boundary. It deliberately returns only
+/// structural success or failure: it cannot create an import capability,
+/// transfer, nonce pair, or signing authorization. The supplied plaintext is
+/// compiler-visibly zeroized before this function returns on every path.
+pub fn audit_nonce_secret_plaintext_v1(mut plaintext: Zeroizing<Vec<u8>>) -> Result<()> {
+    validate_and_zeroize_plaintext(&mut plaintext)
+}
+
 impl NonceSecretTransferV1 {
     /// Minimum exact record length (`n = 2`, no adaptor point).
     pub const MIN_ENCODED_LEN: usize = 387;
@@ -179,6 +189,12 @@ fn validate_structural_bytes(bytes: &[u8]) -> Result<()> {
         });
     }
     validate_context_length(&bytes[FIXED_PREFIX_LEN..FIXED_PREFIX_LEN + context_len])
+}
+
+fn validate_and_zeroize_plaintext(plaintext: &mut Zeroizing<Vec<u8>>) -> Result<()> {
+    let result = validate_structural_bytes(plaintext);
+    plaintext.zeroize();
+    result
 }
 
 fn validate_context_length(context: &[u8]) -> Result<()> {
@@ -362,5 +378,41 @@ mod tests {
                 .into_validated_pair(&[7; 32], &[8; 32], &context, &trusted, &share)
                 .is_err());
         }
+    }
+
+    #[test]
+    fn store_audit_accepts_canonical_plaintext_without_importing_it() {
+        let (bytes, _, _) = record_bytes(2, PurposeV1::Funding);
+        assert!(audit_nonce_secret_plaintext_v1(bytes).is_ok());
+    }
+
+    #[test]
+    fn store_audit_rejects_structural_mutations() {
+        let (bytes, _, _) = record_bytes(2, PurposeV1::Funding);
+        for (offset, replacement) in [(0, b'X'), (8, 2), (74, 0xff)] {
+            let mut mutation = bytes.clone();
+            mutation[offset] = replacement;
+            assert!(audit_nonce_secret_plaintext_v1(mutation).is_err());
+        }
+
+        let mut truncated = bytes.clone();
+        truncated.pop();
+        assert!(audit_nonce_secret_plaintext_v1(truncated).is_err());
+
+        let mut extended = bytes;
+        extended.push(0);
+        assert!(audit_nonce_secret_plaintext_v1(extended).is_err());
+    }
+
+    #[test]
+    fn store_audit_zeroizes_success_and_error_inputs() {
+        let (mut valid, _, _) = record_bytes(2, PurposeV1::Funding);
+        assert!(validate_and_zeroize_plaintext(&mut valid).is_ok());
+        assert!(valid.iter().all(|byte| *byte == 0));
+
+        let (mut invalid, _, _) = record_bytes(2, PurposeV1::Funding);
+        invalid[0] ^= 1;
+        assert!(validate_and_zeroize_plaintext(&mut invalid).is_err());
+        assert!(invalid.iter().all(|byte| *byte == 0));
     }
 }
