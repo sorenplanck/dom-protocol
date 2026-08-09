@@ -1099,6 +1099,11 @@ mod tests {
         Ok(parsed)
     }
 
+    // The parameter list mirrors the libsecp256k1-zkp MPC prover entry point
+    // one-for-one. Grouping them into a struct would add a translation layer
+    // between validated Rust values and the FFI call, which is exactly where
+    // pointer/length mistakes hide.
+    #[allow(clippy::too_many_arguments)]
     fn mpc_round_one(
         backend: &Backend,
         values: &[u64; PROOF_NCOMMITS],
@@ -1196,6 +1201,8 @@ mod tests {
         Ok(bytes)
     }
 
+    // Same reasoning as `mpc_round_one`: the shape is dictated by the FFI.
+    #[allow(clippy::too_many_arguments)]
     fn mpc_round_two(
         backend: &Backend,
         values: &[u64; PROOF_NCOMMITS],
