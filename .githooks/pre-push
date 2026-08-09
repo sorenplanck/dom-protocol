@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "PUSH BLOQUEADO: este clone isolado não possui repositório remoto aprovado para DOM Scriptless Contracts." >&2
+exit 1
