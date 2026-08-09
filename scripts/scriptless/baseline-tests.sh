@@ -9,7 +9,11 @@ case "$repo_real" in
     exit 3
     ;;
 esac
-[[ "$repo_real" == "/home/leonardov/dom-scriptless-dev/dom-scriptless-contracts" ]]
+# Identify the REPOSITORY, not the checkout path, so linked worktrees of
+# dom-scriptless-contracts are accepted. --git-common-dir resolves to the
+# shared .git of the main checkout from every worktree of that repository.
+git_common_real="$(realpath "$(git rev-parse --git-common-dir)")"
+[[ "$git_common_real" == /home/leonardov/dom-scriptless-dev/dom-scriptless-contracts/* ]]
 cd "$repo"
 
 log="$(realpath "$repo/../logs")/baseline-tests.log"

@@ -12,7 +12,11 @@ case "$repo_real" in
     exit 3
     ;;
 esac
-if [[ "$repo_real" != "/home/leonardov/dom-scriptless-dev/dom-scriptless-contracts" ]]; then
+# Identify the REPOSITORY, not the checkout path, so linked worktrees of
+# dom-scriptless-contracts are accepted. --git-common-dir resolves to the
+# shared .git of the main checkout from every worktree of that repository.
+git_common_real="$(realpath "$(git rev-parse --git-common-dir)")"
+if [[ "$git_common_real" != /home/leonardov/dom-scriptless-dev/dom-scriptless-contracts/* ]]; then
   echo "erro: clone DOM Scriptless Contracts inesperado: $repo_real" >&2
   exit 4
 fi
