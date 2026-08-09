@@ -664,4 +664,212 @@ mod tests {
             );
         }
     }
+
+    /// Deterministic SplitMix64 stream used to draw full-width scalars.
+    ///
+    /// This is a reproducible test-only generator, not a nonce source and not a
+    /// hash domain: it never appears outside `cfg(test)` and never derives
+    /// protocol material. A fixed seed keeps every reported case replayable.
+    struct SplitMix64(u64);
+
+    impl SplitMix64 {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        /// Draw a uniformly distributed 32-byte big-endian candidate scalar.
+        fn next_wide_bytes(&mut self) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            for chunk in out.chunks_exact_mut(8) {
+                chunk.copy_from_slice(&self.next_u64().to_be_bytes());
+            }
+            out
+        }
+    }
+
+    /// Closed-cycle property coverage over the *whole* scalar field.
+    ///
+    /// `ten_thousand_deterministic_adapt_extract_cycles_pass_real_verifier`
+    /// varies only the message and confines every secret to `bytes[31]`, so it
+    /// exercises 251 distinct low-byte triples. This test instead draws
+    /// full-width 32-byte scalars, so the high 31 bytes are non-zero and the
+    /// reduction, canonicalisation and SEC1 paths are genuinely stressed.
+    #[test]
+    fn ten_thousand_full_width_adapt_extract_cycles_pass_real_verifier() {
+        const REQUIRED_CASES: u32 = 10_000;
+
+        let chain_id = [0x3C; 32];
+        let mut rng = SplitMix64(0x0DEC_0DED_5C21_7E55);
+        let mut accepted: u32 = 0;
+        let mut attempts: u32 = 0;
+        let mut distinct_signing = std::collections::BTreeSet::new();
+        let mut high_byte_nonzero: u32 = 0;
+
+        while accepted < REQUIRED_CASES {
+            attempts = attempts
+                .checked_add(1)
+                .expect("full-width property attempts must not overflow");
+            assert!(
+                attempts < REQUIRED_CASES.saturating_mul(2),
+                "canonical rejection rate must stay negligible; {attempts} attempts \
+                 produced only {accepted} accepted cases"
+            );
+
+            let signing_bytes = rng.next_wide_bytes();
+            let nonce_bytes = rng.next_wide_bytes();
+            let adaptor_bytes = rng.next_wide_bytes();
+            let message = rng.next_wide_bytes();
+
+            // Reject the (negligibly rare) non-canonical draw instead of
+            // clamping it, so no test case is silently rewritten.
+            let (Some(signing_secret), Some(nonce)) = (
+                scalar_from_bytes(&signing_bytes),
+                scalar_from_bytes(&nonce_bytes),
+            ) else {
+                continue;
+            };
+            let Ok(adaptor_secret) = SecretScalar::from_be_bytes(adaptor_bytes) else {
+                continue;
+            };
+
+            if signing_bytes[0] != 0 && nonce_bytes[0] != 0 && adaptor_bytes[0] != 0 {
+                high_byte_nonzero = high_byte_nonzero.saturating_add(1);
+            }
+            distinct_signing.insert(signing_bytes);
+
+            let signing_key = SecretKey::from_bytes(&signing_bytes)
+                .expect("canonical signing scalar")
+                .public_key();
+            let adaptor_point = adaptor_secret
+                .public_key()
+                .expect("canonical adaptor point");
+            let aggregate_nonce_hat_point = ProjectivePoint::GENERATOR * nonce
+                + compressed_to_projective(&adaptor_point.to_compressed_bytes())
+                    .expect("canonical adaptor point");
+            if bool::from(aggregate_nonce_hat_point.is_identity()) {
+                continue;
+            }
+            let aggregate_nonce_hat = PublicKey::from_compressed_bytes(&projective_to_compressed(
+                &aggregate_nonce_hat_point,
+            ))
+            .expect("canonical aggregate nonce");
+
+            let challenge_bytes = *schnorr_challenge(
+                &aggregate_nonce_hat.to_compressed_bytes(),
+                &signing_key,
+                &chain_id,
+                &message,
+            )
+            .as_bytes();
+            let Some(challenge) = scalar_from_bytes(&challenge_bytes) else {
+                continue;
+            };
+            let scalar_hat_value = nonce + challenge * signing_secret;
+            if bool::from(scalar_hat_value.is_zero()) {
+                continue;
+            }
+            let scalar_hat_bytes: [u8; 32] = scalar_hat_value.to_repr().into();
+            let scalar_hat =
+                PartialSig::from_bytes(&scalar_hat_bytes).expect("canonical pre-signature scalar");
+
+            assert!(
+                scriptless_verify_pre_signature(
+                    &scalar_hat,
+                    &aggregate_nonce_hat,
+                    &signing_key,
+                    &adaptor_point,
+                    &chain_id,
+                    &message,
+                )
+                .expect("pre-signature verification"),
+                "case {accepted} pre-signature equation"
+            );
+
+            let final_signature =
+                scriptless_adapt_signature(&scalar_hat, &aggregate_nonce_hat, &adaptor_secret)
+                    .expect("adaptation");
+            assert!(
+                scriptless_verify_final_signature(
+                    &final_signature,
+                    &signing_key,
+                    &chain_id,
+                    &message,
+                )
+                .expect("final verification"),
+                "case {accepted} final signature must satisfy the real DOM verifier"
+            );
+
+            let extracted = scriptless_extract_adaptor_secret(
+                &final_signature,
+                &scalar_hat,
+                &aggregate_nonce_hat,
+                &adaptor_point,
+            )
+            .expect("extraction");
+            assert_eq!(
+                extracted.public_key().expect("extracted point"),
+                adaptor_point,
+                "case {accepted} extract(adapt(presign)) must recover t with t*G == T"
+            );
+
+            accepted = accepted
+                .checked_add(1)
+                .expect("accepted case counter must not overflow");
+        }
+
+        // Guard the property that this test exists to add: the inputs really
+        // are full width and really are distinct, so the coverage cannot
+        // silently regress to a small-scalar loop.
+        assert_eq!(accepted, REQUIRED_CASES);
+        assert_eq!(
+            distinct_signing.len() as u32,
+            REQUIRED_CASES,
+            "every accepted case must use a distinct signing scalar"
+        );
+        assert!(
+            high_byte_nonzero > REQUIRED_CASES.saturating_mul(9) / 10,
+            "at least 90% of cases must have a nonzero leading byte in all three \
+             secrets; observed {high_byte_nonzero}/{REQUIRED_CASES}"
+        );
+    }
+
+    /// `n-1` is the largest scalar that MUST be accepted. It is the exact value
+    /// an inclusive/exclusive comparison bug in the canonical range check would
+    /// wrongly reject, and it was untested by the boundary suite.
+    #[test]
+    fn scriptless_secret_scalar_accepts_group_order_minus_one() {
+        let order = secp256k1::constants::CURVE_ORDER;
+        let mut order_minus_one = order;
+        order_minus_one[31] = order_minus_one[31]
+            .checked_sub(1)
+            .expect("group-order low byte can be decremented");
+
+        let secret =
+            SecretScalar::from_be_bytes(order_minus_one).expect("n-1 is a canonical secret scalar");
+        let derived = secret.public_key().expect("n-1 has a canonical public key");
+        assert_eq!(
+            derived,
+            secret_scalar_public_key(&order_minus_one).expect("n-1 public key"),
+            "n-1 must be consumed exactly, without reduction or normalisation"
+        );
+        let again =
+            SecretScalar::from_be_bytes(order_minus_one).expect("n-1 remains canonical on reparse");
+        assert!(
+            bool::from(secret.ct_eq(&again)),
+            "n-1 must round-trip to an identical secret scalar"
+        );
+
+        assert!(scalar_bytes_are_canonical(&order_minus_one, false));
+        assert!(scalar_from_bytes(&order_minus_one).is_some());
+
+        // And the neighbours on either side keep their documented behaviour.
+        assert!(SecretScalar::from_be_bytes(order).is_err());
+        let mut one = [0u8; 32];
+        one[31] = 1;
+        assert!(SecretScalar::from_be_bytes(one).is_ok());
+    }
 }

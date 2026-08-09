@@ -258,3 +258,102 @@ fn wrong_adaptor_secret_and_mutated_signature_are_rejected() {
             .is_err());
     }
 }
+
+/// The secp256k1 field prime `p = 2^256 - 2^32 - 977`. An x coordinate must be
+/// strictly below it.
+const FIELD_PRIME: [u8; 32] = [
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xff, 0xff, 0xfc, 0x2f,
+];
+
+fn compressed(prefix: u8, x: [u8; 32]) -> [u8; 33] {
+    let mut out = [0u8; 33];
+    out[0] = prefix;
+    out[1..].copy_from_slice(&x);
+    out
+}
+
+/// Every classic SEC1 parsing escape must be rejected by class.
+///
+/// The existing negative coverage flips the high bit across the point bytes,
+/// which produces mostly-invalid points but never pins *why* each class is
+/// refused. ADR-0010 requires identity, non-canonical encodings and malformed
+/// points to be rejected explicitly, so each class is named here.
+#[test]
+fn non_canonical_sec1_points_are_rejected_by_class() {
+    let mut valid_x = [0u8; 32];
+    valid_x[31] = 1; // x = 1 is on the curve.
+    let mut not_on_curve_x = [0u8; 32];
+    not_on_curve_x[31] = 5; // x = 5 has no square root of x^3 + 7.
+
+    let cases: [(&str, [u8; 33]); 10] = [
+        (
+            "prefix 0x00 is not a compressed-point prefix",
+            compressed(0x00, valid_x),
+        ),
+        (
+            "prefix 0x01 is not a compressed-point prefix",
+            compressed(0x01, valid_x),
+        ),
+        (
+            "prefix 0x04 is the uncompressed prefix",
+            compressed(0x04, valid_x),
+        ),
+        ("prefix 0x05 is reserved", compressed(0x05, valid_x)),
+        ("prefix 0x06 is a hybrid prefix", compressed(0x06, valid_x)),
+        ("prefix 0x07 is a hybrid prefix", compressed(0x07, valid_x)),
+        ("all-zero encoding is the identity, not a point", [0u8; 33]),
+        (
+            "x equal to the field prime is out of range",
+            compressed(0x02, FIELD_PRIME),
+        ),
+        (
+            "x above the field prime is out of range",
+            compressed(0x03, [0xff; 32]),
+        ),
+        (
+            "x with no curve point must not decode",
+            compressed(0x02, not_on_curve_x),
+        ),
+    ];
+
+    // 1. The authoritative DOM point parser rejects every class directly.
+    for (why, encoded) in &cases {
+        assert!(
+            PublicKey::from_compressed_bytes(encoded).is_err(),
+            "DOM point parser accepted a bad encoding: {why}"
+        );
+    }
+
+    // 2. And none of them can enter the canonical pre-signature payload, whose
+    //    adaptor point occupies bytes 32..65 of the 162-byte layout.
+    let line = include_str!("../../dom-consensus/tests/fixtures/scad0_adaptor_vectors_v1.txt")
+        .lines()
+        .find(|line| line.starts_with("V01|"))
+        .expect("V01 exists");
+    let fields = line.split('|').collect::<Vec<_>>();
+    let kernel = TransactionKernel::from_bytes(&hex::decode(fields[4]).expect("kernel hex"))
+        .expect("kernel is canonical");
+    let signature = SchnorrSignature::from_bytes(&kernel.excess_signature).expect("signature");
+    let canonical = AdaptorPreSignatureV1::new(
+        [0x22; 32],
+        PublicKey::from_compressed_bytes(&decode_array::<33>(fields[2])).expect("T"),
+        PublicKey::from_compressed_bytes(signature.r_compressed()).expect("R_hat"),
+        PartialSig::from_bytes(&decode_array::<32>(fields[3])).expect("s_hat"),
+        [0x33; 32],
+    )
+    .to_bytes();
+
+    for (why, encoded) in &cases {
+        let mut payload = canonical;
+        payload[32..65].copy_from_slice(encoded);
+        assert!(
+            AdaptorPreSignatureV1::from_bytes(&payload).is_err(),
+            "pre-signature decoder accepted a bad adaptor point: {why}"
+        );
+    }
+
+    // 3. A sanity anchor: the untouched payload still parses, so the loop above
+    //    is rejecting the point and not the surrounding bytes.
+    assert!(AdaptorPreSignatureV1::from_bytes(&canonical).is_ok());
+}
