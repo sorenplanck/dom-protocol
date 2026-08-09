@@ -31,5 +31,12 @@ dom-crypto = { workspace = true }
 dom-rpc = { workspace = true }
 dom-wire = { workspace = true }
 dom-pow = { workspace = true }
+# G0 (Master Specification §15.7): the Gate G0 baseline test drives the CURRENT
+# wallet engine (v2) and the CURRENT slate version through the real node.
+dom-wallet2 = { workspace = true }
+dom-slate = { workspace = true }
+dom-tx = { workspace = true }
+dom-wallet-keys = { workspace = true }
+tempfile = { workspace = true }
 primitive-types.workspace = true
 sha2.workspace = true
