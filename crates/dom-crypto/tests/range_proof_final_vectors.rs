@@ -157,7 +157,7 @@ fn final_range_proof_restart_and_repeat_100_are_stable() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "developer utility: prints the pinned vectors for manual audit, asserts nothing; run with --ignored"]
 fn print_final_range_proof_vectors() {
     for &vector in VECTORS {
         let (_, commitment, hash) = build(vector);
