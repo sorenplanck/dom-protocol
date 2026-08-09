@@ -38,5 +38,6 @@ dom-slate = { workspace = true }
 dom-tx = { workspace = true }
 dom-wallet-keys = { workspace = true }
 tempfile = { workspace = true }
+zeroize = { workspace = true }
 primitive-types.workspace = true
 sha2.workspace = true
