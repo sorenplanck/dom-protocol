@@ -122,17 +122,31 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config
 
+      # Reproducibility gate: prove the committed Cargo.lock still resolves
+      # the whole workspace on this host BEFORE anything is compiled. With
+      # --locked cargo refuses to touch the lockfile, so a stale or missing
+      # entry fails here instead of being silently rewritten in CI.
+      - name: cargo metadata --locked (committed Cargo.lock must resolve)
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
       - name: cargo build --workspace
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets --locked
 
       - name: cargo clippy --workspace -- -D warnings
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: cargo test --workspace (excluding integration and dom-node)
-        run: cargo test --workspace --exclude dom-integration-tests --exclude dom-node --all-targets
+        run: cargo test --workspace --exclude dom-integration-tests --exclude dom-node --all-targets --locked
+
+      # --all-targets is lib+bins+tests+benches+examples and EXCLUDES doctests,
+      # so the 33 `compile_fail` API-bypass proofs in dom-adaptor/dom-crypto
+      # were never executed by any job above. They are the scriptless-contract
+      # sealing evidence; run them explicitly, on every host in the matrix.
+      - name: cargo test --doc (scriptless compile_fail API-bypass proofs)
+        run: cargo test --doc -p dom-adaptor -p dom-crypto --locked
 
       - name: cargo test -p dom-node --all-targets (serial shutdown/supervisor coverage)
-        run: cargo test -p dom-node --all-targets -- --test-threads=1
+        run: cargo test -p dom-node --all-targets --locked -- --test-threads=1
 
   supply-chain:
     name: "supply chain: cargo deny + cargo audit"
@@ -199,22 +213,22 @@ jobs:
           sudo apt-get install -y build-essential pkg-config
 
       - name: cargo check --workspace
-        run: cargo check --workspace
+        run: cargo check --workspace --locked
 
       - name: cargo test -p dom-consensus
-        run: cargo test -p dom-consensus
+        run: cargo test -p dom-consensus --locked
 
       - name: cargo test -p dom-chain
-        run: cargo test -p dom-chain
+        run: cargo test -p dom-chain --locked
 
       - name: cargo test -p dom-store
-        run: cargo test -p dom-store
+        run: cargo test -p dom-store --locked
 
       - name: cargo test -p dom-node (serial shutdown/supervisor coverage)
-        run: cargo test -p dom-node -- --test-threads=1
+        run: cargo test -p dom-node --locked -- --test-threads=1
 
       - name: cargo test -p dom-mempool
-        run: cargo test -p dom-mempool
+        run: cargo test -p dom-mempool --locked
 
   release-blocker-integration-tests:
     name: "release blockers: dom-integration-tests (linux fast mining)"
@@ -251,10 +265,10 @@ jobs:
           sudo apt-get install -y build-essential pkg-config
 
       - name: cargo test -p dom-integration-tests
-        run: cargo test -p dom-integration-tests -- --test-threads=1
+        run: cargo test -p dom-integration-tests --locked -- --test-threads=1
 
       - name: cargo test -p dom-integration-tests --ignored
-        run: cargo test -p dom-integration-tests -- --ignored --test-threads=1
+        run: cargo test -p dom-integration-tests --locked -- --ignored --test-threads=1
 
   ibd-integration:
     name: ibd-integration
@@ -292,12 +306,21 @@ jobs:
           sudo apt-get install -y build-essential pkg-config
 
       - name: cargo build --release -p dom-node
-        run: cargo build --release -p dom-node
+        run: cargo build --release -p dom-node --locked
+
+      # Release-artifact surface gate on the SHIPPED node binary. It runs here
+      # because this job already produced the release build: the scan reuses
+      # that artifact instead of paying for a second fat-LTO link. dom-node
+      # links dom-crypto, so this is where the default-off `test-helpers`
+      # escape hatch (bp2_test_only_prove_legacy_single_with_nonce) would show
+      # up if it ever leaked into a release graph.
+      - name: release-surface scan (dom-node release binary)
+        run: scripts/check-release-surface.sh --package dom-node
 
       - name: cargo test -p dom-integration-tests --test ibd_two_node
         run: |
           mkdir -p "$DOM_INTEGRATION_LOG_DIR"
-          cargo test -p dom-integration-tests --test ibd_two_node -- --nocapture --test-threads=1
+          cargo test -p dom-integration-tests --test ibd_two_node --locked -- --nocapture --test-threads=1
 
       - name: Upload IBD node logs on failure
         if: failure()
@@ -307,6 +330,53 @@ jobs:
           path: ibd-two-node-logs
           if-no-files-found: warn
 
+  # Phase 1 scriptless-contract evidence gates. These assert that the
+  # API-bypass proofs still EXIST and still RUN, and that the release
+  # library surface carries no test-only capability. Kept as its own
+  # ubuntu job so the assertions are unconditional (no `if:` guard that
+  # could silently skip them) without touching the Windows matrix leg.
+  scriptless-evidence-gates:
+    name: "scriptless evidence: frozen doctests + release surface"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-linux-scriptless-evidence-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-linux-scriptless-evidence-
+
+      - name: Install Linux build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config binutils
+
+      - name: cargo metadata --locked (committed Cargo.lock must resolve)
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: cargo test --doc (scriptless compile_fail API-bypass proofs)
+        run: cargo test --doc -p dom-adaptor -p dom-crypto --locked
+
+      # Freezes the compile_fail fence count per crate, the number of
+      # doctests actually executed, and requires zero bare #[ignore].
+      - name: frozen doctest inventory
+        run: scripts/check-doctest-inventory.sh
+
+      # Release-artifact surface gate on the scriptless library artifacts.
+      # The shipped dom-node binary is scanned by the ibd-integration job,
+      # which already builds it in release.
+      - name: release-surface scan (scriptless library artifacts)
+        run: scripts/check-release-surface.sh --package dom-adaptor --package dom-crypto
+
   release-blocker-gate:
     name: release blocker gate
     runs-on: ubuntu-latest
@@ -314,6 +384,7 @@ jobs:
       - fmt
       - supply-chain
       - build-test
+      - scriptless-evidence-gates
       - release-blocker-crate-tests
       - release-blocker-integration-tests
       - ibd-integration
@@ -324,6 +395,7 @@ jobs:
           test "${{ needs.fmt.result }}" = "success"
           test "${{ needs.supply-chain.result }}" = "success"
           test "${{ needs.build-test.result }}" = "success"
+          test "${{ needs.scriptless-evidence-gates.result }}" = "success"
           test "${{ needs.release-blocker-crate-tests.result }}" = "success"
           test "${{ needs.release-blocker-integration-tests.result }}" = "success"
           test "${{ needs.ibd-integration.result }}" = "success"
@@ -384,20 +456,20 @@ jobs:
       # determinism on that platform.
       - name: Run pinned PMMR vector tests
         run: |
-          cargo test -p dom-test-vectors --lib pmmr_vectors
+          cargo test -p dom-test-vectors --lib --locked pmmr_vectors
 
       - name: Run hash + serialization vector tests
         run: |
-          cargo test -p dom-test-vectors --lib hash_vectors
-          cargo test -p dom-test-vectors --lib serialization_vectors
+          cargo test -p dom-test-vectors --lib --locked hash_vectors
+          cargo test -p dom-test-vectors --lib --locked serialization_vectors
 
       - name: Run PMMR adversarial + reproducer suite
         run: |
-          cargo test -p dom-pmmr --tests
+          cargo test -p dom-pmmr --tests --locked
 
       - name: Print pinned PMMR vectors (cross-platform audit log)
         run: |
-          cargo test -p dom-test-vectors --lib pmmr_vectors::tests::print_pmmr_vectors -- --nocapture
+          cargo test -p dom-test-vectors --lib --locked pmmr_vectors::tests::print_pmmr_vectors -- --nocapture
 
       # Phase 1.4 deterministic snapshot manifest — every host
       # produces the SAME byte sequence. The compare-snapshots job
@@ -407,7 +479,7 @@ jobs:
       - name: Generate deterministic snapshot manifest
         shell: bash
         run: |
-          cargo run -p dom-test-vectors --bin cross_platform_snapshot --quiet \
+          cargo run -p dom-test-vectors --bin cross_platform_snapshot --locked --quiet \
             > snapshot.${{ matrix.host }}.txt
           wc -c snapshot.${{ matrix.host }}.txt
           head -5 snapshot.${{ matrix.host }}.txt
