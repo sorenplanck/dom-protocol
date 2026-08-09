@@ -1,3 +1,24 @@
 [toolchain]
-channel = "stable"
+# Immutable pin, NOT a moving channel.
+#
+# This file previously said `channel = "stable"`, so the compiler changed under
+# a frozen tree: evidence produced from this repository was produced under
+# whatever `stable` resolved to at that moment, which is unknowable after the
+# fact. Not a theoretical risk — during the Phase 1 closure work the same
+# unchanged commit on this machine resolved to cargo 1.96.1 at 20:25 and to
+# cargo 1.97.1 at 20:45, and a parallel run hit E0514 (incompatible rlib) when
+# rustup advanced `stable` mid-run. That is the reproducibility defect this pin
+# closes.
+#
+# 1.96.1 is the version .github/workflows/ci.yml installs and the version the
+# sibling DOM Contracts repository pins, so naming it here makes a local run and
+# a CI run the same measurement. It is NOT a claim that this repository's
+# earlier evidence was produced on 1.96.1: under a moving channel that is
+# precisely what could not be known.
+#
+# `profile` is deliberately NOT narrowed to "minimal" as Contracts does. The
+# protocol workspace is the full node, and the CI doctest gate
+# (`cargo test --doc -p dom-adaptor -p dom-crypto --locked`) needs rustdoc; the
+# default profile guarantees the full component set on every host in the matrix.
+channel = "1.96.1"
 components = ["rustfmt", "clippy"]
