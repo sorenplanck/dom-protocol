@@ -17,6 +17,23 @@ if [[ "$repo_real" != "/home/leonardov/dom-scriptless-dev/dom-scriptless-contrac
   exit 4
 fi
 
+# Fail closed if an instrument this preflight depends on is absent. Without this,
+# a missing tool makes its command fail, and a failing command in an `if` or under
+# `!` reads as "nothing found" — so the isolation checks below would PASS exactly
+# when they became unable to measure anything. Exit 6 = missing tooling.
+require_tools() {
+  local t missing=()
+  for t in "$@"; do
+    command -v "$t" >/dev/null 2>&1 || missing+=("$t")
+  done
+  if (( ${#missing[@]} > 0 )); then
+    echo "erro: ferramentas obrigatórias ausentes: ${missing[*]}" >&2
+    echo "erro: o preflight falha fechado; instale-as antes de reexecutar." >&2
+    exit 6
+  fi
+}
+require_tools grep git realpath tee date cargo
+
 log_dir="$(realpath "$repo/../logs")"
 log="$log_dir/preflight.log"
 exec > >(tee -a "$log") 2>&1
@@ -33,16 +50,44 @@ tag=baseline/scriptless-2026-08-04
 git merge-base --is-ancestor "$base" HEAD
 [[ "$(git config --get core.hooksPath)" == ".githooks" ]]
 [[ -x .githooks/pre-push ]]
-! git remote | rg -x origin
+# No 'origin' remote may exist. Status is inspected explicitly: 0 = found (refuse),
+# 1 = absent (correct), anything else = the search itself failed and must not be
+# mistaken for absence.
+origin_rc=0
+git remote | grep -qxF -- origin || origin_rc=$?
+case "$origin_rc" in
+  0)
+    echo "erro: remote 'origin' presente; o isolamento exige sua ausência" >&2
+    exit 6
+    ;;
+  1) : ;;
+  *)
+    echo "erro: falha ao inspecionar os remotes (status $origin_rc)" >&2
+    exit 7
+    ;;
+esac
 
 while IFS= read -r remote; do
   [[ "$(git remote get-url --push "$remote")" == "no_push://push-disabled" ]]
 done < <(git remote)
 
-if rg -n 'unsafe[[:space:]]*\{|todo!\(|unimplemented!\(' crates/dom-adaptor; then
-  echo "erro: construção proibida em dom-adaptor" >&2
-  exit 5
-fi
+# Forbidden constructions in dom-adaptor. Status is inspected explicitly:
+# 0 = found (refuse), 1 = clean, anything else = the search itself failed and must
+# not be mistaken for a clean tree.
+forbidden_rc=0
+forbidden_hits="$(grep -rnE -- 'unsafe[[:space:]]*\{|todo!\(|unimplemented!\(' crates/dom-adaptor)" || forbidden_rc=$?
+case "$forbidden_rc" in
+  0)
+    printf '%s\n' "$forbidden_hits"
+    echo "erro: construção proibida em dom-adaptor" >&2
+    exit 5
+    ;;
+  1) : ;;
+  *)
+    echo "erro: falha ao varrer crates/dom-adaptor (status $forbidden_rc)" >&2
+    exit 7
+    ;;
+esac
 
 echo "+ cargo metadata --no-deps --format-version 1"
 cargo metadata --no-deps --format-version 1 >/dev/null
