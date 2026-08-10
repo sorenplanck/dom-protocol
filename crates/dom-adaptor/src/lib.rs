@@ -288,6 +288,7 @@
 
 mod adaptor;
 mod bulletproof_mpc;
+mod chain_projection;
 mod collaborative_range_proof;
 mod fee_bump;
 mod collaborative_output;
@@ -320,6 +321,10 @@ pub use bulletproof_mpc::{BpRound1ShareV1, BpRound2ShareV1, BpStatementV1};
 pub use collaborative_range_proof::{
     AggregateBpRound1, AggregateBpRound2, CollaborativeRangeProof, DomCollaborativeRangeProofV1,
     LocalBpSecrets, PendingCommonNonce, RangeProof739,
+};
+pub use chain_projection::{
+    ChainProjectionV1, ContractTxRoleV1, IrreversibleStateV1, LocalContractIndexV1,
+    MonitorActionV1, ReorgEventV1, ReorgWindowV1, TxIndexEntryV1, TxObservation,
 };
 pub use fee_bump::{required_child_fee_v1, ChildFeeV1, FeeBumpPolicyV1};
 pub use collaborative_output::{
