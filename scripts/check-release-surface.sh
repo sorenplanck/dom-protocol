@@ -258,6 +258,54 @@ if ! "${CARGO}" "${build_args[@]}" > "${build_json}"; then
     exit 1
 fi
 
+# A2. Features cargo ACTUALLY compiled. `cargo tree` above reports a resolved
+# graph; the compiler-artifact stream reports what each unit was built with, so
+# this is the authoritative feature evidence for the artifacts scanned below.
+echo "--- A2. features actually compiled into the release units ---"
+feature_hits="${tree_dir}/compiled-features.bad"
+if ! python3 - "${build_json}" "${FORBIDDEN_FEATURES[@]}" > "${feature_hits}" <<'PY'
+import json
+import sys
+
+build_json = sys.argv[1]
+forbidden = {f.replace("_", "-").lower() for f in sys.argv[2:]}
+units = 0
+bad = []
+with open(build_json, "r", encoding="utf-8", errors="replace") as handle:
+    for line in handle:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if msg.get("reason") != "compiler-artifact":
+            continue
+        units += 1
+        name = (msg.get("target") or {}).get("name", "?")
+        for feat in msg.get("features") or []:
+            if feat.replace("_", "-").lower() in forbidden:
+                bad.append(f"{name}: forbidden feature {feat!r} was compiled in")
+sys.stderr.write(f"     {units} compiler-artifact units inspected.\n")
+if units == 0:
+    sys.stderr.write("     FATAL: no compiler-artifact units in the build stream.\n")
+    sys.exit(2)
+for line in bad:
+    print(line)
+PY
+then
+    echo 'FATAL: could not read the compiled feature set from the build stream.' >&2
+    exit 1
+fi
+if [ -s "${feature_hits}" ]; then
+    cat "${feature_hits}" >&2
+    fail "forbidden feature(s) compiled into the release build (see above)."
+else
+    printf 'OK   no forbidden feature compiled into any release unit.\n'
+fi
+echo
+
 for pkg in "${PACKAGES[@]}"; do
     artifacts_file="${tree_dir}/${pkg}.artifacts"
     python3 - "${build_json}" "${pkg}" > "${artifacts_file}" <<'PY'
