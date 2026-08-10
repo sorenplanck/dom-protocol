@@ -289,6 +289,7 @@
 mod adaptor;
 mod bulletproof_mpc;
 mod context;
+mod decoy_capsule;
 mod error;
 mod messages;
 mod nonce;
@@ -311,6 +312,10 @@ mod independent_vector_comparison;
 pub use adaptor::{AdaptorPreSignatureV1, AdaptorSecret, CoreAdaptorPreSignatureV1};
 pub use bulletproof_mpc::{BpRound1ShareV1, BpStatementV1};
 pub use context::{DirectionV1, SessionContextInputsV1, SessionContextV1, SigningPhaseV1};
+pub use decoy_capsule::{
+    combine_decoy_capsule_v1, DecoyCommitmentV1, DecoyContributionV1, DecoyRevealV1,
+    DECOY_VARIABLE_LEN,
+};
 pub use error::{AdaptorError, Result};
 pub use messages::{NonceCommitmentV1, NonceRevealV1, PartialSignatureV1, PurposeV1};
 pub use nonce::{

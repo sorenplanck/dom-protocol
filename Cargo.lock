@@ -982,6 +982,7 @@ dependencies = [
  "hex",
  "rand_core 0.6.4",
  "serde_json",
+ "subtle",
  "thiserror 1.0.69",
  "zeroize",
 ]

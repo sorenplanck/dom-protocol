@@ -1,8 +1,13 @@
 //! Opaque signing-share ownership for DOM Scriptless Contracts.
 
 use crate::{AdaptorError, Result};
-use dom_crypto::{scalar_bytes_are_canonical, secret_scalar_public_key, PublicKey};
+use dom_crypto::{
+    blake2b_256_tagged, scalar_bytes_are_canonical, secret_scalar_public_key, PublicKey,
+};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
+/// Domain tag for the decoy-contribution seed keyed by the signing share.
+const DECOY_SEED_TAG_V1: &str = "DOM:scriptless-decoy-share-seed:v1";
 
 /// Canonical signing share with no raw-byte export.
 ///
@@ -34,6 +39,19 @@ impl SigningShareV1 {
     /// Return the corresponding canonical public key.
     pub const fn public_key(&self) -> &PublicKey {
         &self.public_key
+    }
+
+    /// Derive a decoy-contribution seed keyed by the private share.
+    ///
+    /// The share's public key is public, so a decoy stream keyed only on it
+    /// would be predictable by anyone. This folds the secret bytes in through
+    /// a domain-separated keyed digest, returning a fresh 32-byte seed and
+    /// never the share itself. The returned value is caller-zeroized.
+    pub fn decoy_seed_v1(&self, context: &[u8]) -> Zeroizing<[u8; 32]> {
+        let mut input = Zeroizing::new(Vec::with_capacity(32 + context.len()));
+        input.extend_from_slice(&self.bytes);
+        input.extend_from_slice(context);
+        Zeroizing::new(*blake2b_256_tagged(DECOY_SEED_TAG_V1, &input).as_bytes())
     }
 
     #[cfg(test)]

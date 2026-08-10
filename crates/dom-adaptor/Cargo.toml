@@ -19,6 +19,7 @@ dom-consensus.workspace = true
 thiserror.workspace = true
 rand_core.workspace = true
 zeroize.workspace = true
+subtle.workspace = true
 
 [dev-dependencies]
 dom-crypto = { workspace = true, features = ["test-helpers"] }
