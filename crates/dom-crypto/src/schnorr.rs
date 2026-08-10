@@ -18,6 +18,14 @@ const SECP256K1_N: [u8; 32] = [
     0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
 ];
 
+pub(crate) const fn partial_signature_length_is_canonical(length: usize) -> bool {
+    length == 32
+}
+
+pub(crate) const fn signature_length_is_canonical(length: usize) -> bool {
+    length == 65
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SchnorrSignature {
     r_compressed: [u8; 33],
@@ -31,7 +39,7 @@ pub struct PartialSig {
 
 impl PartialSig {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DomError> {
-        if bytes.len() != 32 {
+        if !partial_signature_length_is_canonical(bytes.len()) {
             return Err(DomError::Malformed(format!(
                 "partial signature must be 32 bytes, got {}",
                 bytes.len()
@@ -54,7 +62,7 @@ impl PartialSig {
 
 impl SchnorrSignature {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DomError> {
-        if bytes.len() != 65 {
+        if !signature_length_is_canonical(bytes.len()) {
             return Err(DomError::Malformed(format!(
                 "signature must be 65 bytes, got {}",
                 bytes.len()
@@ -331,7 +339,7 @@ fn scalar_add_mul(a: &[u8; 32], c: &[u8; 32], b: &[u8; 32]) -> Result<[u8; 32], 
 /// Both predicates are now CT: the zero-check walks all 32 bytes
 /// before reducing, and the order-comparison processes every byte
 /// position without early exit.
-fn is_scalar_valid(bytes: &[u8; 32]) -> bool {
+pub(crate) fn is_scalar_valid(bytes: &[u8; 32]) -> bool {
     let nonzero: Choice = !bytes_eq_zero_ct(bytes);
     let lt_n: Choice = bytes_lt_ct(bytes, &SECP256K1_N);
     bool::from(nonzero & lt_n)
@@ -577,7 +585,7 @@ mod tests {
         assert!(schnorr_aggregate_sigs(&[], &nonce).is_err());
     }
 
-    // ── KAV-conformância: RFC-6979 nonce ─────────────────────────────────────
+    // ── KAV conformance: RFC-6979 nonce ──────────────────────────────────────
     // `rfc6979_nonce` is crate-private and only reachable through `schnorr_sign`
     // (which always pre-hashes the message with Blake2b), so this KAV lives here
     // as an internal unit test rather than in tests/.

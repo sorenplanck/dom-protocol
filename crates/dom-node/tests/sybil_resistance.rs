@@ -31,6 +31,7 @@ use dom_node::pex::{
     MAX_PEER_AGE_SECS,
 };
 use dom_store::PeerAddr;
+use dom_wire::message::AddrEntry;
 
 // ── (1) Fake peer flood is bounded by max_peers ──────────────────────────────
 
@@ -40,12 +41,15 @@ use dom_store::PeerAddr;
 #[test]
 fn flood_is_bounded_by_max_peers() {
     let mut pex = PexManager::new(1000);
-    let flood: Vec<String> = (0..10_000)
+    let flood: Vec<AddrEntry> = (0..10_000)
         .map(|i| {
             let a = (i / 65_536) as u8;
             let b = ((i / 256) % 256) as u8;
             let c = (i % 256) as u8;
-            format!("203.{a}.{b}.{c}:33369")
+            AddrEntry {
+                addr: format!("8.{a}.{b}.{c}:33369"),
+                last_seen: 1,
+            }
         })
         .collect();
     pex.process_addr_message(flood);
@@ -66,38 +70,72 @@ fn flood_is_bounded_by_max_peers() {
 fn malformed_addresses_filtered() {
     let mut pex = PexManager::new(1000);
     let mixed = vec![
-        "10.0.0.1:33369".to_string(),
-        "not_an_addr".to_string(),
-        "PROXY this string".to_string(),
-        "256.256.256.256:33369".to_string(), // out-of-range octets
-        "1.2.3.4".to_string(),               // missing port
-        "[::]:33369:wat".to_string(),
-        "203.0.113.1:33369".to_string(),
+        AddrEntry {
+            addr: "10.0.0.1:33369".into(),
+            last_seen: 1,
+        },
+        AddrEntry {
+            addr: "not_an_addr".into(),
+            last_seen: 1,
+        },
+        AddrEntry {
+            addr: "PROXY this string".into(),
+            last_seen: 1,
+        },
+        AddrEntry {
+            addr: "256.256.256.256:33369".into(),
+            last_seen: 1,
+        },
+        AddrEntry {
+            addr: "1.2.3.4".into(),
+            last_seen: 1,
+        },
+        AddrEntry {
+            addr: "[::]:33369:wat".into(),
+            last_seen: 1,
+        },
+        AddrEntry {
+            addr: "203.0.113.1:33369".into(),
+            last_seen: 1,
+        },
+        AddrEntry {
+            addr: "8.8.8.8:33369".into(),
+            last_seen: 1,
+        },
     ];
     let added = pex.process_addr_message(mixed);
     assert_eq!(
-        added, 2,
-        "exactly 2 well-formed addresses should land in the known set"
+        added, 1,
+        "only a public, well-formed address should land in the known set"
     );
-    assert_eq!(pex.known_count(), 2);
+    assert_eq!(pex.known_count(), 1);
 }
 
-/// PEX SHOULD accept localhost / RFC1918 / link-local addrs as
-/// strings (the dialer is responsible for not connecting to them
-/// in mainnet builds — the address-set is a discovery layer, not
-/// a policy layer). Pin this so a future refactor doesn't add
-/// silent filtering at the wrong layer.
+/// Mainnet PEX MUST reject localhost and RFC1918 candidates before they enter
+/// the address book, rather than relying on a later dial attempt.
 #[test]
-fn rfc1918_and_localhost_addresses_are_accepted_at_pex_layer() {
+fn rfc1918_and_localhost_addresses_are_rejected_at_pex_layer() {
     let mut pex = PexManager::new(1000);
     let addrs = vec![
-        "127.0.0.1:33369".to_string(),
-        "10.0.0.1:33369".to_string(),
-        "192.168.1.1:33369".to_string(),
-        "172.16.0.1:33369".to_string(),
+        AddrEntry {
+            addr: "127.0.0.1:33369".into(),
+            last_seen: 1,
+        },
+        AddrEntry {
+            addr: "10.0.0.1:33369".into(),
+            last_seen: 1,
+        },
+        AddrEntry {
+            addr: "192.168.1.1:33369".into(),
+            last_seen: 1,
+        },
+        AddrEntry {
+            addr: "172.16.0.1:33369".into(),
+            last_seen: 1,
+        },
     ];
     let added = pex.process_addr_message(addrs);
-    assert_eq!(added, 4, "PEX layer must accept private addresses");
+    assert_eq!(added, 0, "Mainnet PEX must reject private addresses");
 }
 
 // ── (3) GetAddr storm ────────────────────────────────────────────────────────
@@ -147,29 +185,29 @@ fn rotating_getaddr_storm_does_not_grow_cooldown_state_without_bound() {
 #[test]
 fn failed_peers_are_evicted() {
     let mut pex = PexManager::new(1000);
-    pex.add_peer("198.51.100.1:33369".to_string());
+    pex.add_peer("8.8.8.1:33369".to_string());
     for _ in 0..10 {
-        pex.record_failure("198.51.100.1:33369");
+        pex.record_failure("8.8.8.1:33369");
     }
     pex.evict_dead_peers();
     assert_eq!(pex.known_count(), 0);
 }
 
-/// add_peer MUST reset the failure counter to zero so a peer that
-/// reconnects gets a clean slate. This is the legitimate use case
-/// of the failure-tracking laundering pattern (a flapping peer
-/// recovers) and the security one (a Sybil cannot pin a target
-/// by failing it once).
+/// Re-announcing a peer MUST NOT reset failures; only a successful outbound
+/// connection may rehabilitate it.
 #[test]
-fn add_peer_resets_failure_counter() {
+fn add_peer_does_not_reset_failure_counter() {
     let mut pex = PexManager::new(1000);
-    pex.add_peer("198.51.100.2:33369".to_string());
-    pex.record_failure("198.51.100.2:33369");
-    pex.record_failure("198.51.100.2:33369");
-    // Re-add — counter resets, not eligible for eviction yet.
-    pex.add_peer("198.51.100.2:33369".to_string());
+    pex.add_peer("8.8.8.2:33369".to_string());
+    for _ in 0..2 {
+        pex.record_failure("8.8.8.2:33369");
+    }
+    pex.add_peer("8.8.8.2:33369".to_string());
+    for _ in 0..8 {
+        pex.record_failure("8.8.8.2:33369");
+    }
     pex.evict_dead_peers();
-    assert_eq!(pex.known_count(), 1);
+    assert_eq!(pex.known_count(), 0);
 }
 
 // ── (5) Connection monopolisation via duplicate advertise ────────────────────
@@ -180,7 +218,12 @@ fn add_peer_resets_failure_counter() {
 #[test]
 fn duplicate_advertise_does_not_inflate_known_set() {
     let mut pex = PexManager::new(1000);
-    let dup: Vec<String> = (0..500).map(|_| "10.0.0.1:33369".to_string()).collect();
+    let dup: Vec<AddrEntry> = (0..500)
+        .map(|_| AddrEntry {
+            addr: "8.8.8.8:33369".into(),
+            last_seen: 1,
+        })
+        .collect();
     pex.process_addr_message(dup);
     assert_eq!(pex.known_count(), 1);
 }
@@ -232,7 +275,8 @@ fn decode_addr_payload_rejects_oversized_count() {
 #[test]
 fn peers_for_sharing_filters_stale_entries() {
     let mut pex = PexManager::new(1000);
-    pex.add_peer("10.0.0.1:33369".to_string());
+    pex.add_peer("8.8.8.8:33369".to_string());
+    pex.mark_connected("8.8.8.8:33369");
     // Manually drop a peer that we'd consider expired. Achieved
     // by inspecting the inferred age via the live time path.
     // The PexManager doesn't expose direct mutation of last_seen,

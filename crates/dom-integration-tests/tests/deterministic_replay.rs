@@ -48,11 +48,15 @@ use std::time::Instant;
 /// difficulty accumulation.
 const N: u64 = 10;
 
-/// SHA-256 of the canonical dump. Re-pinned after a full workspace run and a
-/// direct rerun both produced the same byte-identical two-node dump. Any future
-/// change to genesis, the coinbase/bp2 proof, PMMR roots, or canonical UTXO /
-/// kernel state changes this digest and fails CI.
-const PINNED_DIGEST: &str = "dc6982f5ebd035e2b7083d837401c9d5e264579545cc8bc2a7182ef2dcc89051";
+/// SHA-256 of the canonical dump for the finalized Regtest genesis identity.
+/// A full campaign replay and its independent in-process repeat produced this
+/// byte-identical dump. Any future change to genesis, the coinbase/bp2 proof,
+/// PMMR roots, or canonical UTXO/kernel state changes this digest and fails CI.
+// CON-009: re-pinned after non-genesis headers began binding the complete
+// canonical block body into the third root. The frozen genesis is unchanged.
+// Hard fork v3: re-pinned because Regtest post-genesis headers now carry the
+// required block version 3. The frozen Regtest genesis remains unchanged.
+const PINNED_DIGEST: &str = "32fdbff37ab89ad991272e178dc5196c258c6f01f9dc8328bdda63fad672fe53";
 
 /// Build a deterministic Regtest chain of `N` blocks past genesis using the real
 /// production construction path, then return a canonical byte dump of its state:
@@ -109,7 +113,7 @@ async fn build_and_dump_canonical_state(tag: &str, port: u16) -> Vec<u8> {
             build_deterministic_coinbase(BlockHeight(height), 0, &chain_id).expect("coinbase");
         // Real PMMR roots over this block's contents (coinbase only; no txs).
         let (output_root, kernel_root, rangeproof_root) =
-            compute_block_pmmr_roots(&coinbase, &[]).expect("pmmr roots");
+            compute_block_pmmr_roots(BlockHeight(height), &coinbase, &[]).expect("pmmr roots");
 
         // Regtest fixed trivial target; difficulty derived from it exactly as
         // connect_block recomputes it (from header.target.to_target()).
@@ -127,7 +131,10 @@ async fn build_and_dump_canonical_state(tag: &str, port: u16) -> Vec<u8> {
             .unwrap_or([0u8; 32]);
 
         let mut header = BlockHeader {
-            version: dom_core::PROTOCOL_VERSION,
+            version: dom_core::required_block_version_for_network(
+                dom_core::NETWORK_MAGIC_REGTEST,
+                height,
+            ),
             height: BlockHeight(height),
             prev_hash,
             timestamp: Timestamp(genesis_ts + height),

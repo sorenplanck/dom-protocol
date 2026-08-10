@@ -1,4 +1,4 @@
-use dom_chain::ChainState;
+use dom_chain::{build_canonical_genesis, genesis_canonical_changeset, ChainState};
 use dom_consensus::block::{BlockHeader, ProofOfWork};
 use dom_consensus::{
     compute_block_pmmr_roots, derive_chain_id, Block, CoinbaseKernel, CoinbaseTransaction,
@@ -6,7 +6,7 @@ use dom_consensus::{
 };
 use dom_core::{
     Amount, BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION, TAG_KERNEL_MSG_COINBASE,
+    NETWORK_MAGIC_REGTEST, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::{
     hash::blake2b_256_tagged,
@@ -15,6 +15,7 @@ use dom_crypto::{
     schnorr_sign,
 };
 use dom_node::missing_block_tracker::MissingBlockTracker;
+use dom_node::node::DomNode;
 use dom_node::orphan_pool::{OrphanBlock, OrphanInsertOutcome, RuntimeOrphanPool};
 use dom_pow::{
     compute_expected_target, fast_pow_hash, genesis_anchor, hash_meets_target, target_to_compact,
@@ -24,6 +25,8 @@ use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::DomStore;
 use primitive_types::U256;
 use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::time::Duration;
 
 // Windows CI reserves the LMDB map size on disk, so multi-node fixtures must
 // not open production-sized (16 GiB) maps. These fixtures are tiny.
@@ -84,7 +87,7 @@ fn mine_fast_header(
     let mut nonce = 0u64;
     loop {
         let mut header = BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: dom_core::required_block_version_for_network(NETWORK_MAGIC_REGTEST, height.0),
             height,
             prev_hash,
             timestamp,
@@ -124,7 +127,7 @@ fn build_coinbase_only_block(
 ) -> Block {
     let coinbase = build_coinbase(height, 0, coinbase_seed, chain_id);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &[]).expect("roots");
+        compute_block_pmmr_roots(height, &coinbase, &[]).expect("roots");
     let timestamp = genesis_anchor(NETWORK_MAGIC_REGTEST)
         .expect("anchor")
         .timestamp
@@ -291,12 +294,13 @@ impl HarnessNode {
         let dir = TempDir::new().expect("tempdir");
         let store =
             DomStore::open_with_map_size(dir.path(), TEST_LMDB_MAP_SIZE).expect("store open");
-        let chain = ChainState::open(
+        let mut chain = ChainState::open(
             store,
             Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
             NETWORK_MAGIC_REGTEST,
         )
         .expect("chain open");
+        bootstrap_canonical_regtest_genesis(&mut chain);
         Self {
             dir,
             chain,
@@ -400,11 +404,345 @@ fn test_chain_id() -> [u8; 32] {
     .as_bytes()
 }
 
+fn canonical_regtest_fixture() -> BlockFixture {
+    let canonical = build_canonical_genesis(NETWORK_MAGIC_REGTEST, &test_chain_id())
+        .expect("canonical Regtest genesis");
+    assert_eq!(
+        canonical.hash,
+        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+        "the fixture must use the frozen Regtest genesis identity"
+    );
+    BlockFixture {
+        block: canonical.block.expect("legacy Regtest genesis block"),
+        hash: canonical.hash,
+    }
+}
+
+fn bootstrap_canonical_regtest_genesis(chain: &mut ChainState) {
+    // The frozen Regtest genesis uses its historical signing context to avoid
+    // a genesis-hash/chain-ID signing cycle. Persist it through the same
+    // canonical changeset used by production bootstrap; synthetic height-zero
+    // blocks cannot pass the configured frozen genesis guard.
+    let canonical = build_canonical_genesis(NETWORK_MAGIC_REGTEST, &test_chain_id())
+        .expect("canonical Regtest genesis");
+    let block = canonical
+        .block
+        .as_ref()
+        .expect("legacy Regtest genesis block");
+    let (new_utxos, spent_utxos, kernel_excesses) =
+        genesis_canonical_changeset(block, canonical.hash);
+    chain
+        .store
+        .commit_block(
+            canonical.hash.as_bytes(),
+            block.header.height.0,
+            &canonical.header_bytes,
+            &canonical.block_bytes,
+            &new_utxos,
+            &spent_utxos,
+            &kernel_excesses,
+        )
+        .expect("persist canonical Regtest genesis");
+    chain.tip_hash = canonical.hash;
+    chain.tip_height = block.header.height;
+    chain.tip_difficulty = block.header.total_difficulty;
+}
+
+const PRODUCTION_INGRESS_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn free_local_addr() -> String {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral P2P port")
+        .local_addr()
+        .expect("read ephemeral P2P address")
+        .to_string()
+}
+
+fn production_node_config(dir: &TempDir, p2p_addr: String) -> dom_config::NodeConfig {
+    let mut config = dom_config::NodeConfig::regtest();
+    config.data_dir = dir.path().to_string_lossy().into_owned();
+    config.p2p_listen_addr = p2p_addr;
+    config.min_outbound = 0;
+    config.disable_dns_seeds = true;
+    config.rpc_listen_addr = None;
+    config.metrics_listen_addr = None;
+    config
+}
+
+async fn wait_until(label: &str, mut predicate: impl AsyncFnMut() -> bool) {
+    tokio::time::timeout(PRODUCTION_INGRESS_TIMEOUT, async {
+        loop {
+            if predicate().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {label}"));
+}
+
+struct ProductionPair {
+    destination_dir: TempDir,
+    destination: Arc<DomNode>,
+    source: Arc<DomNode>,
+    destination_run: tokio::task::JoinHandle<Result<(), DomError>>,
+    source_run: tokio::task::JoinHandle<Result<(), DomError>>,
+}
+
+impl ProductionPair {
+    async fn start() -> Self {
+        let destination_dir = TempDir::new().expect("destination tempdir");
+        let source_dir = TempDir::new().expect("source tempdir");
+        let destination_addr = free_local_addr();
+        let source_addr = free_local_addr();
+
+        let destination = Arc::new(
+            DomNode::init_with_map_size(
+                production_node_config(&destination_dir, destination_addr.clone()),
+                TEST_LMDB_MAP_SIZE,
+            )
+            .expect("initialize destination node"),
+        );
+        let mut source_config = production_node_config(&source_dir, source_addr);
+        source_config.min_outbound = 1;
+        source_config.seed_peers = vec![destination_addr];
+        let source = Arc::new(
+            DomNode::init_with_map_size(source_config, TEST_LMDB_MAP_SIZE)
+                .expect("initialize source node"),
+        );
+
+        let destination_run = tokio::spawn(destination.clone().run());
+        wait_until("the destination P2P listener", || async {
+            tokio::net::TcpStream::connect(&destination.config.p2p_listen_addr)
+                .await
+                .is_ok()
+        })
+        .await;
+        let source_run = tokio::spawn(source.clone().run());
+        wait_until("the production P2P session", || async {
+            !destination.peers.lock().await.connected_peers().is_empty()
+                && !source.peers.lock().await.connected_peers().is_empty()
+        })
+        .await;
+
+        Self {
+            destination_dir,
+            destination,
+            source,
+            destination_run,
+            source_run,
+        }
+    }
+
+    async fn genesis(&self) -> BlockFixture {
+        let chain = self.destination.chain.lock().await;
+        let hash = chain.tip_hash;
+        let bytes = chain
+            .store
+            .get_block_body(hash.as_bytes())
+            .expect("read production genesis")
+            .expect("production genesis body");
+        BlockFixture {
+            block: Block::from_bytes(&bytes).expect("decode production genesis"),
+            hash,
+        }
+    }
+
+    fn relay(&self, block: &Block) {
+        self.source
+            .block_relay_tx
+            .send(block.to_bytes().expect("serialize relayed block"))
+            .expect("production relay must have a live peer receiver");
+    }
+
+    async fn wait_for_state(&self, tip: Hash256, orphan_len: usize, missing_len: usize) {
+        wait_until("destination orphan convergence", || async {
+            let chain_tip = self.destination.chain.lock().await.tip_hash;
+            let actual_orphans = self.destination.orphan_pool.lock().await.len();
+            let actual_missing = self.destination.missing_blocks.lock().await.missing_len();
+            chain_tip == tip && actual_orphans == orphan_len && actual_missing == missing_len
+        })
+        .await;
+    }
+
+    async fn stop(self) -> TempDir {
+        self.source.request_shutdown().await;
+        self.destination.request_shutdown().await;
+        tokio::time::timeout(PRODUCTION_INGRESS_TIMEOUT, self.source_run)
+            .await
+            .expect("source shutdown timeout")
+            .expect("source run join")
+            .expect("source graceful shutdown");
+        tokio::time::timeout(PRODUCTION_INGRESS_TIMEOUT, self.destination_run)
+            .await
+            .expect("destination shutdown timeout")
+            .expect("destination run join")
+            .expect("destination graceful shutdown");
+        self.destination_dir
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_peer_ingress_recursively_converges_reverse_orphans() {
+    std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+    let chain_id = test_chain_id();
+
+    let pair = ProductionPair::start().await;
+    let genesis = pair.genesis().await;
+    let seed = *genesis.hash.as_bytes();
+    let b1 = fixture(
+        seed,
+        genesis.hash,
+        genesis.block.header.total_difficulty,
+        1,
+        21,
+        &chain_id,
+    );
+    let b2 = fixture(
+        seed,
+        b1.hash,
+        b1.block.header.total_difficulty,
+        2,
+        22,
+        &chain_id,
+    );
+    let b3 = fixture(
+        seed,
+        b2.hash,
+        b2.block.header.total_difficulty,
+        3,
+        23,
+        &chain_id,
+    );
+    let b4 = fixture(
+        seed,
+        b3.hash,
+        b3.block.header.total_difficulty,
+        4,
+        24,
+        &chain_id,
+    );
+
+    for (block, expected_orphans, expected_missing) in [(&b4, 1, 1), (&b3, 2, 2), (&b2, 3, 3)] {
+        pair.relay(&block.block);
+        pair.wait_for_state(genesis.hash, expected_orphans, expected_missing)
+            .await;
+    }
+    pair.relay(&b1.block);
+    pair.wait_for_state(b4.hash, 0, 0).await;
+
+    let destination_dir = pair.stop().await;
+    let reopened = DomNode::init_with_map_size(
+        production_node_config(&destination_dir, free_local_addr()),
+        TEST_LMDB_MAP_SIZE,
+    )
+    .expect("reopen converged destination");
+    assert_eq!(
+        reopened.chain.lock().await.tip_hash,
+        b4.hash,
+        "B4 must remain canonical after reopening the destination chain state"
+    );
+
+    let pair = ProductionPair::start().await;
+    let genesis = pair.genesis().await;
+    let seed = *genesis.hash.as_bytes();
+    let b1 = fixture(
+        seed,
+        genesis.hash,
+        genesis.block.header.total_difficulty,
+        1,
+        31,
+        &chain_id,
+    );
+    let b2 = fixture(
+        seed,
+        b1.hash,
+        b1.block.header.total_difficulty,
+        2,
+        32,
+        &chain_id,
+    );
+    let b3 = fixture(
+        seed,
+        b2.hash,
+        b2.block.header.total_difficulty,
+        3,
+        33,
+        &chain_id,
+    );
+    pair.relay(&b3.block);
+    pair.wait_for_state(genesis.hash, 1, 1).await;
+    pair.relay(&b2.block);
+    pair.wait_for_state(genesis.hash, 2, 2).await;
+    pair.relay(&b3.block);
+    pair.wait_for_state(genesis.hash, 2, 2).await;
+    pair.relay(&b1.block);
+    pair.wait_for_state(b3.hash, 0, 0).await;
+    {
+        let chain = pair.destination.chain.lock().await;
+        assert!(chain
+            .store
+            .get_block_body(b2.hash.as_bytes())
+            .expect("B2 lookup")
+            .is_some());
+        assert!(chain
+            .store
+            .get_block_body(b3.hash.as_bytes())
+            .expect("B3 lookup")
+            .is_some());
+    }
+    pair.stop().await;
+
+    let pair = ProductionPair::start().await;
+    let genesis = pair.genesis().await;
+    let seed = *genesis.hash.as_bytes();
+    let b1 = fixture(
+        seed,
+        genesis.hash,
+        genesis.block.header.total_difficulty,
+        1,
+        41,
+        &chain_id,
+    );
+    let a2 = fixture(
+        seed,
+        b1.hash,
+        b1.block.header.total_difficulty,
+        2,
+        42,
+        &chain_id,
+    );
+    let a3 = fixture(
+        seed,
+        a2.hash,
+        a2.block.header.total_difficulty,
+        3,
+        43,
+        &chain_id,
+    );
+    let c2 = fixture(
+        seed,
+        b1.hash,
+        b1.block.header.total_difficulty,
+        2,
+        44,
+        &chain_id,
+    );
+    for block in [&a3.block, &a2.block, &c2.block] {
+        pair.relay(block);
+    }
+    pair.wait_for_state(genesis.hash, 3, 2).await;
+    pair.relay(&b1.block);
+    pair.wait_for_state(a3.hash, 0, 0).await;
+    pair.stop().await;
+}
+
 #[test]
 fn out_of_order_child_then_parent_converges_to_normal_tip() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let chain_id = test_chain_id();
-    let genesis = fixture([0u8; 32], Hash256::ZERO, U256::zero(), 0, 10, &chain_id);
+    let genesis = canonical_regtest_fixture();
     let seed = *genesis.hash.as_bytes();
     let parent = fixture(
         seed,
@@ -441,7 +779,7 @@ fn out_of_order_child_then_parent_converges_to_normal_tip() {
 fn multi_level_orphan_delivery_converges() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let chain_id = test_chain_id();
-    let genesis = fixture([0u8; 32], Hash256::ZERO, U256::zero(), 0, 20, &chain_id);
+    let genesis = canonical_regtest_fixture();
     let seed = *genesis.hash.as_bytes();
     let parent = fixture(
         seed,
@@ -492,7 +830,7 @@ fn multi_level_orphan_delivery_converges() {
 fn duplicate_orphan_delivery_is_idempotent() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let chain_id = test_chain_id();
-    let genesis = fixture([0u8; 32], Hash256::ZERO, U256::zero(), 0, 30, &chain_id);
+    let genesis = canonical_regtest_fixture();
     let seed = *genesis.hash.as_bytes();
     let parent = fixture(
         seed,
@@ -534,7 +872,7 @@ fn duplicate_orphan_delivery_is_idempotent() {
 fn bounded_orphan_spam_is_pruned_deterministically() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let chain_id = test_chain_id();
-    let genesis = fixture([0u8; 32], Hash256::ZERO, U256::zero(), 0, 40, &chain_id);
+    let genesis = canonical_regtest_fixture();
     let seed = *genesis.hash.as_bytes();
     let parent = fixture(
         seed,
@@ -598,7 +936,7 @@ fn bounded_orphan_spam_is_pruned_deterministically() {
 fn reordered_delivery_matches_normal_delivery_deep_state() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let chain_id = test_chain_id();
-    let genesis = fixture([0u8; 32], Hash256::ZERO, U256::zero(), 0, 50, &chain_id);
+    let genesis = canonical_regtest_fixture();
     let seed = *genesis.hash.as_bytes();
     let a1 = fixture(
         seed,
@@ -650,7 +988,7 @@ fn reordered_delivery_matches_normal_delivery_deep_state() {
 fn equivalent_live_timelines_converge_to_identical_deep_snapshots() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let chain_id = test_chain_id();
-    let genesis = fixture([0u8; 32], Hash256::ZERO, U256::zero(), 0, 60, &chain_id);
+    let genesis = canonical_regtest_fixture();
     let seed = *genesis.hash.as_bytes();
     let a1 = fixture(
         seed,

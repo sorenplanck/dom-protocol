@@ -149,7 +149,7 @@ fn valid_block_with_transactions(transactions: Vec<Transaction>) -> Block {
     let total_fees = transactions.iter().map(|tx| tx.total_fee().unwrap()).sum();
     let coinbase = build_coinbase(total_fees, &ctx().chain_id);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &transactions).expect("pmmr roots");
+        compute_block_pmmr_roots(BlockHeight(1), &coinbase, &transactions).expect("pmmr roots");
     Block {
         header: BlockHeader {
             version: PROTOCOL_VERSION,
@@ -211,7 +211,8 @@ fn consensus_rejects_invalid_reward_fee_equation() {
     let tx = build_valid_spend_tx(100, scalar(5), 100, scalar(6), None);
     let coinbase = build_coinbase(7, &ctx().chain_id);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, std::slice::from_ref(&tx.tx)).expect("pmmr roots");
+        compute_block_pmmr_roots(BlockHeight(1), &coinbase, std::slice::from_ref(&tx.tx))
+            .expect("pmmr roots");
     let block = Block {
         header: BlockHeader {
             version: PROTOCOL_VERSION,

@@ -5,7 +5,9 @@
 //! layout.
 
 use dom_serialization::{DomDeserialize, DomSerialize};
-use dom_tx::slate::{OutputCommitmentAndProof, Slate, CURRENT_SLATE_VERSION};
+use dom_tx::slate::{
+    OutputCommitmentAndProof, Slate, CURRENT_SLATE_VERSION, RECOVERY_SLATE_VERSION,
+};
 
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::{bp2_prove, BlindingFactor, PublicKey, RangeProof, SecretKey};
@@ -47,6 +49,8 @@ fn base_slate(version: u16) -> Slate {
         recipient_public_nonce: None,
         sender_partial_sig: None,
         recipient_partial_sig: None,
+        sender_change_recovery_capsule: Vec::new(),
+        recipient_recovery_capsule: Vec::new(),
     }
 }
 
@@ -57,7 +61,7 @@ fn xdiff_version_field_is_validated_before_body_parse() {
 
     // v2 buffer = identical body, version prefix overwritten to 2 (LE u16).
     let mut b2 = b1.clone();
-    let unsupported = CURRENT_SLATE_VERSION + 1;
+    let unsupported = RECOVERY_SLATE_VERSION + 1;
     b2[0..2].copy_from_slice(&unsupported.to_le_bytes());
 
     // The encodings differ ONLY in the first two (version) bytes.
@@ -74,9 +78,8 @@ fn xdiff_version_field_is_validated_before_body_parse() {
 
     assert_eq!(d1.version, CURRENT_SLATE_VERSION);
     assert!(
-        err.to_string().contains(&format!(
-            "unsupported slate version {unsupported} (expected {CURRENT_SLATE_VERSION})"
-        )),
+        err.to_string()
+            .contains(&format!("unsupported slate version {unsupported}")),
         "unsupported version should be rejected: {err:?}"
     );
 }

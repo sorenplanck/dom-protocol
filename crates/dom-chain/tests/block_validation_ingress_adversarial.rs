@@ -16,7 +16,7 @@ use dom_consensus::{
 };
 use dom_core::{
     Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+    NETWORK_MAGIC_REGTEST, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::{
     hash::blake2b_256_tagged,
@@ -86,7 +86,7 @@ fn mine_fast_header(
     let mut nonce = 0u64;
     loop {
         let mut header = BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: dom_core::required_block_version_for_network(NETWORK_MAGIC_REGTEST, height.0),
             height,
             prev_hash,
             timestamp,
@@ -121,7 +121,7 @@ fn build_coinbase_only_block(
 ) -> Block {
     let coinbase = build_coinbase(height, 0, coinbase_seed, chain_id);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &[]).expect("roots");
+        compute_block_pmmr_roots(height, &coinbase, &[]).expect("roots");
     let timestamp = genesis_anchor(NETWORK_MAGIC_REGTEST)
         .expect("anchor")
         .timestamp
@@ -220,7 +220,7 @@ fn build_block_with_transactions(
         .sum();
     let coinbase = build_coinbase(height, total_fees, coinbase_seed, chain_id);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &transactions).expect("roots");
+        compute_block_pmmr_roots(height, &coinbase, &transactions).expect("roots");
     let timestamp = genesis_anchor(NETWORK_MAGIC_REGTEST)
         .expect("anchor")
         .timestamp
@@ -256,17 +256,74 @@ fn block_hash(block: &Block) -> Hash256 {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn equal_work_canonical_and_side(
+    seed_hash: [u8; 32],
+    prev_hash: Hash256,
+    height: BlockHeight,
+    parent_total_difficulty: U256,
+    total_kernel_offset: [u8; 32],
+    seeds: std::ops::RangeInclusive<u8>,
+    chain_id: &[u8; 32],
+) -> (u8, Block, u8, Block) {
+    let mut siblings: Vec<_> = seeds
+        .map(|seed| {
+            (
+                seed,
+                build_coinbase_only_block(
+                    seed_hash,
+                    prev_hash,
+                    height,
+                    parent_total_difficulty,
+                    total_kernel_offset,
+                    seed,
+                    chain_id,
+                ),
+            )
+        })
+        .collect();
+    siblings.sort_by(|(_, a), (_, b)| block_hash(a).as_bytes().cmp(block_hash(b).as_bytes()));
+    let (canonical_seed, canonical) = siblings.remove(0);
+    let (side_seed, side) = siblings
+        .pop()
+        .expect("equal-work side fixture with higher hash than canonical");
+    (canonical_seed, canonical, side_seed, side)
+}
+
 fn open_chain(dir: &std::path::Path) -> ChainState {
-    open_test_chain(
-        dir,
-        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-        NETWORK_MAGIC_REGTEST,
-    )
-    .expect("chain open")
+    // These adversarial fixtures deliberately construct a spendable synthetic
+    // height-zero block. Hash256::ZERO disables only the configured-genesis
+    // equality check for this isolated test chain; production startup always
+    // supplies the frozen network genesis hash.
+    open_test_chain(dir, Hash256::ZERO, NETWORK_MAGIC_REGTEST).expect("chain open")
+}
+
+fn synthetic_chain_id() -> [u8; 32] {
+    *derive_chain_id(NETWORK_MAGIC_REGTEST, &Hash256::ZERO).as_bytes()
 }
 
 fn safe_now() -> Timestamp {
     Timestamp(2_000_000_000)
+}
+
+#[test]
+fn synthetic_fixture_genesis_uses_the_unpinned_test_identity() {
+    std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+    let dir = TempDir::new().expect("tempdir");
+    let chain_id = synthetic_chain_id();
+    let genesis = build_coinbase_only_block(
+        [0u8; 32],
+        Hash256::ZERO,
+        BlockHeight::GENESIS,
+        U256::zero(),
+        [0u8; 32],
+        9,
+        &chain_id,
+    );
+
+    open_chain(dir.path())
+        .connect_block(&genesis, safe_now())
+        .expect("synthetic fixture genesis must connect to its unpinned test chain");
 }
 
 #[test]
@@ -279,11 +336,7 @@ fn invariant_direct_chain_extension_rejects_header_and_pmmr_valid_but_economical
     // for these tiny adversarial fixtures, so the test uses a small map size
     // only for fixture storage. Consensus behavior is unchanged.
     let store_dir = dir.path().join("chain");
-    let chain_id = *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes();
+    let chain_id = synthetic_chain_id();
     let mut chain = open_chain(&store_dir);
 
     let genesis = build_coinbase_only_block(
@@ -326,11 +379,7 @@ fn invariant_reorg_candidate_promotion_revalidates_economic_balance_before_state
     // Use a child store directory and the small test-only LMDB map size for
     // Windows CI fixture isolation; production map sizing remains unchanged.
     let store_dir = dir.path().join("chain");
-    let chain_id = *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes();
+    let chain_id = synthetic_chain_id();
     let mut chain = open_chain(&store_dir);
 
     let genesis = build_coinbase_only_block(
@@ -344,28 +393,19 @@ fn invariant_reorg_candidate_promotion_revalidates_economic_balance_before_state
     );
     chain.connect_block(&genesis, safe_now()).expect("genesis");
 
-    let canonical = build_coinbase_only_block(
+    let (_, canonical, _, side_1) = equal_work_canonical_and_side(
         *block_hash(&genesis).as_bytes(),
         block_hash(&genesis),
         BlockHeight(1),
         genesis.header.total_difficulty,
         [0u8; 32],
-        21,
+        21..=36,
         &chain_id,
     );
     chain
         .connect_block(&canonical, safe_now())
         .expect("canonical tip");
 
-    let side_1 = build_coinbase_only_block(
-        *block_hash(&genesis).as_bytes(),
-        block_hash(&genesis),
-        BlockHeight(1),
-        genesis.header.total_difficulty,
-        [0u8; 32],
-        22,
-        &chain_id,
-    );
     let side_1_result = chain
         .connect_block(&side_1, safe_now())
         .expect("side block");
@@ -396,7 +436,7 @@ fn invariant_reorg_candidate_promotion_revalidates_economic_balance_before_state
         .expect("store invalid side block");
 
     let err = chain
-        .promote_heavier_known_tip(invalid_side_2_hash)
+        .promote_heavier_known_tip(invalid_side_2_hash, safe_now())
         .expect_err("reorg promotion must reject invalid aggregate balance");
     let msg = err.to_string();
     assert!(
@@ -410,11 +450,7 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let dir = TempDir::new().expect("tempdir");
     let store_dir = dir.path().join("chain");
-    let chain_id = *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes();
+    let chain_id = synthetic_chain_id();
     let mut chain = open_chain(&store_dir);
 
     let genesis = build_coinbase_only_block(
@@ -428,13 +464,13 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
     );
     chain.connect_block(&genesis, safe_now()).expect("genesis");
 
-    let canonical_1 = build_coinbase_only_block(
+    let (canonical_1_seed, canonical_1, _, side_1) = equal_work_canonical_and_side(
         *block_hash(&genesis).as_bytes(),
         block_hash(&genesis),
         BlockHeight(1),
         genesis.header.total_difficulty,
         [0u8; 32],
-        31,
+        80..=95,
         &chain_id,
     );
     chain
@@ -454,15 +490,24 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
         .connect_block(&canonical_2, safe_now())
         .expect("canonical 2");
 
-    let side_1 = build_coinbase_only_block(
+    // Keep the canonical tip one full-work increment ahead of the invalid
+    // height-two side candidate.  The previous fixture relied on a sampled
+    // BLAKE2b ordering between equal-work blocks; the range proof is
+    // randomized, so that sampling was nondeterministic.  A strict work gap
+    // tests the intended quarantine path without depending on hash luck.
+    let canonical_3 = build_coinbase_only_block(
         *block_hash(&genesis).as_bytes(),
-        block_hash(&genesis),
-        BlockHeight(1),
-        genesis.header.total_difficulty,
+        block_hash(&canonical_2),
+        BlockHeight(3),
+        canonical_2.header.total_difficulty,
         [0u8; 32],
         33,
         &chain_id,
     );
+    chain
+        .connect_block(&canonical_3, safe_now())
+        .expect("canonical 3");
+
     let side_1_result = chain.connect_block(&side_1, safe_now()).expect("side 1");
     assert!(
         matches!(side_1_result, dom_chain::ConnectResult::SideChain),
@@ -472,7 +517,7 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
     let canonical_1_coinbase_value = dom_core::block_reward(BlockHeight(1)).noms();
     let invalid_against_side_branch = valid_spend_tx(
         canonical_1_coinbase_value,
-        scalar(31),
+        scalar(canonical_1_seed),
         canonical_1_coinbase_value - dom_core::MIN_RELAY_FEE_RATE * 100,
         40,
         &chain_id,
@@ -483,7 +528,7 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
         BlockHeight(2),
         side_1.header.total_difficulty,
         [0u8; 32],
-        34,
+        80,
         vec![invalid_against_side_branch],
         &chain_id,
     );
@@ -504,7 +549,7 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
         "side-chain block should be persisted in quarantine"
     );
 
-    let side_3_heavier = build_coinbase_only_block(
+    let side_3 = build_coinbase_only_block(
         *block_hash(&genesis).as_bytes(),
         block_hash(&side_2_invalid),
         BlockHeight(3),
@@ -513,18 +558,37 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
         35,
         &chain_id,
     );
-    let side_3_heavier_hash = block_hash(&side_3_heavier);
+    let side_3_hash = block_hash(&side_3);
     chain
         .store
         .store_known_block(
-            side_3_heavier_hash.as_bytes(),
-            &side_3_heavier.header.to_bytes().expect("header bytes"),
-            &side_3_heavier.to_bytes().expect("block bytes"),
+            side_3_hash.as_bytes(),
+            &side_3.header.to_bytes().expect("header bytes"),
+            &side_3.to_bytes().expect("block bytes"),
+        )
+        .expect("store equal-work side block");
+
+    let side_4_heavier = build_coinbase_only_block(
+        *block_hash(&genesis).as_bytes(),
+        side_3_hash,
+        BlockHeight(4),
+        side_3.header.total_difficulty,
+        [0u8; 32],
+        36,
+        &chain_id,
+    );
+    let side_4_heavier_hash = block_hash(&side_4_heavier);
+    chain
+        .store
+        .store_known_block(
+            side_4_heavier_hash.as_bytes(),
+            &side_4_heavier.header.to_bytes().expect("header bytes"),
+            &side_4_heavier.to_bytes().expect("block bytes"),
         )
         .expect("store heavier side tip");
 
     let err = chain
-        .promote_heavier_known_tip(side_3_heavier_hash)
+        .promote_heavier_known_tip(side_4_heavier_hash, safe_now())
         .expect_err("promotion must reject branch-invalid input");
     let msg = err.to_string();
     assert!(
@@ -533,7 +597,7 @@ fn side_chain_with_branch_invalid_input_is_quarantined_then_rejected_on_promotio
     );
     assert_eq!(
         chain.tip_hash,
-        block_hash(&canonical_2),
+        block_hash(&canonical_3),
         "failed promotion must leave canonical tip unchanged"
     );
 }
@@ -552,11 +616,7 @@ fn direct_connect_rejects_replayed_kernel_with_invalid() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let dir = TempDir::new().expect("tempdir");
     let store_dir = dir.path().join("chain");
-    let chain_id = *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes();
+    let chain_id = synthetic_chain_id();
     let mut chain = open_chain(&store_dir);
 
     let genesis = build_coinbase_only_block(
@@ -616,11 +676,7 @@ fn direct_connect_rejects_duplicate_output_commitment() {
     std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
     let dir = TempDir::new().expect("tempdir");
     let store_dir = dir.path().join("chain");
-    let chain_id = *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes();
+    let chain_id = synthetic_chain_id();
     let mut chain = open_chain(&store_dir);
 
     let genesis = build_coinbase_only_block(
@@ -681,11 +737,7 @@ fn promote_branch_with_within_branch_double_spend_is_rejected() {
     // closed (chain_state.rs:1545 "missing input").
     let dir = tempfile::tempdir().expect("tempdir");
     let mut chain = open_chain(dir.path());
-    let chain_id = *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes();
+    let chain_id = synthetic_chain_id();
     let genesis = build_coinbase_only_block(
         [0u8; 32],
         chain.tip_hash,
@@ -698,13 +750,13 @@ fn promote_branch_with_within_branch_double_spend_is_rejected() {
     chain
         .connect_block(&genesis, safe_now())
         .expect("genesis connects");
-    let canonical_1 = build_coinbase_only_block(
+    let (_, canonical_1, _, side_1) = equal_work_canonical_and_side(
         *block_hash(&genesis).as_bytes(),
         block_hash(&genesis),
         BlockHeight(1),
         genesis.header.total_difficulty,
         [0u8; 32],
-        2,
+        80..=95,
         &chain_id,
     );
     chain
@@ -724,15 +776,6 @@ fn promote_branch_with_within_branch_double_spend_is_rejected() {
         .expect("c2 connects");
     let cb_value = dom_core::block_reward(BlockHeight(0)).noms();
     let cb_blinding = scalar(1);
-    let side_1 = build_coinbase_only_block(
-        *block_hash(&genesis).as_bytes(),
-        block_hash(&genesis),
-        BlockHeight(1),
-        genesis.header.total_difficulty,
-        [0u8; 32],
-        10,
-        &chain_id,
-    );
     chain
         .connect_block(&side_1, safe_now())
         .expect("side_1 quarantined");
@@ -755,7 +798,8 @@ fn promote_branch_with_within_branch_double_spend_is_rejected() {
     );
     chain
         .connect_block(&side_2, safe_now())
-        .expect("side_2 quarantined");
+        .expect("side_2 connects as retained or canonical");
+    let tip_before_rejected_side_3 = chain.tip_hash;
     let spend_b = valid_spend_tx(
         cb_value,
         cb_blinding.clone(),
@@ -773,22 +817,24 @@ fn promote_branch_with_within_branch_double_spend_is_rejected() {
         vec![spend_b],
         &chain_id,
     );
-    // side_3 makes the side branch heavier than canonical (h3 > h2), triggering
-    // an automatic reorg in connect_block. apply_connect replays side_1..side_3;
-    // side_3's re-spend of the input already spent in side_2 hits the overlay
-    // carry-forward (chain_state.rs:1556 -> :1545) and the whole connect fails closed.
+    // side_3 makes its branch heavier than the current canonical tip, triggering
+    // an automatic reorg in connect_block when side_2 remained side-chain. If
+    // side_2 already became canonical under the equal-work tie rule, side_3 is a
+    // direct extension attempt. In both cases, side_3's re-spend of the input
+    // already spent in side_2 must fail closed without advancing the tip.
     let err = chain
         .connect_block(&side_3, safe_now())
         .expect_err("within-branch double-spend must be rejected on auto-reorg");
     let msg = err.to_string();
     assert!(
-        msg.contains("missing input") || msg.contains("reorg connect"),
+        msg.contains("missing input")
+            || msg.contains("input commitment not found")
+            || msg.contains("reorg connect"),
         "expected within-branch double-spend rejection, got: {msg}"
     );
-    // The rejected reorg must leave the canonical tip unchanged.
+    // The rejected block must leave the canonical tip unchanged.
     assert_eq!(
-        chain.tip_hash,
-        block_hash(&canonical_2),
-        "rejected within-branch double-spend reorg must leave canonical tip unchanged"
+        chain.tip_hash, tip_before_rejected_side_3,
+        "rejected within-branch double-spend must leave canonical tip unchanged"
     );
 }

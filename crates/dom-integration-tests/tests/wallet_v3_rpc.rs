@@ -114,8 +114,11 @@ async fn wallet_v3_rpc_uses_canonical_node_evidence() {
     );
     assert_eq!(client.get(format!("{base}/chain/ancestry?ancestor_height=0&ancestor_hash={}&descendant_height={}&descendant_hash={}&max_steps={}", hex::encode(canonical_genesis), MAX_ANCESTRY_STEPS + 1, hex::encode(tip_hash), MAX_ANCESTRY_STEPS)).send().await.unwrap().status(), reqwest::StatusCode::BAD_REQUEST);
 
+    // `/chain/scan` is an authenticated read (see `auth_read_routes`), so the
+    // wallet client presents the node's bearer token for it.
     let scan: serde_json::Value = client
         .get(format!("{base}/chain/scan?from=0&to={tip_height}"))
+        .bearer_auth("wallet-v3-test-token")
         .send()
         .await
         .unwrap()

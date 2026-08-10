@@ -8,7 +8,10 @@
 mod common;
 
 use common::open_test_store;
-use dom_chain::{IbdInterruption, IbdPhase, PersistedIbdState};
+use dom_chain::{
+    IbdInterruption, IbdPhase, PersistedIbdState, IBD_SESSION_METADATA_KEY,
+    LEGACY_IBD_SESSION_METADATA_KEY,
+};
 use dom_serialization::{DomDeserialize, DomSerialize};
 use tempfile::TempDir;
 
@@ -73,4 +76,29 @@ fn cleared_ibd_state_stays_cleared_after_reopen() {
     assert!(PersistedIbdState::load(&reopened)
         .expect("load after clear")
         .is_none());
+}
+
+#[test]
+fn legacy_ibd_session_is_migrated_to_versioned_metadata() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = open_test_store(dir.path());
+    let expected = sample_state();
+    let versioned = expected.to_bytes().expect("serialize v2");
+    store
+        .put_metadata(LEGACY_IBD_SESSION_METADATA_KEY, &versioned[1..])
+        .expect("write legacy snapshot");
+
+    let restored = PersistedIbdState::load(&store)
+        .expect("migrate")
+        .expect("state present");
+
+    assert_eq!(restored, expected);
+    assert!(store
+        .get_metadata(LEGACY_IBD_SESSION_METADATA_KEY)
+        .expect("read legacy key")
+        .is_none());
+    assert!(store
+        .get_metadata(IBD_SESSION_METADATA_KEY)
+        .expect("read v2 key")
+        .is_some());
 }

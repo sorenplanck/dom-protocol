@@ -2,6 +2,10 @@
 
 use dom_core::DomError;
 
+pub(crate) const fn peer_record_has_canonical_length(length: usize) -> bool {
+    length == 12
+}
+
 /// A known peer address.
 #[derive(Debug, Clone)]
 pub struct PeerAddr {
@@ -24,8 +28,8 @@ impl PeerAddr {
 
     /// Deserialize from LMDB.
     pub fn from_bytes(addr: String, bytes: &[u8]) -> Result<Self, DomError> {
-        if bytes.len() < 12 {
-            return Err(DomError::Malformed("peer entry too short".into()));
+        if !peer_record_has_canonical_length(bytes.len()) {
+            return Err(DomError::Malformed("peer entry has invalid length".into()));
         }
         let last_seen = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
         let failures = u32::from_le_bytes(bytes[8..12].try_into().unwrap());

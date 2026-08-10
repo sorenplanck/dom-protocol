@@ -6,10 +6,9 @@
 //! RFC-0010: Weight units, lock_height validation, coinbase maturity placement.
 
 use dom_core::{
-    Amount, BlockHeight, DomError, PeerMisbehavior, KERNEL_FEAT_COINBASE,
+    fee_policy, Amount, BlockHeight, DomError, PeerMisbehavior, KERNEL_FEAT_COINBASE,
     KERNEL_FEAT_HEIGHT_LOCKED, KERNEL_FEAT_PLAIN, MAX_INPUTS_PER_TX, MAX_KERNELS_PER_TX,
-    MAX_OUTPUTS_PER_TX, MAX_TX_WEIGHT, WEIGHT_COINBASE_KERNEL, WEIGHT_INPUT, WEIGHT_KERNEL,
-    WEIGHT_OUTPUT,
+    MAX_OUTPUTS_PER_TX, MAX_TX_WEIGHT, WEIGHT_COINBASE_KERNEL, WEIGHT_KERNEL,
 };
 use dom_crypto::pedersen::Commitment;
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
@@ -17,11 +16,71 @@ use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
 /// Validate that a kernel features byte is a known value.
 /// Unknown feature values are consensus-invalid per RFC-0008 Section 5.
 pub fn validate_kernel_features(features: u8) -> Result<(), DomError> {
-    match features {
-        KERNEL_FEAT_PLAIN | KERNEL_FEAT_COINBASE | KERNEL_FEAT_HEIGHT_LOCKED => Ok(()),
-        other => Err(DomError::Invalid(format!(
-            "unknown kernel features 0x{other:02x}"
-        ))),
+    if is_known_kernel_features(features) {
+        Ok(())
+    } else {
+        Err(DomError::Invalid(format!(
+            "unknown kernel features 0x{features:02x}"
+        )))
+    }
+}
+
+/// Return whether a kernel feature byte is one of the three consensus values.
+pub(crate) const fn is_known_kernel_features(features: u8) -> bool {
+    features == KERNEL_FEAT_PLAIN
+        || features == KERNEL_FEAT_COINBASE
+        || features == KERNEL_FEAT_HEIGHT_LOCKED
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KernelLockClassification {
+    Canonical,
+    HeightLockedAtZero,
+    NonHeightLockedAtNonzero,
+}
+
+/// Classify the canonical relationship between kernel features and lock height.
+pub(crate) const fn classify_kernel_lock_fields(
+    features: u8,
+    lock_height: u64,
+) -> KernelLockClassification {
+    if features == KERNEL_FEAT_HEIGHT_LOCKED && lock_height == 0 {
+        KernelLockClassification::HeightLockedAtZero
+    } else if features != KERNEL_FEAT_HEIGHT_LOCKED && lock_height != 0 {
+        KernelLockClassification::NonHeightLockedAtNonzero
+    } else {
+        KernelLockClassification::Canonical
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoinbaseValueClassification {
+    Accept,
+    RewardFeeOverflow,
+    ExpectedAboveMaximum,
+    ExplicitAboveMaximum,
+    ValueMismatch,
+}
+
+/// Classify coinbase reward and fee accounting without allocation.
+pub(crate) const fn classify_coinbase_value(
+    reward: u64,
+    total_tx_fees: u64,
+    explicit_value: u64,
+    maximum_provable_value: u64,
+) -> CoinbaseValueClassification {
+    let expected = match reward.checked_add(total_tx_fees) {
+        Some(value) => value,
+        None => return CoinbaseValueClassification::RewardFeeOverflow,
+    };
+    if expected > maximum_provable_value {
+        CoinbaseValueClassification::ExpectedAboveMaximum
+    } else if explicit_value > maximum_provable_value {
+        CoinbaseValueClassification::ExplicitAboveMaximum
+    } else if explicit_value != expected {
+        CoinbaseValueClassification::ValueMismatch
+    } else {
+        CoinbaseValueClassification::Accept
     }
 }
 
@@ -39,6 +98,8 @@ impl DomSerialize for TransactionInput {
 }
 
 impl DomDeserialize for TransactionInput {
+    const MIN_SERIALIZED_SIZE: usize = 33;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let bytes = r.read_array::<33>()?;
         Ok(Self {
@@ -51,7 +112,65 @@ impl DomDeserialize for TransactionInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionOutput {
     pub commitment: Commitment,
+    /// Canonical output proof envelope. Legacy protocol/test outputs contain a
+    /// 739-byte proof. Wallet V3 outputs append one 96-byte recovery capsule.
     pub proof: Vec<u8>,
+}
+
+impl TransactionOutput {
+    /// Build a Wallet V3 output envelope from the unchanged range proof and a
+    /// canonical recovery capsule.
+    pub fn with_recovery_capsule(
+        commitment: Commitment,
+        proof: Vec<u8>,
+        capsule: &dom_crypto::recovery::RecoveryCapsule,
+    ) -> Result<Self, DomError> {
+        if proof.len() != dom_crypto::RANGE_PROOF_SIZE {
+            return Err(DomError::Invalid(format!(
+                "range proof length {} != {}",
+                proof.len(),
+                dom_crypto::RANGE_PROOF_SIZE
+            )));
+        }
+        let mut envelope = Vec::with_capacity(dom_core::MAX_OUTPUT_PROOF_ENVELOPE_SIZE);
+        envelope.extend_from_slice(&proof);
+        envelope.extend_from_slice(capsule.as_bytes());
+        Ok(Self {
+            commitment,
+            proof: envelope,
+        })
+    }
+
+    /// Return the unchanged 739-byte mathematical range proof.
+    pub fn range_proof_bytes(&self) -> Result<&[u8], DomError> {
+        match self.proof.len() {
+            dom_crypto::RANGE_PROOF_SIZE => Ok(&self.proof),
+            dom_core::MAX_OUTPUT_PROOF_ENVELOPE_SIZE => {
+                Ok(&self.proof[..dom_crypto::RANGE_PROOF_SIZE])
+            }
+            length => Err(DomError::Invalid(format!(
+                "noncanonical output proof envelope length {length}"
+            ))),
+        }
+    }
+
+    /// Parse the optional Wallet V3 recovery capsule.
+    pub fn recovery_capsule(
+        &self,
+    ) -> Result<Option<dom_crypto::recovery::RecoveryCapsule>, DomError> {
+        match self.proof.len() {
+            dom_crypto::RANGE_PROOF_SIZE => Ok(None),
+            dom_core::MAX_OUTPUT_PROOF_ENVELOPE_SIZE => {
+                dom_crypto::recovery::RecoveryCapsule::from_bytes(
+                    &self.proof[dom_crypto::RANGE_PROOF_SIZE..],
+                )
+                .map(Some)
+            }
+            length => Err(DomError::Invalid(format!(
+                "noncanonical output proof envelope length {length}"
+            ))),
+        }
+    }
 }
 
 impl DomSerialize for TransactionOutput {
@@ -63,9 +182,11 @@ impl DomSerialize for TransactionOutput {
 }
 
 impl DomDeserialize for TransactionOutput {
+    const MIN_SERIALIZED_SIZE: usize = 33 + 4;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let commitment_bytes = r.read_array::<33>()?;
-        let proof = r.read_vec(dom_core::MAX_PROOF_SIZE)?;
+        let proof = r.read_vec(dom_core::MAX_OUTPUT_PROOF_ENVELOPE_SIZE)?;
         Ok(Self {
             commitment: Commitment::from_compressed_bytes(&commitment_bytes)?,
             proof,
@@ -102,6 +223,8 @@ impl DomSerialize for TransactionKernel {
 }
 
 impl DomDeserialize for TransactionKernel {
+    const MIN_SERIALIZED_SIZE: usize = 1 + 8 + 8 + 33 + 65;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         Ok(Self {
             features: r.read_u8()?,
@@ -137,30 +260,38 @@ impl CoinbaseKernel {
         total_tx_fees: u64,
     ) -> Result<(), DomError> {
         let reward = dom_core::block_reward(block_height).noms();
-        let expected = reward
-            .checked_add(total_tx_fees)
-            .ok_or_else(|| DomError::Invalid("coinbase value overflow".into()))?;
-        if expected > dom_crypto::bulletproof::MAX_PROVABLE_VALUE {
-            return Err(DomError::Invalid(format!(
-                "coinbase expected value {} exceeds MAX_PROVABLE_VALUE {}",
-                expected,
-                dom_crypto::bulletproof::MAX_PROVABLE_VALUE
-            )));
-        }
-        if self.explicit_value > dom_crypto::bulletproof::MAX_PROVABLE_VALUE {
-            return Err(DomError::Invalid(format!(
+        let expected = reward.checked_add(total_tx_fees);
+        match classify_coinbase_value(
+            reward,
+            total_tx_fees,
+            self.explicit_value,
+            dom_crypto::MAX_PROVABLE_VALUE,
+        ) {
+            CoinbaseValueClassification::Accept => Ok(()),
+            CoinbaseValueClassification::RewardFeeOverflow => {
+                Err(DomError::Invalid("coinbase value overflow".into()))
+            }
+            CoinbaseValueClassification::ExpectedAboveMaximum => {
+                let expected = expected.expect("classification excludes reward/fee overflow");
+                Err(DomError::Invalid(format!(
+                    "coinbase expected value {} exceeds MAX_PROVABLE_VALUE {}",
+                    expected,
+                    dom_crypto::MAX_PROVABLE_VALUE
+                )))
+            }
+            CoinbaseValueClassification::ExplicitAboveMaximum => Err(DomError::Invalid(format!(
                 "coinbase explicit_value {} exceeds MAX_PROVABLE_VALUE {}",
                 self.explicit_value,
-                dom_crypto::bulletproof::MAX_PROVABLE_VALUE
-            )));
+                dom_crypto::MAX_PROVABLE_VALUE
+            ))),
+            CoinbaseValueClassification::ValueMismatch => {
+                let expected = expected.expect("classification excludes reward/fee overflow");
+                Err(DomError::Invalid(format!(
+                    "coinbase explicit_value {}: expected {} (reward={} + fees={})",
+                    self.explicit_value, expected, reward, total_tx_fees
+                )))
+            }
         }
-        if self.explicit_value != expected {
-            return Err(DomError::Invalid(format!(
-                "coinbase explicit_value {}: expected {} (reward={} + fees={})",
-                self.explicit_value, expected, reward, total_tx_fees
-            )));
-        }
-        Ok(())
     }
 }
 
@@ -175,6 +306,8 @@ impl DomSerialize for CoinbaseKernel {
 }
 
 impl DomDeserialize for CoinbaseKernel {
+    const MIN_SERIALIZED_SIZE: usize = 1 + 8 + 33 + 65;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let features = r.read_u8()?;
         if features != KERNEL_FEAT_COINBASE {
@@ -222,10 +355,24 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn weight(&self) -> u32 {
-        (self.inputs.len() as u32)
-            .saturating_mul(WEIGHT_INPUT)
-            .saturating_add((self.outputs.len() as u32).saturating_mul(WEIGHT_OUTPUT))
-            .saturating_add((self.kernels.len() as u32).saturating_mul(WEIGHT_KERNEL))
+        self.weight_checked()
+            .expect("deserialized transaction count limits keep weight in u32")
+    }
+
+    pub fn fee_shape(&self) -> Result<fee_policy::TransactionShape, DomError> {
+        fee_policy::TransactionShape::from_counts(
+            self.inputs.len(),
+            self.outputs.len(),
+            self.kernels.len(),
+        )
+    }
+
+    pub fn weight_checked(&self) -> Result<u32, DomError> {
+        let weight = fee_policy::transaction_weight(self.fee_shape()?)?;
+        weight
+            .total_weight
+            .try_into()
+            .map_err(|_| DomError::Internal("transaction weight conversion overflow".into()))
     }
 
     pub fn total_fee(&self) -> Result<u64, DomError> {
@@ -247,6 +394,8 @@ impl DomSerialize for Transaction {
 }
 
 impl DomDeserialize for Transaction {
+    const MIN_SERIALIZED_SIZE: usize = 4 + 4 + 4 + 32;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         Ok(Self {
             inputs: r.read_list::<TransactionInput>(MAX_INPUTS_PER_TX)?,
@@ -289,8 +438,10 @@ pub fn validate_transaction_structure(tx: &Transaction) -> Result<(), DomError> 
                 "output {i} has empty range proof"
             )));
         }
-        if o.proof.len() > dom_core::MAX_PROOF_SIZE {
-            return Err(DomError::Invalid(format!("output {i} proof too large")));
+        if o.proof.len() > dom_core::MAX_OUTPUT_PROOF_ENVELOPE_SIZE {
+            return Err(DomError::Invalid(format!(
+                "output {i} proof envelope too large"
+            )));
         }
     }
 
@@ -302,18 +453,21 @@ pub fn validate_transaction_structure(tx: &Transaction) -> Result<(), DomError> 
                 "kernel {i}: COINBASE feature in non-coinbase transaction"
             )));
         }
-        if k.features == KERNEL_FEAT_HEIGHT_LOCKED && k.lock_height == 0 {
-            return Err(DomError::Invalid(format!(
-                "kernel {i}: HEIGHT_LOCKED with lock_height == 0"
-            )));
-        }
-        // AUDIT: non-HEIGHT_LOCKED kernels with lock_height != 0 are malleable
-        // (hash changes without semantic change) — reject them.
-        if k.features != KERNEL_FEAT_HEIGHT_LOCKED && k.lock_height != 0 {
-            return Err(DomError::Invalid(format!(
-                "kernel {i}: lock_height must be 0 for non-HEIGHT_LOCKED kernels (got {})",
-                k.lock_height
-            )));
+        match classify_kernel_lock_fields(k.features, k.lock_height) {
+            KernelLockClassification::Canonical => {}
+            KernelLockClassification::HeightLockedAtZero => {
+                return Err(DomError::Invalid(format!(
+                    "kernel {i}: HEIGHT_LOCKED with lock_height == 0"
+                )));
+            }
+            KernelLockClassification::NonHeightLockedAtNonzero => {
+                // AUDIT: non-HEIGHT_LOCKED kernels with lock_height != 0 are
+                // malleable (hash changes without semantic change) — reject them.
+                return Err(DomError::Invalid(format!(
+                    "kernel {i}: lock_height must be 0 for non-HEIGHT_LOCKED kernels (got {})",
+                    k.lock_height
+                )));
+            }
         }
     }
 
@@ -339,7 +493,7 @@ pub fn validate_transaction_structure(tx: &Transaction) -> Result<(), DomError> 
     tx.total_fee()?;
 
     // Step 9: Weight
-    let w = tx.weight();
+    let w = tx.weight_checked()?;
     if w > MAX_TX_WEIGHT {
         return Err(DomError::Invalid(format!(
             "tx weight {w} > MAX_TX_WEIGHT {MAX_TX_WEIGHT}"
@@ -402,7 +556,16 @@ impl CoinbaseTransaction {
                 "coinbase output has empty range proof".into(),
             ));
         }
-        match dom_crypto::bp2_verify(self.output.commitment.as_bytes(), &self.output.proof) {
+        let proof = self.output.range_proof_bytes()?;
+        let valid = match self.output.recovery_capsule()? {
+            Some(capsule) => dom_crypto::range_proof_verify_with_extra_commit(
+                self.output.commitment.as_bytes(),
+                proof,
+                capsule.as_bytes(),
+            ),
+            None => dom_crypto::range_proof_verify(self.output.commitment.as_bytes(), proof),
+        };
+        match valid {
             Ok(true) => {}
             Ok(false) => {
                 return Err(DomError::Invalid(
@@ -455,7 +618,7 @@ impl CoinbaseTransaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dom_core::{HALVING_INTERVAL, INITIAL_BLOCK_REWARD};
+    use dom_core::{HALVING_INTERVAL, INITIAL_BLOCK_REWARD, WEIGHT_OUTPUT};
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::keys::SecretKey;
     use dom_crypto::pedersen::BlindingFactor;
@@ -491,7 +654,7 @@ mod tests {
         let explicit_value = INITIAL_BLOCK_REWARD;
         let blinding = BlindingFactor::from_bytes([9u8; 32]).unwrap();
         let output_commitment = Commitment::commit(explicit_value, &blinding);
-        let (proof, _) = dom_crypto::bp2_prove(explicit_value, &blinding).unwrap();
+        let (proof, _) = dom_crypto::range_proof_prove_bytes(explicit_value, &blinding).unwrap();
         let excess = Commitment::commit(0, &blinding);
         let kernel_message = {
             let mut data = Vec::with_capacity(9);
@@ -623,7 +786,7 @@ mod tests {
     fn coinbase_explicit_value_above_max_provable_rejected() {
         let k = CoinbaseKernel {
             features: KERNEL_FEAT_COINBASE,
-            explicit_value: dom_crypto::bulletproof::MAX_PROVABLE_VALUE + 1,
+            explicit_value: dom_crypto::MAX_PROVABLE_VALUE + 1,
             excess: g_point(),
             excess_signature: [0u8; 65],
         };
@@ -667,7 +830,8 @@ mod tests {
             .validate(BlockHeight(0), 0, &chain_id)
             .expect_err("invalid coinbase range proof must reject");
         assert!(
-            err.to_string().contains("range proof"),
+            err.to_string()
+                .contains("noncanonical output proof envelope length"),
             "unexpected error: {err}"
         );
     }
@@ -723,21 +887,27 @@ mod tests {
 
 // ── Range Proof Validation (RFC-0007 Step 6) ──────────────────────────────────
 
-/// Validate all Bulletproof range proofs in a transaction.
+/// Validate all final DOM range proofs in a transaction.
 ///
-/// RFC-0007 Step 6: Bulletproofs+ validation.
-/// Each output commitment must have a valid range proof showing
-/// the committed value is in [0, 2^52) (MAX_PROVABLE_VALUE = 2^52 − 1 noms,
-/// ≈ 45M DOM > MAX_SUPPLY_DOM; the 52-bit limit is enforced by the
-/// Bulletproof+ prove() call in dom-crypto/src/bulletproof.rs).
+/// RFC-0007 Step 6: bounded aggregate Bulletproof validation.
+/// Each output commitment must have a valid proof showing the committed value
+/// is in `[0, MAX_PROVABLE_VALUE]`, where `MAX_PROVABLE_VALUE = 2^52 - 1`.
 ///
 /// This prevents negative value outputs which would enable inflation.
 pub fn validate_range_proofs(tx: &Transaction) -> Result<(), DomError> {
     for (i, output) in tx.outputs.iter().enumerate() {
         let commitment = &output.commitment;
-        let proof_bytes = &output.proof;
+        let proof_bytes = output.range_proof_bytes()?;
+        let valid = match output.recovery_capsule()? {
+            Some(capsule) => dom_crypto::range_proof_verify_with_extra_commit(
+                commitment.as_bytes(),
+                proof_bytes,
+                capsule.as_bytes(),
+            ),
+            None => dom_crypto::range_proof_verify(commitment.as_bytes(), proof_bytes),
+        };
 
-        match dom_crypto::bp2_verify(commitment.as_bytes(), proof_bytes) {
+        match valid {
             Ok(true) => {}
             Ok(false) => {
                 return Err(DomError::Invalid(format!(
@@ -902,6 +1072,9 @@ impl DomSerialize for CoinbaseTransaction {
 }
 
 impl DomDeserialize for CoinbaseTransaction {
+    const MIN_SERIALIZED_SIZE: usize =
+        TransactionOutput::MIN_SERIALIZED_SIZE + CoinbaseKernel::MIN_SERIALIZED_SIZE + 32;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         Ok(Self {
             output: TransactionOutput::deserialize(r)?,

@@ -16,8 +16,11 @@ pub const MAX_HEADERS_PER_REQUEST: usize = 2000;
 /// Maximum recoverable retries against one peer before the caller must stop
 /// using that peer for this IBD session.
 pub const MAX_IBD_RETRY_ATTEMPTS: u8 = 3;
-/// Stable metadata key for the persisted IBD session snapshot.
-pub const IBD_SESSION_METADATA_KEY: &[u8] = b"ibd_session";
+/// Versioned metadata key for the persisted IBD session snapshot.
+pub const IBD_SESSION_METADATA_KEY: &[u8] = b"ibd_session/v2";
+/// Pre-versioning metadata key migrated on first successful read.
+pub const LEGACY_IBD_SESSION_METADATA_KEY: &[u8] = b"ibd_session";
+const IBD_SESSION_FORMAT_VERSION: u8 = 2;
 
 /// IBD phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,29 +113,59 @@ pub struct PersistedIbdState {
 impl PersistedIbdState {
     /// Persist this session snapshot into the store metadata DB.
     pub fn save(&self, store: &dom_store::DomStore) -> Result<(), DomError> {
-        store.put_metadata(IBD_SESSION_METADATA_KEY, &self.to_bytes()?)
+        store.put_metadata(IBD_SESSION_METADATA_KEY, &self.to_bytes()?)?;
+        store.delete_metadata(LEGACY_IBD_SESSION_METADATA_KEY)
     }
 
     /// Load the persisted IBD session snapshot, if any.
     pub fn load(store: &dom_store::DomStore) -> Result<Option<Self>, DomError> {
         match store.get_metadata(IBD_SESSION_METADATA_KEY)? {
             Some(bytes) => Ok(Some(Self::from_bytes(&bytes)?)),
-            None => Ok(None),
+            None => match store.get_metadata(LEGACY_IBD_SESSION_METADATA_KEY)? {
+                Some(bytes) => {
+                    let migrated = Self::from_legacy_bytes(&bytes)?;
+                    migrated.save(store)?;
+                    Ok(Some(migrated))
+                }
+                None => Ok(None),
+            },
         }
     }
 
     /// Clear any persisted IBD session snapshot.
     pub fn clear(store: &dom_store::DomStore) -> Result<(), DomError> {
-        store.delete_metadata(IBD_SESSION_METADATA_KEY)
+        store.delete_metadata(IBD_SESSION_METADATA_KEY)?;
+        store.delete_metadata(LEGACY_IBD_SESSION_METADATA_KEY)
+    }
+
+    /// Decode the unversioned v1 body for an in-place metadata migration.
+    pub fn from_legacy_bytes(bytes: &[u8]) -> Result<Self, DomError> {
+        let mut versioned = Vec::with_capacity(bytes.len().saturating_add(1));
+        versioned.push(IBD_SESSION_FORMAT_VERSION);
+        versioned.extend_from_slice(bytes);
+        Self::from_bytes(&versioned)
     }
 
     /// Returns true if this snapshot can be resumed without reconstructing
     /// in-flight round state.
     pub fn is_round_resumable(&self) -> bool {
-        self.block_cursor as usize <= self.pending_blocks.len()
-            && self.header_cursor as usize <= self.pending_headers.len()
-            && (self.pending_blocks.is_empty() || self.header_cursor == 0)
-            && (self.pending_headers.is_empty() || self.block_cursor == 0)
+        if self.block_cursor as usize > self.pending_blocks.len()
+            || self.header_cursor as usize > self.pending_headers.len()
+        {
+            return false;
+        }
+        match self.phase {
+            // During incremental header validation, `pending_blocks` is the
+            // accumulated output prefix and is therefore legitimately nonempty
+            // while `header_cursor` advances.
+            IbdPhase::HeaderSync => self.block_cursor == 0,
+            // Older valid snapshots may retain a redundant raw-header cache
+            // after transitioning to block sync. It is ignored there; only a
+            // nonzero header cursor would make the phase ambiguous.
+            IbdPhase::BlockSync | IbdPhase::Verifying => self.header_cursor == 0,
+            _ if self.pending_headers.is_empty() => self.header_cursor == 0,
+            _ => self.block_cursor == 0,
+        }
     }
 }
 
@@ -177,6 +210,8 @@ impl DomSerialize for IbdPhase {
 }
 
 impl DomDeserialize for IbdPhase {
+    const MIN_SERIALIZED_SIZE: usize = 1;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         match r.read_u8()? {
             0 => Ok(Self::Idle),
@@ -209,6 +244,8 @@ impl DomSerialize for IbdInterruption {
 }
 
 impl DomDeserialize for IbdInterruption {
+    const MIN_SERIALIZED_SIZE: usize = 1;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         match r.read_u8()? {
             0 => Ok(Self::EmptyResponse),
@@ -224,6 +261,7 @@ impl DomDeserialize for IbdInterruption {
 
 impl DomSerialize for PersistedIbdState {
     fn serialize(&self, w: &mut Writer) -> Result<(), DomError> {
+        w.write_u8(IBD_SESSION_FORMAT_VERSION);
         self.phase.serialize(w)?;
         w.write_vec(self.peer_addr.as_bytes())?;
         w.write_u64(self.start_height);
@@ -267,7 +305,16 @@ impl DomSerialize for PersistedIbdState {
 }
 
 impl DomDeserialize for PersistedIbdState {
+    const MIN_SERIALIZED_SIZE: usize =
+        1 + IbdPhase::MIN_SERIALIZED_SIZE + 4 + 8 + 8 + 8 + 8 + 8 + 32 + 1 + 1 + 4 + 4 + 4 + 4 + 8;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
+        let version = r.read_u8()?;
+        if version != IBD_SESSION_FORMAT_VERSION {
+            return Err(DomError::Malformed(format!(
+                "unsupported persisted IBD format version {version}"
+            )));
+        }
         let phase = IbdPhase::deserialize(r)?;
         let peer_addr_bytes = r.read_vec(128)?;
         let peer_addr = String::from_utf8(peer_addr_bytes)

@@ -1,4 +1,4 @@
-//! Node-backed [`ChainScanSource`] for wallet restore / rescan.
+//! Node-backed [`dom_wallet::ChainScanSource`] for wallet restore / rescan.
 //!
 //! Deterministic restore in `dom-wallet`
 //! ([`dom_wallet::Wallet::rescan_canonical_chain`],
@@ -96,6 +96,22 @@ pub fn scan_canonical_block_at(
     let body = store
         .get_block_body(&hash)?
         .ok_or_else(|| DomError::Internal(format!("missing canonical body at height {height}")))?;
+    // The mainnet genesis body is an identity record, not a spendable block: it
+    // carries no wallet-visible outputs, inputs, fees or kernels. Project it as
+    // an empty scan before the block decode below, which its non-block encoding
+    // would otherwise fail.
+    if height == 0 && dom_chain::validate_mainnet_genesis_identity(&body).is_ok() {
+        return Ok(CanonicalScanBlock {
+            scan: ScanBlock {
+                height,
+                block_hash: Some(hash),
+                output_commitments: Vec::new(),
+                input_commitments: Vec::new(),
+                total_fees_noms: 0,
+            },
+            kernel_excesses: Vec::new(),
+        });
+    }
     let block = Block::from_bytes(&body).map_err(|e| {
         DomError::Internal(format!("decode canonical block at height {height}: {e}"))
     })?;

@@ -5,10 +5,11 @@
 //! sends ONE full `Block` body per requested hash:
 //!     for hash in &req.hashes { ...get_block_body(hash)...; codec.send(Block) }
 //! A 32-byte hash in the request yields up to MAX_BLOCK_SERIALIZED_SIZE in the
-//! response — a large per-hash multiplier. The MITIGATION is the parse-time cap
-//! `MAX_GETBLOCKDATA_HASHES`: `GetBlockDataPayload::from_bytes` REJECTS any
-//! request carrying more hashes, so the per-message response is bounded by
-//!     MAX_GETBLOCKDATA_HASHES * MAX_BLOCK_SERIALIZED_SIZE.
+//! response — a large per-hash multiplier. Defense is layered: the parse-time
+//! compatibility cap rejects more than `MAX_GETBLOCKDATA_HASHES`, and the
+//! handler serves at most `MAX_GETBLOCKDATA_SERVE_HASHES` bodies, so one request
+//! is bounded by
+//!     MAX_GETBLOCKDATA_SERVE_HASHES * MAX_BLOCK_SERIALIZED_SIZE.
 //! Likewise `GetHeaders` is bounded by MAX_LOCATOR_HASHES (request) and the
 //! server caps the reply at MAX_HEADERS_PER_MSG.
 //!
@@ -19,12 +20,14 @@
 //! the parser — we prove the bound holds rather than fuzz a non-existent
 //! unbounded path.
 
-use dom_core::{MAX_BLOCK_SERIALIZED_SIZE, MAX_GETBLOCKDATA_HASHES, MAX_LOCATOR_HASHES};
+use dom_core::{
+    MAX_BLOCK_SERIALIZED_SIZE, MAX_GETBLOCKDATA_HASHES, MAX_GETBLOCKDATA_SERVE_HASHES,
+    MAX_LOCATOR_HASHES,
+};
 use dom_wire::message::{GetBlockDataPayload, GetHeadersPayload};
 
 /// A GetBlockData request at the cap round-trips; one hash over the cap is
-/// REJECTED at parse time — so the serve loop can never iterate more than
-/// MAX_GETBLOCKDATA_HASHES bodies for a single message.
+/// REJECTED at parse time. The independent handler cap is measured below.
 #[test]
 fn getblockdata_request_count_is_capped_at_parse() {
     // At the cap: encodes and decodes.
@@ -86,17 +89,20 @@ fn getheaders_locator_is_capped_at_parse() {
 fn worst_case_getblockdata_multiplier_is_bounded_and_recorded() {
     // Request size at cap: 2-byte count prefix + 32 bytes per hash.
     let request_bytes = 2 + MAX_GETBLOCKDATA_HASHES * 32;
-    // Response upper bound: one max-size block body per requested hash.
-    let response_bytes = MAX_GETBLOCKDATA_HASHES * MAX_BLOCK_SERIALIZED_SIZE;
+    // Response upper bound: the handler independently truncates the compatible
+    // wire envelope to its smaller serve cap.
+    let response_bytes = MAX_GETBLOCKDATA_SERVE_HASHES * MAX_BLOCK_SERIALIZED_SIZE;
 
-    // Pin the concrete numbers (locked constants): 128 hashes, 16 MiB blocks.
+    // Pin the concrete numbers: parser accepts 128 hashes for compatibility,
+    // while the handler serves at most 16 bodies of at most 16 MiB each.
     assert_eq!(MAX_GETBLOCKDATA_HASHES, 128);
+    assert_eq!(MAX_GETBLOCKDATA_SERVE_HASHES, 16);
     assert_eq!(MAX_BLOCK_SERIALIZED_SIZE, 16 * 1024 * 1024);
     assert_eq!(request_bytes, 2 + 128 * 32); // 4098 bytes
-    assert_eq!(response_bytes, 128 * 16 * 1024 * 1024); // 2 GiB
+    assert_eq!(response_bytes, 16 * 16 * 1024 * 1024); // 256 MiB
 
     // The multiplier is large but BOUNDED and constant; it cannot be inflated by
-    // the attacker beyond this without changing a consensus constant. (Honest
+    // the attacker beyond this without changing the serving policy. (Honest
     // serving of a 2 GiB reply is itself gated by per-peer rate limits + the
     // requirement that every requested block actually exists in our store.)
     let multiplier = response_bytes / request_bytes;

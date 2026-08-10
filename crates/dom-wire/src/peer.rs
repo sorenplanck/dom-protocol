@@ -1,7 +1,10 @@
 //! Peer connection state machine.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Ban score thresholds for common protocol violations.
 pub mod ban_scores {
@@ -41,6 +44,10 @@ pub enum PeerState {
 /// Peer connection metadata.
 #[derive(Debug)]
 pub struct PeerInfo {
+    /// Process-local connection generation used to make cleanup ownership-safe.
+    pub session_id: u64,
+    /// Authenticated Noise static public key (stable PeerId).
+    pub peer_id: Option<[u8; 32]>,
     /// Remote address.
     pub addr: SocketAddr,
     /// Whether this is an outbound connection.
@@ -67,6 +74,8 @@ impl PeerInfo {
     /// Create for a new connection.
     pub fn new(addr: SocketAddr, outbound: bool) -> Self {
         Self {
+            session_id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
+            peer_id: None,
             addr,
             outbound,
             state: PeerState::Handshaking,

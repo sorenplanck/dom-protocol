@@ -56,7 +56,10 @@ impl Command {
 }
 
 /// Maximum payload size per message (prevents memory exhaustion DoS).
-pub const MAX_MESSAGE_PAYLOAD: usize = 16 * 1024 * 1024; // 16 MiB
+///
+/// A `Command::Block` payload is a [`BlockPayload`]: four bytes of block length
+/// followed by up to `MAX_BLOCK_SERIALIZED_SIZE` consensus block bytes.
+pub const MAX_MESSAGE_PAYLOAD: usize = dom_core::MAX_BLOCK_SERIALIZED_SIZE + 4;
 
 /// Wire message with framing.
 #[derive(Debug, Clone)]
@@ -71,7 +74,7 @@ pub struct WireMessage {
 
 impl WireMessage {
     /// Serialize to bytes (before Noise encryption).
-    /// Format: magic[4 LE] + command[1] + length[4 LE] + checksum[4 LE] + payload
+    /// Format: magic (4-byte LE) + command (1 byte) + length (4-byte LE) + checksum (4-byte LE) + payload.
     pub fn to_bytes(&self) -> Vec<u8> {
         let len = self.payload.len() as u32;
         let checksum = compute_checksum(&self.payload);
@@ -658,7 +661,7 @@ mod tests {
     #[test]
     fn hello_payload_roundtrip() {
         let hello = HelloPayload {
-            version: dom_core::PROTOCOL_VERSION,
+            version: dom_core::WIRE_PROTOCOL_VERSION,
             network_magic: dom_core::NETWORK_MAGIC_MAINNET,
             chain_id: [0xCCu8; 32],
             best_height: 12345,
@@ -675,7 +678,7 @@ mod tests {
 
     fn hello_payload_for_tests() -> HelloPayload {
         HelloPayload {
-            version: dom_core::PROTOCOL_VERSION,
+            version: dom_core::WIRE_PROTOCOL_VERSION,
             network_magic: dom_core::NETWORK_MAGIC_MAINNET,
             chain_id: [0xCCu8; 32],
             best_height: 12345,

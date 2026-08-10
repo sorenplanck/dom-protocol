@@ -7,20 +7,24 @@ use dom_consensus::block::{
     validate_future_timestamp_with_limit, validate_header_syntax, validate_median_time_past,
     validate_parent_timestamp_progression, validate_pow_for_network, BlockHeader,
 };
-use dom_consensus::{derive_chain_id, validate_block, Block, Transaction, ValidationContext};
+use dom_consensus::{
+    checked_accumulated_difficulty, derive_chain_id, validate_block_for_network, Block,
+    Transaction, ValidationContext,
+};
 use dom_core::{BlockHeight, DomError, Hash256, Timestamp};
 use dom_pow::{
-    compute_expected_target, genesis_anchor, pow_params_for_network, randomx_seed_height,
-    target_to_difficulty, AsertAnchor,
+    asert_anchor_for_network_height, compute_expected_target, genesis_anchor,
+    pow_params_for_network_at_height, randomx_seed_height, target_to_difficulty_for_network_height,
+    AsertAnchor,
 };
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_store::utxo::UtxoEntry;
 use dom_store::{DomStore, METADATA_UTXO_SET_DIGEST_KEY};
 use primitive_types::U256;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
-use crate::reorg::{check_reorg_depth, find_common_ancestor};
+use crate::reorg::{check_reorg_depth, check_rolling_finality, find_common_ancestor};
 
 /// Sentinel substring callers grep for to recognise a chainstate
 /// corruption distinctly from other `DomError::Internal` cases. When
@@ -118,11 +122,57 @@ fn coinbase_maturity_for_magic(magic: u32) -> u64 {
     }
 }
 
+/// Return whether a candidate tip deterministically outranks the current tip.
+///
+/// Total accumulated difficulty is primary.  Equal-work candidates use the
+/// lexicographically lower canonical block identifier as the deterministic
+/// tie-breaker, so arrival order cannot influence the selected chain.
+pub(crate) fn is_better_fork_choice_tip(
+    candidate_total_difficulty: U256,
+    candidate_hash: Hash256,
+    current_total_difficulty: U256,
+    current_hash: Hash256,
+) -> bool {
+    candidate_total_difficulty > current_total_difficulty
+        || (candidate_total_difficulty == current_total_difficulty
+            && candidate_hash.as_bytes() < current_hash.as_bytes())
+}
+
 impl ChainState {
+    /// Default startup path. A divergence between the persisted UTXO set and
+    /// the canonical set reconstructed from committed block history is treated
+    /// as fatal corruption (FIX-020): the node refuses to open rather than
+    /// silently healing a possibly-tampered set. Recovery is operator-driven
+    /// via [`ChainState::open_with_utxo_repair`].
     pub fn open(
         store: DomStore,
         genesis_hash: Hash256,
         network_magic: u32,
+    ) -> Result<Self, DomError> {
+        Self::open_inner(store, genesis_hash, network_magic, false)
+    }
+
+    /// Explicit operator recovery entry point. Identical to [`ChainState::open`]
+    /// except that a divergence between the persisted UTXO set and the canonical
+    /// set reconstructed from block history is REPAIRED (the persisted set is
+    /// replaced by the canonical one) instead of being rejected as fatal
+    /// corruption. This is the opt-in the fatal error raised by
+    /// [`ChainState::open`] instructs the operator to use; it must never be the
+    /// unattended default startup path, because a node must not silently run on
+    /// a divergent UTXO set without human intervention.
+    pub fn open_with_utxo_repair(
+        store: DomStore,
+        genesis_hash: Hash256,
+        network_magic: u32,
+    ) -> Result<Self, DomError> {
+        Self::open_inner(store, genesis_hash, network_magic, true)
+    }
+
+    fn open_inner(
+        store: DomStore,
+        genesis_hash: Hash256,
+        network_magic: u32,
+        allow_utxo_repair: bool,
     ) -> Result<Self, DomError> {
         let asert_anchor = genesis_anchor(network_magic)
             .map_err(|e| DomError::Internal(format!("genesis anchor: {e}")))?;
@@ -170,8 +220,8 @@ impl ChainState {
                         )));
                     }
                 }
-                rebuild_kernel_index_from_canonical_chain(&store, header.height)?;
-                ensure_canonical_utxo_set(&store, header.height)?;
+                rebuild_kernel_index_from_canonical_chain(&store, header.height, network_magic)?;
+                ensure_canonical_utxo_set(&store, header.height, network_magic, allow_utxo_repair)?;
                 prune_retained_side_chains(&store, header.height, hash)?;
                 (
                     Hash256::from_bytes(hash),
@@ -184,6 +234,8 @@ impl ChainState {
                 (Hash256::ZERO, BlockHeight::GENESIS, U256::zero())
             }
         };
+
+        validate_persisted_genesis_identity(&store, genesis_hash)?;
 
         Ok(Self {
             store,
@@ -204,7 +256,7 @@ impl ChainState {
     ) -> Result<ConnectResult, DomError> {
         let header = &block.header;
         let header_bytes = header.to_bytes()?;
-        let block_hash = compute_block_hash(&header_bytes);
+        let block_hash = compute_block_identifier(self.network_magic, &header_bytes)?;
 
         // DOM-SEC-RELAY-LOOP fix: early-return for already-known blocks.
         // Without this check, duplicate blocks (e.g. from relay loops between
@@ -241,7 +293,9 @@ impl ChainState {
             return Ok(ConnectResult::AlreadyHave);
         }
 
-        validate_header_syntax(header)?;
+        validate_header_syntax(header, self.network_magic)?;
+        self.validate_genesis_identity(header, block_hash)?;
+        self.validate_genesis_body_identity(block)?;
 
         let parent = if header.height != BlockHeight::GENESIS {
             let parent_bytes = self
@@ -282,13 +336,15 @@ impl ChainState {
             .map(|header| header.total_difficulty)
             .unwrap_or_else(U256::zero);
 
-        let block_diff = target_to_difficulty(
+        let block_diff = target_to_difficulty_for_network_height(
+            self.network_magic,
+            header.height,
             &header
                 .target
                 .to_target()
                 .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?,
         );
-        let expected_total = parent_difficulty.saturating_add(U256::from(block_diff));
+        let expected_total = checked_accumulated_difficulty(parent_difficulty, block_diff?)?;
         if header.total_difficulty != expected_total {
             return Err(DomError::Invalid(format!(
                 "total_difficulty mismatch: expected {expected_total}, got {}",
@@ -303,7 +359,7 @@ impl ChainState {
             now,
         };
 
-        validate_block(block, &ctx).map_err(|e| {
+        validate_block_for_network(block, &ctx, self.network_magic).map_err(|e| {
             DomError::Invalid(format!(
                 "block validation failed: hash={block_hash}, error={e}"
             ))
@@ -315,13 +371,18 @@ impl ChainState {
 
         let is_direct_extension =
             header.height == BlockHeight::GENESIS || header.prev_hash == self.tip_hash;
-        let extends_best_chain = header.total_difficulty > self.tip_difficulty;
+        let extends_best_chain = is_better_fork_choice_tip(
+            header.total_difficulty,
+            block_hash,
+            self.tip_difficulty,
+            self.tip_hash,
+        );
 
         if is_direct_extension {
             if !extends_best_chain {
                 return Err(DomError::Invalid(format!(
-                    "direct extension did not increase total_difficulty: new={} current={}",
-                    header.total_difficulty, self.tip_difficulty
+                    "direct extension did not improve fork choice: new_total={} current_total={} new_hash={} current_hash={}",
+                    header.total_difficulty, self.tip_difficulty, block_hash, self.tip_hash
                 )));
             }
             let (new_utxos, spent_utxos) = build_utxo_changeset(block);
@@ -395,7 +456,7 @@ impl ChainState {
             )?;
             prune_retained_side_chains(&self.store, self.tip_height, *self.tip_hash.as_bytes())?;
             if extends_best_chain {
-                let reorg = self.promote_heavier_known_tip(block_hash)?;
+                let reorg = self.promote_heavier_known_tip(block_hash, now)?;
                 return Ok(ConnectResult::Reorg(reorg));
             }
             debug!(
@@ -424,7 +485,7 @@ impl ChainState {
         let mut decoded = Vec::with_capacity(raw_headers.len());
         for header_bytes in raw_headers {
             let header = BlockHeader::from_bytes(header_bytes)?;
-            let hash = compute_block_hash(header_bytes);
+            let hash = compute_block_identifier(self.network_magic, header_bytes)?;
             let is_known = self.store.get_block_header(hash.as_bytes())?.is_some();
             decoded.push((header, hash, is_known));
         }
@@ -466,7 +527,8 @@ impl ChainState {
             }
 
             if !is_known {
-                validate_header_syntax(header)?;
+                validate_header_syntax(header, self.network_magic)?;
+                self.validate_genesis_identity(header, *hash)?;
 
                 if header.height != BlockHeight::GENESIS {
                     let parent = if idx == 0 {
@@ -512,13 +574,16 @@ impl ChainState {
                     decoded[idx - 1].0.total_difficulty
                 };
 
-                let block_diff = target_to_difficulty(
+                let block_diff = target_to_difficulty_for_network_height(
+                    self.network_magic,
+                    header.height,
                     &header
                         .target
                         .to_target()
                         .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?,
                 );
-                let expected_total = parent_difficulty.saturating_add(U256::from(block_diff));
+                let expected_total =
+                    checked_accumulated_difficulty(parent_difficulty, block_diff?)?;
                 if header.total_difficulty != expected_total {
                     return Err(DomError::Invalid(format!(
                         "total_difficulty mismatch: expected {expected_total}, got {}",
@@ -572,7 +637,7 @@ impl ChainState {
             .enumerate()
         {
             let header = BlockHeader::from_bytes(header_bytes)?;
-            let hash = compute_block_hash(header_bytes);
+            let hash = compute_block_identifier(self.network_magic, header_bytes)?;
             let is_known = self.store.get_block_header(hash.as_bytes())?.is_some();
 
             if idx == 0 {
@@ -615,16 +680,36 @@ impl ChainState {
                 continue;
             }
 
-            if observed_missing != prior_missing_hashes {
+            // A persisted missing-block queue is a checkpoint, not an immutable
+            // consensus fact. Between checkpoint and resume another accepted
+            // path (or an earlier body from the same resumed page) may have
+            // stored one of those blocks. Reconcile only entries that are still
+            // missing before comparing the deterministic prefix. This preserves
+            // strict order/hash checking while accepting the legitimate
+            // `observed N-1, expected N` transition.
+            let mut still_missing = Vec::with_capacity(prior_missing_hashes.len());
+            for hash in prior_missing_hashes {
+                if self.store.get_block_header(hash)?.is_none() {
+                    still_missing.push(*hash);
+                }
+            }
+            if still_missing.len() != prior_missing_hashes.len() {
+                debug!(
+                    "reconciled {} now-known hashes from persisted IBD header prefix",
+                    prior_missing_hashes.len() - still_missing.len()
+                );
+            }
+            if observed_missing != still_missing {
                 return Err(DomError::PolicyRejected(format!(
                     "persisted IBD header prefix mismatch: observed {} missing hashes, expected {}",
                     observed_missing.len(),
-                    prior_missing_hashes.len()
+                    still_missing.len()
                 )));
             }
 
             if !is_known {
-                validate_header_syntax(&header)?;
+                validate_header_syntax(&header, self.network_magic)?;
+                self.validate_genesis_identity(&header, hash)?;
 
                 if header.height != BlockHeight::GENESIS {
                     let parent = if decoded_prefix.is_empty() {
@@ -683,13 +768,16 @@ impl ChainState {
                         .total_difficulty
                 };
 
-                let block_diff = target_to_difficulty(
+                let block_diff = target_to_difficulty_for_network_height(
+                    self.network_magic,
+                    header.height,
                     &header
                         .target
                         .to_target()
                         .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?,
                 );
-                let expected_total = parent_difficulty.saturating_add(U256::from(block_diff));
+                let expected_total =
+                    checked_accumulated_difficulty(parent_difficulty, block_diff?)?;
                 if header.total_difficulty != expected_total {
                     return Err(DomError::Invalid(format!(
                         "total_difficulty mismatch: expected {expected_total}, got {}",
@@ -719,7 +807,7 @@ impl ChainState {
         // but the early-return is added as defense-in-depth for any future
         // IBD/sync codepath that adopts header-first validation.
         let header_bytes = header.to_bytes()?;
-        let header_hash = compute_block_hash(&header_bytes);
+        let header_hash = compute_block_identifier(self.network_magic, &header_bytes)?;
         if self
             .store
             .get_block_header(header_hash.as_bytes())?
@@ -728,7 +816,8 @@ impl ChainState {
             return Ok(());
         }
 
-        validate_header_syntax(header)?;
+        validate_header_syntax(header, self.network_magic)?;
+        self.validate_genesis_identity(header, header_hash)?;
         validate_future_timestamp_with_limit(header, now, self.max_future_block_time())?;
         if header.height != BlockHeight::GENESIS {
             let parent_bytes = self
@@ -743,15 +832,16 @@ impl ChainState {
             validate_median_time_past(header, &ancestors)?;
             self.validate_expected_target(header, &parent)?;
 
-            let block_diff = target_to_difficulty(
+            let block_diff = target_to_difficulty_for_network_height(
+                self.network_magic,
+                header.height,
                 &header
                     .target
                     .to_target()
                     .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?,
             );
-            let expected_total = parent
-                .total_difficulty
-                .saturating_add(U256::from(block_diff));
+            let expected_total =
+                checked_accumulated_difficulty(parent.total_difficulty, block_diff?)?;
             if header.total_difficulty != expected_total {
                 return Err(DomError::Invalid(format!(
                     "total_difficulty mismatch: expected {expected_total}, got {}",
@@ -761,6 +851,69 @@ impl ChainState {
         }
         let seed = self.compute_randomx_seed_branch_aware(header.height.0, header.prev_hash)?;
         validate_pow_for_network(self.network_magic, header, &seed)?;
+        Ok(())
+    }
+
+    fn validate_genesis_identity(
+        &self,
+        header: &BlockHeader,
+        header_hash: Hash256,
+    ) -> Result<(), DomError> {
+        if header.height != BlockHeight::GENESIS {
+            return Ok(());
+        }
+
+        if self.network_magic == dom_core::NETWORK_MAGIC_MAINNET {
+            return Err(DomError::Invalid(
+                "Mainnet genesis is accepted only through the canonical identity-envelope bootstrap path"
+                    .into(),
+            ));
+        }
+
+        if self.genesis_hash != Hash256::ZERO && header_hash != self.genesis_hash {
+            return Err(DomError::Invalid(format!(
+                "genesis hash mismatch: expected {}, got {}",
+                self.genesis_hash, header_hash
+            )));
+        }
+
+        if let Some(existing) = self.store.get_hash_at_height(BlockHeight::GENESIS.0)? {
+            if existing != *header_hash.as_bytes() {
+                return Err(DomError::Invalid(format!(
+                    "alternate genesis block rejected: canonical genesis already exists as {}",
+                    hex::encode(existing)
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Require the exact frozen legacy genesis body whenever this chain is
+    /// configured with a production network identity. Synthetic tests that use
+    /// an explicitly zero or non-production genesis hash retain their local
+    /// fixture behavior.
+    fn validate_genesis_body_identity(&self, block: &Block) -> Result<(), DomError> {
+        if block.header.height != BlockHeight::GENESIS
+            || self.network_magic == dom_core::NETWORK_MAGIC_MAINNET
+        {
+            return Ok(());
+        }
+
+        let configured = dom_core::configured_genesis_hash_for_network_magic(self.network_magic)?;
+        if self.genesis_hash != configured {
+            return Ok(());
+        }
+
+        let chain_id = derive_chain_id(self.network_magic, &configured);
+        let canonical = crate::build_canonical_genesis(self.network_magic, chain_id.as_bytes())?;
+        let actual = block.to_bytes()?;
+        if actual != canonical.block_bytes {
+            return Err(DomError::Invalid(
+                "genesis body mismatch: configured network requires the exact frozen canonical body"
+                    .into(),
+            ));
+        }
         Ok(())
     }
 
@@ -793,11 +946,11 @@ impl ChainState {
             .get_block_header(self.tip_hash.as_bytes())?
             .ok_or_else(|| DomError::Internal("chain tip header missing".into()))?;
         let tip = BlockHeader::from_bytes(&tip_bytes)?;
-        let params = pow_params_for_network(self.network_magic);
         let next_height = tip
             .height
             .checked_next()
             .ok_or_else(|| DomError::Invalid("block height overflow".into()))?;
+        let params = pow_params_for_network_at_height(self.network_magic, next_height)?;
         let next_timestamp = tip
             .timestamp
             .checked_add_secs(params.target_spacing)
@@ -821,7 +974,26 @@ impl ChainState {
     fn compute_randomx_seed(&self, height: u64) -> Result<[u8; 32], DomError> {
         let seed_height = randomx_seed_height(height);
         match self.store.get_hash_at_height(seed_height)? {
-            Some(hash) => Ok(hash),
+            Some(hash) => {
+                let header_bytes = self.store.get_block_header(&hash)?.ok_or_else(|| {
+                    DomError::Internal(format!(
+                        "RandomX seed height {seed_height} points to missing header {}",
+                        hex::encode(hash)
+                    ))
+                })?;
+                let header = BlockHeader::from_bytes(&header_bytes).map_err(|error| {
+                    DomError::Internal(format!(
+                        "RandomX seed header at height {seed_height} is malformed: {error}"
+                    ))
+                })?;
+                if header.height.0 != seed_height {
+                    return Err(DomError::Internal(format!(
+                        "RandomX seed height index mismatch: key {seed_height}, header {}",
+                        header.height.0
+                    )));
+                }
+                Ok(hash)
+            }
             None if seed_height == 0 => Ok([0u8; 32]),
             None => Err(DomError::Internal(format!(
                 "RandomX seed block at height {seed_height} missing from \
@@ -941,8 +1113,8 @@ impl ChainState {
         }
 
         // 2. Committed store (headers from earlier batches).
-        if let Some(hash) = self.store.get_hash_at_height(seed_height)? {
-            return Ok(hash);
+        if self.store.get_hash_at_height(seed_height)?.is_some() {
+            return self.compute_randomx_seed(height);
         }
 
         // 3. Epoch 0: genesis used as seed by convention (RFC-0011).
@@ -992,14 +1164,15 @@ impl ChainState {
             .map_err(|e| DomError::Invalid(format!("invalid target: {e}")))?;
         let next_target =
             compute_expected_target(self.network_magic, child_timestamp, child_height)?;
-        let params = pow_params_for_network(self.network_magic);
+        let params = pow_params_for_network_at_height(self.network_magic, child_height)?;
+        let anchor = asert_anchor_for_network_height(self.network_magic, child_height)?;
         let height_delta = child_height
             .0
-            .checked_sub(self.asert_anchor.height.0)
+            .checked_sub(anchor.height.0)
             .ok_or_else(|| DomError::Invalid("height before ASERT anchor".into()))?;
         let actual_elapsed_secs = child_timestamp
             .0
-            .checked_sub(self.asert_anchor.timestamp.0)
+            .checked_sub(anchor.timestamp.0)
             .ok_or_else(|| DomError::Invalid("timestamp before ASERT anchor".into()))?;
         let expected_elapsed_secs = params
             .target_spacing
@@ -1139,6 +1312,7 @@ impl ChainState {
     pub fn promote_heavier_known_tip(
         &mut self,
         new_tip_hash: Hash256,
+        now: Timestamp,
     ) -> Result<ReorgDelta, DomError> {
         let new_tip_header = self
             .store
@@ -1150,13 +1324,6 @@ impl ChainState {
                 ))
             })
             .and_then(|bytes| BlockHeader::from_bytes(&bytes))?;
-
-        if new_tip_header.total_difficulty <= self.tip_difficulty {
-            return Err(DomError::PolicyRejected(format!(
-                "reorg target is not heavier: new={} current={}",
-                new_tip_header.total_difficulty, self.tip_difficulty
-            )));
-        }
 
         let ancestor = find_common_ancestor(&self.store, self.tip_hash, new_tip_hash)?
             .filter(|h| *h != Hash256::ZERO)
@@ -1177,18 +1344,53 @@ impl ChainState {
             BlockHeader::from_bytes(&ancestor_bytes)?.height.0
         };
 
+        validate_branch_header_syntax(&self.store, new_tip_hash, ancestor, self.network_magic)?;
+
+        if !is_better_fork_choice_tip(
+            new_tip_header.total_difficulty,
+            new_tip_hash,
+            self.tip_difficulty,
+            self.tip_hash,
+        ) {
+            return Err(DomError::PolicyRejected(format!(
+                "reorg target is not heavier or tie-preferred: new_total={} current_total={} new_hash={} current_hash={}",
+                new_tip_header.total_difficulty, self.tip_difficulty, new_tip_hash, self.tip_hash
+            )));
+        }
+
+        let reorg_depth = self
+            .tip_height
+            .0
+            .checked_sub(ancestor_height)
+            .ok_or_else(|| DomError::Internal("reorg ancestor is above local tip".into()))?;
+        if let Err(error) = check_rolling_finality(self.tip_height.0, reorg_depth) {
+            warn!(
+                depth = reorg_depth,
+                local_tip = %self.tip_hash,
+                rejected_tip = %new_tip_hash,
+                "rolling finality rejected deep reorg"
+            );
+            return Err(error);
+        }
+        check_reorg_depth(reorg_depth)?;
         let disconnect_blocks = collect_branch_blocks(&self.store, self.tip_hash, ancestor)?;
-        check_reorg_depth(disconnect_blocks.len() as u64)?;
+        if disconnect_blocks.len() as u64 != reorg_depth {
+            return Err(DomError::Internal(format!(
+                "reorg depth mismatch: height-derived={reorg_depth}, collected={}",
+                disconnect_blocks.len()
+            )));
+        }
         let mut connect_blocks = collect_branch_blocks(&self.store, new_tip_hash, ancestor)?;
         connect_blocks.reverse();
         let chain_id = derive_chain_id(self.network_magic, &self.genesis_hash);
         for (block_hash, block) in &connect_blocks {
+            validate_future_timestamp_with_limit(&block.header, now, self.max_future_block_time())?;
             let ctx = ValidationContext {
                 current_height: block.header.height,
                 chain_id: *chain_id.as_bytes(),
-                now: Timestamp(u64::MAX),
+                now,
             };
-            validate_block(block, &ctx).map_err(|e| {
+            validate_block_for_network(block, &ctx, self.network_magic).map_err(|e| {
                 DomError::Invalid(format!(
                     "reorg candidate block validation failed: hash={}, error={e}",
                     block_hash
@@ -1309,8 +1511,24 @@ impl ChainState {
     }
 }
 
-fn ensure_canonical_utxo_set(store: &DomStore, tip_height: BlockHeight) -> Result<(), DomError> {
-    let canonical = reconstruct_canonical_utxo_set(store, tip_height)?;
+/// Verify the persisted UTXO set against the canonical set reconstructed from
+/// committed block history.
+///
+/// FIX-020 — safety contract: if the two diverge, this is either on-disk
+/// corruption (torn write, bit-rot) or deliberate tampering with the UTXO
+/// database. A node MUST NOT silently continue on a divergent set, so the
+/// default (`allow_utxo_repair == false`) refuses to open with a fatal
+/// `CHAIN_CORRUPT_SENTINEL` error logged at ERROR level. The old auto-heal
+/// (`replace_utxo_set`) remains available ONLY as an explicit operator opt-in
+/// (`allow_utxo_repair == true`, reached via `ChainState::open_with_utxo_repair`).
+/// The reconstruction logic itself is unchanged; only *when* it runs.
+fn ensure_canonical_utxo_set(
+    store: &DomStore,
+    tip_height: BlockHeight,
+    network_magic: u32,
+    allow_utxo_repair: bool,
+) -> Result<(), DomError> {
+    let canonical = reconstruct_canonical_utxo_set(store, tip_height, network_magic)?;
     let canonical_digest = digest_utxo_entries(&canonical);
     let persisted = store.read_all_utxos_raw()?;
     let persisted_digest = store.get_metadata(METADATA_UTXO_SET_DIGEST_KEY)?;
@@ -1326,8 +1544,27 @@ fn ensure_canonical_utxo_set(store: &DomStore, tip_height: BlockHeight) -> Resul
         return Ok(());
     }
 
+    if !allow_utxo_repair {
+        error!(
+            "{CHAIN_CORRUPT_SENTINEL}: persisted UTXO set diverges from canonical reconstruction on reopen \
+             (persisted_entries={}, canonical_entries={}); possible disk corruption or tampering — refusing to open",
+            persisted.len(),
+            canonical.len()
+        );
+        return Err(DomError::Internal(format!(
+            "{CHAIN_CORRUPT_SENTINEL}: persisted UTXO set diverges from the canonical set \
+             reconstructed from block history (persisted_entries={}, canonical_entries={}). \
+             This indicates disk corruption or tampering of the UTXO database. The node refuses \
+             to open on a divergent UTXO set rather than silently healing it. To rebuild the UTXO \
+             set from canonical block history, restart in the explicit operator UTXO-repair mode \
+             (ChainState::open_with_utxo_repair).",
+            persisted.len(),
+            canonical.len()
+        )));
+    }
+
     info!(
-        "Canonical UTXO reconstruction diverged on reopen; replacing persisted set (persisted_entries={}, canonical_entries={})",
+        "Operator UTXO-repair mode: persisted UTXO set diverged on reopen; rebuilding from canonical reconstruction (persisted_entries={}, canonical_entries={})",
         persisted.len(),
         canonical.len()
     );
@@ -1337,6 +1574,7 @@ fn ensure_canonical_utxo_set(store: &DomStore, tip_height: BlockHeight) -> Resul
 fn reconstruct_canonical_utxo_set(
     store: &DomStore,
     tip_height: BlockHeight,
+    network_magic: u32,
 ) -> Result<BTreeMap<[u8; 33], Vec<u8>>, DomError> {
     let mut utxos = BTreeMap::new();
     for h in 0..=tip_height.0 {
@@ -1351,6 +1589,12 @@ fn reconstruct_canonical_utxo_set(
                 hex::encode(hash)
             ))
         })?;
+        if h == BlockHeight::GENESIS.0
+            && network_magic == dom_core::NETWORK_MAGIC_MAINNET
+            && crate::validate_mainnet_genesis_identity(&body).is_ok()
+        {
+            continue;
+        }
         let block = Block::from_bytes(&body).map_err(|e| {
             DomError::Internal(format!(
                 "{CHAIN_CORRUPT_SENTINEL}: canonical block {} body decode failed during UTXO rebuild: {e}",
@@ -1358,7 +1602,7 @@ fn reconstruct_canonical_utxo_set(
             ))
         })?;
         let header_bytes = block.header.to_bytes()?;
-        let computed = compute_block_hash(&header_bytes);
+        let computed = compute_block_identifier(network_magic, &header_bytes)?;
         if computed.as_bytes() != &hash {
             return Err(DomError::Internal(format!(
                 "{CHAIN_CORRUPT_SENTINEL}: canonical block body/header hash mismatch at height {h} during UTXO rebuild: height_index={} body_header={}",
@@ -1432,6 +1676,7 @@ fn digest_utxo_entries(utxos: &BTreeMap<[u8; 33], Vec<u8>>) -> [u8; 32] {
 fn rebuild_kernel_index_from_canonical_chain(
     store: &DomStore,
     tip_height: BlockHeight,
+    network_magic: u32,
 ) -> Result<(), DomError> {
     for h in 0..=tip_height.0 {
         let hash = store.get_hash_at_height(h)?.ok_or_else(|| {
@@ -1445,6 +1690,12 @@ fn rebuild_kernel_index_from_canonical_chain(
                 hex::encode(hash)
             ))
         })?;
+        if h == BlockHeight::GENESIS.0
+            && network_magic == dom_core::NETWORK_MAGIC_MAINNET
+            && crate::validate_mainnet_genesis_identity(&body).is_ok()
+        {
+            continue;
+        }
         let block = Block::from_bytes(&body).map_err(|e| {
             DomError::Internal(format!(
                 "{CHAIN_CORRUPT_SENTINEL}: canonical block {} body decode failed during kernel-index rebuild: {e}",
@@ -1452,7 +1703,7 @@ fn rebuild_kernel_index_from_canonical_chain(
             ))
         })?;
         let header_bytes = block.header.to_bytes()?;
-        let computed = compute_block_hash(&header_bytes);
+        let computed = compute_block_identifier(network_magic, &header_bytes)?;
         if computed.as_bytes() != &hash {
             return Err(DomError::Internal(format!(
                 "{CHAIN_CORRUPT_SENTINEL}: canonical block body/header hash mismatch at height {h}: height_index={} body_header={}",
@@ -1501,8 +1752,10 @@ fn extract_kernel_excesses(block: &Block, block_hash: Hash256) -> Vec<KernelExce
 /// duplicate. Returns `(new_utxos, spent_utxos, kernel_excesses)` in the exact
 /// shape `DomStore::commit_block` expects.
 ///
-/// `block_hash` must be the genesis block hash (Blake2b-256 of the serialized
-/// header) — the same value the reopen path recomputes via `compute_block_hash`.
+/// `block_hash` must be the canonical genesis identifier supplied by the sole
+/// genesis authority. For legacy Testnet and Regtest this is Blake2b-256 of
+/// the serialized header; Mainnet has an empty economic body and therefore
+/// does not use this coinbase changeset helper.
 pub fn genesis_canonical_changeset(
     block: &Block,
     block_hash: Hash256,
@@ -1540,6 +1793,30 @@ fn build_utxo_changeset(block: &Block) -> (Vec<UtxoBytes>, Vec<SpentCommitment>)
         }
     }
     (new_utxos, spent_utxos)
+}
+
+fn validate_branch_header_syntax(
+    store: &DomStore,
+    branch_tip: Hash256,
+    ancestor: Hash256,
+    network_magic: u32,
+) -> Result<(), DomError> {
+    let mut cursor = branch_tip;
+    while cursor != ancestor {
+        let header_bytes = store.get_block_header(cursor.as_bytes())?.ok_or_else(|| {
+            DomError::Internal(format!(
+                "reorg candidate header missing during validation: {cursor}"
+            ))
+        })?;
+        let header = BlockHeader::from_bytes(&header_bytes)?;
+        validate_header_syntax(&header, network_magic).map_err(|error| {
+            DomError::Invalid(format!(
+                "reorg candidate header validation failed: hash={cursor}, error={error}"
+            ))
+        })?;
+        cursor = header.prev_hash;
+    }
+    Ok(())
 }
 
 fn collect_branch_blocks(
@@ -1743,6 +2020,11 @@ fn find_canonical_output_entry(
         let Some(body) = store.get_block_body(&hash)? else {
             continue;
         };
+        if height == BlockHeight::GENESIS.0
+            && crate::validate_mainnet_genesis_identity(&body).is_ok()
+        {
+            continue;
+        }
         let block = Block::from_bytes(&body).map_err(|e| {
             DomError::Internal(format!(
                 "decode canonical block {} while resurrecting {}: {e}",
@@ -1909,8 +2191,8 @@ fn prune_retained_side_chains(
         right
             .total_difficulty
             .cmp(&left.total_difficulty)
-            .then_with(|| right.height.cmp(&left.height))
             .then_with(|| left.hash.as_slice().cmp(right.hash.as_slice()))
+            .then_with(|| right.height.cmp(&left.height))
     });
     candidate_tips.truncate(MAX_RETAINED_SIDE_BRANCH_TIPS);
 
@@ -1989,6 +2271,27 @@ pub enum ConnectResult {
     AlreadyHave,
 }
 
+fn validate_persisted_genesis_identity(
+    store: &DomStore,
+    configured_genesis_hash: Hash256,
+) -> Result<(), DomError> {
+    let Some(stored_genesis_hash) = store.get_hash_at_height(BlockHeight::GENESIS.0)? else {
+        return Ok(());
+    };
+
+    if configured_genesis_hash != Hash256::ZERO
+        && stored_genesis_hash != *configured_genesis_hash.as_bytes()
+    {
+        return Err(DomError::Invalid(format!(
+            "stored genesis hash mismatch: expected {}, got {}",
+            configured_genesis_hash,
+            hex::encode(stored_genesis_hash)
+        )));
+    }
+
+    Ok(())
+}
+
 fn compute_block_hash(header_bytes: &[u8]) -> Hash256 {
     use blake2::digest::consts::U32;
     use blake2::{Blake2b, Digest};
@@ -1999,6 +2302,10 @@ fn compute_block_hash(header_bytes: &[u8]) -> Hash256 {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&result);
     Hash256::from_bytes(arr)
+}
+
+fn compute_block_identifier(network_magic: u32, header_bytes: &[u8]) -> Result<Hash256, DomError> {
+    crate::canonical_header_identifier(network_magic, header_bytes)
 }
 
 #[cfg(test)]
@@ -2072,6 +2379,40 @@ mod randomx_seed_tests {
         assert_ne!(seed, [0u8; 32], "must not fall back to zero seed");
     }
 
+    /// Focused transition matrix for the blocks immediately around two seed
+    /// intervals. The same batch resolver is used by header synchronization;
+    /// miner and branch-aware validator paths share `randomx_seed_height`.
+    #[test]
+    fn focused_randomx_seed_boundaries_select_exact_branch_hashes() {
+        let (_dir, chain) = empty_chain();
+        let genesis = Hash256::from_bytes([0x10; 32]);
+        let epoch_one = Hash256::from_bytes([0x11; 32]);
+        let epoch_two = Hash256::from_bytes([0x12; 32]);
+        let batch = vec![
+            (synth_header(0), genesis, false),
+            (synth_header(1984), epoch_one, false),
+            (synth_header(4032), epoch_two, false),
+        ];
+
+        for (candidate, expected_height, expected_hash) in [
+            (2047, 0, genesis),
+            (2048, 1984, epoch_one),
+            (2049, 1984, epoch_one),
+            (4095, 1984, epoch_one),
+            (4096, 4032, epoch_two),
+            (4097, 4032, epoch_two),
+        ] {
+            assert_eq!(randomx_seed_height(candidate), expected_height);
+            assert_eq!(
+                chain
+                    .compute_randomx_seed_with_batch(candidate, &batch)
+                    .expect("boundary seed resolves"),
+                *expected_hash.as_bytes(),
+                "candidate height {candidate} selected the wrong branch seed"
+            );
+        }
+    }
+
     /// Epoch 0 (height 100, seed_height 0): with an empty batch and an
     /// un-indexed genesis, the genesis fallback `[0u8; 32]` is correct and must
     /// NOT be promoted to an error.
@@ -2138,7 +2479,7 @@ mod randomx_seed_tests {
         // block hash (CANON). commit_block accepts opaque bytes for header/body —
         // dom-store does not parse them — so a minimal synthetic block suffices.
         let canon_seed_hash = [0xAAu8; 32];
-        let opaque_header = vec![0xAAu8; 64];
+        let opaque_header = synth_header(1984).to_bytes().expect("seed header bytes");
         let opaque_body = vec![0xBBu8; 32];
         chain
             .store

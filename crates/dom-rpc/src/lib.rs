@@ -4,15 +4,15 @@
 mod middleware;
 mod token;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use dom_core::PROTOCOL_VERSION;
+use dom_core::WIRE_PROTOCOL_VERSION;
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, sync::Arc};
+use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc};
 use tracing::{error, info, warn};
 
 pub trait NodeHandle: Send + Sync + 'static {
@@ -30,6 +30,13 @@ pub trait NodeHandle: Send + Sync + 'static {
 
     /// Get block header bytes by hash. Returns None if not found.
     fn get_block_header(&self, hash: &[u8; 32]) -> Option<Vec<u8>>;
+
+    /// Get the regular transaction kernel metadata for a block. The default
+    /// keeps third-party/mock handles source-compatible while node handles
+    /// backed by a full block store expose the read-only projection.
+    fn get_block_kernels(&self, _hash: &[u8; 32]) -> Option<Vec<KernelInfo>> {
+        None
+    }
 
     /// Get block hash at a given height. Returns None if height unknown.
     fn get_block_hash_at_height(&self, height: u64) -> Option<[u8; 32]>;
@@ -69,6 +76,13 @@ pub trait NodeHandle: Send + Sync + 'static {
         Err(RpcError::Internal("chain scan not supported".into()))
     }
 
+    /// Request the node's existing coordinated shutdown path. The RPC handler
+    /// runs this future in the background so its `202 Accepted` can reach the
+    /// caller before the RPC service begins winding down.
+    fn request_shutdown(&self) -> ShutdownFuture {
+        Box::pin(async {})
+    }
+
     /// A coherent snapshot of the canonical chain identity.  This is a
     /// wallet-safe RPC value, deliberately separate from `PROTOCOL_VERSION`.
     fn chain_identity(&self) -> Result<ChainIdentity, RpcError> {
@@ -80,6 +94,9 @@ pub trait NodeHandle: Send + Sync + 'static {
         Err(RpcError::Internal("chain ancestry not supported".into()))
     }
 }
+
+/// Type-erased asynchronous request to the node's shutdown coordinator.
+pub type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 /// Maximum number of heights a single [`NodeHandle::scan_chain`] / `/chain/scan`
 /// call returns. Bounds how long the chain lock is held so block connection is
@@ -200,6 +217,14 @@ pub struct MempoolTxInfo {
     pub fee: u64,
     pub fee_rate: u64,
     pub weight: u32,
+    pub kernels: Vec<KernelInfo>,
+}
+
+/// Read-only transaction-kernel fields needed to diagnose height locks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct KernelInfo {
+    pub features: u8,
+    pub lock_height: u64,
 }
 
 /// Outcome of admitting a transaction to the node (`submit_tx`).
@@ -307,6 +332,8 @@ struct MempoolResponse {
     page: usize,
     limit: usize,
     tx_hashes: Vec<String>,
+    /// Additive detailed view; `tx_hashes` remains for existing consumers.
+    transactions: Vec<TxSummaryResponse>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -340,6 +367,16 @@ struct TxFoundResponse {
     fee: u64,
     fee_rate: u64,
     weight: u32,
+    kernels: Vec<KernelInfo>,
+}
+
+#[derive(Debug, Serialize)]
+struct TxSummaryResponse {
+    tx_hash: String,
+    fee: u64,
+    fee_rate: u64,
+    weight: u32,
+    kernels: Vec<KernelInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -354,6 +391,7 @@ struct BlockHeaderResponse {
     prev_hash: String,
     timestamp: u64,
     target: String,
+    kernels: Vec<KernelInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -396,6 +434,7 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
     let timeout = TimeoutLayer::new(Duration::from_secs(30));
 
     let rate_limit_read = middleware::rate_limit_read();
+    let rate_limit_auth_read = middleware::rate_limit_read();
     let rate_limit_submit = middleware::rate_limit_submit();
     let rate_limit_wallet_spend = middleware::rate_limit_submit();
 
@@ -408,16 +447,22 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
         .route("/block/:height_or_hash", get(get_block))
         .route("/utxo/:commitment", get(get_utxo))
         .route("/kernel/:excess", get(get_kernel))
-        .route("/wallet/balance", get(wallet_balance_handler))
-        .route("/chain/scan", get(chain_scan_handler))
         .layer(rate_limit_read);
 
     let submit_route = Router::new()
         .route("/tx/submit", post(submit_tx))
         .layer(rate_limit_submit);
 
+    let auth_read_routes = Router::new()
+        .route("/wallet/balance", get(wallet_balance_handler))
+        .route("/chain/scan", get(chain_scan_handler))
+        .route("/build-info", get(build_info_handler))
+        .route("/shutdown", post(shutdown_handler))
+        .layer(rate_limit_auth_read);
+
     let auth_routes = Router::new()
         .route("/peers", get(get_peers_handler))
+        .merge(auth_read_routes)
         .route(
             "/wallet/spend",
             post(wallet_spend_handler).layer(rate_limit_wallet_spend),
@@ -440,6 +485,28 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
 
 async fn get_peers_handler(State(handle): State<Arc<dyn NodeHandle>>) -> Json<Vec<PeerInfo>> {
     Json(handle.get_peers())
+}
+
+async fn build_info_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"commit": env!("DOM_RPC_BUILD_COMMIT")}))
+}
+
+/// Request a graceful node shutdown after authenticating a local caller.
+///
+/// The loopback check intentionally uses the TCP peer address, never a
+/// forwarded header, so it remains effective even when the RPC listener is
+/// configured on a non-loopback interface.
+async fn shutdown_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> StatusCode {
+    if !peer.ip().is_loopback() {
+        warn!(%peer, "refusing shutdown request from non-loopback peer");
+        return StatusCode::FORBIDDEN;
+    }
+
+    tokio::spawn(handle.request_shutdown());
+    StatusCode::ACCEPTED
 }
 
 async fn shutdown_signal() {
@@ -481,6 +548,23 @@ pub async fn serve_with_token(
     listener: tokio::net::TcpListener,
     configured_token: Option<String>,
 ) -> Result<(), RpcError> {
+    serve_with_token_until_shutdown(handle, listener, configured_token, shutdown_signal()).await
+}
+
+/// Run the RPC accept loop with caller-owned graceful shutdown.
+///
+/// Embedders with a process-wide supervisor must provide its shutdown future
+/// here so the RPC service cannot consume a signal independently and appear
+/// to have exited unexpectedly to that supervisor.
+pub async fn serve_with_token_until_shutdown<F>(
+    handle: Arc<dyn NodeHandle>,
+    listener: tokio::net::TcpListener,
+    configured_token: Option<String>,
+    shutdown: F,
+) -> Result<(), RpcError>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     let token_str = token::get_or_create_token_with_config(configured_token.as_deref())
         .map_err(|e| RpcError::Internal(format!("failed to init token: {e}")))?;
     let bearer_token = Arc::new(BearerToken(token_str));
@@ -499,7 +583,7 @@ pub async fn serve_with_token(
         listener,
         router(handle, bearer_token).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(shutdown)
     .await
     .map_err(|e| RpcError::Internal(format!("server error: {e}")))?;
 
@@ -513,7 +597,7 @@ async fn health() -> Json<HealthResponse> {
 
 async fn status(State(handle): State<Arc<dyn NodeHandle>>) -> Json<StatusResponse> {
     Json(StatusResponse {
-        version: PROTOCOL_VERSION,
+        version: WIRE_PROTOCOL_VERSION,
         chain_height: handle.chain_height(),
         mempool_size: handle.mempool_size(),
         network: handle.network(),
@@ -547,12 +631,24 @@ async fn mempool(
     let all_hashes = handle.mempool_tx_hashes();
     let total = all_hashes.len();
 
-    let tx_hashes = all_hashes
+    let page_hashes = all_hashes
         .into_iter()
         .skip(offset)
         .take(limit)
-        .map(hex::encode)
         .collect::<Vec<_>>();
+
+    let tx_hashes = page_hashes.iter().map(hex::encode).collect::<Vec<_>>();
+    let transactions = page_hashes
+        .iter()
+        .filter_map(|hash| handle.get_mempool_tx(hash))
+        .map(|info| TxSummaryResponse {
+            tx_hash: hex::encode(info.tx_hash),
+            fee: info.fee,
+            fee_rate: info.fee_rate,
+            weight: info.weight,
+            kernels: info.kernels,
+        })
+        .collect();
 
     let count = tx_hashes.len();
 
@@ -562,6 +658,7 @@ async fn mempool(
         page,
         limit,
         tx_hashes,
+        transactions,
     })
     .into_response()
 }
@@ -625,6 +722,7 @@ async fn get_tx(
                 fee: info.fee,
                 fee_rate: info.fee_rate,
                 weight: info.weight,
+                kernels: info.kernels,
             }),
         )
             .into_response())
@@ -670,6 +768,7 @@ async fn get_block(
                     prev_hash: hex::encode(header.prev_hash.as_bytes()),
                     timestamp: header.timestamp.0,
                     target: hex::encode(header.target.0.to_be_bytes()),
+                    kernels: handle.get_block_kernels(&hash).unwrap_or_default(),
                 }),
             )
                 .into_response())
@@ -852,8 +951,8 @@ struct ChainScanResponse {
 }
 
 /// `GET /chain/scan?from&to` — per-block output/input commitments for a height
-/// range (clamped to [`MAX_SCAN_RANGE`] and the tip), plus the tip. Public,
-/// read-only. A node that does not support it answers with the trait default
+/// range (clamped to [`MAX_SCAN_RANGE`] and the tip), plus the tip. An
+/// authenticated node projection. A node that does not support it answers with the trait default
 /// error; a busy chain answers a retriable 503.
 async fn chain_scan_handler(
     State(handle): State<Arc<dyn NodeHandle>>,
@@ -964,9 +1063,17 @@ async fn wallet_spend_handler(
 mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
+    use dom_core::PROTOCOL_VERSION;
     use http_body_util::BodyExt;
     use serde_json::Value;
-    use std::{collections::HashMap, sync::Mutex};
+    use std::{
+        collections::HashMap,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex,
+        },
+        time::Duration,
+    };
     use tower::ServiceExt;
 
     #[derive(Default)]
@@ -979,6 +1086,7 @@ mod tests {
         no_peers: bool,
         /// Canned chain scan for `/chain/scan` tests; `None` → unsupported.
         scan: Option<ChainScan>,
+        shutdown_requested: Arc<AtomicBool>,
         identity: Option<ChainIdentity>,
         ancestry: Option<ChainAncestry>,
     }
@@ -991,6 +1099,7 @@ mod tests {
                 network: "regtest",
                 no_peers: false,
                 scan: None,
+                shutdown_requested: Arc::new(AtomicBool::new(false)),
                 identity: None,
                 ancestry: None,
             }
@@ -1029,6 +1138,13 @@ mod tests {
     }
 
     impl NodeHandle for MockNode {
+        fn request_shutdown(&self) -> ShutdownFuture {
+            let requested = Arc::clone(&self.shutdown_requested);
+            Box::pin(async move {
+                requested.store(true, Ordering::SeqCst);
+            })
+        }
+
         fn chain_height(&self) -> u64 {
             self.height
         }
@@ -1084,6 +1200,7 @@ mod tests {
                     fee: 0,
                     fee_rate: 0,
                     weight: 0,
+                    kernels: Vec::new(),
                 },
             );
             Ok(TxAdmission {
@@ -1099,6 +1216,15 @@ mod tests {
         }
         fn get_utxo(&self, _: &[u8; 33]) -> Option<UtxoInfo> {
             None
+        }
+        fn get_wallet_balance(&self) -> Option<WalletBalanceResponse> {
+            Some(WalletBalanceResponse {
+                confirmed_noms: 42,
+                immature_noms: 0,
+                reserved_noms: 0,
+                confirmed_dom: 0.000_000_042,
+                immature_dom: 0.0,
+            })
         }
     }
 
@@ -1217,10 +1343,31 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let body = body_json(r).await;
-        assert_eq!(body["version"], serde_json::json!(PROTOCOL_VERSION));
+        assert_eq!(body["version"], serde_json::json!(WIRE_PROTOCOL_VERSION));
         // app()'s MockNode is configured for regtest, so /status must report
         // it — never the old hardcoded "mainnet" (DOM-AUDIT-006).
         assert_eq!(body["network"], serde_json::json!("regtest"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_owned_shutdown_stops_rpc_cleanly() {
+        let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_with_token_until_shutdown(
+            Arc::new(MockNode::new(0)),
+            listener,
+            Some("test-token".to_owned()),
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        shutdown_tx.send(()).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("RPC server should honor the supervisor shutdown")
+            .expect("RPC server task should not panic");
+        assert!(result.is_ok(), "supervisor shutdown must be a clean exit");
     }
 
     #[tokio::test]
@@ -1243,6 +1390,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wallet_balance_requires_bearer_and_succeeds_with_it() {
+        let unauthenticated = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/wallet/balance")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let authenticated = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/wallet/balance")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn build_info_requires_bearer_and_returns_a_commit() {
+        let unauthenticated = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/build-info")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let authenticated = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/build-info")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), StatusCode::OK);
+        assert!(body_json(authenticated).await["commit"]
+            .as_str()
+            .is_some_and(|commit| !commit.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn shutdown_requires_bearer() {
+        let r = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/shutdown")
+                    .extension(ConnectInfo(
+                        "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn shutdown_refuses_non_loopback_peer() {
+        let node = MockNode::new(0);
+        let requested = Arc::clone(&node.shutdown_requested);
+        let r = app_with(node)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/shutdown")
+                    .header("authorization", "Bearer test-token")
+                    .extension(ConnectInfo(
+                        "192.0.2.1:12345".parse::<SocketAddr>().unwrap(),
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert!(!requested.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn shutdown_from_loopback_returns_accepted_then_requests_shutdown() {
+        let node = MockNode::new(0);
+        let requested = Arc::clone(&node.shutdown_requested);
+        let r = app_with(node)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/shutdown")
+                    .header("authorization", "Bearer test-token")
+                    .extension(ConnectInfo(
+                        "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::ACCEPTED);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !requested.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("shutdown request task should run after the 202 response");
+    }
+
+    #[tokio::test]
     async fn mempool_is_initially_empty() {
         let r = app()
             .oneshot(
@@ -1258,6 +1529,83 @@ mod tests {
         assert_eq!(body["count"], serde_json::json!(0));
         assert_eq!(body["total"], serde_json::json!(0));
         assert_eq!(body["page"], serde_json::json!(0));
+        assert_eq!(body["transactions"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn tx_and_mempool_expose_height_locked_kernel_fields() {
+        let node = MockNode::new(0);
+        let hash = [0xabu8; 32];
+        node.txs.lock().unwrap().insert(
+            hash,
+            MempoolTxInfo {
+                tx_hash: hash,
+                fee: 7,
+                fee_rate: 2,
+                weight: 3,
+                kernels: vec![KernelInfo {
+                    features: dom_core::KERNEL_FEAT_HEIGHT_LOCKED,
+                    lock_height: 4242,
+                }],
+            },
+        );
+        let app = app_with(node);
+
+        let tx = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/tx/{}", hex::encode(hash)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let tx_body = body_json(tx).await;
+        assert_eq!(
+            tx_body["kernels"],
+            serde_json::json!([{"features": 2, "lock_height": 4242}])
+        );
+
+        let mempool = app
+            .oneshot(
+                Request::builder()
+                    .uri("/mempool")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mempool_body = body_json(mempool).await;
+        assert_eq!(
+            mempool_body["tx_hashes"],
+            serde_json::json!([hex::encode(hash)])
+        );
+        assert_eq!(
+            mempool_body["transactions"][0]["kernels"],
+            tx_body["kernels"]
+        );
+    }
+
+    #[test]
+    fn block_response_serializes_kernel_fields_additively() {
+        let response = BlockHeaderResponse {
+            height: 1,
+            hash: "11".repeat(32),
+            prev_hash: "00".repeat(32),
+            timestamp: 123,
+            target: "1f00ffff".to_owned(),
+            kernels: vec![KernelInfo {
+                features: dom_core::KERNEL_FEAT_HEIGHT_LOCKED,
+                lock_height: 99,
+            }],
+        };
+        let body = serde_json::to_value(response).unwrap();
+        assert_eq!(
+            body["kernels"],
+            serde_json::json!([{"features": 2, "lock_height": 99}])
+        );
+        assert_eq!(body["height"], 1);
     }
 
     #[tokio::test]
@@ -1273,6 +1621,7 @@ mod tests {
                     fee: 0,
                     fee_rate: 0,
                     weight: 0,
+                    kernels: Vec::new(),
                 },
             );
         }
@@ -1342,6 +1691,7 @@ mod tests {
                     fee: 0,
                     fee_rate: 0,
                     weight: 0,
+                    kernels: Vec::new(),
                 },
             );
         }
@@ -1562,11 +1912,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chain_scan_requires_bearer_and_succeeds_with_it() {
+        let unauthenticated = app_with(MockNode::with_scan(2, canned_scan()))
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/scan?from=0&to=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let authenticated = app_with(MockNode::with_scan(2, canned_scan()))
+            .oneshot(
+                Request::builder()
+                    .uri("/chain/scan?from=0&to=2")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn chain_scan_returns_blocks_and_tip() {
         let r = app_with(MockNode::with_scan(2, canned_scan()))
             .oneshot(
                 Request::builder()
                     .uri("/chain/scan?from=0&to=2")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1718,6 +2095,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/chain/scan?from=0&to=2")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1732,6 +2110,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/chain/scan?from=5&to=0")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2006,6 +2385,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/chain/scan?from=0&to=2")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

@@ -23,7 +23,7 @@ mod common;
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
 use common::{open_test_chain, open_test_store};
-use dom_chain::reorg::{check_reorg_depth, find_common_ancestor};
+use dom_chain::reorg::{check_reorg_depth, find_common_ancestor, MAX_REORG_DEPTH};
 use dom_chain::{
     ChainState, MAX_RETAINED_SIDE_BRANCH_LENGTH, MAX_RETAINED_SIDE_BRANCH_REORG_DEPTH,
     MAX_RETAINED_SIDE_BRANCH_TIPS,
@@ -34,8 +34,9 @@ use dom_consensus::{
     Transaction, TransactionInput, TransactionKernel, TransactionOutput,
 };
 use dom_core::{
-    Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+    required_block_version_for_network, Amount, BlockHeight, Hash256, Timestamp,
+    KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN, NETWORK_MAGIC_REGTEST, TAG_KERNEL_MSG,
+    TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::keys::SecretKey;
@@ -47,6 +48,8 @@ use dom_store::utxo::UtxoEntry;
 use dom_store::DomStore;
 use primitive_types::U256;
 use std::collections::BTreeSet;
+use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 type UtxoBytes = ([u8; 33], Vec<u8>);
@@ -57,7 +60,7 @@ type SpentCommitment = [u8; 33];
 /// read them.
 fn synthetic_header(prev_hash: Hash256, height: u64, nonce_seed: u64) -> BlockHeader {
     BlockHeader {
-        version: PROTOCOL_VERSION,
+        version: required_block_version_for_network(NETWORK_MAGIC_REGTEST, height),
         height: BlockHeight(height),
         prev_hash,
         timestamp: Timestamp(1_700_000_000 + height),
@@ -143,6 +146,83 @@ fn put_header(store: &DomStore, header: &BlockHeader) -> Hash256 {
     hash
 }
 
+fn put_known_header(store: &DomStore, header: &BlockHeader) -> Hash256 {
+    let hash = block_hash(header);
+    store
+        .store_known_block(
+            hash.as_bytes(),
+            &header.to_bytes().expect("header serialise"),
+            &[0u8; 8],
+        )
+        .expect("store known synthetic block");
+    hash
+}
+
+fn deep_valid_v3_header_graph(dir: &std::path::Path) -> (ChainState, Hash256, Hash256) {
+    let reorg_depth = MAX_REORG_DEPTH + 40;
+    let store = open_test_store(dir);
+    let mut chain =
+        ChainState::open(store, Hash256::ZERO, NETWORK_MAGIC_REGTEST).expect("empty chain open");
+
+    let genesis = synthetic_header(Hash256::ZERO, 0, 0xAA);
+    let ancestor = put_header(&chain.store, &genesis);
+
+    let mut local_tip = ancestor;
+    for height in 1..=reorg_depth {
+        local_tip = put_header(
+            &chain.store,
+            &synthetic_header(local_tip, height, 0x1000 + height),
+        );
+    }
+    chain.tip_hash = local_tip;
+    chain.tip_height = BlockHeight(reorg_depth);
+    chain.tip_difficulty = U256::from(reorg_depth);
+
+    let mut rejected_tip = ancestor;
+    for height in 1..=reorg_depth + 1 {
+        rejected_tip = put_known_header(
+            &chain.store,
+            &synthetic_header(rejected_tip, height, 0x2000 + height),
+        );
+    }
+
+    (chain, local_tip, rejected_tip)
+}
+
+#[derive(Clone, Default)]
+struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+    type Writer = LogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        LogWriter(self.0.clone())
+    }
+}
+
+impl Write for LogWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .expect("log buffer lock")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogBuffer {
+    fn contents(&self) -> String {
+        String::from_utf8(self.0.lock().expect("log buffer lock").clone())
+            .expect("UTF-8 tracing output")
+    }
+}
+
 /// Build a linear chain of `len` headers starting from `start_prev` and
 /// `start_height`. Returns every hash, in order.
 fn build_chain(
@@ -169,11 +249,7 @@ fn blinding(seed: u8) -> BlindingFactor {
 }
 
 fn test_chain_id() -> [u8; 32] {
-    *derive_chain_id(
-        dom_core::NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes()
+    *derive_chain_id(dom_core::NETWORK_MAGIC_REGTEST, &Hash256::ZERO).as_bytes()
 }
 
 fn kernel_message(fee: u64, lock_height: u64) -> [u8; 32] {
@@ -257,10 +333,7 @@ fn signed_coinbase(height: BlockHeight, seed: u8) -> CoinbaseTransaction {
     let (proof, _) = dom_crypto::bp2_prove(reward, &blinding).expect("coinbase proof");
     let excess = Commitment::commit(0, &blinding);
     let secret = SecretKey::from_bytes(blinding.as_bytes()).expect("coinbase secret");
-    let chain_id = derive_chain_id(
-        dom_core::NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    );
+    let chain_id = derive_chain_id(dom_core::NETWORK_MAGIC_REGTEST, &Hash256::ZERO);
     let msg = {
         let mut data = Vec::with_capacity(1 + 8);
         data.push(KERNEL_FEAT_COINBASE);
@@ -291,11 +364,12 @@ fn synthetic_block(
     let total_fees = transactions.iter().map(|tx| tx.total_fee().unwrap()).sum();
     let coinbase = valid_coinbase(BlockHeight(height), total_fees, coinbase_seed);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &transactions).expect("pmmr roots");
+        compute_block_pmmr_roots(BlockHeight(height), &coinbase, &transactions)
+            .expect("pmmr roots");
 
     Block {
         header: BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: required_block_version_for_network(NETWORK_MAGIC_REGTEST, height),
             height: BlockHeight(height),
             prev_hash,
             timestamp: Timestamp(1_700_100_000 + height),
@@ -324,10 +398,10 @@ fn valid_coinbase_only_block(
 ) -> Block {
     let coinbase = signed_coinbase(BlockHeight(height), coinbase_seed);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &[]).expect("pmmr roots");
+        compute_block_pmmr_roots(BlockHeight(height), &coinbase, &[]).expect("pmmr roots");
     Block {
         header: BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: required_block_version_for_network(NETWORK_MAGIC_REGTEST, height),
             height: BlockHeight(height),
             prev_hash,
             timestamp: Timestamp(1_700_200_000 + height),
@@ -418,12 +492,10 @@ fn store_side_block(store: &DomStore, block: &Block) -> Hash256 {
 }
 
 fn open_chain(dir: &std::path::Path) -> ChainState {
-    open_test_chain(
-        dir,
-        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-        dom_core::NETWORK_MAGIC_REGTEST,
-    )
-    .expect("chain open")
+    // The reorg fixtures commit a synthetic block-zero record. Hash256::ZERO
+    // selects the unpinned test identity, retaining production genesis
+    // validation while allowing this isolated state-machine fixture to reopen.
+    open_test_chain(dir, Hash256::ZERO, dom_core::NETWORK_MAGIC_REGTEST).expect("chain open")
 }
 
 fn retained_noncanonical_hashes(chain: &ChainState) -> BTreeSet<[u8; 32]> {
@@ -567,6 +639,105 @@ fn check_reorg_depth_boundary() {
 }
 
 #[test]
+fn post_activation_v2_candidate_with_more_work_is_invalid_before_fork_choice() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = open_test_store(dir.path());
+    commit_genesis(&store);
+    let mut chain = open_chain(dir.path());
+    let original_tip = chain.tip_hash;
+    let original_work = chain.tip_difficulty;
+
+    let mut invalid_v2 = valid_coinbase_only_block(original_tip, 1, u64::MAX, 0xB0, 0xF0);
+    invalid_v2.header.version = dom_core::BLOCK_VERSION_LEGACY;
+    invalid_v2.header.total_difficulty = U256::MAX;
+
+    let error = chain
+        .connect_block(&invalid_v2, Timestamp(u64::MAX))
+        .expect_err("post-activation v2 must be invalid regardless of accumulated work");
+
+    assert!(matches!(error, dom_core::DomError::Invalid(_)));
+    assert!(error.to_string().contains("invalid block version 2"));
+    assert_eq!(chain.tip_hash, original_tip);
+    assert_eq!(chain.tip_difficulty, original_work);
+    let rejected_hash = block_hash(&invalid_v2.header);
+    assert!(
+        chain
+            .store
+            .get_block_header(rejected_hash.as_bytes())
+            .unwrap()
+            .is_none(),
+        "invalid v2 candidate must not enter the known-chain store"
+    );
+}
+
+#[test]
+fn persisted_v2_side_tip_is_revalidated_before_fork_choice() {
+    let dir = TempDir::new().expect("tempdir");
+    let store = open_test_store(dir.path());
+    commit_genesis(&store);
+    let genesis_hash = Hash256::from_bytes(store.get_hash_at_height(0).unwrap().unwrap());
+    let canonical = valid_coinbase_only_block(genesis_hash, 1, 2, 0xB1, 0xF1);
+    let canonical_hash = commit_canonical_block(&store, &canonical);
+
+    let mut invalid_v2 = valid_coinbase_only_block(genesis_hash, 1, u64::MAX, 0xB2, 0xF2);
+    invalid_v2.header.version = dom_core::BLOCK_VERSION_LEGACY;
+    invalid_v2.header.total_difficulty = U256::MAX;
+    let invalid_hash = store_side_block(&store, &invalid_v2);
+
+    let mut chain = open_chain(dir.path());
+    assert_eq!(chain.tip_hash, canonical_hash);
+    let error = chain
+        .promote_heavier_known_tip(invalid_hash, Timestamp(u64::MAX))
+        .expect_err("persisted post-activation v2 must fail before work comparison");
+
+    assert!(matches!(error, dom_core::DomError::Invalid(_)));
+    assert!(error.to_string().contains("invalid block version 2"));
+    assert_eq!(chain.tip_hash, canonical_hash);
+}
+
+#[test]
+fn valid_heavier_v3_chain_at_depth_400_is_rejected_by_rolling_finality() {
+    let dir = TempDir::new().expect("tempdir");
+    let (mut chain, local_tip, rejected_tip) = deep_valid_v3_header_graph(dir.path());
+
+    let error = chain
+        .promote_heavier_known_tip(rejected_tip, Timestamp(u64::MAX))
+        .expect_err("a 400-block reorg must be rejected despite greater valid v3 work");
+
+    assert!(matches!(error, dom_core::DomError::PolicyRejected(_)));
+    assert!(error.to_string().contains("rolling finality"));
+    assert_eq!(chain.tip_hash, local_tip);
+}
+
+#[test]
+fn rejected_deep_reorg_emits_warn_with_depth_and_both_tips() {
+    let dir = TempDir::new().expect("tempdir");
+    let (mut chain, local_tip, rejected_tip) = deep_valid_v3_header_graph(dir.path());
+    let logs = LogBuffer::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_target(false)
+        // Without this the field names and `=` are wrapped in ANSI escapes, so
+        // the `depth=400` assertions below never match the captured buffer.
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(logs.clone())
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        chain
+            .promote_heavier_known_tip(rejected_tip, Timestamp(u64::MAX))
+            .expect_err("deep reorg must be rejected");
+    });
+
+    let output = logs.contents();
+    assert!(output.contains("rolling finality rejected deep reorg"));
+    assert!(output.contains(&format!("depth={}", MAX_REORG_DEPTH + 40)));
+    assert!(output.contains(&format!("local_tip={local_tip}")));
+    assert!(output.contains(&format!("rejected_tip={rejected_tip}")));
+}
+
+#[test]
 fn promote_heavier_known_tip_emits_block_level_reorg_metadata() {
     let dir = TempDir::new().expect("tempdir");
     let store = open_test_store(dir.path());
@@ -588,7 +759,7 @@ fn promote_heavier_known_tip_emits_block_level_reorg_metadata() {
 
     let mut chain = open_chain(dir.path());
     let reorg = chain
-        .promote_heavier_known_tip(alt_4_hash)
+        .promote_heavier_known_tip(alt_4_hash, Timestamp(2_000_000_000))
         .expect("reorg promotion");
 
     assert_eq!(reorg.common_ancestor_height, 1);
@@ -658,7 +829,7 @@ fn promote_heavier_known_tip_rewrites_canonical_state_and_survives_restart() {
     assert_eq!(chain.tip_hash, old_3_hash);
 
     let reorg = chain
-        .promote_heavier_known_tip(alt_4_hash)
+        .promote_heavier_known_tip(alt_4_hash, Timestamp(2_000_000_000))
         .expect("reorg promotion");
 
     assert_eq!(reorg.disconnected_txs.len(), 1);
@@ -844,7 +1015,7 @@ fn retained_reorg_candidate_is_not_pruned_before_promotion() {
     }
 
     chain
-        .promote_heavier_known_tip(candidate_4_hash)
+        .promote_heavier_known_tip(candidate_4_hash, Timestamp(2_000_000_000))
         .expect("retained heavier branch must remain promotable");
     assert_eq!(chain.tip_hash, candidate_4_hash);
     assert_eq!(chain.tip_height, BlockHeight(4));

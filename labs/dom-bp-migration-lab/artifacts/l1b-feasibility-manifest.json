@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "dom_commit": "93fa9da42bfcb8cdc5c1b82dde5d6ccc5405c59a",
+  "l0_commit": "93fa9da42bfcb8cdc5c1b82dde5d6ccc5405c59a",
+  "branch_observed": "audit/final-prelaunch-security-gate",
+  "backend": "grin_secp256k1zkp-0.7.15",
+  "algorithm": "classic Bulletproof",
+  "seed": "0xa661e6a7ee510001",
+  "scalar_model_cases": 10000,
+  "classification": "B_NOT_RECOVERABLE_FROM_CURRENT_AGGREGATION",
+  "result": "z_equals_one_makes_z_squared_times_one_minus_z_zero_and_erases_the_only_r_term",
+  "experimental_backend_trace": "not_required; live C expressions were mapped directly and scalar model matches them",
+  "prototype": "not_created; total recovery prerequisite is refuted",
+  "source_hashes": {
+    "dom_bulletproof_bp_rs": "ac79492ff67a547520abe2577808405bbd1a3689912c0992113823b2d8551196",
+    "dom_bulletproof_rs": "67fc50cb675a640a887eff81768cdec2f5cc95d5e41ef7aa9fb0c346a757d912",
+    "dom_transaction_rs": "d7fea957deeff91459fe0f915b8c8dd94cb224863256cc4006841e5094a90701",
+    "grin_rangeproof_impl_h": "88935a658d6912f660e4ee85cfe446f36175f0129093a69872ca1a533047f83a",
+    "grin_main_impl_h": "3d24d0ac45f14d1cd8e356df6801035c999c163216843248ec5f836a9834f750",
+    "grin_bulletproofs_header_h": "dda46d6dde88fe3507a5ee9bacccac3632e94fe65af771cadcb69f181fd33754"
+  },
+  "test_result": "green",
+  "generated_utc": "2026-07-12T17:52:00Z"
+}

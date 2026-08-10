@@ -3,11 +3,11 @@
 //! RFC-0005: transport is Noise_XX.
 //! RFC-0009 Section 4.3: chain_id bound to Noise prologue.
 //!
-//! Prologue = "DOM" || PROTOCOL_VERSION[4 LE] || NETWORK_MAGIC[4 LE] || chain_id[32]
+//! Prologue = `DOM` || protocol version (4-byte LE) || network magic (4-byte LE) || chain ID (32 bytes)
 //!
 //! Any MITM modification to the prologue causes MAC failure — detected cryptographically.
 
-use dom_core::{DomError, PeerMisbehavior, PROTOCOL_VERSION};
+use dom_core::{DomError, PeerMisbehavior, WIRE_PROTOCOL_VERSION};
 use snow::{Builder, HandshakeState, TransportState};
 
 const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
@@ -35,6 +35,15 @@ pub fn handshake_timeout_secs() -> u64 {
 /// Peers that send no messages for this long are disconnected.
 pub const IDLE_TIMEOUT_SECS: u64 = 60;
 
+/// Idle timeout used while an established connection is actively serving IBD.
+///
+/// IBD block bodies can be large and validation can be CPU intensive.  The
+/// normal one-minute liveness policy is appropriate for an idle relay session,
+/// but is too aggressive for a request/validate/request synchronization loop.
+/// This only changes local connection scheduling; it does not affect the wire
+/// protocol or any consensus rule.
+pub const IBD_IDLE_TIMEOUT_SECS: u64 = 5 * 60;
+
 /// Per-frame write timeout for established connections.
 ///
 /// Anti-slowloris: a peer that deliberately stops reading lets our kernel send
@@ -59,11 +68,11 @@ pub fn write_timeout_secs() -> u64 {
 
 /// Build the Noise prologue that binds chain_id to the transport.
 ///
-/// RFC-0009: prologue = "DOM" || u32_le(PROTOCOL_VERSION) || u32_le(NETWORK_MAGIC) || chain_id[32]
+/// RFC-0009: prologue = `DOM` || `u32_le(WIRE_PROTOCOL_VERSION)` || `u32_le(NETWORK_MAGIC)` || chain ID (32 bytes).
 pub fn build_prologue(network_magic: u32, chain_id: &[u8; 32]) -> Vec<u8> {
     let mut prologue = Vec::with_capacity(3 + 4 + 4 + 32);
     prologue.extend_from_slice(b"DOM");
-    prologue.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+    prologue.extend_from_slice(&WIRE_PROTOCOL_VERSION.to_le_bytes());
     prologue.extend_from_slice(&network_magic.to_le_bytes());
     prologue.extend_from_slice(chain_id);
     prologue

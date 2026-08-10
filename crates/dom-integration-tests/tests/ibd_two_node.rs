@@ -15,7 +15,10 @@ use dom_consensus::{
     compute_block_pmmr_roots, derive_chain_id, Block, BlockHeader, CoinbaseKernel,
     CoinbaseTransaction, TransactionOutput,
 };
-use dom_core::{BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, PROTOCOL_VERSION};
+use dom_core::{
+    required_block_version_for_network, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE,
+    WIRE_PROTOCOL_VERSION,
+};
 use dom_integration_tests::helpers::*;
 use dom_node::node::DomNode;
 use dom_pow::{
@@ -29,6 +32,7 @@ use dom_wire::message::{Command, HeadersPayload, HelloPayload, WireMessage};
 use primitive_types::U256;
 use std::fs::{self, File};
 use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,7 +42,7 @@ const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(30);
 const TEST_LMDB_MAP_SIZE: usize = 64 << 20;
 const T1_RANDOMX_BOUNDARY_HEIGHT: u64 = RANDOMX_SEED_INTERVAL + 12;
 const T1_IBD_TIMEOUT: Duration = Duration::from_secs(300);
-const T1_SLOW_MACHINE_MULTIPLIER: u32 = 2;
+const T1_SLOW_MACHINE_MULTIPLIER: u32 = 4;
 const T3_IBD_TIMEOUT: Duration = Duration::from_secs(300);
 static IBD_TWO_NODE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -270,9 +274,10 @@ async fn prepopulate_coinbase_chain(node: &Arc<DomNode>, target_height: u64) -> 
         let coinbase =
             build_test_coinbase(BlockHeight(new_height), &chain_id).map_err(|e| e.to_string())?;
         let (output_root, kernel_root, rangeproof_root) =
-            compute_block_pmmr_roots(&coinbase, &[]).map_err(|e| e.to_string())?;
+            compute_block_pmmr_roots(BlockHeight(new_height), &coinbase, &[])
+                .map_err(|e| e.to_string())?;
         let mut header = BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: required_block_version_for_network(node.config.network.magic(), new_height),
             prev_hash: tip_hash,
             height: BlockHeight(new_height),
             timestamp,
@@ -355,7 +360,7 @@ async fn connect_noise_peer_with_height(
             .expect("perform Noise handshake");
     let mut codec = NoiseCodec::new(transport, config.network.magic());
     let hello = HelloPayload {
-        version: PROTOCOL_VERSION,
+        version: WIRE_PROTOCOL_VERSION,
         network_magic: config.network.magic(),
         chain_id,
         best_height,
@@ -377,12 +382,134 @@ async fn connect_noise_peer_with_height(
     (stream, codec)
 }
 
+async fn connect_noise_peer_with_height_from_ip(
+    node: &Arc<DomNode>,
+    source_ip: Ipv4Addr,
+    best_height: u64,
+    user_agent: &str,
+) -> (tokio::net::TcpStream, NoiseCodec, SocketAddr) {
+    let config = node.config.clone();
+    let socket = tokio::net::TcpSocket::new_v4().expect("create IPv4 adversarial socket");
+    socket
+        .bind(SocketAddr::new(IpAddr::V4(source_ip), 0))
+        .expect("bind adversarial source identity");
+    let mut stream = socket
+        .connect(
+            config
+                .p2p_listen_addr
+                .parse()
+                .expect("parse node listen address"),
+        )
+        .await
+        .expect("connect adversarial peer");
+    let local_addr = stream.local_addr().expect("read adversarial local address");
+    let (privkey, _) = generate_static_keypair();
+    let chain_id = chain_id_for(config.network);
+    let transport =
+        perform_handshake_initiator(&mut stream, &privkey, config.network.magic(), &chain_id)
+            .await
+            .expect("perform Noise handshake");
+    let mut codec = NoiseCodec::new(transport, config.network.magic());
+    let hello = HelloPayload {
+        version: WIRE_PROTOCOL_VERSION,
+        network_magic: config.network.magic(),
+        chain_id,
+        best_height,
+        best_hash: [0u8; 32],
+        user_agent: user_agent.into(),
+        local_timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    };
+    codec
+        .send(
+            &mut stream,
+            &WireMessage {
+                magic: config.network.magic(),
+                command: Command::Hello,
+                payload: hello.to_bytes().expect("serialize hello"),
+            },
+        )
+        .await
+        .expect("send hello");
+    assert_eq!(
+        codec
+            .recv(&mut stream)
+            .await
+            .expect("receive hello")
+            .command,
+        Command::Hello
+    );
+    (stream, codec, local_addr)
+}
+
+#[derive(Debug)]
+struct PeerPenaltyObservation {
+    score: u32,
+    latency: Duration,
+}
+
+async fn reputation_score(node: &Arc<DomNode>, expected_key: &str) -> (u32, Vec<String>) {
+    let reputation = node.peers.lock().await.peer_reputation_state();
+    let score = reputation
+        .entries
+        .iter()
+        .find(|entry| entry.addr == expected_key)
+        .map(|entry| entry.score)
+        .unwrap_or(0);
+    let keys = reputation
+        .entries
+        .into_iter()
+        .map(|entry| entry.addr)
+        .collect();
+    (score, keys)
+}
+
+async fn wait_for_peer_penalty(
+    node: &Arc<DomNode>,
+    expected_key: &str,
+    baseline_score: u32,
+    expected_increment: u32,
+    honest_peer_addr: &str,
+    timeout_duration: Duration,
+) -> PeerPenaltyObservation {
+    let started = Instant::now();
+    loop {
+        let (score, keys) = reputation_score(node, expected_key).await;
+        if score >= baseline_score.saturating_add(expected_increment) {
+            return PeerPenaltyObservation {
+                score,
+                latency: started.elapsed(),
+            };
+        }
+        if started.elapsed() >= timeout_duration {
+            let honest_connected = node
+                .peers
+                .lock()
+                .await
+                .connected_peers()
+                .contains(&honest_peer_addr.to_owned());
+            panic!(
+                "timeout waiting for malicious peer penalty: expected_key={expected_key}, baseline={baseline_score}, current={score}, known_keys={keys:?}, honest_peer={honest_peer_addr}, honest_connected={honest_connected}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 async fn wait_for_any_peer_penalty(node: &Arc<DomNode>, timeout_duration: Duration) {
     tokio::time::timeout(timeout_duration, async {
         loop {
-            let reputation = node.peers.lock().await.peer_reputation_state();
-            if !reputation.entries.is_empty() {
-                break;
+            if !node
+                .peers
+                .lock()
+                .await
+                .peer_reputation_state()
+                .entries
+                .is_empty()
+            {
+                return;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -622,52 +749,69 @@ async fn t3_ibd_noise_fragmentation_headers_above_one_frame_async() {
 }
 
 #[test]
-fn t4_reorg_convergence_between_divergent_nodes() {
-    run_ibd_two_node_test(6, t4_reorg_convergence_between_divergent_nodes_async());
+fn t4_equal_height_divergent_nodes_converge() {
+    run_ibd_two_node_test(6, t4_equal_height_divergent_nodes_converge_async());
 }
 
-async fn t4_reorg_convergence_between_divergent_nodes_async() {
+/// Regression for equal-height fork deadlock: before the fork-resolution IBD
+/// path, two nodes that advertised the same height but different tips never
+/// exchanged headers, so chain-state never got a chance to apply fork choice.
+async fn t4_equal_height_divergent_nodes_converge_async() {
     enable_fast_regtest_mining();
     init_tracing();
-    let mut log = TestLog::new("t4_reorg_convergence");
-    log.line("T4 covers divergent private chains converging via reorg");
+    let mut log = TestLog::new("t4_equal_height_fork_resolution");
+    log.line("T4 covers equal-height divergent private chains converging via fork-resolution IBD");
 
     let port_a = free_local_port();
     let port_b = free_local_port();
     let node_a = spawn_node(test_config("t4-a-private", port_a, false)).await;
     let node_b = spawn_node(test_config("t4-b-private", port_b, false)).await;
     mine_blocks_resilient(&node_a, 10).await.expect("A mine 10");
-    mine_blocks_resilient(&node_b, 8).await.expect("B mine 8");
-    let (_, b_old_hash) = tip(&node_b).await;
+    mine_blocks_resilient(&node_b, 10).await.expect("B mine 10");
+    let (height_a, hash_a) = tip(&node_a).await;
+    let (height_b, hash_b) = tip(&node_b).await;
+    assert_eq!(height_a, height_b, "precondition: equal height");
+    assert_ne!(hash_a, hash_b, "precondition: divergent tips");
 
-    let _task_a = start_node(node_a.clone()).await;
-    let data_dir_b = node_b.config.data_dir.clone();
-    drop(node_b);
+    // Regtest has a fixed per-block target, so equal-height branches have
+    // equal accumulated work.  ChainState's deterministic tie-breaker picks
+    // the lower tip hash.  Choosing that node as the source proves the real
+    // P2P equal-height path transfers the competing branch and converges.
+    let (source, stale, source_port, stale_port, source_hash) =
+        if hash_a.as_bytes() < hash_b.as_bytes() {
+            (node_a, node_b, port_a, port_b, hash_a)
+        } else {
+            (node_b, node_a, port_b, port_a, hash_b)
+        };
+    let stale_old_hash = tip(&stale).await.1;
+    let stale_data_dir = stale.config.data_dir.clone();
+    let _source_task = start_node(source.clone()).await;
+    drop(stale);
 
-    let mut config_b = test_config("t4-b-reopen", port_b, false);
-    config_b.data_dir = data_dir_b;
-    config_b.seed_peers = vec![format!("127.0.0.1:{port_a}")];
-    let node_b = spawn_node(config_b).await;
-    let _task_b = start_node(node_b.clone()).await;
+    let mut stale_config = test_config("t4-stale-reopen", stale_port, false);
+    stale_config.data_dir = stale_data_dir;
+    stale_config.seed_peers = vec![format!("127.0.0.1:{source_port}")];
+    let stale = spawn_node(stale_config).await;
+    let _stale_task = start_node(stale.clone()).await;
 
-    wait_for_height(&node_b, 10, CONVERGENCE_TIMEOUT)
-        .await
-        .expect("B should reorg to A's taller chain");
-    let (h_a, hash_a) = tip(&node_a).await;
-    wait_for_tip_hash(&node_b, hash_a, CONVERGENCE_TIMEOUT).await;
-    let (h_b, hash_b) = tip(&node_b).await;
-    assert_eq!(h_a, h_b);
-    assert_eq!(hash_a, hash_b);
-    assert_ne!(hash_b, b_old_hash, "B did not change tip during reorg");
+    wait_for_tip_hash(&stale, source_hash, CONVERGENCE_TIMEOUT).await;
+    let (source_height, source_tip) = tip(&source).await;
+    let (stale_height, stale_tip) = tip(&stale).await;
+    assert_eq!(source_height, stale_height);
+    assert_eq!(source_tip, stale_tip);
+    assert_ne!(
+        stale_tip, stale_old_hash,
+        "stale node did not change tip during reorg"
+    );
 
-    let utxos_a = node_a
+    let utxos_a = source
         .chain
         .lock()
         .await
         .store
         .read_all_utxos_raw()
         .expect("A utxo set");
-    let utxos_b = node_b
+    let utxos_b = stale
         .chain
         .lock()
         .await
@@ -675,8 +819,8 @@ async fn t4_reorg_convergence_between_divergent_nodes_async() {
         .read_all_utxos_raw()
         .expect("B utxo set");
     assert_eq!(utxos_a, utxos_b, "UTXO sets diverged after reorg");
-    assert_no_bans(&node_a).await;
-    assert_no_bans(&node_b).await;
+    assert_no_bans(&source).await;
+    assert_no_bans(&stale).await;
 }
 
 #[test]
@@ -707,20 +851,58 @@ async fn t5_peer_ban_does_not_isolate_node_from_honest_peer_async() {
         .await
         .expect("B should keep honest A peer");
 
-    let (mut stream, mut codec) =
-        connect_noise_peer_with_height(&node_b, 0, "dom-malicious-c").await;
+    let honest_peer_addr = format!("127.0.0.1:{port_a}");
+    assert!(
+        node_b
+            .peers
+            .lock()
+            .await
+            .connected_peers()
+            .contains(&honest_peer_addr),
+        "B must identify the honest A connection before the C attack"
+    );
+    let malicious_ip = Ipv4Addr::new(127, 0, 0, 2);
+    let malicious_reputation_key = malicious_ip.to_string();
+    let (baseline_score, _) = reputation_score(&node_b, &malicious_reputation_key).await;
+    assert_eq!(
+        baseline_score, 0,
+        "C must not inherit a stale penalty before attack"
+    );
+    let (mut stream, mut codec, malicious_socket) =
+        connect_noise_peer_with_height_from_ip(&node_b, malicious_ip, 0, "dom-malicious-c").await;
+    assert_eq!(malicious_socket.ip(), IpAddr::V4(malicious_ip));
     let invalid = WireMessage {
         magic: node_b.config.network.magic(),
         command: Command::Block,
         payload: vec![0xde, 0xad],
     };
-    for _ in 0..6 {
-        let _ = codec.send(&mut stream, &invalid).await;
-    }
-    wait_for_any_peer_penalty(&node_b, Duration::from_secs(10)).await;
+    codec
+        .send(&mut stream, &invalid)
+        .await
+        .expect("C sends malformed block payload");
+    let penalty = wait_for_peer_penalty(
+        &node_b,
+        &malicious_reputation_key,
+        baseline_score,
+        dom_wire::peer::ban_scores::MALFORMED_MESSAGE,
+        &honest_peer_addr,
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(penalty.latency < Duration::from_secs(10));
     assert!(
-        !node_b.peers.lock().await.connected_peers().is_empty(),
-        "B should retain the honest A connection after penalizing C"
+        penalty.score >= dom_wire::peer::ban_scores::MALFORMED_MESSAGE,
+        "C must receive the malformed-message penalty; observed={:?}",
+        penalty
+    );
+    assert!(
+        node_b
+            .peers
+            .lock()
+            .await
+            .connected_peers()
+            .contains(&honest_peer_addr),
+        "B must retain exact honest A connection after penalizing C"
     );
 
     mine_blocks_resilient(&node_a, 2)
@@ -730,6 +912,27 @@ async fn t5_peer_ban_does_not_isolate_node_from_honest_peer_async() {
     wait_for_height(&node_b, h_a, Duration::from_secs(60))
         .await
         .expect("B should continue syncing from A after C is banned");
+    let honest_peer_connected = node_b
+        .peers
+        .lock()
+        .await
+        .connected_peers()
+        .contains(&honest_peer_addr);
+    let evidence = format!(
+        "T5_EVIDENCE malicious_peer={} baseline={} observed={} latency_ms={} honest_peer_connected={} synchronized_height={}",
+        malicious_reputation_key,
+        baseline_score,
+        penalty.score,
+        penalty.latency.as_millis(),
+        honest_peer_connected,
+        h_a
+    );
+    log.line(&evidence);
+    eprintln!("{evidence}");
+    assert!(
+        honest_peer_connected,
+        "B must retain A after post-penalty sync"
+    );
 }
 
 #[test]

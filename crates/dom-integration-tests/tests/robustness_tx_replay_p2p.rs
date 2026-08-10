@@ -1,30 +1,29 @@
-//! FABLE5-001 — PASSO 1: prova/refuta, no CAMINHO P2P REAL, se o replay de uma
-//! transação chega à validação criptográfica (`validate_transaction` →
-//! Bulletproof + Schnorr) ou é cortado antes por alguma camada de
-//! inventory/gossip/dedup.
+//! FABLE5-001 — STEP 1: proves or refutes whether a transaction replay reaches
+//! cryptographic validation (`validate_transaction` → Bulletproof + Schnorr) on
+//! the real P2P path, or is cut off earlier by an inventory, gossip, or dedup
+//! layer.
 //!
-//! ## Pergunta
-//! Um peer reenvia os MESMOS bytes de uma tx. Cada reenvio dispara
-//! `validate_transaction` (crypto cara) OU é descartado antes?
+//! ## Question
+//! A peer sends the SAME transaction bytes again. Does every replay invoke the
+//! expensive `validate_transaction`, or is it discarded first?
 //!
-//! ## Observável determinístico (não timing)
-//! O caminho P2P de tx (`Command::Tx`, `dom-node/src/node.rs:3865`) NÃO tem
-//! handler de `Command::Inv` (cai no catch-all `other => ignoring`, :4015) e NÃO
-//! consulta nenhum cache antes de `accept_tx_with_chain_view`. Uma tx com prova
-//! de range VÁLIDA mas assinatura Schnorr INVÁLIDA é rejeitada por
-//! `validate_transaction` com `DomError::Invalid`, que `peer_violation_score`
-//! pontua como `INVALID_SIGNATURE (25)`. O score do peer é
-//! consultável via `PeerManager::ban_score(addr)`.
+//! ## Deterministic observation, not timing
+//! The P2P transaction path (`Command::Tx`, `dom-node/src/node.rs:3865`) has no
+//! `Command::Inv` handler and does not consult a cache before
+//! `accept_tx_with_chain_view`. A transaction with a valid range proof but an
+//! invalid Schnorr signature is rejected by `validate_transaction` with
+//! `DomError::Invalid`, which `peer_violation_score` scores as
+//! `INVALID_SIGNATURE (25)`. The peer score is available through
+//! `PeerManager::ban_score(addr)`.
 //!
-//! Logo: se CADA replay chega à crypto, o score sobe +25 por envio. Se houvesse
-//! um dedup ANTES da validação (keyed por hash dos bytes), os reenvios idênticos
-//! seriam descartados e o score ESTAGNARIA em 25 — refutando a tese. A prova é a
-//! progressão do score (25, 50, 75, ...), não o tempo.
+//! Therefore, if EACH replay reaches cryptography, the score rises by 25 per
+//! send. If a dedup layer ran BEFORE validation, keyed by the byte hash,
+//! identical replays would be discarded and the score would plateau at 25. The
+//! proof is the score progression (25, 50, 75, ...), not elapsed time.
 //!
-//! A prova usa range proof válido + assinatura corrompida DE PROPÓSITO para
-//! garantir que o passo caro (`bp_verify`, passo 6 de `validate_transaction`)
-//! roda ANTES da rejeição por assinatura (passo 7) — i.e. cada replay paga uma
-//! verificação Bulletproof real.
+//! The proof uses a valid range proof and a deliberately corrupted signature to
+//! guarantee that the expensive `bp_verify` step runs before signature
+//! rejection. Every replay therefore pays for a real Bulletproof verification.
 
 use dom_config::Network;
 use dom_consensus::derive_chain_id;
@@ -180,9 +179,9 @@ async fn wait_for_ban_score(
     }
 }
 
-/// PASSO 1: provar que cada replay de uma tx chega a `validate_transaction` no
-/// caminho P2P real. Enviamos a MESMA tx (assinatura inválida) N vezes e
-/// observamos o score do peer subir `INVALID_SIGNATURE` por envio.
+/// STEP 1: prove that every transaction replay reaches `validate_transaction`
+/// on the real P2P path. Send the SAME invalid-signature transaction N times
+/// and observe the peer score rise by `INVALID_SIGNATURE` for each send.
 #[tokio::test]
 async fn robustness_p2p_tx_replay_reaches_crypto_each_time() {
     init_tracing();
@@ -238,10 +237,10 @@ async fn robustness_p2p_tx_replay_reaches_crypto_each_time() {
         ban_scores::INVALID_SIGNATURE
     );
 
-    // CONCLUSÃO PASSO 1: o replay PASSA até a crypto no caminho P2P real.
-    // Não há camada de inventory/dedup antes de validate_transaction.
+    // STEP 1 CONCLUSION: the replay reaches cryptography on the real P2P path.
+    // No inventory or dedup layer runs before validate_transaction.
     eprintln!(
-        "PASSO 1 RESULT: replay reaches crypto on the real P2P path. \
+        "STEP 1 RESULT: replay reaches cryptography on the real P2P path. \
          ban score after {sends} identical replays = {score} (= {sends} × {}). \
          No pre-validation inventory/dedup exists.",
         ban_scores::INVALID_SIGNATURE
@@ -281,7 +280,7 @@ fn structurally_valid_tx(fee: u64, seed: u8) -> (Transaction, Vec<u8>, [u8; 32])
     (tx, tx_bytes, tx_hash)
 }
 
-/// PASSO 3: a transaction already present in the node's mempool, when replayed
+/// STEP 3: a transaction already present in the node's mempool, when replayed
 /// over the real P2P path, is short-circuited BEFORE deserialization / chain
 /// lock / validation. We observe the dedicated `suppressed_duplicate_tx_relays`
 /// counter increment — a deterministic signal (not timing). Without the

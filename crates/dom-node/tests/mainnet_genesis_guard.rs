@@ -1,23 +1,24 @@
-use dom_config::NodeConfig;
-use dom_core::DomError;
-use dom_node::node::DomNode;
-use tempfile::TempDir;
+//! Mainnet genesis readiness regression tests.
+//!
+//! These checks deliberately validate the frozen Mainnet identity without
+//! constructing or running a Mainnet node. The final campaign is local-only:
+//! readiness must not require a listener, a database, DNS, NTP, or peer I/O.
 
-const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
+use dom_core::{startup_genesis_hash_for_network_magic, Hash256, NETWORK_MAGIC_MAINNET};
 
 #[test]
-fn init_refuses_mainnet_when_genesis_is_unfinalized() {
-    let temp = TempDir::new().expect("tempdir");
-    let mut config = NodeConfig::mainnet();
-    config.data_dir = temp.path().join("dom-mainnet").display().to_string();
+fn finalized_mainnet_genesis_passes_the_startup_readiness_gate() {
+    assert_eq!(
+        startup_genesis_hash_for_network_magic(NETWORK_MAGIC_MAINNET)
+            .expect("finalized Mainnet genesis must be startup-ready"),
+        Hash256::from_bytes(dom_core::GENESIS_HASH_MAINNET),
+    );
+}
 
-    let err = match DomNode::init_with_map_size(config, TEST_LMDB_MAP_SIZE) {
-        Ok(_) => panic!("mainnet must fail closed"),
-        Err(err) => err,
-    };
-    assert!(matches!(err, DomError::Invalid(_)));
-    assert!(
-        err.to_string().contains("mainnet genesis is not finalized"),
-        "unexpected error: {err}"
+#[test]
+fn finalized_mainnet_genesis_matches_the_frozen_identity() {
+    assert_eq!(
+        Hash256::from_bytes(dom_core::GENESIS_HASH_MAINNET).to_hex(),
+        "182e10af28e7ec072f462e6044f580dc9dd8c866cb78dfc293bbfaee4e9325ce"
     );
 }

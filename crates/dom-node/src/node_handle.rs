@@ -1,21 +1,28 @@
 //! NodeHandle implementation — bridges DomNode to the RPC layer.
 //!
 //! Uses a newtype wrapper (NodeHandleImpl) to satisfy Rust orphan rules:
-//! both Arc<DomNode> and NodeHandle are defined outside dom-node.
+//! both `Arc<DomNode>` and `NodeHandle` are defined outside `dom-node`.
 
 use crate::node::{clear_persisted_mempool_snapshot, snapshot_tx_chain_view, DomNode};
 use dom_core::PROTOCOL_VERSION;
 use dom_rpc::{
-    AncestryRequest, ChainAncestry, ChainIdentity, ChainTip, MempoolTxInfo, NodeHandle, PeerInfo,
-    RpcError, TxAdmission, UtxoInfo, MAX_ANCESTRY_STEPS, MAX_SCAN_RANGE,
+    AncestryRequest, ChainAncestry, ChainIdentity, ChainTip, KernelInfo, MempoolTxInfo, NodeHandle,
+    PeerInfo, RpcError, ShutdownFuture, TxAdmission, UtxoInfo, MAX_ANCESTRY_STEPS, MAX_SCAN_RANGE,
 };
 use dom_serialization::DomDeserialize;
 use std::sync::Arc;
 
-/// Newtype so we can impl the foreign NodeHandle trait for Arc<DomNode>.
+/// Newtype so we can impl the foreign `NodeHandle` trait for `Arc<DomNode>`.
 pub struct NodeHandleImpl(pub Arc<DomNode>);
 
 impl NodeHandle for NodeHandleImpl {
+    fn request_shutdown(&self) -> ShutdownFuture {
+        let node = Arc::clone(&self.0);
+        Box::pin(async move {
+            node.request_shutdown().await;
+        })
+    }
+
     fn chain_height(&self) -> u64 {
         match self.0.chain.try_lock() {
             Ok(c) => c.tip_height.0,
@@ -45,6 +52,15 @@ impl NodeHandle for NodeHandleImpl {
             fee: entry.fee,
             fee_rate: entry.fee_rate,
             weight: entry.weight,
+            kernels: entry
+                .tx
+                .kernels
+                .iter()
+                .map(|kernel| KernelInfo {
+                    features: kernel.features,
+                    lock_height: kernel.lock_height,
+                })
+                .collect(),
         })
     }
 
@@ -260,6 +276,25 @@ impl NodeHandle for NodeHandleImpl {
     fn get_block_header(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
         let c = self.0.chain.try_lock().ok()?;
         c.store.get_block_header(hash).ok().flatten()
+    }
+
+    fn get_block_kernels(&self, hash: &[u8; 32]) -> Option<Vec<KernelInfo>> {
+        use dom_consensus::Block;
+
+        let c = self.0.chain.try_lock().ok()?;
+        let body = c.store.get_block_body(hash).ok()??;
+        let block = Block::from_bytes(&body).ok()?;
+        Some(
+            block
+                .transactions
+                .iter()
+                .flat_map(|tx| tx.kernels.iter())
+                .map(|kernel| KernelInfo {
+                    features: kernel.features,
+                    lock_height: kernel.lock_height,
+                })
+                .collect(),
+        )
     }
 
     fn get_block_hash_at_height(&self, height: u64) -> Option<[u8; 32]> {
@@ -1092,6 +1127,19 @@ mod tests {
             )
             .expect("init node"),
         )
+    }
+
+    #[tokio::test]
+    async fn rpc_shutdown_handle_requests_node_supervisor() {
+        let node = fresh_node("rpc-shutdown-handle");
+        let handle = NodeHandleImpl(node.clone());
+
+        handle.request_shutdown().await;
+
+        assert!(
+            node.task_supervisor.is_shutdown(),
+            "the RPC handle must delegate to DomNode::request_shutdown"
+        );
     }
 
     #[tokio::test]

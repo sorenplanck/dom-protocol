@@ -69,7 +69,7 @@ fn rows() -> Vec<AuditRow> {
         AuditRow {
             name: "MAX_SUPPLY_NOMS",
             runtime: MAX_SUPPLY_NOMS as u128,
-            documented_form: "MAX_SUPPLY_NOMS = 3,299,999,976,900,000",
+            documented_form: "MAX_SUPPLY_NOMS = 3,299,996,676,900,000",
         },
         AuditRow {
             name: "COINBASE_MATURITY",
@@ -152,7 +152,7 @@ fn audit_runtime_constants_match_published_literals() {
     assert_eq!(HALVING_INTERVAL, 330_000, "HALVING_INTERVAL drift");
     assert_eq!(TARGET_SPACING, 120, "TARGET_SPACING drift");
     assert_eq!(
-        MAX_SUPPLY_NOMS, 3_299_999_976_900_000,
+        MAX_SUPPLY_NOMS, 3_299_996_676_900_000,
         "MAX_SUPPLY_NOMS drift"
     );
     assert_eq!(COINBASE_MATURITY, 1_000, "COINBASE_MATURITY drift");

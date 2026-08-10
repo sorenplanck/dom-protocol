@@ -4,12 +4,94 @@
 //! DOM_RFC_0007_Validation_Order.md — Block validation steps 1-7.
 
 use dom_core::{
-    BlockHeight, DomError, Hash256, PeerMisbehavior, Timestamp, FUTURE_BLOCK_SOFT_BUFFER_SECS,
-    MAX_FUTURE_BLOCK_TIME, MEDIAN_TIME_WINDOW, PROTOCOL_VERSION,
+    required_block_version_for_network, BlockHeight, DomError, Hash256, PeerMisbehavior, Timestamp,
+    FUTURE_BLOCK_SOFT_BUFFER_SECS, MAX_FUTURE_BLOCK_TIME, MEDIAN_TIME_WINDOW,
 };
 use dom_pow::CompactTarget;
 use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
 use primitive_types::U256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeaderLinkClassification {
+    Valid,
+    GenesisWithNonzeroPrevious,
+    NonGenesisWithZeroPrevious,
+}
+
+/// Classify the height/previous-hash relationship without allocating.
+pub(crate) const fn classify_header_link(
+    height: u64,
+    previous_hash_is_zero: bool,
+) -> HeaderLinkClassification {
+    if height == 0 && !previous_hash_is_zero {
+        HeaderLinkClassification::GenesisWithNonzeroPrevious
+    } else if height != 0 && previous_hash_is_zero {
+        HeaderLinkClassification::NonGenesisWithZeroPrevious
+    } else {
+        HeaderLinkClassification::Valid
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KernelOffsetClassification {
+    Canonical,
+    EqualToCurveOrder,
+    AboveCurveOrder,
+}
+
+const SECP256K1_N: [u8; 32] = [
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
+    0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
+];
+
+/// Classify a big-endian scalar against the secp256k1 curve order.
+pub(crate) fn classify_kernel_offset(offset: &[u8; 32]) -> KernelOffsetClassification {
+    for (candidate, order) in offset.iter().zip(SECP256K1_N.iter()) {
+        if candidate < order {
+            return KernelOffsetClassification::Canonical;
+        }
+        if candidate > order {
+            return KernelOffsetClassification::AboveCurveOrder;
+        }
+    }
+    KernelOffsetClassification::EqualToCurveOrder
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FutureTimestampClassification {
+    Accept,
+    Defer,
+    Reject { soft_limit: u64 },
+    Overflow,
+}
+
+/// Classify a future timestamp using checked hard- and soft-limit arithmetic.
+pub(crate) const fn classify_future_timestamp_window(
+    block_timestamp: u64,
+    now: u64,
+    hard_delta: u64,
+    soft_delta: u64,
+) -> FutureTimestampClassification {
+    let hard_limit = match now.checked_add(hard_delta) {
+        Some(value) => value,
+        None => return FutureTimestampClassification::Overflow,
+    };
+    let combined_delta = match hard_delta.checked_add(soft_delta) {
+        Some(value) => value,
+        None => return FutureTimestampClassification::Overflow,
+    };
+    let soft_limit = match now.checked_add(combined_delta) {
+        Some(value) => value,
+        None => return FutureTimestampClassification::Overflow,
+    };
+    if block_timestamp > soft_limit {
+        FutureTimestampClassification::Reject { soft_limit }
+    } else if block_timestamp > hard_limit {
+        FutureTimestampClassification::Defer
+    } else {
+        FutureTimestampClassification::Accept
+    }
+}
 
 /// DOM block header.
 ///
@@ -86,6 +168,8 @@ impl DomSerialize for ProofOfWork {
 }
 
 impl DomDeserialize for ProofOfWork {
+    const MIN_SERIALIZED_SIZE: usize = 8 + 32;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         Ok(Self {
             nonce: r.read_u64()?,
@@ -115,6 +199,8 @@ impl DomSerialize for BlockHeader {
 }
 
 impl DomDeserialize for BlockHeader {
+    const MIN_SERIALIZED_SIZE: usize = 4 + 8 + 32 + 8 + 32 + 32 + 32 + 32 + 4 + 32 + 40;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         Ok(Self {
             version: r.read_u32()?,
@@ -136,25 +222,27 @@ impl DomDeserialize for BlockHeader {
 }
 
 /// Validate block header syntax (step 2 of RFC-0007 block validation).
-pub fn validate_header_syntax(header: &BlockHeader) -> Result<(), DomError> {
+pub fn validate_header_syntax(header: &BlockHeader, network_magic: u32) -> Result<(), DomError> {
     // Version check
-    if header.version != PROTOCOL_VERSION {
+    let required_version = required_block_version_for_network(network_magic, header.height.0);
+    if header.version != required_version {
         return Err(DomError::Invalid(format!(
-            "unsupported block version: {} (expected {})",
-            header.version, PROTOCOL_VERSION
+            "invalid block version {} at height {} (required {})",
+            header.version, header.height.0, required_version
         )));
     }
-    // Genesis must have zero prev_hash
-    if header.height == BlockHeight::GENESIS && header.prev_hash != Hash256::ZERO {
-        return Err(DomError::Invalid(
-            "genesis block must have zero prev_hash".into(),
-        ));
-    }
-    // Non-genesis must have non-zero prev_hash
-    if header.height != BlockHeight::GENESIS && header.prev_hash == Hash256::ZERO {
-        return Err(DomError::Invalid(
-            "non-genesis block must have non-zero prev_hash".into(),
-        ));
+    match classify_header_link(header.height.0, header.prev_hash == Hash256::ZERO) {
+        HeaderLinkClassification::Valid => {}
+        HeaderLinkClassification::GenesisWithNonzeroPrevious => {
+            return Err(DomError::Invalid(
+                "genesis block must have zero prev_hash".into(),
+            ));
+        }
+        HeaderLinkClassification::NonGenesisWithZeroPrevious => {
+            return Err(DomError::Invalid(
+                "non-genesis block must have non-zero prev_hash".into(),
+            ));
+        }
     }
     // AUDIT: total_kernel_offset must be a canonical scalar in [0, n-1]
     // Non-canonical offsets are Malformed (not Invalid) per RFC-0010 §4.4
@@ -165,27 +253,15 @@ pub fn validate_header_syntax(header: &BlockHeader) -> Result<(), DomError> {
 /// Validate total_kernel_offset is a canonical secp256k1 scalar in [0, n-1].
 /// RFC-0010 §4.4: non-canonical offset is Malformed.
 fn validate_kernel_offset_canonical(offset: &[u8; 32]) -> Result<(), DomError> {
-    // secp256k1 order n (big-endian)
-    const SECP256K1_N: [u8; 32] = [
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36,
-        0x41, 0x41,
-    ];
-    // offset >= n is non-canonical (zero is valid — zero offset means no graph privacy)
-    for i in 0..32 {
-        if offset[i] < SECP256K1_N[i] {
-            return Ok(());
-        }
-        if offset[i] > SECP256K1_N[i] {
-            return Err(DomError::Malformed(
-                "total_kernel_offset >= secp256k1 order n — non-canonical scalar".into(),
-            ));
-        }
+    match classify_kernel_offset(offset) {
+        KernelOffsetClassification::Canonical => Ok(()),
+        KernelOffsetClassification::AboveCurveOrder => Err(DomError::Malformed(
+            "total_kernel_offset >= secp256k1 order n — non-canonical scalar".into(),
+        )),
+        KernelOffsetClassification::EqualToCurveOrder => Err(DomError::Malformed(
+            "total_kernel_offset == secp256k1 order n — non-canonical scalar".into(),
+        )),
     }
-    // offset == n: also non-canonical (must be in [0, n-1])
-    Err(DomError::Malformed(
-        "total_kernel_offset == secp256k1 order n — non-canonical scalar".into(),
-    ))
 }
 
 /// Check that the block timestamp is not too far in the future (step 5).
@@ -244,26 +320,24 @@ pub fn validate_future_timestamp_with_buffer_limits(
     max_future_block_time: u64,
     future_block_soft_buffer_secs: u64,
 ) -> Result<TimestampDecision, DomError> {
-    let hard_limit = now
-        .checked_add_secs(max_future_block_time)
-        .ok_or_else(|| DomError::Invalid("timestamp overflow".into()))?;
-
-    let soft_limit = now
-        .checked_add_secs(max_future_block_time + future_block_soft_buffer_secs)
-        .ok_or_else(|| DomError::Invalid("timestamp overflow".into()))?;
-
-    if header.timestamp.0 > soft_limit.0 {
-        return Err(DomError::TemporarilyInvalid(format!(
-            "block timestamp {} too far in future (soft limit {})",
-            header.timestamp.0, soft_limit.0
-        )));
+    match classify_future_timestamp_window(
+        header.timestamp.0,
+        now.0,
+        max_future_block_time,
+        future_block_soft_buffer_secs,
+    ) {
+        FutureTimestampClassification::Accept => Ok(TimestampDecision::Accept),
+        FutureTimestampClassification::Defer => Ok(TimestampDecision::Defer),
+        FutureTimestampClassification::Reject { soft_limit } => {
+            Err(DomError::TemporarilyInvalid(format!(
+                "block timestamp {} too far in future (soft limit {})",
+                header.timestamp.0, soft_limit
+            )))
+        }
+        FutureTimestampClassification::Overflow => {
+            Err(DomError::Invalid("timestamp overflow".into()))
+        }
     }
-
-    if header.timestamp.0 > hard_limit.0 {
-        return Ok(TimestampDecision::Defer);
-    }
-
-    Ok(TimestampDecision::Accept)
 }
 
 /// Validate strict parent timestamp monotonicity.
@@ -370,10 +444,13 @@ pub fn validate_pow_for_network(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dom_core::{
+        BLOCK_VERSION_LEGACY, BLOCK_VERSION_V3, MAINNET_V3_ACTIVATION_HEIGHT, NETWORK_MAGIC_MAINNET,
+    };
 
     fn dummy_header() -> BlockHeader {
         BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: BLOCK_VERSION_LEGACY,
             height: BlockHeight::GENESIS,
             prev_hash: Hash256::ZERO,
             timestamp: Timestamp(1_704_067_200),
@@ -392,21 +469,47 @@ mod tests {
 
     #[test]
     fn genesis_header_valid_syntax() {
-        assert!(validate_header_syntax(&dummy_header()).is_ok());
+        assert!(validate_header_syntax(&dummy_header(), NETWORK_MAGIC_MAINNET).is_ok());
     }
 
     #[test]
     fn genesis_nonzero_prev_hash_rejected() {
         let mut h = dummy_header();
         h.prev_hash = Hash256::from_bytes([0x01u8; 32]);
-        assert!(validate_header_syntax(&h).is_err());
+        assert!(validate_header_syntax(&h, NETWORK_MAGIC_MAINNET).is_err());
     }
 
     #[test]
     fn wrong_version_rejected() {
         let mut h = dummy_header();
         h.version = 99;
-        assert!(validate_header_syntax(&h).is_err());
+        assert!(validate_header_syntax(&h, NETWORK_MAGIC_MAINNET).is_err());
+    }
+
+    #[test]
+    fn mainnet_v3_activation_boundary_is_bidirectional() {
+        let mut header = dummy_header();
+
+        header.height = BlockHeight(MAINNET_V3_ACTIVATION_HEIGHT - 1);
+        header.prev_hash = Hash256::from_bytes([1; 32]);
+        header.version = BLOCK_VERSION_LEGACY;
+        assert!(validate_header_syntax(&header, NETWORK_MAGIC_MAINNET).is_ok());
+
+        header.version = BLOCK_VERSION_V3;
+        assert!(matches!(
+            validate_header_syntax(&header, NETWORK_MAGIC_MAINNET),
+            Err(DomError::Invalid(_))
+        ));
+
+        header.height = BlockHeight(MAINNET_V3_ACTIVATION_HEIGHT);
+        header.version = BLOCK_VERSION_V3;
+        assert!(validate_header_syntax(&header, NETWORK_MAGIC_MAINNET).is_ok());
+
+        header.version = BLOCK_VERSION_LEGACY;
+        assert!(matches!(
+            validate_header_syntax(&header, NETWORK_MAGIC_MAINNET),
+            Err(DomError::Invalid(_))
+        ));
     }
 
     #[test]
@@ -424,6 +527,23 @@ mod tests {
         let bytes = h.to_bytes().unwrap();
         let h2 = BlockHeader::from_bytes(&bytes).unwrap();
         assert_eq!(h, h2);
+    }
+
+    #[test]
+    fn v2_and_v3_headers_share_the_same_serialized_layout() {
+        use dom_serialization::DomSerialize;
+
+        let legacy = dummy_header();
+        let mut v3 = legacy.clone();
+        v3.version = BLOCK_VERSION_V3;
+        let legacy_bytes = legacy.to_bytes().unwrap();
+        let v3_bytes = v3.to_bytes().unwrap();
+
+        assert_eq!(legacy_bytes.len(), BlockHeader::MIN_SERIALIZED_SIZE);
+        assert_eq!(legacy_bytes.len(), v3_bytes.len());
+        assert_eq!(&legacy_bytes[..4], &BLOCK_VERSION_LEGACY.to_le_bytes());
+        assert_eq!(&v3_bytes[..4], &BLOCK_VERSION_V3.to_le_bytes());
+        assert_eq!(&legacy_bytes[4..], &v3_bytes[4..]);
     }
 
     #[test]
@@ -451,5 +571,13 @@ mod tests {
         h.timestamp = Timestamp(131);
         let now = Timestamp(100);
         assert!(validate_future_timestamp_with_limit(&h, now, 30).is_err());
+    }
+
+    #[test]
+    fn future_timestamp_limit_sum_overflow_fails_closed() {
+        let mut h = dummy_header();
+        h.timestamp = Timestamp(1);
+        let result = validate_future_timestamp_with_buffer_limits(&h, Timestamp(0), u64::MAX, 1);
+        assert!(matches!(result, Err(DomError::Invalid(_))));
     }
 }

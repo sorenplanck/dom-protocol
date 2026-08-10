@@ -1,17 +1,18 @@
-//! Phase 2 sub-step 1: prove the standard-Bulletproof shim (`bp2_prove`/
-//! `bp2_verify`, grin backend) is callable and correct at the CONSENSUS level.
+//! Consensus-level validation for the final DOM bounded aggregate range proof.
 
 use dom_consensus::{validate_range_proofs, Transaction, TransactionKernel, TransactionOutput};
 use dom_core::DomError;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
-use dom_crypto::{bp2_prove, bp2_test_only_prove_legacy_single_with_nonce, bp2_verify};
+use dom_crypto::{
+    bp2_test_only_prove_legacy_single_with_nonce, range_proof_prove_bytes, range_proof_verify,
+};
 
 /// Mirror of `dom_consensus::transaction::validate_range_proofs`, but verifying
-/// with the standard-Bulletproof `bp2_verify`. Same control-flow shape: iterate
+/// with the final range-proof verifier. Same control-flow shape: iterate
 /// outputs, verify each proof against its commitment, map results to DomError.
 fn validate_range_proofs_bp2(outputs: &[TransactionOutput]) -> Result<(), DomError> {
     for (i, output) in outputs.iter().enumerate() {
-        match bp2_verify(output.commitment.as_bytes(), &output.proof) {
+        match range_proof_verify(output.commitment.as_bytes(), &output.proof) {
             Ok(true) => {}
             Ok(false) => {
                 return Err(DomError::Invalid(format!(
@@ -28,9 +29,10 @@ fn validate_range_proofs_bp2(outputs: &[TransactionOutput]) -> Result<(), DomErr
     Ok(())
 }
 
-/// Build a real TransactionOutput using the NEW standard-Bulletproof prover.
+/// Build a real TransactionOutput using the final range-proof prover.
 fn make_output(value: u64, blinding: &BlindingFactor) -> TransactionOutput {
-    let (proof, commitment_sec1) = bp2_prove(value, blinding).expect("bp2_prove");
+    let (proof, commitment_sec1) =
+        range_proof_prove_bytes(value, blinding).expect("range proof prove");
     let commitment = Commitment::from_compressed_bytes(&commitment_sec1).expect("commitment parse");
     TransactionOutput { commitment, proof }
 }
@@ -54,7 +56,7 @@ fn bp2_outputs_validate_at_consensus_shape() {
 
     // Validates through the consensus-shaped range-proof check.
     validate_range_proofs_bp2(&outputs)
-        .expect("valid bp2 outputs must pass consensus-shape validation");
+        .expect("valid final range proofs must pass consensus-shape validation");
 }
 
 #[test]
@@ -91,29 +93,9 @@ fn bp2_wrong_commitment_rejected() {
     );
 }
 
-#[test]
-fn bp2_proof_is_distinct_from_borromean_path() {
-    // Demonstrate the two paths are genuinely separate: a grin standard-Bulletproof
-    // (739 bytes) is NOT accepted by the borromean verifier the legacy API name
-    // path uses (`dom_crypto::bp_verify`). This is why bp2 must be validated via
-    // bp2_verify, and confirms the borromean path is untouched/independent.
-    let blinding = BlindingFactor::from_bytes([5u8; 32]).unwrap();
-    let output = make_output(42, &blinding);
-
-    let borromean_accepts = matches!(
-        dom_crypto::bp_verify(output.commitment.as_bytes(), &output.proof),
-        Ok(true)
-    );
-    assert!(
-        !borromean_accepts,
-        "a standard Bulletproof must NOT verify under the borromean bp_verify"
-    );
-}
-
-/// Sub-step 6: the MAX_PROOF_SIZE serialization envelope is sized to the
-/// Bulletproof format. A real bp2 proof is exactly 739 bytes (pinned), a valid
-/// output round-trips through (de)serialization, and a proof exceeding
-/// MAX_PROOF_SIZE is rejected by the deserializer BEFORE allocation.
+/// Sub-step 6: the range proof remains exactly 739 bytes while the output
+/// envelope allows one bounded recovery capsule. A proof envelope exceeding the
+/// output cap is rejected by the deserializer before allocation.
 #[test]
 fn bp2_proof_size_and_serialization_envelope() {
     use dom_serialization::{DomDeserialize, DomSerialize, Reader, Writer};
@@ -139,11 +121,10 @@ fn bp2_proof_size_and_serialization_envelope() {
     assert_eq!(decoded.proof.len(), 739);
     validate_range_proofs_bp2(std::slice::from_ref(&decoded)).expect("decoded output validates");
 
-    // (3) A proof exceeding MAX_PROOF_SIZE is rejected by the deserializer BEFORE
-    //     allocating it (read_vec checks the declared length against the cap first).
+    // (3) An output envelope exceeding its cap is rejected before allocation.
     let oversized = TransactionOutput {
         commitment: valid.commitment.clone(),
-        proof: vec![0u8; dom_core::MAX_PROOF_SIZE + 1],
+        proof: vec![0u8; dom_core::MAX_OUTPUT_PROOF_ENVELOPE_SIZE + 1],
     };
     let mut w2 = Writer::new();
     oversized.serialize(&mut w2).expect("serialize oversized");
@@ -151,7 +132,7 @@ fn bp2_proof_size_and_serialization_envelope() {
     let mut r2 = Reader::new(&bytes2);
     assert!(
         TransactionOutput::deserialize(&mut r2).is_err(),
-        "a proof above MAX_PROOF_SIZE must be rejected at deserialize, before allocation"
+        "an output proof envelope above its cap must reject before allocation"
     );
 }
 
@@ -159,7 +140,7 @@ fn bp2_proof_size_and_serialization_envelope() {
 fn legacy_over_cap_bp2_proof_is_rejected_by_live_consensus() {
     let blinding = BlindingFactor::from_bytes([0x33; 32]).unwrap();
     let nonce = [0x99; 32];
-    let over_cap = dom_crypto::bulletproof::MAX_PROVABLE_VALUE + 1;
+    let over_cap = dom_crypto::MAX_PROVABLE_VALUE + 1;
     let (proof, commitment_sec1) =
         bp2_test_only_prove_legacy_single_with_nonce(over_cap, &blinding, &nonce)
             .expect("legacy unsafe proof");
@@ -179,7 +160,7 @@ fn legacy_over_cap_bp2_proof_is_rejected_by_live_consensus() {
     };
     let err = validate_range_proofs(&tx).expect_err("legacy over-cap proof must reject");
     assert!(
-        err.to_string().contains("range proof"),
+        err.to_string().contains("proof envelope"),
         "unexpected error: {err}"
     );
 }

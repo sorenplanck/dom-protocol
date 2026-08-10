@@ -27,7 +27,7 @@ use dom_consensus::{
 };
 use dom_core::{
     Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    MIN_RELAY_FEE_RATE, NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION, TAG_KERNEL_MSG_COINBASE,
+    MIN_RELAY_FEE_RATE, NETWORK_MAGIC_REGTEST, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::{
     hash::blake2b_256_tagged,
@@ -125,7 +125,7 @@ fn mine_fast_header(
     let mut nonce = 0u64;
     loop {
         let mut header = BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: dom_core::required_block_version_for_network(NETWORK_MAGIC_REGTEST, height.0),
             height,
             prev_hash,
             timestamp,
@@ -164,7 +164,7 @@ fn build_block_with_txs(
     let target = fixed_target();
     let coinbase = build_coinbase(height, 0, coinbase_seed, chain_id);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &transactions).expect("roots");
+        compute_block_pmmr_roots(height, &coinbase, &transactions).expect("roots");
     let total_difficulty = parent_total_difficulty + U256::from(target_to_difficulty(&target));
     let header = mine_fast_header(
         target,
@@ -242,12 +242,10 @@ fn block_hash(block: &Block) -> Hash256 {
 }
 
 fn open_chain(dir: &std::path::Path) -> ChainState {
-    open_test_chain(
-        dir,
-        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-        NETWORK_MAGIC_REGTEST,
-    )
-    .expect("chain open")
+    // These direct-ingress fixtures construct their own block-zero record.
+    // Use the unpinned test identity so the canonical Regtest genesis check
+    // remains enforced for production configurations without rejecting it.
+    open_test_chain(dir, Hash256::ZERO, NETWORK_MAGIC_REGTEST).expect("chain open")
 }
 
 fn safe_now() -> Timestamp {
@@ -255,11 +253,7 @@ fn safe_now() -> Timestamp {
 }
 
 fn chain_id() -> [u8; 32] {
-    *derive_chain_id(
-        NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes()
+    *derive_chain_id(NETWORK_MAGIC_REGTEST, &Hash256::ZERO).as_bytes()
 }
 
 fn is_cut_through_rejection(msg: &str) -> bool {

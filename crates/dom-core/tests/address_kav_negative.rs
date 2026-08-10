@@ -9,7 +9,7 @@
 //! reference-crate differential) live in `src/address.rs` `#[cfg(test)]`
 //! `shield_bech32m`, where the private codec is reachable.
 
-use dom_core::Address;
+use dom_core::{Address, NETWORK_MAGIC_MAINNET, NETWORK_MAGIC_REGTEST, NETWORK_MAGIC_TESTNET};
 
 // ── KAV-negativo ─────────────────────────────────────────────────────────────
 
@@ -63,8 +63,8 @@ fn mixed_case_address_is_rejected() {
 }
 
 /// KAV-negativo. Wrong payload length: a string that bech32m-decodes cleanly but
-/// whose decoded payload is not exactly 33 bytes MUST be rejected by
-/// `Address::decode`. (32-byte payload encoded with a valid checksum.)
+/// whose decoded payload is not exactly the 40-byte Wallet V3 envelope MUST be
+/// rejected by `Address::decode`.
 #[test]
 fn wrong_length_payload_rejected() {
     use bech32::{Bech32m, Hrp};
@@ -73,14 +73,14 @@ fn wrong_length_payload_rejected() {
     // are NOT 33 bytes. The reference crate gives them a correct checksum, so the
     // ONLY thing that can reject them is DOM's 33-byte payload gate — isolating
     // that vector from any checksum failure.
-    for wrong_len in [0usize, 1, 32, 34, 64] {
+    for wrong_len in [0usize, 1, 33, 39, 41, 64] {
         let payload = vec![0xAB_u8; wrong_len];
         let s = bech32::encode::<Bech32m>(dom, &payload).unwrap();
         // Sanity: the string itself is checksum-valid per the reference crate.
         assert!(bech32::decode(&s).is_ok(), "reference must accept {s}");
         assert!(
             Address::decode(&s).is_err(),
-            "valid-checksum `dom` address with {wrong_len}-byte payload must be rejected (only 33 is legal)"
+            "valid-checksum `dom` address with {wrong_len}-byte payload must be rejected"
         );
     }
 }
@@ -97,7 +97,7 @@ fn unknown_hrp_rejected() {
     use bech32::{Bech32m, Hrp};
     let hrp = Hrp::parse("btc").unwrap();
     let _ = s; // original kept for documentation
-    let foreign = bech32::encode::<Bech32m>(hrp, &[0x02u8; 33]).unwrap();
+    let foreign = bech32::encode::<Bech32m>(hrp, &addr.to_payload_bytes()).unwrap();
     assert!(
         Address::decode(&foreign).is_err(),
         "address with unknown HRP `btc` must be rejected"
@@ -108,7 +108,7 @@ fn unknown_hrp_rejected() {
 /// in-charset but breaks the bech32m checksum MUST be rejected.
 #[test]
 fn bad_checksum_rejected() {
-    let addr = Address::new([0x05u8; 33], true);
+    let addr = Address::new([0x02u8; 33], true);
     let mut s = addr.encode();
     // Mutate a data char (skip the 'dom1' prefix) to a different in-charset char.
     let bytes = unsafe { s.as_bytes_mut() };
@@ -143,6 +143,39 @@ fn structurally_invalid_strings_rejected() {
     }
 }
 
+#[test]
+fn regtest_address_roundtrip_and_wrong_network_rejected() {
+    let addr = Address::new_for_network([0x02u8; 33], NETWORK_MAGIC_REGTEST).unwrap();
+    let encoded = addr.encode();
+    assert!(encoded.starts_with("rdom1"));
+    let decoded = Address::decode(&encoded).unwrap();
+    assert_eq!(decoded.network_magic, NETWORK_MAGIC_REGTEST);
+    assert!(decoded.validate_for_network(NETWORK_MAGIC_REGTEST).is_ok());
+    assert!(decoded.validate_for_network(NETWORK_MAGIC_TESTNET).is_err());
+}
+
+#[test]
+fn unknown_payload_version_rejected() {
+    use bech32::{Bech32m, Hrp};
+    let mut payload = Address::new_for_network([0x02u8; 33], NETWORK_MAGIC_MAINNET)
+        .unwrap()
+        .to_payload_bytes();
+    payload[0] = 2;
+    let s = bech32::encode::<Bech32m>(Hrp::parse("dom").unwrap(), &payload).unwrap();
+    assert!(Address::decode(&s).is_err());
+}
+
+#[test]
+fn malformed_public_key_rejected() {
+    use bech32::{Bech32m, Hrp};
+    let mut payload = Address::new_for_network([0x02u8; 33], NETWORK_MAGIC_MAINNET)
+        .unwrap()
+        .to_payload_bytes();
+    payload[7] = 0x04;
+    let s = bech32::encode::<Bech32m>(Hrp::parse("dom").unwrap(), &payload).unwrap();
+    assert!(Address::decode(&s).is_err());
+}
+
 // ── KAV-drift-congelado (byte-freeze) ────────────────────────────────────────
 
 /// KAV-drift-congelado. Freeze the exact bech32m string for two canonical
@@ -156,11 +189,12 @@ fn canonical_address_byte_freeze() {
     let a_main = Address::new([0x02u8; 33], true).encode();
     // payload = all-0x03, testnet.
     let a_test = Address::new([0x03u8; 33], false).encode();
-    // payload = incrementing 0,1,2,... , mainnet.
+    // payload = compressed-key-shaped incrementing bytes, mainnet.
     let mut inc = [0u8; 33];
     for (i, b) in inc.iter_mut().enumerate() {
         *b = u8::try_from(i).unwrap();
     }
+    inc[0] = 0x02;
     let a_inc = Address::new(inc, true).encode();
 
     assert_eq!(
@@ -184,6 +218,9 @@ fn canonical_address_byte_freeze() {
 
 // Frozen canonical address strings (computed from the current encoder and
 // pinned; see canonical_address_byte_freeze).
-const ADDR_MAIN_02: &str = "dom1qgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqy3rj4dj";
-const ADDR_TEST_03: &str = "tdom1qvpsxqcrqvpsxqcrqvpsxqcrqvpsxqcrqvpsxqcrqvpsxqcrqvpsxfvmd3z";
-const ADDR_MAIN_INC: &str = "dom1qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0jqde9c6k";
+const ADDR_MAIN_02: &str =
+    "dom1qyqqqv2dfazqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszjhch5m";
+const ADDR_TEST_03: &str =
+    "tdom1qyqqq4zdfazqxqcrqvpsxqcrqvpsxqcrqvpsxqcrqvpsxqcrqvpsxqcrqvpsxqcrku6f3c";
+const ADDR_MAIN_INC: &str =
+    "dom1qyqqqv2dfazqyqgzqvzq2ps8pqys5zcvp58q7yq3zgf3g9gkzuvpjxsmrsw3u8eqa0mmy9";

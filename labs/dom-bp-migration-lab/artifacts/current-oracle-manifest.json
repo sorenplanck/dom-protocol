@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "observed_at_utc": "2026-07-12T17:30:25Z",
+  "dom_branch": "audit/final-prelaunch-security-gate",
+  "dom_head": "aa7f389a157af1b1a486dcb7e27cb80e7b543de3",
+  "backend": "dom-current-classic-bulletproof",
+  "backend_version": "grin_secp256k1zkp-0.7.15",
+  "algorithm": "classic Bulletproof",
+  "max_provable_value": 4503599627370495,
+  "proof_nbits": 64,
+  "proof_ncommits": 2,
+  "expected_proof_len": 739,
+  "h_dom_sec1": "020e2cfc9aba78455ffd390cf5f1d17b9982d0ee29b266bb3ea6217b078f09d550",
+  "h_dom_sha256": "186631a5374d3daac51e983b340caba18d49d071e9babee0d86f75b5dbc584f4",
+  "property_seed_hex": "d052ce111ab00001",
+  "property_cases": 10000,
+  "observed_source_sha256": {
+    "crates/dom-crypto/src/bulletproof_bp.rs": "ac79492ff67a547520abe2577808405bbd1a3689912c0992113823b2d8551196",
+    "crates/dom-crypto/src/bulletproof.rs": "67fc50cb675a640a887eff81768cdec2f5cc95d5e41ef7aa9fb0c346a757d912",
+    "crates/dom-consensus/src/transaction.rs": "d7fea957deeff91459fe0f915b8c8dd94cb224863256cc4006841e5094a90701"
+  },
+  "l0_test_result": "passed",
+  "notes": [
+    "Laboratory artifact only; it does not authorize a migration.",
+    "No secret blind, nonce, proof bytes, or recovery material is recorded."
+  ]
+}

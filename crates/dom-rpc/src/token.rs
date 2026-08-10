@@ -87,27 +87,38 @@ fn token_file_path() -> Result<PathBuf, std::io::Error> {
     Ok(dom_dir.join("rpc_token"))
 }
 
-/// Save token to ~/.dom/rpc_token with 0600 permissions.
+/// Save token to ~/.dom/rpc_token with owner-only permissions.
 fn save_token(token: &str) -> Result<(), std::io::Error> {
     let token_path = token_file_path()?;
+    save_token_at(&token_path, token)
+}
+
+/// Create a token file without exposing it through the process umask.
+fn save_token_at(token_path: &std::path::Path, token: &str) -> Result<(), std::io::Error> {
     let dom_dir = token_path
         .parent()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Invalid token path"))?;
 
-    // Create ~/.dom if it doesn't exist
+    // Create the parent directory before opening the token file.
     std::fs::create_dir_all(dom_dir)?;
 
-    // Write token
-    std::fs::write(&token_path, format!("{}\n", token))?;
-
-    // Set permissions to 0600 (owner read/write only)
+    // `create_new` prevents a concurrent replacement and, on Unix, `mode`
+    // applies before the file becomes visible. This avoids a write-then-chmod
+    // window where a newly generated bearer token inherits a permissive umask.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&token_path)?.permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(&token_path, perms)?;
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(token_path)?;
+        file.write_all(format!("{token}\n").as_bytes())?;
+        file.sync_all()?;
     }
+
+    #[cfg(not(unix))]
+    std::fs::write(token_path, format!("{token}\n"))?;
 
     Ok(())
 }
@@ -130,62 +141,21 @@ mod tests {
         assert_ne!(t1, t2);
     }
 
-    // ───────────────────────────────────────────────────────────────────────
-    // dom-shield Lens B (secrets) — token.rs — Soren Planck
-    // ───────────────────────────────────────────────────────────────────────
-
-    /// SECRET-1 (TOCTOU / world-readable window) — directed test on the
-    /// save_token write→chmod ordering.
-    ///
-    /// `save_token` does `std::fs::write(path, token)` THEN, separately,
-    /// `set_permissions(path, 0600)`. Between those two syscalls the file
-    /// exists with the process umask (commonly 0644 → world/group-readable):
-    /// the secret is on disk readable by other local users for a window before
-    /// the chmod lands. The atomic fix is to create the file with mode 0600
-    /// (OpenOptions::mode(0o600)) so it is NEVER readable by others.
-    ///
-    /// save_token is private and writes a FIXED path (~/.dom/rpc_token); we must
-    /// not touch the real home file. We therefore reproduce the EXACT production
-    /// sequence (write-then-chmod) on a temp file and assert the final mode is
-    /// 0600 (post-condition) while documenting the transient window. This pins
-    /// the post-state and records the TOCTOU window as a finding (the test
-    /// cannot observe the sub-millisecond window deterministically without a
-    /// race, so the window itself is asserted by code-shape review, below).
+    /// A generated token must be created with owner-only permissions from the
+    /// first visible filesystem state, rather than tightened after writing.
     #[cfg(unix)]
     #[test]
-    fn save_token_final_mode_is_0600_but_write_precedes_chmod_toctou() {
+    fn save_token_creates_owner_only_file_without_write_chmod_window() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rpc_token");
 
-        // Reproduce production sequence from save_token():
-        // 1) write (inherits umask — transient world/group-readable window)
-        std::fs::write(&path, "deadbeef\n").unwrap();
-        let mode_after_write = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-
-        // 2) chmod 0600 (closes the window)
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(&path, perms).unwrap();
-        let mode_final = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-
-        // Post-condition: final mode is locked to owner-only. (Holds.)
-        assert_eq!(mode_final, 0o600, "final mode must be 0600");
-
-        // FINDING (TOCTOU): the mode immediately after write is the umask
-        // result, NOT 0600 — the secret was on disk world/group-readable for
-        // the interval between the two syscalls. Under the common 0022 umask
-        // that is 0644. We assert the window is real (write mode != 0600) so a
-        // future atomic-create fix (OpenOptions::mode(0o600)) would flip this.
-        // If the platform umask happens to be 0077, mode_after_write could be
-        // 0600 already; we only DOCUMENT the gap, not hard-fail on umask.
-        if mode_after_write != 0o600 {
-            // window confirmed on this host's umask
-            assert!(
-                mode_after_write & 0o077 != 0,
-                "expected a permissive transient mode demonstrating the TOCTOU window"
-            );
-        }
+        save_token_at(&path, "deadbeef").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "token must be owner-only at creation");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "deadbeef\n");
+        assert!(save_token_at(&path, "replacement").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "deadbeef\n");
     }
 
     /// SECRET-2 (zeroization) — STATIC-REVIEW NOTE, intentionally ignored.

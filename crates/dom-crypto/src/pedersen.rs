@@ -402,6 +402,14 @@ mod tests {
     }
 
     #[test]
+    fn blinding_factor_debug_is_redacted() {
+        let blinding = BlindingFactor::from_bytes([1u8; 32]).expect("valid blinding");
+        let dbg = format!("{blinding:?}");
+        assert!(dbg.contains("REDACTED"));
+        assert!(!dbg.contains("01010101"));
+    }
+
+    #[test]
     fn commitment_roundtrip_bytes() {
         let bf = rand_bf();
         let c = Commitment::commit(1000, &bf);

@@ -20,6 +20,58 @@
 
 use dom_core::DomError;
 
+#[cfg(kani)]
+mod kani_invariants;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadAdvance {
+    End(usize),
+    Overflow,
+    OutOfBounds,
+}
+
+/// Classify one reader cursor advance without indexing or allocation.
+pub(crate) const fn classify_read_advance(
+    data_len: usize,
+    position: usize,
+    count: usize,
+) -> ReadAdvance {
+    match position.checked_add(count) {
+        None => ReadAdvance::Overflow,
+        Some(end) if end > data_len => ReadAdvance::OutOfBounds,
+        Some(end) => ReadAdvance::End(end),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListBudget {
+    Valid(usize),
+    ZeroItemSize,
+    Overflow,
+    Insufficient,
+}
+
+/// Classify the minimum canonical byte budget for a declared list.
+pub(crate) const fn classify_list_budget(
+    count: usize,
+    minimum_item_size: usize,
+    remaining: usize,
+) -> ListBudget {
+    if minimum_item_size == 0 {
+        return ListBudget::ZeroItemSize;
+    }
+    match count.checked_mul(minimum_item_size) {
+        None => ListBudget::Overflow,
+        Some(required) if required > remaining => ListBudget::Insufficient,
+        Some(required) => ListBudget::Valid(required),
+    }
+}
+
+/// Return whether a declared collection length is within its protocol limit.
+pub(crate) const fn length_within_limit(declared: usize, limit: usize) -> bool {
+    declared <= limit
+}
+
 // ── Writer ────────────────────────────────────────────────────────────────────
 
 /// Canonical byte writer.
@@ -148,17 +200,19 @@ impl<'a> Reader<'a> {
 
     /// Consume `n` bytes. Returns error if insufficient data.
     fn consume(&mut self, n: usize) -> Result<&'a [u8], DomError> {
-        let end = self
-            .pos
-            .checked_add(n)
-            .ok_or_else(|| DomError::Malformed("position arithmetic overflow".into()))?;
-        if end > self.data.len() {
-            return Err(DomError::Malformed(format!(
-                "unexpected EOF: need {n} bytes at pos {}, have {}",
-                self.pos,
-                self.remaining()
-            )));
-        }
+        let end = match classify_read_advance(self.data.len(), self.pos, n) {
+            ReadAdvance::End(end) => end,
+            ReadAdvance::Overflow => {
+                return Err(DomError::Malformed("position arithmetic overflow".into()));
+            }
+            ReadAdvance::OutOfBounds => {
+                return Err(DomError::Malformed(format!(
+                    "unexpected EOF: need {n} bytes at pos {}, have {}",
+                    self.pos,
+                    self.remaining()
+                )));
+            }
+        };
         let slice = &self.data[self.pos..end];
         self.pos = end;
         Ok(slice)
@@ -208,11 +262,11 @@ impl<'a> Reader<'a> {
 
     /// Read a length-prefixed byte vector.
     ///
-    /// The length prefix is u32 LE. Rejects if length exceeds `max_len`.
-    /// Uses checked arithmetic — no implicit overflow.
+    /// The length prefix is u32 LE. Rejects if length exceeds `max_len`, then
+    /// consumes exactly that many bytes through the reader's checked position path.
     pub fn read_vec(&mut self, max_len: usize) -> Result<Vec<u8>, DomError> {
         let len = self.read_u32()? as usize;
-        if len > max_len {
+        if !length_within_limit(len, max_len) {
             return Err(DomError::Malformed(format!(
                 "vec length {len} exceeds limit {max_len}"
             )));
@@ -222,23 +276,40 @@ impl<'a> Reader<'a> {
 
     /// Read a length-prefixed list of deserializable items.
     ///
-    /// Rejects if count exceeds `max_count`.
+    /// Rejects if count exceeds `max_count` or if the declared item count cannot
+    /// fit in the remaining input using the type's canonical serialized minimum
+    /// item size. The budget is intentionally based on protocol wire encoding,
+    /// not Rust memory layout, so acceptance is identical across architectures.
     pub fn read_list<T: DomDeserialize>(&mut self, max_count: usize) -> Result<Vec<T>, DomError> {
         let count = self.read_u32()? as usize;
-        if count > max_count {
+        if !length_within_limit(count, max_count) {
             return Err(DomError::Malformed(format!(
                 "list count {count} exceeds limit {max_count}"
             )));
         }
-        let min_item_size = std::mem::size_of::<T>().max(1);
+        let min_item_size = T::MIN_SERIALIZED_SIZE;
         let remaining = self.data.len().saturating_sub(self.pos);
-        let max_by_remaining = remaining
-            .checked_div(min_item_size)
-            .ok_or_else(|| DomError::Internal("minimum item size is zero".into()))?;
-        if count > max_by_remaining {
-            return Err(DomError::Malformed(format!(
-                "list count {count} exceeds remaining byte budget {remaining} for minimum item size {min_item_size}"
-            )));
+        match classify_list_budget(count, min_item_size, remaining) {
+            ListBudget::Valid(_) => {}
+            ListBudget::ZeroItemSize => {
+                return Err(DomError::Internal(
+                    "minimum serialized item size must be non-zero".into(),
+                ));
+            }
+            ListBudget::Overflow => {
+                return Err(DomError::Malformed(
+                    "list minimum serialized byte budget overflow".into(),
+                ));
+            }
+            ListBudget::Insufficient => {
+                let required_min_bytes = count
+                    .checked_mul(min_item_size)
+                    .expect("insufficient budget classification excludes overflow");
+                return Err(DomError::Malformed(format!(
+                    "list count {count} requires at least {required_min_bytes} serialized bytes, \
+                     but only {remaining} bytes remain"
+                )));
+            }
         }
         let mut items = Vec::with_capacity(count);
         for _ in 0..count {
@@ -269,7 +340,7 @@ pub trait DomSerialize {
     /// Serialize into a writer.
     fn serialize(&self, w: &mut Writer) -> Result<(), DomError>;
 
-    /// Convenience: serialize to a new Vec<u8>.
+    /// Convenience: serialize to a new `Vec<u8>`.
     fn to_bytes(&self) -> Result<Vec<u8>, DomError> {
         let mut w = Writer::new();
         self.serialize(&mut w)?;
@@ -279,6 +350,13 @@ pub trait DomSerialize {
 
 /// Canonical deserialization trait.
 pub trait DomDeserialize: Sized {
+    /// Minimum number of bytes any canonical serialized value of this type can
+    /// occupy on the wire.
+    ///
+    /// This is a protocol constant. It must not depend on Rust memory layout,
+    /// alignment, pointer width, or host ABI.
+    const MIN_SERIALIZED_SIZE: usize;
+
     /// Deserialize from a reader.
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError>;
 
@@ -302,6 +380,8 @@ impl DomSerialize for dom_core::Hash256 {
 }
 
 impl DomDeserialize for dom_core::Hash256 {
+    const MIN_SERIALIZED_SIZE: usize = 32;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         let arr = r.read_array::<32>()?;
         Ok(dom_core::Hash256::from_bytes(arr))
@@ -318,6 +398,8 @@ impl DomSerialize for dom_core::BlockHeight {
 }
 
 impl DomDeserialize for dom_core::BlockHeight {
+    const MIN_SERIALIZED_SIZE: usize = 8;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         Ok(dom_core::BlockHeight(r.read_u64()?))
     }
@@ -331,6 +413,8 @@ impl DomSerialize for dom_core::Timestamp {
 }
 
 impl DomDeserialize for dom_core::Timestamp {
+    const MIN_SERIALIZED_SIZE: usize = 8;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         Ok(dom_core::Timestamp(r.read_u64()?))
     }
@@ -344,6 +428,8 @@ impl DomSerialize for dom_core::Amount {
 }
 
 impl DomDeserialize for dom_core::Amount {
+    const MIN_SERIALIZED_SIZE: usize = 8;
+
     fn deserialize(r: &mut Reader<'_>) -> Result<Self, DomError> {
         dom_core::Amount::from_noms(r.read_u64()?)
     }

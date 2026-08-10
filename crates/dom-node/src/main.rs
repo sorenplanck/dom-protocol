@@ -1,12 +1,57 @@
 //! DOM node entry point.
 
-use dom_config::NodeConfig;
+use dom_config::{parse_dom_network, Network, NodeConfig};
 use dom_node::node::DomNode;
 use std::sync::Arc;
 use tracing::info;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupAction {
+    Run,
+    Version,
+    Help,
+}
+
+fn parse_startup_action<I>(args: I) -> anyhow::Result<StartupAction>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut args = args.into_iter();
+    let _program = args.next();
+    let Some(argument) = args.next() else {
+        return Ok(StartupAction::Run);
+    };
+    if args.next().is_some() {
+        anyhow::bail!("only --help or --version are accepted as command-line arguments");
+    }
+    match argument.as_str() {
+        "--version" | "-V" => Ok(StartupAction::Version),
+        "--help" | "-h" => Ok(StartupAction::Help),
+        _ => anyhow::bail!("unknown argument {argument:?}; use --help"),
+    }
+}
+
+fn print_help() {
+    println!(
+        "DOM node {}\n\nUsage:\n  DOM_NETWORK=<mainnet|testnet|regtest> dom-node\n\nThe network must be selected explicitly before the node initializes storage, listeners, mining, or peer discovery.\n\nOptions:\n  -h, --help       Print help\n  -V, --version    Print version",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    match parse_startup_action(std::env::args())? {
+        StartupAction::Run => {}
+        StartupAction::Version => {
+            println!("dom-node {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        StartupAction::Help => {
+            print_help();
+            return Ok(());
+        }
+    }
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("DOM_LOG").unwrap_or_else(|_| "info".into()))
@@ -16,30 +61,28 @@ async fn main() -> anyhow::Result<()> {
     info!("Author: Soren Planck");
     info!("License: MIT");
 
-    // Select network via DOM_NETWORK (regtest|testnet|mainnet). Defaults to testnet.
-    // Regtest is a LOCAL dev network with a trivial PoW target — fast blocks, no real mining power
-    // needed. NEVER use regtest for anything public.
-    let mut config = match std::env::var("DOM_NETWORK").as_deref() {
-        Ok("regtest") => {
+    // Select the network before any storage, listener, RPC, metrics, mining, or
+    // peer task is initialized. The value must exactly match a canonical
+    // lowercase network name; a missing value fails closed.
+    let network_value = std::env::var("DOM_NETWORK").ok();
+    let network = parse_dom_network(network_value.as_deref())?;
+    let mut config = match network {
+        Network::Regtest => {
             info!("Network: REGTEST (local dev, trivial PoW)");
             NodeConfig::regtest()
         }
-        Ok("mainnet") => {
+        Network::Mainnet => {
             info!("Network: MAINNET");
             NodeConfig::mainnet()
         }
-        Ok("testnet") | Err(_) => {
-            info!("Network: testnet");
-            NodeConfig::testnet()
-        }
-        Ok(other) => {
-            info!("Unknown DOM_NETWORK={other}, defaulting to testnet");
+        Network::Testnet => {
+            info!("Network: TESTNET");
             NodeConfig::testnet()
         }
     };
 
     // Allow override of seed peers via DOM_SEED_PEERS env var (CSV of host:port).
-    // Useful for testnet privado where DNS seeds don't exist.
+    // Useful for private Testnet deployments where DNS seeds do not exist.
     if let Ok(seeds_csv) = std::env::var("DOM_SEED_PEERS") {
         let seeds: Vec<String> = seeds_csv
             .split(',')
@@ -60,9 +103,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Allow internal Prometheus metrics endpoint via DOM_METRICS_LISTEN_ADDR.
-    // Prefer loopback bindings such as 127.0.0.1:3371; metrics expose node
-    // health and topology signals and should not be public by default.
-    if let Ok(addr) = std::env::var("DOM_METRICS_LISTEN_ADDR") {
+    // Metrics remain disabled unless explicitly enabled. The value `default`
+    // selects the authoritative loopback-only service port.
+    if let Ok(requested) = std::env::var("DOM_METRICS_LISTEN_ADDR") {
+        let addr = if requested == "default" {
+            format!("127.0.0.1:{}", dom_core::METRICS_PORT)
+        } else {
+            requested
+        };
         info!("Enabling metrics listen address: {addr}");
         config.metrics_listen_addr = Some(addr);
     }
@@ -70,7 +118,12 @@ async fn main() -> anyhow::Result<()> {
     // Allow enabling the RPC server via DOM_RPC_LISTEN_ADDR.
     // The RPC exposes /status, /block, /wallet/spend (bearer-auth) etc. Prefer an internal
     // binding (127.0.0.1) or a firewalled interface; /wallet/spend is sensitive.
-    if let Ok(addr) = std::env::var("DOM_RPC_LISTEN_ADDR") {
+    if let Ok(requested) = std::env::var("DOM_RPC_LISTEN_ADDR") {
+        let addr = if requested == "default" {
+            config.network.default_rpc_listen_addr()
+        } else {
+            requested
+        };
         info!("Enabling RPC listen address: {addr}");
         config.rpc_listen_addr = Some(addr);
     }
@@ -138,4 +191,26 @@ async fn main() -> anyhow::Result<()> {
     // Run node
     node.run().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_startup_action, StartupAction};
+
+    #[test]
+    fn inspection_arguments_exit_before_node_startup() {
+        assert_eq!(
+            parse_startup_action(["dom-node".into(), "--version".into()]).unwrap(),
+            StartupAction::Version
+        );
+        assert_eq!(
+            parse_startup_action(["dom-node".into(), "--help".into()]).unwrap(),
+            StartupAction::Help
+        );
+    }
+
+    #[test]
+    fn unknown_startup_argument_fails_closed() {
+        assert!(parse_startup_action(["dom-node".into(), "--unknown".into()]).is_err());
+    }
 }

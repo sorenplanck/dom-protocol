@@ -1,4 +1,4 @@
-//! KAV-drift-congelado — byte-freeze of consensus-critical deterministic
+//! KAV frozen-drift — byte freeze of consensus-critical deterministic
 //! outputs. Unlike conformance KAVs, a freeze test pins the CURRENT behavior so
 //! ANY future drift (dependency bump, refactor, accidental format change) trips
 //! a RED that demands explicit human re-confirmation. These are NOT conformance

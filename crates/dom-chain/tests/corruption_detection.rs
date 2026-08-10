@@ -47,8 +47,6 @@ use primitive_types::U256;
 use std::collections::BTreeMap;
 use tempfile::TempDir;
 
-const REGTEST_GENESIS: [u8; 32] = dom_core::GENESIS_HASH_REGTEST;
-
 fn put_raw(store: &DomStore, db_name: &str, key: &[u8], value: &[u8]) {
     let db = match db_name {
         DB_BLOCKS => store.db_blocks,
@@ -243,9 +241,22 @@ fn make_hash(seed: u8) -> [u8; 32] {
 }
 
 fn open_chain(dir: &std::path::Path) -> Result<ChainState, dom_core::DomError> {
-    open_test_chain(
-        dir,
-        Hash256::from_bytes(REGTEST_GENESIS),
+    // This target persists intentionally synthetic raw blocks to exercise
+    // corruption detection. The unpinned test identity keeps reopen checks
+    // focused on the fabricated storage state; production startup is pinned
+    // to the frozen network genesis hash.
+    open_test_chain(dir, Hash256::ZERO, dom_core::NETWORK_MAGIC_REGTEST)
+}
+
+/// FIX-020: the explicit operator UTXO-repair entry point. A persisted-vs-canonical
+/// UTXO divergence is fatal under the default `open_chain` (see
+/// `ibd_directed_corruption::fix020_*`); the reconstruction that used to run
+/// silently now runs ONLY under this opt-in. The tests below exercise the
+/// reconstruction *correctness* and therefore open in repair mode.
+fn open_chain_repair(dir: &std::path::Path) -> Result<ChainState, dom_core::DomError> {
+    ChainState::open_with_utxo_repair(
+        open_test_store(dir),
+        Hash256::ZERO,
         dom_core::NETWORK_MAGIC_REGTEST,
     )
 }
@@ -290,7 +301,7 @@ fn healthy_committed_block_opens_cleanly() {
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
-                        proof: vec![0u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -315,7 +326,7 @@ fn corrupt_utxo_entry_is_rebuilt_from_canonical_history_on_reopen() {
         let canonical_entry = UtxoEntry {
             block_height: 1,
             is_coinbase: true,
-            proof: vec![0u8; 8],
+            proof: vec![0xAA; 8],
         };
         store
             .commit_block(
@@ -332,7 +343,8 @@ fn corrupt_utxo_entry_is_rebuilt_from_canonical_history_on_reopen() {
         delete_raw(&store, DB_METADATA, METADATA_UTXO_SET_DIGEST_KEY);
     }
 
-    let reopened = open_chain(dir.path()).expect("reopen must rebuild corrupt utxo entry");
+    let reopened =
+        open_chain_repair(dir.path()).expect("repair reopen must rebuild corrupt utxo entry");
     let repaired = reopened
         .store
         .get_utxo(&output)
@@ -370,7 +382,7 @@ fn missing_utxo_entry_is_rebuilt_from_canonical_history_on_reopen() {
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
-                        proof: vec![1u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -382,7 +394,8 @@ fn missing_utxo_entry_is_rebuilt_from_canonical_history_on_reopen() {
         delete_raw(&store, DB_METADATA, METADATA_UTXO_SET_DIGEST_KEY);
     }
 
-    let reopened = open_chain(dir.path()).expect("reopen must restore missing utxo entry");
+    let reopened =
+        open_chain_repair(dir.path()).expect("repair reopen must restore missing utxo entry");
     let repaired = reopened
         .store
         .get_utxo(&output)
@@ -415,7 +428,7 @@ fn extra_utxo_entry_is_removed_by_canonical_rebuild_on_reopen() {
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
-                        proof: vec![2u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -437,7 +450,8 @@ fn extra_utxo_entry_is_removed_by_canonical_rebuild_on_reopen() {
         delete_raw(&store, DB_METADATA, METADATA_UTXO_SET_DIGEST_KEY);
     }
 
-    let reopened = open_chain(dir.path()).expect("reopen must remove extra utxo entry");
+    let reopened =
+        open_chain_repair(dir.path()).expect("repair reopen must remove extra utxo entry");
     assert!(
         reopened.store.get_utxo(&output).unwrap().is_some(),
         "canonical utxo must remain"
@@ -471,7 +485,7 @@ fn reopen_rebuilds_exact_canonical_utxo_after_missing_entry_corruption() {
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
-                        proof: vec![6u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -490,7 +504,7 @@ fn reopen_rebuilds_exact_canonical_utxo_after_missing_entry_corruption() {
         delete_raw(&store, DB_METADATA, METADATA_UTXO_SET_DIGEST_KEY);
     }
 
-    let reopened = open_chain(dir.path()).expect("reopen must rebuild missing utxo");
+    let reopened = open_chain_repair(dir.path()).expect("repair reopen must rebuild missing utxo");
     assert_eq!(
         utxo_digest(&dump_utxo_db(&reopened.store)),
         canonical_digest
@@ -519,7 +533,7 @@ fn reopen_rebuilds_exact_canonical_utxo_after_fake_entry_corruption() {
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
-                        proof: vec![7u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -548,7 +562,7 @@ fn reopen_rebuilds_exact_canonical_utxo_after_fake_entry_corruption() {
         delete_raw(&store, DB_METADATA, METADATA_UTXO_SET_DIGEST_KEY);
     }
 
-    let reopened = open_chain(dir.path()).expect("reopen must drop fake utxo");
+    let reopened = open_chain_repair(dir.path()).expect("repair reopen must drop fake utxo");
     assert_eq!(
         utxo_digest(&dump_utxo_db(&reopened.store)),
         canonical_digest
@@ -574,7 +588,7 @@ fn reopen_rebuilds_exact_canonical_utxo_after_altered_persisted_utxo() {
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
-                        proof: vec![8u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -603,7 +617,8 @@ fn reopen_rebuilds_exact_canonical_utxo_after_altered_persisted_utxo() {
         delete_raw(&store, DB_METADATA, METADATA_UTXO_SET_DIGEST_KEY);
     }
 
-    let reopened = open_chain(dir.path()).expect("reopen must repair altered utxo entry");
+    let reopened =
+        open_chain_repair(dir.path()).expect("repair reopen must repair altered utxo entry");
     assert_eq!(
         utxo_digest(&dump_utxo_db(&reopened.store)),
         canonical_digest
@@ -629,7 +644,7 @@ fn reopen_rebuilds_exact_canonical_utxo_after_digest_metadata_corruption() {
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
-                        proof: vec![9u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -680,7 +695,7 @@ fn canonical_utxo_set_is_equivalent_before_and_after_restart() {
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
-                        proof: vec![3u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -699,7 +714,7 @@ fn canonical_utxo_set_is_equivalent_before_and_after_restart() {
                     UtxoEntry {
                         block_height: 2,
                         is_coinbase: true,
-                        proof: vec![4u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -748,7 +763,7 @@ fn interrupted_reopen_does_not_leave_partial_repair_state() {
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
-                        proof: vec![5u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -808,7 +823,7 @@ fn known_side_block_does_not_resurrect_as_tip_on_restart() {
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
-                        proof: vec![0u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -864,7 +879,7 @@ fn alternating_canonical_and_side_arrivals_reopen_to_canonical_chain() {
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
-                        proof: vec![0u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -886,7 +901,7 @@ fn alternating_canonical_and_side_arrivals_reopen_to_canonical_chain() {
                     UtxoEntry {
                         block_height: 2,
                         is_coinbase: true,
-                        proof: vec![1u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -942,7 +957,7 @@ fn duplicate_known_side_block_rejected_without_mutating_canonical_state() {
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
-                        proof: vec![0u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -991,7 +1006,7 @@ fn reopen_rebuilds_missing_kernel_index_for_canonical_blocks() {
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
-                        proof: vec![0u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -1035,7 +1050,7 @@ fn reopen_rejects_duplicate_kernel_excess_in_legacy_canonical_history() {
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
-                        proof: vec![0u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -1054,7 +1069,7 @@ fn reopen_rejects_duplicate_kernel_excess_in_legacy_canonical_history() {
                     UtxoEntry {
                         block_height: 2,
                         is_coinbase: true,
-                        proof: vec![1u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -1099,7 +1114,7 @@ fn delayed_side_branch_candidate_stays_noncanonical_after_restart() {
                     UtxoEntry {
                         block_height: 1,
                         is_coinbase: true,
-                        proof: vec![0u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],
@@ -1124,7 +1139,7 @@ fn delayed_side_branch_candidate_stays_noncanonical_after_restart() {
                     UtxoEntry {
                         block_height: 2,
                         is_coinbase: true,
-                        proof: vec![1u8; 8],
+                        proof: vec![0xAA; 8],
                     }
                     .to_bytes(),
                 )],

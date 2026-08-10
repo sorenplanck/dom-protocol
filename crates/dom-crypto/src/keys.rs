@@ -132,6 +132,26 @@ impl std::fmt::Debug for SecretKey {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct PublicKey(secp256k1::PublicKey);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompressedKeyFrontier {
+    WrongLength,
+    WrongPrefix,
+    Candidate,
+}
+
+pub(crate) const fn classify_compressed_key_frontier(
+    length: usize,
+    prefix: u8,
+) -> CompressedKeyFrontier {
+    if length != 33 {
+        CompressedKeyFrontier::WrongLength
+    } else if prefix != 0x02 && prefix != 0x03 {
+        CompressedKeyFrontier::WrongPrefix
+    } else {
+        CompressedKeyFrontier::Candidate
+    }
+}
+
 impl PublicKey {
     /// Parse from 33-byte compressed SEC1 encoding.
     ///
@@ -141,17 +161,20 @@ impl PublicKey {
     /// - not a valid curve point
     /// - point is at infinity
     pub fn from_compressed_bytes(bytes: &[u8]) -> Result<Self, DomError> {
-        if bytes.len() != 33 {
-            return Err(DomError::Malformed(format!(
-                "compressed public key must be 33 bytes, got {}",
-                bytes.len()
-            )));
-        }
-        if bytes[0] != 0x02 && bytes[0] != 0x03 {
-            return Err(DomError::Malformed(format!(
-                "compressed public key prefix must be 0x02 or 0x03, got 0x{:02x}",
-                bytes[0]
-            )));
+        let prefix = bytes.first().copied().unwrap_or_default();
+        match classify_compressed_key_frontier(bytes.len(), prefix) {
+            CompressedKeyFrontier::WrongLength => {
+                return Err(DomError::Malformed(format!(
+                    "compressed public key must be 33 bytes, got {}",
+                    bytes.len()
+                )));
+            }
+            CompressedKeyFrontier::WrongPrefix => {
+                return Err(DomError::Malformed(format!(
+                    "compressed public key prefix must be 0x02 or 0x03, got 0x{prefix:02x}"
+                )));
+            }
+            CompressedKeyFrontier::Candidate => {}
         }
         secp256k1::PublicKey::from_slice(bytes)
             .map(Self)
@@ -245,6 +268,14 @@ mod tests {
     fn secret_key_debug_is_redacted() {
         let sk = test_secret_key();
         let dbg = format!("{:?}", sk);
+        assert!(dbg.contains("REDACTED"));
+        assert!(!dbg.contains("01010101"));
+    }
+
+    #[test]
+    fn scalar_debug_is_redacted() {
+        let scalar = Scalar::from_be_bytes([1u8; 32]).expect("valid scalar");
+        let dbg = format!("{scalar:?}");
         assert!(dbg.contains("REDACTED"));
         assert!(!dbg.contains("01010101"));
     }

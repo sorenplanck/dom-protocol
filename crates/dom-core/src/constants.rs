@@ -11,92 +11,111 @@ use crate::{DomError, Hash256};
 
 // ── Timing & Difficulty ──────────────────────────────────────────────────────
 
-/// [CONSENSUS] Target block spacing in seconds (2 minutes).
+/// Consensus. Target block spacing in seconds (2 minutes).
 pub const TARGET_SPACING: u64 = 120;
 
-/// [CONSENSUS] Canonical target block interval in seconds.
+/// Consensus. Canonical target block interval in seconds.
 ///
 /// Alias of `TARGET_SPACING` kept for explicit retargeting codepaths and logs.
 pub const TARGET_BLOCK_TIME_SECS: u64 = TARGET_SPACING;
 
-/// [CONSENSUS] Number of blocks in the deterministic difficulty adjustment window.
+/// Consensus. Number of blocks in the deterministic difficulty adjustment window.
 pub const DIFFICULTY_ADJUSTMENT_WINDOW: u64 = 60;
 
-/// [CONSENSUS] Hardest allowed per-window adjustment factor.
+/// Consensus. Hardest allowed per-window adjustment factor.
 ///
 /// Fast blocks can make the next target at most this many times harder
 /// (numerically smaller) in one adjustment step.
 pub const MAX_DIFFICULTY_ADJUSTMENT_FACTOR_UP: u64 = 4;
 
-/// [CONSENSUS] Easiest allowed per-window adjustment factor.
+/// Consensus. Easiest allowed per-window adjustment factor.
 ///
 /// Slow blocks can make the next target at most this many times easier
 /// (numerically larger) in one adjustment step.
 pub const MAX_DIFFICULTY_ADJUSTMENT_FACTOR_DOWN: u64 = 4;
 
-/// [CONSENSUS] ASERT half-life in target-spacing blocks.
+/// Consensus. ASERT half-life in target-spacing blocks.
 pub const ASERT_HALF_LIFE_BLOCKS: u64 = 288;
 
-/// [CONSENSUS] ASERT half-life in seconds.
+/// Consensus. ASERT half-life in seconds.
 pub const ASERT_HALF_LIFE: u64 = TARGET_SPACING * ASERT_HALF_LIFE_BLOCKS;
 
-/// [CONSENSUS] Fixed-point radix bits for ASERT exponent arithmetic.
+/// Consensus. Fixed-point radix bits for ASERT exponent arithmetic.
 pub const ASERT_RADIX_BITS: u32 = 16;
 
-/// [CONSENSUS] ASERT fixed-point radix (2^16 = 65536).
+/// Consensus. ASERT fixed-point radix (2^16 = 65536).
 pub const ASERT_RADIX: u64 = 1u64 << ASERT_RADIX_BITS;
 
 // ── Genesis ──────────────────────────────────────────────────────────────────
 
-/// [CONSENSUS] Genesis PoW target compact = 0x1e00ffff.
+/// Consensus. Genesis PoW target compact = 0x1e00ffff.
 /// Calibrated for CPU solo RandomX, ~2 min per block.
 /// ASERT adjusts automatically from block 1 onward.
 pub const GENESIS_TARGET_COMPACT: u32 = 0x1e00_ffff;
 
-/// [CONSENSUS] Initial difficulty (computed from GENESIS_TARGET_COMPACT).
-pub const INITIAL_DIFFICULTY: u64 = 1;
-
-/// [CONSENSUS] Frozen testnet genesis timestamp (Unix seconds).
+/// Consensus. Frozen testnet genesis timestamp (Unix seconds).
 ///
 /// This value is already live on the controlled testnet and must remain stable
 /// for every testnet node forever.
 pub const GENESIS_TIMESTAMP_TESTNET: u64 = 1_778_642_633;
 
-/// [CONSENSUS] Pre-launch mainnet genesis timestamp placeholder (Unix seconds).
+/// Consensus. Historical pre-ceremony Mainnet timestamp sentinel.
 ///
-/// This is only the ceremony input placeholder. It is not sufficient to enable
-/// mainnet by itself: `GENESIS_HASH_MAINNET` must be pinned from the canonical
-/// derivation path and `MAINNET_GENESIS_FINALIZED` must be flipped in the same
-/// review set. Until then, any mainnet startup path MUST fail closed.
+/// Retained only so the readiness guard can reject an accidental rollback to
+/// the old Testnet-aliasing placeholder. It is not used for construction.
 pub const GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER: u64 = GENESIS_TIMESTAMP_TESTNET;
 
-/// [CONSENSUS] Backwards-compatible alias used by pre-existing genesis code.
-///
-/// Do not treat this alias as proof that mainnet is finalized; use
-/// `genesis_timestamp_for_network_magic()` plus
-/// `ensure_network_genesis_ready()` instead.
+/// Consensus. Final offline-ceremony Mainnet genesis timestamp (Unix seconds).
+pub const GENESIS_TIMESTAMP_MAINNET: u64 = 1_784_071_429;
+
+/// Consensus. Final offline-ceremony Regtest genesis timestamp (Unix seconds).
+pub const GENESIS_TIMESTAMP_REGTEST: u64 = GENESIS_TIMESTAMP_MAINNET;
+
+/// Consensus. Lowest valid Mainnet genesis nonce from the offline ceremony.
+pub const GENESIS_NONCE_MAINNET: u64 = 7_150;
+
+/// Consensus. Lowest valid Regtest genesis nonce from the offline ceremony.
+pub const GENESIS_NONCE_REGTEST: u64 = 0;
+
+/// Consensus. RandomX digest for the finalized Mainnet genesis header.
+pub const GENESIS_POW_DIGEST_MAINNET: [u8; 32] = [
+    0x00, 0x00, 0x03, 0xbd, 0xa0, 0xb1, 0x41, 0x65, 0x6e, 0x3a, 0x08, 0x6f, 0xbb, 0x2e, 0x01, 0x83,
+    0x21, 0xed, 0x26, 0x11, 0xc9, 0xd5, 0xa7, 0x23, 0xbf, 0x9b, 0x85, 0xcc, 0xe9, 0xba, 0xf3, 0xab,
+];
+
+/// Consensus. Fast-development PoW digest for finalized Regtest genesis.
+pub const GENESIS_POW_DIGEST_REGTEST: [u8; 32] = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x96, 0x5d, 0xe1, 0xca, 0x3c, 0xdb, 0x82, 0x26, 0xdd, 0x38, 0x7e, 0xa2, 0xa8, 0x75, 0xb6, 0x4d,
+];
+
+/// Consensus. Historical placeholder alias retained for rollback detection.
 pub const GENESIS_TIMESTAMP_PLACEHOLDER: u64 = GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER;
 
-/// [CONSENSUS] Immutable message inscribed in the genesis coinbase.
+/// Consensus. Exact UTF-8 bytes carried by the Mainnet genesis inscription.
+///
+/// This constant is the sole source of the consensus payload. Testnet and
+/// Regtest do not serialize it. The Mainnet identity format is defined by
+/// `dom-chain`; presentation strings and documentation are not authorities.
 pub const GENESIS_MESSAGE: &str = "Not a store of value. A means of exchange.";
 
 // ── Monetary Policy ──────────────────────────────────────────────────────────
 
-/// [CONSENSUS] Base unit. 1 DOM = 100_000_000 noms.
+/// Consensus. Base unit. 1 DOM = 100_000_000 noms.
 pub const COIN_UNIT: u64 = 100_000_000;
 
-/// [CONSENSUS] Initial block subsidy: 33 DOM in noms.
+/// Consensus. Initial block subsidy: 33 DOM in noms.
 pub const INITIAL_BLOCK_REWARD: u64 = 33 * COIN_UNIT; // 3_300_000_000 noms
 
-/// [CONSENSUS] Blocks between each halving of the block reward.
+/// Consensus. Blocks between each halving of the block reward.
 /// 330_000 blocks ≈ 1.25 years at 2-minute block time.
 pub const HALVING_INTERVAL: u64 = 330_000;
 
-/// [CONSENSUS] Number of active halving epochs.
+/// Consensus. Number of active halving epochs.
 /// After epoch 54, reward becomes 0 (integer arithmetic floor).
 pub const HALVING_EPOCHS: u32 = 55;
 
-/// [CONSENSUS] Block reward schedule, in noms, per halving epoch.
+/// Consensus. Block reward schedule, in noms, per halving epoch.
 ///
 /// Derived deterministically via integer arithmetic:
 ///   reward(0) = 33 * COIN_UNIT
@@ -163,58 +182,92 @@ pub const BLOCK_REWARD_TABLE: [u64; 55] = [
     0,
 ];
 
-/// [CONSENSUS] Maximum possible supply in noms.
-/// Computed deterministically: sum over all epochs of reward * HALVING_INTERVAL.
-/// Slightly less than 33,000,000 DOM due to integer truncation in late epochs.
-pub const MAX_SUPPLY_NOMS: u64 = {
+/// Consensus. Maximum theoretical Mainnet issuance in noms.
+///
+/// Mainnet genesis is economically empty, so epoch zero contains
+/// `HALVING_INTERVAL - 1` reward-bearing blocks (heights 1..329,999). Every
+/// later nonzero epoch contains the full interval. Checked arithmetic makes a
+/// future schedule change fail at compile time rather than wrap silently.
+pub const MAX_SUPPLY_NOMS: u64 = maximum_supply_from_schedule();
+
+/// Recompute the maximum Mainnet issuance from the frozen reward schedule.
+///
+/// Mainnet height zero has an economically empty body, so the first epoch has
+/// one fewer reward-bearing block than later epochs. This function is the
+/// allocation-free specification used both by the production constant and by
+/// formal verification.
+pub const fn maximum_supply_from_schedule() -> u64 {
     let mut total: u64 = 0;
     let mut epoch: usize = 0;
-    while epoch < 55 {
-        total += BLOCK_REWARD_TABLE[epoch] * HALVING_INTERVAL;
-        epoch += 1;
+    while epoch < BLOCK_REWARD_TABLE.len() {
+        let blocks = if epoch == 0 {
+            match HALVING_INTERVAL.checked_sub(1) {
+                Some(value) => value,
+                None => panic!("HALVING_INTERVAL underflow"),
+            }
+        } else {
+            HALVING_INTERVAL
+        };
+        let issued = match BLOCK_REWARD_TABLE[epoch].checked_mul(blocks) {
+            Some(value) => value,
+            None => panic!("maximum issuance multiplication overflow"),
+        };
+        total = match total.checked_add(issued) {
+            Some(value) => value,
+            None => panic!("maximum issuance addition overflow"),
+        };
+        epoch = match epoch.checked_add(1) {
+            Some(value) => value,
+            None => panic!("reward schedule index overflow"),
+        };
     }
     total
-};
+}
 
-/// [CONSENSUS] Coinbase outputs must mature before spending.
+/// Consensus. Coinbase outputs must mature before spending.
 /// 1000 blocks ≈ 1.4 days at 2-minute block time.
 pub const COINBASE_MATURITY: u64 = 1_000;
 
 // ── Block & Transaction Limits ───────────────────────────────────────────────
 
-/// [CONSENSUS] Maximum block weight units.
+/// Consensus. Maximum block weight units.
 pub const MAX_BLOCK_WEIGHT: u32 = 40_000;
 
-/// [CONSENSUS] Maximum transaction weight units.
+/// Consensus. Maximum transaction weight units.
 pub const MAX_TX_WEIGHT: u32 = 4_000;
 
-/// [CONSENSUS] Maximum inputs per transaction.
+/// Consensus. Maximum inputs per transaction.
 pub const MAX_INPUTS_PER_TX: usize = 255;
 
-/// [CONSENSUS] Maximum outputs per transaction.
+/// Consensus. Maximum outputs per transaction.
 pub const MAX_OUTPUTS_PER_TX: usize = 255;
 
-/// [CONSENSUS] Maximum kernels per transaction.
+/// Consensus. Maximum kernels per transaction.
 pub const MAX_KERNELS_PER_TX: usize = 16;
 
-/// [CONSENSUS] Maximum transactions per block.
+/// Consensus. Maximum transactions per block.
 pub const MAX_BLOCK_TXS: usize = 5_000;
 
-/// [CONSENSUS] Maximum range-proof size in bytes — the standard Bulletproof
+/// Consensus. Maximum range-proof size in bytes — the standard Bulletproof
 /// envelope. DOM's bounded aggregate Bulletproof is a FIXED 739 bytes; DOM
 /// emits exactly one proof per output, so 739 is the true maximum. 768
 /// (3*256) gives ~93 bytes (~13.8%) of defensive headroom — enough to absorb a
-/// minor format/version change without a consensus change — while still bounding
-/// the per-proof deserialization allocation ~8x tighter than the old 6144
-/// (borromean) value. Hard reset: the protocol no longer accepts the legacy
-/// ~4166-byte borromean proofs. (The legacy `bulletproof` module keeps its own
-/// cap for its tests.)
+/// minor format/version change without a consensus change, while still bounding
+/// the per-proof deserialization allocation tightly. The verifier itself
+/// accepts only the exact final 739-byte proof format.
 pub const MAX_PROOF_SIZE: usize = 768;
 
-/// [CONSENSUS] Maximum serialized block size in bytes (16 MiB).
+/// Consensus. Exact Wallet V3 recovery capsule size.
+pub const RECOVERY_CAPSULE_SIZE: usize = 96;
+
+/// Consensus. Maximum length-prefixed output proof envelope. Recoverable
+/// outputs carry the 739-byte range proof followed by a 96-byte capsule.
+pub const MAX_OUTPUT_PROOF_ENVELOPE_SIZE: usize = 739 + RECOVERY_CAPSULE_SIZE;
+
+/// Consensus. Maximum serialized block size in bytes (16 MiB).
 pub const MAX_BLOCK_SERIALIZED_SIZE: usize = 16 * 1_024 * 1_024;
 
-/// [TRANSPORT] Maximum reassembled logical wire message, across Noise transport
+/// Transport. Maximum reassembled logical wire message, across Noise transport
 /// fragments. A single logical message (e.g. a full `Block`, or an IBD `Headers`
 /// batch) may exceed one Noise frame and is fragmented by the codec; this bounds
 /// the reassembly buffer. Sized to the largest legitimate message — a full Block
@@ -222,49 +275,103 @@ pub const MAX_BLOCK_SERIALIZED_SIZE: usize = 16 * 1_024 * 1_024;
 /// stream whose declared total exceeds this BEFORE allocating, as DoS defense.
 pub const MAX_LOGICAL_MSG_BYTES: usize = MAX_BLOCK_SERIALIZED_SIZE + 64 * 1_024;
 
-/// [POLICY] Maximum headers per Headers message (IBD batch size).
+/// Policy. Maximum headers per Headers message (IBD batch size).
 pub const MAX_HEADERS_PER_MSG: usize = 2_000;
 
-/// [POLICY] Maximum block hashes a GetBlockData request can list.
+/// Policy. Maximum block hashes a GetBlockData request can list.
 pub const MAX_GETBLOCKDATA_HASHES: usize = 128;
 
-/// [POLICY] Maximum block locator hashes in GetHeaders.
+/// Policy. Maximum block bodies served for one GetBlockData request.
+pub const MAX_GETBLOCKDATA_SERVE_HASHES: usize = 16;
+
+/// Policy. Maximum block locator hashes in GetHeaders.
 pub const MAX_LOCATOR_HASHES: usize = 32;
 
 // ── Network & Timing Validation ──────────────────────────────────────────────
 
-/// [CONSENSUS] Maximum seconds a block timestamp may be ahead of the local
+/// Consensus. Maximum seconds a block timestamp may be ahead of the local
 /// clock before being rejected as TemporarilyInvalid. Per whitepaper §9 step 3.
 pub const MAX_FUTURE_BLOCK_TIME: u64 = 120;
 
-/// [CONSENSUS] Testnet future timestamp bound.
+/// Consensus. Testnet future timestamp bound.
 ///
 /// Tighter than mainnet to prevent fast timestamp-warped testnet mining once
 /// ASERT enforcement is active.
 pub const TESTNET_MAX_FUTURE_BLOCK_TIME: u64 = 30;
 
-/// [POLICY] Soft buffer for blocks slightly beyond MAX_FUTURE_BLOCK_TIME.
+/// Policy. Soft buffer for blocks slightly beyond MAX_FUTURE_BLOCK_TIME.
 /// Blocks with timestamp in (now+MAX_FUTURE_BLOCK_TIME, now+MAX_FUTURE_BLOCK_TIME+SOFT_BUFFER]
 /// are deferred for re-evaluation rather than immediately rejected.
 /// This reduces orphan rate from transient clock drift without changing
 /// the consensus rule (MAX_FUTURE_BLOCK_TIME remains the hard limit).
 pub const FUTURE_BLOCK_SOFT_BUFFER_SECS: u64 = 60;
 
-/// [POLICY] Testnet soft future timestamp buffer.
+/// Policy. Testnet soft future timestamp buffer.
 pub const TESTNET_FUTURE_BLOCK_SOFT_BUFFER_SECS: u64 = 15;
 
-/// [CONSENSUS] Median-time-past window size.
+/// Consensus. Median-time-past window size.
 pub const MEDIAN_TIME_WINDOW: usize = 11;
 
 // ── Protocol & Network Identity ──────────────────────────────────────────────
 
-/// [NETWORK] Protocol version.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// Network. P2P wire protocol version.
+///
+/// This version is committed to the Noise prologue and exchanged in `Hello`.
+/// It is deliberately independent from block-version consensus rules.
+pub const WIRE_PROTOCOL_VERSION: u32 = 2;
 
-/// [NETWORK] Mainnet magic bytes: ASCII "DOM1" = 0x44_4F_4D_31
+/// Consensus. Block version used by the existing chain.
+pub const BLOCK_VERSION_LEGACY: u32 = 2;
+
+/// Consensus. Block version required after the v3 activation height.
+pub const BLOCK_VERSION_V3: u32 = 3;
+
+/// Consensus. Mainnet height at which block version 3 becomes mandatory.
+pub const MAINNET_V3_ACTIVATION_HEIGHT: u64 = 12_500;
+
+/// Consensus. Testnet activates v3 at its first post-genesis block.
+pub const TESTNET_V3_ACTIVATION_HEIGHT: u64 = 1;
+
+/// Consensus. Regtest activates v3 at its first post-genesis block.
+pub const REGTEST_V3_ACTIVATION_HEIGHT: u64 = 1;
+
+/// Return the block version required by Mainnet consensus at `height`.
+pub const fn required_block_version(height: u64) -> u32 {
+    if height >= MAINNET_V3_ACTIVATION_HEIGHT {
+        BLOCK_VERSION_V3
+    } else {
+        BLOCK_VERSION_LEGACY
+    }
+}
+
+/// Return the block version required by a network at `height`.
+///
+/// Testnet and Regtest keep their frozen v2 genesis identities and activate v3
+/// at the first post-genesis block so tests exercise the new rules without
+/// depending on the Mainnet activation height.
+pub const fn required_block_version_for_network(network_magic: u32, height: u64) -> u32 {
+    let activation_height = match network_magic {
+        NETWORK_MAGIC_TESTNET => TESTNET_V3_ACTIVATION_HEIGHT,
+        NETWORK_MAGIC_REGTEST => REGTEST_V3_ACTIVATION_HEIGHT,
+        _ => MAINNET_V3_ACTIVATION_HEIGHT,
+    };
+    if height >= activation_height {
+        BLOCK_VERSION_V3
+    } else {
+        BLOCK_VERSION_LEGACY
+    }
+}
+
+/// Backwards-compatible name for the P2P wire protocol version.
+///
+/// New code must use [`WIRE_PROTOCOL_VERSION`] for networking and
+/// [`BLOCK_VERSION_LEGACY`] for block construction or validation.
+pub const PROTOCOL_VERSION: u32 = WIRE_PROTOCOL_VERSION;
+
+/// Network. Mainnet magic bytes: ASCII "DOM1" = 0x44_4F_4D_31
 pub const NETWORK_MAGIC_MAINNET: u32 = 0x444F_4D31;
 
-/// [NETWORK] Testnet magic bytes: ASCII "DOMT" = 0x44_4F_4D_54
+/// Network. Testnet magic bytes: ASCII "DOMT" = 0x44_4F_4D_54
 pub const NETWORK_MAGIC_TESTNET: u32 = 0x444F_4D54;
 
 /// [NETWORK — DEV-ONLY] Regtest magic bytes: ASCII "DOMR" = 0x44_4F_4D_52
@@ -276,15 +383,34 @@ pub const NETWORK_MAGIC_TESTNET: u32 = 0x444F_4D54;
 /// peer dispatch path.
 pub const NETWORK_MAGIC_REGTEST: u32 = 0x444F_4D52;
 
-/// [NETWORK] Default P2P port.
+/// Network. Default P2P port.
 pub const P2P_PORT_MAINNET: u16 = 33_369;
 
-/// [NETWORK] Default P2P port for testnet.
+/// Network. Default P2P port for testnet.
 pub const P2P_PORT_TESTNET: u16 = 33_370;
 
 /// [NETWORK — DEV-ONLY] Default P2P port for Regtest.
 /// Distinct from mainnet/testnet so accidental local conflicts also fail loudly.
 pub const P2P_PORT_REGTEST: u16 = 33_371;
+
+/// Network. Default loopback RPC port for Mainnet.
+///
+/// RPC is disabled unless explicitly enabled. RPC ports are intentionally
+/// distinct from every P2P port so an operator cannot accidentally direct an
+/// RPC client at the peer protocol listener.
+pub const RPC_PORT_MAINNET: u16 = 33_372;
+
+/// Network. Default loopback RPC port for Testnet.
+pub const RPC_PORT_TESTNET: u16 = 33_373;
+
+/// [NETWORK — DEV-ONLY] Default loopback RPC port for Regtest.
+pub const RPC_PORT_REGTEST: u16 = 33_374;
+
+/// Service. Default loopback metrics port when metrics are explicitly enabled.
+pub const METRICS_PORT: u16 = 3_371;
+
+/// Service. Default loopback explorer HTTP port.
+pub const EXPLORER_PORT: u16 = 8_081;
 
 /// [DEV-ONLY] Coinbase maturity on Regtest: one confirmation.
 ///
@@ -293,20 +419,20 @@ pub const P2P_PORT_REGTEST: u16 = 33_371;
 /// the canonical constant for Mainnet/Testnet and is unchanged.
 pub const REGTEST_COINBASE_MATURITY: u64 = 1;
 
-/// [NETWORK] Maximum user agent string length in bytes.
+/// Network. Maximum user agent string length in bytes.
 pub const MAX_USER_AGENT_BYTES: usize = 256;
 
 // ── Policy Constants (MUST NOT affect consensus validity) ────────────────────
 
-/// [POLICY] Minimum relay fee rate in noms per weight unit.
+/// Policy. Minimum relay fee rate in noms per weight unit.
 pub const MIN_RELAY_FEE_RATE: u64 = 1_000;
 
-/// [POLICY] Maximum depth of chain reorganization to accept.
+/// Policy. Maximum depth of chain reorganization to accept.
 pub const MAX_REORG_DEPTH_POLICY: u64 = 1_000;
 
 // ── ASERT Target Bounds ──────────────────────────────────────────────────────
 
-/// [CONSENSUS] Minimum PoW target (hardest difficulty).
+/// Consensus. Minimum PoW target (hardest difficulty).
 pub const MIN_TARGET_BYTES: [u8; 32] = {
     let mut b = [0u8; 32];
     b[26] = 0xff;
@@ -314,10 +440,10 @@ pub const MIN_TARGET_BYTES: [u8; 32] = {
     b
 };
 
-/// [CONSENSUS] Alias used by deterministic retargeting codepaths.
+/// Consensus. Alias used by deterministic retargeting codepaths.
 pub const MIN_ALLOWED_TARGET: [u8; 32] = MIN_TARGET_BYTES;
 
-/// [CONSENSUS] Maximum PoW target (easiest difficulty / genesis).
+/// Consensus. Maximum PoW target (easiest difficulty / genesis).
 pub const MAX_TARGET_BYTES: [u8; 32] = {
     let mut b = [0xff_u8; 32];
     b[0] = 0x00;
@@ -325,7 +451,7 @@ pub const MAX_TARGET_BYTES: [u8; 32] = {
     b
 };
 
-/// [CONSENSUS] Alias used by deterministic retargeting codepaths.
+/// Consensus. Alias used by deterministic retargeting codepaths.
 pub const MAX_ALLOWED_TARGET: [u8; 32] = MAX_TARGET_BYTES;
 
 /// Trivial PoW target for future regtest mode — ANY RandomX hash passes.
@@ -360,27 +486,27 @@ pub const REGTEST_TRIVIAL_TARGET_DO_NOT_USE_IN_PRODUCTION: [u8; 32] = MAX_TARGET
 
 // ── Kernel Features ───────────────────────────────────────────────────────────
 
-/// [CONSENSUS] Standard transaction kernel.
+/// Consensus. Standard transaction kernel.
 pub const KERNEL_FEAT_PLAIN: u8 = 0x00;
 
-/// [CONSENSUS] Coinbase kernel — block reward.
+/// Consensus. Coinbase kernel — block reward.
 pub const KERNEL_FEAT_COINBASE: u8 = 0x01;
 
-/// [CONSENSUS] Height-locked kernel — absolute timelock.
+/// Consensus. Height-locked kernel — absolute timelock.
 pub const KERNEL_FEAT_HEIGHT_LOCKED: u8 = 0x02;
 
 // ── Weight Units ──────────────────────────────────────────────────────────────
 
-/// [CONSENSUS] Weight of a single transaction input.
+/// Consensus. Weight of a single transaction input.
 pub const WEIGHT_INPUT: u32 = 1;
 
-/// [CONSENSUS] Weight of a single transaction output.
+/// Consensus. Weight of a single transaction output.
 pub const WEIGHT_OUTPUT: u32 = 21;
 
-/// [CONSENSUS] Weight of a standard transaction kernel.
+/// Consensus. Weight of a standard transaction kernel.
 pub const WEIGHT_KERNEL: u32 = 3;
 
-/// [CONSENSUS] Weight of a coinbase kernel.
+/// Consensus. Weight of a coinbase kernel.
 pub const WEIGHT_COINBASE_KERNEL: u32 = 2;
 
 // ── Cryptographic Domain Tags ────────────────────────────────────────────────
@@ -393,6 +519,14 @@ pub const TAG_BULLETPROOF: &str = "DOM:bulletproof:v1";
 pub const TAG_BP_G: &str = "DOM:bp-G:v1";
 pub const TAG_BP_H: &str = "DOM:bp-H:v1";
 pub const TAG_CHAIN_ID: &str = "DOM:chain-id:v1";
+/// Domain separator for the canonical Mainnet genesis inscription commitment.
+pub const TAG_GENESIS_INSCRIPTION: &str = "DOM:genesis-inscription:v1";
+/// Domain separator for the canonical Mainnet genesis identity envelope.
+pub const TAG_MAINNET_GENESIS_IDENTITY: &str = "DOM:mainnet-genesis-identity:v1";
+/// Domain separator for the complete canonical non-genesis block body.
+pub const TAG_BLOCK_BODY_COMMITMENT: &str = "DOM:block-body-commitment:v1";
+/// Domain separator binding the historical range-proof PMMR to the complete body.
+pub const TAG_BOUND_RANGEPROOF_ROOT: &str = "DOM:bound-rangeproof-root:v1";
 pub const TAG_MUSIG2_TRANSCRIPT: &str = "DOM:musig2-transcript:v1";
 pub const TAG_MUSIG2_NONCE: &str = "DOM:musig2-nonce:v1";
 
@@ -418,7 +552,7 @@ pub const TAG_COINBASE_BLINDING: &str = "DOM:coinbase-blinding:v1";
 /// Canonical genesis block hash for Testnet.
 ///
 /// Derived deterministically from the canonical genesis construction path:
-/// `dom-node::miner::build_genesis_coinbase` ->
+/// `dom-chain::build_canonical_genesis` ->
 /// `dom-consensus::compute_block_pmmr_roots` ->
 /// `BlockHeader` serialization ->
 /// `dom_crypto::hash::blake2b_256(header_bytes)`.
@@ -429,35 +563,33 @@ pub const TAG_COINBASE_BLINDING: &str = "DOM:coinbase-blinding:v1";
 ///
 /// Regenerated after the bounded aggregate bp2 migration using
 /// `TAG_GENESIS_BLINDING:v1`. The genesis coinbase now carries a 739-byte
-/// bounded aggregate Bulletproof, so `rangeproof_root` and this hash changed
-/// from the borromean era; `output_root`/`kernel_root` are unchanged. Pinned
-/// and regression-tested by `dom-node` `miner::tests::genesis_testnet_frozen_vectors`.
+/// bounded aggregate Bulletproof, so `rangeproof_root` and this hash are pinned
+/// to that final format; `output_root`/`kernel_root` are unchanged. Regression
+/// tested by `dom-node` `miner::tests::genesis_testnet_frozen_vectors`.
 pub const GENESIS_HASH_TESTNET: [u8; 32] = [
     0x2a, 0xb5, 0xe6, 0xc7, 0x36, 0x07, 0xe8, 0xbf, 0xbb, 0xec, 0x2d, 0x4c, 0xe3, 0xea, 0x14, 0x19,
     0xcd, 0xa2, 0x9a, 0xe6, 0x89, 0x2e, 0x7f, 0x1c, 0x24, 0xfa, 0xcc, 0x46, 0x5c, 0xd6, 0x58, 0x21,
 ];
 
-/// Explicit mainnet-launch gate.
+/// Explicit Mainnet genesis-finalization gate.
 ///
-/// Keeping this `false` is the only correct state while the repository still
-/// carries placeholder mainnet genesis data. Flipping it to `true` requires the
-/// same change set to:
-/// 1. pin `GENESIS_HASH_MAINNET` from the canonical derivation path above,
-/// 2. keep `NETWORK_MAGIC_MAINNET` unchanged, and
-/// 3. record the ceremony artefacts described in `docs/GENESIS_CEREMONY.md`.
-pub const MAINNET_GENESIS_FINALIZED: bool = false;
+/// This records that the offline identity ceremony is complete. It does not
+/// activate a service, listener, peer connection, seed, or deployment.
+pub const MAINNET_GENESIS_FINALIZED: bool = true;
 
-/// Canonical genesis block hash for Mainnet — UNFINALIZED until mainnet launch.
-pub const GENESIS_HASH_MAINNET: [u8; 32] = [0u8; 32];
+/// Canonical inscription-aware genesis block identifier for Mainnet.
+pub const GENESIS_HASH_MAINNET: [u8; 32] = [
+    0x18, 0x2e, 0x10, 0xaf, 0x28, 0xe7, 0xec, 0x07, 0x2f, 0x46, 0x2e, 0x60, 0x44, 0xf5, 0x80, 0xdc,
+    0x9d, 0xd8, 0xc8, 0x66, 0xcb, 0x78, 0xdf, 0xc2, 0x93, 0xbb, 0xfa, 0xee, 0x4e, 0x93, 0x25, 0xce,
+];
 
 /// [DEV-ONLY] Canonical genesis block hash for Regtest.
 ///
-/// Deterministic placeholder — a Regtest node bootstraps its own genesis
-/// locally on first start (same path mainnet/testnet take through
-/// `create_genesis_block`). Because Regtest peers are isolated by magic
-/// byte (`NETWORK_MAGIC_REGTEST`), this value never reaches a non-Regtest
-/// validator and a zero-array placeholder is acceptable.
-pub const GENESIS_HASH_REGTEST: [u8; 32] = [0u8; 32];
+/// Final deterministic Regtest genesis block identifier.
+pub const GENESIS_HASH_REGTEST: [u8; 32] = [
+    0xfd, 0xda, 0x02, 0x7e, 0x4a, 0x46, 0xdd, 0x36, 0x67, 0x17, 0xc6, 0xe0, 0xa9, 0x76, 0xbf, 0x3e,
+    0x0a, 0x75, 0x12, 0xc5, 0xed, 0xf0, 0x84, 0x70, 0xb0, 0xdc, 0xa9, 0x9d, 0xde, 0xe3, 0xfe, 0x1f,
+];
 
 /// Returns `true` if a genesis hash is still the all-zero placeholder.
 pub const fn is_placeholder_genesis_hash(hash: &[u8; 32]) -> bool {
@@ -471,12 +603,23 @@ pub const fn is_placeholder_genesis_hash(hash: &[u8; 32]) -> bool {
     true
 }
 
+/// Return whether a candidate is valid for the finalized Mainnet identity.
+#[must_use]
+pub fn is_valid_mainnet_genesis_hash(hash: &[u8; 32]) -> bool {
+    *hash != GENESIS_HASH_TESTNET
+        && *hash != GENESIS_HASH_REGTEST
+        && !is_placeholder_genesis_hash(hash)
+}
+
 /// Validate a would-be mainnet genesis hash before allowing mainnet startup.
 ///
 /// This rejects the placeholder hash and the currently pinned non-mainnet
 /// constants so a misconfigured build cannot silently boot a "mainnet" node
 /// bound to testnet or regtest identity.
 pub fn validate_mainnet_genesis_hash(hash: [u8; 32]) -> Result<(), DomError> {
+    if is_valid_mainnet_genesis_hash(&hash) {
+        return Ok(());
+    }
     if hash == GENESIS_HASH_TESTNET {
         return Err(DomError::Invalid(
             "mainnet genesis is not finalized: GENESIS_HASH_MAINNET must not alias GENESIS_HASH_TESTNET".into(),
@@ -487,20 +630,18 @@ pub fn validate_mainnet_genesis_hash(hash: [u8; 32]) -> Result<(), DomError> {
             "mainnet genesis is not finalized: GENESIS_HASH_MAINNET must not alias GENESIS_HASH_REGTEST".into(),
         ));
     }
-    if is_placeholder_genesis_hash(&hash) {
-        return Err(DomError::Invalid(
-            "mainnet genesis is not finalized: GENESIS_HASH_MAINNET is still the zero placeholder"
-                .into(),
-        ));
-    }
-    Ok(())
+    Err(DomError::Invalid(
+        "mainnet genesis is not finalized: GENESIS_HASH_MAINNET is still the zero placeholder"
+            .into(),
+    ))
 }
 
 /// Return the configured genesis timestamp for a network magic value.
 pub fn genesis_timestamp_for_network_magic(network_magic: u32) -> Result<u64, DomError> {
     match network_magic {
-        NETWORK_MAGIC_MAINNET => Ok(GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER),
-        NETWORK_MAGIC_TESTNET | NETWORK_MAGIC_REGTEST => Ok(GENESIS_TIMESTAMP_TESTNET),
+        NETWORK_MAGIC_MAINNET => Ok(GENESIS_TIMESTAMP_MAINNET),
+        NETWORK_MAGIC_TESTNET => Ok(GENESIS_TIMESTAMP_TESTNET),
+        NETWORK_MAGIC_REGTEST => Ok(GENESIS_TIMESTAMP_REGTEST),
         other => Err(DomError::Invalid(format!(
             "unknown network magic 0x{other:08x} for genesis timestamp"
         ))),
@@ -620,6 +761,24 @@ const _: () = {
         "Regtest port must not collide with mainnet/testnet"
     );
     assert!(
+        RPC_PORT_MAINNET != P2P_PORT_MAINNET
+            && RPC_PORT_MAINNET != P2P_PORT_TESTNET
+            && RPC_PORT_MAINNET != P2P_PORT_REGTEST
+            && RPC_PORT_TESTNET != P2P_PORT_MAINNET
+            && RPC_PORT_TESTNET != P2P_PORT_TESTNET
+            && RPC_PORT_TESTNET != P2P_PORT_REGTEST
+            && RPC_PORT_REGTEST != P2P_PORT_MAINNET
+            && RPC_PORT_REGTEST != P2P_PORT_TESTNET
+            && RPC_PORT_REGTEST != P2P_PORT_REGTEST,
+        "RPC ports must not collide with P2P ports"
+    );
+    assert!(
+        RPC_PORT_MAINNET != RPC_PORT_TESTNET
+            && RPC_PORT_MAINNET != RPC_PORT_REGTEST
+            && RPC_PORT_TESTNET != RPC_PORT_REGTEST,
+        "RPC ports must be unique"
+    );
+    assert!(
         REGTEST_COINBASE_MATURITY < COINBASE_MATURITY,
         "REGTEST_COINBASE_MATURITY must be strictly less than the mainnet value"
     );
@@ -649,10 +808,9 @@ mod genesis_tests {
     #[test]
     fn genesis_timestamps_are_fixed() {
         assert_eq!(GENESIS_TIMESTAMP_TESTNET, 1_778_642_633);
-        assert_eq!(
-            GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER, 1_778_642_633,
-            "mainnet must not drift silently before the ceremony pins the final timestamp"
-        );
+        assert_eq!(GENESIS_TIMESTAMP_MAINNET, 1_784_071_429);
+        assert_eq!(GENESIS_TIMESTAMP_REGTEST, GENESIS_TIMESTAMP_MAINNET);
+        assert_eq!(GENESIS_TIMESTAMP_MAINNET_PLACEHOLDER, 1_778_642_633);
     }
 
     #[test]
@@ -663,10 +821,8 @@ mod genesis_tests {
     }
 
     #[test]
-    fn mainnet_guard_rejects_placeholder_hash() {
-        let err = validate_mainnet_genesis_hash(GENESIS_HASH_MAINNET).unwrap_err();
-        assert!(matches!(err, DomError::Invalid(_)));
-        assert!(err.to_string().contains("mainnet genesis is not finalized"));
+    fn mainnet_guard_accepts_finalized_hash() {
+        validate_mainnet_genesis_hash(GENESIS_HASH_MAINNET).unwrap();
     }
 
     #[test]
@@ -687,9 +843,13 @@ mod genesis_tests {
     }
 
     #[test]
-    fn startup_hash_lookup_rejects_disabled_mainnet() {
-        let err = startup_genesis_hash_for_network_magic(NETWORK_MAGIC_MAINNET).unwrap_err();
-        assert!(err.to_string().contains("mainnet genesis is not finalized"));
+    fn startup_hash_lookup_accepts_finalized_mainnet() {
+        assert_eq!(
+            startup_genesis_hash_for_network_magic(NETWORK_MAGIC_MAINNET)
+                .unwrap()
+                .as_bytes(),
+            &GENESIS_HASH_MAINNET
+        );
     }
 
     #[test]
@@ -711,25 +871,26 @@ mod genesis_tests {
 
 // ── Time Discipline Thresholds ───────────────────────────────────────────────
 
-/// [POLICY] Clock drift threshold for warnings.
+/// Policy. Clock drift threshold for warnings.
 /// Nodes with drift above this should be alerted but continue operating.
 pub const CLOCK_DRIFT_WARN_SECS: i64 = 30;
 
-/// [POLICY] Clock drift threshold for critical alerts.
+/// Policy. Clock drift threshold for critical alerts.
 /// Mining should be disabled if drift exceeds this value.
 pub const CLOCK_DRIFT_ERROR_SECS: i64 = 60;
 
-/// [POLICY] Peer drift threshold for scoring penalty.
+/// Policy. Peer drift threshold for scoring penalty.
 /// Peers with timestamp drift above this trigger moderate scoring.
 pub const PEER_DRIFT_WARN_SECS: i64 = 30;
 
-/// [POLICY] Peer drift threshold for immediate disconnection.
+/// Policy. Peer drift threshold for immediate disconnection.
 /// Peers with timestamp drift above this are disconnected.
 pub const PEER_DRIFT_DISCONNECT_SECS: i64 = 90;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{block_reward, BlockHeight};
 
     #[test]
     fn reward_table_is_deterministic() {
@@ -763,8 +924,11 @@ mod tests {
 
     #[test]
     fn supply_matches_expected_value() {
-        // Pre-computed and verified externally: 3_299_999_976_900_000 noms
-        assert_eq!(MAX_SUPPLY_NOMS, 3_299_999_976_900_000);
+        assert_eq!(MAX_SUPPLY_NOMS, 3_299_996_676_900_000);
+        assert_eq!(block_reward(BlockHeight::GENESIS).noms(), 3_300_000_000);
+        assert_eq!(block_reward(BlockHeight(1)).noms(), 3_300_000_000);
+        assert_eq!(block_reward(BlockHeight(17_819_999)).noms(), 1);
+        assert_eq!(block_reward(BlockHeight(17_820_000)).noms(), 0);
     }
 
     #[test]

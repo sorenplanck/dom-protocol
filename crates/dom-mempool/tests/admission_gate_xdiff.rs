@@ -209,7 +209,9 @@ fn xdiff_min_fee_gate_same_verdict_both_paths() {
     for (label, err) in [("legacy", &err_a), ("chain-view", &err_b)] {
         match err {
             DomError::PolicyRejected(msg) => assert!(
-                msg.contains("MIN_RELAY_FEE_RATE") || msg.contains("fee rate"),
+                msg.contains("MIN_RELAY_FEE_RATE")
+                    || msg.contains("fee rate")
+                    || msg.contains("minimum relay fee"),
                 "{label}: expected fee message, got: {msg}"
             ),
             other => panic!("{label}: expected fee PolicyRejected (gate parity); got {other:?}"),

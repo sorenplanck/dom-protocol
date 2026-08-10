@@ -22,10 +22,11 @@ use dom_store::DomStore;
 use dom_wallet::WalletDir;
 use dom_wire::dandelion::DandelionRouter;
 use dom_wire::manager::PeerManager;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -80,6 +81,9 @@ pub struct DomNode {
     pub task_supervisor: NodeTaskSupervisor,
     /// Test/runtime observers wait here for chain, mempool, or peer-state changes.
     pub state_events: Arc<Notify>,
+    /// Number of peer synchronization sessions currently rebuilding the
+    /// canonical chain. Mining remains paused until this reaches zero.
+    pub(crate) ibd_active_sessions: Arc<AtomicU64>,
     /// Peer Exchange state: known peer addresses learned from seeds and Addr
     /// gossip, plus GetAddr cooldown tracking (RFC-0005 §6).
     pub pex: Arc<Mutex<crate::pex::PexManager>>,
@@ -105,6 +109,7 @@ struct NodeServices {
     orphan_pool: Arc<Mutex<RuntimeOrphanPool>>,
     wallet: Option<Arc<Mutex<dom_wallet::WalletDir>>>,
     state_events: Arc<Notify>,
+    ibd_active_sessions: Arc<AtomicU64>,
     pex: Arc<Mutex<crate::pex::PexManager>>,
 }
 
@@ -118,6 +123,37 @@ struct BroadcastChannels {
     block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
     tx_fluff_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
     tx_stem_tx: tokio::sync::broadcast::Sender<dom_wire::dandelion::StemEnvelope>,
+}
+
+struct IbdActiveGuard {
+    sessions: Arc<AtomicU64>,
+    state_events: Arc<Notify>,
+}
+
+impl IbdActiveGuard {
+    fn try_new(sessions: Arc<AtomicU64>, state_events: Arc<Notify>) -> Option<Self> {
+        sessions
+            .compare_exchange(
+                0,
+                1,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .ok()?;
+        state_events.notify_waiters();
+        Some(Self {
+            sessions,
+            state_events,
+        })
+    }
+}
+
+impl Drop for IbdActiveGuard {
+    fn drop(&mut self) {
+        self.sessions
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.state_events.notify_waiters();
+    }
 }
 
 struct TracedMutexGuard<'a, T> {
@@ -199,6 +235,13 @@ const PEX_TARGET_KNOWN_PEERS: usize = 64;
 /// per-peer cooldown in PexManager is the real limiter; this just paces the
 /// check).
 const PEX_GETADDR_TICK_SECS: u64 = 60;
+const CATCHUP_CHECK_INTERVAL_SECS: u64 = 2;
+const CATCHUP_MAX_HASHES_PER_TICK: usize = 16;
+/// Keep at most one requested block body outstanding during IBD. This prevents
+/// a validating node from leaving a peer blocked while its socket buffers fill
+/// with the remainder of a large response page.
+const IBD_BLOCK_REQUEST_WINDOW: usize = 1;
+const IBD_PROGRESS_LOG_INTERVAL: u64 = 100;
 
 const FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS: u64 = 30;
 const FUTURE_BLOCK_QUEUE_MAX_AGE_SECS: u64 = dom_core::MAX_FUTURE_BLOCK_TIME
@@ -208,7 +251,8 @@ const METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 const HELLO_EXCHANGE_TIMEOUT_SECS: u64 = dom_wire::handshake::HANDSHAKE_TIMEOUT_SECS;
 const PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v2";
 const LEGACY_PEER_ROTATION_METADATA_KEY: &[u8] = b"dom/peer_rotation_state/v1";
-const PEER_REPUTATION_METADATA_KEY: &[u8] = b"dom/peer_reputation_state/v1";
+const PEER_REPUTATION_METADATA_KEY: &[u8] = b"dom/peer_reputation_state/v2";
+const LEGACY_PEER_REPUTATION_METADATA_KEY: &[u8] = b"dom/peer_reputation_state/v1";
 const MEMPOOL_METADATA_KEY: &[u8] = b"dom/mempool_state/v1";
 const NOISE_STATIC_KEY_METADATA_KEY: &[u8] = b"dom/noise_static_key/v1";
 
@@ -393,8 +437,17 @@ impl DomNode {
         info!("Chain tip: height={}", chain.tip_height);
 
         let mut peers = PeerManager::new(config.max_inbound, config.min_outbound);
+        peers.set_seed_ips(config.seed_peers.iter().filter_map(|seed| {
+            seed.parse::<std::net::SocketAddr>()
+                .ok()
+                .map(|addr| addr.ip())
+        }));
         restore_peer_rotation_state(&chain.store, &mut peers)?;
         restore_peer_reputation_state(&chain.store, &mut peers)?;
+        // Rewrite after restore so expired entries and migrated v1 records are
+        // removed from disk immediately instead of surviving until the next
+        // peer event.
+        persist_peer_reputation_snapshot(&chain.store, &peers.peer_reputation_state())?;
         // Volatile mempool policy (RFC-0012 §1): start empty and clear any legacy
         // on-disk mempool bytes from older builds. The mempool is never loaded
         // from disk; a restarted node re-acquires pending txs from peers.
@@ -480,14 +533,27 @@ impl DomNode {
             wallet,
             metrics,
             future_block_queue: Arc::new(crate::future_block_queue::FutureBlockQueue::new()),
-            missing_blocks: Arc::new(Mutex::new(MissingBlockTracker::new(8, 2, 16))),
+            // Part A — persistent re-request: base backoff 2 rounds, doubling to
+            // a 64-round ceiling (rounds advance on the ~2s catch-up tick), max 16
+            // hashes per batch. A known-missing parent is re-requested forever
+            // with this capped backoff, never abandoned after a fixed attempt
+            // count. See missing_block_tracker.rs.
+            missing_blocks: Arc::new(Mutex::new(MissingBlockTracker::new(
+                2,
+                64,
+                CATCHUP_MAX_HASHES_PER_TICK,
+            ))),
             orphan_pool: Arc::new(Mutex::new(RuntimeOrphanPool::new(
                 DEFAULT_MAX_ORPHAN_BLOCKS,
                 DEFAULT_MAX_ORPHANS_PER_PARENT,
             ))),
             task_supervisor: NodeTaskSupervisor::new(),
             state_events: Arc::new(Notify::new()),
-            pex: Arc::new(Mutex::new(crate::pex::PexManager::new(PEX_MAX_KNOWN_PEERS))),
+            ibd_active_sessions: Arc::new(AtomicU64::new(0)),
+            pex: Arc::new(Mutex::new(crate::pex::PexManager::for_network(
+                PEX_MAX_KNOWN_PEERS,
+                config.network,
+            ))),
         })
     }
 
@@ -685,12 +751,14 @@ impl DomNode {
             supervisor
                 .spawn_critical(TaskKind::Rpc, async move {
                     trace_task_result("rpc_server", async move {
-                        tokio::select! {
-                            _ = rpc_shutdown.wait() => Ok(()),
-                            result = dom_rpc::serve_with_token(handle, listener, rpc_bearer_token) => {
-                                result.map_err(|e| format!("RPC server error: {e}"))
-                            }
-                        }
+                        dom_rpc::serve_with_token_until_shutdown(
+                            handle,
+                            listener,
+                            rpc_bearer_token,
+                            async move { rpc_shutdown.wait().await },
+                        )
+                        .await
+                        .map_err(|e| format!("RPC server error: {e}"))
                     })
                     .await
                 })
@@ -730,6 +798,9 @@ impl DomNode {
                 let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
                     FUTURE_BLOCK_QUEUE_DRAIN_INTERVAL_SECS,
                 ));
+                // Skip: replaying every missed maintenance tick after a stall
+                // only repeats the same bounded queue scan in a burst.
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tokio::select! {
                         _ = future_shutdown.wait() => return Ok(()),
@@ -904,6 +975,9 @@ impl DomNode {
                         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
                             STEM_CHECK_INTERVAL_SECS,
                         ));
+                        // Skip: one current timeout scan promotes every expired
+                        // stem; replaying historical ticks adds no liveness.
+                        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                         interval.tick().await; // skip first immediate tick
                         loop {
                             tokio::select! {
@@ -952,7 +1026,13 @@ impl DomNode {
             "shutdown completed"
         );
 
-        shutdown.wait().await;
+        tokio::select! {
+            _ = shutdown.wait() => {}
+            signal = tokio::signal::ctrl_c() => {
+                signal.map_err(|e| DomError::Internal(format!("install Ctrl-C handler: {e}")))?;
+                supervisor.request_shutdown().await;
+            }
+        }
         tracing::info!(
             event = "shutdown_requested",
             reason = "shutdown_token",
@@ -1029,16 +1109,18 @@ impl DomNode {
                         orphan_pool: self.orphan_pool.clone(),
                         wallet: self.wallet.clone(),
                         state_events: self.state_events.clone(),
+                        ibd_active_sessions: self.ibd_active_sessions.clone(),
                         pex: self.pex.clone(),
                     };
                     let peers = svc.peers.clone();
                     let metrics = svc.metrics.clone();
+                    let state_events = svc.state_events.clone();
                     let chain_for_persist = chain.clone();
                     let peer_shutdown = shutdown.clone();
                     let task_id = supervisor
                         .spawn_relay(async move {
                             trace_task_result("p2p_inbound_session", async move {
-                                handle_inbound(
+                                let registered_session = handle_inbound(
                                     stream,
                                     peer_addr,
                                     config,
@@ -1051,7 +1133,9 @@ impl DomNode {
                                 .await;
                                 let mut mgr = trace_lock("peers", &peers).await;
                                 let peer_key = peer_addr.to_string();
-                                mgr.remove_peer(&peer_key);
+                                if let Some(session_id) = registered_session {
+                                    mgr.remove_peer_session(&peer_key, session_id);
+                                }
                                 mgr.release_inbound_reservation(&peer_addr);
                                 drop(mgr);
                                 if let Err(e) =
@@ -1059,7 +1143,7 @@ impl DomNode {
                                 {
                                     warn!("Persisting peer reputation state failed: {e}");
                                 }
-                                refresh_peer_metrics(&peers, &metrics, None).await;
+                                refresh_peer_metrics(&peers, &metrics, Some(&state_events)).await;
                                 Ok(())
                             })
                             .await
@@ -1090,8 +1174,10 @@ impl DomNode {
             orphan_pool: self.orphan_pool.clone(),
             wallet: self.wallet.clone(),
             state_events: self.state_events.clone(),
+            ibd_active_sessions: self.ibd_active_sessions.clone(),
             pex: self.pex.clone(),
         };
+        let mut configured_seed_ip_cache = HashMap::<String, HashSet<std::net::IpAddr>>::new();
         loop {
             if shutdown.is_shutdown() {
                 return Ok(());
@@ -1106,6 +1192,14 @@ impl DomNode {
                     warn!("Advancing peer rotation cooldowns failed: {e}");
                 }
                 let mut addrs = resolve_configured_dns_seeds(&self.config).await;
+                let resolved_seed_ips = refresh_configured_seed_ips(
+                    &self.config.seed_peers,
+                    &mut configured_seed_ip_cache,
+                )
+                .await;
+                let mut mgr = trace_lock("peers", &self.peers).await;
+                mgr.set_seed_ips(resolved_seed_ips);
+                drop(mgr);
 
                 // Also try configured seed peers
                 addrs.extend(self.config.seed_peers.iter().cloned());
@@ -1170,6 +1264,7 @@ impl DomNode {
                     let log_addr = cleanup_addr.clone();
                     let peers = self.peers.clone();
                     let metrics = self.metrics.clone();
+                    let state_events = self.state_events.clone();
                     let svc_c = svc.clone();
                     let pex = self.pex.clone();
                     let chain_for_persist = self.chain.clone();
@@ -1196,7 +1291,7 @@ impl DomNode {
                                 if outcome == OutboundAttemptOutcome::RetryableFailure {
                                     mgr.record_outbound_failure(&cleanup_addr);
                                 }
-                                mgr.remove_peer(&cleanup_addr);
+                                mgr.remove_outbound_session(&cleanup_addr);
                                 mgr.release_outbound_reservation(&cleanup_addr);
                                 drop(mgr);
                                 if let Err(e) =
@@ -1209,7 +1304,7 @@ impl DomNode {
                                 {
                                     warn!("Persisting peer reputation state failed: {e}");
                                 }
-                                refresh_peer_metrics(&peers, &metrics, None).await;
+                                refresh_peer_metrics(&peers, &metrics, Some(&state_events)).await;
                                 Ok(())
                             })
                             .await
@@ -1259,6 +1354,15 @@ impl dom_rpc::NodeHandle for DomNode {
             fee,
             fee_rate: if weight > 0 { fee / weight as u64 } else { 0 },
             weight,
+            kernels: entry
+                .tx
+                .kernels
+                .iter()
+                .map(|kernel| dom_rpc::KernelInfo {
+                    features: kernel.features,
+                    lock_height: kernel.lock_height,
+                })
+                .collect(),
         })
     }
 
@@ -1373,6 +1477,25 @@ impl dom_rpc::NodeHandle for DomNode {
         chain.store.get_block_header(hash).ok()?
     }
 
+    fn get_block_kernels(&self, hash: &[u8; 32]) -> Option<Vec<dom_rpc::KernelInfo>> {
+        use dom_serialization::DomDeserialize;
+
+        let chain = self.chain.try_lock().ok()?;
+        let body = chain.store.get_block_body(hash).ok()??;
+        let block = dom_consensus::Block::from_bytes(&body).ok()?;
+        Some(
+            block
+                .transactions
+                .iter()
+                .flat_map(|tx| tx.kernels.iter())
+                .map(|kernel| dom_rpc::KernelInfo {
+                    features: kernel.features,
+                    lock_height: kernel.lock_height,
+                })
+                .collect(),
+        )
+    }
+
     fn get_block_hash_at_height(&self, height: u64) -> Option<[u8; 32]> {
         let chain = self.chain.try_lock().ok()?;
         chain.store.get_hash_at_height(height).ok()?
@@ -1416,7 +1539,7 @@ async fn handle_inbound(
     channels: BroadcastChannels,
     svc: NodeServices,
     shutdown: ShutdownToken,
-) {
+) -> Option<u64> {
     let BroadcastChannels {
         block_relay_tx,
         tx_fluff_tx,
@@ -1431,7 +1554,7 @@ async fn handle_inbound(
     let chain_id =
         *derive_chain_id(config.network.magic(), &Hash256::from_bytes(genesis_hash)).as_bytes();
     let transport = match tokio::select! {
-        _ = shutdown.wait() => return,
+        _ = shutdown.wait() => return None,
         result = dom_wire::handshake::perform_handshake_responder(
             &mut stream,
             &privkey,
@@ -1443,25 +1566,33 @@ async fn handle_inbound(
         Err(e) => {
             let _ = record_pending_peer_violation(&chain, &svc.peers, addr, &e).await;
             warn!("Handshake failed with {addr}: {e}");
-            return;
+            return None;
         }
     };
     info!("Noise handshake complete with {addr}");
 
     let mut codec = dom_wire::codec::NoiseCodec::new(transport, config.network.magic());
     match tokio::select! {
-        _ = shutdown.wait() => return,
+        _ = shutdown.wait() => return None,
         result = hello_exchange(&mut stream, &mut codec, &config, &chain_id, &chain) => result,
     } {
         Ok(peer_hello) => {
+            let peer_id = codec.peer_id();
             info!(
-                "Hello from {addr}: height={} ua={:?}",
-                peer_hello.best_height, peer_hello.user_agent
+                "Hello from {addr}: peer_id={} height={} hash={} ua={:?}",
+                peer_id
+                    .map(hex::encode)
+                    .unwrap_or_else(|| "unavailable".into()),
+                peer_hello.best_height,
+                hex::encode(peer_hello.best_hash),
+                peer_hello.user_agent
             );
             // Register peer in manager so connected_peers() sees it
-            {
+            let registered_session = {
                 use dom_wire::peer::PeerInfo;
                 let mut peer_info = PeerInfo::new(addr, false);
+                let session_id = peer_info.session_id;
+                peer_info.peer_id = peer_id;
                 peer_info.state = dom_wire::peer::PeerState::Connected;
                 peer_info.best_height = peer_hello.best_height;
                 peer_info.best_hash = peer_hello.best_hash;
@@ -1470,24 +1601,42 @@ async fn handle_inbound(
                 info!("register_peer inbound {addr} → {result:?}");
                 if let Err(e) = result {
                     warn!("Failed to register inbound peer {addr}: {e}");
-                    return;
+                    return None;
                 }
-            }
+                session_id
+            };
             if let Err(e) = persist_peer_rotation_state(&chain, &svc.peers).await {
                 warn!("Persisting peer rotation state after inbound registration failed: {e}");
             }
             if let Err(e) = persist_peer_reputation_state(&chain, &svc.peers).await {
                 warn!("Persisting peer reputation state after inbound registration failed: {e}");
             }
+            // The source port of an inbound TCP connection is ephemeral. Learn
+            // the peer's IP on the standard network port as an *unconfirmed*
+            // candidate; only a later successful outbound dial makes it PEX
+            // shareable. This is deliberately compatible with the existing
+            // Hello payload, whose strict length parser cannot be extended
+            // without a protocol-version change. A future protocol revision
+            // may add an explicitly advertised listening endpoint to Hello as
+            // part of a coordinated version/handshake migration.
+            {
+                let mut pex = trace_lock("pex", &svc.pex).await;
+                pex.learn_inbound_peer(addr.ip(), config.network.default_port());
+            }
             refresh_peer_metrics(&svc.peers, &svc.metrics, Some(&svc.state_events)).await;
-            // IBD loop: if the inbound peer claims a higher chain, sync from it.
-            // Mirrors connect_outbound logic so inbound-only nodes (behind NAT
-            // who can only accept connections) still converge to the network's
-            // tip instead of remaining stuck at a stale height.
-            let our_height = chain.lock().await.tip_height.0;
+            // An inbound peer with a taller chain is a normal IBD source.
+            // For equal-height fork resolution, however, the inbound side must
+            // remain in `message_loop` to serve the outbound peer's locator.
+            // If both sides start IBD after the Hello exchange, both wait for
+            // Headers and the connection deadlocks.  The outbound side is the
+            // single deterministic requester for equal-height reconciliation.
+            let our_height = {
+                let chain = chain.lock().await;
+                chain.tip_height.0
+            };
             if peer_hello.best_height > our_height {
                 let ibd_result = tokio::select! {
-                    _ = shutdown.wait() => return,
+                    _ = shutdown.wait() => return Some(registered_session),
                     result = run_ibd_session(
                         &mut stream,
                         &mut codec,
@@ -1496,6 +1645,7 @@ async fn handle_inbound(
                         &svc.mempool,
                         addr,
                         peer_hello.best_height,
+                        false,
                         svc.future_block_queue.clone(),
                         svc.metrics.clone(),
                         svc.wallet.clone(),
@@ -1509,7 +1659,7 @@ async fn handle_inbound(
                     Err(e) => {
                         let _ = record_peer_violation(&chain, &svc.peers, addr, &e).await;
                         warn!("IBD with {addr} failed: {e}");
-                        return;
+                        return Some(registered_session);
                     }
                 }
             }
@@ -1538,20 +1688,28 @@ async fn handle_inbound(
                 if is_write_timeout(&e) {
                     let _ = record_peer_violation(&chain, &svc.peers, addr, &e).await;
                 }
+                let local_height = chain.lock().await.tip_height.0;
                 tracing::info!(
                     event = "session_closed_reason",
                     peer_addr = %addr,
+                    peer_id = %peer_id.map(hex::encode).unwrap_or_else(|| "unavailable".into()),
                     direction = "inbound",
                     reason = %e,
                     failure_class = "operational_network",
+                    ibd_active = svc.ibd_active_sessions.load(std::sync::atomic::Ordering::Acquire) > 0,
+                    local_height,
+                    remote_height = peer_hello.best_height,
+                    remaining_blocks = peer_hello.best_height.saturating_sub(local_height),
                     "peer session closed"
                 );
                 info!("Connection to {addr} closed: {e}");
             }
+            Some(registered_session)
         }
         Err(e) => {
             let _ = record_pending_peer_violation(&chain, &svc.peers, addr, &e).await;
-            warn!("Hello exchange with {addr} failed: {e}")
+            warn!("Hello exchange with {addr} failed: {e}");
+            None
         }
     }
 }
@@ -1621,34 +1779,55 @@ async fn connect_outbound(
         result = hello_exchange(&mut stream, &mut codec, &config, &chain_id, &chain) => result,
     } {
         Ok(peer_hello) => {
+            let peer_id = codec.peer_id();
             info!(
-                "Hello from {addr}: height={} ua={:?}",
-                peer_hello.best_height, peer_hello.user_agent
+                "Hello from {addr}: peer_id={} height={} hash={} ua={:?}",
+                peer_id
+                    .map(hex::encode)
+                    .unwrap_or_else(|| "unavailable".into()),
+                peer_hello.best_height,
+                hex::encode(peer_hello.best_hash),
+                peer_hello.user_agent
             );
+            let sock_addr: std::net::SocketAddr = match addr.parse() {
+                Ok(a) => a,
+                Err(_) => match stream.peer_addr() {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("Cannot determine addr for register_peer: {e}");
+                        return OutboundAttemptOutcome::RetryableFailure;
+                    }
+                },
+            };
+            let canonical_addr = sock_addr.to_string();
             // Register peer in manager so connected_peers() sees it
             {
                 use dom_wire::peer::PeerInfo;
-                let sock_addr: std::net::SocketAddr = match addr.parse() {
-                    Ok(a) => a,
-                    Err(_) => match stream.peer_addr() {
-                        Ok(a) => a,
-                        Err(e) => {
-                            warn!("Cannot determine addr for register_peer: {e}");
-                            return OutboundAttemptOutcome::RetryableFailure;
-                        }
-                    },
-                };
                 let mut peer_info = PeerInfo::new(sock_addr, true);
+                let session_id = peer_info.session_id;
+                peer_info.peer_id = peer_id;
                 peer_info.state = dom_wire::peer::PeerState::Connected;
                 peer_info.best_height = peer_hello.best_height;
                 peer_info.best_hash = peer_hello.best_hash;
                 peer_info.user_agent = peer_hello.user_agent.clone();
-                let result = svc.peers.lock().await.register_peer(peer_info);
+                let mut peers = svc.peers.lock().await;
+                if let Some(peer_id) = peer_id {
+                    peers.note_peer_identity(addr, peer_id);
+                }
+                let result = peers.register_peer(peer_info);
                 info!("register_peer outbound {addr} → {result:?}");
                 if let Err(e) = result {
                     warn!("Failed to register outbound peer {addr}: {e}");
                     return OutboundAttemptOutcome::RetryableFailure;
                 }
+                peers.bind_outbound_session(addr, &canonical_addr, session_id);
+            }
+            // A completed Noise + Hello exchange proves this dial target is
+            // reachable. Promote it from an unconfirmed PEX candidate and only
+            // now refresh last_seen for future Addr responses.
+            {
+                let mut pex = trace_lock("pex", &svc.pex).await;
+                pex.mark_connected(&canonical_addr);
             }
             if let Err(e) = persist_peer_rotation_state(&chain, &svc.peers).await {
                 warn!("Persisting peer rotation state after outbound registration failed: {e}");
@@ -1666,8 +1845,16 @@ async fn connect_outbound(
             };
 
             // IBD loop: keep syncing while peer claims to be ahead.
-            let our_height = chain.lock().await.tip_height.0;
-            if peer_hello.best_height > our_height {
+            let (our_height, our_hash) = {
+                let chain = chain.lock().await;
+                (chain.tip_height.0, *chain.tip_hash.as_bytes())
+            };
+            if let Some(fork_resolution) = sync_mode_for_peer(
+                our_height,
+                our_hash,
+                peer_hello.best_height,
+                peer_hello.best_hash,
+            ) {
                 let ibd_result = tokio::select! {
                     _ = shutdown.wait() => return OutboundAttemptOutcome::Shutdown,
                     result = run_ibd_session(
@@ -1678,6 +1865,7 @@ async fn connect_outbound(
                         &svc.mempool,
                         peer_addr,
                         peer_hello.best_height,
+                        fork_resolution,
                         svc.future_block_queue.clone(),
                         svc.metrics.clone(),
                         svc.wallet.clone(),
@@ -1689,13 +1877,9 @@ async fn connect_outbound(
                 match ibd_result {
                     Ok(()) => {}
                     Err(e) => {
-                        let scored = record_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
+                        let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
                         warn!("IBD with {addr} failed: {e}");
-                        return if scored {
-                            OutboundAttemptOutcome::RetryableFailure
-                        } else {
-                            OutboundAttemptOutcome::Registered
-                        };
+                        return OutboundAttemptOutcome::RetryableFailure;
                     }
                 }
             }
@@ -1725,12 +1909,18 @@ async fn connect_outbound(
                 if is_write_timeout(&e) {
                     let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &e).await;
                 }
+                let local_height = chain.lock().await.tip_height.0;
                 tracing::info!(
                     event = "session_closed_reason",
                     peer_addr = %addr,
+                    peer_id = %peer_id.map(hex::encode).unwrap_or_else(|| "unavailable".into()),
                     direction = "outbound",
                     reason = %e,
                     failure_class = "operational_network",
+                    ibd_active = svc.ibd_active_sessions.load(std::sync::atomic::Ordering::Acquire) > 0,
+                    local_height,
+                    remote_height = peer_hello.best_height,
+                    remaining_blocks = peer_hello.best_height.saturating_sub(local_height),
                     "peer session closed"
                 );
                 info!("Connection to {addr} closed: {e}");
@@ -1783,6 +1973,10 @@ async fn hello_exchange(
     })?
 }
 
+fn node_user_agent() -> String {
+    format!("dom-node/{}", env!("CARGO_PKG_VERSION"))
+}
+
 async fn hello_exchange_inner(
     stream: &mut tokio::net::TcpStream,
     codec: &mut dom_wire::codec::NoiseCodec,
@@ -1799,12 +1993,12 @@ async fn hello_exchange_inner(
     };
 
     let our_hello = HelloPayload {
-        version: dom_core::PROTOCOL_VERSION,
+        version: dom_core::WIRE_PROTOCOL_VERSION,
         network_magic: config.network.magic(),
         chain_id: *chain_id,
         best_height,
         best_hash,
-        user_agent: format!("dom-node/{}", env!("CARGO_PKG_VERSION")),
+        user_agent: node_user_agent(),
         local_timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1827,10 +2021,10 @@ async fn hello_exchange_inner(
     }
     let peer_hello = HelloPayload::from_bytes(&peer_msg.payload)?;
 
-    if peer_hello.version != dom_core::PROTOCOL_VERSION {
+    if peer_hello.version != dom_core::WIRE_PROTOCOL_VERSION {
         return Err(DomError::Invalid(format!(
             "protocol version mismatch: ours={} theirs={}",
-            dom_core::PROTOCOL_VERSION,
+            dom_core::WIRE_PROTOCOL_VERSION,
             peer_hello.version
         )));
     }
@@ -1974,15 +2168,28 @@ async fn record_peer_violation(
     };
 
     let peer_key = peer_addr.to_string();
-    let banned = {
+    let (banned, previous_score, accumulated_score) = {
         let mut mgr = trace_lock("peers", peers).await;
-        mgr.add_ban_score(&peer_key, score)
+        let previous = mgr.ban_score(&peer_key).unwrap_or(0);
+        let banned = mgr.add_ban_score(&peer_key, score);
+        let accumulated = mgr.ban_score(&peer_key).unwrap_or(previous);
+        (banned, previous, accumulated)
     };
     if let Err(e) = persist_peer_reputation_state(chain, peers).await {
         warn!("Persisting peer reputation state failed: {e}");
     }
 
-    if banned {
+    if previous_score < dom_wire::peer::ban_scores::BAN_THRESHOLD
+        && accumulated_score >= dom_wire::peer::ban_scores::BAN_THRESHOLD
+    {
+        warn!(
+            event = "peer_ban_threshold_crossed",
+            peer = %peer_addr,
+            reason = %error,
+            accumulated_score,
+            "peer reputation crossed the ban threshold"
+        );
+    } else if banned {
         warn!("Peer {peer_addr} banned after protocol violation: {error}");
     } else {
         warn!("Peer {peer_addr} protocol violation (+{score}): {error}");
@@ -2002,15 +2209,31 @@ async fn record_pending_peer_violation(
     };
 
     let peer_key = peer_addr.to_string();
-    let banned = {
+    let (banned, previous_score, accumulated_score) = {
         let mut mgr = trace_lock("peers", peers).await;
-        mgr.add_pending_ban_score(&peer_key, score) >= dom_wire::peer::ban_scores::BAN_THRESHOLD
+        let previous = mgr.pending_ban_score(&peer_key);
+        let accumulated = mgr.add_pending_ban_score(&peer_key, score);
+        (
+            accumulated >= dom_wire::peer::ban_scores::BAN_THRESHOLD,
+            previous,
+            accumulated,
+        )
     };
     if let Err(e) = persist_peer_reputation_state(chain, peers).await {
         warn!("Persisting peer reputation state failed: {e}");
     }
 
-    if banned {
+    if previous_score < dom_wire::peer::ban_scores::BAN_THRESHOLD
+        && accumulated_score >= dom_wire::peer::ban_scores::BAN_THRESHOLD
+    {
+        warn!(
+            event = "pending_peer_ban_threshold_crossed",
+            peer = %peer_addr,
+            reason = %error,
+            accumulated_score,
+            "pending peer reputation crossed the ban threshold"
+        );
+    } else if banned {
         warn!("Pending peer {peer_addr} banned after pre-registration violation: {error}");
     } else {
         warn!("Pending peer {peer_addr} violation (+{score}): {error}");
@@ -2022,7 +2245,7 @@ async fn record_pending_peer_violation(
 async fn queue_future_block(
     queue: &Arc<crate::future_block_queue::FutureBlockQueue>,
     block: &dom_consensus::Block,
-    block_bytes: Vec<u8>,
+    _received_block_bytes: Vec<u8>,
 ) -> bool {
     use dom_serialization::DomSerialize;
 
@@ -2034,19 +2257,27 @@ async fn queue_future_block(
         }
     };
     let hash = *dom_crypto::hash::blake2b_256(&header_bytes).as_bytes();
+    let canonical_block_bytes = match block.to_bytes() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!("Could not serialise deferred block: {e}");
+            return false;
+        }
+    };
     let deferred = crate::future_block_queue::DeferredBlock {
         block_hash: hash,
         block_height: block.header.height.0,
         timestamp: block.header.timestamp.0,
         queued_at: std::time::Instant::now(),
-        block_bytes,
+        block_bytes: canonical_block_bytes,
     };
-    let admitted = queue.defer(deferred).await;
+    let admission = queue.admit(deferred).await;
+    let admitted = admission.is_admitted();
     tracing::info!(
         event = "orphan_admitted",
         block_height = block.header.height.0,
         block_hash = %hex::encode(hash),
-        action = if admitted { "queued" } else { "rejected_queue_full" },
+        action = ?admission,
         failure_class = "runtime_future_block",
         "future block queue admission decided"
     );
@@ -2386,9 +2617,19 @@ pub(crate) fn persist_peer_reputation_snapshot(
     use dom_serialization::DomSerialize;
 
     if snapshot.entries.is_empty() {
-        return store.delete_metadata(PEER_REPUTATION_METADATA_KEY);
+        clear_persisted_peer_reputation(store)?;
+        return Ok(());
     }
-    store.put_metadata(PEER_REPUTATION_METADATA_KEY, &snapshot.to_bytes()?)
+    store.put_metadata(PEER_REPUTATION_METADATA_KEY, &snapshot.to_bytes()?)?;
+    store.delete_metadata(LEGACY_PEER_REPUTATION_METADATA_KEY)
+}
+
+/// Delete every known peer-reputation metadata version.
+///
+/// Used by the offline `dom-peer-reputation-clear` maintenance tool.
+pub fn clear_persisted_peer_reputation(store: &DomStore) -> Result<(), DomError> {
+    store.delete_metadata(PEER_REPUTATION_METADATA_KEY)?;
+    store.delete_metadata(LEGACY_PEER_REPUTATION_METADATA_KEY)
 }
 
 pub(crate) fn load_peer_rotation_snapshot(
@@ -2433,7 +2674,22 @@ pub(crate) fn load_peer_reputation_snapshot(
                 })?;
             Ok(Some(snapshot))
         }
-        None => Ok(None),
+        None => match store.get_metadata(LEGACY_PEER_REPUTATION_METADATA_KEY)? {
+            Some(bytes) => {
+                let snapshot =
+                    dom_wire::manager::PersistedPeerReputationState::from_legacy_bytes(&bytes)
+                        .map_err(|e| {
+                            DomError::Invalid(format!(
+                                "legacy peer reputation snapshot decode failed: {e}"
+                            ))
+                        })?;
+                // v1 did not retain age. Its entries migrate expired rather
+                // than acquiring a fresh 15-minute lifetime on every restart.
+                store.delete_metadata(LEGACY_PEER_REPUTATION_METADATA_KEY)?;
+                Ok(Some(snapshot))
+            }
+            None => Ok(None),
+        },
     }
 }
 
@@ -2533,6 +2789,44 @@ pub(crate) async fn resolve_configured_dns_seeds(config: &NodeConfig) -> Vec<Str
     let is_mainnet = config.network == dom_config::Network::Mainnet;
     let port = config.network.default_port();
     dom_wire::dns_seed::resolve_seeds(is_mainnet, port, &config.dns_seeds).await
+}
+
+/// Resolve the current IP identities of explicit `DOM_SEED_PEERS` entries.
+///
+/// `seed_peers` may be hostnames, so resolve them on each connector pass. A
+/// successful lookup replaces that hostname's cached IPs; a transient failure
+/// retains its last successful result. Public DNS-seed candidates are not
+/// included in this immunity set.
+async fn refresh_configured_seed_ips(
+    configured_seed_peers: &[String],
+    cache: &mut HashMap<String, HashSet<std::net::IpAddr>>,
+) -> HashSet<std::net::IpAddr> {
+    cache.retain(|seed, _| configured_seed_peers.contains(seed));
+    for seed in configured_seed_peers {
+        if let Ok(addr) = seed.parse::<std::net::SocketAddr>() {
+            cache.insert(seed.clone(), HashSet::from([addr.ip()]));
+            continue;
+        }
+        match tokio::net::lookup_host(seed).await {
+            Ok(addrs) => {
+                let resolved = addrs.map(|addr| addr.ip()).collect::<HashSet<_>>();
+                if !resolved.is_empty() {
+                    // A successful refresh replaces this hostname's prior IPs,
+                    // so immunity follows real DNS changes.
+                    cache.insert(seed.clone(), resolved);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event = "configured_seed_resolution_failed",
+                    seed = %seed,
+                    error = %error,
+                    "keeping the last resolved seed immunity set"
+                );
+            }
+        }
+    }
+    cache.values().flatten().copied().collect()
 }
 
 async fn persist_peer_rotation_state(
@@ -2645,14 +2939,16 @@ async fn refresh_peer_metrics(
     metrics: &Arc<Metrics>,
     state_events: Option<&Arc<Notify>>,
 ) {
-    let (peer_count, inbound_peers, outbound_peers) = {
+    let (peer_count, inbound_peers, outbound_peers, best_known_peer_height) = {
         let mgr = trace_lock("peers", peers).await;
         let mut peer_count = 0u64;
         let mut inbound_peers = 0u64;
         let mut outbound_peers = 0u64;
+        let mut best_known_peer_height = 0u64;
         for peer in mgr.peers.values() {
             if peer.state == dom_wire::peer::PeerState::Connected {
                 peer_count += 1;
+                best_known_peer_height = best_known_peer_height.max(peer.best_height);
                 if peer.outbound {
                     outbound_peers += 1;
                 } else {
@@ -2660,7 +2956,12 @@ async fn refresh_peer_metrics(
                 }
             }
         }
-        (peer_count, inbound_peers, outbound_peers)
+        (
+            peer_count,
+            inbound_peers,
+            outbound_peers,
+            best_known_peer_height,
+        )
     };
 
     metrics
@@ -2672,8 +2973,59 @@ async fn refresh_peer_metrics(
     metrics
         .outbound_peers
         .store(outbound_peers, std::sync::atomic::Ordering::Relaxed);
+    metrics
+        .best_known_peer_height
+        .store(best_known_peer_height, std::sync::atomic::Ordering::Relaxed);
     if let Some(state_events) = state_events {
         state_events.notify_waiters();
+    }
+}
+
+async fn note_peer_best_height(
+    peers: &Arc<Mutex<PeerManager>>,
+    metrics: &Arc<Metrics>,
+    state_events: &Arc<Notify>,
+    peer_addr: std::net::SocketAddr,
+    height: u64,
+    hash: [u8; 32],
+) {
+    let changed = {
+        let mut mgr = trace_lock("peers", peers).await;
+        match mgr.peers.get_mut(&peer_addr.to_string()) {
+            Some(peer)
+                if peer.state == dom_wire::peer::PeerState::Connected
+                    && height > peer.best_height =>
+            {
+                peer.best_height = height;
+                peer.best_hash = hash;
+                true
+            }
+            _ => false,
+        }
+    };
+    if changed {
+        refresh_peer_metrics(peers, metrics, Some(state_events)).await;
+    }
+}
+
+/// Decide whether a peer's advertised tip requires a header/body sync.
+///
+/// `Some(false)` is ordinary catch-up from a taller peer. `Some(true)` is a
+/// fork-resolution round: equal height but a different authenticated tip hash.
+/// The latter is essential because height alone cannot choose between forks;
+/// chain state resolves the fetched branches by accumulated work.
+fn sync_mode_for_peer(
+    local_height: u64,
+    local_hash: [u8; 32],
+    peer_height: u64,
+    peer_hash: [u8; 32],
+) -> Option<bool> {
+    if peer_height > local_height {
+        Some(false)
+    } else if peer_height == local_height && peer_hash != local_hash {
+        Some(true)
+    } else {
+        None
     }
 }
 
@@ -2715,14 +3067,23 @@ async fn persist_ibd_state(
     round: IbdRoundState,
 ) -> Result<(), DomError> {
     let chain = chain.lock().await;
+    // The canonical tip is the durable block cursor. It can advance inside a
+    // partially completed body page, before `IbdState::note_round_progress` is
+    // called. Persisting the stale in-memory round height alongside the new tip
+    // hash made every mid-page restart fail the resumability check.
+    let durable_blocks_height = chain.tip_height.0;
+    let durable_headers_height = ibd
+        .headers_height
+        .max(ibd.last_progress_height)
+        .max(durable_blocks_height);
     let snapshot = dom_chain::PersistedIbdState {
         phase: ibd.phase,
         peer_addr: peer_addr.to_string(),
         start_height: ibd.start_height,
         best_peer_height: ibd.best_peer_height,
-        headers_height: ibd.headers_height,
-        blocks_height: ibd.blocks_height,
-        last_progress_height: ibd.last_progress_height,
+        headers_height: durable_headers_height,
+        blocks_height: durable_blocks_height,
+        last_progress_height: ibd.last_progress_height.max(durable_blocks_height),
         checkpoint_tip_hash: *chain.tip_hash.as_bytes(),
         retry_attempts: ibd.retry_attempts,
         last_interruption: ibd.last_interruption,
@@ -2743,6 +3104,7 @@ async fn clear_persisted_ibd_state(chain: &Arc<Mutex<ChainState>>) -> Result<(),
 struct IbdRuntimeContext<'a> {
     config: &'a NodeConfig,
     peer_addr: std::net::SocketAddr,
+    peer_id: Option<[u8; 32]>,
     mempool: Arc<Mutex<Mempool>>,
     future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
     metrics: Arc<Metrics>,
@@ -2769,21 +3131,47 @@ async fn initialize_ibd_state(
     let peer_key = peer_addr.to_string();
     let (tip_height, tip_hash, persisted) = {
         let chain = chain.lock().await;
-        (
-            chain.tip_height.0,
-            *chain.tip_hash.as_bytes(),
-            dom_chain::PersistedIbdState::load(&chain.store)?,
-        )
+        let persisted = match dom_chain::PersistedIbdState::load(&chain.store) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                // This metadata is local orchestration state, never peer input.
+                // Discard corruption/incompatible checkpoints and restart from
+                // the canonical local tip without routing the error into peer
+                // reputation.
+                tracing::warn!(
+                    event = "ibd_checkpoint_discarded",
+                    reason = %error,
+                    local_tip_height = chain.tip_height.0,
+                    "invalid local IBD checkpoint discarded"
+                );
+                if let Err(clear_error) = dom_chain::PersistedIbdState::clear(&chain.store) {
+                    tracing::warn!(
+                        event = "ibd_checkpoint_clear_failed",
+                        reason = %clear_error,
+                        "failed to delete invalid local IBD checkpoint"
+                    );
+                }
+                None
+            }
+        };
+        (chain.tip_height.0, *chain.tip_hash.as_bytes(), persisted)
     };
 
     let Some(snapshot) = persisted else {
         return Ok((dom_chain::IbdState::new(tip_height, peer_best_height), None));
     };
 
-    let resumable = snapshot.peer_addr == peer_key
-        && snapshot.best_peer_height == peer_best_height
-        && snapshot.blocks_height == tip_height
+    // The work queues are content-addressed and consensus-validated, so they
+    // remain safe across a reconnect, a peer tip increase, or failover to
+    // another authenticated Mainnet peer. The durable local checkpoint is the
+    // authority. A replacement peer must merely be high enough to serve the
+    // saved round.
+    let peer_can_serve_saved_round = snapshot.pending_blocks.is_empty()
+        && snapshot.pending_headers.is_empty()
+        || peer_best_height >= snapshot.header_cursor_height;
+    let resumable = snapshot.blocks_height == tip_height
         && snapshot.checkpoint_tip_hash == tip_hash
+        && peer_can_serve_saved_round
         && !matches!(
             snapshot.phase,
             dom_chain::IbdPhase::Completed | dom_chain::IbdPhase::Failed
@@ -2795,7 +3183,29 @@ async fn initialize_ibd_state(
     }
 
     match dom_chain::IbdState::from_persisted(&snapshot) {
-        Ok(ibd) => Ok((ibd, Some(snapshot))),
+        Ok(mut ibd) => {
+            let source_changed = snapshot.peer_addr != peer_key;
+            ibd.best_peer_height = ibd.best_peer_height.max(peer_best_height);
+            if source_changed {
+                ibd.retry_attempts = 0;
+                ibd.last_interruption = None;
+            }
+            tracing::info!(
+                event = "ibd_checkpoint_resumed",
+                previous_peer_addr = %snapshot.peer_addr,
+                peer_addr = %peer_addr,
+                source_changed,
+                local_height = tip_height,
+                remote_height = peer_best_height,
+                saved_target_height = snapshot.best_peer_height,
+                block_cursor = snapshot.block_cursor,
+                pending_blocks = snapshot.pending_blocks.len(),
+                header_cursor = snapshot.header_cursor,
+                pending_headers = snapshot.pending_headers.len(),
+                "resuming durable IBD checkpoint"
+            );
+            Ok((ibd, Some(snapshot)))
+        }
         Err(_) => {
             clear_persisted_ibd_state(chain).await?;
             Ok((dom_chain::IbdState::new(tip_height, peer_best_height), None))
@@ -2823,7 +3233,7 @@ async fn resume_ibd_block_sync(
     let mut connected_any = false;
     let mut processed = round.block_cursor;
 
-    for batch in round.pending_blocks[start..].chunks(dom_core::MAX_GETBLOCKDATA_HASHES) {
+    for batch in round.pending_blocks[start..].chunks(IBD_BLOCK_REQUEST_WINDOW) {
         let req = GetBlockDataPayload {
             hashes: batch.to_vec(),
         };
@@ -2836,7 +3246,14 @@ async fn resume_ibd_block_sync(
 
         for expected_hash in batch {
             let block = loop {
-                let m = codec.recv(stream).await?;
+                let m = codec
+                    .recv_with_idle_timeout(
+                        stream,
+                        tokio::time::Duration::from_secs(
+                            dom_wire::handshake::IBD_IDLE_TIMEOUT_SECS,
+                        ),
+                    )
+                    .await?;
                 match m.command {
                     Command::Block => {
                         // The peer relays freshly-mined blocks on the SAME
@@ -2918,9 +3335,10 @@ async fn resume_ibd_block_sync(
             // it while the guard is still alive deadlocks the non-reentrant
             // Tokio mutex. Mirrors the correct call-sites (deferred replay /
             // orphan reprocess / peer block): capture-in-scope, act-after-drop.
-            let (connect_result, best_chain) = {
-                let mut c = chain.lock().await;
-                let connect_result = match c.connect_block(
+            let chain_for_connect = chain.clone();
+            let connect_result = tokio::task::spawn_blocking(move || {
+                let mut c = chain_for_connect.blocking_lock();
+                c.connect_block(
                     &block,
                     Timestamp(
                         std::time::SystemTime::now()
@@ -2928,39 +3346,38 @@ async fn resume_ibd_block_sync(
                             .unwrap_or_default()
                             .as_secs(),
                     ),
-                ) {
-                    Ok(result) => result,
-                    Err(e) => {
-                        return Err(DomError::Invalid(format!(
-                            "IBD resume from {}: connect_block rejected: {e}",
-                            runtime.peer_addr,
-                        )));
-                    }
-                };
-                let best_chain = match &connect_result {
-                    dom_chain::ConnectResult::BestChain => {
-                        connected_any = true;
-                        true
-                    }
-                    dom_chain::ConnectResult::Reorg(_) => {
-                        connected_any = true;
-                        true
-                    }
-                    dom_chain::ConnectResult::SideChain => {
-                        connected_any = true;
-                        false
-                    }
-                    dom_chain::ConnectResult::AlreadyHave => {
-                        tracing::debug!(
-                            "IBD resume from {}: block already known at height {}",
-                            runtime.peer_addr,
-                            height
-                        );
-                        connected_any = true;
-                        false
-                    }
-                };
-                (connect_result, best_chain)
+                )
+            })
+            .await
+            .map_err(|e| DomError::Internal(format!("IBD validation task failed: {e}")))?
+            .map_err(|e| {
+                DomError::Invalid(format!(
+                    "IBD resume from {}: connect_block rejected: {e}",
+                    runtime.peer_addr,
+                ))
+            })?;
+            let best_chain = match &connect_result {
+                dom_chain::ConnectResult::BestChain => {
+                    connected_any = true;
+                    true
+                }
+                dom_chain::ConnectResult::Reorg(_) => {
+                    connected_any = true;
+                    true
+                }
+                dom_chain::ConnectResult::SideChain => {
+                    connected_any = true;
+                    false
+                }
+                dom_chain::ConnectResult::AlreadyHave => {
+                    tracing::debug!(
+                        "IBD resume from {}: block already known at height {}",
+                        runtime.peer_addr,
+                        height
+                    );
+                    connected_any = true;
+                    false
+                }
             };
             // Chain guard dropped above. The following re-acquire chain/mempool/
             // wallet internally and must run with NO chain guard held.
@@ -3030,6 +3447,38 @@ async fn resume_ibd_block_sync(
                 },
             )
             .await?;
+            let local_height = chain.lock().await.tip_height.0;
+            ibd.blocks_height = local_height;
+            ibd.last_progress_height = ibd.last_progress_height.max(local_height);
+            let remaining_blocks = ibd.best_peer_height.saturating_sub(local_height);
+            let progress_percent = if ibd.best_peer_height == 0 {
+                100.0
+            } else {
+                (local_height as f64 * 100.0 / ibd.best_peer_height as f64).min(100.0)
+            };
+            if remaining_blocks == 0 || local_height % IBD_PROGRESS_LOG_INTERVAL == 0 {
+                tracing::info!(
+                    event = "ibd_progress",
+                    peer_addr = %runtime.peer_addr,
+                    peer_id = %runtime.peer_id.map(hex::encode).unwrap_or_else(|| "unavailable".into()),
+                    phase = ?ibd.phase,
+                    local_height,
+                    remote_height = ibd.best_peer_height,
+                    remaining_blocks,
+                    progress_percent = format_args!("{progress_percent:.2}"),
+                    "IBD progress"
+                );
+            } else {
+                tracing::debug!(
+                    event = "ibd_progress",
+                    peer_addr = %runtime.peer_addr,
+                    local_height,
+                    remote_height = ibd.best_peer_height,
+                    remaining_blocks,
+                    progress_percent,
+                    "IBD block committed"
+                );
+            }
         }
     }
 
@@ -3067,6 +3516,43 @@ async fn continue_ibd_header_sync(
     }
 
     ibd.begin_header_sync();
+    if start == 0 && round.pending_blocks.is_empty() {
+        // The normal path validates a fresh batch once. The former per-header
+        // loop re-decoded the complete prefix and rewrote the complete raw
+        // header cache after every cursor advance (quadratic CPU and write
+        // amplification). A crash before this bounded batch completes simply
+        // re-requests it; the final transition is persisted atomically.
+        let headers_for_validation = round.pending_headers.clone();
+        let chain_for_validation = chain.clone();
+        let pending_blocks = tokio::task::spawn_blocking(move || {
+            let c = chain_for_validation.blocking_lock();
+            c.validate_ibd_headers_batch(&headers_for_validation, now)
+        })
+        .await
+        .map_err(|e| DomError::Internal(format!("IBD header validation task failed: {e}")))??;
+        ibd.headers_height = ibd.headers_height.max(round.header_cursor_height);
+        ibd.last_progress_height = ibd.last_progress_height.max(round.header_cursor_height);
+        if pending_blocks.is_empty() {
+            ibd.phase = dom_chain::IbdPhase::Discovering;
+        } else {
+            ibd.begin_block_sync();
+        }
+        persist_ibd_state(
+            chain,
+            peer_addr,
+            ibd,
+            IbdRoundState {
+                pending_blocks: pending_blocks.clone(),
+                pending_headers: Vec::new(),
+                block_cursor: 0,
+                header_cursor: 0,
+                header_cursor_height: round.header_cursor_height,
+            },
+        )
+        .await?;
+        return Ok(pending_blocks);
+    }
+
     let pending_headers = round.pending_headers;
     let mut pending_blocks = round.pending_blocks;
 
@@ -3124,6 +3610,7 @@ async fn run_ibd_session(
     mempool: &Arc<Mutex<Mempool>>,
     peer_addr: std::net::SocketAddr,
     peer_best_height: u64,
+    fork_resolution: bool,
     future_block_queue: Arc<crate::future_block_queue::FutureBlockQueue>,
     metrics: Arc<Metrics>,
     wallet: Option<Arc<Mutex<dom_wallet::WalletDir>>>,
@@ -3131,11 +3618,39 @@ async fn run_ibd_session(
     block_relay_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
     svc: NodeServices,
 ) -> Result<(), DomError> {
+    let Some(_ibd_active) =
+        IbdActiveGuard::try_new(svc.ibd_active_sessions.clone(), state_events.clone())
+    else {
+        let local_height = chain.lock().await.tip_height.0;
+        tracing::debug!(
+            event = "ibd_deferred",
+            peer_addr = %peer_addr,
+            local_height,
+            remote_height = peer_best_height,
+            remaining_blocks = peer_best_height.saturating_sub(local_height),
+            reason = "another IBD session owns the canonical sync cursor",
+            "IBD session deferred"
+        );
+        return Ok(());
+    };
     let our_height = chain.lock().await.tip_height.0;
-    let (mut ibd, persisted) = initialize_ibd_state(chain, peer_addr, peer_best_height).await?;
+    // IBD historically treated `local_height >= peer_height` as complete. That
+    // leaves equal-height forks permanent: the peers have different tips but
+    // never exchange the competing branch, so fork choice cannot compare work.
+    // A synthetic one-block target keeps the existing header/body pipeline
+    // active for exactly one fork-resolution round; the round exits below once
+    // all advertised competing blocks have been connected as side-chain or
+    // canonical data.
+    let ibd_target_height = if fork_resolution {
+        our_height.saturating_add(1)
+    } else {
+        peer_best_height
+    };
+    let (mut ibd, persisted) = initialize_ibd_state(chain, peer_addr, ibd_target_height).await?;
     let runtime = IbdRuntimeContext {
         config,
         peer_addr,
+        peer_id: codec.peer_id(),
         mempool: mempool.clone(),
         future_block_queue,
         metrics,
@@ -3160,6 +3675,8 @@ async fn run_ibd_session(
             ));
         }
     }
+    // `_ibd_active` keeps mining paused and serializes ownership of the single
+    // persisted IBD cursor for the full session, including reconciliation.
     if let Some(snapshot) = persisted.clone() {
         if !snapshot.pending_headers.is_empty()
             && snapshot.header_cursor < snapshot.pending_headers.len() as u32
@@ -3231,12 +3748,21 @@ async fn run_ibd_session(
                     Ok(false) => {}
                     Err(e) => match ibd.note_round_error(&e) {
                         dom_chain::IbdControl::Retry => {
+                            let local_height = chain.lock().await.tip_height.0;
                             warn!(
-                                "IBD with {peer_addr} interrupted ({e}); retry {}/{} remaining={}",
-                                ibd.retry_attempts,
-                                dom_chain::ibd::MAX_IBD_RETRY_ATTEMPTS,
-                                ibd.remaining_retries()
+                                event = "ibd_interrupted",
+                                peer_addr = %peer_addr,
+                                peer_id = %runtime.peer_id.map(hex::encode).unwrap_or_else(|| "unavailable".into()),
+                                phase = ?ibd.phase,
+                                local_height,
+                                remote_height = ibd.best_peer_height,
+                                remaining_blocks = ibd.best_peer_height.saturating_sub(local_height),
+                                retry_attempt = ibd.retry_attempts,
+                                retries_remaining = ibd.remaining_retries(),
+                                reason = %e,
+                                "IBD interrupted; reconnect required"
                             );
+                            return Err(e);
                         }
                         dom_chain::IbdControl::Fail => {
                             clear_persisted_ibd_state(chain).await?;
@@ -3318,12 +3844,21 @@ async fn run_ibd_session(
                 Ok(false) => {}
                 Err(e) => match ibd.note_round_error(&e) {
                     dom_chain::IbdControl::Retry => {
+                        let local_height = chain.lock().await.tip_height.0;
                         warn!(
-                            "IBD with {peer_addr} interrupted ({e}); retry {}/{} remaining={}",
-                            ibd.retry_attempts,
-                            dom_chain::ibd::MAX_IBD_RETRY_ATTEMPTS,
-                            ibd.remaining_retries()
+                            event = "ibd_interrupted",
+                            peer_addr = %peer_addr,
+                            peer_id = %runtime.peer_id.map(hex::encode).unwrap_or_else(|| "unavailable".into()),
+                            phase = ?ibd.phase,
+                            local_height,
+                            remote_height = ibd.best_peer_height,
+                            remaining_blocks = ibd.best_peer_height.saturating_sub(local_height),
+                            retry_attempt = ibd.retry_attempts,
+                            retries_remaining = ibd.remaining_retries(),
+                            reason = %e,
+                            "IBD interrupted; reconnect required"
                         );
+                        return Err(e);
                     }
                     dom_chain::IbdControl::Fail => {
                         clear_persisted_ibd_state(chain).await?;
@@ -3367,7 +3902,22 @@ async fn run_ibd_session(
         .await?;
     }
 
-    info!("Starting IBD from {peer_addr}: our={our_height} peer={peer_best_height}");
+    tracing::info!(
+        event = "ibd_started",
+        peer_addr = %peer_addr,
+        peer_id = %runtime.peer_id.map(hex::encode).unwrap_or_else(|| "unavailable".into()),
+        phase = ?ibd.phase,
+        local_height = our_height,
+        remote_height = peer_best_height,
+        fork_resolution,
+        remaining_blocks = peer_best_height.saturating_sub(our_height),
+        progress_percent = if peer_best_height == 0 {
+            100.0
+        } else {
+            (our_height as f64 * 100.0 / peer_best_height as f64).min(100.0)
+        },
+        "IBD started"
+    );
 
     loop {
         ibd.begin_header_sync();
@@ -3389,6 +3939,18 @@ async fn run_ibd_session(
         .await
         {
             Ok(true) => {
+                if fork_resolution {
+                    clear_persisted_ibd_state(chain).await?;
+                    let (local_height, local_hash) = {
+                        let chain = chain.lock().await;
+                        (chain.tip_height.0, *chain.tip_hash.as_bytes())
+                    };
+                    info!(
+                        "fork-resolution IBD with {peer_addr} completed: local_height={local_height} local_hash={} peer_height={peer_best_height}",
+                        hex::encode(local_hash)
+                    );
+                    return Ok(());
+                }
                 let new_height = chain.lock().await.tip_height.0;
                 match ibd.note_round_progress(new_height) {
                     dom_chain::IbdControl::Complete => {
@@ -3418,6 +3980,11 @@ async fn run_ibd_session(
                         ));
                     }
                 }
+            }
+            Ok(false) if fork_resolution => {
+                clear_persisted_ibd_state(chain).await?;
+                info!("fork-resolution IBD with {peer_addr} found no unknown competing blocks");
+                return Ok(());
             }
             Ok(false) => match ibd.note_empty_response() {
                 dom_chain::IbdControl::Complete => {
@@ -3464,13 +4031,26 @@ async fn run_ibd_session(
             },
             Err(e) => match ibd.note_round_error(&e) {
                 dom_chain::IbdControl::Retry => {
+                    let local_height = chain.lock().await.tip_height.0;
                     warn!(
-                        "IBD with {peer_addr} interrupted ({e}); retry {}/{} remaining={}",
-                        ibd.retry_attempts,
-                        dom_chain::ibd::MAX_IBD_RETRY_ATTEMPTS,
-                        ibd.remaining_retries()
+                        event = "ibd_interrupted",
+                        peer_addr = %peer_addr,
+                        peer_id = %runtime.peer_id.map(hex::encode).unwrap_or_else(|| "unavailable".into()),
+                        phase = ?ibd.phase,
+                        local_height,
+                        remote_height = ibd.best_peer_height,
+                        remaining_blocks = ibd.best_peer_height.saturating_sub(local_height),
+                        retry_attempt = ibd.retry_attempts,
+                        retries_remaining = ibd.remaining_retries(),
+                        reason = %e,
+                        "IBD interrupted; reconnect required"
                     );
-                    continue;
+                    // NoiseCodec treats every receive error as fatal for this
+                    // transport. Retrying on the same stream only consumes the
+                    // retry budget and eventually deletes a valid checkpoint.
+                    // Keep the last durable snapshot and let the peer connector
+                    // establish a fresh authenticated session.
+                    return Err(e);
                 }
                 dom_chain::IbdControl::Fail => {
                     clear_persisted_ibd_state(chain).await?;
@@ -3530,7 +4110,12 @@ async fn ibd_sync_round(
 
     // 2. Receive Headers (skip non-Headers messages).
     let headers_msg = loop {
-        let msg = codec.recv(stream).await?;
+        let msg = codec
+            .recv_with_idle_timeout(
+                stream,
+                tokio::time::Duration::from_secs(dom_wire::handshake::IBD_IDLE_TIMEOUT_SECS),
+            )
+            .await?;
         match msg.command {
             Command::Headers => break msg,
             Command::Ping => {
@@ -3588,6 +4173,7 @@ async fn ibd_sync_round(
     let runtime = IbdRuntimeContext {
         config,
         peer_addr,
+        peer_id: codec.peer_id(),
         mempool: mempool.clone(),
         future_block_queue,
         metrics,
@@ -3658,6 +4244,18 @@ async fn build_headers_response(
     Ok(out)
 }
 
+fn getblockdata_hashes_to_serve(hashes: &[[u8; 32]]) -> &[[u8; 32]] {
+    &hashes[..hashes.len().min(dom_core::MAX_GETBLOCKDATA_SERVE_HASHES)]
+}
+
+fn catchup_interval() -> tokio::time::Interval {
+    let mut timer = tokio::time::interval(tokio::time::Duration::from_secs(
+        CATCHUP_CHECK_INTERVAL_SECS,
+    ));
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    timer
+}
+
 async fn message_loop(
     conn: PeerConn<'_>,
     config: &NodeConfig,
@@ -3681,14 +4279,16 @@ async fn message_loop(
     };
 
     const PING_INTERVAL_SECS: u64 = 30;
-    const CATCHUP_CHECK_INTERVAL_SECS: u64 = 2;
     let mut ping_timer =
         tokio::time::interval(tokio::time::Duration::from_secs(PING_INTERVAL_SECS));
+    // Skip: a delayed connection needs one current liveness probe, never a
+    // burst of historical pings.
+    ping_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Skip the immediate first tick.
     ping_timer.tick().await;
-    let mut catchup_timer = tokio::time::interval(tokio::time::Duration::from_secs(
-        CATCHUP_CHECK_INTERVAL_SECS,
-    ));
+    let mut catchup_timer = catchup_interval();
+    // Skip: IBD can occupy this select arm for minutes. Replaying every missed
+    // tick would advance the re-request clock in a burst and flood the seed.
     catchup_timer.tick().await;
 
     // PEX (RFC-0005 §6): periodically consider asking this peer for addresses.
@@ -3696,8 +4296,15 @@ async fn message_loop(
     // limit; this timer only paces the check.
     let mut pex_timer =
         tokio::time::interval(tokio::time::Duration::from_secs(PEX_GETADDR_TICK_SECS));
+    // Skip: PEX has its own cooldown; historical checks have no useful work.
+    pex_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     pex_timer.tick().await;
     let pex_peer_key = peer_addr.to_string();
+    // Part D — highest block height this peer relayed whose parent we lacked
+    // (an orphan above our tip). The catch-up tick below re-syncs toward
+    // max(peer Hello height, this) via IBD, so a live-relayed orphan hole is
+    // rebuilt even though `peer_best_height` is only refreshed at Hello.
+    let mut blocked_orphan_target: u64 = 0;
     // Inbound Addr rate limit for THIS connection: beyond the budget each
     // extra Addr message scores ADDRESS_FLOODING instead of being processed.
     let mut addr_flood = crate::pex::AddrFloodTracker::new();
@@ -3707,6 +4314,10 @@ async fn message_loop(
     // (each connection has its own limiter). GetAddr/Addr are excluded here
     // (they have their own limiters above).
     let mut msg_rate = crate::msg_rate_limit::MessageRateLimiter::from_env();
+    // Block bodies explicitly requested by this connection are sync responses,
+    // not unsolicited relay traffic. This set makes that distinction before
+    // the per-category limiter decides whether an overflow may affect score.
+    let mut outstanding_sync_blocks = HashSet::<[u8; 32]>::new();
 
     loop {
         tokio::select! {
@@ -3803,30 +4414,61 @@ async fn message_loop(
                 }
             }
             _ = catchup_timer.tick() => {
+                // Part A — persistent re-request tick. Advancing the tracker's
+                // clock here (and only here) is what moves per-hash backoff
+                // forward at a fixed cadence, independent of orphan-arrival rate.
+                // A known-missing parent whose buffered orphan was evicted is
+                // still pursued to convergence, with the interval growing (capped)
+                // so re-request can never become a flood.
+                let rerequest = {
+                    let mut tracker = svc.missing_blocks.lock().await;
+                    let round = tracker.advance_round();
+                    tracker.next_request_batch(round)
+                };
+                if !rerequest.is_empty() {
+                    outstanding_sync_blocks.extend(rerequest.iter().copied());
+                    let req = GetBlockDataPayload { hashes: rerequest };
+                    let wire = WireMessage {
+                        magic: config.network.magic(),
+                        command: Command::GetBlockData,
+                        payload: req.to_bytes()?,
+                    };
+                    if let Err(e) = codec.send(stream, &wire).await {
+                        return Err(annotate_send_err("missing-parent re-request", peer_addr, e));
+                    }
+                }
+
+                // Part D — active recovery via IBD. Re-sync when we are behind a
+                // known-higher tip but blocked by a missing intermediate block.
+                // The target is the max of the peer's Hello-advertised height and
+                // any orphan this peer relayed above our tip; the latter catches
+                // the live-relay hole that `peer_best_height` alone misses.
+                // Reuses the proven IBD path, which rebuilds the gap from our tip
+                // regardless of what the buffered orphan pool retained.
                 let our_height = chain.lock().await.tip_height.0;
                 let peer_best_height = {
                     let peers = svc.peers.lock().await;
                     peers.peer_best_height(&pex_peer_key)
                 };
-                if let Some(peer_best_height) = peer_best_height {
-                    if peer_best_height > our_height {
-                        Box::pin(run_ibd_session(
-                            stream,
-                            codec,
-                            config,
-                            &chain,
-                            &svc.mempool,
-                            peer_addr,
-                            peer_best_height,
-                            svc.future_block_queue.clone(),
-                            svc.metrics.clone(),
-                            svc.wallet.clone(),
-                            svc.state_events.clone(),
-                            block_relay_tx.clone(),
-                            svc.clone(),
-                        ))
-                        .await?;
-                    }
+                let target = peer_best_height.unwrap_or(0).max(blocked_orphan_target);
+                if target > our_height {
+                    Box::pin(run_ibd_session(
+                        stream,
+                        codec,
+                        config,
+                        &chain,
+                        &svc.mempool,
+                        peer_addr,
+                        target,
+                        false,
+                        svc.future_block_queue.clone(),
+                        svc.metrics.clone(),
+                        svc.wallet.clone(),
+                        svc.state_events.clone(),
+                        block_relay_tx.clone(),
+                        svc.clone(),
+                    ))
+                    .await?;
                 }
             }
             // Periodic PEX: solicit addresses while our known set is below
@@ -3865,13 +4507,16 @@ async fn message_loop(
                         return Err(e);
                     }
                 };
-                // Anti-flood: per-category inbound rate limit (before the
-                // potentially expensive handler runs). Overflow scores a
-                // low-severity PROTOCOL_VIOLATION and drops THIS message; a
-                // peer that keeps overflowing crosses the ban threshold (~10
-                // windows) and is disconnected. Honest sync/relay flows stay
-                // well under the budgets (see msg_rate_limit).
-                if !msg_rate.allow(msg.command) {
+                // Anti-flood: sync request/response overflow is paced and
+                // dropped without reputation damage. Other categories may
+                // score only their first excess in each fixed window.
+                let requested_block_response =
+                    msg.command == Command::Block && !outstanding_sync_blocks.is_empty();
+                if let crate::msg_rate_limit::RateLimitDecision::Throttle {
+                    category,
+                    score_violation,
+                } = msg_rate.check(msg.command, requested_block_response)
+                {
                     let err = DomError::peer_misbehavior(
                         PeerMisbehavior::MessageRateLimit,
                         format!(
@@ -3880,12 +4525,20 @@ async fn message_loop(
                             dom_wire::peer::ban_scores::PROTOCOL_VIOLATION,
                         ),
                     );
-                    if record_peer_violation(&chain, &svc.peers, peer_addr, &err).await {
+                    if category == crate::msg_rate_limit::RateCategory::Sync {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            crate::msg_rate_limit::SYNC_THROTTLE_DELAY_MS,
+                        ))
+                        .await;
+                    } else if score_violation
+                        && record_peer_violation(&chain, &svc.peers, peer_addr, &err).await
+                    {
                         return Err(err);
                     }
                     tracing::debug!(
-                        "rate-limited {:?} from {peer_addr}; dropping message",
-                        msg.command
+                        ?category,
+                        score_violation,
+                        "rate-limited {:?} from {peer_addr}; dropping message", msg.command
                     );
                     continue;
                 }
@@ -3929,6 +4582,19 @@ async fn message_loop(
                         };
                         codec.send(stream, &wire).await?;
                     }
+                    Command::Headers => {
+                        // Headers is strictly a response to this connection's
+                        // active GetHeaders request. IBD consumes those replies
+                        // synchronously before entering message_loop. Accepting
+                        // unsolicited headers here lets a peer evade validation
+                        // whenever another connection owns the global IBD
+                        // cursor, so score and close the offending session.
+                        let err = DomError::Invalid(
+                            "unsolicited Headers outside an active IBD request".into(),
+                        );
+                        let _ = record_peer_violation(&chain, &svc.peers, peer_addr, &err).await;
+                        return Err(err);
+                    }
                     Command::Block => {
                         // Peer relayed a block to us. Validate and accept.
                         let (block_bytes, block) = match decode_relay_block(&msg.payload) {
@@ -3952,6 +4618,7 @@ async fn message_loop(
                             .as_secs();
                         let now = dom_core::Timestamp(now_secs);
                         let current_block_hash = block_hash(&block)?;
+                        outstanding_sync_blocks.remove(&current_block_hash);
 
                         // Doc 4.5 mitigation 1: soft buffer for future blocks
                         use dom_consensus::block::{
@@ -3983,6 +4650,21 @@ async fn message_loop(
                                     let mut c = chain.lock().await;
                                     c.connect_block(&block, now)
                                 };
+                                // A connected peer's runtime block announcement
+                                // may advance beyond its one-time Hello height.
+                                // Preserve the per-peer maximum so a later,
+                                // lower announcement cannot relax mining safety.
+                                if result.is_ok() || matches!(&result, Err(DomError::Orphan(_))) {
+                                    note_peer_best_height(
+                                        &svc.peers,
+                                        &svc.metrics,
+                                        &svc.state_events,
+                                        peer_addr,
+                                        height,
+                                        relay_block_hash,
+                                    )
+                                    .await;
+                                }
                                 match relay_block_action(&result) {
                                     RelayBlockAction::RelayBestChain => {
                                         if let Ok(ref connect_result) = result {
@@ -4129,6 +4811,19 @@ async fn message_loop(
                                                 height: block.header.height.0,
                                                 block_bytes: block_bytes.clone(),
                                             });
+                                            // Part D — this peer just relayed a block whose parent we
+                                            // lack, so it holds a chain extending past our tip. Record
+                                            // the height as a catch-up target; the periodic tick below
+                                            // triggers a robust IBD re-sync toward it, guaranteeing the
+                                            // hole is rebuilt even if the buffered orphan is later
+                                            // evicted (peer_best_height alone would miss this, as it is
+                                            // only learned at the Hello handshake).
+                                            blocked_orphan_target =
+                                                blocked_orphan_target.max(block.header.height.0);
+                                            // Part A — request the missing parent immediately at the
+                                            // current re-request clock (no clock advance, so an orphan
+                                            // burst cannot compress the backoff of other tracked
+                                            // parents). Persistent re-request continues on the tick.
                                             let requests = {
                                                 let mut tracker = svc.missing_blocks.lock().await;
                                                 tracker.note_orphan(
@@ -4136,16 +4831,20 @@ async fn message_loop(
                                                     parent_hash,
                                                     block.header.height.0.checked_sub(1),
                                                 );
-                                                tracker.next_request_batch(block.header.height.0)
+                                                let round = tracker.current_round();
+                                                tracker.next_request_batch(round)
                                             };
                                             tracing::debug!(
                                                 peer = %peer_addr,
                                                 child = %hex::encode(current_block_hash),
                                                 parent = %hex::encode(parent_hash),
                                                 ?insert_outcome,
+                                                catchup_target = blocked_orphan_target,
                                                 "Recorded orphan block and scheduled missing-parent request"
                                             );
                                             if !requests.is_empty() {
+                                                outstanding_sync_blocks
+                                                    .extend(requests.iter().copied());
                                                 let req = GetBlockDataPayload { hashes: requests };
                                                 let wire = WireMessage {
                                                     magic: config.network.magic(),
@@ -4390,7 +5089,15 @@ async fn message_loop(
                                 return Err(e);
                             }
                         };
-                        for hash in &req.hashes {
+                        if req.hashes.len() > dom_core::MAX_GETBLOCKDATA_SERVE_HASHES {
+                            tracing::debug!(
+                                peer = %peer_addr,
+                                requested = req.hashes.len(),
+                                served_cap = dom_core::MAX_GETBLOCKDATA_SERVE_HASHES,
+                                "GetBlockData request truncated to the serve cap"
+                            );
+                        }
+                        for hash in getblockdata_hashes_to_serve(&req.hashes) {
                             let body = {
                                 let c = chain.lock().await;
                                 c.store.get_block_body(hash)?
@@ -4469,11 +5176,9 @@ async fn message_loop(
                                 return Err(err);
                             }
                         } else {
-                            let addrs: Vec<String> =
-                                payload.entries.into_iter().map(|e| e.addr).collect();
                             let added = {
                                 let mut px = trace_lock("pex", &svc.pex).await;
-                                px.process_addr_message(addrs)
+                                px.process_addr_message(payload.entries)
                             };
                             tracing::debug!(
                                 "PEX: learned {added} new peer address(es) from {peer_addr}"
@@ -4492,19 +5197,22 @@ async fn message_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        annotate_send_err, bind_metrics_listener, clear_persisted_mempool_snapshot,
+        annotate_send_err, bind_metrics_listener, catchup_interval,
+        clear_persisted_mempool_snapshot, clear_persisted_peer_reputation,
         continue_ibd_header_sync, decode_deferred_block_bytes, decode_ibd_block_response,
-        decode_relay_block, deferred_replay_action, ibd_now, initialize_ibd_state,
-        is_write_timeout, load_mempool_snapshot, load_or_create_noise_static_key,
-        load_peer_reputation_snapshot, load_peer_rotation_snapshot,
-        parse_persisted_noise_static_key, peer_violation_score, pending_peer_violation_score,
-        persist_mempool_snapshot, persist_peer_reputation_snapshot, purge_mempool_confirmed_inputs,
-        reconcile_mempool_after_connect, refresh_peer_metrics, relay_block_action,
-        resolve_configured_dns_seeds, restore_peer_rotation_state, serve_metrics, trace_lock,
-        tx_hash, DeferredReplayAction, DomNode, IbdRoundState, OutboundAttemptOutcome,
-        RelayBlockAction, LEGACY_PEER_ROTATION_METADATA_KEY, MEMPOOL_METADATA_KEY,
-        METRICS_CONTENT_TYPE, NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY,
-        PEER_ROTATION_METADATA_KEY,
+        decode_relay_block, deferred_replay_action, getblockdata_hashes_to_serve, ibd_now,
+        initialize_ibd_state, is_write_timeout, load_mempool_snapshot,
+        load_or_create_noise_static_key, load_peer_reputation_snapshot,
+        load_peer_rotation_snapshot, parse_persisted_noise_static_key, peer_violation_score,
+        pending_peer_violation_score, persist_ibd_state, persist_mempool_snapshot,
+        persist_peer_reputation_snapshot, purge_mempool_confirmed_inputs,
+        reconcile_mempool_after_connect, record_peer_violation, refresh_peer_metrics,
+        relay_block_action, resolve_configured_dns_seeds, restore_peer_rotation_state,
+        serve_metrics, sync_mode_for_peer, trace_lock, tx_hash, DeferredReplayAction, DomNode,
+        IbdActiveGuard, IbdRoundState, OutboundAttemptOutcome, RelayBlockAction,
+        CATCHUP_MAX_HASHES_PER_TICK, LEGACY_PEER_REPUTATION_METADATA_KEY,
+        LEGACY_PEER_ROTATION_METADATA_KEY, MEMPOOL_METADATA_KEY, METRICS_CONTENT_TYPE,
+        NOISE_STATIC_KEY_METADATA_KEY, PEER_REPUTATION_METADATA_KEY, PEER_ROTATION_METADATA_KEY,
     };
     use crate::future_block_queue::DeferredBlock;
     use crate::metrics::Metrics;
@@ -4512,7 +5220,8 @@ mod tests {
     use crate::replay_snapshot::ReplaySnapshot;
     use crate::task_supervisor::{SupervisorStatus, TaskKind};
     use dom_chain::{
-        ChainState, ConnectResult, IbdInterruption, IbdPhase, PersistedIbdState, ReorgDelta,
+        build_canonical_genesis, ChainState, ConnectResult, IbdInterruption, IbdPhase, IbdState,
+        PersistedIbdState, ReorgDelta,
     };
     use dom_config::NodeConfig;
     use dom_consensus::block::{BlockHeader, ProofOfWork};
@@ -4523,8 +5232,8 @@ mod tests {
     use dom_core::PeerMisbehavior;
     use dom_core::{
         Amount, BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-        MAX_BLOCK_SERIALIZED_SIZE, MIN_RELAY_FEE_RATE, NETWORK_MAGIC_REGTEST, PROTOCOL_VERSION,
-        TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+        MAX_BLOCK_SERIALIZED_SIZE, MIN_RELAY_FEE_RATE, NETWORK_MAGIC_REGTEST, TAG_KERNEL_MSG,
+        TAG_KERNEL_MSG_COINBASE,
     };
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::keys::SecretKey;
@@ -4544,15 +5253,84 @@ mod tests {
     use dom_wire::peer::{PeerInfo, PeerState};
     use primitive_types::U256;
     use std::fs;
+    use std::io::{self, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::PathBuf;
-    use std::sync::atomic::Ordering;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex as StdMutex};
     use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, Notify};
     use tokio::task::JoinHandle;
+
+    #[derive(Clone, Default)]
+    struct TestLogBuffer(Arc<StdMutex<Vec<u8>>>);
+
+    struct TestLogWriter(Arc<StdMutex<Vec<u8>>>);
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TestLogBuffer {
+        type Writer = TestLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            TestLogWriter(self.0.clone())
+        }
+    }
+
+    impl Write for TestLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer lock")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl TestLogBuffer {
+        fn contents(&self) -> String {
+            String::from_utf8(self.0.lock().expect("log buffer lock").clone())
+                .expect("UTF-8 tracing output")
+        }
+    }
+
+    #[tokio::test]
+    async fn missed_catchup_ticks_skip_burst_and_fit_sync_budget() {
+        let timer = catchup_interval();
+        assert_eq!(
+            timer.missed_tick_behavior(),
+            tokio::time::MissedTickBehavior::Skip,
+            "a long IBD must collapse missed catch-up ticks into one current tick"
+        );
+        const {
+            assert!(
+                CATCHUP_MAX_HASHES_PER_TICK <= crate::msg_rate_limit::SYNC_PER_WINDOW as usize,
+                "one post-IBD catch-up tick must fit inside the sync limiter budget"
+            );
+            assert!(
+                CATCHUP_MAX_HASHES_PER_TICK <= dom_core::MAX_GETBLOCKDATA_SERVE_HASHES,
+                "the catch-up batch must fit inside the server response cap"
+            );
+        }
+    }
+
+    #[test]
+    fn hello_user_agent_tracks_workspace_package_version() {
+        assert_eq!(super::node_user_agent(), "dom-node/0.2.0");
+    }
+
+    #[test]
+    fn getblockdata_handler_caps_bodies_per_request() {
+        let hashes = vec![[7u8; 32]; dom_core::MAX_GETBLOCKDATA_HASHES];
+        assert_eq!(
+            getblockdata_hashes_to_serve(&hashes).len(),
+            dom_core::MAX_GETBLOCKDATA_SERVE_HASHES
+        );
+    }
 
     /// When `disable_dns_seeds` is set the outbound connector must contribute
     /// NO DNS-resolved bootstrap candidates — neither the configured DNS seeds
@@ -4744,7 +5522,10 @@ mod tests {
         let mut nonce = 0u64;
         loop {
             let mut header = BlockHeader {
-                version: PROTOCOL_VERSION,
+                version: dom_core::required_block_version_for_network(
+                    NETWORK_MAGIC_REGTEST,
+                    height.0,
+                ),
                 height,
                 prev_hash,
                 timestamp,
@@ -4778,7 +5559,7 @@ mod tests {
     ) -> Block {
         let coinbase = build_coinbase(height, 0, chain_id);
         let (output_root, kernel_root, rangeproof_root) =
-            dom_consensus::compute_block_pmmr_roots(&coinbase, &[]).expect("roots");
+            dom_consensus::compute_block_pmmr_roots(height, &coinbase, &[]).expect("roots");
         let timestamp = genesis_anchor(NETWORK_MAGIC_REGTEST)
             .expect("anchor")
             .timestamp
@@ -5662,6 +6443,57 @@ mod tests {
     }
 
     #[test]
+    fn expired_peer_penalty_reintegrates_after_node_restart_without_data_dir_reset() {
+        let dir = fresh_test_dir("peer-reputation-expired-restart");
+        let store = open_test_store(&dir);
+        let addr = "10.0.0.46:33369";
+        let snapshot = PersistedPeerReputationState {
+            entries: vec![dom_wire::manager::PersistedPeerReputation {
+                addr: addr.into(),
+                score: ban_scores::BAN_THRESHOLD,
+                expires_at_unix_secs: 0,
+            }],
+        };
+        persist_peer_reputation_snapshot(&store, &snapshot).expect("persist expired reputation");
+        drop(store);
+
+        let node = init_test_node(regtest_node_config(&dir));
+        let mut peers = node.peers.try_lock().expect("peer lock");
+        assert_eq!(peers.pending_ban_score(addr), 0);
+        let mut peer = PeerInfo::new(addr.parse().expect("peer addr"), true);
+        peer.state = PeerState::Connected;
+        peers
+            .register_peer(peer)
+            .expect("expired score must not be renewed on restart");
+        drop(peers);
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[test]
+    fn reputation_cleanup_removes_current_and_legacy_metadata() {
+        let dir = fresh_test_dir("peer-reputation-clear-tool");
+        let store = open_test_store(&dir);
+        store
+            .put_metadata(PEER_REPUTATION_METADATA_KEY, b"current")
+            .expect("write current reputation");
+        store
+            .put_metadata(LEGACY_PEER_REPUTATION_METADATA_KEY, b"legacy")
+            .expect("write legacy reputation");
+
+        clear_persisted_peer_reputation(&store).expect("clear all reputation metadata");
+
+        assert!(store
+            .get_metadata(PEER_REPUTATION_METADATA_KEY)
+            .expect("read current")
+            .is_none());
+        assert!(store
+            .get_metadata(LEGACY_PEER_REPUTATION_METADATA_KEY)
+            .expect("read legacy")
+            .is_none());
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[test]
     fn wrong_network_ban_score_survives_restart() {
         let dir = fresh_test_dir("peer-reputation-wrong-network");
         let store = open_test_store(&dir);
@@ -5669,6 +6501,7 @@ mod tests {
             entries: vec![dom_wire::manager::PersistedPeerReputation {
                 addr: "10.0.0.44:33369".into(),
                 score: ban_scores::WRONG_CHAIN_ID,
+                expires_at_unix_secs: u64::MAX,
             }],
         };
         persist_peer_reputation_snapshot(&store, &snapshot).expect("persist peer reputation");
@@ -5722,6 +6555,7 @@ mod tests {
             entries: vec![dom_wire::manager::PersistedPeerReputation {
                 addr: "10.0.0.45:33369".into(),
                 score: 20,
+                expires_at_unix_secs: u64::MAX,
             }],
         };
         persist_peer_reputation_snapshot(&store, &snapshot).expect("persist peer reputation");
@@ -5828,6 +6662,50 @@ mod tests {
             peer_violation_score(&DomError::Malformed("bad frame".into())),
             Some(ban_scores::MALFORMED_MESSAGE)
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn abusive_peer_still_bans_and_threshold_warn_contains_reason() {
+        let dir = fresh_test_dir("peer-threshold-warn");
+        let node = init_test_node(regtest_node_config(&dir));
+        let peer_addr: SocketAddr = "127.0.0.2:33369".parse().expect("peer addr");
+        let mut peer = PeerInfo::new(peer_addr, false);
+        peer.state = PeerState::Connected;
+        node.peers
+            .lock()
+            .await
+            .register_peer(peer)
+            .expect("register abusive test peer");
+
+        let logs = TestLogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(logs.clone())
+            .finish();
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let error = DomError::Malformed("repeated malformed abuse".into());
+
+        for attempt in 0..5 {
+            let banned = record_peer_violation(&node.chain, &node.peers, peer_addr, &error).await;
+            assert_eq!(
+                banned,
+                attempt == 4,
+                "five malformed-message penalties must still reach the threshold"
+            );
+        }
+
+        let output = logs.contents();
+        assert!(output.contains("peer_ban_threshold_crossed"), "{output}");
+        assert!(output.contains(&format!("peer={peer_addr}")), "{output}");
+        assert!(
+            output.contains("reason=Malformed: repeated malformed abuse"),
+            "{output}"
+        );
+        assert!(output.contains("accumulated_score=100"), "{output}");
+        crate::test_dir::remove_test_dir(&dir);
     }
 
     #[test]
@@ -6631,20 +7509,15 @@ mod tests {
             .as_bytes()
         };
 
-        let genesis = build_coinbase_only_block(
-            [0u8; 32],
-            Hash256::ZERO,
-            BlockHeight::GENESIS,
-            U256::zero(),
-            [0u8; 32],
-            &chain_id,
-        );
-        {
-            let mut guard = chain.lock().await;
-            guard
-                .connect_block(&genesis, safe_now())
-                .expect("connect genesis");
-        }
+        let genesis = build_canonical_genesis(NETWORK_MAGIC_REGTEST, &chain_id)
+            .expect("canonical Regtest genesis")
+            .block
+            .expect("Regtest genesis has a canonical block body");
+        // Regtest's frozen genesis uses its historical signing context to avoid
+        // a genesis-hash/chain-ID signing cycle. Persist the already canonical
+        // identity directly, as production bootstrap does, then exercise
+        // `connect_block` only for the adversarial IBD block under test.
+        commit_chain_block(&chain, &genesis).await;
 
         let mut invalid_offset = [0u8; 32];
         invalid_offset[31] = 1;
@@ -6932,6 +7805,226 @@ mod tests {
         assert_eq!(persisted.headers_height, 1);
         assert_eq!(persisted.phase, IbdPhase::Discovering);
         crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn persisted_ibd_checkpoint_uses_durable_tip_inside_partial_block_page() {
+        let dir = fresh_test_dir("ibd-durable-tip-cursor");
+        let chain = open_chain(&dir);
+        let peer_addr: SocketAddr = "127.0.0.1:33369".parse().expect("peer addr");
+        let ibd = IbdState::new(0, 10);
+        {
+            let mut guard = chain.lock().await;
+            guard.tip_height = BlockHeight(5);
+            guard.tip_hash = Hash256::from_bytes([0x55; 32]);
+        }
+
+        persist_ibd_state(
+            &chain,
+            peer_addr,
+            &ibd,
+            IbdRoundState {
+                pending_blocks: vec![[0x77; 32]; 5],
+                pending_headers: Vec::new(),
+                block_cursor: 2,
+                header_cursor: 0,
+                header_cursor_height: 10,
+            },
+        )
+        .await
+        .expect("persist partial body page");
+
+        let snapshot = {
+            let guard = chain.lock().await;
+            PersistedIbdState::load(&guard.store)
+                .expect("load snapshot")
+                .expect("snapshot exists")
+        };
+        assert_eq!(snapshot.blocks_height, 5);
+        assert_eq!(snapshot.last_progress_height, 5);
+        assert_eq!(snapshot.checkpoint_tip_hash, [0x55; 32]);
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn persisted_header_prefix_reconciles_hash_that_became_known() {
+        let dir = fresh_test_dir("header-resume-known-prefix");
+        let chain = open_chain(&dir);
+        let peer_addr: SocketAddr = "127.0.0.1:33369".parse().expect("peer addr");
+        let checkpoint_tip_hash = { *chain.lock().await.tip_hash.as_bytes() };
+
+        let header1 = synthetic_known_header(0, Hash256::ZERO, 1);
+        let header2 = synthetic_known_header(1, Hash256::from_bytes(header_hash(&header1)), 2);
+        let header1_hash = header_hash(&header1);
+        // The persisted queue was created while header1 was missing. It became
+        // known before reconstruction, producing the observed N-1/expected N
+        // state from the Mainnet incident.
+        store_known_header(&chain, &header1).await;
+        store_known_header(&chain, &header2).await;
+
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::HeaderSync,
+            peer_addr: peer_addr.to_string(),
+            start_height: 0,
+            best_peer_height: 1,
+            headers_height: 0,
+            blocks_height: 0,
+            last_progress_height: 0,
+            checkpoint_tip_hash,
+            retry_attempts: 0,
+            last_interruption: None,
+            pending_blocks: vec![header1_hash],
+            pending_headers: vec![
+                header1.to_bytes().expect("header1 bytes"),
+                header2.to_bytes().expect("header2 bytes"),
+            ],
+            block_cursor: 0,
+            header_cursor: 1,
+            header_cursor_height: 1,
+        };
+        {
+            let guard = chain.lock().await;
+            snapshot.save(&guard.store).expect("save snapshot");
+        }
+
+        let (mut ibd, restored) = initialize_ibd_state(&chain, peer_addr, 1)
+            .await
+            .expect("initialize");
+        let restored = restored.expect("snapshot remains resumable");
+        let pending = continue_ibd_header_sync(
+            &chain,
+            peer_addr,
+            &mut ibd,
+            IbdRoundState {
+                pending_blocks: restored.pending_blocks,
+                pending_headers: restored.pending_headers,
+                block_cursor: restored.block_cursor,
+                header_cursor: restored.header_cursor,
+                header_cursor_height: restored.header_cursor_height,
+            },
+            ibd_now(),
+        )
+        .await
+        .expect("reconcile now-known prefix hash");
+        assert!(pending.is_empty());
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn persisted_ibd_checkpoint_survives_reconnect_and_peer_tip_growth() {
+        let dir = fresh_test_dir("ibd-reconnect-tip-growth");
+        let chain = open_chain(&dir);
+        let old_peer: SocketAddr = "127.0.0.1:33369".parse().expect("old peer");
+        let new_peer: SocketAddr = "127.0.0.2:33369".parse().expect("new peer");
+        let checkpoint_tip_hash = { *chain.lock().await.tip_hash.as_bytes() };
+        let header = synthetic_known_header(0, Hash256::ZERO, 1);
+
+        let snapshot = PersistedIbdState {
+            phase: IbdPhase::HeaderSync,
+            peer_addr: old_peer.to_string(),
+            start_height: 0,
+            best_peer_height: 1,
+            headers_height: 0,
+            blocks_height: 0,
+            last_progress_height: 0,
+            checkpoint_tip_hash,
+            retry_attempts: 2,
+            last_interruption: Some(IbdInterruption::PeerDisconnected),
+            pending_blocks: Vec::new(),
+            pending_headers: vec![header.to_bytes().expect("header bytes")],
+            block_cursor: 0,
+            header_cursor: 0,
+            header_cursor_height: 1,
+        };
+        {
+            let guard = chain.lock().await;
+            snapshot.save(&guard.store).expect("save snapshot");
+        }
+
+        let (ibd, restored) = initialize_ibd_state(&chain, new_peer, 2)
+            .await
+            .expect("initialize after failover");
+        assert!(
+            restored.is_some(),
+            "durable queue must survive peer failover"
+        );
+        assert_eq!(ibd.best_peer_height, 2);
+        assert_eq!(ibd.retry_attempts, 0, "new peer gets a fresh retry budget");
+        assert_eq!(ibd.last_interruption, None);
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn inconsistent_local_ibd_checkpoint_is_discarded_without_peer_penalty() {
+        let dir = fresh_test_dir("ibd-local-checkpoint-discard");
+        let node = init_test_node(regtest_node_config(&dir));
+        let (local_height, local_hash) = {
+            let chain = node.chain.lock().await;
+            (chain.tip_height.0, *chain.tip_hash.as_bytes())
+        };
+        let inconsistent = PersistedIbdState {
+            phase: IbdPhase::BlockSync,
+            peer_addr: "127.0.0.1:33369".into(),
+            start_height: 10_394,
+            best_peer_height: 10_500,
+            headers_height: 10_500,
+            blocks_height: 10_226,
+            last_progress_height: 10_500,
+            checkpoint_tip_hash: local_hash,
+            retry_attempts: 0,
+            last_interruption: None,
+            pending_blocks: Vec::new(),
+            pending_headers: Vec::new(),
+            block_cursor: 0,
+            header_cursor: 0,
+            header_cursor_height: 10_500,
+        };
+        {
+            let chain = node.chain.lock().await;
+            inconsistent
+                .save(&chain.store)
+                .expect("persist inconsistent local checkpoint");
+        }
+
+        let peer_addr = "127.0.0.1:33369".parse().expect("peer addr");
+        let (ibd, resumed) =
+            initialize_ibd_state(&node.chain, peer_addr, local_height.saturating_add(10))
+                .await
+                .expect("local checkpoint corruption must not escape as a peer error");
+
+        assert!(resumed.is_none());
+        assert_eq!(ibd.start_height, local_height);
+        {
+            let chain = node.chain.lock().await;
+            assert!(PersistedIbdState::load(&chain.store)
+                .expect("load after discard")
+                .is_none());
+        }
+        assert_eq!(
+            node.peers
+                .lock()
+                .await
+                .pending_ban_score(&peer_addr.to_string()),
+            0,
+            "local checkpoint errors must never affect peer reputation"
+        );
+        crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[test]
+    fn only_one_ibd_session_can_own_the_persisted_cursor() {
+        let sessions = Arc::new(AtomicU64::new(0));
+        let state_events = Arc::new(Notify::new());
+        let first = IbdActiveGuard::try_new(sessions.clone(), state_events.clone())
+            .expect("first session owns cursor");
+        assert!(IbdActiveGuard::try_new(sessions.clone(), state_events.clone()).is_none());
+        assert_eq!(sessions.load(Ordering::SeqCst), 1);
+        drop(first);
+        let second = IbdActiveGuard::try_new(sessions.clone(), state_events)
+            .expect("ownership released on drop");
+        assert_eq!(sessions.load(Ordering::SeqCst), 1);
+        drop(second);
+        assert_eq!(sessions.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -7349,5 +8442,16 @@ mod tests {
         assert!(node.task_supervisor.failure().await.is_none());
 
         crate::test_dir::remove_test_dir(&dir);
+    }
+
+    #[test]
+    fn equal_height_different_tip_requires_fork_resolution() {
+        let ours = [0x11; 32];
+        let theirs = [0x22; 32];
+
+        assert_eq!(sync_mode_for_peer(100, ours, 101, theirs), Some(false));
+        assert_eq!(sync_mode_for_peer(100, ours, 100, theirs), Some(true));
+        assert_eq!(sync_mode_for_peer(100, ours, 100, ours), None);
+        assert_eq!(sync_mode_for_peer(100, ours, 99, theirs), None);
     }
 }

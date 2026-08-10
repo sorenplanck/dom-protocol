@@ -1,0 +1,23 @@
+{
+  "title": "L2-D Split Proof Public Test Vectors",
+  "author": "Soren Planck",
+  "email": "sorenplanck@tutamail.com",
+  "status": "Laboratory / Not Production",
+  "schema_version": 1,
+  "backend": "grin_secp256k1zkp-0.7.15",
+  "algorithm": "classic Bulletproof",
+  "max_provable_value": 4503599627370495,
+  "single_proof_len": 675,
+  "envelope_len": 1351,
+  "property_seed": "0xd052d5f117c00001",
+  "property_cases": 10000,
+  "accepted_values": [0, 1, 2251799813685248, 4503599627370494, 4503599627370495],
+  "rejected_values": [4503599627370496, 4503599627370497, 9007199254740991, 9007199254740992, 18446744073709551614, 18446744073709551615],
+  "metadata_layout": "version:u8,network:u8,account:u32be,branch:u8,index:u32be,binding_digest:9bytes",
+  "public_assertions": [
+    "P0 and P1 each use the unchanged single-commit classic verifier",
+    "P0 recovery uses the identical nonce for backend nonce and private_nonce",
+    "P1 uses SHA-256 domain separation from the recovery nonce",
+    "no value at or above 2^52 is accepted"
+  ]
+}

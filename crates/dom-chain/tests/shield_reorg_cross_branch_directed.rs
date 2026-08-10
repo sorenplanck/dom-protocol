@@ -46,7 +46,7 @@ use dom_consensus::{
 };
 use dom_core::{
     Amount, BlockHeight, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+    TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::keys::SecretKey;
@@ -82,11 +82,7 @@ fn blinding(seed: u8) -> BlindingFactor {
 }
 
 fn test_chain_id() -> [u8; 32] {
-    *derive_chain_id(
-        dom_core::NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes()
+    *derive_chain_id(dom_core::NETWORK_MAGIC_REGTEST, &Hash256::ZERO).as_bytes()
 }
 
 fn kernel_message(fee: u64, lock_height: u64) -> [u8; 32] {
@@ -170,10 +166,7 @@ fn signed_coinbase(height: BlockHeight, seed: u8) -> CoinbaseTransaction {
     let (proof, _) = dom_crypto::bp2_prove(reward, &blinding).expect("coinbase proof");
     let excess = Commitment::commit(0, &blinding);
     let secret = SecretKey::from_bytes(blinding.as_bytes()).expect("coinbase secret");
-    let chain_id = derive_chain_id(
-        dom_core::NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    );
+    let chain_id = derive_chain_id(dom_core::NETWORK_MAGIC_REGTEST, &Hash256::ZERO);
     let msg = {
         let mut data = Vec::with_capacity(1 + 8);
         data.push(KERNEL_FEAT_COINBASE);
@@ -204,11 +197,15 @@ fn synthetic_block(
     let total_fees = transactions.iter().map(|tx| tx.total_fee().unwrap()).sum();
     let coinbase = valid_coinbase(BlockHeight(height), total_fees, coinbase_seed);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &transactions).expect("pmmr roots");
+        compute_block_pmmr_roots(BlockHeight(height), &coinbase, &transactions)
+            .expect("pmmr roots");
 
     Block {
         header: BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: dom_core::required_block_version_for_network(
+                dom_core::NETWORK_MAGIC_REGTEST,
+                height,
+            ),
             height: BlockHeight(height),
             prev_hash,
             timestamp: Timestamp(1_700_100_000 + height),
@@ -237,10 +234,13 @@ fn valid_coinbase_only_block(
 ) -> Block {
     let coinbase = signed_coinbase(BlockHeight(height), coinbase_seed);
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &[]).expect("pmmr roots");
+        compute_block_pmmr_roots(BlockHeight(height), &coinbase, &[]).expect("pmmr roots");
     Block {
         header: BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: dom_core::required_block_version_for_network(
+                dom_core::NETWORK_MAGIC_REGTEST,
+                height,
+            ),
             height: BlockHeight(height),
             prev_hash,
             timestamp: Timestamp(1_700_200_000 + height),
@@ -336,12 +336,10 @@ fn store_side_block(store: &DomStore, block: &Block) -> Hash256 {
 }
 
 fn open_chain(dir: &std::path::Path) -> ChainState {
-    open_test_chain(
-        dir,
-        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-        dom_core::NETWORK_MAGIC_REGTEST,
-    )
-    .expect("chain open")
+    // The directed branches have a synthetic block-zero record. Use the
+    // unpinned test identity so that fixture can reopen without relaxing the
+    // finalized Regtest identity required by production startup.
+    open_test_chain(dir, Hash256::ZERO, dom_core::NETWORK_MAGIC_REGTEST).expect("chain open")
 }
 
 /// Deterministic digest over the full persisted UTXO set (commitment+entry).
@@ -452,7 +450,7 @@ fn v1_reorg_a_to_b_removes_a_state_applies_b_keeps_uniqueness() {
 
     // ---- Drive the cross-branch reorg A->B. ----
     chain
-        .promote_heavier_known_tip(b4_hash)
+        .promote_heavier_known_tip(b4_hash, Timestamp(2_000_000_000))
         .expect("reorg A->B");
     assert_eq!(chain.tip_hash, b4_hash);
     assert_eq!(chain.tip_height, BlockHeight(4));
@@ -610,7 +608,7 @@ fn v1b_reorg_a_to_b_resurrects_input_not_respent_by_b() {
     assert!(chain.store.get_utxo(&out_a).unwrap().is_some());
 
     chain
-        .promote_heavier_known_tip(b4_hash)
+        .promote_heavier_known_tip(b4_hash, Timestamp(2_000_000_000))
         .expect("reorg A->B");
     assert_eq!(chain.tip_hash, b4_hash);
 
@@ -679,14 +677,16 @@ fn v2_round_trip_promote_back_to_original_a_is_rejected_not_heavier() {
     let mut chain = open_chain(dir.path());
     assert_eq!(chain.tip_hash, a3_hash);
 
-    chain.promote_heavier_known_tip(b4_hash).expect("A->B");
+    chain
+        .promote_heavier_known_tip(b4_hash, Timestamp(2_000_000_000))
+        .expect("A->B");
     assert_eq!(chain.tip_hash, b4_hash);
 
     // Door closed: promoting back to the original A tip is rejected because it
     // is not strictly heavier than B. This is the residue-free guarantee at the
     // API boundary — a same-tip round trip cannot be forced by replay.
     let err = chain
-        .promote_heavier_known_tip(a3_hash)
+        .promote_heavier_known_tip(a3_hash, Timestamp(2_000_000_000))
         .expect_err("promote back to original A tip must be rejected (not heavier)");
     let msg = format!("{err}");
     assert!(
@@ -748,7 +748,9 @@ fn v2b_round_trip_restores_identical_a_prefix_state_no_residue() {
     let a_tip = chain.tip_hash;
 
     // A -> B.
-    chain.promote_heavier_known_tip(b4_hash).expect("A->B");
+    chain
+        .promote_heavier_known_tip(b4_hash, Timestamp(2_000_000_000))
+        .expect("A->B");
     assert_eq!(chain.tip_hash, b4_hash);
     // Mid-reorg sanity: state actually changed (otherwise the round trip is
     // vacuous).
@@ -760,7 +762,7 @@ fn v2b_round_trip_restores_identical_a_prefix_state_no_residue() {
 
     // B -> A' (A extended heavier, reusing original A blocks as prefix).
     chain
-        .promote_heavier_known_tip(a4_hash)
+        .promote_heavier_known_tip(a4_hash, Timestamp(2_000_000_000))
         .expect("B->A' (A extended heavier)");
     assert_eq!(chain.tip_hash, a4_hash, "back on the A branch");
 

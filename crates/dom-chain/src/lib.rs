@@ -19,12 +19,21 @@ pub mod genesis;
 pub mod ibd;
 pub mod reorg;
 
+#[cfg(kani)]
+mod kani_invariants;
+
 pub use chain_state::{
     genesis_canonical_changeset, ChainState, ConnectResult, ReorgBlockDelta, ReorgDelta,
     CHAIN_CORRUPT_SENTINEL, MAX_RETAINED_SIDE_BRANCH_LENGTH, MAX_RETAINED_SIDE_BRANCH_REORG_DEPTH,
     MAX_RETAINED_SIDE_BRANCH_TIPS,
 };
-pub use genesis::{build_genesis, build_mainnet_genesis, build_testnet_genesis, GenesisResult};
+pub use genesis::{
+    build_canonical_genesis, canonical_genesis_inscription, canonical_header_identifier,
+    validate_mainnet_genesis_identity, CanonicalGenesis, GenesisInscriptionV1,
+    MainnetGenesisIdentityV1, GENESIS_INSCRIPTION_VERSION, MAINNET_GENESIS_IDENTITY_VERSION,
+    MAX_GENESIS_INSCRIPTION_BYTES,
+};
 pub use ibd::{
     IbdControl, IbdInterruption, IbdPhase, IbdState, PersistedIbdState, IBD_SESSION_METADATA_KEY,
+    LEGACY_IBD_SESSION_METADATA_KEY,
 };

@@ -1,4 +1,4 @@
-//! KAV-conformância — authoritative known-answer vectors against the SPEC,
+//! KAV conformance — authoritative known-answer vectors against the SPEC,
 //! never against the code's own output or memory.
 //!
 //! Two doors covered here. The third conformance door — RFC-6979 nonce — lives
@@ -14,9 +14,8 @@
 //!       (published widely; cross-confirmed against the BLAKE2 reference output
 //!       size = 32). If DOM's hasher were misconfigured (wrong digest length,
 //!       keyed mode, BLAKE2s instead of BLAKE2b, salt/personalization), this KAV
-//!       goes RED. This is the only construction-anchoring vector we could source
-//!       authoritatively; "abc" is left #[ignore] (see note) because the commonly
-//!       quoted "abc" 256-bit value online is BLAKE2s-256, NOT BLAKE2b-256.
+//!       goes RED. The `abc` vector is independently cross-checked with GNU
+//!       `b2sum -l 256` and Python's `hashlib.blake2b(digest_size=32)`.
 //!
 //!   (2) **Hash-to-curve vs RFC-9380 Appendix J.8.1 (secp256k1_XMD:SHA-256_
 //!       SSWU_RO_).** DOM derives its Pedersen H generator (h_generator.rs) via
@@ -41,6 +40,7 @@ use dom_crypto::blake2b_256;
 
 /// Authoritative empty-string digest for unkeyed BLAKE2b with 256-bit output.
 const BLAKE2B_256_EMPTY: &str = "0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8";
+const BLAKE2B_256_ABC: &str = "bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319";
 
 #[test]
 fn blake2b_256_empty_matches_authoritative_vector() {
@@ -54,17 +54,14 @@ fn blake2b_256_empty_matches_authoritative_vector() {
     );
 }
 
-/// `abc` BLAKE2b-256 vector — left ignored: the widely-quoted online "abc"
-/// 256-bit value (bddd813c...) is BLAKE2s-256, not BLAKE2b-256. Needs an
-/// authoritative BLAKE2b-256 "abc" vector (e.g. Python
-/// `hashlib.blake2b(b"abc", digest_size=32).hexdigest()` on a trusted host).
+/// Independently cross-checked `abc` BLAKE2b-256 vector.
 #[test]
-#[ignore = "needs authoritative BLAKE2b-256 vector for input \"abc\" (online value is BLAKE2s)"]
 fn blake2b_256_abc_matches_authoritative_vector() {
-    // Fill ONLY with an authoritatively-sourced BLAKE2b-256 digest, then unignore.
-    let _expected = "<authoritative BLAKE2b-256(\"abc\") hex>";
-    let _got = hex::encode(blake2b_256(b"abc").as_bytes());
-    // assert_eq!(_got, _expected);
+    let got = hex::encode(blake2b_256(b"abc").as_bytes());
+    assert_eq!(
+        got, BLAKE2B_256_ABC,
+        "blake2b_256(\"abc\") drifted from the independently cross-checked vector"
+    );
 }
 
 // ── (2) RFC-9380 secp256k1 hash_to_curve conformance ────────────────────────

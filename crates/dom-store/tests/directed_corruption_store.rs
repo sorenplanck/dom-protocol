@@ -4,10 +4,7 @@
 //! against TAMPERED / SHORT / WRONG-LENGTH on-disk bytes. COVERAGE #8 marks the
 //! fuzz-panic family `[—]` (bounded fixed-offset parsers → fuzz theater); this
 //! file instead pins the directed corruption contract that the bounded claim
-//! rests on, and surfaces the one place the "no panic path" claim does NOT hold:
-//! the `block_height + maturity` add in `UtxoSet::validate_input_with_maturity`.
-//!
-//! NO production change. RED tests document a finding; they do not fix it.
+//! rests on.
 
 mod common;
 
@@ -60,15 +57,14 @@ fn utxo_from_bytes_exactly_9_yields_empty_proof_no_panic() {
 }
 
 #[test]
-fn utxo_from_bytes_tampered_coinbase_flag_is_truthy_not_just_one() {
-    // bytes[8] != 0 ⇒ coinbase. A tampered flag of 0xFF must still parse as
-    // coinbase (the parser is total over the flag byte), never panic.
+fn utxo_from_bytes_rejects_noncanonical_coinbase_flag() {
+    // The canonical encoder emits only 0 or 1. A corrupted flag must not be
+    // silently reinterpreted as a valid coinbase entry.
     let mut buf = vec![0u8; 9];
     buf[8] = 0xFF;
-    let e = UtxoEntry::from_bytes(&buf).expect("tampered flag must still parse");
     assert!(
-        e.is_coinbase,
-        "any non-zero flag byte must read as coinbase"
+        matches!(UtxoEntry::from_bytes(&buf), Err(DomError::Malformed(_))),
+        "noncanonical coinbase flags must fail closed"
     );
 }
 
@@ -127,16 +123,12 @@ fn peer_from_bytes_exactly_12_parses_no_panic() {
 }
 
 // ---------------------------------------------------------------------------
-// KAV-negativo: PeerAddr trailing-bytes NON-STRICT parse (malleability).
-// from_bytes reads bytes[0..12] and IGNORES anything past byte 12. So two
-// distinct on-disk encodings (12 bytes vs 12 bytes + garbage tail) decode to
-// the SAME PeerAddr. The codec is non-canonical / malleable on input.
-// Documented as a finding via assertion: the test PASSES (it proves the
-// malleability exists); it is not a crash, so no fix is forced — recorded.
+// PeerAddr trailing bytes are noncanonical persistence corruption and must be
+// rejected rather than silently ignored.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn peer_from_bytes_ignores_trailing_bytes_malleable_decode() {
+fn peer_from_bytes_rejects_trailing_bytes() {
     let base = {
         let p = PeerAddr {
             addr: "x".into(),
@@ -150,16 +142,14 @@ fn peer_from_bytes_ignores_trailing_bytes_malleable_decode() {
     let mut with_tail = base.clone();
     with_tail.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // garbage tail
 
-    let a = PeerAddr::from_bytes("x".into(), &base).expect("canonical parses");
-    let b = PeerAddr::from_bytes("x".into(), &with_tail).expect("tail-padded parses");
-
-    // MALLEABILITY: two different byte strings decode to the same logical value.
-    assert_eq!(a.last_seen, b.last_seen);
-    assert_eq!(a.failures, b.failures);
-    // And critically, the parser does NOT reject the longer encoding — there is
-    // no strict-length check past the 12-byte minimum.
-    // (If a future hardening adds a strict-length gate, THIS test flips to RED
-    // and that is the signal to update the malleability record in COVERAGE.)
+    let _ = PeerAddr::from_bytes("x".into(), &base).expect("canonical parses");
+    assert!(
+        matches!(
+            PeerAddr::from_bytes("x".into(), &with_tail),
+            Err(DomError::Malformed(_))
+        ),
+        "trailing persistence bytes must fail closed"
+    );
 }
 
 #[test]
@@ -177,18 +167,8 @@ fn utxo_proof_tail_is_load_bearing_not_ignored() {
 }
 
 // ---------------------------------------------------------------------------
-// KAV-negativo (RED EXPECTED): is_mature_for / validate_input_with_maturity
-// overflow. `UtxoSet::validate_input_with_maturity` formats its error with
-// `entry.block_height + maturity` (utxo.rs ~L88). With a corrupt on-disk
-// block_height ≈ u64::MAX reaching the IMMATURE branch, that add overflows.
-// The workspace pins `overflow-checks = true` for BOTH dev and release
-// (root Cargo.toml [profile.dev]/[profile.release]), so this PANICS in every
-// build profile — a reachable panic / DoS driven by a single tampered u64 in
-// the persisted utxos db. Contract: this should be a clean Err, not a panic.
-//
-// This test asserts the SAFE contract (clean TemporarilyInvalid Err, no panic)
-// and is therefore EXPECTED TO FAIL (RED) against current code. It is the
-// finding. It is NOT a fix. See report: RED-DS-STORE-001.
+// Maturity diagnostics use saturating arithmetic so hostile persisted heights
+// cannot overflow the error path.
 // ---------------------------------------------------------------------------
 
 #[test]

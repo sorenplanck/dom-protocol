@@ -73,7 +73,7 @@ use dom_consensus::{
 };
 use dom_core::{
     Amount, BlockHeight, DomError, Hash256, Timestamp, KERNEL_FEAT_COINBASE, KERNEL_FEAT_PLAIN,
-    PROTOCOL_VERSION, TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
+    TAG_KERNEL_MSG, TAG_KERNEL_MSG_COINBASE,
 };
 use dom_crypto::hash::blake2b_256_tagged;
 use dom_crypto::keys::SecretKey;
@@ -129,11 +129,7 @@ fn blinding_u16(seed: u16) -> BlindingFactor {
 }
 
 fn test_chain_id() -> [u8; 32] {
-    *derive_chain_id(
-        dom_core::NETWORK_MAGIC_REGTEST,
-        &Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-    )
-    .as_bytes()
+    *derive_chain_id(dom_core::NETWORK_MAGIC_REGTEST, &Hash256::ZERO).as_bytes()
 }
 
 fn kernel_message(fee: u64, lock_height: u64) -> [u8; 32] {
@@ -256,10 +252,14 @@ fn assemble_block(
     transactions: Vec<Transaction>,
 ) -> Block {
     let (output_root, kernel_root, rangeproof_root) =
-        compute_block_pmmr_roots(&coinbase, &transactions).expect("pmmr roots");
+        compute_block_pmmr_roots(BlockHeight(height), &coinbase, &transactions)
+            .expect("pmmr roots");
     Block {
         header: BlockHeader {
-            version: PROTOCOL_VERSION,
+            version: dom_core::required_block_version_for_network(
+                dom_core::NETWORK_MAGIC_REGTEST,
+                height,
+            ),
             height: BlockHeight(height),
             prev_hash,
             timestamp: Timestamp(1_700_300_000 + height),
@@ -421,12 +421,10 @@ fn store_side_block(store: &DomStore, block: &Block) -> Hash256 {
 }
 
 fn open_chain(dir: &std::path::Path) -> ChainState {
-    open_test_chain(
-        dir,
-        Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
-        dom_core::NETWORK_MAGIC_REGTEST,
-    )
-    .expect("chain open")
+    // This adversarial suite persists synthetic block-zero records. The
+    // unpinned test identity permits those fixtures to reopen while production
+    // configurations continue to require finalized Regtest genesis bytes.
+    open_test_chain(dir, Hash256::ZERO, dom_core::NETWORK_MAGIC_REGTEST).expect("chain open")
 }
 
 /// Deterministic digest over the entire persisted UTXO set (commitment + entry
@@ -495,7 +493,7 @@ fn cross_branch_spend_of_disconnected_only_output_is_rejected() {
     assert_eq!(canonical_tip, block_hash(&a2.header), "A2 is canonical tip");
 
     let err = chain
-        .promote_heavier_known_tip(b3_hash)
+        .promote_heavier_known_tip(b3_hash, Timestamp(2_000_000_000))
         .expect_err("promoting a branch that spends a disconnected-only output must fail");
     let msg = err.to_string();
     assert!(
@@ -552,7 +550,7 @@ fn cross_branch_respend_of_shared_prefix_utxo_succeeds() {
 
     let mut chain = open_chain(dir.path());
     chain
-        .promote_heavier_known_tip(b3_hash)
+        .promote_heavier_known_tip(b3_hash, Timestamp(2_000_000_000))
         .expect("legitimate re-spend of resurrected shared UTXO must promote");
 
     assert_eq!(chain.tip_hash, b3_hash);
@@ -570,6 +568,7 @@ fn cross_branch_respend_of_shared_prefix_utxo_succeeds() {
 // ============================================================================
 
 const POLICY: u64 = dom_core::MAX_REORG_DEPTH_POLICY; // 1000
+const FINALITY: u64 = dom_chain::reorg::MAX_REORG_DEPTH; // 360
 
 /// Stage a canonical chain `genesis → shared(1) → c(2..=tip_height)` using
 /// cheap dummy coinbases. Returns (the prebuilt heavier side block attached at
@@ -642,7 +641,7 @@ fn reorg_depth_over_limit_is_rejected_on_promotion_path() {
     let side_hash = stage_side_into_open_chain(&chain, &side);
 
     let err = chain
-        .promote_heavier_known_tip(side_hash)
+        .promote_heavier_known_tip(side_hash, Timestamp(2_000_000_000))
         .expect_err("disconnect depth over MAX_REORG_DEPTH_POLICY must be rejected");
     let msg = err.to_string();
     // The reorg is refused because the ancestor is deeper than the bounded
@@ -664,33 +663,34 @@ fn reorg_depth_over_limit_is_rejected_on_promotion_path() {
     assert_eq!(chain.tip_height, canonical_height);
 }
 
-/// AT-LIMIT: disconnect depth = POLICY must pass `check_reorg_depth`. The
+/// LAST-ACCEPTED: disconnect depth = FINALITY - 1 must pass rolling finality.
+/// The
 /// fixture's side tip carries a dummy proof, so once the depth gate passes the
 /// promotion proceeds into `validate_block` and is rejected there for a
-/// DIFFERENT reason (invalid range proof) — NOT for depth. We assert the
-/// failure is NOT the depth-cap message, which proves the cap admitted exactly
-/// POLICY. (Building a consensus-valid 1000-deep canonical chain with real
-/// proofs would cost ~100s+; out of scope for a fast shield test. The cap
-/// boundary is what this vector targets.)
+/// DIFFERENT reason (invalid range proof) — NOT for depth.
 #[test]
 fn reorg_depth_at_limit_passes_depth_gate() {
-    // canonical_tip_height = POLICY + 1 → disconnect_depth = POLICY (at cap).
+    // canonical_tip_height = FINALITY → disconnect_depth = FINALITY - 1.
     let dir = TempDir::new().expect("tempdir");
-    let (side, disconnect_depth) = stage_depth_fixture(&dir, POLICY + 1);
-    assert_eq!(disconnect_depth, POLICY, "fixture is exactly at the cap");
+    let (side, disconnect_depth) = stage_depth_fixture(&dir, FINALITY);
+    assert_eq!(
+        disconnect_depth,
+        FINALITY - 1,
+        "fixture is the last accepted depth"
+    );
 
     let mut chain = open_chain(dir.path());
     let canonical_tip = chain.tip_hash;
     let side_hash = stage_side_into_open_chain(&chain, &side);
 
-    let result = chain.promote_heavier_known_tip(side_hash);
+    let result = chain.promote_heavier_known_tip(side_hash, Timestamp(2_000_000_000));
     match result {
         Ok(_) => panic!("dummy-proof side tip should not validate; expected post-gate failure"),
         Err(e) => {
             let msg = e.to_string();
             assert!(
-                !msg.contains("exceeds MAX_REORG_DEPTH_POLICY"),
-                "at-limit depth must pass the cap; failure must be post-gate, got: {msg}"
+                !msg.contains("rolling finality"),
+                "depth 359 must pass finality; failure must be post-gate, got: {msg}"
             );
             // It must be a block-validation failure (the depth gate let it
             // through to validate_block, where the dummy proof is rejected).
@@ -756,7 +756,7 @@ fn fix019_over_cap_disconnect_is_refused_before_unbounded_collect_probe() {
     let side_hash = stage_side_into_open_chain(&chain, &side);
 
     let err = chain
-        .promote_heavier_known_tip(side_hash)
+        .promote_heavier_known_tip(side_hash, Timestamp(2_000_000_000))
         .expect_err("over-cap disconnect must be refused");
     let msg = err.to_string();
 
@@ -846,7 +846,7 @@ fn run_scenario_two_orderings(
         }
         drop(store);
         let mut chain = open_chain(dir.path());
-        chain.promote_heavier_known_tip(b_tip_hash)?;
+        chain.promote_heavier_known_tip(b_tip_hash, Timestamp(2_000_000_000))?;
         (chain.tip_hash, utxo_digest(&chain))
     };
 

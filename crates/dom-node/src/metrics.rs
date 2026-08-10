@@ -11,6 +11,11 @@ pub struct Metrics {
     pub outbound_peers: Arc<AtomicU64>,
     pub blocks_mined: Arc<AtomicU64>,
     pub mining_active: Arc<AtomicU64>,
+    pub mining_paused_for_sync: Arc<AtomicU64>,
+    pub mining_template_height: Arc<AtomicU64>,
+    pub best_known_peer_height: Arc<AtomicU64>,
+    pub stale_templates_cancelled: Arc<AtomicU64>,
+    pub mining_hashes: Arc<AtomicU64>,
     pub mempool_size: Arc<AtomicU64>,
     pub txs_received: Arc<AtomicU64>,
     pub txs_relayed: Arc<AtomicU64>,
@@ -47,6 +52,11 @@ impl Metrics {
             outbound_peers: Arc::new(AtomicU64::new(0)),
             blocks_mined: Arc::new(AtomicU64::new(0)),
             mining_active: Arc::new(AtomicU64::new(0)),
+            mining_paused_for_sync: Arc::new(AtomicU64::new(0)),
+            mining_template_height: Arc::new(AtomicU64::new(0)),
+            best_known_peer_height: Arc::new(AtomicU64::new(0)),
+            stale_templates_cancelled: Arc::new(AtomicU64::new(0)),
+            mining_hashes: Arc::new(AtomicU64::new(0)),
             mempool_size: Arc::new(AtomicU64::new(0)),
             txs_received: Arc::new(AtomicU64::new(0)),
             txs_relayed: Arc::new(AtomicU64::new(0)),
@@ -104,9 +114,39 @@ impl Metrics {
             ),
             (
                 "dom_mining_active",
-                "Mining status",
+                "Whether RandomX mining workers are active",
                 "gauge",
                 &self.mining_active,
+            ),
+            (
+                "dom_mining_paused_for_sync",
+                "Whether mining is paused because the node is synchronizing",
+                "gauge",
+                &self.mining_paused_for_sync,
+            ),
+            (
+                "dom_mining_template_height",
+                "Height of the template currently being mined, or zero",
+                "gauge",
+                &self.mining_template_height,
+            ),
+            (
+                "dom_best_known_peer_height",
+                "Highest height announced by a currently connected valid peer",
+                "gauge",
+                &self.best_known_peer_height,
+            ),
+            (
+                "dom_stale_templates_cancelled_total",
+                "Mining templates cancelled after their parent became stale",
+                "counter",
+                &self.stale_templates_cancelled,
+            ),
+            (
+                "dom_mining_hashes_total",
+                "Nonce hashes attempted by local mining workers",
+                "counter",
+                &self.mining_hashes,
             ),
             (
                 "dom_mempool_size",
@@ -248,6 +288,8 @@ mod tests {
         let output = m.export_prometheus();
         assert!(output.contains("dom_chain_height 100"));
         assert!(output.contains("dom_peer_count 5"));
+        assert!(output.contains("dom_mining_paused_for_sync 0"));
+        assert!(output.contains("dom_best_known_peer_height 0"));
         assert!(output.contains("dom_suppressed_duplicate_block_relays_total 2"));
     }
 

@@ -17,6 +17,7 @@ fn payload_strategy() -> impl Strategy<Value = [u8; 33]> {
     proptest::collection::vec(any::<u8>(), 33).prop_map(|v| {
         let mut a = [0u8; 33];
         a.copy_from_slice(&v);
+        a[0] = if a[1] & 1 == 0 { 0x02 } else { 0x03 };
         a
     })
 }

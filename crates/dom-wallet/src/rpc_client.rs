@@ -565,7 +565,7 @@ impl NodeRpcClient {
                         &url_s,
                     )?,
                     timestamp: parsed.timestamp.unwrap_or(0),
-                    target: parse_hash_hex(
+                    target: parse_target_hex(
                         &parsed
                             .target
                             .clone()
@@ -873,6 +873,35 @@ fn parse_hash_hex(s: &str, url: &str) -> Result<[u8; 32], RpcClientError> {
             reason: format!("hash must be 32 bytes (got {})", v.len()),
         })?;
     Ok(arr)
+}
+
+/// Decode the RPC target field without conflating the compact consensus
+/// encoding with a block hash. The node exposes the canonical four-byte
+/// compact target, while older RPC producers may expose a 32-byte target.
+/// Normalize both forms to the public fixed-width representation.
+fn parse_target_hex(s: &str, url: &str) -> Result<[u8; 32], RpcClientError> {
+    let bytes = hex::decode(s).map_err(|e| RpcClientError::Decode {
+        url: url.to_string(),
+        reason: format!("target hex decode: {e}"),
+    })?;
+
+    match bytes.len() {
+        32 => bytes
+            .try_into()
+            .map_err(|v: Vec<u8>| RpcClientError::Decode {
+                url: url.to_string(),
+                reason: format!("target must be 4 or 32 bytes (got {})", v.len()),
+            }),
+        4 => {
+            let mut target = [0u8; 32];
+            target[28..].copy_from_slice(&bytes);
+            Ok(target)
+        }
+        len => Err(RpcClientError::Decode {
+            url: url.to_string(),
+            reason: format!("target must be 4 or 32 bytes (got {len})"),
+        }),
+    }
 }
 
 fn parse_commitment_hex(s: &str, url: &str) -> Result<[u8; 33], RpcClientError> {
