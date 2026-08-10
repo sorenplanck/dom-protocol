@@ -90,11 +90,18 @@ Deliverables 1, 2, and 4 are pure logic and are implemented and unit-tested in
 
 ### Phase 3 — what remains, and why it is not here
 
-- **3.3 atomic persistence**: the finalized-bytes-are-authority pattern is the
-  Contracts store's job — its Linux retained-capability filesystem is where
-  atomic rename and crash-prefix classification already live. Wiring the
-  contract state checkpoints through that store is store-side work, not a pure
-  adaptor concern.
+- **3.3 atomic persistence**: the authority record is done. §10.1
+  `SessionRecordV1` now exists in the Contracts store
+  (`dom-scriptless-store::canonical::session`, built against the current pin):
+  the finalized bytes that are the authority, carrying every §10.1 field
+  (revision, §9.1 phase, terms/transcript hashes, the irreversible state, the
+  reversible chain projection, the sealed payload), authenticated by a new
+  ratified storage domain, with the §10.3 compare-and-swap and §10.1
+  irreversibility (a flag never clears, the nonce epoch never decreases)
+  enforced in `advance`. What remains is the atomic write of those bytes under
+  crash — the persist → tombstone → commit → fsync sequence (§10.5) on the
+  Linux retained-capability filesystem — which needs the store's
+  process-death harness (operator environment).
 - **G3 interruption matrix**: an interruption test at every protocol step,
   proving each cut either advances correctly or aborts releasing reserves with
   no lost funds and no wedged input. Like G2 and G0, this needs the store's
@@ -199,7 +206,7 @@ PHASE2_2_4_PARTIAL_COMMITMENT_POK = DONE
 PHASE2_G2_REGTEST_GATE = PENDING_RUNNING_NODE
 PHASE3_3_1_CONTRACT_ENVELOPE = DONE
 PHASE3_3_2_STATE_MACHINE = DONE_INCLUDING_8_5_EQUIVOCATION_AND_FAILED_CLOSED
-PHASE3_3_3_ATOMIC_PERSISTENCE = PENDING_CONTRACTS_STORE
+PHASE3_3_3_ATOMIC_PERSISTENCE = AUTHORITY_RECORD_DONE_ATOMIC_WRITE_PENDING_HARNESS
 PHASE3_3_4_DEADLINE_POLICY = DONE
 PHASE3_G3_INTERRUPTION_MATRIX = PENDING_RUNNING_NODE
 PHASE4_4_1_FUNDING_ORDER = DONE_GATED_FROM_CLAIMPRESIGNED_SPEC_7_2_7_3
