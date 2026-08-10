@@ -288,6 +288,7 @@
 
 mod adaptor;
 mod bulletproof_mpc;
+mod collaborative_output;
 mod context;
 mod contract_session;
 mod decoy_capsule;
@@ -314,6 +315,10 @@ mod independent_vector_comparison;
 
 pub use adaptor::{AdaptorPreSignatureV1, AdaptorSecret, CoreAdaptorPreSignatureV1};
 pub use bulletproof_mpc::{BpRound1ShareV1, BpStatementV1};
+pub use collaborative_output::{
+    aggregate_shared_commitment_v1, contribute_blinding_share_v1, BlindingShareV1,
+    SharedCommitmentV1,
+};
 pub use context::{DirectionV1, SessionContextInputsV1, SessionContextV1, SigningPhaseV1};
 pub use contract_session::{
     ContractEnvelopeV1, ContractStageV1, ContractStateV1, RefundDeadlinePolicyV1,

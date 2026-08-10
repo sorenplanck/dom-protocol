@@ -1,9 +1,41 @@
 # Driver Blocker — Partial-Commitment PoK vs Pedersen Commitment Shares
 
 Date: 2026-08-10
-Status: **BLOCKS the public collaborative-output driver (2.2) until resolved**
+Status: **RESOLVED by the master specification — see "Resolution from the source"**
 
-## Finding
+## Resolution from the source
+
+The master specification `DOM-Scriptless-Contracts-Especificacao-Mestra-v1.0.docx`
+settles this. The blinding proof of knowledge lives at the **session layer over
+the pure point `R_i = r_i*G`**, not over the Bulletproof statement's commitment
+shares, so the mismatch below never arises in the flow the spec defines.
+
+- **§4.2 "Share de blinding"**: *"Cada participante escolhe r_i e publica
+  R_i = r_i·G. Para impedir contribuição sem conhecimento e ataques de ponto
+  malformado, envia PoK Schnorr"*, with context
+  `chain_id || session_id || participant_id || role || participant_index || R_i
+  || terms_hash || capsule_hash` under the tag `DOM:scriptless-share-pop:v1`.
+  This is exactly what `share_pop.rs` implements (same tag, same fields, with
+  `recovery_binding_hash` carrying `capsule_hash`). Line 375 of the spec names it
+  literally: *"Proof of knowledge do share de blinding/chave."*
+- **§4.3 "Commitment agregado"**: *"Depois de validar todas as PoKs:
+  R_total = Σ R_i; C = vH + R_total"*, rejecting `R_total` or `C` at infinity.
+- **§1.2**: *"Cada participante conhece r_i, mas ninguém precisa conhecer r ...
+  O blinding agregado nunca é reconstruído."* So `C` is computed by point
+  addition, never by summing the scalars.
+- **§5.1 / §5.2**: the Bulletproof statement is a **separate backend layer**
+  (`values = [v, MAX-v]`, `blinds_i = [r_i, -r_i]`). Its commitment-share
+  representation is internal to the range-proof backend and is not the object
+  the §4.2 PoK proves.
+
+Consequently the driver's admission gate is `share_pop` over `R_i` (§4.2),
+followed by `C = vH + Σ R_i` (§4.3). The `partial_commitment_pop` module remains
+a correct standalone discrete-log PoK but is **not** the §4.2 primitive and is
+not required by the driver. The original finding below rested on the wrong
+assumption that the PoK must bind the Bulletproof statement's Pedersen share; the
+spec places it one layer up, over `R_i`.
+
+## Original finding (superseded, kept for the audit trail)
 
 Building the public two-wallet collaborative-output driver surfaced a
 correctness mismatch between two components that were built separately.
