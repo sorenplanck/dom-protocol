@@ -60,6 +60,25 @@ pub enum AdaptorError {
     /// A cryptographic relation did not verify.
     #[error("cryptographic verification failed: {0}")]
     VerificationFailed(&'static str),
+    /// Two different messages were sent under one logical key (§8.5).
+    ///
+    /// The session is aborted permanently and the evidence is preserved; this
+    /// is not a transient rejection the peer may retry.
+    #[error("equivocation: different bytes under the same (session, sender, sequence) key")]
+    Equivocation,
+    /// A message repeated an already-consumed sequence with no record of its
+    /// exact bytes (§8.5).
+    #[error("replay: sequence already consumed for this sender")]
+    Replay,
+    /// A message skipped ahead of the sender's next expected sequence (§8.5).
+    #[error("sequence gap: message is ahead of the sender's next sequence")]
+    SequenceGap,
+    /// A message bound a transcript that is not the one in force (§8.5).
+    #[error("forked transcript: message binds a transcript that is not current")]
+    ForkedTranscript,
+    /// The session latched into permanent failure and accepts nothing further.
+    #[error("session is failed-closed and accepts no further message")]
+    FailedClosed,
 }
 
 impl From<dom_core::DomError> for AdaptorError {

@@ -175,10 +175,26 @@ fn g3_abort_always_available_resume_and_ordering_invariants() {
     .expect("step");
     state.apply(&step).expect("advance");
     let resumed = ContractStateV1::resume(state.stage(), state.transcript(), 1, 0).expect("resume");
-    assert_eq!(resumed, state, "resume reconstructs the exact live state");
+    // The durable projection is reconstructed exactly; the §8.5 duplicate-
+    // detection memory is ephemeral by design and re-binds on the next message.
+    assert_eq!(
+        resumed.stage(),
+        state.stage(),
+        "resume reconstructs the durable stage"
+    );
+    assert_eq!(
+        resumed.transcript(),
+        state.transcript(),
+        "resume reconstructs the durable transcript"
+    );
 
-    // A replayed envelope binds a stale transcript and spent sequence: rejected.
-    assert!(state.apply(&step).is_err(), "replay must not advance");
+    // Replaying the exact accepted bytes is acknowledged idempotently and does
+    // not re-execute the transition (§8.5); the stage is unchanged.
+    assert_eq!(
+        state.apply(&step).expect("idempotent repeat"),
+        dom_adaptor::ContractApplyOutcomeV1::DuplicateAck,
+        "identical bytes are acked, never applied twice"
+    );
     assert_eq!(state.stage(), ContractStageV1::SharedOutputBuilt);
 }
 

@@ -64,6 +64,14 @@ pub enum ContractStageV1 {
     /// its reserves were released. Only reachable from a pre-funding stage
     /// (§9.3); a `Funded` contract can never reach it.
     Aborted,
+    /// Terminal failure: the session latched closed on detected equivocation
+    /// (§8.5 — "abortar permanentemente e preservar evidência"). Unlike
+    /// `Aborted`, this is not a cooperative wind-down: it is entered by the
+    /// state machine itself when a peer sent two different messages under one
+    /// logical key, and it is reachable from any non-terminal stage, including
+    /// `Funded` (where reserves are NOT released — the on-chain value still
+    /// exits only through the claim or the refund).
+    FailedClosed,
 }
 
 impl ContractStageV1 {
@@ -78,6 +86,7 @@ impl ContractStageV1 {
             Self::ClaimedByCondition => 0x06,
             Self::RefundedByTimeout => 0x07,
             Self::Aborted => 0x08,
+            Self::FailedClosed => 0x09,
         }
     }
 
@@ -92,6 +101,7 @@ impl ContractStageV1 {
             0x06 => Self::ClaimedByCondition,
             0x07 => Self::RefundedByTimeout,
             0x08 => Self::Aborted,
+            0x09 => Self::FailedClosed,
             _ => {
                 return Err(AdaptorError::InvalidContext(
                     "contract stage byte is outside the closed registry",
@@ -104,7 +114,10 @@ impl ContractStageV1 {
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::ClaimedByCondition | Self::RefundedByTimeout | Self::Aborted
+            Self::ClaimedByCondition
+                | Self::RefundedByTimeout
+                | Self::Aborted
+                | Self::FailedClosed
         )
     }
 
@@ -320,6 +333,74 @@ pub struct ContractStateV1 {
     transcript: [u8; 32],
     initiator_sequence: u64,
     responder_sequence: u64,
+    /// The session this state is bound to (§8.5's logical key includes it).
+    ///
+    /// Bound from the first envelope applied and required to match on every
+    /// envelope thereafter. A durable resume re-binds it from the first
+    /// post-resume envelope; the session-unique initial transcript is what
+    /// separates sessions across a restart.
+    session_id: Option<[u8; 32]>,
+    /// Digest of the last envelope accepted from each role, keyed with its
+    /// sequence — the memory §8.5 needs to tell an idempotent repeat (identical
+    /// bytes) from equivocation (different bytes, same key).
+    last_initiator: Option<(u64, [u8; 32])>,
+    last_responder: Option<(u64, [u8; 32])>,
+    /// Preserved equivocation evidence (§8.5): the conflicting digests under the
+    /// key that latched the session closed.
+    equivocation: Option<EquivocationEvidenceV1>,
+}
+
+/// Preserved evidence of a detected equivocation (§8.5).
+///
+/// §8.5 requires a permanent abort that *preserves evidence*: the logical key
+/// and both conflicting message digests, so the honest party can prove the peer
+/// sent two different messages under one key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EquivocationEvidenceV1 {
+    session_id: [u8; 32],
+    sender: DirectionV1,
+    sequence: u64,
+    accepted_digest: [u8; 32],
+    conflicting_digest: [u8; 32],
+}
+
+impl EquivocationEvidenceV1 {
+    /// The session the equivocation occurred in.
+    pub const fn session_id(&self) -> &[u8; 32] {
+        &self.session_id
+    }
+
+    /// The role that equivocated.
+    pub const fn sender(&self) -> DirectionV1 {
+        self.sender
+    }
+
+    /// The sequence under which two different messages were sent.
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// The digest of the message that was accepted first.
+    pub const fn accepted_digest(&self) -> &[u8; 32] {
+        &self.accepted_digest
+    }
+
+    /// The digest of the conflicting message sent under the same key.
+    pub const fn conflicting_digest(&self) -> &[u8; 32] {
+        &self.conflicting_digest
+    }
+}
+
+/// The outcome of applying one envelope (§8.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractApplyOutcomeV1 {
+    /// The envelope advanced the contract; the transcript moved.
+    Advanced,
+    /// The exact bytes were already accepted under this key: the same
+    /// acknowledgement is owed and no side effect is re-executed (§8.5
+    /// "bytes idênticos já aceitos: retornar o mesmo Ack, sem reexecutar side
+    /// effects"). The state is unchanged.
+    DuplicateAck,
 }
 
 impl ContractStateV1 {
@@ -338,6 +419,10 @@ impl ContractStateV1 {
             transcript: initial_transcript,
             initiator_sequence: 0,
             responder_sequence: 0,
+            session_id: None,
+            last_initiator: None,
+            last_responder: None,
+            equivocation: None,
         })
     }
 
@@ -374,37 +459,102 @@ impl ContractStateV1 {
     /// replayed, reordered, forked, or out-of-turn message cannot advance the
     /// contract. The updated transcript is the evidence recorded for the
     /// transition.
-    pub fn apply(&mut self, envelope: &ContractEnvelopeV1) -> Result<()> {
+    pub fn apply(&mut self, envelope: &ContractEnvelopeV1) -> Result<ContractApplyOutcomeV1> {
+        if self.stage == ContractStageV1::FailedClosed {
+            return Err(AdaptorError::FailedClosed);
+        }
         if self.stage.is_terminal() {
             return Err(AdaptorError::InvalidContext(
                 "contract state is terminal and accepts no further envelope",
             ));
         }
-        if envelope.previous_transcript != self.transcript {
-            return Err(AdaptorError::InvalidContext(
-                "contract envelope does not bind the current transcript",
-            ));
+        // §8.5: the logical key is (session_id, sender_id, sequence). The
+        // session is bound by the first envelope and fixed thereafter.
+        if let Some(bound) = self.session_id {
+            if envelope.session_id != bound {
+                return Err(AdaptorError::InvalidContext(
+                    "contract envelope belongs to a different session",
+                ));
+            }
         }
-        if envelope.sequence != self.expected_sequence(envelope.sender) {
-            return Err(AdaptorError::InvalidContext(
-                "contract envelope sequence is not the sender's next",
-            ));
+
+        let digest = envelope.digest();
+        let expected = self.expected_sequence(envelope.sender);
+
+        // §8.5, in order: a repeat of the last accepted key is either the exact
+        // same bytes (idempotent Ack, no side effects re-executed) or different
+        // bytes under one key — Equivocation, which aborts permanently and
+        // preserves the evidence.
+        if let Some((sequence, accepted)) = self.last_accepted(envelope.sender) {
+            if envelope.sequence == sequence {
+                if digest == accepted {
+                    return Ok(ContractApplyOutcomeV1::DuplicateAck);
+                }
+                self.latch_failed_closed(EquivocationEvidenceV1 {
+                    session_id: envelope.session_id,
+                    sender: envelope.sender,
+                    sequence,
+                    accepted_digest: accepted,
+                    conflicting_digest: digest,
+                });
+                return Err(AdaptorError::Equivocation);
+            }
+        }
+
+        if envelope.sequence < expected {
+            // An already-consumed sequence whose exact bytes we do not hold.
+            return Err(AdaptorError::Replay);
+        }
+        if envelope.sequence > expected {
+            return Err(AdaptorError::SequenceGap);
+        }
+        if envelope.previous_transcript != self.transcript {
+            return Err(AdaptorError::ForkedTranscript);
         }
         if !self.stage.permits(envelope.target_stage) {
             return Err(AdaptorError::InvalidContext(
                 "contract envelope targets a stage the current stage does not permit",
             ));
         }
+
         let advanced = advance_contract_transcript_v1(
             &self.transcript,
-            &envelope.digest(),
+            &digest,
             envelope.sender,
             envelope.target_stage,
         );
         self.stage = envelope.target_stage;
         self.transcript = advanced;
+        self.session_id.get_or_insert(envelope.session_id);
+        self.record_accepted(envelope.sender, envelope.sequence, digest);
         self.bump_sequence(envelope.sender);
-        Ok(())
+        Ok(ContractApplyOutcomeV1::Advanced)
+    }
+
+    /// The last accepted (sequence, digest) for a role, if any.
+    const fn last_accepted(&self, sender: DirectionV1) -> Option<(u64, [u8; 32])> {
+        match sender {
+            DirectionV1::Initiator => self.last_initiator,
+            DirectionV1::Responder => self.last_responder,
+        }
+    }
+
+    fn record_accepted(&mut self, sender: DirectionV1, sequence: u64, digest: [u8; 32]) {
+        match sender {
+            DirectionV1::Initiator => self.last_initiator = Some((sequence, digest)),
+            DirectionV1::Responder => self.last_responder = Some((sequence, digest)),
+        }
+    }
+
+    /// Latch the session permanently closed, preserving the evidence (§8.5).
+    fn latch_failed_closed(&mut self, evidence: EquivocationEvidenceV1) {
+        self.stage = ContractStageV1::FailedClosed;
+        self.equivocation = Some(evidence);
+    }
+
+    /// The preserved equivocation evidence, if the session latched closed.
+    pub const fn equivocation_evidence(&self) -> Option<&EquivocationEvidenceV1> {
+        self.equivocation.as_ref()
     }
 
     /// Reconstruct the live state from a durable checkpoint and revalidate it.
@@ -429,6 +579,14 @@ impl ContractStateV1 {
             transcript,
             initiator_sequence,
             responder_sequence,
+            // §8.5: a resumed state re-binds the session on its first envelope.
+            // The durable layer restores the finalized bytes; the session-unique
+            // initial transcript is what keeps another session's envelope from
+            // binding here.
+            session_id: None,
+            last_initiator: None,
+            last_responder: None,
+            equivocation: None,
         })
     }
 }
@@ -679,7 +837,9 @@ mod tests {
     }
 
     #[test]
-    fn a_replayed_envelope_does_not_advance_twice() {
+    fn identical_bytes_are_acked_idempotently_without_advancing() {
+        // §8.5: "bytes idênticos já aceitos: retornar o mesmo Ack, sem
+        // reexecutar side effects."
         let mut state = ContractStateV1::open([0x33; 32]).expect("open");
         let env = envelope(
             DirectionV1::Initiator,
@@ -687,10 +847,135 @@ mod tests {
             ContractStageV1::SharedOutputBuilt,
             state.transcript(),
         );
-        state.apply(&env).expect("first apply");
-        // The same envelope now binds a stale transcript and a spent sequence.
-        assert!(state.apply(&env).is_err());
+        assert_eq!(
+            state.apply(&env).expect("first apply"),
+            ContractApplyOutcomeV1::Advanced
+        );
+        let after_first = state.clone();
+        assert_eq!(
+            state.apply(&env).expect("idempotent repeat"),
+            ContractApplyOutcomeV1::DuplicateAck
+        );
+        // No side effect re-executed: the state is byte-identical.
+        assert_eq!(state, after_first);
         assert_eq!(state.stage(), ContractStageV1::SharedOutputBuilt);
+    }
+
+    #[test]
+    fn equivocation_latches_failed_closed_and_preserves_evidence() {
+        // §8.5: "bytes diferentes com a mesma chave: Equivocation, abortar
+        // permanentemente e preservar evidência."
+        let mut state = ContractStateV1::open([0x33; 32]).expect("open");
+        let first = envelope(
+            DirectionV1::Initiator,
+            0,
+            ContractStageV1::SharedOutputBuilt,
+            state.transcript(),
+        );
+        state.apply(&first).expect("first apply");
+
+        // Same (session, sender, sequence); different bytes.
+        let conflicting = ContractEnvelopeV1::new(
+            &chain(),
+            [0x22; 32],
+            DirectionV1::Initiator,
+            ContractKindV1::WitnessOrTimeout,
+            0,
+            ContractStageV1::SharedOutputBuilt,
+            [0x33; 32],
+            vec![0xCD; 8],
+        )
+        .expect("conflicting envelope");
+        assert!(matches!(
+            state.apply(&conflicting),
+            Err(AdaptorError::Equivocation)
+        ));
+
+        // Permanently closed, with the evidence preserved.
+        assert_eq!(state.stage(), ContractStageV1::FailedClosed);
+        assert!(state.stage().is_terminal());
+        let evidence = state.equivocation_evidence().expect("evidence preserved");
+        assert_eq!(evidence.sender(), DirectionV1::Initiator);
+        assert_eq!(evidence.sequence(), 0);
+        assert_eq!(evidence.accepted_digest(), &first.digest());
+        assert_eq!(evidence.conflicting_digest(), &conflicting.digest());
+        assert_ne!(evidence.accepted_digest(), evidence.conflicting_digest());
+
+        // Nothing further is accepted, not even a well-formed message.
+        let next = envelope(
+            DirectionV1::Responder,
+            0,
+            ContractStageV1::RefundPresigned,
+            state.transcript(),
+        );
+        assert!(matches!(
+            state.apply(&next),
+            Err(AdaptorError::FailedClosed)
+        ));
+    }
+
+    #[test]
+    fn sequence_gap_replay_and_forked_transcript_are_typed_distinctly() {
+        // §8.5's taxonomy: each failure mode has its own classification so a
+        // caller can tell a recoverable ordering problem from an attack.
+        let mut state = ContractStateV1::open([0x33; 32]).expect("open");
+
+        // Ahead of the sender's next sequence → SequenceGap.
+        let ahead = envelope(
+            DirectionV1::Initiator,
+            3,
+            ContractStageV1::SharedOutputBuilt,
+            state.transcript(),
+        );
+        assert!(matches!(
+            state.apply(&ahead),
+            Err(AdaptorError::SequenceGap)
+        ));
+
+        // Advance twice so sequence 0 is consumed and no longer the last key.
+        let first = envelope(
+            DirectionV1::Initiator,
+            0,
+            ContractStageV1::SharedOutputBuilt,
+            state.transcript(),
+        );
+        state.apply(&first).expect("first");
+        let second = envelope(
+            DirectionV1::Initiator,
+            1,
+            ContractStageV1::RefundPresigned,
+            state.transcript(),
+        );
+        state.apply(&second).expect("second");
+
+        // A consumed sequence whose bytes we no longer hold → Replay.
+        assert!(matches!(state.apply(&first), Err(AdaptorError::Replay)));
+
+        // Right sequence, wrong transcript → ForkedTranscript.
+        let forked = envelope(
+            DirectionV1::Initiator,
+            2,
+            ContractStageV1::ClaimPresigned,
+            [0x77; 32],
+        );
+        assert!(matches!(
+            state.apply(&forked),
+            Err(AdaptorError::ForkedTranscript)
+        ));
+
+        // A message from another session cannot bind here.
+        let other_session = ContractEnvelopeV1::new(
+            &chain(),
+            [0x99; 32],
+            DirectionV1::Initiator,
+            ContractKindV1::WitnessOrTimeout,
+            2,
+            ContractStageV1::ClaimPresigned,
+            state.transcript(),
+            vec![0xAB; 4],
+        )
+        .expect("other-session envelope");
+        assert!(state.apply(&other_session).is_err());
     }
 
     #[test]
@@ -746,7 +1031,21 @@ mod tests {
         // state, then continue from it.
         let mut resumed =
             ContractStateV1::resume(original.stage(), original.transcript(), 1, 0).expect("resume");
-        assert_eq!(resumed, original);
+        // The durable projection — stage, transcript, per-role sequences — is
+        // reconstructed exactly. The §8.5 duplicate-detection memory (the last
+        // accepted digest per role) is deliberately NOT durable: after a restart
+        // a repeat of the last pre-crash message is classified by sequence and
+        // transcript (Replay / ForkedTranscript) rather than by digest.
+        assert_eq!(resumed.stage(), original.stage());
+        assert_eq!(resumed.transcript(), original.transcript());
+        assert_eq!(
+            resumed.expected_sequence(DirectionV1::Initiator),
+            original.expected_sequence(DirectionV1::Initiator)
+        );
+        assert_eq!(
+            resumed.expected_sequence(DirectionV1::Responder),
+            original.expected_sequence(DirectionV1::Responder)
+        );
 
         let next = envelope(
             DirectionV1::Responder,

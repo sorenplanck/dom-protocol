@@ -71,33 +71,38 @@ Fase 5); the structure that makes the window well-formed is now enforced.
 _None outstanding from this audit._ The lower-severity divergences below are
 recorded for a future pass.
 
-## Lower-severity divergences (recorded, not changed)
+## Lower-severity divergences — addressed
 
-- **`contract_session` §8.5 anti-replay is partial.** The logical key is
-  `(sender, sequence)` + transcript binding; `session_id` is not part of the
-  in-state key (mitigated by the session-unique initial transcript), equivocation
-  (same key, different bytes) is not detected/latched, and there is no
-  `FailedClosed` terminal that preserves evidence. Some of this belongs to the
-  store/transport layer; the module advertises "anti-replay" and should either
-  scope that claim or add the fail-closed hook. (§8.5 mestra:718-725)
-- **`contract_session` contract transcript is a separate construction, not §8.4.**
-  Tag `DOM:scriptless-contract-transition:v1` and a single stage byte, vs §8.4's
-  `DOM:scriptless-transcript:v1` and `accepted_phase_u16_le`. Defensible as a
-  distinct contract-level transcript (the envelope is a sanctioned "formato
-  próprio", Cronograma 3.1), but it must not be conflated with the §8 message
-  transcript.
-- **`contract_session` domain tags not in the §3.4 frozen registry.**
-  `…-contract-transition:v1` and `…-contract-envelope:v1` are ad-hoc literals;
-  §3.4 mandates a closed `DomainTag` registry. Either register them or the closed
-  enum is not yet enforced in this crate.
-- **Error taxonomy.** Both `decoy_capsule` and `contract_session` map
-  equivocation to a generic `InvalidContext` rather than a dedicated
-  `Equivocation` classification (behavior is correct and fails closed; only the
-  typed error diverges). (§13 taxonomy)
-- **`funding_authority` refund-first guarantee is bounded.** `RefundPresigned`
-  attests message acceptance, not a valid, durably-stored, spendable refund
-  (invariant mestra:181). The durability/spendability checks are node-side and
-  documented as out of scope in the module.
+- **§8.5 taxonomy and equivocation — FIXED.** `apply` now implements the §8.5
+  contract: the logical key includes `session_id` (bound on the first envelope
+  and enforced thereafter); identical bytes under an already-accepted key return
+  `ContractApplyOutcomeV1::DuplicateAck` with no side effect re-executed;
+  different bytes under one key raise `AdaptorError::Equivocation`, latch the
+  session into the new `ContractStageV1::FailedClosed` terminal (§9.1
+  `FailedClosed`), and preserve `EquivocationEvidenceV1` (key + both conflicting
+  digests). `Replay`, `SequenceGap`, and `ForkedTranscript` are now distinct
+  typed errors instead of one generic `InvalidContext`. Note: the duplicate-
+  detection memory is deliberately not durable — after a resume, a repeat of the
+  last pre-crash message is classified by sequence/transcript rather than by
+  digest.
+- **§3.4 tag registry — CREATED.** `docs/HASH_DOMAINS.md` did not exist; §3.4
+  requires it as the single registry from which the closed `DomainTag` enum is
+  generated. It now records all 31 live tags, separating the 14 in the spec's
+  normative table from the 17 that are in use and still need ratification, plus
+  the KDF/AEAD labels. The registry is explicitly marked **PROPOSED, not frozen**:
+  §3.4 forbids freezing until G0 locates the canonical DOM BLAKE2b and exposes a
+  byte-identical adapter. Generating the enum and replacing the string literals
+  is listed there as pending work gated on G0.
+- **Contract transcript is a separate construction, not §8.4** — unchanged and
+  documented. Tag `DOM:scriptless-contract-transition:v1` with a stage byte, vs
+  §8.4's `DOM:scriptless-transcript:v1` with `accepted_phase_u16_le`. Defensible
+  as a distinct contract-level transcript (the envelope is a sanctioned "formato
+  próprio", Cronograma 3.1) and now registered in `docs/HASH_DOMAINS.md`; it must
+  not be conflated with the §8 message transcript.
+- **`funding_authority` refund-first guarantee is bounded** — unchanged and
+  documented. `ClaimPresigned` attests message acceptance, not a valid, durably
+  stored, spendable refund plus a verified adaptor pre-signature (invariant
+  mestra:181, §7.3). Those checks are node-side and scoped out in the module doc.
 
 ## Verified clean (no divergence)
 
@@ -125,6 +130,8 @@ CRYPTO_CORE = SPEC_FAITHFUL
 FIXED = POST_FUNDING_ABORT + DECOY_CONSTANTS + FUNDING_GATE_HONESTY + EXTRA_COMMIT + AGGREGATE_PURE_R_I
 ADJUDICATED = FUNDING_ORDER_FOLLOWS_MESTRA_7_2_7_3 (ClaimPresigned gate) + CLAIM_CONFIRMATION_MARGIN_DISTINCT
 ADJUDICATE_REMAINING = NONE
+MINOR_DIVERGENCES = EQUIVOCATION_TAXONOMY_FIXED + TAG_REGISTRY_CREATED_PROPOSED
+TAG_FREEZE_BLOCKED_BY = G0_CANONICAL_BLAKE2B_ADAPTER
 NON_NORMATIVE = PARTIAL_COMMITMENT_POP_REDUNDANT_WITH_SHARE_POP
 PRODUCTION = NOT_AUTHORIZED
 ```

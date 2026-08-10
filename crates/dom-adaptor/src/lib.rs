@@ -321,7 +321,8 @@ pub use collaborative_output::{
 };
 pub use context::{DirectionV1, SessionContextInputsV1, SessionContextV1, SigningPhaseV1};
 pub use contract_session::{
-    ContractEnvelopeV1, ContractStageV1, ContractStateV1, RefundDeadlinePolicyV1,
+    ContractApplyOutcomeV1, ContractEnvelopeV1, ContractStageV1, ContractStateV1,
+    EquivocationEvidenceV1, RefundDeadlinePolicyV1,
 };
 pub use decoy_capsule::{
     combine_decoy_capsule_v1, DecoyCommitmentV1, DecoyContributionV1, DecoyRevealV1,
