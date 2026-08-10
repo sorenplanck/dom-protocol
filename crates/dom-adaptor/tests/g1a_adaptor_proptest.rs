@@ -21,12 +21,14 @@
 //!
 //! Reproducing a failure
 //! ---------------------
-//! `failure_persistence` is left at proptest's default
-//! (`FileFailurePersistence::SourceParallel`), so a failing seed is written to
-//! `crates/dom-adaptor/tests/g1a_adaptor_proptest.proptest-regressions` as a
-//! `cc <64 hex>` line and is replayed first on the next run of
-//! `cargo test -p dom-adaptor --test g1a_adaptor_proptest`. The RNG algorithm
-//! is pinned to `RngAlgorithm::ChaCha`.
+//! Failing seeds are persisted with `FileFailurePersistence::Direct`, at
+//! `REGRESSIONS_FILE` relative to the crate manifest directory. proptest's
+//! default `SourceParallel` policy cannot locate a source root for an
+//! integration test and silently persists nothing, so the path is given
+//! explicitly. A failure appends a `cc <64 hex>` seed line there, and the next
+//! `cargo test -p dom-adaptor --test g1a_adaptor_proptest` replays that seed
+//! before drawing anything new; commit the file to freeze the regression.
+//! The RNG algorithm is pinned to `RngAlgorithm::ChaCha`, and
 //! `seeded_core_cycle_replay_is_bit_for_bit_reproducible` additionally drives
 //! the runner from the fixed seed `CAMPAIGN_SEED`, so that slice of the
 //! campaign is identical on every machine and every run.
@@ -46,7 +48,9 @@ use dom_crypto::{
 };
 use proptest::array::uniform32;
 use proptest::prelude::*;
-use proptest::test_runner::{Config as ProptestConfig, RngAlgorithm, TestRng, TestRunner};
+use proptest::test_runner::{
+    Config as ProptestConfig, FileFailurePersistence, RngAlgorithm, TestRng, TestRunner,
+};
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -59,6 +63,22 @@ const PURPOSE_CASES: u32 = 2_000;
 const PARITY_CASES: u32 = 2_000;
 const NEGATIVE_CASES: u32 = 2_000;
 const SEEDED_REPLAY_CASES: u32 = 1_000;
+
+/// Where a failing seed is recorded, relative to `crates/dom-adaptor`.
+const REGRESSIONS_FILE: &str = "tests/g1a_adaptor_proptest.proptest-regressions";
+
+/// The shared configuration: explicit case count and explicit seed recording.
+fn campaign_config(cases: u32) -> ProptestConfig {
+    ProptestConfig {
+        cases,
+        max_local_rejects: 1_024,
+        max_global_rejects: 1_024,
+        max_shrink_iters: 4_096,
+        rng_algorithm: RngAlgorithm::ChaCha,
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(REGRESSIONS_FILE))),
+        ..ProptestConfig::default()
+    }
+}
 
 /// Fixed 32-byte ChaCha seed for the deterministic replay slice.
 const CAMPAIGN_SEED: [u8; 32] = *b"DOM-G1A-adaptor-proptest-v1-seed";
@@ -562,14 +582,7 @@ fn adaptor_cycle_holds_under_the_real_dom_verifiers() {
     let started = Instant::now();
 
     proptest!(
-        ProptestConfig {
-            cases: CORE_CYCLE_CASES,
-            max_local_rejects: 1_024,
-            max_global_rejects: 1_024,
-            max_shrink_iters: 4_096,
-            rng_algorithm: RngAlgorithm::ChaCha,
-            ..ProptestConfig::default()
-        },
+        campaign_config(CORE_CYCLE_CASES),
         |(draw in core_draw())| {
             let case = match AdaptorCaseV1::build(&draw) {
                 Some(case) => case,
@@ -606,14 +619,7 @@ fn every_authorized_purpose_binds_the_adaptor_session_context() {
     let started = Instant::now();
 
     proptest!(
-        ProptestConfig {
-            cases: PURPOSE_CASES,
-            max_local_rejects: 1_024,
-            max_global_rejects: 1_024,
-            max_shrink_iters: 4_096,
-            rng_algorithm: RngAlgorithm::ChaCha,
-            ..ProptestConfig::default()
-        },
+        campaign_config(PURPOSE_CASES),
         |(draw in core_draw(), session in session_draw())| {
             let case = match AdaptorCaseV1::build(&draw) {
                 Some(case) => case,
@@ -776,14 +782,7 @@ fn all_sec1_parity_classes_survive_the_adaptor_round_trip() {
     let started = Instant::now();
 
     proptest!(
-        ProptestConfig {
-            cases: PARITY_CASES,
-            max_local_rejects: 1_024,
-            max_global_rejects: 1_024,
-            max_shrink_iters: 4_096,
-            rng_algorithm: RngAlgorithm::ChaCha,
-            ..ProptestConfig::default()
-        },
+        campaign_config(PARITY_CASES),
         |(draw in core_draw())| {
             let case = match AdaptorCaseV1::build(&draw) {
                 Some(case) => case,
@@ -877,14 +876,7 @@ fn swapped_statement_transcript_session_participant_role_purpose_and_message_are
     let started = Instant::now();
 
     proptest!(
-        ProptestConfig {
-            cases: NEGATIVE_CASES,
-            max_local_rejects: 1_024,
-            max_global_rejects: 1_024,
-            max_shrink_iters: 4_096,
-            rng_algorithm: RngAlgorithm::ChaCha,
-            ..ProptestConfig::default()
-        },
+        campaign_config(NEGATIVE_CASES),
         |(draw in core_draw(), swap in swap_draw(), session in session_draw())| {
             let case = match AdaptorCaseV1::build(&draw) {
                 Some(case) => case,
@@ -1226,15 +1218,7 @@ fn seeded_core_cycle_replay_is_bit_for_bit_reproducible() {
     let rejected = AtomicUsize::new(0);
     let started = Instant::now();
 
-    let config = ProptestConfig {
-        cases: SEEDED_REPLAY_CASES,
-        max_local_rejects: 1_024,
-        max_global_rejects: 1_024,
-        max_shrink_iters: 4_096,
-        rng_algorithm: RngAlgorithm::ChaCha,
-        failure_persistence: None,
-        ..ProptestConfig::default()
-    };
+    let config = campaign_config(SEEDED_REPLAY_CASES);
     let mut runner = TestRunner::new_with_rng(
         config,
         TestRng::from_seed(RngAlgorithm::ChaCha, &CAMPAIGN_SEED),
