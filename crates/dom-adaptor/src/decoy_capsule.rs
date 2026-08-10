@@ -15,15 +15,28 @@
 
 use crate::{AdaptorError, Result, SessionId, SigningShareV1};
 use dom_crypto::blake2b_256_tagged;
-use dom_crypto::recovery::{RecoveryCapsule, RECOVERY_CAPSULE_SIZE};
+use dom_crypto::recovery::{
+    RecoveryCapsule, RECOVERY_CAPSULE_SIZE, RECOVERY_CIPHERTEXT_SIZE, RECOVERY_NONCE_SIZE,
+    RECOVERY_VERSION,
+};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 const CONTRIBUTION_TAG_V1: &str = "DOM:scriptless-decoy-contribution:v1";
 const COMMIT_TAG_V1: &str = "DOM:scriptless-decoy-commit:v1";
 
+// Framing offsets of the real recovery capsule, derived from the DOM capsule
+// constants so the decoy cannot silently diverge from the real layout if those
+// constants ever change (Cronograma A.2: the sizes must be imported from the
+// DOM module, not duplicated). Layout: version || nonce || ct-len || body.
+const CAPSULE_VERSION_LEN: usize = 2;
+const CAPSULE_LENGTH_FIELD_LEN: usize = 2;
+const CAPSULE_NONCE_OFFSET: usize = CAPSULE_VERSION_LEN;
+const CAPSULE_LENGTH_OFFSET: usize = CAPSULE_NONCE_OFFSET + RECOVERY_NONCE_SIZE;
+const CAPSULE_BODY_OFFSET: usize = CAPSULE_LENGTH_OFFSET + CAPSULE_LENGTH_FIELD_LEN;
+
 /// Variable bytes fixed by the bilateral exchange: nonce plus body.
-pub const DECOY_VARIABLE_LEN: usize = 92;
+pub const DECOY_VARIABLE_LEN: usize = RECOVERY_NONCE_SIZE + RECOVERY_CIPHERTEXT_SIZE;
 
 /// One party's ninety-two-byte decoy contribution.
 ///
@@ -142,10 +155,12 @@ pub fn combine_decoy_capsule_v1(
     }
 
     let mut capsule = [0u8; RECOVERY_CAPSULE_SIZE];
-    capsule[..2].copy_from_slice(&1u16.to_le_bytes());
-    capsule[2..14].copy_from_slice(&combined[..12]);
-    capsule[14..16].copy_from_slice(&80u16.to_le_bytes());
-    capsule[16..].copy_from_slice(&combined[12..]);
+    capsule[..CAPSULE_NONCE_OFFSET].copy_from_slice(&RECOVERY_VERSION.to_le_bytes());
+    capsule[CAPSULE_NONCE_OFFSET..CAPSULE_LENGTH_OFFSET]
+        .copy_from_slice(&combined[..RECOVERY_NONCE_SIZE]);
+    capsule[CAPSULE_LENGTH_OFFSET..CAPSULE_BODY_OFFSET]
+        .copy_from_slice(&(RECOVERY_CIPHERTEXT_SIZE as u16).to_le_bytes());
+    capsule[CAPSULE_BODY_OFFSET..].copy_from_slice(&combined[RECOVERY_NONCE_SIZE..]);
     RecoveryCapsule::from_bytes(&capsule)
         .map_err(|_| AdaptorError::InvalidContext("combined decoy failed capsule framing"))
 }

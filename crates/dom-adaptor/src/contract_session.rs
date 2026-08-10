@@ -54,7 +54,9 @@ pub enum ContractStageV1 {
     ClaimedByCondition,
     /// Terminal: refunded after the timeout height (Phase 5).
     RefundedByTimeout,
-    /// Terminal failure: the session aborted and reserves were released.
+    /// Terminal failure: the session aborted before funding was authorized and
+    /// its reserves were released. Only reachable from a pre-funding stage
+    /// (§9.3); a `Funded` contract can never reach it.
     Aborted,
 }
 
@@ -100,9 +102,14 @@ impl ContractStageV1 {
 
     /// Whether `next` is a permitted successor of `self`.
     ///
-    /// Abort is reachable from every non-terminal stage, because releasing
-    /// reserves must always be possible. The forward path is strictly ordered.
-    /// The two terminal successes are reachable only from `Funded`.
+    /// The forward path is strictly ordered. The two terminal successes are
+    /// reachable only from `Funded`. Abort releasing reserves is reachable only
+    /// from the pre-funding stages: §9.3 requires that abort cancels the
+    /// broadcast only while funding has not been authorized, and funding is
+    /// authorized at the `RefundPresigned → Funded` transition. Once `Funded`,
+    /// the value is in the on-chain shared output, so the contract cannot
+    /// pretend it never existed — its only exits are the adaptor claim and the
+    /// timeout refund, with the wallet in monitoring until one of them settles.
     fn permits(self, next: Self) -> bool {
         use ContractStageV1::*;
         match (self, next) {
@@ -111,7 +118,9 @@ impl ContractStageV1 {
             | (RefundPresigned, Funded)
             | (Funded, ClaimedByCondition)
             | (Funded, RefundedByTimeout) => true,
-            (from, Aborted) if !from.is_terminal() => true,
+            // §9.3: abort with reserve release only before funding is
+            // authorized — never from Funded or a terminal.
+            (Proposed | SharedOutputBuilt | RefundPresigned, Aborted) => true,
             _ => false,
         }
     }
@@ -485,12 +494,20 @@ impl RefundDeadlinePolicyV1 {
     /// relative timelock, so the only protection is the margin between the
     /// claim and the refund unlock. A claim published too close to `H_refund`
     /// risks the counterparty refunding in the same window. This returns the
-    /// last claim height that still leaves the full margin before the refund
-    /// unlocks; publishing at or below it is safe, above it is not.
+    /// last claim height that still leaves the margin before the refund unlocks;
+    /// publishing at or below it is safe, above it is not.
     ///
-    /// The floor uses the same measured margin as the refund derivation, so the
-    /// claim and refund deadlines cannot drift apart. A refund unlock below the
-    /// margin has no safe claim window and fails closed.
+    /// KNOWN LIMITATION (recorded for adjudication in the scriptless findings
+    /// record): this subtracts `total_margin_blocks`, the SAME margin used to
+    /// place the refund at `funding + total_margin`. That makes the floor equal
+    /// to `funding_height`, but a claim can only be published after funding
+    /// confirms (`FundingConfirmed → ClaimBroadcast`, height > funding), so the
+    /// safe window is empty and `claim_is_safe` is false for every real claim.
+    /// The claim safety margin must be a distinct, smaller quantity than the
+    /// refund placement margin (`claim_margin < total_margin`), leaving a
+    /// non-empty window `(funding, refund_lock − claim_margin]`. The exact value
+    /// depends on the Dandelion++ stem-timing study (Cronograma Fase 5) and is
+    /// deliberately not fixed here.
     pub fn claim_floor_height(self, refund_lock_height: u64) -> Result<u64> {
         refund_lock_height
             .checked_sub(self.total_margin_blocks())
@@ -640,15 +657,22 @@ mod tests {
     }
 
     #[test]
-    fn abort_is_reachable_from_every_nonterminal_stage() {
+    fn abort_releasing_reserves_is_reachable_only_before_funding() {
+        // §9.3: abort cancels the broadcast and releases reserves only while
+        // funding has not been authorized — the pre-funding stages.
         for reached in [
             ContractStageV1::Proposed,
             ContractStageV1::SharedOutputBuilt,
             ContractStageV1::RefundPresigned,
-            ContractStageV1::Funded,
         ] {
             assert!(reached.permits(ContractStageV1::Aborted));
         }
+        // Once funded, the value is in the on-chain shared output: abort must
+        // not pretend the contract never existed. Funded exits only to the
+        // adaptor claim or the timeout refund.
+        assert!(!ContractStageV1::Funded.permits(ContractStageV1::Aborted));
+        assert!(ContractStageV1::Funded.permits(ContractStageV1::ClaimedByCondition));
+        assert!(ContractStageV1::Funded.permits(ContractStageV1::RefundedByTimeout));
         for terminal in [
             ContractStageV1::ClaimedByCondition,
             ContractStageV1::RefundedByTimeout,

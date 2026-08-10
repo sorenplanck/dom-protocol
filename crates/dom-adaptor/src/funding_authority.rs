@@ -2,9 +2,7 @@
 //!
 //! Phase 4 of the implementation schedule, the parts that are pure logic. The
 //! central security property is an order: money enters the contract only after
-//! a guaranteed exit exists. Two conditions gate the funding signature, and
-//! this module makes both un-bypassable at the type level — a
-//! `FundingAuthorizationV1` cannot be constructed until they hold.
+//! a guaranteed exit exists. Two conditions gate the funding signature.
 //!
 //! 1. **Bilateral backup.** The shared output's blinding sum is known to no
 //!    single party and is irrecoverable from the chain (the C2 decision), so a
@@ -12,6 +10,9 @@
 //!    Before any funding, each party must prove a backup roundtrip: export the
 //!    share, reimport it, and confirm the reimported material reproduces the
 //!    committed point `share*G`. Both acknowledgements must verify.
+//!    `authorize` consumes the `BackupConfirmedV1` token, and that token can
+//!    only be produced by `verify_bilateral_backup_v1` — so funding cannot be
+//!    authorized without the backup gate having run and passed.
 //!
 //! 2. **Refund-first order.** The refund spending the shared output must be
 //!    co-signed, with the height-locked kernel at `H_refund`, before the
@@ -19,10 +20,25 @@
 //!    is `RefundPresigned`; it cannot mint funding authority from an earlier
 //!    stage.
 //!
-//! Building and broadcasting the actual funding and refund transactions, and
-//! the escalating-fee refund ladder under a real relay, are node-side work and
-//! are tracked in the Phase status record. This module authorizes; it does not
-//! sign or broadcast.
+//! Scope and known gaps (this is the pure-logic typestate half, not the full
+//! §7.3 `ReadyToFund` gate):
+//!
+//! - The backup token records only that a matching ack set verified against the
+//!   `committed_share_points` the caller supplied. It is **not** cryptographically
+//!   bound to this contract's shared-output shares — the caller must pass the
+//!   session's real committed points. Binding the backup receipt to the frozen
+//!   shared output (the spec's `FundingGateEvidence.backup_receipt` over
+//!   `terms_hash`/`shared_output_hash`) is node-side integration.
+//! - The master spec §7.2/§7.3 also requires the claim adaptor pre-signature to
+//!   be built and verified, and `ReadyToFund` persisted, before funding is
+//!   authorized (the gate transitions from `Phase::ClaimPrepared`). The
+//!   implementation schedule orders funding (Phase 4) before the conditional
+//!   claim (Phase 5); this ordering divergence is recorded for adjudication in
+//!   the scriptless findings record and is not resolved here.
+//! - Building and broadcasting the actual funding and refund transactions, and
+//!   the escalating-fee refund ladder under a real relay, are node-side work.
+//!
+//! This module authorizes the ordering; it does not sign or broadcast.
 
 use crate::{AdaptorError, ContractStageV1, ContractStateV1, Result};
 use dom_crypto::PublicKey;
@@ -56,9 +72,12 @@ impl ShareBackupAckV1 {
 
 /// Proof that every participant confirmed a valid backup roundtrip.
 ///
-/// This token exists only when the bilateral backup gate passed. It carries no
-/// data a caller can forge into funding authority; it is a witness that the
-/// gate ran, consumed by `FundingAuthorizationV1::authorize`.
+/// This token exists only when the bilateral backup gate passed: its only
+/// constructor is `verify_bilateral_backup_v1`, so a caller cannot fabricate
+/// one without a complete, matching ack set. It is a witness that the gate ran,
+/// consumed by `FundingAuthorizationV1::authorize`. It records the participant
+/// count only; binding the backed-up shares to a specific contract's shared
+/// output is the caller's responsibility (see the module scope note).
 #[derive(Debug, Clone, Copy)]
 pub struct BackupConfirmedV1 {
     participant_count: usize,
@@ -130,10 +149,18 @@ impl FundingAuthorizationV1 {
     /// The state must be at `RefundPresigned`: authorizing funding from
     /// `Proposed` or `SharedOutputBuilt` would mean money could enter before
     /// the exit exists, and from `Funded` or a terminal it would be a replay.
-    pub fn authorize(state: &ContractStateV1, _backup: BackupConfirmedV1) -> Result<Self> {
+    /// Consuming `backup` requires the caller to have passed the bilateral
+    /// backup gate; a token for fewer than two participants is rejected, since a
+    /// 2-of-2 contract cannot be safely funded without both parties' backups.
+    pub fn authorize(state: &ContractStateV1, backup: BackupConfirmedV1) -> Result<Self> {
         if state.stage() != ContractStageV1::RefundPresigned {
             return Err(AdaptorError::InvalidContext(
                 "funding may be authorized only from the RefundPresigned stage",
+            ));
+        }
+        if backup.participant_count() < 2 {
+            return Err(AdaptorError::InvalidContext(
+                "funding requires a bilateral backup for at least two participants",
             ));
         }
         Ok(Self {
