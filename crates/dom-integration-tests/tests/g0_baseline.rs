@@ -62,9 +62,38 @@ use dom_wallet2::{
     OutputStatus, RpcChainSource, RpcSourceError, StoredOutput, WalletV2State,
 };
 
-/// Regtest chain id = the regtest genesis hash. Both wallets must agree on it or
-/// `receive`/`finalize` refuse the slate (`dom-slate` `ChainIdMismatch`).
-const CHAIN_ID: [u8; 32] = GENESIS_HASH_REGTEST;
+/// The chain id the NODE validates kernel signatures against:
+/// `derive_chain_id(network_magic, genesis_hash)` — see
+/// `crates/dom-node/src/node.rs:369` (`snapshot_tx_chain_view`) feeding
+/// `Mempool::accept_tx_with_chain_view`.
+///
+/// **G0-BLOCKER-002.** The CURRENT wallet does not use this value. Wallet v1
+/// derives it correctly and internally (`crates/dom-wallet/src/wallet.rs:170`,
+/// `:210`, `:272` — `dom_consensus::derive_chain_id(network.magic(),
+/// genesis_hash)`), which is why the v1 end-to-end test `transfer_slate_e2e.rs`
+/// passes. Wallet v2 takes `chain_id` verbatim in
+/// `WalletV2State::new(network, chain_id)`
+/// (`crates/dom-wallet2/src/wallet_state.rs:58`) and the shipping desktop wallet
+/// hands it the **underived genesis hash**
+/// (`wallet-desktop/src-tauri/src/wallet_manager.rs:1206-1210`,
+/// `genesis_chain_id` → `dom_core::startup_genesis_hash_for_network_magic`).
+/// Since the aggregate kernel Schnorr signature binds the chain id, every
+/// transaction the current wallet builds is rejected by every node.
+/// `g0_current_wallet_chain_id_is_rejected_by_consensus` pins that empirically.
+///
+/// The canonical §15.7 scenario below therefore uses the CORRECT (node-agreeing)
+/// chain id, so the remaining §15.7 criteria can actually be measured instead of
+/// all collapsing behind the same single blocker.
+fn node_chain_id() -> [u8; 32] {
+    *dom_consensus::derive_chain_id(
+        dom_core::NETWORK_MAGIC_REGTEST,
+        &Hash256::from_bytes(GENESIS_HASH_REGTEST),
+    )
+    .as_bytes()
+}
+
+/// What the shipping desktop wallet actually configures today.
+const DESKTOP_CHAIN_ID: [u8; 32] = GENESIS_HASH_REGTEST;
 
 /// A deliberately non-boundary amount: not zero, not the whole balance, not a
 /// power of two, not equal to the reward or the fee.
@@ -203,7 +232,12 @@ async fn spawn_bearer_shim(upstream: String, token: String) -> String {
 /// desktop wallet does in `new_state_from_seed`
 /// (`wallet-desktop/src-tauri/src/wallet_manager.rs:1198-1203`).
 fn v2_wallet_from_seed(seed: &Bip39Seed) -> WalletV2State {
-    let mut state = WalletV2State::new(V2Network::Regtest, CHAIN_ID);
+    v2_wallet_from_seed_with_chain_id(seed, node_chain_id())
+}
+
+/// Same, with an explicit chain id (used to reproduce the desktop's configuration).
+fn v2_wallet_from_seed_with_chain_id(seed: &Bip39Seed, chain_id: [u8; 32]) -> WalletV2State {
+    let mut state = WalletV2State::new(V2Network::Regtest, chain_id);
     state.keychain = KeychainV2 {
         seed_bytes: Some(zeroize::Zeroizing::new(*seed.seed_bytes())),
         seed_word_count: Some(seed.word_count() as u8),
@@ -304,6 +338,15 @@ fn over_the_wire(slate: &Slate) -> Slate {
 /// Independent verification of a finalized transaction by a party that did not
 /// build it: canonical-byte round trip plus the consensus validator itself.
 fn verify_final_tx(tx: &Transaction, tip: u64, label: &str) -> Vec<u8> {
+    verify_final_tx_with_chain_id(tx, tip, label, node_chain_id())
+}
+
+fn verify_final_tx_with_chain_id(
+    tx: &Transaction,
+    tip: u64,
+    label: &str,
+    chain_id: [u8; 32],
+) -> Vec<u8> {
     let bytes = tx.to_bytes().expect("tx serialize");
     let decoded = Transaction::from_bytes(&bytes).expect("tx deserialize");
     let rebytes = decoded.to_bytes().expect("tx reserialize");
@@ -314,7 +357,7 @@ fn verify_final_tx(tx: &Transaction, tip: u64, label: &str) -> Vec<u8> {
 
     let ctx = dom_consensus::ValidationContext {
         current_height: dom_core::BlockHeight(tip),
-        chain_id: CHAIN_ID,
+        chain_id,
         now: dom_core::Timestamp(now_secs()),
     };
     dom_consensus::validate_transaction(&decoded, &ctx)
@@ -747,7 +790,7 @@ async fn g0_plain_send_1_to_1_regtest_current_slate() {
     node_b.request_shutdown().await;
     drop(node_a);
     drop(node_b);
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
     let mut cfg_a2 = test_config("g0-alice-restart", p2p_a, false);
     cfg_a2.data_dir = data_dir_a.to_string_lossy().into_owned();
@@ -767,6 +810,9 @@ async fn g0_plain_send_1_to_1_regtest_current_slate() {
     wait_for_listener_ready(&rpc_a, 20).await.expect("A rpc restart");
     tokio::spawn(node_b.clone().run());
     wait_for_listener_ready(&rpc_b, 20).await.expect("B rpc restart");
+    wait_for_peer_count(&node_b, 1, Duration::from_secs(60))
+        .await
+        .expect("B must re-peer with A after restart");
     assert_eq!(
         node_a.chain.lock().await.tip_height.0,
         conf_tip,
@@ -882,14 +928,16 @@ async fn g0_plain_send_1_to_1_regtest_current_slate() {
         "receiver_can_spend: Bob's balance must drop by exactly amount+fee"
     );
     assert_eq!(
-        alice
-            .outputs
+        bob.outputs
             .get(&recipient_commitment)
-            .map(|o| o.status)
-            .or(Some(OutputStatus::Spent))
-            .unwrap(),
+            .expect("Bob retains the spent output (INV-RET)")
+            .status,
         OutputStatus::Spent,
-        "the received output is now spent"
+        "the output Bob received in step 8 is now canonically spent"
+    );
+    assert!(
+        confirmed_total(&alice, a_tip) > 0,
+        "Alice remains solvent after being paid back"
     );
     eprintln!(
         "[G0] receiver_can_spend: OK — bob={} after spending {}",
@@ -1069,5 +1117,119 @@ async fn g0_height_locked_cover_confirms_without_delay() {
     );
 
     eprintln!("[G0] height_locked_cover: confirmed at tip {new_tip} with lock_height {lock_height}");
+    node.request_shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// G0-BLOCKER-002 — measured in isolation.
+// ---------------------------------------------------------------------------
+
+/// The CURRENT wallet, configured exactly as the shipping desktop wallet
+/// configures it, builds a plain send that **every node rejects**.
+///
+/// Reproduces `wallet-desktop/src-tauri/src/wallet_manager.rs:1206-1210`:
+/// ```ignore
+/// fn genesis_chain_id(network: V1Network) -> Result<[u8; 32]> {
+///     let genesis = dom_core::startup_genesis_hash_for_network_magic(network.magic())?;
+///     Ok(*genesis.as_bytes())          // <-- raw genesis hash, NOT derive_chain_id
+/// }
+/// ```
+/// fed to `WalletV2State::new(network, chain_id)`.
+///
+/// The node validates the aggregate kernel Schnorr signature against
+/// `derive_chain_id(network_magic, genesis_hash)`
+/// (`crates/dom-node/src/node.rs:369`), so the signature never verifies.
+/// Wallet v1 does the derivation internally
+/// (`crates/dom-wallet/src/wallet.rs:272`) and is therefore unaffected — which is
+/// why the v1 end-to-end test `transfer_slate_e2e.rs` passes while the current
+/// engine cannot spend at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn g0_current_wallet_chain_id_is_rejected_by_consensus() {
+    init_tracing();
+
+    // The two chain ids are genuinely different values.
+    assert_ne!(
+        DESKTOP_CHAIN_ID,
+        node_chain_id(),
+        "precondition: the desktop's chain id must differ from the node's derived one"
+    );
+
+    let seed = Bip39Seed::generate_new().expect("seed");
+    let tmp = tempfile::tempdir().expect("tmp");
+    let nodewallet = tmp.path().join("blocker2-node-wallet.dom");
+    node_wallet_dir_from_seed(&nodewallet, "pw-b2", &seed);
+
+    let rpc = format!("127.0.0.1:{}", free_local_port());
+    let mut cfg = test_config("g0-blocker2", free_local_port(), false);
+    cfg.data_dir = tmp.path().join("node-b2").to_string_lossy().into_owned();
+    cfg.wallet_path = Some(nodewallet.to_string_lossy().into_owned());
+    cfg.wallet_password = Some("pw-b2".into());
+    cfg.rpc_listen_addr = Some(rpc.clone());
+    cfg.rpc_bearer_token = Some("g0-token-b2".into());
+
+    let node = spawn_node(cfg).await;
+    tokio::spawn(node.clone().run());
+    wait_for_listener_ready(&rpc, 15).await.expect("rpc");
+    let shim = spawn_bearer_shim(rpc.clone(), "g0-token-b2".into()).await;
+
+    // Both wallets configured the way the desktop configures them.
+    let mut sender = v2_wallet_from_seed_with_chain_id(&seed, DESKTOP_CHAIN_ID);
+    let mut recipient = v2_wallet_from_seed_with_chain_id(
+        &Bip39Seed::generate_new().expect("seed2"),
+        DESKTOP_CHAIN_ID,
+    );
+
+    mine_blocks(&node, K_FUNDING).await.expect("fund");
+    let now = now_secs();
+    let tip = wallet_rescan(&mut sender, &shim, now).await;
+    assert!(
+        confirmed_total(&sender, tip) >= G0_AMOUNT + G0_FEE,
+        "sender must be funded before the send"
+    );
+
+    // The whole wallet-side flow SUCCEEDS — both wallets agree with each other.
+    let sent = create_send(&mut sender, G0_AMOUNT, G0_FEE, now).expect("create_send");
+    assert_eq!(sent.slate.chain_id, DESKTOP_CHAIN_ID);
+    let answered = receive(&mut recipient, over_the_wire(&sent.slate), now).expect("receive");
+    let (tx, slate_hash) = finalize_tracked(&mut sender, answered, now).expect("finalize");
+
+    // It even passes the wallet's own self-consistent local validation.
+    let _ = verify_final_tx_with_chain_id(&tx, tip, "desktop-config", DESKTOP_CHAIN_ID);
+
+    // But the node rejects it.
+    let base = format!("http://{rpc}");
+    let (_state, outcome) = tokio::task::spawn_blocking(move || {
+        let mut s = sender;
+        let sink = RpcChainSource::new(base, RPC_TIMEOUT).expect("sink");
+        let out = submit_finalized(&mut s, &sink, slate_hash, now);
+        (s, out)
+    })
+    .await
+    .expect("blocking submit");
+
+    match outcome {
+        Ok(o) => panic!(
+            "G0-BLOCKER-002 appears fixed: the node accepted a v2 tx built with the \
+             desktop's chain id ({o:?}). Re-adjudicate Gate G0."
+        ),
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("Schnorr signature invalid") || msg.contains("InvalidSignature"),
+                "expected a kernel signature rejection, got: {msg}"
+            );
+            eprintln!(
+                "[G0-BLOCKER-002 CONFIRMED] the node rejected a plain send built by the \
+                 CURRENT wallet as configured in production: {msg}\n\
+                 wallet chain_id  = {} (raw genesis hash; wallet-desktop/src-tauri/src/wallet_manager.rs:1206-1210)\n\
+                 node   chain_id  = {} (derive_chain_id; crates/dom-node/src/node.rs:369)\n\
+                 v1 derives it internally at crates/dom-wallet/src/wallet.rs:272, which is why \
+                 the v1 test transfer_slate_e2e.rs passes and the current engine does not.",
+                hex::encode(DESKTOP_CHAIN_ID),
+                hex::encode(node_chain_id()),
+            );
+        }
+    }
+
     node.request_shutdown().await;
 }
