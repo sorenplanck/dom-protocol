@@ -14,11 +14,17 @@
 //!    only be produced by `verify_bilateral_backup_v1` — so funding cannot be
 //!    authorized without the backup gate having run and passed.
 //!
-//! 2. **Refund-first order.** The refund spending the shared output must be
-//!    co-signed, with the height-locked kernel at `H_refund`, before the
-//!    funding is signed. This module consumes evidence that the contract stage
-//!    is `RefundPresigned`; it cannot mint funding authority from an earlier
-//!    stage.
+//! 2. **Refund-first, claim-adaptor-before-funding order (§7.2/§7.3).** The
+//!    master spec fixes the secure order: the refund spending the shared output
+//!    is co-signed with the height-locked kernel at `H_refund` (step 5), then
+//!    the claim adaptor pre-signature is built and verified and `ReadyToFund` is
+//!    reached (steps 7-8), and only then is funding authorized (step 9). The
+//!    §7.3 gate transitions from `ClaimPrepared`. This module therefore consumes
+//!    evidence that the contract stage is `ClaimPresigned` — the coarse stage
+//!    that records "refund co-signed, then claim adaptor pre-signed / ReadyToFund"
+//!    — and cannot mint funding authority from any earlier stage. (Adjudicated:
+//!    the master spec §7.2/§7.3 order governs over the schedule's Phase 4/5
+//!    split.)
 //!
 //! Scope and known gaps (this is the pure-logic typestate half, not the full
 //! §7.3 `ReadyToFund` gate):
@@ -29,12 +35,11 @@
 //!   session's real committed points. Binding the backup receipt to the frozen
 //!   shared output (the spec's `FundingGateEvidence.backup_receipt` over
 //!   `terms_hash`/`shared_output_hash`) is node-side integration.
-//! - The master spec §7.2/§7.3 also requires the claim adaptor pre-signature to
-//!   be built and verified, and `ReadyToFund` persisted, before funding is
-//!   authorized (the gate transitions from `Phase::ClaimPrepared`). The
-//!   implementation schedule orders funding (Phase 4) before the conditional
-//!   claim (Phase 5); this ordering divergence is recorded for adjudication in
-//!   the scriptless findings record and is not resolved here.
+//! - The full §7.3 gate also verifies the template hashes, the refund's
+//!   final-and-spendable status, the claim adaptor pre-signature itself, the
+//!   local/remote ready acks, and the durable nonce tombstones. Reaching
+//!   `ClaimPresigned` is where those checks belong; this typestate enforces the
+//!   ordering, and the cryptographic/durability checks are node-side.
 //! - Building and broadcasting the actual funding and refund transactions, and
 //!   the escalating-fee refund ladder under a real relay, are node-side work.
 //!
@@ -134,28 +139,32 @@ pub fn verify_bilateral_backup_v1(
 /// Authority to sign the funding, minted only after the two conditions hold.
 ///
 /// Construction consumes the backup-confirmed token and the contract state,
-/// and requires the state to be exactly at `RefundPresigned`. There is no
-/// other constructor, so a caller cannot assemble funding authority before the
-/// refund exists or before every backup was confirmed. The type is one-shot:
-/// it is consumed to advance the contract to `Funded`.
+/// and requires the state to be exactly at `ClaimPresigned` — the §7.2/§7.3
+/// stage that follows the co-signed refund with the verified claim adaptor
+/// pre-signature (`ReadyToFund`). There is no other constructor, so a caller
+/// cannot assemble funding authority before the refund exists, before the claim
+/// adaptor is pre-signed, or before every backup was confirmed. The type is
+/// one-shot: it is consumed to advance the contract to `Funded`.
 #[derive(Debug)]
 pub struct FundingAuthorizationV1 {
     session_transcript: [u8; 32],
 }
 
 impl FundingAuthorizationV1 {
-    /// Authorize funding once the refund is presigned and backups confirmed.
+    /// Authorize funding once the refund and claim adaptor are presigned and
+    /// backups confirmed.
     ///
-    /// The state must be at `RefundPresigned`: authorizing funding from
-    /// `Proposed` or `SharedOutputBuilt` would mean money could enter before
-    /// the exit exists, and from `Funded` or a terminal it would be a replay.
+    /// The state must be at `ClaimPresigned` (§7.3 transitions from there):
+    /// authorizing from `Proposed`, `SharedOutputBuilt`, or `RefundPresigned`
+    /// would mean money could enter before the refund exit and the claim path
+    /// both exist, and from `Funded` or a terminal it would be a replay.
     /// Consuming `backup` requires the caller to have passed the bilateral
     /// backup gate; a token for fewer than two participants is rejected, since a
     /// 2-of-2 contract cannot be safely funded without both parties' backups.
     pub fn authorize(state: &ContractStateV1, backup: BackupConfirmedV1) -> Result<Self> {
-        if state.stage() != ContractStageV1::RefundPresigned {
+        if state.stage() != ContractStageV1::ClaimPresigned {
             return Err(AdaptorError::InvalidContext(
-                "funding may be authorized only from the RefundPresigned stage",
+                "funding may be authorized only from the ClaimPresigned stage",
             ));
         }
         if backup.participant_count() < 2 {
@@ -244,7 +253,7 @@ mod tests {
         ));
     }
 
-    fn state_at_refund_presigned() -> ContractStateV1 {
+    fn state_at_claim_presigned() -> ContractStateV1 {
         let mut state = ContractStateV1::open([0x33; 32]).expect("open");
         let steps = [
             (
@@ -256,6 +265,11 @@ mod tests {
                 DirectionV1::Responder,
                 ContractStageV1::RefundPresigned,
                 0u64,
+            ),
+            (
+                DirectionV1::Initiator,
+                ContractStageV1::ClaimPresigned,
+                1u64,
             ),
         ];
         for (sender, target, seq) in steps {
@@ -276,34 +290,40 @@ mod tests {
     }
 
     #[test]
-    fn funding_authorizes_only_from_refund_presigned() {
+    fn funding_authorizes_only_from_claim_presigned() {
         let points = committed();
         let acks = vec![
             ShareBackupAckV1::new(0, points[0].clone()),
             ShareBackupAckV1::new(1, points[1].clone()),
         ];
 
-        // From RefundPresigned with confirmed backups, authorization succeeds.
-        let state = state_at_refund_presigned();
+        // From ClaimPresigned (refund co-signed, claim adaptor pre-signed) with
+        // confirmed backups, authorization succeeds (§7.2/§7.3).
+        let state = state_at_claim_presigned();
         let backup = verify_bilateral_backup_v1(&points, &acks).expect("backup");
         let authority = FundingAuthorizationV1::authorize(&state, backup).expect("authorize");
         assert_eq!(authority.bound_transcript(), &state.transcript());
 
-        // From the earlier SharedOutputBuilt stage, it must fail: money would
-        // enter before the refund exists.
+        // From the earlier RefundPresigned stage, it must fail: the claim adaptor
+        // is not yet pre-signed, so §7.2/§7.3 forbid authorizing funding.
         let mut early = ContractStateV1::open([0x33; 32]).expect("open");
-        let env = ContractEnvelopeV1::new(
-            &chain(),
-            [0x22; 32],
-            DirectionV1::Initiator,
-            ContractKindV1::WitnessOrTimeout,
-            0,
-            ContractStageV1::SharedOutputBuilt,
-            early.transcript(),
-            vec![0xAB; 4],
-        )
-        .expect("envelope");
-        early.apply(&env).expect("transition");
+        for (sender, target, seq) in [
+            (DirectionV1::Initiator, ContractStageV1::SharedOutputBuilt, 0u64),
+            (DirectionV1::Responder, ContractStageV1::RefundPresigned, 0u64),
+        ] {
+            let env = ContractEnvelopeV1::new(
+                &chain(),
+                [0x22; 32],
+                sender,
+                ContractKindV1::WitnessOrTimeout,
+                seq,
+                target,
+                early.transcript(),
+                vec![0xAB; 4],
+            )
+            .expect("envelope");
+            early.apply(&env).expect("transition");
+        }
         let backup2 = verify_bilateral_backup_v1(&points, &acks).expect("backup");
         assert!(FundingAuthorizationV1::authorize(&early, backup2).is_err());
     }

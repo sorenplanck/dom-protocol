@@ -187,8 +187,9 @@ fn g3_abort_always_available_resume_and_ordering_invariants() {
 //      unlocks at H_refund and is accepted first try.
 //
 // Node-independent invariants asserted here:
-//   * funding cannot be authorized before the refund is presigned (money never
-//     enters before a guaranteed exit exists);
+//   * funding cannot be authorized before the refund AND the claim adaptor are
+//     presigned (§7.2/§7.3: money never enters before a guaranteed exit and the
+//     claim path both exist);
 //   * the bilateral backup gate requires every participant's roundtrip ack;
 //   * the refund lock height is a well-formed nonzero margin beyond funding.
 //
@@ -213,12 +214,14 @@ fn g4_funding_order_backup_and_refund_margin_invariants() {
         "an incomplete backup set must fail closed"
     );
 
-    // Funding may be authorized only after the refund is presigned.
-    let state = state_at_refund_presigned();
+    // Funding may be authorized only after the refund and claim adaptor are
+    // presigned (§7.2/§7.3 — the gate transitions from ClaimPresigned).
+    let state = state_at_claim_presigned();
     let authority = FundingAuthorizationV1::authorize(&state, backup).expect("authorize");
     assert_eq!(authority.bound_transcript(), &state.transcript());
 
-    // Authorizing from an earlier stage — money before the refund — fails.
+    // Authorizing from an earlier stage — money before the exit/claim path —
+    // fails.
     let mut early = ContractStateV1::open([0x33; 32]).expect("open");
     let env = ContractEnvelopeV1::new(
         &chain(),
@@ -345,18 +348,21 @@ fn scalar_bytes(byte: u8) -> Zeroizing<[u8; 32]> {
     bytes
 }
 
-fn state_at_refund_presigned() -> ContractStateV1 {
+fn state_at_claim_presigned() -> ContractStateV1 {
     let mut state = ContractStateV1::open([0x33; 32]).expect("open");
-    for (sender, target) in [
-        (DirectionV1::Initiator, ContractStageV1::SharedOutputBuilt),
-        (DirectionV1::Responder, ContractStageV1::RefundPresigned),
+    // §7.2/§7.3: refund co-signed (step 5), then the claim adaptor pre-signed /
+    // ReadyToFund (steps 7-8), before funding is authorized.
+    for (sender, target, seq) in [
+        (DirectionV1::Initiator, ContractStageV1::SharedOutputBuilt, 0u64),
+        (DirectionV1::Responder, ContractStageV1::RefundPresigned, 0u64),
+        (DirectionV1::Initiator, ContractStageV1::ClaimPresigned, 1u64),
     ] {
         let env = ContractEnvelopeV1::new(
             &chain(),
             [0x22; 32],
             sender,
             ContractKindV1::WitnessOrTimeout,
-            0,
+            seq,
             target,
             state.transcript(),
             vec![0xAB; 4],

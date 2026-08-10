@@ -46,8 +46,14 @@ pub enum ContractStageV1 {
     Proposed,
     /// The collaborative shared output has been constructed (Phase 2).
     SharedOutputBuilt,
-    /// The refund spending the shared output is co-signed (Phase 4 order).
+    /// The refund spending the shared output is co-signed with the height-locked
+    /// kernel at `H_refund` (§7.2 step 5 — the refund precedes funding).
     RefundPresigned,
+    /// The claim adaptor pre-signature is built and verified and ReadyToFund is
+    /// reached (§7.2 steps 7-8). Per §7.3 the funding gate transitions from
+    /// here: funding is authorized only after the claim path exists as a
+    /// verified adaptor pre-signature.
+    ClaimPresigned,
     /// The funding is signed and published; the contract is live.
     Funded,
     /// Terminal: claimed through the adaptor condition (Phase 5).
@@ -67,10 +73,11 @@ impl ContractStageV1 {
             Self::Proposed => 0x01,
             Self::SharedOutputBuilt => 0x02,
             Self::RefundPresigned => 0x03,
-            Self::Funded => 0x04,
-            Self::ClaimedByCondition => 0x05,
-            Self::RefundedByTimeout => 0x06,
-            Self::Aborted => 0x07,
+            Self::ClaimPresigned => 0x04,
+            Self::Funded => 0x05,
+            Self::ClaimedByCondition => 0x06,
+            Self::RefundedByTimeout => 0x07,
+            Self::Aborted => 0x08,
         }
     }
 
@@ -80,10 +87,11 @@ impl ContractStageV1 {
             0x01 => Self::Proposed,
             0x02 => Self::SharedOutputBuilt,
             0x03 => Self::RefundPresigned,
-            0x04 => Self::Funded,
-            0x05 => Self::ClaimedByCondition,
-            0x06 => Self::RefundedByTimeout,
-            0x07 => Self::Aborted,
+            0x04 => Self::ClaimPresigned,
+            0x05 => Self::Funded,
+            0x06 => Self::ClaimedByCondition,
+            0x07 => Self::RefundedByTimeout,
+            0x08 => Self::Aborted,
             _ => {
                 return Err(AdaptorError::InvalidContext(
                     "contract stage byte is outside the closed registry",
@@ -102,25 +110,29 @@ impl ContractStageV1 {
 
     /// Whether `next` is a permitted successor of `self`.
     ///
-    /// The forward path is strictly ordered. The two terminal successes are
-    /// reachable only from `Funded`. Abort releasing reserves is reachable only
-    /// from the pre-funding stages: §9.3 requires that abort cancels the
-    /// broadcast only while funding has not been authorized, and funding is
-    /// authorized at the `RefundPresigned → Funded` transition. Once `Funded`,
-    /// the value is in the on-chain shared output, so the contract cannot
-    /// pretend it never existed — its only exits are the adaptor claim and the
-    /// timeout refund, with the wallet in monitoring until one of them settles.
+    /// The forward path is strictly ordered and follows the §7.2 secure order:
+    /// the refund is co-signed before the claim adaptor pre-signature, which is
+    /// built and verified before funding is authorized (§7.3 transitions from
+    /// `ClaimPresigned`). The two terminal successes are reachable only from
+    /// `Funded`. Abort releasing reserves is reachable only from the pre-funding
+    /// stages: §9.3 requires abort cancels the broadcast only while funding has
+    /// not been authorized, and funding is authorized at the
+    /// `ClaimPresigned → Funded` transition. Once `Funded`, the value is in the
+    /// on-chain shared output, so the contract cannot pretend it never existed —
+    /// its only exits are the adaptor claim and the timeout refund, with the
+    /// wallet in monitoring until one of them settles.
     fn permits(self, next: Self) -> bool {
         use ContractStageV1::*;
         match (self, next) {
             (Proposed, SharedOutputBuilt)
             | (SharedOutputBuilt, RefundPresigned)
-            | (RefundPresigned, Funded)
+            | (RefundPresigned, ClaimPresigned)
+            | (ClaimPresigned, Funded)
             | (Funded, ClaimedByCondition)
             | (Funded, RefundedByTimeout) => true,
             // §9.3: abort with reserve release only before funding is
             // authorized — never from Funded or a terminal.
-            (Proposed | SharedOutputBuilt | RefundPresigned, Aborted) => true,
+            (Proposed | SharedOutputBuilt | RefundPresigned | ClaimPresigned, Aborted) => true,
             _ => false,
         }
     }
@@ -593,6 +605,7 @@ mod tests {
         let steps = [
             (DirectionV1::Initiator, ContractStageV1::SharedOutputBuilt),
             (DirectionV1::Responder, ContractStageV1::RefundPresigned),
+            (DirectionV1::Responder, ContractStageV1::ClaimPresigned),
             (DirectionV1::Initiator, ContractStageV1::Funded),
             (DirectionV1::Initiator, ContractStageV1::ClaimedByCondition),
         ];
@@ -729,7 +742,7 @@ mod tests {
         for byte in 0u8..=u8::MAX {
             match ContractStageV1::from_byte(byte) {
                 Ok(stage) => assert_eq!(stage.to_byte(), byte),
-                Err(_) => assert!(!(0x01..=0x07).contains(&byte)),
+                Err(_) => assert!(!(0x01..=0x08).contains(&byte)),
             }
         }
     }

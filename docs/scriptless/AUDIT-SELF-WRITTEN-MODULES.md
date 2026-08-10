@@ -28,22 +28,28 @@ recorded here.
 | F0a | `bulletproof_mpc`/`crypto` | 32-byte `extra_commit` could not equal the raw 96-byte capsule consensus verifies against — the shared output would fail consensus. Now binds the raw bytes. | §5.2, §1.3 | `1bc7fb6` |
 | F0b | `bulletproof_mpc` | Aggregate folded the value into `commitment_shares[0]` instead of pure `R_i` with `C = v·H + Σ R_i`. Now pure shares + value term in the check. | §4.2, §4.3, §1.2 | `d57cb28` |
 
-## Awaiting adjudication (design decisions, not auto-changed)
+## Adjudicated
 
-### A1 — Funding order: claim adaptor before or after funding?
+### A1 — Funding order: claim adaptor before funding (RESOLVED per master spec §7.2/§7.3)
 
 - **Master spec §7.2/§7.3** orders the claim adaptor pre-signature (step 7) and
   `ReadyToFund` persistence (step 8) **before** funding authorization (step 9),
-  and the §7.3 gate transitions from `Phase::ClaimPrepared`.
+  and the §7.3 gate transitions from `ClaimPrepared`.
 - **Cronograma** sequences funding in **Fase 4** and the conditional claim in
-  **Fase 5** — funding before the claim adaptor.
+  **Fase 5**.
 
-These two master documents conflict on the ordering. `funding_authority`
-currently authorizes from `RefundPresigned` (the schedule's order) and does not
-require the claim adaptor pre-signature. The divergence is documented in the
-module; resolving it (which document governs) is your call. The full §7.3 gate
-(`FundingGateEvidence` with the eight template/refund/adaptor/backup hashes, CAS,
-fsync, tombstones) is node-side integration regardless.
+**Adjudicated to follow the master spec §7.2/§7.3.** Implemented (commit in this
+cycle): a `ClaimPresigned` stage was inserted in `ContractStageV1` between
+`RefundPresigned` and `Funded`, with the forward path
+`RefundPresigned → ClaimPresigned → Funded` (abort reachable from every
+pre-funding stage including `ClaimPresigned`, §9.3). `FundingAuthorizationV1::authorize`
+now transitions from `ClaimPresigned`, not `RefundPresigned`, so funding cannot
+be authorized before the refund is co-signed AND the claim adaptor is pre-signed.
+The cryptographic checks the full §7.3 gate performs at that stage (template
+hashes, refund final-and-spendable, adaptor pre-signature verification, ready
+acks, durable tombstones, `FundingGateEvidence` binding) remain node-side.
+
+## Awaiting adjudication (design decisions, not auto-changed)
 
 ### A2 — Claim safety margin value
 
