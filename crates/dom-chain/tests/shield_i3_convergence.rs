@@ -406,13 +406,20 @@ fn convergence_same_canonical_tip_independent_of_arrival_order() {
         c1_hash.as_bytes() < block_hash(&s1).as_bytes(),
         "fixture must keep side sibling worse than C1 under equal-work tie rule"
     );
+    // C2/C3 seeds must stay OUTSIDE the sibling range above. A coinbase
+    // commitment is `commit(block_reward(height), scalar(seed))`, and the
+    // reward is identical across heights 1-3 (same halving epoch), so the
+    // commitment is a pure function of the seed. C1 is whichever sibling sorts
+    // lowest by hash, so reusing a sibling seed here makes the fixture collide
+    // with C1 — a duplicate output commitment — whenever that lottery happens
+    // to pick it.
     let c2 = build_coinbase_only_block(
         *block_hash(&genesis).as_bytes(),
         block_hash(&c1),
         BlockHeight(2),
         c1.header.total_difficulty,
         [0u8; 32],
-        12,
+        100,
         &chain_id,
     );
     let c3 = build_coinbase_only_block(
@@ -421,7 +428,7 @@ fn convergence_same_canonical_tip_independent_of_arrival_order() {
         BlockHeight(3),
         c2.header.total_difficulty,
         [0u8; 32],
-        13,
+        101,
         &chain_id,
     );
 
