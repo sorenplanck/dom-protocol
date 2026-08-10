@@ -130,6 +130,47 @@ The adaptor mechanics the claim relies on — `presign`/`adapt`/`extract` and th
 `t*G == T` check — have existed since Phase 1 (`adaptor.rs`), covered by the
 SCAD0 vectors and the closed-cycle property test.
 
+## Cycle closure — what this development cycle delivered
+
+This cycle went beyond adding deliverables: every module written in it was
+audited source-first against the master specification, and the audit found real
+defects that are now fixed. The full record is in
+`docs/scriptless/AUDIT-SELF-WRITTEN-MODULES.md`.
+
+**Output-correctness fixes** (these would have broken a real shared output):
+
+- the collaborative proof bound a 32-byte `extra_commit` while consensus verifies
+  with the raw 96-byte capsule — the shared output would have been rejected;
+- the aggregate folded the value into `commitment_shares[0]` instead of the §4.2
+  pure `R_i` with `C = v·H + Σ R_i` (§4.3).
+
+**Protocol-order fixes** (adjudicated to the master specification):
+
+- funding is authorized from `ClaimPresigned`, after the refund is co-signed AND
+  the claim adaptor is pre-signed (§7.2 steps 5/7-8/9, §7.3), not from
+  `RefundPresigned`;
+- abort releasing reserves is confined to the pre-funding stages (§9.3); a funded
+  contract exits only through the claim or the refund;
+- the claim floor uses a distinct claim confirmation margin, strictly smaller
+  than the refund placement margin, so the safe claim window is non-empty.
+
+**Protocol-hygiene fixes:**
+
+- §8.5 idempotence/equivocation: typed `Equivocation`/`Replay`/`SequenceGap`/
+  `ForkedTranscript`, an idempotent `DuplicateAck`, and a `FailedClosed` terminal
+  that preserves the equivocation evidence;
+- the decoy capsule derives its framing from the DOM capsule constants instead of
+  magic numbers, so it cannot silently diverge and break §1.3;
+- `docs/HASH_DOMAINS.md` now exists as the §3.4 registry (PROPOSED; the freeze is
+  gated on G0).
+
+**What remains is node-side, by construction.** Every pure-logic deliverable that
+can be built and unit-tested without a running node is built and unit-tested. The
+remaining items — G0, G2, G3, G4, G5, atomic persistence (3.3), the fee ladder
+(4.3), the per-`r_i` transport, and the `DomainTag` freeze — all require a
+running node, a real relay, or the G0 hash registry, and are enumerated with
+their exact steps in `docs/scriptless/REGTEST-GATES.md`.
+
 ## Machine-readable status
 
 ```text
@@ -139,17 +180,19 @@ PHASE2_2_3_DECOY_CAPSULE = DONE
 PHASE2_2_4_PARTIAL_COMMITMENT_POK = DONE
 PHASE2_G2_REGTEST_GATE = PENDING_RUNNING_NODE
 PHASE3_3_1_CONTRACT_ENVELOPE = DONE
-PHASE3_3_2_STATE_MACHINE = DONE
+PHASE3_3_2_STATE_MACHINE = DONE_INCLUDING_8_5_EQUIVOCATION_AND_FAILED_CLOSED
 PHASE3_3_3_ATOMIC_PERSISTENCE = PENDING_CONTRACTS_STORE
 PHASE3_3_4_DEADLINE_POLICY = DONE
 PHASE3_G3_INTERRUPTION_MATRIX = PENDING_RUNNING_NODE
-PHASE4_4_1_FUNDING_ORDER = DONE
+PHASE4_4_1_FUNDING_ORDER = DONE_GATED_FROM_CLAIMPRESIGNED_SPEC_7_2_7_3
 PHASE4_4_2_BILATERAL_BACKUP = DONE
 PHASE4_4_3_FEE_LADDER = PENDING_RELAY
 PHASE4_G4_ABANDONMENT_MATRIX = PENDING_RUNNING_NODE
 PHASE5_5_1_5_2_ADAPTOR_CLAIM = PRESENT_SINCE_PHASE1
-PHASE5_5_3_CLAIM_FLOOR = DONE
+PHASE5_5_3_CLAIM_FLOOR = DONE_DISTINCT_CLAIM_CONFIRMATION_MARGIN
 PHASE5_G5_TWO_TERMINAL_CYCLE = PENDING_RUNNING_NODE
+SELF_AUDIT = COMPLETE_SEE_AUDIT-SELF-WRITTEN-MODULES
+HASH_DOMAIN_REGISTRY = CREATED_PROPOSED_FREEZE_GATED_ON_G0
 PRODUCTION = NOT_AUTHORIZED
 MAINNET = DISABLED
 REAL_FUNDS = PROHIBITED
