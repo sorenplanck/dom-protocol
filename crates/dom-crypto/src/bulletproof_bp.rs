@@ -712,7 +712,10 @@ pub struct BulletproofMpcRound1State {
     commitments: [[u8; 33]; PROOF_NCOMMITS],
     common_nonce: Zeroizing<[u8; 32]>,
     private_nonce: Zeroizing<[u8; 32]>,
-    extra_commit: [u8; 32],
+    // Owned variable-length extra_commit: the raw recovery-capsule bytes the
+    // proof is bound to, threaded unchanged through rounds 2 and finalize so
+    // every phase binds the exact bytes consensus verifies against (§5.2/§1.3).
+    extra_commit: Vec<u8>,
 }
 
 /// One-shot private state accepted only by the final backend phase.
@@ -811,7 +814,12 @@ pub fn bulletproof_mpc_round1(
     aggregate_commitment: [u8; 33],
     common_nonce: Zeroizing<[u8; 32]>,
     private_nonce: Zeroizing<[u8; 32]>,
-    extra_commit: [u8; 32],
+    // Variable-length so the collaborative proof can bind the exact bytes
+    // consensus verifies against — the raw recovery capsule. Spec §5.2:
+    // "recovery_binding_hash é o hash dos bytes exatos passados como
+    // extra_commit"; §1.3 structural indistinguishability requires the same
+    // extra_commit as the single-party path, which is the raw capsule.
+    extra_commit: &[u8],
 ) -> Result<(BulletproofMpcRound1State, BulletproofMpcRound1Output), DomError> {
     let complement_value = MAX_PROVABLE_VALUE
         .checked_sub(value)
@@ -858,7 +866,11 @@ pub fn bulletproof_mpc_round1(
             PROOF_NBITS,
             common_nonce.as_ptr(),
             private_nonce.as_ptr(),
-            extra_commit.as_ptr(),
+            if extra_commit.is_empty() {
+                ptr::null()
+            } else {
+                extra_commit.as_ptr()
+            },
             extra_commit.len(),
             ptr::null(),
         )
@@ -879,7 +891,7 @@ pub fn bulletproof_mpc_round1(
             commitments,
             common_nonce,
             private_nonce,
-            extra_commit,
+            extra_commit: extra_commit.to_vec(),
         },
         output,
     ))
@@ -922,7 +934,11 @@ pub fn bulletproof_mpc_round2(
             PROOF_NBITS,
             state.common_nonce.as_ptr(),
             state.private_nonce.as_ptr(),
-            state.extra_commit.as_ptr(),
+            if state.extra_commit.is_empty() {
+                ptr::null()
+            } else {
+                state.extra_commit.as_ptr()
+            },
             state.extra_commit.len(),
             ptr::null(),
         )
@@ -1030,7 +1046,11 @@ pub fn bulletproof_mpc_finalize(
             PROOF_NBITS,
             state.state.common_nonce.as_ptr(),
             state.state.private_nonce.as_ptr(),
-            state.state.extra_commit.as_ptr(),
+            if state.state.extra_commit.is_empty() {
+                ptr::null()
+            } else {
+                state.state.extra_commit.as_ptr()
+            },
             state.state.extra_commit.len(),
             ptr::null(),
         )

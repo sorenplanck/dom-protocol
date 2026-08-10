@@ -630,6 +630,12 @@ pub(crate) fn participant_round1_v1(
     participant_index: u16,
     local_blinding: BpLocalBlindingV1,
     common_nonce: BpCommonNonceV1,
+    // Spec §5.2: the proof binds the exact bytes passed as extra_commit — the
+    // raw recovery capsule (or empty when the output carries no capsule) — and
+    // the statement's recovery_binding_hash is their hash. Consensus verifies
+    // the shared output with the same raw bytes (dom-consensus transaction.rs),
+    // so the proof must be bound to them, not to the 32-byte hash.
+    extra_commit: &[u8],
 ) -> Result<(BpParticipantRound1StateV1, BpRound1ShareV1)> {
     if statement
         .participant_ids()
@@ -647,7 +653,7 @@ pub(crate) fn participant_round1_v1(
         statement.aggregate_commitment().to_compressed_bytes(),
         common_nonce.0,
         private_nonce,
-        *statement.recovery_binding_hash(),
+        extra_commit,
     )?;
     let t_one = PublicKey::from_compressed_bytes(output.t_one())?;
     let t_two = PublicKey::from_compressed_bytes(output.t_two())?;
@@ -938,6 +944,12 @@ mod tests {
             })
             .collect();
 
+        // Spec §5.2: the proof binds the exact bytes passed as extra_commit,
+        // which consensus verifies against — the raw recovery capsule (96 bytes
+        // for a capsule-carrying shared output). Bind and verify with the same
+        // bytes so this exercises the exact consensus range-proof check shape.
+        let extra_commit = [0x5Au8; RECOVERY_CAPSULE_SIZE_BYTES];
+
         let mut round1_states = Vec::with_capacity(participant_count);
         let mut round1_shares = Vec::with_capacity(participant_count);
         for (index, blind) in blinds.into_iter().enumerate() {
@@ -949,6 +961,7 @@ mod tests {
                 u16::try_from(index).expect("bounded participant"),
                 blind,
                 common_nonce,
+                &extra_commit,
             )
             .expect("pinned backend round 1");
             round1_states.push(state);
@@ -969,14 +982,20 @@ mod tests {
         }
         let proof = finalize_participant_v1(finalizers.remove(0), &statement, round2_shares)
             .expect("pinned backend finalization");
+        // Verify with the exact bytes bound above: this is the same call shape
+        // consensus uses for a capsule-carrying output (range_proof_verify_
+        // with_extra_commit(commitment, proof, capsule.as_bytes())).
         assert!(range_proof_verify_with_extra_commit(
             &statement.aggregate_commitment().to_compressed_bytes(),
             &proof,
-            statement.recovery_binding_hash(),
+            &extra_commit,
         )
         .expect("unchanged DOM verifier"));
         proof
     }
+
+    /// The recovery-capsule size the shared output carries on the wire.
+    const RECOVERY_CAPSULE_SIZE_BYTES: usize = 96;
 
     #[test]
     fn production_phase_wrapper_handles_two_three_and_sixteen_participants() {
