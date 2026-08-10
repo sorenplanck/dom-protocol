@@ -2,7 +2,7 @@
 //! Exercise exact collaborative Bulletproof statement and round parsers.
 
 use dom_adaptor::{BpRound1ShareV1, BpStatementV1, SigningShareV1, TrustedChainIdV1};
-use dom_crypto::{scriptless_add_public_points, Hash256};
+use dom_crypto::Hash256;
 use libfuzzer_sys::fuzz_target;
 
 fn point(value: u8) -> dom_crypto::PublicKey {
@@ -29,7 +29,8 @@ fuzz_target!(|data: &[u8]| {
         }
         _ => {
             let shares = vec![point(3), point(5)];
-            let aggregate = scriptless_add_public_points(&shares).expect("fixed aggregate");
+            let aggregate = BpStatementV1::aggregate_commitment_from_shares(&shares, 42)
+                .expect("fixed aggregate");
             let statement = BpStatementV1::new(
                 &trusted_chain,
                 [0x22; 32],

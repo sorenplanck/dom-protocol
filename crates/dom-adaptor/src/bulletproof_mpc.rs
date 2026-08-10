@@ -5,6 +5,7 @@
 )]
 
 use crate::{error::exact_array, AdaptorError, Result, TrustedChainIdV1};
+use dom_crypto::pedersen::Commitment;
 use dom_crypto::{
     blake2b_256_tagged, bulletproof_mpc_aggregate_tau_x, bulletproof_mpc_finalize,
     bulletproof_mpc_round1, bulletproof_mpc_round2, h_compressed, scalar_bytes_are_canonical,
@@ -42,6 +43,43 @@ impl BpStatementV1 {
     /// Maximum participant count.
     pub const MAX_PARTICIPANTS: usize = 16;
 
+    /// §4.3 aggregate commitment `C = v*H + Σ R_i` over the ordered pure
+    /// blinding shares `R_i = r_i*G` (§4.2).
+    ///
+    /// Each published share is the pure point `R_i`, exactly the point party `i`
+    /// proves knowledge of in its §4.2 share PoK; the value term `v*H` is added
+    /// once, on top of the ordered point sum. The value term is formed without
+    /// ever taking a zero blinding — `(v*H + b*G) - (b*G)` for a fixed nonzero
+    /// `b` — and the shares are summed as points, never reduced to a scalar
+    /// (§1.2). This is the exact `aggregate_commitment` the frozen statement
+    /// carries, so both parties derive the same `C` from the same shares.
+    pub fn aggregate_commitment_from_shares(
+        shares: &[PublicKey],
+        value_noms: u64,
+    ) -> Result<PublicKey> {
+        // §4.3: R_total = Σ R_i (point addition; rejects the identity).
+        let r_total = scriptless_add_public_points(shares)?;
+        let r_total_commitment =
+            Commitment::from_compressed_bytes(&r_total.to_compressed_bytes())
+                .map_err(|_| AdaptorError::InvalidContext("aggregate R_total is not a valid point"))?;
+        // v*H, without forming a zero blinding: (v*H + b*G) - (b*G), for a fixed
+        // nonzero b. commit rejects a zero blinding, so a fixed nonzero b is used.
+        let base = BlindingFactor::from_bytes([
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0,
+        ])
+        .map_err(|_| AdaptorError::InvalidContext("fixed value-generator blinding is invalid"))?;
+        let value_h = Commitment::commit(value_noms, &base)
+            .sub(&Commitment::commit(0, &base))
+            .map_err(|_| AdaptorError::InvalidContext("value generator term is the identity"))?;
+        // §4.3: C = v*H + R_total (rejects the identity).
+        let commitment = value_h
+            .add(&r_total_commitment)
+            .map_err(|_| AdaptorError::InvalidContext("shared commitment is the identity"))?;
+        PublicKey::from_compressed_bytes(commitment.as_bytes())
+            .map_err(|_| AdaptorError::InvalidContext("aggregate commitment is not a valid point"))
+    }
+
     /// Construct an exact statement from authenticated public inputs.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -69,7 +107,7 @@ impl BpStatementV1 {
                 "Bulletproof commitment-share count differs from participant count",
             ));
         }
-        validate_aggregate(&commitment_shares, &aggregate_commitment)?;
+        validate_aggregate(&commitment_shares, &aggregate_commitment, value_noms)?;
         let recovery_binding_hash = match recovery_binding_hash {
             Some(hash) => hash,
             None => *blake2b_256_tagged(NO_RECOVERY_TAG_V1, &[]).as_bytes(),
@@ -199,7 +237,7 @@ impl BpStatementV1 {
         }
         let aggregate_commitment = PublicKey::from_compressed_bytes(&bytes[cursor..cursor + 33])?;
         cursor += 33;
-        validate_aggregate(&commitment_shares, &aggregate_commitment)?;
+        validate_aggregate(&commitment_shares, &aggregate_commitment, value_noms)?;
         if bytes[cursor..cursor + 32] == [0u8; 32] {
             return Err(AdaptorError::InvalidContext(
                 "Bulletproof recovery binding hash must be nonzero",
@@ -783,10 +821,13 @@ fn validate_participants(participant_ids: &[[u8; 32]]) -> Result<()> {
     Ok(())
 }
 
-fn validate_aggregate(shares: &[PublicKey], aggregate: &PublicKey) -> Result<()> {
-    if scriptless_add_public_points(shares)? != *aggregate {
+fn validate_aggregate(shares: &[PublicKey], aggregate: &PublicKey, value_noms: u64) -> Result<()> {
+    // §4.3: the frozen aggregate must equal `v*H + Σ R_i` for the pure blinding
+    // shares. This rejects both an aggregate that folds the value into a share
+    // and a wire value that disagrees with the recorded shares.
+    if BpStatementV1::aggregate_commitment_from_shares(shares, value_noms)? != *aggregate {
         return Err(AdaptorError::InvalidContext(
-            "Bulletproof aggregate commitment differs from ordered share sum",
+            "Bulletproof aggregate commitment differs from v*H + ordered share sum",
         ));
     }
     Ok(())
@@ -810,7 +851,8 @@ mod tests {
     fn statement() -> BpStatementV1 {
         let chain = TrustedChainIdV1::from_signed_fixture([0x11; 32]);
         let shares = vec![point(3), point(5)];
-        let aggregate = scriptless_add_public_points(&shares).expect("sum");
+        let aggregate =
+            BpStatementV1::aggregate_commitment_from_shares(&shares, 42).expect("aggregate");
         BpStatementV1::new(
             &chain,
             [0x22; 32],
@@ -901,14 +943,12 @@ mod tests {
             let mut bytes = [0u8; 32];
             bytes[31] = u8::try_from(index + 1).expect("at most sixteen participants");
             let blind = BpLocalBlindingV1::from_bytes_for_test(bytes).expect("small nonzero blind");
-            commitment_shares.push(
-                blind
-                    .commitment_share(if index == 0 { value } else { 0 })
-                    .expect("canonical commitment share"),
-            );
+            // §4.2: each published share is the pure point R_i = r_i*G; the value
+            // is carried once by the §4.3 aggregate, not folded into a share.
+            commitment_shares.push(blind.commitment_share(0).expect("canonical commitment share"));
             blinds.push(blind);
         }
-        let aggregate = scriptless_add_public_points(&commitment_shares)
+        let aggregate = BpStatementV1::aggregate_commitment_from_shares(&commitment_shares, value)
             .expect("nonidentity aggregate commitment");
         let statement = BpStatementV1::new(
             &trusted_chain(),

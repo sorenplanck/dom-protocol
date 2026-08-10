@@ -270,7 +270,6 @@ fn challenge_scalar(
 mod tests {
     use super::*;
     use crate::TrustedChainIdV1;
-    use dom_crypto::scriptless_add_public_points;
 
     fn blinding(byte: u8) -> PartialBlindingV1 {
         let mut bytes = [0u8; 32];
@@ -293,7 +292,8 @@ mod tests {
         let c_a = r_a.commitment_share().expect("C_a");
         let c_b = r_b.commitment_share().expect("C_b");
         let aggregate =
-            scriptless_add_public_points(&[c_a.clone(), c_b.clone()]).expect("aggregate");
+            BpStatementV1::aggregate_commitment_from_shares(&[c_a.clone(), c_b.clone()], 42)
+                .expect("aggregate");
         let chain = TrustedChainIdV1::from_signed_fixture([0x11; 32]);
         let statement = BpStatementV1::new(
             &chain,
@@ -427,7 +427,8 @@ mod tests {
         let c_a = r_a.commitment_share().unwrap();
         let c_x = r_x.commitment_share().unwrap();
         let aggregate =
-            scriptless_add_public_points(&[c_a.clone(), c_x.clone()]).expect("aggregate");
+            BpStatementV1::aggregate_commitment_from_shares(&[c_a.clone(), c_x.clone()], 42)
+                .expect("aggregate");
         let chain = TrustedChainIdV1::from_signed_fixture([0x11; 32]);
         let statement = BpStatementV1::new(
             &chain,

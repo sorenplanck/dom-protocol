@@ -107,7 +107,9 @@ fn two_party_commitment_statement() -> (BpStatementV1, Vec<(u16, PartialCommitme
     let r_b = small_blinding(9);
     let c_a = r_a.commitment_share().expect("C_a");
     let c_b = r_b.commitment_share().expect("C_b");
-    let aggregate = scriptless_add_public_points(&[c_a.clone(), c_b.clone()]).expect("aggregate");
+    let aggregate =
+        BpStatementV1::aggregate_commitment_from_shares(&[c_a.clone(), c_b.clone()], 42)
+            .expect("aggregate");
     let statement = BpStatementV1::new(
         &chain(),
         [0x22; 32],
