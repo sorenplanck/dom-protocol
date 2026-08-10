@@ -163,6 +163,17 @@ impl PendingCommonNonce {
         ))
     }
 
+    /// This participant's reveal `q_i`, for the rodada 0A reveal phase.
+    ///
+    /// §5.4: after every commitment `c_i` is accepted, "revelar q_i somente
+    /// no canal E2E entre participantes" — the caller transports these bytes
+    /// on the participants' end-to-end channel only, never through a
+    /// coordinator that could read them, and never before the full
+    /// commitment vector is accepted. The returned copy is caller-zeroized.
+    pub fn reveal_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(*self.own_reveal)
+    }
+
     /// Complete rodada 0A: accept every reveal against the full accepted
     /// commitment vector and derive the joint secrets.
     ///

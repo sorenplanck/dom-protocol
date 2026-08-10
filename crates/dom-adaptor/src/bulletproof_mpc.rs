@@ -62,20 +62,31 @@ impl BpStatementV1 {
         let r_total_commitment =
             Commitment::from_compressed_bytes(&r_total.to_compressed_bytes())
                 .map_err(|_| AdaptorError::InvalidContext("aggregate R_total is not a valid point"))?;
-        // v*H, without forming a zero blinding: (v*H + b*G) - (b*G), for a fixed
-        // nonzero b. commit rejects a zero blinding, so a fixed nonzero b is used.
-        let base = BlindingFactor::from_bytes([
-            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0,
-        ])
-        .map_err(|_| AdaptorError::InvalidContext("fixed value-generator blinding is invalid"))?;
-        let value_h = Commitment::commit(value_noms, &base)
-            .sub(&Commitment::commit(0, &base))
-            .map_err(|_| AdaptorError::InvalidContext("value generator term is the identity"))?;
-        // §4.3: C = v*H + R_total (rejects the identity).
-        let commitment = value_h
-            .add(&r_total_commitment)
-            .map_err(|_| AdaptorError::InvalidContext("shared commitment is the identity"))?;
+        // §4.3: C = v*H + R_total, rejecting only R_total or C at infinity —
+        // not the v*H term itself. When v = 0 the value term is the identity
+        // and C = R_total; §4.3 permits that (the §5.7 v=0 edge), so it is not
+        // an error. For v != 0, v*H is formed without a zero blinding:
+        // (v*H + b*G) - (b*G) for a fixed nonzero b (commit rejects a zero
+        // blinding), then added to the ordered point sum.
+        let commitment = if value_noms == 0 {
+            r_total_commitment
+        } else {
+            let base = BlindingFactor::from_bytes([
+                1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0,
+            ])
+            .map_err(|_| {
+                AdaptorError::InvalidContext("fixed value-generator blinding is invalid")
+            })?;
+            let value_h = Commitment::commit(value_noms, &base)
+                .sub(&Commitment::commit(0, &base))
+                .map_err(|_| {
+                    AdaptorError::InvalidContext("value generator term is the identity")
+                })?;
+            value_h
+                .add(&r_total_commitment)
+                .map_err(|_| AdaptorError::InvalidContext("shared commitment is the identity"))?
+        };
         PublicKey::from_compressed_bytes(commitment.as_bytes())
             .map_err(|_| AdaptorError::InvalidContext("aggregate commitment is not a valid point"))
     }
