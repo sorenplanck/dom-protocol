@@ -14,8 +14,8 @@ still needs a running node.
 
 | # | Deliverable | State | Where |
 | --- | --- | --- | --- |
-| 2.1 | Joint blinding — each party contributes `r_j`, nobody learns the sum | Component done; transport pending | `bulletproof_mpc.rs` (shares + aggregate), enforcement in `partial_commitment_pop.rs` |
-| 2.2 | Collaborative Bulletproof over the real FFI (`tau_x`/`t_one`/`t_two`, `n_commits=2`) | Runs end to end internally, verified by the real DOM verifier | `bulletproof_mpc.rs` |
+| 2.1 | Joint blinding — each party publishes `R_i = r_i*G` + §4.2 PoK; `C = v*H + Σ R_i` (§4.3), scalar sum never formed (§1.2) | **Session layer done** | `collaborative_output.rs`, gate via `share_pop.rs` |
+| 2.2 | Collaborative Bulletproof over the real FFI (`tau_x`/`t_one`/`t_two`, `n_commits=2`) | Rounds run end to end internally, verified by the real DOM verifier; public round driver (§5.4/§5.5) pending | `bulletproof_mpc.rs` |
 | 2.3 | Deterministic canonical decoy capsule | **Done** | `decoy_capsule.rs` |
 | 2.4 | PoK of the partial commitment `C_j` | **Done** | `partial_commitment_pop.rs` |
 
@@ -38,14 +38,25 @@ still needs a running node.
 
 ## What remains, and why it is not here
 
-- **The per-`r_j` contribution transport** (2.1): exchanging the blinding
-  contributions and commit-reveal across the wire belongs to the Phase 3
-  session and transport layer, which does not exist yet.
-- **Public MPC orchestration surface** (2.2): the round-1/round-2/finalize
-  functions are `pub(crate)` and driven only by a test harness. A downstream
-  driver should thread the partial-commitment PoK gate into round-1 admission
-  so a share without a valid opening proof is rejected before the output is
-  built.
+- **Driver session layer (2.1) — DONE.** `collaborative_output.rs` implements
+  the spec §4.2/§4.3 flow: each party publishes `R_i = r_i*G` with the §4.2
+  share PoK (`share_pop.rs`, tag `DOM:scriptless-share-pop:v1`), every proof is
+  validated, and `C = v*H + Σ R_i` is formed by point addition without ever
+  taking the scalar sum (§1.2). This is the admission gate the driver needed;
+  the earlier "PoK vs Pedersen" blocker was a misreading of which layer the
+  proof lives in and is resolved (see `DRIVER-BLOCKER-POK-PEDERSEN.md`).
+- **Driver Bulletproof round layer (2.2) — remaining.** The §5.4 rounds
+  (common-nonce commit-reveal, round-1 `T1/T2`, round-2 `tau_x`, finalize) and
+  the §5.5 `CollaborativeRangeProof` trait shape already exist as tested
+  `pub(crate)` functions in `bulletproof_mpc.rs`. Exposing them as the public
+  per-participant driver needs a blinding-injection path so each party's `r_i`
+  (the same one it proved in the session layer) drives its round, instead of the
+  internally-generated blind used by the current test harness. This is the next
+  build step and is pure logic — no node required.
+- **The per-`r_j` contribution transport** (2.1): exchanging `R_i`, the PoKs,
+  and the common-nonce commit-reveal across a real E2E channel (§5.4 roda 0A,
+  no coordinator sees plaintext) belongs to the Phase 3 transport, which is not
+  yet wired to a network.
 - **G2 exit gate**: two independent wallets construct and publish a shared
   output; consensus accepts it; it measures 872 bytes on the wire; no isolated
   participant can spend it. This requires a running regtest node and the wallet
@@ -122,8 +133,8 @@ SCAD0 vectors and the closed-cycle property test.
 ## Machine-readable status
 
 ```text
-PHASE2_2_1_JOINT_BLINDING = COMPONENT_DONE_TRANSPORT_PENDING
-PHASE2_2_2_COLLABORATIVE_BP = INTERNAL_END_TO_END_DONE_PUBLIC_DRIVER_PENDING
+PHASE2_2_1_JOINT_BLINDING = SESSION_LAYER_DONE_SPEC_4_2_4_3
+PHASE2_2_2_COLLABORATIVE_BP = ROUNDS_INTERNAL_DONE_PUBLIC_ROUND_DRIVER_PENDING
 PHASE2_2_3_DECOY_CAPSULE = DONE
 PHASE2_2_4_PARTIAL_COMMITMENT_POK = DONE
 PHASE2_G2_REGTEST_GATE = PENDING_RUNNING_NODE
