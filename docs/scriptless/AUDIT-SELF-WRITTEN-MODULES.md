@@ -49,18 +49,27 @@ The cryptographic checks the full §7.3 gate performs at that stage (template
 hashes, refund final-and-spendable, adaptor pre-signature verification, ready
 acks, durable tombstones, `FundingGateEvidence` binding) remain node-side.
 
+### A2 — Claim safety margin (RESOLVED: distinct claim confirmation margin)
+
+`contract_session::claim_floor_height` subtracted the **same** `total_margin_blocks`
+used to place the refund, so the floor equalled `funding_height` and the safe
+claim window was empty (`claim_is_safe` false for every real claim).
+
+**Adjudicated to follow the claim confirmation margin.** `RefundDeadlinePolicyV1`
+now carries a distinct `claim_confirmation_blocks` — the buffer the adaptor claim
+needs, once published, to reach a reorg-safe depth before the refund could unlock
+and race it (§7.2 step 10's confirmation policy; §7.5). The constructor enforces
+`claim_confirmation_blocks < total_margin_blocks` (the refund placement margin),
+so `claim_floor = refund_lock − claim_confirmation_blocks` is strictly above
+funding and the safe window `(funding, floor]` is non-empty. `claim_is_safe` now
+returns true for a real post-funding claim inside the window. The concrete value
+remains an operator input from the Dandelion++ stem-timing study (Cronograma
+Fase 5); the structure that makes the window well-formed is now enforced.
+
 ## Awaiting adjudication (design decisions, not auto-changed)
 
-### A2 — Claim safety margin value
-
-`contract_session::claim_floor_height` subtracts the **same** `total_margin_blocks`
-used to place the refund, so the floor equals `funding_height` and the safe claim
-window is empty (`claim_is_safe` is false for every real claim, since a claim can
-only be published after funding confirms). The fix requires a **distinct, smaller**
-claim margin (`claim_margin < total_margin`) leaving a non-empty window
-`(funding, refund_lock − claim_margin]`. The exact value depends on the
-Dandelion++ stem-timing study (Cronograma Fase 5) and is deliberately not fixed.
-Documented in place; the formula/API change is left for your decision.
+_None outstanding from this audit._ The lower-severity divergences below are
+recorded for a future pass.
 
 ## Lower-severity divergences (recorded, not changed)
 
@@ -114,7 +123,8 @@ Documented in place; the formula/API change is left for your decision.
 ```text
 CRYPTO_CORE = SPEC_FAITHFUL
 FIXED = POST_FUNDING_ABORT + DECOY_CONSTANTS + FUNDING_GATE_HONESTY + EXTRA_COMMIT + AGGREGATE_PURE_R_I
-ADJUDICATE = FUNDING_ORDER_MESTRA_VS_CRONOGRAMA + CLAIM_SAFETY_MARGIN_VALUE
+ADJUDICATED = FUNDING_ORDER_FOLLOWS_MESTRA_7_2_7_3 (ClaimPresigned gate) + CLAIM_CONFIRMATION_MARGIN_DISTINCT
+ADJUDICATE_REMAINING = NONE
 NON_NORMATIVE = PARTIAL_COMMITMENT_POP_REDUNDANT_WITH_SHARE_POP
 PRODUCTION = NOT_AUTHORIZED
 ```

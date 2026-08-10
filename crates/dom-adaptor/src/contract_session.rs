@@ -453,44 +453,88 @@ fn advance_contract_transcript_v1(
 /// The schedule forbids an arbitrary constant: the refund lock height must be
 /// derived from block-height margins — propagation depth plus reorg depth —
 /// not a magic number. This type performs that derivation and rejects a
-/// degenerate (zero) margin. The concrete mainnet-measured values for
-/// propagation and reorg depth are an external input, not fixed here; this
-/// enforces that whatever they are, the refund sits a well-formed, nonzero
-/// margin beyond funding.
+/// degenerate (zero) margin. The concrete mainnet-measured values are an
+/// external input, not fixed here.
+///
+/// Two distinct margins matter, and conflating them is unsafe:
+///
+/// - **Refund placement margin** (`propagation + reorg`): how far beyond
+///   funding the refund unlocks, so the party that must fall back to the
+///   timeout has time to observe and react.
+/// - **Claim confirmation margin** (`claim_confirmation_blocks`): how many
+///   blocks the adaptor claim needs, once published, to reach a reorg-safe
+///   depth before the refund could unlock and race it (§7.2 step 10's
+///   confirmation policy; §7.5). A claim that is not reorg-safe by `H_refund`
+///   can be undone by a reorg while the counterparty's refund wins.
+///
+/// The claim confirmation margin must be strictly smaller than the refund
+/// placement margin, so the safe claim window `(funding, H_refund −
+/// claim_confirmation]` is non-empty. The concrete value depends on the
+/// Dandelion++ stem-timing study (Cronograma Fase 5); this type does not fix it
+/// but enforces the relationship that makes the window well-formed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefundDeadlinePolicyV1 {
     propagation_blocks: u32,
     reorg_depth_blocks: u32,
+    claim_confirmation_blocks: u32,
 }
 
 impl RefundDeadlinePolicyV1 {
     /// Construct a policy from measured margins.
     ///
-    /// Both margins must be nonzero: a zero propagation or reorg allowance
-    /// would place the refund unsafely close to funding, which is exactly the
-    /// arbitrary-deadline failure the schedule rules out.
-    pub fn new(propagation_blocks: u32, reorg_depth_blocks: u32) -> Result<Self> {
+    /// All three margins must be nonzero: a zero propagation or reorg allowance
+    /// would place the refund unsafely close to funding, and a zero claim
+    /// confirmation margin would treat an unconfirmed claim as safe. The claim
+    /// confirmation margin must also be strictly less than the refund placement
+    /// margin (`propagation + reorg`); otherwise the safe claim window is empty
+    /// (a claim can only be published after funding confirms), which is exactly
+    /// the degenerate deadline the schedule rules out.
+    pub fn new(
+        propagation_blocks: u32,
+        reorg_depth_blocks: u32,
+        claim_confirmation_blocks: u32,
+    ) -> Result<Self> {
         if propagation_blocks == 0 || reorg_depth_blocks == 0 {
             return Err(AdaptorError::InvalidContext(
                 "refund deadline margins must be nonzero block heights",
             ));
         }
-        Ok(Self {
+        if claim_confirmation_blocks == 0 {
+            return Err(AdaptorError::InvalidContext(
+                "claim confirmation margin must be a nonzero block height",
+            ));
+        }
+        let policy = Self {
             propagation_blocks,
             reorg_depth_blocks,
-        })
+            claim_confirmation_blocks,
+        };
+        if u64::from(claim_confirmation_blocks) >= policy.total_margin_blocks() {
+            return Err(AdaptorError::InvalidContext(
+                "claim confirmation margin must be smaller than the refund placement margin, \
+                 else the safe claim window is empty",
+            ));
+        }
+        Ok(policy)
     }
 
-    /// The total margin in blocks the refund sits beyond funding.
+    /// The refund placement margin in blocks: how far beyond funding the refund
+    /// unlocks.
     pub const fn total_margin_blocks(self) -> u64 {
         self.propagation_blocks as u64 + self.reorg_depth_blocks as u64
     }
 
+    /// The claim confirmation margin in blocks: the buffer the claim needs to
+    /// reach a reorg-safe depth before the refund unlocks.
+    pub const fn claim_confirmation_blocks(self) -> u64 {
+        self.claim_confirmation_blocks as u64
+    }
+
     /// Derive the refund lock height from the funding height.
     ///
-    /// The refund becomes spendable at `funding_height + margin`, so a party
-    /// that must fall back to the timeout has the full margin to observe and
-    /// react before the refund unlocks. Overflow fails closed.
+    /// The refund becomes spendable at `funding_height + total_margin`, so a
+    /// party that must fall back to the timeout has the full margin to observe
+    /// and react before the refund unlocks. Overflow fails closed.
     pub fn refund_lock_height(self, funding_height: u64) -> Result<u64> {
         funding_height
             .checked_add(self.total_margin_blocks())
@@ -503,32 +547,24 @@ impl RefundDeadlinePolicyV1 {
     ///
     /// Phase 5 deliverable 3, the claim floor. Publishing the adaptor claim
     /// reveals `t` in the mempool before confirmation, and the DOM has no
-    /// relative timelock, so the only protection is the margin between the
-    /// claim and the refund unlock. A claim published too close to `H_refund`
-    /// risks the counterparty refunding in the same window. This returns the
-    /// last claim height that still leaves the margin before the refund unlocks;
-    /// publishing at or below it is safe, above it is not.
-    ///
-    /// KNOWN LIMITATION (recorded for adjudication in the scriptless findings
-    /// record): this subtracts `total_margin_blocks`, the SAME margin used to
-    /// place the refund at `funding + total_margin`. That makes the floor equal
-    /// to `funding_height`, but a claim can only be published after funding
-    /// confirms (`FundingConfirmed → ClaimBroadcast`, height > funding), so the
-    /// safe window is empty and `claim_is_safe` is false for every real claim.
-    /// The claim safety margin must be a distinct, smaller quantity than the
-    /// refund placement margin (`claim_margin < total_margin`), leaving a
-    /// non-empty window `(funding, refund_lock − claim_margin]`. The exact value
-    /// depends on the Dandelion++ stem-timing study (Cronograma Fase 5) and is
-    /// deliberately not fixed here.
+    /// relative timelock, so the only protection is the margin between the claim
+    /// and the refund unlock (§7.5). This returns the last claim height that
+    /// still leaves the **claim confirmation margin** before `H_refund`:
+    /// `refund_lock − claim_confirmation_blocks`. A claim at or below it reaches
+    /// a reorg-safe depth before the refund can race it; a claim above it does
+    /// not. Because the claim confirmation margin is strictly smaller than the
+    /// refund placement margin (enforced in `new`), the floor is strictly above
+    /// `funding_height`, so the safe window `(funding, floor]` is non-empty.
     pub fn claim_floor_height(self, refund_lock_height: u64) -> Result<u64> {
         refund_lock_height
-            .checked_sub(self.total_margin_blocks())
+            .checked_sub(self.claim_confirmation_blocks())
             .ok_or(AdaptorError::InvalidContext(
-                "refund unlock is too low to leave a safe claim margin",
+                "refund unlock is too low to leave the claim confirmation margin",
             ))
     }
 
-    /// Whether a claim at `claim_height` leaves a safe margin before refund.
+    /// Whether a claim at `claim_height` leaves the claim confirmation margin
+    /// before the refund unlocks.
     pub fn claim_is_safe(self, claim_height: u64, refund_lock_height: u64) -> Result<bool> {
         Ok(claim_height <= self.claim_floor_height(refund_lock_height)?)
     }
@@ -749,32 +785,44 @@ mod tests {
 
     #[test]
     fn deadline_policy_derives_a_nonzero_margin_and_rejects_degenerate_input() {
-        assert!(RefundDeadlinePolicyV1::new(0, 6).is_err());
-        assert!(RefundDeadlinePolicyV1::new(6, 0).is_err());
-        let policy = RefundDeadlinePolicyV1::new(3, 6).expect("policy");
+        // Every margin must be nonzero.
+        assert!(RefundDeadlinePolicyV1::new(0, 6, 4).is_err());
+        assert!(RefundDeadlinePolicyV1::new(6, 0, 4).is_err());
+        assert!(RefundDeadlinePolicyV1::new(3, 6, 0).is_err());
+        // The claim confirmation margin must be strictly smaller than the refund
+        // placement margin, else the safe claim window is empty.
+        assert!(RefundDeadlinePolicyV1::new(3, 6, 9).is_err());
+        assert!(RefundDeadlinePolicyV1::new(3, 6, 10).is_err());
+
+        let policy = RefundDeadlinePolicyV1::new(3, 6, 4).expect("policy");
         assert_eq!(policy.total_margin_blocks(), 9);
+        assert_eq!(policy.claim_confirmation_blocks(), 4);
         assert_eq!(policy.refund_lock_height(1000).expect("lock"), 1009);
         assert!(policy.refund_lock_height(u64::MAX).is_err());
     }
 
     #[test]
-    fn claim_floor_leaves_the_full_margin_before_the_refund_unlocks() {
-        let policy = RefundDeadlinePolicyV1::new(3, 6).expect("policy");
-        // Funding at 1000 → refund unlocks at 1009 → claim floor at 1000.
+    fn claim_floor_leaves_the_claim_confirmation_margin_and_a_nonempty_window() {
+        // Refund placement margin 9 (propagation 3 + reorg 6); claim confirmation
+        // margin 4. Funding at 1000 → refund unlocks at 1009 → claim floor at
+        // 1009 − 4 = 1005, leaving a non-empty safe window (1000, 1005].
+        let policy = RefundDeadlinePolicyV1::new(3, 6, 4).expect("policy");
         let refund = policy.refund_lock_height(1000).expect("refund");
-        assert_eq!(policy.claim_floor_height(refund).expect("floor"), 1000);
+        assert_eq!(refund, 1009);
+        assert_eq!(policy.claim_floor_height(refund).expect("floor"), 1005);
 
-        // A claim at or below the floor is safe; above it is not.
-        assert!(policy.claim_is_safe(1000, refund).expect("safe at floor"));
-        assert!(policy.claim_is_safe(999, refund).expect("safe below floor"));
-        assert!(!policy
-            .claim_is_safe(1001, refund)
-            .expect("unsafe above floor"));
+        // The whole point of the fix: a real claim published after funding
+        // confirms is now safe when it leaves the confirmation margin.
+        assert!(policy.claim_is_safe(1001, refund).expect("safe after funding"));
+        assert!(policy.claim_is_safe(1005, refund).expect("safe at floor"));
+        // Above the floor the claim cannot reach a reorg-safe depth before the
+        // refund unlocks.
+        assert!(!policy.claim_is_safe(1006, refund).expect("unsafe above floor"));
         assert!(!policy
             .claim_is_safe(refund, refund)
             .expect("unsafe at unlock"));
 
-        // A refund unlock below the margin has no safe claim window.
-        assert!(policy.claim_floor_height(5).is_err());
+        // A refund unlock below the confirmation margin has no safe claim window.
+        assert!(policy.claim_floor_height(3).is_err());
     }
 }

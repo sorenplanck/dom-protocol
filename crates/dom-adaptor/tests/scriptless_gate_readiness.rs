@@ -238,8 +238,9 @@ fn g4_funding_order_backup_and_refund_margin_invariants() {
     let backup2 = dom_adaptor::verify_bilateral_backup_v1(&points, &acks).expect("backup");
     assert!(FundingAuthorizationV1::authorize(&early, backup2).is_err());
 
-    // The refund sits a nonzero margin beyond funding.
-    let policy = RefundDeadlinePolicyV1::new(3, 6).expect("policy");
+    // The refund sits a nonzero margin beyond funding, with a smaller claim
+    // confirmation margin leaving a non-empty safe claim window.
+    let policy = RefundDeadlinePolicyV1::new(3, 6, 4).expect("policy");
     assert_eq!(policy.refund_lock_height(1000).expect("refund"), 1009);
 }
 
@@ -322,10 +323,15 @@ fn g5_adaptor_extraction_and_claim_floor_invariants() {
         "extract(adapt(presign)) == t, verified through the point"
     );
 
-    // The claim floor rejects a claim published too close to the refund unlock.
-    let policy = RefundDeadlinePolicyV1::new(3, 6).expect("policy");
+    // The claim floor admits a claim published inside the safe window and
+    // rejects one too close to the refund unlock. Refund margin 9, claim
+    // confirmation margin 4 → funding 1000, refund 1009, floor 1005.
+    let policy = RefundDeadlinePolicyV1::new(3, 6, 4).expect("policy");
     let refund = policy.refund_lock_height(1000).expect("refund");
-    assert!(policy.claim_is_safe(1000, refund).expect("safe at floor"));
+    assert!(policy.claim_is_safe(1005, refund).expect("safe at floor"));
+    assert!(!policy
+        .claim_is_safe(1006, refund)
+        .expect("unsafe above floor"));
     assert!(!policy
         .claim_is_safe(refund, refund)
         .expect("unsafe at unlock"));
