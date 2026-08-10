@@ -11,8 +11,8 @@ use std::error::Error;
 
 const CONTEXT_BINDING_MAGIC: &[u8; 8] = b"DOMNVCT1";
 const CONTEXT_BINDING_TAG_V1: &str = "DOM:contracts-vault-reservation-context:v1";
-const BUDGET_KEY_TAG_V1: &str = "DOM:scriptless-vault-budget-key:v1";
-const COUNTERPARTY_TAG_V1: &str = "DOM:scriptless-vault-counterparty:v1";
+const BUDGET_KEY_TAG_V1: &str = crate::DomainTag::VaultBudgetKey.as_str();
+const COUNTERPARTY_TAG_V1: &str = crate::DomainTag::VaultCounterparty.as_str();
 const CONTEXT_BINDING_FIXED_PREFIX_LEN: usize = 16;
 const PROTOCOL_ROSTER_ENTRY_LEN: usize = 101;
 const PROTOCOL_ROSTER_LEN: usize = 2 * PROTOCOL_ROSTER_ENTRY_LEN;

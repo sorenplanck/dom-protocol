@@ -15,12 +15,12 @@ use dom_crypto::{
 use rand_core::{OsRng, RngCore};
 use zeroize::{Zeroize, Zeroizing};
 
-const STATEMENT_TAG_V1: &str = "DOM:scriptless-bp-statement:v1";
-const NO_RECOVERY_TAG_V1: &str = "DOM:scriptless-bp-no-recovery:v1";
-const COMMON_COMMIT_TAG_V1: &str = "DOM:scriptless-bp-common-commit:v1";
-const COMMON_JOINT_TAG_V1: &str = "DOM:scriptless-bp-common-joint:v1";
-const COMMON_NONCE_TAG_V1: &str = "DOM:scriptless-bp-common-nonce:v1";
-const ROUND1_COMMIT_TAG_V1: &str = "DOM:scriptless-bp-round1-commit:v1";
+const STATEMENT_TAG_V1: &str = crate::DomainTag::BpStatement.as_str();
+const NO_RECOVERY_TAG_V1: &str = crate::DomainTag::BpNoRecovery.as_str();
+const COMMON_COMMIT_TAG_V1: &str = crate::DomainTag::BpCommonCommit.as_str();
+const COMMON_JOINT_TAG_V1: &str = crate::DomainTag::BpCommonJoint.as_str();
+const COMMON_NONCE_TAG_V1: &str = crate::DomainTag::BpCommonNonce.as_str();
+const ROUND1_COMMIT_TAG_V1: &str = crate::DomainTag::BpRound1Commit.as_str();
 const STATEMENT_MAGIC: &[u8; 4] = b"DSBP";
 const ROUND1_MAGIC: &[u8; 4] = b"DBR1";
 const ROUND2_MAGIC: &[u8; 4] = b"DBR2";

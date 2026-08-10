@@ -12,8 +12,8 @@ use crate::{AdaptorError, Result};
 use dom_crypto::{blake2b_256_tagged, Hash256};
 
 #[cfg(test)]
-const PERMIT_DIGEST_TAG_V1: &str = "DOM:scriptless-vault-exposure-permit:v1";
-const OUTBOUND_DIGEST_TAG_V1: &str = "DOM:scriptless-vault-outbound:v1";
+const PERMIT_DIGEST_TAG_V1: &str = crate::DomainTag::VaultExposurePermit.as_str();
+const OUTBOUND_DIGEST_TAG_V1: &str = crate::DomainTag::VaultOutbound.as_str();
 
 /// Closed exposure-kind registry for independently authorized public artifacts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

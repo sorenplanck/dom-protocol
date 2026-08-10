@@ -10,8 +10,8 @@ use dom_crypto::{
 use rand_core::{OsRng, RngCore};
 use zeroize::{Zeroize, Zeroizing};
 
-const CONTEXT_TAG_V1: &str = "DOM:scriptless-share-pop:v1";
-const CHALLENGE_TAG_V1: &str = "DOM:scriptless-share-pop-challenge:v1";
+const CONTEXT_TAG_V1: &str = crate::DomainTag::SharePop.as_str();
+const CHALLENGE_TAG_V1: &str = crate::DomainTag::SharePopChallenge.as_str();
 const MAGIC: &[u8; 4] = b"DSPO";
 const VERSION: u16 = 1;
 const MIN_PARTICIPANTS: usize = 2;

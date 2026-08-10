@@ -5,8 +5,8 @@ use dom_crypto::{
     blake2b_256_tagged, scriptless_bind_public_nonces, Hash256, PartialSig, PublicKey,
 };
 
-const NONCE_COMMIT_TAG_V1: &str = "DOM:scriptless-nonce-commit:v1";
-const NONCE_BIND_TAG_V1: &str = "DOM:scriptless-sig-nonce-bind:v1";
+const NONCE_COMMIT_TAG_V1: &str = crate::DomainTag::NonceCommit.as_str();
+const NONCE_BIND_TAG_V1: &str = crate::DomainTag::SigNonceBind.as_str();
 
 /// Fixed fields shared by the v1 collective nonce-binding transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -7,7 +7,7 @@ use dom_crypto::{
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Domain tag for the decoy-contribution seed keyed by the signing share.
-const DECOY_SEED_TAG_V1: &str = "DOM:scriptless-decoy-share-seed:v1";
+const DECOY_SEED_TAG_V1: &str = crate::DomainTag::DecoyShareSeed.as_str();
 
 /// Canonical signing share with no raw-byte export.
 ///

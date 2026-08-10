@@ -21,8 +21,8 @@ use dom_crypto::{
 use rand_core::{OsRng, RngCore};
 use zeroize::{Zeroize, Zeroizing};
 
-const CHALLENGE_TAG_V1: &str = "DOM:scriptless-partial-commit-pop-challenge:v1";
-const CONTEXT_TAG_V1: &str = "DOM:scriptless-partial-commit-pop-context:v1";
+const CHALLENGE_TAG_V1: &str = crate::DomainTag::PartialCommitPopChallenge.as_str();
+const CONTEXT_TAG_V1: &str = crate::DomainTag::PartialCommitPopContext.as_str();
 
 /// Opaque partial blinding scalar `r_j` behind a commitment share.
 ///

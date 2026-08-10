@@ -6,12 +6,12 @@ use dom_crypto::{blake2b_256_tagged, PublicKey};
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
 
-const PARTICIPANT_TAG_V1: &str = "DOM:scriptless-participant:v1";
-const SESSION_ID_TAG_V1: &str = "DOM:scriptless-session-id:v1";
-const TEMPLATE_TAG_V1: &str = "DOM:scriptless-template:v1";
-const TRANSCRIPT_INIT_TAG_V1: &str = "DOM:scriptless-transcript-init:v1";
-const SESSION_MESSAGE_TAG_V1: &str = "DOM:scriptless-message:v1";
-const TRANSCRIPT_UPDATE_TAG_V1: &str = "DOM:scriptless-transcript:v1";
+const PARTICIPANT_TAG_V1: &str = crate::DomainTag::Participant.as_str();
+const SESSION_ID_TAG_V1: &str = crate::DomainTag::SessionId.as_str();
+const TEMPLATE_TAG_V1: &str = crate::DomainTag::Template.as_str();
+const TRANSCRIPT_INIT_TAG_V1: &str = crate::DomainTag::TranscriptInit.as_str();
+const SESSION_MESSAGE_TAG_V1: &str = crate::DomainTag::Message.as_str();
+const TRANSCRIPT_UPDATE_TAG_V1: &str = crate::DomainTag::Transcript.as_str();
 
 /// Chain identifier obtained only from the authoritative DOM chain adapter.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]

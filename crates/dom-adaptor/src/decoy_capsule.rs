@@ -22,8 +22,8 @@ use dom_crypto::recovery::{
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
-const CONTRIBUTION_TAG_V1: &str = "DOM:scriptless-decoy-contribution:v1";
-const COMMIT_TAG_V1: &str = "DOM:scriptless-decoy-commit:v1";
+const CONTRIBUTION_TAG_V1: &str = crate::DomainTag::DecoyContribution.as_str();
+const COMMIT_TAG_V1: &str = crate::DomainTag::DecoyCommit.as_str();
 
 // Framing offsets of the real recovery capsule, derived from the DOM capsule
 // constants so the decoy cannot silently diverge from the real layout if those

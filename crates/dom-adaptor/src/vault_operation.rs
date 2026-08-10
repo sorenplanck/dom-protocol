@@ -6,7 +6,7 @@ use crate::{
 };
 use dom_crypto::{blake2b_256_tagged, PublicKey};
 
-const OPERATION_INPUT_TAG_V1: &str = "DOM:scriptless-vault-computation-input:v1";
+const OPERATION_INPUT_TAG_V1: &str = crate::DomainTag::VaultComputationInput.as_str();
 const COMMITMENT_SET_MAGIC: &[u8; 8] = b"DOMNVCM1";
 const REVEAL_SET_MAGIC: &[u8; 8] = b"DOMNVRL1";
 const OPERATION_INPUT_VERSION: u16 = 1;

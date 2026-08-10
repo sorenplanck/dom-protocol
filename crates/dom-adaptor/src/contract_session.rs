@@ -30,8 +30,8 @@ use dom_crypto::blake2b_256_tagged;
 
 const ENVELOPE_MAGIC: &[u8; 4] = b"DCS1";
 const ENVELOPE_VERSION: u16 = 1;
-const TRANSITION_TAG_V1: &str = "DOM:scriptless-contract-transition:v1";
-const ENVELOPE_DIGEST_TAG_V1: &str = "DOM:scriptless-contract-envelope:v1";
+const TRANSITION_TAG_V1: &str = crate::DomainTag::ContractTransition.as_str();
+const ENVELOPE_DIGEST_TAG_V1: &str = crate::DomainTag::ContractEnvelope.as_str();
 
 /// Ordered stages of the V1 witness-or-timeout contract.
 ///
