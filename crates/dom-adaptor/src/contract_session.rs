@@ -477,6 +477,32 @@ impl RefundDeadlinePolicyV1 {
                 "refund lock height overflows the funding height",
             ))
     }
+
+    /// The highest block at which a claim may still be published safely.
+    ///
+    /// Phase 5 deliverable 3, the claim floor. Publishing the adaptor claim
+    /// reveals `t` in the mempool before confirmation, and the DOM has no
+    /// relative timelock, so the only protection is the margin between the
+    /// claim and the refund unlock. A claim published too close to `H_refund`
+    /// risks the counterparty refunding in the same window. This returns the
+    /// last claim height that still leaves the full margin before the refund
+    /// unlocks; publishing at or below it is safe, above it is not.
+    ///
+    /// The floor uses the same measured margin as the refund derivation, so the
+    /// claim and refund deadlines cannot drift apart. A refund unlock below the
+    /// margin has no safe claim window and fails closed.
+    pub fn claim_floor_height(self, refund_lock_height: u64) -> Result<u64> {
+        refund_lock_height
+            .checked_sub(self.total_margin_blocks())
+            .ok_or(AdaptorError::InvalidContext(
+                "refund unlock is too low to leave a safe claim margin",
+            ))
+    }
+
+    /// Whether a claim at `claim_height` leaves a safe margin before refund.
+    pub fn claim_is_safe(self, claim_height: u64, refund_lock_height: u64) -> Result<bool> {
+        Ok(claim_height <= self.claim_floor_height(refund_lock_height)?)
+    }
 }
 
 #[cfg(test)]
@@ -692,5 +718,26 @@ mod tests {
         assert_eq!(policy.total_margin_blocks(), 9);
         assert_eq!(policy.refund_lock_height(1000).expect("lock"), 1009);
         assert!(policy.refund_lock_height(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn claim_floor_leaves_the_full_margin_before_the_refund_unlocks() {
+        let policy = RefundDeadlinePolicyV1::new(3, 6).expect("policy");
+        // Funding at 1000 → refund unlocks at 1009 → claim floor at 1000.
+        let refund = policy.refund_lock_height(1000).expect("refund");
+        assert_eq!(policy.claim_floor_height(refund).expect("floor"), 1000);
+
+        // A claim at or below the floor is safe; above it is not.
+        assert!(policy.claim_is_safe(1000, refund).expect("safe at floor"));
+        assert!(policy.claim_is_safe(999, refund).expect("safe below floor"));
+        assert!(!policy
+            .claim_is_safe(1001, refund)
+            .expect("unsafe above floor"));
+        assert!(!policy
+            .claim_is_safe(refund, refund)
+            .expect("unsafe at unlock"));
+
+        // A refund unlock below the margin has no safe claim window.
+        assert!(policy.claim_floor_height(5).is_err());
     }
 }

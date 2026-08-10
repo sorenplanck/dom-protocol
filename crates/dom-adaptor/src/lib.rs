@@ -292,6 +292,7 @@ mod context;
 mod contract_session;
 mod decoy_capsule;
 mod error;
+mod funding_authority;
 mod messages;
 mod nonce;
 mod nonce_secret_record;
@@ -321,6 +322,10 @@ pub use decoy_capsule::{
     combine_decoy_capsule_v1, DecoyCommitmentV1, DecoyContributionV1, DecoyRevealV1,
     DECOY_VARIABLE_LEN,
 };
+pub use funding_authority::{
+    verify_bilateral_backup_v1, BackupConfirmedV1, FundingAuthorizationV1, ShareBackupAckV1,
+};
+
 pub use error::{AdaptorError, Result};
 pub use messages::{NonceCommitmentV1, NonceRevealV1, PartialSignatureV1, PurposeV1};
 pub use nonce::{
