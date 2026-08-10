@@ -15,7 +15,7 @@ still needs a running node.
 | # | Deliverable | State | Where |
 | --- | --- | --- | --- |
 | 2.1 | Joint blinding — each party publishes `R_i = r_i*G` + §4.2 PoK; `C = v*H + Σ R_i` (§4.3), scalar sum never formed (§1.2) | **Session layer done** | `collaborative_output.rs`, gate via `share_pop.rs` |
-| 2.2 | Collaborative Bulletproof over the real FFI (`tau_x`/`t_one`/`t_two`, `n_commits=2`) | Rounds run end to end internally, verified by the real DOM verifier; public round driver (§5.4/§5.5) pending | `bulletproof_mpc.rs` |
+| 2.2 | Collaborative Bulletproof over the real FFI (`tau_x`/`t_one`/`t_two`, `n_commits=2`) | **Done** — public per-participant driver (§5.4/§5.5) over the internal rounds | `collaborative_range_proof.rs`, `bulletproof_mpc.rs` |
 | 2.3 | Deterministic canonical decoy capsule | **Done** | `decoy_capsule.rs` |
 | 2.4 | PoK of the partial commitment `C_j` | **Done** | `partial_commitment_pop.rs` |
 
@@ -45,14 +45,26 @@ still needs a running node.
   taking the scalar sum (§1.2). This is the admission gate the driver needed;
   the earlier "PoK vs Pedersen" blocker was a misreading of which layer the
   proof lives in and is resolved (see `DRIVER-BLOCKER-POK-PEDERSEN.md`).
-- **Driver Bulletproof round layer (2.2) — remaining.** The §5.4 rounds
-  (common-nonce commit-reveal, round-1 `T1/T2`, round-2 `tau_x`, finalize) and
-  the §5.5 `CollaborativeRangeProof` trait shape already exist as tested
-  `pub(crate)` functions in `bulletproof_mpc.rs`. Exposing them as the public
-  per-participant driver needs a blinding-injection path so each party's `r_i`
-  (the same one it proved in the session layer) drives its round, instead of the
-  internally-generated blind used by the current test harness. This is the next
-  build step and is pure logic — no node required.
+- **Driver Bulletproof round layer (2.2) — DONE.**
+  `collaborative_range_proof.rs` exposes the §5.5 API method for method
+  (`CollaborativeRangeProof`, `LocalBpSecrets`, `AggregateBpRound1/2`,
+  `RangeProof739`) over the ratified backend phases, driving the §5.4 rounds:
+  0A commit-reveal (`PendingCommonNonce`, reveals only accepted with the full
+  commitment vector), 0B round-1 share commitments enforced at aggregation,
+  round-1 `T1/T2` and round-2 `tau_x` aggregation, and finalization with the
+  §5.4 exit checks (backend success, exactly 739 bytes, the existing
+  `verify_with_extra_commit`, the statement's agreed commitment). The blinding
+  injection unifies the layers: `LocalBpSecrets` fails closed unless the
+  injected §4.2 share opens the statement's exact `commitment_shares[i]`
+  (§5.1's `blinds_i = [r_i, -r_i]`). Every stage is take-once — a duplicate
+  call fails closed without destroying material it did not consume. Five
+  tests, including the full two-party choreography verified by the exact
+  consensus call shape with the raw 96-byte capsule as `extra_commit`. Note
+  for the §3.4 freeze: the 0B commitment is bound under the pre-existing
+  `DOM:scriptless-bp-round1-commit:v1` (statement-hash context, strictly
+  stronger binding) while §5.4 names the registered
+  `DOM:scriptless-nonce-commit:v1` with purpose `"bp-r1"`; the divergence is
+  recorded, not silently rewritten.
 - **The per-`r_j` contribution transport** (2.1): exchanging `R_i`, the PoKs,
   and the common-nonce commit-reveal across a real E2E channel (§5.4 roda 0A,
   no coordinator sees plaintext) belongs to the Phase 3 transport, which is not
@@ -175,7 +187,7 @@ their exact steps in `docs/scriptless/REGTEST-GATES.md`.
 
 ```text
 PHASE2_2_1_JOINT_BLINDING = SESSION_LAYER_DONE_SPEC_4_2_4_3
-PHASE2_2_2_COLLABORATIVE_BP = ROUNDS_INTERNAL_DONE_PUBLIC_ROUND_DRIVER_PENDING
+PHASE2_2_2_COLLABORATIVE_BP = DONE_PUBLIC_DRIVER_SPEC_5_4_5_5
 PHASE2_2_3_DECOY_CAPSULE = DONE
 PHASE2_2_4_PARTIAL_COMMITMENT_POK = DONE
 PHASE2_G2_REGTEST_GATE = PENDING_RUNNING_NODE

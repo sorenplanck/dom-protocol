@@ -374,7 +374,7 @@ impl BpRound1ShareV1 {
 /// This secret-bearing intermediate deliberately implements no clone, copy,
 /// debug, display, equality, ordering, or generic serialization. Its owned
 /// bytes are compiler-visibly zeroized on drop.
-pub(crate) struct BpRound2ShareV1 {
+pub struct BpRound2ShareV1 {
     bytes: Zeroizing<[u8; Self::ENCODED_LEN]>,
 }
 
@@ -410,7 +410,7 @@ impl BpRound2ShareV1 {
     }
 
     /// Parse and bind a second-round share to the immutable statement.
-    pub(crate) fn from_bytes(bytes: &[u8], statement: &BpStatementV1) -> Result<Self> {
+    pub fn from_bytes(bytes: &[u8], statement: &BpStatementV1) -> Result<Self> {
         if bytes.len() != Self::ENCODED_LEN {
             return Err(AdaptorError::InvalidLength {
                 object: "BpRound2ShareV1",
@@ -446,7 +446,7 @@ impl BpRound2ShareV1 {
     }
 
     /// Consume the share into one zeroizing transport buffer.
-    pub(crate) fn into_zeroizing_bytes(self) -> Zeroizing<[u8; Self::ENCODED_LEN]> {
+    pub fn into_zeroizing_bytes(self) -> Zeroizing<[u8; Self::ENCODED_LEN]> {
         self.bytes
     }
 }
@@ -499,18 +499,32 @@ impl BpCommonNonceShareV1 {
         common_nonce_commitment_for_bytes_v1(statement, self.participant_index, &self.reveal)
     }
 
+    /// Rebuild a share from revealed bytes (§5.4 rodada 0A reveal phase).
+    ///
+    /// After every commitment `c_i` is accepted, each `q_i` is revealed on the
+    /// participants' E2E channel; the receiver reconstructs the share from the
+    /// revealed bytes, and `derive_common_nonce_v1` fails closed unless the
+    /// share still matches the accepted commitment byte for byte.
+    pub(crate) fn from_revealed_bytes(
+        statement: &BpStatementV1,
+        participant_index: u16,
+        reveal: Zeroizing<[u8; 32]>,
+    ) -> Result<Self> {
+        let share = Self {
+            participant_index,
+            reveal,
+        };
+        share.commitment(statement)?;
+        Ok(share)
+    }
+
     #[cfg(test)]
     fn from_bytes_for_test(
         statement: &BpStatementV1,
         participant_index: u16,
         reveal: [u8; 32],
     ) -> Result<Self> {
-        let share = Self {
-            participant_index,
-            reveal: Zeroizing::new(reveal),
-        };
-        share.commitment(statement)?;
-        Ok(share)
+        Self::from_revealed_bytes(statement, participant_index, Zeroizing::new(reveal))
     }
 }
 
@@ -525,6 +539,24 @@ impl BpLocalBlindingV1 {
                 return Ok(Self(bytes));
             }
         }
+    }
+
+    /// Inject the party's §4.2 blinding share `r_i` as its local BP blind.
+    ///
+    /// Spec §5.1: each participant supplies `blinds_i = [r_i, -r_i]` — the
+    /// same `r_i` whose pure point `R_i = r_i*G` it published and proved in
+    /// the §4.2 session layer. This is the unification the pure-`R_i`
+    /// statement made possible: the round layer must be driven by that exact
+    /// scalar, not an internally generated one, or the proof's blinds no
+    /// longer open the statement's shares.
+    pub(crate) fn from_signing_share(share: &crate::SigningShareV1) -> Result<Self> {
+        let bytes = Zeroizing::new(*share.as_be_bytes());
+        if !scalar_bytes_are_canonical(&bytes, false) {
+            return Err(AdaptorError::InvalidContext(
+                "Bulletproof blinding share is noncanonical",
+            ));
+        }
+        Ok(Self(bytes))
     }
 
     pub(crate) fn commitment_share(&self, value_share: u64) -> Result<PublicKey> {
@@ -561,7 +593,7 @@ pub(crate) struct BpParticipantFinalizeStateV1 {
     statement_hash: [u8; 32],
 }
 
-fn common_nonce_commitment_for_bytes_v1(
+pub(crate) fn common_nonce_commitment_for_bytes_v1(
     statement: &BpStatementV1,
     participant_index: u16,
     reveal: &[u8; 32],
@@ -797,6 +829,13 @@ pub(crate) fn finalize_participant_v1(
     }
     let aggregate_tau_x = aggregate_round2_shares_v1(statement, shares)?;
     bulletproof_mpc_finalize(state.backend, aggregate_tau_x).map_err(Into::into)
+}
+
+/// The codec's §5.2 no-recovery sentinel: the binding hash a statement
+/// carries when the output has no capsule ("se não houver capsule, usa o
+/// sentinel definido no codec, não um None ambíguo").
+pub(crate) fn no_recovery_sentinel_v1() -> [u8; 32] {
+    *blake2b_256_tagged(NO_RECOVERY_TAG_V1, &[]).as_bytes()
 }
 
 fn validate_participants(participant_ids: &[[u8; 32]]) -> Result<()> {
