@@ -717,6 +717,9 @@ fn rejected_deep_reorg_emits_warn_with_depth_and_both_tips() {
     let subscriber = tracing_subscriber::fmt()
         .without_time()
         .with_target(false)
+        // Without this the field names and `=` are wrapped in ANSI escapes, so
+        // the `depth=400` assertions below never match the captured buffer.
+        .with_ansi(false)
         .with_max_level(tracing::Level::WARN)
         .with_writer(logs.clone())
         .finish();
