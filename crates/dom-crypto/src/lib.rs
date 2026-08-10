@@ -44,9 +44,9 @@ pub use scriptless::{
     scalar_bytes_are_canonical, scalar_from_wide_be, scriptless_adapt_signature,
     scriptless_add_public_points, scriptless_aggregate_partial_scalars,
     scriptless_bind_public_nonces, scriptless_extract_adaptor_secret,
-    scriptless_verify_bound_partial, scriptless_verify_final_signature,
-    scriptless_verify_pre_signature, secret_scalar_mul_add_assign, secret_scalar_public_key,
-    verify_scalar_response, SecretScalar,
+    scriptless_extract_adaptor_secret_be_bytes, scriptless_verify_bound_partial,
+    scriptless_verify_final_signature, scriptless_verify_pre_signature,
+    secret_scalar_mul_add_assign, secret_scalar_public_key, verify_scalar_response, SecretScalar,
 };
 mod bulletproof_bp;
 #[cfg(kani)]

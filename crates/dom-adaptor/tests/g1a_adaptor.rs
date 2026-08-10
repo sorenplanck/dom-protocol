@@ -28,7 +28,8 @@ fn all_eight_scad0_vectors_verify_adapt_extract_and_pass_consensus() {
         let fields = line.split('|').collect::<Vec<_>>();
         assert_eq!(fields.len(), 5, "SCAD0 record shape");
         let id = fields[0];
-        let secret = AdaptorSecret::from_be_bytes(decode_array(fields[1]))
+        let secret_bytes: [u8; 32] = decode_array(fields[1]);
+        let secret = AdaptorSecret::from_be_bytes(secret_bytes)
             .unwrap_or_else(|error| panic!("{id} secret: {error}"));
         let adaptor_point = PublicKey::from_compressed_bytes(&decode_array::<33>(fields[2]))
             .unwrap_or_else(|error| panic!("{id} adaptor point: {error}"));
@@ -92,6 +93,22 @@ fn all_eight_scad0_vectors_verify_adapt_extract_and_pass_consensus() {
             secret.public_point().expect("adaptor point"),
             "{id} extracted point"
         );
+
+        // The revealed-bytes entry point must recover the SAME scalar the
+        // frozen corpus starts from — byte for byte, not merely a value with
+        // the same point. This is the evidence that a counterparty leg claimed
+        // with these bytes is claimed with the real `t`.
+        let revealed = pre_signature
+            .extract_revealed_secret_be_bytes(
+                &adapted,
+                &[0x22; 32],
+                &[0x33; 32],
+                &signing_key,
+                &CHAIN_ID,
+                &MESSAGE,
+            )
+            .unwrap_or_else(|error| panic!("{id} revealed extraction: {error}"));
+        assert_eq!(*revealed, secret_bytes, "{id} revealed bytes == corpus t");
 
         let transaction = Transaction {
             inputs: Vec::new(),
@@ -256,5 +273,37 @@ fn wrong_adaptor_secret_and_mutated_signature_are_rejected() {
                 &MESSAGE,
             )
             .is_err());
+        // The revealed-bytes path must refuse wherever the opaque path
+        // refuses. An export that verified less than the sealed entry point
+        // would be exactly the wrong difference between the two.
+        assert!(
+            pre_signature
+                .extract_revealed_secret_be_bytes(
+                    &mutated,
+                    &[0x22; 32],
+                    &[0x33; 32],
+                    &signing_key,
+                    &CHAIN_ID,
+                    &MESSAGE,
+                )
+                .is_err(),
+            "the byte export must never be laxer than `extract`"
+        );
     }
+
+    // Wrong session bindings must close the export path too: a caller cannot
+    // reach the bytes by presenting a signature from another session.
+    assert!(
+        pre_signature
+            .extract_revealed_secret_be_bytes(
+                &signature,
+                &[0x23; 32],
+                &[0x33; 32],
+                &signing_key,
+                &CHAIN_ID,
+                &MESSAGE,
+            )
+            .is_err(),
+        "a mismatched claim-template hash must refuse the export"
+    );
 }

@@ -3,9 +3,10 @@
 use crate::error::{exact_array, AdaptorError, Result};
 use dom_crypto::{
     scriptless_adapt_signature, scriptless_extract_adaptor_secret,
-    scriptless_verify_final_signature, scriptless_verify_pre_signature, PartialSig, PublicKey,
-    SchnorrSignature, SecretScalar,
+    scriptless_extract_adaptor_secret_be_bytes, scriptless_verify_final_signature,
+    scriptless_verify_pre_signature, PartialSig, PublicKey, SchnorrSignature, SecretScalar,
 };
+use zeroize::Zeroizing;
 
 /// Canonical 65-byte cryptographic adaptor pre-signature core `R_hat || s_hat`.
 ///
@@ -224,6 +225,91 @@ impl AdaptorPreSignatureV1 {
         chain_id: &[u8; 32],
         kernel_message: &[u8],
     ) -> Result<AdaptorSecret> {
+        self.verify_both_signatures(
+            final_signature,
+            expected_claim_template_hash,
+            expected_transcript_hash,
+            signing_key,
+            chain_id,
+            kernel_message,
+        )?;
+        scriptless_extract_adaptor_secret(
+            final_signature,
+            &self.scalar_hat,
+            &self.aggregate_nonce_hat,
+            &self.adaptor_point,
+        )
+        .map(AdaptorSecret)
+        .map_err(Into::into)
+    }
+
+    /// Verify both signatures, extract the adaptor secret, and return its
+    /// canonical big-endian bytes.
+    ///
+    /// Same verification as [`Self::extract`] — both go through the same
+    /// private check and the same extraction in `dom-crypto`; the only
+    /// difference is that this one hands back the 32 bytes instead of the
+    /// opaque [`AdaptorSecret`].
+    ///
+    /// # Why this export exists, and why it is not a leak
+    ///
+    /// The extracted adaptor secret is the one secret scalar that is **public
+    /// by construction**: it is `t = s - s_hat` over two signatures that are
+    /// both already published, so any observer can compute it. Returning it
+    /// discloses nothing the network does not already hold.
+    ///
+    /// It is also the value a cross-chain swap is built to deliver. The
+    /// counterparty leg is claimed with exactly these bytes, so without an
+    /// export path the DOM leg can prove it recovered the right `t` — by
+    /// comparing the public point — but cannot hand it over, and the swap
+    /// cannot complete. Recomputing `t` outside the authority would put the
+    /// adaptor arithmetic in a second place; this keeps it in one.
+    ///
+    /// Nothing else becomes exportable: [`AdaptorSecret`] still has no byte
+    /// accessor, `dom_crypto::SecretScalar` is unchanged, and these bytes are
+    /// reachable only through a fully verified extraction. The value comes
+    /// back in a [`Zeroizing`] buffer so it is wiped on drop.
+    #[allow(clippy::too_many_arguments)]
+    pub fn extract_revealed_secret_be_bytes(
+        &self,
+        final_signature: &SchnorrSignature,
+        expected_claim_template_hash: &[u8; 32],
+        expected_transcript_hash: &[u8; 32],
+        signing_key: &PublicKey,
+        chain_id: &[u8; 32],
+        kernel_message: &[u8],
+    ) -> Result<Zeroizing<[u8; 32]>> {
+        self.verify_both_signatures(
+            final_signature,
+            expected_claim_template_hash,
+            expected_transcript_hash,
+            signing_key,
+            chain_id,
+            kernel_message,
+        )?;
+        scriptless_extract_adaptor_secret_be_bytes(
+            final_signature,
+            &self.scalar_hat,
+            &self.aggregate_nonce_hat,
+            &self.adaptor_point,
+        )
+        .map_err(Into::into)
+    }
+
+    /// The pre-signature equation and the observed final signature, in that
+    /// order. Shared by both extraction entry points so they can never drift
+    /// apart: an export path that checked less than the opaque path would be
+    /// exactly the wrong difference to have.
+    #[allow(clippy::too_many_arguments)]
+    fn verify_both_signatures(
+        &self,
+        final_signature: &SchnorrSignature,
+        expected_claim_template_hash: &[u8; 32],
+        expected_transcript_hash: &[u8; 32],
+        signing_key: &PublicKey,
+        chain_id: &[u8; 32],
+        kernel_message: &[u8],
+    ) -> Result<()> {
         if !self.verify(
             expected_claim_template_hash,
             expected_transcript_hash,
@@ -245,14 +331,7 @@ impl AdaptorPreSignatureV1 {
                 "final DOM Schnorr signature",
             ));
         }
-        scriptless_extract_adaptor_secret(
-            final_signature,
-            &self.scalar_hat,
-            &self.aggregate_nonce_hat,
-            &self.adaptor_point,
-        )
-        .map(AdaptorSecret)
-        .map_err(Into::into)
+        Ok(())
     }
 
     /// Return the bound claim-template digest.

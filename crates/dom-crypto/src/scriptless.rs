@@ -221,6 +221,49 @@ pub fn scriptless_extract_adaptor_secret(
     aggregate_nonce_hat: &PublicKey,
     adaptor_point: &PublicKey,
 ) -> Result<SecretScalar, DomError> {
+    let bytes = scriptless_extract_adaptor_secret_be_bytes(
+        final_signature,
+        scalar_hat,
+        aggregate_nonce_hat,
+        adaptor_point,
+    )?;
+    SecretScalar::from_be_bytes(*bytes)
+}
+
+/// Extract and validate the adaptor secret, returning its canonical
+/// big-endian bytes.
+///
+/// The verification is the same one [`scriptless_extract_adaptor_secret`]
+/// performs — it is the same code, and that function now delegates here: the
+/// final signature's nonce must equal the pre-signature's, both scalars must
+/// be canonical, their difference must be nonzero, and `t*G` must equal the
+/// committed adaptor point. Only a scalar that passes all of it is returned.
+///
+/// # Why exporting these bytes is not a leak
+///
+/// This is the one secret scalar in the protocol that is **public by
+/// construction**. It is recovered as `t = s - s_hat` from two signatures
+/// that are BOTH already published: the pre-signature the parties exchanged
+/// and the final signature observed on chain. Any observer can carry out this
+/// same subtraction, so returning the bytes discloses nothing the network
+/// does not already hold.
+///
+/// It is also what an adaptor-signature swap exists to produce. A
+/// counterparty leg on another chain is claimed with exactly these 32 bytes;
+/// without an export path the DOM leg can prove it recovered the right `t`
+/// (by comparing the public point) but cannot hand it over, and the swap
+/// cannot complete.
+///
+/// No other secret gains an export path: [`SecretScalar`] still has no public
+/// byte accessor, signing shares and nonces are unaffected, and these bytes
+/// are reachable only through a fully verified extraction. The value is
+/// returned in a [`Zeroizing`] buffer so it is wiped when the caller drops it.
+pub fn scriptless_extract_adaptor_secret_be_bytes(
+    final_signature: &SchnorrSignature,
+    scalar_hat: &PartialSig,
+    aggregate_nonce_hat: &PublicKey,
+    adaptor_point: &PublicKey,
+) -> Result<Zeroizing<[u8; 32]>, DomError> {
     if final_signature.r_compressed() != &aggregate_nonce_hat.to_compressed_bytes() {
         return Err(DomError::Invalid(
             "final signature nonce differs from the pre-signature nonce".into(),
@@ -243,14 +286,14 @@ pub fn scriptless_extract_adaptor_secret(
         return Err(DomError::Invalid("extracted adaptor secret is zero".into()));
     }
 
-    let bytes: [u8; 32] = extracted.to_repr().into();
-    let secret = SecretScalar::from_be_bytes(bytes)?;
+    let bytes = Zeroizing::new(<[u8; 32]>::from(extracted.to_repr()));
+    let secret = SecretScalar::from_be_bytes(*bytes)?;
     if secret.public_key()? != *adaptor_point {
         return Err(DomError::Invalid(
             "extracted scalar does not match the adaptor point".into(),
         ));
     }
-    Ok(secret)
+    Ok(bytes)
 }
 
 /// Compute the bound public nonce `R1 + b*R2` using DOM point arithmetic.
