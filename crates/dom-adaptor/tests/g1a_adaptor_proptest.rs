@@ -43,8 +43,9 @@ use dom_core::{Amount, Hash256, KERNEL_FEAT_HEIGHT_LOCKED, KERNEL_FEAT_PLAIN, TA
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::{
     blake2b_256_tagged, schnorr_challenge, scriptless_adapt_signature,
-    scriptless_add_public_points, scriptless_verify_final_signature, secret_scalar_mul_add_assign,
-    secret_scalar_public_key, PartialSig, PublicKey, SchnorrSignature, SecretKey,
+    scriptless_add_public_points, scriptless_extract_adaptor_secret,
+    scriptless_verify_final_signature, secret_scalar_mul_add_assign, secret_scalar_public_key,
+    PartialSig, PublicKey, SchnorrSignature, SecretKey,
 };
 use proptest::array::uniform32;
 use proptest::prelude::*;
@@ -464,15 +465,25 @@ fn assert_positive_cycle(case: &AdaptorCaseV1) -> Result<SchnorrSignature, TestC
         "extracted t satisfies t*G == T"
     );
 
-    // Exact scalar equality, not just point equality: re-adapting with the
-    // extracted secret must reproduce the identical 65 signature bytes, which
-    // holds only if `extracted == t` as a scalar.
+    // Exact scalar equality, not merely equality of the derived points.
+    // `AdaptorSecret` exposes no raw bytes and no constant-time comparison, so
+    // the equality is decided by re-adapting with the *extracted* scalar: since
+    // `s_final = s_hat + t`, `s_hat + t' == s_hat + t` holds in the scalar field
+    // only when `t' == t`. The extracted scalar is obtained from the same
+    // authoritative extractor the production `extract` delegates to.
+    let extracted_scalar = scriptless_extract_adaptor_secret(
+        &adapted,
+        &case.scalar_hat,
+        &case.aggregate_nonce_hat,
+        &case.adaptor_point,
+    )
+    .expect("authoritative extraction");
     let re_adapted = scriptless_adapt_signature(
         &case.scalar_hat,
         &case.aggregate_nonce_hat,
-        &dom_crypto::SecretScalar::from_be_bytes(case.adaptor_bytes).expect("t"),
+        &extracted_scalar,
     )
-    .expect("re-adaptation");
+    .expect("re-adaptation with the extracted scalar");
     prop_assert_eq!(
         re_adapted.to_bytes(),
         adapted.to_bytes(),
