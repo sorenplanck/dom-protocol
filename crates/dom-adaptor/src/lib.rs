@@ -339,8 +339,8 @@ pub use nonce_vault::{
     VaultExportedArtifactV1, VaultKeyId, VaultReservationSnapshotV1, VaultSpentArtifactSnapshotV1,
 };
 pub use partial_commitment_pop::{
-    prove_partial_commitment_v1, verify_partial_commitment_v1, PartialBlindingV1,
-    PartialCommitmentProofV1,
+    prove_partial_commitment_v1, verify_all_partial_commitments_v1, verify_partial_commitment_v1,
+    PartialBlindingV1, PartialCommitmentProofV1,
 };
 pub use permit::{exposure_outbound_digest_v1, validate_exposure_permit_record_v1, ExposureKindV1};
 pub use reservation_binding::{

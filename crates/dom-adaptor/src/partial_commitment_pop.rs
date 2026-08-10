@@ -156,6 +156,42 @@ pub fn verify_partial_commitment_v1(
     .map_err(Into::into)
 }
 
+/// Require a valid opening proof for every commitment share in the statement.
+///
+/// This is the joint-blinding enforcement gate. The Bulletproof statement
+/// already validates that the commitment shares sum to the aggregate; that
+/// alone does not stop a party from contributing a share it cannot open. This
+/// requires exactly one proof per participant index, each verifying against the
+/// share the statement records, before the aggregate is trusted. Missing,
+/// duplicate, out-of-range, or invalid proofs all fail closed.
+///
+/// The proofs are supplied as `(participant_index, proof)` in any order; the
+/// gate reduces them to a per-participant presence set so the caller cannot
+/// satisfy the check by repeating one participant's proof.
+pub fn verify_all_partial_commitments_v1(
+    statement: &BpStatementV1,
+    proofs: &[(u16, PartialCommitmentProofV1)],
+) -> Result<bool> {
+    let participant_count = statement.commitment_shares().len();
+    let mut seen = vec![false; participant_count];
+    for (participant_index, proof) in proofs {
+        let position = usize::from(*participant_index);
+        if position >= participant_count {
+            return Err(AdaptorError::InvalidContext(
+                "partial commitment proof index is outside the statement",
+            ));
+        }
+        if seen[position] {
+            return Err(AdaptorError::DuplicateParticipant);
+        }
+        if !verify_partial_commitment_v1(statement, *participant_index, proof)? {
+            return Ok(false);
+        }
+        seen[position] = true;
+    }
+    Ok(seen.iter().all(|present| *present))
+}
+
 fn random_secret_scalar() -> Result<Zeroizing<[u8; 32]>> {
     loop {
         let mut bytes = Zeroizing::new([0u8; 32]);
@@ -296,6 +332,59 @@ mod tests {
         assert_eq!(
             PartialCommitmentProofV1::from_bytes(&proof_a.to_bytes()).unwrap(),
             proof_a
+        );
+    }
+
+    #[test]
+    fn joint_gate_requires_one_valid_proof_per_participant() {
+        let (statement, r_a, r_b) = fixture();
+        let proof_a = prove_with_nonce(
+            &statement,
+            0,
+            &r_a.commitment_share().unwrap(),
+            &r_a,
+            nonce(3),
+        )
+        .expect("proof A");
+        let proof_b = prove_with_nonce(
+            &statement,
+            1,
+            &r_b.commitment_share().unwrap(),
+            &r_b,
+            nonce(4),
+        )
+        .expect("proof B");
+
+        // Complete and correct set passes.
+        assert!(verify_all_partial_commitments_v1(
+            &statement,
+            &[(0, proof_a.clone()), (1, proof_b.clone())],
+        )
+        .unwrap());
+
+        // A missing participant fails closed even though every supplied proof
+        // is valid.
+        assert!(!verify_all_partial_commitments_v1(&statement, &[(0, proof_a.clone())]).unwrap());
+
+        // Repeating one participant's proof cannot cover for the other.
+        assert!(matches!(
+            verify_all_partial_commitments_v1(
+                &statement,
+                &[(0, proof_a.clone()), (0, proof_a.clone())]
+            ),
+            Err(AdaptorError::DuplicateParticipant)
+        ));
+
+        // An out-of-range index fails closed.
+        assert!(verify_all_partial_commitments_v1(
+            &statement,
+            &[(0, proof_a.clone()), (2, proof_b.clone())],
+        )
+        .is_err());
+
+        // A proof placed under the wrong participant index does not verify.
+        assert!(
+            !verify_all_partial_commitments_v1(&statement, &[(0, proof_b), (1, proof_a)],).unwrap()
         );
     }
 
