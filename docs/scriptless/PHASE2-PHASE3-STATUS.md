@@ -1,8 +1,9 @@
-# Phase 2 — Shared Output — Status
+# Phases 2 and 3 — Status
 
 Date: 2026-08-10
 Branch: `feat/dom-protocol-g1-closed-cycle-property`
-Scope: what is implemented and unit-tested, and what remains for the G2 gate.
+Scope: what is implemented and unit-tested, and what remains for the regtest
+gates (G2, G3).
 
 Phase 2 of `DOM-Scriptless-Cronograma-Implementacao-v1.md` is "the hard piece":
 risk HIGH, weeks-to-a-month, gated by G2 in regtest. This file records the
@@ -51,6 +52,36 @@ still needs a running node.
   build, which this environment does not provide. It is the same class of gate
   as G0 (`DC-P1-G017`), which has never executed.
 
+## Phase 3 — Session, transport, and state
+
+Phase 3 makes the choreography survive crash, restart, and a slow counterparty.
+Deliverables 1, 2, and 4 are pure logic and are implemented and unit-tested in
+`contract_session.rs`; deliverable 3 and gate G3 need the store and a node.
+
+| # | Deliverable | State | Where |
+| --- | --- | --- | --- |
+| 3.1 | Versioned off-chain contract envelope (session id, roles, transcript, anti-replay) | **Done** | `contract_session.rs` |
+| 3.2 | Contract state machine, per-transition transcript evidence, restart resume | **Done** | `contract_session.rs` |
+| 3.3 | Atomic persistence of finalized bytes | Pending | Contracts store (retained-capability fs) |
+| 3.4 | Deadline policy derived in block height, not arbitrary | **Done** | `contract_session.rs` |
+
+### Phase 3 — what remains, and why it is not here
+
+- **3.3 atomic persistence**: the finalized-bytes-are-authority pattern is the
+  Contracts store's job — its Linux retained-capability filesystem is where
+  atomic rename and crash-prefix classification already live. Wiring the
+  contract state checkpoints through that store is store-side work, not a pure
+  adaptor concern.
+- **G3 interruption matrix**: an interruption test at every protocol step,
+  proving each cut either advances correctly or aborts releasing reserves with
+  no lost funds and no wedged input. Like G2 and G0, this needs the store's
+  process-death harness and a running node.
+
+The state machine is built so that this gate is reachable: every transition is
+ordered and transcript-bound, abort is always available from a non-terminal
+stage, and `resume()` reconstructs the exact state from a durable checkpoint —
+which is what an interruption test exercises once the durable layer exists.
+
 ## Machine-readable status
 
 ```text
@@ -59,6 +90,11 @@ PHASE2_2_2_COLLABORATIVE_BP = INTERNAL_END_TO_END_DONE_PUBLIC_DRIVER_PENDING
 PHASE2_2_3_DECOY_CAPSULE = DONE
 PHASE2_2_4_PARTIAL_COMMITMENT_POK = DONE
 PHASE2_G2_REGTEST_GATE = PENDING_RUNNING_NODE
+PHASE3_3_1_CONTRACT_ENVELOPE = DONE
+PHASE3_3_2_STATE_MACHINE = DONE
+PHASE3_3_3_ATOMIC_PERSISTENCE = PENDING_CONTRACTS_STORE
+PHASE3_3_4_DEADLINE_POLICY = DONE
+PHASE3_G3_INTERRUPTION_MATRIX = PENDING_RUNNING_NODE
 PRODUCTION = NOT_AUTHORIZED
 MAINNET = DISABLED
 REAL_FUNDS = PROHIBITED
