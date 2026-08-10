@@ -295,6 +295,7 @@ mod messages;
 mod nonce;
 mod nonce_secret_record;
 mod nonce_vault;
+mod partial_commitment_pop;
 mod permit;
 mod reservation_binding;
 mod secret_nonce;
@@ -336,6 +337,10 @@ pub use nonce_vault::{
     SpentArtifactDescriptorV1, TemplateHash, TerminalReservationV1,
     ValidatedPreparedExposureViewV1, VaultArtifactPersistencePermitV1, VaultComputationStageV1,
     VaultExportedArtifactV1, VaultKeyId, VaultReservationSnapshotV1, VaultSpentArtifactSnapshotV1,
+};
+pub use partial_commitment_pop::{
+    prove_partial_commitment_v1, verify_partial_commitment_v1, PartialBlindingV1,
+    PartialCommitmentProofV1,
 };
 pub use permit::{exposure_outbound_digest_v1, validate_exposure_permit_record_v1, ExposureKindV1};
 pub use reservation_binding::{
