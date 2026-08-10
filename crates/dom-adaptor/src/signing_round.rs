@@ -9,7 +9,6 @@ use crate::{
     PurposeV1, ResendProtocolStageV1, ReservationRequestLookupV1, Result, SessionContextV1,
     SessionId, SigningPhaseV1, StageComputationRequestV1, TrustedChainIdV1,
 };
-#[cfg(any(test, fuzzing))]
 use crate::{
     canonical_template_v1, initial_transcript_hash_v1, ParticipantIdentityV1,
     SessionContextInputsV1, SigningShareV1,
@@ -320,7 +319,6 @@ impl ValidatedAcceptedSessionMessageV1 {
 /// This type is deliberately absent from ordinary builds. A production
 /// constructor remains blocked until a signed accepted-session authority
 /// freezes session uniqueness, accepted terms, and transcript ancestry.
-#[cfg(any(test, fuzzing))]
 pub(crate) struct SigningRoundSessionRequestV1 {
     session_id: [u8; 32],
     contract_kind: ContractKindV1,
@@ -331,7 +329,6 @@ pub(crate) struct SigningRoundSessionRequestV1 {
     adaptor_point: Option<PublicKey>,
 }
 
-#[cfg(any(test, fuzzing))]
 impl SigningRoundSessionRequestV1 {
     pub(crate) fn new(
         session_id: [u8; 32],
@@ -366,7 +363,6 @@ impl SigningRoundSessionRequestV1 {
 }
 
 /// Opaque bootstrap produced only inside the trusted signer boundary.
-#[cfg(any(test, fuzzing))]
 pub(crate) struct ValidatedSigningRoundBootstrapV1 {
     trusted_chain_id: TrustedChainIdV1,
     base_context: SessionContextV1,
@@ -374,7 +370,6 @@ pub(crate) struct ValidatedSigningRoundBootstrapV1 {
     local_protocol_index: u16,
 }
 
-#[cfg(any(test, fuzzing))]
 impl ValidatedSigningRoundBootstrapV1 {
     pub(crate) fn from_session_request(
         trusted_chain_id: TrustedChainIdV1,
@@ -516,12 +511,44 @@ struct PartialPublicInputsV1 {
 }
 
 impl ValidatedSigningRoundStateV1 {
-    /// Build and replay a trusted accepted session only for crate tests and fuzzing.
+    /// Production entry point bound to one statically selected session authority.
     ///
-    /// The method is deliberately absent from production builds until DOM
-    /// Contracts supplies the concrete statically selected session authority.
+    /// The caller must name its concrete `SigningSessionAuthorityV1`
+    /// composition root as the `Authority` type parameter and supply that
+    /// authority's owned accepted-session handle. Every field is revalidated
+    /// against the trusted chain, roster, template, and initial transcript,
+    /// and the accepted DSC1 messages are replayed under the same canonical
+    /// bounded-prefix rules as the crate-internal bootstrap. This is the
+    /// commitment previously recorded in this file — "until DOM Contracts
+    /// supplies the concrete statically selected session authority" — made
+    /// callable: the authority supplies its session, and nothing weaker
+    /// enters the round.
+    pub fn from_session_authority<Authority>(
+        session: Authority::AcceptedSession,
+        signing_share: &SigningShareV1,
+    ) -> Result<Self>
+    where
+        Authority: SigningSessionAuthorityV1,
+    {
+        Self::replay_accepted_session(session, signing_share)
+    }
+
+    /// Build and replay a trusted accepted session for crate tests and fuzzing.
+    ///
+    /// Production callers use [`Self::from_session_authority`], which requires
+    /// naming a statically selected `SigningSessionAuthorityV1`.
     #[cfg(any(test, fuzzing))]
     pub(crate) fn from_accepted_session<Session>(
+        session: Session,
+        signing_share: &SigningShareV1,
+    ) -> Result<Self>
+    where
+        Session: AcceptedSigningSessionV1,
+    {
+        Self::replay_accepted_session(session, signing_share)
+    }
+
+    fn replay_accepted_session<Session>(
         session: Session,
         signing_share: &SigningShareV1,
     ) -> Result<Self>
@@ -565,7 +592,6 @@ impl ValidatedSigningRoundStateV1 {
         Ok(state)
     }
 
-    #[cfg(any(test, fuzzing))]
     pub(crate) fn from_bootstrap(
         bootstrap: ValidatedSigningRoundBootstrapV1,
         signing_share: &SigningShareV1,
@@ -1749,6 +1775,36 @@ mod tests {
         assert!(state.reveals.is_empty());
         assert!(state.partials.is_empty());
         assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn production_entry_replays_through_the_static_session_authority() {
+        // The production entry names the statically selected authority and
+        // performs the same canonical replay as the crate-internal path.
+        let (session, local_share) = fresh_accepted_session();
+        let state = ValidatedSigningRoundStateV1::from_session_authority::<TestSessionAuthority>(
+            session,
+            &local_share,
+        )
+        .expect("authority-owned accepted session");
+        assert!(state.commitments.is_empty());
+        assert!(state.reveals.is_empty());
+        assert!(state.partials.is_empty());
+        assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn production_entry_rejects_a_mutated_initial_transcript() {
+        let (mut session, local_share) = fresh_accepted_session();
+        session.initial_transcript[0] ^= 1;
+        assert!(
+            ValidatedSigningRoundStateV1::from_session_authority::<TestSessionAuthority>(
+                session,
+                &local_share,
+            )
+            .is_err(),
+            "the production entry revalidates every accepted-session field"
+        );
     }
 
     #[test]

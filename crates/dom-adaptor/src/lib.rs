@@ -65,7 +65,9 @@
 //! ```
 //!
 //! A caller-defined implementation of the semantic accepted-session view
-//! cannot invoke a production round constructor; that entry remains absent:
+//! cannot invoke the crate-internal replay constructor directly; production
+//! callers enter only through `from_session_authority`, naming their
+//! statically selected `SigningSessionAuthorityV1` composition root:
 //!
 //! ```compile_fail
 //! use dom_adaptor::{AcceptedSigningSessionV1, SigningShareV1,
