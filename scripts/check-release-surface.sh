@@ -19,7 +19,7 @@
 #
 # WHAT IT CHECKS
 # --------------
-#   A. Feature graph  -- `cargo tree --locked -e features,normal,build,no-dev`
+#   A. Feature graph  -- `cargo tree --locked -e features,no-dev`
 #      for each release package must not enable any forbidden feature and must
 #      not pull in any forbidden (test-only / fuzz / lab / bench) package.
 #   B. Symbols        -- `nm` over every artifact `cargo build --release`
@@ -216,7 +216,7 @@ trap 'rm -rf "${tree_dir}"' EXIT
 
 for pkg in "${PACKAGES[@]}"; do
     tree_out="${tree_dir}/${pkg}.tree"
-    if ! "${CARGO}" tree --locked -p "${pkg}" -e features,normal,build,no-dev > "${tree_out}" 2>"${tree_out}.err"; then
+    if ! "${CARGO}" tree --locked -p "${pkg}" -e features,no-dev > "${tree_out}" 2>"${tree_out}.err"; then
         cat "${tree_out}.err" >&2
         fail "${pkg}: cargo tree failed; the feature graph could not be inspected."
         continue
