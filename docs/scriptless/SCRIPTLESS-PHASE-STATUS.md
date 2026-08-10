@@ -127,7 +127,13 @@ gates are node-side.
 - **4.3 fee ladder**: Mimblewimble has no RBF and the fee is frozen in the
   signed message, so a refund can age below the relay minimum. The remedy is a
   ladder of refunds at escalating fees — real signed transactions broadcast
-  under a real relay policy, node-side.
+  under a real relay policy, node-side. The pure half is done: the §7.6 CPFP
+  calculator (`fee_bump.rs`) computes `required_child_fee =
+  target_package_fee(parent_weight + child_weight) − parent_fee` through the
+  authoritative `dom_core::fee_policy`, with the three §7.6 guards (checked
+  arithmetic, policy ceiling, reserved balance) failing closed and the parent
+  left byte-identical. Choosing the target rate under a live relay, and the
+  child's relayability, remain the node-side ladder.
 - **G4**: simulated abandonment at every step; nobody loses funds, or the refund
   unlocks at `H_refund` and is accepted first try, reproducing O-03 over the
   shared output. Needs regtest.
@@ -198,7 +204,7 @@ PHASE3_3_4_DEADLINE_POLICY = DONE
 PHASE3_G3_INTERRUPTION_MATRIX = PENDING_RUNNING_NODE
 PHASE4_4_1_FUNDING_ORDER = DONE_GATED_FROM_CLAIMPRESIGNED_SPEC_7_2_7_3
 PHASE4_4_2_BILATERAL_BACKUP = DONE
-PHASE4_4_3_FEE_LADDER = PENDING_RELAY
+PHASE4_4_3_FEE_LADDER = CPFP_CALCULATOR_DONE_LADDER_PENDING_RELAY
 PHASE4_G4_ABANDONMENT_MATRIX = PENDING_RUNNING_NODE
 PHASE5_5_1_5_2_ADAPTOR_CLAIM = PRESENT_SINCE_PHASE1
 PHASE5_5_3_CLAIM_FLOOR = DONE_DISTINCT_CLAIM_CONFIRMATION_MARGIN
