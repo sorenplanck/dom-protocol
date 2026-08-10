@@ -379,3 +379,189 @@ impl ReservationResumeRequestV1 {
         &self.0.context_binding
     }
 }
+
+/// Fuzz-only harness for the four closed reservation and computation requests.
+///
+/// NAR-DC-P1-004 §20 requires persistent fuzz coverage of the closed request
+/// types. They are deliberately non-constructible outside this crate — the same
+/// section requires proof that an application caller cannot build a fresh,
+/// resume, derivation, or later-stage request — so no downstream target can
+/// reach them and the harness has to live here, next to their constructors.
+///
+/// This symbol is selected only by cargo-fuzz's `cfg(fuzzing)` build and is
+/// absent from production feature resolution.
+#[cfg(fuzzing)]
+pub fn fuzz_closed_request_types_v1(data: &[u8]) {
+    use crate::{
+        DirectionV1, NonceDerivationRequestV1, ParticipantIdentityV1, SessionContextInputsV1,
+        TrustedChainIdV1,
+    };
+    use dom_core::Hash256;
+
+    fn field(data: &[u8], start: usize, fallback: u8) -> [u8; 32] {
+        let mut value = [fallback; 32];
+        if let Some(bytes) = data.get(start..start.saturating_add(32)) {
+            if bytes.len() == 32 {
+                value.copy_from_slice(bytes);
+            }
+        }
+        // Keep the field nonzero: every identifier here rejects zero, and a
+        // stream of zero fields would only ever exercise that one branch.
+        value[0] |= 1;
+        value
+    }
+
+    let selector = data.first().copied().unwrap_or_default();
+    let chain_bytes = field(data, 1, 0x21);
+    let session_bytes = field(data, 33, 0x22);
+    let template_bytes = field(data, 65, 0x23);
+    let message_bytes = field(data, 97, 0x24);
+    let transcript_bytes = field(data, 129, 0x25);
+    let binding_digest = field(data, 161, 0x26);
+
+    let network_magic = u32::from_le_bytes([
+        chain_bytes[0],
+        chain_bytes[1],
+        chain_bytes[2],
+        chain_bytes[3],
+    ]);
+    let chain = TrustedChainIdV1::from_authenticated_genesis(
+        network_magic,
+        &Hash256::from_bytes(session_bytes),
+    );
+    let chain_bytes = *chain.as_bytes();
+    let (Ok(local_share), Ok(remote_share)) = (
+        SigningShareV1::from_be_bytes(field(data, 193, 0x27)),
+        SigningShareV1::from_be_bytes(field(data, 225, 0x28)),
+    ) else {
+        return;
+    };
+    if local_share.public_key() == remote_share.public_key() {
+        return;
+    }
+
+    let local_direction = if selector & 1 == 0 {
+        DirectionV1::Initiator
+    } else {
+        DirectionV1::Responder
+    };
+    let remote_direction = if selector & 1 == 0 {
+        DirectionV1::Responder
+    } else {
+        DirectionV1::Initiator
+    };
+
+    let (Ok(local_entry), Ok(remote_entry)) = (
+        ParticipantIdentityV1::new(
+            &chain,
+            local_share.public_key().clone(),
+            local_share.public_key().clone(),
+            local_direction,
+        ),
+        ParticipantIdentityV1::new(
+            &chain,
+            remote_share.public_key().clone(),
+            remote_share.public_key().clone(),
+            remote_direction,
+        ),
+    ) else {
+        return;
+    };
+    let local_participant_id = *local_entry.participant_id();
+
+    let mut entries = vec![local_entry, remote_entry];
+    entries.sort_by_key(|entry| *entry.participant_id());
+    let Ok(roster) = ParticipantRosterV1::new(entries) else {
+        return;
+    };
+
+    // The binding requires the local roster position, the G1A signing index and
+    // the context key order to agree. Derive them instead of guessing, so valid
+    // cases reach the deep constructors rather than dying at the first check.
+    let Some(local_protocol_index) = roster
+        .entries()
+        .iter()
+        .position(|entry| entry.participant_id() == &local_participant_id)
+        .and_then(|index| u16::try_from(index).ok())
+    else {
+        return;
+    };
+    let Ok(signing_index) = roster.signing_index(&local_participant_id) else {
+        return;
+    };
+    let mut participant_public_keys = vec![
+        local_share.public_key().clone(),
+        remote_share.public_key().clone(),
+    ];
+    if usize::from(signing_index) == 1 {
+        participant_public_keys.swap(0, 1);
+    }
+
+    let inputs = SessionContextInputsV1 {
+        chain_id: chain_bytes,
+        session_id: session_bytes,
+        purpose: if selector & 2 == 0 {
+            PurposeV1::Refund
+        } else {
+            PurposeV1::ClaimAdaptor
+        },
+        direction: local_direction,
+        signing_phase: SigningPhaseV1::SigNonceCommit,
+        template_hash: template_bytes,
+        message_digest: message_bytes,
+        transcript_hash: transcript_bytes,
+        retry_counter: 0,
+        participant_public_keys,
+        participant_index: signing_index,
+        adaptor_point: None,
+    };
+    let Ok(context) = SessionContextV1::new(inputs, &local_share) else {
+        return;
+    };
+
+    // The binding is deliberately not `Clone`: it is a one-shot authority.
+    // Build a fresh one for each consumer rather than reusing a copy.
+    let build_binding =
+        || ReservationContextBindingV1::new(&context, &roster, local_protocol_index, &local_share);
+    let Ok(reference_binding) = build_binding() else {
+        return;
+    };
+    let reference_digest = *reference_binding.digest();
+    drop(reference_binding);
+
+    // Fresh: the constructor draws its own lookup, so the caller cannot choose
+    // it. Exercising it proves the OS-randomness path stays reachable.
+    if let Ok(binding) = build_binding() {
+        let _fresh = PreparedFreshReservationV1::new(&context, &local_share, binding);
+    }
+
+    // Resume: the lookup is caller-supplied and must bind to the same context.
+    if let (Ok(resume_lookup), Ok(binding)) = (
+        ReservationRequestLookupV1::from_bytes(field(data, 257, 0x29)),
+        build_binding(),
+    ) {
+        let _resume = ReservationResumeRequestV1::from_trusted_state(
+            &context,
+            &local_share,
+            resume_lookup,
+            binding,
+        );
+    }
+
+    // Derivation: a caller-shaped digest must not be able to stand in for the
+    // binding digest the Store authenticated.
+    let derivation_digest = if selector & 4 == 0 {
+        reference_digest
+    } else {
+        binding_digest
+    };
+    let _derivation = NonceDerivationRequestV1::new(derivation_digest, context.clone());
+
+    // Later stage: the same constructor must reject a context whose phase was
+    // advanced without the round evidence that authorizes the advance.
+    if let Ok(advanced) =
+        context.with_stage_and_transcript(SigningPhaseV1::SigNonceReveal, transcript_bytes)
+    {
+        let _rejected_stage = NonceDerivationRequestV1::new(derivation_digest, advanced);
+    }
+}

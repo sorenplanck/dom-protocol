@@ -65,4 +65,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "closed_request_types"
+path = "fuzz_targets/closed_request_types.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

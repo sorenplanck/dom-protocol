@@ -356,6 +356,9 @@ pub use signing_round::{
 pub use nonce_vault::fuzz_nar006_runtime_bindings_v1;
 #[cfg(fuzzing)]
 #[doc(hidden)]
+pub use reservation_binding::fuzz_closed_request_types_v1;
+#[cfg(fuzzing)]
+#[doc(hidden)]
 pub use signing_round::fuzz_dsc1_signing_round_acceptance_v1;
 pub use signing_share::SigningShareV1;
 pub use transcript::{
