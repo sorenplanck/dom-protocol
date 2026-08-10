@@ -139,11 +139,24 @@ fail() {
     failures=$((failures + 1))
 }
 
+# Probe INVOCABILITY, not mere presence. `command -v cargo` can succeed while
+# `cargo --version` fails with "the 'cargo' binary is not applicable to the
+# 'stable-x86_64-unknown-linux-gnu' toolchain" (rustup mid-update, a broken
+# shim, or a shell function shadowing the real binary). A gate that only checks
+# presence would then fail later, confusingly, or worse: appear to pass.
 require_tool() {
-    command -v "$1" >/dev/null 2>&1 || {
-        printf 'FATAL: required tool %s not found; this gate cannot run and therefore fails.\n' "$1" >&2
+    local tool="$1"
+    local probe="${2:---version}"
+    if ! command -v "${tool}" >/dev/null 2>&1; then
+        printf 'FATAL: required tool %s not found; this gate cannot run and therefore fails.\n' "${tool}" >&2
         exit 1
-    }
+    fi
+    if ! "${tool}" "${probe}" >/dev/null 2>&1; then
+        printf 'FATAL: %s is present but not invocable (%s %s failed); this gate cannot run and therefore fails.\n' \
+            "${tool}" "${tool}" "${probe}" >&2
+        "${tool}" "${probe}" >&2 || true
+        exit 1
+    fi
 }
 
 require_tool "${CARGO}"
