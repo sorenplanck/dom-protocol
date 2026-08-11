@@ -34,24 +34,42 @@
   "batches": [
     {
       "batch": 0,
-      "index_range": [0, 999],
+      "index_range": [
+        0,
+        999
+      ],
       "cases": 1000,
       "command": "DSC_F4_SOAK_CASES=1000 DSC_F4_SOAK_BATCH=0 cargo test -p dom-adaptor --test collaborative_bp_soak -- --ignored --nocapture",
       "toolchain": "stable (rust-toolchain.toml)",
       "features": "default",
       "environment": "linux x86_64",
-      "result": "RUNNING",
-      "duration_s": null,
-      "commit": "pending",
-      "tree": "pending"
+      "result": "PASS",
+      "duration_s": 626.5,
+      "commit": "9cdf190ffd36c5bec0b46f6aaf63aed4600ddb9a",
+      "tree": "a9bdf44359d2818116616793f2ace803fc262a8d",
+      "cases_passed": 1000,
+      "cases_failed": 0,
+      "harness_repo": "sorenplanck/dom-protocol (feature line; harness cannot compile here until the pin advances)"
     }
   ],
   "cumulative": {
-    "unique_cases_passed": 0,
-    "normative_status": "1000/10000 pending batch 0 completion",
+    "unique_cases_passed": 1000,
+    "local_integration_gate": "1000/1000 PASSED",
+    "normative_cumulative": "1000/10000",
     "closure_gate": "NOT_SATISFIED",
-    "remaining_batches": [1, 2, 3, 4, 5, 6, 7, 8, 9],
-    "remaining_cases": 9000
+    "remaining_batches": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "remaining_cases": 9000,
+    "note": "The harness prints DSC_F4_REQUIREMENT=SATISFIED against its local threshold of 1000, which is the ratified local integration gate. That is NOT the closure gate. The closure gate needs 10000 unique passing cases across disjoint index ranges and stays NOT_SATISFIED."
   },
   "policy": "The 10000-case closure gate is NOT complete until this manifest proves 10000 unique passing cases. Remaining batches are a release/closure evidence task and must not block ordinary development."
 }
