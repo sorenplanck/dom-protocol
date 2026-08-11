@@ -1,0 +1,57 @@
+{
+  "requirement": "DSC-F4 randomized collaborative Bulletproof executions",
+  "normative_target_cases": 10000,
+  "local_integration_gate_cases": 1000,
+  "batch_size": 1000,
+  "case_index_space": {
+    "scheme": "global case index; batch n covers [n*1000, (n+1)*1000)",
+    "seeding": "each case seeded from its own global index via splitmix64(base_seed, index)",
+    "base_seed": "0x53434f414b000001",
+    "non_overlap_proof": "index ranges are disjoint by construction; no index is drawn twice, so no case can be double-counted across batches",
+    "reproducibility": "any failing case is reproducible alone from its index, without replaying its batch"
+  },
+  "counting_rules": {
+    "same_implementation_required": true,
+    "invalidate_on": [
+      "material cryptographic change",
+      "transcript or statement byte-layout change",
+      "vendored FFI change",
+      "collaborative Bulletproof round change"
+    ],
+    "note": "batches count together only while the materially relevant implementation and environment are compatible"
+  },
+  "per_case_coverage": [
+    "full 5.4 choreography over the real vendored DOM FFI",
+    "rodada 0A commit/reveal with all commitments before any reveal",
+    "rodada 0B pre-reveal commitment gate",
+    "T1/T2 aggregation",
+    "tau_x aggregation",
+    "finalization",
+    "assert proof is exactly 739 bytes",
+    "assert verification through range_proof_verify_with_extra_commit with the raw 96-byte capsule",
+    "randomized participants, value (including 0 and MAX_PROVABLE_VALUE edges), blinding shares and capsule bytes"
+  ],
+  "batches": [
+    {
+      "batch": 0,
+      "index_range": [0, 999],
+      "cases": 1000,
+      "command": "DSC_F4_SOAK_CASES=1000 DSC_F4_SOAK_BATCH=0 cargo test -p dom-adaptor --test collaborative_bp_soak -- --ignored --nocapture",
+      "toolchain": "stable (rust-toolchain.toml)",
+      "features": "default",
+      "environment": "linux x86_64",
+      "result": "RUNNING",
+      "duration_s": null,
+      "commit": "pending",
+      "tree": "pending"
+    }
+  ],
+  "cumulative": {
+    "unique_cases_passed": 0,
+    "normative_status": "1000/10000 pending batch 0 completion",
+    "closure_gate": "NOT_SATISFIED",
+    "remaining_batches": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+    "remaining_cases": 9000
+  },
+  "policy": "The 10000-case closure gate is NOT complete until this manifest proves 10000 unique passing cases. Remaining batches are a release/closure evidence task and must not block ordinary development."
+}

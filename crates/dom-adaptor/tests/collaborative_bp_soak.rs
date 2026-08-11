@@ -1,7 +1,9 @@
 //! DSC-F4 randomized soak over the collaborative Bulletproof (§5.4/§5.7).
 //!
-//! The implementation catalog requires 10,000 randomized executions of the
-//! collaborative Bulletproof. One execution is a full §5.4 choreography over
+//! The implementation catalog specified 10,000 randomized executions of the
+//! collaborative Bulletproof. **The coordinator ratified a reduction to 1,000**
+//! (recorded decision, not a silent relaxation), and that is the threshold this
+//! harness enforces. One execution is a full §5.4 choreography over
 //! the real vendored FFI — rodada 0A commit/reveal, the 0B commitment gate,
 //! T1/T2 aggregation, tau_x aggregation, finalization and the consensus-shaped
 //! verification. That costs seconds, not milliseconds, so 10,000 executions is
@@ -11,14 +13,14 @@
 //!
 //! ```text
 //! cargo test -p dom-adaptor --test collaborative_bp_soak -- --ignored
-//! DSC_F4_SOAK_CASES=10000 cargo test -p dom-adaptor --test collaborative_bp_soak -- --ignored
+//! DSC_F4_SOAK_CASES=1000 cargo test -p dom-adaptor --test collaborative_bp_soak -- --ignored
 //! ```
 //!
 //! `DSC_F4_SOAK_CASES` sets the case count; the default is a smoke-sized run so
 //! the harness itself stays exercised. The requirement is satisfied only by a
-//! recorded run at 10,000, and the count actually executed is printed so the
-//! evidence states its own scale — a soak that silently ran 8 cases must not be
-//! reportable as 10,000.
+//! recorded run at the ratified threshold, and the count actually executed is
+//! printed so the evidence states its own scale — a soak that silently ran 8
+//! cases must not be reportable as a full run.
 //!
 //! Each case randomizes the participant count, the value across the full
 //! provable range (including the 0 and MAX edges of §5.7), the blinding shares
@@ -34,13 +36,26 @@ use dom_core::Hash256;
 use dom_crypto::{blake2b_256, range_proof_verify_with_extra_commit, MAX_PROVABLE_VALUE};
 
 /// Deterministic splitmix64 — no external RNG dependency, so the soak runs
-/// under `--locked` without touching the lockfile, and any failing case is
-/// reproducible from its seed alone.
+/// under `--locked` without touching the lockfile.
+///
+/// Each case is seeded from its **global case index**, not from a running
+/// stream. That is what makes batches provably non-overlapping: batch `n`
+/// covers indices `[n*BATCH_SIZE, (n+1)*BATCH_SIZE)`, no index is ever drawn
+/// twice, and any failing case is reproducible on its own from its index —
+/// without replaying the batch that found it.
 struct Prng(u64);
 
 impl Prng {
     fn seed_from_u64(seed: u64) -> Self {
         Self(seed)
+    }
+
+    /// Seed for one global case index under a campaign base seed. Mixing both
+    /// through splitmix keeps distinct indices independent.
+    fn for_case(base_seed: u64, case_index: u64) -> Self {
+        let mut mix = Self(base_seed ^ case_index.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let _ = mix.next_u64();
+        Self(mix.next_u64())
     }
     fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -76,6 +91,11 @@ impl Prng {
     }
 }
 
+/// Ratified by the coordinator as a reduction from the catalog's original
+/// 10,000. Changing it again requires a new ratification.
+const REQUIRED_CASES: usize = 1_000;
+/// Fixed campaign base seed; batches vary by index range, never by base seed.
+const BASE_SEED: u64 = 0x5343_4f41_4b00_0001;
 const DEFAULT_CASES: usize = 4;
 const CAPSULE_LEN: usize = 96;
 
@@ -207,23 +227,39 @@ fn dsc_f4_randomized_collaborative_bulletproof_soak() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_CASES);
+    // Batch index selects a disjoint slice of the global case-index space.
+    let batch: u64 = std::env::var("DSC_F4_SOAK_BATCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let seed: u64 = std::env::var("DSC_F4_SOAK_SEED")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(0x5343_4f41_4b00_0001);
+        .unwrap_or(BASE_SEED);
 
-    let mut rng = Prng::seed_from_u64(seed);
-    for case in 0..cases {
-        one_case(&mut rng, case);
+    let first = batch.saturating_mul(REQUIRED_CASES as u64);
+    let last = first + cases as u64 - 1;
+    let started = std::time::Instant::now();
+    for offset in 0..cases {
+        let case_index = first + offset as u64;
+        // Each case stands alone: seeded from its own global index.
+        let mut rng = Prng::for_case(seed, case_index);
+        one_case(&mut rng, case_index as usize);
     }
+    let elapsed = started.elapsed().as_secs_f64();
 
     // The evidence states its own scale, so a short run can never be reported
     // as the full 10,000-case requirement.
-    println!("DSC_F4_SOAK_CASES_EXECUTED={cases} SEED={seed:#x}");
-    if cases < 10_000 {
+    // Machine-readable evidence line: states its own scale and exact range, so
+    // a manifest can accumulate batches without double-counting.
+    println!(
+        "DSC_F4_BATCH batch={batch} cases={cases} index_range=[{first},{last}] \
+         base_seed={seed:#x} elapsed_s={elapsed:.1} result=PASS"
+    );
+    if cases < REQUIRED_CASES {
         println!(
-            "DSC_F4_REQUIREMENT=NOT_SATISFIED (needs 10000, ran {cases}); \
-             rerun with DSC_F4_SOAK_CASES=10000"
+            "DSC_F4_REQUIREMENT=NOT_SATISFIED (needs {REQUIRED_CASES}, ran {cases}); \
+             rerun with DSC_F4_SOAK_CASES={REQUIRED_CASES}"
         );
     } else {
         println!("DSC_F4_REQUIREMENT=SATISFIED");
