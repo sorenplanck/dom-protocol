@@ -52,16 +52,58 @@ The goal supplies expected SHA-256 values. Verified directly:
 | `DOM-Scriptless-Contracts-Especificacao-Mestra-v1.0.docx` | `5ad366d6…dd6b5` | `5ad366d6b5c01c88bc88d4e9c016b447c32f24fbc24a32fa8b6946d7ff5dd6b5` | **MATCH** |
 | `DOM-Scriptless-Cronograma-Implementacao-v1.md` | `cfee4487…95e48` | `cfee44873007390f1e19ea95ec5da66e860373a882c32af51ace985fde495e48` | **MATCH** |
 | `DOM-Scriptless-Relatorio-Consolidado-v1.md` | `5431ca38…35acb` | `5431ca3894c42ffbee86cd719d4bb0e70ec8ddfb21b33895e889372fa5335acb` | **MATCH** |
-| `DOM-Scriptless-Adendo-P1-UX-DevEx-G-UX1-v1.0` | `98453889…ecb2d` | *not present* | **ABSENT** |
+| `DOM-Scriptless-Adendo-P1-UX-DevEx-G-UX1-v1.0.docx` | `98453889…ecb2d` | `984538890d5f38cd5802ee811d2164c469b2306bb97d9c37d4e92131e81ecb2d` | **MATCH** |
 
 All three present documents are byte-identical to the supplied baseline, at
 `docs/scriptless/source-guides/normative/`.
 
-**Finding A-1 — `BLOCKED_EXTERNAL`.** The UX/DevEx addendum defining gate
-`UX-G-UX1` is **not in this repository**. Every UX-01…UX-16 criterion is
-therefore unauditable here: the authority text is unavailable. No UX-G-UX1
-status may be asserted — positively or negatively — until the document is
-supplied.
+**Finding A-1 — RESOLVED.** The UX/DevEx addendum was supplied by the
+coordinator during the audit, verified byte-identical to the expected digest,
+and installed at
+`docs/scriptless/source-guides/normative/DOM-Scriptless-Adendo-P1-UX-DevEx-G-UX1-v1.0.docx`.
+**All four mandatory baseline documents now hash-match.** `UX-G-UX1` is
+auditable; see §9.
+
+---
+
+## 9. UX-G-UX1 — audited against the supplied addendum
+
+`G-UX1` is classified in the addendum as a **mandatory STOP-SHIP gate**:
+approval of the cryptographic gates and of the E2E milestone does **not**
+authorise a production release without independent G-UX1 approval.
+
+The sixteen acceptance criteria target an **application/SDK layer**: an
+intent-oriented API, a persistent wallet executor that survives UI closure,
+idempotent retransmission without human action, and public error semantics.
+Searching the repository for that layer:
+
+| Artefact required by the criteria | Files in repo |
+| --- | --- |
+| SDK (Rust or TypeScript) | 0 |
+| persistent wallet executor | 0 |
+| Keystone coordination | 0 |
+| intent / approval surface | 0 |
+
+**Finding A-7 — `MISSING`, STOP-SHIP.** No UX-G-UX1 criterion can be marked
+satisfied, because the layer the criteria govern **does not exist in this
+repository**. What exists in `dom-adaptor` are the *protocol primitives the
+criteria depend on*, which is a different thing from the criteria themselves:
+
+| Criterion | Supporting primitive present | Criterion status |
+| --- | --- | --- |
+| UX-08 (funding never before final, validated, persisted, backed refund) | `funding_authority.rs` typestate + `ClaimPresigned` gate (§7.2/§7.3) | `PARTIAL` — order enforced at the type level; "persisted and backed" is store/node-side |
+| UX-13 (integrator computes no timelocks, claim deadlines or reorg margins) | `RefundDeadlinePolicyV1` derives refund lock and claim floor from block-height margins | `PARTIAL` — derivation exists; no SDK hides it from an integrator |
+| UX-07 (reorgs handled without integrator coordination) | `chain_projection.rs` — §11.2 rules as engine-returned actions | `PARTIAL` — engine logic exists; no executor runs it |
+| UX-09 (pre-funding failure releases reserves safely) | contract state machine abort restricted to pre-funding stages (§9.3) | `PARTIAL` |
+| UX-10 (post-funding failure stays monitored to a safe terminal) | `Funded` exits only to claim or timeout refund | `PARTIAL` |
+| UX-03 (no nonce, share, adaptor secret or pre-signature exposed by the public SDK) | opaque one-shot types, no raw accessors, zeroization | `PARTIAL` — the crate does not leak them, but there is no public SDK to audit |
+| UX-01, 02, 04, 05, 06, 11, 12, 14, 15, 16 | — | `MISSING` — require the absent application layer |
+
+**Consequence.** `G-UX1` is a stop-ship gate that is **not close to closure**,
+and this is the largest single scope gap found in the audit. It is a whole
+product layer — SDK, persistent executor, approval model, error taxonomy,
+Keystone tolerance — not a set of fixes to existing code. Delivering the
+cryptographic phases does not shorten it.
 
 ---
 
