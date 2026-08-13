@@ -1837,6 +1837,7 @@ dependencies = [
  "dom-core",
  "dom-mempool",
  "dom-serialization",
+ "dom-wallet-core-api",
  "governor",
  "hex",
  "http-body-util",

@@ -1619,6 +1619,7 @@ impl dom_rpc::NodeHandle for DomNode {
         Ok(dom_rpc::TxAdmission {
             tx_hash: hash,
             relayed,
+            state: dom_rpc::TxAdmissionState::New,
         })
     }
 
