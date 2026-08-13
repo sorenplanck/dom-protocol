@@ -332,6 +332,18 @@ pub struct CollaborativeBpRound2PersistenceCapabilityV1 {
     statement: BpStatementV1,
 }
 
+/// Zeroizing round-2 persistence payload and the corresponding one-shot
+/// reconstruction authorities.
+///
+/// Keeping this tuple named makes the vault boundary readable without adding
+/// a wrapper that could accidentally grow accessors for secret plaintext.
+pub type CollaborativeBpRound2PersistencePayloadV1 = (
+    Zeroizing<Vec<u8>>,
+    Zeroizing<[u8; ROUND2_SHARE_LEN]>,
+    CollaborativeBpFinalizeImportCapabilityV1,
+    CollaborativeBpRound2ImportCapabilityV1,
+);
+
 impl CollaborativeBpRound2PersistenceCapabilityV1 {
     pub(crate) fn new(
         binding: &CollaborativeBpFinalizeBindingV1,
@@ -350,12 +362,7 @@ impl CollaborativeBpRound2PersistenceCapabilityV1 {
         self,
         continuation: CollaborativeBpFinalizeContinuationV1,
         share: BpRound2ShareV1,
-    ) -> Result<(
-        Zeroizing<Vec<u8>>,
-        Zeroizing<[u8; ROUND2_SHARE_LEN]>,
-        CollaborativeBpFinalizeImportCapabilityV1,
-        CollaborativeBpRound2ImportCapabilityV1,
-    )> {
+    ) -> Result<CollaborativeBpRound2PersistencePayloadV1> {
         let expected_binding = CollaborativeBpNonceBindingV1::from_statement(
             &self.statement,
             self.binding.nonce_binding.participant_index,
@@ -370,7 +377,7 @@ impl CollaborativeBpRound2PersistenceCapabilityV1 {
         )?;
         let bytes = share.into_zeroizing_bytes();
         BpRound2ShareV1::from_bytes(bytes.as_ref(), &self.statement)?;
-        let message_digest = round2_message_digest_v1(&self.binding.nonce_binding, &*bytes);
+        let message_digest = round2_message_digest_v1(&self.binding.nonce_binding, &bytes);
         Ok((
             continuation_bytes,
             bytes,
@@ -459,7 +466,7 @@ impl CollaborativeBpRound2ImportCapabilityV1 {
             return Err(AdaptorError::AuthorizationMismatch);
         }
         BpRound2ShareV1::from_bytes(plaintext.as_ref(), statement)?;
-        let message_digest = round2_message_digest_v1(&self.binding, &*plaintext);
+        let message_digest = round2_message_digest_v1(&self.binding, &plaintext);
         if self
             .expected_message_digest
             .is_some_and(|expected| expected != message_digest)

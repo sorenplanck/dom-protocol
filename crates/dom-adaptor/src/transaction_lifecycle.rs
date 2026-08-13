@@ -324,6 +324,10 @@ impl ScriptlessTransactionTemplateV1 {
     /// Ask the statically selected Contracts Store to issue a durable,
     /// process-local authorization bound to this exact unsigned funding
     /// template and ready-to-fund evidence.
+    // The flat arguments are intentional at this authority boundary: every
+    // independently authenticated prerequisite remains visible at the call
+    // site and is cross-checked before the Store receives an issuance token.
+    #[allow(clippy::too_many_arguments)]
     pub fn authorize_funding_v1<Store: OperationalFundingAuthorizationStoreV1>(
         &self,
         chain_id: &[u8; 32],
@@ -987,22 +991,12 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct TestAuthorizationStore {
         issuance: Option<DurableOperationalFundingIssuanceV1>,
         issue_count: usize,
         resume_count: usize,
         consumed: bool,
-    }
-
-    impl Default for TestAuthorizationStore {
-        fn default() -> Self {
-            Self {
-                issuance: None,
-                issue_count: 0,
-                resume_count: 0,
-                consumed: false,
-            }
-        }
     }
 
     fn validate_unsigned_authorization_view(
@@ -1228,44 +1222,46 @@ mod tests {
         let transcript = [0x71; 32];
         let mut store = TestAuthorizationStore::default();
 
-        let first = template
-            .authorize_funding_v1(
-                &chain_id,
-                session_id,
-                transcript,
-                [0x55; 32],
-                &shared.statement,
-                [0x76; 32],
-                [0x72; 32],
-                [0x73; 32],
-                [0x74; 32],
-                &mut store,
-            )
-            .expect("initial durable issuance");
-        assert_eq!(first.issuance_record_digest(), &[0x75; 32]);
-        assert_eq!(first.authorized_revision(), 7);
+        {
+            let first = template
+                .authorize_funding_v1(
+                    &chain_id,
+                    session_id,
+                    transcript,
+                    [0x55; 32],
+                    &shared.statement,
+                    [0x76; 32],
+                    [0x72; 32],
+                    [0x73; 32],
+                    [0x74; 32],
+                    &mut store,
+                )
+                .expect("initial durable issuance");
+            assert_eq!(first.issuance_record_digest(), &[0x75; 32]);
+            assert_eq!(first.authorized_revision(), 7);
+        } // process crash before signing discards the process-local authority
         assert_eq!(store.issue_count, 1);
-        drop(first); // process crash before signing
 
-        let resumed = template
-            .resume_funding_authorization_v1(
-                &chain_id,
-                session_id,
-                transcript,
-                [0x55; 32],
-                &shared.statement,
-                [0x76; 32],
-                [0x72; 32],
-                [0x73; 32],
-                [0x74; 32],
-                &mut store,
-            )
-            .expect("same-issuance resume");
-        assert_eq!(resumed.issuance_record_digest(), &[0x75; 32]);
-        assert_eq!(resumed.authorized_revision(), 7);
+        {
+            let resumed = template
+                .resume_funding_authorization_v1(
+                    &chain_id,
+                    session_id,
+                    transcript,
+                    [0x55; 32],
+                    &shared.statement,
+                    [0x76; 32],
+                    [0x72; 32],
+                    [0x73; 32],
+                    [0x74; 32],
+                    &mut store,
+                )
+                .expect("same-issuance resume");
+            assert_eq!(resumed.issuance_record_digest(), &[0x75; 32]);
+            assert_eq!(resumed.authorized_revision(), 7);
+        }
         assert_eq!(store.issue_count, 1, "resume must not issue again");
         assert_eq!(store.resume_count, 1);
-        drop(resumed);
 
         assert!(template
             .resume_funding_authorization_v1(
