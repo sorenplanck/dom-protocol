@@ -61,6 +61,31 @@ pub trait AcceptedSigningSessionV1 {
     fn accepted_signing_messages(&self) -> impl Iterator<Item = &[u8]>;
 }
 
+/// Statically selected operational authority for a signing round embedded in
+/// the single global DSC1 session journal.
+///
+/// Unlike the frozen Phase-1 compatibility entry, this authority starts from
+/// the Store-authenticated transcript and per-sender sequence positions that
+/// immediately follow the complete durable contract ancestry. It does not
+/// create a child session, purpose-specific journal, or alternate logical key.
+pub trait OperationalSigningSessionAuthorityV1: Sized {
+    /// Redacted error reported by the trusted operational session Store.
+    type Error: core::error::Error + Send + Sync + 'static;
+    /// Opaque one-shot operational session owned by that exact static Store.
+    type AcceptedSession: AcceptedOperationalSigningSessionV1;
+}
+
+/// Store-authenticated extension of the frozen accepted-session view for F7.
+pub trait AcceptedOperationalSigningSessionV1: AcceptedSigningSessionV1 {
+    /// Transcript predecessor immediately before this signing round's first
+    /// `SigNonceCommit` message.
+    fn round_start_transcript_hash(&self) -> &[u8; 32];
+
+    /// Global DSC1 next-sequence value for each protocol-roster sender at the
+    /// signing-round boundary.
+    fn sender_sequence_bases(&self) -> &[u64; 2];
+}
+
 /// Result of supplying one authenticated DSC1 message to the round owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AcceptedMessageDispositionV1 {
@@ -107,7 +132,7 @@ impl AcceptedMessageKindV1 {
         }
     }
 
-    const fn sender_sequence(self) -> u64 {
+    const fn sender_sequence_offset(self) -> u64 {
         match self {
             Self::NonceCommitment => 0,
             Self::NonceReveal => 1,
@@ -550,6 +575,7 @@ pub struct ValidatedSigningRoundStateV1 {
     base_context: SessionContextV1,
     roster: ParticipantRosterV1,
     local_protocol_index: u16,
+    sender_sequence_bases: [u64; 2],
     next_sender_sequences: [u64; 2],
     current_transcript: [u8; 32],
     commitment_transcript: Option<[u8; 32]>,
@@ -574,6 +600,63 @@ struct PartialPublicInputsV1 {
 }
 
 impl ValidatedSigningRoundStateV1 {
+    /// Production entry point bound to one statically selected session authority.
+    ///
+    /// The caller names its concrete [`SigningSessionAuthorityV1`] composition
+    /// root and supplies that authority's owned accepted-session handle. Every
+    /// field is revalidated against the trusted chain, roster, template, and
+    /// initial transcript, and accepted DSC1 messages are replayed under the
+    /// same canonical bounded-prefix rules as the signer-owned entry.
+    pub fn from_session_authority<Authority>(
+        session: Authority::AcceptedSession,
+        signing_share: &SigningShareV1,
+    ) -> Result<Self>
+    where
+        Authority: SigningSessionAuthorityV1,
+    {
+        Self::from_accepted_session(session, signing_share)
+    }
+
+    /// F7 production entry over one global, durably authenticated DSC1 journal.
+    ///
+    /// The ordinary accepted-session fields are recomputed exactly as in the
+    /// frozen NAR entry, including the contract initial transcript. The round
+    /// then starts at the Store-provided global predecessor and sequence bases;
+    /// only the canonical prefix belonging to this exact round is replayed.
+    pub fn from_operational_session_authority<Authority>(
+        session: Authority::AcceptedSession,
+        signing_share: &SigningShareV1,
+    ) -> Result<Self>
+    where
+        Authority: OperationalSigningSessionAuthorityV1,
+    {
+        let mut bootstrap =
+            ValidatedSigningRoundBootstrapV1::from_accepted_session(&session, signing_share)?;
+        if bootstrap.base_context.transcript_hash() != session.initial_transcript_hash() {
+            return Err(AdaptorError::InvalidTranscript(
+                "operational session initial transcript mismatch",
+            ));
+        }
+        let round_start = *session.round_start_transcript_hash();
+        let sender_sequence_bases = *session.sender_sequence_bases();
+        if round_start == [0; 32]
+            || sender_sequence_bases
+                .iter()
+                .any(|base| base.checked_add(2).is_none())
+        {
+            return Err(AdaptorError::InvalidTranscript(
+                "operational signing-round boundary is invalid",
+            ));
+        }
+        bootstrap.base_context = bootstrap
+            .base_context
+            .with_stage_and_transcript(SigningPhaseV1::SigNonceCommit, round_start)?;
+        let mut state =
+            Self::from_bootstrap_with_sequences(bootstrap, signing_share, sender_sequence_bases)?;
+        Self::replay_accepted_prefix(&mut state, session.accepted_signing_messages())?;
+        Ok(state)
+    }
+
     /// Build and replay a trusted accepted session behind the static signer entry.
     pub(crate) fn from_accepted_session<Session>(
         session: Session,
@@ -590,8 +673,16 @@ impl ValidatedSigningRoundStateV1 {
             ));
         }
         let mut state = Self::from_bootstrap(bootstrap, signing_share)?;
+        Self::replay_accepted_prefix(&mut state, session.accepted_signing_messages())?;
+        Ok(state)
+    }
+
+    fn replay_accepted_prefix<'a>(
+        state: &mut Self,
+        messages: impl Iterator<Item = &'a [u8]>,
+    ) -> Result<()> {
         let mut count = 0usize;
-        for message in session.accepted_signing_messages() {
+        for message in messages {
             count = count.checked_add(1).ok_or(AdaptorError::InvalidTranscript(
                 "accepted replay length overflow",
             ))?;
@@ -604,12 +695,20 @@ impl ValidatedSigningRoundStateV1 {
                 ));
             }
         }
-        Ok(state)
+        Ok(())
     }
 
     pub(crate) fn from_bootstrap(
         bootstrap: ValidatedSigningRoundBootstrapV1,
         signing_share: &SigningShareV1,
+    ) -> Result<Self> {
+        Self::from_bootstrap_with_sequences(bootstrap, signing_share, [0, 0])
+    }
+
+    fn from_bootstrap_with_sequences(
+        bootstrap: ValidatedSigningRoundBootstrapV1,
+        signing_share: &SigningShareV1,
+        sender_sequence_bases: [u64; 2],
     ) -> Result<Self> {
         let ValidatedSigningRoundBootstrapV1 {
             trusted_chain_id,
@@ -644,7 +743,8 @@ impl ValidatedSigningRoundStateV1 {
             base_context,
             roster,
             local_protocol_index,
-            next_sender_sequences: [0, 0],
+            sender_sequence_bases,
+            next_sender_sequences: sender_sequence_bases,
             pending: Vec::with_capacity(MAX_PENDING_SIGNING_MESSAGES),
             commitments: Vec::new(),
             reveals: Vec::new(),
@@ -694,7 +794,10 @@ impl ValidatedSigningRoundStateV1 {
             .iter()
             .position(|entry| entry.participant_id() == message.sender_participant_id())
             .ok_or(AdaptorError::AuthorizationMismatch)?;
-        if message.sender_sequence != message.kind.sender_sequence() {
+        let expected_kind_sequence = self.sender_sequence_bases[sender_index]
+            .checked_add(message.kind.sender_sequence_offset())
+            .ok_or(AdaptorError::InvalidTranscript("DSC1 sequence overflow"))?;
+        if message.sender_sequence != expected_kind_sequence {
             self.closed = true;
             return Err(AdaptorError::InvalidTranscript(
                 "DSC1 message kind and sender sequence disagree",
@@ -1769,6 +1872,71 @@ mod tests {
         type AcceptedSession = TestAcceptedSession;
     }
 
+    struct TestOperationalAcceptedSession {
+        inner: TestAcceptedSession,
+        round_start: [u8; 32],
+        sender_sequence_bases: [u64; 2],
+    }
+
+    impl AcceptedSigningSessionV1 for TestOperationalAcceptedSession {
+        fn trusted_chain_id(&self) -> &TrustedChainIdV1 {
+            self.inner.trusted_chain_id()
+        }
+
+        fn session_id(&self) -> &[u8; 32] {
+            self.inner.session_id()
+        }
+
+        fn contract_kind(&self) -> ContractKindV1 {
+            self.inner.contract_kind()
+        }
+
+        fn purpose(&self) -> PurposeV1 {
+            self.inner.purpose()
+        }
+
+        fn roster(&self) -> &ParticipantRosterV1 {
+            self.inner.roster()
+        }
+
+        fn transaction_template(&self) -> &Transaction {
+            self.inner.transaction_template()
+        }
+
+        fn kernel_index(&self) -> usize {
+            self.inner.kernel_index()
+        }
+
+        fn adaptor_point(&self) -> Option<&PublicKey> {
+            self.inner.adaptor_point()
+        }
+
+        fn initial_transcript_hash(&self) -> &[u8; 32] {
+            self.inner.initial_transcript_hash()
+        }
+
+        fn accepted_signing_messages(&self) -> impl Iterator<Item = &[u8]> {
+            self.inner.accepted_signing_messages()
+        }
+    }
+
+    impl AcceptedOperationalSigningSessionV1 for TestOperationalAcceptedSession {
+        fn round_start_transcript_hash(&self) -> &[u8; 32] {
+            &self.round_start
+        }
+
+        fn sender_sequence_bases(&self) -> &[u64; 2] {
+            &self.sender_sequence_bases
+        }
+    }
+
+    struct TestOperationalSessionAuthority;
+
+    impl OperationalSigningSessionAuthorityV1 for TestOperationalSessionAuthority {
+        type Error = std::io::Error;
+        type AcceptedSession = TestOperationalAcceptedSession;
+    }
+
     fn fresh_accepted_session() -> (TestAcceptedSession, SigningShareV1) {
         let chain = TrustedChainIdV1::from_signed_fixture([0x71; 32]);
         let identity_a = SecretKey::from_bytes(&[0x72; 32]).expect("identity secret");
@@ -1830,8 +1998,11 @@ mod tests {
         fn assert_static_authority<Authority: SigningSessionAuthorityV1>() {}
         assert_static_authority::<TestSessionAuthority>();
         let (session, local_share) = fresh_accepted_session();
-        let state = ValidatedSigningRoundStateV1::from_accepted_session(session, &local_share)
-            .expect("accepted session");
+        let state = ValidatedSigningRoundStateV1::from_session_authority::<TestSessionAuthority>(
+            session,
+            &local_share,
+        )
+        .expect("authority-owned accepted session");
         assert!(state.commitments.is_empty());
         assert!(state.reveals.is_empty());
         assert!(state.partials.is_empty());
@@ -1843,7 +2014,11 @@ mod tests {
         let (mut session, local_share) = fresh_accepted_session();
         session.initial_transcript[0] ^= 1;
         assert!(
-            ValidatedSigningRoundStateV1::from_accepted_session(session, &local_share).is_err()
+            ValidatedSigningRoundStateV1::from_session_authority::<TestSessionAuthority>(
+                session,
+                &local_share,
+            )
+            .is_err()
         );
 
         let (mut session, local_share) = fresh_accepted_session();
@@ -1853,6 +2028,64 @@ mod tests {
         assert!(
             ValidatedSigningRoundStateV1::from_accepted_session(session, &local_share).is_err()
         );
+    }
+
+    #[test]
+    fn operational_session_uses_global_transcript_and_sender_sequence_bases() {
+        let (mut inner, local_share) = fresh_accepted_session();
+        let round_start = [0x79; 32];
+        let sender_sequence_bases = [9, 14];
+        let participant = &inner.roster.entries()[0];
+        let identity_secret = [[0x72; 32], [0x73; 32]]
+            .into_iter()
+            .map(|bytes| SecretKey::from_bytes(&bytes).expect("identity secret"))
+            .find(|secret| &secret.public_key() == participant.identity_public_key())
+            .expect("participant identity secret");
+        let (first, second) = protocol_nonce_pair(0);
+        let (_, template_hash) =
+            canonical_template_v1(&inner.transaction).expect("canonical template");
+        let signing_index = inner
+            .roster
+            .signing_index(participant.participant_id())
+            .expect("signing index");
+        let reveal_hash = nonce_commitment_hash_v1(
+            inner.chain.as_bytes(),
+            &inner.session_id,
+            participant.participant_id(),
+            PurposeV1::Refund,
+            &template_hash,
+            first.public_key(),
+            second.public_key(),
+            None,
+        )
+        .expect("commitment hash");
+        let payload =
+            NonceCommitmentV1::new(PurposeV1::Refund, signing_index, *reveal_hash.as_bytes())
+                .to_bytes();
+        inner.messages.push(signed_envelope(
+            inner.chain.as_bytes(),
+            &inner.session_id,
+            participant.participant_id(),
+            sender_sequence_bases[0],
+            &round_start,
+            KIND_NONCE_COMMITMENT,
+            &payload,
+            &identity_secret,
+        ));
+        let accepted = TestOperationalAcceptedSession {
+            inner,
+            round_start,
+            sender_sequence_bases,
+        };
+        let state = ValidatedSigningRoundStateV1::from_operational_session_authority::<
+            TestOperationalSessionAuthority,
+        >(accepted, &local_share)
+        .expect("global operational signing round");
+        assert_eq!(state.base_context.transcript_hash(), &round_start);
+        assert_eq!(state.sender_sequence_bases, sender_sequence_bases);
+        assert_eq!(state.next_sender_sequences, [10, 14]);
+        assert_eq!(state.commitments.len(), 1);
+        assert!(state.pending.is_empty());
     }
 
     struct CommitmentFixture {

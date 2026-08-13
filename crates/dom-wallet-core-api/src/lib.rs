@@ -13,6 +13,13 @@ use thiserror::Error;
 /// Current scanner cursor wire version.
 pub const WALLET_SCAN_CURSOR_VERSION: u16 = 1;
 
+/// Full-fidelity scanner projection schema consumed by Wallet V3 and F7.
+///
+/// This version is independent of consensus and wire versions. It is bumped
+/// only when the additive scanner projection can no longer be decoded by a V1
+/// consumer.
+pub const FULL_SCAN_PROJECTION_VERSION: u16 = 1;
+
 /// Current scanner cursor serialized byte length.
 pub const WALLET_SCAN_CURSOR_LEN: usize = 2 + 4 + 32 + 8 + 8 + 32;
 
@@ -229,6 +236,9 @@ pub struct ScanBlock {
     pub block_hash: [u8; 32],
     /// Previous block hash.
     pub previous_block_hash: [u8; 32],
+    /// Exact canonical DOM header bytes whose authenticated identifier is
+    /// `block_hash`.
+    pub canonical_header_bytes: Vec<u8>,
     /// Block timestamp.
     pub timestamp: u64,
     /// Canonical continuity marker.
@@ -239,6 +249,11 @@ pub struct ScanBlock {
     pub inputs: Vec<ScanInput>,
     /// Kernels in this block.
     pub kernels: Vec<ScanKernel>,
+    /// Canonical non-coinbase transactions, preserving block order and every
+    /// transaction boundary. This is the authoritative F7 monitoring view;
+    /// the flat input/output/kernel projections above remain for Wallet V3
+    /// recovery compatibility.
+    pub transactions: Vec<ScanTransaction>,
     /// Coinbase metadata.
     pub coinbase: CoinbaseScanMetadata,
     /// Total transaction fees in noms.
@@ -289,6 +304,39 @@ pub struct ScanKernel {
     pub fee: u64,
     /// Absolute lock height.
     pub lock_height: u64,
+    /// Canonical 65-byte DOM Schnorr signature. Keeping this field is required
+    /// for Scriptless claim-secret extraction from a confirmed transaction.
+    pub excess_signature: [u8; 65],
+}
+
+/// Canonical location of one non-coinbase transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransactionLocation {
+    /// Canonical block height.
+    pub block_height: u64,
+    /// Canonical block identifier.
+    pub block_hash: [u8; 32],
+    /// Zero-based position in `Block::transactions`.
+    pub transaction_index: u32,
+}
+
+/// Full-fidelity canonical transaction projection for monitoring and restore.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanTransaction {
+    /// Canonical chain location observed under the scanner's chain lock.
+    pub location: TransactionLocation,
+    /// BLAKE2b-256 of `canonical_bytes`, matching DOM mempool transaction IDs.
+    pub tx_hash: [u8; 32],
+    /// Exact `DomSerialize` transaction bytes accepted by the DOM decoder.
+    pub canonical_bytes: Vec<u8>,
+    /// Inputs in canonical transaction order.
+    pub inputs: Vec<ScanInput>,
+    /// Outputs in canonical transaction order.
+    pub outputs: Vec<ScanOutput>,
+    /// Kernels in canonical transaction order, including final signatures.
+    pub kernels: Vec<ScanKernel>,
+    /// Canonical transaction offset scalar bytes.
+    pub offset: [u8; 32],
 }
 
 /// Coinbase metadata.
@@ -300,6 +348,14 @@ pub struct CoinbaseScanMetadata {
     pub explicit_value: u64,
     /// Coinbase kernel excess.
     pub kernel_excess: [u8; 33],
+    /// Coinbase kernel feature byte.
+    pub kernel_features: u8,
+    /// Canonical 65-byte coinbase kernel signature.
+    pub kernel_excess_signature: [u8; 65],
+    /// Canonical coinbase transaction offset.
+    pub offset: [u8; 32],
+    /// Exact canonical coinbase output proof envelope.
+    pub output_proof_envelope: Vec<u8>,
 }
 
 /// UTXO query result.

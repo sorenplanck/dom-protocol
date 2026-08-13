@@ -28,7 +28,8 @@ fn all_eight_scad0_vectors_verify_adapt_extract_and_pass_consensus() {
         let fields = line.split('|').collect::<Vec<_>>();
         assert_eq!(fields.len(), 5, "SCAD0 record shape");
         let id = fields[0];
-        let secret = AdaptorSecret::from_be_bytes(decode_array(fields[1]))
+        let secret_bytes: [u8; 32] = decode_array(fields[1]);
+        let secret = AdaptorSecret::from_be_bytes(secret_bytes)
             .unwrap_or_else(|error| panic!("{id} secret: {error}"));
         let adaptor_point = PublicKey::from_compressed_bytes(&decode_array::<33>(fields[2]))
             .unwrap_or_else(|error| panic!("{id} adaptor point: {error}"));
@@ -91,6 +92,20 @@ fn all_eight_scad0_vectors_verify_adapt_extract_and_pass_consensus() {
             extracted.public_point().expect("extracted point"),
             secret.public_point().expect("adaptor point"),
             "{id} extracted point"
+        );
+        let revealed = pre_signature
+            .extract_revealed_secret_be_bytes(
+                &adapted,
+                &[0x22; 32],
+                &[0x33; 32],
+                &signing_key,
+                &CHAIN_ID,
+                &MESSAGE,
+            )
+            .unwrap_or_else(|error| panic!("{id} revealed extraction: {error}"));
+        assert_eq!(
+            *revealed, secret_bytes,
+            "{id} revealed bytes satisfy t*G == T"
         );
 
         let transaction = Transaction {
@@ -256,7 +271,27 @@ fn wrong_adaptor_secret_and_mutated_signature_are_rejected() {
                 &MESSAGE,
             )
             .is_err());
+        assert!(pre_signature
+            .extract_revealed_secret_be_bytes(
+                &mutated,
+                &[0x22; 32],
+                &[0x33; 32],
+                &signing_key,
+                &CHAIN_ID,
+                &MESSAGE,
+            )
+            .is_err());
     }
+    assert!(pre_signature
+        .extract_revealed_secret_be_bytes(
+            &signature,
+            &[0x23; 32],
+            &[0x33; 32],
+            &signing_key,
+            &CHAIN_ID,
+            &MESSAGE,
+        )
+        .is_err());
 }
 
 /// The secp256k1 field prime `p = 2^256 - 2^32 - 977`. An x coordinate must be

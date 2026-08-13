@@ -64,20 +64,16 @@
 //! use dom_adaptor::SigningRoundSessionRequestV1;
 //! ```
 //!
-//! A generic accepted-session implementation cannot invoke the associated-type
-//! production entry:
+//! A caller-defined implementation of the semantic accepted-session view
+//! cannot invoke the crate-internal replay constructor directly; production
+//! callers enter only through `from_session_authority`, naming their
+//! statically selected `SigningSessionAuthorityV1` composition root:
 //!
 //! ```compile_fail
-//! use dom_adaptor::{AcceptedSigningSessionV1, NonceVaultV1,
-//!     ReservationLookupCustodyV1, SigningSessionAuthorityV1, VaultBackedSignerV1};
-//! fn start<V, C, S, T>(signer: &mut VaultBackedSignerV1<V, C, S>, session: T)
-//! where
-//!     V: NonceVaultV1,
-//!     C: ReservationLookupCustodyV1,
-//!     S: SigningSessionAuthorityV1,
-//!     T: AcceptedSigningSessionV1,
-//! {
-//!     let _round = signer.begin_accepted_signing_round(session);
+//! use dom_adaptor::{AcceptedSigningSessionV1, SigningShareV1,
+//!     ValidatedSigningRoundStateV1};
+//! fn start<S: AcceptedSigningSessionV1>(session: S, share: &SigningShareV1) {
+//!     let _round = ValidatedSigningRoundStateV1::from_accepted_session(session, share);
 //! }
 //! ```
 //!
@@ -282,6 +278,47 @@
 //!         ResendProtocolStageV1::PartialSignature, [2; 32]);
 //! }
 //! ```
+//!
+//! Operational funding import authority cannot be constructed by a downstream
+//! caller:
+//!
+//! ```compile_fail
+//! use dom_adaptor::OperationalFundingAuthorizationImportCapabilityV1;
+//! let _capability = OperationalFundingAuthorizationImportCapabilityV1::new();
+//! ```
+//!
+//! A fully signed funding transaction has no public transaction or byte
+//! accessor before it is consumed by the statically selected Store sink:
+//!
+//! ```compile_fail
+//! use dom_adaptor::VerifiedFundingTransactionV1;
+//! fn escape(funding: &VerifiedFundingTransactionV1) {
+//!     let _bytes = funding.canonical_bytes();
+//! }
+//! ```
+//!
+//! Collaborative-BP finalizer/proof import authorities are driver-created;
+//! downstream code cannot construct one or extract continuation plaintext:
+//!
+//! ```compile_fail
+//! use dom_adaptor::CollaborativeBpFinalizeImportCapabilityV1;
+//! let _ = CollaborativeBpFinalizeImportCapabilityV1::for_restart;
+//! ```
+//!
+//! ```compile_fail
+//! use dom_adaptor::CollaborativeBpFinalizeContinuationV1;
+//! fn escape(continuation: CollaborativeBpFinalizeContinuationV1) {
+//!     let _bytes = continuation.into_zeroizing_bytes();
+//! }
+//! ```
+//!
+//! A verified collaborative proof has no public constructor before the Store's
+//! persistence-and-finalizer-retirement transaction succeeds:
+//!
+//! ```compile_fail
+//! use dom_adaptor::DurableBpProofTransportV1;
+//! let _ = DurableBpProofTransportV1::new;
+//! ```
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -289,27 +326,31 @@
 mod adaptor;
 mod bulletproof_mpc;
 mod chain_projection;
-mod collaborative_range_proof;
-mod domain_tag;
-mod fee_bump;
+mod collaborative_bp_nonce_vault;
 mod collaborative_output;
+mod collaborative_range_proof;
 mod context;
 mod contract_session;
 mod decoy_capsule;
+mod domain_tag;
 mod error;
+mod fee_bump;
 mod funding_authority;
 mod messages;
 mod nonce;
 mod nonce_secret_record;
 mod nonce_vault;
+mod operational_funding_authority;
 mod partial_commitment_pop;
 mod permit;
 mod reservation_binding;
 mod secret_nonce;
 mod session;
 mod share_pop;
+mod shared_blinding_vault;
 mod signing_round;
 mod signing_share;
+mod transaction_lifecycle;
 mod transcript;
 mod vault_operation;
 mod vault_signer;
@@ -319,19 +360,27 @@ mod independent_vector_comparison;
 
 pub use adaptor::{AdaptorPreSignatureV1, AdaptorSecret, CoreAdaptorPreSignatureV1};
 pub use bulletproof_mpc::{BpRound1ShareV1, BpRound2ShareV1, BpStatementV1};
-pub use collaborative_range_proof::{
-    AggregateBpRound1, AggregateBpRound2, CollaborativeRangeProof, DomCollaborativeRangeProofV1,
-    LocalBpSecrets, PendingCommonNonce, RangeProof739,
-};
-pub use domain_tag::DomainTag;
 pub use chain_projection::{
     ChainProjectionV1, ContractTxRoleV1, IrreversibleStateV1, LocalContractIndexV1,
     MonitorActionV1, ReorgEventV1, ReorgWindowV1, TxIndexEntryV1, TxObservation,
 };
-pub use fee_bump::{required_child_fee_v1, ChildFeeV1, FeeBumpPolicyV1};
+pub use collaborative_bp_nonce_vault::{
+    CollaborativeBpFinalizeBindingV1, CollaborativeBpFinalizeContinuationV1,
+    CollaborativeBpFinalizeImportCapabilityV1, CollaborativeBpNonceBindingV1,
+    CollaborativeBpNonceImportCapabilityV1, CollaborativeBpNonceMaterialV1,
+    CollaborativeBpNonceSealCapabilityV1, CollaborativeBpNonceVaultError,
+    CollaborativeBpNonceVaultV1, CollaborativeBpProofImportCapabilityV1,
+    CollaborativeBpProofPersistenceCapabilityV1, CollaborativeBpRound2ImportCapabilityV1,
+    CollaborativeBpRound2PersistenceCapabilityV1, DurableBpProofTransportV1,
+    DurableBpRound2TransportV1,
+};
 pub use collaborative_output::{
     aggregate_shared_commitment_v1, contribute_blinding_share_v1, BlindingShareV1,
     SharedCommitmentV1,
+};
+pub use collaborative_range_proof::{
+    AggregateBpRound1, AggregateBpRound2, CollaborativeRangeProof, DomCollaborativeRangeProofV1,
+    LocalBpSecrets, PendingCommonNonce, RangeProof739,
 };
 pub use context::{DirectionV1, SessionContextInputsV1, SessionContextV1, SigningPhaseV1};
 pub use contract_session::{
@@ -342,6 +391,8 @@ pub use decoy_capsule::{
     combine_decoy_capsule_v1, DecoyCommitmentV1, DecoyContributionV1, DecoyRevealV1,
     DECOY_VARIABLE_LEN,
 };
+pub use domain_tag::DomainTag;
+pub use fee_bump::{required_child_fee_v1, ChildFeeV1, FeeBumpPolicyV1};
 pub use funding_authority::{
     verify_bilateral_backup_v1, BackupConfirmedV1, FundingAuthorizationV1, ShareBackupAckV1,
 };
@@ -367,6 +418,12 @@ pub use nonce_vault::{
     ValidatedPreparedExposureViewV1, VaultArtifactPersistencePermitV1, VaultComputationStageV1,
     VaultExportedArtifactV1, VaultKeyId, VaultReservationSnapshotV1, VaultSpentArtifactSnapshotV1,
 };
+pub use operational_funding_authority::{
+    DurableOperationalFundingIssuanceV1, OperationalFundingAuthorizationBindingV1,
+    OperationalFundingAuthorizationError, OperationalFundingAuthorizationImportCapabilityV1,
+    OperationalFundingAuthorizationStoreV1, OperationalFundingAuthorizationV1,
+    OperationalFundingUnsignedTemplateV1,
+};
 pub use partial_commitment_pop::{
     prove_partial_commitment_v1, verify_all_partial_commitments_v1, verify_partial_commitment_v1,
     PartialBlindingV1, PartialCommitmentProofV1,
@@ -385,7 +442,8 @@ pub use share_pop::{
     prove_share_knowledge_v1, verify_share_knowledge_v1, SharePoPStatementV1, ShareProofV1,
 };
 pub use signing_round::{
-    AcceptedMessageDispositionV1, AcceptedSigningSessionV1, SigningSessionAuthorityV1,
+    AcceptedMessageDispositionV1, AcceptedOperationalSigningSessionV1, AcceptedSigningSessionV1,
+    OperationalSigningSessionAuthorityV1, SigningSessionAuthorityV1,
     ValidatedAcceptedSessionMessageV1, ValidatedCommitmentRoundV1, ValidatedDerivationBaseV1,
     ValidatedResendAuthorizationV1, ValidatedRevealRoundV1, ValidatedSigningRoundStateV1,
 };
@@ -396,10 +454,27 @@ pub use nonce_vault::fuzz_nar006_runtime_bindings_v1;
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub use reservation_binding::fuzz_closed_request_types_v1;
+pub use shared_blinding_vault::{
+    contribute_vault_backed_blinding_share_v1, open_pending_vault_backed_blinding_share_v1,
+    open_vault_backed_blinding_share_v1, DurableShareBackupAckCapabilityV1,
+    PendingSessionBlindingShareCapabilityV1, PendingSharedBlindingBindingV1,
+    SessionBlindingShareCapabilityV1, SharedBlindingBindingUpgradeCapabilityV1,
+    SharedBlindingBindingV1, SharedBlindingImportCapabilityV1, SharedBlindingMaterialV1,
+    SharedBlindingRetirementCapabilityV1, SharedBlindingSealCapabilityV1, SharedBlindingVaultError,
+    SharedBlindingVaultV1,
+};
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub use signing_round::fuzz_dsc1_signing_round_acceptance_v1;
-pub use signing_share::SigningShareV1;
+pub use signing_share::{
+    aggregate_transaction_offset_contributions_v1, compose_local_funding_signing_share_v1,
+    compose_local_shared_output_spend_signing_share_v1, SigningShareV1,
+};
+pub use transaction_lifecycle::{
+    OperationalFundingPersistenceCapabilityV1, OperationalFundingTransactionSinkV1,
+    ScriptlessTransactionTemplateV1, VerifiedFundingAuthorizationV1, VerifiedFundingTransactionV1,
+    VerifiedScriptlessTransactionV1, VerifiedSharedOutputV1,
+};
 pub use transcript::{
     binding_factor_v1, nonce_commitment_hash_v1, BindingContextV1, BindingFactorV1,
     ParticipantPublicNoncesV1,

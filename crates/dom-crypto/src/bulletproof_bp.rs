@@ -29,7 +29,7 @@
 // helper paths only used by tests/regressions.
 #![allow(dead_code)]
 
-use crate::pedersen::{derive_complement_commitment, negate_blinding, BlindingFactor};
+use crate::pedersen::{derive_complement_commitment, negate_blinding, BlindingFactor, Commitment};
 use crate::range_proof::MAX_PROVABLE_VALUE;
 use crate::sec1_zkp_bridge::{sec1_to_zkp, zkp_to_sec1}; // single source of truth for SEC1<->zkp
 use dom_core::DomError;
@@ -53,6 +53,11 @@ pub(crate) const PROOF_NBITS: usize = 64;
 ///   1. `v`
 ///   2. `MAX_PROVABLE_VALUE - v`
 const PROOF_NCOMMITS: usize = 2;
+
+const MPC_FINALIZE_CONTINUATION_MAGIC_V1: &[u8; 4] = b"DBFC";
+const MPC_FINALIZE_CONTINUATION_VERSION_V1: u16 = 1;
+const MPC_FINALIZE_CONTINUATION_FIXED_LEN_V1: usize = 278;
+const MPC_FINALIZE_CONTINUATION_MAX_EXTRA_COMMIT_LEN_V1: usize = u16::MAX as usize;
 
 fn proof_has_valid_curve_points(proof: &[u8]) -> bool {
     // The first Bulletproof section is 64 bytes of scalars followed by one
@@ -726,6 +731,230 @@ pub struct BulletproofMpcFinalizeState {
     state: BulletproofMpcRound1State,
     t_one: ffi::PublicKey,
     t_two: ffi::PublicKey,
+}
+
+fn continuation_array<const N: usize>(
+    bytes: &[u8],
+    cursor: &mut usize,
+    field: &'static str,
+) -> Result<[u8; N], DomError> {
+    let end = cursor
+        .checked_add(N)
+        .ok_or_else(|| DomError::Malformed("BP finalizer continuation length overflow".into()))?;
+    let value = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| DomError::Malformed(format!("BP finalizer continuation misses {field}")))?
+        .try_into()
+        .map_err(|_| DomError::Malformed(format!("BP finalizer continuation invalid {field}")))?;
+    *cursor = end;
+    Ok(value)
+}
+
+/// Serialize one consumed collaborative-BP finalizer into the canonical V1
+/// crash-continuation plaintext used exclusively by an authenticated vault.
+///
+/// This is a low-level custody hook, not a wire codec. The returned buffer
+/// contains secret blinding and nonce material and therefore is zeroizing. A
+/// higher layer must pass it directly to authenticated encryption, bind it to
+/// the statement/participant/aggregate-round-1 identity, and never log,
+/// clone, back up, or transport it. The operational adaptor exposes this hook
+/// only through one-shot Store capabilities.
+#[doc(hidden)]
+pub fn bulletproof_mpc_finalize_continuation_to_bytes_v1(
+    state: BulletproofMpcFinalizeState,
+) -> Result<Zeroizing<Vec<u8>>, DomError> {
+    let backend = backend()?;
+    let BulletproofMpcFinalizeState {
+        state,
+        t_one,
+        t_two,
+    } = state;
+    let BulletproofMpcRound1State {
+        value,
+        blind_pair,
+        commitments,
+        common_nonce,
+        private_nonce,
+        extra_commit,
+    } = state;
+    if extra_commit.len() > MPC_FINALIZE_CONTINUATION_MAX_EXTRA_COMMIT_LEN_V1 {
+        return Err(DomError::Invalid(
+            "BP finalizer continuation extra_commit exceeds the V1 bound".into(),
+        ));
+    }
+    let extra_len = u32::try_from(extra_commit.len()).map_err(|_| {
+        DomError::Invalid("BP finalizer continuation extra_commit is too long".into())
+    })?;
+    let capacity = MPC_FINALIZE_CONTINUATION_FIXED_LEN_V1
+        .checked_add(extra_commit.len())
+        .ok_or_else(|| DomError::Malformed("BP finalizer continuation length overflow".into()))?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
+    bytes.extend_from_slice(MPC_FINALIZE_CONTINUATION_MAGIC_V1);
+    bytes.extend_from_slice(&MPC_FINALIZE_CONTINUATION_VERSION_V1.to_le_bytes());
+    bytes.extend_from_slice(&value.to_le_bytes());
+    bytes.extend_from_slice(&blind_pair[0]);
+    bytes.extend_from_slice(&blind_pair[1]);
+    bytes.extend_from_slice(&commitments[0]);
+    bytes.extend_from_slice(&commitments[1]);
+    bytes.extend_from_slice(common_nonce.as_ref());
+    bytes.extend_from_slice(private_nonce.as_ref());
+    bytes.extend_from_slice(&extra_len.to_le_bytes());
+    bytes.extend_from_slice(&extra_commit);
+    bytes.extend_from_slice(&mpc_serialize_public_key(backend, &t_one)?);
+    bytes.extend_from_slice(&mpc_serialize_public_key(backend, &t_two)?);
+    debug_assert_eq!(bytes.len(), capacity);
+    Ok(bytes)
+}
+
+/// Reconstruct one collaborative-BP finalizer from authenticated canonical V1
+/// custody plaintext and bind it to all expected public protocol inputs.
+///
+/// The caller must supply bytes obtained from authenticated, rollback-safe
+/// storage. Parsing revalidates every scalar, point, commitment relation,
+/// aggregate round-1 point, statement value/commitment, and exact
+/// `extra_commit` before rebuilding the opaque backend state. The input is
+/// consumed and zeroized on every path.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn bulletproof_mpc_finalize_continuation_from_bytes_v1(
+    bytes: Zeroizing<Vec<u8>>,
+    expected_value: u64,
+    expected_commitment: &[u8; 33],
+    expected_blinding_point: &[u8; 33],
+    expected_t_one: &[u8; 33],
+    expected_t_two: &[u8; 33],
+    expected_extra_commit: &[u8],
+) -> Result<BulletproofMpcFinalizeState, DomError> {
+    if bytes.len() < MPC_FINALIZE_CONTINUATION_FIXED_LEN_V1 {
+        return Err(DomError::Malformed(
+            "BP finalizer continuation is shorter than the V1 minimum".into(),
+        ));
+    }
+    let mut cursor = 0usize;
+    let magic = continuation_array::<4>(&bytes, &mut cursor, "magic")?;
+    if &magic != MPC_FINALIZE_CONTINUATION_MAGIC_V1 {
+        return Err(DomError::Invalid(
+            "BP finalizer continuation magic mismatch".into(),
+        ));
+    }
+    let version = u16::from_le_bytes(continuation_array::<2>(&bytes, &mut cursor, "version")?);
+    if version != MPC_FINALIZE_CONTINUATION_VERSION_V1 {
+        return Err(DomError::Invalid(
+            "BP finalizer continuation version mismatch".into(),
+        ));
+    }
+    let value = u64::from_le_bytes(continuation_array::<8>(&bytes, &mut cursor, "value")?);
+    if value != expected_value || value > MAX_PROVABLE_VALUE {
+        return Err(DomError::Invalid(
+            "BP finalizer continuation value differs from the statement".into(),
+        ));
+    }
+    let first_blind = Zeroizing::new(continuation_array::<32>(
+        &bytes,
+        &mut cursor,
+        "primary blinding",
+    )?);
+    let complement_blind = Zeroizing::new(continuation_array::<32>(
+        &bytes,
+        &mut cursor,
+        "complement blinding",
+    )?);
+    BlindingFactor::from_bytes(*first_blind)?;
+    if crate::scriptless::secret_scalar_public_key(&first_blind)?.to_compressed_bytes()
+        != *expected_blinding_point
+    {
+        return Err(DomError::Invalid(
+            "BP finalizer continuation blinding differs from the participant share".into(),
+        ));
+    }
+    if negate_blinding(&first_blind)? != *complement_blind {
+        return Err(DomError::Invalid(
+            "BP finalizer continuation complement blinding mismatch".into(),
+        ));
+    }
+    BlindingFactor::from_bytes(*complement_blind)?;
+    let commitments = [
+        continuation_array::<33>(&bytes, &mut cursor, "primary commitment")?,
+        continuation_array::<33>(&bytes, &mut cursor, "complement commitment")?,
+    ];
+    let expected_aggregate = Commitment::from_compressed_bytes(expected_commitment)?;
+    let expected_complement =
+        derive_complement_commitment(&expected_aggregate, MAX_PROVABLE_VALUE)?;
+    if &commitments[0] != expected_commitment || expected_complement.as_bytes() != &commitments[1] {
+        return Err(DomError::Invalid(
+            "BP finalizer continuation commitment relation mismatch".into(),
+        ));
+    }
+    let common_nonce = Zeroizing::new(continuation_array::<32>(
+        &bytes,
+        &mut cursor,
+        "common nonce",
+    )?);
+    let private_nonce = Zeroizing::new(continuation_array::<32>(
+        &bytes,
+        &mut cursor,
+        "private nonce",
+    )?);
+    if !crate::scriptless::scalar_bytes_are_canonical(&common_nonce, false)
+        || !crate::scriptless::scalar_bytes_are_canonical(&private_nonce, false)
+    {
+        return Err(DomError::Invalid(
+            "BP finalizer continuation nonce is zero or noncanonical".into(),
+        ));
+    }
+    let extra_len = u32::from_le_bytes(continuation_array::<4>(
+        &bytes,
+        &mut cursor,
+        "extra_commit length",
+    )?) as usize;
+    if extra_len > MPC_FINALIZE_CONTINUATION_MAX_EXTRA_COMMIT_LEN_V1 {
+        return Err(DomError::Invalid(
+            "BP finalizer continuation extra_commit exceeds the V1 bound".into(),
+        ));
+    }
+    let expected_len = MPC_FINALIZE_CONTINUATION_FIXED_LEN_V1
+        .checked_add(extra_len)
+        .ok_or_else(|| DomError::Malformed("BP finalizer continuation length overflow".into()))?;
+    if bytes.len() != expected_len {
+        return Err(DomError::Malformed(format!(
+            "BP finalizer continuation length {}, expected {expected_len}",
+            bytes.len()
+        )));
+    }
+    let extra_end = cursor
+        .checked_add(extra_len)
+        .ok_or_else(|| DomError::Malformed("BP finalizer continuation length overflow".into()))?;
+    let extra_commit = bytes
+        .get(cursor..extra_end)
+        .ok_or_else(|| DomError::Malformed("BP finalizer continuation misses extra_commit".into()))?
+        .to_vec();
+    cursor = extra_end;
+    if extra_commit != expected_extra_commit {
+        return Err(DomError::Invalid(
+            "BP finalizer continuation extra_commit differs from the statement".into(),
+        ));
+    }
+    let t_one_bytes = continuation_array::<33>(&bytes, &mut cursor, "aggregate T1")?;
+    let t_two_bytes = continuation_array::<33>(&bytes, &mut cursor, "aggregate T2")?;
+    if &t_one_bytes != expected_t_one || &t_two_bytes != expected_t_two {
+        return Err(DomError::Invalid(
+            "BP finalizer continuation aggregate round-1 points mismatch".into(),
+        ));
+    }
+    debug_assert_eq!(cursor, bytes.len());
+    let backend = backend()?;
+    Ok(BulletproofMpcFinalizeState {
+        state: BulletproofMpcRound1State {
+            value,
+            blind_pair: Zeroizing::new([*first_blind, *complement_blind]),
+            commitments,
+            common_nonce,
+            private_nonce,
+            extra_commit,
+        },
+        t_one: mpc_parse_public_key(backend, &t_one_bytes)?,
+        t_two: mpc_parse_public_key(backend, &t_two_bytes)?,
+    })
 }
 
 fn mpc_internal_commitments(

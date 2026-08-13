@@ -13,11 +13,15 @@
 //! foundation those demonstrations stand on.
 
 use dom_adaptor::{
-    combine_decoy_capsule_v1, verify_all_partial_commitments_v1, AdaptorPreSignatureV1,
-    AdaptorSecret, BpStatementV1, ContractEnvelopeV1, ContractKindV1, ContractStageV1,
-    ContractStateV1, DecoyContributionV1, DirectionV1, FundingAuthorizationV1, PartialBlindingV1,
-    PartialCommitmentProofV1, RefundDeadlinePolicyV1, SessionId, ShareBackupAckV1, SigningShareV1,
-    TrustedChainIdV1,
+    combine_decoy_capsule_v1, contribute_vault_backed_blinding_share_v1,
+    verify_all_partial_commitments_v1, AdaptorPreSignatureV1, AdaptorSecret, BpStatementV1,
+    ContractEnvelopeV1, ContractKindV1, ContractStageV1, ContractStateV1, DecoyContributionV1,
+    DirectionV1, DurableShareBackupAckCapabilityV1, FundingAuthorizationV1, PartialBlindingV1,
+    PartialCommitmentProofV1, PendingSharedBlindingBindingV1, RefundDeadlinePolicyV1, SessionId,
+    ShareBackupAckV1, SharedBlindingBindingUpgradeCapabilityV1, SharedBlindingBindingV1,
+    SharedBlindingImportCapabilityV1, SharedBlindingMaterialV1,
+    SharedBlindingRetirementCapabilityV1, SharedBlindingSealCapabilityV1, SharedBlindingVaultV1,
+    SigningShareV1, TrustedChainIdV1,
 };
 use dom_core::Hash256;
 use dom_crypto::recovery::RECOVERY_CAPSULE_SIZE;
@@ -27,6 +31,114 @@ use dom_crypto::{
     PartialSig, PublicKey, RANGE_PROOF_SIZE,
 };
 use zeroize::Zeroizing;
+
+#[derive(Debug, thiserror::Error)]
+#[error("test shared-blinding vault failure")]
+struct TestShareVaultError;
+
+#[derive(Default)]
+struct TestShareVault {
+    plaintext: Option<[u8; 32]>,
+    pending: Option<PendingSharedBlindingBindingV1>,
+    bound: Option<SharedBlindingBindingV1>,
+}
+
+impl SharedBlindingVaultV1 for TestShareVault {
+    type Error = TestShareVaultError;
+
+    fn seal_fresh_share(
+        &mut self,
+        binding: &PendingSharedBlindingBindingV1,
+        material: SharedBlindingMaterialV1,
+        capability: SharedBlindingSealCapabilityV1,
+    ) -> Result<(), Self::Error> {
+        if self.plaintext.is_some() {
+            return Err(TestShareVaultError);
+        }
+        self.plaintext = Some(*capability.into_plaintext(material));
+        self.pending = Some(binding.clone());
+        Ok(())
+    }
+
+    fn open_persisted_pending_share(
+        &mut self,
+        binding: &PendingSharedBlindingBindingV1,
+        capability: SharedBlindingImportCapabilityV1,
+    ) -> Result<SharedBlindingMaterialV1, Self::Error> {
+        if self.pending.as_ref() != Some(binding) {
+            return Err(TestShareVaultError);
+        }
+        capability
+            .import(Zeroizing::new(self.plaintext.ok_or(TestShareVaultError)?))
+            .map_err(|_| TestShareVaultError)
+    }
+
+    fn confirm_pending_backup_roundtrip(
+        &mut self,
+        binding: &PendingSharedBlindingBindingV1,
+        capability: DurableShareBackupAckCapabilityV1,
+    ) -> Result<ShareBackupAckV1, Self::Error> {
+        capability
+            .acknowledge_pending(binding, binding.share_point().clone())
+            .map_err(|_| TestShareVaultError)
+    }
+
+    fn bind_recovery_capsule(
+        &mut self,
+        pending: &PendingSharedBlindingBindingV1,
+        bound: &SharedBlindingBindingV1,
+        capability: SharedBlindingBindingUpgradeCapabilityV1,
+    ) -> Result<(), Self::Error> {
+        capability
+            .authorize_upgrade(pending, bound)
+            .map_err(|_| TestShareVaultError)?;
+        if self.pending.as_ref() != Some(pending) || self.bound.is_some() {
+            return Err(TestShareVaultError);
+        }
+        self.bound = Some(bound.clone());
+        self.pending = None;
+        Ok(())
+    }
+
+    fn open_persisted_share(
+        &mut self,
+        binding: &SharedBlindingBindingV1,
+        capability: SharedBlindingImportCapabilityV1,
+    ) -> Result<SharedBlindingMaterialV1, Self::Error> {
+        if self.bound.as_ref() != Some(binding) {
+            return Err(TestShareVaultError);
+        }
+        capability
+            .import(Zeroizing::new(self.plaintext.ok_or(TestShareVaultError)?))
+            .map_err(|_| TestShareVaultError)
+    }
+
+    fn confirm_backup_roundtrip(
+        &mut self,
+        binding: &SharedBlindingBindingV1,
+        capability: DurableShareBackupAckCapabilityV1,
+    ) -> Result<ShareBackupAckV1, Self::Error> {
+        capability
+            .acknowledge(binding, binding.share_point().clone())
+            .map_err(|_| TestShareVaultError)
+    }
+
+    fn retire_pending_share(
+        &mut self,
+        _binding: &PendingSharedBlindingBindingV1,
+        _capability: SharedBlindingRetirementCapabilityV1,
+    ) -> Result<(), Self::Error> {
+        Err(TestShareVaultError)
+    }
+
+    fn retire_bound_share(
+        &mut self,
+        _binding: &SharedBlindingBindingV1,
+        _capability: SharedBlindingRetirementCapabilityV1,
+    ) -> Result<(), Self::Error> {
+        Err(TestShareVaultError)
+    }
+}
 
 const CHAIN_ID: [u8; 32] = [0xAD; 32];
 
@@ -219,10 +331,48 @@ fn g3_abort_always_available_resume_and_ordering_invariants() {
 #[test]
 fn g4_funding_order_backup_and_refund_margin_invariants() {
     // The bilateral backup gate: every participant's roundtrip must be confirmed.
-    let points = vec![point(3), point(5)];
+    let roster = [[0x31; 32], [0x32; 32]];
+    let mut vault_a = TestShareVault::default();
+    let mut vault_b = TestShareVault::default();
+    let pending_a = contribute_vault_backed_blinding_share_v1(
+        &chain(),
+        [0x22; 32],
+        &roster,
+        DirectionV1::Initiator,
+        0,
+        [0x41; 32],
+        &mut vault_a,
+    )
+    .expect("durable share A");
+    let pending_b = contribute_vault_backed_blinding_share_v1(
+        &chain(),
+        [0x22; 32],
+        &roster,
+        DirectionV1::Responder,
+        1,
+        [0x41; 32],
+        &mut vault_b,
+    )
+    .expect("durable share B");
+    let decoy_a = pending_a.derive_decoy_contribution_v1().expect("decoy A");
+    let decoy_b = pending_b.derive_decoy_contribution_v1().expect("decoy B");
+    let commitment_b = decoy_b.commitment();
+    let capsule = combine_decoy_capsule_v1(
+        &decoy_a.into_reveal(),
+        &decoy_b.into_reveal(),
+        &commitment_b,
+    )
+    .expect("canonical bilateral capsule");
+    let mut cap_a = pending_a
+        .bind_recovery_capsule_v1(&capsule, &mut vault_a)
+        .expect("bound share A");
+    let mut cap_b = pending_b
+        .bind_recovery_capsule_v1(&capsule, &mut vault_b)
+        .expect("bound share B");
+    let points = vec![cap_a.public_key().clone(), cap_b.public_key().clone()];
     let acks = vec![
-        ShareBackupAckV1::new(0, points[0].clone()),
-        ShareBackupAckV1::new(1, points[1].clone()),
+        cap_a.take_durable_backup_ack_v1().expect("backup A"),
+        cap_b.take_durable_backup_ack_v1().expect("backup B"),
     ];
     let backup = dom_adaptor::verify_bilateral_backup_v1(&points, &acks).expect("backup");
     assert!(
@@ -375,9 +525,21 @@ fn state_at_claim_presigned() -> ContractStateV1 {
     // §7.2/§7.3: refund co-signed (step 5), then the claim adaptor pre-signed /
     // ReadyToFund (steps 7-8), before funding is authorized.
     for (sender, target, seq) in [
-        (DirectionV1::Initiator, ContractStageV1::SharedOutputBuilt, 0u64),
-        (DirectionV1::Responder, ContractStageV1::RefundPresigned, 0u64),
-        (DirectionV1::Initiator, ContractStageV1::ClaimPresigned, 1u64),
+        (
+            DirectionV1::Initiator,
+            ContractStageV1::SharedOutputBuilt,
+            0u64,
+        ),
+        (
+            DirectionV1::Responder,
+            ContractStageV1::RefundPresigned,
+            0u64,
+        ),
+        (
+            DirectionV1::Initiator,
+            ContractStageV1::ClaimPresigned,
+            1u64,
+        ),
     ] {
         let env = ContractEnvelopeV1::new(
             &chain(),

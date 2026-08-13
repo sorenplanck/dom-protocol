@@ -66,11 +66,19 @@ use crate::bulletproof_mpc::{
     aggregate_round1_shares_v1, common_nonce_commitment_for_bytes_v1, derive_common_nonce_v1,
     finalize_participant_v1, no_recovery_sentinel_v1, participant_round1_v1, participant_round2_v1,
     BpCommonNonceShareV1, BpCommonNonceV1, BpLocalBlindingV1, BpParticipantFinalizeStateV1,
-    BpParticipantRound1StateV1, BpRound1ShareV1, BpRound2ShareV1, BpStatementV1,
+    BpParticipantRound1StateV1, BpPrivateNonceV1, BpRound1ShareV1, BpRound2ShareV1, BpStatementV1,
 };
-use crate::{AdaptorError, Result, SigningShareV1};
+use crate::{
+    AdaptorError, CollaborativeBpFinalizeBindingV1, CollaborativeBpFinalizeContinuationV1,
+    CollaborativeBpFinalizeImportCapabilityV1, CollaborativeBpNonceBindingV1,
+    CollaborativeBpNonceImportCapabilityV1, CollaborativeBpNonceMaterialV1,
+    CollaborativeBpNonceSealCapabilityV1, CollaborativeBpNonceVaultError,
+    CollaborativeBpNonceVaultV1, CollaborativeBpProofImportCapabilityV1,
+    CollaborativeBpProofPersistenceCapabilityV1, CollaborativeBpRound2ImportCapabilityV1,
+    CollaborativeBpRound2PersistenceCapabilityV1, DurableBpProofTransportV1,
+    DurableBpRound2TransportV1, Result, SigningShareV1,
+};
 use dom_crypto::{blake2b_256, range_proof_verify_with_extra_commit, PublicKey, RANGE_PROOF_SIZE};
-use rand_core::{OsRng, RngCore};
 use std::sync::Mutex;
 use zeroize::Zeroizing;
 
@@ -120,9 +128,27 @@ pub struct PendingCommonNonce {
     statement_hash: [u8; 32],
     blinding: BpLocalBlindingV1,
     own_reveal: Zeroizing<[u8; 32]>,
+    private_nonce: BpPrivateNonceV1,
 }
 
 impl PendingCommonNonce {
+    fn require_bound_share(
+        statement: &BpStatementV1,
+        participant_index: u16,
+        blinding_share: &SigningShareV1,
+    ) -> Result<()> {
+        let expected_share = statement
+            .commitment_shares()
+            .get(usize::from(participant_index))
+            .ok_or(AdaptorError::InvalidContext(
+                "collaborative proof participant index is outside the statement",
+            ))?;
+        if blinding_share.public_key() != expected_share {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
+        Ok(())
+    }
+
     /// Begin rodada 0A for one participant, injecting its §4.2 share.
     ///
     /// Fails closed unless `blinding_share` opens the statement's exact
@@ -135,21 +161,82 @@ impl PendingCommonNonce {
         participant_index: u16,
         blinding_share: &SigningShareV1,
     ) -> Result<(Self, [u8; 32])> {
-        let expected_share = statement
-            .commitment_shares()
-            .get(usize::from(participant_index))
-            .ok_or(AdaptorError::InvalidContext(
-                "collaborative proof participant index is outside the statement",
-            ))?;
-        if blinding_share.public_key() != expected_share {
-            return Err(AdaptorError::AuthorizationMismatch);
-        }
-        let blinding = BpLocalBlindingV1::from_signing_share(blinding_share)?;
+        let material = CollaborativeBpNonceMaterialV1::generate_from_os_rng()?;
+        Self::from_persisted_material_v1(statement, participant_index, blinding_share, material)
+    }
 
-        let mut own_reveal = Zeroizing::new([0u8; 32]);
-        OsRng
-            .try_fill_bytes(own_reveal.as_mut())
-            .map_err(|_| AdaptorError::RandomnessFailure)?;
+    /// Generate, durably seal, reopen, and validate fresh rodada-0A/backend
+    /// nonce material before releasing `c_i`.
+    ///
+    /// Production F7 callers use this entry instead of [`Self::new`]. The
+    /// selected vault sees the plaintext only through a one-shot seal/import
+    /// capability, authenticates the complete statement/session binding, and
+    /// must fsync the fresh record before returning. No public commitment is
+    /// computed until the authenticated reopen succeeds.
+    pub fn new_vault_backed_v1<Vault: CollaborativeBpNonceVaultV1>(
+        statement: &BpStatementV1,
+        participant_index: u16,
+        blinding_share: &SigningShareV1,
+        vault: &mut Vault,
+    ) -> core::result::Result<(Self, [u8; 32]), CollaborativeBpNonceVaultError<Vault::Error>> {
+        Self::require_bound_share(statement, participant_index, blinding_share)
+            .map_err(CollaborativeBpNonceVaultError::Protocol)?;
+        let binding = CollaborativeBpNonceBindingV1::from_statement(statement, participant_index)
+            .map_err(CollaborativeBpNonceVaultError::Protocol)?;
+        let material = CollaborativeBpNonceMaterialV1::generate_from_os_rng()
+            .map_err(CollaborativeBpNonceVaultError::Protocol)?;
+        vault
+            .seal_fresh_material(
+                &binding,
+                material,
+                CollaborativeBpNonceSealCapabilityV1::new(),
+            )
+            .map_err(CollaborativeBpNonceVaultError::Vault)?;
+        Self::resume_vault_backed_v1(statement, participant_index, blinding_share, vault)
+    }
+
+    /// Reconstruct the exact pending state from an authenticated encrypted
+    /// record after restart.
+    ///
+    /// The store owns whether its monotonic stage still permits this open. It
+    /// must reject consumed, replaced, rolled-back, or differently bound
+    /// material. Recomputed public bytes are deterministic for the same record;
+    /// once a later public artifact exists, the store retransmits those already
+    /// persisted bytes instead of reopening this method.
+    pub fn resume_vault_backed_v1<Vault: CollaborativeBpNonceVaultV1>(
+        statement: &BpStatementV1,
+        participant_index: u16,
+        blinding_share: &SigningShareV1,
+        vault: &mut Vault,
+    ) -> core::result::Result<(Self, [u8; 32]), CollaborativeBpNonceVaultError<Vault::Error>> {
+        Self::require_bound_share(statement, participant_index, blinding_share)
+            .map_err(CollaborativeBpNonceVaultError::Protocol)?;
+        let binding = CollaborativeBpNonceBindingV1::from_statement(statement, participant_index)
+            .map_err(CollaborativeBpNonceVaultError::Protocol)?;
+        let material = vault
+            .open_persisted_material(&binding, CollaborativeBpNonceImportCapabilityV1::new())
+            .map_err(CollaborativeBpNonceVaultError::Vault)?;
+        Self::from_persisted_material_v1(statement, participant_index, blinding_share, material)
+            .map_err(CollaborativeBpNonceVaultError::Protocol)
+    }
+
+    /// Rebuild a pending state from opaque, AEAD-authenticated persisted
+    /// material.
+    ///
+    /// Ordinary callers cannot construct `material`; only the driver's private
+    /// import capability can. This method revalidates the statement's exact
+    /// participant share, consumes both secret halves, and returns only the
+    /// public commitment alongside the one-shot pending state.
+    pub fn from_persisted_material_v1(
+        statement: &BpStatementV1,
+        participant_index: u16,
+        blinding_share: &SigningShareV1,
+        material: CollaborativeBpNonceMaterialV1,
+    ) -> Result<(Self, [u8; 32])> {
+        Self::require_bound_share(statement, participant_index, blinding_share)?;
+        let blinding = BpLocalBlindingV1::from_signing_share(blinding_share)?;
+        let (own_reveal, private_nonce) = material.into_parts();
+        let private_nonce = BpPrivateNonceV1::from_persisted_bytes(private_nonce)?;
         let commitment =
             common_nonce_commitment_for_bytes_v1(statement, participant_index, &own_reveal)?;
         Ok((
@@ -158,6 +245,7 @@ impl PendingCommonNonce {
                 statement_hash: statement.statement_hash(),
                 blinding,
                 own_reveal,
+                private_nonce,
             },
             commitment,
         ))
@@ -192,11 +280,11 @@ impl PendingCommonNonce {
         if self.statement_hash != statement.statement_hash() {
             return Err(AdaptorError::AuthorizationMismatch);
         }
-        let own = all_reveals
-            .get(usize::from(self.participant_index))
-            .ok_or(AdaptorError::InvalidContext(
+        let own = all_reveals.get(usize::from(self.participant_index)).ok_or(
+            AdaptorError::InvalidContext(
                 "collaborative proof reveal vector misses this participant",
-            ))?;
+            ),
+        )?;
         if own.as_ref() != self.own_reveal.as_ref() {
             return Err(AdaptorError::AuthorizationMismatch);
         }
@@ -216,6 +304,7 @@ impl PendingCommonNonce {
             stage: Mutex::new(LocalStage::Ready {
                 blinding: self.blinding,
                 common_nonce,
+                private_nonce: self.private_nonce,
             }),
         })
     }
@@ -225,6 +314,7 @@ enum LocalStage {
     Ready {
         blinding: BpLocalBlindingV1,
         common_nonce: BpCommonNonceV1,
+        private_nonce: BpPrivateNonceV1,
     },
     Round1Done {
         state: BpParticipantRound1StateV1,
@@ -310,12 +400,16 @@ impl AggregateBpRound2 {
 /// the error type (§5.5's `BpError`).
 pub trait CollaborativeRangeProof {
     /// Rodada 1 (§5.4): produce this participant's `T1_i`/`T2_i` share.
-    fn round1(&self, statement: &BpStatementV1, local: &LocalBpSecrets)
-        -> Result<BpRound1ShareV1>;
+    fn round1(&self, statement: &BpStatementV1, local: &LocalBpSecrets) -> Result<BpRound1ShareV1>;
 
     /// Rodada 2 (§5.4): produce this participant's `tau_x_i` share against
     /// the aggregated `T1`/`T2`. The local state is marked consumed before
     /// the share is returned.
+    ///
+    /// This frozen compatibility surface is for deterministic tests and
+    /// non-operational tooling. F7 production composition must call
+    /// [`DomCollaborativeRangeProofV1::round2_vault_backed_v1`] so persistence
+    /// and the durable nonce tombstone precede transport exposure.
     fn round2(
         &self,
         statement: &BpStatementV1,
@@ -381,14 +475,201 @@ impl DomCollaborativeRangeProofV1 {
         }
         Ok(())
     }
-}
 
-impl CollaborativeRangeProof for DomCollaborativeRangeProofV1 {
-    fn round1(
+    fn produce_round2_parts(
         &self,
         statement: &BpStatementV1,
         local: &LocalBpSecrets,
-    ) -> Result<BpRound1ShareV1> {
+        aggregate_r1: &AggregateBpRound1,
+    ) -> Result<(BpParticipantFinalizeStateV1, BpRound2ShareV1)> {
+        self.require_statement(statement)?;
+        if aggregate_r1.statement_hash != self.statement_hash {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
+        let mut stage = local.stage.lock().map_err(|_| poisoned())?;
+        if !matches!(*stage, LocalStage::Round1Done { .. }) {
+            return Err(consumed());
+        }
+        let LocalStage::Round1Done { state } = std::mem::replace(&mut *stage, LocalStage::Consumed)
+        else {
+            unreachable!("stage variant checked under the same lock");
+        };
+        // §5.5: local state is Consumed before either result can leave. The
+        // compatibility path keeps the finalizer process-local; the F7 path
+        // sends it immediately to the retained vault in the same boundary.
+        participant_round2_v1(state, statement, &aggregate_r1.t_one, &aggregate_r1.t_two)
+    }
+
+    fn produce_round2_share(
+        &self,
+        statement: &BpStatementV1,
+        local: &LocalBpSecrets,
+        aggregate_r1: &AggregateBpRound1,
+    ) -> Result<BpRound2ShareV1> {
+        let (finalizer, share) = self.produce_round2_parts(statement, local, aggregate_r1)?;
+        *self.finalizer.lock().map_err(|_| poisoned())? = Some(finalizer);
+        Ok(share)
+    }
+
+    fn finalize_binding_v1(
+        &self,
+        statement: &BpStatementV1,
+        participant_index: u16,
+        aggregate_r1: &AggregateBpRound1,
+    ) -> Result<CollaborativeBpFinalizeBindingV1> {
+        self.require_statement(statement)?;
+        if aggregate_r1.statement_hash != self.statement_hash {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
+        let nonce_binding =
+            CollaborativeBpNonceBindingV1::from_statement(statement, participant_index)?;
+        CollaborativeBpFinalizeBindingV1::new(
+            &nonce_binding,
+            statement,
+            aggregate_r1.t_one.to_compressed_bytes(),
+            aggregate_r1.t_two.to_compressed_bytes(),
+            &self.extra_commit,
+        )
+    }
+
+    /// Production round-2 boundary: persist the exact encrypted `tau_x_i`
+    /// artifact and atomically retire its nonce record before any transport
+    /// bytes can leave the driver.
+    ///
+    /// A vault error returns no share bytes. If the retained transaction
+    /// committed before a crash/error became observable, recovery proceeds only
+    /// through [`Self::resume_persisted_round2_v1`]; the consumed nonce is never
+    /// reopened or recomputed.
+    pub fn round2_vault_backed_v1<Vault: CollaborativeBpNonceVaultV1>(
+        &self,
+        statement: &BpStatementV1,
+        local: &LocalBpSecrets,
+        aggregate_r1: &AggregateBpRound1,
+        vault: &mut Vault,
+    ) -> core::result::Result<
+        DurableBpRound2TransportV1,
+        CollaborativeBpNonceVaultError<Vault::Error>,
+    > {
+        let (finalizer, share) = self
+            .produce_round2_parts(statement, local, aggregate_r1)
+            .map_err(CollaborativeBpNonceVaultError::Protocol)?;
+        let binding = self
+            .finalize_binding_v1(statement, local.participant_index, aggregate_r1)
+            .map_err(CollaborativeBpNonceVaultError::Protocol)?;
+        vault
+            .persist_round2_and_consume_material(
+                &binding,
+                statement,
+                CollaborativeBpFinalizeContinuationV1::new(finalizer),
+                share,
+                CollaborativeBpRound2PersistenceCapabilityV1::new(&binding, statement),
+            )
+            .map_err(CollaborativeBpNonceVaultError::Vault)
+    }
+
+    /// Reopen a one-send byte-identical round-2 authority after restart or ACK
+    /// loss, using only the immutable encrypted artifact and its terminal nonce
+    /// tombstone.
+    pub fn resume_persisted_round2_v1<Vault: CollaborativeBpNonceVaultV1>(
+        &self,
+        statement: &BpStatementV1,
+        participant_index: u16,
+        vault: &mut Vault,
+    ) -> core::result::Result<
+        DurableBpRound2TransportV1,
+        CollaborativeBpNonceVaultError<Vault::Error>,
+    > {
+        self.require_statement(statement)
+            .map_err(CollaborativeBpNonceVaultError::Protocol)?;
+        let binding = CollaborativeBpNonceBindingV1::from_statement(statement, participant_index)
+            .map_err(CollaborativeBpNonceVaultError::Protocol)?;
+        vault
+            .open_persisted_round2(
+                &binding,
+                statement,
+                CollaborativeBpRound2ImportCapabilityV1::for_restart(&binding),
+            )
+            .map_err(CollaborativeBpNonceVaultError::Vault)
+    }
+
+    /// Resume final proof construction after any restart following round 2.
+    ///
+    /// The Store reopens the encrypted finalizer continuation without opening
+    /// the consumed BP nonce record. Only after the unchanged DOM verifier
+    /// accepts the exact 739-byte result does the Store atomically persist the
+    /// proof and retire the continuation. Thus both pre-proof and post-proof
+    /// crash positions have a deterministic retained recovery path.
+    pub fn finalize_vault_backed_v1<Vault: CollaborativeBpNonceVaultV1>(
+        &self,
+        statement: &BpStatementV1,
+        participant_index: u16,
+        aggregate_r1: &AggregateBpRound1,
+        aggregate_r2: &AggregateBpRound2,
+        vault: &mut Vault,
+    ) -> core::result::Result<DurableBpProofTransportV1, CollaborativeBpNonceVaultError<Vault::Error>>
+    {
+        if aggregate_r2.statement_hash != self.statement_hash {
+            return Err(CollaborativeBpNonceVaultError::Protocol(
+                AdaptorError::AuthorizationMismatch,
+            ));
+        }
+        let binding = self
+            .finalize_binding_v1(statement, participant_index, aggregate_r1)
+            .map_err(CollaborativeBpNonceVaultError::Protocol)?;
+        let continuation = vault
+            .open_persisted_finalize_continuation(
+                &binding,
+                statement,
+                CollaborativeBpFinalizeImportCapabilityV1::for_restart(&binding),
+            )
+            .map_err(CollaborativeBpNonceVaultError::Vault)?;
+        let shares = aggregate_r2
+            .shares
+            .lock()
+            .map_err(|_| CollaborativeBpNonceVaultError::Protocol(poisoned()))?
+            .take()
+            .ok_or_else(|| CollaborativeBpNonceVaultError::Protocol(consumed()))?;
+        let proof_bytes = finalize_participant_v1(continuation.into_state(), statement, shares)
+            .map_err(CollaborativeBpNonceVaultError::Protocol)?;
+        let proof = RangeProof739::try_from(proof_bytes.as_slice())
+            .map_err(CollaborativeBpNonceVaultError::Protocol)?;
+        self.verify_final(statement, &proof)
+            .map_err(CollaborativeBpNonceVaultError::Protocol)?;
+        vault
+            .persist_verified_proof_and_consume_finalize(
+                &binding,
+                statement,
+                proof,
+                CollaborativeBpProofPersistenceCapabilityV1::new(&binding, statement),
+            )
+            .map_err(CollaborativeBpNonceVaultError::Vault)
+    }
+
+    /// Reopen an already persisted proof for byte-identical output assembly or
+    /// retransmission after restart, without restoring any secret state.
+    pub fn resume_persisted_proof_v1<Vault: CollaborativeBpNonceVaultV1>(
+        &self,
+        statement: &BpStatementV1,
+        participant_index: u16,
+        aggregate_r1: &AggregateBpRound1,
+        vault: &mut Vault,
+    ) -> core::result::Result<DurableBpProofTransportV1, CollaborativeBpNonceVaultError<Vault::Error>>
+    {
+        let binding = self
+            .finalize_binding_v1(statement, participant_index, aggregate_r1)
+            .map_err(CollaborativeBpNonceVaultError::Protocol)?;
+        vault
+            .open_persisted_proof(
+                &binding,
+                statement,
+                CollaborativeBpProofImportCapabilityV1::for_restart(&binding),
+            )
+            .map_err(CollaborativeBpNonceVaultError::Vault)
+    }
+}
+
+impl CollaborativeRangeProof for DomCollaborativeRangeProofV1 {
+    fn round1(&self, statement: &BpStatementV1, local: &LocalBpSecrets) -> Result<BpRound1ShareV1> {
         self.require_statement(statement)?;
         if local.statement_hash != self.statement_hash {
             return Err(AdaptorError::AuthorizationMismatch);
@@ -404,6 +685,7 @@ impl CollaborativeRangeProof for DomCollaborativeRangeProofV1 {
         let LocalStage::Ready {
             blinding,
             common_nonce,
+            private_nonce,
         } = std::mem::replace(&mut *stage, LocalStage::Consumed)
         else {
             unreachable!("stage variant checked under the same lock");
@@ -413,6 +695,7 @@ impl CollaborativeRangeProof for DomCollaborativeRangeProofV1 {
             local.participant_index,
             blinding,
             common_nonce,
+            private_nonce,
             &self.extra_commit,
         )?;
         *stage = LocalStage::Round1Done { state };
@@ -425,25 +708,7 @@ impl CollaborativeRangeProof for DomCollaborativeRangeProofV1 {
         local: &LocalBpSecrets,
         aggregate_r1: &AggregateBpRound1,
     ) -> Result<BpRound2ShareV1> {
-        self.require_statement(statement)?;
-        if aggregate_r1.statement_hash != self.statement_hash {
-            return Err(AdaptorError::AuthorizationMismatch);
-        }
-        let mut stage = local.stage.lock().map_err(|_| poisoned())?;
-        if !matches!(*stage, LocalStage::Round1Done { .. }) {
-            return Err(consumed());
-        }
-        let LocalStage::Round1Done { state } =
-            std::mem::replace(&mut *stage, LocalStage::Consumed)
-        else {
-            unreachable!("stage variant checked under the same lock");
-        };
-        // §5.5: the local state is Consumed before the share leaves; the
-        // finalizer moves into the driver so rodada 3 needs no local secrets.
-        let (finalizer, share) =
-            participant_round2_v1(state, statement, &aggregate_r1.t_one, &aggregate_r1.t_two)?;
-        *self.finalizer.lock().map_err(|_| poisoned())? = Some(finalizer);
-        Ok(share)
+        self.produce_round2_share(statement, local, aggregate_r1)
     }
 
     fn finalize(
@@ -500,7 +765,11 @@ impl CollaborativeRangeProof for DomCollaborativeRangeProofV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TrustedChainIdV1;
+    use crate::{
+        CollaborativeBpNonceBindingV1, CollaborativeBpNonceImportCapabilityV1,
+        CollaborativeBpNonceMaterialV1, CollaborativeBpNonceSealCapabilityV1,
+        CollaborativeBpNonceVaultV1, TrustedChainIdV1,
+    };
     use dom_core::Hash256;
 
     const CAPSULE: [u8; 96] = [0x5A; 96];
@@ -533,6 +802,200 @@ mod tests {
         .expect("statement")
     }
 
+    #[derive(Debug, thiserror::Error)]
+    #[error("test collaborative-BP nonce vault failure")]
+    struct TestNonceVaultError;
+
+    #[derive(Default)]
+    struct TestNonceVault {
+        binding: Option<CollaborativeBpNonceBindingV1>,
+        plaintext: Option<[u8; 64]>,
+        finalize_binding: Option<CollaborativeBpFinalizeBindingV1>,
+        finalize_plaintext: Option<Zeroizing<Vec<u8>>>,
+        round2_plaintext: Option<[u8; BpRound2ShareV1::ENCODED_LEN]>,
+        round2_consumed: bool,
+        finalize_consumed: bool,
+        proof_plaintext: Option<[u8; dom_crypto::RANGE_PROOF_SIZE]>,
+        seal_count: usize,
+        open_count: usize,
+        round2_persist_count: usize,
+        round2_open_count: usize,
+        finalize_open_count: usize,
+        proof_persist_count: usize,
+        proof_open_count: usize,
+    }
+
+    impl CollaborativeBpNonceVaultV1 for TestNonceVault {
+        type Error = TestNonceVaultError;
+
+        fn seal_fresh_material(
+            &mut self,
+            binding: &CollaborativeBpNonceBindingV1,
+            material: CollaborativeBpNonceMaterialV1,
+            capability: CollaborativeBpNonceSealCapabilityV1,
+        ) -> core::result::Result<(), Self::Error> {
+            if self.binding.is_some() || self.plaintext.is_some() {
+                return Err(TestNonceVaultError);
+            }
+            self.binding = Some(binding.clone());
+            self.plaintext = Some(*capability.into_plaintext(material));
+            self.seal_count += 1;
+            Ok(())
+        }
+
+        fn open_persisted_material(
+            &mut self,
+            binding: &CollaborativeBpNonceBindingV1,
+            capability: CollaborativeBpNonceImportCapabilityV1,
+        ) -> core::result::Result<CollaborativeBpNonceMaterialV1, Self::Error> {
+            if self.binding.as_ref() != Some(binding) {
+                return Err(TestNonceVaultError);
+            }
+            self.open_count += 1;
+            capability
+                .import(Zeroizing::new(self.plaintext.ok_or(TestNonceVaultError)?))
+                .map_err(|_| TestNonceVaultError)
+        }
+
+        fn persist_round2_and_consume_material(
+            &mut self,
+            binding: &CollaborativeBpFinalizeBindingV1,
+            statement: &BpStatementV1,
+            continuation: CollaborativeBpFinalizeContinuationV1,
+            share: BpRound2ShareV1,
+            capability: CollaborativeBpRound2PersistenceCapabilityV1,
+        ) -> core::result::Result<DurableBpRound2TransportV1, Self::Error> {
+            if self.binding.as_ref() != Some(binding.nonce_binding())
+                || self.plaintext.is_none()
+                || self.round2_plaintext.is_some()
+                || self.finalize_plaintext.is_some()
+                || self.round2_consumed
+            {
+                return Err(TestNonceVaultError);
+            }
+            let (finalize_plaintext, round2_plaintext, finalize_import, round2_import) = capability
+                .into_plaintext(continuation, share)
+                .map_err(|_| TestNonceVaultError)?;
+            self.finalize_binding = Some(binding.clone());
+            self.finalize_plaintext = Some(finalize_plaintext);
+            self.round2_plaintext = Some(*round2_plaintext);
+            self.plaintext = None;
+            self.round2_consumed = true;
+            self.round2_persist_count += 1;
+            let _authenticated_continuation = finalize_import
+                .import(
+                    statement,
+                    Zeroizing::new(
+                        self.finalize_plaintext
+                            .as_ref()
+                            .ok_or(TestNonceVaultError)?
+                            .as_slice()
+                            .to_vec(),
+                    ),
+                )
+                .map_err(|_| TestNonceVaultError)?;
+            round2_import
+                .import(
+                    statement,
+                    Zeroizing::new(self.round2_plaintext.ok_or(TestNonceVaultError)?),
+                )
+                .map_err(|_| TestNonceVaultError)
+        }
+
+        fn open_persisted_round2(
+            &mut self,
+            binding: &CollaborativeBpNonceBindingV1,
+            statement: &BpStatementV1,
+            capability: CollaborativeBpRound2ImportCapabilityV1,
+        ) -> core::result::Result<DurableBpRound2TransportV1, Self::Error> {
+            if self.binding.as_ref() != Some(binding)
+                || !self.round2_consumed
+                || self.plaintext.is_some()
+            {
+                return Err(TestNonceVaultError);
+            }
+            self.round2_open_count += 1;
+            capability
+                .import(
+                    statement,
+                    Zeroizing::new(self.round2_plaintext.ok_or(TestNonceVaultError)?),
+                )
+                .map_err(|_| TestNonceVaultError)
+        }
+
+        fn open_persisted_finalize_continuation(
+            &mut self,
+            binding: &CollaborativeBpFinalizeBindingV1,
+            statement: &BpStatementV1,
+            capability: CollaborativeBpFinalizeImportCapabilityV1,
+        ) -> core::result::Result<CollaborativeBpFinalizeContinuationV1, Self::Error> {
+            if self.finalize_binding.as_ref() != Some(binding)
+                || !self.round2_consumed
+                || self.plaintext.is_some()
+                || self.finalize_consumed
+            {
+                return Err(TestNonceVaultError);
+            }
+            self.finalize_open_count += 1;
+            capability
+                .import(
+                    statement,
+                    Zeroizing::new(
+                        self.finalize_plaintext
+                            .as_ref()
+                            .ok_or(TestNonceVaultError)?
+                            .as_slice()
+                            .to_vec(),
+                    ),
+                )
+                .map_err(|_| TestNonceVaultError)
+        }
+
+        fn persist_verified_proof_and_consume_finalize(
+            &mut self,
+            binding: &CollaborativeBpFinalizeBindingV1,
+            statement: &BpStatementV1,
+            proof: RangeProof739,
+            capability: CollaborativeBpProofPersistenceCapabilityV1,
+        ) -> core::result::Result<DurableBpProofTransportV1, Self::Error> {
+            if self.finalize_binding.as_ref() != Some(binding)
+                || self.finalize_plaintext.is_none()
+                || self.finalize_consumed
+                || self.proof_plaintext.is_some()
+            {
+                return Err(TestNonceVaultError);
+            }
+            let (plaintext, import) = capability
+                .into_plaintext(proof)
+                .map_err(|_| TestNonceVaultError)?;
+            self.proof_plaintext = Some(plaintext);
+            self.finalize_plaintext = None;
+            self.finalize_consumed = true;
+            self.proof_persist_count += 1;
+            import
+                .import(statement, self.proof_plaintext.ok_or(TestNonceVaultError)?)
+                .map_err(|_| TestNonceVaultError)
+        }
+
+        fn open_persisted_proof(
+            &mut self,
+            binding: &CollaborativeBpFinalizeBindingV1,
+            statement: &BpStatementV1,
+            capability: CollaborativeBpProofImportCapabilityV1,
+        ) -> core::result::Result<DurableBpProofTransportV1, Self::Error> {
+            if self.finalize_binding.as_ref() != Some(binding)
+                || !self.finalize_consumed
+                || self.finalize_plaintext.is_some()
+            {
+                return Err(TestNonceVaultError);
+            }
+            self.proof_open_count += 1;
+            capability
+                .import(statement, self.proof_plaintext.ok_or(TestNonceVaultError)?)
+                .map_err(|_| TestNonceVaultError)
+        }
+    }
+
     #[test]
     fn injected_share_must_open_the_statement_share() {
         let (r_a, r_b) = (share(3), share(5));
@@ -543,6 +1006,44 @@ mod tests {
             Err(AdaptorError::AuthorizationMismatch)
         ));
         assert!(PendingCommonNonce::new(&statement, 0, &r_a).is_ok());
+    }
+
+    #[test]
+    fn vault_backed_nonce_material_is_sealed_before_commitment_and_restart_stable() {
+        let (r_a, r_b) = (share(3), share(5));
+        let statement = statement(&r_a, &r_b);
+        let mut vault = TestNonceVault::default();
+        let (pending, commitment) =
+            PendingCommonNonce::new_vault_backed_v1(&statement, 0, &r_a, &mut vault)
+                .expect("sealed pending nonce");
+        assert_eq!(vault.seal_count, 1);
+        assert_eq!(vault.open_count, 1);
+        assert_eq!(
+            vault.binding.as_ref().expect("binding").statement_hash(),
+            &statement.statement_hash()
+        );
+        let reveal = pending.reveal_bytes();
+        let mut restarted_vault = TestNonceVault {
+            binding: vault.binding.clone(),
+            plaintext: vault.plaintext,
+            seal_count: 1,
+            ..TestNonceVault::default()
+        };
+        let (restarted, restarted_commitment) =
+            PendingCommonNonce::resume_vault_backed_v1(&statement, 0, &r_a, &mut restarted_vault)
+                .expect("restart from authenticated material");
+        assert_eq!(restarted_commitment, commitment);
+        assert_eq!(restarted.reveal_bytes().as_ref(), reveal.as_ref());
+
+        let mut wrong_share_vault = TestNonceVault::default();
+        assert!(PendingCommonNonce::new_vault_backed_v1(
+            &statement,
+            0,
+            &r_b,
+            &mut wrong_share_vault,
+        )
+        .is_err());
+        assert_eq!(wrong_share_vault.seal_count, 0);
     }
 
     #[test]
@@ -560,12 +1061,20 @@ mod tests {
     fn round1_aggregate_enforces_the_0b_commitment_gate() {
         let (r_a, r_b) = (share(3), share(5));
         let statement = statement(&r_a, &r_b);
-        let share_a =
-            BpRound1ShareV1::new(&statement, 0, share(7).public_key().clone(), share(9).public_key().clone())
-                .expect("share A");
-        let share_b =
-            BpRound1ShareV1::new(&statement, 1, share(11).public_key().clone(), share(13).public_key().clone())
-                .expect("share B");
+        let share_a = BpRound1ShareV1::new(
+            &statement,
+            0,
+            share(7).public_key().clone(),
+            share(9).public_key().clone(),
+        )
+        .expect("share A");
+        let share_b = BpRound1ShareV1::new(
+            &statement,
+            1,
+            share(11).public_key().clone(),
+            share(13).public_key().clone(),
+        )
+        .expect("share B");
         let commitments = [share_a.reveal_commitment(), share_b.reveal_commitment()];
         assert!(AggregateBpRound1::new(
             &statement,
@@ -602,12 +1111,16 @@ mod tests {
             DomCollaborativeRangeProofV1::new(&statement, CAPSULE.to_vec()).expect("driver A");
         let driver_b =
             DomCollaborativeRangeProofV1::new(&statement, CAPSULE.to_vec()).expect("driver B");
+        let mut vault_a = TestNonceVault::default();
+        let mut vault_b = TestNonceVault::default();
 
         // Rodada 0A: commitments first, reveals only after both are accepted.
         let (pending_a, commit_a) =
-            PendingCommonNonce::new(&statement, 0, &r_a).expect("pending A");
+            PendingCommonNonce::new_vault_backed_v1(&statement, 0, &r_a, &mut vault_a)
+                .expect("persisted pending A");
         let (pending_b, commit_b) =
-            PendingCommonNonce::new(&statement, 1, &r_b).expect("pending B");
+            PendingCommonNonce::new_vault_backed_v1(&statement, 1, &r_b, &mut vault_b)
+                .expect("persisted pending B");
         let accepted = [commit_a, commit_b];
         let reveal_a = Zeroizing::new(*pending_a.own_reveal);
         let reveal_b = Zeroizing::new(*pending_b.own_reveal);
@@ -635,32 +1148,93 @@ mod tests {
         )
         .expect("aggregate round 1");
 
-        // Rodada 2: tau_x shares; B's crosses the wire as exact bytes.
-        let round2_a = driver_a
-            .round2(&statement, &local_a, &aggregate_r1)
-            .expect("round2 A");
-        let round2_b = driver_b
-            .round2(&statement, &local_b, &aggregate_r1)
-            .expect("round2 B");
-        let round2_b_bytes = round2_b.into_zeroizing_bytes();
+        // Rodada 2: each exact tau_x share is encrypted and its nonce record is
+        // tombstoned before one send-attempt authority exists.
+        let transport_a = driver_a
+            .round2_vault_backed_v1(&statement, &local_a, &aggregate_r1, &mut vault_a)
+            .expect("durable round2 A");
+        let transport_b = driver_b
+            .round2_vault_backed_v1(&statement, &local_b, &aggregate_r1, &mut vault_b)
+            .expect("durable round2 B");
+        assert!(vault_a.plaintext.is_none());
+        assert!(vault_b.plaintext.is_none());
+        assert!(vault_a.round2_consumed && vault_b.round2_consumed);
+        assert_eq!(vault_a.round2_persist_count, 1);
+        assert_eq!(vault_b.round2_persist_count, 1);
+        let round2_a_bytes = transport_a.into_zeroizing_bytes();
+        let round2_a =
+            BpRound2ShareV1::from_bytes(round2_a_bytes.as_ref(), &statement).expect("A share");
+        let round2_b_digest = *transport_b.message_digest();
+        let round2_b_bytes = transport_b.into_zeroizing_bytes();
         let round2_b_received =
             BpRound2ShareV1::from_bytes(round2_b_bytes.as_ref(), &statement).expect("B share");
+        let retransmission = driver_b
+            .resume_persisted_round2_v1(&statement, 1, &mut vault_b)
+            .expect("ACK-loss retransmission without nonce reopen");
+        assert_eq!(retransmission.message_digest(), &round2_b_digest);
+        assert_eq!(
+            retransmission.into_zeroizing_bytes().as_ref(),
+            round2_b_bytes.as_ref()
+        );
+        assert_eq!(vault_b.round2_open_count, 1);
+        assert!(vault_b.plaintext.is_none());
 
-        // Rodada 3: party A finalizes and the §5.4 exit checks all run.
+        // Crash both processes immediately after round 2. A fresh driver for
+        // party A reopens only the retained finalizer continuation (the nonce
+        // is already tombstoned), finalizes, verifies, and persists the proof
+        // before the continuation is retired.
         let aggregate_r2 = AggregateBpRound2::new(&statement, vec![round2_a, round2_b_received])
             .expect("aggregate round 2");
-        let proof = driver_a
-            .finalize(&statement, &aggregate_r1, &aggregate_r2)
-            .expect("finalize");
+        let restarted_driver_a =
+            DomCollaborativeRangeProofV1::new(&statement, CAPSULE.to_vec()).expect("restart A");
+        let original_finalize = Zeroizing::new(
+            vault_a
+                .finalize_plaintext
+                .as_ref()
+                .expect("durable finalizer")
+                .as_slice()
+                .to_vec(),
+        );
+        vault_a
+            .finalize_plaintext
+            .as_mut()
+            .expect("durable finalizer")[14] ^= 1;
+        assert!(restarted_driver_a
+            .finalize_vault_backed_v1(&statement, 0, &aggregate_r1, &aggregate_r2, &mut vault_a)
+            .is_err());
+        vault_a.finalize_plaintext = Some(Zeroizing::new(original_finalize.as_slice().to_vec()));
+        let proof_transport = restarted_driver_a
+            .finalize_vault_backed_v1(&statement, 0, &aggregate_r1, &aggregate_r2, &mut vault_a)
+            .expect("restart-safe durable finalize");
+        let proof_digest = *proof_transport.proof_digest();
+        let proof = proof_transport.into_proof();
         assert_eq!(proof.as_bytes().len(), 739);
+        assert_eq!(vault_a.finalize_open_count, 2);
+        assert_eq!(vault_a.proof_persist_count, 1);
+        assert!(vault_a.finalize_plaintext.is_none());
+        assert!(vault_a.finalize_consumed);
+
+        // A second process restart reopens only the immutable verified proof;
+        // neither original nonce nor finalizer continuation is restored.
+        let restarted_again =
+            DomCollaborativeRangeProofV1::new(&statement, CAPSULE.to_vec()).expect("restart A2");
+        let proof_retransmission = restarted_again
+            .resume_persisted_proof_v1(&statement, 0, &aggregate_r1, &mut vault_a)
+            .expect("restart proof retransmission");
+        assert_eq!(proof_retransmission.proof_digest(), &proof_digest);
+        assert_eq!(
+            proof_retransmission.into_proof().as_bytes(),
+            proof.as_bytes()
+        );
+        assert_eq!(vault_a.proof_open_count, 1);
+        assert!(vault_a.plaintext.is_none());
+        assert!(vault_a.finalize_plaintext.is_none());
 
         // Both parties can run the exit verification independently.
-        driver_a
+        restarted_driver_a
             .verify_final(&statement, &proof)
             .expect("verify A");
-        driver_b
-            .verify_final(&statement, &proof)
-            .expect("verify B");
+        driver_b.verify_final(&statement, &proof).expect("verify B");
         // And it is the exact consensus call shape for a capsule output.
         assert!(range_proof_verify_with_extra_commit(
             &statement.aggregate_commitment().to_compressed_bytes(),
@@ -669,9 +1243,10 @@ mod tests {
         )
         .expect("DOM verifier"));
 
-        // One-shot finalization: the aggregates and finalizer are consumed.
-        assert!(driver_a
-            .finalize(&statement, &aggregate_r1, &aggregate_r2)
+        // One-shot finalization: the aggregate was consumed and the finalizer
+        // is terminally retired in the Store.
+        assert!(restarted_driver_a
+            .finalize_vault_backed_v1(&statement, 0, &aggregate_r1, &aggregate_r2, &mut vault_a)
             .is_err());
     }
 }

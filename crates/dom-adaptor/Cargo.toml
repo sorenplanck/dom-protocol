@@ -16,6 +16,7 @@ default = []
 dom-core.workspace = true
 dom-crypto.workspace = true
 dom-consensus.workspace = true
+dom-serialization.workspace = true
 thiserror.workspace = true
 rand_core.workspace = true
 zeroize.workspace = true
@@ -23,9 +24,9 @@ subtle.workspace = true
 
 [dev-dependencies]
 dom-crypto = { workspace = true, features = ["test-helpers"] }
-dom-serialization.workspace = true
 hex.workspace = true
 serde_json.workspace = true
+k256.workspace = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }

@@ -44,6 +44,7 @@ pub use scriptless::{
     scalar_bytes_are_canonical, scalar_from_wide_be, scriptless_adapt_signature,
     scriptless_add_public_points, scriptless_aggregate_partial_scalars,
     scriptless_bind_public_nonces, scriptless_extract_adaptor_secret,
+    scriptless_extract_adaptor_secret_be_bytes, scriptless_subtract_public_points,
     scriptless_verify_bound_partial, scriptless_verify_final_signature,
     scriptless_verify_pre_signature, secret_scalar_mul_add_assign, secret_scalar_public_key,
     verify_scalar_response, SecretScalar,
@@ -57,7 +58,9 @@ pub mod recovery;
 #[doc(hidden)]
 pub use bulletproof_bp::bp2_test_only_prove_legacy_single_with_nonce;
 pub use bulletproof_bp::{
-    bulletproof_mpc_aggregate_tau_x, bulletproof_mpc_finalize, bulletproof_mpc_round1,
+    bulletproof_mpc_aggregate_tau_x, bulletproof_mpc_finalize,
+    bulletproof_mpc_finalize_continuation_from_bytes_v1,
+    bulletproof_mpc_finalize_continuation_to_bytes_v1, bulletproof_mpc_round1,
     bulletproof_mpc_round2, BulletproofMpcFinalizeState, BulletproofMpcRound1Output,
     BulletproofMpcRound1State,
 };

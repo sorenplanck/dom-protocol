@@ -43,7 +43,10 @@
 //! - Building and broadcasting the actual funding and refund transactions, and
 //!   the escalating-fee refund ladder under a real relay, are node-side work.
 //!
-//! This module authorizes the ordering; it does not sign or broadcast.
+//! This module authorizes the pure state-model ordering; it does not authorize
+//! an operational funding signature or broadcast. F7 production finalization
+//! requires the separate durable, template-bound
+//! `OperationalFundingAuthorizationV1` issued by the selected Contracts Store.
 
 use crate::{AdaptorError, ContractStageV1, ContractStateV1, Result};
 use dom_crypto::PublicKey;
@@ -61,8 +64,11 @@ pub struct ShareBackupAckV1 {
 }
 
 impl ShareBackupAckV1 {
-    /// Record a backup acknowledgement for one participant.
-    pub const fn new(participant_index: u16, recovered_share_point: PublicKey) -> Self {
+    /// Constructed only by the durable share-vault acknowledgement capability.
+    pub(crate) const fn new_durable(
+        participant_index: u16,
+        recovered_share_point: PublicKey,
+    ) -> Self {
         Self {
             participant_index,
             recovered_share_point,
@@ -72,6 +78,11 @@ impl ShareBackupAckV1 {
     /// The participant this acknowledgement belongs to.
     pub const fn participant_index(&self) -> u16 {
         self.participant_index
+    }
+
+    /// Public point reproduced by the independently restored backup.
+    pub const fn share_point(&self) -> &PublicKey {
+        &self.recovered_share_point
     }
 }
 
@@ -136,7 +147,7 @@ pub fn verify_bilateral_backup_v1(
     Ok(BackupConfirmedV1 { participant_count })
 }
 
-/// Authority to sign the funding, minted only after the two conditions hold.
+/// Pure-model witness that the funding-order preconditions hold.
 ///
 /// Construction consumes the backup-confirmed token and the contract state,
 /// and requires the state to be exactly at `ClaimPresigned` — the §7.2/§7.3
@@ -144,7 +155,9 @@ pub fn verify_bilateral_backup_v1(
 /// pre-signature (`ReadyToFund`). There is no other constructor, so a caller
 /// cannot assemble funding authority before the refund exists, before the claim
 /// adaptor is pre-signed, or before every backup was confirmed. The type is
-/// one-shot: it is consumed to advance the contract to `Funded`.
+/// one-shot at the model layer. It is deliberately not accepted by
+/// `ScriptlessTransactionTemplateV1::finalize_funding`; operational signing
+/// requires a durable `OperationalFundingAuthorizationV1`.
 #[derive(Debug)]
 pub struct FundingAuthorizationV1 {
     session_transcript: [u8; 32],
@@ -212,8 +225,8 @@ mod tests {
     fn a_complete_matching_backup_set_passes() {
         let points = committed();
         let acks = vec![
-            ShareBackupAckV1::new(0, points[0].clone()),
-            ShareBackupAckV1::new(1, points[1].clone()),
+            ShareBackupAckV1::new_durable(0, points[0].clone()),
+            ShareBackupAckV1::new_durable(1, points[1].clone()),
         ];
         let confirmed = verify_bilateral_backup_v1(&points, &acks).expect("backup");
         assert_eq!(confirmed.participant_count(), 2);
@@ -222,7 +235,7 @@ mod tests {
     #[test]
     fn a_missing_participant_fails_closed() {
         let points = committed();
-        let acks = vec![ShareBackupAckV1::new(0, points[0].clone())];
+        let acks = vec![ShareBackupAckV1::new_durable(0, points[0].clone())];
         assert!(verify_bilateral_backup_v1(&points, &acks).is_err());
     }
 
@@ -230,9 +243,9 @@ mod tests {
     fn a_wrong_recovered_point_fails_closed() {
         let points = committed();
         let acks = vec![
-            ShareBackupAckV1::new(0, points[0].clone()),
+            ShareBackupAckV1::new_durable(0, points[0].clone()),
             // Party 1 recovered the wrong point: its backup did not roundtrip.
-            ShareBackupAckV1::new(1, point(9)),
+            ShareBackupAckV1::new_durable(1, point(9)),
         ];
         assert!(matches!(
             verify_bilateral_backup_v1(&points, &acks),
@@ -244,8 +257,8 @@ mod tests {
     fn a_duplicated_participant_cannot_cover_for_the_other() {
         let points = committed();
         let acks = vec![
-            ShareBackupAckV1::new(0, points[0].clone()),
-            ShareBackupAckV1::new(0, points[0].clone()),
+            ShareBackupAckV1::new_durable(0, points[0].clone()),
+            ShareBackupAckV1::new_durable(0, points[0].clone()),
         ];
         assert!(matches!(
             verify_bilateral_backup_v1(&points, &acks),
@@ -293,8 +306,8 @@ mod tests {
     fn funding_authorizes_only_from_claim_presigned() {
         let points = committed();
         let acks = vec![
-            ShareBackupAckV1::new(0, points[0].clone()),
-            ShareBackupAckV1::new(1, points[1].clone()),
+            ShareBackupAckV1::new_durable(0, points[0].clone()),
+            ShareBackupAckV1::new_durable(1, points[1].clone()),
         ];
 
         // From ClaimPresigned (refund co-signed, claim adaptor pre-signed) with
@@ -308,8 +321,16 @@ mod tests {
         // is not yet pre-signed, so §7.2/§7.3 forbid authorizing funding.
         let mut early = ContractStateV1::open([0x33; 32]).expect("open");
         for (sender, target, seq) in [
-            (DirectionV1::Initiator, ContractStageV1::SharedOutputBuilt, 0u64),
-            (DirectionV1::Responder, ContractStageV1::RefundPresigned, 0u64),
+            (
+                DirectionV1::Initiator,
+                ContractStageV1::SharedOutputBuilt,
+                0u64,
+            ),
+            (
+                DirectionV1::Responder,
+                ContractStageV1::RefundPresigned,
+                0u64,
+            ),
         ] {
             let env = ContractEnvelopeV1::new(
                 &chain(),

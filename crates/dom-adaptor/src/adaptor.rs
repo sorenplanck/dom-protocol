@@ -3,9 +3,10 @@
 use crate::error::{exact_array, AdaptorError, Result};
 use dom_crypto::{
     scriptless_adapt_signature, scriptless_extract_adaptor_secret,
-    scriptless_verify_final_signature, scriptless_verify_pre_signature, PartialSig, PublicKey,
-    SchnorrSignature, SecretScalar,
+    scriptless_extract_adaptor_secret_be_bytes, scriptless_verify_final_signature,
+    scriptless_verify_pre_signature, PartialSig, PublicKey, SchnorrSignature, SecretScalar,
 };
+use zeroize::Zeroizing;
 
 /// Canonical 65-byte cryptographic adaptor pre-signature core `R_hat || s_hat`.
 ///
@@ -224,6 +225,67 @@ impl AdaptorPreSignatureV1 {
         chain_id: &[u8; 32],
         kernel_message: &[u8],
     ) -> Result<AdaptorSecret> {
+        self.verify_both_signatures(
+            final_signature,
+            expected_claim_template_hash,
+            expected_transcript_hash,
+            signing_key,
+            chain_id,
+            kernel_message,
+        )?;
+        scriptless_extract_adaptor_secret(
+            final_signature,
+            &self.scalar_hat,
+            &self.aggregate_nonce_hat,
+            &self.adaptor_point,
+        )
+        .map(AdaptorSecret)
+        .map_err(Into::into)
+    }
+
+    /// Verify the pre-signature and observed final signature, then export the
+    /// revealed adaptor scalar as canonical big-endian bytes.
+    ///
+    /// This is deliberately the same verified extraction path as
+    /// [`Self::extract`]. The returned scalar is public by construction after
+    /// the two signatures are known and is held in a zeroizing buffer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn extract_revealed_secret_be_bytes(
+        &self,
+        final_signature: &SchnorrSignature,
+        expected_claim_template_hash: &[u8; 32],
+        expected_transcript_hash: &[u8; 32],
+        signing_key: &PublicKey,
+        chain_id: &[u8; 32],
+        kernel_message: &[u8],
+    ) -> Result<Zeroizing<[u8; 32]>> {
+        self.verify_both_signatures(
+            final_signature,
+            expected_claim_template_hash,
+            expected_transcript_hash,
+            signing_key,
+            chain_id,
+            kernel_message,
+        )?;
+        scriptless_extract_adaptor_secret_be_bytes(
+            final_signature,
+            &self.scalar_hat,
+            &self.aggregate_nonce_hat,
+            &self.adaptor_point,
+        )
+        .map_err(Into::into)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn verify_both_signatures(
+        &self,
+        final_signature: &SchnorrSignature,
+        expected_claim_template_hash: &[u8; 32],
+        expected_transcript_hash: &[u8; 32],
+        signing_key: &PublicKey,
+        chain_id: &[u8; 32],
+        kernel_message: &[u8],
+    ) -> Result<()> {
         if !self.verify(
             expected_claim_template_hash,
             expected_transcript_hash,
@@ -245,14 +307,7 @@ impl AdaptorPreSignatureV1 {
                 "final DOM Schnorr signature",
             ));
         }
-        scriptless_extract_adaptor_secret(
-            final_signature,
-            &self.scalar_hat,
-            &self.aggregate_nonce_hat,
-            &self.adaptor_point,
-        )
-        .map(AdaptorSecret)
-        .map_err(Into::into)
+        Ok(())
     }
 
     /// Return the bound claim-template digest.

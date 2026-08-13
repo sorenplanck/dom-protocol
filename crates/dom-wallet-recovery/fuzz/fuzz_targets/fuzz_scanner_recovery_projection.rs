@@ -18,6 +18,7 @@ fuzz_target!(|data: &[u8]| {
         height: 0,
         block_hash,
         previous_block_hash: [0u8; 32],
+        canonical_header_bytes: Vec::new(),
         timestamp: 0,
         canonical_marker: block_hash,
         outputs: vec![ScanOutput {
@@ -32,10 +33,15 @@ fuzz_target!(|data: &[u8]| {
         }],
         inputs: Vec::new(),
         kernels: Vec::new(),
+        transactions: Vec::new(),
         coinbase: CoinbaseScanMetadata {
             output_commitment: [0u8; 33],
             explicit_value: 0,
             kernel_excess: [0u8; 33],
+            kernel_features: 1,
+            kernel_excess_signature: [0u8; 65],
+            offset: [0u8; 32],
+            output_proof_envelope: Vec::new(),
         },
         total_fees_noms: 0,
         protocol_version: 1,

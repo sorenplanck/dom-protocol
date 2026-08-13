@@ -4,15 +4,16 @@ use crate::secret_nonce::SecretNonceDerivationV1;
 use crate::{
     nonce_commitment_hash_v1, AcceptedSigningSessionV1, AdaptorError, AuthorizedExposureV1,
     ExposureKindV1, NonceCommitmentV1, NonceDerivationRequestV1, NonceRevealV1,
-    NonceSecretTransferV1, NonceVaultError, NonceVaultV1, PartialSignatureV1, PreparedExposureV1,
-    PublicNoncePairV1, ResendProtocolStageV1, ResendRequestV1, ReservationContextBindingV1,
-    ReservationLiveStageV1, ReservationLookupCustodyV1, ReservationRequestLookupV1,
-    ReservationResumeRequestV1, ReservationResumeResultV1, ReservationState, RestoreState,
-    SessionContextV1, SigningSessionAuthorityV1, SigningShareV1, TerminalReservationV1,
-    TrustedChainIdV1, ValidatedCommitmentRoundV1, ValidatedDerivationBaseV1,
-    ValidatedResendAuthorizationV1, ValidatedRevealRoundV1, ValidatedSigningRoundStateV1,
-    VaultExportedArtifactV1, VaultReservationSnapshotV1, VaultSecretImportCapabilityV1,
-    VaultSecretSealCapabilityV1, VaultSpentArtifactSnapshotV1,
+    NonceSecretTransferV1, NonceVaultError, NonceVaultV1, OperationalSigningSessionAuthorityV1,
+    PartialSignatureV1, PreparedExposureV1, PublicNoncePairV1, ResendProtocolStageV1,
+    ResendRequestV1, ReservationContextBindingV1, ReservationLiveStageV1,
+    ReservationLookupCustodyV1, ReservationRequestLookupV1, ReservationResumeRequestV1,
+    ReservationResumeResultV1, ReservationState, RestoreState, SessionContextV1,
+    SigningSessionAuthorityV1, SigningShareV1, TerminalReservationV1, TrustedChainIdV1,
+    ValidatedCommitmentRoundV1, ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1,
+    ValidatedRevealRoundV1, ValidatedSigningRoundStateV1, VaultExportedArtifactV1,
+    VaultReservationSnapshotV1, VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
+    VaultSpentArtifactSnapshotV1,
 };
 use core::fmt;
 use dom_crypto::{schnorr_challenge, PartialSig};
@@ -235,7 +236,6 @@ pub struct VaultBackedSignerV1<Vault, Custody, Sessions>
 where
     Vault: NonceVaultV1,
     Custody: ReservationLookupCustodyV1,
-    Sessions: SigningSessionAuthorityV1,
 {
     vault: Vault,
     custody: Custody,
@@ -258,8 +258,93 @@ where
     Custody: ReservationLookupCustodyV1,
     Sessions: SigningSessionAuthorityV1,
 {
-    /// Bind all security-critical dependencies statically at the composition root.
+    /// Bind the frozen Phase-1 accepted-session composition statically.
     pub fn new(
+        vault: Vault,
+        custody: Custody,
+        sessions: Sessions,
+        trusted_chain_id: TrustedChainIdV1,
+        signing_share: SigningShareV1,
+    ) -> Self {
+        Self::from_parts(vault, custody, sessions, trusted_chain_id, signing_share)
+    }
+
+    /// Consume one frozen Phase-1 accepted session from the selected authority.
+    pub fn begin_accepted_signing_round(
+        &mut self,
+        accepted_session: Sessions::AcceptedSession,
+    ) -> core::result::Result<
+        ValidatedSigningRoundStateV1,
+        VaultBackedSignerError<Vault::Error, Custody::Error>,
+    > {
+        if accepted_session.trusted_chain_id() != &self.trusted_chain_id {
+            return Err(AdaptorError::InvalidContext(
+                "accepted session trusted chain does not match the signer",
+            )
+            .into());
+        }
+        ValidatedSigningRoundStateV1::from_session_authority::<Sessions>(
+            accepted_session,
+            &self.signing_share,
+        )
+        .map_err(Into::into)
+    }
+}
+
+impl<Vault, Custody, Sessions> VaultBackedSignerV1<Vault, Custody, Sessions>
+where
+    Vault: NonceVaultV1,
+    Custody: ReservationLookupCustodyV1,
+    Sessions: OperationalSigningSessionAuthorityV1,
+{
+    /// Bind the F7 operational global-journal authority statically.
+    ///
+    /// This constructor is separate from [`Self::new`] so a marker that only
+    /// implements the operational trait can never enter the frozen Phase-1
+    /// session path accidentally.
+    pub fn new_operational(
+        vault: Vault,
+        custody: Custody,
+        sessions: Sessions,
+        trusted_chain_id: TrustedChainIdV1,
+        signing_share: SigningShareV1,
+    ) -> Self {
+        Self::from_parts(vault, custody, sessions, trusted_chain_id, signing_share)
+    }
+
+    /// Consume one Store-authenticated operational signing-round handle.
+    ///
+    /// The returned state starts at the global journal predecessor and sender
+    /// sequence bases supplied by the opaque handle. All subsequent signer
+    /// methods are the same vault-backed consume-before-export path; there is
+    /// no caller-constructed state or fallback to local sequence zero.
+    pub fn begin_operational_signing_round(
+        &mut self,
+        accepted_session: Sessions::AcceptedSession,
+    ) -> core::result::Result<
+        ValidatedSigningRoundStateV1,
+        VaultBackedSignerError<Vault::Error, Custody::Error>,
+    > {
+        if accepted_session.trusted_chain_id() != &self.trusted_chain_id {
+            return Err(AdaptorError::InvalidContext(
+                "operational session trusted chain does not match the signer",
+            )
+            .into());
+        }
+        ValidatedSigningRoundStateV1::from_operational_session_authority::<Sessions>(
+            accepted_session,
+            &self.signing_share,
+        )
+        .map_err(Into::into)
+    }
+}
+
+impl<Vault, Custody, Sessions> VaultBackedSignerV1<Vault, Custody, Sessions>
+where
+    Vault: NonceVaultV1,
+    Custody: ReservationLookupCustodyV1,
+{
+    fn from_parts(
         vault: Vault,
         custody: Custody,
         sessions: Sessions,
@@ -278,29 +363,6 @@ where
     /// Delegate the reconciled read-only recovery state of the concrete vault.
     pub fn restore_state(&self) -> RestoreState {
         self.vault.restore_state()
-    }
-
-    /// Consume one accepted session from the statically selected authority.
-    ///
-    /// This is the sole production composition seam ratified by P1-007. It
-    /// recomputes the canonical context and replays the accepted transcript
-    /// before returning any stage authority. Validation failure consumes and
-    /// drops the handle without invoking the vault or creating a reservation.
-    pub fn begin_accepted_signing_round(
-        &mut self,
-        accepted_session: Sessions::AcceptedSession,
-    ) -> core::result::Result<
-        ValidatedSigningRoundStateV1,
-        VaultBackedSignerError<Vault::Error, Custody::Error>,
-    > {
-        if accepted_session.trusted_chain_id() != &self.trusted_chain_id {
-            return Err(AdaptorError::InvalidContext(
-                "accepted session trusted chain does not match the signer",
-            )
-            .into());
-        }
-        ValidatedSigningRoundStateV1::from_accepted_session(accepted_session, &self.signing_share)
-            .map_err(Into::into)
     }
 
     /// Durably retain request lookup custody and then claim one fresh reservation.
@@ -1787,6 +1849,8 @@ mod tests {
         roster: crate::ParticipantRosterV1,
         transaction: dom_consensus::Transaction,
         initial_transcript: [u8; 32],
+        round_start_transcript: [u8; 32],
+        sender_sequence_bases: [u64; 2],
     }
 
     impl AcceptedSigningSessionV1 for SeamAcceptedSession {
@@ -1831,9 +1895,26 @@ mod tests {
         }
     }
 
+    impl crate::AcceptedOperationalSigningSessionV1 for SeamAcceptedSession {
+        fn round_start_transcript_hash(&self) -> &[u8; 32] {
+            &self.round_start_transcript
+        }
+
+        fn sender_sequence_bases(&self) -> &[u64; 2] {
+            &self.sender_sequence_bases
+        }
+    }
+
     struct SeamSessionAuthority;
 
     impl SigningSessionAuthorityV1 for SeamSessionAuthority {
+        type Error = SeamTestError;
+        type AcceptedSession = SeamAcceptedSession;
+    }
+
+    struct SeamOperationalSessionAuthority;
+
+    impl OperationalSigningSessionAuthorityV1 for SeamOperationalSessionAuthority {
         type Error = SeamTestError;
         type AcceptedSession = SeamAcceptedSession;
     }
@@ -1911,6 +1992,8 @@ mod tests {
                     roster,
                     transaction,
                     initial_transcript,
+                    round_start_transcript: initial_transcript,
+                    sender_sequence_bases: [9, 14],
                 },
                 local_share,
             )
@@ -1928,6 +2011,38 @@ mod tests {
             chain,
             signing_share,
         )
+    }
+
+    fn operational_seam_signer(
+        chain: TrustedChainIdV1,
+        signing_share: SigningShareV1,
+    ) -> VaultBackedSignerV1<SeamTestVault, SeamTestCustody, SeamOperationalSessionAuthority> {
+        VaultBackedSignerV1::new_operational(
+            SeamTestVault,
+            SeamTestCustody,
+            SeamOperationalSessionAuthority,
+            chain,
+            signing_share,
+        )
+    }
+
+    #[test]
+    fn operational_only_store_marker_uses_the_complete_vault_backed_signer() {
+        let (session, signing_share) = SeamTestSessionStore::issue();
+        let chain = *session.trusted_chain_id();
+        let mut signer = operational_seam_signer(chain, signing_share);
+        let mut round = signer
+            .begin_operational_signing_round(session)
+            .expect("operational global-journal round");
+        let derivation = round
+            .take_derivation_base()
+            .expect("operational derivation authority");
+        // `SeamOperationalSessionAuthority` deliberately implements only the
+        // operational Store trait, matching the concrete Contracts marker.
+        // Reaching the common signer method proves the previous whole-impl
+        // legacy bound is gone; the seam store then fails at its intentional
+        // first durable operation.
+        assert!(signer.claim_fresh(derivation).is_err());
     }
 
     #[test]

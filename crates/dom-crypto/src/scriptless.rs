@@ -221,6 +221,32 @@ pub fn scriptless_extract_adaptor_secret(
     aggregate_nonce_hat: &PublicKey,
     adaptor_point: &PublicKey,
 ) -> Result<SecretScalar, DomError> {
+    let bytes = scriptless_extract_adaptor_secret_be_bytes(
+        final_signature,
+        scalar_hat,
+        aggregate_nonce_hat,
+        adaptor_point,
+    )?;
+    SecretScalar::from_be_bytes(*bytes)
+}
+
+/// Extract and validate the adaptor secret, returning its canonical
+/// big-endian bytes.
+///
+/// The verification is the same one [`scriptless_extract_adaptor_secret`]
+/// performs: the final signature nonce must equal the pre-signature nonce,
+/// both scalars must be canonical, their difference must be nonzero, and
+/// `t*G` must equal the committed adaptor point.
+///
+/// This scalar is public by construction once both the pre-signature and final
+/// signature are available. No other secret gains an export path. The result
+/// is kept in a zeroizing buffer for the cross-chain consumer.
+pub fn scriptless_extract_adaptor_secret_be_bytes(
+    final_signature: &SchnorrSignature,
+    scalar_hat: &PartialSig,
+    aggregate_nonce_hat: &PublicKey,
+    adaptor_point: &PublicKey,
+) -> Result<Zeroizing<[u8; 32]>, DomError> {
     if final_signature.r_compressed() != &aggregate_nonce_hat.to_compressed_bytes() {
         return Err(DomError::Invalid(
             "final signature nonce differs from the pre-signature nonce".into(),
@@ -243,14 +269,14 @@ pub fn scriptless_extract_adaptor_secret(
         return Err(DomError::Invalid("extracted adaptor secret is zero".into()));
     }
 
-    let bytes: [u8; 32] = extracted.to_repr().into();
-    let secret = SecretScalar::from_be_bytes(bytes)?;
+    let bytes = Zeroizing::new(<[u8; 32]>::from(extracted.to_repr()));
+    let secret = SecretScalar::from_be_bytes(*bytes)?;
     if secret.public_key()? != *adaptor_point {
         return Err(DomError::Invalid(
             "extracted scalar does not match the adaptor point".into(),
         ));
     }
-    Ok(secret)
+    Ok(bytes)
 }
 
 /// Compute the bound public nonce `R1 + b*R2` using DOM point arithmetic.
@@ -289,6 +315,27 @@ pub fn scriptless_add_public_points(points: &[PublicKey]) -> Result<PublicKey, D
         ));
     }
     PublicKey::from_compressed_bytes(&projective_to_compressed(&sum))
+}
+
+/// Subtract one canonical Scriptless public point from another.
+///
+/// This narrow authority exists for pre-template composition of a participant's
+/// shared-output spend excess `E_i - R_i`. It performs no secret-scalar
+/// construction and rejects the point at infinity, which has no canonical DOM
+/// public-key encoding.
+pub fn scriptless_subtract_public_points(
+    minuend: &PublicKey,
+    subtrahend: &PublicKey,
+) -> Result<PublicKey, DomError> {
+    let minuend = compressed_to_projective(&minuend.to_compressed_bytes())?;
+    let subtrahend = compressed_to_projective(&subtrahend.to_compressed_bytes())?;
+    let difference = minuend - subtrahend;
+    if bool::from(difference.is_identity()) {
+        return Err(DomError::Invalid(
+            "Scriptless public-point difference is the point at infinity".into(),
+        ));
+    }
+    PublicKey::from_compressed_bytes(&projective_to_compressed(&difference))
 }
 
 /// Aggregate participant partial scalars without constructing a final

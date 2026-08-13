@@ -13,6 +13,7 @@ dom-core.workspace      = true
 dom-mempool.workspace   = true
 dom-consensus.workspace = true
 dom-serialization.workspace = true
+dom-wallet-core-api.workspace = true
 thiserror.workspace     = true
 tokio.workspace         = true
 serde.workspace         = true
@@ -31,4 +32,3 @@ subtle.workspace = true
 http-body-util = "0.1"
 proptest.workspace = true
 tempfile = "3"
-

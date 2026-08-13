@@ -8,8 +8,10 @@ use crate::{error::exact_array, AdaptorError, Result, TrustedChainIdV1};
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::{
     blake2b_256_tagged, bulletproof_mpc_aggregate_tau_x, bulletproof_mpc_finalize,
-    bulletproof_mpc_round1, bulletproof_mpc_round2, h_compressed, scalar_bytes_are_canonical,
-    scalar_from_wide_be, scriptless_add_public_points, BlindingFactor, BulletproofMpcFinalizeState,
+    bulletproof_mpc_finalize_continuation_from_bytes_v1,
+    bulletproof_mpc_finalize_continuation_to_bytes_v1, bulletproof_mpc_round1,
+    bulletproof_mpc_round2, h_compressed, scalar_bytes_are_canonical, scalar_from_wide_be,
+    scriptless_add_public_points, BlindingFactor, BulletproofMpcFinalizeState,
     BulletproofMpcRound1State, PublicKey, MAX_PROVABLE_VALUE,
 };
 use rand_core::{OsRng, RngCore};
@@ -59,9 +61,8 @@ impl BpStatementV1 {
     ) -> Result<PublicKey> {
         // §4.3: R_total = Σ R_i (point addition; rejects the identity).
         let r_total = scriptless_add_public_points(shares)?;
-        let r_total_commitment =
-            Commitment::from_compressed_bytes(&r_total.to_compressed_bytes())
-                .map_err(|_| AdaptorError::InvalidContext("aggregate R_total is not a valid point"))?;
+        let r_total_commitment = Commitment::from_compressed_bytes(&r_total.to_compressed_bytes())
+            .map_err(|_| AdaptorError::InvalidContext("aggregate R_total is not a valid point"))?;
         // §4.3: C = v*H + R_total, rejecting only R_total or C at infinity —
         // not the v*H term itself. When v = 0 the value term is the identity
         // and C = R_total; §4.3 permits that (the §5.7 v=0 edge), so it is not
@@ -298,11 +299,28 @@ impl BpStatementV1 {
         &self.aggregate_commitment
     }
 
-    pub(crate) const fn value_noms(&self) -> u64 {
+    /// Return the authenticated DOM chain identity carried by the statement.
+    pub fn chain_id(&self) -> [u8; 32] {
+        self.bytes[6..38]
+            .try_into()
+            .expect("validated BP statement always contains a 32-byte chain ID")
+    }
+
+    /// Return the authenticated contract session identity.
+    pub fn session_id(&self) -> [u8; 32] {
+        self.bytes[38..70]
+            .try_into()
+            .expect("validated BP statement always contains a 32-byte session ID")
+    }
+
+    /// Return the exact confidential output value bound by this statement.
+    pub const fn value_noms(&self) -> u64 {
         self.value_noms
     }
 
-    pub(crate) const fn recovery_binding_hash(&self) -> &[u8; 32] {
+    /// Return the hash of the exact recovery capsule bytes, or the canonical
+    /// no-capsule sentinel.
+    pub const fn recovery_binding_hash(&self) -> &[u8; 32] {
         &self.recovery_binding_hash
     }
 }
@@ -468,6 +486,12 @@ impl BpRound2ShareV1 {
 /// phase. Phase 2 transport integration remains outside this mission.
 pub(crate) struct BpCommonNonceV1(Zeroizing<[u8; 32]>);
 
+/// Independently generated participant-private backend nonce.
+///
+/// It is imported only from the authenticated short-lived BP vault record,
+/// has no raw accessor, and is consumed by backend round one.
+pub(crate) struct BpPrivateNonceV1(Zeroizing<[u8; 32]>);
+
 /// One participant's unrevealed common-nonce contribution.
 ///
 /// The share is generated internally, has no raw accessor, and is consumed by
@@ -591,6 +615,30 @@ impl BpLocalBlindingV1 {
     }
 }
 
+impl BpPrivateNonceV1 {
+    pub(crate) fn from_persisted_bytes(bytes: Zeroizing<[u8; 32]>) -> Result<Self> {
+        if !scalar_bytes_are_canonical(&bytes, false) {
+            return Err(AdaptorError::InvalidContext(
+                "Bulletproof private nonce is noncanonical or zero",
+            ));
+        }
+        Ok(Self(bytes))
+    }
+
+    #[cfg(test)]
+    fn generate_for_internal_test() -> Result<Self> {
+        loop {
+            let mut nonce = Zeroizing::new([0u8; 32]);
+            OsRng
+                .try_fill_bytes(nonce.as_mut())
+                .map_err(|_| AdaptorError::RandomnessFailure)?;
+            if scalar_bytes_are_canonical(&nonce, false) {
+                return Ok(Self(nonce));
+            }
+        }
+    }
+}
+
 /// One-shot participant state between backend rounds one and two.
 pub(crate) struct BpParticipantRound1StateV1 {
     backend: BulletproofMpcRound1State,
@@ -602,6 +650,7 @@ pub(crate) struct BpParticipantRound1StateV1 {
 pub(crate) struct BpParticipantFinalizeStateV1 {
     backend: BulletproofMpcFinalizeState,
     statement_hash: [u8; 32],
+    participant_index: u16,
 }
 
 pub(crate) fn common_nonce_commitment_for_bytes_v1(
@@ -692,18 +741,6 @@ pub(crate) fn derive_common_nonce_v1(
     }
 }
 
-fn random_private_nonce() -> Result<Zeroizing<[u8; 32]>> {
-    loop {
-        let mut nonce = Zeroizing::new([0u8; 32]);
-        OsRng
-            .try_fill_bytes(nonce.as_mut())
-            .map_err(|_| AdaptorError::RandomnessFailure)?;
-        if scalar_bytes_are_canonical(&nonce, false) {
-            return Ok(nonce);
-        }
-    }
-}
-
 /// Execute a participant's first backend phase and return only its typed public
 /// round-one share plus one non-cloneable continuation state.
 pub(crate) fn participant_round1_v1(
@@ -711,6 +748,7 @@ pub(crate) fn participant_round1_v1(
     participant_index: u16,
     local_blinding: BpLocalBlindingV1,
     common_nonce: BpCommonNonceV1,
+    private_nonce: BpPrivateNonceV1,
     // Spec §5.2: the proof binds the exact bytes passed as extra_commit — the
     // raw recovery capsule (or empty when the output carries no capsule) — and
     // the statement's recovery_binding_hash is their hash. Consensus verifies
@@ -727,13 +765,12 @@ pub(crate) fn participant_round1_v1(
             "Bulletproof participant index is outside the roster",
         ));
     }
-    let private_nonce = random_private_nonce()?;
     let (backend, output) = bulletproof_mpc_round1(
         statement.value_noms(),
         local_blinding.into_blinding()?,
         statement.aggregate_commitment().to_compressed_bytes(),
         common_nonce.0,
-        private_nonce,
+        private_nonce.0,
         extra_commit,
     )?;
     let t_one = PublicKey::from_compressed_bytes(output.t_one())?;
@@ -796,9 +833,60 @@ pub(crate) fn participant_round2_v1(
         BpParticipantFinalizeStateV1 {
             backend,
             statement_hash: state.statement_hash,
+            participant_index: state.participant_index,
         },
         share,
     ))
+}
+
+/// Consume a participant finalizer into the canonical zeroizing vault
+/// continuation plaintext. This is never a network or public object codec.
+pub(crate) fn participant_finalize_continuation_to_bytes_v1(
+    state: BpParticipantFinalizeStateV1,
+    statement: &BpStatementV1,
+    participant_index: u16,
+) -> Result<Zeroizing<Vec<u8>>> {
+    if state.statement_hash != statement.statement_hash()
+        || state.participant_index != participant_index
+    {
+        return Err(AdaptorError::AuthorizationMismatch);
+    }
+    bulletproof_mpc_finalize_continuation_to_bytes_v1(state.backend).map_err(Into::into)
+}
+
+/// Rebuild a participant finalizer only from authenticated canonical vault
+/// plaintext and exact statement/aggregate-round-1 public inputs.
+pub(crate) fn participant_finalize_continuation_from_bytes_v1(
+    bytes: Zeroizing<Vec<u8>>,
+    statement: &BpStatementV1,
+    participant_index: u16,
+    aggregate_t_one: &[u8; 33],
+    aggregate_t_two: &[u8; 33],
+    extra_commit: &[u8],
+) -> Result<BpParticipantFinalizeStateV1> {
+    if statement
+        .participant_ids()
+        .get(usize::from(participant_index))
+        .is_none()
+    {
+        return Err(AdaptorError::InvalidContext(
+            "Bulletproof finalizer participant index is outside the roster",
+        ));
+    }
+    let backend = bulletproof_mpc_finalize_continuation_from_bytes_v1(
+        bytes,
+        statement.value_noms(),
+        &statement.aggregate_commitment().to_compressed_bytes(),
+        &statement.commitment_shares()[usize::from(participant_index)].to_compressed_bytes(),
+        aggregate_t_one,
+        aggregate_t_two,
+        extra_commit,
+    )?;
+    Ok(BpParticipantFinalizeStateV1 {
+        backend,
+        statement_hash: statement.statement_hash(),
+        participant_index,
+    })
 }
 
 fn aggregate_round2_shares_v1(
@@ -995,7 +1083,11 @@ mod tests {
             let blind = BpLocalBlindingV1::from_bytes_for_test(bytes).expect("small nonzero blind");
             // §4.2: each published share is the pure point R_i = r_i*G; the value
             // is carried once by the §4.3 aggregate, not folded into a share.
-            commitment_shares.push(blind.commitment_share(0).expect("canonical commitment share"));
+            commitment_shares.push(
+                blind
+                    .commitment_share(0)
+                    .expect("canonical commitment share"),
+            );
             blinds.push(blind);
         }
         let aggregate = BpStatementV1::aggregate_commitment_from_shares(&commitment_shares, value)
@@ -1051,6 +1143,7 @@ mod tests {
                 u16::try_from(index).expect("bounded participant"),
                 blind,
                 common_nonce,
+                BpPrivateNonceV1::generate_for_internal_test().expect("independent private nonce"),
                 &extra_commit,
             )
             .expect("pinned backend round 1");
