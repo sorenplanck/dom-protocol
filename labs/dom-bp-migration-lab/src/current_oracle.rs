@@ -162,10 +162,7 @@ pub struct CurrentOracle;
 
 impl CurrentOracle {
     pub fn assert_consensus_constants() {
-        assert_eq!(
-            dom_crypto::bulletproof::MAX_PROVABLE_VALUE,
-            MAX_PROVABLE_VALUE
-        );
+        assert_eq!(dom_crypto::MAX_PROVABLE_VALUE, MAX_PROVABLE_VALUE);
         assert_eq!(PROOF_NBITS, 64);
         assert_eq!(PROOF_NCOMMITS, 2);
         assert_eq!(CURRENT_PROOF_LEN, 739);
