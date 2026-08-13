@@ -287,12 +287,30 @@
 //! let _capability = OperationalFundingAuthorizationImportCapabilityV1::new();
 //! ```
 //!
+//! The parallel M.8 import authority is equally private and cannot be
+//! substituted for the legacy profile:
+//!
+//! ```compile_fail
+//! use dom_adaptor::OperationalM8FundingAuthorizationImportCapabilityV1;
+//! let _capability = OperationalM8FundingAuthorizationImportCapabilityV1::new();
+//! ```
+//!
 //! A fully signed funding transaction has no public transaction or byte
 //! accessor before it is consumed by the statically selected Store sink:
 //!
 //! ```compile_fail
 //! use dom_adaptor::VerifiedFundingTransactionV1;
 //! fn escape(funding: &VerifiedFundingTransactionV1) {
+//!     let _bytes = funding.canonical_bytes();
+//! }
+//! ```
+//!
+//! The M.8 verified funding wrapper likewise requires an explicit consuming
+//! handoff to a profile-specific sink before exact bytes become available:
+//!
+//! ```compile_fail
+//! use dom_adaptor::VerifiedM8FundingTransactionV1;
+//! fn escape(funding: &VerifiedM8FundingTransactionV1) {
 //!     let _bytes = funding.canonical_bytes();
 //! }
 //! ```
@@ -419,10 +437,13 @@ pub use nonce_vault::{
     VaultExportedArtifactV1, VaultKeyId, VaultReservationSnapshotV1, VaultSpentArtifactSnapshotV1,
 };
 pub use operational_funding_authority::{
-    DurableOperationalFundingIssuanceV1, OperationalFundingAuthorizationBindingV1,
-    OperationalFundingAuthorizationError, OperationalFundingAuthorizationImportCapabilityV1,
-    OperationalFundingAuthorizationStoreV1, OperationalFundingAuthorizationV1,
-    OperationalFundingUnsignedTemplateV1,
+    DurableOperationalFundingIssuanceV1, DurableOperationalM8FundingIssuanceV1,
+    OperationalFundingAuthorizationBindingV1, OperationalFundingAuthorizationError,
+    OperationalFundingAuthorizationImportCapabilityV1, OperationalFundingAuthorizationStoreV1,
+    OperationalFundingAuthorizationV1, OperationalFundingUnsignedTemplateV1,
+    OperationalM8FundingAuthorizationBindingV1,
+    OperationalM8FundingAuthorizationImportCapabilityV1, OperationalM8FundingAuthorizationStoreV1,
+    OperationalM8FundingAuthorizationV1,
 };
 pub use partial_commitment_pop::{
     prove_partial_commitment_v1, verify_all_partial_commitments_v1, verify_partial_commitment_v1,
@@ -472,7 +493,9 @@ pub use signing_share::{
 };
 pub use transaction_lifecycle::{
     OperationalFundingPersistenceCapabilityV1, OperationalFundingTransactionSinkV1,
+    OperationalM8FundingPersistenceCapabilityV1, OperationalM8FundingTransactionSinkV1,
     ScriptlessTransactionTemplateV1, VerifiedFundingAuthorizationV1, VerifiedFundingTransactionV1,
+    VerifiedM8FundingAuthorizationV1, VerifiedM8FundingTransactionV1,
     VerifiedScriptlessTransactionV1, VerifiedSharedOutputV1,
 };
 pub use transcript::{

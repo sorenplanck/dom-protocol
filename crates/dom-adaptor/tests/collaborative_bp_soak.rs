@@ -46,10 +46,6 @@ use dom_crypto::{blake2b_256, range_proof_verify_with_extra_commit, MAX_PROVABLE
 struct Prng(u64);
 
 impl Prng {
-    fn seed_from_u64(seed: u64) -> Self {
-        Self(seed)
-    }
-
     /// Seed for one global case index under a campaign base seed. Mixing both
     /// through splitmix keeps distinct indices independent.
     fn for_case(base_seed: u64, case_index: u64) -> Self {
@@ -208,7 +204,11 @@ fn one_case(rng: &mut Prng, case: usize) {
     let proof = drivers[0]
         .finalize(&statement, &aggregate_r1, &aggregate_r2)
         .expect("finalization");
-    assert_eq!(proof.as_bytes().len(), 739, "case {case}: proof size drifted");
+    assert_eq!(
+        proof.as_bytes().len(),
+        739,
+        "case {case}: proof size drifted"
+    );
     assert!(
         range_proof_verify_with_extra_commit(
             &statement.aggregate_commitment().to_compressed_bytes(),

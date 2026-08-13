@@ -38,9 +38,8 @@ const CAPSULE: [u8; 96] = [0x5A; 96];
 
 /// The secp256k1 group order minus one: the negation of the scalar 1.
 const GROUP_ORDER_MINUS_ONE: [u8; 32] = [
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0xfe, 0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36,
-    0x41, 0x40,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+    0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x40,
 ];
 
 fn chain() -> TrustedChainIdV1 {
@@ -84,7 +83,11 @@ fn full_flow(value: u64) -> (BpStatementV1, RangeProof739, [BpRound1ShareV1; 2],
     let accepted = [commit_a, commit_b];
     let (reveal_a, reveal_b) = (pending_a.reveal_bytes(), pending_b.reveal_bytes());
     let local_a = pending_a
-        .finish(&statement, &accepted, vec![reveal_a.clone(), reveal_b.clone()])
+        .finish(
+            &statement,
+            &accepted,
+            vec![reveal_a.clone(), reveal_b.clone()],
+        )
         .expect("local A");
     let local_b = pending_b
         .finish(&statement, &accepted, vec![reveal_a, reveal_b])
@@ -123,12 +126,15 @@ fn value_edges_zero_one_and_the_provable_limit_all_prove_and_verify() {
     for value in [0u64, 1, MAX_PROVABLE_VALUE - 1, MAX_PROVABLE_VALUE] {
         let (statement, proof, _, _) = full_flow(value);
         assert_eq!(proof.as_bytes().len(), 739, "value {value}");
-        assert!(range_proof_verify_with_extra_commit(
-            &statement.aggregate_commitment().to_compressed_bytes(),
-            proof.as_bytes(),
-            &CAPSULE,
-        )
-        .expect("verifier"), "value {value}");
+        assert!(
+            range_proof_verify_with_extra_commit(
+                &statement.aggregate_commitment().to_compressed_bytes(),
+                proof.as_bytes(),
+                &CAPSULE,
+            )
+            .expect("verifier"),
+            "value {value}"
+        );
     }
     // And one past the limit is refused before any round can run.
     let (r_a, r_b) = (share(3), share(5));
@@ -175,12 +181,8 @@ fn tampered_round_shares_fail_closed() {
             Err(_) => {}
             Ok(reparsed) => {
                 assert!(
-                    AggregateBpRound1::new(
-                        &statement,
-                        &accepted,
-                        &[reparsed, round1_b.clone()],
-                    )
-                    .is_err(),
+                    AggregateBpRound1::new(&statement, &accepted, &[reparsed, round1_b.clone()],)
+                        .is_err(),
                     "mutation at byte {index} slipped past the 0B gate"
                 );
             }
@@ -255,19 +257,20 @@ fn duplicated_omitted_and_reordered_participants_fail_at_the_round_layer() {
 
     // §5.7 "participante duplicado, omitido e reordenado" at round 1: the
     // ordered aggregation refuses a duplicate, a swap, and an incomplete set.
-    assert!(AggregateBpRound1::new(
-        &statement,
-        &accepted,
-        &[round1_a.clone(), round1_a.clone()],
-    )
-    .is_err());
+    assert!(
+        AggregateBpRound1::new(&statement, &accepted, &[round1_a.clone(), round1_a.clone()],)
+            .is_err()
+    );
     assert!(AggregateBpRound1::new(
         &statement,
         &[accepted[1], accepted[0]],
         &[round1_b.clone(), round1_a.clone()],
     )
     .is_err());
-    assert!(AggregateBpRound1::new(&statement, &accepted[..1], &[round1_a.clone()]).is_err());
+    assert!(
+        AggregateBpRound1::new(&statement, &accepted[..1], std::slice::from_ref(&round1_a))
+            .is_err()
+    );
 
     // And at round 2: an omitted share never assembles an aggregate.
     let only_b = BpRound2ShareV1::from_bytes(&round2_b_bytes, &statement).expect("B share");
@@ -291,10 +294,8 @@ fn single_and_multi_party_proofs_share_size_verifier_and_external_bytes() {
 
     assert_eq!(single_proof.len(), 739);
     assert_eq!(multi_proof.as_bytes().len(), 739);
-    assert!(range_proof_verify_with_extra_commit(
-        &single_commitment,
-        &single_proof,
-        &CAPSULE,
-    )
-    .expect("single verifies"));
+    assert!(
+        range_proof_verify_with_extra_commit(&single_commitment, &single_proof, &CAPSULE,)
+            .expect("single verifies")
+    );
 }

@@ -28,7 +28,7 @@ use dom_crypto::recovery::RECOVERY_CAPSULE_SIZE;
 use dom_crypto::{
     blake2b_256_tagged, schnorr_challenge, scriptless_add_public_points,
     scriptless_verify_final_signature, secret_scalar_mul_add_assign, secret_scalar_public_key,
-    PartialSig, PublicKey, RANGE_PROOF_SIZE,
+    PartialSig, RANGE_PROOF_SIZE,
 };
 use zeroize::Zeroizing;
 
@@ -504,15 +504,6 @@ fn g5_adaptor_extraction_and_claim_floor_invariants() {
 }
 
 // --- shared fixtures -------------------------------------------------------
-
-fn point(value: u8) -> PublicKey {
-    let mut bytes = [0u8; 32];
-    bytes[31] = value;
-    SigningShareV1::from_be_bytes(bytes)
-        .expect("fixture scalar")
-        .public_key()
-        .clone()
-}
 
 fn scalar_bytes(byte: u8) -> Zeroizing<[u8; 32]> {
     let mut bytes = Zeroizing::new([0u8; 32]);

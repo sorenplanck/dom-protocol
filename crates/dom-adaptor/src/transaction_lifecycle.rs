@@ -12,7 +12,9 @@ use crate::{
     ContractTxRoleV1, OperationalFundingAuthorizationBindingV1,
     OperationalFundingAuthorizationError, OperationalFundingAuthorizationImportCapabilityV1,
     OperationalFundingAuthorizationStoreV1, OperationalFundingAuthorizationV1,
-    OperationalFundingUnsignedTemplateV1, RangeProof739, Result, SharedCommitmentV1,
+    OperationalFundingUnsignedTemplateV1, OperationalM8FundingAuthorizationBindingV1,
+    OperationalM8FundingAuthorizationImportCapabilityV1, OperationalM8FundingAuthorizationStoreV1,
+    OperationalM8FundingAuthorizationV1, RangeProof739, Result, SharedCommitmentV1,
 };
 use dom_consensus::{
     scriptless_kernel_message_digest_v1, validate_balance_equation, validate_range_proofs,
@@ -478,6 +480,150 @@ impl ScriptlessTransactionTemplateV1 {
             .map_err(OperationalFundingAuthorizationError::Store)
     }
 
+    /// Issue the M.8 two-phase funding authority without allocating claim
+    /// signing nonces or requiring a claim adaptor pre-signature.
+    ///
+    /// The exact claim template and adaptor point are frozen now, together
+    /// with the immutable M.8 timing/finality policy. Real funding-anchor
+    /// evidence is necessarily produced after funding confirms and therefore
+    /// belongs to the later claim-signing gate, not this capability.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_funding_m8_v1<Store: OperationalM8FundingAuthorizationStoreV1>(
+        &self,
+        chain_id: &[u8; 32],
+        session_id: [u8; 32],
+        expected_transcript_hash: [u8; 32],
+        terms_hash: [u8; 32],
+        bp_statement: &BpStatementV1,
+        claim_template_hash: [u8; 32],
+        expected_adaptor_point: [u8; 33],
+        refund_tx_hash: [u8; 32],
+        backup_receipt_hash: [u8; 32],
+        m8_policy_digest: [u8; 32],
+        store: &mut Store,
+    ) -> core::result::Result<
+        OperationalM8FundingAuthorizationV1,
+        OperationalFundingAuthorizationError<Store::Error>,
+    > {
+        self.validate_operational_funding_inputs(chain_id, session_id, bp_statement, false)?;
+        let binding = OperationalM8FundingAuthorizationBindingV1::new(
+            *chain_id,
+            session_id,
+            expected_transcript_hash,
+            terms_hash,
+            self.shared_output_commitment,
+            bp_statement.statement_hash(),
+            self.template_hash,
+            claim_template_hash,
+            expected_adaptor_point,
+            m8_policy_digest,
+            refund_tx_hash,
+            backup_receipt_hash,
+        )
+        .map_err(OperationalFundingAuthorizationError::Protocol)?;
+        store
+            .issue_operational_m8_funding_authorization(
+                &binding,
+                &OperationalFundingUnsignedTemplateV1::new(
+                    &self.transaction,
+                    bp_statement,
+                    &self.canonical_template_bytes,
+                    &self.template_hash,
+                ),
+                OperationalM8FundingAuthorizationImportCapabilityV1::new(),
+            )
+            .map_err(OperationalFundingAuthorizationError::Store)
+    }
+
+    /// Resume the exact already-durable M.8 funding issuance after a crash.
+    ///
+    /// All public fields and the canonical unsigned template are reconstructed
+    /// and rechecked. The Store must import the same issuance digest and
+    /// revision and must reject a consumed successor or profile substitution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resume_funding_m8_authorization_v1<Store: OperationalM8FundingAuthorizationStoreV1>(
+        &self,
+        chain_id: &[u8; 32],
+        session_id: [u8; 32],
+        expected_transcript_hash: [u8; 32],
+        terms_hash: [u8; 32],
+        bp_statement: &BpStatementV1,
+        claim_template_hash: [u8; 32],
+        expected_adaptor_point: [u8; 33],
+        refund_tx_hash: [u8; 32],
+        backup_receipt_hash: [u8; 32],
+        m8_policy_digest: [u8; 32],
+        store: &mut Store,
+    ) -> core::result::Result<
+        OperationalM8FundingAuthorizationV1,
+        OperationalFundingAuthorizationError<Store::Error>,
+    > {
+        self.validate_operational_funding_inputs(chain_id, session_id, bp_statement, true)?;
+        let binding = OperationalM8FundingAuthorizationBindingV1::new(
+            *chain_id,
+            session_id,
+            expected_transcript_hash,
+            terms_hash,
+            self.shared_output_commitment,
+            bp_statement.statement_hash(),
+            self.template_hash,
+            claim_template_hash,
+            expected_adaptor_point,
+            m8_policy_digest,
+            refund_tx_hash,
+            backup_receipt_hash,
+        )
+        .map_err(OperationalFundingAuthorizationError::Protocol)?;
+        store
+            .resume_operational_m8_funding_authorization(
+                &binding,
+                &OperationalFundingUnsignedTemplateV1::new(
+                    &self.transaction,
+                    bp_statement,
+                    &self.canonical_template_bytes,
+                    &self.template_hash,
+                ),
+                OperationalM8FundingAuthorizationImportCapabilityV1::new(),
+            )
+            .map_err(OperationalFundingAuthorizationError::Store)
+    }
+
+    fn validate_operational_funding_inputs<E>(
+        &self,
+        chain_id: &[u8; 32],
+        session_id: [u8; 32],
+        bp_statement: &BpStatementV1,
+        resume: bool,
+    ) -> core::result::Result<(), OperationalFundingAuthorizationError<E>> {
+        if self.role != ContractTxRoleV1::Funding {
+            return Err(OperationalFundingAuthorizationError::Protocol(
+                AdaptorError::InvalidContext(if resume {
+                    "M.8 operational funding resume received another transaction role"
+                } else {
+                    "M.8 operational funding authorization received another transaction role"
+                }),
+            ));
+        }
+        if chain_id == &[0; 32]
+            || bp_statement.chain_id() != *chain_id
+            || bp_statement.session_id() != session_id
+            || bp_statement.aggregate_commitment().to_compressed_bytes()
+                != self.shared_output_commitment
+            || self
+                .transaction
+                .outputs
+                .iter()
+                .filter(|output| output.commitment.as_bytes() == &self.shared_output_commitment)
+                .count()
+                != 1
+        {
+            return Err(OperationalFundingAuthorizationError::Protocol(
+                AdaptorError::AuthorizationMismatch,
+            ));
+        }
+        Ok(())
+    }
+
     /// Finalize funding only after consuming the Contracts Store's durable,
     /// template-bound one-shot operational authorization.
     pub fn finalize_funding(
@@ -508,6 +654,45 @@ impl ScriptlessTransactionTemplateV1 {
         Ok(VerifiedFundingTransactionV1 {
             transaction,
             authorization: VerifiedFundingAuthorizationV1 {
+                binding: authorization_binding,
+                issuance_record_digest,
+                authorized_revision,
+            },
+        })
+    }
+
+    /// Finalize M.8 funding after consuming its distinct profile-bound,
+    /// durable one-shot authorization.
+    ///
+    /// A legacy pre-signed-claim token cannot inhabit the M.8 authorization
+    /// type, so profile confusion is rejected statically as well as by the
+    /// Store's canonical binding bytes.
+    pub fn finalize_funding_m8(
+        self,
+        authorization: OperationalM8FundingAuthorizationV1,
+        final_signature: SchnorrSignature,
+        chain_id: &[u8; 32],
+        current_height: u64,
+    ) -> Result<VerifiedM8FundingTransactionV1> {
+        if self.role != ContractTxRoleV1::Funding {
+            return Err(AdaptorError::InvalidContext(
+                "M.8 funding finalizer received another transaction role",
+            ));
+        }
+        if authorization.binding().funding_template_hash() != &self.template_hash
+            || authorization.binding().shared_output_commitment() != &self.shared_output_commitment
+            || authorization.binding().chain_id() != chain_id
+        {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
+        let authorization_binding = authorization.binding().clone();
+        let issuance_record_digest = *authorization.issuance_record_digest();
+        let authorized_revision = authorization.authorized_revision();
+        let transaction =
+            self.finalize_with_signature(final_signature, chain_id, current_height)?;
+        Ok(VerifiedM8FundingTransactionV1 {
+            transaction,
+            authorization: VerifiedM8FundingAuthorizationV1 {
                 binding: authorization_binding,
                 issuance_record_digest,
                 authorized_revision,
@@ -622,6 +807,14 @@ pub struct VerifiedFundingAuthorizationV1 {
     authorized_revision: u64,
 }
 
+/// Public M.8 issuance evidence carried to the post-sign persistence sink.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedM8FundingAuthorizationV1 {
+    binding: OperationalM8FundingAuthorizationBindingV1,
+    issuance_record_digest: [u8; 32],
+    authorized_revision: u64,
+}
+
 impl VerifiedScriptlessTransactionV1 {
     /// Lifecycle role.
     pub const fn role(&self) -> ContractTxRoleV1 {
@@ -679,6 +872,18 @@ pub struct VerifiedFundingTransactionV1 {
     authorization: VerifiedFundingAuthorizationV1,
 }
 
+/// Fully verified M.8 funding transaction with no direct byte accessor.
+///
+/// This type deliberately implements no `Clone`, `Copy`, `Debug`, codec, or
+/// direct canonical-byte accessor. Exact bytes are exposed only during the
+/// explicit, consuming handoff to an implementation of the profile-specific
+/// persistence sink. The public sink trait is a composition boundary, not an
+/// attestation that a caller selected a particular trusted implementation.
+pub struct VerifiedM8FundingTransactionV1 {
+    transaction: VerifiedScriptlessTransactionV1,
+    authorization: VerifiedM8FundingAuthorizationV1,
+}
+
 impl VerifiedFundingTransactionV1 {
     /// DOM transaction id of the fully verified funding transaction.
     pub const fn tx_hash(&self) -> &[u8; 32] {
@@ -713,6 +918,42 @@ impl VerifiedFundingTransactionV1 {
     }
 }
 
+impl VerifiedM8FundingTransactionV1 {
+    /// DOM transaction id of the fully verified M.8 funding transaction.
+    pub const fn tx_hash(&self) -> &[u8; 32] {
+        self.transaction.tx_hash()
+    }
+
+    /// Signature-omitting template hash bound by the M.8 issuance record.
+    pub const fn template_hash(&self) -> &[u8; 32] {
+        self.transaction.template_hash()
+    }
+
+    /// Store-verifiable M.8 evidence copied from the consumed authorization.
+    pub const fn authorization(&self) -> &VerifiedM8FundingAuthorizationV1 {
+        &self.authorization
+    }
+
+    /// Re-run the real DOM verifier without releasing transaction bytes.
+    pub fn verify(&self, chain_id: &[u8; 32], current_height: u64) -> Result<()> {
+        self.transaction.verify(chain_id, current_height)
+    }
+
+    /// Consume this value into the caller-selected M.8 Store sink.
+    ///
+    /// Production callers must select their trusted persistence Store here;
+    /// the type system enforces a consuming capability handoff but does not
+    /// authenticate a particular downstream trait implementation.
+    pub fn persist_with_m8_sink_v1<Sink: OperationalM8FundingTransactionSinkV1>(
+        self,
+        sink: &mut Sink,
+    ) -> core::result::Result<Sink::PersistedFunding, Sink::Error> {
+        sink.persist_verified_m8_funding(OperationalM8FundingPersistenceCapabilityV1 {
+            funding: self,
+        })
+    }
+}
+
 /// One-shot post-sign capability delivered only to the selected Store sink.
 ///
 /// It owns the verified funding transaction and its issuance evidence. The
@@ -720,6 +961,16 @@ impl VerifiedFundingTransactionV1 {
 /// issuance record; ordinary lifecycle callers never receive this capability.
 pub struct OperationalFundingPersistenceCapabilityV1 {
     funding: VerifiedFundingTransactionV1,
+}
+
+/// One-shot post-sign capability for the exact M.8 funding profile.
+///
+/// This capability can only be created by the consuming handoff above, but a
+/// downstream crate can implement the public sink trait and inspect it. Trust
+/// in durable persistence and issuance consumption therefore remains an
+/// operational property of the selected Store implementation.
+pub struct OperationalM8FundingPersistenceCapabilityV1 {
+    funding: VerifiedM8FundingTransactionV1,
 }
 
 impl OperationalFundingPersistenceCapabilityV1 {
@@ -759,6 +1010,43 @@ impl OperationalFundingPersistenceCapabilityV1 {
     }
 }
 
+impl OperationalM8FundingPersistenceCapabilityV1 {
+    /// Fully signed canonical transaction for Store-side revalidation.
+    pub const fn transaction(&self) -> &Transaction {
+        self.funding.transaction.transaction()
+    }
+
+    /// Exact canonical bytes that must be fsynced before broadcast.
+    pub fn canonical_bytes(&self) -> &[u8] {
+        self.funding.transaction.canonical_bytes()
+    }
+
+    /// DOM transaction id of the exact canonical bytes.
+    pub const fn tx_hash(&self) -> &[u8; 32] {
+        self.funding.transaction.tx_hash()
+    }
+
+    /// Signature-omitting funding template hash.
+    pub const fn template_hash(&self) -> &[u8; 32] {
+        self.funding.transaction.template_hash()
+    }
+
+    /// Shared output created by this funding transaction.
+    pub const fn shared_output_commitment(&self) -> &[u8; 33] {
+        self.funding.transaction.shared_output_commitment()
+    }
+
+    /// Exact M.8 issuance evidence to consume atomically.
+    pub const fn authorization(&self) -> &VerifiedM8FundingAuthorizationV1 {
+        self.funding.authorization()
+    }
+
+    /// Re-run the complete DOM verifier before committing broadcast bytes.
+    pub fn verify(&self, chain_id: &[u8; 32], current_height: u64) -> Result<()> {
+        self.funding.verify(chain_id, current_height)
+    }
+}
+
 /// Static post-sign Store composition for a verified funding transaction.
 ///
 /// Implementations must reject any mismatch among the issuance record,
@@ -781,6 +1069,25 @@ pub trait OperationalFundingTransactionSinkV1: Sized {
     ) -> core::result::Result<Self::PersistedFunding, Self::Error>;
 }
 
+/// Static post-sign Store composition for M.8 funding.
+///
+/// Implementations must authenticate the exact M.8 profile binding and its
+/// issuance record, atomically persist the byte-identical signed transaction,
+/// and consume the issuance before returning a broadcast-capable artifact.
+pub trait OperationalM8FundingTransactionSinkV1: Sized {
+    /// Store-specific redacted error.
+    type Error: Error + Send + Sync + 'static;
+
+    /// Store-owned artifact proving durable bytes and issuance consumption.
+    type PersistedFunding;
+
+    /// Consume the M.8 capability that reveals signed funding bytes.
+    fn persist_verified_m8_funding(
+        &mut self,
+        capability: OperationalM8FundingPersistenceCapabilityV1,
+    ) -> core::result::Result<Self::PersistedFunding, Self::Error>;
+}
+
 impl VerifiedFundingAuthorizationV1 {
     /// Complete ready-to-fund evidence binding consumed before signing.
     pub const fn binding(&self) -> &OperationalFundingAuthorizationBindingV1 {
@@ -798,6 +1105,23 @@ impl VerifiedFundingAuthorizationV1 {
     }
 }
 
+impl VerifiedM8FundingAuthorizationV1 {
+    /// Complete profile-tagged pre-funding evidence binding.
+    pub const fn binding(&self) -> &OperationalM8FundingAuthorizationBindingV1 {
+        &self.binding
+    }
+
+    /// Exact immutable Store issuance-record digest.
+    pub const fn issuance_record_digest(&self) -> &[u8; 32] {
+        &self.issuance_record_digest
+    }
+
+    /// Durable M.8 funding-authorized session revision.
+    pub const fn authorized_revision(&self) -> u64 {
+        self.authorized_revision
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,8 +1129,8 @@ mod tests {
         aggregate_public_nonces_v1, aggregate_shared_commitment_v1, combine_decoy_capsule_v1,
         contribute_blinding_share_v1, AggregateBpRound1, AggregateBpRound2, BpStatementV1,
         CollaborativeRangeProof, DecoyContributionV1, DirectionV1, DomCollaborativeRangeProofV1,
-        DurableOperationalFundingIssuanceV1, PendingCommonNonce, SessionId, SigningShareV1,
-        TrustedChainIdV1,
+        DurableOperationalFundingIssuanceV1, DurableOperationalM8FundingIssuanceV1,
+        PendingCommonNonce, SessionId, SigningShareV1, TrustedChainIdV1,
     };
     use dom_core::{Amount, Hash256};
     use dom_crypto::{
@@ -1067,6 +1391,87 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct TestM8AuthorizationStore {
+        issuance: Option<DurableOperationalM8FundingIssuanceV1>,
+        issue_count: usize,
+        resume_count: usize,
+        consumed: bool,
+    }
+
+    fn validate_unsigned_m8_authorization_view(
+        binding: &OperationalM8FundingAuthorizationBindingV1,
+        unsigned_template: &OperationalFundingUnsignedTemplateV1<'_>,
+    ) -> core::result::Result<(), std::io::Error> {
+        let (canonical_bytes, template_hash) =
+            canonical_template_v1(unsigned_template.transaction())
+                .map_err(std::io::Error::other)?;
+        if canonical_bytes != unsigned_template.canonical_template_bytes()
+            || &template_hash != unsigned_template.template_hash()
+            || binding.funding_template_hash() != unsigned_template.template_hash()
+            || binding.bp_statement_hash() != &unsigned_template.bp_statement().statement_hash()
+            || binding.shared_output_commitment()
+                != &unsigned_template
+                    .bp_statement()
+                    .aggregate_commitment()
+                    .to_compressed_bytes()
+        {
+            return Err(std::io::Error::other(
+                "unsigned M.8 funding template mismatch",
+            ));
+        }
+        Ok(())
+    }
+
+    impl OperationalM8FundingAuthorizationStoreV1 for TestM8AuthorizationStore {
+        type Error = std::io::Error;
+
+        fn issue_operational_m8_funding_authorization(
+            &mut self,
+            binding: &OperationalM8FundingAuthorizationBindingV1,
+            unsigned_template: &OperationalFundingUnsignedTemplateV1<'_>,
+            capability: OperationalM8FundingAuthorizationImportCapabilityV1,
+        ) -> core::result::Result<OperationalM8FundingAuthorizationV1, Self::Error> {
+            validate_unsigned_m8_authorization_view(binding, unsigned_template)?;
+            if self.issuance.is_some() || self.consumed {
+                return Err(std::io::Error::other("M.8 funding issuance already exists"));
+            }
+            let issuance =
+                DurableOperationalM8FundingIssuanceV1::new(binding.clone(), [0x85; 32], 8)
+                    .map_err(std::io::Error::other)?;
+            self.issuance = Some(issuance.clone());
+            self.issue_count += 1;
+            capability
+                .import(binding, issuance)
+                .map_err(std::io::Error::other)
+        }
+
+        fn resume_operational_m8_funding_authorization(
+            &mut self,
+            binding: &OperationalM8FundingAuthorizationBindingV1,
+            unsigned_template: &OperationalFundingUnsignedTemplateV1<'_>,
+            capability: OperationalM8FundingAuthorizationImportCapabilityV1,
+        ) -> core::result::Result<OperationalM8FundingAuthorizationV1, Self::Error> {
+            validate_unsigned_m8_authorization_view(binding, unsigned_template)?;
+            if self.consumed {
+                return Err(std::io::Error::other("M.8 funding issuance was consumed"));
+            }
+            let issuance = self
+                .issuance
+                .clone()
+                .ok_or_else(|| std::io::Error::other("M.8 funding issuance does not exist"))?;
+            if issuance.binding() != binding {
+                return Err(std::io::Error::other(
+                    "M.8 funding issuance binding mismatch",
+                ));
+            }
+            self.resume_count += 1;
+            capability
+                .import(binding, issuance)
+                .map_err(std::io::Error::other)
+        }
+    }
+
     struct TestFundingSink {
         chain_id: [u8; 32],
         height: u64,
@@ -1097,6 +1502,303 @@ mod tests {
             self.stored_bytes = Some(capability.canonical_bytes().to_vec());
             Ok(tx_hash)
         }
+    }
+
+    struct TestM8FundingSink {
+        chain_id: [u8; 32],
+        height: u64,
+        stored_bytes: Option<Vec<u8>>,
+    }
+
+    impl OperationalM8FundingTransactionSinkV1 for TestM8FundingSink {
+        type Error = std::io::Error;
+        type PersistedFunding = [u8; 32];
+
+        fn persist_verified_m8_funding(
+            &mut self,
+            capability: OperationalM8FundingPersistenceCapabilityV1,
+        ) -> core::result::Result<Self::PersistedFunding, Self::Error> {
+            capability
+                .verify(&self.chain_id, self.height)
+                .map_err(std::io::Error::other)?;
+            if capability.authorization().binding().funding_template_hash()
+                != capability.template_hash()
+                || capability.authorization().issuance_record_digest() != &[0x85; 32]
+                || capability.authorization().authorized_revision() != 8
+            {
+                return Err(std::io::Error::other(
+                    "M.8 funding persistence evidence mismatch",
+                ));
+            }
+            let tx_hash = *capability.tx_hash();
+            self.stored_bytes = Some(capability.canonical_bytes().to_vec());
+            Ok(tx_hash)
+        }
+    }
+
+    #[test]
+    fn legacy_profile_still_requires_nonzero_claim_presignature_hash() {
+        let shared = shared_fixture(90);
+        let chain_id = *shared.chain.as_bytes();
+        let input_blinding = blinding(11);
+        let excess_blinding = shared
+            .aggregate_blinding
+            .sub(&input_blinding)
+            .expect("difference")
+            .require_nonzero()
+            .expect("nonzero excess");
+        let template = ScriptlessTransactionTemplateV1::funding(
+            &shared.output,
+            vec![TransactionInput {
+                commitment: Commitment::commit(100, &input_blinding),
+            }],
+            Vec::new(),
+            0,
+            unsigned_kernel(10, 0, &excess_blinding),
+            [0u8; 32],
+        )
+        .expect("funding template");
+        let mut store = TestAuthorizationStore::default();
+        let result = template.authorize_funding_v1(
+            &chain_id,
+            shared.statement.session_id(),
+            [0x71; 32],
+            [0x55; 32],
+            &shared.statement,
+            [0x76; 32],
+            [0x72; 32],
+            [0; 32],
+            [0x74; 32],
+            &mut store,
+        );
+        assert!(matches!(
+            result,
+            Err(OperationalFundingAuthorizationError::Protocol(
+                AdaptorError::InvalidContext(_)
+            ))
+        ));
+        assert_eq!(store.issue_count, 0);
+        assert!(store.issuance.is_none());
+    }
+
+    #[test]
+    fn m8_two_phase_funding_authorizes_without_claim_nonce_or_presignature() {
+        let shared = shared_fixture(90);
+        let chain_id = *shared.chain.as_bytes();
+        let input_blinding = blinding(11);
+        let excess_blinding = shared
+            .aggregate_blinding
+            .sub(&input_blinding)
+            .expect("difference")
+            .require_nonzero()
+            .expect("nonzero excess");
+        let kernel = unsigned_kernel(10, 0, &excess_blinding);
+        let signature = sign_kernel(&kernel, &excess_blinding, &chain_id);
+        let template = ScriptlessTransactionTemplateV1::funding(
+            &shared.output,
+            vec![TransactionInput {
+                commitment: Commitment::commit(100, &input_blinding),
+            }],
+            Vec::new(),
+            0,
+            kernel,
+            [0u8; 32],
+        )
+        .expect("funding template");
+        let template_hash = *template.template_hash();
+        let adaptor_point = SecretKey::from_bytes(&scalar(13))
+            .expect("adaptor secret fixture")
+            .public_key()
+            .to_compressed_bytes();
+        let policy_digest = [0x79; 32];
+        let mut store = TestM8AuthorizationStore::default();
+        let authorization = template
+            .authorize_funding_m8_v1(
+                &chain_id,
+                shared.statement.session_id(),
+                [0x71; 32],
+                [0x55; 32],
+                &shared.statement,
+                [0x76; 32],
+                adaptor_point,
+                [0x72; 32],
+                [0x74; 32],
+                policy_digest,
+                &mut store,
+            )
+            .expect("M.8 pre-funding authority without claim signing");
+        let funding = template
+            .finalize_funding_m8(authorization, signature, &chain_id, 5)
+            .expect("verified M.8 funding");
+        assert_eq!(funding.template_hash(), &template_hash);
+        let binding = funding.authorization().binding();
+        assert_eq!(binding.claim_template_hash(), &[0x76; 32]);
+        assert_eq!(binding.claim_adaptor_point(), &adaptor_point);
+        assert_eq!(binding.m8_policy_digest(), &policy_digest);
+        assert_eq!(binding.refund_tx_hash(), &[0x72; 32]);
+        assert_eq!(binding.backup_receipt_hash(), &[0x74; 32]);
+        let encoded = binding.to_bytes();
+        assert_eq!(
+            &encoded[..8],
+            &OperationalM8FundingAuthorizationBindingV1::MAGIC
+        );
+        assert_eq!(&encoded[8..10], &1u16.to_le_bytes());
+        assert_eq!(&encoded[10..14], b"M8T2");
+        assert_eq!(encoded.len(), 400);
+
+        let expected_tx_hash = *funding.tx_hash();
+        let mut sink = TestM8FundingSink {
+            chain_id,
+            height: 5,
+            stored_bytes: None,
+        };
+        let persisted = funding
+            .persist_with_m8_sink_v1(&mut sink)
+            .expect("persist exact M.8 funding bytes");
+        assert_eq!(persisted, expected_tx_hash);
+        assert_eq!(
+            blake2b_256(&sink.stored_bytes.expect("stored bytes")).as_bytes(),
+            &expected_tx_hash
+        );
+    }
+
+    #[test]
+    fn m8_restart_resumes_same_profile_issuance_and_rejects_substitution() {
+        let shared = shared_fixture(90);
+        let chain_id = *shared.chain.as_bytes();
+        let input_blinding = blinding(11);
+        let excess_blinding = shared
+            .aggregate_blinding
+            .sub(&input_blinding)
+            .expect("difference")
+            .require_nonzero()
+            .expect("nonzero excess");
+        let template = ScriptlessTransactionTemplateV1::funding(
+            &shared.output,
+            vec![TransactionInput {
+                commitment: Commitment::commit(100, &input_blinding),
+            }],
+            Vec::new(),
+            0,
+            unsigned_kernel(10, 0, &excess_blinding),
+            [0u8; 32],
+        )
+        .expect("funding template");
+        let adaptor_point = SecretKey::from_bytes(&scalar(13))
+            .expect("adaptor secret fixture")
+            .public_key()
+            .to_compressed_bytes();
+        let mut store = TestM8AuthorizationStore::default();
+
+        {
+            let first = template
+                .authorize_funding_m8_v1(
+                    &chain_id,
+                    shared.statement.session_id(),
+                    [0x71; 32],
+                    [0x55; 32],
+                    &shared.statement,
+                    [0x76; 32],
+                    adaptor_point,
+                    [0x72; 32],
+                    [0x74; 32],
+                    [0x79; 32],
+                    &mut store,
+                )
+                .expect("initial durable M.8 issuance");
+            assert_eq!(first.issuance_record_digest(), &[0x85; 32]);
+            assert_eq!(first.authorized_revision(), 8);
+        }
+        assert_eq!(store.issue_count, 1);
+
+        {
+            let resumed = template
+                .resume_funding_m8_authorization_v1(
+                    &chain_id,
+                    shared.statement.session_id(),
+                    [0x71; 32],
+                    [0x55; 32],
+                    &shared.statement,
+                    [0x76; 32],
+                    adaptor_point,
+                    [0x72; 32],
+                    [0x74; 32],
+                    [0x79; 32],
+                    &mut store,
+                )
+                .expect("same M.8 issuance after process crash");
+            assert_eq!(resumed.issuance_record_digest(), &[0x85; 32]);
+            assert_eq!(resumed.authorized_revision(), 8);
+        }
+        assert_eq!(store.issue_count, 1, "resume must not reissue");
+        assert_eq!(store.resume_count, 1);
+
+        assert!(template
+            .resume_funding_m8_authorization_v1(
+                &chain_id,
+                shared.statement.session_id(),
+                [0x71; 32],
+                [0x55; 32],
+                &shared.statement,
+                [0x76; 32],
+                adaptor_point,
+                [0x72; 32],
+                [0x74; 32],
+                [0x99; 32],
+                &mut store,
+            )
+            .is_err());
+        assert_eq!(store.resume_count, 1, "substitution must not import");
+        store.consumed = true;
+        assert!(template
+            .resume_funding_m8_authorization_v1(
+                &chain_id,
+                shared.statement.session_id(),
+                [0x71; 32],
+                [0x55; 32],
+                &shared.statement,
+                [0x76; 32],
+                adaptor_point,
+                [0x72; 32],
+                [0x74; 32],
+                [0x79; 32],
+                &mut store,
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn m8_binding_rejects_zero_noncanonical_and_policy_substitution() {
+        let shared = shared_fixture(90);
+        let adaptor_point = SecretKey::from_bytes(&scalar(13))
+            .expect("adaptor secret fixture")
+            .public_key()
+            .to_compressed_bytes();
+        let make = |point, policy| {
+            OperationalM8FundingAuthorizationBindingV1::new(
+                *shared.chain.as_bytes(),
+                shared.statement.session_id(),
+                [0x71; 32],
+                [0x55; 32],
+                *shared.output.commitment(),
+                shared.statement.statement_hash(),
+                [0x70; 32],
+                [0x76; 32],
+                point,
+                policy,
+                [0x72; 32],
+                [0x74; 32],
+            )
+        };
+        let binding = make(adaptor_point, [0x79; 32]).expect("valid binding");
+        let substituted = make(adaptor_point, [0x7a; 32]).expect("other policy");
+        assert_ne!(binding, substituted);
+        assert_ne!(binding.to_bytes(), substituted.to_bytes());
+        assert!(make(adaptor_point, [0; 32]).is_err());
+        assert!(make([0; 33], [0x79; 32]).is_err());
+        let mut malformed = adaptor_point;
+        malformed[0] = 0x04;
+        assert!(make(malformed, [0x79; 32]).is_err());
     }
 
     #[test]
