@@ -1778,6 +1778,7 @@ dependencies = [
  "dom-pow",
  "dom-rpc",
  "dom-serialization",
+ "dom-slate",
  "dom-store",
  "dom-tx",
  "dom-wallet",
