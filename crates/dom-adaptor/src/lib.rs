@@ -479,10 +479,13 @@ pub use nonce_vault::fuzz_nar006_runtime_bindings_v1;
 pub use reservation_binding::fuzz_closed_request_types_v1;
 pub use shared_blinding_vault::{
     contribute_vault_backed_blinding_share_v1, open_pending_vault_backed_blinding_share_v1,
-    open_vault_backed_blinding_share_v1, DurableShareBackupAckCapabilityV1,
+    open_vault_backed_blinding_share_v1, resume_vault_backed_blinding_share_after_restart_v1,
+    DurableShareBackupAckCapabilityV1, LocatedSharedBlindingStageV1,
     PendingSessionBlindingShareCapabilityV1, PendingSharedBlindingBindingV1,
+    RestartableSharedBlindingVaultV1, RestartedSessionBlindingShareV1,
     SessionBlindingShareCapabilityV1, SharedBlindingBindingUpgradeCapabilityV1,
     SharedBlindingBindingV1, SharedBlindingImportCapabilityV1, SharedBlindingMaterialV1,
+    SharedBlindingRestartLookupCapabilityV1, SharedBlindingRestartRequestV1,
     SharedBlindingRetirementCapabilityV1, SharedBlindingSealCapabilityV1, SharedBlindingVaultError,
     SharedBlindingVaultV1,
 };
