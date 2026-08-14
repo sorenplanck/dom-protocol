@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -84,6 +84,10 @@ pub struct DomNode {
     /// Number of peer synchronization sessions currently rebuilding the
     /// canonical chain. Mining remains paused until this reaches zero.
     pub(crate) ibd_active_sessions: Arc<AtomicU64>,
+    /// Serializes the authenticated bounded regtest mining control. This is
+    /// distinct from the continuous miner, which must be disabled for RPC
+    /// mining so height-sensitive laboratory tests remain deterministic.
+    pub(crate) regtest_rpc_mining_active: Arc<AtomicBool>,
     /// Peer Exchange state: known peer addresses learned from seeds and Addr
     /// gossip, plus GetAddr cooldown tracking (RFC-0005 §6).
     pub pex: Arc<Mutex<crate::pex::PexManager>>,
@@ -550,6 +554,7 @@ impl DomNode {
             task_supervisor: NodeTaskSupervisor::new(),
             state_events: Arc::new(Notify::new()),
             ibd_active_sessions: Arc::new(AtomicU64::new(0)),
+            regtest_rpc_mining_active: Arc::new(AtomicBool::new(false)),
             pex: Arc::new(Mutex::new(crate::pex::PexManager::for_network(
                 PEX_MAX_KNOWN_PEERS,
                 config.network,

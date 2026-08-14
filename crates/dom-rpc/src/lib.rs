@@ -58,6 +58,42 @@ pub trait NodeHandle: Send + Sync + 'static {
         Err(RpcError::Internal("wallet not available".into()))
     }
 
+    /// Create and durably retain a public Wallet V3 recovery Slate offer.
+    fn wallet_slate_create_v1(
+        &self,
+        _request: WalletSlateCreateRequestV1,
+    ) -> Result<WalletSlateOfferV1, RpcError> {
+        Err(RpcError::Internal("wallet Slate API not available".into()))
+    }
+
+    /// Finalize and persist an exact Wallet V3 Slate response without
+    /// admission or relay, leaving room for recipient third-message checking.
+    fn wallet_slate_finalize_v1(
+        &self,
+        _request: WalletSlateFinalizeRequestV1,
+    ) -> Result<WalletSlateFinalizedV1, RpcError> {
+        Err(RpcError::Internal("wallet Slate API not available".into()))
+    }
+
+    /// Admit and relay only an exact transaction previously finalized and
+    /// persisted by this WalletDir, after the recipient's third-message check.
+    fn wallet_slate_submit_v1(
+        &self,
+        _request: WalletSlateSubmitRequestV1,
+    ) -> Result<WalletSlateSubmittedV1, RpcError> {
+        Err(RpcError::Internal("wallet Slate API not available".into()))
+    }
+
+    /// Mine an exact bounded number of real blocks on an explicitly
+    /// configured regtest node whose continuous miner is disabled.
+    fn regtest_mine_v1(&self, _request: RegtestMineRequestV1) -> RegtestMineFuture {
+        Box::pin(async {
+            Err(RpcError::Internal(
+                "regtest mining API not available".into(),
+            ))
+        })
+    }
+
     /// Per-block chain scan for the heights `from..=to` (clamped — see
     /// [`MAX_SCAN_RANGE`]), plus the current tip. Read-only projection of the
     /// canonical chain the node already has on disk; serves the v2 wallet's
@@ -93,6 +129,10 @@ pub trait NodeHandle: Send + Sync + 'static {
 
 /// Type-erased asynchronous request to the node's shutdown coordinator.
 pub type ShutdownFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+/// Type-erased bounded regtest mining request owned by the node runtime.
+pub type RegtestMineFuture =
+    Pin<Box<dyn Future<Output = Result<RegtestMineResultV1, RpcError>> + Send + 'static>>;
 
 /// Maximum number of heights a single [`NodeHandle::scan_chain`] / `/chain/scan`
 /// call returns. Bounds how long the chain lock is held so block connection is
@@ -251,6 +291,87 @@ pub struct SpendRequest {
     pub fee_noms: u64,
 }
 
+/// Public-only request for the authenticated Wallet V3 Slate sender boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletSlateCreateRequestV1 {
+    /// Optional canonical lowercase Wallet V3 recipient address. When absent,
+    /// the official Wallet V3 automatic one-time identity framing is used.
+    /// This is public material, never a recipient blinding factor.
+    #[serde(default)]
+    pub recipient_address: Option<String>,
+    /// Recipient amount in noms.
+    pub amount_noms: u64,
+    /// Exact kernel fee in noms.
+    pub fee_noms: u64,
+    /// Inclusive canonical expiry height.
+    pub expires_at_height: u64,
+}
+
+/// Exact public Wallet V3 sender offer retained by the node WalletDir.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalletSlateOfferV1 {
+    /// Canonical recovery Slate envelope bytes.
+    pub canonical_slate: Vec<u8>,
+    /// Public Slate identifier committed by the envelope.
+    pub slate_id: [u8; 32],
+    /// Public replay identifier committed by the envelope.
+    pub replay_id: [u8; 32],
+}
+
+/// Exact public Wallet V3 recipient response submitted for finalization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletSlateFinalizeRequestV1 {
+    /// Hex encoding of canonical recovery Slate envelope bytes.
+    pub canonical_response_hex: String,
+}
+
+/// Finalized, durably retained public transaction awaiting recipient checking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalletSlateFinalizedV1 {
+    /// Exact canonical DOM transaction bytes retained for restart replay.
+    pub canonical_transaction: Vec<u8>,
+    /// Exact hash of `canonical_transaction`.
+    pub transaction_hash: [u8; 32],
+    /// Opaque public hash naming the durable pending sender record.
+    pub pending_key: [u8; 32],
+}
+
+/// Submit authority for one exact, already-persisted Wallet V3 transaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletSlateSubmitRequestV1 {
+    /// Hex encoding of the 32-byte pending sender-record key.
+    pub pending_key_hex: String,
+    /// Hex encoding of the expected exact canonical transaction hash.
+    pub expected_transaction_hash_hex: String,
+}
+
+/// Exact persisted Wallet V3 transaction and its node admission result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalletSlateSubmittedV1 {
+    /// Exact canonical bytes loaded from the WalletDir (never request bytes).
+    pub canonical_transaction: Vec<u8>,
+    /// Idempotent node admission outcome.
+    pub admission: TxAdmission,
+}
+
+/// Authenticated regtest-only bounded mining request.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RegtestMineRequestV1 {
+    /// Exact number of new canonical blocks requested (1..=1000).
+    pub count: u32,
+}
+
+/// Exact canonical result of a bounded regtest mining request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegtestMineResultV1 {
+    /// Height of the first new block.
+    pub start_height: u64,
+    /// Height of the last new block.
+    pub end_height: u64,
+    /// Canonical hashes in ascending height order, exactly `count` entries.
+    pub block_hashes: Vec<[u8; 32]>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WalletBalanceResponse {
     pub confirmed_noms: u64,
@@ -305,7 +426,7 @@ pub enum TxAdmissionState {
 }
 
 impl TxAdmissionState {
-    const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::New => "new",
             Self::Mempool => "mempool",
@@ -313,11 +434,11 @@ impl TxAdmissionState {
         }
     }
 
-    const fn already_known(self) -> bool {
+    pub const fn already_known(self) -> bool {
         !matches!(self, Self::New)
     }
 
-    const fn confirmed(self) -> bool {
+    pub const fn confirmed(self) -> bool {
         matches!(self, Self::Confirmed)
     }
 }
@@ -522,6 +643,10 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
     let rate_limit_auth_read = middleware::rate_limit_read();
     let rate_limit_submit = middleware::rate_limit_submit();
     let rate_limit_wallet_spend = middleware::rate_limit_submit();
+    let rate_limit_wallet_slate_create = middleware::rate_limit_submit();
+    let rate_limit_wallet_slate_finalize = middleware::rate_limit_submit();
+    let rate_limit_wallet_slate_submit = middleware::rate_limit_submit();
+    let rate_limit_regtest_mine = middleware::rate_limit_submit();
 
     let public_routes = Router::new()
         .route("/status", get(status))
@@ -549,6 +674,22 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
         .route(
             "/wallet/spend",
             post(wallet_spend_handler).layer(rate_limit_wallet_spend),
+        )
+        .route(
+            "/wallet/slate/v1/create",
+            post(wallet_slate_create_v1_handler).layer(rate_limit_wallet_slate_create),
+        )
+        .route(
+            "/wallet/slate/v1/finalize",
+            post(wallet_slate_finalize_v1_handler).layer(rate_limit_wallet_slate_finalize),
+        )
+        .route(
+            "/wallet/slate/v1/submit",
+            post(wallet_slate_submit_v1_handler).layer(rate_limit_wallet_slate_submit),
+        )
+        .route(
+            "/regtest/mine/v1",
+            post(regtest_mine_v1_handler).layer(rate_limit_regtest_mine),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             bearer_token,
@@ -1321,6 +1462,98 @@ async fn wallet_spend_handler(
     }
 }
 
+async fn wallet_slate_create_v1_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Json(request): Json<WalletSlateCreateRequestV1>,
+) -> impl IntoResponse {
+    match handle.wallet_slate_create_v1(request) {
+        Ok(offer) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "schema_version": 1,
+                "canonical_slate_hex": hex::encode(offer.canonical_slate),
+                "slate_id": hex::encode(offer.slate_id),
+                "replay_id": hex::encode(offer.replay_id),
+            })),
+        )
+            .into_response(),
+        Err(error) => {
+            warn!("wallet Slate create error: {error}");
+            error.into_response()
+        }
+    }
+}
+
+async fn wallet_slate_finalize_v1_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Json(request): Json<WalletSlateFinalizeRequestV1>,
+) -> impl IntoResponse {
+    match handle.wallet_slate_finalize_v1(request) {
+        Ok(finalized) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "schema_version": 1,
+                "canonical_tx_hex": hex::encode(finalized.canonical_transaction),
+                "tx_hash": hex::encode(finalized.transaction_hash),
+                "pending_key": hex::encode(finalized.pending_key),
+            })),
+        )
+            .into_response(),
+        Err(error) => {
+            warn!("wallet Slate finalize error: {error}");
+            error.into_response()
+        }
+    }
+}
+
+async fn wallet_slate_submit_v1_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Json(request): Json<WalletSlateSubmitRequestV1>,
+) -> impl IntoResponse {
+    match handle.wallet_slate_submit_v1(request) {
+        Ok(submitted) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "schema_version": 1,
+                "canonical_tx_hex": hex::encode(submitted.canonical_transaction),
+                "tx_hash": hex::encode(submitted.admission.tx_hash),
+                "relayed": submitted.admission.relayed,
+                "state": submitted.admission.state.as_str(),
+                "already_known": submitted.admission.state.already_known(),
+                "confirmed": submitted.admission.state.confirmed(),
+            })),
+        )
+            .into_response(),
+        Err(error) => {
+            warn!("wallet Slate submit error: {error}");
+            error.into_response()
+        }
+    }
+}
+
+async fn regtest_mine_v1_handler(
+    State(handle): State<Arc<dyn NodeHandle>>,
+    Json(request): Json<RegtestMineRequestV1>,
+) -> impl IntoResponse {
+    match handle.regtest_mine_v1(request).await {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "schema_version": 1,
+                "start_height": result.start_height,
+                "end_height": result.end_height,
+                "count": result.block_hashes.len(),
+                "block_hashes": result.block_hashes.into_iter().map(hex::encode).collect::<Vec<_>>(),
+            })),
+        )
+            .into_response(),
+        Err(error) => {
+            warn!("regtest bounded mining error: {error}");
+            error.into_response()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1492,6 +1725,57 @@ mod tests {
                 reserved_noms: 0,
                 confirmed_dom: 0.000_000_042,
                 immature_dom: 0.0,
+            })
+        }
+        fn wallet_slate_create_v1(
+            &self,
+            _request: WalletSlateCreateRequestV1,
+        ) -> Result<WalletSlateOfferV1, RpcError> {
+            Ok(WalletSlateOfferV1 {
+                canonical_slate: vec![0xa1, 0xb2],
+                slate_id: [0x11; 32],
+                replay_id: [0x22; 32],
+            })
+        }
+        fn wallet_slate_finalize_v1(
+            &self,
+            _request: WalletSlateFinalizeRequestV1,
+        ) -> Result<WalletSlateFinalizedV1, RpcError> {
+            Ok(WalletSlateFinalizedV1 {
+                canonical_transaction: vec![0xc3, 0xd4],
+                transaction_hash: [0x33; 32],
+                pending_key: [0x44; 32],
+            })
+        }
+        fn wallet_slate_submit_v1(
+            &self,
+            _request: WalletSlateSubmitRequestV1,
+        ) -> Result<WalletSlateSubmittedV1, RpcError> {
+            Ok(WalletSlateSubmittedV1 {
+                canonical_transaction: vec![0xc3, 0xd4],
+                admission: TxAdmission {
+                    tx_hash: [0x33; 32],
+                    relayed: false,
+                    state: TxAdmissionState::Mempool,
+                },
+            })
+        }
+        fn regtest_mine_v1(&self, request: RegtestMineRequestV1) -> RegtestMineFuture {
+            Box::pin(async move {
+                if request.count == 0 || request.count > 1000 {
+                    return Err(RpcError::Rejected("count out of bounds".to_string()));
+                }
+                Ok(RegtestMineResultV1 {
+                    start_height: 43,
+                    end_height: 42 + u64::from(request.count),
+                    block_hashes: (0..request.count)
+                        .map(|offset| {
+                            let mut hash = [0u8; 32];
+                            hash[..4].copy_from_slice(&(offset + 1).to_le_bytes());
+                            hash
+                        })
+                        .collect(),
+                })
             })
         }
     }
@@ -2281,6 +2565,147 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn wallet_slate_three_message_routes_require_bearer() {
+        let requests = [
+            (
+                "/wallet/slate/v1/create",
+                serde_json::json!({
+                    "amount_noms": 1,
+                    "fee_noms": 1,
+                    "expires_at_height": 10
+                }),
+            ),
+            (
+                "/wallet/slate/v1/finalize",
+                serde_json::json!({"canonical_response_hex": "a1b2"}),
+            ),
+            (
+                "/wallet/slate/v1/submit",
+                serde_json::json!({
+                    "pending_key_hex": "44".repeat(32),
+                    "expected_transaction_hash_hex": "33".repeat(32)
+                }),
+            ),
+        ];
+        for (uri, body) in requests {
+            let response = app()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn wallet_slate_finalize_is_distinct_from_explicit_submit() {
+        let finalize = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/wallet/slate/v1/finalize")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(r#"{"canonical_response_hex":"a1b2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(finalize.status(), StatusCode::OK);
+        let finalize = body_json(finalize).await;
+        assert_eq!(finalize["canonical_tx_hex"], serde_json::json!("c3d4"));
+        assert_eq!(finalize["tx_hash"], serde_json::json!("33".repeat(32)));
+        assert_eq!(finalize["pending_key"], serde_json::json!("44".repeat(32)));
+        assert!(finalize.get("state").is_none());
+        assert!(finalize.get("relayed").is_none());
+
+        let submit = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/wallet/slate/v1/submit")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "pending_key_hex": "44".repeat(32),
+                            "expected_transaction_hash_hex": "33".repeat(32)
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(submit.status(), StatusCode::OK);
+        let submit = body_json(submit).await;
+        assert_eq!(submit["canonical_tx_hex"], serde_json::json!("c3d4"));
+        assert_eq!(submit["state"], serde_json::json!("mempool"));
+        assert_eq!(submit["already_known"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn bounded_regtest_mining_requires_bearer_and_reports_exact_count() {
+        let body = serde_json::json!({"count": 3}).to_string();
+        let unauthorized = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/regtest/mine/v1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/regtest/mine/v1")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authorized.status(), StatusCode::OK);
+        let response = body_json(authorized).await;
+        assert_eq!(response["start_height"], serde_json::json!(43));
+        assert_eq!(response["end_height"], serde_json::json!(45));
+        assert_eq!(response["count"], serde_json::json!(3));
+        assert_eq!(response["block_hashes"].as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn bounded_regtest_mining_rejects_zero_and_excessive_counts() {
+        for count in [0, 1001] {
+            let response = app()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/regtest/mine/v1")
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::from(serde_json::json!({"count": count}).to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
     }
 
     #[tokio::test]

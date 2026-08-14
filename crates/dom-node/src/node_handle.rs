@@ -5,14 +5,24 @@
 
 use crate::node::{clear_persisted_mempool_snapshot, snapshot_tx_chain_view, DomNode};
 use dom_rpc::{
-    KernelInfo, MempoolTxInfo, NodeHandle, PeerInfo, RpcError, ShutdownFuture, TxAdmission,
-    TxAdmissionState, UtxoInfo,
+    KernelInfo, MempoolTxInfo, NodeHandle, PeerInfo, RegtestMineFuture, RegtestMineRequestV1,
+    RegtestMineResultV1, RpcError, ShutdownFuture, TxAdmission, TxAdmissionState, UtxoInfo,
+    WalletSlateCreateRequestV1, WalletSlateFinalizeRequestV1, WalletSlateFinalizedV1,
+    WalletSlateOfferV1, WalletSlateSubmitRequestV1, WalletSlateSubmittedV1,
 };
 use dom_serialization::{DomDeserialize, DomSerialize};
 use std::sync::Arc;
 
 /// Newtype so we can impl the foreign `NodeHandle` trait for `Arc<DomNode>`.
 pub struct NodeHandleImpl(pub Arc<DomNode>);
+
+struct RegtestRpcMiningGuard(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for RegtestRpcMiningGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
 
 impl NodeHandle for NodeHandleImpl {
     fn request_shutdown(&self) -> ShutdownFuture {
@@ -412,6 +422,334 @@ impl NodeHandle for NodeHandleImpl {
         Ok(tx_hash)
     }
 
+    fn wallet_slate_create_v1(
+        &self,
+        request: WalletSlateCreateRequestV1,
+    ) -> Result<WalletSlateOfferV1, RpcError> {
+        if request.amount_noms == 0 {
+            return Err(RpcError::Rejected(
+                "Wallet V3 Slate amount must be non-zero".to_string(),
+            ));
+        }
+        let receiver_address = request
+            .recipient_address
+            .as_deref()
+            .map(|text| {
+                let address = dom_core::Address::decode(text)
+                    .map_err(|error| RpcError::Rejected(format!("recipient address: {error}")))?;
+                if address.encode() != text {
+                    return Err(RpcError::Rejected(
+                        "recipient address is not canonical lowercase Wallet V3 encoding"
+                            .to_string(),
+                    ));
+                }
+                address
+                    .validate_for_network(self.0.config.network.magic())
+                    .map_err(|error| RpcError::Rejected(format!("recipient address: {error}")))?;
+                Ok(address)
+            })
+            .transpose()?;
+        let wallet = self
+            .0
+            .wallet
+            .as_ref()
+            .ok_or_else(|| RpcError::Internal("wallet not configured".to_string()))?;
+
+        // Chain -> Wallet is a valid subset of the canonical subsystem lock
+        // order. Retain both through durable offer creation so the expiry is
+        // checked against the same height written into the persisted offer.
+        let chain = self
+            .0
+            .chain
+            .try_lock()
+            .map_err(|_| RpcError::Overloaded("chain busy".to_string()))?;
+        let mut wallet_dir = wallet
+            .try_lock()
+            .map_err(|_| RpcError::Overloaded("wallet busy".to_string()))?;
+        let envelope = wallet_dir
+            .wallet_mut()
+            .create_send_slate_envelope_recoverable(
+                receiver_address,
+                request.amount_noms,
+                request.fee_noms,
+                chain.tip_height.0,
+                request.expires_at_height,
+            )
+            .map_err(|error| RpcError::Rejected(format!("create Wallet V3 Slate: {error}")))?;
+        let canonical_slate = envelope
+            .to_canonical_bytes()
+            .map_err(|error| RpcError::Internal(format!("encode Wallet V3 Slate: {error}")))?;
+        Ok(WalletSlateOfferV1 {
+            canonical_slate,
+            slate_id: envelope.slate_id,
+            replay_id: envelope.replay_id,
+        })
+    }
+
+    fn wallet_slate_finalize_v1(
+        &self,
+        request: WalletSlateFinalizeRequestV1,
+    ) -> Result<WalletSlateFinalizedV1, RpcError> {
+        use dom_tx::slate::SlateEnvelope;
+
+        let response_bytes = hex::decode(&request.canonical_response_hex)
+            .map_err(|error| RpcError::InvalidHex(error.to_string()))?;
+        let response = SlateEnvelope::from_canonical_bytes(&response_bytes)
+            .map_err(|error| RpcError::InvalidTx(format!("Wallet V3 Slate response: {error}")))?;
+        if response
+            .to_canonical_bytes()
+            .map_err(|error| RpcError::InvalidTx(error.to_string()))?
+            != response_bytes
+        {
+            return Err(RpcError::InvalidTx(
+                "Wallet V3 Slate response is not canonical".to_string(),
+            ));
+        }
+        let wallet = self
+            .0
+            .wallet
+            .as_ref()
+            .ok_or_else(|| RpcError::Internal("wallet not configured".to_string()))?;
+        // This second message only finalizes and persists. Deliberately do not
+        // touch the mempool or relay: the official recipient must first import
+        // and verify the resulting public transaction (the third message).
+        let chain = self
+            .0
+            .chain
+            .try_lock()
+            .map_err(|_| RpcError::Overloaded("chain busy".to_string()))?;
+        let mut wallet_dir = wallet
+            .try_lock()
+            .map_err(|_| RpcError::Overloaded("wallet busy".to_string()))?;
+        let finalized = wallet_dir
+            .wallet_mut()
+            .finalize_slate_envelope_recoverable(response, chain.tip_height.0)
+            .map_err(|error| RpcError::Rejected(format!("finalize Wallet V3 Slate: {error}")))?;
+        let canonical_transaction = finalized
+            .tx
+            .to_bytes()
+            .map_err(|error| RpcError::Internal(format!("encode transaction: {error}")))?;
+        let transaction_hash = *dom_crypto::blake2b_256(&canonical_transaction).as_bytes();
+        Ok(WalletSlateFinalizedV1 {
+            canonical_transaction,
+            transaction_hash,
+            pending_key: finalized.pending_key,
+        })
+    }
+
+    fn wallet_slate_submit_v1(
+        &self,
+        request: WalletSlateSubmitRequestV1,
+    ) -> Result<WalletSlateSubmittedV1, RpcError> {
+        let pending_key =
+            Self::decode_canonical_hash_hex("pending_key_hex", &request.pending_key_hex)?;
+        let expected_hash = Self::decode_canonical_hash_hex(
+            "expected_transaction_hash_hex",
+            &request.expected_transaction_hash_hex,
+        )?;
+        let wallet = self
+            .0
+            .wallet
+            .as_ref()
+            .ok_or_else(|| RpcError::Internal("wallet not configured".to_string()))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let (canonical_transaction, state) = {
+            let chain = self
+                .0
+                .chain
+                .try_lock()
+                .map_err(|_| RpcError::Overloaded("chain busy".to_string()))?;
+            let mut mempool = self
+                .0
+                .mempool
+                .try_lock()
+                .map_err(|_| RpcError::Overloaded("mempool busy".to_string()))?;
+            let mut wallet_dir = wallet
+                .try_lock()
+                .map_err(|_| RpcError::Overloaded("wallet busy".to_string()))?;
+            let finalized = wallet_dir
+                .wallet()
+                .finalized_slate_transaction_for_submission(pending_key, expected_hash)
+                .map_err(|error| {
+                    RpcError::Rejected(format!("load finalized Wallet V3 Slate: {error}"))
+                })?;
+            let canonical_transaction = finalized
+                .tx
+                .to_bytes()
+                .map_err(|error| RpcError::Internal(format!("encode transaction: {error}")))?;
+            let state = if Self::canonical_chain_contains_exact_transaction(
+                &chain,
+                &finalized.tx,
+                &expected_hash,
+                &canonical_transaction,
+            )? {
+                TxAdmissionState::Confirmed
+            } else if let Some(entry) = mempool.get_tx(&expected_hash) {
+                let existing = entry
+                    .tx
+                    .to_bytes()
+                    .map_err(|error| RpcError::Internal(error.to_string()))?;
+                if existing != canonical_transaction {
+                    return Err(RpcError::Rejected(
+                        "transaction id collision with different mempool bytes".to_string(),
+                    ));
+                }
+                TxAdmissionState::Mempool
+            } else {
+                let chain_view = snapshot_tx_chain_view(&chain, &finalized.tx)
+                    .map_err(|error| RpcError::Rejected(format!("mempool precheck: {error}")))?;
+                mempool
+                    .accept_tx_with_chain_view(
+                        finalized.tx,
+                        expected_hash,
+                        now,
+                        chain_view.current_height,
+                        chain_view.chain_id,
+                        chain_view.coinbase_maturity,
+                        |commitment| Ok(chain_view.utxos.get(commitment).cloned().flatten()),
+                    )
+                    .map_err(|error| RpcError::Rejected(format!("mempool: {error}")))?;
+                self.0
+                    .metrics
+                    .txs_received
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.0
+                    .metrics
+                    .mempool_size
+                    .store(mempool.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                clear_persisted_mempool_snapshot(&chain.store)
+                    .map_err(|error| RpcError::Internal(format!("persist mempool: {error}")))?;
+                TxAdmissionState::New
+            };
+            wallet_dir
+                .wallet_mut()
+                .mark_submitted_idempotent(pending_key)
+                .map_err(|error| {
+                    RpcError::Internal(format!("persist submitted Slate state: {error}"))
+                })?;
+            (canonical_transaction, state)
+        };
+        let relayed = if state.confirmed() {
+            false
+        } else {
+            self.relay_transaction(expected_hash, &canonical_transaction)
+        };
+        Ok(WalletSlateSubmittedV1 {
+            canonical_transaction,
+            admission: TxAdmission {
+                tx_hash: expected_hash,
+                relayed,
+                state,
+            },
+        })
+    }
+
+    fn regtest_mine_v1(&self, request: RegtestMineRequestV1) -> RegtestMineFuture {
+        let node = Arc::clone(&self.0);
+        Box::pin(async move {
+            if request.count == 0 || request.count > 1000 {
+                return Err(RpcError::Rejected(
+                    "regtest mine count must be in 1..=1000".to_string(),
+                ));
+            }
+            if node.config.network != dom_config::Network::Regtest {
+                return Err(RpcError::Rejected(
+                    "bounded mining RPC is available only on regtest".to_string(),
+                ));
+            }
+            if node.config.mine {
+                return Err(RpcError::Rejected(
+                    "bounded mining RPC requires continuous mining to be disabled".to_string(),
+                ));
+            }
+            node.regtest_rpc_mining_active
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .map_err(|_| {
+                    RpcError::Overloaded("another bounded mining request is active".into())
+                })?;
+            let _guard = RegtestRpcMiningGuard(Arc::clone(&node.regtest_rpc_mining_active));
+
+            let (needs_genesis, initial_tip) = {
+                let chain = node.chain.lock().await;
+                (
+                    chain.tip_height.0 == 0 && chain.tip_hash == dom_core::Hash256::ZERO,
+                    chain.tip_height.0,
+                )
+            };
+            let mut block_hashes = Vec::with_capacity(request.count as usize);
+            let start_height = if needs_genesis {
+                0
+            } else {
+                initial_tip
+                    .checked_add(1)
+                    .ok_or_else(|| RpcError::Internal("canonical height exhausted".to_string()))?
+            };
+            let mut expected_height = start_height;
+            if needs_genesis {
+                crate::miner::create_genesis_block(Arc::clone(&node))
+                    .await
+                    .map_err(|error| RpcError::Internal(format!("create genesis: {error}")))?;
+                let hash = {
+                    let chain = node.chain.lock().await;
+                    if chain.tip_height.0 != 0 || chain.tip_hash == dom_core::Hash256::ZERO {
+                        return Err(RpcError::Internal(
+                            "genesis mining did not produce the canonical height-zero block"
+                                .to_string(),
+                        ));
+                    }
+                    *chain.tip_hash.as_bytes()
+                };
+                block_hashes.push(hash);
+                expected_height = 1;
+            }
+
+            while block_hashes.len() < request.count as usize {
+                let height = crate::miner::mine_one_block(Arc::clone(&node))
+                    .await
+                    .map_err(|error| RpcError::Internal(format!("mine block: {error}")))?;
+                if height != expected_height {
+                    return Err(RpcError::Internal(format!(
+                        "canonical height changed concurrently: expected {expected_height}, mined {height}"
+                    )));
+                }
+                let hash = {
+                    let chain = node.chain.lock().await;
+                    chain
+                        .store
+                        .get_hash_at_height(height)
+                        .map_err(|error| RpcError::Internal(error.to_string()))?
+                        .ok_or_else(|| {
+                            RpcError::Internal(format!(
+                                "mined canonical block at height {height} is missing"
+                            ))
+                        })?
+                };
+                block_hashes.push(hash);
+                expected_height = expected_height
+                    .checked_add(1)
+                    .ok_or_else(|| RpcError::Internal("canonical height exhausted".to_string()))?;
+            }
+
+            let end_height = expected_height.checked_sub(1).ok_or_else(|| {
+                RpcError::Internal("bounded mining produced no block".to_string())
+            })?;
+            Ok(RegtestMineResultV1 {
+                start_height,
+                end_height,
+                block_hashes,
+            })
+        })
+    }
+
     fn scan_chain(&self, from: u64, to: u64) -> Result<dom_rpc::ChainScan, RpcError> {
         // GOLDEN RULE: never block on the chain lock. If it is busy (mining /
         // connecting a block), yield immediately with a retriable 503 — mining
@@ -468,6 +806,21 @@ impl NodeHandle for NodeHandleImpl {
 }
 
 impl NodeHandleImpl {
+    fn decode_canonical_hash_hex(label: &str, text: &str) -> Result<[u8; 32], RpcError> {
+        let bytes = hex::decode(text).map_err(|error| RpcError::InvalidHex(error.to_string()))?;
+        if bytes.len() != 32 || hex::encode(&bytes) != text {
+            return Err(RpcError::InvalidHex(format!(
+                "{label} must be exactly 64 lowercase hexadecimal characters"
+            )));
+        }
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&bytes);
+        if hash == [0u8; 32] {
+            return Err(RpcError::Rejected(format!("{label} must be non-zero")));
+        }
+        Ok(hash)
+    }
+
     fn canonical_chain_contains_exact_transaction(
         chain: &dom_chain::ChainState,
         transaction: &dom_consensus::Transaction,
@@ -768,10 +1121,13 @@ mod tests {
     use dom_core::{Amount, KERNEL_FEAT_PLAIN, MIN_RELAY_FEE_RATE, TAG_KERNEL_MSG};
     use dom_crypto::hash::blake2b_256_tagged;
     use dom_crypto::{bp2_prove, pedersen::Commitment, schnorr_sign, BlindingFactor, SecretKey};
-    use dom_rpc::{RpcError, SpendRequest, TxAdmissionState};
+    use dom_rpc::{
+        RegtestMineRequestV1, RpcError, SpendRequest, TxAdmissionState, WalletSlateCreateRequestV1,
+        WalletSlateFinalizeRequestV1, WalletSlateSubmitRequestV1,
+    };
     use dom_serialization::{DomDeserialize, DomSerialize};
     use dom_store::utxo::UtxoEntry;
-    use dom_wallet::{Network, OwnedOutput, Wallet, WalletDir, WALLET_DAT_NAME};
+    use dom_wallet::{Bip39Seed, Network, OwnedOutput, Wallet, WalletDir, WALLET_DAT_NAME};
     use std::sync::{atomic::Ordering, Arc};
 
     const TEST_LMDB_MAP_SIZE: usize = 64 << 20; // 64 MiB
@@ -870,6 +1226,239 @@ mod tests {
         }
         .to_bytes()
         .expect("serialize tx")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wallet_v3_slate_requires_recipient_check_before_restart_safe_submit() {
+        std::env::set_var("DOM_REGTEST_FAST_MINING", "1");
+        let unique = format!(
+            "dom-node-handle-slate-v3-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos()
+        );
+        let data_dir = std::env::temp_dir().join(format!("{unique}-data"));
+        let wallet_path = std::env::temp_dir().join(format!("{unique}.dom"));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_dir_all(&wallet_path);
+        let sender_seed = Bip39Seed::generate_new().expect("sender seed");
+        let recipient_seed = Bip39Seed::generate_new().expect("recipient seed");
+        drop(
+            WalletDir::create_from_seed(
+                &wallet_path,
+                "password123",
+                Network::Regtest,
+                &dom_core::Hash256::from_bytes(dom_core::GENESIS_HASH_REGTEST),
+                &sender_seed,
+            )
+            .expect("deterministic sender WalletDir"),
+        );
+
+        let config = || {
+            test_config(
+                data_dir.to_str().expect("utf8 data dir"),
+                wallet_path.to_str().expect("utf8 wallet path"),
+            )
+        };
+        let node = Arc::new(
+            DomNode::init_with_map_size(config(), TEST_LMDB_MAP_SIZE).expect("init sender node"),
+        );
+        crate::miner::create_genesis_block(Arc::clone(&node))
+            .await
+            .expect("create real regtest genesis");
+        crate::miner::mine_one_block(Arc::clone(&node))
+            .await
+            .expect("mine real sender coinbase");
+        crate::miner::mine_one_block(Arc::clone(&node))
+            .await
+            .expect("mature real sender coinbase");
+        let handle = NodeHandleImpl(Arc::clone(&node));
+        let offer = handle
+            .wallet_slate_create_v1(WalletSlateCreateRequestV1 {
+                recipient_address: None,
+                amount_noms: 40_000_000,
+                fee_noms: 100_000,
+                expires_at_height: 100,
+            })
+            .expect("persist public sender offer");
+        assert_eq!(node.mempool.try_lock().unwrap().len(), 0);
+        let offer_envelope =
+            dom_tx::slate::SlateEnvelope::from_canonical_bytes(&offer.canonical_slate)
+                .expect("canonical sender offer");
+        let recovery_chain = dom_crypto::recovery::RecoveryChainContext {
+            network_magic: dom_core::NETWORK_MAGIC_REGTEST,
+            chain_id: offer_envelope.chain_id,
+        };
+        let recovery_root =
+            dom_crypto::recovery::derive_recovery_root(recipient_seed.seed_bytes(), recovery_chain)
+                .unwrap();
+        let recipient = dom_slate::respond_receive_recoverable(
+            offer_envelope.body.clone(),
+            &offer_envelope.chain_id,
+            dom_slate::RecoveryBuildContext {
+                root: &recovery_root,
+                chain: recovery_chain,
+                account: 0,
+                derivation_index: 0,
+            },
+        )
+        .expect("recipient response");
+        let mut response_envelope = offer_envelope;
+        response_envelope.phase = dom_tx::slate::SLATE_PHASE_RECEIVER_RESPONSE;
+        response_envelope.body = recipient.slate;
+        let response_hex = hex::encode(response_envelope.to_canonical_bytes().unwrap());
+        drop(handle);
+        drop(node); // real process-equivalent restart between offer and finalize
+
+        let node = Arc::new(
+            DomNode::init_with_map_size(config(), TEST_LMDB_MAP_SIZE)
+                .expect("restart for finalization"),
+        );
+        let handle = NodeHandleImpl(Arc::clone(&node));
+        let finalized = handle
+            .wallet_slate_finalize_v1(WalletSlateFinalizeRequestV1 {
+                canonical_response_hex: response_hex,
+            })
+            .expect("finalize and persist exact transaction");
+        assert_eq!(node.mempool.try_lock().unwrap().len(), 0);
+        assert_eq!(
+            *dom_crypto::blake2b_256(&finalized.canonical_transaction).as_bytes(),
+            finalized.transaction_hash
+        );
+        drop(handle);
+        drop(node); // recipient checks bytes here; node may restart before submit
+
+        let node = Arc::new(
+            DomNode::init_with_map_size(config(), TEST_LMDB_MAP_SIZE).expect("restart for submit"),
+        );
+        let _relay_receiver = node.tx_fluff_tx.subscribe();
+        let handle = NodeHandleImpl(Arc::clone(&node));
+        let request = WalletSlateSubmitRequestV1 {
+            pending_key_hex: hex::encode(finalized.pending_key),
+            expected_transaction_hash_hex: hex::encode(finalized.transaction_hash),
+        };
+        let submitted = handle
+            .wallet_slate_submit_v1(request.clone())
+            .expect("submit retained exact transaction");
+        assert_eq!(submitted.admission.state, TxAdmissionState::New);
+        assert_eq!(
+            submitted.canonical_transaction,
+            finalized.canonical_transaction
+        );
+        let retried = handle
+            .wallet_slate_submit_v1(request)
+            .expect("ACK-loss submit retry");
+        assert_eq!(retried.admission.state, TxAdmissionState::Mempool);
+        assert_eq!(
+            retried.canonical_transaction,
+            finalized.canonical_transaction
+        );
+
+        drop(handle);
+        drop(node);
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_dir_all(&wallet_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bounded_regtest_mining_is_exact_serialized_and_background_exclusive() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = test_config(
+            directory.path().to_str().unwrap(),
+            directory.path().join("unused-wallet").to_str().unwrap(),
+        );
+        config.wallet_path = None;
+        config.wallet_password = None;
+        config.mine = false;
+        let node = Arc::new(
+            DomNode::init_with_map_size(config, TEST_LMDB_MAP_SIZE)
+                .expect("init bounded regtest miner"),
+        );
+        let handle = NodeHandleImpl(Arc::clone(&node));
+
+        for count in [0, 1001] {
+            assert!(matches!(
+                handle.regtest_mine_v1(RegtestMineRequestV1 { count }).await,
+                Err(RpcError::Rejected(_))
+            ));
+        }
+        let result = handle
+            .regtest_mine_v1(RegtestMineRequestV1 { count: 2 })
+            .await
+            .expect("mine exact genesis and height-one block");
+        assert_eq!(result.start_height, 0);
+        assert_eq!(result.end_height, 1);
+        assert_eq!(result.block_hashes.len(), 2);
+        {
+            let chain = node.chain.lock().await;
+            assert_eq!(chain.tip_height.0, 1);
+            assert_eq!(
+                chain.store.get_hash_at_height(0).unwrap(),
+                Some(result.block_hashes[0])
+            );
+            assert_eq!(
+                chain.store.get_hash_at_height(1).unwrap(),
+                Some(result.block_hashes[1])
+            );
+        }
+        assert!(!node
+            .regtest_rpc_mining_active
+            .load(std::sync::atomic::Ordering::Acquire));
+        node.regtest_rpc_mining_active
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(matches!(
+            handle
+                .regtest_mine_v1(RegtestMineRequestV1 { count: 1 })
+                .await,
+            Err(RpcError::Overloaded(_))
+        ));
+        node.regtest_rpc_mining_active
+            .store(false, std::sync::atomic::Ordering::Release);
+
+        let background_directory = tempfile::tempdir().unwrap();
+        let mut background = test_config(
+            background_directory.path().to_str().unwrap(),
+            background_directory
+                .path()
+                .join("unused-wallet")
+                .to_str()
+                .unwrap(),
+        );
+        background.wallet_path = None;
+        background.wallet_password = None;
+        background.mine = true;
+        let background = NodeHandleImpl(Arc::new(
+            DomNode::init_with_map_size(background, TEST_LMDB_MAP_SIZE).unwrap(),
+        ));
+        assert!(matches!(
+            background
+                .regtest_mine_v1(RegtestMineRequestV1 { count: 1 })
+                .await,
+            Err(RpcError::Rejected(ref message)) if message.contains("continuous mining")
+        ));
+    }
+
+    #[tokio::test]
+    async fn bounded_mining_refuses_non_regtest_network() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = test_config(
+            directory.path().to_str().unwrap(),
+            directory.path().join("unused-wallet").to_str().unwrap(),
+        );
+        config.network = dom_config::Network::Testnet;
+        config.wallet_path = None;
+        config.wallet_password = None;
+        config.mine = false;
+        let handle = NodeHandleImpl(Arc::new(
+            DomNode::init_with_map_size(config, TEST_LMDB_MAP_SIZE).unwrap(),
+        ));
+        assert!(matches!(
+            handle
+                .regtest_mine_v1(RegtestMineRequestV1 { count: 1 })
+                .await,
+            Err(RpcError::Rejected(ref message)) if message.contains("only on regtest")
+        ));
     }
 
     #[test]

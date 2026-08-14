@@ -2,78 +2,34 @@
 
 use dom_config::{parse_dom_network, Network, NodeConfig};
 use dom_node::node::DomNode;
-use std::{ffi::OsStr, io::Read, net::SocketAddr, path::Path, sync::Arc};
+use dom_node::secret_file::load_owner_only_utf8_secret_file;
+use std::{ffi::OsStr, net::SocketAddr, path::Path, sync::Arc};
 use tracing::info;
 
 /// Maximum bearer-token payload before an optional trailing newline.
 const MAX_RPC_BEARER_TOKEN_BYTES: u64 = 512;
 
 fn load_rpc_bearer_token_file(path: &Path) -> anyhow::Result<String> {
-    let path_metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| anyhow::anyhow!("cannot inspect RPC bearer-token file: {error}"))?;
-    if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
-        anyhow::bail!("RPC bearer-token path must name a regular, non-symlink file");
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if path_metadata.permissions().mode() & 0o077 != 0 {
-            anyhow::bail!("RPC bearer-token file must not be accessible by group or others");
-        }
-    }
-
-    if path_metadata.len() == 0
-        || path_metadata.len() > MAX_RPC_BEARER_TOKEN_BYTES.saturating_add(2)
-    {
-        anyhow::bail!(
-            "RPC bearer-token file must contain 32..={MAX_RPC_BEARER_TOKEN_BYTES} bytes plus at most one trailing newline"
-        );
-    }
-
-    let file = std::fs::File::open(path)
-        .map_err(|error| anyhow::anyhow!("cannot open RPC bearer-token file: {error}"))?;
-    let open_metadata = file
-        .metadata()
-        .map_err(|error| anyhow::anyhow!("cannot inspect opened RPC bearer-token file: {error}"))?;
-    if !open_metadata.is_file() {
-        anyhow::bail!("opened RPC bearer-token path is not a regular file");
-    }
-
-    // Detect a path replacement between symlink_metadata and open. Reading the
-    // already-open descriptor is then race-free for the lifetime of this call.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if path_metadata.dev() != open_metadata.dev() || path_metadata.ino() != open_metadata.ino()
-        {
-            anyhow::bail!("RPC bearer-token file changed while it was being opened");
-        }
-        if open_metadata.permissions().mode() & 0o077 != 0 {
-            anyhow::bail!("RPC bearer-token file must not be accessible by group or others");
-        }
-    }
-
-    let mut raw = Vec::new();
-    file.take(MAX_RPC_BEARER_TOKEN_BYTES.saturating_add(3))
-        .read_to_end(&mut raw)
-        .map_err(|error| anyhow::anyhow!("cannot read RPC bearer-token file: {error}"))?;
-    if raw.len() as u64 > MAX_RPC_BEARER_TOKEN_BYTES.saturating_add(2) {
-        anyhow::bail!("RPC bearer-token file exceeds the bounded size");
-    }
-    let raw = String::from_utf8(raw)
-        .map_err(|_| anyhow::anyhow!("RPC bearer-token file is not valid UTF-8"))?;
-    let token = raw
-        .strip_suffix("\r\n")
-        .or_else(|| raw.strip_suffix('\n'))
-        .unwrap_or(&raw);
-    if token.len() < 32 || token.len() as u64 > MAX_RPC_BEARER_TOKEN_BYTES {
-        anyhow::bail!("RPC bearer token must contain 32..={MAX_RPC_BEARER_TOKEN_BYTES} bytes");
-    }
+    let token =
+        load_owner_only_utf8_secret_file(path, "RPC bearer-token", 32, MAX_RPC_BEARER_TOKEN_BYTES)?;
     if !token.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) {
         anyhow::bail!("RPC bearer token must contain only visible ASCII without whitespace");
     }
-    Ok(token.to_owned())
+    Ok(token)
+}
+
+const MAX_WALLET_PASSWORD_BYTES: u64 = 1024;
+
+fn load_wallet_password_file(path: &Path) -> anyhow::Result<String> {
+    let password =
+        load_owner_only_utf8_secret_file(path, "wallet password", 1, MAX_WALLET_PASSWORD_BYTES)?;
+    if password
+        .chars()
+        .any(|character| matches!(character, '\0' | '\r' | '\n'))
+    {
+        anyhow::bail!("wallet password file contains a forbidden control character");
+    }
+    Ok(password)
 }
 
 fn configure_standalone_rpc(
@@ -133,7 +89,7 @@ where
 
 fn print_help() {
     println!(
-        "DOM node {}\n\nUsage:\n  DOM_NETWORK=<mainnet|testnet|regtest> dom-node\n\nThe network must be selected explicitly before the node initializes storage, listeners, mining, or peer discovery. Standalone RPC additionally requires a loopback DOM_RPC_LISTEN_ADDR and an owner-only DOM_RPC_BEARER_TOKEN_FILE.\n\nOptions:\n  -h, --help       Print help\n  -V, --version    Print version",
+        "DOM node {}\n\nUsage:\n  DOM_NETWORK=<mainnet|testnet|regtest> dom-node\n\nThe network must be selected explicitly before the node initializes storage, listeners, mining, or peer discovery. Standalone RPC additionally requires a loopback DOM_RPC_LISTEN_ADDR and an owner-only DOM_RPC_BEARER_TOKEN_FILE. An existing WalletDir should be opened with DOM_WALLET_PATH plus owner-only DOM_WALLET_PASSWORD_FILE.\n\nOptions:\n  -h, --help       Print help\n  -V, --version    Print version",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -275,9 +231,22 @@ async fn main() -> anyhow::Result<()> {
         config.wallet_path = Some(path);
     }
 
-    // Allow override of wallet password via DOM_WALLET_PASSWORD.
-    if let Ok(password) = std::env::var("DOM_WALLET_PASSWORD") {
-        info!("Overriding wallet password: [REDACTED]");
+    // Standalone deployments should load the wallet password from the same
+    // owner-only, bounded file boundary as the RPC token. The legacy direct
+    // environment value remains source-compatible but is mutually exclusive
+    // so a stale environment cannot silently override the file authority.
+    let wallet_password_file = std::env::var_os("DOM_WALLET_PASSWORD_FILE");
+    let legacy_wallet_password = std::env::var("DOM_WALLET_PASSWORD").ok();
+    if wallet_password_file.is_some() && legacy_wallet_password.is_some() {
+        anyhow::bail!(
+            "DOM_WALLET_PASSWORD_FILE and legacy DOM_WALLET_PASSWORD are mutually exclusive"
+        );
+    }
+    if let Some(path) = wallet_password_file {
+        config.wallet_password = Some(load_wallet_password_file(Path::new(&path))?);
+        info!("Loaded wallet password from owner-only file: [REDACTED]");
+    } else if let Some(password) = legacy_wallet_password {
+        info!("Overriding wallet password from legacy environment: [REDACTED]");
         config.wallet_password = Some(password);
     }
 
@@ -301,7 +270,8 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        configure_standalone_rpc, load_rpc_bearer_token_file, parse_startup_action, StartupAction,
+        configure_standalone_rpc, load_rpc_bearer_token_file, load_wallet_password_file,
+        parse_startup_action, StartupAction,
     };
     use dom_config::NodeConfig;
 
@@ -380,6 +350,26 @@ mod tests {
 
         std::fs::write(&path, vec![b'a'; 515]).expect("write oversized token fixture");
         assert!(load_rpc_bearer_token_file(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standalone_wallet_password_loads_only_owner_only_bounded_utf8_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, path) = secure_token_file(b"wallet-only-secret\n");
+        assert_eq!(
+            load_wallet_password_file(&path).unwrap(),
+            "wallet-only-secret"
+        );
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("make wallet password fixture insecure");
+        assert!(load_wallet_password_file(&path).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("restore wallet password fixture mode");
+        std::fs::write(&path, b"embedded\nnewline\n").expect("write invalid password fixture");
+        assert!(load_wallet_password_file(&path).is_err());
     }
 
     #[cfg(unix)]

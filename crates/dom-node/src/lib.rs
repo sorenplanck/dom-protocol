@@ -14,6 +14,7 @@ pub mod peer_scoring;
 pub mod pex;
 pub mod relay;
 pub mod replay_snapshot;
+pub mod secret_file;
 pub mod task_supervisor;
 #[cfg(test)]
 pub(crate) mod test_dir;

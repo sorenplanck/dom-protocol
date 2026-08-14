@@ -21,8 +21,11 @@ use dom_core::{Address, Amount, BlockHeight, KERNEL_FEAT_COINBASE};
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::{blake2b_256_tagged, BlindingFactor, Hash256};
 use dom_serialization::{DomDeserialize, DomSerialize};
-use dom_tx::slate::Slate;
+use dom_tx::slate::{
+    Slate, SlateEnvelope, SLATE_PHASE_RECEIVER_RESPONSE, SLATE_PHASE_SENDER_OFFER,
+};
 use dom_tx::SpendBuilder;
+use rand::RngCore;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
@@ -69,6 +72,16 @@ pub struct FinalizedSlate {
     pub tx: Transaction,
     /// Key of the pending tx in `pending_txs` (the sender slate hash).
     pub pending_key: [u8; 32],
+}
+
+fn random_nonzero_identifier() -> [u8; 32] {
+    loop {
+        let mut identifier = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut identifier);
+        if identifier != [0u8; 32] {
+            return identifier;
+        }
+    }
 }
 
 /// Canonical wallet rescan execution mode.
@@ -1418,7 +1431,11 @@ impl Wallet {
                 inputs: selected_commitments,
                 tx_bytes: Vec::new(),
                 change: pending_change,
-                send_slate: Some(PendingSendSlate { slate_bytes }),
+                send_slate: Some(PendingSendSlate {
+                    slate_bytes,
+                    envelope_bytes: Vec::new(),
+                    response_envelope_bytes: Vec::new(),
+                }),
                 send_slate_secrets: Some(PendingSendSlateSecrets {
                     sender_excess_blinding,
                     sender_nonce,
@@ -1431,6 +1448,166 @@ impl Wallet {
         self.save()?;
         info!("created pending send slate {}", hex::encode(slate_hash));
         Ok(slate)
+    }
+
+    /// Create a recovery-capable Wallet V3 sender envelope for public Slate
+    /// transport while keeping every sender secret in encrypted WalletDir
+    /// state.
+    ///
+    /// The returned envelope contains only canonical public material. Sender
+    /// excess, single-use nonce, selected-output blindings, seed bytes, and
+    /// wallet password never leave this wallet boundary. The pending envelope
+    /// and its signing context are persisted before the caller receives it, so
+    /// a node restart can finalize the exact recipient response.
+    pub fn create_send_slate_envelope_recoverable(
+        &mut self,
+        receiver_address: Option<dom_core::Address>,
+        amount: u64,
+        fee: u64,
+        current_height: u64,
+        expires_at_height: u64,
+    ) -> Result<SlateEnvelope, WalletError> {
+        if expires_at_height == 0 || current_height > expires_at_height {
+            return Err(WalletError::Crypto(
+                "recovery slate expiry is zero or already elapsed".into(),
+            ));
+        }
+        let required = amount
+            .checked_add(fee)
+            .ok_or_else(|| WalletError::Crypto("slate amount + fee overflow".into()))?;
+        let selected = self.outputs.select_for_spend_with_maturity(
+            required,
+            current_height,
+            self.network.coinbase_maturity(),
+        )?;
+        let selected_commitments: Vec<[u8; 33]> =
+            selected.iter().map(|output| output.commitment).collect();
+        let total_selected = selected.iter().try_fold(0u64, |total, output| {
+            total
+                .checked_add(output.value)
+                .ok_or_else(|| WalletError::Crypto("selected slate value overflow".into()))
+        })?;
+        let change_value = total_selected
+            .checked_sub(required)
+            .ok_or_else(|| WalletError::Crypto("selected slate value is insufficient".into()))?;
+        let input_material: Vec<dom_slate::SlateInput> = selected
+            .into_iter()
+            .map(|output| dom_slate::SlateInput {
+                commitment: output.commitment,
+                blinding: *output.blinding,
+            })
+            .collect();
+
+        let seed = self
+            .keychain
+            .seed_bytes
+            .as_ref()
+            .ok_or_else(|| WalletError::Crypto("wallet has no deterministic seed".into()))?;
+        let chain = dom_crypto::recovery::RecoveryChainContext {
+            network_magic: self.network.magic(),
+            chain_id: self.chain_id,
+        };
+        let recovery_root = dom_crypto::recovery::derive_recovery_root(seed.as_slice(), chain)
+            .map_err(|error| WalletError::Crypto(format!("derive recovery root: {error}")))?;
+        let change_index = self.keychain.next_change_index;
+        let built = dom_slate::build_send_recoverable(
+            &input_material,
+            change_value,
+            amount,
+            fee,
+            self.chain_id,
+            dom_slate::RecoveryBuildContext {
+                root: &recovery_root,
+                chain,
+                account: self.keychain.account,
+                derivation_index: u64::from(change_index),
+            },
+        )?;
+        let pending_change = built.change.as_ref().map(|change| PendingChange {
+            commitment: change.commitment,
+            value: change.value,
+            blinding: change.blinding,
+        });
+        let sender_excess_blinding = built.excess_blinding;
+        let sender_nonce = built.nonce;
+        let slate = built.slate;
+
+        // Match the official Wallet V3 automatic identity convention when no
+        // explicit recipient address is supplied: sender excess and nonce
+        // public keys become distinct one-time interaction identities.
+        let sender_address = dom_core::Address::new_for_network(
+            slate.sender_public_excess.to_compressed_bytes(),
+            self.network.magic(),
+        )?;
+        let receiver_address = match receiver_address {
+            Some(address) => {
+                address.validate_for_network(self.network.magic())?;
+                address
+            }
+            None => dom_core::Address::new_for_network(
+                slate.sender_public_nonce.to_compressed_bytes(),
+                self.network.magic(),
+            )?,
+        };
+        let envelope = SlateEnvelope::new(
+            self.network.magic(),
+            self.chain_id,
+            random_nonzero_identifier(),
+            random_nonzero_identifier(),
+            SLATE_PHASE_SENDER_OFFER,
+            expires_at_height,
+            sender_address,
+            receiver_address,
+            slate.clone(),
+        )?;
+        let slate_bytes = slate.to_bytes()?;
+        let envelope_bytes = envelope.to_canonical_bytes()?;
+        let slate_hash = *dom_crypto::blake2b_256(&slate_bytes).as_bytes();
+
+        self.record_journal(
+            slate_hash,
+            TxJournalEvent::Built {
+                inputs: selected_commitments.clone(),
+                tx_hex: None,
+                output_count: u32::from(slate.sender_change_output.is_some()),
+                fee_noms: fee,
+                change: pending_change.clone(),
+            },
+        )?;
+        for commitment in &selected_commitments {
+            self.outputs.reserve(commitment, slate_hash)?;
+        }
+        if pending_change.is_some() {
+            self.keychain.next_change_index = change_index
+                .checked_add(1)
+                .ok_or_else(|| WalletError::Crypto("change derivation index exhausted".into()))?;
+        }
+        self.pending_txs.insert(
+            slate_hash,
+            PendingTx {
+                tx_hash: slate_hash,
+                inputs: selected_commitments,
+                tx_bytes: Vec::new(),
+                change: pending_change,
+                send_slate: Some(PendingSendSlate {
+                    slate_bytes,
+                    envelope_bytes,
+                    response_envelope_bytes: Vec::new(),
+                }),
+                send_slate_secrets: Some(PendingSendSlateSecrets {
+                    sender_excess_blinding,
+                    sender_nonce,
+                }),
+                receive_slate: None,
+                receive_slate_secrets: None,
+            },
+        );
+        self.save()?;
+        info!(
+            "created pending recovery sender slate {}",
+            hex::encode(slate_hash)
+        );
+        Ok(envelope)
     }
 
     /// Respond to a sender-created interactive Mimblewimble slate.
@@ -1554,6 +1731,155 @@ impl Wallet {
             tx,
             pending_key: sender_slate_hash,
         })
+    }
+
+    /// Finalize the exact Wallet V3 recovery response for a previously
+    /// persisted sender envelope.
+    ///
+    /// The first successful call consumes the sender nonce and persists the
+    /// canonical transaction plus exact response. Repeating the byte-identical
+    /// response after an RPC loss or process restart returns the persisted
+    /// transaction; a different response fails closed.
+    pub fn finalize_slate_envelope_recoverable(
+        &mut self,
+        response: SlateEnvelope,
+        current_height: u64,
+    ) -> Result<FinalizedSlate, WalletError> {
+        response.validate()?;
+        if response.envelope_version != dom_tx::slate::RECOVERY_SLATE_ENVELOPE_VERSION
+            || response.body.version != dom_tx::slate::RECOVERY_SLATE_VERSION
+            || response.phase != SLATE_PHASE_RECEIVER_RESPONSE
+            || response.network_magic != self.network.magic()
+            || response.chain_id != self.chain_id
+            || response.is_expired_at(current_height)
+        {
+            return Err(WalletError::Crypto(
+                "invalid recovery slate response context".into(),
+            ));
+        }
+        let response_bytes = response.to_canonical_bytes()?;
+        let sender_body = dom_slate::sender_phase_slate(&response.body);
+        let sender_body_bytes = sender_body.to_bytes()?;
+        let sender_slate_hash = *dom_crypto::blake2b_256(&sender_body_bytes).as_bytes();
+        let pending = self
+            .pending_txs
+            .get(&sender_slate_hash)
+            .ok_or_else(|| WalletError::Crypto("pending recovery sender slate not found".into()))?;
+        let stored = pending
+            .send_slate
+            .as_ref()
+            .ok_or_else(|| WalletError::Crypto("pending recovery sender slate missing".into()))?;
+        let mut expected_offer = response.clone();
+        expected_offer.phase = SLATE_PHASE_SENDER_OFFER;
+        expected_offer.body = sender_body;
+        let expected_offer_bytes = expected_offer.to_canonical_bytes()?;
+        if stored.slate_bytes != sender_body_bytes
+            || stored.envelope_bytes.is_empty()
+            || stored.envelope_bytes != expected_offer_bytes
+        {
+            return Err(WalletError::Crypto(
+                "recovery response does not match persisted sender offer".into(),
+            ));
+        }
+
+        if !pending.tx_bytes.is_empty() {
+            if stored.response_envelope_bytes != response_bytes {
+                return Err(WalletError::Crypto(
+                    "recovery response conflicts with finalized pending slate".into(),
+                ));
+            }
+            let tx = Transaction::from_bytes(&pending.tx_bytes)?;
+            if tx.to_bytes()? != pending.tx_bytes {
+                return Err(WalletError::Crypto(
+                    "persisted finalized slate transaction is non-canonical".into(),
+                ));
+            }
+            return Ok(FinalizedSlate {
+                tx,
+                pending_key: sender_slate_hash,
+            });
+        }
+
+        let secrets = pending
+            .send_slate_secrets
+            .clone()
+            .ok_or_else(|| WalletError::Crypto("pending recovery sender secrets missing".into()))?;
+        let pending_change = pending.change.clone();
+        let (_finalized_envelope, tx) = dom_slate::finalize_envelope(
+            response,
+            &secrets.sender_excess_blinding,
+            &secrets.sender_nonce,
+            self.network.magic(),
+            &self.chain_id,
+            current_height,
+        )?;
+        let tx_bytes = tx.to_bytes()?;
+        let pending = self
+            .pending_txs
+            .get_mut(&sender_slate_hash)
+            .ok_or_else(|| WalletError::Crypto("pending recovery sender slate vanished".into()))?;
+        pending.tx_bytes = tx_bytes;
+        pending.change = pending_change;
+        pending.send_slate_secrets = None;
+        pending
+            .send_slate
+            .as_mut()
+            .ok_or_else(|| WalletError::Crypto("pending recovery sender slate missing".into()))?
+            .response_envelope_bytes = response_bytes;
+        self.save()?;
+        info!(
+            "finalized pending recovery sender slate {}",
+            hex::encode(sender_slate_hash)
+        );
+        Ok(FinalizedSlate {
+            tx,
+            pending_key: sender_slate_hash,
+        })
+    }
+
+    /// Reload one exact finalized recovery-Slate transaction for the explicit
+    /// post-recipient-verification submit step.
+    ///
+    /// Callers provide only the public pending-record key and expected hash;
+    /// arbitrary transaction bytes are never accepted at this boundary.
+    pub fn finalized_slate_transaction_for_submission(
+        &self,
+        pending_key: [u8; 32],
+        expected_transaction_hash: [u8; 32],
+    ) -> Result<FinalizedSlate, WalletError> {
+        if pending_key == [0u8; 32] || expected_transaction_hash == [0u8; 32] {
+            return Err(WalletError::Crypto(
+                "finalized slate submit identifiers must be non-zero".into(),
+            ));
+        }
+        let pending = self
+            .pending_txs
+            .get(&pending_key)
+            .ok_or_else(|| WalletError::Crypto("pending recovery sender slate not found".into()))?;
+        let slate = pending.send_slate.as_ref().ok_or_else(|| {
+            WalletError::Crypto("pending record is not a recovery sender slate".into())
+        })?;
+        if pending.tx_bytes.is_empty()
+            || slate.response_envelope_bytes.is_empty()
+            || pending.send_slate_secrets.is_some()
+        {
+            return Err(WalletError::Crypto(
+                "recovery sender slate has not been finalized".into(),
+            ));
+        }
+        let tx = Transaction::from_bytes(&pending.tx_bytes)?;
+        let canonical = tx.to_bytes()?;
+        if canonical != pending.tx_bytes {
+            return Err(WalletError::Crypto(
+                "persisted finalized slate transaction is non-canonical".into(),
+            ));
+        }
+        if dom_crypto::blake2b_256(&canonical).as_bytes() != &expected_transaction_hash {
+            return Err(WalletError::Crypto(
+                "expected transaction hash does not match persisted finalized slate".into(),
+            ));
+        }
+        Ok(FinalizedSlate { tx, pending_key })
     }
 
     /// Build, reserve, and persist a single-party spend transaction.
@@ -1745,6 +2071,32 @@ impl Wallet {
         }
         self.record_journal(tx_hash, TxJournalEvent::Submitted)?;
         Ok(())
+    }
+
+    /// Idempotently record submission after a Wallet V3 third-message check.
+    /// An ACK-loss retry does not append an invalid duplicate journal edge.
+    pub fn mark_submitted_idempotent(&mut self, tx_hash: [u8; 32]) -> Result<(), WalletError> {
+        if !self.pending_txs.contains_key(&tx_hash) {
+            return Err(WalletError::Io("pending tx not found".into()));
+        }
+        if let Some(journal) = &self.journal {
+            if let Some(record) = journal
+                .replay()
+                .map_err(|error| WalletError::Io(format!("replay journal: {error}")))?
+                .get(&tx_hash)
+            {
+                match record.status {
+                    TxStatus::Submitted | TxStatus::Confirmed { .. } => return Ok(()),
+                    TxStatus::Building => {}
+                    _ => {
+                        return Err(WalletError::Io(
+                            "pending transaction is not submit-eligible".into(),
+                        ))
+                    }
+                }
+            }
+        }
+        self.record_journal(tx_hash, TxJournalEvent::Submitted)
     }
 
     /// Record that submission failed with an explicit operator-visible
@@ -2849,6 +3201,119 @@ mod tests {
                 Some(TxStatus::Submitted)
             ),
             "journal should advance to Submitted under the pending key"
+        );
+    }
+
+    #[test]
+    fn recovery_slate_finalize_and_submit_material_survive_restarts() {
+        let directory = tempdir().unwrap();
+        let genesis = Hash256::from_bytes([0x42; 32]);
+        let sender_seed = Bip39Seed::generate_new().unwrap();
+        let recipient_seed = Bip39Seed::generate_new().unwrap();
+        let mut sender = WalletDir::create_from_seed(
+            directory.path(),
+            "wallet-password",
+            Network::Regtest,
+            &genesis,
+            &sender_seed,
+        )
+        .unwrap();
+        sender
+            .wallet_mut()
+            .add_output(fixed_output(1_000_000, 10, 51));
+        sender.wallet_mut().save().unwrap();
+        let offer = sender
+            .wallet_mut()
+            .create_send_slate_envelope_recoverable(None, 900_000, 100_000, 100, 200)
+            .unwrap();
+        let offer_bytes = offer.to_canonical_bytes().unwrap();
+        let chain_id = offer.chain_id;
+        let chain = dom_crypto::recovery::RecoveryChainContext {
+            network_magic: Network::Regtest.magic(),
+            chain_id,
+        };
+        let recipient_root =
+            dom_crypto::recovery::derive_recovery_root(recipient_seed.seed_bytes(), chain).unwrap();
+        let response_body = dom_slate::respond_receive_recoverable(
+            offer.body.clone(),
+            &chain_id,
+            dom_slate::RecoveryBuildContext {
+                root: &recipient_root,
+                chain,
+                account: 0,
+                derivation_index: 0,
+            },
+        )
+        .unwrap()
+        .slate;
+        let mut response = offer.clone();
+        response.phase = SLATE_PHASE_RECEIVER_RESPONSE;
+        response.body = response_body;
+        response.validate().unwrap();
+        let response_bytes = response.to_canonical_bytes().unwrap();
+        drop(sender); // restart between persisted offer and response
+
+        let mut reopened = WalletDir::open(directory.path(), "wallet-password").unwrap();
+        let finalized = reopened
+            .wallet_mut()
+            .finalize_slate_envelope_recoverable(response.clone(), 100)
+            .unwrap();
+        let tx_bytes = finalized.tx.to_bytes().unwrap();
+        let tx_hash = *dom_crypto::blake2b_256(&tx_bytes).as_bytes();
+        let pending_key = finalized.pending_key;
+        assert_ne!(pending_key, tx_hash);
+        drop(reopened); // restart between finalization and explicit submit
+
+        let mut reopened = WalletDir::open(directory.path(), "wallet-password").unwrap();
+        let retained = reopened
+            .wallet()
+            .finalized_slate_transaction_for_submission(pending_key, tx_hash)
+            .unwrap();
+        assert_eq!(retained.tx.to_bytes().unwrap(), tx_bytes);
+        reopened
+            .wallet_mut()
+            .mark_submitted_idempotent(pending_key)
+            .unwrap();
+        reopened
+            .wallet_mut()
+            .mark_submitted_idempotent(pending_key)
+            .unwrap();
+        let records = reopened.wallet().journal().unwrap().replay().unwrap();
+        assert!(matches!(
+            records.get(&pending_key).map(|record| &record.status),
+            Some(TxStatus::Submitted)
+        ));
+        assert!(reopened
+            .wallet()
+            .finalized_slate_transaction_for_submission(pending_key, [0x99; 32])
+            .is_err());
+
+        // Lost finalization ACK accepts only the byte-identical response.
+        assert_eq!(
+            reopened
+                .wallet_mut()
+                .finalize_slate_envelope_recoverable(response.clone(), 100)
+                .unwrap()
+                .tx
+                .to_bytes()
+                .unwrap(),
+            tx_bytes
+        );
+        let mut conflicting_response = response.clone();
+        conflicting_response.replay_id[0] ^= 1;
+        assert!(reopened
+            .wallet_mut()
+            .finalize_slate_envelope_recoverable(conflicting_response, 100)
+            .is_err());
+
+        // Only public canonical envelope bytes were transported.
+        assert_eq!(
+            SlateEnvelope::from_canonical_bytes(&offer_bytes).unwrap(),
+            offer
+        );
+        assert_eq!(
+            SlateEnvelope::from_canonical_bytes(&response_bytes).unwrap(),
+            response
         );
     }
 

@@ -290,6 +290,15 @@ pub struct PendingChange {
 pub struct PendingSendSlate {
     /// Canonical `dom_tx::slate::Slate` bytes from step 1.
     pub slate_bytes: Vec<u8>,
+    /// Canonical Wallet V3 envelope bytes when this send uses recovery Slate
+    /// v4. Empty for historical body-only Slate v3 pending records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub envelope_bytes: Vec<u8>,
+    /// Exact recipient response envelope accepted by the sender. Persisting it
+    /// beside the finalized transaction makes restart retries byte-identical
+    /// and rejects equivocation after the single-use sender nonce is consumed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_envelope_bytes: Vec<u8>,
 }
 
 /// Sender-only secrets needed to finalize an interactive slate.
