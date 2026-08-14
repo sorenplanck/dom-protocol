@@ -431,10 +431,11 @@ pub use nonce_vault::{
     NonceVaultV1, ParticipantId, PermitIdV1, PreparedExposureV1, PreparedExposureValidationError,
     ProcessComputationBindingIdV1, Purpose, ResendProtocolStageV1, ResendRequestV1,
     ReservationLiveStageV1, ReservationNonceId, ReservationRequestLookupV1,
-    ReservationResumeResultV1, ReservationState, RestoreState, SessionId,
-    SpentArtifactDescriptorV1, TemplateHash, TerminalReservationV1,
-    ValidatedPreparedExposureViewV1, VaultArtifactPersistencePermitV1, VaultComputationStageV1,
-    VaultExportedArtifactV1, VaultKeyId, VaultReservationSnapshotV1, VaultSpentArtifactSnapshotV1,
+    ReservationResumeResultV1, ReservationState, RestartArtifactRecoveryRequestV1,
+    RestartArtifactRecoveryVaultV1, RestoreState, SessionId, SpentArtifactDescriptorV1,
+    TemplateHash, TerminalReservationV1, ValidatedPreparedExposureViewV1,
+    VaultArtifactPersistencePermitV1, VaultComputationStageV1, VaultExportedArtifactV1, VaultKeyId,
+    VaultReservationSnapshotV1, VaultSpentArtifactSnapshotV1,
 };
 pub use operational_funding_authority::{
     DurableOperationalFundingIssuanceV1, DurableOperationalM8FundingIssuanceV1,
@@ -452,7 +453,8 @@ pub use partial_commitment_pop::{
 pub use permit::{exposure_outbound_digest_v1, validate_exposure_permit_record_v1, ExposureKindV1};
 pub use reservation_binding::{
     DurableReservationLookupV1, FreshReservationRequestV1, PreparedFreshReservationV1,
-    ReservationContextBindingV1, ReservationLookupCustodyV1, ReservationResumeRequestV1,
+    ReservationContextBindingV1, ReservationLookupCustodyV1, ReservationLookupRecoveryCustodyV1,
+    ReservationLookupRecoveryRequestV1, ReservationResumeRequestV1,
 };
 pub use session::{
     advance_transcript_hash_v1, canonical_template_v1, generate_session_id_v1,
@@ -509,7 +511,8 @@ pub use vault_operation::{
 };
 pub use vault_signer::{
     CommitmentExportedV1, PartialExportedTerminalV1, ResentArtifactV1, ReservedNonceV1,
-    ResumedReservationV1, RevealExportedV1, VaultBackedSignerError, VaultBackedSignerV1,
+    RestartedPartialAuthorizedV1, RestartedReservationV1, ResumedReservationV1, RevealExportedV1,
+    VaultBackedSignerError, VaultBackedSignerV1,
 };
 
 #[cfg(test)]

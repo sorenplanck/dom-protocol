@@ -5,7 +5,7 @@ use crate::{
     advance_transcript_hash_v1, aggregate_public_nonces_v1, binding_factor_v1,
     canonical_template_v1, initial_transcript_hash_v1, nonce_commitment_hash_v1,
     session_message_digest_v1, AdaptorError, BindingContextV1, BindingFactorV1, ContractKindV1,
-    NonceCommitmentV1, NonceRevealV1, PartialSignatureV1, ParticipantIdentityV1,
+    NonceCommitmentV1, NonceRevealV1, PartialSignatureV1, ParticipantId, ParticipantIdentityV1,
     ParticipantPublicNoncesV1, ParticipantRosterV1, ProtocolCommitmentSetV1, ProtocolRevealSetV1,
     PurposeV1, ResendProtocolStageV1, ReservationContextBindingV1, ReservationRequestLookupV1,
     ReservationResumeRequestV1, Result, SessionContextInputsV1, SessionContextV1, SessionId,
@@ -585,6 +585,7 @@ pub struct ValidatedSigningRoundStateV1 {
     reveals: Vec<ValidatedAcceptedSessionMessageV1>,
     partials: Vec<ValidatedAcceptedSessionMessageV1>,
     derivation_authority_issued: bool,
+    restart_authority_issued: bool,
     commitment_authority_issued: bool,
     reveal_authority_issued: bool,
     resend_authority_issued: [bool; 3],
@@ -750,6 +751,7 @@ impl ValidatedSigningRoundStateV1 {
             reveals: Vec::new(),
             partials: Vec::new(),
             derivation_authority_issued: false,
+            restart_authority_issued: false,
             commitment_authority_issued: false,
             reveal_authority_issued: false,
             resend_authority_issued: [false; 3],
@@ -992,7 +994,10 @@ impl ValidatedSigningRoundStateV1 {
 
     /// Consume the unique derivation authority before any commitment is accepted.
     pub fn take_derivation_base(&mut self) -> Result<ValidatedDerivationBaseV1> {
-        if self.derivation_authority_issued || !self.commitments.is_empty() {
+        if self.derivation_authority_issued
+            || self.restart_authority_issued
+            || !self.commitments.is_empty()
+        {
             return Err(AdaptorError::AuthorizationMismatch);
         }
         self.derivation_authority_issued = true;
@@ -1000,6 +1005,90 @@ impl ValidatedSigningRoundStateV1 {
             context: self.base_context.clone(),
             roster: self.roster.clone(),
             local_protocol_index: self.local_protocol_index,
+        })
+    }
+
+    /// Consume one restart-only derivation authority for the authenticated prefix.
+    ///
+    /// The returned crate-private value can enter only the vault-backed
+    /// recovery path. It is a different type from [`ValidatedDerivationBaseV1`]
+    /// and therefore can never authorize a fresh reservation claim.
+    pub(crate) fn take_restart_derivation_base(
+        &mut self,
+    ) -> Result<ValidatedRestartDerivationBaseV1> {
+        if self.derivation_authority_issued
+            || self.restart_authority_issued
+            || !self.pending.is_empty()
+            || self.closed
+        {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
+        self.restart_authority_issued = true;
+        Ok(ValidatedRestartDerivationBaseV1 {
+            context: self.base_context.clone(),
+            roster: self.roster.clone(),
+            local_protocol_index: self.local_protocol_index,
+            progress: RestartRoundProgressV1 {
+                commitments: u8::try_from(self.commitments.len())
+                    .map_err(|_| AdaptorError::AuthorizationMismatch)?,
+                reveals: u8::try_from(self.reveals.len())
+                    .map_err(|_| AdaptorError::AuthorizationMismatch)?,
+                partials: u8::try_from(self.partials.len())
+                    .map_err(|_| AdaptorError::AuthorizationMismatch)?,
+                local_protocol_index: self.local_protocol_index,
+            },
+        })
+    }
+
+    pub(crate) fn prepare_restart_resend(
+        &mut self,
+        protocol_stage: ResendProtocolStageV1,
+        request_lookup: ReservationRequestLookupV1,
+        reservation_context_binding_digest: [u8; 32],
+    ) -> Result<ValidatedRestartResendBaseV1> {
+        if self.closed || reservation_context_binding_digest == [0; 32] {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
+        let stage_index = match protocol_stage {
+            ResendProtocolStageV1::Commitment => 0,
+            ResendProtocolStageV1::Reveal => 1,
+            ResendProtocolStageV1::PartialSignature => 2,
+        };
+        if self.resend_authority_issued[stage_index]
+            || (protocol_stage == ResendProtocolStageV1::Reveal && self.commitments.len() != 2)
+            || (protocol_stage == ResendProtocolStageV1::PartialSignature
+                && self.reveals.len() != 2)
+        {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
+        let local_index = usize::from(self.local_protocol_index);
+        let accepted = match protocol_stage {
+            ResendProtocolStageV1::Commitment => self.commitments.get(local_index),
+            ResendProtocolStageV1::Reveal => self.reveals.get(local_index),
+            ResendProtocolStageV1::PartialSignature => self.partials.get(local_index),
+        };
+        let accepted_outbound_digest = accepted
+            .map(|message| {
+                crate::exposure_outbound_digest_v1(
+                    protocol_stage.exposure_kind(),
+                    message.payload_bytes(),
+                )
+            })
+            .transpose()?
+            .map(|digest| *digest.as_bytes());
+        self.resend_authority_issued[stage_index] = true;
+        Ok(ValidatedRestartResendBaseV1 {
+            request_lookup,
+            reservation_context_binding_digest,
+            session_id: SessionId::from_bytes(*self.base_context.session_id())
+                .map_err(|_| AdaptorError::AuthorizationMismatch)?,
+            participant_id: ParticipantId::from_bytes(
+                *self.roster.entries()[local_index].participant_id(),
+            )
+            .map_err(|_| AdaptorError::AuthorizationMismatch)?,
+            purpose: self.base_context.purpose(),
+            protocol_stage,
+            accepted_outbound_digest,
         })
     }
 
@@ -1159,6 +1248,103 @@ impl ValidatedSigningRoundStateV1 {
             )?);
         }
         ProtocolRevealSetV1::new(entries)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RestartRoundProgressV1 {
+    commitments: u8,
+    reveals: u8,
+    partials: u8,
+    local_protocol_index: u16,
+}
+
+impl RestartRoundProgressV1 {
+    pub(crate) fn allows_pre_derivation(self) -> bool {
+        self.commitments <= self.local_protocol_index as u8
+            && self.reveals == 0
+            && self.partials == 0
+    }
+
+    pub(crate) fn allows_after_commitment(self) -> bool {
+        self.reveals <= self.local_protocol_index as u8 && self.partials == 0
+    }
+
+    pub(crate) fn allows_after_reveal(self) -> bool {
+        self.commitments == 2 && self.partials <= self.local_protocol_index as u8
+    }
+
+    pub(crate) fn allows_partial_authorized(self) -> bool {
+        self.reveals == 2
+    }
+
+    pub(crate) fn is_empty(self) -> bool {
+        self.commitments == 0 && self.reveals == 0 && self.partials == 0
+    }
+}
+
+/// Crate-private authority for exact reservation recovery after replay.
+///
+/// This value is deliberately distinct from [`ValidatedDerivationBaseV1`].
+/// It cannot enter `claim_fresh` and retains the authenticated prefix progress
+/// needed to reject a vault stage that could not have produced that prefix.
+pub(crate) struct ValidatedRestartDerivationBaseV1 {
+    context: SessionContextV1,
+    roster: ParticipantRosterV1,
+    local_protocol_index: u16,
+    progress: RestartRoundProgressV1,
+}
+
+impl ValidatedRestartDerivationBaseV1 {
+    pub(crate) const fn context(&self) -> &SessionContextV1 {
+        &self.context
+    }
+
+    pub(crate) const fn roster(&self) -> &ParticipantRosterV1 {
+        &self.roster
+    }
+
+    pub(crate) const fn local_protocol_index(&self) -> u16 {
+        self.local_protocol_index
+    }
+
+    pub(crate) const fn progress(&self) -> RestartRoundProgressV1 {
+        self.progress
+    }
+}
+
+/// Crate-private protocol proof for one exact restart resend attempt.
+pub(crate) struct ValidatedRestartResendBaseV1 {
+    request_lookup: ReservationRequestLookupV1,
+    reservation_context_binding_digest: [u8; 32],
+    session_id: SessionId,
+    participant_id: ParticipantId,
+    purpose: PurposeV1,
+    protocol_stage: ResendProtocolStageV1,
+    accepted_outbound_digest: Option<[u8; 32]>,
+}
+
+impl ValidatedRestartResendBaseV1 {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ReservationRequestLookupV1,
+        [u8; 32],
+        SessionId,
+        ParticipantId,
+        PurposeV1,
+        ResendProtocolStageV1,
+        Option<[u8; 32]>,
+    ) {
+        (
+            self.request_lookup,
+            self.reservation_context_binding_digest,
+            self.session_id,
+            self.participant_id,
+            self.purpose,
+            self.protocol_stage,
+            self.accepted_outbound_digest,
+        )
     }
 }
 
@@ -2681,6 +2867,100 @@ mod tests {
             .find(|share| share.public_key() == local_public_key)
             .expect("local signing share");
         (fixture.state, local_share)
+    }
+
+    #[test]
+    fn restart_only_authority_covers_every_canonical_prefix_without_fresh_reuse() {
+        let (completed, _) = completed_partial_round_fixture();
+        let messages: Vec<Vec<u8>> = completed
+            .commitments
+            .iter()
+            .chain(&completed.reveals)
+            .chain(&completed.partials)
+            .map(|message| message.complete_bytes.to_vec())
+            .collect();
+        assert_eq!(messages.len(), 6);
+
+        for cut in 0..=messages.len() {
+            let mut state = commitment_fixture().state;
+            for message in &messages[..cut] {
+                assert_eq!(
+                    state.accept_message(message).expect("canonical prefix"),
+                    AcceptedMessageDispositionV1::Advanced
+                );
+            }
+            let authority = state
+                .take_restart_derivation_base()
+                .expect("restart-only authority");
+            let progress = authority.progress();
+            let expected = match cut {
+                0 => (true, true, false, false),
+                1 => (false, true, false, false),
+                2 => (false, true, true, false),
+                3 => (false, false, true, false),
+                4 => (false, false, true, true),
+                5 | 6 => (false, false, false, true),
+                _ => unreachable!("bounded six-message profile"),
+            };
+            assert_eq!(progress.allows_pre_derivation(), expected.0);
+            assert_eq!(progress.allows_after_commitment(), expected.1);
+            assert_eq!(progress.allows_after_reveal(), expected.2);
+            assert_eq!(progress.allows_partial_authorized(), expected.3);
+            assert!(state.take_restart_derivation_base().is_err());
+            assert!(state.take_derivation_base().is_err());
+        }
+    }
+
+    #[test]
+    fn restart_only_authority_rejects_gap_and_divergent_prefixes() {
+        let (completed, _) = completed_partial_round_fixture();
+        let messages: Vec<Vec<u8>> = completed
+            .commitments
+            .iter()
+            .chain(&completed.reveals)
+            .chain(&completed.partials)
+            .map(|message| message.complete_bytes.to_vec())
+            .collect();
+
+        let mut gap = commitment_fixture().state;
+        assert_eq!(
+            gap.accept_message(&messages[1]).expect("buffered gap"),
+            AcceptedMessageDispositionV1::Buffered
+        );
+        assert!(gap.take_restart_derivation_base().is_err());
+
+        let mut divergent = commitment_fixture().state;
+        let mut wrong = messages[0].clone();
+        *wrong.last_mut().expect("signature byte") ^= 1;
+        assert!(divergent.accept_message(&wrong).is_err());
+
+        let mut equivocation = commitment_fixture();
+        equivocation
+            .state
+            .accept_message(&equivocation.messages[0])
+            .expect("first exact message");
+        let participant = &equivocation.roster.entries()[0];
+        let signing_index = equivocation
+            .roster
+            .signing_index(participant.participant_id())
+            .expect("signing index");
+        let conflicting_payload =
+            NonceCommitmentV1::new(PurposeV1::Refund, signing_index, [0xaa; 32]).to_bytes();
+        let same_sequence_different_bytes = signed_envelope(
+            equivocation.state.base_context.chain_id(),
+            equivocation.state.base_context.session_id(),
+            participant.participant_id(),
+            0,
+            equivocation.state.base_context.transcript_hash(),
+            KIND_NONCE_COMMITMENT,
+            &conflicting_payload,
+            equivocation.protocol_identity_secret(0),
+        );
+        assert!(equivocation
+            .state
+            .accept_message(&same_sequence_different_bytes)
+            .is_err());
+        assert!(equivocation.state.take_restart_derivation_base().is_err());
     }
 
     #[test]

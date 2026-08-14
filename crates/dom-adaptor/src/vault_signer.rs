@@ -1,19 +1,21 @@
 //! Non-bypassable high-level G1a/G1b signer composition.
 
 use crate::secret_nonce::SecretNonceDerivationV1;
+use crate::signing_round::{ValidatedRestartDerivationBaseV1, ValidatedRestartResendBaseV1};
 use crate::{
     nonce_commitment_hash_v1, AcceptedSigningSessionV1, AdaptorError, AuthorizedExposureV1,
     ExposureKindV1, NonceCommitmentV1, NonceDerivationRequestV1, NonceRevealV1,
     NonceSecretTransferV1, NonceVaultError, NonceVaultV1, OperationalSigningSessionAuthorityV1,
     PartialSignatureV1, PreparedExposureV1, PublicNoncePairV1, ResendProtocolStageV1,
     ResendRequestV1, ReservationContextBindingV1, ReservationLiveStageV1,
-    ReservationLookupCustodyV1, ReservationRequestLookupV1, ReservationResumeRequestV1,
-    ReservationResumeResultV1, ReservationState, RestoreState, SessionContextV1,
-    SigningSessionAuthorityV1, SigningShareV1, TerminalReservationV1, TrustedChainIdV1,
-    ValidatedCommitmentRoundV1, ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1,
-    ValidatedRevealRoundV1, ValidatedSigningRoundStateV1, VaultExportedArtifactV1,
-    VaultReservationSnapshotV1, VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1,
-    VaultSpentArtifactSnapshotV1,
+    ReservationLookupCustodyV1, ReservationLookupRecoveryCustodyV1,
+    ReservationLookupRecoveryRequestV1, ReservationRequestLookupV1, ReservationResumeRequestV1,
+    ReservationResumeResultV1, ReservationState, RestartArtifactRecoveryRequestV1,
+    RestartArtifactRecoveryVaultV1, RestoreState, SessionContextV1, SigningSessionAuthorityV1,
+    SigningShareV1, TerminalReservationV1, TrustedChainIdV1, ValidatedCommitmentRoundV1,
+    ValidatedDerivationBaseV1, ValidatedResendAuthorizationV1, ValidatedRevealRoundV1,
+    ValidatedSigningRoundStateV1, VaultExportedArtifactV1, VaultReservationSnapshotV1,
+    VaultSecretImportCapabilityV1, VaultSecretSealCapabilityV1, VaultSpentArtifactSnapshotV1,
 };
 use core::fmt;
 use dom_crypto::{schnorr_challenge, PartialSig};
@@ -208,6 +210,33 @@ pub enum ResumedReservationV1<Handle> {
     AfterCommitment(CommitmentExportedV1<Handle>),
     /// Exact spent commitment and reveal successors with a verified sealed secret.
     AfterReveal(RevealExportedV1<Handle>),
+}
+
+/// Exhaustive reservation state recovered from an authenticated DSC1 prefix.
+///
+/// Every live variant retains the original opaque vault handle. The terminal
+/// partial variant carries only the private lookup/binding needed by the safe
+/// signer to recover and resend the exact already-spent partial. No variant
+/// permits a fresh reservation claim or exposes lookup bytes.
+pub enum RestartedReservationV1<Handle> {
+    /// A retained reservation exists but no nonce derivation occurred yet.
+    PreDerivation(ReservedNonceV1<Handle>),
+    /// The exact commitment is already spent and the secret remains sealed.
+    AfterCommitment(CommitmentExportedV1<Handle>),
+    /// The exact reveal is already spent and the secret remains sealed.
+    AfterReveal(RevealExportedV1<Handle>),
+    /// The nonce is consumed and one exact partial is available for resend.
+    PartialAuthorized(RestartedPartialAuthorizedV1),
+    /// A zero-prefix reservation was irreversibly aborted before public bytes.
+    TerminalBeforePublicMaterial(TerminalReservationV1),
+}
+
+/// Opaque restart-only state for an already-authorized terminal partial.
+pub struct RestartedPartialAuthorizedV1 {
+    request_lookup: ReservationRequestLookupV1,
+    context_binding_digest: [u8; 32],
+    session_id: crate::SessionId,
+    purpose: crate::PurposeV1,
 }
 
 /// Closed typed result of a validated restart resend lookup.
@@ -537,6 +566,179 @@ where
                     }
                 };
                 Ok(ReservationResumeResultV1::Live(state))
+            }
+        }
+    }
+
+    /// Resume the exact previously claimed reservation selected by custody.
+    ///
+    /// The signer consumes a restart-only authority from the authenticated
+    /// accepted-round prefix, recomputes the private context binding, and asks
+    /// custody for the single matching lookup. There is no caller-provided
+    /// lookup and no fresh-claim fallback. A vault stage inconsistent with the
+    /// replayed prefix fails closed before any artifact can be exported.
+    pub fn resume_claimed_after_restart(
+        &mut self,
+        round: &mut ValidatedSigningRoundStateV1,
+    ) -> SignerResult<Vault, Custody, RestartedReservationV1<Vault::ReservationHandle>>
+    where
+        Custody: ReservationLookupRecoveryCustodyV1,
+    {
+        let authority = round.take_restart_derivation_base()?;
+        self.resume_restart_authority(authority)
+    }
+
+    fn resume_restart_authority(
+        &mut self,
+        authority: ValidatedRestartDerivationBaseV1,
+    ) -> SignerResult<Vault, Custody, RestartedReservationV1<Vault::ReservationHandle>>
+    where
+        Custody: ReservationLookupRecoveryCustodyV1,
+    {
+        let binding = ReservationContextBindingV1::new(
+            authority.context(),
+            authority.roster(),
+            authority.local_protocol_index(),
+            &self.signing_share,
+        )?;
+        let participant_id = *binding.local_participant_id();
+        let binding_digest = *binding.digest();
+        let context = authority.context().clone();
+        let recovery = ReservationLookupRecoveryRequestV1::new(
+            crate::SessionId::from_bytes(*context.session_id())?,
+            binding_digest,
+        )?;
+        let request_lookup = self
+            .custody
+            .load_custodied_lookup(&recovery)
+            .map_err(VaultBackedSignerError::Custody)?;
+        let request = ReservationResumeRequestV1::from_trusted_state(
+            &context,
+            &self.signing_share,
+            request_lookup.clone(),
+            binding,
+        )?;
+        let progress = authority.progress();
+        match self
+            .vault
+            .resume_claimed_reservation(request)
+            .map_err(VaultBackedSignerError::Vault)?
+        {
+            ReservationResumeResultV1::RetryNotFound => {
+                self.custody
+                    .abandon_before_vault_claim(
+                        &request_lookup,
+                        &crate::SessionId::from_bytes(*context.session_id())?,
+                        &binding_digest,
+                    )
+                    .map_err(VaultBackedSignerError::Custody)?;
+                Err(VaultBackedSignerError::Contract(
+                    NonceVaultError::ReservationNotFound,
+                ))
+            }
+            ReservationResumeResultV1::Terminal(terminal)
+                if terminal.state == ReservationState::ConsumedPartialAuthorized
+                    && progress.allows_partial_authorized() =>
+            {
+                Ok(RestartedReservationV1::PartialAuthorized(
+                    RestartedPartialAuthorizedV1 {
+                        request_lookup,
+                        context_binding_digest: binding_digest,
+                        session_id: crate::SessionId::from_bytes(*context.session_id())?,
+                        purpose: context.purpose(),
+                    },
+                ))
+            }
+            ReservationResumeResultV1::Terminal(terminal)
+                if terminal.state == ReservationState::AbortedBeforePublicMaterial
+                    && progress.is_empty() =>
+            {
+                Ok(RestartedReservationV1::TerminalBeforePublicMaterial(
+                    terminal,
+                ))
+            }
+            ReservationResumeResultV1::Terminal(_) => Err(VaultBackedSignerError::Contract(
+                NonceVaultError::InvalidTransition,
+            )),
+            ReservationResumeResultV1::Live(handle) => {
+                let snapshot = self
+                    .vault
+                    .snapshot_reservation(&handle)
+                    .map_err(VaultBackedSignerError::Vault)?;
+                validate_live_snapshot(
+                    &snapshot,
+                    ExpectedLiveSnapshotV1 {
+                        request_lookup: &request_lookup,
+                        context_binding_digest: &binding_digest,
+                        session_id: context.session_id(),
+                        participant_id: &participant_id,
+                        purpose: context.purpose(),
+                        stage: snapshot.live_stage(),
+                        retry_counter: snapshot.final_retry_counter(),
+                    },
+                )?;
+                let reservation_nonce_id = snapshot.reservation_nonce_id().clone();
+                match snapshot.live_stage() {
+                    ReservationLiveStageV1::PreDerivation if progress.allows_pre_derivation() => {
+                        Ok(RestartedReservationV1::PreDerivation(ReservedNonceV1 {
+                            handle,
+                            request_lookup,
+                            reservation_nonce_id,
+                            context,
+                            participant_id,
+                            context_binding_digest: binding_digest,
+                        }))
+                    }
+                    ReservationLiveStageV1::AfterCommitment
+                        if progress.allows_after_commitment() =>
+                    {
+                        let resumed_context = context.with_retry_counter(
+                            snapshot
+                                .final_retry_counter()
+                                .ok_or(NonceVaultError::CorruptState)?,
+                        );
+                        let permit_id = snapshot
+                            .spent_commitment()
+                            .ok_or(NonceVaultError::CorruptState)?
+                            .permit_id()
+                            .clone();
+                        Ok(RestartedReservationV1::AfterCommitment(
+                            CommitmentExportedV1 {
+                                handle,
+                                request_lookup,
+                                reservation_nonce_id,
+                                context: resumed_context,
+                                participant_id,
+                                context_binding_digest: binding_digest,
+                                permit_id,
+                            },
+                        ))
+                    }
+                    ReservationLiveStageV1::AfterReveal if progress.allows_after_reveal() => {
+                        let resumed_context = context.with_retry_counter(
+                            snapshot
+                                .final_retry_counter()
+                                .ok_or(NonceVaultError::CorruptState)?,
+                        );
+                        let permit_id = snapshot
+                            .spent_reveal()
+                            .ok_or(NonceVaultError::CorruptState)?
+                            .permit_id()
+                            .clone();
+                        Ok(RestartedReservationV1::AfterReveal(RevealExportedV1 {
+                            handle,
+                            request_lookup,
+                            reservation_nonce_id,
+                            context: resumed_context,
+                            participant_id,
+                            context_binding_digest: binding_digest,
+                            permit_id,
+                        }))
+                    }
+                    _ => Err(VaultBackedSignerError::Contract(
+                        NonceVaultError::InvalidTransition,
+                    )),
+                }
             }
         }
     }
@@ -974,6 +1176,134 @@ where
     ) -> SignerResult<Vault, Custody, ResentArtifactV1> {
         let stage = authority.protocol_stage();
         self.resend_bound(authority, stage)
+    }
+
+    /// Recover and resend the exact commitment spent ahead of journal ACK.
+    pub fn resend_commitment_from_restarted(
+        &mut self,
+        state: &CommitmentExportedV1<Vault::ReservationHandle>,
+        round: &mut ValidatedSigningRoundStateV1,
+    ) -> SignerResult<Vault, Custody, ResentArtifactV1>
+    where
+        Vault: RestartArtifactRecoveryVaultV1,
+    {
+        let base = round.prepare_restart_resend(
+            ResendProtocolStageV1::Commitment,
+            state.request_lookup.clone(),
+            state.context_binding_digest,
+        )?;
+        self.restart_resend_bound(base, state.context.session_id(), state.context.purpose())
+    }
+
+    /// Recover and resend the exact reveal spent ahead of journal ACK.
+    pub fn resend_reveal_from_restarted(
+        &mut self,
+        state: &RevealExportedV1<Vault::ReservationHandle>,
+        round: &mut ValidatedSigningRoundStateV1,
+    ) -> SignerResult<Vault, Custody, ResentArtifactV1>
+    where
+        Vault: RestartArtifactRecoveryVaultV1,
+    {
+        let base = round.prepare_restart_resend(
+            ResendProtocolStageV1::Reveal,
+            state.request_lookup.clone(),
+            state.context_binding_digest,
+        )?;
+        self.restart_resend_bound(base, state.context.session_id(), state.context.purpose())
+    }
+
+    /// Recover and resend the exact terminal partial spent ahead of journal ACK.
+    pub fn resend_partial_from_restarted(
+        &mut self,
+        state: &RestartedPartialAuthorizedV1,
+        round: &mut ValidatedSigningRoundStateV1,
+    ) -> SignerResult<Vault, Custody, ResentArtifactV1>
+    where
+        Vault: RestartArtifactRecoveryVaultV1,
+    {
+        let base = round.prepare_restart_resend(
+            ResendProtocolStageV1::PartialSignature,
+            state.request_lookup.clone(),
+            state.context_binding_digest,
+        )?;
+        self.restart_resend_bound(base, state.session_id.as_bytes(), state.purpose)
+    }
+
+    fn restart_resend_bound(
+        &mut self,
+        base: ValidatedRestartResendBaseV1,
+        expected_session_id: &[u8; 32],
+        expected_purpose: crate::PurposeV1,
+    ) -> SignerResult<Vault, Custody, ResentArtifactV1>
+    where
+        Vault: RestartArtifactRecoveryVaultV1,
+    {
+        let (
+            request_lookup,
+            context_binding_digest,
+            session_id,
+            participant_id,
+            purpose,
+            protocol_stage,
+            accepted_outbound_digest,
+        ) = base.into_parts();
+        if session_id.as_bytes() != expected_session_id || purpose != expected_purpose {
+            return Err(AdaptorError::AuthorizationMismatch.into());
+        }
+        let recovery = RestartArtifactRecoveryRequestV1::new(
+            request_lookup.clone(),
+            context_binding_digest,
+            session_id.clone(),
+            participant_id,
+            purpose,
+            protocol_stage,
+        )?;
+        let recovered = self
+            .vault
+            .recover_spent_artifact_for_restart(&recovery)
+            .map_err(VaultBackedSignerError::Vault)?;
+        if recovered.nonce_identity().session_id() != &session_id
+            || recovered.nonce_identity().participant_id() != recovery.participant_id()
+            || recovered.nonce_identity().purpose() != purpose
+            || recovered.nonce_identity().bound_digest() != &context_binding_digest
+            || recovered.kind() != protocol_stage.exposure_kind()
+            || accepted_outbound_digest
+                .is_some_and(|digest| recovered.adaptor_outbound_digest() != &digest)
+        {
+            return Err(VaultBackedSignerError::AuthorizedArtifactMismatch);
+        }
+        let authorization = ValidatedResendAuthorizationV1::new(
+            request_lookup,
+            context_binding_digest,
+            session_id,
+            purpose,
+            protocol_stage,
+            *recovered.adaptor_outbound_digest(),
+        )?;
+        let request = ResendRequestV1::from_recovered(authorization, &recovered)?;
+        let expected_kind = protocol_stage.exposure_kind();
+        let expected_digest = *recovered.adaptor_outbound_digest();
+        let exported = self
+            .vault
+            .resend_exported(request)
+            .map_err(VaultBackedSignerError::Vault)?;
+        let authorized = validate_exported_artifact(&exported, expected_kind)?;
+        if crate::exposure_outbound_digest_v1(expected_kind, authorized.as_bytes())?.as_bytes()
+            != &expected_digest
+        {
+            return Err(VaultBackedSignerError::AuthorizedArtifactMismatch);
+        }
+        match expected_kind {
+            ExposureKindV1::NonceCommitment => Ok(ResentArtifactV1::NonceCommitment(
+                NonceCommitmentV1::from_bytes(authorized.as_bytes())?,
+            )),
+            ExposureKindV1::NonceReveal => Ok(ResentArtifactV1::NonceReveal(
+                NonceRevealV1::from_bytes(authorized.as_bytes())?,
+            )),
+            ExposureKindV1::PartialSignature => Ok(ResentArtifactV1::PartialSignature(
+                PartialSignatureV1::from_bytes(authorized.as_bytes())?,
+            )),
+        }
     }
 
     fn resend_bound(
@@ -1803,6 +2133,15 @@ mod tests {
         }
     }
 
+    impl RestartArtifactRecoveryVaultV1 for SeamTestVault {
+        fn recover_spent_artifact_for_restart(
+            &mut self,
+            _request: &RestartArtifactRecoveryRequestV1,
+        ) -> core::result::Result<Self::RecoveredSpentArtifact, Self::Error> {
+            Err(SeamTestError)
+        }
+    }
+
     struct NeverDurableLookup;
 
     impl crate::DurableReservationLookupV1 for NeverDurableLookup {
@@ -1838,6 +2177,15 @@ mod tests {
             _session_id: &crate::SessionId,
             _context_binding_digest: &[u8; 32],
         ) -> core::result::Result<(), Self::Error> {
+            Err(SeamTestError)
+        }
+    }
+
+    impl ReservationLookupRecoveryCustodyV1 for SeamTestCustody {
+        fn load_custodied_lookup(
+            &mut self,
+            _request: &ReservationLookupRecoveryRequestV1,
+        ) -> core::result::Result<ReservationRequestLookupV1, Self::Error> {
             Err(SeamTestError)
         }
     }
@@ -2043,6 +2391,21 @@ mod tests {
         // legacy bound is gone; the seam store then fails at its intentional
         // first durable operation.
         assert!(signer.claim_fresh(derivation).is_err());
+    }
+
+    #[test]
+    fn restart_only_signer_path_reaches_custody_without_fresh_claim() {
+        let (session, signing_share) = SeamTestSessionStore::issue();
+        let chain = *session.trusted_chain_id();
+        let mut signer = operational_seam_signer(chain, signing_share);
+        let mut round = signer
+            .begin_operational_signing_round(session)
+            .expect("operational restart round");
+        assert!(matches!(
+            signer.resume_claimed_after_restart(&mut round),
+            Err(VaultBackedSignerError::Custody(_))
+        ));
+        assert!(round.take_derivation_base().is_err());
     }
 
     #[test]

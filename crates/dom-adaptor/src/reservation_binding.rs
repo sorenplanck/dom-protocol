@@ -328,6 +328,56 @@ pub trait ReservationLookupCustodyV1: Sized {
     ) -> core::result::Result<(), Self::Error>;
 }
 
+/// Opaque restart-only request for the exact retained reservation lookup.
+///
+/// Only the vault-backed signer can construct this value, after recomputing
+/// the canonical reservation-context binding from an authenticated signing
+/// session and the local signing share. Downstream callers cannot provide a
+/// raw digest or trial candidate lookup to the recovery custody boundary.
+pub struct ReservationLookupRecoveryRequestV1 {
+    session_id: SessionId,
+    context_binding_digest: [u8; 32],
+}
+
+impl ReservationLookupRecoveryRequestV1 {
+    pub(crate) fn new(session_id: SessionId, context_binding_digest: [u8; 32]) -> Result<Self> {
+        if context_binding_digest == [0; 32] {
+            return Err(AdaptorError::InvalidTranscript(
+                "zero restart reservation context-binding digest",
+            ));
+        }
+        Ok(Self {
+            session_id,
+            context_binding_digest,
+        })
+    }
+
+    /// Return the authenticated lifetime-unique session identifier.
+    pub const fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    /// Return the signer-derived canonical reservation-context digest.
+    pub const fn context_binding_digest(&self) -> &[u8; 32] {
+        &self.context_binding_digest
+    }
+}
+
+/// Additive production custody boundary for restart-only lookup recovery.
+///
+/// This trait is intentionally separate from [`ReservationLookupCustodyV1`]
+/// so existing fresh-claim custody implementations do not gain restart
+/// authority accidentally. Implementations must resolve exactly one retained
+/// lookup or fail closed; they must never create a lookup or select among
+/// caller-provided candidates.
+pub trait ReservationLookupRecoveryCustodyV1: ReservationLookupCustodyV1 {
+    /// Load the one exact lookup bound to the opaque signer request.
+    fn load_custodied_lookup(
+        &mut self,
+        request: &ReservationLookupRecoveryRequestV1,
+    ) -> core::result::Result<ReservationRequestLookupV1, Self::Error>;
+}
+
 /// Opaque one-shot request for exact reservation retry or restart lookup.
 pub struct ReservationResumeRequestV1(ReservationRequestFieldsV1);
 

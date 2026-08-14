@@ -1016,6 +1016,74 @@ impl ResendProtocolStageV1 {
     }
 }
 
+/// Opaque restart-only request for one already-spent outbound artifact.
+///
+/// The safe signer constructs this value from an authenticated accepted-round
+/// prefix and the exact recovered reservation binding. It contains no bytes
+/// and no caller-selected outbound digest. A durable vault must resolve the
+/// unique matching spent record under its retained lock or fail closed.
+pub struct RestartArtifactRecoveryRequestV1 {
+    request_lookup: ReservationRequestLookupV1,
+    reservation_context_binding_digest: [u8; 32],
+    session_id: SessionId,
+    participant_id: ParticipantId,
+    purpose: PurposeV1,
+    protocol_stage: ResendProtocolStageV1,
+}
+
+impl RestartArtifactRecoveryRequestV1 {
+    pub(crate) fn new(
+        request_lookup: ReservationRequestLookupV1,
+        reservation_context_binding_digest: [u8; 32],
+        session_id: SessionId,
+        participant_id: ParticipantId,
+        purpose: PurposeV1,
+        protocol_stage: ResendProtocolStageV1,
+    ) -> Result<Self, NonceVaultError> {
+        if reservation_context_binding_digest == [0; 32] || !purpose.is_strict_v1_authorized() {
+            return Err(NonceVaultError::InvalidPermit);
+        }
+        Ok(Self {
+            request_lookup,
+            reservation_context_binding_digest,
+            session_id,
+            participant_id,
+            purpose,
+            protocol_stage,
+        })
+    }
+
+    /// Return the exact Store-retained request lookup.
+    pub const fn request_lookup(&self) -> &ReservationRequestLookupV1 {
+        &self.request_lookup
+    }
+
+    /// Return the complete signer-derived reservation-context digest.
+    pub const fn reservation_context_binding_digest(&self) -> &[u8; 32] {
+        &self.reservation_context_binding_digest
+    }
+
+    /// Return the authenticated lifetime-unique session identifier.
+    pub const fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    /// Return the authenticated local protocol participant identifier.
+    pub const fn participant_id(&self) -> &ParticipantId {
+        &self.participant_id
+    }
+
+    /// Return the strict signing purpose.
+    pub const fn purpose(&self) -> PurposeV1 {
+        self.purpose
+    }
+
+    /// Return the exact already-spent protocol stage to recover.
+    pub const fn protocol_stage(&self) -> ResendProtocolStageV1 {
+        self.protocol_stage
+    }
+}
+
 /// Non-authoritative lookup request constructed only from validated protocol state.
 ///
 /// The request carries no live Store capability. A concrete Store must recover and
@@ -1308,6 +1376,20 @@ pub trait NonceVaultV1: Sized {
 
     /// Return whether adaptor operations are available after reconciliation.
     fn restore_state(&self) -> RestoreState;
+}
+
+/// Additive durable-vault boundary for an artifact spent ahead of the journal.
+///
+/// This extension is used only during authenticated restart continuation. It
+/// returns the ordinary non-exporting spent descriptor; exact bytes remain
+/// behind [`NonceVaultV1::resend_exported`] and can leave the vault only after
+/// the signer constructs and consumes the matching resend authorization.
+pub trait RestartArtifactRecoveryVaultV1: NonceVaultV1 {
+    /// Recover the unique spent descriptor selected by an opaque signer request.
+    fn recover_spent_artifact_for_restart(
+        &mut self,
+        request: &RestartArtifactRecoveryRequestV1,
+    ) -> core::result::Result<Self::RecoveredSpentArtifact, Self::Error>;
 }
 
 /// Fail-closed errors shared by contract consumers and wallet implementations.
