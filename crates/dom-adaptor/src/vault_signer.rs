@@ -949,6 +949,15 @@ where
             ExposureKindV1::PartialSignature => Ok(ResentArtifactV1::PartialSignature(
                 PartialSignatureV1::from_bytes(authorized.as_bytes())?,
             )),
+            // NAR-003 §2.2. `ResentArtifactV1` enumerates the three DSC-1
+            // signing artifacts. The Bulletproof round 1 share is not one of
+            // them, and `ProtocolStageV1` has no stage that yields this kind, so
+            // this arm is unreachable through the public API. It refuses rather
+            // than inventing a resend shape for an artifact this record does not
+            // route here.
+            ExposureKindV1::BulletproofRound1Share => {
+                Err(VaultBackedSignerError::AuthorizedArtifactMismatch)
+            }
         }
     }
 
@@ -1139,6 +1148,10 @@ where
         ExposureKindV1::NonceCommitment => snapshot.spent_commitment(),
         ExposureKindV1::NonceReveal => snapshot.spent_reveal(),
         ExposureKindV1::PartialSignature => return Err(NonceVaultError::InvalidTransition),
+        // NAR-003 §2.2. The snapshot projects the two DSC-1 nonce artifacts.
+        // The Bulletproof round 1 share has no projection here, and inventing
+        // one would be the second persistence path §2.6 forbids.
+        ExposureKindV1::BulletproofRound1Share => return Err(NonceVaultError::InvalidTransition),
     }
     .ok_or(NonceVaultError::CorruptState)?;
     if spent.kind() != kind

@@ -589,20 +589,40 @@ impl PreparedArtifactBindingV1 {
         permit: &impl VaultArtifactPersistencePermitV1,
         operation: &crate::ValidatedVaultComputationViewV1<'_>,
     ) -> core::result::Result<Self, PreparedExposureValidationError> {
+        // NAR-003 §2.2 registers the Bulletproof round 1 share as an exposure
+        // kind. It is not a DSC-1 signing artifact: it has no signing phase, no
+        // exposure sequence position, and no vault computation stage in the
+        // three-step commit/reveal/partial pipeline this function validates.
+        //
+        // Mapping it onto one of those steps would assert something false about
+        // it, so the DSC-1 path refuses it instead. Wiring the Bulletproof share
+        // to its own durable path is NAR-003 §6 step 4 and is not this record.
+        if permit.exposure_kind() == ExposureKindV1::BulletproofRound1Share {
+            return Err(PreparedExposureValidationError::BindingMismatch);
+        }
         let expected_sequence = match permit.exposure_kind() {
             ExposureKindV1::NonceCommitment => 1,
             ExposureKindV1::NonceReveal => 2,
             ExposureKindV1::PartialSignature => 3,
+            ExposureKindV1::BulletproofRound1Share => {
+                return Err(PreparedExposureValidationError::BindingMismatch)
+            }
         };
         let expected_phase = match permit.exposure_kind() {
             ExposureKindV1::NonceCommitment => SigningPhaseV1::SigNonceCommit,
             ExposureKindV1::NonceReveal => SigningPhaseV1::SigNonceReveal,
             ExposureKindV1::PartialSignature => SigningPhaseV1::SigPartial,
+            ExposureKindV1::BulletproofRound1Share => {
+                return Err(PreparedExposureValidationError::BindingMismatch)
+            }
         };
         let expected_stage = match permit.exposure_kind() {
             ExposureKindV1::NonceCommitment => VaultComputationStageV1::NonceDerivation,
             ExposureKindV1::NonceReveal => VaultComputationStageV1::NonceReveal,
             ExposureKindV1::PartialSignature => VaultComputationStageV1::PartialAttempt,
+            ExposureKindV1::BulletproofRound1Share => {
+                return Err(PreparedExposureValidationError::BindingMismatch)
+            }
         };
         if permit.reservation_context_binding_digest() == &[0; 32]
             || permit.derivation_attempt_digest() == &[0; 32]

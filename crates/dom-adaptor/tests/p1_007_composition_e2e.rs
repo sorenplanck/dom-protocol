@@ -595,6 +595,15 @@ impl NonceVaultV1 for TestVault {
                 record.terminal = true;
                 ReservationLiveStageV1::AfterReveal
             }
+            // NAR-003 §2.2. This harness models the DSC-1 three-artifact
+            // lifecycle. The Bulletproof round 1 share has no stage in it, and
+            // giving it one here would make the test assert a lifecycle the
+            // record does not define.
+            ExposureKindV1::BulletproofRound1Share => {
+                return Err(TestBoundaryError(
+                    "Bulletproof round 1 share is not a DSC-1 lifecycle artifact",
+                ))
+            }
         };
         record.spent.push(artifact);
         Ok(TestExposurePermit {
