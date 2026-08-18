@@ -58,8 +58,8 @@ pub mod recovery;
 pub use bulletproof_bp::bp2_test_only_prove_legacy_single_with_nonce;
 pub use bulletproof_bp::{
     bulletproof_mpc_aggregate_tau_x, bulletproof_mpc_finalize, bulletproof_mpc_round1,
-    bulletproof_mpc_round2, BulletproofMpcFinalizeState, BulletproofMpcRound1Output,
-    BulletproofMpcRound1State,
+    bulletproof_mpc_round1_with_extra_commit, bulletproof_mpc_round2, BulletproofMpcFinalizeState,
+    BulletproofMpcRound1Output, BulletproofMpcRound1State,
 };
 pub use range_proof::{
     prove as range_proof_prove, prove_bytes as range_proof_prove_bytes,

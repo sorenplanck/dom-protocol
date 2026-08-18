@@ -712,7 +712,7 @@ pub struct BulletproofMpcRound1State {
     commitments: [[u8; 33]; PROOF_NCOMMITS],
     common_nonce: Zeroizing<[u8; 32]>,
     private_nonce: Zeroizing<[u8; 32]>,
-    extra_commit: [u8; 32],
+    extra_commit: Vec<u8>,
 }
 
 /// One-shot private state accepted only by the final backend phase.
@@ -813,6 +813,36 @@ pub fn bulletproof_mpc_round1(
     private_nonce: Zeroizing<[u8; 32]>,
     extra_commit: [u8; 32],
 ) -> Result<(BulletproofMpcRound1State, BulletproofMpcRound1Output), DomError> {
+    bulletproof_mpc_round1_with_extra_commit(
+        value,
+        blinding,
+        aggregate_commitment,
+        common_nonce,
+        private_nonce,
+        &extra_commit,
+    )
+}
+
+/// Execute the collaborative first round binding an extra commitment of any
+/// length the prover and the verifier can agree on.
+///
+/// The fixed-width [`bulletproof_mpc_round1`] cannot bind the 96-byte recovery
+/// capsule that `dom_consensus::validate_range_proofs` hands back to the
+/// verifier for an 835-byte output envelope, nor the empty extra commitment it
+/// uses for a 739-byte one. A collaborative output therefore could not be
+/// validated by a node in either envelope shape.
+///
+/// This entry point is prover-side only. It changes no consensus rule, no wire
+/// format and no verifier, and the fixed-width function above is preserved as
+/// a wrapper so every existing caller is unaffected.
+pub fn bulletproof_mpc_round1_with_extra_commit(
+    value: u64,
+    blinding: BlindingFactor,
+    aggregate_commitment: [u8; 33],
+    common_nonce: Zeroizing<[u8; 32]>,
+    private_nonce: Zeroizing<[u8; 32]>,
+    extra_commit: &[u8],
+) -> Result<(BulletproofMpcRound1State, BulletproofMpcRound1Output), DomError> {
     let complement_value = MAX_PROVABLE_VALUE
         .checked_sub(value)
         .ok_or_else(|| DomError::Invalid("value exceeds MAX_PROVABLE_VALUE".into()))?;
@@ -879,7 +909,7 @@ pub fn bulletproof_mpc_round1(
             commitments,
             common_nonce,
             private_nonce,
-            extra_commit,
+            extra_commit: extra_commit.to_vec(),
         },
         output,
     ))
