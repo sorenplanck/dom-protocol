@@ -442,8 +442,6 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
         .route("/status", get(status))
         .route("/chain/identity", get(chain_identity_handler))
         .route("/chain/ancestry", get(chain_ancestry_handler))
-        .route("/mempool", get(mempool))
-        .route("/tx/:tx_hash", get(get_tx))
         .route("/block/:height_or_hash", get(get_block))
         .route("/utxo/:commitment", get(get_utxo))
         .route("/kernel/:excess", get(get_kernel))
@@ -453,7 +451,21 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
         .route("/tx/submit", post(submit_tx))
         .layer(rate_limit_submit);
 
+    // `/mempool` and `/tx/:tx_hash` are authenticated, not public. They are the
+    // only routes that expose *unconfirmed* local state, and mempool residency
+    // is the observation Dandelion++ exists to withhold: a transaction in stem
+    // phase sits in this same general pool (accepted in `node.rs` before the
+    // stem/fluff decision, with no separate stem pool), so an unauthenticated
+    // reader polling several nodes can watch a propagation front and converge on
+    // its origin.
+    //
+    // The chain-data routes stay public deliberately. `/block`, `/utxo` and
+    // `/kernel` serve confirmed, already-published state that any peer obtains
+    // by syncing; withholding it would buy nothing. The line is drawn at
+    // unconfirmed state, not at chain state.
     let auth_read_routes = Router::new()
+        .route("/mempool", get(mempool))
+        .route("/tx/:tx_hash", get(get_tx))
         .route("/wallet/balance", get(wallet_balance_handler))
         .route("/chain/scan", get(chain_scan_handler))
         .route("/build-info", get(build_info_handler))
@@ -1390,6 +1402,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mempool_requires_bearer() {
+        let unauthenticated = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/mempool")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            unauthenticated.status(),
+            StatusCode::UNAUTHORIZED,
+            "mempool residency is unconfirmed local state and must not be readable anonymously"
+        );
+
+        let authenticated = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/mempool")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn tx_lookup_requires_bearer() {
+        let unauthenticated = app()
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/tx/{}", "11".repeat(32)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            unauthenticated.status(),
+            StatusCode::UNAUTHORIZED,
+            "probing whether this node holds a given transaction must not be anonymous"
+        );
+
+        let authenticated = app()
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/tx/{}", "11".repeat(32)))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn confirmed_chain_routes_stay_public() {
+        // The tightening is scoped to unconfirmed state. Chain data that any
+        // peer obtains by syncing stays anonymously readable on purpose; a
+        // regression here would be an unintended availability change.
+        for uri in [
+            "/status",
+            "/health",
+            &format!("/block/{}", 1),
+            &format!("/utxo/{}", "02".repeat(33)),
+            &format!("/kernel/{}", "02".repeat(33)),
+        ] {
+            let response = app()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_ne!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{uri} must remain public"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn wallet_balance_requires_bearer_and_succeeds_with_it() {
         let unauthenticated = app()
             .oneshot(
@@ -1519,6 +1615,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/mempool")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1556,6 +1653,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/tx/{}", hex::encode(hash)))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1571,6 +1669,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/mempool")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1632,6 +1731,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/mempool?page=0&limit=2")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1647,6 +1747,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/mempool?page=2&limit=2")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1666,6 +1767,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/mempool?page={}", usize::MAX))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1699,6 +1801,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/mempool?page=1&limit=2")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1719,6 +1822,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/mempool?limit=9999")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1873,6 +1977,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/tx/{}", "a".repeat(64)))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2262,6 +2367,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/tx/zzzznothex")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2279,6 +2385,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/tx/{}", "ab".repeat(15))) // 30 chars = 15 bytes
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2295,6 +2402,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/tx/abc") // 3 hex chars: odd
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2422,6 +2530,7 @@ mod tests {
                     .oneshot(
                         Request::builder()
                             .uri(format!("/mempool?page={page}&limit={limit}"))
+                            .header("authorization", "Bearer test-token")
                             .body(Body::empty())
                             .unwrap(),
                     )
