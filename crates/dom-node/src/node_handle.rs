@@ -323,7 +323,7 @@ impl NodeHandle for NodeHandleImpl {
     }
 
     fn resolve_admitted_tx(&self, tx_hash: &[u8; 32]) -> Option<ConfirmedTxRef> {
-        // NOT RATIFIED — Option A interim. hash → excess through the
+        // Ratified 2026-08-21 (F8_PLAN_AND_DECISIONS_RATIFICATION.md Q-3, signed) — Option A. hash → excess through the
         // admission-time identity map; excess → block through the kernel
         // index, which apply_reorg maintains. Confirmation is never asserted
         // from the identity entry alone.

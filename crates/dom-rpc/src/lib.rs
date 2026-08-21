@@ -55,7 +55,7 @@ pub trait NodeHandle: Send + Sync + 'static {
     /// index. `None` means unconfirmed, reorged out, aged out of retention, or
     /// never seen by this node — callers must not read it as "not on chain".
     ///
-    /// NOT RATIFIED — Option A interim of the tx-identity defects (§3/§4).
+    /// Ratified 2026-08-21 (F8_PLAN_AND_DECISIONS_RATIFICATION.md Q-3, signed) — Option A of the tx-identity defects (§3/§4).
     /// The default keeps third-party/mock handles source-compatible.
     fn resolve_admitted_tx(&self, _tx_hash: &[u8; 32]) -> Option<ConfirmedTxRef> {
         None
@@ -774,7 +774,7 @@ async fn get_tx(
         )
             .into_response())
     } else if let Some(confirmed) = handle.resolve_admitted_tx(&hash) {
-        // NOT RATIFIED — Option A interim (tx-identity defects §4): a mined
+        // Ratified 2026-08-21 (F8_PLAN_AND_DECISIONS_RATIFICATION.md Q-3, signed) — Option A (tx-identity defects §4): a mined
         // transaction stops reporting as nonexistent. `found: false` still
         // means only "this node cannot resolve the hash", never "not on
         // chain" — a node that never admitted the transaction, or whose

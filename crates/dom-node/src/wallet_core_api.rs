@@ -198,7 +198,7 @@ impl EmbeddedWalletCoreApi {
     /// Resolve a transaction hash this node admitted to its kernel excess and,
     /// when that kernel is currently canonical, the confirming block.
     ///
-    /// NOT RATIFIED — Option A interim. Returns `None` when the node never
+    /// Ratified 2026-08-21 (F8_PLAN_AND_DECISIONS_RATIFICATION.md Q-3, signed) — Option A. Returns `None` when the node never
     /// admitted the hash, the entry aged out of retention, or the kernel is
     /// not in the canonical index (including after a reorg of any depth —
     /// the identity entry is deliberately not consulted as confirmation).
@@ -774,7 +774,7 @@ impl WalletCoreApi for EmbeddedWalletCoreApi {
                         return Ok(TransactionStatus::InMempool);
                     }
                 }
-                // NOT RATIFIED — Option A interim: hash → excess through the
+                // Ratified 2026-08-21 (F8_PLAN_AND_DECISIONS_RATIFICATION.md Q-3, signed) — Option A: hash → excess through the
                 // admission-time identity map, then excess → block through the
                 // kernel index, which apply_reorg maintains. Confirmation is
                 // never asserted from the identity entry alone, so a reorged
@@ -861,7 +861,7 @@ impl WalletCoreApi for EmbeddedWalletCoreApi {
 
         if let Ok(chain) = self.node.chain.try_lock() {
             let _ = clear_persisted_mempool_snapshot(&chain.store);
-            // NOT RATIFIED — Option A interim (tx-identity defects §3): record
+            // Ratified 2026-08-21 (F8_PLAN_AND_DECISIONS_RATIFICATION.md Q-3, signed) — Option A (tx-identity defects §3): record
             // hash → primary kernel excess at admission, so status queries by
             // hash can later resolve through the reorg-maintained kernel
             // index. Best-effort by design: a failed write degrades a status
@@ -980,7 +980,7 @@ impl WalletCoreApi for EmbeddedWalletCoreApi {
                     })?;
                 let known = mempool.contains(&tx_hash);
                 drop(mempool);
-                // NOT RATIFIED — Option A interim: before reporting a hash the
+                // Ratified 2026-08-21 (F8_PLAN_AND_DECISIONS_RATIFICATION.md Q-3, signed) — Option A: before reporting a hash the
                 // mempool no longer holds as rejected, ask whether it confirmed.
                 // "AlreadyKnown"'s own documentation reads "already known to
                 // the mempool or chain index", which is exactly this case.

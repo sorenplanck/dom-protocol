@@ -103,9 +103,8 @@ pub const DB_PEER_ADDRS: &str = "peer_addrs";
 pub const DB_METADATA: &str = "metadata";
 /// tx_identity: canonical transaction hash → primary kernel excess plus the
 /// height at which this node admitted the transaction to its own mempool
-/// (33 + 8 bytes LE). NOT RATIFIED — interim implementation of Option A of
-/// `F7_NODE_TX_IDENTITY_DEFECTS_FOR_RATIFICATION.md` §3, awaiting the
-/// operator's schema decision. The mapping is a property of the transaction
+/// (33 + 8 bytes LE). Ratified 2026-08-21 (F8_PLAN_AND_DECISIONS_RATIFICATION.md Q-3, signed) — Option A of
+/// `F7_NODE_TX_IDENTITY_DEFECTS_FOR_RATIFICATION.md` §3. The mapping is a property of the transaction
 /// and never changes, so this database needs no reorg maintenance of its
 /// own: every reorg-dependent answer is served by `kernel_index`, which
 /// `apply_reorg` maintains. Confirmation is therefore never asserted from
@@ -113,8 +112,9 @@ pub const DB_METADATA: &str = "metadata";
 pub const DB_TX_IDENTITY: &str = "tx_identity";
 
 /// How long a tx-identity entry is retained, in blocks after admission.
-/// At the 6-second block target this is roughly one week. NOT RATIFIED —
-/// an interim constant; a change is a policy decision, not a tuning knob.
+/// At the 6-second block target this is roughly one week. This constant
+/// REMAINS INTERIM by the ratification's own text (Q-3): changing it is a
+/// policy decision requiring a new ratification, not a tuning knob.
 pub const TX_IDENTITY_RETENTION_BLOCKS: u64 = 100_000;
 /// Stable metadata key holding the canonical UTXO-set digest when the
 /// persisted UTXO database has been verified or rebuilt against canonical
@@ -413,7 +413,7 @@ impl DomStore {
     /// Record which kernel excess a transaction hash resolves through, at the
     /// moment this node admits the transaction to its own mempool.
     ///
-    /// NOT RATIFIED — Option A interim implementation; see [`DB_TX_IDENTITY`].
+    /// Ratified 2026-08-21 (F8_PLAN_AND_DECISIONS_RATIFICATION.md Q-3, signed) — Option A; see [`DB_TX_IDENTITY`].
     ///
     /// The same write transaction also sweeps expired entries — those admitted
     /// more than [`TX_IDENTITY_RETENTION_BLOCKS`] before `current_height`.
