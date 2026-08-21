@@ -6,8 +6,9 @@
 use crate::node::{clear_persisted_mempool_snapshot, snapshot_tx_chain_view, DomNode};
 use dom_core::PROTOCOL_VERSION;
 use dom_rpc::{
-    AncestryRequest, ChainAncestry, ChainIdentity, ChainTip, KernelInfo, MempoolTxInfo, NodeHandle,
-    PeerInfo, RpcError, ShutdownFuture, TxAdmission, UtxoInfo, MAX_ANCESTRY_STEPS, MAX_SCAN_RANGE,
+    AncestryRequest, ChainAncestry, ChainIdentity, ChainTip, ConfirmedTxRef, KernelInfo,
+    MempoolTxInfo, NodeHandle, PeerInfo, RpcError, ShutdownFuture, TxAdmission, UtxoInfo,
+    MAX_ANCESTRY_STEPS, MAX_SCAN_RANGE,
 };
 use dom_serialization::DomDeserialize;
 use std::sync::Arc;
@@ -319,6 +320,27 @@ impl NodeHandle for NodeHandleImpl {
         let block_hash = c.store.get_kernel_block(excess).ok().flatten()?;
         // Do not surface a malformed zero value as confirmation evidence.
         (block_hash != [0u8; 32]).then_some(block_hash)
+    }
+
+    fn resolve_admitted_tx(&self, tx_hash: &[u8; 32]) -> Option<ConfirmedTxRef> {
+        // NOT RATIFIED — Option A interim. hash → excess through the
+        // admission-time identity map; excess → block through the kernel
+        // index, which apply_reorg maintains. Confirmation is never asserted
+        // from the identity entry alone.
+        let c = self.0.chain.try_lock().ok()?;
+        let (excess, _admitted) = c.store.get_tx_identity(tx_hash).ok().flatten()?;
+        let block_hash = c.store.get_kernel_block(&excess).ok().flatten()?;
+        if block_hash == [0u8; 32] {
+            return None;
+        }
+        let header_bytes = c.store.get_block_header(&block_hash).ok().flatten()?;
+        use dom_consensus::block::BlockHeader;
+        let header = BlockHeader::from_bytes(&header_bytes).ok()?;
+        Some(ConfirmedTxRef {
+            kernel_excess: excess,
+            block_hash,
+            block_height: header.height.0,
+        })
     }
 
     fn get_peers(&self) -> Vec<PeerInfo> {

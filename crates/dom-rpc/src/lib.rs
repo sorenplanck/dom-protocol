@@ -50,6 +50,17 @@ pub trait NodeHandle: Send + Sync + 'static {
         None
     }
 
+    /// Resolve a transaction hash this node admitted to its confirming block,
+    /// through the admission-time identity map and the reorg-maintained kernel
+    /// index. `None` means unconfirmed, reorged out, aged out of retention, or
+    /// never seen by this node — callers must not read it as "not on chain".
+    ///
+    /// NOT RATIFIED — Option A interim of the tx-identity defects (§3/§4).
+    /// The default keeps third-party/mock handles source-compatible.
+    fn resolve_admitted_tx(&self, _tx_hash: &[u8; 32]) -> Option<ConfirmedTxRef> {
+        None
+    }
+
     /// Get list of connected peers.
     fn get_peers(&self) -> Vec<PeerInfo> {
         Vec::new()
@@ -359,6 +370,30 @@ struct SubmitTxResponse {
 /// Advisory returned when a tx is accepted locally but not relayed onward.
 const WARN_ACCEPTED_NOT_RELAYED: &str =
     "no peers connected; tx will be retransmitted when the node reconnects";
+
+/// A confirmed transaction located through the node's persistent indices.
+#[derive(Debug, Clone, Copy)]
+pub struct ConfirmedTxRef {
+    /// Primary kernel excess the hash was admitted with.
+    pub kernel_excess: [u8; 33],
+    /// Canonical block currently carrying that kernel.
+    pub block_hash: [u8; 32],
+    /// Height of that block.
+    pub block_height: u64,
+}
+
+/// `GET /tx/{hash}` for a transaction that is no longer in the mempool but is
+/// confirmed on the canonical chain. Additive: the mempool shape and the
+/// `found: false` shape are unchanged for existing consumers.
+#[derive(Debug, Serialize)]
+struct TxConfirmedResponse {
+    found: bool,
+    confirmed: bool,
+    tx_hash: String,
+    kernel_excess: String,
+    block_hash: String,
+    block_height: u64,
+}
 
 #[derive(Debug, Serialize)]
 struct TxFoundResponse {
@@ -738,6 +773,24 @@ async fn get_tx(
             }),
         )
             .into_response())
+    } else if let Some(confirmed) = handle.resolve_admitted_tx(&hash) {
+        // NOT RATIFIED — Option A interim (tx-identity defects §4): a mined
+        // transaction stops reporting as nonexistent. `found: false` still
+        // means only "this node cannot resolve the hash", never "not on
+        // chain" — a node that never admitted the transaction, or whose
+        // identity entry aged out of retention, answers exactly as before.
+        Ok((
+            StatusCode::OK,
+            Json(TxConfirmedResponse {
+                found: true,
+                confirmed: true,
+                tx_hash: hex::encode(hash),
+                kernel_excess: hex::encode(confirmed.kernel_excess),
+                block_hash: hex::encode(confirmed.block_hash),
+                block_height: confirmed.block_height,
+            }),
+        )
+            .into_response())
     } else {
         Ok((StatusCode::OK, Json(TxNotFoundResponse { found: false })).into_response())
     }
@@ -1101,6 +1154,8 @@ mod tests {
         shutdown_requested: Arc<AtomicBool>,
         identity: Option<ChainIdentity>,
         ancestry: Option<ChainAncestry>,
+        /// Canned answer for `resolve_admitted_tx`, keyed by tx hash.
+        confirmed: Option<([u8; 32], ConfirmedTxRef)>,
     }
 
     impl MockNode {
@@ -1114,6 +1169,7 @@ mod tests {
                 shutdown_requested: Arc::new(AtomicBool::new(false)),
                 identity: None,
                 ancestry: None,
+                confirmed: None,
             }
         }
 
@@ -1150,6 +1206,13 @@ mod tests {
     }
 
     impl NodeHandle for MockNode {
+        fn resolve_admitted_tx(&self, tx_hash: &[u8; 32]) -> Option<ConfirmedTxRef> {
+            match &self.confirmed {
+                Some((hash, reply)) if hash == tx_hash => Some(*reply),
+                _ => None,
+            }
+        }
+
         fn request_shutdown(&self) -> ShutdownFuture {
             let requested = Arc::clone(&self.shutdown_requested);
             Box::pin(async move {
@@ -2361,6 +2424,56 @@ mod tests {
     // the structurally-valid-but-absent case) — never a panic, never a 500.
 
     /// PARSE-1 — /tx/<non-hex> → 400 InvalidHex (parse_hash_hex via decode_hex).
+    #[tokio::test]
+    async fn get_tx_resolves_a_confirmed_transaction() {
+        // §4 of the tx-identity defects: a mined transaction must stop
+        // reporting as nonexistent. The mock hands the handler a canned
+        // confirmed resolution; the wire shape is asserted, not assumed.
+        let mut node = MockNode::new(9);
+        let hash = [0x5Au8; 32];
+        node.confirmed = Some((
+            hash,
+            ConfirmedTxRef {
+                kernel_excess: [0x02u8; 33],
+                block_hash: [0xB1u8; 32],
+                block_height: 7,
+            },
+        ));
+        let response = app_with(node)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/tx/{}", hex::encode(hash)))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["found"], true);
+        assert_eq!(body["confirmed"], true);
+        assert_eq!(body["block_height"], 7);
+        assert_eq!(body["block_hash"], hex::encode([0xB1u8; 32]));
+        assert_eq!(body["kernel_excess"], hex::encode([0x02u8; 33]));
+
+        // And a hash the node cannot resolve keeps the exact old shape.
+        let other = MockNode::new(9);
+        let response = app_with(other)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/tx/{}", hex::encode([0x77u8; 32])))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_json(response).await;
+        assert_eq!(body["found"], false);
+        assert!(body.get("confirmed").is_none());
+    }
+
     #[tokio::test]
     async fn get_tx_non_hex_returns_400() {
         let r = app()

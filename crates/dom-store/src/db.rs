@@ -101,6 +101,21 @@ pub const DB_UTXOS: &str = "utxos";
 pub const DB_KERNEL_INDEX: &str = "kernel_index";
 pub const DB_PEER_ADDRS: &str = "peer_addrs";
 pub const DB_METADATA: &str = "metadata";
+/// tx_identity: canonical transaction hash → primary kernel excess plus the
+/// height at which this node admitted the transaction to its own mempool
+/// (33 + 8 bytes LE). NOT RATIFIED — interim implementation of Option A of
+/// `F7_NODE_TX_IDENTITY_DEFECTS_FOR_RATIFICATION.md` §3, awaiting the
+/// operator's schema decision. The mapping is a property of the transaction
+/// and never changes, so this database needs no reorg maintenance of its
+/// own: every reorg-dependent answer is served by `kernel_index`, which
+/// `apply_reorg` maintains. Confirmation is therefore never asserted from
+/// this entry alone.
+pub const DB_TX_IDENTITY: &str = "tx_identity";
+
+/// How long a tx-identity entry is retained, in blocks after admission.
+/// At the 6-second block target this is roughly one week. NOT RATIFIED —
+/// an interim constant; a change is a policy decision, not a tuning knob.
+pub const TX_IDENTITY_RETENTION_BLOCKS: u64 = 100_000;
 /// Stable metadata key holding the canonical UTXO-set digest when the
 /// persisted UTXO database has been verified or rebuilt against canonical
 /// history on reopen.
@@ -128,6 +143,8 @@ pub struct DomStore {
     pub db_peers: Database,
     /// metadata: arbitrary bounded node/runtime metadata keyed by stable bytes
     pub db_metadata: Database,
+    /// tx_identity: tx_hash_32 → excess_33 ‖ admitted_height_le8 (see [`DB_TX_IDENTITY`])
+    pub db_tx_identity: Database,
 }
 
 impl DomStore {
@@ -178,6 +195,7 @@ impl DomStore {
             db_kernels: open_db(DB_KERNEL_INDEX)?,
             db_peers: open_db(DB_PEER_ADDRS)?,
             db_metadata: open_db(DB_METADATA)?,
+            db_tx_identity: open_db(DB_TX_IDENTITY)?,
             env,
         })
     }
@@ -389,6 +407,90 @@ impl DomStore {
             Ok(_) => Err(DomError::Internal("corrupt kernel index".into())),
             Err(lmdb::Error::NotFound) => Ok(None),
             Err(e) => Err(DomError::Internal(format!("get kernel: {e}"))),
+        }
+    }
+
+    /// Record which kernel excess a transaction hash resolves through, at the
+    /// moment this node admits the transaction to its own mempool.
+    ///
+    /// NOT RATIFIED — Option A interim implementation; see [`DB_TX_IDENTITY`].
+    ///
+    /// The same write transaction also sweeps expired entries — those admitted
+    /// more than [`TX_IDENTITY_RETENTION_BLOCKS`] before `current_height`.
+    /// Admissions are wallet-scale, the whole database is bounded by the
+    /// retention rule to roughly one week of submissions, and a full cursor
+    /// pass over it costs milliseconds, so the sweep runs on every put rather
+    /// than on a schedule that could silently never fire.
+    pub fn put_tx_identity(
+        &self,
+        tx_hash: &[u8; 32],
+        excess: &[u8; 33],
+        current_height: u64,
+    ) -> Result<(), DomError> {
+        let mut txn = self
+            .env
+            .begin_rw_txn()
+            .map_err(|e| DomError::Internal(format!("rw txn: {e}")))?;
+        let expired: Vec<[u8; 32]> = {
+            let mut cursor = txn
+                .open_ro_cursor(self.db_tx_identity)
+                .map_err(|e| DomError::Internal(format!("tx_identity cursor: {e}")))?;
+            cursor
+                .iter_start()
+                .filter_map(|entry| entry.ok())
+                .filter_map(|(key, value)| {
+                    if key.len() != 32 || value.len() != 41 {
+                        return None; // tolerated: skipped here, surfaced on read
+                    }
+                    let mut admitted = [0u8; 8];
+                    admitted.copy_from_slice(&value[33..41]);
+                    let admitted = u64::from_le_bytes(admitted);
+                    if admitted.saturating_add(TX_IDENTITY_RETENTION_BLOCKS) < current_height {
+                        let mut k = [0u8; 32];
+                        k.copy_from_slice(key);
+                        Some(k)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        for key in &expired {
+            match txn.del(self.db_tx_identity, key, None) {
+                Ok(()) | Err(lmdb::Error::NotFound) => {}
+                Err(e) => return Err(DomError::Internal(format!("tx_identity prune: {e}"))),
+            }
+        }
+        let mut value = [0u8; 41];
+        value[..33].copy_from_slice(excess);
+        value[33..].copy_from_slice(&current_height.to_le_bytes());
+        txn.put(self.db_tx_identity, tx_hash, &value, WriteFlags::empty())
+            .map_err(|e| DomError::Internal(format!("put tx_identity: {e}")))?;
+        txn.commit()
+            .map_err(|e| DomError::Internal(format!("commit tx_identity: {e}")))?;
+        Ok(())
+    }
+
+    /// Resolve a transaction hash this node admitted to its primary kernel
+    /// excess and the admission height. `None` means this node never saw the
+    /// transaction, or the entry aged out of the retention window — callers
+    /// must not read `None` as "not on chain".
+    pub fn get_tx_identity(&self, tx_hash: &[u8; 32]) -> Result<Option<([u8; 33], u64)>, DomError> {
+        let txn = self
+            .env
+            .begin_ro_txn()
+            .map_err(|e| DomError::Internal(format!("ro txn: {e}")))?;
+        match txn.get(self.db_tx_identity, tx_hash) {
+            Ok(bytes) if bytes.len() == 41 => {
+                let mut excess = [0u8; 33];
+                excess.copy_from_slice(&bytes[..33]);
+                let mut admitted = [0u8; 8];
+                admitted.copy_from_slice(&bytes[33..41]);
+                Ok(Some((excess, u64::from_le_bytes(admitted))))
+            }
+            Ok(_) => Err(DomError::Internal("corrupt tx_identity entry".into())),
+            Err(lmdb::Error::NotFound) => Ok(None),
+            Err(e) => Err(DomError::Internal(format!("get tx_identity: {e}"))),
         }
     }
 

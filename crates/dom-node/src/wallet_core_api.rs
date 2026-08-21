@@ -195,6 +195,37 @@ impl EmbeddedWalletCoreApi {
         )))
     }
 
+    /// Resolve a transaction hash this node admitted to its kernel excess and,
+    /// when that kernel is currently canonical, the confirming block.
+    ///
+    /// NOT RATIFIED — Option A interim. Returns `None` when the node never
+    /// admitted the hash, the entry aged out of retention, or the kernel is
+    /// not in the canonical index (including after a reorg of any depth —
+    /// the identity entry is deliberately not consulted as confirmation).
+    fn resolve_admitted_tx(
+        &self,
+        tx_hash: &[u8; 32],
+    ) -> Result<Option<([u8; 33], BlockRef)>, WalletCoreError> {
+        let identity = {
+            let chain = self
+                .node
+                .chain
+                .try_lock()
+                .map_err(|_| WalletCoreError::NodeNotReady("chain lock busy".to_string()))?;
+            chain
+                .store
+                .get_tx_identity(tx_hash)
+                .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?
+        };
+        let Some((excess, _admitted_height)) = identity else {
+            return Ok(None);
+        };
+        match self.get_kernel(&excess)? {
+            Some(kernel) => Ok(Some((excess, kernel.block))),
+            None => Ok(None),
+        }
+    }
+
     fn tx_hash(tx: &Transaction) -> Result<([u8; 32], Vec<u8>), WalletCoreError> {
         let bytes = tx
             .to_bytes()
@@ -735,14 +766,23 @@ impl WalletCoreApi for EmbeddedWalletCoreApi {
     ) -> Result<TransactionStatus, WalletCoreError> {
         match identifier {
             TransactionIdentifier::TxHash(tx_hash) => {
-                let mempool =
-                    self.node.mempool.try_lock().map_err(|_| {
+                {
+                    let mempool = self.node.mempool.try_lock().map_err(|_| {
                         WalletCoreError::NodeNotReady("mempool lock busy".to_string())
                     })?;
-                if mempool.contains(&tx_hash) {
-                    Ok(TransactionStatus::InMempool)
-                } else {
-                    Ok(TransactionStatus::Unknown)
+                    if mempool.contains(&tx_hash) {
+                        return Ok(TransactionStatus::InMempool);
+                    }
+                }
+                // NOT RATIFIED — Option A interim: hash → excess through the
+                // admission-time identity map, then excess → block through the
+                // kernel index, which apply_reorg maintains. Confirmation is
+                // never asserted from the identity entry alone, so a reorged
+                // transaction answers `Unknown` at every depth. `Unknown` also
+                // means "this node never saw it" — not "not on chain".
+                match self.resolve_admitted_tx(&tx_hash)? {
+                    Some((_, block)) => Ok(TransactionStatus::Confirmed(block)),
+                    None => Ok(TransactionStatus::Unknown),
                 }
             }
             TransactionIdentifier::KernelExcess(excess) => self
@@ -821,6 +861,16 @@ impl WalletCoreApi for EmbeddedWalletCoreApi {
 
         if let Ok(chain) = self.node.chain.try_lock() {
             let _ = clear_persisted_mempool_snapshot(&chain.store);
+            // NOT RATIFIED — Option A interim (tx-identity defects §3): record
+            // hash → primary kernel excess at admission, so status queries by
+            // hash can later resolve through the reorg-maintained kernel
+            // index. Best-effort by design: a failed write degrades a status
+            // answer to `Unknown`, never the submission itself.
+            if let Some(excess) = primary_kernel_excess {
+                let _ = chain
+                    .store
+                    .put_tx_identity(&tx_hash, &excess, chain_view.current_height);
+            }
         }
 
         let relayed = self.relay_transaction(tx_hash, tx_bytes);
@@ -929,18 +979,30 @@ impl WalletCoreApi for EmbeddedWalletCoreApi {
                         WalletCoreError::NodeNotReady("mempool lock busy".to_string())
                     })?;
                 let known = mempool.contains(&tx_hash);
+                drop(mempool);
+                // NOT RATIFIED — Option A interim: before reporting a hash the
+                // mempool no longer holds as rejected, ask whether it confirmed.
+                // "AlreadyKnown"'s own documentation reads "already known to
+                // the mempool or chain index", which is exactly this case.
+                let confirmed_excess = if known {
+                    None
+                } else {
+                    self.resolve_admitted_tx(&tx_hash)?
+                        .map(|(excess, _)| excess)
+                };
+                let recognized = known || confirmed_excess.is_some();
                 Ok(SubmissionResult {
-                    kind: if known {
+                    kind: if recognized {
                         SubmissionResultKind::AlreadyKnown
                     } else {
                         SubmissionResultKind::RejectedPolicy
                     },
                     tx_hash,
-                    primary_kernel_excess: None,
+                    primary_kernel_excess: confirmed_excess,
                     accepted_to_mempool: known,
                     broadcast_attempted: false,
                     relayed: false,
-                    diagnostic: known.then_some(SubmissionDiagnostic::AlreadyKnown),
+                    diagnostic: recognized.then_some(SubmissionDiagnostic::AlreadyKnown),
                 })
             }
             TransactionIdentifier::KernelExcess(excess) => {
