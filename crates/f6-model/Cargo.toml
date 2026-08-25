@@ -1,0 +1,10 @@
+[package]
+name = "f6-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true  # MIT by being DOM (absorption licence-by-inheritance)
+publish = false  # D-ORQ-9: explicit, never inherited
+
+[dependencies]
+rfq = { path = "../rfq" }

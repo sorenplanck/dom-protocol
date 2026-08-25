@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! R_i = r_i · G          each party's published commitment share
-//! R   = R_A + R_B        dom_crypto::scriptless_add_public_points
+//! R   = R_A + R_B        dom_scriptless_primitives::scriptless_add_public_points
 //! C   = v · H_DOM + R    the shared output commitment
 //! ```
 //!
@@ -54,7 +54,8 @@ use dom_adaptor::{
     TrustedChainIdV1,
 };
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
-use dom_crypto::{scriptless_add_public_points, secret_scalar_public_key, PublicKey};
+use dom_crypto::{PublicKey};
+use dom_scriptless_primitives::{scriptless_add_public_points, secret_scalar_public_key};
 
 /// Exactly two parties form a shared output, as NAR-DC-P1-007 §3 ratified.
 pub const SHARED_OUTPUT_PARTIES: usize = 2;

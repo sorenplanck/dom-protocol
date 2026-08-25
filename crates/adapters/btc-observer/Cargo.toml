@@ -1,0 +1,22 @@
+# Bitcoin chain observer and durable store (Annex M M.9, M.10).
+#
+# Reorg-aware observation via a durable cursor, an idempotent effect
+# transaction per observed event, and the minimal adapter schema of
+# M.10.2. Persists only PUBLIC data — templates, public artifacts,
+# cursors, evidence refs — never keys, shares, t, secnonce or
+# session_secrand (M.10.1).
+[package]
+name = "btc-observer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true  # MIT by being DOM (absorption licence-by-inheritance)
+publish = false  # D-ORQ-9: explicit, never inherited
+
+[dependencies]
+thiserror = { workspace = true }
+rusqlite = { workspace = true }
+blake2 = { version = "=0.10.6", default-features = false }
+
+[dev-dependencies]
+hex = "=0.4.3"

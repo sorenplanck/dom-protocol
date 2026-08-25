@@ -239,7 +239,7 @@ fn session_id_from_nonce_v1(
 
 /// Project a DOM transaction through the authoritative NAR-002 template adapter.
 pub fn canonical_template_v1(tx: &dom_consensus::Transaction) -> Result<(Vec<u8>, [u8; 32])> {
-    let bytes = dom_consensus::scriptless_transaction_template_bytes_v1(tx)?;
+    let bytes = dom_scriptless_consensus::scriptless_transaction_template_bytes_v1(tx)?;
     let hash = *blake2b_256_tagged(TEMPLATE_TAG_V1, &bytes).as_bytes();
     Ok((bytes, hash))
 }

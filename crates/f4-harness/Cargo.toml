@@ -1,0 +1,27 @@
+[package]
+name = "f4-harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true  # MIT by being DOM (absorption licence-by-inheritance)
+publish = false  # D-ORQ-9: explicit, never inherited
+
+# F4 spec §3.1: the dev-only harness of the Minimal USPE. Nothing links
+# it; it composes the ratified pieces (uspe objects + machine, the EVM
+# adapter over ConditionLockV2) into the BondAdapter of spec §7. It holds
+# no key and signs nothing — broadcasting stays behind a seam exactly as
+# in the F3 harness.
+[features]
+default = []
+rpc-http = ["adapter-evm/rpc-http"]
+
+[dependencies]
+adapter-evm = { path = "../adapters/evm" }
+counterparty-api = { workspace = true }
+store = { workspace = true }
+thiserror = { workspace = true }
+uspe = { path = "../uspe" }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"

@@ -13,6 +13,9 @@ publish = false
 default = []
 
 [dependencies]
+dom-scriptless-primitives = { path = "../dom-scriptless-primitives" }
+dom-scriptless-bulletproof = { path = "../dom-scriptless-bulletproof" }
+dom-scriptless-consensus = { path = "../dom-scriptless-consensus" }
 dom-core.workspace = true
 dom-crypto.workspace = true
 dom-consensus.workspace = true

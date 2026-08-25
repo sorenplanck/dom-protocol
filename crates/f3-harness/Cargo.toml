@@ -1,0 +1,51 @@
+[package]
+name = "f3-harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true  # MIT by being DOM (absorption licence-by-inheritance)
+publish = false  # D-ORQ-9: explicit, never inherited
+
+# Integration + end-to-end harness for gate G-F3 (B-DOM composition: the
+# ratified §24 `SettlementEngine` drives the DOM leg via `f2-harness`, and the
+# EVM leg is the counterparty — a real `ConditionLockV2` deployment observed by
+# `adapter-evm`). NOT a production crate: it composes the frozen pieces
+# (`kaystra-core`, `f2-harness`, `adapter-evm`, `dom-leg`, `adapter-dom-sim`,
+# `store`) and proves the composition fails closed.
+#
+# `rpc-http` is NOT default: the offline suite drives `adapter_evm::mock`
+# and performs zero network I/O. The Anvil end-to-end tests need it.
+#
+# `real-dom-adaptor` turns on the pinned DOM authority underneath `dom-leg`.
+# On this trunk that single feature is the whole real-crypto configuration:
+# `dom-leg` pulls `dom-consensus`/`dom-serialization` with it, so there is no
+# separate `pin-integration` tier to mirror. The frozen SCAD0 corpus remains
+# the only source of a genuinely valid pre-signature at the pinned revision.
+[features]
+default = []
+rpc-http = ["adapter-evm/rpc-http"]
+real-dom-adaptor = ["dom-leg/real-dom-adaptor"]
+
+[dependencies]
+counterparty-api = { workspace = true }
+dom-leg = { workspace = true }
+kaystra-core = { path = "../kaystra-core" }
+adapter-evm = { path = "../adapters/evm" }
+adapter-dom-sim = { path = "../adapters/dom-sim" }
+# The DOM leg is the very same §24 `SimSettlementChain`/`SimEffectSink` the
+# ratified G-F2 harness drives. Reused rather than reimplemented, so F2/F3/F5
+# settle through one engine (F3 interface spec section 4).
+f2-harness = { path = "../f2-harness" }
+# The outbox's durability substrate: the ratified append-only journal (WAL,
+# synchronous=FULL, kill-9-durable — ADR-A7). Reused, not reinvented.
+store = { path = "../store" }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+# `CounterpartyAdapter` is async while the EVM-leg driver is sync; this is the
+# minimal bridge, and it pulls in no runtime.
+pollster = "0.3"
+serde_json = "1"
+
+[dev-dependencies]
+hex = "0.4"
+tempfile = "=3.24.0"  # aligned upward with the absorbed pin; dev-only, exact pin kept

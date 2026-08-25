@@ -1,0 +1,28 @@
+# C1a/C1b conformance harness (Annex M M.11.1, M.11.2).
+#
+# This crate compiles the PINNED upstream secp256k1-zkp test suite —
+# including the official BIP327 vector families embedded upstream in
+# src/modules/musig/vectors.h (auto-generated from the vectors published
+# with BIP327) — into its own translation unit, and runs it unmodified.
+#
+# It is a DEV-ONLY conformance crate: no production crate may ever depend
+# on it (guarded in scripts/guards.sh). It deliberately does NOT depend on
+# btc-secp-sys — tests.c compiles the whole library into this TU, and
+# linking a second copy of the same symbols would be an ODR hazard.
+[package]
+name = "btc-secp-c1a"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true  # MIT by being DOM (absorption licence-by-inheritance)
+publish = false  # D-ORQ-9: explicit, never inherited
+build = "build.rs"
+links = "dominterop_secp_c1a_harness"
+
+[dependencies]
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+hex = "=0.4.3"

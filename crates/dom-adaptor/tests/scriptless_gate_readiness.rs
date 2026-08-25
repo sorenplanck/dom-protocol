@@ -25,11 +25,8 @@ use dom_adaptor::{
 };
 use dom_core::Hash256;
 use dom_crypto::recovery::RECOVERY_CAPSULE_SIZE;
-use dom_crypto::{
-    blake2b_256_tagged, schnorr_challenge, scriptless_add_public_points,
-    scriptless_verify_final_signature, secret_scalar_mul_add_assign, secret_scalar_public_key,
-    PartialSig, RANGE_PROOF_SIZE,
-};
+use dom_crypto::{PartialSig, RANGE_PROOF_SIZE, blake2b_256_tagged, schnorr_challenge};
+use dom_scriptless_primitives::{scriptless_add_public_points, scriptless_verify_final_signature, secret_scalar_mul_add_assign, secret_scalar_public_key};
 use zeroize::Zeroizing;
 
 #[derive(Debug, thiserror::Error)]

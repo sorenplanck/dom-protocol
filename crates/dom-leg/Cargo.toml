@@ -47,6 +47,8 @@ f7-wallet-compositor = [
 evidence-only = ["f7-wallet-compositor"]
 
 [dependencies]
+dom-scriptless-primitives = { path = "../dom-scriptless-primitives" }
+dom-scriptless-consensus = { path = "../dom-scriptless-consensus" }
 counterparty-api = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }

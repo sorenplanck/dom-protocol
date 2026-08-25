@@ -1,0 +1,41 @@
+# Concrete Bitcoin Core wallet/RPC boundary for the F7 laboratory.
+#
+# Funding is built and signed by a real Bitcoin Core wallet but remains
+# prebroadcast until an exact, validated refund has been durably armed. Chain
+# evidence is collected from the same authenticated node and revalidated with
+# rust-bitcoin before it can cross into btc-evidence or the M.8 authority.
+[package]
+name = "adapter-btc-live"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true  # MIT by being DOM (absorption licence-by-inheritance)
+publish = false  # D-ORQ-9: explicit, never inherited
+
+[dependencies]
+adapter-btc = { path = "../btc" }
+btc-evidence = { path = "../btc-evidence" }
+btc-crypto = { path = "../btc-crypto" }
+btc-vault = { path = "../btc-vault" }
+bitcoin = "=0.32.5"
+blake2 = { version = "=0.10.6", default-features = false }
+cap-std = { workspace = true }
+getrandom = "=0.2.16"
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde_json = "=1.0.151"
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"

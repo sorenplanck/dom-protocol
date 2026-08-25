@@ -14,10 +14,8 @@ use crate::{
     NonceRevealV1, SessionContextV1, SigningShareV1,
 };
 use crate::{AdaptorError, BindingFactorV1, PartialSignatureV1, PurposeV1, Result};
-use dom_crypto::{
-    schnorr_aggregate_sigs, scriptless_add_public_points, scriptless_aggregate_partial_scalars,
-    scriptless_verify_final_signature, PartialSig, PublicKey, SchnorrSignature,
-};
+use dom_crypto::{PartialSig, PublicKey, SchnorrSignature, schnorr_aggregate_sigs};
+use dom_scriptless_primitives::{scriptless_add_public_points, scriptless_aggregate_partial_scalars, scriptless_verify_final_signature};
 #[cfg(test)]
 use dom_crypto::{schnorr_challenge, Hash256};
 

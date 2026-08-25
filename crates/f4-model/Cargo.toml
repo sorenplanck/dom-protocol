@@ -1,0 +1,13 @@
+[package]
+name = "f4-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true  # MIT by being DOM (absorption licence-by-inheritance)
+publish = false  # D-ORQ-9: explicit, never inherited
+
+# Model checker for the G-F4 economic invariants. It checks the REAL
+# machine (`uspe::assurance_transition`) against an abstract world; it is
+# an adjudication tool, never a production path.
+[dependencies]
+uspe = { path = "../uspe" }

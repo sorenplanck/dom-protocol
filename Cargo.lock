@@ -12,6 +12,76 @@ dependencies = [
 ]
 
 [[package]]
+name = "adapter-btc"
+version = "0.2.0"
+dependencies = [
+ "bitcoin",
+ "blake2",
+ "btc-crypto",
+ "btc-vault",
+ "counterparty-api",
+ "hex",
+ "proptest",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
+name = "adapter-btc-live"
+version = "0.2.0"
+dependencies = [
+ "adapter-btc",
+ "bitcoin",
+ "blake2",
+ "btc-crypto",
+ "btc-evidence",
+ "btc-vault",
+ "cap-std",
+ "getrandom 0.2.16",
+ "reqwest",
+ "rustix 1.1.4",
+ "serde_json",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
+name = "adapter-dom-real"
+version = "0.2.0"
+dependencies = [
+ "blake2",
+ "counterparty-api",
+ "dom-leg",
+ "dom-scriptless-chain-adapter",
+ "dom-scriptless-store",
+ "kaystra-core",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "adapter-dom-sim"
+version = "0.2.0"
+dependencies = [
+ "counterparty-api",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "adapter-evm"
+version = "0.2.0"
+dependencies = [
+ "counterparty-api",
+ "hex",
+ "k256",
+ "pollster",
+ "proptest",
+ "serde_json",
+ "sha3",
+ "thiserror 1.0.69",
+ "ureq",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -73,6 +143,12 @@ checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "ambient-authority"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9d4ee0d472d1cd2e28c97dfa124b3d8d992e10eb0a035f33f5d12e3a177ba3b"
 
 [[package]]
 name = "android-activity"
@@ -208,7 +284,7 @@ checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -285,6 +361,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c7f02d4ea65f2c1853089ffd8d2787bdbc63de2f0d29dedbcf8ccdfa0ccd4cf"
 
 [[package]]
+name = "base58ck"
+version = "0.1.101"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "365c0acd5b2e8dd0111a46c4faea83fb3cfb6e39a49a7c73a06e090db7b2eff0"
+dependencies = [
+ "bitcoin_hashes",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -295,6 +380,12 @@ name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+
+[[package]]
+name = "bech32"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32637268377fc7b10a8c6d51de3e7fba1ce5dd371a96e342b34e6078db558e7f"
 
 [[package]]
 name = "bech32"
@@ -346,18 +437,77 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b71798fca2c1fe1086445a7258a4bc81e6e49dcd24c8d0dd9a1e57395b603f51"
 
 [[package]]
+name = "bitcoin"
+version = "0.32.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce6bc65742dea50536e35ad42492b234c27904a27f0abdcbce605015cb4ea026"
+dependencies = [
+ "base58ck",
+ "bech32 0.11.1",
+ "bitcoin-internals 0.3.0",
+ "bitcoin-io",
+ "bitcoin-units",
+ "bitcoin_hashes",
+ "hex-conservative 0.2.2",
+ "hex_lit",
+ "secp256k1 0.29.1",
+]
+
+[[package]]
+name = "bitcoin-consensus-encoding"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6712f9c6fd6785b3b270884e57c441c403dc5d7e19ca45368c97c7a1de3000ec"
+dependencies = [
+ "bitcoin-internals 0.6.0",
+ "hex-conservative 1.2.0",
+ "serde",
+]
+
+[[package]]
+name = "bitcoin-internals"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30bdbe14aa07b06e6cfeffc529a1f099e5fbe249524f8125358604df99a4bed2"
+
+[[package]]
+name = "bitcoin-internals"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d573f4cf32996a8dce612e4348cece65a241f1882ed594047c9ba348e8869fa5"
+
+[[package]]
+name = "bitcoin-io"
+version = "0.1.101"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb5de036369d1ac59d3c1819ebc4d850f89466f5401c571a285b6ed564a4cb78"
+dependencies = [
+ "bitcoin-consensus-encoding",
+]
+
+[[package]]
 name = "bitcoin-private"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73290177011694f38ec25e165d0387ab7ea749a4b81cd4c80dae5988229f7a57"
 
 [[package]]
-name = "bitcoin_hashes"
-version = "0.14.1"
+name = "bitcoin-units"
+version = "0.1.101"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26ec84b80c482df901772e931a9a681e26a1b9ee2302edeff23cb30328745c8b"
+checksum = "9cb95693f371d089a4b5b6fc41c6f3ea6e01ee8c15388335dfac8ea685173b51"
 dependencies = [
- "hex-conservative",
+ "bitcoin-consensus-encoding",
+]
+
+[[package]]
+name = "bitcoin_hashes"
+version = "0.14.101"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bca4c7abb40c8817d77403c880988cfd484f23ab2365726afb2f798363e2c4a2"
+dependencies = [
+ "bitcoin-io",
+ "hex-conservative 0.2.2",
 ]
 
 [[package]]
@@ -421,6 +571,65 @@ dependencies = [
 ]
 
 [[package]]
+name = "btc-crypto"
+version = "0.2.0"
+dependencies = [
+ "btc-secp-sys",
+ "hex",
+ "zeroize",
+]
+
+[[package]]
+name = "btc-evidence"
+version = "0.2.0"
+dependencies = [
+ "bitcoin",
+ "hex",
+ "thiserror 1.0.69",
+ "uspe",
+]
+
+[[package]]
+name = "btc-observer"
+version = "0.2.0"
+dependencies = [
+ "blake2",
+ "hex",
+ "rusqlite",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "btc-secp-c1a"
+version = "0.2.0"
+dependencies = [
+ "cc",
+ "hex",
+]
+
+[[package]]
+name = "btc-secp-sys"
+version = "0.2.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "btc-vault"
+version = "0.2.0"
+dependencies = [
+ "blake2",
+ "cap-std",
+ "chacha20poly1305",
+ "getrandom 0.2.16",
+ "hex",
+ "rusqlite",
+ "rustix 1.1.4",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -449,7 +658,7 @@ checksum = "f9abbd1bc6865053c427f7198e6af43bfdedc55ab791faed4fbd361d789575ff"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -522,6 +731,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "cap-fs-ext"
+version = "4.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d78e5a3368ae89b7cb68186411452b4b9fac8b41be9c19bf3f47c2d2c8e36e6b"
+dependencies = [
+ "cap-primitives",
+ "cap-std",
+ "io-lifetimes 3.0.1",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "cap-primitives"
+version = "4.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b5f74729fd2f44701d1a8eb47e906cdb3ccd9ec0f02baad85a744b791940b18"
+dependencies = [
+ "ambient-authority",
+ "fs-set-times",
+ "io-extras",
+ "io-lifetimes 3.0.1",
+ "ipnet",
+ "maybe-owned",
+ "rustix 1.1.4",
+ "rustix-linux-procfs",
+ "windows-sys 0.61.2",
+ "winx",
+]
+
+[[package]]
+name = "cap-std"
+version = "4.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7281235d6e96d3544ca18bba9049be92f4190f8d923e3caef1b5f66cfa752608"
+dependencies = [
+ "cap-primitives",
+ "io-extras",
+ "io-lifetimes 3.0.1",
+ "rustix 1.1.4",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.62"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -579,6 +830,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chain-profile"
+version = "0.2.0"
+dependencies = [
+ "adapter-btc",
+ "blake2",
+ "kaystra-core",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -620,7 +881,7 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -777,6 +1038,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "counterparty-api"
+version = "0.2.0"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -867,7 +1135,7 @@ checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -950,7 +1218,7 @@ checksum = "97369cbbc041bc366949bc74d34658d6cda5621039731c6310521892a3a20ae0"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -969,6 +1237,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
+]
+
+[[package]]
+name = "dom-adaptor"
+version = "0.2.0"
+dependencies = [
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-scriptless-bulletproof",
+ "dom-scriptless-consensus",
+ "dom-scriptless-primitives",
+ "dom-serialization",
+ "hex",
+ "k256",
+ "rand_core 0.6.4",
+ "serde_json",
+ "subtle",
+ "thiserror 1.0.69",
+ "zeroize",
 ]
 
 [[package]]
@@ -1044,7 +1332,7 @@ dependencies = [
 name = "dom-core"
 version = "0.2.0"
 dependencies = [
- "bech32",
+ "bech32 0.12.0",
  "hex",
  "proptest",
  "subtle",
@@ -1139,6 +1427,42 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "dom-leg"
+version = "0.2.0"
+dependencies = [
+ "adapter-evm",
+ "btc-crypto",
+ "btc-secp-sys",
+ "cap-std",
+ "counterparty-api",
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-scriptless-consensus",
+ "dom-scriptless-crypto",
+ "dom-scriptless-identity-store",
+ "dom-scriptless-primitives",
+ "dom-scriptless-store",
+ "dom-scriptless-transport",
+ "dom-serialization",
+ "dom-wallet-core",
+ "dom-wallet-core-protocol",
+ "dom-wallet-core-recovery",
+ "dom-wallet-core-sync",
+ "dom-wallet-domain",
+ "dom-wallet-remote-source",
+ "hex",
+ "rand_core 0.6.4",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "zeroize",
 ]
 
 [[package]]
@@ -1262,12 +1586,67 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-scriptless-chain-adapter"
+version = "0.2.0"
+dependencies = [
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-crypto",
+ "dom-scriptless-types",
+ "dom-serialization",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "dom-scriptless-consensus"
 version = "0.2.0"
 dependencies = [
  "dom-consensus",
  "dom-core",
  "dom-crypto",
+]
+
+[[package]]
+name = "dom-scriptless-crypto"
+version = "0.2.0"
+dependencies = [
+ "argon2",
+ "chacha20poly1305",
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-scriptless-bulletproof",
+ "dom-scriptless-primitives",
+ "dom-serialization",
+ "getrandom 0.2.16",
+ "hkdf",
+ "serde",
+ "sha2",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "dom-scriptless-identity-store"
+version = "0.2.0"
+dependencies = [
+ "argon2",
+ "cap-std",
+ "chacha20poly1305",
+ "dom-crypto",
+ "dom-scriptless-store",
+ "dom-scriptless-transport",
+ "rand_core 0.6.4",
+ "rustix 1.1.4",
+ "static_assertions",
+ "tempfile",
+ "zeroize",
 ]
 
 [[package]]
@@ -1281,6 +1660,56 @@ dependencies = [
  "subtle",
  "zeroize",
 ]
+
+[[package]]
+name = "dom-scriptless-protocol"
+version = "0.2.0"
+dependencies = [
+ "dom-scriptless-crypto",
+ "dom-scriptless-store",
+ "dom-scriptless-types",
+]
+
+[[package]]
+name = "dom-scriptless-store"
+version = "0.2.0"
+dependencies = [
+ "cap-fs-ext",
+ "cap-std",
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-scriptless-consensus",
+ "dom-scriptless-crypto",
+ "dom-scriptless-primitives",
+ "dom-serialization",
+ "f7-anchor-authority",
+ "nix",
+ "rand_core 0.6.4",
+ "rustix 1.1.4",
+ "static_assertions",
+ "zeroize",
+]
+
+[[package]]
+name = "dom-scriptless-transport"
+version = "0.2.0"
+dependencies = [
+ "dom-adaptor",
+ "dom-crypto",
+ "dom-scriptless-protocol",
+ "dom-scriptless-store",
+ "dom-scriptless-types",
+ "rand_core 0.6.4",
+ "snow",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "dom-scriptless-types"
+version = "0.2.0"
 
 [[package]]
 name = "dom-serialization"
@@ -1364,6 +1793,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-vault"
+version = "0.2.0"
+dependencies = [
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-scriptless-consensus",
+ "store",
+ "tempfile",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "dom-wallet"
 version = "0.2.0"
 dependencies = [
@@ -1377,7 +1821,7 @@ dependencies = [
  "dom-serialization",
  "dom-slate",
  "dom-tx",
- "dom-wallet-crypto",
+ "dom-wallet-crypto 0.2.0",
  "dom-wallet-keys",
  "fs2",
  "hex",
@@ -1421,6 +1865,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-wallet-core"
+version = "0.3.2"
+source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
+dependencies = [
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-node",
+ "dom-serialization",
+ "dom-slate",
+ "dom-wallet-core-api",
+ "dom-wallet-core-protocol",
+ "dom-wallet-core-recovery",
+ "dom-wallet-core-restore",
+ "dom-wallet-core-submit",
+ "dom-wallet-core-sync",
+ "dom-wallet-crypto 0.3.2",
+ "dom-wallet-domain",
+ "dom-wallet-embedded-core",
+ "dom-wallet-production-backend",
+ "dom-wallet-storage",
+ "hex",
+ "rand 0.8.6",
+ "serde",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "dom-wallet-core-api"
 version = "0.2.0"
 dependencies = [
@@ -1428,6 +1905,91 @@ dependencies = [
  "dom-core",
  "hex",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "dom-wallet-core-protocol"
+version = "0.3.2"
+source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
+dependencies = [
+ "base64",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-serialization",
+ "dom-tx",
+ "dom-wallet-core-api",
+ "dom-wallet-core-sync",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dom-wallet-core-recovery"
+version = "0.3.2"
+source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
+dependencies = [
+ "bip39",
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-node",
+ "dom-serialization",
+ "dom-slate",
+ "dom-tx",
+ "dom-wallet-core-api",
+ "dom-wallet-core-protocol",
+ "dom-wallet-core-sync",
+ "dom-wallet-domain",
+ "dom-wallet-keys",
+ "dom-wallet-recovery",
+ "rand 0.8.6",
+ "thiserror 2.0.18",
+ "zeroize",
+]
+
+[[package]]
+name = "dom-wallet-core-restore"
+version = "0.3.2"
+source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
+dependencies = [
+ "dom-crypto",
+ "dom-tx",
+ "dom-wallet-core-api",
+ "dom-wallet-core-recovery",
+ "dom-wallet-core-sync",
+ "dom-wallet-crypto 0.3.2",
+ "dom-wallet-domain",
+ "dom-wallet-recovery",
+ "dom-wallet-storage",
+ "thiserror 2.0.18",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "dom-wallet-core-submit"
+version = "0.3.2"
+source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
+dependencies = [
+ "dom-consensus",
+ "dom-wallet-core-api",
+ "dom-wallet-core-sync",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dom-wallet-core-sync"
+version = "0.3.2"
+source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
+dependencies = [
+ "dom-chain",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-serialization",
+ "dom-wallet-core-api",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1448,6 +2010,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-wallet-crypto"
+version = "0.3.2"
+source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
+dependencies = [
+ "argon2",
+ "chacha20poly1305",
+ "hkdf",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "zeroize",
+]
+
+[[package]]
+name = "dom-wallet-domain"
+version = "0.3.2"
+source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "dom-wallet-embedded-core"
+version = "0.3.2"
+source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
+dependencies = [
+ "dom-chain",
+ "dom-config",
+ "dom-consensus",
+ "dom-core",
+ "dom-node",
+ "dom-pow",
+ "dom-serialization",
+ "dom-wallet-core-api",
+ "randomx-rs",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dom-wallet-keys"
 version = "0.2.0"
 dependencies = [
@@ -1463,6 +2070,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-wallet-production-backend"
+version = "0.3.2"
+source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
+dependencies = [
+ "dom-node",
+ "dom-wallet-core-api",
+ "dom-wallet-core-protocol",
+ "dom-wallet-core-recovery",
+ "dom-wallet-core-restore",
+ "dom-wallet-core-submit",
+ "dom-wallet-core-sync",
+ "dom-wallet-crypto 0.3.2",
+ "dom-wallet-embedded-core",
+ "dom-wallet-storage",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "dom-wallet-recovery"
 version = "0.2.0"
 dependencies = [
@@ -1475,6 +2100,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-wallet-remote-source"
+version = "0.3.2"
+source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
+dependencies = [
+ "dom-chain",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-serialization",
+ "dom-wallet-core-api",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+]
+
+[[package]]
+name = "dom-wallet-storage"
+version = "0.3.2"
+source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
+dependencies = [
+ "dom-wallet-crypto 0.3.2",
+ "dom-wallet-domain",
+ "fs2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "dom-wallet2"
 version = "0.2.0"
 dependencies = [
@@ -1484,7 +2142,7 @@ dependencies = [
  "dom-serialization",
  "dom-slate",
  "dom-tx",
- "dom-wallet-crypto",
+ "dom-wallet-crypto 0.2.0",
  "dom-wallet-keys",
  "hex",
  "proptest",
@@ -1761,6 +2419,143 @@ dependencies = [
 ]
 
 [[package]]
+name = "f2-harness"
+version = "0.2.0"
+dependencies = [
+ "adapter-dom-sim",
+ "adapter-evm",
+ "counterparty-api",
+ "kaystra-core",
+ "rusqlite",
+ "store",
+ "uspe",
+]
+
+[[package]]
+name = "f2-model"
+version = "0.2.0"
+dependencies = [
+ "kaystra-core",
+]
+
+[[package]]
+name = "f3-harness"
+version = "0.2.0"
+dependencies = [
+ "adapter-dom-sim",
+ "adapter-evm",
+ "counterparty-api",
+ "dom-leg",
+ "f2-harness",
+ "hex",
+ "kaystra-core",
+ "pollster",
+ "serde_json",
+ "store",
+ "tempfile",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
+name = "f4-harness"
+version = "0.2.0"
+dependencies = [
+ "adapter-evm",
+ "counterparty-api",
+ "serde_json",
+ "store",
+ "tempfile",
+ "thiserror 1.0.69",
+ "uspe",
+]
+
+[[package]]
+name = "f4-model"
+version = "0.2.0"
+dependencies = [
+ "uspe",
+]
+
+[[package]]
+name = "f5-e2e"
+version = "0.2.0"
+dependencies = [
+ "adapter-btc",
+ "adapter-btc-live",
+ "adapter-dom-sim",
+ "adapter-evm",
+ "bitcoin",
+ "blake2",
+ "btc-crypto",
+ "btc-evidence",
+ "btc-observer",
+ "btc-vault",
+ "counterparty-api",
+ "f6-engine",
+ "f7-anchor-authority",
+ "getrandom 0.3.4",
+ "rfq",
+ "serde_json",
+ "uspe",
+ "zeroize",
+]
+
+[[package]]
+name = "f6-engine"
+version = "0.2.0"
+dependencies = [
+ "btc-crypto",
+ "f2-harness",
+ "f4-harness",
+ "kaystra-core",
+ "relay",
+ "rfq",
+ "store",
+ "tempfile",
+ "thiserror 1.0.69",
+ "uspe",
+]
+
+[[package]]
+name = "f6-model"
+version = "0.2.0"
+dependencies = [
+ "rfq",
+]
+
+[[package]]
+name = "f7-anchor-authority"
+version = "0.2.0"
+dependencies = [
+ "adapter-btc",
+ "bitcoin",
+ "dom-scriptless-chain-adapter",
+ "kaystra-core",
+ "static_assertions",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "f7-e2e"
+version = "0.2.0"
+dependencies = [
+ "f7-anchor-authority",
+]
+
+[[package]]
+name = "fallible-iterator"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
+name = "fallible-streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1876,7 +2671,7 @@ checksum = "1a5c6c585bc94aaf2c7b51dd4c2ba22680844aba4c687be581871a6f518c5742"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1902,6 +2697,17 @@ checksum = "8835f84f38484cc86f110a805655697908257fb9a7af005234060891557198e9"
 dependencies = [
  "nonempty",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "fs-set-times"
+version = "0.20.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94e7099f6313ecacbe1256e8ff9d617b75d1bcb16a6fddef94866d225a01a14a"
+dependencies = [
+ "io-lifetimes 2.0.4",
+ "rustix 1.1.4",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1982,7 +2788,7 @@ checksum = "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2043,9 +2849,9 @@ dependencies = [
 
 [[package]]
 name = "getrandom"
-version = "0.2.17"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
+checksum = "335ff9f135e4384c8150d6f27c6daed433577f86b4750418338c01a1a2528592"
 dependencies = [
  "cfg-if",
  "js-sys",
@@ -2336,6 +3142,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hex-conservative"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35431185f361ccf3ffc58254628af5f1f5d5f28531da2e02e5d6c82bbc282a10"
+dependencies = [
+ "arrayvec",
+]
+
+[[package]]
+name = "hex_lit"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3011d1213f159867b13cfd6ac92d2cd5f1345762c63be3554e84092d85a50bbd"
+
+[[package]]
 name = "hexf-parse"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2438,7 +3259,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -2604,7 +3425,7 @@ checksum = "a0eb5a3343abf848c0984fe4604b2b105da9539376e24fc0a3b0007411ae4fd9"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2627,6 +3448,40 @@ checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "generic-array",
 ]
+
+[[package]]
+name = "intent-book"
+version = "0.2.0"
+dependencies = [
+ "btc-crypto",
+ "kaystra-core",
+ "relay",
+ "rfq",
+ "solver",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "io-extras"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20fd6de4ccfcc187e38bc21cfa543cb5a302cb86a8b114eb7f0bf0dc9f8ac00f"
+dependencies = [
+ "io-lifetimes 3.0.1",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "io-lifetimes"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06432fb54d3be7964ecd3649233cddf80db2832f47fec34c01f65b3d9d774983"
+
+[[package]]
+name = "io-lifetimes"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f0fb0570afe1fed943c5c3d4102d5358592d8625fda6a0007fdbe65a92fba96"
 
 [[package]]
 name = "ipnet"
@@ -2682,7 +3537,7 @@ dependencies = [
  "quote",
  "rustc_version",
  "simd_cesu8",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2710,7 +3565,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264"
 dependencies = [
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2748,6 +3603,27 @@ dependencies = [
  "serdect",
  "sha2",
  "signature",
+]
+
+[[package]]
+name = "kaystra-core"
+version = "0.2.0"
+dependencies = [
+ "blake2",
+ "counterparty-api",
+ "hex",
+ "proptest",
+ "store",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "keccak"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb26cec98cce3a3d96cbb7bced3c4b16e3d13f27ec56dbd62cbc8f39cfb9d653"
+dependencies = [
+ "cpufeatures",
 ]
 
 [[package]]
@@ -2827,6 +3703,17 @@ dependencies = [
  "libc",
  "plain",
  "redox_syscall 0.7.5",
+]
+
+[[package]]
+name = "libsqlite3-sys"
+version = "0.38.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+dependencies = [
+ "cc",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
@@ -2917,6 +3804,12 @@ name = "matchit"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
+
+[[package]]
+name = "maybe-owned"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "memchr"
@@ -3035,6 +3928,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.0",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "no-std-compat"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3096,7 +4001,7 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3442,7 +4347,7 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3515,7 +4420,7 @@ checksum = "c96395f0a926bc13b1c17622aaddda1ecb55d49c8f1bf9777e4d877800a43f8b"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3572,6 +4477,12 @@ dependencies = [
  "rustix 1.1.4",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "pollster"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22686f4785f02a4fcc856d3b3bb19bf6c8160d103f7a99cc258bddd0251dc7f2"
 
 [[package]]
 name = "poly1305"
@@ -3645,7 +4556,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
 dependencies = [
  "proc-macro2",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3685,13 +4596,14 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "proptest"
-version = "1.11.0"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
+checksum = "6fcdab19deb5195a31cf7726a210015ff1496ba1464fd42cb4f537b8b01b471f"
 dependencies = [
  "bit-set 0.8.0",
  "bit-vec 0.8.0",
  "bitflags 2.13.0",
+ "lazy_static",
  "num-traits",
  "rand 0.9.4",
  "rand_chacha 0.9.0",
@@ -3901,7 +4813,7 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
- "getrandom 0.2.17",
+ "getrandom 0.2.16",
 ]
 
 [[package]]
@@ -3992,7 +4904,7 @@ version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
 dependencies = [
- "getrandom 0.2.17",
+ "getrandom 0.2.16",
  "libredox",
  "thiserror 1.0.69",
 ]
@@ -4013,6 +4925,29 @@ name = "regex-syntax"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
+
+[[package]]
+name = "relay"
+version = "0.2.0"
+dependencies = [
+ "blake2",
+ "btc-crypto",
+ "kaystra-core",
+ "rusqlite",
+ "rustix 1.1.4",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "relay-scriptless-wire"
+version = "0.2.0"
+dependencies = [
+ "blake2",
+ "btc-crypto",
+ "relay",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "renderdoc-sys"
@@ -4050,14 +4985,16 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower 0.5.3",
  "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
- "webpki-roots",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -4071,6 +5008,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rfq"
+version = "0.2.0"
+dependencies = [
+ "blake2",
+ "kaystra-core",
+ "proptest",
+ "thiserror 1.0.69",
+ "uspe",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4078,10 +5026,48 @@ checksum = "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
 dependencies = [
  "cc",
  "cfg-if",
- "getrandom 0.2.17",
+ "getrandom 0.2.16",
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "route-composer"
+version = "0.2.0"
+dependencies = [
+ "adapter-evm",
+ "blake2",
+ "f2-harness",
+ "kaystra-core",
+ "proptest",
+ "rfq",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
+name = "route-transport"
+version = "0.2.0"
+dependencies = [
+ "btc-crypto",
+ "kaystra-core",
+ "relay",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
+name = "rusqlite"
+version = "0.40.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11438310b19e3109b6446c33d1ed5e889428cf2e278407bc7896bc4aaea43323"
+dependencies = [
+ "bitflags 2.13.0",
+ "fallible-iterator",
+ "fallible-streaming-iterator",
+ "libsqlite3-sys",
+ "smallvec",
 ]
 
 [[package]]
@@ -4138,11 +5124,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustix-linux-procfs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fc84bf7e9aa16c4f2c758f27412dc9841341e16aa682d9c7ac308fe3ee12056"
+dependencies = [
+ "once_cell",
+ "rustix 1.1.4",
+]
+
+[[package]]
 name = "rustls"
 version = "0.23.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -4248,6 +5245,7 @@ version = "0.29.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9465315bc9d4566e1724f0fffcbcc446268cb522e60f9a27bcded6b19c108113"
 dependencies = [
+ "bitcoin_hashes",
  "rand 0.8.6",
  "secp256k1-sys 0.10.1",
 ]
@@ -4304,9 +5302,9 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"
-version = "1.0.228"
+version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
+checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
  "serde_derive",
@@ -4314,29 +5312,29 @@ dependencies = [
 
 [[package]]
 name = "serde_core"
-version = "1.0.228"
+version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
+checksum = "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
 dependencies = [
  "serde_derive",
 ]
 
 [[package]]
 name = "serde_derive"
-version = "1.0.228"
+version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.4",
 ]
 
 [[package]]
 name = "serde_json"
-version = "1.0.149"
+version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
  "itoa",
  "memchr",
@@ -4380,13 +5378,23 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.10.9"
+version = "0.10.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+checksum = "793db75ad2bcafc3ffa7c68b215fee268f537982cd901d132f89c6343f3a3dc8"
 dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "sha3"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77fd7028345d415a4034cf8777cd4f8ab1851274233b45f84e3d955502d93874"
+dependencies = [
+ "digest",
+ "keccak",
 ]
 
 [[package]]
@@ -4576,6 +5584,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "solver"
+version = "0.2.0"
+dependencies = [
+ "btc-crypto",
+ "f6-engine",
+ "kaystra-core",
+ "relay",
+ "rfq",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "spinning_top"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4607,6 +5628,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "store"
+version = "0.2.0"
+dependencies = [
+ "rusqlite",
+ "store",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4630,6 +5661,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "syn"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
 name = "sync_wrapper"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4646,7 +5688,7 @@ checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4657,12 +5699,12 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "tempfile"
-version = "3.27.0"
+version = "3.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+checksum = "655da9c7eb6305c55742045d5a8d2037996d61d8de95806335c7c86ce0f82e9c"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -4694,7 +5736,7 @@ checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4705,7 +5747,7 @@ checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4781,7 +5823,7 @@ checksum = "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4954,7 +5996,7 @@ checksum = "7490cfa5ec963746568740651ac6781f701c9c5ea257c58e057f3ba8cf69e8da"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -5091,6 +6133,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "ureq"
+version = "2.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02d1a66277ed75f640d608235660df48c8e3c19f3b4edb6a263315626cc3c01d"
+dependencies = [
+ "base64",
+ "log",
+ "once_cell",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "url",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5100,6 +6159,18 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
+]
+
+[[package]]
+name = "uspe"
+version = "0.2.0"
+dependencies = [
+ "blake2",
+ "counterparty-api",
+ "kaystra-core",
+ "proptest",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -5119,12 +6190,24 @@ name = "uuid"
 version = "1.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
+dependencies = [
+ "getrandom 0.4.2",
+ "js-sys",
+ "serde_core",
+ "wasm-bindgen",
+]
 
 [[package]]
 name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vello_common"
@@ -5254,7 +6337,7 @@ dependencies = [
  "bumpalo",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
  "wasm-bindgen-shared",
 ]
 
@@ -5287,6 +6370,19 @@ dependencies = [
  "indexmap",
  "wasm-encoder",
  "wasmparser",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -5470,6 +6566,15 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "url",
  "web-sys",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -5929,6 +7034,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "winx"
+version = "0.36.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
+dependencies = [
+ "bitflags 2.13.0",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "wit-bindgen"
 version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5964,7 +7079,7 @@ dependencies = [
  "heck",
  "indexmap",
  "prettyplease",
- "syn",
+ "syn 2.0.117",
  "wasm-metadata",
  "wit-bindgen-core",
  "wit-component",
@@ -5980,7 +7095,7 @@ dependencies = [
  "prettyplease",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
  "wit-bindgen-core",
  "wit-bindgen-rust",
 ]
@@ -6131,7 +7246,7 @@ checksum = "de844c262c8848816172cef550288e7dc6c7b7814b4ee56b3e1553f275f1858e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
  "synstructure",
 ]
 
@@ -6152,7 +7267,7 @@ checksum = "70e3cd084b1788766f53af483dd21f93881ff30d7320490ec3ef7526d203bad4"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6172,7 +7287,7 @@ checksum = "11532158c46691caf0f2593ea8358fed6bbf68a0315e80aae9bd41fbade684a1"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
  "synstructure",
 ]
 
@@ -6193,7 +7308,7 @@ checksum = "85a5b4158499876c763cb03bc4e49185d3cccbabb15b33c627f7884f43db852e"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6226,7 +7341,7 @@ checksum = "625dc425cab0dca6dc3c3319506e6593dcb08a9f387ea3b284dbd52a92c40555"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]

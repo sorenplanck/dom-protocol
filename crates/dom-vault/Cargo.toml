@@ -17,6 +17,7 @@ default = []
 real-dom-adaptor = ["dep:dom-adaptor", "dep:dom-crypto", "dep:dom-consensus", "dep:dom-core"]
 
 [dependencies]
+dom-scriptless-consensus = { path = "../dom-scriptless-consensus" }
 store = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }

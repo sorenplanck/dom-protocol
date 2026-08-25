@@ -29,7 +29,8 @@ use crate::{
     AdaptorError, DirectionV1, Result, ShareProofV1, SigningShareV1, TrustedChainIdV1,
 };
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
-use dom_crypto::{scriptless_add_public_points, PublicKey};
+use dom_crypto::{PublicKey};
+use dom_scriptless_primitives::{scriptless_add_public_points};
 
 /// One participant's published blinding share `R_i` and its §4.2 PoK.
 ///

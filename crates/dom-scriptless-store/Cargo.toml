@@ -13,6 +13,8 @@ default = []
 evidence-only = []
 
 [dependencies]
+dom-scriptless-primitives = { path = "../dom-scriptless-primitives" }
+dom-scriptless-consensus = { path = "../dom-scriptless-consensus" }
 dom-adaptor.workspace = true
 dom-scriptless-crypto = { path = "../dom-scriptless-crypto" }
 rand_core = "=0.6.4"

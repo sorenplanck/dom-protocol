@@ -11,11 +11,8 @@
 //! ambient RNG dependency would make the recorded evidence unreproducible.
 
 use dom_adaptor::{AdaptorPreSignatureV1, AdaptorSecret};
-use dom_crypto::{
-    blake2b_256_tagged, schnorr_challenge, scriptless_add_public_points,
-    scriptless_verify_final_signature, secret_scalar_mul_add_assign, secret_scalar_public_key,
-    PartialSig, PublicKey,
-};
+use dom_crypto::{PartialSig, PublicKey, blake2b_256_tagged, schnorr_challenge};
+use dom_scriptless_primitives::{scriptless_add_public_points, scriptless_verify_final_signature, secret_scalar_mul_add_assign, secret_scalar_public_key};
 use zeroize::Zeroizing;
 
 /// Cases required by the Phase 1 exit gate.

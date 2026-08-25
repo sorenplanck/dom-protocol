@@ -15,10 +15,8 @@ use crate::{
     NonceRevealV1, PartialSignatureV1, ParticipantIdentityV1, ParticipantPublicNoncesV1, PurposeV1,
     SessionContextV1, SigningPhaseV1, SigningShareV1, TrustedChainIdV1,
 };
-use dom_crypto::{
-    blake2b_256_tagged, scalar_from_wide_be, schnorr_add_public_keys, schnorr_challenge,
-    scriptless_verify_bound_partial, scriptless_verify_final_signature, PartialSig, PublicKey,
-};
+use dom_crypto::{PartialSig, PublicKey, blake2b_256_tagged, schnorr_add_public_keys, schnorr_challenge};
+use dom_scriptless_primitives::{scalar_from_wide_be, scriptless_verify_bound_partial, scriptless_verify_final_signature};
 use serde_json::Value;
 
 struct Checks {

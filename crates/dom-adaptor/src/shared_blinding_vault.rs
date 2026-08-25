@@ -7,7 +7,8 @@ use crate::{
 };
 use core::fmt;
 use dom_crypto::recovery::RecoveryCapsule;
-use dom_crypto::{blake2b_256, scalar_bytes_are_canonical, PublicKey};
+use dom_crypto::{PublicKey, blake2b_256};
+use dom_scriptless_primitives::{scalar_bytes_are_canonical};
 use rand_core::{OsRng, RngCore};
 use std::error::Error;
 use zeroize::{Zeroize, Zeroizing};
@@ -1139,7 +1140,7 @@ impl SessionBlindingShareCapabilityV1 {
         &self,
         wallet_excess_point: &PublicKey,
     ) -> Result<PublicKey> {
-        dom_crypto::scriptless_add_public_points(&[
+        dom_scriptless_primitives::scriptless_add_public_points(&[
             self.signing_share.public_key().clone(),
             wallet_excess_point.clone(),
         ])
@@ -1156,7 +1157,7 @@ impl SessionBlindingShareCapabilityV1 {
         &self,
         wallet_payout_excess_point: &PublicKey,
     ) -> Result<PublicKey> {
-        dom_crypto::scriptless_subtract_public_points(
+        dom_scriptless_primitives::scriptless_subtract_public_points(
             wallet_payout_excess_point,
             self.signing_share.public_key(),
         )

@@ -21,14 +21,11 @@ use dom_adaptor::{
     SigningShareV1, TrustedChainIdV1, ValidatedSigningRoundStateV1, VaultBackedSignerError,
     VaultBackedSignerV1, VerifiedScriptlessTransactionV1, VerifiedSharedOutputV1,
 };
-use dom_consensus::{
-    scriptless_kernel_message_digest_v1, validate_transaction, Transaction, TransactionKernel,
-    ValidationContext,
-};
+use dom_consensus::{Transaction, TransactionKernel, ValidationContext, validate_transaction};
+use dom_scriptless_consensus::{scriptless_kernel_message_digest_v1};
 use dom_core::{Amount, BlockHeight, Timestamp, KERNEL_FEAT_HEIGHT_LOCKED, KERNEL_FEAT_PLAIN};
-use dom_crypto::{
-    blake2b_256, pedersen::Commitment, scriptless_add_public_points, PublicKey, SchnorrSignature,
-};
+use dom_crypto::{PublicKey, SchnorrSignature, blake2b_256, pedersen::Commitment};
+use dom_scriptless_primitives::{scriptless_add_public_points};
 use dom_scriptless_crypto::{Passphrase, StorageIdsV1};
 use dom_scriptless_identity_store::{
     ContractsIdentityPassphraseV1, ContractsTransportIdentityStoreV1, IdentityStoreError,
@@ -2135,7 +2132,7 @@ fn finalize_operational_plain_signature_v1(
         .kernels
         .first()
         .ok_or(F7WalletCompositorError::Dom)?;
-    let message = dom_consensus::scriptless_kernel_message_digest_v1(kernel);
+    let message = dom_scriptless_consensus::scriptless_kernel_message_digest_v1(kernel);
     finalize_plain_signature_v1(
         &output.partials,
         purpose,

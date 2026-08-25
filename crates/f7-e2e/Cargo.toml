@@ -1,0 +1,22 @@
+[package]
+name = "f7-e2e"
+description = "Evidence-gated real DOM and Bitcoin integration harness for F7"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true  # MIT by being DOM (absorption licence-by-inheritance)
+publish = false  # D-ORQ-9: explicit, never inherited
+
+[dependencies]
+f7-anchor-authority = { path = "../f7-anchor-authority" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"

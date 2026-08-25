@@ -1,10 +1,8 @@
 //! Private one-shot secret two-nonce workflow.
 
 use crate::{AdaptorError, Result, SigningShareV1};
-use dom_crypto::{
-    blake2b_256_tagged, scalar_bytes_are_canonical, scalar_from_wide_be,
-    secret_scalar_mul_add_assign, secret_scalar_public_key, PartialSig, PublicKey,
-};
+use dom_crypto::{PartialSig, PublicKey, blake2b_256_tagged};
+use dom_scriptless_primitives::{scalar_bytes_are_canonical, scalar_from_wide_be, secret_scalar_mul_add_assign, secret_scalar_public_key};
 use rand_core::{OsRng, RngCore};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 

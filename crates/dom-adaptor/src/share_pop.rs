@@ -3,10 +3,8 @@
 use crate::{
     error::exact_array, AdaptorError, DirectionV1, Result, SigningShareV1, TrustedChainIdV1,
 };
-use dom_crypto::{
-    blake2b_256_tagged, scalar_bytes_are_canonical, scalar_from_wide_be,
-    secret_scalar_mul_add_assign, secret_scalar_public_key, verify_scalar_response, PublicKey,
-};
+use dom_crypto::{PublicKey, blake2b_256_tagged};
+use dom_scriptless_primitives::{scalar_bytes_are_canonical, scalar_from_wide_be, secret_scalar_mul_add_assign, secret_scalar_public_key, verify_scalar_response};
 use rand_core::{OsRng, RngCore};
 use zeroize::{Zeroize, Zeroizing};
 

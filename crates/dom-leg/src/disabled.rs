@@ -19,7 +19,7 @@ pub const SECP256K1_ORDER: [u8; 32] = [
 /// Scalar canonicity: `0 < t < n`.
 ///
 /// Local hygiene for the backend-less build. In the real build the authority
-/// is `dom_crypto::scalar_bytes_are_canonical` and this function does not
+/// is `dom_scriptless_primitives::scalar_bytes_are_canonical` and this function does not
 /// exist (I15).
 pub fn scalar_is_canonical(scalar: &[u8; 32]) -> bool {
     if scalar.iter().all(|b| *b == 0) {

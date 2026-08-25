@@ -5,7 +5,7 @@
 //! challenge, and §6.6 requires that no normalisation be reinvented locally.
 //! This module therefore computes nothing: it parses with
 //! [`dom_adaptor::AdaptorPreSignatureV1`] and calls that type's own `verify`,
-//! which reaches `dom_crypto::scriptless_verify_pre_signature`. No challenge,
+//! which reaches `dom_scriptless_primitives::scriptless_verify_pre_signature`. No challenge,
 //! curve operation, or verifier is reimplemented here.
 //!
 //! # What a success proves, and what it does not

@@ -1,0 +1,41 @@
+# F5 end-to-end harness (Annex M M.14, M.17 steps 14-16).
+#
+# A thin binary that derives the F5 P2TR contract for fixed test keys and
+# prints the regtest bech32m address + scriptPubKey, so a real Bitcoin
+# Core node can be asked to fund exactly that output and the observer /
+# evidence verifier can consume the result. The signing E2E (funding ->
+# key-path claim -> CSV refund) is driven by the runbook against a live
+# bitcoind; this binary is the deterministic derivation half that CI can
+# cross-check against `bitcoin-cli` without any secret material.
+[package]
+name = "f5-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true  # MIT by being DOM (absorption licence-by-inheritance)
+publish = false  # D-ORQ-9: explicit, never inherited
+
+[dependencies]
+adapter-btc = { path = "../adapters/btc" }
+adapter-btc-live = { path = "../adapters/btc-live" }
+btc-crypto = { path = "../adapters/btc-crypto" }
+bitcoin = "=0.32.5"
+blake2 = { version = "=0.10.6", default-features = false }
+zeroize = { workspace = true }
+btc-vault = { path = "../adapters/btc-vault" }
+btc-evidence = { path = "../adapters/btc-evidence" }
+btc-observer = { path = "../adapters/btc-observer" }
+adapter-dom-sim = { path = "../adapters/dom-sim" }
+counterparty-api = { path = "../counterparty-api" }
+uspe = { path = "../uspe" }
+f6-engine = { path = "../f6-engine" }
+rfq = { path = "../rfq" }
+serde_json = "1"
+
+[dev-dependencies]
+getrandom = "=0.3.4"
+f7-anchor-authority = { path = "../f7-anchor-authority" }
+# LAB (NOT RATIFIED): the composed-route live test ties the real Bitcoin claim
+# to the EVM leg by deriving address(t*G) / point(t) with the same real secp
+# helper the EVM adapter uses. adapter-evm does not import the DOM pin.
+adapter-evm = { path = "../adapters/evm" }

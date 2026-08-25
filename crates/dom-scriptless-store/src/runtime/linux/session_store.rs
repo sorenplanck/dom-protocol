@@ -37,9 +37,8 @@ use dom_adaptor::{
     ScriptlessTransactionTemplateV1, SessionId, ShareBackupAckV1, SharedBlindingBindingV1,
     SigningPhaseV1, TrustedChainIdV1,
 };
-use dom_consensus::{
-    scriptless_kernel_message_digest_v1, validate_transaction, Transaction, ValidationContext,
-};
+use dom_consensus::{Transaction, ValidationContext, validate_transaction};
+use dom_scriptless_consensus::{scriptless_kernel_message_digest_v1};
 use dom_core::{BlockHeight, Timestamp, KERNEL_FEAT_HEIGHT_LOCKED};
 use dom_crypto::{
     blake2b_256, recovery::RecoveryCapsule, schnorr_verify, PublicKey, SchnorrSignature,

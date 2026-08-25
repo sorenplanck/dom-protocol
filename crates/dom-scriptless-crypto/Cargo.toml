@@ -9,6 +9,8 @@ authors.workspace = true
 repository.workspace = true
 publish = false  # D-ORQ-9: explicit, never inherited
 [dependencies]
+dom-scriptless-primitives = { path = "../dom-scriptless-primitives" }
+dom-scriptless-bulletproof = { path = "../dom-scriptless-bulletproof" }
 argon2 = { version = "=0.5.3", default-features = false, features = ["alloc", "zeroize"] }
 chacha20poly1305 = { version = "=0.10.1", default-features = false }
 dom-adaptor.workspace = true

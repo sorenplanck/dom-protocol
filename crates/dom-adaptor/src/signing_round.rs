@@ -539,7 +539,7 @@ impl ValidatedSigningRoundBootstrapV1 {
             ));
         }
         let (_, template_hash) = canonical_template_v1(&transaction_template)?;
-        let kernel_message_digest = dom_consensus::scriptless_kernel_message_digest_v1(kernel);
+        let kernel_message_digest = dom_scriptless_consensus::scriptless_kernel_message_digest_v1(kernel);
         let initial_transcript =
             initial_transcript_hash_v1(&trusted_chain_id, &session_id, contract_kind, &roster);
         let local = &roster.entries()[usize::from(local_protocol_index)];

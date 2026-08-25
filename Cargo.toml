@@ -41,6 +41,55 @@ members = [
     "crates/dom-scriptless-bulletproof",
     "crates/dom-scriptless-consensus",
     "crates/dom-scriptless-primitives",
+
+    "crates/adapters/btc",
+    "crates/adapters/btc-crypto",
+    "crates/adapters/btc-secp-sys",
+    "crates/adapters/btc-vault",
+    "crates/adapters/dom-real",
+    "crates/adapters/evm",
+    "crates/chain-profile",
+    "crates/counterparty-api",
+    "crates/dom-adaptor",
+    "crates/dom-leg",
+    "crates/dom-scriptless-chain-adapter",
+    "crates/dom-scriptless-crypto",
+    "crates/dom-scriptless-identity-store",
+    "crates/dom-scriptless-protocol",
+    "crates/dom-scriptless-store",
+    "crates/dom-scriptless-transport",
+    "crates/dom-scriptless-types",
+    "crates/dom-vault",
+    "crates/f6-engine",
+    "crates/f7-anchor-authority",
+    "crates/intent-book",
+    "crates/kaystra-core",
+    "crates/relay",
+    "crates/relay-scriptless-wire",
+    "crates/rfq",
+    "crates/route-composer",
+    "crates/route-transport",
+    "crates/solver",
+    "crates/store",
+    "crates/uspe",
+
+    # ── F2–F7 acceptance harness ──────────────────────────────────────────
+    # The machinery that proves the layer's phases: model checkers, the
+    # end-to-end suites and the simulation and evidence adapters only they
+    # consume. Test scaffolding, never a product binary.
+    "crates/adapters/btc-evidence",
+    "crates/adapters/btc-live",
+    "crates/adapters/btc-observer",
+    "crates/adapters/btc-secp-c1a",
+    "crates/adapters/dom-sim",
+    "crates/f2-harness",
+    "crates/f2-model",
+    "crates/f3-harness",
+    "crates/f4-harness",
+    "crates/f4-model",
+    "crates/f5-e2e",
+    "crates/f6-model",
+    "crates/f7-e2e",
 ]
 
 # Tauri desktop wallet — excluded from the workspace because it needs a
@@ -48,6 +97,18 @@ members = [
 # own from wallet-desktop/ (npm run tauri build / CI).
 exclude = [
     "wallet-desktop",
+
+    # The F7 laboratory runtime. It drives the live wallet compositor, which
+    # needs a Wallet V3 revision built against this node. The pin it carries
+    # (dom-wallet-v3 @ 512def5) was built against the F7 node lineage and
+    # expects scanner surfaces the mainnet release line does not publish —
+    # `ScanTransaction`, `TransactionLocation`, and the wider
+    # `CoinbaseScanMetadata`. Since the node is mainnet and cannot grow them,
+    # the runner is kept out of the workspace build rather than being made to
+    # compile by weakening either side. Nothing else in the tree depends on
+    # it. It builds again the day dom-wallet-v3 publishes a revision against
+    # the release line.
+    "crates/f7-runner",
 ]
 
 [workspace.package]
@@ -57,6 +118,24 @@ rust-version = "1.75"
 authors     = ["Soren Planck <sorenplanck@tutamail.com>"]
 license     = "MIT"
 repository  = "https://github.com/sorenplanck/dom-protocol"
+
+
+# ── Lint regime carried over verbatim from the absorbed Contracts workspace.
+# `[workspace.lints]` is opt-in per member: only the seven dom-scriptless-*
+# crates declare `lints.workspace = true`, so no pre-existing member's lint
+# regime changes. Nothing is loosened — the absorbed crates keep exactly the
+# rules they had.
+[workspace.lints.rust]
+missing_docs = "deny"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
 
 # ── Shared dependency versions ────────────────────────────────────────────────
 [workspace.dependencies]
@@ -126,6 +205,62 @@ tower-http = { version = "0.5", features = ["cors", "trace"] }
 bip39 = { version = "2.0", features = ["rand"] }
 # Property-based testing (Roadmap v2 Phase 1.1 — replay determinism, reorg fuzz).
 proptest = { version = "1" }
+
+# ── DOM interoperability layer: local members ─────────────────────────────
+counterparty-api = { path = "crates/counterparty-api" }
+dom-adaptor = { path = "crates/dom-adaptor" }
+dom-leg = { path = "crates/dom-leg" }
+dom-scriptless-bulletproof = { path = "crates/dom-scriptless-bulletproof" }
+dom-scriptless-chain-adapter = { path = "crates/dom-scriptless-chain-adapter" }
+dom-scriptless-consensus = { path = "crates/dom-scriptless-consensus" }
+dom-scriptless-crypto = { path = "crates/dom-scriptless-crypto" }
+dom-scriptless-identity-store = { path = "crates/dom-scriptless-identity-store" }
+dom-scriptless-primitives = { path = "crates/dom-scriptless-primitives" }
+dom-scriptless-store = { path = "crates/dom-scriptless-store" }
+dom-scriptless-transport = { path = "crates/dom-scriptless-transport" }
+store = { path = "crates/store" }
+
+# Registry and wallet-edge pins the absorbed crates already used, carried
+# over verbatim from the Interop manifest.
+reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+cap-std = { version = "=4.0.2", default-features = false }
+rusqlite = { version = "=0.40.1", default-features = false, features = ["backup", "bundled", "limits"] }
+dom-wallet-core = { git = "https://github.com/sorenplanck/dom-wallet-v3", rev = "512def52945100785b9e7d6e93dbb17d78adeb3e", package = "dom-wallet-core" }
+dom-wallet-core-recovery = { git = "https://github.com/sorenplanck/dom-wallet-v3", rev = "512def52945100785b9e7d6e93dbb17d78adeb3e", package = "dom-wallet-core-recovery" }
+dom-wallet-core-protocol = { git = "https://github.com/sorenplanck/dom-wallet-v3", rev = "512def52945100785b9e7d6e93dbb17d78adeb3e", package = "dom-wallet-core-protocol" }
+dom-wallet-core-sync = { git = "https://github.com/sorenplanck/dom-wallet-v3", rev = "512def52945100785b9e7d6e93dbb17d78adeb3e", package = "dom-wallet-core-sync" }
+dom-wallet-domain = { git = "https://github.com/sorenplanck/dom-wallet-v3", rev = "512def52945100785b9e7d6e93dbb17d78adeb3e", package = "dom-wallet-domain" }
+dom-wallet-remote-source = { git = "https://github.com/sorenplanck/dom-wallet-v3", rev = "512def52945100785b9e7d6e93dbb17d78adeb3e", package = "dom-wallet-remote-source" }
+
+# ── One node in the graph, and it is this one ─────────────────────────────
+# The Wallet V3 pin still resolves the DOM through a git revision of this
+# same repository. Left alone, Cargo builds two DOMs: the mainnet tree here
+# and an older checkout beside it, whose `TransactionInput` is a different
+# type from ours. Every node package the wallet reaches is therefore mapped
+# onto the local tree, so the layer and the wallet compile against the
+# release line rather than against a snapshot of it.
+[patch."https://github.com/sorenplanck/dom-protocol"]
+dom-adaptor = { path = "crates/dom-adaptor" }
+dom-chain = { path = "crates/dom-chain" }
+dom-config = { path = "crates/dom-config" }
+dom-consensus = { path = "crates/dom-consensus" }
+dom-core = { path = "crates/dom-core" }
+dom-crypto = { path = "crates/dom-crypto" }
+dom-mempool = { path = "crates/dom-mempool" }
+dom-node = { path = "crates/dom-node" }
+dom-pmmr = { path = "crates/dom-pmmr" }
+dom-pow = { path = "crates/dom-pow" }
+dom-rpc = { path = "crates/dom-rpc" }
+dom-serialization = { path = "crates/dom-serialization" }
+dom-slate = { path = "crates/dom-slate" }
+dom-store = { path = "crates/dom-store" }
+dom-tx = { path = "crates/dom-tx" }
+dom-wallet = { path = "crates/dom-wallet" }
+dom-wallet-core-api = { path = "crates/dom-wallet-core-api" }
+dom-wallet-crypto = { path = "crates/dom-wallet-crypto" }
+dom-wallet-keys = { path = "crates/dom-wallet-keys" }
+dom-wallet-recovery = { path = "crates/dom-wallet-recovery" }
+dom-wire = { path = "crates/dom-wire" }
 
 [profile.release]
 opt-level       = 3

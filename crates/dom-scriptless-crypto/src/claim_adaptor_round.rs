@@ -10,7 +10,7 @@
 //! Read from the pinned code, not derived from prose:
 //!
 //! ```text
-//! R_i = R1_i + R2_i · b     dom_crypto::scriptless_bind_public_nonces
+//! R_i = R1_i + R2_i · b     dom_scriptless_primitives::scriptless_bind_public_nonces
 //! R   = Σ R_i               dom_adaptor::aggregate_public_nonces_v1
 //! R̂   = R + T               dom_adaptor::aggregate_public_nonces_v1([R, T])
 //! ```
@@ -248,7 +248,7 @@ pub fn begin_claim_adaptor_round_v1(
     .map_err(|_| ClaimAdaptorRoundError::BindingRefused)?;
 
     // `BindingFactorV1::bind_public_nonces` is the pinned wrapper over
-    // `dom_crypto::scriptless_bind_public_nonces`. Going through the wrapper
+    // `dom_scriptless_primitives::scriptless_bind_public_nonces`. Going through the wrapper
     // keeps the factor and the binding in one pinned type rather than passing
     // a loose scalar into a lower-level primitive.
     let mut effective_nonces = Vec::with_capacity(inputs.participants.len());
@@ -457,7 +457,7 @@ impl ClaimAdaptorRoundV1 {
             .map_err(|_| ClaimAdaptorRoundError::AdaptationRejected)?;
 
         // Independent native DOM verification of the finalized 65 bytes.
-        match dom_crypto::scriptless_verify_final_signature(
+        match dom_scriptless_primitives::scriptless_verify_final_signature(
             &final_signature,
             &self.aggregate_signing_key,
             &self.chain_id,

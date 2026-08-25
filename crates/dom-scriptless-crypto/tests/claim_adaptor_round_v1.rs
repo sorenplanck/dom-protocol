@@ -2,7 +2,7 @@
 //!
 //! Every value in this file is produced by a pinned primitive. No scalar
 //! arithmetic, hash, challenge, or point operation is written here: partial
-//! signatures are built with `dom_crypto::secret_scalar_mul_add_assign`, the
+//! signatures are built with `dom_scriptless_primitives::secret_scalar_mul_add_assign`, the
 //! same accumulator the pinned signer uses, and every check is the pinned one.
 //!
 //! The known-answer test `the_frozen_relation_between_r_t_and_r_hat` freezes
@@ -12,10 +12,8 @@ use dom_adaptor::{
     binding_factor_v1, AdaptorSecret, BindingContextV1, PartialSignatureV1,
     ParticipantPublicNoncesV1, PurposeV1,
 };
-use dom_crypto::{
-    schnorr_challenge, scriptless_add_public_points, secret_scalar_mul_add_assign,
-    secret_scalar_public_key, PartialSig, PublicKey,
-};
+use dom_crypto::{PartialSig, PublicKey, schnorr_challenge};
+use dom_scriptless_primitives::{scriptless_add_public_points, secret_scalar_mul_add_assign, secret_scalar_public_key};
 use dom_scriptless_crypto::{
     begin_claim_adaptor_round_v1, ClaimAdaptorRoundError, ClaimAdaptorRoundInputsV1,
     ClaimAdaptorRoundV1, CompletedClaimAdaptorCycleV1,

@@ -20,16 +20,12 @@ use dom_adaptor::{
     SigningPhaseV1, SigningSessionAuthorityV1, SigningShareV1, TrustedChainIdV1,
     VaultBackedSignerV1,
 };
-use dom_consensus::{
-    scriptless_kernel_message_digest_v1, validate_kernel_signatures, Transaction, TransactionKernel,
-};
+use dom_consensus::{Transaction, TransactionKernel, validate_kernel_signatures};
+use dom_scriptless_consensus::{scriptless_kernel_message_digest_v1};
 use dom_core::{Amount, Hash256};
 use dom_crypto::pedersen::Commitment;
-use dom_crypto::{
-    schnorr_challenge, schnorr_sign, scriptless_add_public_points,
-    scriptless_aggregate_partial_scalars, scriptless_verify_bound_partial,
-    scriptless_verify_final_signature, PartialSig, PublicKey, SchnorrSignature, SecretKey,
-};
+use dom_crypto::{PartialSig, PublicKey, SchnorrSignature, SecretKey, schnorr_challenge, schnorr_sign};
+use dom_scriptless_primitives::{scriptless_add_public_points, scriptless_aggregate_partial_scalars, scriptless_verify_bound_partial, scriptless_verify_final_signature};
 use dom_scriptless_crypto::{
     authoritative_storage_hash_v1, Passphrase, StorageHashDomainV1, StorageIdsV1,
 };

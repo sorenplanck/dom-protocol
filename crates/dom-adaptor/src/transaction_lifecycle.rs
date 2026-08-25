@@ -16,11 +16,8 @@ use crate::{
     OperationalM8FundingAuthorizationImportCapabilityV1, OperationalM8FundingAuthorizationStoreV1,
     OperationalM8FundingAuthorizationV1, RangeProof739, Result, SharedCommitmentV1,
 };
-use dom_consensus::{
-    scriptless_kernel_message_digest_v1, validate_balance_equation, validate_range_proofs,
-    validate_transaction, validate_transaction_structure, Transaction, TransactionInput,
-    TransactionKernel, TransactionOutput, ValidationContext,
-};
+use dom_consensus::{Transaction, TransactionInput, TransactionKernel, TransactionOutput, ValidationContext, validate_balance_equation, validate_range_proofs, validate_transaction, validate_transaction_structure};
+use dom_scriptless_consensus::{scriptless_kernel_message_digest_v1};
 use dom_core::{BlockHeight, Timestamp, KERNEL_FEAT_HEIGHT_LOCKED, KERNEL_FEAT_PLAIN};
 use dom_crypto::{
     blake2b_256, pedersen::Commitment, range_proof_verify, range_proof_verify_with_extra_commit,

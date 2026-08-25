@@ -33,7 +33,7 @@
 //!   and the pin's secret-nonce derivation is `compile_fail` for external
 //!   consumers (`lib.rs:13-22`). The leg therefore has to keep the share
 //!   bytes in [`LocalSigningShare`] and generate the two nonces locally.
-//! - `AdaptorSecret` (`adaptor.rs:43`) and `dom_crypto::SecretScalar` do not
+//! - `AdaptorSecret` (`adaptor.rs:43`) and `dom_scriptless_primitives::SecretScalar` do not
 //!   export bytes. An extracted `t` can only be compared through the public
 //!   POINT — see [`ExtractedAdaptorSecret`].
 
@@ -51,11 +51,8 @@ use dom_adaptor::{
     SessionContextV1, SessionIdRegistryV1, SharePoPStatementV1, ShareProofV1, SigningPhaseV1,
     SigningShareV1, TrustedChainIdV1,
 };
-use dom_crypto::{
-    scalar_bytes_are_canonical, schnorr_add_public_keys, schnorr_challenge,
-    secret_scalar_mul_add_assign, secret_scalar_public_key, PartialSig, PublicKey,
-    SchnorrSignature,
-};
+use dom_crypto::{PartialSig, PublicKey, SchnorrSignature, schnorr_add_public_keys, schnorr_challenge};
+use dom_scriptless_primitives::{scalar_bytes_are_canonical, secret_scalar_mul_add_assign, secret_scalar_public_key};
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
 
@@ -71,7 +68,7 @@ const SCHNORR_SIGNATURE_LEN: usize = 65;
 /// Same name and signature as the backend-less build's helper, so downstream
 /// code has ONE predicate in both configurations rather than a function that
 /// vanishes when the feature is switched on. This is not a second
-/// implementation: it delegates to `dom_crypto::scalar_bytes_are_canonical`,
+/// implementation: it delegates to `dom_scriptless_primitives::scalar_bytes_are_canonical`,
 /// the pin's own predicate, so the authority decides canonicity here as
 /// everywhere else (I15).
 pub fn scalar_is_canonical(scalar: &[u8; 32]) -> bool {
