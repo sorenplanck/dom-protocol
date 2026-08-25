@@ -14,10 +14,11 @@
 //! `len(tag) as u16 little-endian || tag_ascii || data`, no personalization,
 //! salt or key, and no streaming state invented in the Scriptless layer. It is
 //! a single function — the "one canonical `H_tag`" §3.4 requires — so there is
-//! no second hash dialect. The BIP340 `SHA256(tag) || SHA256(tag) || message`
-//! construction, a SHA256→BLAKE2b swap that keeps the duplication, and any
-//! generic BLAKE2b instantiated directly in the Scriptless layer are all
-//! forbidden and covered by `every_scriptless_domain_matches_dom_blake2b_backend`.
+//! no second hash dialect. The BIP340 tagged-hash construction — the tag's
+//! digest repeated twice ahead of the message — a swap of that digest for
+//! BLAKE2b that keeps the duplication, and any generic BLAKE2b instantiated
+//! directly in the Scriptless layer are all forbidden and covered by
+//! `every_scriptless_domain_matches_dom_blake2b_backend`.
 //!
 //! Tags are ASCII, case-sensitive, without NUL, Unicode, normalization, or any
 //! runtime concatenation. Changing an algorithm, framing, or tag after the

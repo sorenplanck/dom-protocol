@@ -232,36 +232,6 @@ dom-wallet-core-sync = { git = "https://github.com/sorenplanck/dom-wallet-v3", r
 dom-wallet-domain = { git = "https://github.com/sorenplanck/dom-wallet-v3", rev = "512def52945100785b9e7d6e93dbb17d78adeb3e", package = "dom-wallet-domain" }
 dom-wallet-remote-source = { git = "https://github.com/sorenplanck/dom-wallet-v3", rev = "512def52945100785b9e7d6e93dbb17d78adeb3e", package = "dom-wallet-remote-source" }
 
-# ── One node in the graph, and it is this one ─────────────────────────────
-# The Wallet V3 pin still resolves the DOM through a git revision of this
-# same repository. Left alone, Cargo builds two DOMs: the mainnet tree here
-# and an older checkout beside it, whose `TransactionInput` is a different
-# type from ours. Every node package the wallet reaches is therefore mapped
-# onto the local tree, so the layer and the wallet compile against the
-# release line rather than against a snapshot of it.
-[patch."https://github.com/sorenplanck/dom-protocol"]
-dom-adaptor = { path = "crates/dom-adaptor" }
-dom-chain = { path = "crates/dom-chain" }
-dom-config = { path = "crates/dom-config" }
-dom-consensus = { path = "crates/dom-consensus" }
-dom-core = { path = "crates/dom-core" }
-dom-crypto = { path = "crates/dom-crypto" }
-dom-mempool = { path = "crates/dom-mempool" }
-dom-node = { path = "crates/dom-node" }
-dom-pmmr = { path = "crates/dom-pmmr" }
-dom-pow = { path = "crates/dom-pow" }
-dom-rpc = { path = "crates/dom-rpc" }
-dom-serialization = { path = "crates/dom-serialization" }
-dom-slate = { path = "crates/dom-slate" }
-dom-store = { path = "crates/dom-store" }
-dom-tx = { path = "crates/dom-tx" }
-dom-wallet = { path = "crates/dom-wallet" }
-dom-wallet-core-api = { path = "crates/dom-wallet-core-api" }
-dom-wallet-crypto = { path = "crates/dom-wallet-crypto" }
-dom-wallet-keys = { path = "crates/dom-wallet-keys" }
-dom-wallet-recovery = { path = "crates/dom-wallet-recovery" }
-dom-wire = { path = "crates/dom-wire" }
-
 [profile.release]
 opt-level       = 3
 lto             = "fat"
