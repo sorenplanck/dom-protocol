@@ -1,0 +1,23 @@
+[package]
+name = "solver"
+description = "DOM Interop — the reference solver: consumes an RfqV1 and produces an admissible, BIP340-signed QuoteV1 under an explicit pricing policy; gives the RFQ board a counterparty (NOT RATIFIED)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+rfq = { path = "../rfq" }
+kaystra-core = { path = "../kaystra-core", default-features = false }
+# The pinned D-013 BIP340 backend: the quote signature admissibility
+# verifies is produced by the SAME backend (I15).
+btc-crypto = { path = "../adapters/btc-crypto" }
+thiserror = { workspace = true }
+# The solver's signing secret lives only in zeroizing memory (I6).
+zeroize = { workspace = true }
+
+[dev-dependencies]
+# The end-to-end proof: RFQ and quote travel the ratified Relay V1 §5.4
+# pipeline and are consumed by the f6-engine payload checks.
+relay = { path = "../relay" }
+f6-engine = { path = "../f6-engine" }

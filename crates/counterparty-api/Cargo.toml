@@ -1,0 +1,9 @@
+[package]
+name = "counterparty-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+thiserror = { workspace = true }

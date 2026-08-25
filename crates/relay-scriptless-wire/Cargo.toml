@@ -1,0 +1,29 @@
+[package]
+name = "relay-scriptless-wire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+description = "PROVISIONAL/NON-NORMATIVE default-off Relay V2 Scriptless wire candidate"
+readme = "README.md"
+
+[features]
+# PROVISIONAL/NON-NORMATIVE: an empty default prevents the D-030 candidate
+# from being mistaken for a ratified or production-enabled Relay version.
+default = []
+# PROVISIONAL/NON-NORMATIVE: explicit opt-in activates verification through
+# the already pinned Bitcoin cryptography backend. It does not ratify V2.
+provisional-non-normative-v2 = ["dep:btc-crypto"]
+
+[dependencies]
+blake2 = "=0.10.6"
+thiserror = { workspace = true }
+# PROVISIONAL/NON-NORMATIVE: reuse the pinned D-013 BIP340 implementation;
+# this crate implements no cryptographic primitive and holds no secret key.
+btc-crypto = { path = "../adapters/btc-crypto", optional = true }
+
+[dev-dependencies]
+# PROVISIONAL/NON-NORMATIVE: codec-only dev edge used solely to prove that
+# ratified Relay V1 and this candidate reject each other's canonical bytes.
+relay = { path = "../relay", default-features = false }

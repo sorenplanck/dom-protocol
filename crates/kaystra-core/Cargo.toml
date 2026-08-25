@@ -1,0 +1,27 @@
+# F2 frozen dependency set (spec §4, DECIDED). The lockfile is committed;
+# any version bump is intentional, isolated, and requires re-running the
+# terms vectors. serde/JSON/CBOR/bincode never define the canonical wire
+# of SettlementTermsV1 — the encoder in src/terms.rs does.
+[package]
+name = "kaystra-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[features]
+default = ["engine"]
+# The settlement engine and its concrete persistence port remain the default
+# profile.  Lower evidence authorities may select only canonical terms/types
+# without acquiring a persistence dependency or creating an authority cycle.
+engine = ["dep:store"]
+
+[dependencies]
+counterparty-api = { workspace = true }
+store = { workspace = true, optional = true }
+thiserror = { workspace = true }
+blake2 = { version = "=0.10.6", default-features = false }
+
+[dev-dependencies]
+proptest = "=1.7.0"
+hex = "=0.4.3"

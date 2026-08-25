@@ -1,0 +1,18 @@
+[package]
+name = "chain-profile"
+description = "DOM Interop — chain profiles: the explicit, digest-committed per-chain parameters (timing bounds, finality, lock contracts, assets) that the timelock validators trust; enabling a network is a profile entry, never an engine change (swap-tab design; NOT RATIFIED)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+# Neutral ids and the finality policy the settlement legs consume.
+kaystra-core = { path = "../kaystra-core", default-features = false }
+# ChainTimingBoundsV1 and the M.8 additive margin rule, REUSED — never a
+# second implementation of the arithmetic the validator trusts (I15).
+# Default features off: the pure-Rust codec/types build, no crypto backend.
+adapter-btc = { path = "../adapters/btc", default-features = false }
+# Same exact hash crate and version as every other canonical digest (I15).
+blake2 = "=0.10.6"
+thiserror = { workspace = true }

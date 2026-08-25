@@ -1,0 +1,51 @@
+[package]
+name = "dom-vault"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+# Durable cryptographic implementation of the `NonceVaultV1` contract (D-005).
+# Together with `dom-leg`, this is one of the only two crates authorized to
+# depend on `dom-adaptor`. The real dependency sits behind `real-dom-adaptor`
+# so the workspace compiles without a C toolchain; the F1 gate makes enabling
+# it mandatory.
+[features]
+default = []
+# dom-consensus is named only to reference `dom_consensus::Transaction` in the
+# AcceptedSigningSessionV1 contract surface (the session template); same pin.
+real-dom-adaptor = ["dep:dom-adaptor", "dep:dom-crypto", "dep:dom-consensus", "dep:dom-core"]
+
+[dependencies]
+store = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+[dependencies.dom-adaptor]
+workspace = true
+optional = true
+
+[dependencies.dom-crypto]
+workspace = true
+optional = true
+
+[dependencies.dom-consensus]
+workspace = true
+optional = true
+
+# Test-only (via the real-dom-adaptor feature): names dom_core::Amount to
+# build the session transaction template in the G-F1 contract test.
+[dependencies.dom-core]
+workspace = true
+optional = true
+
+[dev-dependencies]
+tempfile = "=3.24.0"  # aligned up to the Contracts pin at absorption (dev-only; exact pin preserved)
+
+[[test]]
+name = "g_f1_contract"
+required-features = ["real-dom-adaptor"]
+
+[[test]]
+name = "g_f1_e2e"
+required-features = ["real-dom-adaptor"]

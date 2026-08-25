@@ -1,0 +1,17 @@
+[package]
+name = "rfq"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+kaystra-core = { path = "../kaystra-core" }
+uspe = { path = "../uspe" }
+thiserror = { workspace = true }
+# Same exact hash crate and version as kaystra-core and uspe: one
+# BLAKE2b-256 implementation across every canonical digest (I15).
+blake2 = "=0.10.6"
+
+[dev-dependencies]
+proptest = "=1.7.0"

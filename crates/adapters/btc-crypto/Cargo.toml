@@ -1,0 +1,25 @@
+# Safe cryptographic backend of the Bitcoin leg (Annex M M.1.2).
+#
+# This crate is the ONLY place in the F5 stack that wraps the pinned
+# secp256k1-zkp FFI (`btc-secp-sys`). It contains `unsafe`, isolated to
+# the smallest possible surface, each block carrying its SAFETY contract.
+# `adapter-btc` and everything above stay `#![forbid(unsafe_code)]` and
+# consume only the safe `BitcoinCryptoBackend` trait exposed here.
+#
+# The wrapper never treats FFI success as cryptographic proof (M.1.2):
+# after signing it verifies the partial, after aggregation it verifies the
+# adaptor relation, after adapt it verifies the final BIP340 signature,
+# and before returning an extracted secret it checks t·G == T.
+[package]
+name = "btc-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+btc-secp-sys = { path = "../btc-secp-sys" }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+hex = "=0.4.3"

@@ -1,0 +1,52 @@
+# F5 Bitcoin adapter (Annex M v3.2). The wire formats in src/codec.rs are
+# the canonical DOMBTC encoding — serde/JSON/bincode never define them
+# (M.5.3). The real cryptographic backend enters behind the feature set of
+# M.14.1 from step 5 of the build order; the canonical types and codec of
+# step 2 have no cryptographic dependency at all.
+[package]
+name = "adapter-btc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+counterparty-api = { workspace = true }
+thiserror = { workspace = true }
+blake2 = { version = "=0.10.6", default-features = false }
+zeroize = { workspace = true }
+# The safe crypto backend (M.1.2). Optional so the pure-Rust codec/types
+# still build with `--no-default-features` on a machine with no C
+# toolchain; the gate build (default features) always compiles it.
+btc-crypto = { path = "../btc-crypto", optional = true }
+# The durable one-shot nonce vault (M.6). Gated with the crypto backend:
+# the round machine needs both, and neither is part of the pure-Rust
+# codec build.
+btc-vault = { path = "../btc-vault", optional = true }
+# The audited Bitcoin library. Used ONLY for transaction serialization
+# and the BIP341 TapSighash (M.3): computing SIGHASH_DEFAULT by hand would
+# be reimplementing Taproot, which M.0.4 forbids and which would be less
+# safe than a reviewed implementation. The MuSig2/adaptor primitives
+# rust-bitcoin lacks come from the pinned secp backend. Optional, so the
+# pure-Rust `--no-default-features` build stays free of the C secp
+# rust-bitcoin would pull in.
+bitcoin = { version = "=0.32.5", optional = true }
+
+[features]
+# M.14.1. `real-bitcoin-crypto` is default-on: the annex requires the gate
+# job to prove the real backend compiled and ran; a suite that passes with
+# the backend absent has no gate value. The remaining features are armed
+# here and consumed by later build-order steps.
+default = ["real-bitcoin-crypto"]
+real-bitcoin-crypto = ["dep:btc-crypto", "dep:btc-vault", "dep:bitcoin"]
+bitcoin-core-rpc = []
+keystone-evidence = []
+# Test-only; guarded — see M.11.2. Never enabled by default.
+instrumented-tagged-hash = []
+
+[dev-dependencies]
+hex = "=0.4.3"
+proptest = "=1.7.0"
+# `bitcoin` is also the independent reference for the Taproot cross-check
+# of M.2.2 step 12; it is already pulled in as a (gated) production
+# dependency above, and the tests run with default features on.

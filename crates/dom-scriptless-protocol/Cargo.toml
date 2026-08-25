@@ -1,0 +1,20 @@
+[package]
+name = "dom-scriptless-protocol"
+license.workspace = true
+description = "Pure protocol state boundary for DOM Contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+dom-scriptless-crypto = { path = "../dom-scriptless-crypto" }
+# SessionPhaseV1 and its frozen §9.1 discriminants are owned by the Store, the
+# crate that owns the canonical Contracts codecs. The topology reuses that type
+# rather than redeclaring a second source of truth for already-signed bytes.
+dom-scriptless-store = { path = "../dom-scriptless-store" }
+dom-scriptless-types = { path = "../dom-scriptless-types" }
+
+[lints]
+workspace = true

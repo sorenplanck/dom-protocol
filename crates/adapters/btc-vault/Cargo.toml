@@ -1,0 +1,31 @@
+# One-shot Bitcoin nonce vault (Annex M M.6).
+#
+# Durable custody of the one-shot `session_secrand` reservation. The
+# uniqueness of `session_secrand` is a property of THIS vault, not of the
+# type system (M.6.1): the consumption of a reservation is persisted and
+# fsync'd before any derived PubNonce may leave the process, and a crash
+# after exposure aborts the session to the refund path rather than ever
+# rederiving a nonce.
+[package]
+name = "btc-vault"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+rusqlite = { workspace = true }
+blake2 = { version = "=0.10.6", default-features = false }
+# OS entropy for the one-shot secret randomness. 0.2 is already in the
+# lockfile via the Bitcoin stack; pinned to avoid a silent bump.
+getrandom = { version = "=0.2.16" }
+chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
+cap-std = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
+
+[dev-dependencies]
+hex = "=0.4.3"

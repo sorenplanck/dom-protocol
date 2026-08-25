@@ -1,0 +1,28 @@
+[package]
+name = "f7-anchor-authority"
+description = "Store-free real-chain anchor authority for DOM Interop F7"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+adapter-btc = { path = "../adapters/btc", default-features = false }
+bitcoin = "=0.32.5"
+dom-scriptless-chain-adapter.workspace = true
+kaystra-core = { path = "../kaystra-core", default-features = false }
+thiserror.workspace = true
+
+[dev-dependencies]
+static_assertions = "=1.1.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"

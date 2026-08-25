@@ -1,0 +1,105 @@
+[package]
+name = "dom-leg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+# The ONLY crate authorized to depend on dom-adaptor (§4.2, grep-gate in CI),
+# together with dom-vault (D-005). The real dependency sits behind the
+# `real-dom-adaptor` feature so the workspace compiles without a C toolchain;
+# the conformance CI (§9.1) and the F1+ phases enable it mandatorily.
+#
+# `dom-adaptor` does NOT re-export `SchnorrSignature`, `PublicKey`, or
+# `Transaction`; naming those types requires `dom-crypto` and `dom-consensus`
+# pinned at the SAME rev (see [workspace.dependencies] at the root).
+[features]
+default = []
+real-dom-adaptor = [
+  "dep:dom-adaptor",
+  "dep:dom-crypto",
+  "dep:dom-consensus",
+  "dep:dom-core",
+  "dep:dom-serialization",
+  "dep:rand_core",
+]
+f7-wallet-compositor = [
+  "real-dom-adaptor",
+  "dep:cap-std",
+  "dep:dom-scriptless-crypto",
+  "dep:dom-scriptless-identity-store",
+  "dep:dom-scriptless-store",
+  "dep:dom-scriptless-transport",
+  "dep:dom-wallet-core",
+  "dep:dom-wallet-core-recovery",
+  "dep:dom-wallet-core-protocol",
+  "dep:dom-wallet-core-sync",
+  "dep:dom-wallet-domain",
+  "dep:dom-wallet-remote-source",
+  "dep:hex",
+  "dep:reqwest",
+  "dep:serde",
+  "dep:serde_json",
+]
+# Never enabled by the production F7 runner. This exists only so retained
+# evidence fixtures may inject a completed refund signature while still
+# running the frozen DOM verifier.
+evidence-only = ["f7-wallet-compositor"]
+
+[dependencies]
+counterparty-api = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+dom-adaptor   = { workspace = true, optional = true }
+dom-crypto    = { workspace = true, optional = true }
+dom-consensus = { workspace = true, optional = true }
+dom-core      = { workspace = true, optional = true }
+# Used only by the SCAD0 differential test; pinned at the same rev.
+dom-serialization = { workspace = true, optional = true }
+cap-std = { workspace = true, optional = true }
+dom-scriptless-crypto = { workspace = true, optional = true }
+dom-scriptless-identity-store = { workspace = true, optional = true }
+dom-scriptless-store = { workspace = true, optional = true }
+dom-scriptless-transport = { workspace = true, optional = true }
+dom-wallet-core = { workspace = true, optional = true }
+dom-wallet-core-recovery = { workspace = true, optional = true }
+dom-wallet-core-protocol = { workspace = true, optional = true }
+dom-wallet-core-sync = { workspace = true, optional = true }
+dom-wallet-domain = { workspace = true, optional = true }
+dom-wallet-remote-source = { workspace = true, optional = true }
+hex = { version = "=0.4.3", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+# Operating-system CSPRNG for the two nonces per round. The pin seals its own
+# derivation (`SecretNoncePairV1`/`derive_secret_nonce_pair_v1` are
+# `compile_fail` for external consumers — lib.rs:13-22), so the leg generates
+# the scalars here and consumes them exactly once.
+rand_core = { version = "0.6.4", default-features = false, features = ["getrandom"], optional = true }
+
+[dev-dependencies]
+tempfile = "=3.24.0"  # aligned up to the Contracts pin at absorption (dev-only; exact pin preserved)
+
+# LAB (NOT RATIFIED): the composed-route level-1 proof drives the BTC and EVM
+# legs alongside the DOM leg to show one adaptor scalar binds all three. These
+# leg crates do NOT import the dom-adaptor pin, so the §4.2 boundary is intact.
+btc-crypto = { path = "../adapters/btc-crypto" }
+btc-secp-sys = { path = "../adapters/btc-secp-sys" }
+adapter-evm = { path = "../adapters/evm" }
+dom-adaptor = { workspace = true }
+dom-crypto = { workspace = true }
+dom-consensus = { workspace = true }
+
+# §8 differential against the pin's frozen SCAD0 corpus; ends at the real
+# consensus verifier. Only exists with the real backend.
+[[test]]
+name = "scad0_differential"
+required-features = ["real-dom-adaptor"]
+
+# LAB (NOT RATIFIED): composed cross-chain route proof, level 1 (cryptography).
+# One adaptor scalar t / point T binds the DOM, BTC and EVM legs at once.
+[[test]]
+name = "composed_routes"
+required-features = ["real-dom-adaptor"]

@@ -1,0 +1,18 @@
+[package]
+name = "uspe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+counterparty-api = { workspace = true }
+# F4 spec §5 (D-017, erratum E-1): the assurance objects reuse the frozen
+# F2 vocabulary — one definition of the types, never a divergent copy —
+# and the same pinned BLAKE2 the terms hash uses.
+kaystra-core = { path = "../kaystra-core" }
+blake2 = { version = "=0.10.6", default-features = false }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = "=1.7.0"

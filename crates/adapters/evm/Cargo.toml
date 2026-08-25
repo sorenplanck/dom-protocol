@@ -1,0 +1,33 @@
+[package]
+name = "adapter-evm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+# EVM counterparty adapter (F3). Implements `counterparty_api::CounterpartyAdapter`.
+#
+# Feature `rpc-http` is NOT default: the whole test suite runs offline against
+# the deterministic in-crate mock (`crate::mock`).
+[features]
+default = []
+rpc-http = ["dep:ureq"]
+
+[dependencies]
+counterparty-api = { workspace = true }
+thiserror = { workspace = true }
+# secp256k1 arithmetic, used ONLY for EVM-side address derivation
+# (`address(t*G)`); it is never a DOM primitive. See `binding` module header.
+k256 = { version = "0.13", default-features = false, features = ["arithmetic", "precomputed-tables", "std"] }
+# keccak256 for ABI/topic0/binding derivation.
+sha3 = { version = "0.10", default-features = false, features = ["std"] }
+# JSON-RPC envelope only. Never used as a cryptographic wire format (I14).
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["json", "tls"], optional = true }
+
+[dev-dependencies]
+proptest = "1"
+# Minimal `block_on` so the async trait surface can be exercised without
+# pulling a full async runtime into the workspace.
+pollster = "0.3"
+hex = "0.4"

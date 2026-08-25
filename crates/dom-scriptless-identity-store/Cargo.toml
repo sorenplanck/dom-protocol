@@ -1,0 +1,27 @@
+[package]
+name = "dom-scriptless-identity-store"
+license.workspace = true
+description = "Independent encrypted transport-identity custody for DOM Contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+argon2 = { version = "=0.5.3", default-features = false, features = ["alloc", "zeroize"] }
+cap-std = { version = "=4.0.2", default-features = false }
+chacha20poly1305 = { version = "=0.10.1", default-features = false }
+dom-crypto.workspace = true
+dom-scriptless-store = { path = "../dom-scriptless-store" }
+dom-scriptless-transport = { path = "../dom-scriptless-transport" }
+rand_core.workspace = true
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+static_assertions = "=1.1.0"
+tempfile = "=3.24.0"
+
+[lints]
+workspace = true

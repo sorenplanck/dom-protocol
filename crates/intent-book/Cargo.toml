@@ -1,0 +1,22 @@
+[package]
+name = "intent-book"
+description = "DOM Interop — the intent board: a two-phase cascade (private solver window, then public board) over the ratified RFQ flow, with merit privilege whose weights are operator configuration and have no default (NOT RATIFIED)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+# The board never re-implements admissibility or selection: it delegates
+# to the ratified F6 objects (I15).
+rfq = { path = "../rfq" }
+kaystra-core = { path = "../kaystra-core", default-features = false }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# The end-to-end proof quotes with the reference solver of this workspace.
+solver = { path = "../solver" }
+btc-crypto = { path = "../adapters/btc-crypto" }
+# Dev-only: the D-019 adversarial proves the relay refuses a board kind.
+# The library keeps NO runtime edge to the relay (OQ-S3).
+relay = { path = "../relay" }

@@ -1,0 +1,23 @@
+[package]
+name = "dom-scriptless-transport"
+license.workspace = true
+description = "Bounded transport shell for DOM Contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+dom-adaptor.workspace = true
+dom-crypto.workspace = true
+dom-scriptless-protocol = { path = "../dom-scriptless-protocol" }
+dom-scriptless-store = { path = "../dom-scriptless-store" }
+dom-scriptless-types = { path = "../dom-scriptless-types" }
+rand_core.workspace = true
+snow.workspace = true
+x25519-dalek.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

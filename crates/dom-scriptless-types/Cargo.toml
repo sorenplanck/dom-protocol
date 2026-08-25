@@ -1,0 +1,12 @@
+[package]
+name = "dom-scriptless-types"
+license.workspace = true
+description = "Bounded application types for DOM Contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[lints]
+workspace = true

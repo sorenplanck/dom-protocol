@@ -1,0 +1,33 @@
+[package]
+name = "route-composer"
+description = "DOM Interop — composed cross-chain route binding: two settlements, one adaptor point, fail-closed window/ordering/scalar guards (Foundation §1.2 DOM-hub; NOT RATIFIED)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+# Terms/types/state only — the composer never opens an engine itself, so the
+# persistence port stays out of its dependency surface (§4.2 boundary).
+kaystra-core = { path = "../kaystra-core", default-features = false }
+# The composed treasury rate, charged ONCE per route (fee ADR / fee_policy).
+rfq = { path = "../rfq" }
+# T = t*G recomputation for the scalar hand-off, through the SAME secp helper
+# the EVM leg and the level-1/level-2 composed proofs already use (I15: reuse,
+# never a second implementation).
+adapter-evm = { path = "../adapters/evm" }
+# Same exact hash crate and version as kaystra-core, uspe and rfq: one
+# BLAKE2b-256 implementation across every canonical digest (I15).
+blake2 = "=0.10.6"
+thiserror = { workspace = true }
+# Scalar hygiene: the revealed route scalar lives only in zeroizing memory.
+zeroize = { workspace = true }
+
+[dev-dependencies]
+# The integration proof drives two REAL durable engines through the composer,
+# mirroring the level-2 composed-routes evidence.
+kaystra-core = { path = "../kaystra-core" }
+f2-harness = { path = "../../../dom-interop/crates/f2-harness" }  # dev-only: audit harness, retained in the residual Interop repository (absorption of 2026-08-25)
+# Property-based invariants of the ladder, the digest and the hand-off
+# (same exact pin as rfq and kaystra-core).
+proptest = "=1.7.0"

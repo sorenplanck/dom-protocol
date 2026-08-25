@@ -1,0 +1,40 @@
+[package]
+name = "relay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[features]
+# The A10 verification backend (D-013). Default-on: a Relay build that
+# cannot verify signatures has no gate value, and the fallback REFUSES
+# every signature rather than accepting one it cannot check. Off only
+# for a `--no-default-features` build on a machine with no C toolchain.
+default = ["real-bip340", "production-durable"]
+real-bip340 = ["dep:btc-crypto"]
+# Durable SQLite/WAL production queue. Default-on for the production Relay;
+# separable so the historical no-default codec build still needs no C toolchain.
+production-durable = ["dep:rusqlite", "dep:rustix"]
+# Explicit laboratory-only process/database-loss controls. Production builds
+# do not contain destructive Relay fault entry points.
+relay-fault-injection = ["production-durable"]
+
+[dependencies]
+kaystra-core = { path = "../kaystra-core" }
+thiserror = { workspace = true }
+# BIP340 verification through the PINNED D-013 backend — the single
+# cryptographic authority (I15). No new primitive, no key material here.
+btc-crypto = { path = "../adapters/btc-crypto", optional = true }
+# Same exact hash crate and version as kaystra-core, uspe and rfq: one
+# BLAKE2b-256 implementation across every canonical digest (I15).
+blake2 = "=0.10.6"
+# The Relay production queue uses the already pinned workspace SQLite/WAL
+# backend. It remains a separate database from the participant-authoritative
+# Store; the Relay is transport only and never becomes an outcome authority.
+rusqlite = { workspace = true, optional = true }
+# Owner/mode checks and the retained single-writer lock use the same pinned
+# Linux syscall facade as the other owner-only F7 stores.
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"], optional = true }
+
+[dev-dependencies]
+tempfile = "=3.24.0"  # aligned up to the Contracts pin at absorption (dev-only; exact pin preserved)

@@ -1,0 +1,29 @@
+# F5 pinned cryptographic backend (Annex M v3.2, M.1.2 / M.17 step 1).
+#
+# This crate compiles the VENDORED secp256k1-zkp C library and exposes the
+# minimal FFI surface the Bitcoin leg needs: MuSig2 (BIP327) with adaptor
+# signatures, Taproot x-only tweaking, BIP340 verification and tagged
+# hashing. Pin provenance (see VENDOR.md):
+#
+#   upstream secp256k1-zkp revision 6152622613fdf1c5af6f31f74c427c4e9ee120ce
+#   vendored via secp256k1-zkp-sys 0.10.1 (crates.io), whose tree ships the
+#   symbols pre-renamed; this crate re-prefixes them to
+#   `dominterop_secp_v0_10_0_` so it can NEVER collide at link time with the
+#   published zkp-sys that dom-crypto pulls into real-dom-adaptor builds.
+#
+# The `links` key makes cargo refuse two crates claiming the same native
+# library, turning any accidental duplication into a build error.
+[package]
+name = "btc-secp-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+links = "dominterop_secp_v0_10_0"
+build = "build.rs"
+
+[dependencies]
+
+[build-dependencies]
+cc = "1"

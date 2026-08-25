@@ -1,0 +1,27 @@
+[package]
+name = "adapter-dom-real"
+description = "Real DOM node source and Scriptless evidence verifier for F7"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+blake2.workspace = true
+counterparty-api.workspace = true
+dom-leg = { workspace = true, features = ["real-dom-adaptor"] }
+dom-scriptless-chain-adapter.workspace = true
+dom-scriptless-store.workspace = true
+kaystra-core = { path = "../../kaystra-core" }
+thiserror.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"

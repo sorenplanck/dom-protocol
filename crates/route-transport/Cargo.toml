@@ -1,0 +1,22 @@
+[package]
+name = "route-transport"
+description = "DOM Interop — the route's DSC1 messages over Relay V1 as RouteTransportV1 (0x0005, D-029): sender/recipient bridge with the full §5.4 pipeline; closes the F7 §7.1 open row legitimately (NOT RATIFIED)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+[dependencies]
+# Relay V1: the ratified store-and-forward reference and the §5.4
+# validation pipeline, at its DEFAULT feature set — the shipped and
+# gate-tested combination (real-bip340 + production-durable). A bridge
+# that cannot verify what it accepts has no value.
+relay = { path = "../relay" }
+# The pinned D-013 BIP340 backend for envelope signing (I15: the same
+# backend the Relay verifies with).
+btc-crypto = { path = "../adapters/btc-crypto" }
+thiserror = { workspace = true }
+# Digest32 and the shared id types (the same alias the relay itself uses).
+kaystra-core = { path = "../kaystra-core", default-features = false }
+# The sender's signing secret lives only in zeroizing memory (I6).
+zeroize = { workspace = true }
