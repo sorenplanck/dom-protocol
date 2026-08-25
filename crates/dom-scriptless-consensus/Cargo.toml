@@ -1,0 +1,14 @@
+# Off-chain Scriptless projections of DOM transactions. Reads the node's
+# canonical types; changes nothing about them.
+[package]
+name = "dom-scriptless-consensus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+
+[dependencies]
+dom-consensus = { workspace = true }
+dom-core = { workspace = true }
+dom-crypto = { workspace = true }
