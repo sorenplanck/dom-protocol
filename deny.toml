@@ -66,3 +66,56 @@ required-git-spec = "rev"
 allow-git = [
     "https://github.com/BlockstreamResearch/rust-secp256k1-zkp",
 ]
+
+# ── DOM interoperability layer, decision D-ORQ-10 ────────────────────────────
+# (a) The absorbed crates are all `publish = false` (D-ORQ-9). The Interop
+# policy ratified as A-015/A-016 checks private crates deliberately, so the
+# same is made explicit here rather than left to a default.
+[licenses.private]
+ignore = false
+
+# (b) The two nominal exceptions of A-015/A-016, transported verbatim with
+# their justification. They are exceptions for THESE crates by name; no
+# licence is added to the allow-list above, which is not reduced either --
+# it exists for this workspace's own graph (the Tauri/egui shell).
+[[licenses.exceptions]]
+# Only the Apache-2.0 branch of this crate's dual licence is accepted.
+crate = "r-efi"
+allow = ["Apache-2.0"]
+
+[[licenses.exceptions]]
+# MPL-2.0 accepted for this crate alone; source availability noted in A-015.
+crate = "option-ext"
+allow = ["MPL-2.0"]
+
+[[licenses.exceptions]]
+# FINDING of the absorption, resolved with the NARROWEST mechanism available.
+# `hex_lit` (reached through bitcoin 0.32.5 <- adapter-btc) declares MITNFA.
+# The ratified A-015/A-016 allow-list PERMITS MITNFA; this workspace's own
+# list simply never needed it, because the two lists are not nested. This is
+# therefore alignment with the stricter governing policy, not a widening
+# beyond it: the strict-closure check (laboratory/scripts/
+# absorbed_licence_closure) already accepts MITNFA and stays green.
+# Granted to this crate BY NAME rather than adding MITNFA to the general
+# allow-list above, which is left untouched. Reversible by the operator.
+crate = "hex_lit"
+allow = ["MITNFA"]
+
+[bans]
+# F1 targets git-source hygiene + advisories + licenses, not version dedup.
+# Keep version/wildcard hygiene non-failing so the supply-chain signal stays clean.
+multiple-versions = "allow"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# Every git dependency MUST be pinned by an exact commit rev (no branch/tag).
+# This is the rule that fires on secp256k1-zkp { branch = "master" }.
+required-git-spec = "rev"
+# The upstream Blockstream repo is a legitimate source — but only when pinned by
+# rev (enforced by required-git-spec above). Listing it here does NOT exempt the
+# rev requirement.
+allow-git = [
+    "https://github.com/BlockstreamResearch/rust-secp256k1-zkp",
+]

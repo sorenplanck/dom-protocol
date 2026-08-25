@@ -1,0 +1,397 @@
+{
+  "fixture": "DOM Scriptless Contracts Phase 1 KDF V1 — independent KAT inputs only",
+  "status": "FINAL CANDIDATE — EFFECTIVE ONLY AFTER VALID DETACHED RATIFICATION",
+  "date": "2026-08-04",
+  "normative_source": "NAR-001 — Phase 1 Cryptographic Assignment Record",
+  "ratification": {
+    "scheme": "Minisign detached signature",
+    "key_id": "74197A95CA309CF0",
+    "public_key": "RWTwnDDKlXoZdG3obVRiLPfVRHr17E0Fj2GN8IZ2rBkipRZvIIW6PLJ3",
+    "expected_signature_file": "kat_inputs_v2.en.json.minisig"
+  },
+  "independence_rule": "This file contains inputs and validation classifications only. It contains no KDF, point, transcript, signature, adaptation, or extraction outputs. The independent implementation must commit its code and outputs before inspecting production G1a code or receiving any expected output.",
+  "case_expansion_rule": "For every mutation, deep-clone the named base_case, replace each complete top-level field listed in replace, and make no other change. Objects are replaced as complete values; arrays are replaced as complete arrays. Unknown fields, missing base cases, duplicate replacement keys, and recursive inheritance are errors.",
+  "encoding": {
+    "hex": "lowercase, even-length, no 0x prefix",
+    "integers": "little-endian at the exact widths named by each field",
+    "points": "33-byte canonical compressed SEC1",
+    "scalars": "32-byte canonical big-endian unless a negative case deliberately violates the scalar rule",
+    "context": "context_version_u16_le || chain_id || session_id || purpose_u8 || direction_u8 || signing_phase_u16_le || template_hash || message_digest || transcript_hash || retry_counter_u64_le || participant_count_u16_le || participant_public_keys || participant_index_u16_le || adaptor_presence_u8 || adaptor_point_if_present"
+  },
+  "curve": {
+    "name": "secp256k1",
+    "order_n_be32": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"
+  },
+  "known_scalar_points": {
+    "signing_share_07_be32": "0707070707070707070707070707070707070707070707070707070707070707",
+    "signing_public_key_07_sec1": "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+    "signing_share_08_be32": "0808080808080808080808080808080808080808080808080808080808080808",
+    "signing_public_key_08_sec1": "03f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b",
+    "counterparty_scalar_03_be32": "0000000000000000000000000000000000000000000000000000000000000003",
+    "counterparty_public_key_03_sec1": "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+    "adaptor_secret_05_be32": "0000000000000000000000000000000000000000000000000000000000000005",
+    "adaptor_point_05_sec1": "022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4"
+  },
+  "registries": {
+    "purpose_v1": {
+      "01": "Refund",
+      "02": "ClaimAdaptor",
+      "03": "Funding",
+      "04": "Sponsor — codec only; strict Phase 1 derivation rejects"
+    },
+    "direction_v1": {
+      "01": "Initiator",
+      "02": "Responder"
+    },
+    "signing_phase_v1_u16_le": {
+      "0001": "SigNonceCommit",
+      "0101": "SigNonceReveal",
+      "0201": "SigBinding",
+      "0301": "SigPartial",
+      "0401": "SigAdapt",
+      "0501": "SigExtract"
+    }
+  },
+  "base_cases": [
+    {
+      "name": "B1-refund-initiator-commit",
+      "expected": "accept",
+      "context_version_u16_le": "0100",
+      "chain_id_32": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "session_id_32": "0101010101010101010101010101010101010101010101010101010101010101",
+      "purpose_u8": "01",
+      "direction_u8": "01",
+      "signing_phase_u16_le": "0001",
+      "template_hash_32": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "message_digest_32": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "transcript_hash_32": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "retry_counter_u64_le": "0000000000000000",
+      "participant_count_u16_le": "0200",
+      "participant_public_keys_sec1": [
+        "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+        "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+      ],
+      "participant_index_u16_le": "0000",
+      "signing_share_be32": "0707070707070707070707070707070707070707070707070707070707070707",
+      "signing_public_key_sec1": "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+      "adaptor_presence_u8": "00",
+      "adaptor_point_sec1": null,
+      "adaptor_secret_be32": null,
+      "aux_rand_32": "0909090909090909090909090909090909090909090909090909090909090909"
+    },
+    {
+      "name": "B2-claim-adaptor-initiator-commit",
+      "expected": "accept",
+      "context_version_u16_le": "0100",
+      "chain_id_32": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "session_id_32": "0202020202020202020202020202020202020202020202020202020202020202",
+      "purpose_u8": "02",
+      "direction_u8": "01",
+      "signing_phase_u16_le": "0001",
+      "template_hash_32": "abababababababababababababababababababababababababababababababab",
+      "message_digest_32": "bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc",
+      "transcript_hash_32": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "retry_counter_u64_le": "0000000000000000",
+      "participant_count_u16_le": "0200",
+      "participant_public_keys_sec1": [
+        "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+        "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+      ],
+      "participant_index_u16_le": "0000",
+      "signing_share_be32": "0707070707070707070707070707070707070707070707070707070707070707",
+      "signing_public_key_sec1": "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+      "adaptor_presence_u8": "01",
+      "adaptor_point_sec1": "022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+      "adaptor_secret_be32": "0000000000000000000000000000000000000000000000000000000000000005",
+      "aux_rand_32": "0909090909090909090909090909090909090909090909090909090909090909"
+    },
+    {
+      "name": "B3-funding-initiator-commit",
+      "expected": "accept",
+      "context_version_u16_le": "0100",
+      "chain_id_32": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "session_id_32": "0303030303030303030303030303030303030303030303030303030303030303",
+      "purpose_u8": "03",
+      "direction_u8": "01",
+      "signing_phase_u16_le": "0001",
+      "template_hash_32": "acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac",
+      "message_digest_32": "bdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbd",
+      "transcript_hash_32": "cececececececececececececececececececececececececececececececece",
+      "retry_counter_u64_le": "0000000000000000",
+      "participant_count_u16_le": "0200",
+      "participant_public_keys_sec1": [
+        "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+        "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+      ],
+      "participant_index_u16_le": "0000",
+      "signing_share_be32": "0707070707070707070707070707070707070707070707070707070707070707",
+      "signing_public_key_sec1": "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+      "adaptor_presence_u8": "00",
+      "adaptor_point_sec1": null,
+      "adaptor_secret_be32": null,
+      "aux_rand_32": "0909090909090909090909090909090909090909090909090909090909090909"
+    }
+  ],
+  "accepted_mutations": [
+    {
+      "name": "P1-direction-responder",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "direction_u8": "02" },
+      "expected": "accept and change context, seed, k1, and k2"
+    },
+    {
+      "name": "P2-phase-reveal",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "signing_phase_u16_le": "0101" },
+      "expected": "accept and change context, seed, k1, and k2"
+    },
+    {
+      "name": "P3-phase-binding",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "signing_phase_u16_le": "0201" },
+      "expected": "accept and change context, seed, k1, and k2"
+    },
+    {
+      "name": "P4-phase-partial",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "signing_phase_u16_le": "0301" },
+      "expected": "accept and change context, seed, k1, and k2"
+    },
+    {
+      "name": "P5-phase-adapt",
+      "base_case": "B2-claim-adaptor-initiator-commit",
+      "replace": { "signing_phase_u16_le": "0401" },
+      "expected": "accept and change context, seed, k1, and k2"
+    },
+    {
+      "name": "P6-phase-extract",
+      "base_case": "B2-claim-adaptor-initiator-commit",
+      "replace": { "signing_phase_u16_le": "0501" },
+      "expected": "accept and change context, seed, k1, and k2"
+    },
+    {
+      "name": "P7-aux-changed",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "aux_rand_32": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a" },
+      "expected": "accept and change mask, seed, k1, and k2"
+    },
+    {
+      "name": "P8-session-changed",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "session_id_32": "1111111111111111111111111111111111111111111111111111111111111111" },
+      "expected": "accept and change context, seed, k1, and k2"
+    },
+    {
+      "name": "P9-template-changed",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "template_hash_32": "1212121212121212121212121212121212121212121212121212121212121212" },
+      "expected": "accept and change context, seed, k1, and k2"
+    },
+    {
+      "name": "P10-message-changed",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "message_digest_32": "1313131313131313131313131313131313131313131313131313131313131313" },
+      "expected": "accept and change context, seed, k1, and k2"
+    },
+    {
+      "name": "P11-transcript-changed",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "transcript_hash_32": "1414141414141414141414141414141414141414141414141414141414141414" },
+      "expected": "accept and change context, seed, k1, and k2"
+    },
+    {
+      "name": "P12-retry-counter-one",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "retry_counter_u64_le": "0100000000000000" },
+      "expected": "accept only before public export and change context, seed, k1, and k2"
+    },
+    {
+      "name": "P13-signing-share-eight",
+      "base_case": "B2-claim-adaptor-initiator-commit",
+      "replace": {
+        "signing_share_be32": "0808080808080808080808080808080808080808080808080808080808080808",
+        "signing_public_key_sec1": "03f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b",
+        "participant_public_keys_sec1": [
+          "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+          "03f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b"
+        ],
+        "participant_index_u16_le": "0100"
+      },
+      "expected": "accept and change context, mask input, seed, k1, and k2"
+    }
+  ],
+  "rejected_mutations": [
+    {
+      "name": "N1-purpose-zero",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "purpose_u8": "00" },
+      "expected": "reject unknown PurposeV1 before hashing"
+    },
+    {
+      "name": "N2-purpose-sponsor-strict-phase1",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "purpose_u8": "04" },
+      "expected": "codec accepts Sponsor; strict Phase 1 derivation rejects before hashing"
+    },
+    {
+      "name": "N3-purpose-unknown",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "purpose_u8": "05" },
+      "expected": "reject unknown PurposeV1 before hashing"
+    },
+    {
+      "name": "N4-direction-invalid",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "direction_u8": "03" },
+      "expected": "reject unknown DirectionV1 before hashing"
+    },
+    {
+      "name": "N5-base-phase-outside-signing-subregistry",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "signing_phase_u16_le": "0000" },
+      "expected": "Created is valid in the base phase registry but rejected by SigningPhaseV1"
+    },
+    {
+      "name": "N6-session-zero",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "session_id_32": "0000000000000000000000000000000000000000000000000000000000000000" },
+      "expected": "reject before hashing"
+    },
+    {
+      "name": "N7-participant-duplicate",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": {
+        "participant_public_keys_sec1": [
+          "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+          "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f"
+        ]
+      },
+      "expected": "reject duplicate roster independently from ordering"
+    },
+    {
+      "name": "N8-participant-unsorted",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": {
+        "participant_public_keys_sec1": [
+          "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+          "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f"
+        ],
+        "participant_index_u16_le": "0100"
+      },
+      "expected": "reject out-of-order roster independently from duplication"
+    },
+    {
+      "name": "N9-participant-invalid-prefix",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": {
+        "participant_public_keys_sec1": [
+          "ff989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+          "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+        ]
+      },
+      "expected": "reject invalid SEC1 prefix before scalar arithmetic"
+    },
+    {
+      "name": "N10-participant-index-out-of-range",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "participant_index_u16_le": "0200" },
+      "expected": "reject index equal to participant count"
+    },
+    {
+      "name": "N11-claim-adaptor-identity",
+      "base_case": "B2-claim-adaptor-initiator-commit",
+      "replace": { "adaptor_point_sec1": "000000000000000000000000000000000000000000000000000000000000000000" },
+      "expected": "reject identity/non-SEC1 adaptor before scalar arithmetic"
+    },
+    {
+      "name": "N12-secret-public-key-mismatch",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "signing_share_be32": "0808080808080808080808080808080808080808080808080808080808080808" },
+      "expected": "reject because signing_share*G does not equal signing_public_key or roster entry"
+    },
+    {
+      "name": "N13-claim-missing-adaptor",
+      "base_case": "B2-claim-adaptor-initiator-commit",
+      "replace": {
+        "adaptor_presence_u8": "00",
+        "adaptor_point_sec1": null,
+        "adaptor_secret_be32": null
+      },
+      "expected": "reject ClaimAdaptor without an adaptor point"
+    },
+    {
+      "name": "N14-refund-unexpected-adaptor",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": {
+        "adaptor_presence_u8": "01",
+        "adaptor_point_sec1": "022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "adaptor_secret_be32": "0000000000000000000000000000000000000000000000000000000000000005"
+      },
+      "expected": "reject unexpected adaptor for Refund"
+    },
+    {
+      "name": "N15-funding-unexpected-adaptor",
+      "base_case": "B3-funding-initiator-commit",
+      "replace": {
+        "adaptor_presence_u8": "01",
+        "adaptor_point_sec1": "022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+        "adaptor_secret_be32": "0000000000000000000000000000000000000000000000000000000000000005"
+      },
+      "expected": "reject unexpected adaptor for Funding"
+    },
+    {
+      "name": "N16-signing-share-zero",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "signing_share_be32": "0000000000000000000000000000000000000000000000000000000000000000" },
+      "expected": "reject zero scalar before hashing"
+    },
+    {
+      "name": "N17-signing-share-equal-group-order",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "signing_share_be32": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141" },
+      "expected": "reject scalar equal to group order before hashing"
+    },
+    {
+      "name": "N18-adaptor-presence-invalid",
+      "base_case": "B2-claim-adaptor-initiator-commit",
+      "replace": { "adaptor_presence_u8": "02" },
+      "expected": "reject noncanonical optionality discriminant"
+    },
+    {
+      "name": "N19-context-version-unknown",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "context_version_u16_le": "0200" },
+      "expected": "reject unknown context version"
+    },
+    {
+      "name": "N20-chain-id-zero",
+      "base_case": "B1-refund-initiator-commit",
+      "replace": { "chain_id_32": "0000000000000000000000000000000000000000000000000000000000000000" },
+      "expected": "reject untrusted/all-zero chain ID"
+    }
+  ],
+  "required_independent_outputs_per_accepted_case": [
+    "canonical_context_bytes",
+    "aux_tag_input_bytes",
+    "mask",
+    "masked_signing_share",
+    "seed_tag_input_bytes",
+    "seed",
+    "k1_wide_digest_0_tag_input_bytes",
+    "k1_wide_digest_0",
+    "k1_wide_digest_1_tag_input_bytes",
+    "k1_wide_digest_1",
+    "W_1",
+    "k1_be32",
+    "k2_wide_digest_0_tag_input_bytes",
+    "k2_wide_digest_0",
+    "k2_wide_digest_1_tag_input_bytes",
+    "k2_wide_digest_1",
+    "W_2",
+    "k2_be32",
+    "R_i1_sec1",
+    "R_i2_sec1"
+  ],
+  "cross_implementation_rule": "After the independent implementation and outputs are committed, compare every listed intermediate byte-for-byte against production. A final-scalar-only match is insufficient. Stop at the first divergence and do not alter the independent generator merely to agree.",
+  "ratification_note": "This fixture becomes frozen only when this exact JSON file and the exact NAR-001 candidate are both covered by valid detached signatures from the ratification key. Any byte change after signing invalidates the signature and freeze."
+}

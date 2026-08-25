@@ -1,0 +1,327 @@
+{
+  "fixture": "DOM Scriptless Contracts Phase 1 complete two-party adaptor vector — supplemental inputs only",
+  "status": "FINAL CANDIDATE — EFFECTIVE ONLY AFTER VALID DETACHED RATIFICATION",
+  "date": "2026-08-04",
+  "normative_sources": [
+    "Ratified NAR-001 — Phase 1 Cryptographic Assignment Record",
+    "Accepted ADR-0013 — two-nonce scheme and binding",
+    "Signed KAT V2 input encoding conventions",
+    "crates/dom-crypto/src/hash.rs::blake2b_256_tagged",
+    "crates/dom-crypto/src/schnorr.rs::schnorr_challenge"
+  ],
+  "ratification": {
+    "scheme": "Minisign detached signature",
+    "key_id": "74197A95CA309CF0",
+    "public_key": "RWTwnDDKlXoZdG3obVRiLPfVRHr17E0Fj2GN8IZ2rBkipRZvIIW6PLJ3",
+    "expected_signature_file": "kat_two_party_adaptor_inputs_v1.en.json.minisig"
+  },
+  "independence_rule": "This candidate contains input bytes and acceptance classifications only. It contains no nonce, commitment, binding, challenge, partial-signature, pre-signature, adaptation, extraction, or final-signature output. Expected outputs must be generated and committed by the independent implementation only after this exact candidate is ratified.",
+  "case_expansion_rule": "For every mutation, deep-clone base_case, replace each complete top-level field listed in replace, and make no other change. Arrays are replaced as complete arrays. Unknown fields, duplicate replacement keys, and recursive inheritance are errors.",
+  "encoding": {
+    "hex": "lowercase, even-length, no 0x prefix",
+    "integers": "little-endian at the exact widths named by each field",
+    "points": "33-byte canonical compressed SEC1",
+    "secret_scalars": "32-byte canonical big-endian in [1,n-1] unless a negative mutation deliberately violates the rule",
+    "context": "context_version_u16_le || chain_id_32 || session_id_32 || purpose_u8 || direction_u8 || signing_phase_u16_le || template_hash_32 || message_digest_32 || transcript_hash_32 || retry_counter_u64_le || participant_count_u16_le || participant_public_keys_sec1 || participant_index_u16_le || adaptor_presence_u8 || adaptor_point_sec1_if_present",
+    "signature": "R_hat_compressed_sec1_33 || s_be32_32"
+  },
+  "curve": {
+    "name": "secp256k1",
+    "order_n_be32": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"
+  },
+  "closed_tags": {
+    "secret_nonce_aux": "DOM:scriptless-secret-nonce-aux:v1",
+    "secret_nonce_seed": "DOM:scriptless-secret-nonce-seed:v1",
+    "secret_nonce_wide": "DOM:scriptless-secret-nonce-wide:v1",
+    "nonce_commitment": "DOM:scriptless-nonce-commit:v1",
+    "nonce_binding": "DOM:scriptless-sig-nonce-bind:v1",
+    "kernel_challenge": "DOM:kernel-sig:v1"
+  },
+  "authoritative_hash": {
+    "definition": "BLAKE2b-256(u16_le(len(tag_ascii)) || tag_ascii || data)",
+    "digest_size_bytes": 32,
+    "key": null,
+    "salt": null,
+    "personalization": null
+  },
+  "authoritative_kernel_challenge": {
+    "data": "R_hat_compressed_sec1_33 || aggregate_excess_compressed_sec1_33 || chain_id_32 || kernel_message_digest_32",
+    "tag": "DOM:kernel-sig:v1",
+    "mapping": "pass the 32-byte tagged digest byte-exactly to the authoritative DOM big-endian scalar parser; the current DOM challenge boundary accepts canonical scalars in [0,n-1] and rejects values greater than or equal to n"
+  },
+  "derivation_contract": {
+    "participant_public_nonces": "For each participant j, derive (k_j1,k_j2) from that participant's secret share, independent aux_rand_32, and validated canonical context; then R_j1=k_j1*G and R_j2=k_j2*G.",
+    "commitment": "Apply the accepted ADR-0013 canonical nonce-commitment grammar and tag to each participant's ordered public nonce pair.",
+    "binding": "Apply the accepted ADR-0013 canonical binding grammar to the explicitly counted participant list in binding_participant_order_u16_le order; ClaimAdaptor appends the canonical adaptor point.",
+    "effective_nonce": "R_j=R_j1+b*R_j2",
+    "aggregate_nonce": "R=sum(R_j) in participant-index order",
+    "adaptor_nonce": "R_hat=R+T",
+    "aggregate_excess": "X=sum(aggregate_excess_public_keys_sec1) in the listed order",
+    "partial": "s_j_hat=k_j1+b*k_j2+e*x_j",
+    "partial_verification": "s_j_hat*G==R_j+e*X_j",
+    "aggregate_pre_signature": "s_hat=sum(s_j_hat)",
+    "adaptation": "s=s_hat+t",
+    "extraction": "t=s-s_hat and t*G==T",
+    "final_verification": "R_hat_compressed_sec1_33 || s_be32_32 must pass the unchanged real DOM verifier"
+  },
+  "base_case": {
+    "name": "S1-two-party-claim-adaptor",
+    "expected": "accept",
+    "context_version_u16_le": "0100",
+    "chain_id_32": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "session_id_32": "4242424242424242424242424242424242424242424242424242424242424242",
+    "purpose_u8": "02",
+    "signing_phase_u16_le": "0001",
+    "template_hash_32": "abababababababababababababababababababababababababababababababab",
+    "message_digest_32": "bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc",
+    "transcript_hash_32": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "participant_count_u16_le": "0200",
+    "participant_public_keys_sec1": [
+      "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+      "03f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b"
+    ],
+    "binding_participant_order_u16_le": [
+      "0000",
+      "0100"
+    ],
+    "aggregate_excess_public_keys_sec1": [
+      "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+      "03f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b"
+    ],
+    "participant_0_index_u16_le": "0000",
+    "participant_0_direction_u8": "01",
+    "participant_0_retry_counter_u64_le": "0000000000000000",
+    "participant_0_signing_share_be32": "0707070707070707070707070707070707070707070707070707070707070707",
+    "participant_0_signing_public_key_sec1": "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+    "participant_0_aux_rand_32": "0909090909090909090909090909090909090909090909090909090909090909",
+    "participant_1_index_u16_le": "0100",
+    "participant_1_direction_u8": "02",
+    "participant_1_retry_counter_u64_le": "0000000000000000",
+    "participant_1_signing_share_be32": "0808080808080808080808080808080808080808080808080808080808080808",
+    "participant_1_signing_public_key_sec1": "03f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b",
+    "participant_1_aux_rand_32": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+    "adaptor_presence_u8": "01",
+    "adaptor_secret_be32": "0000000000000000000000000000000000000000000000000000000000000005",
+    "adaptor_point_sec1": "022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+    "kernel_challenge_chain_id_32": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "kernel_challenge_message_digest_32": "bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc"
+  },
+  "accepted_mutations": [
+    {
+      "name": "SP1-participant-0-aux-changed",
+      "replace": {
+        "participant_0_aux_rand_32": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+      },
+      "expected": "accept and change participant 0 nonce pair and every dependent public value"
+    },
+    {
+      "name": "SP2-participant-1-aux-changed",
+      "replace": {
+        "participant_1_aux_rand_32": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+      },
+      "expected": "accept and change participant 1 nonce pair and every dependent public value"
+    },
+    {
+      "name": "SP3-participant-0-retry-one",
+      "replace": {
+        "participant_0_retry_counter_u64_le": "0100000000000000"
+      },
+      "expected": "accept only before public export and change participant 0 nonce pair"
+    },
+    {
+      "name": "SP4-participant-1-retry-one",
+      "replace": {
+        "participant_1_retry_counter_u64_le": "0100000000000000"
+      },
+      "expected": "accept only before public export and change participant 1 nonce pair"
+    },
+    {
+      "name": "SP5-session-changed",
+      "replace": {
+        "session_id_32": "4343434343434343434343434343434343434343434343434343434343434343"
+      },
+      "expected": "accept and change both canonical contexts, nonce pairs, and dependent public values"
+    },
+    {
+      "name": "SP6-phase-reveal",
+      "replace": {
+        "signing_phase_u16_le": "0101"
+      },
+      "expected": "accept and change both canonical contexts and nonce pairs"
+    },
+    {
+      "name": "SP7-phase-binding",
+      "replace": {
+        "signing_phase_u16_le": "0201"
+      },
+      "expected": "accept and change both canonical contexts and nonce pairs"
+    },
+    {
+      "name": "SP8-role-owner-swapped",
+      "replace": {
+        "participant_0_direction_u8": "02",
+        "participant_1_direction_u8": "01"
+      },
+      "expected": "accept; roster index is independent from protocol role, and both contexts change"
+    }
+  ],
+  "rejected_mutations": [
+    {
+      "name": "SN1-purpose-refund-with-adaptor",
+      "replace": { "purpose_u8": "01" },
+      "expected": "reject unexpected adaptor for Refund before nonce derivation"
+    },
+    {
+      "name": "SN2-purpose-sponsor-strict-phase1",
+      "replace": { "purpose_u8": "04" },
+      "expected": "codec accepts Sponsor; strict Phase 1 derivation rejects"
+    },
+    {
+      "name": "SN3-purpose-unknown",
+      "replace": { "purpose_u8": "05" },
+      "expected": "reject unknown PurposeV1"
+    },
+    {
+      "name": "SN4-claim-missing-adaptor",
+      "replace": {
+        "adaptor_presence_u8": "00",
+        "adaptor_secret_be32": null,
+        "adaptor_point_sec1": null
+      },
+      "expected": "reject ClaimAdaptor without adaptor input"
+    },
+    {
+      "name": "SN5-adaptor-invalid-prefix",
+      "replace": {
+        "adaptor_point_sec1": "ff2f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4"
+      },
+      "expected": "reject invalid SEC1 adaptor point"
+    },
+    {
+      "name": "SN6-adaptor-secret-point-mismatch",
+      "replace": {
+        "adaptor_secret_be32": "0000000000000000000000000000000000000000000000000000000000000006"
+      },
+      "expected": "reject because adaptor_secret*G does not equal adaptor_point"
+    },
+    {
+      "name": "SN7-roster-reversed",
+      "replace": {
+        "participant_public_keys_sec1": [
+          "03f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b",
+          "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f"
+        ]
+      },
+      "expected": "reject roster not strictly ascending"
+    },
+    {
+      "name": "SN8-roster-duplicate",
+      "replace": {
+        "participant_public_keys_sec1": [
+          "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f",
+          "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f"
+        ]
+      },
+      "expected": "reject duplicate participant"
+    },
+    {
+      "name": "SN9-participant-0-index-mismatch",
+      "replace": { "participant_0_index_u16_le": "0100" },
+      "expected": "reject signer not located at participant 0 context index"
+    },
+    {
+      "name": "SN10-participant-1-index-out-of-range",
+      "replace": { "participant_1_index_u16_le": "0200" },
+      "expected": "reject index equal to participant count"
+    },
+    {
+      "name": "SN11-participant-1-scalar-zero",
+      "replace": {
+        "participant_1_signing_share_be32": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expected": "reject zero signing scalar"
+    },
+    {
+      "name": "SN12-participant-1-scalar-equal-order",
+      "replace": {
+        "participant_1_signing_share_be32": "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141"
+      },
+      "expected": "reject signing scalar equal to group order"
+    },
+    {
+      "name": "SN13-participant-1-secret-public-mismatch",
+      "replace": {
+        "participant_1_signing_share_be32": "0707070707070707070707070707070707070707070707070707070707070707"
+      },
+      "expected": "reject signing share/public key mismatch"
+    },
+    {
+      "name": "SN14-two-initiators",
+      "replace": { "participant_1_direction_u8": "01" },
+      "expected": "reject incomplete two-party role assignment"
+    },
+    {
+      "name": "SN15-chain-zero",
+      "replace": {
+        "chain_id_32": "0000000000000000000000000000000000000000000000000000000000000000",
+        "kernel_challenge_chain_id_32": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expected": "reject all-zero/untrusted chain ID"
+    },
+    {
+      "name": "SN16-kernel-chain-diverges-from-context",
+      "replace": {
+        "kernel_challenge_chain_id_32": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "expected": "reject challenge chain ID that differs from canonical context"
+    },
+    {
+      "name": "SN17-kernel-message-diverges-from-context",
+      "replace": {
+        "kernel_challenge_message_digest_32": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+      },
+      "expected": "reject challenge message that differs from canonical context"
+    },
+    {
+      "name": "SN18-base-phase-outside-signing-subregistry",
+      "replace": { "signing_phase_u16_le": "0000" },
+      "expected": "reject Created as outside SigningPhaseV1"
+    },
+    {
+      "name": "SN19-participant-0-aux-wrong-length",
+      "replace": { "participant_0_aux_rand_32": "0909" },
+      "expected": "reject non-32-byte auxiliary randomness"
+    },
+    {
+      "name": "SN20-aggregate-excess-input-order-diverges",
+      "replace": {
+        "aggregate_excess_public_keys_sec1": [
+          "03f991f944d1e1954a7fc8b9bf62e0d78f015f4c07762d505e20e6c45260a3661b",
+          "02989c0b76cb563971fdc9bef31ec06c3560f3249d6ee9e5d83c57625596e05f6f"
+        ]
+      },
+      "expected": "reject aggregate excess input list that diverges from canonical participant order"
+    }
+  ],
+  "required_outputs_after_ratification": [
+    "participant_0_canonical_context_bytes",
+    "participant_1_canonical_context_bytes",
+    "every participant KDF tagged-hash input and digest",
+    "participant_0_k1_k2_R1_R2",
+    "participant_1_k1_k2_R1_R2",
+    "each nonce commitment preimage and digest",
+    "binding preimage and binding scalar",
+    "each effective participant nonce",
+    "aggregate nonce R",
+    "aggregate excess X",
+    "R_hat",
+    "kernel challenge preimage, digest, and scalar",
+    "each participant partial scalar and verification result",
+    "aggregate s_hat and 65-byte adaptor pre-signature",
+    "adapted 65-byte final signature",
+    "real DOM verifier result",
+    "extracted t and t*G comparison",
+    "every negative mutation rejection stage"
+  ],
+  "ratification_note": "This fixture is not effective while unsigned. Any byte change after detached signing invalidates its signature and requires a new candidate revision."
+}
