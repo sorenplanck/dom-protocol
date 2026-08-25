@@ -1245,6 +1245,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-scriptless-bulletproof"
+version = "0.2.0"
+dependencies = [
+ "dom-core",
+ "dom-crypto",
+ "dom-scriptless-primitives",
+ "grin_secp256k1zkp",
+ "hex",
+ "k256",
+ "rand 0.8.6",
+ "secp256k1 0.28.2",
+ "secp256k1-zkp",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "dom-scriptless-consensus"
 version = "0.2.0"
 dependencies = [

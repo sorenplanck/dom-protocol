@@ -11,7 +11,7 @@
 //!
 //! Interop Foundation Document §2.1, §2.2 and §4.4.
 
-mod curve;
+pub mod curve;
 
 use crate::curve::{
     compressed_to_projective, is_scalar_canonical_allow_zero, is_scalar_valid,

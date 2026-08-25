@@ -1,0 +1,29 @@
+# Collaborative Bulletproof MPC for the Scriptless shared output.
+#
+# Carries a transcription of `dom-crypto`'s crate-private grin backend,
+# because the mainnet node cannot be edited to widen it. The pins below must
+# stay exactly those of the node's own workspace: a divergence here would mean
+# two different proving backends under one DOM.
+[package]
+name = "dom-scriptless-bulletproof"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+
+[dependencies]
+dom-core = { workspace = true }
+dom-crypto = { workspace = true }
+dom-scriptless-primitives = { path = "../dom-scriptless-primitives" }
+grin_secp256k1zkp = { workspace = true }
+k256 = { workspace = true }
+rand = { workspace = true }
+secp256k1 = { workspace = true }
+secp256k1-zkp = { workspace = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+# Test-only: the transcribed suites read their frozen vectors as hex.
+hex = { workspace = true }

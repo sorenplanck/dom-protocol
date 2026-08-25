@@ -38,6 +38,7 @@ members = [
     #
     # Bridges: the node is frozen, so the surfaces the laboratory lineage had
     # added inside `dom-crypto` and `dom-consensus` live here instead.
+    "crates/dom-scriptless-bulletproof",
     "crates/dom-scriptless-consensus",
     "crates/dom-scriptless-primitives",
 ]
