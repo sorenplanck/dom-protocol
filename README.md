@@ -48,6 +48,7 @@ Confidential by construction, deterministic by design, and built to circulate.**
 - [RPC and metrics](#rpc-and-metrics)
 - [Solo CPU mining](#solo-cpu-mining)
 - [DOM Wallet V3](#dom-wallet-v3)
+- [Independent audit](#independent-audit)
 - [Security and verification](#security-and-verification)
 - [Reproducible builds](#reproducible-builds)
 - [Repository layout](#repository-layout)
@@ -55,6 +56,7 @@ Confidential by construction, deterministic by design, and built to circulate.**
 - [Future Layer 2 work](#future-layer-2-work)
 - [Contributing](#contributing)
 - [Security disclosure](#security-disclosure)
+- [Official links](#official-links)
 - [License](#license)
 
 ---
@@ -97,10 +99,11 @@ DOM Mainnet is public and the initial bootstrap node is online.
 | Item | Value |
 |---|---|
 | **Network** | Mainnet |
-| **Release** | `v1.0.0` |
-| **Release branch** | `release/mainnet` |
-| **DOM Core commit** | `6c58b0383c095384cd0150cabf074aa00fb57b17` |
-| **Protocol version** | `2` |
+| **Workspace version** | `0.2.0` |
+| **Release branch** | `release/mainnetv2` |
+| **Launch release** | `v1.0.0` at `6c58b0383c095384cd0150cabf074aa00fb57b17` |
+| **Wire protocol version** | `2` (`WIRE_PROTOCOL_VERSION`, `crates/dom-core/src/constants.rs:321`) |
+| **Block version** | `2` below height `12,500`; `3` at and above it — see *Consensus upgrade* |
 | **Public DNS seed** | `seed1.dom-protocol.org` |
 | **Public P2P endpoint** | `seed1.dom-protocol.org:33369` |
 | **Direct IP fallback** | `168.100.9.70:33369` |
@@ -116,6 +119,30 @@ proof-of-work blocks are produced.
 The initial seed exists to provide public peer discovery, synchronization,
 transaction relay, and block relay. It does not receive a protocol allocation and
 does not mine on behalf of the project.
+
+### Consensus upgrade — block version 3
+
+Mainnet consensus requires **block version 3 at and above height `12,500`**.
+Below that height, version `2` remains the required version. The rule is a
+compile-time constant, not a configuration value:
+
+```text
+crates/dom-core/src/constants.rs
+  WIRE_PROTOCOL_VERSION        = 2      // P2P handshake; independent of consensus
+  BLOCK_VERSION_LEGACY         = 2
+  BLOCK_VERSION_V3             = 3
+  MAINNET_V3_ACTIVATION_HEIGHT = 12_500
+```
+
+**What node operators must do.** Run a build that contains the v3 rules before
+Mainnet reaches height `12,500`. A node whose binary predates the upgrade will
+reject valid v3 blocks and follow a chain that the network abandons. Upgrading
+after the activation height requires resynchronizing from a valid chain.
+
+The wire protocol version is deliberately independent from block-version
+consensus: `WIRE_PROTOCOL_VERSION` stays `2` across this upgrade, so peer
+handshakes are unaffected. Testnet and Regtest activate v3 at their first
+post-genesis block, keeping their frozen v2 genesis identities.
 
 ### Mainnet identity
 
@@ -294,9 +321,13 @@ block valid.
 ### DOM Core
 
 - Repository: <https://github.com/sorenplanck/dom-protocol>
-- Mainnet release: <https://github.com/sorenplanck/dom-protocol/releases/tag/v1.0.0>
-- Release branch: <https://github.com/sorenplanck/dom-protocol/tree/release/mainnet>
-- Canonical release commit: `6c58b0383c095384cd0150cabf074aa00fb57b17`
+- Current release branch: <https://github.com/sorenplanck/dom-protocol/tree/release/mainnetv2>
+- Launch release: <https://github.com/sorenplanck/dom-protocol/releases/tag/v1.0.0>
+  at `6c58b0383c095384cd0150cabf074aa00fb57b17`
+
+The launch tag `v1.0.0` records the genesis-time build and remains valid as a
+historical reference. It predates the block version 3 consensus upgrade and must
+not be used to run a node past Mainnet height `12,500`.
 
 ### DOM Wallet V3
 
@@ -615,6 +646,40 @@ Mainnet consensus.
 
 ---
 
+## Independent audit
+
+A distribution built from this repository — `dom-v2-0.2.0`, packaging Core
+executables together with the DOM Wallet V3 shell — completed an independent
+audit in August 2026. The audit is documented here because its results are
+useful to anyone verifying this software, and because two of its findings
+changed the verification instructions above.
+
+**This distribution is not the software currently serving Mainnet.** It is an
+audited candidate. The live network runs the release branch identified under
+*Mainnet status*. Nothing in this section should be read as a release
+announcement.
+
+What the audit established, and what it did not:
+
+- **Byte reproducibility, independently.** Four isolated reviewers, each
+  building at a different filesystem path with no network access, produced an
+  identical binary from identical sources. Reaching that result required fixing
+  a real defect: the original build embedded absolute paths, so it had never
+  been reproducible by a third party. The corrected procedure is the one in
+  *Reproducible builds*.
+- **A complete, public defect record.** The audit closed with findings still
+  open, each carrying its measured cause and its destination. They were not
+  waived, averaged away, or silently reclassified. Known debts include two
+  RustSec advisories in build-reachable dependencies, wallet seed-memory
+  hygiene weaker in the audited revision than in current development, and a
+  node/wallet compatibility divergence that is dormant in the shipped
+  configuration.
+- **What it did not cover.** The audit covers exactly the pinned revisions and
+  the package it names. It is not a warranty, it does not extend to later
+  commits, and it does not replace reading the code.
+
+---
+
 ## Security and verification
 
 DOM Core `v1.0.0` was produced after a project-operated final engineering
@@ -686,6 +751,31 @@ For a meaningful comparison, perform the second build in a clean checkout and a
 separate target directory using the same toolchain, lockfile, target triple, and
 environment.
 
+**Build at a different absolute path for the comparison to mean anything.**
+A build that only reproduces from the same directory proves nothing about
+reproducibility: without path remapping, the compiler embeds absolute source,
+registry and toolchain paths into the binary, so two builds of identical sources
+at two different paths differ byte-for-byte. This was measured, not assumed —
+an independent audit reproduced a Core-family binary at three distinct paths and
+obtained three distinct binaries from identical sources.
+
+A verification that is independent of where it runs also needs:
+
+```bash
+export SOURCE_DATE_EPOCH=1784071429
+export CARGO_INCREMENTAL=0
+export RUSTFLAGS="--remap-path-prefix=$PWD=/build \
+                  --remap-path-prefix=$HOME/.cargo=/cargo \
+                  --remap-path-prefix=$HOME/.rustup=/rustup"
+```
+
+Build outside any directory tree that carries an ancestral `.cargo/config.toml`,
+and use a clean `HOME`: Cargo discovers configuration from ancestor directories,
+so an unrelated file above the checkout can change the output. With these in
+place, two builds at two different paths must produce identical bytes; if they
+do not, the divergence is a finding, not an expected artifact of the
+environment.
+
 ---
 
 ## Repository layout
@@ -698,6 +788,7 @@ an excluded Tauri desktop application.
 dom-protocol/
 ├── crates/
 │   ├── dom-core/                Consensus constants, primitive types, fee policy
+│   ├── dom-config/              Network profiles and node configuration
 │   ├── dom-serialization/       Canonical bounded encoding and decoding
 │   ├── dom-crypto/              Schnorr, Pedersen, range proofs, recovery data
 │   ├── dom-pmmr/                Prunable Merkle Mountain Range
@@ -711,6 +802,7 @@ dom-protocol/
 │   ├── dom-rpc/                 HTTP RPC server and bearer-token handling
 │   ├── dom-cli/                 Core command-line tools
 │   ├── dom-explorer/            Explorer service
+│   ├── dom-faucet/              Test-network faucet service
 │   ├── dom-tx/                  Transaction and recoverable-output construction
 │   ├── dom-slate/               Interactive slate protocol
 │   ├── dom-test-vectors/        Frozen and adversarial vectors
