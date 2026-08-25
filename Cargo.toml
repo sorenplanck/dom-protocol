@@ -30,6 +30,15 @@ members = [
     "crates/dom-wallet-app",
     "crates/dom-test-runner",
     "crates/dom-agent-runner",
+
+    # ── DOM interoperability layer ────────────────────────────────────────
+    # Injected beside the mainnet node, never into it. Every member below is
+    # additive: no pre-existing crate's source, manifest or lint regime is
+    # touched by this layer's presence.
+    #
+    # Bridges: the node is frozen, so the surfaces the laboratory lineage had
+    # added inside `dom-crypto` and `dom-consensus` live here instead.
+    "crates/dom-scriptless-primitives",
 ]
 
 # Tauri desktop wallet — excluded from the workspace because it needs a

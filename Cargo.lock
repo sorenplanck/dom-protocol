@@ -1245,6 +1245,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-scriptless-primitives"
+version = "0.2.0"
+dependencies = [
+ "dom-core",
+ "dom-crypto",
+ "k256",
+ "secp256k1 0.28.2",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "dom-serialization"
 version = "0.2.0"
 dependencies = [

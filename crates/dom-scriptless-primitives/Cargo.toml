@@ -1,0 +1,25 @@
+# Scriptless arithmetic held beside the immutable mainnet node.
+#
+# This crate consumes `dom-crypto`'s public surface only. It must never
+# acquire a dependency that would let it define a challenge, a verifier or a
+# generator of its own: those are the node's, and Foundation Document I15
+# forbids reimplementing them.
+[package]
+name = "dom-scriptless-primitives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false  # D-ORQ-9: explicit, never inherited
+
+[dependencies]
+dom-core = { workspace = true }
+dom-crypto = { workspace = true }
+k256 = { workspace = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+# Test-only: the frozen curve order the module's own bound checks are read
+# against. Never a production dependency of this crate.
+secp256k1 = { workspace = true }
