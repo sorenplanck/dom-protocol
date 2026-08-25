@@ -134,10 +134,15 @@ crates/dom-core/src/constants.rs
   MAINNET_V3_ACTIVATION_HEIGHT = 12_500
 ```
 
-**What node operators must do.** Run a build that contains the v3 rules before
-Mainnet reaches height `12,500`. A node whose binary predates the upgrade will
-reject valid v3 blocks and follow a chain that the network abandons. Upgrading
-after the activation height requires resynchronizing from a valid chain.
+**This upgrade has already activated.** Mainnet passed height `12,500` and the
+network transitioned without incident; the chain has continued producing blocks
+under the v3 rules since. The activation is history, not a pending event.
+
+**What this means for node operators today.** A build that predates the upgrade
+cannot follow Mainnet at all: it rejects the v3 blocks that make up the current
+chain and cannot synchronize past the activation height. Any node must run a
+build containing the v3 rules — there is no configuration that restores
+compatibility, because the rule is a compile-time constant.
 
 The wire protocol version is deliberately independent from block-version
 consensus: `WIRE_PROTOCOL_VERSION` stays `2` across this upgrade, so peer
@@ -326,8 +331,8 @@ block valid.
   at `6c58b0383c095384cd0150cabf074aa00fb57b17`
 
 The launch tag `v1.0.0` records the genesis-time build and remains valid as a
-historical reference. It predates the block version 3 consensus upgrade and must
-not be used to run a node past Mainnet height `12,500`.
+historical reference only. It predates the block version 3 consensus upgrade,
+which Mainnet has already passed, so it cannot synchronize the current chain.
 
 ### DOM Wallet V3
 
