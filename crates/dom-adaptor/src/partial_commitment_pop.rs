@@ -14,8 +14,11 @@
 //! authoritative DOM scalar and point helpers; it introduces no arithmetic.
 
 use crate::{bulletproof_mpc::BpStatementV1, error::exact_array, AdaptorError, Result};
-use dom_crypto::{PublicKey, blake2b_256_tagged};
-use dom_scriptless_primitives::{scalar_bytes_are_canonical, scalar_from_wide_be, secret_scalar_mul_add_assign, secret_scalar_public_key, verify_scalar_response};
+use dom_crypto::{blake2b_256_tagged, PublicKey};
+use dom_scriptless_primitives::{
+    scalar_bytes_are_canonical, scalar_from_wide_be, secret_scalar_mul_add_assign,
+    secret_scalar_public_key, verify_scalar_response,
+};
 use rand_core::{OsRng, RngCore};
 use zeroize::{Zeroize, Zeroizing};
 

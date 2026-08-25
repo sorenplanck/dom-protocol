@@ -12,11 +12,13 @@ use dom_adaptor::{
     binding_factor_v1, AdaptorSecret, BindingContextV1, PartialSignatureV1,
     ParticipantPublicNoncesV1, PurposeV1,
 };
-use dom_crypto::{PartialSig, PublicKey, schnorr_challenge};
-use dom_scriptless_primitives::{scriptless_add_public_points, secret_scalar_mul_add_assign, secret_scalar_public_key};
+use dom_crypto::{schnorr_challenge, PartialSig, PublicKey};
 use dom_scriptless_crypto::{
     begin_claim_adaptor_round_v1, ClaimAdaptorRoundError, ClaimAdaptorRoundInputsV1,
     ClaimAdaptorRoundV1, CompletedClaimAdaptorCycleV1,
+};
+use dom_scriptless_primitives::{
+    scriptless_add_public_points, secret_scalar_mul_add_assign, secret_scalar_public_key,
 };
 use zeroize::Zeroizing;
 

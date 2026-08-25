@@ -25,7 +25,6 @@ fn commit_unblinded(value: u64) -> Result<Commitment, DomError> {
     Commitment::commit(value, &blinding).sub(&Commitment::commit(0, &blinding))
 }
 
-
 pub fn derive_complement_commitment(
     commitment: &Commitment,
     max_value: u64,

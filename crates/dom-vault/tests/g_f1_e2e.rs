@@ -36,11 +36,11 @@ use dom_adaptor::{
     PurposeV1, SigningPhaseV1, SigningShareV1, TrustedChainIdV1, ValidatedSigningRoundStateV1,
     VaultBackedSignerV1,
 };
-use dom_consensus::{Transaction, TransactionKernel, validate_kernel_signatures};
-use dom_scriptless_consensus::{scriptless_kernel_message_digest_v1};
+use dom_consensus::{validate_kernel_signatures, Transaction, TransactionKernel};
 use dom_core::Amount;
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::{schnorr_sign, PublicKey, SecretKey};
+use dom_scriptless_consensus::scriptless_kernel_message_digest_v1;
 use dom_vault::{AcceptedSession, DurableLookupCustody, DurableNonceVault, SessionAuthority};
 
 const NETWORK_MAGIC: u32 = 0x0D01_0002;

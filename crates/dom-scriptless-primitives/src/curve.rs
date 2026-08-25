@@ -134,10 +134,9 @@ mod conformance {
                 "round trip diverged from the node encoding"
             );
 
-            let reparsed = dom_crypto::PublicKey::from_compressed_bytes(
-                &projective_to_compressed(&point),
-            )
-            .expect("the node must accept what this module emits");
+            let reparsed =
+                dom_crypto::PublicKey::from_compressed_bytes(&projective_to_compressed(&point))
+                    .expect("the node must accept what this module emits");
             assert_eq!(reparsed.to_compressed_bytes(), node_bytes);
         }
     }

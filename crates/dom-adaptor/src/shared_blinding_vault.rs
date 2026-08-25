@@ -7,8 +7,8 @@ use crate::{
 };
 use core::fmt;
 use dom_crypto::recovery::RecoveryCapsule;
-use dom_crypto::{PublicKey, blake2b_256};
-use dom_scriptless_primitives::{scalar_bytes_are_canonical};
+use dom_crypto::{blake2b_256, PublicKey};
+use dom_scriptless_primitives::scalar_bytes_are_canonical;
 use rand_core::{OsRng, RngCore};
 use std::error::Error;
 use zeroize::{Zeroize, Zeroizing};

@@ -6,9 +6,16 @@
 
 use crate::{error::exact_array, AdaptorError, Result, TrustedChainIdV1};
 use dom_crypto::pedersen::Commitment;
-use dom_crypto::{BlindingFactor, MAX_PROVABLE_VALUE, PublicKey, blake2b_256_tagged, h_compressed};
-use dom_scriptless_bulletproof::{BulletproofMpcFinalizeState, BulletproofMpcRound1State, bulletproof_mpc_aggregate_tau_x, bulletproof_mpc_finalize, bulletproof_mpc_finalize_continuation_from_bytes_v1, bulletproof_mpc_finalize_continuation_to_bytes_v1, bulletproof_mpc_round1, bulletproof_mpc_round2};
-use dom_scriptless_primitives::{scalar_bytes_are_canonical, scalar_from_wide_be, scriptless_add_public_points};
+use dom_crypto::{blake2b_256_tagged, h_compressed, BlindingFactor, PublicKey, MAX_PROVABLE_VALUE};
+use dom_scriptless_bulletproof::{
+    bulletproof_mpc_aggregate_tau_x, bulletproof_mpc_finalize,
+    bulletproof_mpc_finalize_continuation_from_bytes_v1,
+    bulletproof_mpc_finalize_continuation_to_bytes_v1, bulletproof_mpc_round1,
+    bulletproof_mpc_round2, BulletproofMpcFinalizeState, BulletproofMpcRound1State,
+};
+use dom_scriptless_primitives::{
+    scalar_bytes_are_canonical, scalar_from_wide_be, scriptless_add_public_points,
+};
 use rand_core::{OsRng, RngCore};
 use zeroize::{Zeroize, Zeroizing};
 

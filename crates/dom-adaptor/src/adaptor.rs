@@ -2,7 +2,11 @@
 
 use crate::error::{exact_array, AdaptorError, Result};
 use dom_crypto::{PartialSig, PublicKey, SchnorrSignature};
-use dom_scriptless_primitives::{SecretScalar, scriptless_adapt_signature, scriptless_extract_adaptor_secret, scriptless_extract_adaptor_secret_be_bytes, scriptless_verify_final_signature, scriptless_verify_pre_signature};
+use dom_scriptless_primitives::{
+    scriptless_adapt_signature, scriptless_extract_adaptor_secret,
+    scriptless_extract_adaptor_secret_be_bytes, scriptless_verify_final_signature,
+    scriptless_verify_pre_signature, SecretScalar,
+};
 use zeroize::Zeroizing;
 
 /// Canonical 65-byte cryptographic adaptor pre-signature core `R_hat || s_hat`.

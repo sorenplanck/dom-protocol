@@ -14,7 +14,7 @@ use crate::bulletproof_mpc::{
 use crate::{AdaptorError, BpRound2ShareV1, BpStatementV1, RangeProof739, Result};
 use core::fmt;
 use dom_crypto::{blake2b_256, range_proof_verify_with_extra_commit};
-use dom_scriptless_primitives::{scalar_bytes_are_canonical};
+use dom_scriptless_primitives::scalar_bytes_are_canonical;
 use rand_core::{OsRng, RngCore};
 use std::error::Error;
 use zeroize::{Zeroize, Zeroizing};

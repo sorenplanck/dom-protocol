@@ -51,8 +51,12 @@ use dom_adaptor::{
     SessionContextV1, SessionIdRegistryV1, SharePoPStatementV1, ShareProofV1, SigningPhaseV1,
     SigningShareV1, TrustedChainIdV1,
 };
-use dom_crypto::{PartialSig, PublicKey, SchnorrSignature, schnorr_add_public_keys, schnorr_challenge};
-use dom_scriptless_primitives::{scalar_bytes_are_canonical, secret_scalar_mul_add_assign, secret_scalar_public_key};
+use dom_crypto::{
+    schnorr_add_public_keys, schnorr_challenge, PartialSig, PublicKey, SchnorrSignature,
+};
+use dom_scriptless_primitives::{
+    scalar_bytes_are_canonical, secret_scalar_mul_add_assign, secret_scalar_public_key,
+};
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
 

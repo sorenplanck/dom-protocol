@@ -54,7 +54,7 @@ use dom_adaptor::{
     TrustedChainIdV1,
 };
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
-use dom_crypto::{PublicKey};
+use dom_crypto::PublicKey;
 use dom_scriptless_primitives::{scriptless_add_public_points, secret_scalar_public_key};
 
 /// Exactly two parties form a shared output, as NAR-DC-P1-007 §3 ratified.

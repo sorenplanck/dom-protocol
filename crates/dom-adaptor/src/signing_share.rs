@@ -1,8 +1,10 @@
 //! Opaque signing-share ownership for DOM Scriptless Contracts.
 
 use crate::{AdaptorError, Result};
-use dom_crypto::{PublicKey, blake2b_256_tagged};
-use dom_scriptless_primitives::{scalar_bytes_are_canonical, secret_scalar_mul_add_assign, secret_scalar_public_key};
+use dom_crypto::{blake2b_256_tagged, PublicKey};
+use dom_scriptless_primitives::{
+    scalar_bytes_are_canonical, secret_scalar_mul_add_assign, secret_scalar_public_key,
+};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Domain tag for the decoy-contribution seed keyed by the signing share.

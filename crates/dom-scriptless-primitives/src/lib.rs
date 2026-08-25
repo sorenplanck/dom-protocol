@@ -17,8 +17,8 @@ use crate::curve::{
     compressed_to_projective, is_scalar_canonical_allow_zero, is_scalar_valid,
     projective_to_compressed, scalar_from_bytes,
 };
-use dom_crypto::{schnorr_challenge, schnorr_verify, PartialSig, PublicKey, SchnorrSignature};
 use dom_core::DomError;
+use dom_crypto::{schnorr_challenge, schnorr_verify, PartialSig, PublicKey, SchnorrSignature};
 use k256::elliptic_curve::bigint::U512;
 use k256::elliptic_curve::group::Group;
 use k256::elliptic_curve::ops::Reduce;

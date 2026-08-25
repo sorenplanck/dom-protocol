@@ -9,14 +9,17 @@ use dom_adaptor::{
     prove_share_knowledge_v1, DirectionV1, SharePoPStatementV1, SigningShareV1, TrustedChainIdV1,
 };
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
-use dom_crypto::{MAX_PROVABLE_VALUE, PublicKey, range_proof};
-use dom_scriptless_bulletproof::{bulletproof_mpc_aggregate_tau_x, bulletproof_mpc_finalize, bulletproof_mpc_round1, bulletproof_mpc_round2};
-use dom_scriptless_primitives::{secret_scalar_public_key};
+use dom_crypto::{range_proof, PublicKey, MAX_PROVABLE_VALUE};
+use dom_scriptless_bulletproof::{
+    bulletproof_mpc_aggregate_tau_x, bulletproof_mpc_finalize, bulletproof_mpc_round1,
+    bulletproof_mpc_round2,
+};
 use dom_scriptless_crypto::{
     commit_to_reveal, freeze_shared_output_statement_v1, CommonNonceError, CommonNonceRoundV1,
     FrozenSharedOutputV1, PrivateNonceCustodyV1, SharedOutputContributionV1, SharedOutputError,
     SharedOutputInputsV1,
 };
+use dom_scriptless_primitives::secret_scalar_public_key;
 use zeroize::Zeroizing;
 
 /// A test failure, reported as text so no test needs `unwrap`, `expect`, or

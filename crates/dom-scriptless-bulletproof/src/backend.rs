@@ -37,10 +37,10 @@
 #![allow(dead_code)]
 
 use crate::node_private::{derive_complement_commitment, negate_blinding};
-use dom_crypto::pedersen::{BlindingFactor, Commitment};
-use dom_crypto::range_proof::MAX_PROVABLE_VALUE;
 use crate::sec1_zkp_bridge::{sec1_to_zkp, zkp_to_sec1}; // single source of truth for SEC1<->zkp
 use dom_core::DomError;
+use dom_crypto::pedersen::{BlindingFactor, Commitment};
+use dom_crypto::range_proof::MAX_PROVABLE_VALUE;
 use rand::RngCore;
 use secp256k1zkp::{constants, ffi};
 use std::ptr;
@@ -1664,7 +1664,8 @@ mod tests {
         statement.extend_from_slice(&recovery);
         statement.push(64);
         assert_eq!(statement.len(), 187 + 65 * participant_count);
-        let statement_hash = *dom_crypto::blake2b_256_tagged(BP_STATEMENT_TAG, &statement).as_bytes();
+        let statement_hash =
+            *dom_crypto::blake2b_256_tagged(BP_STATEMENT_TAG, &statement).as_bytes();
 
         let q_values: Vec<[u8; 32]> = (0..participant_count)
             .map(|index| [0x40 + u8::try_from(index).expect("bounded participant"); 32])

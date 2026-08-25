@@ -1,8 +1,8 @@
 //! Canonical fixed-width G1a v1 message payloads.
 
 use crate::error::{exact_array, AdaptorError, Result};
-use dom_crypto::{PartialSig, PublicKey, schnorr_challenge};
-use dom_scriptless_primitives::{scriptless_verify_bound_partial};
+use dom_crypto::{schnorr_challenge, PartialSig, PublicKey};
+use dom_scriptless_primitives::scriptless_verify_bound_partial;
 
 /// Closed and versioned purpose registry from Master Specification Appendix E.6.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

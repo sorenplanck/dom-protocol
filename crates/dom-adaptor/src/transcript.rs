@@ -1,8 +1,8 @@
 //! Frozen G1a v1 nonce commitment and binding transcripts.
 
 use crate::{AdaptorError, PurposeV1, Result};
-use dom_crypto::{Hash256, PartialSig, PublicKey, blake2b_256_tagged};
-use dom_scriptless_primitives::{scriptless_bind_public_nonces};
+use dom_crypto::{blake2b_256_tagged, Hash256, PartialSig, PublicKey};
+use dom_scriptless_primitives::scriptless_bind_public_nonces;
 
 const NONCE_COMMIT_TAG_V1: &str = crate::DomainTag::NonceCommit.as_str();
 const NONCE_BIND_TAG_V1: &str = crate::DomainTag::SigNonceBind.as_str();
