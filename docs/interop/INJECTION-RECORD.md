@@ -252,6 +252,61 @@ below what the node's own dependencies demand.
 Whether to pin a compiler version for reproducible mainnet builds is an open
 question this record raises and does not decide.
 
+### The layer's exact pins moved the node's dependency versions — several down
+
+This is the sharper form of the same point, and it is an **open item, not a
+closed one.**
+
+The node declares its dependencies as ranges (`sha2 = "0.10"`,
+`proptest = "1"`, `tempfile = "3.10"`). The layer declares many of the same
+crates as exact pins (`=0.10.8`, `=1.7.0`, `=3.24.0`, `=0.2.16`). Cargo
+resolves one version per major, and an exact pin is the binding constraint —
+so the layer's pins decide what the node compiles against. Fourteen packages
+that already existed on the release line resolve differently now:
+
+| Package | Release line | After injection | Node crates reached |
+| --- | --- | --- | --- |
+| `sha2` | 0.10.9 | **0.10.8** | dom-crypto, dom-wallet, dom-wallet-crypto, dom-wallet-keys |
+| `proptest` | 1.11.0 | **1.7.0** | 21 node crates' property tests |
+| `tempfile` | 3.27.0 | **3.24.0** | 10 node crates |
+| `getrandom` | 0.2.17 | **0.2.16** | transitive |
+| `serde`, `serde_json` | 1.0.228 / 1.0.149 | 1.0.229 / 1.0.151 | 9 node crates |
+
+No package was dropped, and 85 are new. But `sha2` is the node's hashing
+dependency and it moved **backwards**.
+
+Section 1's `git diff` is still true and still empty. That is exactly the
+limit worth naming: **byte-identical source does not mean the node builds the
+same artifact as the release line does.** It does not, today.
+
+Two ways out, and the choice is not mine to make:
+
+1. **Align the layer's pins up** to the versions the release line resolves.
+   This restores the node's dependency set exactly, and follows the direction
+   the absorption already took with `tempfile`. Its cost: the layer would no
+   longer run against the versions its F7 evidence was produced on.
+2. **Accept the drag** and record it. Its cost: mainnet compiles against a
+   dependency set that the release line's own CI never tested, including a
+   downgraded `sha2`.
+
+Neither is free, and both are supply-chain decisions over an audited pin set
+(D-ORQ-10). They are put here for the coordinator rather than taken.
+
+### One node test is flaky, and its cause is not yet established
+
+`dom-chain`'s `convergence_same_canonical_tip_independent_of_arrival_order`
+fails roughly one run in four, with `direct connect duplicate output
+commitment`. Measured: three passes and one failure in four consecutive runs.
+
+`crates/dom-chain` is byte-identical to the release line, so the injection did
+not change its source. What the injection **did** change is what it links
+against, per the section above — `proptest` alone moved four minor versions
+backwards across the node's test suites. That makes the drag a candidate
+cause that has not been excluded, and the honest statement is that this flake
+has not been shown to pre-date the injection. Establishing it requires running
+the same test on `release/mainnetv2` with its own lockfile, which this record
+does not yet contain.
+
 ---
 
 ## 8. What this record does not claim
