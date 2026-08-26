@@ -12,6 +12,13 @@ rust-version.workspace = true
 license.workspace = true
 publish = false  # D-ORQ-9: explicit, never inherited
 
+[features]
+# Mirrors `dom-crypto`'s own feature of the same name. The transcription
+# carries the node's `#[cfg(any(test, feature = "test-helpers"))]` gate, so the
+# feature must be declared here too or the gate names something that does not
+# exist.
+test-helpers = []
+
 [dependencies]
 dom-core = { workspace = true }
 dom-crypto = { workspace = true }

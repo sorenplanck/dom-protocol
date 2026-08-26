@@ -316,36 +316,25 @@ pub fn freeze_shared_output_statement_v1(
     };
     // The Bulletproof statement is frozen here, before any round-1 share
     // exists. Nothing after this point can steer it.
-    // The statement's commitment shares must sum to C, not to R.
     //
-    // The pinned driver `participant_round1_v1` feeds
-    // `statement.aggregate_commitment()` straight into `bulletproof_mpc_round1`,
-    // and the pinned `BpLocalBlindingV1::commitment_share(value_share)` returns
-    // `commit(value_share, blind)` — every pinned share carries a value
-    // component, and the whole value sits on one participant. `validate_aggregate`
-    // only asserts `sum(shares) == aggregate`, so it cannot catch a statement
-    // built over R; a statement asserting `v` over an aggregate that opens to 0
-    // passes it and is still wrong.
+    // The statement's commitment shares are the PURE points `R_i`, not shares
+    // carrying a value component. That is the pinned authority's own stated
+    // convention: `BpStatementV1::aggregate_commitment_from_shares` documents
+    // `C = v*H + Σ R_i` "over the ordered pure blinding shares", where "each
+    // published share is the pure point `R_i`, exactly the point party `i`
+    // proves knowledge of in its §4.2 share PoK", and it adds `v*H` ONCE on
+    // top of that ordered sum. Those are exactly the points verified against
+    // their own share PoK above, so they are passed through unchanged.
     //
-    // The value-carrying shares are derivable from public data alone:
-    // `C_0 = v·H_DOM + R_0` and `C_i = R_i` for the rest, so no blind is needed
-    // here and their ordered sum is exactly C.
-    let mut statement_shares = Vec::with_capacity(shares.len());
-    for (position, share) in shares.iter().enumerate() {
-        if position == 0 && inputs.value_noms != 0 {
-            let carried = Commitment::from_compressed_bytes(&share.to_compressed_bytes())
-                .map_err(|_| SharedOutputError::NonCanonicalShare)?;
-            let with_value = value_component(inputs.value_noms)?
-                .add(&carried)
-                .map_err(|_| SharedOutputError::AggregationRefused)?;
-            statement_shares.push(
-                PublicKey::from_compressed_bytes(with_value.as_bytes())
-                    .map_err(|_| SharedOutputError::AggregationRefused)?,
-            );
-        } else {
-            statement_shares.push(share.clone());
-        }
-    }
+    // An earlier revision of this function injected `v*H` into share 0,
+    // reasoning that `validate_aggregate` "only asserts `sum(shares) ==
+    // aggregate`" and so could not refuse a statement asserting `v` over an
+    // aggregate that opens to 0. That was true of an older aggregate check and
+    // is no longer: the pinned check now REBUILDS `v*H + Σ shares` and compares
+    // it, so a statement claiming `v` over an aggregate equal to `R` fails it.
+    // The defence the injection existed for is now the authority's, and
+    // injecting on top of it made the frozen statement assert `2v*H + R`.
+    let statement_shares = shares.clone();
     let aggregate_point = PublicKey::from_compressed_bytes(aggregate_commitment.as_bytes())
         .map_err(|_| SharedOutputError::AggregationRefused)?;
 
