@@ -206,6 +206,16 @@ jobs:
       - name: Release-surface boundary
         run: ./scripts/check-release-surface.sh
 
+      # Feature surfaces no other job reaches. `--all-targets` builds the
+      # default feature set only, so a crate's optional surface can rot
+      # unnoticed: `mod signer_e2e` is gated on `all(test, evidence-only)`,
+      # which neither `cargo test --workspace` nor a plain clippy run compiles.
+      - name: Optional feature surfaces
+        run: |
+          cargo clippy -p dom-scriptless-store --features evidence-only --all-targets --locked -- -D warnings
+          cargo test  -p dom-scriptless-store --features evidence-only --locked
+          cargo clippy -p store --features failpoints --all-targets --locked -- -D warnings
+
   release-blocker-crate-tests:
     name: "release blockers: crate tests (linux)"
     runs-on: ubuntu-latest

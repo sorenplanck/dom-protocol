@@ -74,6 +74,61 @@ const MASTER_KEY_ENVELOPE_LEN: usize = 182;
 const NONCE_SECRET_ENVELOPE_MAX_LEN: usize = 1_122;
 pub(super) const TOMBSTONE_ENVELOPE_LEN: usize = 495;
 
+#[cfg(all(test, feature = "evidence-only"))]
+std::thread_local! {
+    static TEST_UNIX_TIME: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+// Resend fault injection for the evidence-only signer E2E. The gate is the
+// SAME pair that guards `mod signer_e2e`, its only consumer, so these items
+// exist exactly where they are used and are dead in no configuration.
+#[cfg(all(test, feature = "evidence-only"))]
+type ResendInterpositionV1 = Box<dyn FnOnce() -> Result<(), InventoryError> + Send + 'static>;
+
+#[cfg(all(test, feature = "evidence-only"))]
+std::thread_local! {
+    static RESEND_INTERPOSITION: std::cell::RefCell<Option<ResendInterpositionV1>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, feature = "evidence-only"))]
+#[must_use]
+pub(super) struct ResendInterpositionGuardV1 {
+    previous: Option<ResendInterpositionV1>,
+}
+
+#[cfg(all(test, feature = "evidence-only"))]
+impl Drop for ResendInterpositionGuardV1 {
+    fn drop(&mut self) {
+        RESEND_INTERPOSITION.with(|slot| {
+            slot.replace(self.previous.take());
+        });
+    }
+}
+
+#[cfg(all(test, feature = "evidence-only"))]
+pub(super) fn install_resend_interposition(
+    interposition: ResendInterpositionV1,
+) -> Result<ResendInterpositionGuardV1, InventoryError> {
+    let previous = RESEND_INTERPOSITION.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_some() {
+            return Err(InventoryError::RestoreQuarantined);
+        }
+        Ok(slot.replace(interposition))
+    })?;
+    Ok(ResendInterpositionGuardV1 { previous })
+}
+
+#[cfg(all(test, feature = "evidence-only"))]
+fn run_resend_interposition() -> Result<(), InventoryError> {
+    let interposition = RESEND_INTERPOSITION.with(|slot| slot.borrow_mut().take());
+    match interposition {
+        Some(interposition) => interposition(),
+        None => Ok(()),
+    }
+}
+
 /// Terminates a test subprocess after one exact normal-vault durability cut.
 #[cfg(test)]
 fn test_normal_vault_crash_hook(boundary: &str) {
@@ -4554,11 +4609,15 @@ impl ContractsNonceVaultV1 {
         Ok(())
     }
 
-    // No test clock: the sole caller is `claim_fresh_reservation`, whose
-    // `FreshReservationRequestV1` no code outside the pin can construct, so an
-    // injected clock could never be observed. The clock-dependent admission
-    // takes `now` as a parameter and is exercised directly instead.
     fn unix_time() -> Result<u64, InventoryError> {
+        #[cfg(all(test, feature = "evidence-only"))]
+        if let Some(now) = TEST_UNIX_TIME.with(std::cell::Cell::get) {
+            return if now == 0 {
+                Err(InventoryError::RestoreQuarantined)
+            } else {
+                Ok(now)
+            };
+        }
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| InventoryError::RestoreQuarantined)?
@@ -4566,6 +4625,11 @@ impl ContractsNonceVaultV1 {
             .checked_add(0)
             .filter(|value| *value != 0)
             .ok_or(InventoryError::RestoreQuarantined)
+    }
+
+    #[cfg(all(test, feature = "evidence-only"))]
+    pub(super) fn set_evidence_test_time(now: Option<u64>) {
+        TEST_UNIX_TIME.with(|value| value.set(now));
     }
 
     fn handle_for_authority(
@@ -5076,12 +5140,11 @@ impl NonceVaultV1 for ContractsNonceVaultV1 {
         &mut self,
         request: ResendRequestV1,
     ) -> Result<Self::ExportedArtifact, Self::Error> {
-        // No interposition: `ResendRequestV1::from_recovered` is `pub(crate)`
-        // in the pin, so no test in this crate can build a request and reach
-        // this seam. The I7 byte-identical-resend invariant is covered where
-        // the pin allows it — the store's idempotency ledger and the pin's own
-        // `ResendRequestV1` suite. A hook nothing can install is not coverage.
-        self.resend_exported_inner(request, || Ok(()))
+        self.resend_exported_inner(request, || {
+            #[cfg(all(test, feature = "evidence-only"))]
+            run_resend_interposition()?;
+            Ok(())
+        })
     }
 
     fn cancel_reservation(

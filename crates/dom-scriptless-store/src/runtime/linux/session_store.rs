@@ -8948,6 +8948,9 @@ impl PostAnchorClaimAuthorizationRecordV1 {
         Ok(record)
     }
 
+    // Asserted only by this module's own tests; gated to match, so it is dead
+    // in no configuration rather than allowed in one.
+    #[cfg(test)]
     fn matches_evidence(&self, evidence: &PostAnchorDomClaimSigningEvidenceV1) -> bool {
         self.session_id == evidence.session_id
             && self.settlement_id == evidence.settlement_id
