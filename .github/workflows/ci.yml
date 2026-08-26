@@ -171,6 +171,41 @@ jobs:
       - name: cargo audit
         run: cargo audit
 
+  interop-real-backend:
+    name: "interop: real cryptographic backend + layer guards"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # G-F2 requires the full F1 regression to stay green against the REAL
+      # cryptographic backend rather than the disabled one. The suites live in
+      # dom-vault and dom-leg behind `real-dom-adaptor`, and
+      # `f2_e2e_018_the_f1_real_backend_regression_stays_wired_in_ci` reads this
+      # file and fails if either command is ever removed — so the regression
+      # cannot be dropped while the gate still claims it.
+      - name: F1 real-backend regression (vault)
+        run: cargo test -p dom-vault --features real-dom-adaptor --locked
+
+      - name: F1 real-backend regression (leg)
+        run: cargo test -p dom-leg --features real-dom-adaptor --locked
+
+      # The layer's executable guards. Each fails the build on its own finding;
+      # none of them is advisory.
+      - name: Layer guards
+        run: |
+          ./scripts/check-adaptor-two-nonce.sh
+          ./scripts/check-claim-adaptor-provenance.sh
+          ./scripts/check-hash-domains.sh
+          ./scripts/check-normative-adjudication.sh
+          ./scripts/check-policy-topology.sh
+          ./scripts/check-shared-output-bp.sh
+
+      - name: Release-surface boundary
+        run: ./scripts/check-release-surface.sh
+
   release-blocker-crate-tests:
     name: "release blockers: crate tests (linux)"
     runs-on: ubuntu-latest
