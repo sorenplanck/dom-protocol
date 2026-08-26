@@ -374,13 +374,45 @@ advisories FAILED, bans ok, licenses ok, sources ok
 the allow-list holds. `bans ok` and `sources ok` mean every git dependency the
 layer brought is pinned by exact rev.
 
-The one advisory is `webbrowser 1.2.1` (`BROWSER` argument injection), reached
+### The one advisory, and closing it at the source
+
+The advisory was `webbrowser 1.2.1` (`BROWSER` argument injection), reached
 through `egui-winit -> eframe -> dom-wallet-app` — a node crate, a node
 dependency. `release/mainnetv2` resolves the same version and, run with its
-own lockfile, produces the identical verdict:
-`advisories FAILED, bans ok, licenses ok, sources ok`. **The supply-chain job
-is red on the release line today, and the injection neither caused it nor
-cleared it.** Upgrading `webbrowser` is the node's call, not this layer's.
+own lockfile, produced the identical verdict. The supply-chain job was red on
+the release line too.
+
+Pre-existing is an origin, not a licence to leave it standing. It was closed
+by **upgrading**, which is the only direction permitted here:
+
+`egui-winit` declares `webbrowser = "1.2"`, a range admitting `>=1.2.0,
+<2.0.0`, so the fixed 1.2.4 is inside it. `cargo update -p webbrowser
+--precise 1.2.4` was enough — no manifest was touched, and in particular
+`dom-wallet-app`'s was not edited to force a newer `eframe`. Forcing a version
+into the node would have been the dependency drag running the other way.
+
+Four things were proven rather than assumed:
+
+| Claim | Result |
+| --- | --- |
+| `cargo deny check` | `advisories ok, bans ok, licenses ok, sources ok` (exit 0) |
+| The node's 29 crates | `git diff` against `release/mainnetv2` still empty |
+| The extended gate, `--no-fail-fast` | 445 suites, 3817 tests, 0 failures; both feature surfaces green |
+| `Cargo.lock` delta | `webbrowser 1.2.1 -> 1.2.4`; `core-foundation 0.10.1` leaves the graph (0.9.4, the release line's own, remains). No version moved down. |
+
+`ignore` in `[advisories]` stays empty, and
+`the_advisory_ignore_list_holds_only_what_was_proven` now pins it. An entry may
+be added only with the ID `cargo deny` reported, a reference to a written
+unreachability proof, and an expiry date — never to make a build green, and
+never before upgrading has been ruled out. Verified by injecting a clandestine
+ID and watching the guard name it, then reverting.
+
+**What the node's own line still needs.** This closed the red in the merged
+tree by moving the lockfile, not by changing any node source. The release line
+resolves `webbrowser 1.2.1` on its own and remains red until it takes the same
+update. That is one command in that repository —
+`cargo update -p webbrowser --precise 1.2.4` — and it is the operator's to run
+there. Nothing in this layer can reach it.
 
 ---
 
