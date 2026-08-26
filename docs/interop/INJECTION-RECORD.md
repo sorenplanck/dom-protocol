@@ -143,7 +143,7 @@ to a range.
 
 ---
 
-## 6. Four defects the injection surfaced, and how each was closed
+## 6. Five defects the injection surfaced, and how each was closed
 
 Bringing the layer under the DOM's workspace and the DOM's audits put it
 under checks it had never faced. Each finding below reproduces identically
@@ -167,14 +167,30 @@ defence became the authority's, and layering on top of it broke the
 composition. `dom-adaptor` is the cryptographic authority (§P.2), so the
 consumer moved. Every refusal test still passes.
 
-### Two fault-injection hooks nothing could reach
+### Two fault-injection hooks I wrongly called unreachable
 
-The resend interposition and the evidence test clock in `dom-scriptless-store`
-were both installed by no test. Neither could be: `ResendRequestV1::from_recovered`
-and `FreshReservationRequestV1` are sealed by the pin, so the paths that would
-observe them cannot be entered from this crate — and `#[cfg(test)]` hides them
-from every other. Removed rather than annotated. A hook nothing can install is
-not coverage.
+**This entry corrects an earlier claim in this document.** It first said the
+resend interposition and the evidence test clock were installed by no test and
+could not be, and recorded them as removed. That was wrong.
+
+`mod signer_e2e` is gated `#[cfg(all(test, feature = "evidence-only"))]` and
+uses both — `resend_revalidates_full_store_across_lookup_interposition`
+installs the interposition, `budget_scopes_windows_clock_and_abort_states_fail_closed`
+drives the clock. My reasoning about the pin sealing `ResendRequestV1` was
+about the wrong entry point.
+
+What made the error survive is the part worth keeping: **no gate compiled that
+intersection.** `cargo test --workspace` builds default features;
+`clippy --all-targets` builds targets, not feature combinations. So the
+consumer and the hooks disappeared from every check at once, and deleting them
+looked clean in a green tree.
+
+Both are restored under `all(test, feature = "evidence-only")` — the exact
+condition of their only consumer, tighter than the `#[cfg(test)]` they carried
+— so they exist where they are used and are dead in no configuration. The gate
+now compiles the surface: `interop-real-backend` lints and tests
+`dom-scriptless-store --features evidence-only` and lints
+`store --features failpoints`.
 
 ### A test that assumed seven directories where six exist
 
@@ -193,9 +209,52 @@ twenty settled routes ran against; they are labelled as evidence and
 deliberately not repointed, because repointing them would restate what the
 evidence was made on.
 
+### A crate outside the workspace is a crate no gate covers
+
+`f7-runner` is excluded for a reason written in `Cargo.toml`, and the reason
+holds. The risk is not that entry but the next one, added quietly to make a
+build pass. `the_workspace_excludes_exactly_the_crates_it_is_allowed_to` pins
+the list — both entries, each with its reason — and fails on any change, so
+growing it takes a diff a reviewer sees. Verified by adding a clandestine
+exclusion and watching the guard fail.
+
 ---
 
-## 7. What this record does not claim
+## 7. The toolchain is not pinned, and source identity does not cover it
+
+Section 1's invariant is a **source** invariant. It says the node's twenty-nine
+crates are byte-identical to `release/mainnetv2`. It does not say the binary is.
+
+`rust-toolchain.toml` is byte-identical to the release line — the injection did
+not touch it — and it reads:
+
+```toml
+[toolchain]
+channel = "stable"
+```
+
+`stable` floats. Nothing in this repository pins a compiler version, so the
+binary the mainnet runs is a function of the day it was built, with or without
+this injection. This gate ran on:
+
+```
+cargo 1.98.0 (797e8a9bc 2026-08-05)
+rustc 1.98.0 (88d9e12ae 2026-08-18)
+```
+
+The layer did **not** raise the floor. The highest MSRV in the resolved graph
+is 1.92, declared by `eframe`/`egui`, which the node's own `dom-wallet-app`
+pulls in — the node already required it. `rusqlite =0.40.1` and
+`libsqlite3-sys`, which only layer crates use, declare no `rust-version` at
+all. The workspace's `rust-version = "1.75"` is unchanged and was already
+below what the node's own dependencies demand.
+
+Whether to pin a compiler version for reproducible mainnet builds is an open
+question this record raises and does not decide.
+
+---
+
+## 8. What this record does not claim
 
 - No gate verdict. `G-F7` and `G-F8` exist only when the operator says so
   in writing.
