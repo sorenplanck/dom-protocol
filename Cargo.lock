@@ -1233,32 +1233,17 @@ dependencies = [
 name = "dom-adaptor"
 version = "0.2.0"
 dependencies = [
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
  "dom-scriptless-bulletproof",
  "dom-scriptless-consensus",
  "dom-scriptless-primitives",
- "dom-serialization 0.2.0",
+ "dom-serialization",
  "hex",
  "k256",
  "rand_core 0.6.4",
  "serde_json",
- "subtle",
- "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
-name = "dom-adaptor"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "rand_core 0.6.4",
  "subtle",
  "thiserror 1.0.69",
  "zeroize",
@@ -1278,13 +1263,13 @@ name = "dom-chain"
 version = "0.2.0"
 dependencies = [
  "blake2",
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
- "dom-pmmr 0.2.0",
- "dom-pow 0.2.0",
- "dom-serialization 0.2.0",
- "dom-store 0.2.0",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-pmmr",
+ "dom-pow",
+ "dom-serialization",
+ "dom-store",
  "hex",
  "lmdb-rkv",
  "primitive-types",
@@ -1297,52 +1282,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "dom-chain"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "blake2",
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-pmmr 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-pow 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-store 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "hex",
- "primitive-types",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "dom-cli"
 version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
- "dom-core 0.2.0",
- "dom-wallet 0.2.0",
+ "dom-core",
+ "dom-wallet",
 ]
 
 [[package]]
 name = "dom-config"
 version = "0.2.0"
 dependencies = [
- "dom-core 0.2.0",
+ "dom-core",
  "proptest",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "dom-config"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -1352,29 +1306,15 @@ dependencies = [
 name = "dom-consensus"
 version = "0.2.0"
 dependencies = [
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
- "dom-pmmr 0.2.0",
- "dom-pow 0.2.0",
- "dom-serialization 0.2.0",
+ "dom-core",
+ "dom-crypto",
+ "dom-pmmr",
+ "dom-pow",
+ "dom-serialization",
  "k256",
  "primitive-types",
  "proptest",
  "secp256k1 0.28.2",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "dom-consensus"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-pmmr 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-pow 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "primitive-types",
  "thiserror 1.0.69",
 ]
 
@@ -1391,23 +1331,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "dom-core"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "hex",
- "subtle",
- "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
 name = "dom-crypto"
 version = "0.2.0"
 dependencies = [
  "blake2",
  "chacha20poly1305",
- "dom-core 0.2.0",
+ "dom-core",
  "grin_secp256k1zkp",
  "hex",
  "hkdf",
@@ -1425,34 +1354,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "dom-crypto"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "blake2",
- "chacha20poly1305",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "grin_secp256k1zkp",
- "hex",
- "hkdf",
- "hmac",
- "k256",
- "rand 0.8.6",
- "secp256k1 0.28.2",
- "secp256k1-zkp",
- "sha2",
- "subtle",
- "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
 name = "dom-explorer"
 version = "0.2.0"
 dependencies = [
  "axum",
- "dom-core 0.2.0",
- "dom-wallet 0.2.0",
+ "dom-core",
+ "dom-wallet",
  "hex",
  "serde",
  "serde_json",
@@ -1469,10 +1376,10 @@ name = "dom-faucet"
 version = "0.2.0"
 dependencies = [
  "axum",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
+ "dom-core",
+ "dom-crypto",
  "dom-faucet",
- "dom-wallet 0.2.0",
+ "dom-wallet",
  "hex",
  "proptest",
  "serde",
@@ -1490,18 +1397,18 @@ name = "dom-integration-tests"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "dom-chain 0.2.0",
- "dom-config 0.2.0",
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
- "dom-node 0.2.0",
- "dom-pow 0.2.0",
- "dom-rpc 0.2.0",
- "dom-serialization 0.2.0",
- "dom-store 0.2.0",
- "dom-wallet 0.2.0",
- "dom-wire 0.2.0",
+ "dom-chain",
+ "dom-config",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-node",
+ "dom-pow",
+ "dom-rpc",
+ "dom-serialization",
+ "dom-store",
+ "dom-wallet",
+ "dom-wire",
  "hex",
  "primitive-types",
  "reqwest",
@@ -1519,30 +1426,15 @@ dependencies = [
  "adapter-evm",
  "btc-crypto",
  "btc-secp-sys",
- "cap-std",
  "counterparty-api",
- "dom-adaptor 0.2.0",
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
  "dom-scriptless-consensus",
- "dom-scriptless-crypto",
- "dom-scriptless-identity-store",
  "dom-scriptless-primitives",
- "dom-scriptless-store",
- "dom-scriptless-transport",
- "dom-serialization 0.2.0",
- "dom-wallet-core",
- "dom-wallet-core-protocol",
- "dom-wallet-core-recovery",
- "dom-wallet-core-sync",
- "dom-wallet-domain",
- "dom-wallet-remote-source",
- "hex",
+ "dom-serialization",
  "rand_core 0.6.4",
- "reqwest",
- "serde",
- "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "zeroize",
@@ -1552,28 +1444,13 @@ dependencies = [
 name = "dom-mempool"
 version = "0.2.0"
 dependencies = [
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
- "dom-serialization 0.2.0",
- "dom-store 0.2.0",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-serialization",
+ "dom-store",
  "hex",
  "proptest",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "dom-mempool"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-store 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "hex",
  "thiserror 1.0.69",
  "tracing",
 ]
@@ -1583,21 +1460,21 @@ name = "dom-node"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "dom-chain 0.2.0",
- "dom-config 0.2.0",
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
- "dom-mempool 0.2.0",
- "dom-pmmr 0.2.0",
- "dom-pow 0.2.0",
- "dom-rpc 0.2.0",
- "dom-serialization 0.2.0",
- "dom-store 0.2.0",
- "dom-tx 0.2.0",
- "dom-wallet 0.2.0",
- "dom-wallet-core-api 0.2.0",
- "dom-wire 0.2.0",
+ "dom-chain",
+ "dom-config",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-mempool",
+ "dom-pmmr",
+ "dom-pow",
+ "dom-rpc",
+ "dom-serialization",
+ "dom-store",
+ "dom-tx",
+ "dom-wallet",
+ "dom-wallet-core-api",
+ "dom-wire",
  "futures",
  "hex",
  "k256",
@@ -1615,57 +1492,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "dom-node"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "anyhow",
- "dom-chain 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-config 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-mempool 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-pmmr 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-pow 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-rpc 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-store 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-tx 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-api 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wire 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "futures",
- "hex",
- "k256",
- "primitive-types",
- "rand 0.8.6",
- "randomx-rs",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "dom-pmmr"
 version = "0.2.0"
 dependencies = [
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
+ "dom-core",
+ "dom-crypto",
  "proptest",
  "rand 0.8.6",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "dom-pmmr"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
  "thiserror 1.0.69",
 ]
 
@@ -1674,24 +1507,10 @@ name = "dom-pow"
 version = "0.2.0"
 dependencies = [
  "blake2",
- "dom-core 0.2.0",
- "dom-serialization 0.2.0",
+ "dom-core",
+ "dom-serialization",
  "primitive-types",
  "proptest",
- "randomx-rs",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "dom-pow"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "blake2",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "primitive-types",
  "randomx-rs",
  "thiserror 1.0.69",
  "tracing",
@@ -1703,10 +1522,10 @@ version = "0.2.0"
 dependencies = [
  "axum",
  "dirs",
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-mempool 0.2.0",
- "dom-serialization 0.2.0",
+ "dom-consensus",
+ "dom-core",
+ "dom-mempool",
+ "dom-serialization",
  "governor",
  "hex",
  "http-body-util",
@@ -1725,37 +1544,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "dom-rpc"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "axum",
- "dirs",
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-mempool 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-api 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "governor",
- "hex",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "subtle",
- "thiserror 1.0.69",
- "tokio",
- "tower 0.4.13",
- "tower-http 0.5.2",
- "tower_governor",
- "tracing",
-]
-
-[[package]]
 name = "dom-scriptless-bulletproof"
 version = "0.2.0"
 dependencies = [
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
+ "dom-core",
+ "dom-crypto",
  "dom-scriptless-primitives",
  "grin_secp256k1zkp",
  "hex",
@@ -1771,11 +1564,11 @@ dependencies = [
 name = "dom-scriptless-chain-adapter"
 version = "0.2.0"
 dependencies = [
- "dom-adaptor 0.2.0",
- "dom-consensus 0.2.0",
- "dom-crypto 0.2.0",
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-crypto",
  "dom-scriptless-types",
- "dom-serialization 0.2.0",
+ "dom-serialization",
  "hex",
  "reqwest",
  "serde",
@@ -1788,9 +1581,9 @@ dependencies = [
 name = "dom-scriptless-consensus"
 version = "0.2.0"
 dependencies = [
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
 ]
 
 [[package]]
@@ -1799,13 +1592,13 @@ version = "0.2.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
- "dom-adaptor 0.2.0",
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
  "dom-scriptless-bulletproof",
  "dom-scriptless-primitives",
- "dom-serialization 0.2.0",
+ "dom-serialization",
  "getrandom 0.2.16",
  "hkdf",
  "serde",
@@ -1821,7 +1614,7 @@ dependencies = [
  "argon2",
  "cap-std",
  "chacha20poly1305",
- "dom-crypto 0.2.0",
+ "dom-crypto",
  "dom-scriptless-store",
  "dom-scriptless-transport",
  "rand_core 0.6.4",
@@ -1835,8 +1628,8 @@ dependencies = [
 name = "dom-scriptless-primitives"
 version = "0.2.0"
 dependencies = [
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
+ "dom-core",
+ "dom-crypto",
  "k256",
  "secp256k1 0.28.2",
  "subtle",
@@ -1858,14 +1651,14 @@ version = "0.2.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "dom-adaptor 0.2.0",
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
  "dom-scriptless-consensus",
  "dom-scriptless-crypto",
  "dom-scriptless-primitives",
- "dom-serialization 0.2.0",
+ "dom-serialization",
  "f7-anchor-authority",
  "nix",
  "rand_core 0.6.4",
@@ -1878,8 +1671,8 @@ dependencies = [
 name = "dom-scriptless-transport"
 version = "0.2.0"
 dependencies = [
- "dom-adaptor 0.2.0",
- "dom-crypto 0.2.0",
+ "dom-adaptor",
+ "dom-crypto",
  "dom-scriptless-protocol",
  "dom-scriptless-store",
  "dom-scriptless-types",
@@ -1897,17 +1690,8 @@ version = "0.2.0"
 name = "dom-serialization"
 version = "0.2.0"
 dependencies = [
- "dom-core 0.2.0",
+ "dom-core",
  "proptest",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "dom-serialization"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
  "thiserror 1.0.69",
 ]
 
@@ -1915,29 +1699,14 @@ dependencies = [
 name = "dom-slate"
 version = "0.2.0"
 dependencies = [
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
- "dom-serialization 0.2.0",
- "dom-tx 0.2.0",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-serialization",
+ "dom-tx",
  "hex",
  "k256",
  "proptest",
- "rand 0.8.6",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "dom-slate"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-tx 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "k256",
  "rand 0.8.6",
  "thiserror 1.0.69",
 ]
@@ -1947,34 +1716,18 @@ name = "dom-store"
 version = "0.2.0"
 dependencies = [
  "blake2",
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
- "dom-pmmr 0.2.0",
- "dom-pow 0.2.0",
- "dom-serialization 0.2.0",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-pmmr",
+ "dom-pow",
+ "dom-serialization",
  "hex",
  "libc",
  "lmdb-rkv",
  "primitive-types",
  "proptest",
  "tempfile",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "dom-store"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "blake2",
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-pmmr 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "hex",
- "lmdb-rkv",
  "thiserror 1.0.69",
  "tracing",
 ]
@@ -1991,14 +1744,14 @@ dependencies = [
 name = "dom-test-vectors"
 version = "0.2.0"
 dependencies = [
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
- "dom-mempool 0.2.0",
- "dom-pmmr 0.2.0",
- "dom-pow 0.2.0",
- "dom-serialization 0.2.0",
- "dom-wire 0.2.0",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-mempool",
+ "dom-pmmr",
+ "dom-pow",
+ "dom-serialization",
+ "dom-wire",
  "hex",
 ]
 
@@ -2006,23 +1759,11 @@ dependencies = [
 name = "dom-tx"
 version = "0.2.0"
 dependencies = [
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
- "dom-serialization 0.2.0",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-serialization",
  "proptest",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "dom-tx"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
  "thiserror 1.0.69",
 ]
 
@@ -2030,10 +1771,10 @@ dependencies = [
 name = "dom-vault"
 version = "0.2.0"
 dependencies = [
- "dom-adaptor 0.2.0",
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
  "dom-scriptless-consensus",
  "store",
  "tempfile",
@@ -2049,14 +1790,14 @@ dependencies = [
  "bip39",
  "chacha20poly1305",
  "clap",
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
- "dom-serialization 0.2.0",
- "dom-slate 0.2.0",
- "dom-tx 0.2.0",
- "dom-wallet-crypto 0.2.0",
- "dom-wallet-keys 0.2.0",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-serialization",
+ "dom-slate",
+ "dom-tx",
+ "dom-wallet-crypto",
+ "dom-wallet-keys",
  "fs2",
  "hex",
  "hkdf",
@@ -2077,48 +1818,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "dom-wallet"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "argon2",
- "bip39",
- "chacha20poly1305",
- "clap",
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-slate 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-tx 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-keys 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "fs2",
- "hex",
- "hkdf",
- "hmac",
- "k256",
- "rand 0.8.6",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 1.0.69",
- "tracing",
- "url",
- "zeroize",
-]
-
-[[package]]
 name = "dom-wallet-app"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
- "dom-serialization 0.2.0",
- "dom-wallet 0.2.0",
- "dom-wire 0.2.0",
+ "dom-core",
+ "dom-crypto",
+ "dom-serialization",
+ "dom-wallet",
+ "dom-wire",
  "eframe",
  "hex",
  "proptest",
@@ -2132,142 +1840,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "dom-wallet-core"
-version = "0.3.2"
-source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
-dependencies = [
- "dom-adaptor 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-node 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-slate 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-api 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-protocol",
- "dom-wallet-core-recovery",
- "dom-wallet-core-restore",
- "dom-wallet-core-submit",
- "dom-wallet-core-sync",
- "dom-wallet-crypto 0.3.2",
- "dom-wallet-domain",
- "dom-wallet-embedded-core",
- "dom-wallet-production-backend",
- "dom-wallet-storage",
- "hex",
- "rand 0.8.6",
- "serde",
- "sha2",
- "thiserror 2.0.18",
- "tracing",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "dom-wallet-core-api"
 version = "0.2.0"
 dependencies = [
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
+ "dom-consensus",
+ "dom-core",
  "hex",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "dom-wallet-core-api"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "hex",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "dom-wallet-core-protocol"
-version = "0.3.2"
-source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
-dependencies = [
- "base64",
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-tx 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-api 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-sync",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "dom-wallet-core-recovery"
-version = "0.3.2"
-source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
-dependencies = [
- "bip39",
- "dom-adaptor 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-node 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-slate 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-tx 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-api 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-protocol",
- "dom-wallet-core-sync",
- "dom-wallet-domain",
- "dom-wallet-keys 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-recovery 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "rand 0.8.6",
- "thiserror 2.0.18",
- "zeroize",
-]
-
-[[package]]
-name = "dom-wallet-core-restore"
-version = "0.3.2"
-source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
-dependencies = [
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-tx 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-api 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-recovery",
- "dom-wallet-core-sync",
- "dom-wallet-crypto 0.3.2",
- "dom-wallet-domain",
- "dom-wallet-recovery 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-storage",
- "thiserror 2.0.18",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "dom-wallet-core-submit"
-version = "0.3.2"
-source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
-dependencies = [
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-api 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-sync",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "dom-wallet-core-sync"
-version = "0.3.2"
-source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
-dependencies = [
- "dom-chain 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-api 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2288,67 +1867,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dom-wallet-crypto"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "argon2",
- "chacha20poly1305",
- "hkdf",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
-name = "dom-wallet-crypto"
-version = "0.3.2"
-source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
-dependencies = [
- "argon2",
- "chacha20poly1305",
- "hkdf",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "zeroize",
-]
-
-[[package]]
-name = "dom-wallet-domain"
-version = "0.3.2"
-source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
-dependencies = [
- "serde",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "dom-wallet-embedded-core"
-version = "0.3.2"
-source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
-dependencies = [
- "dom-chain 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-config 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-node 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-pow 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-api 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "randomx-rs",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "dom-wallet-keys"
 version = "0.2.0"
 dependencies = [
@@ -2364,106 +1882,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "dom-wallet-keys"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "bip39",
- "hmac",
- "rand 0.8.6",
- "secp256k1 0.28.2",
- "sha2",
- "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
-name = "dom-wallet-production-backend"
-version = "0.3.2"
-source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
-dependencies = [
- "dom-node 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-api 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-protocol",
- "dom-wallet-core-recovery",
- "dom-wallet-core-restore",
- "dom-wallet-core-submit",
- "dom-wallet-core-sync",
- "dom-wallet-crypto 0.3.2",
- "dom-wallet-embedded-core",
- "dom-wallet-storage",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "dom-wallet-recovery"
 version = "0.2.0"
 dependencies = [
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
- "dom-tx 0.2.0",
- "dom-wallet-core-api 0.2.0",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-tx",
+ "dom-wallet-core-api",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "dom-wallet-recovery"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-tx 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-api 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "dom-wallet-remote-source"
-version = "0.3.2"
-source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
-dependencies = [
- "dom-chain 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-crypto 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-wallet-core-api 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "hex",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "url",
-]
-
-[[package]]
-name = "dom-wallet-storage"
-version = "0.3.2"
-source = "git+https://github.com/sorenplanck/dom-wallet-v3?rev=512def52945100785b9e7d6e93dbb17d78adeb3e#512def52945100785b9e7d6e93dbb17d78adeb3e"
-dependencies = [
- "dom-wallet-crypto 0.3.2",
- "dom-wallet-domain",
- "fs2",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
 ]
 
 [[package]]
 name = "dom-wallet2"
 version = "0.2.0"
 dependencies = [
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-crypto 0.2.0",
- "dom-serialization 0.2.0",
- "dom-slate 0.2.0",
- "dom-tx 0.2.0",
- "dom-wallet-crypto 0.2.0",
- "dom-wallet-keys 0.2.0",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-serialization",
+ "dom-slate",
+ "dom-tx",
+ "dom-wallet-crypto",
+ "dom-wallet-keys",
  "hex",
  "proptest",
  "reqwest",
@@ -2478,33 +1919,12 @@ name = "dom-wire"
 version = "0.2.0"
 dependencies = [
  "blake2",
- "dom-config 0.2.0",
- "dom-consensus 0.2.0",
- "dom-core 0.2.0",
- "dom-serialization 0.2.0",
+ "dom-config",
+ "dom-consensus",
+ "dom-core",
+ "dom-serialization",
  "futures",
  "proptest",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "snow",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "x25519-dalek",
-]
-
-[[package]]
-name = "dom-wire"
-version = "0.2.0"
-source = "git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137#6f8a947dee0e54c3421caa295755b1746c178137"
-dependencies = [
- "blake2",
- "dom-config 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-consensus 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-core 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "dom-serialization 0.2.0 (git+https://github.com/sorenplanck/dom-protocol?rev=6f8a947dee0e54c3421caa295755b1746c178137)",
- "futures",
  "rand 0.8.6",
  "serde",
  "serde_json",
@@ -2975,12 +2395,6 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "foldhash"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
-
-[[package]]
-name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
@@ -3210,22 +2624,9 @@ dependencies = [
  "cfg-if",
  "js-sys",
  "libc",
- "r-efi 5.3.0",
+ "r-efi",
  "wasip2",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "getrandom"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555"
-dependencies = [
- "cfg-if",
- "libc",
- "r-efi 6.0.0",
- "wasip2",
- "wasip3",
 ]
 
 [[package]]
@@ -3256,7 +2657,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d99fc21d493812643aae86d53b7bbd02f376434a90317e8a790bc209fdd6605e"
 dependencies = [
  "bytemuck",
- "foldhash 0.2.0",
+ "foldhash",
  "hashbrown 0.17.1",
  "log",
  "peniko",
@@ -3430,20 +2831,11 @@ checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
 
 [[package]]
 name = "hashbrown"
-version = "0.15.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
-dependencies = [
- "foldhash 0.1.5",
-]
-
-[[package]]
-name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 dependencies = [
- "foldhash 0.2.0",
+ "foldhash",
 ]
 
 [[package]]
@@ -3452,7 +2844,7 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "foldhash 0.2.0",
+ "foldhash",
 ]
 
 [[package]]
@@ -3709,12 +3101,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "id-arena"
-version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
-
-[[package]]
 name = "idna"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3777,8 +3163,6 @@ checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -4005,12 +3389,6 @@ name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
-
-[[package]]
-name = "leb128fmt"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "libc"
@@ -4891,16 +4269,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prettyplease"
-version = "0.2.37"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
-dependencies = [
- "proc-macro2",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "primitive-types"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5066,12 +4434,6 @@ name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
-
-[[package]]
-name = "r-efi"
-version = "6.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "radium"
@@ -5326,14 +4688,12 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
- "tokio-util",
  "tower 0.5.3",
  "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
  "web-sys",
  "webpki-roots 1.0.7",
 ]
@@ -6500,7 +5860,6 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
- "serde_derive",
 ]
 
 [[package]]
@@ -6531,12 +5890,6 @@ name = "uuid"
 version = "1.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
-dependencies = [
- "getrandom 0.4.2",
- "js-sys",
- "serde_core",
- "wasm-bindgen",
-]
 
 [[package]]
 name = "valuable"
@@ -6624,16 +5977,7 @@ version = "1.0.3+wasi-0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20064672db26d7cdc89c7798c48a0fdfac8213434a1186e5ef29fd560ae223d6"
 dependencies = [
- "wit-bindgen 0.57.1",
-]
-
-[[package]]
-name = "wasip3"
-version = "0.4.0+wasi-0.3.0-rc-2026-01-06"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5428f8bf88ea5ddc08faddef2ac4a67e390b88186c703ce6dbd955e1c145aca5"
-dependencies = [
- "wit-bindgen 0.51.0",
+ "wit-bindgen",
 ]
 
 [[package]]
@@ -6689,53 +6033,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4e0100b01e9f0d03189a92b96772a1fb998639d981193d7dbab487302513441"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "wasm-encoder"
-version = "0.244.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "990065f2fe63003fe337b932cfb5e3b80e0b4d0f5ff650e6985b1048f62c8319"
-dependencies = [
- "leb128fmt",
- "wasmparser",
-]
-
-[[package]]
-name = "wasm-metadata"
-version = "0.244.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb0e353e6a2fbdc176932bbaab493762eb1255a7900fe0fea1a2f96c296cc909"
-dependencies = [
- "anyhow",
- "indexmap",
- "wasm-encoder",
- "wasmparser",
-]
-
-[[package]]
-name = "wasm-streams"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
-dependencies = [
- "futures-util",
- "js-sys",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "wasmparser"
-version = "0.244.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47b807c72e1bac69382b3a6fb3dbe8ea4c0ed87ff5629b8685ae6b9a611028fe"
-dependencies = [
- "bitflags 2.13.0",
- "hashbrown 0.15.5",
- "indexmap",
- "semver",
 ]
 
 [[package]]
@@ -7386,97 +6683,9 @@ dependencies = [
 
 [[package]]
 name = "wit-bindgen"
-version = "0.51.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7249219f66ced02969388cf2bb044a09756a083d0fab1e566056b04d9fbcaa5"
-dependencies = [
- "wit-bindgen-rust-macro",
-]
-
-[[package]]
-name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
-
-[[package]]
-name = "wit-bindgen-core"
-version = "0.51.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea61de684c3ea68cb082b7a88508a8b27fcc8b797d738bfc99a82facf1d752dc"
-dependencies = [
- "anyhow",
- "heck",
- "wit-parser",
-]
-
-[[package]]
-name = "wit-bindgen-rust"
-version = "0.51.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7c566e0f4b284dd6561c786d9cb0142da491f46a9fbed79ea69cdad5db17f21"
-dependencies = [
- "anyhow",
- "heck",
- "indexmap",
- "prettyplease",
- "syn 2.0.117",
- "wasm-metadata",
- "wit-bindgen-core",
- "wit-component",
-]
-
-[[package]]
-name = "wit-bindgen-rust-macro"
-version = "0.51.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c0f9bfd77e6a48eccf51359e3ae77140a7f50b1e2ebfe62422d8afdaffab17a"
-dependencies = [
- "anyhow",
- "prettyplease",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
- "wit-bindgen-core",
- "wit-bindgen-rust",
-]
-
-[[package]]
-name = "wit-component"
-version = "0.244.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d66ea20e9553b30172b5e831994e35fbde2d165325bec84fc43dbf6f4eb9cb2"
-dependencies = [
- "anyhow",
- "bitflags 2.13.0",
- "indexmap",
- "log",
- "serde",
- "serde_derive",
- "serde_json",
- "wasm-encoder",
- "wasm-metadata",
- "wasmparser",
- "wit-parser",
-]
-
-[[package]]
-name = "wit-parser"
-version = "0.244.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecc8ac4bc1dc3381b7f59c34f00b67e18f910c2c0f50015669dde7def656a736"
-dependencies = [
- "anyhow",
- "id-arena",
- "indexmap",
- "log",
- "semver",
- "serde",
- "serde_derive",
- "serde_json",
- "unicode-xid",
- "wasmparser",
-]
 
 [[package]]
 name = "writeable"
