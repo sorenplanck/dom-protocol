@@ -272,14 +272,33 @@ that already existed on the release line resolve differently now:
 | `getrandom` | 0.2.17 | **0.2.16** | transitive |
 | `serde`, `serde_json` | 1.0.228 / 1.0.149 | 1.0.229 / 1.0.151 | 9 node crates |
 
-No package was dropped, and 85 are new. But `sha2` is the node's hashing
-dependency and it moved **backwards**.
+No package was dropped, and 85 are new. `sha2` is the node's hashing
+dependency and it moved **backwards**, so that one was answered from the
+crate's own changelog and source rather than left as a worry.
+
+**sha2 0.10.9 -> 0.10.8 is inert here.** The 0.10.9 release (2025-04-30) has a
+single entry, and it is an addition: the opt-in `force-soft-compact` feature
+selecting a compact software backend (backport of RustCrypto/hashes#686 via
+#687). No fix, no advisory. The source diff between the two versions agrees
+with the changelog exactly — doc examples in `lib.rs`, and in `sha256.rs` and
+`sha512.rs` one new `cfg_if` branch gated on that new feature plus the
+`soft_compact.rs` modules it selects. No existing compression function is
+touched. Nothing in this workspace enables `force-soft-compact` or
+`force-soft`, and `cargo deny check advisories` reports nothing against `sha2`
+at either version.
+
+The other four downgrades are dev/test or transitive and carry no advisory
+either. `proptest` is the one with a behavioural surface — it generates the
+node's property-test cases — and its effect was measured directly: see the
+flake section below.
 
 Section 1's `git diff` is still true and still empty. That is exactly the
 limit worth naming: **byte-identical source does not mean the node builds the
 same artifact as the release line does.** It does not, today.
 
-Two ways out, and the choice is not mine to make:
+What remains open is fidelity, not a known defect: the node compiles against
+a dependency set its own CI never exercised. Two ways out, and the choice is
+not mine to make:
 
 1. **Align the layer's pins up** to the versions the release line resolves.
    This restores the node's dependency set exactly, and follows the direction
@@ -324,7 +343,48 @@ more.
 
 ---
 
-## 8. What this record does not claim
+## 8. The supply-chain gate, and a defect of mine it exposed
+
+`cargo deny check` runs in the node's own `supply-chain` job — all four
+checks, advisories included — and `cargo audit` beside it. The layer's licence
+policy was merged into the same `deny.toml`, so that job now governs both.
+
+**My merge broke it.** The block I appended carried the tail of the
+laboratory's `deny.toml`, which was itself the node's file plus that block —
+so `[bans]` and `[sources]` were declared twice. TOML forbids redefining a
+table, so `cargo deny check` aborted at the parse and the advisories check did
+not run at all. Every local gate stayed green, because cargo-deny is not part
+of them. The duplicates were byte-identical to the node's own sections and are
+removed; what was genuinely new — `[licenses.private]` and the three named
+crate exceptions of A-015/A-016 — remains.
+
+`the_supply_chain_policy_declares_no_table_twice` now fails on any repeated
+table header, and a companion test asserts the four denials the node's policy
+header names (`yanked`, `unknown-registry`, `unknown-git`,
+`required-git-spec = "rev"`) survive the merge. Verified by reintroducing the
+duplicate and watching the guard name it, then reverting.
+
+With the file repaired, `cargo-deny 0.20.2` reports:
+
+```
+advisories FAILED, bans ok, licenses ok, sources ok
+```
+
+`licenses ok` is the layer's policy working — the three exceptions resolve and
+the allow-list holds. `bans ok` and `sources ok` mean every git dependency the
+layer brought is pinned by exact rev.
+
+The one advisory is `webbrowser 1.2.1` (`BROWSER` argument injection), reached
+through `egui-winit -> eframe -> dom-wallet-app` — a node crate, a node
+dependency. `release/mainnetv2` resolves the same version and, run with its
+own lockfile, produces the identical verdict:
+`advisories FAILED, bans ok, licenses ok, sources ok`. **The supply-chain job
+is red on the release line today, and the injection neither caused it nor
+cleared it.** Upgrading `webbrowser` is the node's call, not this layer's.
+
+---
+
+## 9. What this record does not claim
 
 - No gate verdict. `G-F7` and `G-F8` exist only when the operator says so
   in writing.
