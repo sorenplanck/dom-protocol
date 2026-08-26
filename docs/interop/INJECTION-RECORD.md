@@ -292,20 +292,35 @@ Two ways out, and the choice is not mine to make:
 Neither is free, and both are supply-chain decisions over an audited pin set
 (D-ORQ-10). They are put here for the coordinator rather than taken.
 
-### One node test is flaky, and its cause is not yet established
+### One node test is flaky, and the flake pre-dates the injection
 
 `dom-chain`'s `convergence_same_canonical_tip_independent_of_arrival_order`
-fails roughly one run in four, with `direct connect duplicate output
-commitment`. Measured: three passes and one failure in four consecutive runs.
+fails intermittently with `direct connect duplicate output commitment`. It
+surfaced during a full workspace run, where it also aborts the remaining test
+targets.
 
-`crates/dom-chain` is byte-identical to the release line, so the injection did
-not change its source. What the injection **did** change is what it links
-against, per the section above — `proptest` alone moved four minor versions
-backwards across the node's test suites. That makes the drag a candidate
-cause that has not been excluded, and the honest statement is that this flake
-has not been shown to pre-date the injection. Establishing it requires running
-the same test on `release/mainnetv2` with its own lockfile, which this record
-does not yet contain.
+`crates/dom-chain` is byte-identical to the release line, but that alone did
+not settle it: the section above shows the injection changed what the node
+links against, and `proptest` moved four minor versions backwards across the
+node's test suites. So the drag was a live candidate cause.
+
+It was measured rather than argued. A `release/mainnetv2` worktree was built
+with **its own lockfile** — the pre-injection dependency set — and the same
+test run repeatedly on both sides:
+
+| Tree | Passed | Failed | Rate |
+| --- | --- | --- | --- |
+| `release/mainnetv2`, its own lockfile | 50 | 1 of 51 | ~2.0% |
+| This tree, after the injection | 53 | 1 of 54 | ~1.9% |
+
+The release line fails at the same rate. **The flake pre-dates the injection
+and the dependency drag did not worsen it.** It remains a real defect in a
+node test — the node is immutable here, so it is reported, not fixed — and the
+reproduction is: run that test enough times on either tree.
+
+Note what this does *not* retire: the dependency drag above is still open on
+its own terms. This measurement clears it of causing this one flake, nothing
+more.
 
 ---
 
