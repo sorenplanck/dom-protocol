@@ -143,7 +143,59 @@ to a range.
 
 ---
 
-## 6. What this record does not claim
+## 6. Four defects the injection surfaced, and how each was closed
+
+Bringing the layer under the DOM's workspace and the DOM's audits put it
+under checks it had never faced. Each finding below reproduces identically
+in the laboratory monorepo, so none was caused by the injection — and none
+was left standing.
+
+### The Bulletproof statement was frozen over the wrong shares
+
+Twelve tests in `dom-scriptless-crypto::shared_output_v1` failed with "the
+pinned Bulletproof statement was refused". `freeze_shared_output_statement_v1`
+injected `v*H` into share 0 before freezing, while
+`BpStatementV1::aggregate_commitment_from_shares` adds `v*H` once on top of
+the ordered sum — so the statement asserted `2v*H + R` against an aggregate
+of `v*H + R`, and every real formation was refused.
+
+The injection had a written reason: that the aggregate check "only asserts
+`sum(shares) == aggregate`" and so could not refuse a statement claiming `v`
+over an aggregate that opens to `0`. True of an earlier check; the pinned one
+now rebuilds `v*H + Σ shares`, so it refuses exactly that on its own. The
+defence became the authority's, and layering on top of it broke the
+composition. `dom-adaptor` is the cryptographic authority (§P.2), so the
+consumer moved. Every refusal test still passes.
+
+### Two fault-injection hooks nothing could reach
+
+The resend interposition and the evidence test clock in `dom-scriptless-store`
+were both installed by no test. Neither could be: `ResendRequestV1::from_recovered`
+and `FreshReservationRequestV1` are sealed by the pin, so the paths that would
+observe them cannot be entered from this crate — and `#[cfg(test)]` hides them
+from every other. Removed rather than annotated. A hook nothing can install is
+not coverage.
+
+### A test that assumed seven directories where six exist
+
+`restored_generation_inventory_allows_only_the_seven_optional_namespaces`
+removed seven namespace directories, but `collaborative-secrets` is created
+lazily and is absent in a fresh generation. The removal now accepts an
+already-absent namespace — and only that; every other error still propagates —
+while the assertion that follows is unchanged.
+
+### Bare commit hashes under the DOM's drift audit
+
+`dom-leg` documented the real-adaptor round as running "over the crate pinned
+at" a revision, which stopped being true the moment `dom-adaptor` became a
+workspace member. `f7-runner`'s two frozen commits are evidence of what the
+twenty settled routes ran against; they are labelled as evidence and
+deliberately not repointed, because repointing them would restate what the
+evidence was made on.
+
+---
+
+## 7. What this record does not claim
 
 - No gate verdict. `G-F7` and `G-F8` exist only when the operator says so
   in writing.
