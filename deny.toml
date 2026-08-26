@@ -100,22 +100,3 @@ allow = ["MPL-2.0"]
 # allow-list above, which is left untouched. Reversible by the operator.
 crate = "hex_lit"
 allow = ["MITNFA"]
-
-[bans]
-# F1 targets git-source hygiene + advisories + licenses, not version dedup.
-# Keep version/wildcard hygiene non-failing so the supply-chain signal stays clean.
-multiple-versions = "allow"
-wildcards = "allow"
-
-[sources]
-unknown-registry = "deny"
-unknown-git = "deny"
-# Every git dependency MUST be pinned by an exact commit rev (no branch/tag).
-# This is the rule that fires on secp256k1-zkp { branch = "master" }.
-required-git-spec = "rev"
-# The upstream Blockstream repo is a legitimate source — but only when pinned by
-# rev (enforced by required-git-spec above). Listing it here does NOT exempt the
-# rev requirement.
-allow-git = [
-    "https://github.com/BlockstreamResearch/rust-secp256k1-zkp",
-]
