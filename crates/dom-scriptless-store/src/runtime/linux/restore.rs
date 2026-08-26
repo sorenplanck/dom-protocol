@@ -2444,7 +2444,7 @@ fn authenticate_predecessor_from_disk(
 ///
 /// The caller retains the exclusive Store lock for this entire call. Every
 /// post-rename verifier reopens the canonical location from the retained root;
-/// stale staging handles never grant authority after a move.
+/// Staging handles that went out of date never grant authority after a move.
 #[allow(clippy::too_many_arguments)]
 #[cfg(any(test, feature = "evidence-only"))]
 pub(super) fn publish_staged_existing_device_restore(

@@ -4,8 +4,11 @@
 //!
 //! ## Two configurations
 //!
-//! - `--features real-dom-adaptor`: REAL 2-of-2 round over the crate pinned at
-//!   `6f8a947dee0e54c3421caa295755b1746c178137`. Mandatory in the conformance
+//! - `--features real-dom-adaptor`: REAL 2-of-2 round over `dom-adaptor`, which
+//!   is now a member of this workspace rather than a git pin — the DOM and its
+//!   interoperability layer are one tree. The audited revision it was absorbed
+//!   at was commit `6f8a947dee0e54c3421caa295755b1746c178137`, kept here as
+//!   provenance and not as a resolution target. Mandatory in the conformance
 //!   CI (§9.1) and in F1+. See [`round`].
 //! - default: compiles without a C toolchain. The BOUNDARY (names and argument
 //!   order) is the same, but every cryptographic operation returns
