@@ -1,3 +1,16 @@
+// The laboratory surface of this crate — the evidence-only constructors and
+// the restore, backup and funding-authorization paths that only they reach —
+// is compiled OUT of the default profile by design. `scripts/check-release-
+// surface.sh` makes that a gate: a release build must accept the crate without
+// the feature and must REFUSE it with the feature.
+//
+// In exactly that build, the support those paths use becomes unreachable and
+// `dead_code` reports it. That is the design working, not a defect, so the
+// lint is quieted only there. Under `test` and under `evidence-only` — the two
+// configurations where this code is actually built and exercised — the lint
+// stays fully on and any genuinely unused item is still an error.
+#![cfg_attr(not(any(test, feature = "evidence-only")), allow(dead_code))]
+
 //! Fail-closed canonical storage codecs for DOM Contracts.
 //!
 //! Authenticated canonical-record creation and validation use the pinned DOM

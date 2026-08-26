@@ -988,6 +988,11 @@ impl RestartableSharedBlindingVaultV1 for ContractsNonceVaultV1 {
                         }
                     }
                 }
+                // Clippy would fold this into a match guard. The condition is
+                // fallible and multi-line: a `?` in a guard is harder to read
+                // and to audit than the explicit arm, and this arm decides a
+                // quarantine.
+                #[allow(clippy::collapsible_match)]
                 StateKind::SharedBoundRetired => {
                     if capability
                         .bound_candidate(request, &record.binding)
@@ -1484,10 +1489,9 @@ fn require_terminal_session_marker(
             .map_err(|_| LinuxCapabilityError::ExactBytesMismatch)?;
         if record.kind == StateKind::TerminalSession
             && record.binding.get(10..42) == Some(session_id.as_slice())
+            && found.replace(record.binding_digest).is_some()
         {
-            if found.replace(record.binding_digest).is_some() {
-                return Err(LinuxCapabilityError::ExactBytesMismatch);
-            }
+            return Err(LinuxCapabilityError::ExactBytesMismatch);
         }
         Ok(())
     })?;

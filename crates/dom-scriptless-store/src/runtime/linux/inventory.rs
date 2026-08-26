@@ -74,11 +74,6 @@ const MASTER_KEY_ENVELOPE_LEN: usize = 182;
 const NONCE_SECRET_ENVELOPE_MAX_LEN: usize = 1_122;
 pub(super) const TOMBSTONE_ENVELOPE_LEN: usize = 495;
 
-#[cfg(test)]
-std::thread_local! {
-    static TEST_UNIX_TIME: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
-}
-
 /// Terminates a test subprocess after one exact normal-vault durability cut.
 #[cfg(test)]
 fn test_normal_vault_crash_hook(boundary: &str) {
@@ -142,53 +137,6 @@ impl From<LinuxCapabilityError> for InventoryError {
 impl From<CanonicalCodecError> for InventoryError {
     fn from(_: CanonicalCodecError) -> Self {
         Self::Canonical
-    }
-}
-
-#[cfg(test)]
-type ResendInterpositionV1 = Box<dyn FnOnce() -> Result<(), InventoryError> + Send + 'static>;
-
-#[cfg(test)]
-std::thread_local! {
-    static RESEND_INTERPOSITION: std::cell::RefCell<Option<ResendInterpositionV1>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-#[must_use]
-pub(super) struct ResendInterpositionGuardV1 {
-    previous: Option<ResendInterpositionV1>,
-}
-
-#[cfg(test)]
-impl Drop for ResendInterpositionGuardV1 {
-    fn drop(&mut self) {
-        RESEND_INTERPOSITION.with(|slot| {
-            slot.replace(self.previous.take());
-        });
-    }
-}
-
-#[cfg(test)]
-pub(super) fn install_resend_interposition(
-    interposition: ResendInterpositionV1,
-) -> Result<ResendInterpositionGuardV1, InventoryError> {
-    let previous = RESEND_INTERPOSITION.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if slot.is_some() {
-            return Err(InventoryError::RestoreQuarantined);
-        }
-        Ok(slot.replace(interposition))
-    })?;
-    Ok(ResendInterpositionGuardV1 { previous })
-}
-
-#[cfg(test)]
-fn run_resend_interposition() -> Result<(), InventoryError> {
-    let interposition = RESEND_INTERPOSITION.with(|slot| slot.borrow_mut().take());
-    match interposition {
-        Some(interposition) => interposition(),
-        None => Ok(()),
     }
 }
 
@@ -4606,15 +4554,11 @@ impl ContractsNonceVaultV1 {
         Ok(())
     }
 
+    // No test clock: the sole caller is `claim_fresh_reservation`, whose
+    // `FreshReservationRequestV1` no code outside the pin can construct, so an
+    // injected clock could never be observed. The clock-dependent admission
+    // takes `now` as a parameter and is exercised directly instead.
     fn unix_time() -> Result<u64, InventoryError> {
-        #[cfg(test)]
-        if let Some(now) = TEST_UNIX_TIME.with(std::cell::Cell::get) {
-            return if now == 0 {
-                Err(InventoryError::RestoreQuarantined)
-            } else {
-                Ok(now)
-            };
-        }
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| InventoryError::RestoreQuarantined)?
@@ -4622,11 +4566,6 @@ impl ContractsNonceVaultV1 {
             .checked_add(0)
             .filter(|value| *value != 0)
             .ok_or(InventoryError::RestoreQuarantined)
-    }
-
-    #[cfg(test)]
-    pub(super) fn set_evidence_test_time(now: Option<u64>) {
-        TEST_UNIX_TIME.with(|value| value.set(now));
     }
 
     fn handle_for_authority(
@@ -5137,11 +5076,12 @@ impl NonceVaultV1 for ContractsNonceVaultV1 {
         &mut self,
         request: ResendRequestV1,
     ) -> Result<Self::ExportedArtifact, Self::Error> {
-        self.resend_exported_inner(request, || {
-            #[cfg(test)]
-            run_resend_interposition()?;
-            Ok(())
-        })
+        // No interposition: `ResendRequestV1::from_recovered` is `pub(crate)`
+        // in the pin, so no test in this crate can build a request and reach
+        // this seam. The I7 byte-identical-resend invariant is covered where
+        // the pin allows it — the store's idempotency ledger and the pin's own
+        // `ResendRequestV1` suite. A hook nothing can install is not coverage.
+        self.resend_exported_inner(request, || Ok(()))
     }
 
     fn cancel_reservation(
@@ -8622,7 +8562,17 @@ mod tests {
             "nonce-secrets",
             "collaborative-secrets",
         ] {
-            fs::remove_dir(generation_path.join(namespace))?;
+            // The seven are optional and created lazily: a freshly
+            // initialized generation carries six of them, and
+            // `collaborative-secrets` only appears once something writes there.
+            // An already-absent namespace is the state this test is about, so
+            // it is accepted — and only that. Any other removal failure still
+            // propagates.
+            match fs::remove_dir(generation_path.join(namespace)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
             assert!(open_optional_namespace(&initialized.generation, namespace)?.is_none());
         }
         require_generation_inventory(&initialized.generation)?;
