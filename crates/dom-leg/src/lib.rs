@@ -46,7 +46,6 @@ pub use round::{
     LegParticipant, LocalSigningShare, RoundNonces, SessionBindings, SessionOpenRequest,
 };
 
-
 /// Purpose registry.
 ///
 /// [AUTHORITY: dom-adaptor 6f8a947d] with `real-dom-adaptor` this is the pin's
