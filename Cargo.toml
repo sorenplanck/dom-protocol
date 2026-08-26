@@ -97,18 +97,6 @@ members = [
 # own from wallet-desktop/ (npm run tauri build / CI).
 exclude = [
     "wallet-desktop",
-
-    # The F7 laboratory runtime. It drives the live wallet compositor, which
-    # needs a Wallet V3 revision built against this node. The pin it carries
-    # (dom-wallet-v3 @ 512def5) was built against the F7 node lineage and
-    # expects scanner surfaces the mainnet release line does not publish —
-    # `ScanTransaction`, `TransactionLocation`, and the wider
-    # `CoinbaseScanMetadata`. Since the node is mainnet and cannot grow them,
-    # the runner is kept out of the workspace build rather than being made to
-    # compile by weakening either side. Nothing else in the tree depends on
-    # it. It builds again the day dom-wallet-v3 publishes a revision against
-    # the release line.
-    "crates/f7-runner",
 ]
 
 [workspace.package]

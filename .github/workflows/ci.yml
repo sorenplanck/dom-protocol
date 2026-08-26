@@ -194,6 +194,17 @@ jobs:
 
       # The layer's executable guards. Each fails the build on its own finding;
       # none of them is advisory.
+      - name: Architecture boundaries
+        run: ./scripts/check-boundaries.sh
+
+      - name: Ratification signatures
+        run: |
+          command -v minisign >/dev/null || sudo apt-get install -y minisign
+          ./scripts/check-ratification-signatures.sh
+
+      - name: F7 DOM surfaces
+        run: ./scripts/f7-validate-dom-surfaces.sh
+
       - name: Layer guards
         run: |
           ./scripts/check-adaptor-two-nonce.sh

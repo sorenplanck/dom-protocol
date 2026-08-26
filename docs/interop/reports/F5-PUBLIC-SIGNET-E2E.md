@@ -12,6 +12,17 @@ the gate, roadmap and release and never blocks F5-F8. No funding transaction
 or F5 spend was built, signed, broadcast, or claimed as confirmed. The
 operator-provided funding address below is preserved as historical data.
 
+> **Redaction note.** One line of this document was redacted when it was
+> transported into the DOM repository: the Bitcoin Core datadir in §3 carried
+> the operator's machine-local home path, which `scripts/check-boundaries.sh`
+> forbids in tracked content. The absolute prefix was replaced by
+> `<operator-home>`; the directory name, and every other value in this
+> document — heights, hashes, pins, challenge script — are unchanged. The
+> path was incidental to what the document proves, which is why it could be
+> redacted rather than carried: nothing here rests on where the datadir sat.
+> This document is therefore no longer verbatim, and says so rather than
+> letting a reader assume it is.
+
 ## 1. Commit binding
 
 | Item | Observed value |
@@ -75,7 +86,7 @@ rescan, deletion, network substitution, mining, or reorg injection:
 
 | Item | Observed value/status |
 |---|---|
-| Datadir | `/home/leonardov/.bitcoin-f5-signet` |
+| Datadir | `<operator-home>/.bitcoin-f5-signet` (redacted, see note) |
 | Bitcoin Core | `v31.0.0` |
 | Configuration | `signet=1`, `server=1`, `txindex=1`, `dbcache=1500` |
 | RPC | authenticated and responsive for `getrpcinfo` on `127.0.0.1:38332` |

@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# NOTE on the line that moved. This list is `rustfmt --check` targets, nothing
+# more: it never asserted a property about `crates/dom-crypto/src/scriptless.rs`
+# beyond that file being formatted. That file belonged to the F7 node lineage
+# and does not exist on the mainnet release line; its contents live here as
+# `dom-scriptless-primitives`, beside the node rather than inside it. The entry
+# is repointed at the bridge's own sources, so nothing is lost — there was no
+# property to lose — and the script stops being permanently red.
 set -euo pipefail
 
 export CARGO_BUILD_JOBS=2
@@ -55,7 +62,8 @@ rustfmt --edition 2021 --config skip_children=true --check \
   crates/dom-adaptor/tests/scriptless_gate_readiness.rs \
   crates/dom-crypto/src/bulletproof_bp.rs \
   crates/dom-crypto/src/lib.rs \
-  crates/dom-crypto/src/scriptless.rs \
+  crates/dom-scriptless-primitives/src/lib.rs \
+  crates/dom-scriptless-primitives/src/curve.rs \
   crates/dom-node/src/main.rs \
   crates/dom-node/src/node.rs \
   crates/dom-node/src/node_handle.rs \
