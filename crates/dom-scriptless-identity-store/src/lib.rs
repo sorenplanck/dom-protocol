@@ -107,7 +107,7 @@ impl ContractsIdentityPassphraseV1 {
     /// Accepts 16 through 1024 non-NUL bytes. The value is never serialized or
     /// returned by this crate.
     pub fn new(bytes: Vec<u8>) -> Result<Self, IdentityStoreError> {
-        if !(16..=1024).contains(&bytes.len()) || bytes.iter().any(|byte| *byte == 0) {
+        if !(16..=1024).contains(&bytes.len()) || bytes.contains(&0) {
             return Err(IdentityStoreError::InvalidInput);
         }
         Ok(Self {
