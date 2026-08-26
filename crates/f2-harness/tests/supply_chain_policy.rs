@@ -41,7 +41,9 @@ fn the_supply_chain_policy_declares_no_table_twice() {
     let mut duplicates = Vec::new();
     for (line, header) in table_headers(&policy) {
         match first_seen.get(&header) {
-            Some(earlier) => duplicates.push(format!("[{header}] at line {line}, already at {earlier}")),
+            Some(earlier) => {
+                duplicates.push(format!("[{header}] at line {line}, already at {earlier}"))
+            }
             None => {
                 first_seen.insert(header, line);
             }
