@@ -82,3 +82,34 @@ fn the_supply_chain_policy_still_denies_what_it_must() {
         );
     }
 }
+
+/// Source-level layer: the barriers must EXIST, checkable without a build.
+///
+/// The build guards (`check-release-surface.sh`,
+/// `check-relay-fault-surface.sh`) prove the barriers FIRE. This proves they
+/// are still written, and catches someone deleting one without needing a
+/// release build to notice — the same two-layer shape the Contracts lineage
+/// used for the Store.
+#[test]
+fn the_release_barriers_are_present_in_source() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (krate, feature) in [
+        ("dom-scriptless-store", "evidence-only"),
+        ("relay", "relay-fault-injection"),
+    ] {
+        let lib = root.join("crates").join(krate).join("src/lib.rs");
+        let source = std::fs::read_to_string(&lib)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", lib.display()));
+        let gate = format!("feature = \"{feature}\", not(debug_assertions)");
+        assert!(
+            source.contains(&gate),
+            "{krate} no longer carries the release barrier for `{feature}`.\n\
+             A laboratory surface that can be compiled into a release build is \
+             one build-configuration mistake away from shipping."
+        );
+        assert!(
+            source.contains("compile_error!"),
+            "{krate} carries the cfg gate but no compile_error! behind it"
+        );
+    }
+}

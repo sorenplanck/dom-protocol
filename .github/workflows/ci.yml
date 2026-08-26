@@ -217,6 +217,9 @@ jobs:
       - name: Release-surface boundary
         run: ./scripts/check-release-surface.sh
 
+      - name: Relay fault-injection release boundary
+        run: ./scripts/check-relay-fault-surface.sh
+
       # Feature surfaces no other job reaches. `--all-targets` builds the
       # default feature set only, so a crate's optional surface can rot
       # unnoticed: `mod signer_e2e` is gated on `all(test, evidence-only)`,

@@ -19,6 +19,21 @@
 
 #![forbid(unsafe_code)]
 
+// Policy extension decided by the operator, not a pre-existing rule: the
+// laboratory fault-injection surface of this crate is barred from release
+// builds, the way `dom-scriptless-store` already bars its evidence-only
+// surface. This is a safeguard against a build-configuration mistake in a
+// component third parties compile — not a security fix, and not a defect
+// report against the feature, which is correctly gated and enabled by nobody.
+//
+// The discriminator is deliberately the same imperfect one the Store uses.
+// `not(debug_assertions)` is an approximation of "release": a release profile
+// with debug-assertions turned on slips past it. Consistency with the existing
+// pattern is worth more than a better discriminator only this crate would use.
+// It stops an accident; it does not stop intent.
+#[cfg(all(feature = "relay-fault-injection", not(debug_assertions)))]
+compile_error!("the relay fault-injection surface is forbidden in release builds");
+
 use blake2::{
     digest::{Update, VariableOutput},
     Blake2bVar,

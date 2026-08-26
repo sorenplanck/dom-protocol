@@ -433,7 +433,50 @@ there. Nothing in this layer can reach it.
 
 ---
 
-## 9. What this record does not claim
+## 9. One barrier added on the operator's decision, and what it does not do
+
+**This is new policy, not the application of an existing rule.** The
+`dom-scriptless-store` crate already bars its `evidence-only` surface from
+release builds; the operator decided to extend the same rule to `relay`'s
+`relay-fault-injection`, and `crates/relay/src/lib.rs` now carries:
+
+```rust
+#[cfg(all(feature = "relay-fault-injection", not(debug_assertions)))]
+compile_error!("the relay fault-injection surface is forbidden in release builds");
+```
+
+The reason is narrow and worth stating exactly: it is a safeguard against a
+**build-configuration mistake** in a component third parties compile. It is
+not a security fix, and it is not a defect report against the feature — that
+feature is correctly gated, off by default, and enabled by nothing in the
+tree.
+
+Two layers enforce it, mirroring what the Contracts lineage already did for
+the Store. `the_release_barriers_are_present_in_source` proves the barrier is
+still WRITTEN, catching a deletion without needing a release build to notice.
+`scripts/check-relay-fault-surface.sh` — a sibling of
+`check-release-surface.sh`, not an extension of it, since that script pins one
+exact diagnostic and the two subjects are independent — proves it FIRES. Both
+were verified by deleting the barrier and watching each react.
+
+Three things were proven rather than assumed: release with the feature fails
+with the exact diagnostic; release without it compiles clean; and **debug with
+the feature still compiles and its thirteen tests still pass**, the four
+fault-injection ones among them. The point is to stop an accident, not to
+amputate the crate, and a guard that quietly removed the laboratory capability
+would be a worse defect than the one it prevents.
+
+**The hole, stated rather than hidden.** `not(debug_assertions)` is an
+imperfect approximation of "release": a release profile with debug-assertions
+enabled slips past it. The Store lives with the same hole, and consistency
+with the existing pattern was chosen over a better discriminator only this
+crate would use. So the barrier stops a mistake; it does not stop intent. A
+guard whose limitation is written down is a guard. One that presents itself as
+airtight is a trap for the next reader.
+
+---
+
+## 10. What this record does not claim
 
 - No gate verdict. `G-F7` and `G-F8` exist only when the operator says so
   in writing.
