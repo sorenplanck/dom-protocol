@@ -108,35 +108,54 @@ transcription should be deleted, not maintained.
 
 ---
 
-## 4. What is blocked, and why nothing was weakened to hide it
+## 4. What did not travel, and why
 
-`f7-runner` — the laboratory runtime — is in the tree but out of the
-workspace build, with the reason written in `Cargo.toml`.
+Three things stayed behind. None of them is blocked work waiting to resume —
+each is laboratory apparatus that only appeared to belong here because it
+lived under `crates/`.
 
-It is the only crate that enables `dom-leg/f7-wallet-compositor`, and
-nothing depends on it. That feature pulls Wallet V3 at
-`dom-wallet-v3 @ 512def5`, which was built against the F7 node lineage and
-expects scanner surfaces the release line does not publish:
-`ScanTransaction`, `TransactionLocation`, and a `CoinbaseScanMetadata`
-carrying `kernel_features`, `kernel_excess_signature`, `offset` and
-`output_proof_envelope`.
+**`laboratory/`** — the minutes, adjudications and signatures of the F7/F8
+process. Governance record, not product.
 
-Two ways existed to make it compile, and both were refused: growing those
-types on the node breaks the rule, and stubbing them in the wallet would
-fake a scanner. It builds the day `dom-wallet-v3` publishes a revision
-against the release line.
+**`f7-runner`** — the laboratory runtime, removed from this branch's HISTORY,
+not merely excluded from the build. Excluding it left its source published,
+and that source is the only place in any of the four lineages that BUILDS
+paths into two of the three protected runtime directories from a
+machine-local root the code validates against, naming four credential files.
+`crates/f2-harness/tests/workspace_exclusions.rs` now refuses the path itself
+rather than listing it, so re-adding it under exclusion cannot pass.
 
-Related: the Wallet V3 pin resolves the DOM through a git revision of this
-same repository, which placed a **second, older node** in the graph — its
-`TransactionInput` is a different type from ours. All twenty-one node
-packages it reaches are patched onto the local tree, so there is one DOM
-and it is mainnet.
+**`dom-leg/f7-wallet-compositor`** — the Wallet V3 compositor, and the six
+`dom-wallet-*` git dependencies it switched on. Three written bases, none of
+them anyone's judgement: `check-boundaries.sh:13` makes an ordinary DOM Wallet
+dependency an architectural violation; `dom-leg`'s own comment declared the
+feature evidence apparatus, "never enabled by the production F7 runner"; and
+`f7-runner` was its only consumer anywhere, so the runner's removal left it
+with no caller at all.
+
+It went out as a normal commit rather than a rewrite: those six declarations
+carry no machine-local path, so what they violated was the CURRENT boundary
+state, which `git grep` reads from HEAD.
+
+The removal reached further than the feature's name suggests — `lib.rs` gated
+three modules on it, plus a test module included by `#[path]` — and every
+dependency it switched on was checked one at a time for another consumer
+before being dropped. Nine had none.
+
+**This is what finally closed the second node.** The Wallet V3 pin resolved
+the DOM through a git revision of this same repository, putting an older node
+in the graph whose `TransactionInput` is a different type from ours. An
+earlier revision of this record claimed that was already resolved; it was
+true only of the resolved graph, while Cargo's optional closure still carried
+`dom-protocol @ 6f8a947d` in the lockfile. With the compositor gone the
+lockfile lost 950 lines, and both the graph and the closure now hold exactly
+two git packages, both `secp256k1-zkp`. There is one DOM and it is mainnet.
 
 ---
 
 ## 5. Two pins moved, both upward, both dev-only
 
-`tempfile` in `f3-harness` and `f7-runner` was `=3.23.0` while the absorbed
+`tempfile` in `f3-harness` was `=3.23.0` while the absorbed
 crates carry `=3.24.0`. Aligned upward, the same direction the absorption
 took. Both are dev-dependencies; the exact pin is kept rather than widened
 to a range.
@@ -204,19 +223,17 @@ while the assertion that follows is unchanged.
 
 `dom-leg` documented the real-adaptor round as running "over the crate pinned
 at" a revision, which stopped being true the moment `dom-adaptor` became a
-workspace member. `f7-runner`'s two frozen commits are evidence of what the
-twenty settled routes ran against; they are labelled as evidence and
-deliberately not repointed, because repointing them would restate what the
-evidence was made on.
+workspace member. The two frozen commits that carried the same shape left
+with `f7-runner` itself.
 
 ### A crate outside the workspace is a crate no gate covers
 
-`f7-runner` is excluded for a reason written in `Cargo.toml`, and the reason
-holds. The risk is not that entry but the next one, added quietly to make a
-build pass. `the_workspace_excludes_exactly_the_crates_it_is_allowed_to` pins
-the list — both entries, each with its reason — and fails on any change, so
-growing it takes a diff a reviewer sees. Verified by adding a clandestine
-exclusion and watching the guard fail.
+`wallet-desktop` is the node's own exclusion and the only one left.
+`the_workspace_excludes_exactly_the_crates_it_is_allowed_to` pins the list and
+fails on any change, and `the_forbidden_paths_are_absent_from_the_tree` goes
+further for `crates/f7-runner`: it refuses the path itself, because listing a
+removed crate as an exclusion would restore exactly the state that was
+removed. Both verified by injecting the violation and watching them fire.
 
 ---
 
