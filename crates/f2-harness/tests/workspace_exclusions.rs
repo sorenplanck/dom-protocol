@@ -76,8 +76,8 @@ fn the_workspace_excludes_exactly_the_crates_it_is_allowed_to() {
 /// `crates/f7-runner` was removed from the branch's history rather than
 /// excluded from the build. Excluding it left its source published, and that
 /// source is the only place in any of the four lineages that BUILDS paths into
-/// two of the three protected runtime directories — `runtime-final/secrets`
-/// (naming four credential files) and `runtime-final/routes` — anchored to a
+/// two of the three protected runtime directories — the credential directory,
+/// naming four credential files, and the route directory — anchored to a
 /// machine-local root the code validates against.
 ///
 /// Re-adding it under exclusion would restore exactly the state that was
@@ -85,7 +85,7 @@ fn the_workspace_excludes_exactly_the_crates_it_is_allowed_to() {
 /// This one refuses the path itself.
 const FORBIDDEN_PATHS: &[(&str, &str)] = &[(
     "crates/f7-runner",
-    "builds paths into runtime-final/secrets and runtime-final/routes from a \
+    "builds paths into two of the three protected runtime directories from a \
      machine-local root; removed from history, not excluded",
 )];
 
