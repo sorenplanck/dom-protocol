@@ -8,6 +8,7 @@ name: CI
 # support removal.
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths-ignore:
