@@ -113,3 +113,41 @@ fn the_release_barriers_are_present_in_source() {
         );
     }
 }
+
+/// The node's own migration lab does not compile, and the coverage that
+/// depended on it is deferred rather than dropped.
+///
+/// `scripts/f7-validate-dom-surfaces.sh` used to run a test inside
+/// `labs/dom-bp-migration-lab`. That crate belongs to the node and names
+/// `dom_crypto::bulletproof`, which the release line does not expose — it has
+/// a private `bulletproof_bp` and a public `range_proof`. Both files are
+/// byte-identical to `release/mainnetv2`, so this is the node's breakage, and
+/// the node is immutable in this branch.
+///
+/// Removing the invocation without pinning the reason is how coverage
+/// disappears for good. This test asserts the breakage is still exactly what
+/// it was: when the node repairs its lab, this fails and tells whoever sees it
+/// to put the invocation back.
+#[test]
+fn the_node_owned_migration_lab_is_still_broken() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+    let lab = root.join("labs/dom-bp-migration-lab/src/current_oracle.rs");
+    let lab_source = std::fs::read_to_string(&lab)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", lab.display()));
+    let still_names_it = lab_source.contains("dom_crypto::bulletproof::");
+
+    let lib = root.join("crates/dom-crypto/src/lib.rs");
+    let crypto_source = std::fs::read_to_string(&lib)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", lib.display()));
+    let still_absent = !crypto_source.contains("pub mod bulletproof;");
+
+    assert!(
+        still_names_it && still_absent,
+        "the node's migration lab no longer fails the way it did:\n\
+           lab still names dom_crypto::bulletproof:: = {still_names_it}\n\
+           dom-crypto still lacks a public `bulletproof` module = {still_absent}\n\
+         If the node repaired this, restore the invocation removed from \
+         scripts/f7-validate-dom-surfaces.sh and delete this test."
+    );
+}
