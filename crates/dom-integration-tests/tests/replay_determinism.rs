@@ -339,11 +339,29 @@ async fn side_chain_block_does_not_rewrite_canonical_tip_after_restart() {
         (chain.tip_hash, chain.tip_height, chain.tip_difficulty)
     };
 
-    let (side_bytes, side_hash) = produce_single_block("sidechain-source", 43403).await;
-    assert_ne!(
-        side_hash, canonical_tip,
-        "test requires two distinct height-1 blocks"
-    );
+    // The node's fork choice breaks an equal-work tie by the lexicographically
+    // smaller hash (dom_chain::is_better_fork_choice_tip), and both blocks are at
+    // height 1 on regtest with the same fixed target — equal total difficulty by
+    // construction. This test is about a side block that LOSES that tie-break; one
+    // that wins exercises the reorg path and invalidates everything below.
+    let (side_bytes, side_hash) = {
+        let mut attempt = 0;
+        loop {
+            let (bytes, hash) = produce_single_block("sidechain-source", 43403).await;
+            assert_ne!(
+                hash, canonical_tip,
+                "test requires two distinct height-1 blocks"
+            );
+            if hash.as_bytes() > canonical_tip.as_bytes() {
+                break (bytes, hash);
+            }
+            attempt += 1;
+            assert!(
+                attempt < 16,
+                "could not mine a height-1 block that loses the equal-work tie-break"
+            );
+        }
+    };
     let side_block = Block::from_bytes(&side_bytes).expect("decode side block");
 
     {

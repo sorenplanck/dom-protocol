@@ -252,6 +252,13 @@ jobs:
           ./scripts/check-policy-topology.sh
           ./scripts/check-shared-output-bp.sh
 
+      # The one named exception to node byte-identity. This guard fails on the
+      # day the node line adopts the same fix, which is when the exception ends
+      # and byte identity must be restored. It fetches the release commit by SHA
+      # (one commit) because actions/checkout is shallow by default.
+      - name: Node-test exception (byte-identity)
+        run: ./scripts/check-node-test-exception.sh
+
       - name: Release-surface boundary
         run: ./scripts/check-release-surface.sh
 

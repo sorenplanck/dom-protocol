@@ -16,7 +16,9 @@ So the layer was not merged into the node. It was placed beside it.
 
 ## 1. The invariant, and how to check it in one command
 
-The twenty-nine crates of the node are byte for byte the release line:
+The twenty-nine crates of the node are byte for byte the release line, with
+**one named exception**, recorded in full below:
+`crates/dom-integration-tests/tests/replay_determinism.rs`.
 
 ```bash
 git diff release/mainnetv2 -- crates/dom-cli crates/dom-core \
@@ -31,10 +33,62 @@ git diff release/mainnetv2 -- crates/dom-cli crates/dom-core \
   crates/dom-wallet-app crates/dom-test-runner crates/dom-agent-runner
 ```
 
-It prints nothing. Outside `crates/`, the only pre-existing files that
-changed at all are `Cargo.toml` and `deny.toml`, and both changed by
-addition only — `git diff release/mainnetv2 -- Cargo.toml deny.toml | grep
-'^-[^-]'` is empty.
+It prints exactly one hunk, in `replay_determinism.rs`, and nothing else.
+Outside `crates/`, the only pre-existing files that changed at all are
+`Cargo.toml` and `deny.toml`, and both changed by addition only —
+`git diff release/mainnetv2 -- Cargo.toml deny.toml | grep '^-[^-]'` is empty.
+
+### The exception, its reason, and its death condition
+
+`crates/dom-integration-tests/tests/replay_determinism.rs` carries one hunk
+that the release line does not. It repairs a defect of the release line, not
+of the injection.
+
+The test `side_chain_block_does_not_rewrite_canonical_tip_after_restart`
+mines a canonical height-1 block and an independent height-1 competitor, then
+asserts `ConnectResult::SideChain`. Both blocks sit at height 1 on regtest
+with the same fixed target, so their total difficulty is **equal by
+construction**, and the node's own fork choice breaks an equal-work tie by the
+lexicographically smaller hash — `is_better_fork_choice_tip`,
+`crates/dom-chain/src/chain_state.rs:130`. The assertion therefore holds only
+when the competitor's hash happens to sort above the canonical tip's. It is a
+coin flip on the mined nonce, and the test's ten subsequent assertions all
+depend on the competitor losing.
+
+Measured, not inferred. On the release line itself — the same test rebuilt
+with `3008587`'s own `Cargo.toml` and `Cargo.lock`, both verified identical by
+sha256 — **8 failures in 16 runs**. On this branch before the fix, 42 runs
+correlate perfectly with the tie-break: competitor hash below the canonical
+tip ⇒ failure, above ⇒ pass, 42 of 42 without exception. The CI history of
+`release/mainnetv2` shows the workflow ran three times in total, all on 10
+August, the last of them green: with a 50% coin, three runs reveal nothing.
+The defect is live on the release line and has simply never been exercised
+enough to surface.
+
+The fix makes the **scenario** deterministic rather than the result
+conditional: it re-mines the competitor until it loses the tie-break. That is
+the scenario the test's name already describes. Accepting either result would
+make the test incapable of failing; writing the reorg branch would be dozens
+of new lines in a node file. Selecting the fixture keeps the test's subject,
+leaves its body untouched, and holds the diff to one hunk.
+
+Two preconditions of the loop were verified before it was written, not
+assumed. `produce_single_block` yields distinct hashes on repeated in-process
+calls — 16 of 16 distinct, measured — because `test_config` derives a fresh
+data directory per call from pid, port and nanoseconds, and the node identity
+follows the directory. And port 43403 cannot collide across attempts because
+`spawn_node` only calls `DomNode::init`; the P2P bind lives in `run()`
+(`crates/dom-node/src/node.rs:678`), which this path never invokes. The loop
+is bounded at 16 attempts, so a spurious failure has probability 2⁻¹⁶.
+
+**This exception dies when the node line adopts the same text.**
+`scripts/check-node-test-exception.sh` enforces both halves: it pins the
+release-line blob and the fixed text by sha256, asserts the difference is
+exactly one hunk, and **fails** the moment the release line contains the fix —
+telling whoever sees it to restore byte identity with `git checkout`, delete
+the guard and its CI wiring, and remove this section. It fails closed if it
+cannot reach the release commit; it does not skip. All four failure modes were
+exercised against a simulated adoption before the guard was wired in.
 
 ---
 
