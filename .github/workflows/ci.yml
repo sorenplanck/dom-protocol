@@ -123,16 +123,53 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config
 
-      - name: cargo build --workspace
-        run: cargo build --workspace --all-targets
+      # The interoperability layer is Linux-only in substance: its custody and
+      # live-node crates are built on retained directory capabilities, rustix
+      # and Unix permission modes. The non-Linux legs therefore build the
+      # NODE's twenty-nine crates rather than the workspace. The node list is
+      # named positively because it is immutable in this branch; excluding the
+      # layer instead would rot on every crate added to it.
+      - name: Set build scope (full workspace on Linux, node crates elsewhere)
+        shell: bash
+        run: |
+          NODE="dom-agent-runner dom-chain dom-cli dom-config dom-consensus dom-core
+                dom-crypto dom-explorer dom-faucet dom-integration-tests dom-mempool
+                dom-node dom-pmmr dom-pow dom-rpc dom-serialization dom-slate dom-store
+                dom-test-runner dom-test-vectors dom-tx dom-wallet dom-wallet-app
+                dom-wallet-core-api dom-wallet-crypto dom-wallet-keys
+                dom-wallet-recovery dom-wallet2 dom-wire"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            echo "SCOPE_BUILD=--workspace" >> "$GITHUB_ENV"
+            echo "SCOPE_TEST=--workspace --exclude dom-integration-tests --exclude dom-node" >> "$GITHUB_ENV"
+          else
+            B=""; T=""
+            for c in $NODE; do
+              B="$B -p $c"
+              case "$c" in dom-integration-tests|dom-node) ;; *) T="$T -p $c";; esac
+            done
+            echo "SCOPE_BUILD=$B" >> "$GITHUB_ENV"
+            echo "SCOPE_TEST=$T" >> "$GITHUB_ENV"
+          fi
 
-      - name: cargo clippy --workspace -- -D warnings
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      # `shell: bash` on every step below is load-bearing, not style: the
+      # Windows runner defaults to PowerShell, where `$SCOPE_BUILD` does not
+      # expand an environment variable. It would silently become empty and the
+      # command would build the whole workspace unscoped — failing again, for a
+      # reason the log would not show.
+      - name: cargo build
+        shell: bash
+        run: cargo build $SCOPE_BUILD --all-targets
 
-      - name: cargo test --workspace (excluding integration and dom-node)
-        run: cargo test --workspace --exclude dom-integration-tests --exclude dom-node --all-targets
+      - name: cargo clippy -- -D warnings
+        shell: bash
+        run: cargo clippy $SCOPE_BUILD --all-targets -- -D warnings
 
-      - name: cargo test -p dom-node --all-targets (serial shutdown/supervisor coverage)
+      - name: cargo test (excluding integration and dom-node)
+        shell: bash
+        run: cargo test $SCOPE_TEST --all-targets
+
+      - name: cargo test -p dom-node --all-targets (serial)
+        shell: bash
         run: cargo test -p dom-node --all-targets -- --test-threads=1
 
   supply-chain:
