@@ -864,6 +864,8 @@ mod frozen_format_vectors {
     const FIXED_SECRET: [u8; 32] = [0x51; 32];
     const FIXED_ANCHOR: [u8; 32] = [0x61; 32];
     const FIXED_BINDING: [u8; 32] = [0x71; 32];
+    // Fixture of the Linux-gated key-store envelope tests only.
+    #[cfg(target_os = "linux")]
     const FIXED_OWNER_BINDING: [u8; 32] = [0x81; 32];
 
     fn hex(bytes: &[u8]) -> String {
@@ -913,7 +915,9 @@ mod frozen_format_vectors {
     }
 
     /// The key-store envelope, byte for byte.
+    // Exercises the Linux-gated key-store envelope; follows the same gate.
     #[test]
+    #[cfg(target_os = "linux")]
     fn key_store_envelope_is_frozen() {
         let encoded =
             encode_key_envelope(&fixed_key(), &FIXED_OWNER_BINDING).expect("the fixed key encodes");
@@ -922,7 +926,9 @@ mod frozen_format_vectors {
     }
 
     /// The same envelope decodes back to the same key identity.
+    // Exercises the Linux-gated key-store envelope; follows the same gate.
     #[test]
+    #[cfg(target_os = "linux")]
     fn key_store_envelope_decodes_to_the_same_key() {
         let key = fixed_key();
         let encoded =
@@ -934,6 +940,8 @@ mod frozen_format_vectors {
     }
 
     const SEALED_SECRET_VECTOR: &str = "444254434e53563100014142434445464748494a4b4cdae0e0d0be9b8cd312ba9570836c74adec3f5b2a836da936dee0ae37777f51db3a8be741a5f4c9fa5862fd3e1e60f42d";
+    // Fixture of the Linux-gated key-store envelope tests only.
+    #[cfg(target_os = "linux")]
     const KEY_STORE_ENVELOPE_VECTOR: &str = "444254434b53563100018181818181818181818181818181818181818181818181818181818181818181b938e750989016c1c6dd92d81b825fc6c5d054481af174774c9bafce1a34ee4b101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2fd4f5e18e1ef242e04d114e4ad4f3f045";
 }
 
@@ -1011,7 +1019,9 @@ mod length_refusals {
     }
 
     /// The same for the key-store envelope.
+    // Exercises the Linux-gated key-store envelope; follows the same gate.
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_key_envelope_of_the_wrong_length_is_refused() {
         for len in [
             0_usize,

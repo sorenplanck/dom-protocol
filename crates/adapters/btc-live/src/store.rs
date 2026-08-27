@@ -10,11 +10,15 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
 use blake2::digest::consts::U32;
+#[cfg(target_os = "linux")]
 use blake2::digest::{KeyInit, Mac};
+#[cfg(target_os = "linux")]
 use blake2::Blake2bMac;
 #[cfg(target_os = "linux")]
 use cap_std::fs::Dir;
+#[cfg(target_os = "linux")]
 use zeroize::Zeroizing;
 
 #[cfg(target_os = "linux")]
@@ -29,15 +33,25 @@ use rustix::process::geteuid;
 
 use crate::LiveBitcoinError;
 
+#[cfg(target_os = "linux")]
 const RECORD_MAGIC: &[u8; 8] = b"DBTCLRV1";
+#[cfg(target_os = "linux")]
 const RECORD_VERSION: u16 = 1;
+#[cfg(target_os = "linux")]
 const RECORD_DOMAIN: &[u8] = b"DOM-INTEROP/F7/BTC-LIVE/RECORD/V1\0";
+#[cfg(target_os = "linux")]
 const RECORD_OVERHEAD: usize = 8 + 2 + 1 + 4 + 32;
+#[cfg(target_os = "linux")]
 const KEY_MAGIC: &[u8; 8] = b"DBTCLKV1";
+#[cfg(target_os = "linux")]
 const KEY_VERSION: u16 = 1;
+#[cfg(target_os = "linux")]
 const KEY_RECORD_LEN: usize = 8 + 2 + 32;
+#[cfg(target_os = "linux")]
 const AUTH_KEY_NAME: &str = ".record-auth.key";
+#[cfg(target_os = "linux")]
 const AUTH_KEY_STAGING: &str = ".record-auth.key.staging";
+#[cfg(target_os = "linux")]
 const LOCK_NAME: &str = ".prebroadcast.lock";
 #[cfg(target_os = "linux")]
 const DIRECTORY_MODE: u32 = 0o700;
@@ -59,6 +73,7 @@ pub(crate) enum StageKind {
 }
 
 impl StageKind {
+    #[cfg(target_os = "linux")]
     const fn file_name(self) -> &'static str {
         match self {
             Self::Prepared => "prepared.v1",
@@ -70,6 +85,7 @@ impl StageKind {
         }
     }
 
+    #[cfg(target_os = "linux")]
     const fn staging_name(self) -> &'static str {
         match self {
             Self::Prepared => ".prepared.v1.staging",
@@ -87,6 +103,7 @@ pub(crate) struct DurableStageStoreV1 {
     root: Dir,
     #[cfg(target_os = "linux")]
     _lock: File,
+    #[cfg(target_os = "linux")]
     key: Zeroizing<[u8; 32]>,
 }
 
@@ -257,6 +274,7 @@ impl DurableStageStoreV1 {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn encode_record(
     key: &[u8; 32],
     kind: StageKind,
@@ -279,6 +297,7 @@ fn encode_record(
     Ok(envelope)
 }
 
+#[cfg(target_os = "linux")]
 fn decode_record(
     key: &[u8; 32],
     kind: StageKind,
@@ -319,6 +338,7 @@ fn decode_record(
     Ok(envelope[15..authenticated_len].to_vec())
 }
 
+#[cfg(target_os = "linux")]
 fn record_tag(key: &[u8; 32], authenticated: &[u8]) -> Result<[u8; 32], LiveBitcoinError> {
     let mut mac = <Blake2bMac<U32> as KeyInit>::new_from_slice(key)
         .map_err(|_| LiveBitcoinError::StoreUnavailable)?;
@@ -329,6 +349,7 @@ fn record_tag(key: &[u8; 32], authenticated: &[u8]) -> Result<[u8; 32], LiveBitc
     Ok(tag)
 }
 
+#[cfg(target_os = "linux")]
 fn verify_record_tag(
     key: &[u8; 32],
     authenticated: &[u8],
@@ -389,6 +410,7 @@ fn load_or_create_auth_key(root: &Dir) -> Result<Zeroizing<[u8; 32]>, LiveBitcoi
         .and_then(|bytes| decode_key(&bytes))
 }
 
+#[cfg(target_os = "linux")]
 fn decode_key(bytes: &[u8]) -> Result<Zeroizing<[u8; 32]>, LiveBitcoinError> {
     if bytes.len() != KEY_RECORD_LEN
         || &bytes[..8] != KEY_MAGIC

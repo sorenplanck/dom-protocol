@@ -55,6 +55,12 @@ pub mod auth;
 pub mod fault;
 #[cfg(all(feature = "production-durable", target_os = "linux"))]
 pub mod production;
+// `production`'s companion: its authenticated batch exists to be replayed by
+// `ProductionRelayV1::reconstruct`, and nothing outside this crate consumes
+// it. With `production` gated to Linux the batch entries became unread off
+// Linux, so the module follows the same gate rather than the field being
+// allowed dead.
+#[cfg(target_os = "linux")]
 pub mod recovery;
 pub mod server;
 

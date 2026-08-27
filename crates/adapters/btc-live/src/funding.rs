@@ -2374,6 +2374,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     struct FixtureRefundSigner {
         keypair: Keypair,
         expected_plan_digest: [u8; 32],

@@ -1,5 +1,6 @@
 //! Concrete, cookie-authenticated Bitcoin Core JSON-RPC transport.
 
+#[cfg(target_os = "linux")]
 use std::fs::File;
 use std::io::Read;
 #[cfg(target_os = "linux")]
@@ -24,6 +25,7 @@ use rustix::process::geteuid;
 use crate::LiveBitcoinError;
 
 pub(crate) const MAX_RPC_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(target_os = "linux")]
 const MAX_COOKIE_BYTES: u64 = 4 * 1024;
 const MAX_WALLET_NAME_BYTES: usize = 128;
 pub(crate) const MAX_SIGNET_CHALLENGE_BYTES: usize = 10_000;
