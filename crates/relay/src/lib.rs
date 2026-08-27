@@ -45,9 +45,15 @@ use kaystra_core::types::Digest32;
 pub use kaystra_core::types::{ParticipantId, TimelockSpec};
 
 pub mod auth;
-#[cfg(feature = "relay-fault-injection")]
+// Linux, not merely the feature. The durable Relay is built on retained
+// directory capabilities, `rustix::process` (which upstream gates
+// `cfg(not(windows))`) and Unix permission modes; its substance is
+// Linux-only. The feature was default-on and the module ungated by platform,
+// so a `--workspace` build on macOS or Windows reached code that cannot
+// exist there. `fault` follows the same gate: it imports from `production`.
+#[cfg(all(feature = "relay-fault-injection", target_os = "linux"))]
 pub mod fault;
-#[cfg(feature = "production-durable")]
+#[cfg(all(feature = "production-durable", target_os = "linux"))]
 pub mod production;
 pub mod recovery;
 pub mod server;

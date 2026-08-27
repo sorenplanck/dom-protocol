@@ -206,7 +206,13 @@ impl NodeIdentity {
             device: stat.st_dev,
             inode: stat.st_ino,
             mode: stat.st_mode,
-            link_count: stat.st_nlink,
+            // `st_nlink` follows the architecture: libc defines `nlink_t` as
+            // u64 on x86_64-linux and u32 on aarch64-linux. The conversion is
+            // real on aarch64 and reflexive on x86_64, where clippy calls it
+            // useless — so the allow is scoped to this one field rather than
+            // the field's type being pinned to whatever the build host uses.
+            #[allow(clippy::useless_conversion)]
+            link_count: u64::from(stat.st_nlink),
             owner: stat.st_uid,
             node_type: expected_type,
         })

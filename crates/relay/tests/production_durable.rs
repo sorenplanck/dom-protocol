@@ -1,6 +1,10 @@
 //! Production Relay durability, loss and authenticated-reconstruction tests.
 
-#![cfg(all(feature = "real-bip340", feature = "production-durable"))]
+#![cfg(all(
+    feature = "real-bip340",
+    feature = "production-durable",
+    target_os = "linux"
+))]
 
 use std::fs;
 use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};

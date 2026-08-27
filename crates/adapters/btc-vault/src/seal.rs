@@ -35,9 +35,17 @@ const SEAL_MAGIC: &[u8; 8] = b"DBTCNSV1";
 const SEAL_VERSION: u16 = 1;
 const SEAL_DOMAIN: &[u8] = b"DOM-INTEROP/BTC/F7/SEALED-NONCE-OWNER/V1\0";
 const SEALED_SECRET_LEN: usize = 8 + 2 + 12 + 32 + 16;
+// Linux-gated to match their only consumers. The key-store envelope is read
+// and written exclusively inside this file's `#[cfg(target_os = "linux")]`
+// paths, so off Linux these five items are unreachable and `-D dead-code`
+// rejects them. The gate is placed on the definitions rather than the lint
+// silenced, so they exist exactly where they are used.
+#[cfg(target_os = "linux")]
 const KEY_STORE_MAGIC: &[u8; 8] = b"DBTCKSV1";
+#[cfg(target_os = "linux")]
 const KEY_STORE_VERSION: u16 = 1;
 const KEY_ID_DOMAIN: &[u8] = b"DOM-INTEROP/BTC/F7/NONCE-SEAL-KEY-ID/V1\0";
+#[cfg(target_os = "linux")]
 const KEY_STORE_ENVELOPE_LEN: usize = 8 + 2 + 32 + 32 + 32 + 16;
 #[cfg(target_os = "linux")]
 const DIRECTORY_MODE: u32 = 0o700;
@@ -281,6 +289,7 @@ fn key_id(key_bytes: &[u8; 32]) -> Result<[u8; 32], VaultError> {
     Ok(output)
 }
 
+#[cfg(target_os = "linux")]
 fn encode_key_envelope(
     key: &BitcoinNonceSealKeyV1,
     owner_binding: &[u8; 32],
@@ -302,6 +311,7 @@ fn encode_key_envelope(
     Ok(bytes)
 }
 
+#[cfg(target_os = "linux")]
 fn decode_key_envelope(
     bytes: &[u8],
     expected_owner_binding: &[u8; 32],
