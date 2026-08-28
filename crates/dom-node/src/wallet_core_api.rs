@@ -140,6 +140,92 @@ impl EmbeddedWalletCoreApi {
         tx.kernels.first().map(|kernel| *kernel.excess.as_bytes())
     }
 
+    /// Resolve a kernel excess to the canonical block that carries it and, when
+    /// the kernel belongs to a regular transaction, that transaction's canonical
+    /// hash.
+    ///
+    /// Answering the block question already reads and decodes the whole block
+    /// body, so recovering the transaction identity is a scan of a block that is
+    /// in hand rather than another store round trip. Returns `None` for the hash
+    /// when the excess is the block's coinbase kernel, which is not a
+    /// `Transaction` and has no canonical transaction hash.
+    fn locate_kernel(
+        &self,
+        excess: &[u8; 33],
+    ) -> Result<Option<(BlockRef, Option<[u8; 32]>)>, WalletCoreError> {
+        let chain = self
+            .node
+            .chain
+            .try_lock()
+            .map_err(|_| WalletCoreError::NodeNotReady("chain lock busy".to_string()))?;
+        let Some(block_hash) = chain
+            .store
+            .get_kernel_block(excess)
+            .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let Some(body) = chain
+            .store
+            .get_block_body(&block_hash)
+            .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?
+        else {
+            return Err(WalletCoreError::InternalFailure(
+                "kernel index points to missing block body".to_string(),
+            ));
+        };
+        let block = Block::from_bytes(&body)
+            .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?;
+        let tx_hash = block
+            .transactions
+            .iter()
+            .find(|tx| {
+                tx.kernels
+                    .iter()
+                    .any(|kernel| kernel.excess.as_bytes() == excess)
+            })
+            .map(|tx| Self::tx_hash(tx).map(|(hash, _)| hash))
+            .transpose()?;
+        Ok(Some((
+            BlockRef {
+                height: block.header.height.0,
+                hash: block_hash,
+            },
+            tx_hash,
+        )))
+    }
+
+    /// Resolve a transaction hash this node admitted to its kernel excess and,
+    /// when that kernel is currently canonical, the confirming block.
+    ///
+    /// Ratified 2026-08-21 (F8_PLAN_AND_DECISIONS_RATIFICATION.md Q-3, signed) — Option A. Returns `None` when the node never
+    /// admitted the hash, the entry aged out of retention, or the kernel is
+    /// not in the canonical index (including after a reorg of any depth —
+    /// the identity entry is deliberately not consulted as confirmation).
+    fn resolve_admitted_tx(
+        &self,
+        tx_hash: &[u8; 32],
+    ) -> Result<Option<([u8; 33], BlockRef)>, WalletCoreError> {
+        let identity = {
+            let chain = self
+                .node
+                .chain
+                .try_lock()
+                .map_err(|_| WalletCoreError::NodeNotReady("chain lock busy".to_string()))?;
+            chain
+                .store
+                .get_tx_identity(tx_hash)
+                .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?
+        };
+        let Some((excess, _admitted_height)) = identity else {
+            return Ok(None);
+        };
+        match self.get_kernel(&excess)? {
+            Some(kernel) => Ok(Some((excess, kernel.block))),
+            None => Ok(None),
+        }
+    }
+
     fn tx_hash(tx: &Transaction) -> Result<([u8; 32], Vec<u8>), WalletCoreError> {
         let bytes = tx
             .to_bytes()
@@ -602,36 +688,12 @@ impl WalletCoreApi for EmbeddedWalletCoreApi {
     }
 
     fn get_kernel(&self, excess: &[u8; 33]) -> Result<Option<KernelQueryResult>, WalletCoreError> {
-        let chain = self
-            .node
-            .chain
-            .try_lock()
-            .map_err(|_| WalletCoreError::NodeNotReady("chain lock busy".to_string()))?;
-        let Some(block_hash) = chain
-            .store
-            .get_kernel_block(excess)
-            .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?
-        else {
-            return Ok(None);
-        };
-        let Some(body) = chain
-            .store
-            .get_block_body(&block_hash)
-            .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?
-        else {
-            return Err(WalletCoreError::InternalFailure(
-                "kernel index points to missing block body".to_string(),
-            ));
-        };
-        let block = Block::from_bytes(&body)
-            .map_err(|error| WalletCoreError::InternalFailure(error.to_string()))?;
-        Ok(Some(KernelQueryResult {
-            excess: *excess,
-            block: BlockRef {
-                height: block.header.height.0,
-                hash: block_hash,
-            },
-        }))
+        Ok(self
+            .locate_kernel(excess)?
+            .map(|(block, _)| KernelQueryResult {
+                excess: *excess,
+                block,
+            }))
     }
 
     fn get_block_summary(
@@ -704,14 +766,23 @@ impl WalletCoreApi for EmbeddedWalletCoreApi {
     ) -> Result<TransactionStatus, WalletCoreError> {
         match identifier {
             TransactionIdentifier::TxHash(tx_hash) => {
-                let mempool =
-                    self.node.mempool.try_lock().map_err(|_| {
+                {
+                    let mempool = self.node.mempool.try_lock().map_err(|_| {
                         WalletCoreError::NodeNotReady("mempool lock busy".to_string())
                     })?;
-                if mempool.contains(&tx_hash) {
-                    Ok(TransactionStatus::InMempool)
-                } else {
-                    Ok(TransactionStatus::Unknown)
+                    if mempool.contains(&tx_hash) {
+                        return Ok(TransactionStatus::InMempool);
+                    }
+                }
+                // Ratified 2026-08-21 (F8_PLAN_AND_DECISIONS_RATIFICATION.md Q-3, signed) — Option A: hash → excess through the
+                // admission-time identity map, then excess → block through the
+                // kernel index, which apply_reorg maintains. Confirmation is
+                // never asserted from the identity entry alone, so a reorged
+                // transaction answers `Unknown` at every depth. `Unknown` also
+                // means "this node never saw it" — not "not on chain".
+                match self.resolve_admitted_tx(&tx_hash)? {
+                    Some((_, block)) => Ok(TransactionStatus::Confirmed(block)),
+                    None => Ok(TransactionStatus::Unknown),
                 }
             }
             TransactionIdentifier::KernelExcess(excess) => self
@@ -790,6 +861,16 @@ impl WalletCoreApi for EmbeddedWalletCoreApi {
 
         if let Ok(chain) = self.node.chain.try_lock() {
             let _ = clear_persisted_mempool_snapshot(&chain.store);
+            // Ratified 2026-08-21 (F8_PLAN_AND_DECISIONS_RATIFICATION.md Q-3, signed) — Option A (tx-identity defects §3): record
+            // hash → primary kernel excess at admission, so status queries by
+            // hash can later resolve through the reorg-maintained kernel
+            // index. Best-effort by design: a failed write degrades a status
+            // answer to `Unknown`, never the submission itself.
+            if let Some(excess) = primary_kernel_excess {
+                let _ = chain
+                    .store
+                    .put_tx_identity(&tx_hash, &excess, chain_view.current_height);
+            }
         }
 
         let relayed = self.relay_transaction(tx_hash, tx_bytes);
@@ -816,16 +897,43 @@ impl WalletCoreApi for EmbeddedWalletCoreApi {
         &self,
         identifier: TransactionIdentifier,
     ) -> Result<SubmissionResult, WalletCoreError> {
-        let TransactionIdentifier::TxHash(tx_hash) = identifier else {
-            return Ok(SubmissionResult {
-                kind: SubmissionResultKind::RejectedPolicy,
-                tx_hash: [0u8; 32],
-                primary_kernel_excess: None,
-                accepted_to_mempool: false,
-                broadcast_attempted: false,
-                relayed: false,
-                diagnostic: Some(SubmissionDiagnostic::Policy),
-            });
+        let tx_hash = match identifier {
+            TransactionIdentifier::TxHash(tx_hash) => tx_hash,
+            TransactionIdentifier::KernelExcess(excess) => {
+                // Asked by kernel excess. This arm used to reject unconditionally,
+                // without inspecting any state, so a caller could not tell "already
+                // confirmed, nothing to rebroadcast" from "I refuse". Look before
+                // answering: a kernel in the canonical index means the transaction
+                // is confirmed, which `SubmissionResultKind::AlreadyKnown` already
+                // means — its own documentation reads "already known to the mempool
+                // or chain index".
+                //
+                // A rebroadcast is still not performed and must not be: the node
+                // holds transaction bytes only in the mempool, keyed by hash, so
+                // there is nothing to relay by excess. Only the reported reason
+                // changes, from a false one to a true one.
+                let (kind, tx_hash, diagnostic) = match self.locate_kernel(&excess)? {
+                    Some((_, tx_hash)) => (
+                        SubmissionResultKind::AlreadyKnown,
+                        tx_hash.unwrap_or([0u8; 32]),
+                        SubmissionDiagnostic::AlreadyKnown,
+                    ),
+                    None => (
+                        SubmissionResultKind::RejectedPolicy,
+                        [0u8; 32],
+                        SubmissionDiagnostic::Policy,
+                    ),
+                };
+                return Ok(SubmissionResult {
+                    kind,
+                    tx_hash,
+                    primary_kernel_excess: Some(excess),
+                    accepted_to_mempool: false,
+                    broadcast_attempted: false,
+                    relayed: false,
+                    diagnostic: Some(diagnostic),
+                });
+            }
         };
         let tx_bytes = {
             let mempool = match self.node.mempool.try_lock() {
@@ -871,29 +979,52 @@ impl WalletCoreApi for EmbeddedWalletCoreApi {
                         WalletCoreError::NodeNotReady("mempool lock busy".to_string())
                     })?;
                 let known = mempool.contains(&tx_hash);
+                drop(mempool);
+                // Ratified 2026-08-21 (F8_PLAN_AND_DECISIONS_RATIFICATION.md Q-3, signed) — Option A: before reporting a hash the
+                // mempool no longer holds as rejected, ask whether it confirmed.
+                // "AlreadyKnown"'s own documentation reads "already known to
+                // the mempool or chain index", which is exactly this case.
+                let confirmed_excess = if known {
+                    None
+                } else {
+                    self.resolve_admitted_tx(&tx_hash)?
+                        .map(|(excess, _)| excess)
+                };
+                let recognized = known || confirmed_excess.is_some();
                 Ok(SubmissionResult {
-                    kind: if known {
+                    kind: if recognized {
                         SubmissionResultKind::AlreadyKnown
                     } else {
                         SubmissionResultKind::RejectedPolicy
                     },
                     tx_hash,
-                    primary_kernel_excess: None,
+                    primary_kernel_excess: confirmed_excess,
                     accepted_to_mempool: known,
                     broadcast_attempted: false,
                     relayed: false,
-                    diagnostic: known.then_some(SubmissionDiagnostic::AlreadyKnown),
+                    diagnostic: recognized.then_some(SubmissionDiagnostic::AlreadyKnown),
                 })
             }
             TransactionIdentifier::KernelExcess(excess) => {
-                let confirmed = self.get_kernel(&excess)?.is_some();
+                // Report the transaction this kernel actually belongs to. This
+                // field used to be all zeroes on this arm, which is a value a
+                // caller can mistake for evidence; a truthful hash instead lets
+                // the caller cross-check that the confirmation it received is
+                // about the transaction it asked about. It stays zero only when
+                // the excess is a coinbase kernel, which has no transaction
+                // hash to report.
+                let located = self.locate_kernel(&excess)?;
+                let confirmed = located.is_some();
+                let tx_hash = located
+                    .and_then(|(_, tx_hash)| tx_hash)
+                    .unwrap_or([0u8; 32]);
                 Ok(SubmissionResult {
                     kind: if confirmed {
                         SubmissionResultKind::AlreadyKnown
                     } else {
                         SubmissionResultKind::RejectedPolicy
                     },
-                    tx_hash: [0u8; 32],
+                    tx_hash,
                     primary_kernel_excess: Some(excess),
                     accepted_to_mempool: false,
                     broadcast_attempted: false,
@@ -1073,6 +1204,39 @@ mod tests {
             }],
             offset: [0u8; 32],
         }
+    }
+
+    #[test]
+    fn unknown_kernel_excess_reports_no_transaction_hash() {
+        let api = api("kernel-excess-unknown");
+        let excess = *g_point().as_bytes();
+
+        let result = api
+            .query_submission(TransactionIdentifier::KernelExcess(excess))
+            .expect("query by excess");
+
+        assert_eq!(result.kind, SubmissionResultKind::RejectedPolicy);
+        assert_eq!(result.tx_hash, [0u8; 32]);
+        assert_eq!(result.diagnostic, None);
+    }
+
+    #[test]
+    fn rebroadcast_by_unknown_kernel_excess_echoes_the_excess_and_refuses() {
+        let api = api("rebroadcast-excess");
+        let unknown_excess = *g_point().as_bytes();
+
+        // Unknown to the chain: refusing is correct, and `Policy` is the true
+        // reason — the node has no bytes to relay for an excess it never saw.
+        let unknown = api
+            .rebroadcast_transaction(TransactionIdentifier::KernelExcess(unknown_excess))
+            .expect("rebroadcast unknown excess");
+        assert_eq!(unknown.kind, SubmissionResultKind::RejectedPolicy);
+        assert_eq!(unknown.diagnostic, Some(SubmissionDiagnostic::Policy));
+        assert_eq!(
+            unknown.primary_kernel_excess,
+            Some(unknown_excess),
+            "the excess asked about must be echoed back so the caller can bind the answer"
+        );
     }
 
     #[test]

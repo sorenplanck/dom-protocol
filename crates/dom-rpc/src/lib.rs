@@ -50,6 +50,17 @@ pub trait NodeHandle: Send + Sync + 'static {
         None
     }
 
+    /// Resolve a transaction hash this node admitted to its confirming block,
+    /// through the admission-time identity map and the reorg-maintained kernel
+    /// index. `None` means unconfirmed, reorged out, aged out of retention, or
+    /// never seen by this node — callers must not read it as "not on chain".
+    ///
+    /// Ratified 2026-08-21 (F8_PLAN_AND_DECISIONS_RATIFICATION.md Q-3, signed) — Option A of the tx-identity defects (§3/§4).
+    /// The default keeps third-party/mock handles source-compatible.
+    fn resolve_admitted_tx(&self, _tx_hash: &[u8; 32]) -> Option<ConfirmedTxRef> {
+        None
+    }
+
     /// Get list of connected peers.
     fn get_peers(&self) -> Vec<PeerInfo> {
         Vec::new()
@@ -360,6 +371,30 @@ struct SubmitTxResponse {
 const WARN_ACCEPTED_NOT_RELAYED: &str =
     "no peers connected; tx will be retransmitted when the node reconnects";
 
+/// A confirmed transaction located through the node's persistent indices.
+#[derive(Debug, Clone, Copy)]
+pub struct ConfirmedTxRef {
+    /// Primary kernel excess the hash was admitted with.
+    pub kernel_excess: [u8; 33],
+    /// Canonical block currently carrying that kernel.
+    pub block_hash: [u8; 32],
+    /// Height of that block.
+    pub block_height: u64,
+}
+
+/// `GET /tx/{hash}` for a transaction that is no longer in the mempool but is
+/// confirmed on the canonical chain. Additive: the mempool shape and the
+/// `found: false` shape are unchanged for existing consumers.
+#[derive(Debug, Serialize)]
+struct TxConfirmedResponse {
+    found: bool,
+    confirmed: bool,
+    tx_hash: String,
+    kernel_excess: String,
+    block_hash: String,
+    block_height: u64,
+}
+
 #[derive(Debug, Serialize)]
 struct TxFoundResponse {
     found: bool,
@@ -442,8 +477,6 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
         .route("/status", get(status))
         .route("/chain/identity", get(chain_identity_handler))
         .route("/chain/ancestry", get(chain_ancestry_handler))
-        .route("/mempool", get(mempool))
-        .route("/tx/:tx_hash", get(get_tx))
         .route("/block/:height_or_hash", get(get_block))
         .route("/utxo/:commitment", get(get_utxo))
         .route("/kernel/:excess", get(get_kernel))
@@ -453,7 +486,21 @@ pub fn router(handle: Arc<dyn NodeHandle>, bearer_token: Arc<BearerToken>) -> Ro
         .route("/tx/submit", post(submit_tx))
         .layer(rate_limit_submit);
 
+    // `/mempool` and `/tx/:tx_hash` are authenticated, not public. They are the
+    // only routes that expose *unconfirmed* local state, and mempool residency
+    // is the observation Dandelion++ exists to withhold: a transaction in stem
+    // phase sits in this same general pool (accepted in `node.rs` before the
+    // stem/fluff decision, with no separate stem pool), so an unauthenticated
+    // reader polling several nodes can watch a propagation front and converge on
+    // its origin.
+    //
+    // The chain-data routes stay public deliberately. `/block`, `/utxo` and
+    // `/kernel` serve confirmed, already-published state that any peer obtains
+    // by syncing; withholding it would buy nothing. The line is drawn at
+    // unconfirmed state, not at chain state.
     let auth_read_routes = Router::new()
+        .route("/mempool", get(mempool))
+        .route("/tx/:tx_hash", get(get_tx))
         .route("/wallet/balance", get(wallet_balance_handler))
         .route("/chain/scan", get(chain_scan_handler))
         .route("/build-info", get(build_info_handler))
@@ -723,6 +770,24 @@ async fn get_tx(
                 fee_rate: info.fee_rate,
                 weight: info.weight,
                 kernels: info.kernels,
+            }),
+        )
+            .into_response())
+    } else if let Some(confirmed) = handle.resolve_admitted_tx(&hash) {
+        // Ratified 2026-08-21 (F8_PLAN_AND_DECISIONS_RATIFICATION.md Q-3, signed) — Option A (tx-identity defects §4): a mined
+        // transaction stops reporting as nonexistent. `found: false` still
+        // means only "this node cannot resolve the hash", never "not on
+        // chain" — a node that never admitted the transaction, or whose
+        // identity entry aged out of retention, answers exactly as before.
+        Ok((
+            StatusCode::OK,
+            Json(TxConfirmedResponse {
+                found: true,
+                confirmed: true,
+                tx_hash: hex::encode(hash),
+                kernel_excess: hex::encode(confirmed.kernel_excess),
+                block_hash: hex::encode(confirmed.block_hash),
+                block_height: confirmed.block_height,
             }),
         )
             .into_response())
@@ -1089,6 +1154,8 @@ mod tests {
         shutdown_requested: Arc<AtomicBool>,
         identity: Option<ChainIdentity>,
         ancestry: Option<ChainAncestry>,
+        /// Canned answer for `resolve_admitted_tx`, keyed by tx hash.
+        confirmed: Option<([u8; 32], ConfirmedTxRef)>,
     }
 
     impl MockNode {
@@ -1102,6 +1169,7 @@ mod tests {
                 shutdown_requested: Arc::new(AtomicBool::new(false)),
                 identity: None,
                 ancestry: None,
+                confirmed: None,
             }
         }
 
@@ -1138,6 +1206,13 @@ mod tests {
     }
 
     impl NodeHandle for MockNode {
+        fn resolve_admitted_tx(&self, tx_hash: &[u8; 32]) -> Option<ConfirmedTxRef> {
+            match &self.confirmed {
+                Some((hash, reply)) if hash == tx_hash => Some(*reply),
+                _ => None,
+            }
+        }
+
         fn request_shutdown(&self) -> ShutdownFuture {
             let requested = Arc::clone(&self.shutdown_requested);
             Box::pin(async move {
@@ -1390,6 +1465,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mempool_requires_bearer() {
+        let unauthenticated = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/mempool")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            unauthenticated.status(),
+            StatusCode::UNAUTHORIZED,
+            "mempool residency is unconfirmed local state and must not be readable anonymously"
+        );
+
+        let authenticated = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/mempool")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn tx_lookup_requires_bearer() {
+        let unauthenticated = app()
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/tx/{}", "11".repeat(32)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            unauthenticated.status(),
+            StatusCode::UNAUTHORIZED,
+            "probing whether this node holds a given transaction must not be anonymous"
+        );
+
+        let authenticated = app()
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/tx/{}", "11".repeat(32)))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn confirmed_chain_routes_stay_public() {
+        // The tightening is scoped to unconfirmed state. Chain data that any
+        // peer obtains by syncing stays anonymously readable on purpose; a
+        // regression here would be an unintended availability change.
+        for uri in [
+            "/status",
+            "/health",
+            &format!("/block/{}", 1),
+            &format!("/utxo/{}", "02".repeat(33)),
+            &format!("/kernel/{}", "02".repeat(33)),
+        ] {
+            let response = app()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_ne!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{uri} must remain public"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn wallet_balance_requires_bearer_and_succeeds_with_it() {
         let unauthenticated = app()
             .oneshot(
@@ -1519,6 +1678,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/mempool")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1556,6 +1716,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/tx/{}", hex::encode(hash)))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1571,6 +1732,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/mempool")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1632,6 +1794,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/mempool?page=0&limit=2")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1647,6 +1810,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/mempool?page=2&limit=2")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1666,6 +1830,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/mempool?page={}", usize::MAX))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1699,6 +1864,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/mempool?page=1&limit=2")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1719,6 +1885,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/mempool?limit=9999")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1873,6 +2040,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/tx/{}", "a".repeat(64)))
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2257,11 +2425,62 @@ mod tests {
 
     /// PARSE-1 — /tx/<non-hex> → 400 InvalidHex (parse_hash_hex via decode_hex).
     #[tokio::test]
+    async fn get_tx_resolves_a_confirmed_transaction() {
+        // §4 of the tx-identity defects: a mined transaction must stop
+        // reporting as nonexistent. The mock hands the handler a canned
+        // confirmed resolution; the wire shape is asserted, not assumed.
+        let mut node = MockNode::new(9);
+        let hash = [0x5Au8; 32];
+        node.confirmed = Some((
+            hash,
+            ConfirmedTxRef {
+                kernel_excess: [0x02u8; 33],
+                block_hash: [0xB1u8; 32],
+                block_height: 7,
+            },
+        ));
+        let response = app_with(node)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/tx/{}", hex::encode(hash)))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["found"], true);
+        assert_eq!(body["confirmed"], true);
+        assert_eq!(body["block_height"], 7);
+        assert_eq!(body["block_hash"], hex::encode([0xB1u8; 32]));
+        assert_eq!(body["kernel_excess"], hex::encode([0x02u8; 33]));
+
+        // And a hash the node cannot resolve keeps the exact old shape.
+        let other = MockNode::new(9);
+        let response = app_with(other)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/tx/{}", hex::encode([0x77u8; 32])))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = body_json(response).await;
+        assert_eq!(body["found"], false);
+        assert!(body.get("confirmed").is_none());
+    }
+
+    #[tokio::test]
     async fn get_tx_non_hex_returns_400() {
         let r = app()
             .oneshot(
                 Request::builder()
                     .uri("/tx/zzzznothex")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2279,6 +2498,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/tx/{}", "ab".repeat(15))) // 30 chars = 15 bytes
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2295,6 +2515,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/tx/abc") // 3 hex chars: odd
+                    .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2422,6 +2643,7 @@ mod tests {
                     .oneshot(
                         Request::builder()
                             .uri(format!("/mempool?page={page}&limit={limit}"))
+                            .header("authorization", "Bearer test-token")
                             .body(Body::empty())
                             .unwrap(),
                     )
