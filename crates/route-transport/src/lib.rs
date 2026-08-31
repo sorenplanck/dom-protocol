@@ -40,22 +40,102 @@
 //!   unchanged, checkable by `relay::server::verify_equivocation`.
 //!
 //! The signing secret lives in zeroizing memory and is never logged or
-//! encoded (I6). This crate holds no session semantics: whether the
-//! carried bytes ADVANCE a session is the Contracts store's decision
-//! (step 10 is the caller's), exactly as before.
+//! encoded (I6).  On Linux, [`DurableRelaySenderV1`] owns one shared outbound
+//! sequence/transcript and one persist-before-submit outbox for every F6 kind
+//! plus route transport; an ACK atomically advances its checkpoint.  The
+//! matching [`DurableRelayInboxV1`] owns one durable recipient pipeline for
+//! all Relay V1 kinds.  It journals an authenticated envelope before exposing
+//! its payload to F6 or Contracts and redelivers a pending payload after
+//! restart.  Contracts still decides whether DSC1 bytes advance a signing
+//! session: the inbox deliberately accepts only the strict
+//! [`ContractsTransportPortV1`] boundary, which has no caller-supplied
+//! successor argument.
+//!
+//! Direct V1 remains deliberately single-envelope. Large DSC1 objects use the
+//! separately versioned [`RouteFramePlanV2`] format: each ordinary signed Relay
+//! envelope carries one context-bound frame, and the Linux
+//! [`DurableFrameReassemblerV2`] with [`FramedContractsTransportV2`] is the only
+//! production path that reconstructs one byte-identical message before
+//! Contracts sees it. No implicit truncation or ephemeral reassembly exists.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+use blake2::{
+    digest::{Update, VariableOutput},
+    Blake2bVar,
+};
 use btc_crypto::SecpContext;
 use kaystra_core::types::Digest32;
 use relay::auth::{
     accept_envelope, message_type, AuthRefusal, RecipientContextV1, RosterRegistryV1,
     TranscriptStateV1,
 };
-use relay::server::{AckV1, RelayRefusal, RelayV1};
+use relay::server::{AckV1, IdempotencyKeyV1, RelayRefusal, RelayV1};
 use relay::{ParticipantId, RelayEnvelopeV1, SenderRoleV1, TimelockSpec};
 use zeroize::Zeroizing;
+
+/// Largest opaque DSC1 object direct Route Transport V1 can carry in one Relay
+/// envelope. Larger valid Contracts messages use [`RouteFramePlanV2`].
+pub const MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES: usize = relay::MAX_PAYLOAD_BYTES;
+
+const SENDER_CHECKPOINT_MAGIC: &[u8; 8] = b"DOMRTSC1";
+const SENDER_CHECKPOINT_VERSION: u16 = 1;
+const SENDER_CHECKPOINT_DOMAIN: &[u8] = b"DOM-INTEROP/ROUTE-SENDER-CHECKPOINT/V1\0";
+/// Exact byte length of [`RouteSenderCheckpointV1`].
+pub const ROUTE_SENDER_CHECKPOINT_LEN: usize = 282;
+
+#[cfg(target_os = "linux")]
+mod durable;
+#[cfg(target_os = "linux")]
+mod durable_sender;
+mod framing;
+#[cfg(target_os = "linux")]
+mod framing_durable;
+
+pub use framing::{
+    RouteFrameErrorV2, RouteFramePlanV2, RouteFrameSendErrorV2, RouteFrameV2,
+    MAX_FRAMED_DSC1_BYTES_V2, MAX_ROUTE_FRAME_CHUNK_BYTES_V2, MAX_ROUTE_FRAME_COUNT_V2,
+    ROUTE_FRAME_HEADER_LEN_V2, ROUTE_FRAME_MAGIC_V2, ROUTE_FRAME_VERSION_V2,
+};
+
+#[cfg(target_os = "linux")]
+pub use durable::{
+    ContractsRouteDeliveryEvidenceV2, ContractsRouteDeliveryV1, ContractsTransportPortV1,
+    DurableInboxConfigV1, DurableInboxEnvelopeRefusalV1, DurableInboxError,
+    DurableInboxIngestReportV1, DurableInboxStatsV1, DurablePayloadCommitV1,
+    DurablePayloadDispositionV1, DurableRelayInboxV1, F6DispatchErrorV1, F6DispatchReportV1,
+    F6PayloadDeliveryV1, F6TransportPortV1, RouteDispatchErrorV1, RouteDispatchReportV1,
+};
+#[cfg(target_os = "linux")]
+pub use durable_sender::{
+    DurableFrameTransferStatusV2, DurableOutboundEnvelopeV1, DurableRelaySenderConfigV1,
+    DurableRelaySenderErrorV1, DurableRelaySenderStatsV1, DurableRelaySenderV1,
+    DurableSenderCommitV1, RouteApplicationDispositionV2, RouteApplicationStateV2,
+    RouteApplicationStatusV2,
+};
+#[cfg(target_os = "linux")]
+pub use framing_durable::{
+    DurableFrameReassemblerConfigV2, DurableFrameReassemblerErrorV2,
+    DurableFrameReassemblerStatsV2, DurableFrameReassemblerV2, FramedContractsTransportErrorV2,
+    FramedContractsTransportV2,
+};
+
+/// Read-only classification of one production authority creation path.
+///
+/// Composition roots use this before mutating any member of a multi-store
+/// provisioning stage. The result is advisory and must be revalidated while
+/// holding the authority lock before creation is resumed.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DurableProductionCreationStateV1 {
+    /// No root exists yet.
+    Missing,
+    /// Only a safe, non-economic creation prefix exists.
+    Incomplete,
+    /// Exact metadata and an empty economic state are durable.
+    InitializedPristine,
+}
 
 /// Everything a bridge step can refuse, by name (I13).
 #[derive(Debug, thiserror::Error)]
@@ -67,6 +147,14 @@ pub enum BridgeRefusal {
     /// A DSC1 message is never empty; an empty payload is a caller bug.
     #[error("empty payload")]
     EmptyPayload,
+    /// The opaque DSC1 object does not fit the single-envelope Relay V1 wire.
+    #[error("route payload too large: {actual} bytes, maximum {maximum}")]
+    RoutePayloadTooLarge {
+        /// Supplied payload size.
+        actual: usize,
+        /// Frozen single-envelope maximum.
+        maximum: usize,
+    },
     /// The envelope could not be encoded or digested.
     #[error("envelope: {0}")]
     Envelope(relay::EnvelopeError),
@@ -77,12 +165,87 @@ pub enum BridgeRefusal {
     /// carries the ratified proof through unchanged.
     #[error("relay: {0}")]
     Relay(RelayRefusal),
+    /// The durable Linux Relay queue refused or could not persist the
+    /// operation.  Its error is already redacted by the Relay authority.
+    #[cfg(target_os = "linux")]
+    #[error("durable relay: {0}")]
+    DurableRelay(relay::production::ProductionRelayError),
     /// The §5.4 pipeline refused the envelope.
     #[error("pipeline: {0}")]
     Pipeline(AuthRefusal),
     /// The ACK does not acknowledge THESE bytes (I7, sender side).
     #[error("ack digest mismatch")]
     AckDigestMismatch,
+    /// A persisted sender checkpoint is malformed, corrupt, or outside its
+    /// frozen V1 domain.
+    #[error("invalid route sender checkpoint")]
+    InvalidSenderCheckpoint,
+    /// Prepared outbox bytes do not belong to the sender's exact current flow
+    /// position or fail signature revalidation.
+    #[error("prepared route envelope does not match sender flow")]
+    PreparedEnvelopeMismatch,
+    /// No further sequence can be represented in Relay V1.
+    #[error("route sender sequence exhausted")]
+    SequenceExhausted,
+}
+
+/// Closed queue surface shared by the in-memory protocol reference and the
+/// durable Linux Relay.  Transport code cannot accidentally call an API that
+/// exists on only one backend, and queue failures stay named.
+pub trait RelayQueueV1 {
+    /// Durably (or, for the reference queue, atomically in memory) retain one
+    /// exact canonical envelope before returning its acknowledgement.
+    fn queue_submit(&mut self, raw: &[u8]) -> Result<AckV1, BridgeRefusal>;
+
+    /// Return the at-least-once mailbox for one recipient.
+    fn queue_deliver(&self, recipient: &ParticipantId) -> Result<Vec<Vec<u8>>, BridgeRefusal>;
+}
+
+impl RelayQueueV1 for RelayV1 {
+    fn queue_submit(&mut self, raw: &[u8]) -> Result<AckV1, BridgeRefusal> {
+        self.submit(raw).map_err(BridgeRefusal::Relay)
+    }
+
+    fn queue_deliver(&self, recipient: &ParticipantId) -> Result<Vec<Vec<u8>>, BridgeRefusal> {
+        Ok(self.deliver(recipient))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl RelayQueueV1 for relay::production::ProductionRelayV1 {
+    fn queue_submit(&mut self, raw: &[u8]) -> Result<AckV1, BridgeRefusal> {
+        self.submit(raw).map_err(BridgeRefusal::DurableRelay)
+    }
+
+    fn queue_deliver(&self, recipient: &ParticipantId) -> Result<Vec<Vec<u8>>, BridgeRefusal> {
+        self.deliver(recipient).map_err(BridgeRefusal::DurableRelay)
+    }
+}
+
+fn sender_role_byte(role: SenderRoleV1) -> u8 {
+    match role {
+        SenderRoleV1::Initiator => 1,
+        SenderRoleV1::Solver => 2,
+        SenderRoleV1::Observer => 3,
+    }
+}
+
+fn sender_role_from_byte(byte: u8) -> Option<SenderRoleV1> {
+    match byte {
+        1 => Some(SenderRoleV1::Initiator),
+        2 => Some(SenderRoleV1::Solver),
+        3 => Some(SenderRoleV1::Observer),
+        _ => None,
+    }
+}
+
+fn sender_checkpoint_digest(bytes: &[u8]) -> Result<Digest32, ()> {
+    let mut hasher = Blake2bVar::new(32).map_err(|_| ())?;
+    hasher.update(SENDER_CHECKPOINT_DOMAIN);
+    hasher.update(bytes);
+    let mut digest = [0; 32];
+    hasher.finalize_variable(&mut digest).map_err(|_| ())?;
+    Ok(digest)
 }
 
 /// The session-wide wire facts every envelope of a route shares.
@@ -98,6 +261,205 @@ pub struct RouteWireContextV1 {
     pub roster_snapshot: Digest32,
     /// Protocol policy version.
     pub policy_version: u32,
+}
+
+/// Secret-free, integrity-checked durable checkpoint of one outbound addressed
+/// flow.  Owner-only storage remains its authority; the unkeyed digest is not
+/// an authorization MAC.
+///
+/// Persist this record together with a prepared outbox envelope before
+/// submission.  If the Relay ACK is lost, reopen the old checkpoint and
+/// resubmit the exact prepared bytes; Relay idempotency returns the same ACK
+/// and [`RouteSenderV1::submit_prepared`] advances to the same checkpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RouteSenderCheckpointV1 {
+    ctx: RouteWireContextV1,
+    sender_id: ParticipantId,
+    recipient_id: ParticipantId,
+    role: SenderRoleV1,
+    next_sequence: u64,
+    previous_digest: Digest32,
+}
+
+impl RouteSenderCheckpointV1 {
+    /// Encodes the complete secret-free checkpoint with a domain-separated
+    /// integrity digest.
+    pub fn canonical_bytes(&self) -> Result<[u8; ROUTE_SENDER_CHECKPOINT_LEN], BridgeRefusal> {
+        let mut bytes = [0; ROUTE_SENDER_CHECKPOINT_LEN];
+        bytes[..8].copy_from_slice(SENDER_CHECKPOINT_MAGIC);
+        bytes[8..10].copy_from_slice(&SENDER_CHECKPOINT_VERSION.to_be_bytes());
+        bytes[10..42].copy_from_slice(&self.ctx.network_id);
+        bytes[42..74].copy_from_slice(&self.ctx.session_id);
+        bytes[74..106].copy_from_slice(&self.ctx.route_id);
+        bytes[106..138].copy_from_slice(&self.ctx.roster_snapshot);
+        bytes[138..142].copy_from_slice(&self.ctx.policy_version.to_be_bytes());
+        bytes[142..174].copy_from_slice(&self.sender_id.0);
+        bytes[174..206].copy_from_slice(&self.recipient_id.0);
+        bytes[206] = sender_role_byte(self.role);
+        bytes[210..218].copy_from_slice(&self.next_sequence.to_be_bytes());
+        bytes[218..250].copy_from_slice(&self.previous_digest);
+        let digest = sender_checkpoint_digest(&bytes[..250])
+            .map_err(|_| BridgeRefusal::InvalidSenderCheckpoint)?;
+        bytes[250..].copy_from_slice(&digest);
+        Ok(bytes)
+    }
+
+    /// Strictly decodes and integrity-checks one complete checkpoint.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, BridgeRefusal> {
+        if bytes.len() != ROUTE_SENDER_CHECKPOINT_LEN
+            || &bytes[..8] != SENDER_CHECKPOINT_MAGIC
+            || u16::from_be_bytes([bytes[8], bytes[9]]) != SENDER_CHECKPOINT_VERSION
+            || bytes[207..210] != [0; 3]
+            || bytes[250..]
+                != sender_checkpoint_digest(&bytes[..250])
+                    .map_err(|_| BridgeRefusal::InvalidSenderCheckpoint)?
+        {
+            return Err(BridgeRefusal::InvalidSenderCheckpoint);
+        }
+        let digest32 = |range: core::ops::Range<usize>| -> Result<Digest32, BridgeRefusal> {
+            bytes[range]
+                .try_into()
+                .map_err(|_| BridgeRefusal::InvalidSenderCheckpoint)
+        };
+        let role =
+            sender_role_from_byte(bytes[206]).ok_or(BridgeRefusal::InvalidSenderCheckpoint)?;
+        let network_id = digest32(10..42)?;
+        let session_id = digest32(42..74)?;
+        let route_id = digest32(74..106)?;
+        let roster_snapshot = digest32(106..138)?;
+        let sender_id = ParticipantId(digest32(142..174)?);
+        let recipient_id = ParticipantId(digest32(174..206)?);
+        let next_sequence = u64::from_be_bytes(
+            bytes[210..218]
+                .try_into()
+                .map_err(|_| BridgeRefusal::InvalidSenderCheckpoint)?,
+        );
+        let previous_digest = digest32(218..250)?;
+        let policy_version = u32::from_be_bytes(
+            bytes[138..142]
+                .try_into()
+                .map_err(|_| BridgeRefusal::InvalidSenderCheckpoint)?,
+        );
+        if role == SenderRoleV1::Observer
+            || network_id == [0; 32]
+            || session_id == [0; 32]
+            || route_id == [0; 32]
+            || roster_snapshot == [0; 32]
+            || sender_id.0 == [0; 32]
+            || recipient_id.0 == [0; 32]
+            || sender_id == recipient_id
+            || policy_version == 0
+            || (next_sequence == 0 && previous_digest != [0; 32])
+            || (next_sequence > 0 && previous_digest == [0; 32])
+        {
+            return Err(BridgeRefusal::InvalidSenderCheckpoint);
+        }
+        Ok(Self {
+            ctx: RouteWireContextV1 {
+                network_id,
+                session_id,
+                route_id,
+                roster_snapshot,
+                policy_version,
+            },
+            sender_id,
+            recipient_id,
+            role,
+            next_sequence,
+            previous_digest,
+        })
+    }
+
+    /// Sequence the next prepared envelope must use.
+    pub const fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
+    /// Digest the next prepared envelope must chain from.
+    pub const fn previous_digest(&self) -> &Digest32 {
+        &self.previous_digest
+    }
+
+    /// Frozen addressed-flow sender.
+    pub const fn sender_id(&self) -> ParticipantId {
+        self.sender_id
+    }
+
+    /// Frozen addressed-flow recipient.
+    pub const fn recipient_id(&self) -> ParticipantId {
+        self.recipient_id
+    }
+
+    /// Frozen sender role used by the closed Relay kind policy.
+    pub const fn sender_role(&self) -> SenderRoleV1 {
+        self.role
+    }
+
+    /// Frozen route wire context.
+    pub const fn wire_context(&self) -> RouteWireContextV1 {
+        self.ctx
+    }
+}
+
+/// Exact signed outbox bytes prepared before Relay submission.
+#[derive(Clone, Eq, PartialEq)]
+pub struct PreparedRouteEnvelopeV1 {
+    raw: Vec<u8>,
+    digest: Digest32,
+    key: IdempotencyKeyV1,
+}
+
+impl core::fmt::Debug for PreparedRouteEnvelopeV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("PreparedRouteEnvelopeV1")
+            .field("digest", &self.digest)
+            .field("key", &self.key)
+            .field("length", &self.raw.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedRouteEnvelopeV1 {
+    /// Reconstructs exact persisted outbox bytes.  Flow ownership and the
+    /// sender signature are revalidated by `submit_prepared` before use.
+    pub fn from_canonical_bytes(raw: &[u8]) -> Result<Self, BridgeRefusal> {
+        let envelope = RelayEnvelopeV1::decode(raw).map_err(BridgeRefusal::Envelope)?;
+        if envelope.message_type != message_type::ROUTE_TRANSPORT
+            || envelope.payload.is_empty()
+            || envelope.payload.len() > MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES
+            || envelope
+                .canonical_bytes()
+                .map_err(BridgeRefusal::Envelope)?
+                != raw
+        {
+            return Err(BridgeRefusal::PreparedEnvelopeMismatch);
+        }
+        let digest = envelope
+            .envelope_digest()
+            .map_err(BridgeRefusal::Envelope)?;
+        let key = IdempotencyKeyV1::of(&envelope);
+        Ok(Self {
+            raw: raw.to_vec(),
+            digest,
+            key,
+        })
+    }
+
+    /// Exact canonical signed bytes that must be persisted before submission.
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.raw
+    }
+
+    /// Relay envelope digest acknowledged after successful submission.
+    pub const fn envelope_digest(&self) -> &Digest32 {
+        &self.digest
+    }
+
+    /// Exact Relay idempotency key of this prepared envelope.
+    pub const fn idempotency_key(&self) -> &IdempotencyKeyV1 {
+        &self.key
+    }
 }
 
 /// The outcome of one mailbox pull: what was accepted, what was
@@ -166,32 +528,77 @@ impl RouteSenderV1 {
         if role == SenderRoleV1::Observer {
             return Err(BridgeRefusal::ObserverEmitsNothing);
         }
+        Self::resume(
+            RouteSenderCheckpointV1 {
+                ctx,
+                sender_id,
+                recipient_id,
+                role,
+                next_sequence: 0,
+                previous_digest: [0u8; 32],
+            },
+            secret,
+            secp_seed,
+        )
+    }
+
+    /// Restores one sender from a secret-free authenticated checkpoint.  The
+    /// caller retains custody of the signing secret; it is never part of the
+    /// checkpoint or prepared outbox bytes.
+    pub fn resume(
+        checkpoint: RouteSenderCheckpointV1,
+        secret: [u8; 32],
+        secp_seed: [u8; 32],
+    ) -> Result<Self, BridgeRefusal> {
+        let encoded = checkpoint.canonical_bytes()?;
+        let validated = RouteSenderCheckpointV1::from_bytes(&encoded)?;
+        if validated != checkpoint {
+            return Err(BridgeRefusal::InvalidSenderCheckpoint);
+        }
         Ok(Self {
-            ctx,
-            sender_id,
-            recipient_id,
-            role,
+            ctx: checkpoint.ctx,
+            sender_id: checkpoint.sender_id,
+            recipient_id: checkpoint.recipient_id,
+            role: checkpoint.role,
             secret: Zeroizing::new(secret),
             secp: SecpContext::new(&secp_seed),
-            next_sequence: 0,
-            previous_digest: [0u8; 32],
+            next_sequence: checkpoint.next_sequence,
+            previous_digest: checkpoint.previous_digest,
         })
     }
 
-    /// Wrap `payload` (signed DSC1 bytes, opaque here) into the next
-    /// (flows start at sequence 0 — the §5.4 step-8 rule)
-    /// `ROUTE_TRANSPORT` envelope of this flow, sign it, submit it, and
-    /// advance the flow chain — only after the ACK acknowledges exactly
-    /// these bytes.
-    pub fn send(
-        &mut self,
-        relay: &mut RelayV1,
+    /// Returns the complete secret-free current flow checkpoint.
+    pub const fn checkpoint(&self) -> RouteSenderCheckpointV1 {
+        RouteSenderCheckpointV1 {
+            ctx: self.ctx,
+            sender_id: self.sender_id,
+            recipient_id: self.recipient_id,
+            role: self.role,
+            next_sequence: self.next_sequence,
+            previous_digest: self.previous_digest,
+        }
+    }
+
+    /// Builds and signs the next exact outbox envelope without changing flow
+    /// state.  Production callers persist [`PreparedRouteEnvelopeV1::canonical_bytes`]
+    /// and the current [`Self::checkpoint`] atomically before submission.
+    pub fn prepare(
+        &self,
         payload: Vec<u8>,
         expiry: TimelockSpec,
         aux_rand: [u8; 32],
-    ) -> Result<AckV1, BridgeRefusal> {
+    ) -> Result<PreparedRouteEnvelopeV1, BridgeRefusal> {
         if payload.is_empty() {
             return Err(BridgeRefusal::EmptyPayload);
+        }
+        if payload.len() > MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES {
+            return Err(BridgeRefusal::RoutePayloadTooLarge {
+                actual: payload.len(),
+                maximum: MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES,
+            });
+        }
+        if self.next_sequence == u64::MAX {
+            return Err(BridgeRefusal::SequenceExhausted);
         }
         let mut envelope = RelayEnvelopeV1 {
             network_id: self.ctx.network_id,
@@ -220,16 +627,90 @@ impl RouteSenderV1 {
         let raw = envelope
             .canonical_bytes()
             .map_err(BridgeRefusal::Envelope)?;
-        let ack = relay.submit(&raw).map_err(BridgeRefusal::Relay)?;
-        // I7 from the sender's side: the ACK must acknowledge exactly
-        // these bytes; anything else is refused, and the flow does NOT
-        // advance — a resend replays the same envelope.
-        if ack.digest != digest {
+        Ok(PreparedRouteEnvelopeV1 {
+            raw,
+            digest,
+            key: IdempotencyKeyV1::of(&envelope),
+        })
+    }
+
+    /// Submits exact already-persisted outbox bytes and advances only after an
+    /// ACK binds both their idempotency key and digest.  Repeating this call
+    /// from the old checkpoint after ACK loss is safe and deterministic.
+    pub fn submit_prepared<Q: RelayQueueV1>(
+        &mut self,
+        relay: &mut Q,
+        prepared: &PreparedRouteEnvelopeV1,
+    ) -> Result<AckV1, BridgeRefusal> {
+        let envelope = RelayEnvelopeV1::decode(&prepared.raw)
+            .map_err(|_| BridgeRefusal::PreparedEnvelopeMismatch)?;
+        let canonical = envelope
+            .canonical_bytes()
+            .map_err(|_| BridgeRefusal::PreparedEnvelopeMismatch)?;
+        let digest = envelope
+            .envelope_digest()
+            .map_err(|_| BridgeRefusal::PreparedEnvelopeMismatch)?;
+        let (_, sender_xonly) = self
+            .secp
+            .sign_bip340(&self.secret, &[0; 32], &[0; 32])
+            .map_err(|_| BridgeRefusal::SigningRefused)?;
+        if canonical != prepared.raw
+            || digest != prepared.digest
+            || envelope.network_id != self.ctx.network_id
+            || envelope.message_type != message_type::ROUTE_TRANSPORT
+            || envelope.session_id != self.ctx.session_id
+            || envelope.route_id != self.ctx.route_id
+            || envelope.sender_id != self.sender_id
+            || envelope.recipient_id != self.recipient_id
+            || envelope.sender_role != self.role
+            || envelope.sequence != self.next_sequence
+            || envelope.previous_transcript_hash != self.previous_digest
+            || envelope.policy_version != self.ctx.policy_version
+            || envelope.roster_snapshot != self.ctx.roster_snapshot
+            || self
+                .secp
+                .verify_bip340(&sender_xonly, &digest, &envelope.signature)
+                .is_err()
+        {
+            return Err(BridgeRefusal::PreparedEnvelopeMismatch);
+        }
+        let key = IdempotencyKeyV1::of(&envelope);
+        if prepared.key != key {
+            return Err(BridgeRefusal::PreparedEnvelopeMismatch);
+        }
+        let ack = relay.queue_submit(&prepared.raw)?;
+        if ack.digest != digest || ack.key != key {
             return Err(BridgeRefusal::AckDigestMismatch);
         }
-        self.next_sequence += 1;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .ok_or(BridgeRefusal::SequenceExhausted)?;
         self.previous_digest = digest;
         Ok(ack)
+    }
+
+    /// Wrap `payload` (signed DSC1 bytes, opaque here) into the next
+    /// (flows start at sequence 0 — the §5.4 step-8 rule)
+    /// `ROUTE_TRANSPORT` envelope of this flow, sign it, submit it, and
+    /// advance the flow chain — only after the ACK acknowledges exactly
+    /// these bytes.
+    ///
+    /// This convenience method does not persist its prepared envelope.  A
+    /// production worker must call [`Self::prepare`], durably commit that exact
+    /// outbox plus [`Self::checkpoint`], then call [`Self::submit_prepared`].
+    #[deprecated(
+        note = "ephemeral convenience only; production must persist prepare()+checkpoint() before submit_prepared()"
+    )]
+    pub fn send<Q: RelayQueueV1>(
+        &mut self,
+        relay: &mut Q,
+        payload: Vec<u8>,
+        expiry: TimelockSpec,
+        aux_rand: [u8; 32],
+    ) -> Result<AckV1, BridgeRefusal> {
+        let prepared = self.prepare(payload, expiry, aux_rand)?;
+        self.submit_prepared(relay, &prepared)
     }
 }
 
@@ -254,8 +735,11 @@ impl RouteSenderV1 {
 /// The accepted payload bytes are EXACTLY what the sender submitted;
 /// handing them to the Contracts store's `accept_transport_message` is
 /// step 10 — the caller's, as the pipeline defines.
-pub fn receive_route_payloads(
-    relay: &RelayV1,
+#[deprecated(
+    note = "ephemeral harness receiver; production must use DurableRelayInboxV1 so F6 and route share one durable transcript"
+)]
+pub fn receive_route_payloads<Q: RelayQueueV1>(
+    relay: &Q,
     ctx: &RecipientContextV1,
     rosters: &RosterRegistryV1,
     state: &mut TranscriptStateV1,
@@ -266,7 +750,14 @@ pub fn receive_route_payloads(
         refused: Vec::new(),
         skipped: 0,
     };
-    for raw in relay.deliver(&ctx.recipient_id) {
+    let mailbox = match relay.queue_deliver(&ctx.recipient_id) {
+        Ok(mailbox) => mailbox,
+        Err(refusal) => {
+            delivery.refused.push(refusal);
+            return delivery;
+        }
+    };
+    for raw in mailbox {
         // Codec-only peek (no authentication, no state): a kind this
         // path does not carry is left for its own consumer, untouched.
         match RelayEnvelopeV1::decode(&raw) {

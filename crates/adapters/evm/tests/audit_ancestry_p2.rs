@@ -505,7 +505,7 @@ fn evidence_can_be_minted_with_an_anchor_gap_no_verifier_can_walk() {
     assert_eq!(
         a.verify_evidence_blocking(&bytes),
         Ok(counterparty_api::VerifiedOutcome::Claimed {
-            revealed: counterparty_api::RevealedSecretBytes(s.secret),
+            revealed: counterparty_api::RevealedSecretBytes::new(s.secret),
             height: e.block_number,
         }),
         "evidence the crate's own collection path produced is permanently \

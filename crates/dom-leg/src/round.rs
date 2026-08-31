@@ -51,12 +51,14 @@ use dom_adaptor::{
     SessionContextV1, SessionIdRegistryV1, SharePoPStatementV1, ShareProofV1, SigningPhaseV1,
     SigningShareV1, TrustedChainIdV1,
 };
+use dom_consensus::Transaction;
 use dom_crypto::{
     schnorr_add_public_keys, schnorr_challenge, PartialSig, PublicKey, SchnorrSignature,
 };
 use dom_scriptless_primitives::{
     scalar_bytes_are_canonical, secret_scalar_mul_add_assign, secret_scalar_public_key,
 };
+use dom_serialization::DomDeserialize;
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
 
@@ -134,7 +136,8 @@ pub struct SessionOpenRequest<'a> {
     pub chain_id: TrustedChainIdV1,
     /// Closed contract-kind registry entry.
     pub contract_kind: ContractKindV1,
-    /// Roster validated and ordered by participant id.
+    /// Roster validated and ordered by participant id. Every entry is
+    /// rederived against `chain_id` before durable session registration.
     pub roster: ParticipantRosterV1,
     /// Participant id of the initiator (who generates the session id).
     pub initiator_participant_id: [u8; 32],
@@ -154,6 +157,52 @@ pub struct SessionOpenRequest<'a> {
     pub terms_hash: [u8; 32],
     /// Non-zero digest of the recovery binding (binds the share PoK).
     pub recovery_binding_hash: [u8; 32],
+}
+
+/// Retained facts of one already-completed round, supplied by a caller that
+/// holds them, for [`SessionBindings::open_with_caller_supplied_identity_v1`].
+///
+/// Read that constructor's documentation before filling this in: the session
+/// identity here is **supplied**, not proved, and what makes supplying it safe
+/// is where the values came from, not this type.
+pub struct CallerSuppliedIdentitySessionRequestV1<'a> {
+    /// Chain id coming from the authenticated chain adapter.
+    pub chain_id: TrustedChainIdV1,
+    /// Closed contract-kind registry entry.
+    pub contract_kind: ContractKindV1,
+    /// Roster the retained round was bound to. Rederived against `chain_id`.
+    pub roster: ParticipantRosterV1,
+    /// Frozen purpose of the phase.
+    pub purpose: PurposeV1,
+    /// Adaptor point `T`; mandatory in `ClaimAdaptor`, forbidden elsewhere.
+    pub adaptor_point: Option<PublicKey>,
+    /// Exact canonical DOM transaction bytes of the frozen template.
+    ///
+    /// Bytes rather than a decoded transaction, because that is the shape a
+    /// retained record has: the decode belongs in the crate that owns the
+    /// consensus pin, not spread across every consumer that holds retained
+    /// facts. A caller hands over what it stored.
+    pub canonical_transaction_bytes: &'a [u8],
+    /// DOM kernel digest signed in this phase.
+    pub kernel_message_digest: [u8; 32],
+    /// Non-zero digest of the canonical terms (binds the share PoK).
+    pub terms_hash: [u8; 32],
+    /// Non-zero digest of the recovery binding (binds the share PoK).
+    pub recovery_binding_hash: [u8; 32],
+    /// Session identity of the retained round. **Supplied, never generated.**
+    pub session_id: [u8; 32],
+    /// Initial transcript the retained record carries.
+    ///
+    /// The constructor recomputes the initial transcript from `chain_id`,
+    /// `session_id`, `contract_kind` and the rederived roster and requires
+    /// equality with this value. That is the whole of the identity check.
+    pub expected_initial_transcript_hash: [u8; 32],
+    /// Accepted transcript the round had reached.
+    ///
+    /// For a Claim adaptor round this is the **reveal** transcript, because
+    /// that is the one the retained pre-signature is bound to and the one
+    /// [`DomLegSession::pre_signature_from_wire`] compares against.
+    pub transcript_hash: [u8; 32],
 }
 
 /// Immutable bindings of a DOM leg session.
@@ -189,7 +238,9 @@ impl fmt::Debug for SessionBindings {
 }
 
 impl SessionBindings {
-    /// Opens the session: durable session id, canonical template, and transcript.
+    /// Opens the session after rederiving the complete roster against the
+    /// trusted chain, then creates the durable session id, canonical template,
+    /// and transcript.
     ///
     /// `registry` is the caller's DURABLE `SessionIdRegistryV1` — the
     /// `dom-vault` owns it; this leg never implements one (§4.7).
@@ -197,8 +248,52 @@ impl SessionBindings {
         request: SessionOpenRequest<'_>,
         registry: &mut R,
     ) -> Result<Self, LegError> {
+        let rebound_entries = request
+            .roster
+            .entries()
+            .iter()
+            .map(|entry| {
+                ParticipantIdentityV1::new(
+                    &request.chain_id,
+                    entry.identity_public_key().clone(),
+                    entry.signing_public_key().clone(),
+                    entry.direction(),
+                )
+                .map_err(|_| LegError::RosterMismatch)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let rebound_roster =
+            ParticipantRosterV1::new(rebound_entries).map_err(|_| LegError::RosterMismatch)?;
+        if rebound_roster != request.roster {
+            return Err(LegError::RosterMismatch);
+        }
+        if !rebound_roster
+            .entries()
+            .iter()
+            .any(|entry| entry.participant_id() == &request.initiator_participant_id)
+        {
+            return Err(LegError::RosterMismatch);
+        }
+
         // Sponsor is closed off here, by the pin's own registry.
         let purpose = request.purpose.require_strict_phase1()?;
+
+        // The grammar `SessionOpenRequest::adaptor_point` states — mandatory in
+        // `ClaimAdaptor`, forbidden elsewhere — enforced instead of assumed.
+        // The first half was already refused, but late, at
+        // `build_claim_pre_signature`. The second half was refused nowhere, and
+        // its absence is not cosmetic: `BoundRound::bind` folds the point into
+        // the aggregate nonce whenever it is `Some`, without consulting the
+        // purpose, so a `Refund` or `Funding` session opened with a point
+        // silently signs against a displaced `R̂` and nothing downstream
+        // notices. Strictly restrictive: no request that was accepted before is
+        // refused now unless it carried that contradiction.
+        match (purpose, request.adaptor_point.as_ref()) {
+            (PurposeV1::ClaimAdaptor, None) => return Err(LegError::AdaptorPointMissing),
+            (PurposeV1::ClaimAdaptor, Some(_)) => {}
+            (_, Some(_)) => return Err(LegError::PurposeMismatch),
+            (_, None) => {}
+        }
 
         let session_id = generate_session_id_v1(
             &request.chain_id,
@@ -213,7 +308,7 @@ impl SessionBindings {
             &request.chain_id,
             &session_id,
             request.contract_kind,
-            &request.roster,
+            &rebound_roster,
         );
         let opening_digest = session_message_digest_v1(&template_bytes);
         let transcript_hash = advance_transcript_hash_v1(
@@ -223,8 +318,7 @@ impl SessionBindings {
             request.opening_phase,
         );
 
-        let mut signing_keys: Vec<PublicKey> = request
-            .roster
+        let mut signing_keys: Vec<PublicKey> = rebound_roster
             .entries()
             .iter()
             .map(|entry| entry.signing_public_key().clone())
@@ -235,12 +329,171 @@ impl SessionBindings {
             chain_id: request.chain_id,
             contract_kind: request.contract_kind,
             session_id,
-            roster: request.roster,
+            roster: rebound_roster,
             signing_keys,
             template_bytes,
             template_hash,
             initial_transcript_hash,
             transcript_hash,
+            purpose,
+            adaptor_point: request.adaptor_point,
+            kernel_message_digest: request.kernel_message_digest,
+            terms_hash: request.terms_hash,
+            recovery_binding_hash: request.recovery_binding_hash,
+        })
+    }
+
+    /// Reassembles the bindings of an already-completed round from retained
+    /// facts, taking the session identity from the caller instead of drawing
+    /// one.
+    ///
+    /// **What the tie-back proves, and what it does not.** The `session_id`
+    /// this accepts is checked in exactly one way: the initial transcript is
+    /// recomputed from the chain id, that `session_id`, the contract kind and
+    /// the rederived roster, and must equal the
+    /// `expected_initial_transcript_hash` the caller supplied. That proves the
+    /// supplied `session_id` is the one the supplied initial transcript
+    /// commits to — [`initial_transcript_hash_v1`] hashes the session id into
+    /// its body — and it proves **nothing about where either value came
+    /// from**. In particular it does **not** prove the identity was ever
+    /// drawn: anyone presenting a mutually consistent pair passes, and
+    /// fabricating such a pair is one call to that same function. **The
+    /// security is in the provenance of the pair**, which has to come from the
+    /// durable, authenticated record of the Contracts Store and from nowhere
+    /// else. A caller that reads the pair from anywhere a peer can influence
+    /// has authenticated nothing here, whatever this constructor returns.
+    ///
+    /// Four things are rederived here, and they are the same four
+    /// [`Self::open`] rederives, byte for byte: the roster is rebuilt entry by
+    /// entry against the trusted chain and required to equal the one supplied,
+    /// the purpose must be a strict phase-1 purpose, the canonical template and
+    /// its hash are recomputed from the transaction, and the signing keys are
+    /// collected and ordered. They are written out again here rather than
+    /// shared with `open` through a helper, deliberately: sharing would mean
+    /// editing the live path to make room for this one, and the two are allowed
+    /// to diverge later without either silently dragging the other.
+    ///
+    /// Four other fields cross this constructor **textually** — neither
+    /// rederived nor tied to anything: `kernel_message_digest`, `terms_hash`,
+    /// `recovery_binding_hash`, and the point inside `adaptor_point`. `open`
+    /// carries them the same way, so this is parity and not a weakening, but
+    /// the sentence above says *rederived* and it means only those four, not
+    /// these.
+    ///
+    /// The adaptor-point grammar **is** enforced here, unlike in `open`: a
+    /// `ClaimAdaptor` request without a point is
+    /// [`LegError::AdaptorPointMissing`], and any other purpose carrying one is
+    /// [`LegError::PurposeMismatch`]. The field documentation has always said
+    /// "mandatory in `ClaimAdaptor`, forbidden elsewhere" and nothing enforced
+    /// the second half; a point accepted on a non-adaptor purpose silently
+    /// displaces the aggregate nonce, because [`BoundRound::bind`] adds it
+    /// whenever it is `Some` without consulting the purpose. This constructor
+    /// is filled in by a consumer reading retained facts rather than by a live
+    /// protocol flow, so the grammar is checked where the values enter.
+    ///
+    /// Three structural refusals precede all of it: a zero `session_id`, a zero
+    /// `expected_initial_transcript_hash` or a zero `transcript_hash` is
+    /// [`LegError::MalformedRetainedFacts`]. Being exact about what those are
+    /// worth: against a caller that fabricates its inputs they are worth
+    /// **nothing**, because whoever chooses an identity chooses a non-zero one
+    /// at the same cost. They catch a field a caller failed to populate — an
+    /// accident, not an attack — and all three have that property equally,
+    /// which is why all three are guarded and not one of them.
+    ///
+    /// What it does not do, by contrast with `open`: it takes no
+    /// [`SessionIdRegistryV1`] and reaches no source of randomness. It cannot
+    /// register a new session and cannot mint an identity.
+    ///
+    /// The accepted transcript is taken, not advanced. Advancing it would
+    /// require the direction and subphase of the opening message, which no
+    /// durable record retains; taking it is also what a consumer needs, since
+    /// the value that matters downstream is the reveal transcript the retained
+    /// pre-signature is bound to.
+    pub fn open_with_caller_supplied_identity_v1(
+        request: CallerSuppliedIdentitySessionRequestV1<'_>,
+    ) -> Result<Self, LegError> {
+        // Accident detectors, symmetric on purpose: none of the three can be a
+        // legitimate value, none of the three survives a caller that chooses
+        // its own inputs, and singling one out would suggest the other two were
+        // somehow safer.
+        if request.session_id == [0; 32]
+            || request.expected_initial_transcript_hash == [0; 32]
+            || request.transcript_hash == [0; 32]
+        {
+            return Err(LegError::MalformedRetainedFacts);
+        }
+
+        let rebound_entries = request
+            .roster
+            .entries()
+            .iter()
+            .map(|entry| {
+                ParticipantIdentityV1::new(
+                    &request.chain_id,
+                    entry.identity_public_key().clone(),
+                    entry.signing_public_key().clone(),
+                    entry.direction(),
+                )
+                .map_err(|_| LegError::RosterMismatch)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let rebound_roster =
+            ParticipantRosterV1::new(rebound_entries).map_err(|_| LegError::RosterMismatch)?;
+        if rebound_roster != request.roster {
+            return Err(LegError::RosterMismatch);
+        }
+
+        let purpose = request.purpose.require_strict_phase1()?;
+
+        // The grammar the field documentation states, enforced where the value
+        // enters. `BoundRound::bind` consults only whether the point is
+        // present, so a point admitted on a non-adaptor purpose would displace
+        // the aggregate nonce with nothing to catch it downstream.
+        match (purpose, request.adaptor_point.as_ref()) {
+            (PurposeV1::ClaimAdaptor, None) => return Err(LegError::AdaptorPointMissing),
+            (PurposeV1::ClaimAdaptor, Some(_)) => {}
+            (_, Some(_)) => return Err(LegError::PurposeMismatch),
+            (_, None) => {}
+        }
+
+        // The decode is here, in the crate that owns the consensus pin. It is
+        // not followed by a re-encode: the retained bytes a caller hands over
+        // are already the round-trip-checked encoding, and re-checking that
+        // here would compare this crate's encoder against itself rather than
+        // against anything the caller supplied.
+        let template_tx = Transaction::from_bytes(request.canonical_transaction_bytes)
+            .map_err(|_| LegError::MalformedRetainedFacts)?;
+        let (template_bytes, template_hash) = canonical_template_v1(&template_tx)?;
+
+        // The tie-back. The identity is accepted only because everything else
+        // reproduces the transcript that commits it.
+        let initial_transcript_hash = initial_transcript_hash_v1(
+            &request.chain_id,
+            &request.session_id,
+            request.contract_kind,
+            &rebound_roster,
+        );
+        if initial_transcript_hash != request.expected_initial_transcript_hash {
+            return Err(LegError::TranscriptMismatch);
+        }
+
+        let mut signing_keys: Vec<PublicKey> = rebound_roster
+            .entries()
+            .iter()
+            .map(|entry| entry.signing_public_key().clone())
+            .collect();
+        signing_keys.sort_by_key(PublicKey::to_compressed_bytes);
+
+        Ok(Self {
+            chain_id: request.chain_id,
+            contract_kind: request.contract_kind,
+            session_id: request.session_id,
+            roster: rebound_roster,
+            signing_keys,
+            template_bytes,
+            template_hash,
+            initial_transcript_hash,
+            transcript_hash: request.transcript_hash,
             purpose,
             adaptor_point: request.adaptor_point,
             kernel_message_digest: request.kernel_message_digest,
@@ -349,11 +602,15 @@ impl SessionBindings {
 
 /// Aggregate signing key of the session.
 ///
-/// §2.2.6, "without exception": this value can only be constructed by
-/// [`LegParticipant::accept_share_proofs`], which verifies the share PoK of
-/// ALL counterparties BEFORE adding any public point. There is no constructor
-/// that skips that step, and every nonce aggregation and every finalization
-/// requires this proof that the step happened.
+/// §2.2.6, "without exception": this value has exactly two constructors and
+/// **both** verify share proofs of knowledge BEFORE adding any public point.
+/// [`LegParticipant::accept_share_proofs`] is the signer's, and verifies ALL
+/// counterparties, skipping only the local participant, who does not prove
+/// knowledge to itself. [`AggregateSigningKey::from_verified_share_proofs_v1`]
+/// is the shareless verifier's, and has no local participant to skip, so it
+/// verifies **every** roster entry. There is no constructor that skips the
+/// step, and every nonce aggregation and every finalization requires this
+/// value as proof that the step happened.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct AggregateSigningKey(PublicKey);
 
@@ -361,6 +618,65 @@ impl AggregateSigningKey {
     /// Aggregate point `X`.
     pub fn public_key(&self) -> &PublicKey {
         &self.0
+    }
+
+    /// Aggregates after verifying the share proof of **every** roster entry.
+    ///
+    /// The sibling of [`LegParticipant::accept_share_proofs`], for a caller
+    /// that holds no signing share. It exists because a consumer reassembling a
+    /// completed round — to verify a claim, never to sign — needs the aggregate
+    /// key and nothing else, and the participant-shaped route would make it
+    /// carry a secret it never uses: `accept_share_proofs` reads only
+    /// `self.roster_index` and builds statements out of `bindings`, so the
+    /// share it demands does no arithmetic on that path. Demanding a secret in
+    /// order to perform a public computation is an argument too many on a
+    /// security path, and this removes it.
+    ///
+    /// §2.2.6 is not relaxed but tightened. `accept_share_proofs` skips the
+    /// local participant's own index, because a signer does not prove
+    /// knowledge to itself; this has no local index to skip, so it requires and
+    /// verifies a proof for **every** entry of the roster, the local one
+    /// included. No public point is added until all of them have verified.
+    ///
+    /// **What it does not verify, and cannot.** That the caller holds the
+    /// signing share of any of these participants. It has no share and asks for
+    /// none. It establishes that a proof exists for each roster entry, that
+    /// each proof's statement is byte-identical to the statement this session's
+    /// bindings imply for that entry, and that each proof verifies against it —
+    /// and nothing beyond that. A caller is not authenticated as a participant
+    /// by calling this, and a value returned by it says nothing about who asked.
+    pub fn from_verified_share_proofs_v1(
+        bindings: &SessionBindings,
+        proofs: &[(SharePoPStatementV1, ShareProofV1)],
+    ) -> Result<Self, LegError> {
+        let participant_ids = bindings.participant_ids();
+        for (position, entry) in bindings.roster.entries().iter().enumerate() {
+            let index = u16::try_from(position).map_err(|_| LegError::IndexOutOfRange)?;
+            let (received, proof) = proofs
+                .iter()
+                .find(|(statement, _)| statement.participant_index() == index)
+                .ok_or(LegError::MissingShareProof)?;
+            let expected = SharePoPStatementV1::new(
+                &bindings.chain_id,
+                bindings.session_id,
+                &participant_ids,
+                entry.direction(),
+                index,
+                entry.signing_public_key().clone(),
+                bindings.terms_hash,
+                bindings.recovery_binding_hash,
+            )?;
+            if received.to_bytes() != expected.to_bytes() {
+                return Err(LegError::ShareStatementMismatch);
+            }
+            if !verify_share_knowledge_v1(&expected, proof)? {
+                return Err(LegError::ShareProofRejected);
+            }
+        }
+        // Only now: no public-point addition happened before this.
+        let aggregate =
+            schnorr_add_public_keys(&bindings.signing_keys).map_err(AdaptorError::from)?;
+        Ok(Self(aggregate))
     }
 }
 
@@ -1065,7 +1381,11 @@ impl DomLegSession {
                 &self.bindings.kernel_message_digest,
             )
             .map_err(LegError::from)?;
-        Ok(RevealedSecretBytes(*revealed))
+        // Constructed through `new` rather than the tuple field: stage 2 of the
+        // `RevealedSecretBytes` migration closes that field and trades `Copy`
+        // for `Clone + ZeroizeOnDrop`, and this is the one production site in
+        // this crate that would otherwise have to change on that day.
+        Ok(RevealedSecretBytes::new(*revealed))
     }
 }
 
@@ -1075,6 +1395,7 @@ mod tests {
     use dom_adaptor::Result as AdaptorResult;
     use dom_consensus::Transaction;
     use dom_crypto::Hash256;
+    use dom_serialization::DomSerialize;
 
     const GROUP_ORDER: [u8; 32] = [
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -1289,6 +1610,422 @@ mod tests {
         let mut partials = vec![partial_a, partial_b];
         partials.sort_by_key(PartialSignatureV1::participant_index);
         (round, partials)
+    }
+
+    /// The shareless aggregation requires, and verifies, every roster entry.
+    ///
+    /// Four calls over one fixture, differing in exactly one input each, with
+    /// the positive first so the three refusals are attributable to what was
+    /// changed and not to anything upstream of it. The positive also asserts
+    /// the value equals the one the participant-shaped route produced, which is
+    /// the real claim: removing the secret removed an argument, not a check.
+    #[test]
+    fn shareless_share_proof_aggregation_requires_every_roster_entry() {
+        let local = fixture(PurposeV1::ClaimAdaptor, Some(point(31)));
+        let proof_a = local
+            .first
+            .prove_share(&local.bindings)
+            .expect("first participant proves its share");
+        let proof_b = local
+            .second
+            .prove_share(&local.bindings)
+            .expect("second participant proves its share");
+        assert_eq!(proof_a.0.participant_index(), 0);
+        assert_eq!(proof_b.0.participant_index(), 1);
+        let both = [proof_a.clone(), proof_b.clone()];
+
+        // Positive anchor: both proofs, and the same key the signer's route
+        // reaches with a share in hand.
+        let aggregate = AggregateSigningKey::from_verified_share_proofs_v1(&local.bindings, &both)
+            .expect("every roster entry has a verifying proof");
+        assert_eq!(aggregate, local.aggregate);
+
+        // One entry unproved. `accept_share_proofs` would have accepted this
+        // set, because it skips the local index; this must not.
+        let Err(error) =
+            AggregateSigningKey::from_verified_share_proofs_v1(&local.bindings, &both[..1])
+        else {
+            panic!("a roster entry without a proof must fail closed");
+        };
+        assert_eq!(error, LegError::MissingShareProof);
+
+        // A statement bound to another session, presented under the right
+        // index. The bytes cannot match what these bindings imply.
+        let other = fixture(PurposeV1::ClaimAdaptor, Some(point(31)));
+        // Asserted rather than assumed: the case below only tests what it
+        // claims if the two sessions really are distinct, and the identity is
+        // drawn from `OsRng` rather than derived, so nothing but this line
+        // establishes it.
+        assert_ne!(local.bindings.session_id(), other.bindings.session_id());
+        let foreign = other
+            .first
+            .prove_share(&other.bindings)
+            .expect("the other session proves its own share");
+        let Err(error) = AggregateSigningKey::from_verified_share_proofs_v1(
+            &local.bindings,
+            &[foreign, proof_b.clone()],
+        ) else {
+            panic!("a statement from another session must fail closed");
+        };
+        assert_eq!(error, LegError::ShareStatementMismatch);
+
+        // The right statement carrying the other entry's proof: the statement
+        // matches byte for byte and the proof does not open it.
+        let swapped = (proof_a.0.clone(), proof_b.1.clone());
+        let Err(error) = AggregateSigningKey::from_verified_share_proofs_v1(
+            &local.bindings,
+            &[swapped, proof_b],
+        ) else {
+            panic!("a proof belonging to another entry must fail closed");
+        };
+        assert_eq!(error, LegError::ShareProofRejected);
+    }
+
+    /// The adaptor-point grammar on the live path, both halves.
+    ///
+    /// `SessionOpenRequest::adaptor_point` has always documented the rule —
+    /// mandatory in `ClaimAdaptor`, forbidden elsewhere — and only the first
+    /// half was ever refused, late, at `build_claim_pre_signature`. The second
+    /// half mattered more than it looked: `BoundRound::bind` folds the point
+    /// into the aggregate nonce whenever it is `Some` without consulting the
+    /// purpose, so a non-adaptor session opened with one would have signed
+    /// against a displaced `R̂` with nothing downstream to catch it.
+    ///
+    /// Both halves are asserted to be refused **before the registry is
+    /// consulted**, so a contradiction cannot burn a session identity on its
+    /// way to being rejected.
+    #[test]
+    fn session_open_enforces_the_adaptor_point_grammar_before_registry_use() {
+        for (case, purpose, adaptor_point, expected) in [
+            (
+                "claim adaptor without its point",
+                PurposeV1::ClaimAdaptor,
+                None,
+                LegError::AdaptorPointMissing,
+            ),
+            (
+                "refund carrying a point",
+                PurposeV1::Refund,
+                Some(point(31)),
+                LegError::PurposeMismatch,
+            ),
+            (
+                "funding carrying a point",
+                PurposeV1::Funding,
+                Some(point(31)),
+                LegError::PurposeMismatch,
+            ),
+        ] {
+            let chain_id = chain();
+            let roster = roster_for(&chain_id);
+            let initiator = *roster.entries()[0].participant_id();
+            let tx = template_tx();
+            let mut registry = MemoryRegistry(Vec::new());
+            let Err(error) = SessionBindings::open(
+                SessionOpenRequest {
+                    chain_id,
+                    contract_kind: ContractKindV1::WitnessOrTimeout,
+                    roster,
+                    initiator_participant_id: initiator,
+                    purpose,
+                    adaptor_point,
+                    template_tx: &tx,
+                    kernel_message_digest: [0x44; 32],
+                    opening_direction: DirectionV1::Initiator,
+                    opening_phase: SigningPhaseV1::SigNonceCommit,
+                    terms_hash: [0x55; 32],
+                    recovery_binding_hash: [0x66; 32],
+                },
+                &mut registry,
+            ) else {
+                panic!("{case}: the adaptor-point grammar must fail closed");
+            };
+            assert_eq!(error, expected, "{case}");
+            assert!(
+                registry.0.is_empty(),
+                "{case}: the grammar must be refused before a session id is drawn"
+            );
+        }
+    }
+
+    /// The tie-back is the whole identity check, and it fires.
+    ///
+    /// Every case below is the same reassembly with exactly **one** value
+    /// perturbed, against bindings the live path produced, so a refusal is
+    /// attributable to the perturbation and to nothing upstream of it. The
+    /// paired positive at the top is what makes that attribution sound: it
+    /// proves the unperturbed request reaches the end.
+    ///
+    /// What it deliberately does not claim to test: that a caller cannot
+    /// fabricate a consistent pair. A caller can — the last case here does
+    /// exactly that and is accepted — and the constructor's documentation says
+    /// so. This test pins the tie-back, not a provenance the type cannot check.
+    #[test]
+    fn caller_supplied_identity_is_accepted_only_when_the_transcript_commits_it() {
+        fn retained<'a>(
+            bytes: &'a [u8],
+            adaptor_point: &PublicKey,
+            session_id: [u8; 32],
+            expected_initial_transcript_hash: [u8; 32],
+            transcript_hash: [u8; 32],
+        ) -> CallerSuppliedIdentitySessionRequestV1<'a> {
+            let chain_id = chain();
+            let roster = roster_for(&chain_id);
+            CallerSuppliedIdentitySessionRequestV1 {
+                chain_id,
+                contract_kind: ContractKindV1::WitnessOrTimeout,
+                roster,
+                purpose: PurposeV1::ClaimAdaptor,
+                adaptor_point: Some(adaptor_point.clone()),
+                canonical_transaction_bytes: bytes,
+                kernel_message_digest: [0x44; 32],
+                terms_hash: [0x55; 32],
+                recovery_binding_hash: [0x66; 32],
+                session_id,
+                expected_initial_transcript_hash,
+                transcript_hash,
+            }
+        }
+
+        let adaptor_point = point(31);
+        let live = open(
+            PurposeV1::ClaimAdaptor,
+            Some(adaptor_point.clone()),
+            SigningPhaseV1::SigNonceCommit,
+            0x33,
+        );
+        let mut tx = template_tx();
+        tx.offset = [0x33; 32];
+        let bytes = tx.to_bytes().expect("canonical template bytes");
+        let session_id = *live.session_id();
+        let initial = *live.initial_transcript_hash();
+        let transcript = *live.transcript_hash();
+
+        // Positive: the pair the live path produced reassembles the same
+        // bindings, identity and transcripts included.
+        let rehydrated = SessionBindings::open_with_caller_supplied_identity_v1(retained(
+            &bytes,
+            &adaptor_point,
+            session_id,
+            initial,
+            transcript,
+        ))
+        .expect("the retained pair reassembles");
+        assert_eq!(rehydrated.session_id(), &session_id);
+        assert_eq!(rehydrated.initial_transcript_hash(), &initial);
+        assert_eq!(rehydrated.transcript_hash(), &transcript);
+        assert_eq!(rehydrated.template_hash(), live.template_hash());
+        assert_eq!(rehydrated.contract_kind(), live.contract_kind());
+
+        // A forged identity against the retained transcript: the recomputed
+        // initial transcript no longer equals the one supplied.
+        let mut forged = session_id;
+        forged[0] ^= 0x01;
+        let Err(error) = SessionBindings::open_with_caller_supplied_identity_v1(retained(
+            &bytes,
+            &adaptor_point,
+            forged,
+            initial,
+            transcript,
+        )) else {
+            panic!("a session identity the initial transcript does not commit must fail closed");
+        };
+        assert_eq!(error, LegError::TranscriptMismatch);
+
+        // The mirror image: the true identity against a tampered initial
+        // transcript. The same gate refuses it, from the other side.
+        let mut tampered = initial;
+        tampered[31] ^= 0x80;
+        let Err(error) = SessionBindings::open_with_caller_supplied_identity_v1(retained(
+            &bytes,
+            &adaptor_point,
+            session_id,
+            tampered,
+            transcript,
+        )) else {
+            panic!("a tampered initial transcript must fail closed");
+        };
+        assert_eq!(error, LegError::TranscriptMismatch);
+
+        // The three structural refusals, all three asserted, because the
+        // argument for guarding them is that they are indistinguishable and a
+        // test that covered one would invite someone to drop the others.
+        for (case, id, expected_initial, accepted) in [
+            ("zero identity", [0; 32], initial, transcript),
+            ("zero initial transcript", session_id, [0; 32], transcript),
+            ("zero accepted transcript", session_id, initial, [0; 32]),
+        ] {
+            let Err(error) = SessionBindings::open_with_caller_supplied_identity_v1(retained(
+                &bytes,
+                &adaptor_point,
+                id,
+                expected_initial,
+                accepted,
+            )) else {
+                panic!("{case}: a structurally empty field must fail closed");
+            };
+            assert_eq!(error, LegError::MalformedRetainedFacts, "{case}");
+        }
+
+        // The roster gate of this constructor, exercised on this constructor.
+        // The equivalent gate on `open` is covered by its own tests, and the
+        // reason that is not enough is that the two blocks are separate text:
+        // the day one of them is edited, only a test aimed here notices.
+        let foreign_chain = TrustedChainIdV1::from_authenticated_genesis(
+            0x2345_6789,
+            &Hash256::from_bytes([0x12; 32]),
+        );
+        let mut wrong_roster = retained(&bytes, &adaptor_point, session_id, initial, transcript);
+        wrong_roster.roster = roster_for(&foreign_chain);
+        let Err(error) = SessionBindings::open_with_caller_supplied_identity_v1(wrong_roster)
+        else {
+            panic!("a roster bound to another chain must fail closed");
+        };
+        assert_eq!(error, LegError::RosterMismatch);
+
+        // The purpose gate. `Sponsor` is the one purpose `require_strict_phase1`
+        // refuses, and it is refused before the template is touched, so an
+        // adaptor error at this point can only have come from that gate.
+        let mut sponsored = retained(&bytes, &adaptor_point, session_id, initial, transcript);
+        sponsored.purpose = PurposeV1::Sponsor;
+        let Err(error) = SessionBindings::open_with_caller_supplied_identity_v1(sponsored) else {
+            panic!("a purpose outside strict phase 1 must fail closed");
+        };
+        assert!(
+            matches!(error, LegError::Adaptor(_)),
+            "the purpose registry must be the refusing authority, got {error:?}"
+        );
+
+        // The adaptor-point grammar, both halves. The second half is the one
+        // nothing enforced before: a point on a non-adaptor purpose would
+        // otherwise displace the aggregate nonce with nothing downstream to
+        // catch it.
+        let mut pointless = retained(&bytes, &adaptor_point, session_id, initial, transcript);
+        pointless.adaptor_point = None;
+        let Err(error) = SessionBindings::open_with_caller_supplied_identity_v1(pointless) else {
+            panic!("a claim-adaptor round without its point must fail closed");
+        };
+        assert_eq!(error, LegError::AdaptorPointMissing);
+
+        let mut refund_with_point =
+            retained(&bytes, &adaptor_point, session_id, initial, transcript);
+        refund_with_point.purpose = PurposeV1::Refund;
+        let Err(error) = SessionBindings::open_with_caller_supplied_identity_v1(refund_with_point)
+        else {
+            panic!("a non-adaptor purpose carrying a point must fail closed");
+        };
+        assert_eq!(error, LegError::PurposeMismatch);
+
+        // And the honest limit, asserted rather than left to prose: a caller
+        // who computes the matching initial transcript for an identity of its
+        // own choosing is accepted. Nothing here proves provenance, and this
+        // case exists so that the day someone believes it does, the test that
+        // says otherwise is already on the page.
+        let chosen = [0x7c; 32];
+        let consistent = initial_transcript_hash_v1(
+            &chain(),
+            &chosen,
+            ContractKindV1::WitnessOrTimeout,
+            &roster_for(&chain()),
+        );
+        let fabricated = SessionBindings::open_with_caller_supplied_identity_v1(retained(
+            &bytes,
+            &adaptor_point,
+            chosen,
+            consistent,
+            transcript,
+        ))
+        .expect("a mutually consistent pair passes: the tie-back is not provenance");
+        assert_eq!(fabricated.session_id(), &chosen);
+    }
+    #[test]
+    fn session_open_rederives_the_complete_roster_before_registry_use() {
+        let expected_chain = chain();
+        let foreign_chain = TrustedChainIdV1::from_authenticated_genesis(
+            0x1234_5678,
+            &Hash256::from_bytes([0x12; 32]),
+        );
+        let mut mixed_entries = vec![
+            ParticipantIdentityV1::new(
+                &expected_chain,
+                point(21),
+                point(7),
+                DirectionV1::Initiator,
+            )
+            .expect("local-chain participant"),
+            ParticipantIdentityV1::new(&foreign_chain, point(22), point(9), DirectionV1::Responder)
+                .expect("foreign-chain participant"),
+        ];
+        mixed_entries.sort_by_key(|entry| *entry.participant_id());
+        let mixed_roster = ParticipantRosterV1::new(mixed_entries).expect("mixed-chain roster");
+        let initiator = *mixed_roster.entries()[0].participant_id();
+        let tx = template_tx();
+        let mut registry = MemoryRegistry(Vec::new());
+
+        let error = expect_leg_err(
+            SessionBindings::open(
+                SessionOpenRequest {
+                    chain_id: expected_chain,
+                    contract_kind: ContractKindV1::WitnessOrTimeout,
+                    roster: mixed_roster,
+                    initiator_participant_id: initiator,
+                    purpose: PurposeV1::Funding,
+                    adaptor_point: None,
+                    template_tx: &tx,
+                    kernel_message_digest: [0x44; 32],
+                    opening_direction: DirectionV1::Initiator,
+                    opening_phase: SigningPhaseV1::SigNonceCommit,
+                    terms_hash: [0x55; 32],
+                    recovery_binding_hash: [0x66; 32],
+                },
+                &mut registry,
+            ),
+            "mixed-chain roster",
+        );
+        assert_eq!(error, LegError::RosterMismatch);
+        assert!(
+            registry.0.is_empty(),
+            "chain/roster mismatch must fail before durable session-ID registration"
+        );
+    }
+
+    #[test]
+    fn session_open_rejects_a_nonmember_initiator_before_registry_use() {
+        let chain_id = chain();
+        let roster = roster_for(&chain_id);
+        let foreign_participant_id = [0x99; 32];
+        assert!(roster
+            .entries()
+            .iter()
+            .all(|entry| entry.participant_id() != &foreign_participant_id));
+        let tx = template_tx();
+        let mut registry = MemoryRegistry(Vec::new());
+
+        let error = expect_leg_err(
+            SessionBindings::open(
+                SessionOpenRequest {
+                    chain_id,
+                    contract_kind: ContractKindV1::WitnessOrTimeout,
+                    roster,
+                    initiator_participant_id: foreign_participant_id,
+                    purpose: PurposeV1::Funding,
+                    adaptor_point: None,
+                    template_tx: &tx,
+                    kernel_message_digest: [0x44; 32],
+                    opening_direction: DirectionV1::Initiator,
+                    opening_phase: SigningPhaseV1::SigNonceCommit,
+                    terms_hash: [0x55; 32],
+                    recovery_binding_hash: [0x66; 32],
+                },
+                &mut registry,
+            ),
+            "nonmember initiator",
+        );
+        assert_eq!(error, LegError::RosterMismatch);
+        assert!(
+            registry.0.is_empty(),
+            "initiator membership must fail before durable session-ID registration"
+        );
     }
 
     #[test]

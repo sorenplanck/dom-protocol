@@ -1,0 +1,20 @@
+[package]
+name = "participant-binding"
+description = "Dual-signed participant-to-chain-account bindings for DOM interoperability"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+adapter-evm = { path = "../adapters/evm", default-features = false }
+btc-crypto = { path = "../adapters/btc-crypto" }
+deployment-registry = { path = "../deployment-registry" }
+k256 = { workspace = true, features = ["ecdsa"] }
+kaystra-core = { path = "../kaystra-core", default-features = false }
+sha3 = { version = "0.10", default-features = false, features = ["std"] }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

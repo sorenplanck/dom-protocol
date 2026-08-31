@@ -1,0 +1,20 @@
+[package]
+name = "settlement-coordinator"
+description = "Durable two-face settlement coordinator for DOM interoperability"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+blake2 = { workspace = true }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
+
+[dev-dependencies]
+static_assertions = "=1.1.0"
+tempfile = { workspace = true }

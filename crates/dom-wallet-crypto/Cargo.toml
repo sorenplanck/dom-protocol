@@ -23,8 +23,12 @@ serde.workspace      = true
 serde_json.workspace = true
 # Errors.
 thiserror.workspace = true
+# Same-directory, random, exclusive temporary-file authority for atomic saves.
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.4", default-features = false, features = ["process"] }
 
 [dev-dependencies]
 serde      = { workspace = true }
-tempfile.workspace = true
 proptest.workspace = true

@@ -11,6 +11,9 @@ publish = false
 
 [features]
 default = []
+# Laboratory seam that mints one claim observation from a crypto-real opening.
+# No shipped feature enables it and it is a hard compile error in release.
+evidence-only = []
 
 [dependencies]
 dom-scriptless-primitives = { path = "../dom-scriptless-primitives" }
@@ -30,6 +33,7 @@ dom-crypto = { workspace = true, features = ["test-helpers"] }
 hex.workspace = true
 serde_json.workspace = true
 k256.workspace = true
+static_assertions = "=1.1.0"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }

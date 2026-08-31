@@ -286,10 +286,10 @@ impl TranscriptStateV1 {
     }
 }
 
-/// A message-type registry decision: which roles may emit which types.
-/// v1 keeps it explicit and total — an unknown type is refused, never
-/// accepted by default (the ratified step-3/6 discipline).
-pub trait MessageTypePolicy {
+/// Internal message-type registry decision: which roles may emit which
+/// types. Keeping this trait private makes the canonical policy a property
+/// of the production API, not a convention downstream callers can bypass.
+trait MessageTypePolicy {
     /// Whether `role` may emit `message_type`.
     fn permits(&self, role: SenderRoleV1, message_type: u16) -> bool;
 }
@@ -344,14 +344,31 @@ pub mod message_type {
 
 /// The canonical authorization mapping of Relay V1, RATIFIED by D-019.
 /// This is the production policy and the ONLY one the production path
-/// may use ([`accept_envelope`] hard-wires it; `guards.sh` enforces
-/// that no other implementation reaches a production path).
+/// may use: [`accept_envelope`] hard-wires it and the replacement seam is
+/// private to this module.
 ///
 /// Initiator: RFQ, Acceptance, Selection. Solver: Quote. Observer:
 /// nothing — the evidence role is strictly non-emitting (Annex M
 /// M.9.1). Any unknown kind is refused.
+///
+/// The following regressions pin both halves of the private boundary:
+///
+/// ```compile_fail
+/// use relay::auth::MessageTypePolicy;
+/// ```
+///
+/// ```compile_fail
+/// use relay::auth::accept_envelope_with_policy;
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct CanonicalMessageTypePolicyV1;
+
+impl CanonicalMessageTypePolicyV1 {
+    /// Applies the ratified, closed role-to-message-type mapping.
+    pub fn permits(&self, role: SenderRoleV1, message_type: u16) -> bool {
+        <Self as MessageTypePolicy>::permits(self, role, message_type)
+    }
+}
 
 impl MessageTypePolicy for CanonicalMessageTypePolicyV1 {
     fn permits(&self, role: SenderRoleV1, message_type: u16) -> bool {
@@ -456,12 +473,10 @@ pub fn accept_envelope(
     accept_envelope_with_policy(raw, ctx, rosters, &CanonicalMessageTypePolicyV1, state, now)
 }
 
-/// TEST-ONLY entry point that accepts an alternative
-/// [`MessageTypePolicy`]. Production code MUST call [`accept_envelope`]
-/// instead; `guards.sh` refuses this symbol outside test trees
-/// (the same discipline that keeps the F2 store failpoints test-only).
-#[doc(hidden)]
-pub fn accept_envelope_with_policy<P: MessageTypePolicy>(
+/// Internal implementation seam. It is deliberately private: external
+/// crates cannot replace the ratified policy even if they ignore repository
+/// source guards or compile this library in a different composition root.
+fn accept_envelope_with_policy<P: MessageTypePolicy>(
     raw: &[u8],
     ctx: &RecipientContextV1,
     rosters: &RosterRegistryV1,

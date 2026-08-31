@@ -5,6 +5,20 @@ use core::fmt;
 use dom_consensus::Transaction;
 use std::error::Error;
 
+/// Domain of the canonical M.8 V2 funding-authorization binding.
+pub const OPERATIONAL_M8_FUNDING_AUTHORIZATION_BINDING_V2_DOMAIN: &str =
+    "DOM:contracts-operational-m8-funding-authorization-binding:v2";
+/// Magic reserved for the durable M.8 V2 issuance record owned by Contracts.
+pub const OPERATIONAL_M8_FUNDING_ISSUANCE_MAGIC_V2: [u8; 8] = *b"DOMSM8I2";
+/// Domain reserved for the durable M.8 V2 issuance record owned by Contracts.
+pub const OPERATIONAL_M8_FUNDING_ISSUANCE_V2_DOMAIN: &str =
+    "DOM:contracts-operational-m8-funding-issuance:v2";
+/// Magic reserved for the durable M.8 V2 funding commit owned by Contracts.
+pub const OPERATIONAL_M8_FUNDING_COMMIT_MAGIC_V2: [u8; 8] = *b"DOMSM8C2";
+/// Domain reserved for the durable M.8 V2 funding commit owned by Contracts.
+pub const OPERATIONAL_M8_FUNDING_COMMIT_V2_DOMAIN: &str =
+    "DOM:contracts-operational-m8-funding-commit:v2";
+
 /// Exact public evidence bound by a durable one-shot funding issuance record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OperationalFundingAuthorizationBindingV1 {
@@ -45,6 +59,20 @@ pub struct OperationalM8FundingAuthorizationBindingV1 {
     backup_receipt_hash: [u8; 32],
 }
 
+/// Exact M.8 V2 funding authority including bilateral readiness and explicit
+/// final-claim roles.
+///
+/// The first 400 bytes preserve the economic field positions of the frozen
+/// M.8 V1 profile, but use a distinct magic and version. The final two fields
+/// bind the complete role object and the deterministic bilateral 0x11 vote
+/// payload. V1 bytes are never accepted or guessed by length.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperationalM8FundingAuthorizationBindingV2 {
+    economic_binding: OperationalM8FundingAuthorizationBindingV1,
+    final_claim_role_binding_digest: [u8; 32],
+    ready_binding_digest: [u8; 32],
+}
+
 /// Complete already-durable evidence from which an operational funding token
 /// may be imported.
 ///
@@ -63,6 +91,18 @@ pub struct DurableOperationalFundingIssuanceV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableOperationalM8FundingIssuanceV1 {
     binding: OperationalM8FundingAuthorizationBindingV1,
+    issuance_record_digest: [u8; 32],
+    authorized_revision: u64,
+}
+
+/// Complete durable issuance proof for the M.8 V2 funding profile.
+///
+/// This proof cannot be imported by the V1 capability. The durable Contracts
+/// record must use [`OPERATIONAL_M8_FUNDING_ISSUANCE_MAGIC_V2`] and
+/// [`OPERATIONAL_M8_FUNDING_ISSUANCE_V2_DOMAIN`] and copy both V2 digests.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DurableOperationalM8FundingIssuanceV2 {
+    binding: OperationalM8FundingAuthorizationBindingV2,
     issuance_record_digest: [u8; 32],
     authorized_revision: u64,
 }
@@ -359,6 +399,187 @@ impl OperationalM8FundingAuthorizationBindingV1 {
     }
 }
 
+impl OperationalM8FundingAuthorizationBindingV2 {
+    /// Canonical magic for the role-bound M.8 V2 operational profile.
+    pub const MAGIC: [u8; 8] = *b"DOMF7M82";
+    /// Canonical binding version.
+    pub const VERSION: u16 = 2;
+    /// Explicit two-phase M.8 profile tag. Its meaning is version-scoped by
+    /// [`Self::MAGIC`] and [`Self::VERSION`].
+    pub const PROFILE_TAG: [u8; 4] = *b"M8T2";
+    /// Exact canonical encoded length.
+    pub const ENCODED_LEN: usize = 464;
+
+    /// Extend an already validated M.8 economic binding with the exact
+    /// final-claim role and bilateral-ready commitments.
+    ///
+    /// Keeping the frozen economic object intact avoids a second
+    /// caller-shaped list of the same fields at the V2 boundary. The Store
+    /// must still reauthenticate the complete role and ready objects before it
+    /// imports an issuance capability.
+    pub fn new(
+        economic_binding: OperationalM8FundingAuthorizationBindingV1,
+        final_claim_role_binding_digest: [u8; 32],
+        ready_binding_digest: [u8; 32],
+    ) -> Result<Self> {
+        if final_claim_role_binding_digest == [0; 32] || ready_binding_digest == [0; 32] {
+            return Err(AdaptorError::InvalidContext(
+                "M.8 V2 role and ready binding digests must be nonzero",
+            ));
+        }
+        Ok(Self {
+            economic_binding,
+            final_claim_role_binding_digest,
+            ready_binding_digest,
+        })
+    }
+
+    /// Strictly decode the exact V2 representation.
+    ///
+    /// V1 magic/version, truncation, extension, invalid points and zero fields
+    /// all fail closed. The value is reconstructed through [`Self::new`] and
+    /// compared byte-for-byte so no non-canonical representation is accepted.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != Self::ENCODED_LEN {
+            return Err(AdaptorError::InvalidLength {
+                object: "OperationalM8FundingAuthorizationBindingV2",
+                expected: Self::ENCODED_LEN,
+                actual: bytes.len(),
+            });
+        }
+        if bytes.get(..8) != Some(Self::MAGIC.as_slice())
+            || bytes.get(8..10) != Some(Self::VERSION.to_le_bytes().as_slice())
+            || bytes.get(10..14) != Some(Self::PROFILE_TAG.as_slice())
+        {
+            return Err(AdaptorError::InvalidContext(
+                "invalid M.8 V2 funding authorization header",
+            ));
+        }
+        let economic_binding = OperationalM8FundingAuthorizationBindingV1::new(
+            binding_array(bytes, 14)?,
+            binding_array(bytes, 46)?,
+            binding_array(bytes, 78)?,
+            binding_array(bytes, 110)?,
+            binding_array(bytes, 142)?,
+            binding_array(bytes, 175)?,
+            binding_array(bytes, 207)?,
+            binding_array(bytes, 239)?,
+            binding_array(bytes, 271)?,
+            binding_array(bytes, 304)?,
+            binding_array(bytes, 336)?,
+            binding_array(bytes, 368)?,
+        )?;
+        let binding = Self::new(
+            economic_binding,
+            binding_array(bytes, 400)?,
+            binding_array(bytes, 432)?,
+        )?;
+        if binding.to_bytes().as_slice() != bytes {
+            return Err(AdaptorError::InvalidContext(
+                "non-canonical M.8 V2 funding authorization binding",
+            ));
+        }
+        Ok(binding)
+    }
+
+    /// Canonical profile-tagged V2 bytes bound by issuance and commit records.
+    pub fn to_bytes(&self) -> [u8; Self::ENCODED_LEN] {
+        let mut bytes = [0u8; Self::ENCODED_LEN];
+        bytes[..OperationalM8FundingAuthorizationBindingV1::ENCODED_LEN]
+            .copy_from_slice(&self.economic_binding.to_bytes());
+        bytes[..8].copy_from_slice(&Self::MAGIC);
+        bytes[8..10].copy_from_slice(&Self::VERSION.to_le_bytes());
+        bytes[10..14].copy_from_slice(&Self::PROFILE_TAG);
+        bytes[400..432].copy_from_slice(&self.final_claim_role_binding_digest);
+        bytes[432..464].copy_from_slice(&self.ready_binding_digest);
+        bytes
+    }
+
+    /// Domain-separated digest of the exact V2 canonical bytes.
+    pub fn digest(&self) -> [u8; 32] {
+        *dom_crypto::blake2b_256_tagged(
+            OPERATIONAL_M8_FUNDING_AUTHORIZATION_BINDING_V2_DOMAIN,
+            &self.to_bytes(),
+        )
+        .as_bytes()
+    }
+
+    /// DOM chain identity authenticated by the real node adapter.
+    pub const fn chain_id(&self) -> &[u8; 32] {
+        self.economic_binding.chain_id()
+    }
+
+    /// Session whose durable state reached M.8 V2 funding authorization.
+    pub const fn session_id(&self) -> &[u8; 32] {
+        self.economic_binding.session_id()
+    }
+
+    /// Ready-to-fund transcript hash.
+    pub const fn transcript_hash(&self) -> &[u8; 32] {
+        self.economic_binding.transcript_hash()
+    }
+
+    /// Hash of the exact accepted economic terms.
+    pub const fn terms_hash(&self) -> &[u8; 32] {
+        self.economic_binding.terms_hash()
+    }
+
+    /// Exact confidential output created by funding.
+    pub const fn shared_output_commitment(&self) -> &[u8; 33] {
+        self.economic_binding.shared_output_commitment()
+    }
+
+    /// Hash of the canonical collaborative-Bulletproof statement.
+    pub const fn bp_statement_hash(&self) -> &[u8; 32] {
+        self.economic_binding.bp_statement_hash()
+    }
+
+    /// Signature-omitting funding template hash.
+    pub const fn funding_template_hash(&self) -> &[u8; 32] {
+        self.economic_binding.funding_template_hash()
+    }
+
+    /// Signature-omitting claim template hash.
+    pub const fn claim_template_hash(&self) -> &[u8; 32] {
+        self.economic_binding.claim_template_hash()
+    }
+
+    /// Exact canonical compressed adaptor point `T=tG`.
+    pub const fn claim_adaptor_point(&self) -> &[u8; 33] {
+        self.economic_binding.claim_adaptor_point()
+    }
+
+    /// Digest of the immutable M.8 timing and anchor/finality policy.
+    pub const fn m8_policy_digest(&self) -> &[u8; 32] {
+        self.economic_binding.m8_policy_digest()
+    }
+
+    /// Exact fully signed refund transaction hash.
+    pub const fn refund_tx_hash(&self) -> &[u8; 32] {
+        self.economic_binding.refund_tx_hash()
+    }
+
+    /// Hash of the complete durable bilateral-backup receipt.
+    pub const fn backup_receipt_hash(&self) -> &[u8; 32] {
+        self.economic_binding.backup_receipt_hash()
+    }
+
+    /// Digest of the exact self-contained final-claim role binding.
+    pub const fn final_claim_role_binding_digest(&self) -> &[u8; 32] {
+        &self.final_claim_role_binding_digest
+    }
+
+    /// Digest signed identically by both bilateral ReadyToFund voters.
+    pub const fn ready_binding_digest(&self) -> &[u8; 32] {
+        &self.ready_binding_digest
+    }
+
+    /// Frozen M.8 economic evidence extended by this V2 binding.
+    pub const fn economic_binding(&self) -> &OperationalM8FundingAuthorizationBindingV1 {
+        &self.economic_binding
+    }
+}
+
 impl DurableOperationalFundingIssuanceV1 {
     /// Construct proof of an exact nonzero durable issuance record.
     pub fn new(
@@ -429,6 +650,41 @@ impl DurableOperationalM8FundingIssuanceV1 {
     }
 }
 
+impl DurableOperationalM8FundingIssuanceV2 {
+    /// Construct proof of an exact nonzero durable M.8 V2 issuance record.
+    pub fn new(
+        binding: OperationalM8FundingAuthorizationBindingV2,
+        issuance_record_digest: [u8; 32],
+        authorized_revision: u64,
+    ) -> Result<Self> {
+        if issuance_record_digest == [0; 32] || authorized_revision == 0 {
+            return Err(AdaptorError::InvalidContext(
+                "M.8 V2 operational funding issuance proof must be nonzero",
+            ));
+        }
+        Ok(Self {
+            binding,
+            issuance_record_digest,
+            authorized_revision,
+        })
+    }
+
+    /// Exact role- and ready-bound evidence stored in the V2 issuance record.
+    pub const fn binding(&self) -> &OperationalM8FundingAuthorizationBindingV2 {
+        &self.binding
+    }
+
+    /// Digest of the immutable authenticated V2 issuance record.
+    pub const fn issuance_record_digest(&self) -> &[u8; 32] {
+        &self.issuance_record_digest
+    }
+
+    /// Durable session revision that owns the V2 issuance record.
+    pub const fn authorized_revision(&self) -> u64 {
+        self.authorized_revision
+    }
+}
+
 impl<'a> OperationalFundingUnsignedTemplateV1<'a> {
     pub(crate) const fn new(
         transaction: &'a Transaction,
@@ -484,6 +740,16 @@ pub struct OperationalM8FundingAuthorizationV1 {
     authorized_revision: u64,
 }
 
+/// One-shot process-local authority for the exact role-bound M.8 V2 profile.
+///
+/// It has no public constructor, codec, `Clone`, `Copy`, or `Debug` and cannot
+/// be substituted at either V1 finalization path.
+pub struct OperationalM8FundingAuthorizationV2 {
+    binding: OperationalM8FundingAuthorizationBindingV2,
+    issuance_record_digest: [u8; 32],
+    authorized_revision: u64,
+}
+
 impl OperationalFundingAuthorizationV1 {
     pub(crate) const fn binding(&self) -> &OperationalFundingAuthorizationBindingV1 {
         &self.binding
@@ -516,6 +782,22 @@ impl OperationalM8FundingAuthorizationV1 {
     }
 }
 
+impl OperationalM8FundingAuthorizationV2 {
+    pub(crate) const fn binding(&self) -> &OperationalM8FundingAuthorizationBindingV2 {
+        &self.binding
+    }
+
+    /// Store issuance-record digest retained for exact V2 sink cross-checking.
+    pub const fn issuance_record_digest(&self) -> &[u8; 32] {
+        &self.issuance_record_digest
+    }
+
+    /// Durable session revision that issued this V2 authority.
+    pub const fn authorized_revision(&self) -> u64 {
+        self.authorized_revision
+    }
+}
+
 /// One-shot authority available only to the lifecycle builder when asking the
 /// statically selected Contracts Store to import a durable issuance record.
 pub struct OperationalFundingAuthorizationImportCapabilityV1 {
@@ -524,6 +806,11 @@ pub struct OperationalFundingAuthorizationImportCapabilityV1 {
 
 /// One-shot lifecycle authority to import an exact durable M.8 issuance.
 pub struct OperationalM8FundingAuthorizationImportCapabilityV1 {
+    _private: (),
+}
+
+/// One-shot lifecycle authority to import an exact durable M.8 V2 issuance.
+pub struct OperationalM8FundingAuthorizationImportCapabilityV2 {
     _private: (),
 }
 
@@ -568,6 +855,28 @@ impl OperationalM8FundingAuthorizationImportCapabilityV1 {
             return Err(AdaptorError::AuthorizationMismatch);
         }
         Ok(OperationalM8FundingAuthorizationV1 {
+            binding: issuance.binding,
+            issuance_record_digest: issuance.issuance_record_digest,
+            authorized_revision: issuance.authorized_revision,
+        })
+    }
+}
+
+impl OperationalM8FundingAuthorizationImportCapabilityV2 {
+    pub(crate) const fn new() -> Self {
+        Self { _private: () }
+    }
+
+    /// Import one already-persisted V2 issuance after an exact binding check.
+    pub fn import(
+        self,
+        expected_binding: &OperationalM8FundingAuthorizationBindingV2,
+        issuance: DurableOperationalM8FundingIssuanceV2,
+    ) -> Result<OperationalM8FundingAuthorizationV2> {
+        if issuance.binding() != expected_binding {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
+        Ok(OperationalM8FundingAuthorizationV2 {
             binding: issuance.binding,
             issuance_record_digest: issuance.issuance_record_digest,
             authorized_revision: issuance.authorized_revision,
@@ -643,6 +952,52 @@ pub trait OperationalM8FundingAuthorizationStoreV1: Sized {
     ) -> core::result::Result<OperationalM8FundingAuthorizationV1, Self::Error>;
 }
 
+/// Static Contracts Store composition for role-bound M.8 V2 funding.
+///
+/// Implementations must authenticate the complete final-claim role binding,
+/// deterministic ready binding and their exact digests before issuing. The
+/// retained issuance must use the V2 magic/domain constants, copy both
+/// digests, be persisted and fsynced, and remain disjoint from every V1 record
+/// and filename. Resume may re-import only that exact immutable V2 issuance.
+pub trait OperationalM8FundingAuthorizationStoreV2: Sized {
+    /// Store-specific redacted error.
+    type Error: Error + Send + Sync + 'static;
+
+    /// Durably issue one process-local authority for the exact M.8 V2 binding.
+    fn issue_operational_m8_funding_authorization_v2(
+        &mut self,
+        binding: &OperationalM8FundingAuthorizationBindingV2,
+        unsigned_template: &OperationalFundingUnsignedTemplateV1<'_>,
+        capability: OperationalM8FundingAuthorizationImportCapabilityV2,
+    ) -> core::result::Result<OperationalM8FundingAuthorizationV2, Self::Error>;
+
+    /// Rehydrate only the exact already-issued V2 authority after a crash.
+    fn resume_operational_m8_funding_authorization_v2(
+        &mut self,
+        binding: &OperationalM8FundingAuthorizationBindingV2,
+        unsigned_template: &OperationalFundingUnsignedTemplateV1<'_>,
+        capability: OperationalM8FundingAuthorizationImportCapabilityV2,
+    ) -> core::result::Result<OperationalM8FundingAuthorizationV2, Self::Error>;
+}
+
+fn binding_array<const N: usize>(bytes: &[u8], start: usize) -> Result<[u8; N]> {
+    let end = start.checked_add(N).ok_or(AdaptorError::InvalidLength {
+        object: "OperationalM8FundingAuthorizationBindingV2 field",
+        expected: N,
+        actual: 0,
+    })?;
+    let field = bytes.get(start..end).ok_or(AdaptorError::InvalidLength {
+        object: "OperationalM8FundingAuthorizationBindingV2 field",
+        expected: N,
+        actual: bytes.len().saturating_sub(start),
+    })?;
+    field.try_into().map_err(|_| AdaptorError::InvalidLength {
+        object: "OperationalM8FundingAuthorizationBindingV2 field",
+        expected: N,
+        actual: field.len(),
+    })
+}
+
 /// Failure at the lifecycle/store operational authorization boundary.
 #[derive(Debug)]
 pub enum OperationalFundingAuthorizationError<E> {
@@ -669,5 +1024,102 @@ impl<E: Error + Send + Sync + 'static> Error for OperationalFundingAuthorization
             Self::Protocol(error) => Some(error),
             Self::Store(error) => Some(error),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use static_assertions::assert_not_impl_any;
+
+    assert_not_impl_any!(OperationalM8FundingAuthorizationV2: Clone, Copy, fmt::Debug);
+    assert_not_impl_any!(OperationalM8FundingAuthorizationImportCapabilityV2: Clone, Copy, fmt::Debug);
+
+    const GENERATOR_COMPRESSED: [u8; 33] = [
+        0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
+        0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16,
+        0xf8, 0x17, 0x98,
+    ];
+
+    fn v1_binding() -> OperationalM8FundingAuthorizationBindingV1 {
+        OperationalM8FundingAuthorizationBindingV1::new(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            GENERATOR_COMPRESSED,
+            [5; 32],
+            [6; 32],
+            [7; 32],
+            GENERATOR_COMPRESSED,
+            [8; 32],
+            [9; 32],
+            [10; 32],
+        )
+        .expect("valid V1 recovery binding")
+    }
+
+    fn v2_binding() -> OperationalM8FundingAuthorizationBindingV2 {
+        OperationalM8FundingAuthorizationBindingV2::new(v1_binding(), [11; 32], [12; 32])
+            .expect("valid V2 binding")
+    }
+
+    #[test]
+    fn v2_codec_preserves_v1_economic_offsets_but_never_the_header() {
+        let legacy = v1_binding().to_bytes();
+        let binding = v2_binding();
+        let bytes = binding.to_bytes();
+
+        assert_eq!(bytes.len(), 464);
+        assert_eq!(
+            &bytes[..8],
+            &OperationalM8FundingAuthorizationBindingV2::MAGIC
+        );
+        assert_eq!(&bytes[8..10], &2_u16.to_le_bytes());
+        assert_ne!(&bytes[..10], &legacy[..10]);
+        assert_eq!(&bytes[10..400], &legacy[10..400]);
+        assert_eq!(&bytes[400..432], &[11; 32]);
+        assert_eq!(&bytes[432..464], &[12; 32]);
+        assert_eq!(
+            OperationalM8FundingAuthorizationBindingV2::from_bytes(&bytes).expect("roundtrip"),
+            binding
+        );
+    }
+
+    #[test]
+    fn v2_codec_fails_closed_on_v1_tamper_or_extension() {
+        let binding = v2_binding();
+        let bytes = binding.to_bytes();
+        assert!(
+            OperationalM8FundingAuthorizationBindingV2::from_bytes(&v1_binding().to_bytes())
+                .is_err()
+        );
+
+        let mut tampered = bytes;
+        tampered[0] ^= 1;
+        assert!(OperationalM8FundingAuthorizationBindingV2::from_bytes(&tampered).is_err());
+        let mut tampered = bytes;
+        tampered[400..432].fill(0);
+        assert!(OperationalM8FundingAuthorizationBindingV2::from_bytes(&tampered).is_err());
+        let mut extended = bytes.to_vec();
+        extended.push(0);
+        assert!(OperationalM8FundingAuthorizationBindingV2::from_bytes(&extended).is_err());
+    }
+
+    #[test]
+    fn role_and_ready_digests_are_distinct_issuance_evidence() {
+        let binding = v2_binding();
+        let issuance = DurableOperationalM8FundingIssuanceV2::new(binding.clone(), [13; 32], 14)
+            .expect("issuance");
+        let authority = OperationalM8FundingAuthorizationImportCapabilityV2::new()
+            .import(&binding, issuance)
+            .expect("exact import");
+        assert_eq!(
+            authority.binding().final_claim_role_binding_digest(),
+            &[11; 32]
+        );
+        assert_eq!(authority.binding().ready_binding_digest(), &[12; 32]);
+        assert_eq!(authority.issuance_record_digest(), &[13; 32]);
+        assert_eq!(authority.authorized_revision(), 14);
     }
 }

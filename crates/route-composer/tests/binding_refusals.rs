@@ -196,6 +196,57 @@ fn two_hub_chains_refuse() {
 }
 
 #[test]
+fn equal_numbers_in_different_dom_assets_are_not_conservation() {
+    let (up, mut dn) = good_pair();
+    dn.dom_leg.asset_id = AssetId(b32(0xca));
+    assert_eq!(
+        ComposedBindingV1::bind(up, dn, margin()).unwrap_err(),
+        ComposerRefusal::HubAssetMismatch
+    );
+}
+
+#[test]
+fn mixed_dom_profiles_and_non_adaptor_hub_legs_refuse() {
+    let (up, mut dn) = good_pair();
+    dn.dom_leg.adapter_profile_hash = b32(0xcb);
+    assert_eq!(
+        ComposedBindingV1::bind(up, dn, margin()).unwrap_err(),
+        ComposerRefusal::HubProfileMismatch
+    );
+
+    let (up, mut dn) = good_pair();
+    dn.dom_leg.mechanism = LockMechanism::HashlockFallback;
+    assert_eq!(
+        ComposedBindingV1::bind(up, dn, margin()).unwrap_err(),
+        ComposerRefusal::InvalidHubMechanism
+    );
+}
+
+#[test]
+fn unrelated_intents_mixed_policies_and_optional_refunds_refuse() {
+    let (up, mut dn) = good_pair();
+    dn.intent_hash = IntentHash(b32(0xcc));
+    assert_eq!(
+        ComposedBindingV1::bind(up, dn, margin()).unwrap_err(),
+        ComposerRefusal::RouteIntentMismatch
+    );
+
+    let (up, mut dn) = good_pair();
+    dn.policy_version = 2;
+    assert_eq!(
+        ComposedBindingV1::bind(up, dn, margin()).unwrap_err(),
+        ComposerRefusal::RoutePolicyMismatch
+    );
+
+    let (up, mut dn) = good_pair();
+    dn.recovery.refund_before_funding = false;
+    assert_eq!(
+        ComposedBindingV1::bind(up, dn, margin()).unwrap_err(),
+        ComposerRefusal::UnsafeRecoveryPolicy
+    );
+}
+
+#[test]
 fn an_inverted_hub_ladder_refuses() {
     let t33 = t_point();
     // Upstream DOM deadline matures BEFORE downstream: the catastrophic window.
@@ -227,6 +278,34 @@ fn the_exact_margin_boundary_binds() {
     let up = terms(0xa0, 1000, 1100, t33);
     let dn = terms(0xd0, 900, 1000, t33);
     assert!(ComposedBindingV1::bind(up, dn, margin()).is_ok());
+}
+
+#[test]
+fn overflowing_deadline_addition_never_fakes_a_safety_margin() {
+    let (mut up, mut dn) = good_pair();
+
+    // The actual distance is only 50 blocks, below the required margin of
+    // 100. Adding the margin to `dn` overflows u64, so the comparison must
+    // fail closed instead of saturating to a deadline that `up` can equal.
+    up.dom_leg.deadline = TimelockSpec::BlockHeight { value: u64::MAX };
+    dn.dom_leg.deadline = TimelockSpec::BlockHeight {
+        value: u64::MAX - 50,
+    };
+
+    assert_eq!(
+        ComposedBindingV1::bind(up, dn, margin()).unwrap_err(),
+        ComposerRefusal::UnsafeComposedWindow
+    );
+
+    let (mut up, mut dn) = good_pair();
+    up.counterparty_leg.deadline = TimelockSpec::TimestampSeconds { value: u64::MAX };
+    dn.counterparty_leg.deadline = TimelockSpec::TimestampSeconds {
+        value: u64::MAX - 50,
+    };
+    assert_eq!(
+        ComposedBindingV1::bind(up, dn, margin()).unwrap_err(),
+        ComposerRefusal::UnsafeComposedWindow
+    );
 }
 
 #[test]

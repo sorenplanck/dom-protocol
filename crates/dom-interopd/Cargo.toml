@@ -1,0 +1,167 @@
+[package]
+name = "dom-interopd"
+description = "Production composition root and durable supervisor for DOM interoperability routes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+build = "build.rs"
+
+[features]
+default = ["development"]
+development = ["route-executor/development"]
+simulation = [
+    "dep:adapter-btc",
+    "dep:fs2",
+    "dep:rusqlite",
+    "route-executor/development",
+]
+production = [
+    "dep:adapter-btc",
+    "dep:adapter-btc-live",
+    "dep:cap-std",
+    "dep:counterparty-api",
+    "dep:adapter-dom-real",
+    "dep:dom-adaptor",
+    "adapter-evm/rpc-http",
+    "dep:btc-actuator",
+    "btc-actuator/rpc-http",
+    "dep:dom-actuator",
+    "dom-actuator/production",
+    "dep:dom-leg",
+    "dom-leg/real-dom-adaptor",
+    "dep:dom-scriptless-chain-adapter",
+    "dep:dom-scriptless-store",
+    "dep:dom-scriptless-identity-store",
+    "dep:dom-scriptless-transport",
+    "dep:dom-vault",
+    "dom-vault/real-dom-adaptor",
+    "dep:evm-actuator",
+    "dep:fs2",
+    "dep:f6-engine",
+    "evm-actuator/rpc-http",
+    "dep:nix",
+    "dep:relay",
+    "dep:rusqlite",
+    "dep:route-time-anchor",
+    "dep:route-secret-vault",
+    "dep:route-transport",
+    "dep:rfq",
+    "dep:settlement-coordinator",
+    "dep:solver-inventory",
+    "dep:solver-status",
+    "dep:store",
+    "route-executor/production",
+]
+# Isolated laboratory feature for the post-anchor V2 ancestry tests only.
+# It is deliberately absent from `production`, `development` and `simulation`,
+# and uses the weak `?` form so it can never pull the Store into a graph that
+# did not already contain it. The Store's own release guard still refuses this
+# surface in release builds; a static manifest guard in `tests/relay_worker.rs`
+# pins the isolation.
+evidence-only-ancestry-tests = ["dom-scriptless-store?/evidence-only"]
+# Compiles `production_config` alone so its canonical codec and frozen golden
+# can be verified without building the production dependency graph. It
+# activates no dependency, is not part of `default`, `development`,
+# `simulation` or `production`, exposes no symbol on the crate surface, and
+# must never be enabled by another crate or by a shipped build.
+config-only = []
+
+[dependencies]
+adapter-evm = { path = "../adapters/evm", default-features = false }
+blake2 = { workspace = true }
+btc-crypto = { path = "../adapters/btc-crypto" }
+chain-profile = { path = "../chain-profile" }
+deployment-registry = { path = "../deployment-registry" }
+getrandom = "=0.2.16"
+kaystra-core = { path = "../kaystra-core", default-features = false }
+participant-binding = { path = "../participant-binding" }
+route-executor = { path = "../route-executor", default-features = false }
+route-composer = { path = "../route-composer" }
+route-time-anchor = { path = "../route-time-anchor", optional = true }
+route-secret-vault = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# Normal, non-optional: the bearer boundary wipes its bounded read buffer on
+# every refusal, and that boundary compiles under `config-only` as well.
+zeroize.workspace = true
+
+fs2 = { version = "=0.4.3", optional = true }
+f6-engine = { path = "../f6-engine", optional = true }
+rusqlite = { workspace = true, optional = true }
+adapter-btc = { path = "../adapters/btc", optional = true }
+
+# Directory capabilities for the composition root. This edge rose from
+# `[dev-dependencies]` to a normal optional one on 2026-08-30, and the reason
+# belongs here rather than in a commit message: the two Contracts stores are
+# opened with `ContractsSessionStoreV1::create_production` and
+# `ContractsTransportIdentityStoreV1::create_production`, both of which take an
+# `Arc<cap_std::fs::Dir>`, so without this the daemon's product code cannot name
+# the capability and both stores are unreachable from anything but a test.
+# Measured before moving: the same pinned `=4.0.2` is already a normal
+# dependency of `dom-scriptless-store` and `dom-scriptless-identity-store`, both
+# activated by `production`, so the move adds no third-party code to the graph.
+# Optional and reached only through `production`, because every user of it is.
+cap-std = { workspace = true, optional = true }
+counterparty-api = { workspace = true, optional = true }
+adapter-btc-live = { path = "../adapters/btc-live", optional = true }
+adapter-dom-real = { path = "../adapters/dom-real", optional = true }
+btc-actuator = { path = "../btc-actuator", default-features = false, optional = true }
+dom-actuator = { path = "../dom-actuator", default-features = false, optional = true }
+dom-leg = { path = "../dom-leg", default-features = false, optional = true }
+dom-adaptor = { workspace = true, optional = true }
+dom-scriptless-chain-adapter = { path = "../dom-scriptless-chain-adapter", optional = true }
+dom-scriptless-identity-store = { path = "../dom-scriptless-identity-store", optional = true }
+dom-scriptless-store = { path = "../dom-scriptless-store", default-features = false, optional = true }
+dom-scriptless-transport = { path = "../dom-scriptless-transport", optional = true }
+dom-vault = { path = "../dom-vault", default-features = false, optional = true }
+evm-actuator = { path = "../evm-actuator", default-features = false, optional = true }
+nix = { version = "=0.31.3", default-features = false, features = ["pthread", "signal"], optional = true }
+relay = { path = "../relay", default-features = true, optional = true }
+route-transport = { path = "../route-transport", optional = true }
+rfq = { path = "../rfq", optional = true }
+settlement-coordinator = { path = "../settlement-coordinator", optional = true }
+solver-inventory = { path = "../solver-inventory", optional = true }
+solver-status = { path = "../solver-status", optional = true }
+store = { workspace = true, optional = true }
+
+[build-dependencies]
+blake2 = { workspace = true }
+
+[dev-dependencies]
+adapter-btc = { path = "../adapters/btc" }
+bitcoin = "=0.32.5"
+chain-profile = { path = "../chain-profile" }
+dom-adaptor = { workspace = true }
+dom-core = { workspace = true }
+dom-consensus = { workspace = true }
+dom-crypto = { workspace = true }
+dom-scriptless-crypto = { path = "../dom-scriptless-crypto" }
+k256 = { workspace = true, features = ["ecdsa"] }
+hex = { workspace = true }
+route-time-anchor = { path = "../route-time-anchor" }
+sha3 = { version = "0.10", default-features = false, features = ["std"] }
+static_assertions = "=1.1.0"
+tempfile = { workspace = true }
+
+[[bin]]
+name = "dom-interopd"
+path = "src/main.rs"
+
+[[test]]
+name = "self_check"
+path = "tests/self_check.rs"
+required-features = ["development"]
+
+[[test]]
+name = "simulation"
+path = "tests/simulation.rs"
+required-features = ["simulation"]
+
+[[test]]
+name = "relay_worker_post_anchor_v2"
+path = "tests/relay_worker_post_anchor_v2.rs"
+required-features = ["production", "evidence-only-ancestry-tests"]

@@ -325,7 +325,7 @@ fn canonical_ancestry(node: &RegtestNode, funding_height: u64) -> Result<Vec<[u8
 
 fn point(secret: &RevealedSecretBytes) -> AdaptorPointBytes {
     let secp = Secp256k1::new();
-    let key = SecretKey::from_slice(&secret.0).expect("canonical test scalar");
+    let key = SecretKey::from_slice(&secret.expose_scalar_bytes()).expect("canonical test scalar");
     AdaptorPointBytes(PublicKey::from_secret_key(&secp, &key).serialize())
 }
 
@@ -335,7 +335,7 @@ fn random_canonical_secret() -> Result<RevealedSecretBytes, String> {
         getrandom::fill(&mut candidate)
             .map_err(|error| format!("operating-system randomness failed: {error}"))?;
         if SecretKey::from_slice(&candidate).is_ok() {
-            return Ok(RevealedSecretBytes(candidate));
+            return Ok(RevealedSecretBytes::new(candidate));
         }
     }
     Err("operating-system randomness did not produce a canonical scalar".to_string())

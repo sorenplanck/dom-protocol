@@ -1,0 +1,1012 @@
+{
+  "schema": "dom.production-readiness.v1",
+  "generated_at": "2026-08-27",
+  "audit": {
+    "repository": "sorenplanck/dom-protocol",
+    "branch": "feat/domv2-interop-absorption",
+    "snapshot_commit": "166b55299d5642200e0f5b7e384b14cf8bcbd17f",
+    "snapshot_verdict": "no-go-for-real-value",
+    "worktree_is_not_snapshot": true,
+    "push_performed": false
+  },
+  "status_legend": {
+    "missing": "No production implementation exists in the fixed snapshot.",
+    "partial": "Reusable code exists, but the production path is incomplete.",
+    "worktree-only": "Visible locally but absent from the fixed Git snapshot.",
+    "present": "Implemented in the indicated tree; still subject to integration gates.",
+    "intentional-exclusion": "Deliberately unavailable until a separate enablement decision."
+  },
+  "baseline": [
+    {
+      "id": "BASE-001",
+      "capability": "durable per-settlement engine with journal, CAS, cursor and outbox",
+      "evidence": [
+        "crates/kaystra-core/src/settlement_engine.rs:239",
+        "crates/store/src/settlement.rs:3"
+      ]
+    },
+    {
+      "id": "BASE-002",
+      "capability": "two-leg static composition and funding-order refusal",
+      "evidence": [
+        "crates/route-composer/src/lib.rs:208",
+        "crates/route-composer/src/lib.rs:425"
+      ]
+    },
+    {
+      "id": "BASE-003",
+      "capability": "durable Linux Contracts Store with restart duplicate and equivocation handling",
+      "evidence": [
+        "crates/dom-scriptless-store/src/runtime/linux/session_store.rs:3880",
+        "crates/dom-scriptless-store/src/runtime/linux/session_store.rs:13474"
+      ]
+    },
+    {
+      "id": "BASE-004",
+      "capability": "durable Linux relay queue with SQLite WAL and exclusive owner lock",
+      "evidence": [
+        "crates/relay/src/production.rs:1",
+        "crates/relay/src/production.rs:386"
+      ]
+    },
+    {
+      "id": "BASE-005",
+      "capability": "digest-committed chain profile schema with EVM address and code-hash pins",
+      "evidence": [
+        "crates/chain-profile/src/lib.rs:96",
+        "crates/chain-profile/src/lib.rs:217"
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "PRD-001",
+      "area": "route-runtime",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "No durable route-level state machine owns both settlements and their economic completion.",
+      "evidence": [
+        "crates/route-composer/src/lib.rs:15",
+        "crates/route-composer/src/lib.rs:425"
+      ],
+      "target": "crates/route-executor",
+      "depends_on": [],
+      "acceptance_tests": [
+        "a composed route reaches two terminal economic outcomes without manual calls",
+        "every route decision is replay-deterministic and emits effects only after commit",
+        "a nonterminal error enters recovery-only mode rather than abandoning locked funds"
+      ]
+    },
+    {
+      "id": "PRD-002",
+      "area": "route-runtime",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "There is no route journal/snapshot/outbox/timer store spanning both settlement stores.",
+      "evidence": [
+        "crates/store/src/lib.rs:1",
+        "crates/kaystra-core/src/store_port.rs:91"
+      ],
+      "target": "crates/route-executor/src/store",
+      "depends_on": [
+        "PRD-001"
+      ],
+      "acceptance_tests": [
+        "event, snapshot, exact command or external-custody commitment and timer commit atomically",
+        "journal replay equals the materialized route snapshot",
+        "route store never persists a standalone adaptor scalar"
+      ]
+    },
+    {
+      "id": "PRD-003",
+      "area": "daemon",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "No long-lived production binary opens authorities, restores routes, ticks engines and supervises workers.",
+      "evidence": [
+        "Cargo.toml:75",
+        "crates/f7-e2e/src/lib.rs:1",
+        "crates/f5-e2e/src/main.rs:1"
+      ],
+      "target": "crates/dom-interopd",
+      "depends_on": [
+        "PRD-001",
+        "PRD-002",
+        "PRD-006",
+        "PRD-009",
+        "PRD-014",
+        "PRD-025"
+      ],
+      "acceptance_tests": [
+        "daemon restarts with open routes and resumes before accepting new work",
+        "critical worker exit fails health and starts the recovery lane",
+        "ordered shutdown drains durable writes while preserving refund and urgent-claim work"
+      ]
+    },
+    {
+      "id": "PRD-004",
+      "area": "route-runtime",
+      "priority": "P0",
+      "snapshot_status": "partial",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "Scalar verification exists, but no automatic, restart-safe downstream-to-upstream handoff exists.",
+      "evidence": [
+        "crates/route-composer/src/lib.rs:389",
+        "crates/f5-e2e/tests/composed_route_live.rs:1"
+      ],
+      "target": "crates/route-executor/src/secret_handoff",
+      "depends_on": [
+        "PRD-001",
+        "PRD-002",
+        "PRD-005",
+        "PRD-006",
+        "PRD-014"
+      ],
+      "acceptance_tests": [
+        "mempool or broadcast exposure irreversibly moves secret visibility to Public even across reorg",
+        "restart re-extracts t from exact public evidence, verifies t*G equals T and claims upstream",
+        "plaintext t never appears in route state, logs, metrics or crash reports"
+      ]
+    },
+    {
+      "id": "PRD-005",
+      "area": "route-runtime",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "Static funding order does not provide a fresh, one-shot all-leg authorization immediately before revealing t.",
+      "evidence": [
+        "crates/route-composer/src/lib.rs:425",
+        "crates/adapters/evm/src/adapter.rs:533"
+      ],
+      "target": "crates/route-executor/src/reveal_authority",
+      "depends_on": [
+        "PRD-001",
+        "PRD-025"
+      ],
+      "acceptance_tests": [
+        "reorg, stale snapshot, RPC uncertainty, insufficient action budget or changed terms deny reveal",
+        "authorization binds route, both legs, T, exact action digest, actor, expiry and one-shot nonce",
+        "TOCTOU revalidation occurs immediately before the secret-bearing action leaves custody"
+      ]
+    },
+    {
+      "id": "PRD-006",
+      "area": "chain-runtime",
+      "priority": "P0",
+      "snapshot_status": "partial",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "Adapters implement observation/effect traits, but no permanent worker drives them or distinguishes outage from an empty scan at system level.",
+      "evidence": [
+        "crates/kaystra-core/src/settlement_engine.rs:123",
+        "crates/adapters/dom-real/src/lib.rs:930",
+        "crates/adapters/dom-real/src/lib.rs:1115"
+      ],
+      "target": "crates/dom-interopd/src/workers",
+      "depends_on": [
+        "PRD-002"
+      ],
+      "acceptance_tests": [
+        "DOM, EVM and Bitcoin observers continuously persist canonical cursors and reorg records",
+        "RPC failure advances neither cursor nor economic state",
+        "worker backoff remains below the route's committed action budget"
+      ]
+    },
+    {
+      "id": "PRD-007",
+      "area": "chain-runtime",
+      "priority": "P0",
+      "snapshot_status": "partial",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "There is no cross-chain actuator service owning broadcast, nonce, fee, replacement, rebroadcast and reconciliation policy.",
+      "evidence": [
+        "crates/adapters/evm/src/adapter.rs:245",
+        "crates/adapters/btc-live/src/lib.rs:1",
+        "crates/kaystra-core/src/settlement_engine.rs:154"
+      ],
+      "target": "crates/dom-interopd/src/actuators",
+      "depends_on": [
+        "PRD-002",
+        "PRD-006",
+        "PRD-014"
+      ],
+      "acceptance_tests": [
+        "restart reconciles exact transaction identity before any resend",
+        "EVM replacements preserve nonce, to, value and calldata while changing only allowed fee fields",
+        "Bitcoin funding fee bump cannot invalidate a presigned refund or silently change the bound outpoint"
+      ]
+    },
+    {
+      "id": "PRD-008",
+      "area": "relay",
+      "priority": "P1",
+      "snapshot_status": "partial",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "The relay has in-memory and durable queue libraries but no authenticated network-facing service, discovery or backpressure layer.",
+      "evidence": [
+        "crates/relay/src/server.rs:1",
+        "crates/relay/src/production.rs:1"
+      ],
+      "target": "crates/dom-relayd",
+      "depends_on": [
+        "PRD-025"
+      ],
+      "acceptance_tests": [
+        "remote submit and mailbox APIs preserve exact durable ACK semantics across restart",
+        "authentication, quotas, bounded payloads and backpressure resist unauthenticated exhaustion",
+        "relay loss never removes a participant's claim or refund authority"
+      ]
+    },
+    {
+      "id": "PRD-009",
+      "area": "relay",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "No worker feeds accepted opaque route payloads into ContractsSessionStoreV1 and returns durable outcomes.",
+      "evidence": [
+        "crates/route-transport/src/lib.rs:243",
+        "crates/dom-scriptless-store/src/runtime/linux/session_store.rs:3882"
+      ],
+      "target": "crates/dom-interopd/src/relay_worker",
+      "depends_on": [
+        "PRD-002"
+      ],
+      "acceptance_tests": [
+        "accepted payload bytes reach accept_transport_message byte-identically",
+        "F6 and route messages consume one shared durable TranscriptStateV1 watermark",
+        "duplicate, reorder, gap and equivocation retain their classification after daemon restart"
+      ]
+    },
+    {
+      "id": "PRD-010",
+      "area": "daemon",
+      "priority": "P1",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "No authenticated user/operator API exposes route creation, approval, status and recovery without granting raw signer access.",
+      "evidence": [
+        "Cargo.toml:1"
+      ],
+      "target": "crates/dom-interopd/src/api",
+      "depends_on": [
+        "PRD-003",
+        "PRD-014",
+        "PRD-027"
+      ],
+      "acceptance_tests": [
+        "API authorization is route- and method-scoped",
+        "status responses redact keys, nonces, t and raw confidential artifacts",
+        "manual recovery cannot bypass funding, reveal or refund gates"
+      ]
+    },
+    {
+      "id": "PRD-011",
+      "area": "wallet",
+      "priority": "P0",
+      "snapshot_status": "partial",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "The DOM wallet can reserve ordinary spends, but does not expose a route-bound authority for shared output, collaborative proof, refund and adaptor claim sessions.",
+      "evidence": [
+        "crates/dom-wallet/src/wallet.rs:1564",
+        "crates/dom-wallet/src/wallet.rs:1680",
+        "crates/dom-leg/src/lib.rs:1"
+      ],
+      "target": "crates/dom-wallet/src/interop_authority",
+      "depends_on": [
+        "PRD-002",
+        "PRD-014"
+      ],
+      "acceptance_tests": [
+        "selected DOM outputs are exclusively reserved by route and restored after crash",
+        "shares and nonce capabilities are bound to session, terms, purpose and exact templates",
+        "wallet can complete and rebroadcast claim or refund without exporting seed or raw signing share"
+      ]
+    },
+    {
+      "id": "PRD-012",
+      "area": "wallet",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "The EVM adapter deliberately emits only UnsignedEvmCall; no production signer, account-nonce or allowance authority consumes it.",
+      "evidence": [
+        "crates/adapters/evm/src/adapter.rs:1",
+        "crates/adapters/evm/src/adapter.rs:245"
+      ],
+      "target": "crates/evm-wallet-authority",
+      "depends_on": [
+        "PRD-014",
+        "PRD-016",
+        "PRD-017"
+      ],
+      "acceptance_tests": [
+        "signer verifies chain, code hash, account, exact call and route authorization before signing",
+        "nonce allocation and EIP-1559 replacement recover across concurrent routes and restart",
+        "ERC-20 approval is exact/bounded and cannot authorize an unprofiled token or spender"
+      ]
+    },
+    {
+      "id": "PRD-013",
+      "area": "wallet",
+      "priority": "P0",
+      "snapshot_status": "partial",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "The live Bitcoin custody boundary exists as a library, but no production caller owns it for an entire route lifecycle.",
+      "evidence": [
+        "crates/adapters/btc-live/src/lib.rs:1",
+        "crates/f5-e2e/src/main.rs:1"
+      ],
+      "target": "crates/dom-interopd/src/bitcoin_authority",
+      "depends_on": [
+        "PRD-002",
+        "PRD-007",
+        "PRD-014"
+      ],
+      "acceptance_tests": [
+        "funding bytes are unavailable until the exact refund is durably armed",
+        "Bitcoin Core wallet identity, network, selected UTXOs and outpoint are revalidated on restart",
+        "claim/refund fee policy remains executable near deadline without nonce reuse"
+      ]
+    },
+    {
+      "id": "PRD-014",
+      "area": "wallet",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "There is no common least-authority protocol between route decisions and DOM/EVM/Bitcoin signers.",
+      "evidence": [
+        "crates/kaystra-core/src/settlement_engine.rs:154",
+        "crates/adapters/evm/src/adapter.rs:1"
+      ],
+      "target": "crates/signer-boundary",
+      "depends_on": [
+        "PRD-001",
+        "PRD-025"
+      ],
+      "acceptance_tests": [
+        "capability binds route, leg, action, exact digest, policy, expiry and monotonic use counter",
+        "signers reject arbitrary calldata, arbitrary transactions and cross-route replay",
+        "external-custody completion stores only public transaction identity and commitment in route state"
+      ]
+    },
+    {
+      "id": "PRD-015",
+      "area": "wallet",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "Wallet restore and backup do not reconcile open interoperability routes, reservations and external-custody actions.",
+      "evidence": [
+        "crates/dom-wallet/src/restore.rs:1",
+        "crates/dom-wallet/src/main.rs:136"
+      ],
+      "target": "crates/dom-wallet/src/interop_recovery",
+      "depends_on": [
+        "PRD-002",
+        "PRD-011",
+        "PRD-012",
+        "PRD-013"
+      ],
+      "acceptance_tests": [
+        "restore during each open-route phase reconstructs or fails into a funded recovery lane",
+        "no restored output can be double-reserved by ordinary wallet and route wallet paths",
+        "backup age and missing signer authority are detected before accepting new routes"
+      ]
+    },
+    {
+      "id": "PRD-016",
+      "area": "contracts",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "worktree-only",
+      "release_blocker": true,
+      "gap": "The fixed Git snapshot contains no contracts tree; local ConditionLock sources and tests are not a branch deliverable.",
+      "evidence": [
+        "git:HEAD:contracts-tree-absent",
+        "contracts/src/ConditionLockCoreV2.sol:26",
+        "contracts/src/ConditionLockV2.sol:19",
+        "contracts/src/ConditionLockERC20V2.sol:42"
+      ],
+      "target": "contracts/src and contracts/test as tracked release inputs",
+      "depends_on": [],
+      "acceptance_tests": [
+        "clean checkout builds and runs all Foundry tests with pinned dependencies",
+        "Rust adapter vectors match tracked Solidity bytecode and ABI",
+        "contract source, build settings and artifacts reproduce the pinned runtime code hash"
+      ]
+    },
+    {
+      "id": "PRD-017",
+      "area": "contracts",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "No release registry publishes deployed address, start block, ABI/version, compiler settings and runtime code hash for an enabled network.",
+      "evidence": [
+        "crates/chain-profile/src/lib.rs:96",
+        "contracts/script/Deploy.s.sol:1"
+      ],
+      "target": "deployments and crates/deployment-registry",
+      "depends_on": [
+        "PRD-016",
+        "PRD-025"
+      ],
+      "acceptance_tests": [
+        "daemon refuses address, chain, start block or extcodehash mismatch before route creation",
+        "deployment manifest is signed, versioned and reproducible from tracked sources",
+        "proxy or mutable implementation is rejected unless explicitly represented and pinned"
+      ]
+    },
+    {
+      "id": "PRD-018",
+      "area": "contracts",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "Contract availability is not connected to an executable asset, allowance, payout, gas and DOM treasury-output policy.",
+      "evidence": [
+        "contracts/src/ConditionLockERC20V2.sol:121",
+        "crates/chain-profile/src/lib.rs:136",
+        "crates/rfq/src/fee_policy.rs:144"
+      ],
+      "target": "crates/route-executor/src/asset_policy and wallet transaction builders",
+      "depends_on": [
+        "PRD-011",
+        "PRD-012",
+        "PRD-016",
+        "PRD-017",
+        "PRD-025"
+      ],
+      "acceptance_tests": [
+        "v1 can be restricted to native assets and an explicit reviewed token allowlist",
+        "gas headroom and deferred withdrawal are monitored and exercised for hostile recipients",
+        "the confidential DOM treasury output binds amount and the pinned treasury recipient, not only a numeric fee"
+      ]
+    },
+    {
+      "id": "PRD-019",
+      "area": "contracts",
+      "priority": "P0",
+      "snapshot_status": "partial",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "F4 models a bond on ConditionLock, but no live authority funds, observes, releases, slashes and compensates it for solver quotes.",
+      "evidence": [
+        "crates/f4-harness/src/lib.rs:1",
+        "crates/f6-engine/src/lib.rs:1",
+        "crates/solver/src/lib.rs:28"
+      ],
+      "target": "crates/solver-node/src/bond_authority",
+      "depends_on": [
+        "PRD-007",
+        "PRD-016",
+        "PRD-017",
+        "PRD-021",
+        "PRD-022"
+      ],
+      "acceptance_tests": [
+        "a quote is admissible only after independently verified live collateral reservation",
+        "one collateral unit cannot back two concurrent quotes",
+        "release, slash and compensation execute on the live lock and reconcile after relay loss or restart"
+      ]
+    },
+    {
+      "id": "PRD-020",
+      "area": "contracts",
+      "priority": "P1",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "There is no independent production audit/deployment verification record for the locally added EVM locks.",
+      "evidence": [
+        "contracts/test/ConditionLockV2.t.sol:1",
+        "contracts/test/ConditionLockERC20V2.t.sol:1"
+      ],
+      "target": "independent contract audit plus reproducible deployment gate",
+      "depends_on": [
+        "PRD-016",
+        "PRD-017",
+        "PRD-018"
+      ],
+      "acceptance_tests": [
+        "independent review closes all high and critical findings",
+        "invariant, fuzz, differential and hostile-token suites run against final bytecode",
+        "verified source and runtime bytecode match every enabled deployment"
+      ]
+    },
+    {
+      "id": "PRD-021",
+      "area": "solver",
+      "priority": "P0",
+      "snapshot_status": "partial",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "ReferenceSolverV1 prices and signs one RFQ but no service receives RFQs, owns policy and participates through settlement completion.",
+      "evidence": [
+        "crates/solver/src/lib.rs:1",
+        "crates/solver/src/lib.rs:111"
+      ],
+      "target": "crates/solver-node",
+      "depends_on": [
+        "PRD-002",
+        "PRD-003",
+        "PRD-014"
+      ],
+      "acceptance_tests": [
+        "fixed-inventory solver quotes, signs, reserves and completes one live route without manual intervention",
+        "quote expiry releases reservations durably",
+        "solver restart cannot issue a quote before replaying inventory and open obligations"
+      ]
+    },
+    {
+      "id": "PRD-022",
+      "area": "solver",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "Bond reservation IDs do not reserve real DOM, EVM or Bitcoin inventory across routes.",
+      "evidence": [
+        "crates/f6-engine/src/lib.rs:1",
+        "crates/solver/src/lib.rs:98"
+      ],
+      "target": "crates/solver-node/src/inventory",
+      "depends_on": [
+        "PRD-002",
+        "PRD-011",
+        "PRD-012",
+        "PRD-013"
+      ],
+      "acceptance_tests": [
+        "real balances, UTXOs and DOM outputs are atomically reserved per quote/route",
+        "concurrent quote race cannot overbook inventory",
+        "terminal, expiry and failed-pre-funding paths release only the correct reservation"
+      ]
+    },
+    {
+      "id": "PRD-023",
+      "area": "solver",
+      "priority": "P1",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "Pricing uses a static operator rate; no market-data provenance, staleness, exposure or spread-risk policy exists.",
+      "evidence": [
+        "crates/solver/src/lib.rs:13",
+        "crates/solver/src/lib.rs:83"
+      ],
+      "target": "crates/solver-node/src/pricing",
+      "depends_on": [
+        "PRD-021",
+        "PRD-022",
+        "PRD-025"
+      ],
+      "acceptance_tests": [
+        "stale or contradictory market inputs stop new quotes without stopping recovery",
+        "per-asset, per-chain and aggregate exposure caps are enforced",
+        "quote records bind pricing-input digest, policy version and validity window"
+      ]
+    },
+    {
+      "id": "PRD-024",
+      "area": "solver",
+      "priority": "P2",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": false,
+      "gap": "No external venue or rebalancing adapters exist; this is optional for a funded bilateral solver but required for scalable commercial liquidity.",
+      "evidence": [
+        "crates/solver/src/lib.rs:1"
+      ],
+      "target": "crates/solver-node/src/venues",
+      "depends_on": [
+        "PRD-021",
+        "PRD-022",
+        "PRD-023"
+      ],
+      "acceptance_tests": [
+        "venue failures never mutate settlement truth",
+        "reservation and hedge executions are idempotent and exposure-capped"
+      ]
+    },
+    {
+      "id": "PRD-025",
+      "area": "configuration",
+      "priority": "P0",
+      "snapshot_status": "partial",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "ChainProfileV1 is a validated value type, not a signed operational registry with loading, rollout, revocation and startup verification.",
+      "evidence": [
+        "crates/chain-profile/src/lib.rs:96",
+        "crates/chain-profile/src/lib.rs:217"
+      ],
+      "target": "crates/deployment-registry",
+      "depends_on": [],
+      "acceptance_tests": [
+        "every route freezes exact profile and deployment digests",
+        "unknown, unsigned, expired or rollback registry versions fail before external effects",
+        "RPC genesis/network identity and deployed code are checked against the frozen entry"
+      ]
+    },
+    {
+      "id": "PRD-026",
+      "area": "build-release",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "Separate feature tests do not prove that one production binary contains every required real backend and excludes laboratory surfaces.",
+      "evidence": [
+        "crates/dom-leg/Cargo.toml:14",
+        "crates/adapters/evm/Cargo.toml:8",
+        "scripts/check-release-surface.sh:1",
+        "scripts/check-relay-fault-surface.sh:1"
+      ],
+      "target": "crates/dom-interopd/Cargo.toml and release artifact attestation",
+      "depends_on": [
+        "PRD-003"
+      ],
+      "acceptance_tests": [
+        "release binary depends non-optionally on real DOM, EVM HTTP, Bitcoin live and production stores",
+        "evidence-only, fault injection, mock success and test keys are absent from the release feature graph",
+        "artifact publishes source commit, Cargo.lock, features, target, compiler and contract/profile digests"
+      ]
+    },
+    {
+      "id": "PRD-027",
+      "area": "platform",
+      "priority": "P0",
+      "snapshot_status": "partial",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "Contracts Store and durable relay authority are Linux-only, but no authenticated sidecar boundary is defined for desktop/mobile wallets.",
+      "evidence": [
+        "crates/dom-scriptless-store/src/lib.rs:162",
+        "crates/relay/src/lib.rs:48"
+      ],
+      "target": "crates/dom-interopd/src/local_transport and wallet client bindings",
+      "depends_on": [
+        "PRD-003",
+        "PRD-014"
+      ],
+      "acceptance_tests": [
+        "v1 declares Linux as the only authority host and rejects unsupported in-process operation",
+        "Unix-socket or mutually authenticated remote channel enforces user, route and method scopes",
+        "loss of UI/client cannot stop daemon recovery of already funded routes"
+      ]
+    },
+    {
+      "id": "PRD-028",
+      "area": "network-enablement",
+      "priority": "P2",
+      "snapshot_status": "intentional-exclusion",
+      "worktree_status": "intentional-exclusion",
+      "release_blocker": false,
+      "gap": "Bitcoin mainnet is unrepresentable and Ethereum chain id 1 is rejected; real-mainnet enablement requires a separate threat model and audit.",
+      "evidence": [
+        "crates/adapters/btc/src/types.rs:59",
+        "crates/adapters/evm/src/adapter.rs:52",
+        "crates/chain-profile/src/lib.rs:62"
+      ],
+      "target": "future versioned network profiles after testnet production closure",
+      "depends_on": [
+        "PRD-020",
+        "PRD-031",
+        "PRD-032",
+        "PRD-033",
+        "PRD-034",
+        "PRD-035",
+        "PRD-036",
+        "PRD-037"
+      ],
+      "acceptance_tests": [
+        "explicit governance decision names enabled mainnets and risk limits",
+        "independent audit and disaster rehearsal pass against exact release artifacts"
+      ]
+    },
+    {
+      "id": "PRD-029",
+      "area": "testing",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "No automated daemon-owned DOM-to-EVM route exercises real wallet authorities and tracked deployed contracts.",
+      "evidence": [
+        "crates/f3-harness/tests/e2e_anvil.rs:47",
+        "scripts/e2e_anvil.sh:1"
+      ],
+      "target": "tests/system/dom_evm",
+      "depends_on": [
+        "PRD-003",
+        "PRD-011",
+        "PRD-012",
+        "PRD-016",
+        "PRD-017"
+      ],
+      "acceptance_tests": [
+        "fresh DOM regtest and Anvil processes complete claim and refund routes through the daemon",
+        "no fixed test key or shell-driven manual step exists in the product path",
+        "receipts, finality, reorg and restart are correlated to the correct route"
+      ]
+    },
+    {
+      "id": "PRD-030",
+      "area": "testing",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "Live Bitcoin component tests exist, but no daemon-owned DOM-to-Bitcoin route uses real DOM wallet and Bitcoin authorities end to end.",
+      "evidence": [
+        "crates/f5-e2e/tests/f7_bitcoin_regtest.rs:1",
+        "crates/adapters/btc-live/src/lib.rs:1"
+      ],
+      "target": "tests/system/dom_bitcoin",
+      "depends_on": [
+        "PRD-003",
+        "PRD-011",
+        "PRD-013"
+      ],
+      "acceptance_tests": [
+        "fresh DOM regtest and Bitcoin Core regtest complete claim and refund through the daemon",
+        "refund is durably executable before funding becomes broadcastable",
+        "restart at each Bitcoin custody boundary converges without nonce reuse"
+      ]
+    },
+    {
+      "id": "PRD-031",
+      "area": "testing",
+      "priority": "P0",
+      "snapshot_status": "partial",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "A manually invoked mixed-chain harness proves cryptographic handoff, not an autonomous multi-process EVM-DOM-Bitcoin route.",
+      "evidence": [
+        "crates/f5-e2e/tests/composed_route_live.rs:1",
+        "crates/f2-harness/tests/composed_routes_engine.rs:1"
+      ],
+      "target": "tests/system/composed_route",
+      "depends_on": [
+        "PRD-004",
+        "PRD-005",
+        "PRD-029",
+        "PRD-030"
+      ],
+      "acceptance_tests": [
+        "separate initiator, solver, relay, daemon, DOM, EVM and Bitcoin processes complete the route",
+        "the same T binds both settlements and t is obtained only from the designated reveal path",
+        "all processes can restart and every funded leg reaches claim or refund"
+      ]
+    },
+    {
+      "id": "PRD-032",
+      "area": "testing",
+      "priority": "P0",
+      "snapshot_status": "partial",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "Component crash/reorg tests do not cover every route-level write, broadcast, reveal and recovery cut across real processes.",
+      "evidence": [
+        "crates/adapters/btc-vault/tests/vault_crash_harness.rs:1",
+        "crates/dom-scriptless-store/src/runtime/linux/session_store.rs:13743",
+        "crates/f2-harness/tests/composed_routes_engine.rs:1"
+      ],
+      "target": "tests/system/fault_matrix",
+      "depends_on": [
+        "PRD-031"
+      ],
+      "acceptance_tests": [
+        "SIGKILL after every durable write and external handoff converges",
+        "relay loss/duplication/reorder, RPC outage, node restart, mempool eviction and bounded reorg converge",
+        "post-secret reorg never returns the route to a secret-private or passive state"
+      ]
+    },
+    {
+      "id": "PRD-033",
+      "area": "testing",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "No system test proves process exclusivity, fencing and backup restore while money is locked.",
+      "evidence": [
+        "crates/store/src/lib.rs:145",
+        "crates/relay/src/production.rs:22"
+      ],
+      "target": "tests/system/ownership_recovery",
+      "depends_on": [
+        "PRD-002",
+        "PRD-015",
+        "PRD-031"
+      ],
+      "acceptance_tests": [
+        "two executors cannot dispatch the same route under distinct fencing generations",
+        "stale worker completion cannot acknowledge a newer generation's command",
+        "restored backup reconciles chain truth before signing or broadcasting anything"
+      ]
+    },
+    {
+      "id": "PRD-034",
+      "area": "testing",
+      "priority": "P0",
+      "snapshot_status": "partial",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "Secret-redaction practices exist in types, but no release-wide artifact/log/store scanner proves route secrets and nonces are absent.",
+      "evidence": [
+        "crates/route-composer/src/lib.rs:188",
+        "crates/counterparty-api/src/lib.rs:37"
+      ],
+      "target": "scripts/check-interop-secrets and sanitized evidence exporter",
+      "depends_on": [
+        "PRD-003",
+        "PRD-031"
+      ],
+      "acceptance_tests": [
+        "canonical artifacts are checked read-only across text, SQLite/WAL, structured logs and crash dumps",
+        "seeds, private keys, secret nonces, signing shares and standalone t fail the gate without being echoed",
+        "public SID, txid, pubkey, T and already-public chain transaction evidence remain distinguishable"
+      ]
+    },
+    {
+      "id": "PRD-035",
+      "area": "operations",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "No route-level metrics, health model or urgent alerts exist for deadlines, stuck transactions and public-secret exposure.",
+      "evidence": [
+        "crates/dom-node/src/task_supervisor.rs:1"
+      ],
+      "target": "crates/dom-interopd/src/observability",
+      "depends_on": [
+        "PRD-003",
+        "PRD-004",
+        "PRD-006"
+      ],
+      "acceptance_tests": [
+        "DownstreamSecretPublicButUpstreamUnclaimed triggers highest-severity alert and shortest retry lane",
+        "health fails on stale observers, outbox backlog, signer loss, registry mismatch and insufficient action budget",
+        "metrics and logs contain identifiers/digests but no protected material"
+      ]
+    },
+    {
+      "id": "PRD-036",
+      "area": "operations",
+      "priority": "P0",
+      "snapshot_status": "missing",
+      "worktree_status": "missing",
+      "release_blocker": true,
+      "gap": "No tested backup, disaster recovery, schema migration and key-rotation procedure covers route, wallet, vault, relay and deployment state together.",
+      "evidence": [
+        "crates/dom-wallet/src/backup.rs:1",
+        "crates/relay/src/recovery.rs:1",
+        "crates/store/src/lib.rs:49"
+      ],
+      "target": "crates/dom-interopd/src/recovery and system disaster tests",
+      "depends_on": [
+        "PRD-002",
+        "PRD-003",
+        "PRD-015"
+      ],
+      "acceptance_tests": [
+        "consistent backup set records component identities, revisions and profile digests",
+        "restore rehearsals recover open funded routes before new work",
+        "upgrade/downgrade and partial migration fail closed without losing refund authority"
+      ]
+    },
+    {
+      "id": "PRD-037",
+      "area": "operations",
+      "priority": "P1",
+      "snapshot_status": "partial",
+      "worktree_status": "partial",
+      "release_blocker": true,
+      "gap": "Transport bounds exist, but no service-level admission, rate limiting, identity lifecycle, revocation or key rotation exists.",
+      "evidence": [
+        "crates/relay/src/server.rs:1",
+        "crates/relay/src/auth.rs:233"
+      ],
+      "target": "crates/dom-relayd/src/admission and participant identity service",
+      "depends_on": [
+        "PRD-008",
+        "PRD-025"
+      ],
+      "acceptance_tests": [
+        "per-identity and global quotas bound CPU, storage and mailbox retention",
+        "rotation cannot rewrite an active route roster and revocation has explicit active-route semantics",
+        "reconnection and replay preserve transcript continuity"
+      ]
+    }
+  ],
+  "milestones": [
+    {
+      "id": "M0",
+      "name": "durable runtime skeleton",
+      "requirements": [
+        "PRD-001",
+        "PRD-002",
+        "PRD-003",
+        "PRD-005",
+        "PRD-006",
+        "PRD-009",
+        "PRD-014",
+        "PRD-025",
+        "PRD-026",
+        "PRD-027"
+      ],
+      "exit": "simulated claim/refund/crash routes converge through the product binary"
+    },
+    {
+      "id": "M1",
+      "name": "one real vertical settlement",
+      "requirements": [
+        "PRD-007",
+        "PRD-011",
+        "PRD-012",
+        "PRD-013",
+        "PRD-015",
+        "PRD-016",
+        "PRD-017",
+        "PRD-018",
+        "PRD-029",
+        "PRD-030"
+      ],
+      "exit": "DOM-EVM and DOM-Bitcoin claim/refund paths run automatically on fresh test networks"
+    },
+    {
+      "id": "M2",
+      "name": "composed route and operational solver",
+      "requirements": [
+        "PRD-004",
+        "PRD-019",
+        "PRD-021",
+        "PRD-022",
+        "PRD-023",
+        "PRD-031"
+      ],
+      "exit": "a fixed-inventory solver completes EVM-DOM-Bitcoin without manual intervention"
+    },
+    {
+      "id": "M3",
+      "name": "adversarial production gate",
+      "requirements": [
+        "PRD-008",
+        "PRD-010",
+        "PRD-020",
+        "PRD-032",
+        "PRD-033",
+        "PRD-034",
+        "PRD-035",
+        "PRD-036",
+        "PRD-037"
+      ],
+      "exit": "all fault, recovery, security and operations gates pass on the exact release artifact"
+    }
+  ]
+}

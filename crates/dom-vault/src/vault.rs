@@ -137,6 +137,15 @@ pub struct ReservationSnapshot {
     spent_reveal: Option<SpentArtifactSnapshot>,
 }
 
+struct OpenAndBindRequestV1 {
+    reservation_id: [u8; 32],
+    expected_revision: u64,
+    retry_counter: u64,
+    operation_input_digest: [u8; 32],
+    exposure_kind: ExposureKindV1,
+    import_capability: VaultSecretImportCapabilityV1,
+}
+
 redacted_debug!(
     ReservationHandle,
     DerivationAttemptPermit,
@@ -263,6 +272,18 @@ impl DurableNonceVault {
         }
     }
 
+    /// Open a strict production vault after auditing every retained semantic row.
+    pub fn open_production(store: store::Store) -> Result<Self> {
+        Self::open_production_with_limits(store, VaultLimits::default())
+    }
+
+    /// Open a strict production vault with exact durable budget policy.
+    pub fn open_production_with_limits(store: store::Store, limits: VaultLimits) -> Result<Self> {
+        Ok(Self {
+            core: DurableVaultCore::open_production(store, limits)?,
+        })
+    }
+
     /// Lends out the durable core, without exposing the `store`.
     ///
     /// Test-only: production paths reach the core through the typed contract
@@ -272,10 +293,11 @@ impl DurableNonceVault {
         &mut self.core
     }
 
-    fn require_operational(&self) -> Result<()> {
+    fn require_operational(&mut self) -> Result<()> {
         if self.core.is_quarantined() {
             return Err(VaultError::RestoreQuarantined);
         }
+        self.core.audit_if_production()?;
         Ok(())
     }
 
@@ -384,16 +406,18 @@ impl DurableNonceVault {
     }
 
     /// Opens the sealed record and returns the transferred pair plus the exact permit.
-    #[allow(clippy::too_many_arguments)]
     fn open_and_bind(
         &mut self,
-        reservation_id: [u8; 32],
-        expected_revision: u64,
-        retry_counter: u64,
-        operation_input_digest: [u8; 32],
-        exposure_kind: ExposureKindV1,
-        import_capability: VaultSecretImportCapabilityV1,
+        request: OpenAndBindRequestV1,
     ) -> Result<(NonceSecretTransferV1, ArtifactPersistencePermit)> {
+        let OpenAndBindRequestV1 {
+            reservation_id,
+            expected_revision,
+            retry_counter,
+            operation_input_digest,
+            exposure_kind,
+            import_capability,
+        } = request;
         self.require_operational()?;
         let mut record = self.core.load(&reservation_id)?;
         if record.revision != expected_revision {
@@ -667,14 +691,14 @@ impl NonceVaultV1 for DurableNonceVault {
         if permit.reservation_id != reservation.reservation_id {
             return Err(VaultError::InvalidPermit);
         }
-        self.open_and_bind(
-            permit.reservation_id,
-            permit.revision,
-            permit.retry_counter,
-            permit.operation_input_digest,
-            ExposureKindV1::NonceCommitment,
+        self.open_and_bind(OpenAndBindRequestV1 {
+            reservation_id: permit.reservation_id,
+            expected_revision: permit.revision,
+            retry_counter: permit.retry_counter,
+            operation_input_digest: permit.operation_input_digest,
+            exposure_kind: ExposureKindV1::NonceCommitment,
             import_capability,
-        )
+        })
     }
 
     fn begin_stage_computation(
@@ -748,14 +772,14 @@ impl NonceVaultV1 for DurableNonceVault {
         if permit.reservation_id != reservation.reservation_id {
             return Err(VaultError::InvalidPermit);
         }
-        self.open_and_bind(
-            permit.reservation_id,
-            permit.revision,
-            permit.retry_counter,
-            permit.operation_input_digest,
-            permit.exposure_kind,
+        self.open_and_bind(OpenAndBindRequestV1 {
+            reservation_id: permit.reservation_id,
+            expected_revision: permit.revision,
+            retry_counter: permit.retry_counter,
+            operation_input_digest: permit.operation_input_digest,
+            exposure_kind: permit.exposure_kind,
             import_capability,
-        )
+        })
     }
 
     fn persist_computed_artifact(
@@ -946,6 +970,7 @@ impl NonceVaultV1 for DurableNonceVault {
         &mut self,
         reservation: Self::ReservationHandle,
     ) -> Result<TerminalReservationV1> {
+        self.require_operational()?;
         let mut record = self.core.load(&reservation.reservation_id)?;
         if record.state.is_terminal() {
             return Ok(TerminalReservationV1 {

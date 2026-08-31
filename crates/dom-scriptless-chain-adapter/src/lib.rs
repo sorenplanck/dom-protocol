@@ -114,15 +114,31 @@ pub struct ExpectedDomIdentityV1 {
 }
 
 impl ExpectedDomIdentityV1 {
-    /// Validates a laboratory identity. Mainnet is deliberately prohibited by
-    /// the F7 scope and HTTP is allowed only on loopback.
+    /// Validates one startup-safe canonical network identity.
+    ///
+    /// The label selects exactly one magic and one compiled genesis. Mainnet
+    /// additionally passes `dom-core`'s explicit finalized-genesis readiness
+    /// gate. The derived chain id and both wire-version pins are then checked
+    /// against that exact startup-safe genesis; a configured arbitrary genesis
+    /// is never accepted, including on testnet and regtest.
     pub fn validate(&self) -> Result<(), ChainAdapterError> {
-        if !matches!(self.network.as_str(), "regtest" | "testnet")
-            || self.network_magic == 0
+        let expected_magic = match self.network.as_str() {
+            "regtest" => dom_core::NETWORK_MAGIC_REGTEST,
+            "testnet" => dom_core::NETWORK_MAGIC_TESTNET,
+            "mainnet" => dom_core::NETWORK_MAGIC_MAINNET,
+            _ => return Err(ChainAdapterError::InvalidConfiguration),
+        };
+        let startup_genesis = dom_core::startup_genesis_hash_for_network_magic(expected_magic)
+            .map_err(|_| ChainAdapterError::InvalidConfiguration)?;
+        if self.network_magic != expected_magic
             || self.chain_id == [0_u8; 32]
             || self.genesis_hash == [0_u8; 32]
-            || self.protocol_version == 0
-            || self.range_proof_serialization_version == 0
+            || startup_genesis.as_bytes() != &self.genesis_hash
+            || self.protocol_version != dom_core::PROTOCOL_VERSION
+            || self.range_proof_serialization_version
+                != dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION
+            || dom_consensus::derive_chain_id(self.network_magic, &startup_genesis).as_bytes()
+                != &self.chain_id
         {
             return Err(ChainAdapterError::InvalidConfiguration);
         }
@@ -180,30 +196,197 @@ pub struct ObservedDomIdentityV1 {
 }
 
 /// Canonical location of an observed transaction.
+/// Where the authenticated scanner placed one transaction.
+///
+/// Its fields are private and it has **no public constructor at all**: a value
+/// of this type exists only inside a
+/// [`CanonicalTransactionEvidenceV1`], and only this module builds one. A
+/// caller may read a location; it cannot make one, and it cannot alter one it
+/// was given.
+///
+/// ```compile_fail
+/// use dom_scriptless_chain_adapter::TransactionLocationV1;
+///
+/// let _forged = TransactionLocationV1 {
+///     block_height: 9,
+///     block_hash: [0x81; 32],
+///     transaction_index: 1,
+/// };
+/// ```
+///
+/// **What it does not establish.** That the transaction is at that height, in
+/// that block, at that index. These three values are the scanner's word,
+/// carried faithfully; sealing them stops a third party from substituting
+/// them, and stops nothing else. What makes a location trustworthy is the
+/// hash-linked walk that proves the block is an ancestor of a reported tip —
+/// `RealDomRpcRuntimeV1::transaction_with_proved_tip` in `adapters/dom-real`,
+/// not this type.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TransactionLocationV1 {
-    /// Block height.
-    pub block_height: u64,
-    /// Canonical block identifier.
-    pub block_hash: [u8; 32],
-    /// Zero-based transaction position in the block.
-    pub transaction_index: u32,
+    block_height: u64,
+    block_hash: [u8; 32],
+    transaction_index: u32,
+}
+
+impl TransactionLocationV1 {
+    /// Block height the scanner reported.
+    #[must_use]
+    pub const fn block_height(&self) -> u64 {
+        self.block_height
+    }
+
+    /// Canonical block identifier the scanner reported.
+    #[must_use]
+    pub const fn block_hash(&self) -> [u8; 32] {
+        self.block_hash
+    }
+
+    /// Zero-based position of the transaction inside that block.
+    #[must_use]
+    pub const fn transaction_index(&self) -> u32 {
+        self.transaction_index
+    }
 }
 
 /// Full, locally decoded real-DOM transaction evidence.
+///
+/// Its fields are private: callers may inspect evidence, but cannot
+/// manufacture it. The invariant this buys is exact and worth stating in one
+/// sentence: **it is impossible to build an evidence whose `tx_hash`
+/// disagrees with its `canonical_bytes`**, because no constructor accepts an
+/// identity — every route derives it from the bytes through
+/// [`canonical_transaction_hash_v1`], which decodes with the pinned decoder,
+/// requires the re-encoding to round-trip, and only then hashes.
+///
+/// All four fields are private, and that is what makes a forged literal
+/// impossible. It is asserted as four reads rather than as one literal, and
+/// deliberately: a literal would have to name `dom_consensus::Transaction` for
+/// the last field, and a `compile_fail` block that fails because an `extern`
+/// did not resolve passes while testing nothing. Every block below names the
+/// crate under test and nothing else, so the only error each of them can
+/// produce is the one it is there to produce.
+///
+/// ```compile_fail
+/// fn read_location(e: &dom_scriptless_chain_adapter::CanonicalTransactionEvidenceV1) {
+///     let _ = e.location;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn read_identity(e: &dom_scriptless_chain_adapter::CanonicalTransactionEvidenceV1) {
+///     let _ = e.tx_hash;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn read_bytes(e: &dom_scriptless_chain_adapter::CanonicalTransactionEvidenceV1) {
+///     let _ = &e.canonical_bytes;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn read_transaction(e: &dom_scriptless_chain_adapter::CanonicalTransactionEvidenceV1) {
+///     let _ = &e.transaction;
+/// }
+/// ```
+///
+/// Two negatives used to live in `adapters/dom-real`'s test module and are
+/// promoted here, because the compiler now says what they used to assert.
+/// Both set an identity that contradicted the bytes — one an arbitrary
+/// `[0x9a; 32]`, one the funding transaction's identity on a claim — and both
+/// existed to prove that the verifier recomputes the identity from the bytes
+/// and refuses a mislabelled transaction. That state is no longer refuted; it
+/// is unrepresentable, and these two lines are the whole of what remains
+/// necessary:
+///
+/// ```compile_fail
+/// fn mislabel(mut evidence: dom_scriptless_chain_adapter::CanonicalTransactionEvidenceV1) {
+///     evidence.tx_hash = [0x9a; 32];
+/// }
+/// ```
+///
+/// **What it does not establish.** That this transaction is on any chain, at
+/// the location it carries, or at all. It establishes that these bytes decode,
+/// round-trip, and hash to this identity. Inclusion is the scanner's claim and
+/// the ancestry walk's proof; see [`TransactionLocationV1`].
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CanonicalTransactionEvidenceV1 {
-    /// Canonical inclusion location.
-    pub location: TransactionLocationV1,
-    /// BLAKE2b-256 identity of `canonical_bytes`.
-    pub tx_hash: [u8; 32],
-    /// Exact bytes returned by the authenticated scanner.
-    pub canonical_bytes: Vec<u8>,
-    /// Transaction decoded by the pinned DOM canonical decoder.
-    pub transaction: Transaction,
+    location: TransactionLocationV1,
+    tx_hash: [u8; 32],
+    canonical_bytes: Vec<u8>,
+    transaction: Transaction,
 }
 
 impl CanonicalTransactionEvidenceV1 {
+    /// Builds evidence from exact canonical bytes and the location they were
+    /// found at, deriving the identity rather than accepting one.
+    ///
+    /// The only public route into this type. It runs
+    /// [`canonical_transaction_hash_v1`] — pinned decoder, re-encoding
+    /// round-trip, then hash — so the identity is a function of the bytes and
+    /// a caller has nothing to lie about there. It adds no cryptographic
+    /// surface: that discipline was already public and already the one the
+    /// scanner path uses.
+    ///
+    /// The transaction is decoded a second time to be retained. That decode
+    /// cannot fail once the first has succeeded, and it is written as a
+    /// fallible call anyway rather than assumed, because "cannot fail" is the
+    /// kind of claim this codebase has learned to check.
+    ///
+    /// **What the caller still chooses**, and it is deliberate: the three
+    /// location values. That is honest rather than lax — the location is the
+    /// scanner's word however this value is built, and what makes it
+    /// trustworthy is the ancestry walk in `adapters/dom-real`, not a
+    /// constructor here. A zero block identity is refused because it can
+    /// describe no block, and that is the whole of what is checked.
+    pub fn from_canonical_bytes_at(
+        block_height: u64,
+        block_hash: [u8; 32],
+        transaction_index: u32,
+        canonical_bytes: Vec<u8>,
+    ) -> Result<Self, ChainAdapterError> {
+        if block_hash == [0_u8; 32] {
+            return Err(ChainAdapterError::InvalidEvidence);
+        }
+        let tx_hash = canonical_transaction_hash_v1(&canonical_bytes)?;
+        let transaction = Transaction::from_bytes(&canonical_bytes)
+            .map_err(|_| ChainAdapterError::InvalidTransaction)?;
+        Ok(Self {
+            location: TransactionLocationV1 {
+                block_height,
+                block_hash,
+                transaction_index,
+            },
+            tx_hash,
+            canonical_bytes,
+            transaction,
+        })
+    }
+
+    /// Canonical inclusion location the scanner reported.
+    #[must_use]
+    pub const fn location(&self) -> TransactionLocationV1 {
+        self.location
+    }
+
+    /// BLAKE2b-256 identity, always derived from [`Self::canonical_bytes`].
+    #[must_use]
+    pub const fn tx_hash(&self) -> [u8; 32] {
+        self.tx_hash
+    }
+
+    /// Exact bytes the authenticated scanner returned.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical_bytes
+    }
+
+    /// Transaction decoded by the pinned DOM canonical decoder.
+    #[must_use]
+    pub const fn transaction(&self) -> &Transaction {
+        &self.transaction
+    }
+
     /// Computes the signature-omitting template hash through the pinned DOM
     /// adaptor authority. This is the comparison used for an observed claim,
     /// whose final adaptor signature is not known when terms are frozen.
@@ -271,15 +454,64 @@ pub struct ScriptlessScanPageV1 {
     pub reached_snapshot_tip: bool,
 }
 
-/// Successful real-node transaction admission.
+/// Successful economic admission of an exact transaction by a real DOM node.
+///
+/// Its fields are intentionally private: callers may inspect a receipt, but
+/// cannot manufacture one.  Values are created only after the closed node
+/// response has been validated against the locally recomputed transaction
+/// identifier and the economic predicate (`confirmed || relayed`).
+///
+/// ```compile_fail
+/// use dom_scriptless_chain_adapter::{SubmissionReceiptV1, SubmissionStateV1};
+///
+/// let _forged = SubmissionReceiptV1 {
+///     tx_hash: [1_u8; 32],
+///     relayed: true,
+///     state: SubmissionStateV1::New,
+/// };
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[must_use = "a validated submission receipt must be durably acted upon"]
 pub struct SubmissionReceiptV1 {
+    tx_hash: [u8; 32],
+    relayed: bool,
+    state: SubmissionStateV1,
+}
+
+impl SubmissionReceiptV1 {
     /// Locally recomputed canonical transaction identifier.
-    pub tx_hash: [u8; 32],
-    /// Whether at least one relay subscriber accepted it.
-    pub relayed: bool,
+    #[must_use]
+    pub const fn tx_hash(&self) -> [u8; 32] {
+        self.tx_hash
+    }
+
+    /// Whether at least one relay subscriber accepted the exact transaction.
+    #[must_use]
+    pub const fn was_relayed(&self) -> bool {
+        self.relayed
+    }
+
     /// Canonical node knowledge state for this exact transaction.
-    pub state: SubmissionStateV1,
+    #[must_use]
+    pub const fn state(&self) -> SubmissionStateV1 {
+        self.state
+    }
+
+    /// Whether this validated receipt establishes economic admission.
+    ///
+    /// This is always true for values returned by the production adapter.  It
+    /// remains public so durable consumers can defensively recheck the
+    /// invariant without reconstructing the receipt.
+    #[must_use]
+    pub const fn is_economically_admitted(&self) -> bool {
+        self.state.is_confirmed() || self.relayed
+    }
+
+    /// Canonical commitment to the exact validated receipt facts.
+    #[must_use]
+    pub fn receipt_digest_v1(&self) -> [u8; 32] {
+        submission_receipt_digest_v1(self.tx_hash, self.state, self.relayed)
+    }
 }
 
 /// Exact transaction state returned by idempotent real-node submission.
@@ -293,20 +525,89 @@ pub enum SubmissionStateV1 {
     Confirmed,
 }
 
+impl SubmissionStateV1 {
+    /// Stable tag used by the canonical receipt commitment and durable stores.
+    #[must_use]
+    pub const fn tag_v1(self) -> u8 {
+        match self {
+            Self::New => 1,
+            Self::Mempool => 2,
+            Self::Confirmed => 3,
+        }
+    }
+
+    /// Whether the exact transaction is already in the canonical chain.
+    #[must_use]
+    pub const fn is_confirmed(self) -> bool {
+        matches!(self, Self::Confirmed)
+    }
+}
+
+/// Revalidates public receipt facts loaded from a durable owner-only store.
+///
+/// This function does not mint a [`SubmissionReceiptV1`]. It only checks the
+/// economic predicate and the domain-separated commitment, allowing a durable
+/// consumer to detect local corruption without creating a caller-forgeable
+/// node receipt.
+pub fn validate_submission_receipt_facts_v1(
+    tx_hash: [u8; 32],
+    state: SubmissionStateV1,
+    relayed: bool,
+    receipt_digest: [u8; 32],
+) -> Result<(), ChainAdapterError> {
+    if !(state.is_confirmed() || relayed)
+        || submission_receipt_digest_v1(tx_hash, state, relayed) != receipt_digest
+    {
+        return Err(ChainAdapterError::InvalidEvidence);
+    }
+    Ok(())
+}
+
+fn submission_receipt_digest_v1(
+    tx_hash: [u8; 32],
+    state: SubmissionStateV1,
+    relayed: bool,
+) -> [u8; 32] {
+    let mut material = [0_u8; 34];
+    material[..32].copy_from_slice(&tx_hash);
+    material[32] = state.tag_v1();
+    material[33] = u8::from(relayed);
+    let mut input = Vec::with_capacity(31 + material.len());
+    input.extend_from_slice(b"DOM:submission-receipt:v1");
+    input.extend_from_slice(&material);
+    *blake2b_256(&input).as_bytes()
+}
+
 /// Bearer token kept zeroizing and always redacted from formatting.
 pub struct BearerTokenV1(Zeroizing<String>);
 
 impl BearerTokenV1 {
     /// Retains a nonempty token. Tokens larger than 4 KiB are rejected before
     /// entering the HTTP client.
+    ///
+    /// The token is moved into its zeroizing wrapper **before** validation, so
+    /// every exit path of *this constructor* wipes it. A rejected token is
+    /// secret material exactly like an accepted one — it was typed, sealed or
+    /// read from a manifest by the same operator — and failing validation is no
+    /// reason to hand it back to the allocator in the clear.
+    ///
+    /// Known limit, stated rather than implied: this covers **retention**, not
+    /// transmission. Every request re-materializes the credential through
+    /// `bearer_auth` (`:556`, `:579`), which builds a `String` and a
+    /// `HeaderValue` that this crate does not own and cannot zeroize. `reqwest`
+    /// marks the resulting header sensitive, so it is kept out of logs and
+    /// debug output, but the bytes still reach the allocator uncleared once per
+    /// request. Closing that would require an owned header path through the
+    /// HTTP client, which is out of this boundary's control.
     pub fn new(token: String) -> Result<Self, ChainAdapterError> {
+        let token = Zeroizing::new(token);
         if token.is_empty()
             || token.len() > 4_096
             || token.bytes().any(|byte| byte.is_ascii_control())
         {
             return Err(ChainAdapterError::InvalidConfiguration);
         }
-        Ok(Self(Zeroizing::new(token)))
+        Ok(Self(token))
     }
 }
 
@@ -335,6 +636,14 @@ impl DomHttpChainAdapterV1 {
         request_timeout: Duration,
     ) -> Result<Self, ChainAdapterError> {
         expected.validate()?;
+        // Endpoint length bound. The daemon repeats this number as
+        // `MAX_DOM_NODE_ENDPOINT_BYTES_V1`
+        // (`dom-interopd/src/production_node.rs:77`) because the dependency runs
+        // daemon -> adapter and a shared constant would invert it. The two must
+        // move together, and the daemon side already proves they agree in
+        // `endpoint_prefilter_and_client_agree_on_the_canonical_table`
+        // (`production_node.rs:959`); this comment is the link from the adapter
+        // side, which has no way to reference that test.
         if endpoint.len() > 2_048
             || connect_timeout.is_zero()
             || request_timeout.is_zero()
@@ -354,8 +663,17 @@ impl DomHttpChainAdapterV1 {
         let host = url
             .host_str()
             .ok_or(ChainAdapterError::InvalidConfiguration)?;
-        let loopback = host.eq_ignore_ascii_case("localhost")
-            || host
+        // `Url::host_str` returns an IPv6 literal in its bracketed form
+        // (`[::1]`), which `IpAddr` does not parse. Strip exactly that wrapper
+        // and nothing else, so an IPv6 loopback is recognised as the loopback it
+        // is. Without this, `http://[::1]/` was refused while `https://[::1]/`
+        // was accepted — an accidental asymmetry of URL syntax, never a rule.
+        let bare_host = host
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+            .unwrap_or(host);
+        let loopback = bare_host.eq_ignore_ascii_case("localhost")
+            || bare_host
                 .parse::<std::net::IpAddr>()
                 .is_ok_and(|address| address.is_loopback());
         if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
@@ -430,6 +748,8 @@ impl DomHttpChainAdapterV1 {
 
     /// Submits exact canonical transaction bytes to the real DOM mempool.
     /// Local parsing is a preflight only; the node remains the authority.
+    /// A receipt is returned only after the node proves canonical confirmation
+    /// or at least one relay subscriber accepted the exact transaction.
     pub fn submit_canonical_transaction(
         &self,
         canonical_bytes: &[u8],
@@ -467,9 +787,7 @@ fn validate_submission_response(
     let state = match dto.state.as_str() {
         "new" if !dto.already_known && !dto.confirmed => SubmissionStateV1::New,
         "mempool" if dto.already_known && !dto.confirmed => SubmissionStateV1::Mempool,
-        "confirmed" if dto.already_known && dto.confirmed && !dto.relayed => {
-            SubmissionStateV1::Confirmed
-        }
+        "confirmed" if dto.already_known && dto.confirmed => SubmissionStateV1::Confirmed,
         _ => return Err(ChainAdapterError::MalformedResponse),
     };
     let observed_hash = dto
@@ -480,11 +798,18 @@ fn validate_submission_response(
     if observed_hash != expected_hash {
         return Err(ChainAdapterError::InvalidEvidence);
     }
-    Ok(SubmissionReceiptV1 {
+    let receipt = SubmissionReceiptV1 {
         tx_hash: expected_hash,
         relayed: dto.relayed,
         state,
-    })
+    };
+    if !receipt.is_economically_admitted() {
+        // The node accepted the bytes locally, but they remain volatile.  The
+        // caller must retry the exact transaction until it is relayed or
+        // observed canonical; no admission authority is emitted yet.
+        return Err(ChainAdapterError::TemporarilyUnavailable);
+    }
+    Ok(receipt)
 }
 
 #[derive(Deserialize)]
@@ -1001,15 +1326,132 @@ fn parse_hex_65(value: &str) -> Result<[u8; 65], ChainAdapterError> {
 mod tests {
     use super::*;
 
-    fn identity() -> ExpectedDomIdentityV1 {
-        ExpectedDomIdentityV1 {
-            network: "regtest".to_owned(),
-            network_magic: 0xD0_4D_52_47,
-            chain_id: [1_u8; 32],
-            genesis_hash: [2_u8; 32],
-            protocol_version: 3,
-            range_proof_serialization_version: 1,
+    fn identity() -> Result<ExpectedDomIdentityV1, ChainAdapterError> {
+        identity_for("regtest", dom_core::NETWORK_MAGIC_REGTEST)
+    }
+
+    fn identity_for(
+        network: &str,
+        network_magic: u32,
+    ) -> Result<ExpectedDomIdentityV1, ChainAdapterError> {
+        let genesis = dom_core::startup_genesis_hash_for_network_magic(network_magic)
+            .map_err(|_| ChainAdapterError::InvalidConfiguration)?;
+        Ok(ExpectedDomIdentityV1 {
+            network: network.to_owned(),
+            network_magic,
+            chain_id: *dom_consensus::derive_chain_id(network_magic, &genesis).as_bytes(),
+            genesis_hash: *genesis.as_bytes(),
+            protocol_version: dom_core::PROTOCOL_VERSION,
+            range_proof_serialization_version: dom_crypto::RANGE_PROOF_SERIALIZATION_VERSION,
+        })
+    }
+
+    #[test]
+    fn bearer_tokens_reject_ascii_control_and_out_of_range_material(
+    ) -> Result<(), ChainAdapterError> {
+        // A trailing newline is the realistic accident: a token read from a file
+        // or pasted into a manifest. `BearerTokenV1` has no `PartialEq`, and the
+        // workspace lints deny `unwrap_err`, so the error is bound by let-else
+        // and then compared by its exact variant.
+        for rejected in [
+            "tok\n".to_owned(),
+            "tok\u{0}".to_owned(),
+            "tok\t".to_owned(),
+            String::new(),
+            "x".repeat(4_097),
+        ] {
+            let Err(error) = BearerTokenV1::new(rejected) else {
+                return Err(ChainAdapterError::InvalidConfiguration);
+            };
+            assert_eq!(error, ChainAdapterError::InvalidConfiguration);
         }
+        BearerTokenV1::new("valid-token".to_owned())?;
+        BearerTokenV1::new("x".repeat(4_096))?;
+        Ok(())
+    }
+
+    #[test]
+    fn plain_http_is_accepted_only_for_loopback_hosts() -> Result<(), ChainAdapterError> {
+        // IPv6 loopback must behave exactly like IPv4 loopback. The bracketed
+        // host form is a URL syntax detail, never a policy difference.
+        for (endpoint, accepted) in [
+            ("http://127.0.0.1:8080/", true),
+            ("http://[::1]:8080/", true),
+            ("http://localhost:8080/", true),
+            ("http://10.0.0.1:8080/", false),
+            ("http://[2001:db8::1]:8080/", false),
+            ("http://node.example:8080/", false),
+            // An IPv4-mapped IPv6 address is deliberately NOT unwrapped:
+            // `Ipv6Addr::is_loopback` is true only for `::1`, and widening that
+            // here would be policy, not syntax.
+            ("http://[::ffff:127.0.0.1]:8080/", false),
+            // A malformed IPv6 literal fails at URL parsing, before any
+            // loopback question is asked.
+            ("http://[::1:8080/", false),
+            ("https://127.0.0.1:8080/", true),
+            ("https://[::1]:8080/", true),
+            ("https://10.0.0.1:8080/", true),
+            ("https://[2001:db8::1]:8080/", true),
+            ("https://node.example:8080/", true),
+        ] {
+            let outcome = DomHttpChainAdapterV1::new(
+                endpoint,
+                identity()?,
+                BearerTokenV1::new("table-driven-token".to_owned())?,
+                Duration::from_millis(50),
+                Duration::from_millis(50),
+            );
+            match outcome {
+                Ok(_) => assert!(accepted, "endpoint {endpoint} must be refused"),
+                Err(error) => {
+                    assert!(!accepted, "endpoint {endpoint} must be accepted");
+                    assert_eq!(error, ChainAdapterError::InvalidConfiguration);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn identity_accepts_only_exact_startup_safe_network_tuple() -> Result<(), ChainAdapterError> {
+        let identity = identity()?;
+        assert_eq!(identity.validate(), Ok(()));
+        let mainnet = identity_for("mainnet", dom_core::NETWORK_MAGIC_MAINNET)?;
+        assert_eq!(mainnet.validate(), Ok(()));
+        assert_eq!(
+            identity_for("testnet", dom_core::NETWORK_MAGIC_TESTNET)?.validate(),
+            Ok(())
+        );
+
+        let mut wrong_magic = mainnet.clone();
+        wrong_magic.network_magic = dom_core::NETWORK_MAGIC_REGTEST;
+        assert_eq!(
+            wrong_magic.validate(),
+            Err(ChainAdapterError::InvalidConfiguration)
+        );
+
+        let mut wrong_protocol = mainnet.clone();
+        wrong_protocol.protocol_version = wrong_protocol.protocol_version.saturating_add(1);
+        assert_eq!(
+            wrong_protocol.validate(),
+            Err(ChainAdapterError::InvalidConfiguration)
+        );
+
+        let mut wrong_rangeproof = mainnet.clone();
+        wrong_rangeproof.range_proof_serialization_version = wrong_rangeproof
+            .range_proof_serialization_version
+            .saturating_add(1);
+        let mut wrong_genesis = mainnet.clone();
+        wrong_genesis.genesis_hash[0] ^= 1;
+        let mut wrong_chain = mainnet;
+        wrong_chain.chain_id[0] ^= 1;
+        for invalid in [wrong_rangeproof, wrong_genesis, wrong_chain] {
+            assert_eq!(
+                invalid.validate(),
+                Err(ChainAdapterError::InvalidConfiguration)
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -1018,7 +1460,7 @@ mod tests {
         let token = || BearerTokenV1::new("laboratory-token".to_owned());
         assert!(DomHttpChainAdapterV1::new(
             "http://example.com:43374",
-            identity(),
+            identity()?,
             token()?,
             Duration::from_secs(1),
             Duration::from_secs(2),
@@ -1026,7 +1468,7 @@ mod tests {
         .is_err());
         assert!(DomHttpChainAdapterV1::new(
             "http://user:secret@127.0.0.1:43374",
-            identity(),
+            identity()?,
             token()?,
             Duration::from_secs(1),
             Duration::from_secs(2),
@@ -1034,7 +1476,7 @@ mod tests {
         .is_err());
         assert!(DomHttpChainAdapterV1::new(
             "http://127.0.0.1:43374",
-            identity(),
+            identity()?,
             token()?,
             Duration::from_secs(1),
             Duration::from_secs(2),
@@ -1124,7 +1566,7 @@ mod tests {
 
     #[test]
     fn page_validation_binds_identity_and_anchor() -> Result<(), ChainAdapterError> {
-        let expected = identity();
+        let expected = identity()?;
         let cursor = ScriptlessScanCursorV1 {
             next_height: 1,
             anchor_hash: Some(expected.genesis_hash),
@@ -1171,21 +1613,47 @@ mod tests {
             error: None,
         };
         assert_eq!(
-            validate_submission_response(response("new", false, false, true), hash)?.state,
+            validate_submission_response(response("new", false, false, true), hash)?.state(),
             SubmissionStateV1::New
         );
         assert_eq!(
-            validate_submission_response(response("mempool", true, false, true), hash)?.state,
+            validate_submission_response(response("mempool", true, false, true), hash)?.state(),
             SubmissionStateV1::Mempool
         );
+        let confirmed =
+            validate_submission_response(response("confirmed", true, true, false), hash)?;
+        assert_eq!(confirmed.state(), SubmissionStateV1::Confirmed);
+        assert_eq!(confirmed.tx_hash(), hash);
+        assert!(!confirmed.was_relayed());
+        assert!(confirmed.is_economically_admitted());
+        let receipt_digest = confirmed.receipt_digest_v1();
+        validate_submission_receipt_facts_v1(
+            hash,
+            SubmissionStateV1::Confirmed,
+            false,
+            receipt_digest,
+        )?;
         assert_eq!(
-            validate_submission_response(response("confirmed", true, true, false), hash)?.state,
-            SubmissionStateV1::Confirmed
+            validate_submission_receipt_facts_v1(
+                hash,
+                SubmissionStateV1::Confirmed,
+                false,
+                [0x81; 32],
+            ),
+            Err(ChainAdapterError::InvalidEvidence)
         );
         assert_eq!(
-            validate_submission_response(response("confirmed", true, true, true), hash),
-            Err(ChainAdapterError::MalformedResponse)
+            validate_submission_response(response("new", false, false, false), hash),
+            Err(ChainAdapterError::TemporarilyUnavailable)
         );
+        assert_eq!(
+            validate_submission_response(response("mempool", true, false, false), hash),
+            Err(ChainAdapterError::TemporarilyUnavailable)
+        );
+        let confirmed_and_relayed =
+            validate_submission_response(response("confirmed", true, true, true), hash)?;
+        assert_eq!(confirmed_and_relayed.state(), SubmissionStateV1::Confirmed);
+        assert!(confirmed_and_relayed.was_relayed());
         assert_eq!(
             validate_submission_response(response("unknown", false, false, false), hash),
             Err(ChainAdapterError::MalformedResponse)

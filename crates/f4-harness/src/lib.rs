@@ -348,13 +348,17 @@ impl<R: JsonRpc, B: BondBroadcaster, C: BondClock> BondAdapter for EvmBondAdapte
         if *bond_lock_id != self.lock_id {
             return Err(BondError::UnknownLock);
         }
+        // The scalar leaves the redacting wrapper once, here, and the three
+        // uses below share that one copy. Taking it out per use would have made
+        // three exposure points where the work needs one.
+        let scalar = revealed.expose_scalar_bytes();
         // The contract's own claim checks, applied fail-closed before any
         // bytes exist: canonical scalar, the scalar must open THIS lock's
         // adaptor commitment, and the deadline must not have passed.
-        if !is_canonical_scalar(&revealed.0) {
+        if !is_canonical_scalar(&scalar) {
             return Err(BondError::NonCanonicalScalar);
         }
-        if adaptor_address_of_scalar(&revealed.0)? != self.terms.adaptor_address {
+        if adaptor_address_of_scalar(&scalar)? != self.terms.adaptor_address {
             return Err(BondError::ScalarPointMismatch);
         }
         if self.clock.now_timestamp()? >= self.deadline {
@@ -367,7 +371,7 @@ impl<R: JsonRpc, B: BondBroadcaster, C: BondClock> BondAdapter for EvmBondAdapte
         calldata.extend_from_slice(&selector(SIG_CLAIM));
         calldata.extend_from_slice(&concat_words(&[
             word_bytes32(self.lock_id),
-            word_u256(revealed.0),
+            word_u256(scalar),
         ])?);
         self.broadcaster.broadcast(&UnsignedEvmCall {
             version: UNSIGNED_CALL_VERSION,

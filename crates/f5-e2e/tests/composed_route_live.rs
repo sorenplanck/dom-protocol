@@ -204,7 +204,7 @@ fn one_scalar_revealed_on_a_live_evm_chain_claims_a_live_bitcoin_output() {
     assert_eq!(open["status"].as_str(), Some("0x1"), "open succeeded");
 
     // The claim: the protocol's reveal of t on the EVM chain.
-    let t_word = format!("0x{}", encode_hex(&t.0));
+    let t_word = format!("0x{}", encode_hex(&t.expose_scalar_bytes()));
     let claim_receipt = evm
         .send_json(&[&lock_contract, "claim(bytes32,uint256)", &lock_id, &t_word])
         .expect("claim with t");
@@ -228,9 +228,9 @@ fn one_scalar_revealed_on_a_live_evm_chain_claims_a_live_bitcoin_output() {
             }
         }
     }
-    let observed = RevealedSecretBytes(observed_word.expect("Claimed event data word"));
+    let observed = RevealedSecretBytes::new(observed_word.expect("Claimed event data word"));
     assert_eq!(
-        adapter_evm::binding::adaptor_address_of_scalar(&observed.0)
+        adapter_evm::binding::adaptor_address_of_scalar(&observed.expose_scalar_bytes())
             .expect("observed scalar is canonical"),
         evm_adaptor_address,
         "the observed scalar reproduces the committed EVM adaptor address"
@@ -361,7 +361,8 @@ fn one_scalar_revealed_on_a_live_evm_chain_claims_a_live_bitcoin_output() {
          to the one the EVM chain published"
     );
     assert_eq!(
-        adapter_evm::binding::adaptor_address_of_scalar(&extracted.0).expect("canonical"),
+        adapter_evm::binding::adaptor_address_of_scalar(&extracted.expose_scalar_bytes())
+            .expect("canonical"),
         evm_adaptor_address,
         "the Bitcoin-extracted scalar reproduces the EVM commitment"
     );
@@ -574,7 +575,7 @@ fn one_scalar_revealed_on_a_live_bitcoin_chain_claims_a_live_evm_lock() {
     // that is NOT the one the Bitcoin witness carried must be refused by the
     // live contract. Without this, a claim that accepted anything would look
     // exactly like a successful route hand-off.
-    let mut wrong = observed.0;
+    let mut wrong = observed.expose_scalar_bytes();
     wrong[31] ^= 0x01;
     let wrong_word = format!("0x{}", encode_hex(&wrong));
     let refused = evm.send_json(&[
@@ -597,7 +598,7 @@ fn one_scalar_revealed_on_a_live_bitcoin_chain_claims_a_live_evm_lock() {
 
     // The claim submits the scalar RECOVERED FROM BITCOIN. The contract
     // recomputes address(t*G) on chain and reverts unless it matches.
-    let observed_word = format!("0x{}", encode_hex(&observed.0));
+    let observed_word = format!("0x{}", encode_hex(&observed.expose_scalar_bytes()));
     let claim_receipt = evm
         .send_json(&[
             &lock_contract,
@@ -627,7 +628,7 @@ fn one_scalar_revealed_on_a_live_bitcoin_chain_claims_a_live_evm_lock() {
     }
     assert_eq!(
         published.expect("Claimed event data word"),
-        observed.0,
+        observed.expose_scalar_bytes(),
         "the EVM chain published the same scalar the Bitcoin witness carried"
     );
 
@@ -822,7 +823,7 @@ fn canonical_ancestry(node: &RegtestNode, funding_height: u64) -> Result<Vec<[u8
 
 fn point(secret: &RevealedSecretBytes) -> AdaptorPointBytes {
     let secp = Secp256k1::new();
-    let key = SecretKey::from_slice(&secret.0).expect("canonical route scalar");
+    let key = SecretKey::from_slice(&secret.expose_scalar_bytes()).expect("canonical route scalar");
     AdaptorPointBytes(PublicKey::from_secret_key(&secp, &key).serialize())
 }
 
@@ -832,7 +833,7 @@ fn random_canonical_secret() -> Result<RevealedSecretBytes, String> {
         getrandom::fill(&mut candidate)
             .map_err(|error| format!("operating-system randomness failed: {error}"))?;
         if SecretKey::from_slice(&candidate).is_ok() {
-            return Ok(RevealedSecretBytes(candidate));
+            return Ok(RevealedSecretBytes::new(candidate));
         }
     }
     Err("operating-system randomness did not produce a canonical scalar".to_string())

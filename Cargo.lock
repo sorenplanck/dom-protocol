@@ -51,11 +51,17 @@ version = "0.2.0"
 dependencies = [
  "blake2",
  "counterparty-api",
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
  "dom-leg",
  "dom-scriptless-chain-adapter",
  "dom-scriptless-store",
+ "dom-serialization",
  "kaystra-core",
  "thiserror 1.0.69",
+ "zeroize",
 ]
 
 [[package]]
@@ -571,6 +577,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "btc-actuator"
+version = "0.2.0"
+dependencies = [
+ "adapter-btc",
+ "adapter-btc-live",
+ "bitcoin",
+ "blake2",
+ "btc-crypto",
+ "btc-vault",
+ "chain-profile",
+ "counterparty-api",
+ "deployment-registry",
+ "getrandom 0.2.16",
+ "kaystra-core",
+ "reqwest",
+ "rusqlite",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "btc-crypto"
 version = "0.2.0"
 dependencies = [
@@ -1032,6 +1063,7 @@ name = "counterparty-api"
 version = "0.2.0"
 dependencies = [
  "thiserror 1.0.69",
+ "zeroize",
 ]
 
 [[package]]
@@ -1142,6 +1174,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "deployment-registry"
+version = "0.2.0"
+dependencies = [
+ "adapter-btc",
+ "adapter-evm",
+ "bitcoin",
+ "blake2",
+ "btc-crypto",
+ "chain-profile",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "kaystra-core",
+ "rusqlite",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1230,6 +1284,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-actuator"
+version = "0.2.0"
+dependencies = [
+ "adapter-dom-real",
+ "blake2",
+ "cap-std",
+ "counterparty-api",
+ "deployment-registry",
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-scriptless-chain-adapter",
+ "dom-scriptless-crypto",
+ "dom-scriptless-store",
+ "dom-slate",
+ "dom-wallet2",
+ "kaystra-core",
+ "rusqlite",
+ "rustix 1.1.4",
+ "static_assertions",
+ "tempfile",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "dom-adaptor"
 version = "0.2.0"
 dependencies = [
@@ -1244,6 +1325,7 @@ dependencies = [
  "k256",
  "rand_core 0.6.4",
  "serde_json",
+ "static_assertions",
  "subtle",
  "thiserror 1.0.69",
  "zeroize",
@@ -1393,6 +1475,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom-final-claim-binding"
+version = "0.2.0"
+dependencies = [
+ "dom-adaptor",
+ "dom-core",
+ "dom-crypto",
+ "hex",
+ "kaystra-core",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "dom-integration-tests"
 version = "0.2.0"
 dependencies = [
@@ -1417,6 +1511,65 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "dom-interopd"
+version = "0.2.0"
+dependencies = [
+ "adapter-btc",
+ "adapter-btc-live",
+ "adapter-dom-real",
+ "adapter-evm",
+ "bitcoin",
+ "blake2",
+ "btc-actuator",
+ "btc-crypto",
+ "cap-std",
+ "chain-profile",
+ "counterparty-api",
+ "deployment-registry",
+ "dom-actuator",
+ "dom-adaptor",
+ "dom-consensus",
+ "dom-core",
+ "dom-crypto",
+ "dom-leg",
+ "dom-scriptless-chain-adapter",
+ "dom-scriptless-crypto",
+ "dom-scriptless-identity-store",
+ "dom-scriptless-store",
+ "dom-scriptless-transport",
+ "dom-vault",
+ "evm-actuator",
+ "f6-engine",
+ "fs2",
+ "getrandom 0.2.16",
+ "hex",
+ "k256",
+ "kaystra-core",
+ "nix",
+ "participant-binding",
+ "relay",
+ "rfq",
+ "route-composer",
+ "route-executor",
+ "route-secret-vault",
+ "route-time-anchor",
+ "route-transport",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "settlement-coordinator",
+ "sha3",
+ "solver-inventory",
+ "solver-status",
+ "static_assertions",
+ "store",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -1566,6 +1719,7 @@ version = "0.2.0"
 dependencies = [
  "dom-adaptor",
  "dom-consensus",
+ "dom-core",
  "dom-crypto",
  "dom-scriptless-types",
  "dom-serialization",
@@ -1614,6 +1768,8 @@ dependencies = [
  "argon2",
  "cap-std",
  "chacha20poly1305",
+ "dom-adaptor",
+ "dom-core",
  "dom-crypto",
  "dom-scriptless-store",
  "dom-scriptless-transport",
@@ -1649,17 +1805,21 @@ dependencies = [
 name = "dom-scriptless-store"
 version = "0.2.0"
 dependencies = [
+ "adapter-btc",
  "cap-fs-ext",
  "cap-std",
  "dom-adaptor",
  "dom-consensus",
  "dom-core",
  "dom-crypto",
+ "dom-final-claim-binding",
+ "dom-scriptless-chain-adapter",
  "dom-scriptless-consensus",
  "dom-scriptless-crypto",
  "dom-scriptless-primitives",
  "dom-serialization",
  "f7-anchor-authority",
+ "kaystra-core",
  "nix",
  "rand_core 0.6.4",
  "rustix 1.1.4",
@@ -1858,6 +2018,7 @@ dependencies = [
  "hkdf",
  "proptest",
  "rand 0.8.6",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2",
@@ -2180,6 +2341,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "evm-actuator"
+version = "0.2.0"
+dependencies = [
+ "adapter-btc",
+ "adapter-evm",
+ "btc-crypto",
+ "chain-profile",
+ "deployment-registry",
+ "hex",
+ "k256",
+ "kaystra-core",
+ "reqwest",
+ "rusqlite",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "static_assertions",
+ "tempfile",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "f2-harness"
 version = "0.2.0"
 dependencies = [
@@ -2257,6 +2441,8 @@ dependencies = [
  "f7-anchor-authority",
  "getrandom 0.3.4",
  "rfq",
+ "rustix 1.1.4",
+ "serde",
  "serde_json",
  "uspe",
  "zeroize",
@@ -2266,12 +2452,16 @@ dependencies = [
 name = "f6-engine"
 version = "0.2.0"
 dependencies = [
+ "blake2",
  "btc-crypto",
+ "deployment-registry",
  "f2-harness",
  "f4-harness",
  "kaystra-core",
  "relay",
  "rfq",
+ "solver-status",
+ "static_assertions",
  "store",
  "tempfile",
  "thiserror 1.0.69",
@@ -2291,6 +2481,8 @@ version = "0.2.0"
 dependencies = [
  "adapter-btc",
  "bitcoin",
+ "dom-adaptor",
+ "dom-final-claim-binding",
  "dom-scriptless-chain-adapter",
  "kaystra-core",
  "static_assertions",
@@ -4093,6 +4285,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "participant-binding"
+version = "0.2.0"
+dependencies = [
+ "adapter-evm",
+ "btc-crypto",
+ "deployment-registry",
+ "k256",
+ "kaystra-core",
+ "sha3",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "password-hash"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4737,23 +4942,96 @@ dependencies = [
 name = "route-composer"
 version = "0.2.0"
 dependencies = [
+ "adapter-btc",
  "adapter-evm",
+ "bitcoin",
  "blake2",
+ "btc-crypto",
+ "chain-profile",
+ "deployment-registry",
+ "dom-consensus",
+ "dom-core",
+ "dom-final-claim-binding",
  "f2-harness",
+ "hex",
  "kaystra-core",
  "proptest",
  "rfq",
+ "route-time-anchor",
+ "tempfile",
  "thiserror 1.0.69",
  "zeroize",
+]
+
+[[package]]
+name = "route-executor"
+version = "0.2.0"
+dependencies = [
+ "blake2",
+ "rusqlite",
+ "rustix 1.1.4",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "route-secret-vault"
+version = "0.2.0"
+dependencies = [
+ "cap-std",
+ "chacha20poly1305",
+ "counterparty-api",
+ "hex",
+ "k256",
+ "rand_core 0.6.4",
+ "route-executor",
+ "rustix 1.1.4",
+ "sha2",
+ "static_assertions",
+ "subtle",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "route-time-anchor"
+version = "0.2.0"
+dependencies = [
+ "adapter-btc",
+ "bitcoin",
+ "blake2",
+ "btc-crypto",
+ "chain-profile",
+ "deployment-registry",
+ "dom-consensus",
+ "dom-core",
+ "hex",
+ "kaystra-core",
+ "proptest",
+ "rfq",
+ "rusqlite",
+ "rustix 1.1.4",
+ "store",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "route-transport"
 version = "0.2.0"
 dependencies = [
+ "blake2",
  "btc-crypto",
+ "cap-std",
+ "dom-crypto",
+ "dom-scriptless-crypto",
+ "dom-scriptless-store",
+ "dom-scriptless-transport",
  "kaystra-core",
  "relay",
+ "rusqlite",
+ "rustix 1.1.4",
+ "tempfile",
  "thiserror 1.0.69",
  "zeroize",
 ]
@@ -5078,6 +5356,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "settlement-coordinator"
+version = "0.2.0"
+dependencies = [
+ "blake2",
+ "rusqlite",
+ "rustix 1.1.4",
+ "static_assertions",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5298,6 +5588,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "solver-inventory"
+version = "0.2.0"
+dependencies = [
+ "blake2",
+ "counterparty-api",
+ "f6-engine",
+ "rfq",
+ "rusqlite",
+ "rustix 1.1.4",
+ "solver",
+ "tempfile",
+ "thiserror 1.0.69",
+ "uspe",
+]
+
+[[package]]
+name = "solver-status"
+version = "0.2.0"
+dependencies = [
+ "blake2",
+ "btc-crypto",
+ "deployment-registry",
+ "kaystra-core",
+ "store",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "spinning_top"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5333,6 +5652,7 @@ name = "store"
 version = "0.2.0"
 dependencies = [
  "rusqlite",
+ "rustix 1.1.4",
  "store",
  "tempfile",
  "thiserror 1.0.69",

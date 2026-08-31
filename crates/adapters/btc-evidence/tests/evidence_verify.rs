@@ -15,8 +15,8 @@ use bitcoin::{
 };
 
 use btc_evidence::{
-    verified_outcome_to_uspe_event, verify_evidence, BitcoinEvidenceNetworkV1, BitcoinOutPointV1,
-    BitcoinOutcomeV1, BoundedMerkleBranchV1, KeystoneBitcoinEvidenceV1,
+    verify_evidence, BitcoinEvidenceNetworkV1, BitcoinOutPointV1, BitcoinOutcomeV1,
+    BoundedMerkleBranchV1, KeystoneBitcoinEvidenceV1,
 };
 
 /// Builds a single-transaction regtest block whose one tx spends
@@ -99,7 +99,7 @@ fn evidence_for(
     raw_header.copy_from_slice(&serialize(header));
     let block_hash = header.block_hash();
     KeystoneBitcoinEvidenceV1 {
-        codec_version: 1,
+        codec_version: KeystoneBitcoinEvidenceV1::CODEC_VERSION,
         network: BitcoinEvidenceNetworkV1::Regtest,
         network_genesis_hash: genesis_block(Network::Regtest)
             .block_hash()
@@ -131,7 +131,7 @@ fn evidence_for(
 }
 
 #[test]
-fn valid_keypath_evidence_verifies_and_bridges_to_uspe() {
+fn valid_keypath_evidence_remains_structurally_verifiable_for_migration() {
     let prev = OutPoint {
         txid: Txid::from_raw_hash(Hash::from_byte_array([0x22; 32])),
         vout: 0,
@@ -143,15 +143,62 @@ fn valid_keypath_evidence_verifies_and_bridges_to_uspe() {
     assert_eq!(outcome.outcome, BitcoinOutcomeV1::KeyPathClaim);
     assert_eq!(outcome.terms_hash, [0x13; 32]);
     assert_eq!(outcome.confirmation_depth, 3);
+}
 
-    // The USPE bridge carries ONLY the terms binding — no secret material.
-    let event = verified_outcome_to_uspe_event(&outcome);
-    match event {
-        uspe::AssuranceEvent::CompensationClaimed { terms_hash } => {
-            assert_eq!(terms_hash, [0x13; 32]);
-        }
-        _ => panic!("unexpected event"),
-    }
+#[test]
+fn v1_golden_vector_bytes_remain_frozen() {
+    let prev = OutPoint {
+        txid: Txid::from_raw_hash(Hash::from_byte_array([0x22; 32])),
+        vout: 0,
+    };
+    let (header, tx) = build_block(prev, keypath_witness());
+    let evidence = evidence_for(&header, &tx, BitcoinOutcomeV1::KeyPathClaim);
+
+    assert_eq!(
+        hex::encode(&evidence.raw_transaction),
+        "0200000000010122222222222222222222222222222222222222222222222222222222222222220000000000fdffffff0150c30000000000000351010101401111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111100000000"
+    );
+    assert_eq!(
+        hex::encode(evidence.block_header),
+        "000000200000000000000000000000000000000000000000000000000000000000000000a4a743beb00ddeb4c06032fd317f948a6460a3ebdf4f988c9d83d5b59a4aae8e00f15365ffff7f2004000000"
+    );
+    assert_eq!(
+        hex::encode(evidence.txid),
+        "a4a743beb00ddeb4c06032fd317f948a6460a3ebdf4f988c9d83d5b59a4aae8e"
+    );
+    assert_eq!(
+        hex::encode(evidence.wtxid),
+        "b8f85117991e956630c9e948f262f70a243dfcdab147c46e24b7c05cd177966b"
+    );
+    assert_eq!(
+        evidence
+            .confirmation_headers
+            .iter()
+            .map(hex::encode)
+            .collect::<Vec<_>>(),
+        vec![
+            "00000020498bb9bb522a32082a284ef98bca6673d2969366345926c9c5a21eded5a00774000000000000000000000000000000000000000000000000000000000000000064f15365ffff7f2000000000",
+            "000000207cc92d34792e5eb9dd6c3abef8225c6e5bacc9dab2870efb11128f2cc7acbe03000000000000000000000000000000000000000000000000000000000000000065f15365ffff7f2000000000",
+            "000000206e0b8108d411de1d7eb8b9dda66fbb7826d3af695705b926359e8a97cb51391a000000000000000000000000000000000000000000000000000000000000000066f15365ffff7f2000000000",
+        ]
+    );
+    assert!(verify_evidence(&evidence).is_ok());
+}
+
+#[test]
+fn unknown_v1_codec_version_is_rejected() {
+    let prev = OutPoint {
+        txid: Txid::from_raw_hash(Hash::from_byte_array([0x22; 32])),
+        vout: 0,
+    };
+    let (header, tx) = build_block(prev, keypath_witness());
+    let mut evidence = evidence_for(&header, &tx, BitcoinOutcomeV1::KeyPathClaim);
+    evidence.codec_version = 2;
+
+    assert_eq!(
+        verify_evidence(&evidence).unwrap_err(),
+        btc_evidence::EvidenceError::UnsupportedCodecVersion
+    );
 }
 
 #[test]

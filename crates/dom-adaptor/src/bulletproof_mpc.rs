@@ -164,6 +164,27 @@ impl BpStatementV1 {
 
     /// Parse exact canonical statement bytes and validate every derived field.
     pub fn from_bytes(bytes: &[u8], trusted_chain_id: &TrustedChainIdV1) -> Result<Self> {
+        Self::from_bytes_for_chain_id(bytes, trusted_chain_id.as_bytes())
+    }
+
+    /// Reparse statement bytes retained behind an already authenticated chain
+    /// binding.
+    ///
+    /// This does not create a chain authority. It exists so a durable owner of
+    /// an independently authenticated raw chain identifier can revalidate all
+    /// statement fields after restart without manufacturing a
+    /// [`TrustedChainIdV1`]. New protocol inputs should continue to use
+    /// [`Self::from_bytes`].
+    pub fn from_retained_bytes(bytes: &[u8], authenticated_chain_id: &[u8; 32]) -> Result<Self> {
+        if authenticated_chain_id == &[0; 32] {
+            return Err(AdaptorError::InvalidContext(
+                "retained Bulletproof chain ID must be authenticated and nonzero",
+            ));
+        }
+        Self::from_bytes_for_chain_id(bytes, authenticated_chain_id)
+    }
+
+    fn from_bytes_for_chain_id(bytes: &[u8], authenticated_chain_id: &[u8; 32]) -> Result<Self> {
         if bytes.len() < 317 {
             return Err(AdaptorError::InvalidLength {
                 object: "BpStatementV1",
@@ -181,7 +202,7 @@ impl BpStatementV1 {
                 "Bulletproof statement version must be exactly V1",
             ));
         }
-        if bytes[6..38] != *trusted_chain_id.as_bytes() {
+        if bytes[6..38] != *authenticated_chain_id {
             return Err(AdaptorError::InvalidContext(
                 "Bulletproof chain ID differs from the trusted local chain",
             ));
@@ -1017,6 +1038,13 @@ mod tests {
             BpStatementV1::from_bytes(statement.to_bytes(), &trusted_chain()).expect("roundtrip"),
             statement
         );
+        assert_eq!(
+            BpStatementV1::from_retained_bytes(statement.to_bytes(), &[0x11; 32])
+                .expect("retained roundtrip"),
+            statement
+        );
+        assert!(BpStatementV1::from_retained_bytes(statement.to_bytes(), &[0; 32]).is_err());
+        assert!(BpStatementV1::from_retained_bytes(statement.to_bytes(), &[0x12; 32]).is_err());
         let round1 = BpRound1ShareV1::new(&statement, 0, point(7), point(9)).expect("round 1");
         assert_eq!(round1.to_bytes().len(), 138);
         assert_ne!(round1.reveal_commitment(), [0u8; 32]);

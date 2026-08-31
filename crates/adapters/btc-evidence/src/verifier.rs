@@ -1,4 +1,4 @@
-//! The evidence verifier (Annex M M.9.3).
+//! The byte-frozen legacy V1 structural evidence verifier (Annex M M.9.3).
 //!
 //! Fail-closed: incomplete, contradictory, or cross-network proof is
 //! rejected. Every parser enforces its cap before allocating (M.10.6).
@@ -18,6 +18,10 @@ use crate::evidence::{
 /// Verification failures. No variant carries secret material (M.21).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum EvidenceError {
+    /// The V1 container carried a codec version other than the only version
+    /// this verifier understands. A version label is never advisory.
+    #[error("unsupported evidence codec version")]
+    UnsupportedCodecVersion,
     /// The evidence names a known network but carries another network's
     /// genesis hash. Public Signet evidence must never be accepted as a
     /// regtest or custom-Signet artefact (M.13.2).
@@ -80,11 +84,18 @@ fn merkle_root_from_branch(txid: &[u8; 32], branch: &BoundedMerkleBranchV1) -> [
     acc
 }
 
-/// Verifies one piece of evidence, returning the verified public outcome
-/// (M.9.3). The USPE consumes the return value; `t` never appears here.
+/// Performs the legacy V1 structural checks and returns public facts (M.9.3).
+///
+/// This does not authenticate expected difficulty, retarget, MTP, chain work,
+/// Signet challenge execution or an external checkpoint. Its return value is
+/// intentionally not accepted by the V2-only operational USPE bridge.
 pub fn verify_evidence(
     evidence: &KeystoneBitcoinEvidenceV1,
 ) -> Result<VerifiedBitcoinOutcomeV1, EvidenceError> {
+    if evidence.codec_version != KeystoneBitcoinEvidenceV1::CODEC_VERSION {
+        return Err(EvidenceError::UnsupportedCodecVersion);
+    }
+
     // Cap the Merkle branch before any work (M.10.6).
     if evidence.txid_merkle_branch.siblings.len() > BoundedMerkleBranchV1::MAX_DEPTH {
         return Err(EvidenceError::MerkleBranchTooDeep);

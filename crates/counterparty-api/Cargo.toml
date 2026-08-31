@@ -7,3 +7,13 @@ license.workspace = true
 publish = false  # D-ORQ-9: explicit, never inherited
 [dependencies]
 thiserror = { workspace = true }
+# Second edge, and deliberately noted: this crate is the leaf everything else
+# depends on, so an edge here is an edge in every downstream graph. It is here
+# because `RevealedSecretBytes` carries a secp256k1 scalar and had no scrubbing
+# at all — callers reached through the public field to zeroize the array
+# themselves. A hand-rolled `self.0 = [0; 32]` is not a substitute: this crate
+# is `#![forbid(unsafe_code)]`, so it could not stop the compiler eliding the
+# write, and it would carry the name of a guarantee it does not provide.
+# `zeroize` is already in the workspace and already in this crate's downstream
+# graph via `f3-harness`, so no new third-party code enters the build.
+zeroize = { workspace = true }

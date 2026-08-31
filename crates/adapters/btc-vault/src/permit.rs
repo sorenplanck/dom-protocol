@@ -1,7 +1,6 @@
 //! Reservation identity and the signing permit (Annex M M.6.2).
 
-use blake2::digest::{Update, VariableOutput};
-use blake2::Blake2bVar;
+use blake2::{digest::consts::U32, Blake2b, Digest};
 
 /// A durable reservation identifier (M.6.2). Derived deterministically
 /// from the permit so the same signing intent maps to the same
@@ -67,23 +66,20 @@ impl BitcoinNoncePermitV1 {
     /// every permit field (M.6.2).
     #[must_use]
     pub fn reservation_id(&self) -> BitcoinNonceReservationIdV1 {
-        let mut h = Blake2bVar::new(32).expect("BLAKE2b-256 output size is valid"); // I14-ALLOW: fixed 32-byte output is always valid
+        let mut h = Blake2b::<U32>::new();
         h.update(RESERVATION_DOMAIN);
-        h.update(&self.settlement_id);
-        h.update(&self.session_id);
-        h.update(&self.participant_id);
-        h.update(&[self.purpose as u8]);
-        h.update(&[self.phase as u8]);
-        h.update(&self.roster_hash);
-        h.update(&self.terms_hash);
-        h.update(&self.claim_template_hash);
-        h.update(&self.tap_sighash);
-        h.update(&self.adaptor_point);
-        h.update(&self.attempt.to_be_bytes());
-        let mut out = [0u8; 32];
-        h.finalize_variable(&mut out)
-            .expect("BLAKE2b-256 output size is valid"); // I14-ALLOW: fixed 32-byte output
-        BitcoinNonceReservationIdV1(out)
+        h.update(self.settlement_id);
+        h.update(self.session_id);
+        h.update(self.participant_id);
+        h.update([self.purpose as u8]);
+        h.update([self.phase as u8]);
+        h.update(self.roster_hash);
+        h.update(self.terms_hash);
+        h.update(self.claim_template_hash);
+        h.update(self.tap_sighash);
+        h.update(self.adaptor_point);
+        h.update(self.attempt.to_be_bytes());
+        BitcoinNonceReservationIdV1(h.finalize().into())
     }
 
     /// Digest of the whole permit, stored as the binding witness so a

@@ -1,0 +1,23 @@
+[package]
+name = "dom-final-claim-binding"
+description = "Canonical bilateral FinalClaim role and M.8 readiness bindings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+dom-adaptor = { path = "../dom-adaptor" }
+dom-crypto.workspace = true
+kaystra-core = { path = "../kaystra-core", default-features = false }
+thiserror.workspace = true
+
+[dev-dependencies]
+dom-core.workspace = true
+hex.workspace = true
+
+[lints]
+workspace = true

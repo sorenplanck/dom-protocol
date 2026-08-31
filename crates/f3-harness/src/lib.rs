@@ -159,7 +159,7 @@ pub fn submit_dom_claim(
     if authorisation.lock_id != dom.lock_id() {
         return adapter_dom_sim::SubmitResult::Rejected(adapter_dom_sim::RejectReason::UnknownLock);
     }
-    dom.submit_claim(revealed.0)
+    dom.submit_claim(revealed.expose_scalar_bytes())
 }
 
 #[cfg(test)]

@@ -21,6 +21,12 @@
 //! * invalid CRC or framing ⇒ [`VaultError::CorruptState`], with the readable
 //!   prefix still saying which reservation to burn.
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use dom_adaptor::{
+    audit_bound_nonce_secret_plaintext_v1, exposure_outbound_digest_v1, ExposureKindV1,
+    NonceSecretPlaintextAuditBindingV1, PurposeV1,
+};
 use zeroize::Zeroizing;
 
 use crate::framing::{FrameReader, FrameWriter};
@@ -32,6 +38,9 @@ const MAGIC_RESERVATION: &[u8; 8] = b"DOMVRSV1";
 const MAGIC_ARTIFACT: &[u8; 8] = b"DOMVARV1";
 /// Magic of the sealed record of the nonce pair.
 const MAGIC_SEALED: &[u8; 8] = b"DOMVSSV1";
+const PRODUCTION_AUDIT_MAX_ROWS: u64 = 100_000;
+const PRODUCTION_AUDIT_MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+const PRODUCTION_AUDIT_MAX_RECORD_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Semantic discriminants of the append-only journal.
 pub(crate) const JOURNAL_CLAIM: u16 = 0x0001;
@@ -288,6 +297,909 @@ impl ArtifactRecord {
         }
         Ok(record)
     }
+
+    fn validate_content(&self) -> Result<()> {
+        let kind = ExposureKindV1::try_from(self.kind).map_err(|_| VaultError::CorruptState)?;
+        let digest =
+            exposure_outbound_digest_v1(kind, &self.bytes).map_err(|_| VaultError::CorruptState)?;
+        let purpose = PurposeV1::try_from(self.purpose).map_err(|_| VaultError::CorruptState)?;
+        if digest.as_bytes() != &self.outbound_digest
+            || !purpose.is_strict_v1_authorized()
+            || [
+                self.permit_id,
+                self.reservation_id,
+                self.request_lookup,
+                self.session_id,
+                self.participant_id,
+                self.outbound_digest,
+                self.bound_digest,
+            ]
+            .contains(&[0; 32])
+            || self.nonce_epoch == 0
+        {
+            return Err(VaultError::CorruptState);
+        }
+        Ok(())
+    }
+}
+
+type ArtifactKeyV1 = ([u8; 32], u8);
+type ReservationHistoryV1 = BTreeMap<u64, ReservationRecord>;
+
+struct SemanticSnapshotV1 {
+    reservations: BTreeMap<[u8; 32], ReservationHistoryV1>,
+    request_lookups: BTreeMap<[u8; 32], [u8; 32]>,
+    custody: BTreeMap<[u8; 32], ([u8; 32], [u8; 32])>,
+    abandoned: BTreeMap<[u8; 32], ([u8; 32], [u8; 32])>,
+    session_tombstones: BTreeSet<[u8; 32]>,
+    sealed: BTreeSet<[u8; 32]>,
+    burned: BTreeSet<[u8; 32]>,
+    persisted: BTreeMap<ArtifactKeyV1, ArtifactRecord>,
+    authorized: BTreeMap<ArtifactKeyV1, ArtifactRecord>,
+    spent: BTreeMap<[u8; 32], ArtifactRecord>,
+    spent_index: BTreeMap<([u8; 32], u8), [u8; 32]>,
+    reservation_anchors: BTreeMap<[u8; 32], u64>,
+    key_budgets: BTreeMap<[u8; 32], u64>,
+    counterparty_budgets: BTreeMap<[u8; 32], u64>,
+    nonce_epoch: Option<u64>,
+    revision_journal: BTreeMap<([u8; 32], u64), u16>,
+    persisted_journal: BTreeSet<([u8; 32], u8, [u8; 32])>,
+    authorized_journal: BTreeSet<([u8; 32], u8, [u8; 32])>,
+    spent_journal: BTreeSet<[u8; 32]>,
+}
+
+impl SemanticSnapshotV1 {
+    fn new() -> Self {
+        Self {
+            reservations: BTreeMap::new(),
+            request_lookups: BTreeMap::new(),
+            custody: BTreeMap::new(),
+            abandoned: BTreeMap::new(),
+            session_tombstones: BTreeSet::new(),
+            sealed: BTreeSet::new(),
+            burned: BTreeSet::new(),
+            persisted: BTreeMap::new(),
+            authorized: BTreeMap::new(),
+            spent: BTreeMap::new(),
+            spent_index: BTreeMap::new(),
+            reservation_anchors: BTreeMap::new(),
+            key_budgets: BTreeMap::new(),
+            counterparty_budgets: BTreeMap::new(),
+            nonce_epoch: None,
+            revision_journal: BTreeMap::new(),
+            persisted_journal: BTreeSet::new(),
+            authorized_journal: BTreeSet::new(),
+            spent_journal: BTreeSet::new(),
+        }
+    }
+}
+
+fn audit_semantic_snapshot(
+    snapshot: &store::ProductionAuditSnapshotV1,
+    limits: VaultLimits,
+) -> Result<()> {
+    let mut semantic = SemanticSnapshotV1::new();
+    parse_opaque_records(snapshot, &mut semantic)?;
+    parse_revision_records(snapshot, &mut semantic)?;
+    validate_reservation_histories(&semantic)?;
+    parse_journal_records(snapshot, &mut semantic)?;
+    validate_semantic_cross_links(snapshot, &semantic, limits)
+}
+
+fn parse_opaque_records(
+    snapshot: &store::ProductionAuditSnapshotV1,
+    semantic: &mut SemanticSnapshotV1,
+) -> Result<()> {
+    for row in snapshot.opaque_records() {
+        let namespace = row.namespace();
+        let key = row.key();
+        let value = row.value();
+        if namespace == namespace::RESERVATION {
+            let (reservation_id, revision) = parse_record_key(key)?;
+            let record = ReservationRecord::decode(value, &reservation_id)?;
+            validate_reservation_record(&record)?;
+            if record.revision != revision
+                || semantic
+                    .reservations
+                    .entry(reservation_id)
+                    .or_default()
+                    .insert(revision, record)
+                    .is_some()
+            {
+                return Err(VaultError::CorruptState);
+            }
+        } else if namespace == namespace::REQUEST_LOOKUP {
+            let lookup = exact_nonzero_digest(key)?;
+            let reservation_id = exact_nonzero_digest(value)?;
+            if semantic
+                .request_lookups
+                .insert(lookup, reservation_id)
+                .is_some()
+            {
+                return Err(VaultError::CorruptState);
+            }
+        } else if namespace == namespace::LOOKUP_CUSTODY || namespace == namespace::LOOKUP_ABANDONED
+        {
+            let lookup = exact_nonzero_digest(key)?;
+            let (session, digest) = crate::custody::decode_record(value)?;
+            let target = if namespace == namespace::LOOKUP_CUSTODY {
+                &mut semantic.custody
+            } else {
+                &mut semantic.abandoned
+            };
+            if target
+                .insert(lookup, (*session.as_bytes(), digest))
+                .is_some()
+            {
+                return Err(VaultError::CorruptState);
+            }
+        } else if namespace == namespace::SESSION_TOMBSTONE {
+            let session_id = exact_nonzero_digest(key)?;
+            if value != [1] || !semantic.session_tombstones.insert(session_id) {
+                return Err(VaultError::CorruptState);
+            }
+        } else if namespace == namespace::SEALED_SECRET {
+            let reservation_id = exact_nonzero_digest(key)?;
+            if !semantic.sealed.insert(reservation_id) {
+                return Err(VaultError::CorruptState);
+            }
+        } else if namespace == namespace::BURN_MARKER {
+            let reservation_id = exact_nonzero_digest(key)?;
+            if value != [1] || !semantic.burned.insert(reservation_id) {
+                return Err(VaultError::CorruptState);
+            }
+        } else if namespace == namespace::PERSISTED_ARTIFACT
+            || namespace == namespace::AUTHORIZED_ARTIFACT
+        {
+            let (reservation_id, kind) = parse_artifact_key(key)?;
+            let record = ArtifactRecord::decode(value, &reservation_id)?;
+            record.validate_content()?;
+            if record.kind != kind {
+                return Err(VaultError::CorruptState);
+            }
+            let target = if namespace == namespace::PERSISTED_ARTIFACT {
+                &mut semantic.persisted
+            } else {
+                &mut semantic.authorized
+            };
+            if target.insert((reservation_id, kind), record).is_some() {
+                return Err(VaultError::CorruptState);
+            }
+        } else if namespace == namespace::SPENT_ARTIFACT {
+            let permit_id = exact_nonzero_digest(key)?;
+            let reservation_id =
+                FrameReader::readable_prefix(value).ok_or(VaultError::CorruptState)?;
+            let record = ArtifactRecord::decode(value, &reservation_id)?;
+            record.validate_content()?;
+            if record.permit_id != permit_id || semantic.spent.insert(permit_id, record).is_some() {
+                return Err(VaultError::CorruptState);
+            }
+        } else if namespace == namespace::SPENT_INDEX {
+            let (lookup, kind) = parse_artifact_key(key)?;
+            let permit_id = exact_nonzero_digest(value)?;
+            if semantic
+                .spent_index
+                .insert((lookup, kind), permit_id)
+                .is_some()
+            {
+                return Err(VaultError::CorruptState);
+            }
+        } else {
+            return Err(VaultError::CorruptState);
+        }
+    }
+    Ok(())
+}
+
+fn parse_revision_records(
+    snapshot: &store::ProductionAuditSnapshotV1,
+    semantic: &mut SemanticSnapshotV1,
+) -> Result<()> {
+    for row in snapshot.revisions() {
+        let entity = row.entity();
+        if entity.len() != 33 || row.revision() == 0 {
+            return Err(VaultError::CorruptState);
+        }
+        let key = exact_digest(&entity[1..])?;
+        let replaced = match entity[0] {
+            b'r' if key != [0; 32] => semantic
+                .reservation_anchors
+                .insert(key, row.revision())
+                .is_some(),
+            b'k' if key != [0; 32] => semantic.key_budgets.insert(key, row.revision()).is_some(),
+            b'c' if key != [0; 32] => semantic
+                .counterparty_budgets
+                .insert(key, row.revision())
+                .is_some(),
+            b'e' if key == [0; 32] => semantic.nonce_epoch.replace(row.revision()).is_some(),
+            _ => return Err(VaultError::CorruptState),
+        };
+        if replaced {
+            return Err(VaultError::CorruptState);
+        }
+    }
+    Ok(())
+}
+
+fn parse_journal_records(
+    snapshot: &store::ProductionAuditSnapshotV1,
+    semantic: &mut SemanticSnapshotV1,
+) -> Result<()> {
+    for row in snapshot.journal() {
+        let kind = row.kind();
+        let payload = row.payload();
+        match kind {
+            JOURNAL_CLAIM
+            | JOURNAL_DERIVATION_ATTEMPT
+            | JOURNAL_SEAL
+            | JOURNAL_OPEN
+            | JOURNAL_STAGE_ATTEMPT
+            | JOURNAL_TERMINAL => {
+                insert_revision_journal(semantic, kind, payload)?;
+            }
+            JOURNAL_PERSIST | JOURNAL_AUTHORIZE => {
+                if payload.len() == 40 {
+                    insert_revision_journal(semantic, kind, payload)?;
+                } else {
+                    let reservation_id =
+                        FrameReader::readable_prefix(payload).ok_or(VaultError::CorruptState)?;
+                    let artifact = ArtifactRecord::decode(payload, &reservation_id)?;
+                    artifact.validate_content()?;
+                    let retained = if kind == JOURNAL_PERSIST {
+                        semantic.persisted.get(&(reservation_id, artifact.kind))
+                    } else {
+                        semantic.authorized.get(&(reservation_id, artifact.kind))
+                    }
+                    .ok_or(VaultError::CorruptState)?;
+                    if retained != &artifact {
+                        return Err(VaultError::CorruptState);
+                    }
+                    let audit_key = (reservation_id, artifact.kind, artifact.permit_id);
+                    let inserted = if kind == JOURNAL_PERSIST {
+                        semantic.persisted_journal.insert(audit_key)
+                    } else {
+                        semantic.authorized_journal.insert(audit_key)
+                    };
+                    if !inserted {
+                        return Err(VaultError::CorruptState);
+                    }
+                }
+            }
+            JOURNAL_SPEND => {
+                if payload.len() == 40 {
+                    insert_revision_journal(semantic, kind, payload)?;
+                } else {
+                    let permit_id = exact_nonzero_digest(payload)?;
+                    if !semantic.spent.contains_key(&permit_id) {
+                        return Err(VaultError::CorruptState);
+                    }
+                    if !semantic.spent_journal.insert(permit_id) {
+                        return Err(VaultError::CorruptState);
+                    }
+                }
+            }
+            _ => return Err(VaultError::CorruptState),
+        }
+    }
+    Ok(())
+}
+
+fn insert_revision_journal(
+    semantic: &mut SemanticSnapshotV1,
+    kind: u16,
+    payload: &[u8],
+) -> Result<()> {
+    let (reservation_id, revision) = parse_record_key(payload)?;
+    if !semantic
+        .reservations
+        .get(&reservation_id)
+        .is_some_and(|history| history.contains_key(&revision))
+        || semantic
+            .revision_journal
+            .insert((reservation_id, revision), kind)
+            .is_some()
+    {
+        return Err(VaultError::CorruptState);
+    }
+    Ok(())
+}
+
+fn exact_digest(bytes: &[u8]) -> Result<[u8; 32]> {
+    bytes.try_into().map_err(|_| VaultError::CorruptState)
+}
+
+fn exact_nonzero_digest(bytes: &[u8]) -> Result<[u8; 32]> {
+    let digest = exact_digest(bytes)?;
+    if digest == [0; 32] {
+        return Err(VaultError::CorruptState);
+    }
+    Ok(digest)
+}
+
+fn parse_record_key(bytes: &[u8]) -> Result<([u8; 32], u64)> {
+    if bytes.len() != 40 {
+        return Err(VaultError::CorruptState);
+    }
+    let reservation_id = exact_nonzero_digest(&bytes[..32])?;
+    let revision = u64::from_le_bytes(
+        bytes[32..]
+            .try_into()
+            .map_err(|_| VaultError::CorruptState)?,
+    );
+    if revision == 0 {
+        return Err(VaultError::CorruptState);
+    }
+    Ok((reservation_id, revision))
+}
+
+fn parse_artifact_key(bytes: &[u8]) -> Result<([u8; 32], u8)> {
+    if bytes.len() != 33 {
+        return Err(VaultError::CorruptState);
+    }
+    let digest = exact_nonzero_digest(&bytes[..32])?;
+    let kind = bytes[32];
+    ExposureKindV1::try_from(kind).map_err(|_| VaultError::CorruptState)?;
+    Ok((digest, kind))
+}
+
+fn validate_reservation_record(record: &ReservationRecord) -> Result<()> {
+    let purpose =
+        PurposeV1::try_from(record.identity.purpose).map_err(|_| VaultError::CorruptState)?;
+    if !purpose.is_strict_v1_authorized()
+        || [
+            record.identity.reservation_id,
+            record.identity.request_lookup,
+            record.identity.session_id,
+            record.identity.participant_id,
+            record.identity.template_hash,
+            record.identity.key_id,
+            record.identity.counterparty,
+            record.identity.context_binding_digest,
+        ]
+        .contains(&[0; 32])
+        || record.identity.nonce_epoch == 0
+        || record.revision == 0
+        || record.retry_counter.is_some() != record.attempt_digest.is_some()
+        || record.attempt_digest == Some([0; 32])
+        || record.stage_digest == Some([0; 32])
+        || (record.stage_digest.is_some() && record.attempt_digest.is_none())
+        || (record.sealed && record.attempt_digest.is_none())
+    {
+        return Err(VaultError::CorruptState);
+    }
+    validate_record_state_shape(record)
+}
+
+fn validate_record_state_shape(record: &ReservationRecord) -> Result<()> {
+    for spent in [
+        record.spent_commitment.as_ref(),
+        record.spent_reveal.as_ref(),
+        record.spent_partial.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if spent.permit_id == [0; 32] || spent.outbound_digest == [0; 32] {
+            return Err(VaultError::CorruptState);
+        }
+    }
+    let valid = match record.state {
+        StateCode::Reserved => {
+            record.spent_commitment.is_none()
+                && record.spent_reveal.is_none()
+                && record.spent_partial.is_none()
+        }
+        StateCode::CommitmentAuthorized => {
+            record.sealed
+                && record.spent_commitment.is_some()
+                && record.spent_reveal.is_none()
+                && record.spent_partial.is_none()
+        }
+        StateCode::RevealAuthorized => {
+            record.sealed
+                && record.spent_commitment.is_some()
+                && record.spent_reveal.is_some()
+                && record.spent_partial.is_none()
+        }
+        StateCode::ConsumedPartialAuthorized => {
+            record.sealed
+                && record.spent_commitment.is_some()
+                && record.spent_reveal.is_some()
+                && record.spent_partial.is_some()
+        }
+        StateCode::AbortedBeforePublicMaterial => {
+            !record.sealed
+                && record.retry_counter.is_none()
+                && record.attempt_digest.is_none()
+                && record.stage_digest.is_none()
+                && record.spent_commitment.is_none()
+                && record.spent_reveal.is_none()
+                && record.spent_partial.is_none()
+        }
+        StateCode::ConsumedOnAbort => {
+            record.spent_partial.is_none()
+                && (record.attempt_digest.is_some()
+                    || record.sealed
+                    || record.spent_commitment.is_some()
+                    || record.spent_reveal.is_some())
+        }
+        StateCode::Burned => false,
+    };
+    if !valid {
+        return Err(VaultError::CorruptState);
+    }
+    Ok(())
+}
+
+fn validate_reservation_histories(semantic: &SemanticSnapshotV1) -> Result<()> {
+    if semantic.reservations.len() != semantic.reservation_anchors.len() {
+        return Err(VaultError::CorruptState);
+    }
+    for (reservation_id, history) in &semantic.reservations {
+        let anchor = semantic
+            .reservation_anchors
+            .get(reservation_id)
+            .copied()
+            .ok_or(VaultError::CorruptState)?;
+        if usize::try_from(anchor).map_err(|_| VaultError::CorruptState)? != history.len() {
+            return Err(VaultError::RollbackDetected);
+        }
+        let first = history.get(&1).ok_or(VaultError::CorruptState)?;
+        if first.identity.reservation_id != *reservation_id
+            || first.revision != 1
+            || first.state != StateCode::Reserved
+            || first.retry_counter.is_some()
+            || first.attempt_digest.is_some()
+            || first.stage_digest.is_some()
+            || first.sealed
+            || first.spent_commitment.is_some()
+            || first.spent_reveal.is_some()
+            || first.spent_partial.is_some()
+        {
+            return Err(VaultError::CorruptState);
+        }
+        let mut prior = first;
+        for revision in 2..=anchor {
+            let current = history.get(&revision).ok_or(VaultError::RollbackDetected)?;
+            validate_reservation_transition(prior, current)?;
+            prior = current;
+        }
+    }
+    Ok(())
+}
+
+fn validate_reservation_transition(
+    prior: &ReservationRecord,
+    current: &ReservationRecord,
+) -> Result<()> {
+    if prior.state.is_terminal()
+        || prior.identity != current.identity
+        || current.revision != prior.revision + 1
+        || !option_is_monotonic(prior.retry_counter, current.retry_counter)
+        || !option_is_monotonic(prior.attempt_digest, current.attempt_digest)
+        || (prior.sealed && !current.sealed)
+        || !option_is_monotonic(
+            prior.spent_commitment.as_ref(),
+            current.spent_commitment.as_ref(),
+        )
+        || !option_is_monotonic(prior.spent_reveal.as_ref(), current.spent_reveal.as_ref())
+        || !option_is_monotonic(prior.spent_partial.as_ref(), current.spent_partial.as_ref())
+    {
+        return Err(VaultError::CorruptState);
+    }
+    if prior.stage_digest != current.stage_digest {
+        let valid_stage_change = match (prior.stage_digest, current.stage_digest) {
+            (None, Some(_)) => matches!(
+                prior.state,
+                StateCode::CommitmentAuthorized | StateCode::RevealAuthorized
+            ),
+            (Some(_), Some(_)) => prior.state == StateCode::RevealAuthorized,
+            _ => false,
+        };
+        if !valid_stage_change {
+            return Err(VaultError::CorruptState);
+        }
+    }
+    let valid_state = if current.state == prior.state {
+        true
+    } else {
+        matches!(
+            (prior.state, current.state),
+            (StateCode::Reserved, StateCode::CommitmentAuthorized)
+                | (StateCode::CommitmentAuthorized, StateCode::RevealAuthorized)
+                | (
+                    StateCode::RevealAuthorized,
+                    StateCode::ConsumedPartialAuthorized
+                )
+                | (_, StateCode::AbortedBeforePublicMaterial)
+                | (_, StateCode::ConsumedOnAbort)
+        )
+    };
+    if !valid_state {
+        return Err(VaultError::CorruptState);
+    }
+    validate_reservation_record(current)
+}
+
+fn option_is_monotonic<T: PartialEq>(prior: Option<T>, current: Option<T>) -> bool {
+    match (prior, current) {
+        (None, _) => true,
+        (Some(left), Some(right)) => left == right,
+        (Some(_), None) => false,
+    }
+}
+
+fn validate_semantic_cross_links(
+    snapshot: &store::ProductionAuditSnapshotV1,
+    semantic: &SemanticSnapshotV1,
+    _limits: VaultLimits,
+) -> Result<()> {
+    let mut seen_sessions = BTreeSet::new();
+    let mut seen_epochs = BTreeSet::new();
+    let mut key_counts: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+    let mut counterparty_counts: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+    let mut maximum_epoch = 0_u64;
+
+    if semantic.request_lookups.len() != semantic.reservations.len() {
+        return Err(VaultError::CorruptState);
+    }
+    for (reservation_id, history) in &semantic.reservations {
+        let current = history
+            .last_key_value()
+            .map(|(_, record)| record)
+            .ok_or(VaultError::CorruptState)?;
+        if semantic
+            .request_lookups
+            .get(&current.identity.request_lookup)
+            != Some(reservation_id)
+            || semantic
+                .custody
+                .get(&current.identity.request_lookup)
+                .is_some_and(|custody| {
+                    custody
+                        != &(
+                            current.identity.session_id,
+                            current.identity.context_binding_digest,
+                        )
+                })
+            || semantic
+                .abandoned
+                .contains_key(&current.identity.request_lookup)
+            || !semantic
+                .session_tombstones
+                .contains(&current.identity.session_id)
+            || !seen_sessions.insert(current.identity.session_id)
+            || !seen_epochs.insert(current.identity.nonce_epoch)
+            || semantic.sealed.contains(reservation_id) != current.sealed
+            || semantic.burned.contains(reservation_id) != current.state.is_terminal()
+        {
+            return Err(VaultError::CorruptState);
+        }
+        maximum_epoch = maximum_epoch.max(current.identity.nonce_epoch);
+        increment_count(&mut key_counts, current.identity.key_id)?;
+        increment_count(&mut counterparty_counts, current.identity.counterparty)?;
+        validate_revision_journal(history, semantic)?;
+    }
+    if !semantic.reservations.is_empty()
+        && semantic
+            .nonce_epoch
+            .map_or(true, |epoch| epoch < maximum_epoch)
+    {
+        return Err(VaultError::RollbackDetected);
+    }
+    for (key, count) in key_counts {
+        if semantic.key_budgets.get(&key).copied().unwrap_or(0) < count {
+            return Err(VaultError::RollbackDetected);
+        }
+    }
+    for (counterparty, count) in counterparty_counts {
+        if semantic
+            .counterparty_budgets
+            .get(&counterparty)
+            .copied()
+            .unwrap_or(0)
+            < count
+        {
+            return Err(VaultError::RollbackDetected);
+        }
+    }
+    for (lookup, abandoned) in &semantic.abandoned {
+        if semantic.custody.get(lookup) != Some(abandoned)
+            || semantic.request_lookups.contains_key(lookup)
+        {
+            return Err(VaultError::CorruptState);
+        }
+    }
+    audit_sealed_rows(snapshot, semantic)?;
+    validate_artifact_cross_links(semantic)
+}
+
+fn increment_count(counts: &mut BTreeMap<[u8; 32], u64>, key: [u8; 32]) -> Result<()> {
+    let current = counts.get(&key).copied().unwrap_or(0);
+    counts.insert(
+        key,
+        current.checked_add(1).ok_or(VaultError::CounterOverflow)?,
+    );
+    Ok(())
+}
+
+fn validate_revision_journal(
+    history: &ReservationHistoryV1,
+    semantic: &SemanticSnapshotV1,
+) -> Result<()> {
+    let first = history.get(&1).ok_or(VaultError::CorruptState)?;
+    if semantic
+        .revision_journal
+        .get(&(first.identity.reservation_id, 1))
+        != Some(&JOURNAL_CLAIM)
+    {
+        return Err(VaultError::CorruptState);
+    }
+    let anchor = u64::try_from(history.len()).map_err(|_| VaultError::CounterOverflow)?;
+    for revision in 2..=anchor {
+        let prior = history
+            .get(&(revision - 1))
+            .ok_or(VaultError::CorruptState)?;
+        let current = history.get(&revision).ok_or(VaultError::CorruptState)?;
+        let kind = semantic
+            .revision_journal
+            .get(&(current.identity.reservation_id, revision))
+            .copied()
+            .ok_or(VaultError::CorruptState)?;
+        validate_revision_kind(prior, current, kind)?;
+    }
+    Ok(())
+}
+
+fn validate_revision_kind(
+    prior: &ReservationRecord,
+    current: &ReservationRecord,
+    kind: u16,
+) -> Result<()> {
+    let attempt_changed = prior.retry_counter != current.retry_counter
+        || prior.attempt_digest != current.attempt_digest;
+    let sealed_changed = prior.sealed != current.sealed;
+    let stage_changed = prior.stage_digest != current.stage_digest;
+    let commitment_changed = prior.spent_commitment != current.spent_commitment;
+    let reveal_changed = prior.spent_reveal != current.spent_reveal;
+    let partial_changed = prior.spent_partial != current.spent_partial;
+    let state_changed = prior.state != current.state;
+    let spent_changed = commitment_changed || reveal_changed || partial_changed;
+    let expected = if spent_changed {
+        if !(state_changed
+            && usize::from(commitment_changed)
+                + usize::from(reveal_changed)
+                + usize::from(partial_changed)
+                == 1)
+        {
+            return Err(VaultError::CorruptState);
+        }
+        JOURNAL_SPEND
+    } else if state_changed {
+        if !current.state.is_terminal() {
+            return Err(VaultError::CorruptState);
+        }
+        JOURNAL_TERMINAL
+    } else if attempt_changed {
+        JOURNAL_DERIVATION_ATTEMPT
+    } else if sealed_changed {
+        JOURNAL_SEAL
+    } else if stage_changed {
+        JOURNAL_STAGE_ATTEMPT
+    } else {
+        if !matches!(kind, JOURNAL_OPEN | JOURNAL_PERSIST | JOURNAL_AUTHORIZE) {
+            return Err(VaultError::CorruptState);
+        }
+        return Ok(());
+    };
+    let change_count = usize::from(attempt_changed)
+        + usize::from(sealed_changed)
+        + usize::from(stage_changed)
+        + usize::from(spent_changed)
+        + usize::from(state_changed && !spent_changed);
+    if kind != expected || change_count != 1 {
+        return Err(VaultError::CorruptState);
+    }
+    Ok(())
+}
+
+fn audit_sealed_rows(
+    snapshot: &store::ProductionAuditSnapshotV1,
+    semantic: &SemanticSnapshotV1,
+) -> Result<()> {
+    for row in snapshot
+        .opaque_records()
+        .iter()
+        .filter(|row| row.namespace() == namespace::SEALED_SECRET)
+    {
+        let reservation_id = exact_nonzero_digest(row.key())?;
+        let current = semantic
+            .reservations
+            .get(&reservation_id)
+            .and_then(BTreeMap::last_key_value)
+            .map(|(_, record)| record)
+            .ok_or(VaultError::CorruptState)?;
+        let retry_counter = current.retry_counter.ok_or(VaultError::CorruptState)?;
+        let purpose =
+            PurposeV1::try_from(current.identity.purpose).map_err(|_| VaultError::CorruptState)?;
+        let expected = NonceSecretPlaintextAuditBindingV1::new(
+            reservation_id,
+            current.identity.participant_id,
+            current.identity.key_id,
+            current.identity.session_id,
+            purpose,
+            current.identity.template_hash,
+            retry_counter,
+        )
+        .map_err(|_| VaultError::CorruptState)?;
+        let mut reader = FrameReader::open(row.value(), MAGIC_SEALED, &reservation_id)?;
+        let plaintext = Zeroizing::new(reader.blob()?);
+        reader.finish()?;
+        audit_bound_nonce_secret_plaintext_v1(plaintext, &expected)
+            .map_err(|_| VaultError::CorruptState)?;
+    }
+    Ok(())
+}
+
+fn validate_artifact_cross_links(semantic: &SemanticSnapshotV1) -> Result<()> {
+    let mut permit_ids = BTreeSet::new();
+    let mut persisted_counts: BTreeMap<[u8; 32], usize> = BTreeMap::new();
+    let mut authorized_counts: BTreeMap<[u8; 32], usize> = BTreeMap::new();
+    for ((reservation_id, kind), artifact) in &semantic.persisted {
+        let current = current_reservation(semantic, reservation_id)?;
+        validate_artifact_identity(current, artifact)?;
+        validate_artifact_stage(current, *kind)?;
+        if !permit_ids.insert(artifact.permit_id)
+            || !semantic
+                .persisted_journal
+                .contains(&(*reservation_id, *kind, artifact.permit_id))
+        {
+            return Err(VaultError::CorruptState);
+        }
+        increment_usize(&mut persisted_counts, *reservation_id)?;
+    }
+    for ((reservation_id, kind), artifact) in &semantic.authorized {
+        if semantic.persisted.get(&(*reservation_id, *kind)) != Some(artifact)
+            || !semantic
+                .authorized_journal
+                .contains(&(*reservation_id, *kind, artifact.permit_id))
+        {
+            return Err(VaultError::CorruptState);
+        }
+        increment_usize(&mut authorized_counts, *reservation_id)?;
+    }
+    for (permit_id, artifact) in &semantic.spent {
+        let key = (artifact.reservation_id, artifact.kind);
+        let current = current_reservation(semantic, &artifact.reservation_id)?;
+        let spent_ref = current
+            .spent(artifact.kind)
+            .ok_or(VaultError::CorruptState)?;
+        if semantic.persisted.get(&key) != Some(artifact)
+            || semantic.authorized.get(&key) != Some(artifact)
+            || spent_ref.permit_id != *permit_id
+            || spent_ref.outbound_digest != artifact.outbound_digest
+            || semantic
+                .spent_index
+                .get(&(artifact.request_lookup, artifact.kind))
+                != Some(permit_id)
+            || !semantic.spent_journal.contains(permit_id)
+        {
+            return Err(VaultError::CorruptState);
+        }
+    }
+    for ((lookup, kind), permit_id) in &semantic.spent_index {
+        let artifact = semantic
+            .spent
+            .get(permit_id)
+            .ok_or(VaultError::CorruptState)?;
+        if artifact.request_lookup != *lookup || artifact.kind != *kind {
+            return Err(VaultError::CorruptState);
+        }
+    }
+    for (reservation_id, history) in &semantic.reservations {
+        let current = history
+            .last_key_value()
+            .map(|(_, record)| record)
+            .ok_or(VaultError::CorruptState)?;
+        for (kind, reference) in [
+            (1_u8, current.spent_commitment.as_ref()),
+            (2_u8, current.spent_reveal.as_ref()),
+            (3_u8, current.spent_partial.as_ref()),
+        ] {
+            if let Some(reference) = reference {
+                let artifact = semantic
+                    .spent
+                    .get(&reference.permit_id)
+                    .ok_or(VaultError::CorruptState)?;
+                if artifact.reservation_id != *reservation_id
+                    || artifact.kind != kind
+                    || artifact.outbound_digest != reference.outbound_digest
+                {
+                    return Err(VaultError::CorruptState);
+                }
+            }
+        }
+        let persisted_revisions = semantic
+            .revision_journal
+            .iter()
+            .filter(|((id, _), kind)| id == reservation_id && **kind == JOURNAL_PERSIST)
+            .count();
+        let authorized_revisions = semantic
+            .revision_journal
+            .iter()
+            .filter(|((id, _), kind)| id == reservation_id && **kind == JOURNAL_AUTHORIZE)
+            .count();
+        let spent_revisions = semantic
+            .revision_journal
+            .iter()
+            .filter(|((id, _), kind)| id == reservation_id && **kind == JOURNAL_SPEND)
+            .count();
+        if persisted_revisions != persisted_counts.get(reservation_id).copied().unwrap_or(0)
+            || authorized_revisions != authorized_counts.get(reservation_id).copied().unwrap_or(0)
+            || spent_revisions
+                != [
+                    current.spent_commitment.as_ref(),
+                    current.spent_reveal.as_ref(),
+                    current.spent_partial.as_ref(),
+                ]
+                .into_iter()
+                .flatten()
+                .count()
+        {
+            return Err(VaultError::CorruptState);
+        }
+    }
+    Ok(())
+}
+
+fn current_reservation<'a>(
+    semantic: &'a SemanticSnapshotV1,
+    reservation_id: &[u8; 32],
+) -> Result<&'a ReservationRecord> {
+    semantic
+        .reservations
+        .get(reservation_id)
+        .and_then(BTreeMap::last_key_value)
+        .map(|(_, record)| record)
+        .ok_or(VaultError::CorruptState)
+}
+
+fn validate_artifact_identity(
+    reservation: &ReservationRecord,
+    artifact: &ArtifactRecord,
+) -> Result<()> {
+    if artifact.reservation_id != reservation.identity.reservation_id
+        || artifact.request_lookup != reservation.identity.request_lookup
+        || artifact.session_id != reservation.identity.session_id
+        || artifact.participant_id != reservation.identity.participant_id
+        || artifact.purpose != reservation.identity.purpose
+        || artifact.bound_digest != reservation.identity.context_binding_digest
+        || artifact.nonce_epoch != reservation.identity.nonce_epoch
+    {
+        return Err(VaultError::CorruptState);
+    }
+    Ok(())
+}
+
+fn validate_artifact_stage(reservation: &ReservationRecord, kind: u8) -> Result<()> {
+    let valid = match ExposureKindV1::try_from(kind).map_err(|_| VaultError::CorruptState)? {
+        ExposureKindV1::NonceCommitment => reservation.sealed,
+        ExposureKindV1::NonceReveal => reservation.spent_commitment.is_some(),
+        ExposureKindV1::PartialSignature => reservation.spent_reveal.is_some(),
+    };
+    if !valid {
+        return Err(VaultError::CorruptState);
+    }
+    Ok(())
+}
+
+fn increment_usize(counts: &mut BTreeMap<[u8; 32], usize>, key: [u8; 32]) -> Result<()> {
+    let current = counts.get(&key).copied().unwrap_or(0);
+    counts.insert(
+        key,
+        current.checked_add(1).ok_or(VaultError::CounterOverflow)?,
+    );
+    Ok(())
 }
 
 /// Durable caps per signing key and per counterparty.
@@ -324,6 +1236,7 @@ pub struct DurableVaultCore {
     store: store::Store,
     limits: VaultLimits,
     quarantined: bool,
+    production_audit: bool,
 }
 
 impl core::fmt::Debug for DurableVaultCore {
@@ -367,6 +1280,7 @@ impl DurableVaultCore {
             store,
             limits: VaultLimits::default(),
             quarantined: false,
+            production_audit: false,
         }
     }
 
@@ -376,7 +1290,39 @@ impl DurableVaultCore {
             store,
             limits,
             quarantined: false,
+            production_audit: false,
         }
+    }
+
+    /// Opens a strict production core only after a complete bounded semantic audit.
+    pub fn open_production(store: store::Store, limits: VaultLimits) -> Result<Self> {
+        let mut core = Self {
+            store,
+            limits,
+            quarantined: false,
+            production_audit: true,
+        };
+        core.audit_production_state()?;
+        Ok(core)
+    }
+
+    /// Re-audit every retained production row before a public authority boundary.
+    pub(crate) fn audit_if_production(&mut self) -> Result<()> {
+        if self.production_audit {
+            self.audit_production_state()?;
+        }
+        Ok(())
+    }
+
+    fn audit_production_state(&mut self) -> Result<()> {
+        let limits = store::ProductionAuditLimitsV1::new(
+            PRODUCTION_AUDIT_MAX_ROWS,
+            PRODUCTION_AUDIT_MAX_TOTAL_BYTES,
+            PRODUCTION_AUDIT_MAX_RECORD_BYTES,
+        )?;
+        let snapshot = self.store.production_audit_snapshot(limits)?;
+        let outcome = audit_semantic_snapshot(&snapshot, self.limits);
+        self.guard(outcome)
     }
 
     /// Reports whether adaptor operations are blocked pending reconciliation.
@@ -766,6 +1712,36 @@ impl DurableVaultCore {
 mod tests {
     use super::*;
 
+    fn production_store(seed: u8) -> (tempfile::TempDir, store::Store) {
+        let dir = tempfile::tempdir().expect("production tempdir");
+        let binding =
+            store::ProductionStoreBindingV1::new([seed; 32]).expect("nonzero production binding");
+        let store = store::Store::create_production(&dir.path().join("vault.db"), binding)
+            .expect("strict production store");
+        (dir, store)
+    }
+
+    fn complete_reserved_production_store(seed: u8) -> (tempfile::TempDir, store::Store) {
+        let (dir, store) = production_store(seed);
+        let mut core = DurableVaultCore::new(store);
+        let identity = identity(1);
+        core.claim_session_id(&identity.session_id)
+            .expect("session tombstone");
+        core.charge_budgets(&identity.key_id, &identity.counterparty)
+            .expect("budget counters");
+        assert_eq!(core.next_nonce_epoch().expect("nonce epoch"), 1);
+        core.insert_reservation(identity)
+            .expect("complete reservation");
+        (dir, core.store)
+    }
+
+    fn assert_production_semantic_rejection(store: store::Store) {
+        assert!(matches!(
+            DurableVaultCore::open_production(store, VaultLimits::default()),
+            Err(VaultError::CorruptState | VaultError::RollbackDetected)
+        ));
+    }
+
     fn core() -> (tempfile::TempDir, DurableVaultCore) {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = store::Store::open(&dir.path().join("vault.db")).expect("open");
@@ -807,6 +1783,149 @@ mod tests {
         let encoded = record.encode().expect("encode");
         let decoded = ReservationRecord::decode(&encoded, &[1; 32]).expect("decode");
         assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn production_audit_accepts_only_empty_or_complete_semantic_state() {
+        let (_empty_dir, empty) = production_store(0xa1);
+        assert!(DurableVaultCore::open_production(empty, VaultLimits::default()).is_ok());
+
+        let (_reserved_dir, reserved) = complete_reserved_production_store(0xa2);
+        assert!(DurableVaultCore::open_production(reserved, VaultLimits::default()).is_ok());
+    }
+
+    #[test]
+    fn production_audit_rejects_unknown_namespace_revision_and_journal_registries() {
+        let (_namespace_dir, mut namespace_store) = production_store(0xb1);
+        namespace_store
+            .put_opaque(b"foreign/namespace", &[1], &[2])
+            .expect("plant unknown namespace");
+        assert_production_semantic_rejection(namespace_store);
+
+        let (_revision_dir, mut revision_store) = production_store(0xb2);
+        revision_store
+            .compare_and_swap_revision(b"foreign-revision", 0)
+            .expect("plant unknown revision");
+        assert_production_semantic_rejection(revision_store);
+
+        let (_journal_dir, mut journal_store) = production_store(0xb3);
+        journal_store
+            .append_journal(u16::MAX, b"foreign-journal")
+            .expect("plant unknown journal kind");
+        assert_production_semantic_rejection(journal_store);
+    }
+
+    #[test]
+    fn production_audit_rejects_malformed_rows_and_orphan_indices() {
+        let (_record_dir, mut record_store) = production_store(0xc1);
+        record_store
+            .put_opaque(
+                namespace::RESERVATION,
+                &record_key(&[1; 32], 1),
+                b"not-a-framed-reservation",
+            )
+            .expect("plant malformed reservation");
+        assert_production_semantic_rejection(record_store);
+
+        let (_lookup_dir, mut lookup_store) = production_store(0xc2);
+        lookup_store
+            .put_opaque(namespace::REQUEST_LOOKUP, &[1; 32], &[2; 32])
+            .expect("plant orphan lookup");
+        assert_production_semantic_rejection(lookup_store);
+
+        let (_sealed_dir, mut sealed_store) = complete_reserved_production_store(0xc3);
+        sealed_store
+            .put_opaque(namespace::SEALED_SECRET, &[1; 32], b"foreign-sealed-row")
+            .expect("plant incoherent sealed row");
+        assert_production_semantic_rejection(sealed_store);
+
+        let (_artifact_dir, mut artifact_store) = complete_reserved_production_store(0xc4);
+        let artifact = artifact(2);
+        artifact_store
+            .put_opaque(
+                namespace::PERSISTED_ARTIFACT,
+                &artifact_key(&artifact.reservation_id, artifact.kind),
+                &artifact.encode().expect("artifact frame"),
+            )
+            .expect("plant incoherent artifact");
+        assert_production_semantic_rejection(artifact_store);
+
+        let (_spent_dir, mut spent_store) = complete_reserved_production_store(0xc5);
+        let spent = artifact(3);
+        spent_store
+            .put_opaque(
+                namespace::SPENT_ARTIFACT,
+                &spent.permit_id,
+                &spent.encode().expect("spent frame"),
+            )
+            .expect("plant incoherent spent row");
+        assert_production_semantic_rejection(spent_store);
+    }
+
+    #[test]
+    fn production_audit_rejects_revision_gaps_and_budget_or_epoch_rollback() {
+        let (_gap_dir, gap_store) = complete_reserved_production_store(0xd1);
+        let mut gap_core = DurableVaultCore::new(gap_store);
+        let mut third = gap_core.load(&[1; 32]).expect("current reservation");
+        third.revision = 3;
+        gap_core
+            .store
+            .put_opaque(
+                namespace::RESERVATION,
+                &record_key(&[1; 32], 3),
+                &third.encode().expect("third revision"),
+            )
+            .expect("plant revision ahead of anchor");
+        gap_core
+            .store
+            .compare_and_swap_revision(&revision_entity(b'r', &[1; 32]), 1)
+            .expect("advance anchor across a gap");
+        assert_production_semantic_rejection(gap_core.store);
+
+        let (_budget_dir, budget_store) = complete_reserved_production_store(0xd2);
+        let mut budget_core = DurableVaultCore::new(budget_store);
+        let first = identity(1);
+        let mut second = identity(20);
+        second.key_id = first.key_id;
+        second.counterparty = first.counterparty;
+        budget_core
+            .claim_session_id(&second.session_id)
+            .expect("second session");
+        second.nonce_epoch = budget_core.next_nonce_epoch().expect("second epoch");
+        budget_core
+            .insert_reservation(second)
+            .expect("reservation without matching budget charge");
+        assert_production_semantic_rejection(budget_core.store);
+
+        let (_epoch_dir, epoch_store) = complete_reserved_production_store(0xd3);
+        let mut epoch_core = DurableVaultCore::new(epoch_store);
+        let mut second = identity(30);
+        second.nonce_epoch = 2;
+        epoch_core
+            .claim_session_id(&second.session_id)
+            .expect("second session");
+        epoch_core
+            .charge_budgets(&second.key_id, &second.counterparty)
+            .expect("second budgets");
+        epoch_core
+            .insert_reservation(second)
+            .expect("reservation ahead of retained epoch");
+        assert_production_semantic_rejection(epoch_core.store);
+    }
+
+    #[test]
+    fn production_audit_rejects_cross_reservation_session_transplant() {
+        let (_dir, store) = complete_reserved_production_store(0xe1);
+        let mut core = DurableVaultCore::new(store);
+        let first = identity(1);
+        let mut second = identity(40);
+        second.session_id = first.session_id;
+        core.charge_budgets(&second.key_id, &second.counterparty)
+            .expect("second budgets");
+        second.nonce_epoch = core.next_nonce_epoch().expect("second epoch");
+        core.insert_reservation(second)
+            .expect("plant duplicate retained session");
+        assert_production_semantic_rejection(core.store);
     }
 
     #[test]

@@ -1,8 +1,11 @@
 # Bitcoin evidence verifier and USPE bridge (Annex M M.9.3, M.9.5).
 #
 # The trust-minimized, replaceable, NON-CUSTODIAL evidence module (M.9.1):
-# it verifies headers, inclusion, witness and outcome rules and produces a
-# VerifiedBitcoinOutcomeV1. It NEVER signs, funds, selects a nonce, adapts
+# V1 is retained as a byte-frozen structural format. The V2 path verifies the
+# mandatory full block and can produce an operational outcome only after an
+# opaque authenticated-header/checkpoint authority has matched every chain and
+# policy fact and bound the canonical evidence provenance. It NEVER signs,
+# funds, selects a nonce, adapts
 # a signature or holds custody, and it never sees `t` (M.0.4, M.9.1). The
 # USPE consumes only the verified public outcome + terms_hash.
 #

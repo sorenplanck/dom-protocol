@@ -459,17 +459,17 @@ impl BoundFreshBitcoinClaimAuthorityV1 {
     ///
     /// All template and key bindings were completed by
     /// [`RetainedFreshBitcoinClaimAuthorityV1::bind_exact_claim`] before this
-    /// method can receive any custody path.
-    #[allow(clippy::too_many_arguments)]
+    /// method can receive any custody path. Both fixed arrays are ordered as
+    /// the canonical claim roster: signer one (Maker), then signer two (Taker).
     pub fn prepare_after_m8(
         self,
         m8_authorizations: [AnchoredCrossChainWindowV1; 2],
-        signer_one_seal_key: &BitcoinNonceSealKeyV1,
-        signer_two_seal_key: &BitcoinNonceSealKeyV1,
-        signer_one_vault: &Path,
-        signer_two_vault: &Path,
+        signer_seal_keys: [&BitcoinNonceSealKeyV1; 2],
+        signer_vaults: [&Path; 2],
     ) -> Result<PreparedFreshBitcoinClaimV1, LiveBitcoinError> {
         let [authorization_one, authorization_two] = m8_authorizations;
+        let [signer_one_seal_key, signer_two_seal_key] = signer_seal_keys;
+        let [signer_one_vault, signer_two_vault] = signer_vaults;
         if authorization_one.settlement_terms_hash() != self.binding.terms_hash
             || authorization_two.settlement_terms_hash() != self.binding.terms_hash
             || authorization_one.anchor_evidence_digest() == [0; 32]
@@ -905,16 +905,16 @@ impl BitcoinPrebroadcastStoreV1 {
                 return Err(LiveBitcoinError::FundingNotArmed);
             }
         };
-        validate_reopened_receipt(
-            &receipt,
-            &plan,
-            authority.request,
+        validate_reopened_receipt(ReopenedReceiptValidationV1 {
+            receipt: &receipt,
+            plan: &plan,
+            request: authority.request,
             roster,
             refund_key_xonly,
-            &authority.claim_script_pubkey,
-            &authority.refund_script_pubkey,
-            &armed,
-        )?;
+            claim_script_pubkey: &authority.claim_script_pubkey,
+            refund_script_pubkey: &authority.refund_script_pubkey,
+            armed: &armed,
+        })?;
         let claim_authority = RetainedFreshBitcoinClaimAuthorityV1 {
             network: authority.network,
             route_binding: receipt.route_binding,
@@ -1249,19 +1249,30 @@ fn validate_receipt(
     Ok(())
 }
 
-// Every parameter is an independent authority the receipt is validated
-// against; grouping them would hide which ones actually bind.
-#[allow(clippy::too_many_arguments)]
-fn validate_reopened_receipt(
-    receipt: &BitcoinFreshRouteReceiptV1,
-    plan: &BitcoinPrebroadcastPlanV1,
+struct ReopenedReceiptValidationV1<'a> {
+    receipt: &'a BitcoinFreshRouteReceiptV1,
+    plan: &'a BitcoinPrebroadcastPlanV1,
     request: BitcoinFreshRouteRequestV1,
     roster: ParticipantKeyRosterV1,
     refund_key_xonly: [u8; 32],
-    claim_script_pubkey: &[u8],
-    refund_script_pubkey: &[u8],
-    armed: &ArmedBitcoinFundingV1,
+    claim_script_pubkey: &'a [u8],
+    refund_script_pubkey: &'a [u8],
+    armed: &'a ArmedBitcoinFundingV1,
+}
+
+fn validate_reopened_receipt(
+    validation: ReopenedReceiptValidationV1<'_>,
 ) -> Result<(), LiveBitcoinError> {
+    let ReopenedReceiptValidationV1 {
+        receipt,
+        plan,
+        request,
+        roster,
+        refund_key_xonly,
+        claim_script_pubkey,
+        refund_script_pubkey,
+        armed,
+    } = validation;
     validate_request(request)?;
     let plan_digest = plan.canonical_digest()?;
     let summary = armed.funding_summary();

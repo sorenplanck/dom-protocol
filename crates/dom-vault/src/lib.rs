@@ -93,7 +93,7 @@ pub use custody::{DurableLookup, DurableLookupCustody};
 #[cfg(feature = "real-dom-adaptor")]
 pub use durable::{BudgetScopeLocal, DurableVaultCore, VaultLimits};
 #[cfg(feature = "real-dom-adaptor")]
-pub use session::{AcceptedSession, SessionAuthority};
+pub use session::{AcceptedSession, AcceptedSessionFreshRequestV1, SessionAuthority};
 #[cfg(feature = "real-dom-adaptor")]
 pub use vault::{
     ArtifactPersistencePermit, DerivationAttemptPermit, DurableNonceVault, ExportedArtifact,

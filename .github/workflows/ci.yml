@@ -209,6 +209,66 @@ jobs:
       - name: cargo audit
         run: cargo audit
 
+  interop-evm-contracts:
+    name: "interop: EVM custody contracts"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Same release used by the local F3 evidence and gas thresholds.
+          version: 1.7.1
+
+      # Vendored dependencies are intentionally absent. Install the exact
+      # audited tags on every run so a clean checkout can reproduce the
+      # deployed custody bytecode and its adversarial suite.
+      - name: Install pinned Solidity dependencies
+        working-directory: contracts
+        run: |
+          forge install OpenZeppelin/openzeppelin-contracts@v5.1.0 --no-git
+          forge install foundry-rs/forge-std@v1.9.6 --no-git
+
+      - name: Contract license headers are resolved
+        run: |
+          contract_scopes=(contracts/src contracts/script contracts/test)
+          test "$(find "${contract_scopes[@]}" -name '*.sol' -type f -print | wc -l)" = \
+               "$(grep -rl '^// SPDX-License-Identifier: MIT$' "${contract_scopes[@]}" --include='*.sol' | wc -l)"
+          ! grep -R -E 'TBD-A2|SPDX-License-Identifier: UNLICENSED' \
+            "${contract_scopes[@]}" --include='*.sol'
+
+      - name: forge fmt --check
+        working-directory: contracts
+        run: forge fmt --check
+
+      - name: forge build
+        working-directory: contracts
+        run: forge build
+
+      - name: forge test
+        working-directory: contracts
+        run: forge test -vvv
+
+      # Runs the Rust adapter/engine against the deployed bytecode and refuses
+      # a green result unless every named F3/F4 scenario actually executed.
+      - name: Anvil cross-chain end-to-end gate (12 F3 + 6 F4)
+        run: ./scripts/e2e_anvil.sh
+
+      # Independent implementation of the ecrecover construction used to
+      # authenticate address(t*G), separate from both Solidity and Rust.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Independent ecrecover verification
+        run: |
+          npm install --no-audit --no-fund ethereumjs-util@7.1.5
+          node contracts/test/verify_ecrecover_trick.js | tee ecrecover.log
+          grep -q 'VERIFICADO (5/5)' ecrecover.log
+
   interop-real-backend:
     name: "interop: real cryptographic backend + layer guards"
     runs-on: ubuntu-latest
@@ -418,6 +478,8 @@ jobs:
       - fmt
       - supply-chain
       - build-test
+      - interop-evm-contracts
+      - interop-real-backend
       - release-blocker-crate-tests
       - release-blocker-integration-tests
       - ibd-integration
@@ -428,6 +490,8 @@ jobs:
           test "${{ needs.fmt.result }}" = "success"
           test "${{ needs.supply-chain.result }}" = "success"
           test "${{ needs.build-test.result }}" = "success"
+          test "${{ needs.interop-evm-contracts.result }}" = "success"
+          test "${{ needs.interop-real-backend.result }}" = "success"
           test "${{ needs.release-blocker-crate-tests.result }}" = "success"
           test "${{ needs.release-blocker-integration-tests.result }}" = "success"
           test "${{ needs.ibd-integration.result }}" = "success"

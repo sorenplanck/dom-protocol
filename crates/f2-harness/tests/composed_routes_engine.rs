@@ -249,12 +249,13 @@ fn two_engines_share_one_scalar_across_the_route() {
         .observe_revealed_secret()
         .expect("the downstream claim revealed a scalar on chain");
     assert_eq!(
-        recovered, t,
+        recovered.expose_scalar_bytes(),
+        t,
         "the scalar observed on chain is the route scalar"
     );
 
     // 3. Carry that recovered t to the UPSTREAM leg; drive to Settled.
-    fund_and_claim(&up_chain, &mut up, recovered);
+    fund_and_claim(&up_chain, &mut up, recovered.expose_scalar_bytes());
     assert_eq!(
         state(&up),
         SettlementState::Settled,

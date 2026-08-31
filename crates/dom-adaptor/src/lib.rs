@@ -295,6 +295,13 @@
 //! let _capability = OperationalM8FundingAuthorizationImportCapabilityV1::new();
 //! ```
 //!
+//! The role-bound M.8 V2 import authority is a different private capability:
+//!
+//! ```compile_fail
+//! use dom_adaptor::OperationalM8FundingAuthorizationImportCapabilityV2;
+//! let _capability = OperationalM8FundingAuthorizationImportCapabilityV2::new();
+//! ```
+//!
 //! A fully signed funding transaction has no public transaction or byte
 //! accessor before it is consumed by the statically selected Store sink:
 //!
@@ -311,6 +318,13 @@
 //! ```compile_fail
 //! use dom_adaptor::VerifiedM8FundingTransactionV1;
 //! fn escape(funding: &VerifiedM8FundingTransactionV1) {
+//!     let _bytes = funding.canonical_bytes();
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use dom_adaptor::VerifiedM8FundingTransactionV2;
+//! fn escape_v2(funding: &VerifiedM8FundingTransactionV2) {
 //!     let _bytes = funding.canonical_bytes();
 //! }
 //! ```
@@ -341,6 +355,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+#[cfg(all(feature = "evidence-only", not(debug_assertions)))]
+compile_error!("the evidence-only observation seam is forbidden in release builds");
+
 mod adaptor;
 mod bulletproof_mpc;
 mod chain_projection;
@@ -351,6 +368,7 @@ mod context;
 mod contract_session;
 mod decoy_capsule;
 mod domain_tag;
+mod early_transport;
 mod error;
 mod fee_bump;
 mod funding_authority;
@@ -373,10 +391,22 @@ mod transcript;
 mod vault_operation;
 mod vault_signer;
 
+#[cfg(feature = "evidence-only")]
+mod evidence_only_observation;
 #[cfg(test)]
 mod independent_vector_comparison;
 
-pub use adaptor::{AdaptorPreSignatureV1, AdaptorSecret, CoreAdaptorPreSignatureV1};
+pub use adaptor::{
+    AdaptorPreSignatureV1, AdaptorSecret, CoreAdaptorPreSignatureV1, FinalSignatureOpeningContextV1,
+};
+#[cfg(feature = "evidence-only")]
+pub use evidence_only_observation::{
+    evidence_only_verified_claim_observation_v1, EvidenceOnlyClaimOpeningV1,
+};
+// `SchnorrSignature` already appears in this crate's public signatures, for
+// example `AdaptorPreSignatureV1::verify_final_signature_opens_adaptor_point_v1`,
+// so without this a downstream crate cannot name the argument it must pass.
+// Re-exporting names an existing public type; it adds no new surface.
 pub use bulletproof_mpc::{BpRound1ShareV1, BpRound2ShareV1, BpStatementV1};
 pub use chain_projection::{
     ChainProjectionV1, ContractTxRoleV1, IrreversibleStateV1, LocalContractIndexV1,
@@ -409,7 +439,11 @@ pub use decoy_capsule::{
     combine_decoy_capsule_v1, DecoyCommitmentV1, DecoyContributionV1, DecoyRevealV1,
     DECOY_VARIABLE_LEN,
 };
+pub use dom_crypto::SchnorrSignature;
 pub use domain_tag::DomainTag;
+pub use early_transport::{
+    EarlyShareCommitmentV1, EarlyShareRevealV1, EarlyTermsBindingV1, EarlyTermsMessageKindV1,
+};
 pub use fee_bump::{required_child_fee_v1, ChildFeeV1, FeeBumpPolicyV1};
 pub use funding_authority::{
     verify_bilateral_backup_v1, BackupConfirmedV1, FundingAuthorizationV1, ShareBackupAckV1,
@@ -422,7 +456,8 @@ pub use nonce::{
     PublicNoncePairV1,
 };
 pub use nonce_secret_record::{
-    audit_nonce_secret_plaintext_v1, NonceSecretTransferV1, VaultSecretImportCapabilityV1,
+    audit_bound_nonce_secret_plaintext_v1, audit_nonce_secret_plaintext_v1,
+    NonceSecretPlaintextAuditBindingV1, NonceSecretTransferV1, VaultSecretImportCapabilityV1,
     VaultSecretSealCapabilityV1,
 };
 pub use nonce_vault::{
@@ -439,12 +474,17 @@ pub use nonce_vault::{
 };
 pub use operational_funding_authority::{
     DurableOperationalFundingIssuanceV1, DurableOperationalM8FundingIssuanceV1,
-    OperationalFundingAuthorizationBindingV1, OperationalFundingAuthorizationError,
-    OperationalFundingAuthorizationImportCapabilityV1, OperationalFundingAuthorizationStoreV1,
-    OperationalFundingAuthorizationV1, OperationalFundingUnsignedTemplateV1,
-    OperationalM8FundingAuthorizationBindingV1,
-    OperationalM8FundingAuthorizationImportCapabilityV1, OperationalM8FundingAuthorizationStoreV1,
-    OperationalM8FundingAuthorizationV1,
+    DurableOperationalM8FundingIssuanceV2, OperationalFundingAuthorizationBindingV1,
+    OperationalFundingAuthorizationError, OperationalFundingAuthorizationImportCapabilityV1,
+    OperationalFundingAuthorizationStoreV1, OperationalFundingAuthorizationV1,
+    OperationalFundingUnsignedTemplateV1, OperationalM8FundingAuthorizationBindingV1,
+    OperationalM8FundingAuthorizationBindingV2,
+    OperationalM8FundingAuthorizationImportCapabilityV1,
+    OperationalM8FundingAuthorizationImportCapabilityV2, OperationalM8FundingAuthorizationStoreV1,
+    OperationalM8FundingAuthorizationStoreV2, OperationalM8FundingAuthorizationV1,
+    OperationalM8FundingAuthorizationV2, OPERATIONAL_M8_FUNDING_AUTHORIZATION_BINDING_V2_DOMAIN,
+    OPERATIONAL_M8_FUNDING_COMMIT_MAGIC_V2, OPERATIONAL_M8_FUNDING_COMMIT_V2_DOMAIN,
+    OPERATIONAL_M8_FUNDING_ISSUANCE_MAGIC_V2, OPERATIONAL_M8_FUNDING_ISSUANCE_V2_DOMAIN,
 };
 pub use partial_commitment_pop::{
     prove_partial_commitment_v1, verify_all_partial_commitments_v1, verify_partial_commitment_v1,
@@ -457,9 +497,9 @@ pub use reservation_binding::{
     ReservationLookupRecoveryRequestV1, ReservationResumeRequestV1,
 };
 pub use session::{
-    advance_transcript_hash_v1, canonical_template_v1, generate_session_id_v1,
-    initial_transcript_hash_v1, session_message_digest_v1, ContractKindV1, ParticipantIdentityV1,
-    ParticipantRosterV1, SessionIdRegistryV1, TrustedChainIdV1,
+    advance_transcript_hash_v1, audit_retained_participant_id_v1, canonical_template_v1,
+    generate_session_id_v1, initial_transcript_hash_v1, session_message_digest_v1, ContractKindV1,
+    ParticipantIdentityV1, ParticipantRosterV1, SessionIdRegistryV1, TrustedChainIdV1,
 };
 pub use share_pop::{
     prove_share_knowledge_v1, verify_share_knowledge_v1, SharePoPStatementV1, ShareProofV1,
@@ -480,7 +520,7 @@ pub use reservation_binding::fuzz_closed_request_types_v1;
 pub use shared_blinding_vault::{
     contribute_vault_backed_blinding_share_v1, open_pending_vault_backed_blinding_share_v1,
     open_vault_backed_blinding_share_v1, resume_vault_backed_blinding_share_after_restart_v1,
-    DurableShareBackupAckCapabilityV1, LocatedSharedBlindingStageV1,
+    BoundShareBackupAckV2, DurableShareBackupAckCapabilityV1, LocatedSharedBlindingStageV1,
     PendingSessionBlindingShareCapabilityV1, PendingSharedBlindingBindingV1,
     RestartableSharedBlindingVaultV1, RestartedSessionBlindingShareV1,
     SessionBlindingShareCapabilityV1, SharedBlindingBindingUpgradeCapabilityV1,
@@ -497,11 +537,17 @@ pub use signing_share::{
     compose_local_shared_output_spend_signing_share_v1, SigningShareV1,
 };
 pub use transaction_lifecycle::{
-    OperationalFundingPersistenceCapabilityV1, OperationalFundingTransactionSinkV1,
-    OperationalM8FundingPersistenceCapabilityV1, OperationalM8FundingTransactionSinkV1,
-    ScriptlessTransactionTemplateV1, VerifiedFundingAuthorizationV1, VerifiedFundingTransactionV1,
-    VerifiedM8FundingAuthorizationV1, VerifiedM8FundingTransactionV1,
-    VerifiedScriptlessTransactionV1, VerifiedSharedOutputV1,
+    ClaimObservationError, ClaimObservationOpeningProofV1, DomClaimObservationTagV1,
+    ExactDomClaimBroadcasterV1, ExactDomClaimObservationSourceV1, ObservedClaimBindingV1,
+    ObservedClaimFactsV1, ObservedClaimLocationV1, OperationalClaimPersistenceCapabilityV1,
+    OperationalClaimTransactionSinkV1, OperationalFundingPersistenceCapabilityV1,
+    OperationalFundingTransactionSinkV1, OperationalM8FundingPersistenceCapabilityV1,
+    OperationalM8FundingPersistenceCapabilityV2, OperationalM8FundingTransactionSinkV1,
+    OperationalM8FundingTransactionSinkV2, ScriptlessTransactionTemplateV1,
+    VerifiedClaimTransactionV1, VerifiedDomClaimObservationV1, VerifiedFundingAuthorizationV1,
+    VerifiedFundingTransactionV1, VerifiedM8FundingAuthorizationV1,
+    VerifiedM8FundingAuthorizationV2, VerifiedM8FundingTransactionV1,
+    VerifiedM8FundingTransactionV2, VerifiedScriptlessTransactionV1, VerifiedSharedOutputV1,
 };
 pub use transcript::{
     binding_factor_v1, nonce_commitment_hash_v1, BindingContextV1, BindingFactorV1,

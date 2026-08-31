@@ -41,7 +41,10 @@ use dom_core::Amount;
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::{schnorr_sign, PublicKey, SecretKey};
 use dom_scriptless_consensus::scriptless_kernel_message_digest_v1;
-use dom_vault::{AcceptedSession, DurableLookupCustody, DurableNonceVault, SessionAuthority};
+use dom_vault::{
+    AcceptedSession, AcceptedSessionFreshRequestV1, DurableLookupCustody, DurableNonceVault,
+    SessionAuthority,
+};
 
 const NETWORK_MAGIC: u32 = 0x0D01_0002;
 const KIND_NONCE_COMMITMENT: u8 = 0x0c;
@@ -163,16 +166,16 @@ fn accepted_session(
     purpose: PurposeV1,
     adaptor_point: Option<PublicKey>,
 ) -> AcceptedSession {
-    AcceptedSession::fresh(
-        shared.chain,
-        shared.session_id,
-        ContractKindV1::WitnessOrTimeout,
+    AcceptedSession::fresh(AcceptedSessionFreshRequestV1 {
+        trusted_chain_id: shared.chain,
+        session_id: shared.session_id,
+        contract_kind: ContractKindV1::WitnessOrTimeout,
         purpose,
-        shared.roster.clone(),
-        shared.template.clone(),
-        0,
+        roster: shared.roster.clone(),
+        transaction_template: shared.template.clone(),
+        kernel_index: 0,
         adaptor_point,
-    )
+    })
     .expect("accepted session")
 }
 

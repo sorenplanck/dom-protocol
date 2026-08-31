@@ -57,7 +57,7 @@ use rfq::selection::{select_winner, CandidateFactsV1, SelectionError, SelectionO
 use rfq::{QuoteV1, RfqV1};
 use std::collections::BTreeMap;
 use thiserror::Error;
-use wire::{IntentV1, NegotiationKey};
+use wire::{IntentError, IntentV1, NegotiationKey};
 
 /// The ratified phase-1 duration — design: "janela dos solvers, 120
 /// segundos", stated as a fixed product rule with no user bypass ("Regra
@@ -76,6 +76,9 @@ pub enum PhaseV1 {
 /// Why the board refuses an operation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
 pub enum BoardRefusal {
+    /// The intent failed structural or cross-object validation.
+    #[error("malformed intent: {0}")]
+    MalformedIntent(IntentError),
     /// No intent with that identifier.
     #[error("unknown intent")]
     UnknownIntent,
@@ -175,6 +178,7 @@ impl IntentBoardV1 {
 
     /// Publish an intent. Phase 1 starts at `intent.published_at_seconds`.
     pub fn publish(&mut self, intent: IntentV1) -> Result<(), BoardRefusal> {
+        intent.validate().map_err(BoardRefusal::MalformedIntent)?;
         if self.entries.contains_key(&intent.intent_id) {
             return Err(BoardRefusal::DuplicateIntent);
         }

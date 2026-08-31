@@ -30,7 +30,7 @@ fn encode_record(session_id: &SessionId, binding_digest: &[u8; 32]) -> [u8; RECO
     bytes
 }
 
-fn decode_record(bytes: &[u8]) -> Result<(SessionId, [u8; 32])> {
+pub(crate) fn decode_record(bytes: &[u8]) -> Result<(SessionId, [u8; 32])> {
     if bytes.len() != RECORD_LEN || &bytes[..8] != CUSTODY_MAGIC {
         return Err(VaultError::CorruptState);
     }

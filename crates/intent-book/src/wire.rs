@@ -13,7 +13,7 @@
 //! never becomes a second source of truth for it.
 
 use crate::SOLVER_WINDOW_SECONDS;
-use kaystra_core::types::Digest32;
+use kaystra_core::types::{Digest32, TimelockSpec};
 use rfq::RfqV1;
 use thiserror::Error;
 
@@ -52,6 +52,10 @@ pub enum IntentError {
     /// The embedded RFQ did not decode.
     #[error("embedded RFQ is malformed")]
     MalformedRfq,
+    /// The board deadline does not exactly mirror the embedded RFQ's
+    /// timestamp deadline.
+    #[error("intent deadline does not match the embedded rfq")]
+    RfqDeadlineMismatch,
     /// `quote_deadline_seconds` is at or before publication, so the intent
     /// is dead on arrival.
     #[error("intent deadline is not after publication")]
@@ -103,8 +107,16 @@ impl IntentV1 {
         if self.version != 1 {
             return Err(IntentError::UnknownVersion);
         }
+        self.rfq.validate().map_err(|_| IntentError::MalformedRfq)?;
         if self.quote_deadline_seconds <= self.published_at_seconds {
             return Err(IntentError::DeadlineNotAfterPublication);
+        }
+        if self.rfq.quote_deadline
+            != (TimelockSpec::TimestampSeconds {
+                value: self.quote_deadline_seconds,
+            })
+        {
+            return Err(IntentError::RfqDeadlineMismatch);
         }
         Ok(())
     }

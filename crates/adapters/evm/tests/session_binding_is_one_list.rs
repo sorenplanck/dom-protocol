@@ -39,7 +39,7 @@ use adapter_evm::adapter::test_support::{
     sample_config, sample_terms, FIXTURE_BENEFICIARY, FIXTURE_CHAIN_ID, FIXTURE_CONTRACT,
     FIXTURE_FUNDER,
 };
-use adapter_evm::evidence::amount_word;
+use adapter_evm::evidence::{amount_word, EvidencePayload};
 use adapter_evm::mock::MockChain;
 use adapter_evm::rpc::EthClient;
 use adapter_evm::{
@@ -81,7 +81,7 @@ fn coherent_claim(cfg: &EvmAdapterConfig, terms: LockTerms, t: [u8; 32]) -> EvmE
         log_index: 0,
         finalized_height: 7,
         finalized_block_hash: [0x53; 32],
-        payload: t,
+        payload: EvidencePayload::ClaimedScalar(t),
     };
     recohere(&mut e);
     e
@@ -351,7 +351,7 @@ fn a_second_lock_of_this_session_verifies_until_the_lock_is_named() {
         log_index: log.log_index,
         finalized_height: head.height,
         finalized_block_hash: head.hash,
-        payload: dust_terms.amount,
+        payload: EvidencePayload::Amount(dust_terms.amount),
     }
     .encode();
 

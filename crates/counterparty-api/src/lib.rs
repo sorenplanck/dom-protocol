@@ -16,6 +16,8 @@
 
 use core::fmt;
 
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
 /// Opaque identifier of the counterparty chain (not the DOM chain id).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct CounterpartyChainId(pub [u8; 32]);
@@ -43,11 +45,103 @@ impl fmt::Debug for AdaptorPointBytes {
 
 /// Scalar `t` publicly revealed by an on-chain claim.
 ///
-/// I6: even though it is public after the claim, it is never printed by
-/// `Debug` so it cannot leak through logs during windows in which it has not
-/// yet been confirmed.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct RevealedSecretBytes(pub [u8; 32]);
+/// # What this type enforces
+///
+/// * **The scalar is not reachable by field access.** The field is private, so
+///   the only way out is [`Self::expose_scalar_bytes`], whose name is long and
+///   unpleasant on purpose: every place the scalar leaves the wrapper is one
+///   grep away. A `compile_fail` example on that method proves the field is
+///   unreachable from outside this crate — a doctest compiles as a foreign
+///   crate, which is the only vantage point from which the question is real.
+/// * **`Debug` never prints it.** The hand-written [`fmt::Debug`] below writes
+///   a fixed string, so a value formatted *as this type* — including through
+///   every derived `Debug` of a struct or enum holding one, such as
+///   [`ObservedEvent::LockClaimed`] and [`VerifiedOutcome::Claimed`] — renders
+///   `RevealedSecretBytes(<redacted>)`. That is invariant I6, and
+///   `revealed_secret_never_prints_material` pins it.
+/// * **The bytes are scrubbed when the value dies.** `ZeroizeOnDrop` gives it a
+///   destructor; `Zeroize` is also public, so a caller holding a value it wants
+///   gone early can scrub it in place without waiting for the drop.
+/// * **There is no `Copy`.** Handing the value on is a move, and a second live
+///   copy has to be asked for by name through `clone`. `Copy` and `Drop` are
+///   mutually exclusive in Rust, so this is not three independent choices: the
+///   scrubbing *is* the reason the copying stopped.
+///
+/// # What it still does not enforce, and nobody should infer
+///
+/// [`Self::expose_scalar_bytes`] returns a plain `[u8; 32]`, and that array is
+/// outside every guarantee above — it has a derived `Debug` that prints in
+/// full, it copies implicitly, and nothing scrubs it. The wrapper protects what
+/// it holds, not what a caller takes out of it. That is why the accessor is
+/// named the way it is rather than `as_bytes`.
+///
+/// The scalar is public on chain by the time a well-behaved producer builds one
+/// of these, so none of this is confidentiality in the cryptographic sense. It
+/// is custody hygiene: the value has one door, the door is greppable, and the
+/// bytes do not outlive the value by accident.
+///
+/// The absence of `Copy` is pinned here, because "this does not compile" is not
+/// something a passing unit test can assert. Restoring `Copy` to quiet a move
+/// error would delete the destructor with it — `Copy` and `Drop` are mutually
+/// exclusive — so this example failing to compile is load-bearing:
+///
+/// ```compile_fail
+/// let secret = counterparty_api::RevealedSecretBytes::new([0xAB; 32]);
+/// let _moved = secret;
+/// // `secret` was moved, not copied: this second use is the compile error.
+/// let _again = secret.expose_scalar_bytes();
+/// ```
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+pub struct RevealedSecretBytes([u8; 32]);
+
+impl RevealedSecretBytes {
+    /// Wraps the scalar an on-chain claim has already made public.
+    ///
+    /// It is not a barrier and does not pretend to be one: the argument is a
+    /// bare `[u8; 32]`, so nothing here can tell a scalar from a lock
+    /// identifier or an amount. What it is, now that the field is closed, is
+    /// the only way to build one of these at all.
+    #[must_use]
+    pub fn new(scalar: [u8; 32]) -> Self {
+        Self(scalar)
+    }
+
+    /// Copies the scalar out of the redacting wrapper.
+    ///
+    /// The name is long and unpleasant on purpose. Every call is a place where
+    /// the scalar leaves the only type that redacts it, and a reviewer should
+    /// be able to find all of them by searching for one string. `secret.0` was
+    /// not greppable in that way; this is.
+    ///
+    /// It returns a copy, and that copy is outside every guarantee the wrapper
+    /// gives: derived `Debug`, implicit copying, no scrubbing. Keep it short
+    /// lived, and call [`Zeroize::zeroize`] on the wrapper when the original is
+    /// no longer wanted rather than waiting for the drop.
+    ///
+    /// The field itself is unreachable from outside this crate. A doctest is
+    /// the only place that claim can be tested, because it compiles as a
+    /// foreign crate and a unit test in this file does not — a child module can
+    /// see its parent's private fields, so an in-crate test would pass whether
+    /// the field were public or not:
+    ///
+    /// ```compile_fail
+    /// let secret = counterparty_api::RevealedSecretBytes::new([0xAB; 32]);
+    /// // The field is private: this is the whole barrier, and it is a
+    /// // compile error rather than a runtime refusal.
+    /// let _bypass = secret.0;
+    /// ```
+    ///
+    /// The accessor is how the bytes come out, and it compiles:
+    ///
+    /// ```
+    /// let secret = counterparty_api::RevealedSecretBytes::new([0xAB; 32]);
+    /// assert_eq!(secret.expose_scalar_bytes(), [0xAB; 32]);
+    /// ```
+    #[must_use]
+    pub const fn expose_scalar_bytes(&self) -> [u8; 32] {
+        self.0
+    }
+}
 
 impl fmt::Debug for RevealedSecretBytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -304,9 +398,136 @@ mod tests {
 
     #[test]
     fn revealed_secret_never_prints_material() {
-        let s = RevealedSecretBytes([0xAB; 32]);
+        let s = RevealedSecretBytes::new([0xAB; 32]);
         let rendered = format!("{s:?}");
         assert!(rendered.contains("redacted"), "I6");
         assert!(!rendered.contains("ab"), "I6: no scalar byte in the log");
+        // Formatting the type through a container that derives `Debug` must
+        // reach the same hand-written impl, since that is where every real log
+        // line goes through.
+        let carried = ObservedEvent::LockClaimed {
+            lock_id: [0x01; 32],
+            revealed: s,
+            height: 7,
+        };
+        let rendered = format!("{carried:?}");
+        assert!(rendered.contains("redacted"), "I6 through a container");
+        assert!(
+            !rendered.contains("ab"),
+            "I6: no scalar byte through a container"
+        );
+    }
+
+    /// Successor to `the_public_field_bypasses_the_redaction`, which is gone.
+    ///
+    /// # What the retired test proved, and why it cannot be written any more
+    ///
+    /// From stage 1 until stage 2 this module carried a test that asserted a
+    /// *limitation*: that `format!("{:?}", secret.0)` printed the scalar in
+    /// full, so the redaction was exactly one `.0` away. It existed because a
+    /// doc sentence describing a hole rots silently, and an executable one
+    /// fails the day the hole closes. That day is this one.
+    ///
+    /// It is recorded rather than deleted because a test that vanishes reads as
+    /// coverage lost, and this is the opposite: it was written with its own
+    /// death as the success condition, and it reached it.
+    ///
+    /// One honest detail, because it changes what can be claimed here. Closing
+    /// the field did **not** make the old test stop compiling. A child module
+    /// can read its parent's private fields, so `s.0` still resolves inside
+    /// this file and the retired assertion would still pass — it would simply
+    /// no longer be measuring anything about the crate's boundary. That is why
+    /// the real successor is not below but on
+    /// [`RevealedSecretBytes::expose_scalar_bytes`]: a `compile_fail` doctest,
+    /// which compiles as a foreign crate and is therefore the only vantage
+    /// point from which "the field is unreachable" is a testable statement.
+    ///
+    /// What remains testable in-crate is the part that is about behaviour
+    /// rather than visibility, and that is what this asserts.
+    #[test]
+    fn the_scalar_leaves_only_through_the_named_accessor() {
+        let secret = RevealedSecretBytes::new([0xAB; 32]);
+        // The one door, and it really does hand over the bytes.
+        assert_eq!(secret.expose_scalar_bytes(), [0xAB; 32]);
+        // What comes out is a bare array, outside every guarantee the wrapper
+        // gives. Asserted, not described, for the same reason the retired test
+        // asserted its limitation: so nobody reads the long name as a promise
+        // that the bytes stay protected after they leave.
+        assert!(!format!("{:?}", secret.expose_scalar_bytes()).contains("redacted"));
+        assert!(format!("{:?}", secret.expose_scalar_bytes()).contains("171"));
+        // And the wrapper itself still redacts, so the door did not widen.
+        assert!(format!("{secret:?}").contains("redacted"));
+    }
+
+    /// Construction and extraction are exact inverses.
+    ///
+    /// Its stage-1 ancestor also compared both against the public field, which
+    /// is what made the ~78-site migration safe to do mechanically. That half
+    /// is gone with the field; this keeps the half that is still meaningful,
+    /// because a round trip that lost or reordered a byte would be a defect no
+    /// amount of visibility discipline would catch.
+    #[test]
+    fn construction_and_extraction_round_trip() {
+        for scalar in [[0x00; 32], [0xAB; 32], [0xFF; 32]] {
+            assert_eq!(
+                RevealedSecretBytes::new(scalar).expose_scalar_bytes(),
+                scalar
+            );
+        }
+        let scalar = [0xAB; 32];
+        assert_eq!(
+            RevealedSecretBytes::new(scalar),
+            RevealedSecretBytes::new(scalar)
+        );
+    }
+
+    /// Scrubbing no longer requires reaching through the field.
+    ///
+    /// `f3-harness/src/routes.rs` zeroizes a revealed scalar today by writing
+    /// `inner.revealed.0.zeroize()` — it reaches *through* the public field,
+    /// which is why closing that field cannot be a one-line change. This impl
+    /// is the replacement that call site needs before stage 2 can happen, and
+    /// it is real: it comes from `zeroize`, not from an assignment this crate
+    /// cannot stop the compiler eliding.
+    #[test]
+    fn the_wrapper_scrubs_itself_without_the_public_field() {
+        let mut secret = RevealedSecretBytes::new([0xAB; 32]);
+        secret.zeroize();
+        assert_eq!(secret.expose_scalar_bytes(), [0; 32]);
+        // At stage 1 this block read `let mut duplicate = original;` and the
+        // assertion below carried the note "stage 1 is Copy". That line is now
+        // a **move**, and needing `clone` to write it at all is the whole point
+        // of dropping `Copy`: a second live copy of a secret is something a
+        // caller now has to ask for by name.
+        let original = RevealedSecretBytes::new([0xCD; 32]);
+        let mut duplicate = original.clone();
+        duplicate.zeroize();
+        assert_eq!(duplicate.expose_scalar_bytes(), [0; 32]);
+        assert_eq!(
+            original.expose_scalar_bytes(),
+            [0xCD; 32],
+            "a clone is an independent value: scrubbing it must not reach the original"
+        );
+    }
+
+    /// Handing the value on is a move, and a second holder needs `clone`.
+    ///
+    /// This is the *positive* half only, and says so: a passing move proves
+    /// nothing about `Copy`, because a `Copy` type moves just as happily. The
+    /// half that actually pins the absence of `Copy` is a `compile_fail`
+    /// doctest on [`RevealedSecretBytes`], since "this does not compile" is not
+    /// a statement a passing unit test can make.
+    ///
+    /// A first attempt here was `fn assert_not_copy<T: Clone>() {}`, which
+    /// asserts `Clone` and nothing else. It is recorded because it looked like
+    /// a structural check and was one of the failure shapes this migration
+    /// exists to avoid: a test whose name claims more than its body.
+    #[test]
+    fn handing_the_wrapper_on_is_a_move() {
+        let secret = RevealedSecretBytes::new([0xAB; 32]);
+        let moved = secret;
+        assert_eq!(moved.expose_scalar_bytes(), [0xAB; 32]);
+        let second = moved.clone();
+        assert_eq!(second, moved);
     }
 }

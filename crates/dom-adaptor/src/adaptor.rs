@@ -58,6 +58,25 @@ impl AdaptorSecret {
     }
 }
 
+/// Public session bindings used to verify that a final signature opens an
+/// adaptor pre-signature.
+///
+/// This is an input-only cryptographic context, not an authorization or a
+/// proof object.  It deliberately contains only borrowed public values and
+/// has no encoder or decoder.
+pub struct FinalSignatureOpeningContextV1<'a> {
+    /// Hash of the exact Claim template committed by the session.
+    pub expected_claim_template_hash: &'a [u8; 32],
+    /// Hash of the authenticated transcript committed by the session.
+    pub expected_transcript_hash: &'a [u8; 32],
+    /// Aggregate signing key bound to the Claim kernel.
+    pub signing_key: &'a PublicKey,
+    /// Trusted DOM chain identifier.
+    pub chain_id: &'a [u8; 32],
+    /// Exact DOM kernel message covered by the signature challenge.
+    pub kernel_message: &'a [u8],
+}
+
 /// Canonical 162-byte Claim adaptor pre-signature payload.
 ///
 /// This type intentionally implements neither `Clone` nor `Debug`; its scalar
@@ -242,6 +261,64 @@ impl AdaptorPreSignatureV1 {
         )
         .map(AdaptorSecret)
         .map_err(Into::into)
+    }
+
+    /// Verify that a final DOM signature opens this pre-signature's committed
+    /// adaptor point, without returning or persisting the revealed scalar.
+    ///
+    /// This follows the same fail-closed path as [`Self::extract`]: it verifies
+    /// the session-bound pre-signature, verifies the final DOM signature,
+    /// requires the nonce to remain byte-identical, extracts a canonical
+    /// nonzero scalar, and proves `t*G == T`.  The resulting
+    /// [`AdaptorSecret`] is zeroized when it is discarded before this method
+    /// returns.
+    pub fn verify_final_signature_opens_adaptor_point_v1(
+        &self,
+        final_signature: &SchnorrSignature,
+        context: &FinalSignatureOpeningContextV1<'_>,
+    ) -> Result<()> {
+        let verified_secret = self.extract(
+            final_signature,
+            context.expected_claim_template_hash,
+            context.expected_transcript_hash,
+            context.signing_key,
+            context.chain_id,
+            context.kernel_message,
+        )?;
+        drop(verified_secret);
+        Ok(())
+    }
+
+    /// Prove that an observed final signature opens this pre-signature's
+    /// committed adaptor point, sealing an observation proof instead of a
+    /// scalar.
+    ///
+    /// This is [`Self::verify_final_signature_opens_adaptor_point_v1`] with a
+    /// linear witness: it runs the identical fail-closed path, drops the
+    /// zeroizing [`AdaptorSecret`] before returning, and yields a value only the
+    /// claim-observation boundary can consume. It exists so a durable receiver
+    /// exposure marker can require *evidence that the opening was proved*,
+    /// rather than trusting a caller that says it was.
+    ///
+    /// The returned proof carries the chain identifier, the claim template hash,
+    /// the committed adaptor point `T` and the caller-verified observation
+    /// binding — transaction identity, shared output and kernel index. Sealing
+    /// the binding is what stops a genuine opening from later being paired with
+    /// a different transaction. It never carries the revealed scalar or the
+    /// observed signature.
+    pub fn prove_observed_claim_opens_adaptor_point_v1(
+        &self,
+        final_signature: &SchnorrSignature,
+        context: &FinalSignatureOpeningContextV1<'_>,
+        binding: crate::ObservedClaimBindingV1,
+    ) -> Result<crate::ClaimObservationOpeningProofV1> {
+        self.verify_final_signature_opens_adaptor_point_v1(final_signature, context)?;
+        Ok(crate::ClaimObservationOpeningProofV1::seal(
+            *context.chain_id,
+            *context.expected_claim_template_hash,
+            self.adaptor_point.clone(),
+            binding,
+        ))
     }
 
     /// Verify the pre-signature and observed final signature, then export the

@@ -1,6 +1,10 @@
 //! Production-boundary tests using the frozen SCAD0 corpus and real DOM verifier.
 
-use dom_adaptor::{AdaptorPreSignatureV1, AdaptorSecret, CoreAdaptorPreSignatureV1};
+use dom_adaptor::{
+    AdaptorPreSignatureV1, AdaptorSecret, ClaimObservationError, CoreAdaptorPreSignatureV1,
+    DomClaimObservationTagV1, FinalSignatureOpeningContextV1, ObservedClaimBindingV1,
+    ObservedClaimFactsV1, ObservedClaimLocationV1, VerifiedDomClaimObservationV1,
+};
 use dom_consensus::{validate_kernel_signatures, Transaction, TransactionKernel};
 use dom_crypto::{PartialSig, PublicKey, SchnorrSignature};
 use dom_serialization::DomDeserialize;
@@ -294,6 +298,141 @@ fn wrong_adaptor_secret_and_mutated_signature_are_rejected() {
         .is_err());
 }
 
+#[test]
+fn unit_opening_verifier_accepts_only_the_exact_public_session_bindings() {
+    let mut lines = include_str!("../../dom-consensus/tests/fixtures/scad0_adaptor_vectors_v1.txt")
+        .lines()
+        .filter(|line| line.starts_with('V'));
+    let fields = lines
+        .next()
+        .expect("first SCAD0 vector exists")
+        .split('|')
+        .collect::<Vec<_>>();
+    let other_fields = lines
+        .next()
+        .expect("second SCAD0 vector exists")
+        .split('|')
+        .collect::<Vec<_>>();
+    let kernel = TransactionKernel::from_bytes(&hex::decode(fields[4]).expect("kernel hex"))
+        .expect("kernel is canonical");
+    let final_signature =
+        SchnorrSignature::from_bytes(&kernel.excess_signature).expect("final signature");
+    let signing_key =
+        PublicKey::from_compressed_bytes(kernel.excess.as_bytes()).expect("signing key");
+    let pre_signature = AdaptorPreSignatureV1::new(
+        [0x22; 32],
+        PublicKey::from_compressed_bytes(&decode_array::<33>(fields[2])).expect("T"),
+        PublicKey::from_compressed_bytes(final_signature.r_compressed()).expect("R hat"),
+        PartialSig::from_bytes(&decode_array::<32>(fields[3])).expect("s hat"),
+        [0x33; 32],
+    );
+    let exact = FinalSignatureOpeningContextV1 {
+        expected_claim_template_hash: &[0x22; 32],
+        expected_transcript_hash: &[0x33; 32],
+        signing_key: &signing_key,
+        chain_id: &CHAIN_ID,
+        kernel_message: &MESSAGE,
+    };
+
+    let _: () = pre_signature
+        .verify_final_signature_opens_adaptor_point_v1(&final_signature, &exact)
+        .expect("the exact final signature opens the committed adaptor point");
+
+    let wrong_template = [0x23; 32];
+    let wrong_transcript = [0x34; 32];
+    let wrong_chain = [0xAE; 32];
+    let mut wrong_message = MESSAGE;
+    wrong_message[0] ^= 1;
+    let other_kernel =
+        TransactionKernel::from_bytes(&hex::decode(other_fields[4]).expect("other kernel hex"))
+            .expect("other kernel is canonical");
+    let wrong_signing_key = PublicKey::from_compressed_bytes(other_kernel.excess.as_bytes())
+        .expect("other signing key");
+
+    for (case, context) in [
+        (
+            "claim template",
+            FinalSignatureOpeningContextV1 {
+                expected_claim_template_hash: &wrong_template,
+                expected_transcript_hash: &[0x33; 32],
+                signing_key: &signing_key,
+                chain_id: &CHAIN_ID,
+                kernel_message: &MESSAGE,
+            },
+        ),
+        (
+            "transcript",
+            FinalSignatureOpeningContextV1 {
+                expected_claim_template_hash: &[0x22; 32],
+                expected_transcript_hash: &wrong_transcript,
+                signing_key: &signing_key,
+                chain_id: &CHAIN_ID,
+                kernel_message: &MESSAGE,
+            },
+        ),
+        (
+            "aggregate signing key",
+            FinalSignatureOpeningContextV1 {
+                expected_claim_template_hash: &[0x22; 32],
+                expected_transcript_hash: &[0x33; 32],
+                signing_key: &wrong_signing_key,
+                chain_id: &CHAIN_ID,
+                kernel_message: &MESSAGE,
+            },
+        ),
+        (
+            "chain",
+            FinalSignatureOpeningContextV1 {
+                expected_claim_template_hash: &[0x22; 32],
+                expected_transcript_hash: &[0x33; 32],
+                signing_key: &signing_key,
+                chain_id: &wrong_chain,
+                kernel_message: &MESSAGE,
+            },
+        ),
+        (
+            "kernel message",
+            FinalSignatureOpeningContextV1 {
+                expected_claim_template_hash: &[0x22; 32],
+                expected_transcript_hash: &[0x33; 32],
+                signing_key: &signing_key,
+                chain_id: &CHAIN_ID,
+                kernel_message: &wrong_message,
+            },
+        ),
+    ] {
+        assert!(
+            pre_signature
+                .verify_final_signature_opens_adaptor_point_v1(&final_signature, &context)
+                .is_err(),
+            "divergent {case} must fail closed"
+        );
+    }
+
+    // The final signature remains valid for the original public session, but
+    // pairing its scalar difference with another committed adaptor point must
+    // still fail closed.
+    let incompatible_pre_signature = AdaptorPreSignatureV1::new(
+        [0x22; 32],
+        PublicKey::from_compressed_bytes(&decode_array::<33>(other_fields[2]))
+            .expect("different adaptor point"),
+        PublicKey::from_compressed_bytes(final_signature.r_compressed()).expect("R hat"),
+        PartialSig::from_bytes(&decode_array::<32>(fields[3])).expect("s hat"),
+        [0x33; 32],
+    );
+    let transaction = Transaction {
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        kernels: vec![kernel],
+        offset: [0; 32],
+    };
+    validate_kernel_signatures(&transaction, &CHAIN_ID)
+        .expect("the observed final signature itself remains consensus-valid");
+    assert!(incompatible_pre_signature
+        .verify_final_signature_opens_adaptor_point_v1(&final_signature, &exact)
+        .is_err());
+}
+
 /// The secp256k1 field prime `p = 2^256 - 2^32 - 977`. An x coordinate must be
 /// strictly below it.
 const FIELD_PRIME: [u8; 32] = [
@@ -391,4 +530,137 @@ fn non_canonical_sec1_points_are_rejected_by_class() {
     // 3. A sanity anchor: the untouched payload still parses, so the loop above
     //    is rejecting the point and not the surrounding bytes.
     assert!(AdaptorPreSignatureV1::from_bytes(&canonical).is_ok());
+}
+
+/// Real SCAD0 corpus: the observation proof accepts exactly what the
+/// unit-returning verifier accepts, and it seals the observed binding so a
+/// genuine opening cannot later be paired with a different transaction.
+#[test]
+fn observation_opening_proof_seals_the_exact_observed_claim() {
+    let fields = include_str!("../../dom-consensus/tests/fixtures/scad0_adaptor_vectors_v1.txt")
+        .lines()
+        .find(|line| line.starts_with('V'))
+        .expect("first SCAD0 vector exists")
+        .split('|')
+        .collect::<Vec<_>>();
+    let kernel = TransactionKernel::from_bytes(&hex::decode(fields[4]).expect("kernel hex"))
+        .expect("kernel is canonical");
+    let final_signature =
+        SchnorrSignature::from_bytes(&kernel.excess_signature).expect("final signature");
+    let signing_key =
+        PublicKey::from_compressed_bytes(kernel.excess.as_bytes()).expect("signing key");
+    let adaptor_point =
+        PublicKey::from_compressed_bytes(&decode_array::<33>(fields[2])).expect("T");
+    let pre_signature = AdaptorPreSignatureV1::new(
+        [0x22; 32],
+        adaptor_point.clone(),
+        PublicKey::from_compressed_bytes(final_signature.r_compressed()).expect("R hat"),
+        PartialSig::from_bytes(&decode_array::<32>(fields[3])).expect("s hat"),
+        [0x33; 32],
+    );
+    let exact = FinalSignatureOpeningContextV1 {
+        expected_claim_template_hash: &[0x22; 32],
+        expected_transcript_hash: &[0x33; 32],
+        signing_key: &signing_key,
+        chain_id: &CHAIN_ID,
+        kernel_message: &MESSAGE,
+    };
+    let binding = ObservedClaimBindingV1 {
+        tx_hash: [0x41; 32],
+        shared_output_commitment: [0x02; 33],
+        kernel_index: 0,
+    };
+    let facts = ObservedClaimFactsV1 {
+        chain_id: CHAIN_ID,
+        session_id: [0x42; 32],
+        tx_hash: binding.tx_hash,
+        template_hash: [0x22; 32],
+        shared_output_commitment: binding.shared_output_commitment,
+        location: ObservedClaimLocationV1 {
+            block_height: 9,
+            block_hash: [0x43; 32],
+            transaction_index: 1,
+        },
+        observed_tip_height: 13,
+        observed_tip_id: [0x45; 32],
+    };
+
+    let proof = pre_signature
+        .prove_observed_claim_opens_adaptor_point_v1(&final_signature, &exact, binding)
+        .expect("the exact final signature opens the committed adaptor point");
+    let observed = VerifiedDomClaimObservationV1::from_verified_opening_v1(
+        proof,
+        DomClaimObservationTagV1::CounterpartyClaimObserved,
+        facts,
+    )
+    .expect("consistent observation");
+    assert_eq!(observed.chain_id(), &CHAIN_ID);
+    assert_eq!(observed.tx_hash(), &binding.tx_hash);
+    assert_eq!(
+        observed.shared_output_commitment(),
+        &binding.shared_output_commitment
+    );
+    assert_eq!(observed.template_hash(), &[0x22; 32]);
+    assert_eq!(observed.adaptor_point(), &adaptor_point);
+    assert_eq!(observed.kernel_index(), 0);
+    assert_eq!(observed.location(), facts.location);
+
+    // A genuine opening paired with different observed facts fails closed.
+    for divergent in [
+        ObservedClaimFactsV1 {
+            tx_hash: [0x44; 32],
+            ..facts
+        },
+        ObservedClaimFactsV1 {
+            shared_output_commitment: [0x03; 33],
+            ..facts
+        },
+        ObservedClaimFactsV1 {
+            template_hash: [0x23; 32],
+            ..facts
+        },
+        ObservedClaimFactsV1 {
+            chain_id: [0xAE; 32],
+            ..facts
+        },
+        // A tip that predates the observed block cannot have that block as an
+        // ancestor, so the pair is incoherent whatever the opening proves.
+        ObservedClaimFactsV1 {
+            observed_tip_height: facts.location.block_height - 1,
+            ..facts
+        },
+        ObservedClaimFactsV1 {
+            observed_tip_id: [0; 32],
+            ..facts
+        },
+    ] {
+        let proof = pre_signature
+            .prove_observed_claim_opens_adaptor_point_v1(&final_signature, &exact, binding)
+            .expect("the opening itself still succeeds");
+        // `expect_err` is unavailable on purpose: it would require the
+        // capability to implement `Debug`, and it deliberately does not.
+        let Err(error) = VerifiedDomClaimObservationV1::from_verified_opening_v1(
+            proof,
+            DomClaimObservationTagV1::CounterpartyClaimObserved,
+            divergent,
+        ) else {
+            panic!("facts that contradict the sealed opening must fail closed: {divergent:?}");
+        };
+        assert_eq!(error, ClaimObservationError::InconsistentObservation);
+    }
+
+    // The proof cannot be minted at all when the public session diverges.
+    assert!(pre_signature
+        .prove_observed_claim_opens_adaptor_point_v1(
+            &final_signature,
+            &FinalSignatureOpeningContextV1 {
+                expected_claim_template_hash: &[0x23; 32],
+                expected_transcript_hash: &[0x33; 32],
+                signing_key: &signing_key,
+                chain_id: &CHAIN_ID,
+                kernel_message: &MESSAGE,
+            },
+            binding,
+        )
+        .is_err());
 }

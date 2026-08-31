@@ -19,11 +19,21 @@
 
 #![forbid(unsafe_code)]
 
+mod historical_signet;
 mod public;
+mod regtest_authority;
 
-pub use public::{
-    verify_custom_evidence_file, verify_public_evidence_file, PublicEvidenceResult,
+pub use historical_signet::{
+    verify_custom_evidence_file, verify_public_evidence_file, HistoricalSignetEvidenceResultV1,
     SignetEvidenceProfile,
+};
+pub use public::{
+    verify_regtest_evidence_file, PublicEvidenceResult, RegtestEvidenceExpectationV2,
+    RegtestExpectedOutcomeV2, RegtestRouteExpectationV2,
+};
+pub use regtest_authority::{
+    create_regtest_authority_from_file, PinnedRegtestHeaderAuthorityV2, RegtestAuthorityFactsV2,
+    RegtestAuthorityPinV2,
 };
 
 use adapter_btc::roster::{BitcoinSignerRoleV1, ParticipantKeyRosterV1, ParticipantKeyV1};
@@ -855,7 +865,7 @@ pub fn extract_revealed_secret_from_confirmed_claim(
             &context.adaptor_point,
         )
         .map_err(|error| format!("confirmed Bitcoin claim extraction: {error}"))?;
-    let revealed = RevealedSecretBytes(extracted);
+    let revealed = RevealedSecretBytes::new(extracted);
     extracted.zeroize();
     Ok(revealed)
 }
@@ -1049,9 +1059,9 @@ pub fn build_public_claim_durable(
     signer_one_vault: &std::path::Path,
     signer_two_vault: &std::path::Path,
 ) -> Result<PublicClaimArtifacts, String> {
-    let secret = RevealedSecretBytes(row_secret(ADAPTOR_T, Some(row)));
+    let secret = RevealedSecretBytes::new(row_secret(ADAPTOR_T, Some(row)));
     let secp = Secp256k1::new();
-    let point = AdaptorPointBytes(compressed(&secp, &secret.0));
+    let point = AdaptorPointBytes(compressed(&secp, &secret.expose_scalar_bytes()));
     let prepared = prepare_claim_durable_internal(
         Some(row),
         selected_signet_template_network(),
@@ -1416,7 +1426,7 @@ fn validate_adaptor_secret(
     expected_adaptor_point: &AdaptorPointBytes,
 ) -> Result<(), String> {
     let secp = Secp256k1::new();
-    let secret_key = SecretKey::from_slice(&adaptor_secret.0)
+    let secret_key = SecretKey::from_slice(&adaptor_secret.expose_scalar_bytes())
         .map_err(|_| "route adaptor secret is not a canonical secp256k1 scalar".to_string())?;
     let derived_adaptor_point = PublicKey::from_secret_key(&secp, &secret_key).serialize();
     if derived_adaptor_point != expected_adaptor_point.0 {
@@ -1435,7 +1445,9 @@ fn adapt_prepared_claim(
 
     let ctx = SecpContext::new(&[0x5a; 32]);
     let secp = Secp256k1::new();
-    let adaptor_t = Zeroizing::new(adaptor_secret.0);
+    // The copy this makes is the one `Zeroizing` scrubs; the wrapper the
+    // scalar came out of is the caller's and is untouched.
+    let adaptor_t = Zeroizing::new(adaptor_secret.expose_scalar_bytes());
     let final_sig = ctx
         .adapt(
             &prepared.pre_signature,

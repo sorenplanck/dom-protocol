@@ -86,6 +86,7 @@ pub enum RoundError {
 fn map_restart_vault_error(error: VaultError) -> RoundError {
     match error {
         VaultError::StorageUnavailable
+        | VaultError::CreationIncomplete
         | VaultError::EntropyUnavailable
         | VaultError::KeyStoreUnavailable => RoundError::RestartStorageUnavailable,
         VaultError::CorruptState
@@ -99,6 +100,24 @@ fn map_restart_vault_error(error: VaultError) -> RoundError {
         | VaultError::IllegalTransition
         | VaultError::RevisionConflict
         | VaultError::NoSuchArtifact => RoundError::Vault,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{map_restart_vault_error, RoundError};
+    use btc_vault::VaultError;
+
+    #[test]
+    fn incomplete_production_vault_is_retryable_and_never_refund_eligible() {
+        assert_eq!(
+            map_restart_vault_error(VaultError::CreationIncomplete),
+            RoundError::RestartStorageUnavailable
+        );
+        assert_ne!(
+            map_restart_vault_error(VaultError::CreationIncomplete),
+            RoundError::RestartOwnerCorrupt
+        );
     }
 }
 

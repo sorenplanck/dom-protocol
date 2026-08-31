@@ -312,6 +312,12 @@ pub struct SettlementJournalRow {
     pub context_hash: [u8; 32],
 }
 
+/// Durable cursor state for one settlement/chain pair.
+///
+/// Naming the row keeps the public storage boundary reviewable without a
+/// lint exception over a four-element nested tuple.
+pub type SettlementCursorRowV1 = (Vec<u8>, Option<i64>, Option<[u8; 32]>, u64);
+
 impl core::fmt::Debug for SettlementJournalRow {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SettlementJournalRow")
@@ -607,6 +613,7 @@ impl Store {
     /// existing snapshot); the same `settlement_id` with a different
     /// binding is equivocation and fails closed.
     pub fn f2_create(&mut self, req: &SettlementCreate<'_>) -> Result<SettlementSnapshotRow> {
+        self.refuse_settlement_profile_for_production()?;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -666,6 +673,7 @@ impl Store {
 
     /// Loads the snapshot joined with the settlement's binding.
     pub fn f2_load(&self, settlement_id: [u8; 32]) -> Result<Option<SettlementSnapshotRow>> {
+        self.refuse_settlement_profile_for_production()?;
         let row = self
             .connection
             .query_row(
@@ -707,6 +715,7 @@ impl Store {
     /// from these bytes instead of from loose parameters (spec §20), so a
     /// restarted process cannot run under a policy the terms never froze.
     pub fn f2_terms(&self, settlement_id: [u8; 32]) -> Result<Option<(Vec<u8>, [u8; 32])>> {
+        self.refuse_settlement_profile_for_production()?;
         Ok(self
             .connection
             .query_row(
@@ -728,6 +737,7 @@ impl Store {
         settlement_id: [u8; 32],
         evidence_id: [u8; 32],
     ) -> Result<usize> {
+        self.refuse_settlement_profile_for_production()?;
         Ok(self.connection.execute(
             REAFFIRM_EVIDENCE_SQL,
             rusqlite::params![
@@ -748,6 +758,7 @@ impl Store {
         settlement_id: [u8; 32],
         event_id: [u8; 32],
     ) -> Result<Option<Vec<u8>>> {
+        self.refuse_settlement_profile_for_production()?;
         Ok(self
             .connection
             .query_row(
@@ -796,6 +807,7 @@ impl Store {
         req: &SettlementCommit<'_>,
         external: Option<ExternalCustodyMutation<'_>>,
     ) -> Result<CommitOutcome> {
+        self.refuse_settlement_profile_for_production()?;
         failpoint!(C0);
         let tx = self
             .connection
@@ -1060,6 +1072,7 @@ impl Store {
         ev: &EvidenceRow,
         first_seen_seq: u64,
     ) -> Result<ParkOutcome> {
+        self.refuse_settlement_profile_for_production()?;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1129,6 +1142,7 @@ impl Store {
         settlement_id: [u8; 32],
         status_tag: i64,
     ) -> Result<Vec<EvidenceRow>> {
+        self.refuse_settlement_profile_for_production()?;
         let mut stmt = self.connection.prepare(
             "SELECT evidence_id, chain_id, tx_id, event_index, block_height,
                     block_anchor, status_tag
@@ -1176,6 +1190,7 @@ impl Store {
         settlement_id: [u8; 32],
         from_height: u64,
     ) -> Result<usize> {
+        self.refuse_settlement_profile_for_production()?;
         let height = i64::try_from(from_height).map_err(|_| StoreError::CounterOverflow)?;
         let affected = self.connection.execute(
             "UPDATE observed_evidence
@@ -1196,6 +1211,7 @@ impl Store {
         lease_ms: i64,
         max: u32,
     ) -> Result<Vec<ClaimedEffect>> {
+        self.refuse_settlement_profile_for_production()?;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1271,6 +1287,7 @@ impl Store {
         &self,
         settlement_id: [u8; 32],
     ) -> Result<Vec<F2OutboxEffectSummaryV1>> {
+        self.refuse_settlement_profile_for_production()?;
         let mut statement = self.connection.prepare(
             "SELECT snapshot.last_event_seq, outbox.rowid,
                     outbox.effect_id, outbox.source_seq, outbox.effect_kind,
@@ -1417,6 +1434,7 @@ impl Store {
         expected_payload_hash: [u8; 32],
         now_unix_ms: i64,
     ) -> Result<()> {
+        self.refuse_settlement_profile_for_production()?;
         failpoint!(C9);
         let tx = self
             .connection
@@ -1459,6 +1477,7 @@ impl Store {
         terminal_tag: u16,
         now_unix_ms: i64,
     ) -> Result<()> {
+        self.refuse_settlement_profile_for_production()?;
         self.connection.execute(
             "INSERT OR IGNORE INTO late_evidence
              (settlement_id, evidence_id, terminal_tag, observed_at_unix_ms)
@@ -1479,6 +1498,7 @@ impl Store {
     /// each arrived. No event bytes are stored by the recorder, so none can
     /// be returned here: the row is an audit trail, not a replay source.
     pub fn f2_late_evidence(&self, settlement_id: [u8; 32]) -> Result<Vec<([u8; 32], u16, i64)>> {
+        self.refuse_settlement_profile_for_production()?;
         let mut stmt = self.connection.prepare(
             "SELECT evidence_id, terminal_tag, observed_at_unix_ms
              FROM late_evidence WHERE settlement_id = ?1
@@ -1500,6 +1520,7 @@ impl Store {
     /// Journal of one settlement, in order, with continuity validated
     /// (recovery: a gap is corruption, spec §13).
     pub fn f2_read_journal(&self, settlement_id: [u8; 32]) -> Result<Vec<SettlementJournalRow>> {
+        self.refuse_settlement_profile_for_production()?;
         let mut stmt = self.connection.prepare(
             "SELECT seq, expected_revision, resulting_revision, event_id,
                     event_kind, event_bytes, context_hash
@@ -1543,12 +1564,12 @@ impl Store {
     }
 
     /// Cursor of one (settlement, chain), if present.
-    #[allow(clippy::type_complexity)]
     pub fn f2_cursor(
         &self,
         settlement_id: [u8; 32],
         chain_id: [u8; 32],
-    ) -> Result<Option<(Vec<u8>, Option<i64>, Option<[u8; 32]>, u64)>> {
+    ) -> Result<Option<SettlementCursorRowV1>> {
+        self.refuse_settlement_profile_for_production()?;
         let row = self
             .connection
             .query_row(
@@ -1578,6 +1599,7 @@ impl Store {
 
     /// Terminal outcome of one settlement, if finalized.
     pub fn f2_terminal(&self, settlement_id: [u8; 32]) -> Result<Option<(u16, [u8; 32], u64)>> {
+        self.refuse_settlement_profile_for_production()?;
         let row = self
             .connection
             .query_row(

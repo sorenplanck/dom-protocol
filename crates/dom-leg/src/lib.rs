@@ -42,8 +42,9 @@ pub use disabled::{scalar_is_canonical, DomLegSession, SessionBindings, SECP256K
 
 #[cfg(feature = "real-dom-adaptor")]
 pub use round::{
-    scalar_is_canonical, AggregateSigningKey, BoundRound, DomLegSession, ExtractedAdaptorSecret,
-    LegParticipant, LocalSigningShare, RoundNonces, SessionBindings, SessionOpenRequest,
+    scalar_is_canonical, AggregateSigningKey, BoundRound, CallerSuppliedIdentitySessionRequestV1,
+    DomLegSession, ExtractedAdaptorSecret, LegParticipant, LocalSigningShare, RoundNonces,
+    SessionBindings, SessionOpenRequest,
 };
 
 /// Purpose registry.
@@ -118,6 +119,14 @@ pub enum LegError {
     /// Participant index outside the roster.
     #[error("participant index is outside the roster")]
     IndexOutOfRange,
+    /// Retained session facts that are structurally impossible for any round.
+    ///
+    /// Raised only by `SessionBindings::open_with_caller_supplied_identity_v1`,
+    /// for a field the caller failed to populate. It is an accident detector
+    /// and nothing more: a caller that chooses its own inputs chooses non-zero
+    /// ones at the same cost, so this refusal is worth nothing against one.
+    #[error("retained session facts are structurally incomplete")]
+    MalformedRetainedFacts,
     /// Rejection coming from the pinned crate, propagated without
     /// reinterpretation.
     ///

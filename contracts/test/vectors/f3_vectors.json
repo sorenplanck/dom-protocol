@@ -1,0 +1,352 @@
+{
+  "scalarVectors": [
+    {
+      "t": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "adaptorAddress": "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
+    },
+    {
+      "t": "0x0000000000000000000000000000000000000000000000000000000000000002",
+      "adaptorAddress": "0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF"
+    },
+    {
+      "t": "0x0000000000000000000000000000000000000000000000000000000000000003",
+      "adaptorAddress": "0x6813Eb9362372EEF6200f3b1dbC3f819671cBA69"
+    },
+    {
+      "t": "0x0000000000000000000000000000000000000000000000000000000000000007",
+      "adaptorAddress": "0xd41c057fd1c78805AAC12B0A94a405c0461A6FBb"
+    },
+    {
+      "t": "0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140",
+      "adaptorAddress": "0x80C0dbf239224071c59dD8970ab9d542E3414aB2"
+    },
+    {
+      "t": "0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413f",
+      "adaptorAddress": "0x92D48Ff5523c9B04Aa426191b4bD21e6080F074A"
+    },
+    {
+      "t": "0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd036413e",
+      "adaptorAddress": "0x2Ef1f47E3244806c0FAf4Bd42D96cD1e05AefFeC"
+    },
+    {
+      "t": "0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0",
+      "adaptorAddress": "0x3B3c67F57f74CE72a02978b0492620b1a661DA43"
+    },
+    {
+      "t": "0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a1",
+      "adaptorAddress": "0x3be94BC74D6898509F726419B93a66B3Bd899642"
+    },
+    {
+      "t": "0x0000000000000000000000000000000100000000000000000000000000000000",
+      "adaptorAddress": "0x669DA9aEfae50b66d8956054d574a76c76D853B1"
+    },
+    {
+      "t": "0x00000000000000000000000000000000ffffffffffffffffffffffffffffffff",
+      "adaptorAddress": "0x420a8a3F198cA29091398F8a3Afd7118FCf308E6"
+    },
+    {
+      "t": "0x0000000000000000000000000000000100000000000000000000000000000000",
+      "adaptorAddress": "0x669DA9aEfae50b66d8956054d574a76c76D853B1"
+    },
+    {
+      "t": "0xa2e305f3890c24ebedbef773665a1f9d75e483f1b1e8edd3817ce6fe9e28e3f3",
+      "adaptorAddress": "0x999f72Ef8D7882C84d235A6BA405e5eE4869a32F"
+    },
+    {
+      "t": "0x26bd38344ea4f3265dc9406bba9134501c8351314adc8d405aa0de072c821fc5",
+      "adaptorAddress": "0x1940450458b106fc8598F12c77A04B0Ed9Bf5fa4"
+    },
+    {
+      "t": "0xf05f65d24654329706aaaa2e5ceb671acffa890923b26d439d8218dcb956e67a",
+      "adaptorAddress": "0x06b02210C8b66F5B576262623c049d9b8FA0987a"
+    },
+    {
+      "t": "0xf1f6b9f824c2ce821e494bbd31ee570ea994f9c9a815964aea6b3b33f3fcf1dc",
+      "adaptorAddress": "0x3b6873F5cD11290fB53622851De5A6cC92EfDDEe"
+    },
+    {
+      "t": "0x5167dd5573c56772c100b254e0bbfafbdfb6b2dbe0222bcc164eaba90c1b5ccf",
+      "adaptorAddress": "0x906B99A29AB28751f485e8EB0cbfCD72A4f23b95"
+    },
+    {
+      "t": "0x141afc12ca5b9c90828127ce3e665c758280406f9d836a37ba5a64484d0fc8fb",
+      "adaptorAddress": "0x094A3a66cf2D46bB42E50be77dEE00B4198c21d8"
+    },
+    {
+      "t": "0x36be648111557ab07827d95eb018c7a81d3f8e6cb6fcb8a543ed6706f5e66526",
+      "adaptorAddress": "0x3AFD2c32a914911E9726eEF869C40edCA699Be6D"
+    },
+    {
+      "t": "0x8a990aa560d87985486ff865d79a69337ed730df9b9bb5dcf65e0edc83ae9f3d",
+      "adaptorAddress": "0xa63B64715FFa1EcBCD925E4Ebd6DdFa2b9d6E09e"
+    }
+  ],
+  "bindingVectors": [
+    {
+      "chainId": 31337,
+      "contract": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+      "terms": {
+        "domChainId": "0x3a463ded9a02cd1ddc3a1a09954e6b889394af810b2ab6e64c982117a1bfdc5a",
+        "direction": 0,
+        "sessionId": "0xe516640ca845b8e019f7de97df983edac470a3bc13110e22aaa5b1cf172718b1",
+        "termsHash": "0x317b4746a2fbaf617655a2306105689e70c596961c646368bf0bf472eae8d6ab",
+        "participantsHash": "0xe4534d5455f43fea96d91c57a1b94add1c474a4d28ce15b914d57b82550e1945",
+        "asset": "0x0000000000000000000000000000000000000000",
+        "amount": "3000000000000000000",
+        "beneficiary": "0x00000000000000000000000000000000000000B1",
+        "adaptorAddress": "0xceAB42dcA5Acb2772B2549E65f92Ca9444c0c661",
+        "deadline": "1900000000"
+      },
+      "funder": "0x00000000000000000000000000000000000000f1",
+      "binding": "0x43615bd305b6fb3d2e84c05d940051ddb1bb3d1f627949b89df92bed7fb6ef96",
+      "lockId": "0x858e72f840855888c788b774553720d794f38b2d794113a365917542fdb598d3"
+    },
+    {
+      "chainId": 31337,
+      "contract": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+      "terms": {
+        "domChainId": "0x1f241b3550d0d2e9ec76aa76ad0f882d1bdf94cb7a14e349e19e2669301c3333",
+        "direction": 0,
+        "sessionId": "0xe516640ca845b8e019f7de97df983edac470a3bc13110e22aaa5b1cf172718b1",
+        "termsHash": "0x317b4746a2fbaf617655a2306105689e70c596961c646368bf0bf472eae8d6ab",
+        "participantsHash": "0xe4534d5455f43fea96d91c57a1b94add1c474a4d28ce15b914d57b82550e1945",
+        "asset": "0x0000000000000000000000000000000000000000",
+        "amount": "3000000000000000000",
+        "beneficiary": "0x00000000000000000000000000000000000000B1",
+        "adaptorAddress": "0xceAB42dcA5Acb2772B2549E65f92Ca9444c0c661",
+        "deadline": "1900000000"
+      },
+      "funder": "0x00000000000000000000000000000000000000f1",
+      "binding": "0x1e9f264943786d914ab74c08e9f97fadecb9ed9264b8c160f625622500fbb7a1",
+      "lockId": "0xd16290e25a38132304ff0c5603ee5a8fd796c2a8da55a5ac4c62aa4216154894"
+    },
+    {
+      "chainId": 31337,
+      "contract": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+      "terms": {
+        "domChainId": "0x1f241b3550d0d2e9ec76aa76ad0f882d1bdf94cb7a14e349e19e2669301c3333",
+        "direction": 1,
+        "sessionId": "0xe516640ca845b8e019f7de97df983edac470a3bc13110e22aaa5b1cf172718b1",
+        "termsHash": "0x317b4746a2fbaf617655a2306105689e70c596961c646368bf0bf472eae8d6ab",
+        "participantsHash": "0xe4534d5455f43fea96d91c57a1b94add1c474a4d28ce15b914d57b82550e1945",
+        "asset": "0x0000000000000000000000000000000000000000",
+        "amount": "3000000000000000000",
+        "beneficiary": "0x00000000000000000000000000000000000000B1",
+        "adaptorAddress": "0xceAB42dcA5Acb2772B2549E65f92Ca9444c0c661",
+        "deadline": "1900000000"
+      },
+      "funder": "0x00000000000000000000000000000000000000f1",
+      "binding": "0xc996f504a509b05011310c2ed5be0150a1298ac717c4f08d06b733c587070589",
+      "lockId": "0xb75afb25b7acf75fa90cce0346ad2957761b75e33fa41d2793426ea228eb736e"
+    },
+    {
+      "chainId": 31337,
+      "contract": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+      "terms": {
+        "domChainId": "0x1f241b3550d0d2e9ec76aa76ad0f882d1bdf94cb7a14e349e19e2669301c3333",
+        "direction": 1,
+        "sessionId": "0x28b0bbccd5fe3a09c551343ef5c849f674898ace8dc22357a92a9f8ab3db0bc9",
+        "termsHash": "0x317b4746a2fbaf617655a2306105689e70c596961c646368bf0bf472eae8d6ab",
+        "participantsHash": "0xe4534d5455f43fea96d91c57a1b94add1c474a4d28ce15b914d57b82550e1945",
+        "asset": "0x0000000000000000000000000000000000000000",
+        "amount": "3000000000000000000",
+        "beneficiary": "0x00000000000000000000000000000000000000B1",
+        "adaptorAddress": "0xceAB42dcA5Acb2772B2549E65f92Ca9444c0c661",
+        "deadline": "1900000000"
+      },
+      "funder": "0x00000000000000000000000000000000000000f1",
+      "binding": "0x2fd163e051972431eee275341c55a3e9cd242d438cf763c1df8b90dbb6a00458",
+      "lockId": "0x845aff5d999f61b8744f298e84337bf09f9c6c4fb755d9b2b2fb8da55f852a0d"
+    },
+    {
+      "chainId": 31337,
+      "contract": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+      "terms": {
+        "domChainId": "0x1f241b3550d0d2e9ec76aa76ad0f882d1bdf94cb7a14e349e19e2669301c3333",
+        "direction": 1,
+        "sessionId": "0x28b0bbccd5fe3a09c551343ef5c849f674898ace8dc22357a92a9f8ab3db0bc9",
+        "termsHash": "0xe8483b17730a3ed72748e27ab377a0db0d8b72aed3b1d3d48ae39a16c00d00c8",
+        "participantsHash": "0xe4534d5455f43fea96d91c57a1b94add1c474a4d28ce15b914d57b82550e1945",
+        "asset": "0x0000000000000000000000000000000000000000",
+        "amount": "3000000000000000000",
+        "beneficiary": "0x00000000000000000000000000000000000000B1",
+        "adaptorAddress": "0xceAB42dcA5Acb2772B2549E65f92Ca9444c0c661",
+        "deadline": "1900000000"
+      },
+      "funder": "0x00000000000000000000000000000000000000f1",
+      "binding": "0xad39778f24577344064e0180023b447e5640086b7b0589300a2b48b7c84ab7b2",
+      "lockId": "0xddc12608ab8c10e0584eb6184c9d3f459ffb658bffcc6c6bac4b1acdc9f74a43"
+    },
+    {
+      "chainId": 31337,
+      "contract": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+      "terms": {
+        "domChainId": "0x1f241b3550d0d2e9ec76aa76ad0f882d1bdf94cb7a14e349e19e2669301c3333",
+        "direction": 1,
+        "sessionId": "0x28b0bbccd5fe3a09c551343ef5c849f674898ace8dc22357a92a9f8ab3db0bc9",
+        "termsHash": "0xe8483b17730a3ed72748e27ab377a0db0d8b72aed3b1d3d48ae39a16c00d00c8",
+        "participantsHash": "0xe5f0fa7254860fe88091e38f582ceee8223b3a3669f258a2d1565657efc587eb",
+        "asset": "0x0000000000000000000000000000000000000000",
+        "amount": "3000000000000000000",
+        "beneficiary": "0x00000000000000000000000000000000000000B1",
+        "adaptorAddress": "0xceAB42dcA5Acb2772B2549E65f92Ca9444c0c661",
+        "deadline": "1900000000"
+      },
+      "funder": "0x00000000000000000000000000000000000000f1",
+      "binding": "0xf3ba77029dbe094758d495d281c0050e34e4dda291ab2b726bd29dfc6fd56588",
+      "lockId": "0x50f97b2e87e20b55d648c7305025f3c6f0706eaad80e8aa69962920363fc9b74"
+    },
+    {
+      "chainId": 31337,
+      "contract": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+      "terms": {
+        "domChainId": "0x1f241b3550d0d2e9ec76aa76ad0f882d1bdf94cb7a14e349e19e2669301c3333",
+        "direction": 1,
+        "sessionId": "0x28b0bbccd5fe3a09c551343ef5c849f674898ace8dc22357a92a9f8ab3db0bc9",
+        "termsHash": "0xe8483b17730a3ed72748e27ab377a0db0d8b72aed3b1d3d48ae39a16c00d00c8",
+        "participantsHash": "0xe5f0fa7254860fe88091e38f582ceee8223b3a3669f258a2d1565657efc587eb",
+        "asset": "0x00000000000000000000000000000000000000A5",
+        "amount": "3000000000000000000",
+        "beneficiary": "0x00000000000000000000000000000000000000B1",
+        "adaptorAddress": "0xceAB42dcA5Acb2772B2549E65f92Ca9444c0c661",
+        "deadline": "1900000000"
+      },
+      "funder": "0x00000000000000000000000000000000000000f1",
+      "binding": "0xb5092142c2a041ee989d8a41e9a3e59dde929abf4ba5492d3bc4b948de707c07",
+      "lockId": "0x007c1758875dff567b0adeb2ea5ebe1595ebabc58b5fa310ffe564b7cd7f8a88"
+    },
+    {
+      "chainId": 31337,
+      "contract": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+      "terms": {
+        "domChainId": "0x1f241b3550d0d2e9ec76aa76ad0f882d1bdf94cb7a14e349e19e2669301c3333",
+        "direction": 1,
+        "sessionId": "0x28b0bbccd5fe3a09c551343ef5c849f674898ace8dc22357a92a9f8ab3db0bc9",
+        "termsHash": "0xe8483b17730a3ed72748e27ab377a0db0d8b72aed3b1d3d48ae39a16c00d00c8",
+        "participantsHash": "0xe5f0fa7254860fe88091e38f582ceee8223b3a3669f258a2d1565657efc587eb",
+        "asset": "0x00000000000000000000000000000000000000A5",
+        "amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        "beneficiary": "0x00000000000000000000000000000000000000B1",
+        "adaptorAddress": "0xceAB42dcA5Acb2772B2549E65f92Ca9444c0c661",
+        "deadline": "1900000000"
+      },
+      "funder": "0x00000000000000000000000000000000000000f1",
+      "binding": "0xbec2f828c849a2deadb9cccdc123fdc9317c516aa8fa4d41904974ab55d249df",
+      "lockId": "0x6edd918c7809e369e5f5a849d6f9a730874703c2eb73be16d6f42a99fe243699"
+    },
+    {
+      "chainId": 31337,
+      "contract": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+      "terms": {
+        "domChainId": "0x1f241b3550d0d2e9ec76aa76ad0f882d1bdf94cb7a14e349e19e2669301c3333",
+        "direction": 1,
+        "sessionId": "0x28b0bbccd5fe3a09c551343ef5c849f674898ace8dc22357a92a9f8ab3db0bc9",
+        "termsHash": "0xe8483b17730a3ed72748e27ab377a0db0d8b72aed3b1d3d48ae39a16c00d00c8",
+        "participantsHash": "0xe5f0fa7254860fe88091e38f582ceee8223b3a3669f258a2d1565657efc587eb",
+        "asset": "0x00000000000000000000000000000000000000A5",
+        "amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        "beneficiary": "0x00000000000000000000000000000000000000b2",
+        "adaptorAddress": "0xceAB42dcA5Acb2772B2549E65f92Ca9444c0c661",
+        "deadline": "1900000000"
+      },
+      "funder": "0x00000000000000000000000000000000000000f1",
+      "binding": "0x39f41c989d8354d20ccc86549e4f6b85413617472047447a9a78af72fdeed740",
+      "lockId": "0xcde9cefce6cbf89957dba410e2b48697e9344be1483167a19c012c20afb4006d"
+    },
+    {
+      "chainId": 31337,
+      "contract": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+      "terms": {
+        "domChainId": "0x1f241b3550d0d2e9ec76aa76ad0f882d1bdf94cb7a14e349e19e2669301c3333",
+        "direction": 1,
+        "sessionId": "0x28b0bbccd5fe3a09c551343ef5c849f674898ace8dc22357a92a9f8ab3db0bc9",
+        "termsHash": "0xe8483b17730a3ed72748e27ab377a0db0d8b72aed3b1d3d48ae39a16c00d00c8",
+        "participantsHash": "0xe5f0fa7254860fe88091e38f582ceee8223b3a3669f258a2d1565657efc587eb",
+        "asset": "0x00000000000000000000000000000000000000A5",
+        "amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        "beneficiary": "0x00000000000000000000000000000000000000b2",
+        "adaptorAddress": "0xf60413aF8ab186b36042e8FF9Bba52911CCF83e6",
+        "deadline": "1900000000"
+      },
+      "funder": "0x00000000000000000000000000000000000000f1",
+      "binding": "0x33d50ec226969412ba3e4c7444d07e28fa8ba9f656c97d6f5e0a4dfacceace26",
+      "lockId": "0x399a7704d0361493ad8d0373607640ffa7326e9313ba03b2b9e1b92236fef3ed"
+    },
+    {
+      "chainId": 31337,
+      "contract": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+      "terms": {
+        "domChainId": "0x1f241b3550d0d2e9ec76aa76ad0f882d1bdf94cb7a14e349e19e2669301c3333",
+        "direction": 1,
+        "sessionId": "0x28b0bbccd5fe3a09c551343ef5c849f674898ace8dc22357a92a9f8ab3db0bc9",
+        "termsHash": "0xe8483b17730a3ed72748e27ab377a0db0d8b72aed3b1d3d48ae39a16c00d00c8",
+        "participantsHash": "0xe5f0fa7254860fe88091e38f582ceee8223b3a3669f258a2d1565657efc587eb",
+        "asset": "0x00000000000000000000000000000000000000A5",
+        "amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        "beneficiary": "0x00000000000000000000000000000000000000b2",
+        "adaptorAddress": "0xf60413aF8ab186b36042e8FF9Bba52911CCF83e6",
+        "deadline": "18446744073709551615"
+      },
+      "funder": "0x00000000000000000000000000000000000000f1",
+      "binding": "0x16ebf1bc055c8fecc6e14124dfe85048653b7994612c8c900778717ffa3adae1",
+      "lockId": "0xffe553120734bf3e168b3528c7397f8986524173a2dab8f57eb7c6d9def5f45a"
+    },
+    {
+      "chainId": 31337,
+      "contract": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+      "terms": {
+        "domChainId": "0x1f241b3550d0d2e9ec76aa76ad0f882d1bdf94cb7a14e349e19e2669301c3333",
+        "direction": 1,
+        "sessionId": "0x28b0bbccd5fe3a09c551343ef5c849f674898ace8dc22357a92a9f8ab3db0bc9",
+        "termsHash": "0xe8483b17730a3ed72748e27ab377a0db0d8b72aed3b1d3d48ae39a16c00d00c8",
+        "participantsHash": "0xe5f0fa7254860fe88091e38f582ceee8223b3a3669f258a2d1565657efc587eb",
+        "asset": "0x00000000000000000000000000000000000000A5",
+        "amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        "beneficiary": "0x00000000000000000000000000000000000000b2",
+        "adaptorAddress": "0xf60413aF8ab186b36042e8FF9Bba52911CCF83e6",
+        "deadline": "18446744073709551615"
+      },
+      "funder": "0x00000000000000000000000000000000000000F2",
+      "binding": "0x16ebf1bc055c8fecc6e14124dfe85048653b7994612c8c900778717ffa3adae1",
+      "lockId": "0x833c76810d52e0300885314fa628247081d02238f9ae6e2e4f11859869a07070"
+    },
+    {
+      "chainId": 31337,
+      "contract": "0x2e234DAe75C793f67A35089C9d99245E1C58470b",
+      "terms": {
+        "domChainId": "0x1f241b3550d0d2e9ec76aa76ad0f882d1bdf94cb7a14e349e19e2669301c3333",
+        "direction": 1,
+        "sessionId": "0x28b0bbccd5fe3a09c551343ef5c849f674898ace8dc22357a92a9f8ab3db0bc9",
+        "termsHash": "0xe8483b17730a3ed72748e27ab377a0db0d8b72aed3b1d3d48ae39a16c00d00c8",
+        "participantsHash": "0xe5f0fa7254860fe88091e38f582ceee8223b3a3669f258a2d1565657efc587eb",
+        "asset": "0x00000000000000000000000000000000000000A5",
+        "amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        "beneficiary": "0x00000000000000000000000000000000000000b2",
+        "adaptorAddress": "0xf60413aF8ab186b36042e8FF9Bba52911CCF83e6",
+        "deadline": "18446744073709551615"
+      },
+      "funder": "0x00000000000000000000000000000000000000f1",
+      "binding": "0x585c6b92476c80f82af19be91420b2c2a0bec7164fcd85b54136d7ee190f77a0",
+      "lockId": "0x424157e9222b3d32b4daa87ac4b5b3731c5bd5163f8888e40672cfa1bf5b332c"
+    },
+    {
+      "chainId": 11155111,
+      "contract": "0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f",
+      "terms": {
+        "domChainId": "0x1f241b3550d0d2e9ec76aa76ad0f882d1bdf94cb7a14e349e19e2669301c3333",
+        "direction": 1,
+        "sessionId": "0x28b0bbccd5fe3a09c551343ef5c849f674898ace8dc22357a92a9f8ab3db0bc9",
+        "termsHash": "0xe8483b17730a3ed72748e27ab377a0db0d8b72aed3b1d3d48ae39a16c00d00c8",
+        "participantsHash": "0xe5f0fa7254860fe88091e38f582ceee8223b3a3669f258a2d1565657efc587eb",
+        "asset": "0x00000000000000000000000000000000000000A5",
+        "amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        "beneficiary": "0x00000000000000000000000000000000000000b2",
+        "adaptorAddress": "0xf60413aF8ab186b36042e8FF9Bba52911CCF83e6",
+        "deadline": "18446744073709551615"
+      },
+      "funder": "0x00000000000000000000000000000000000000f1",
+      "binding": "0x596b558ea8e88f6c3b6711652e32efc8e60d964bf09a35713f31d8bf7ca97a89",
+      "lockId": "0x8bdcd4cf3b1f5a0bca3974c4f978a8600bd75ceb34e3db6afce1a1bca2e3a8c6"
+    }
+  ]
+}

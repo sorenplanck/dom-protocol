@@ -49,6 +49,9 @@ pub const MESSAGE_FIXED_LEN_V1: usize = UNSIGNED_PREFIX_LEN_V1 + IDENTITY_SIGNAT
 /// Global payload ceiling from Master section 8.1.
 pub const GLOBAL_PAYLOAD_CAP_V1: usize = 1024 * 1024;
 
+/// Exact byte length of the typed V1 Abort payload.
+pub const ABORT_PAYLOAD_LEN_V1: usize = 32;
+
 /// Largest accepted canonical message.
 pub const MAX_MESSAGE_LEN_V1: usize = MESSAGE_FIXED_LEN_V1 + GLOBAL_PAYLOAD_CAP_V1;
 
@@ -121,8 +124,8 @@ impl MessageTypeV1 {
             | Self::BpRoundCommit
             | Self::SigNonceCommit
             | Self::ReadyToFund
-            | Self::Abort
             | Self::Ack => 4 * 1024,
+            Self::Abort => ABORT_PAYLOAD_LEN_V1,
             Self::ShareReveal
             | Self::BpRound1
             | Self::BpRound2
@@ -166,6 +169,50 @@ impl MessageTypeV1 {
             Self::Abort => phase == SessionPhaseV1::Aborted,
             Self::Ack => true,
         }
+    }
+}
+
+/// Canonical public payload for a V1 [`MessageTypeV1::Abort`] message.
+///
+/// The single field is a non-zero digest that binds the cooperative abort to
+/// its higher-layer durable decision or evidence. It is deliberately not a
+/// free-form reason string and must not contain secret material. The `DSC1`
+/// envelope separately binds the exact chain, session, sender, sequence and
+/// predecessor transcript.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AbortPayloadV1 {
+    binding_digest: [u8; ABORT_PAYLOAD_LEN_V1],
+}
+
+impl AbortPayloadV1 {
+    /// Construct an Abort payload from its non-zero application binding.
+    pub fn new(binding_digest: [u8; ABORT_PAYLOAD_LEN_V1]) -> Result<Self, TransportError> {
+        if binding_digest == [0; ABORT_PAYLOAD_LEN_V1] {
+            return Err(TransportError::ZeroPayloadCommitment);
+        }
+        Ok(Self { binding_digest })
+    }
+
+    /// Decode the complete type-owned payload without accepting extensions.
+    pub fn decode_exact(bytes: &[u8]) -> Result<Self, TransportError> {
+        if bytes.len() != ABORT_PAYLOAD_LEN_V1 {
+            return Err(TransportError::NonCanonicalLength);
+        }
+        let mut binding_digest = [0; ABORT_PAYLOAD_LEN_V1];
+        binding_digest.copy_from_slice(bytes);
+        Self::new(binding_digest)
+    }
+
+    /// Non-zero digest binding this Abort to its higher-layer authority.
+    #[must_use]
+    pub const fn binding_digest(&self) -> &[u8; ABORT_PAYLOAD_LEN_V1] {
+        &self.binding_digest
+    }
+
+    /// Consume the typed payload and return its exact wire bytes.
+    #[must_use]
+    pub const fn into_bytes(self) -> [u8; ABORT_PAYLOAD_LEN_V1] {
+        self.binding_digest
     }
 }
 
@@ -221,6 +268,8 @@ pub enum TransportError {
     NonCanonicalLength,
     /// A required identifier was all zero.
     ZeroIdentifier,
+    /// A required type-owned payload commitment was all zero.
+    ZeroPayloadCommitment,
     /// Chain or session context differs from the receiver.
     ContextMismatch,
     /// Sender is not in the frozen two-party roster.
@@ -263,6 +312,7 @@ impl fmt::Display for TransportError {
             Self::LengthOverflow => "message length overflow",
             Self::NonCanonicalLength => "message length is not canonical",
             Self::ZeroIdentifier => "a required identifier is zero",
+            Self::ZeroPayloadCommitment => "a required payload commitment is zero",
             Self::ContextMismatch => "message chain or session context differs",
             Self::UnknownSender => "message sender is not in the session roster",
             Self::AuthenticationFailed => "message authentication failed",
@@ -312,6 +362,7 @@ impl UnsignedMessageV1 {
         if payload.len() > kind.payload_cap() || payload.len() > GLOBAL_PAYLOAD_CAP_V1 {
             return Err(TransportError::PayloadTooLarge);
         }
+        validate_registered_payload(kind, &payload)?;
         Ok(Self {
             kind,
             chain_id,
@@ -321,6 +372,26 @@ impl UnsignedMessageV1 {
             previous_transcript_hash,
             payload,
         })
+    }
+
+    /// Construct a typed V1 Abort message without accepting raw payload bytes.
+    pub fn new_abort(
+        chain_id: [u8; 32],
+        session_id: [u8; 32],
+        sender_id: [u8; 32],
+        sequence: u64,
+        previous_transcript_hash: [u8; 32],
+        payload: AbortPayloadV1,
+    ) -> Result<Self, TransportError> {
+        Self::new(
+            MessageTypeV1::Abort,
+            chain_id,
+            session_id,
+            sender_id,
+            sequence,
+            previous_transcript_hash,
+            payload.into_bytes().to_vec(),
+        )
     }
 
     /// Registered message type.
@@ -464,7 +535,8 @@ impl SignedMessageV1 {
         let sequence = read_u64(&bytes[104..112])?;
         let previous_transcript_hash = array_32(&bytes[112..144])?;
         let unsigned_len = UNSIGNED_PREFIX_LEN_V1 + payload_len;
-        let payload = bytes[UNSIGNED_PREFIX_LEN_V1..unsigned_len].to_vec();
+        let payload = &bytes[UNSIGNED_PREFIX_LEN_V1..unsigned_len];
+        validate_registered_payload(kind, payload)?;
         let mut signature = [0; IDENTITY_SIGNATURE_LEN_V1];
         signature.copy_from_slice(&bytes[unsigned_len..]);
         let digest = message_digest(&bytes[..unsigned_len]);
@@ -476,7 +548,7 @@ impl SignedMessageV1 {
                 sender_id,
                 sequence,
                 previous_transcript_hash,
-                payload,
+                payload: payload.to_vec(),
             },
             signature,
             bytes: bytes.to_vec(),
@@ -739,23 +811,41 @@ fn valid_phase_movement(
         return next == current;
     }
     if kind == MessageTypeV1::Abort {
-        return !is_terminal(current) && next == SessionPhaseV1::Aborted;
+        return abort_is_strictly_pre_funding(current) && next == SessionPhaseV1::Aborted;
     }
     next == current || dom_scriptless_protocol::is_normative_edge(current, next)
 }
 
-fn is_terminal(phase: SessionPhaseV1) -> bool {
+const fn abort_is_strictly_pre_funding(phase: SessionPhaseV1) -> bool {
     matches!(
         phase,
-        SessionPhaseV1::Settled
-            | SessionPhaseV1::Refunded
-            | SessionPhaseV1::Aborted
-            | SessionPhaseV1::FailedClosed
+        SessionPhaseV1::Created
+            | SessionPhaseV1::TermsCommitted
+            | SessionPhaseV1::SharesCommitted
+            | SessionPhaseV1::SharesRevealed
+            | SessionPhaseV1::BpCommonCommitted
+            | SessionPhaseV1::BpCommonEstablished
+            | SessionPhaseV1::BpNonceCommitted
+            | SessionPhaseV1::BpRound1Complete
+            | SessionPhaseV1::BpRound2Complete
+            | SessionPhaseV1::OutputFinalized
+            | SessionPhaseV1::TemplatesCommitted
+            | SessionPhaseV1::RefundSigning
+            | SessionPhaseV1::RefundSigned
+            | SessionPhaseV1::ClaimSigning
+            | SessionPhaseV1::ClaimPrepared
     )
 }
 
 fn message_digest(unsigned: &[u8]) -> [u8; 32] {
     *blake2b_256_tagged(MESSAGE_DIGEST_TAG_V1, unsigned).as_bytes()
+}
+
+fn validate_registered_payload(kind: MessageTypeV1, payload: &[u8]) -> Result<(), TransportError> {
+    if kind == MessageTypeV1::Abort {
+        AbortPayloadV1::decode_exact(payload)?;
+    }
+    Ok(())
 }
 
 fn advance_transcript(
@@ -1112,6 +1202,251 @@ mod tests {
             )?,
             key,
         )?)
+    }
+
+    fn signed_abort(
+        key: &SecretKey,
+        sender: [u8; 32],
+        sequence: u64,
+        transcript: [u8; 32],
+        binding_digest: [u8; ABORT_PAYLOAD_LEN_V1],
+    ) -> Result<SignedMessageV1, Box<dyn Error>> {
+        let payload = AbortPayloadV1::new(binding_digest)?;
+        Ok(SignedMessageV1::sign(
+            UnsignedMessageV1::new_abort(
+                [0x11; 32], [0x22; 32], sender, sequence, transcript, payload,
+            )?,
+            key,
+        )?)
+    }
+
+    fn abort_receiver(
+        phase: SessionPhaseV1,
+        transcript: [u8; 32],
+    ) -> Result<SessionReceiverV1, Box<dyn Error>> {
+        let alice_key = identity(21)?;
+        let bob_key = identity(22)?;
+        Ok(SessionReceiverV1::new(
+            [0x11; 32],
+            [0x22; 32],
+            [
+                TransportParticipantV1::new(
+                    [0xa5; 32],
+                    alice_key.public_key(),
+                    DirectionV1::Initiator,
+                )?,
+                TransportParticipantV1::new(
+                    [0xb6; 32],
+                    bob_key.public_key(),
+                    DirectionV1::Responder,
+                )?,
+            ],
+            phase,
+            transcript,
+        )?)
+    }
+
+    fn replace_abort_payload(message: &SignedMessageV1, payload: &[u8]) -> Vec<u8> {
+        assert_eq!(message.unsigned().kind(), MessageTypeV1::Abort);
+        assert_eq!(message.unsigned().payload().len(), ABORT_PAYLOAD_LEN_V1);
+        let signature_offset = UNSIGNED_PREFIX_LEN_V1 + ABORT_PAYLOAD_LEN_V1;
+        let mut bytes = message.as_bytes()[..UNSIGNED_PREFIX_LEN_V1].to_vec();
+        bytes[144..148].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(payload);
+        bytes.extend_from_slice(&message.as_bytes()[signature_offset..]);
+        bytes
+    }
+
+    #[test]
+    fn abort_payload_is_exact_nonzero_and_preserves_registry_v1() -> Result<(), Box<dyn Error>> {
+        let key = identity(21)?;
+        let binding_digest = [0x7a; ABORT_PAYLOAD_LEN_V1];
+        let payload = AbortPayloadV1::new(binding_digest)?;
+        assert_eq!(payload.binding_digest(), &binding_digest);
+        assert_eq!(payload.into_bytes(), binding_digest);
+        assert_eq!(MessageTypeV1::Abort as u8, 0x13);
+        assert_eq!(MessageTypeV1::try_from(0x13)?, MessageTypeV1::Abort);
+        assert_eq!(MessageTypeV1::Abort.payload_cap(), ABORT_PAYLOAD_LEN_V1);
+
+        let message = signed_abort(&key, [0xa5; 32], 0, [0x51; 32], binding_digest)?;
+        let decoded = SignedMessageV1::decode_exact(message.as_bytes())?;
+        decoded.verify_identity(&key.public_key())?;
+        assert_eq!(decoded.as_bytes(), message.as_bytes());
+        assert_eq!(
+            AbortPayloadV1::decode_exact(decoded.unsigned().payload())?,
+            payload
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn abort_payload_rejects_every_noncanonical_length_and_zero() -> Result<(), Box<dyn Error>> {
+        let key = identity(21)?;
+        let valid = signed_abort(&key, [0xa5; 32], 0, [0x51; 32], [0x7a; 32])?;
+
+        for length in [0, 31, 33, 4096] {
+            let payload = vec![0x7a; length];
+            let envelope_error = if length > ABORT_PAYLOAD_LEN_V1 {
+                TransportError::PayloadTooLarge
+            } else {
+                TransportError::NonCanonicalLength
+            };
+            assert_eq!(
+                AbortPayloadV1::decode_exact(&payload),
+                Err(TransportError::NonCanonicalLength)
+            );
+            assert_eq!(
+                UnsignedMessageV1::new(
+                    MessageTypeV1::Abort,
+                    [0x11; 32],
+                    [0x22; 32],
+                    [0xa5; 32],
+                    0,
+                    [0x51; 32],
+                    payload.clone(),
+                )
+                .err(),
+                Some(envelope_error)
+            );
+            assert_eq!(
+                SignedMessageV1::decode_exact(&replace_abort_payload(&valid, &payload)).err(),
+                Some(envelope_error)
+            );
+        }
+
+        let zero = [0; ABORT_PAYLOAD_LEN_V1];
+        assert_eq!(
+            AbortPayloadV1::new(zero),
+            Err(TransportError::ZeroPayloadCommitment)
+        );
+        assert_eq!(
+            AbortPayloadV1::decode_exact(&zero),
+            Err(TransportError::ZeroPayloadCommitment)
+        );
+        assert_eq!(
+            UnsignedMessageV1::new(
+                MessageTypeV1::Abort,
+                [0x11; 32],
+                [0x22; 32],
+                [0xa5; 32],
+                0,
+                [0x51; 32],
+                zero.to_vec(),
+            )
+            .err(),
+            Some(TransportError::ZeroPayloadCommitment)
+        );
+        assert_eq!(
+            SignedMessageV1::decode_exact(&replace_abort_payload(&valid, &zero)).err(),
+            Some(TransportError::ZeroPayloadCommitment)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn abort_is_allowed_from_every_prefunding_phase_for_both_participants(
+    ) -> Result<(), Box<dyn Error>> {
+        let abortable = [
+            SessionPhaseV1::Created,
+            SessionPhaseV1::TermsCommitted,
+            SessionPhaseV1::SharesCommitted,
+            SessionPhaseV1::SharesRevealed,
+            SessionPhaseV1::BpCommonCommitted,
+            SessionPhaseV1::BpCommonEstablished,
+            SessionPhaseV1::BpNonceCommitted,
+            SessionPhaseV1::BpRound1Complete,
+            SessionPhaseV1::BpRound2Complete,
+            SessionPhaseV1::OutputFinalized,
+            SessionPhaseV1::TemplatesCommitted,
+            SessionPhaseV1::RefundSigning,
+            SessionPhaseV1::RefundSigned,
+            SessionPhaseV1::ClaimSigning,
+            SessionPhaseV1::ClaimPrepared,
+        ];
+        let alice_key = identity(21)?;
+        let bob_key = identity(22)?;
+        for phase in abortable {
+            for (key, sender, binding_byte) in
+                [(&alice_key, [0xa5; 32], 0x71), (&bob_key, [0xb6; 32], 0x72)]
+            {
+                let initial = [phase as u16 as u8; 32];
+                let mut receiver = abort_receiver(phase, initial)?;
+                let abort = signed_abort(key, sender, 0, initial, [binding_byte; 32])?;
+                let receipt = receiver.accept(abort.as_bytes(), SessionPhaseV1::Aborted)?;
+                assert_eq!(receipt.kind, MessageTypeV1::Abort);
+                assert!(!receipt.duplicate);
+                assert_eq!(receiver.phase(), SessionPhaseV1::Aborted);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn abort_is_refused_from_funding_authorized_and_every_later_phase() -> Result<(), Box<dyn Error>>
+    {
+        let forbidden = [
+            SessionPhaseV1::FundingAuthorized,
+            SessionPhaseV1::FundingBroadcast,
+            SessionPhaseV1::FundingConfirmed,
+            SessionPhaseV1::ClaimBroadcast,
+            SessionPhaseV1::RefundEligible,
+            SessionPhaseV1::RefundBroadcast,
+            SessionPhaseV1::Settled,
+            SessionPhaseV1::Refunded,
+            SessionPhaseV1::Aborted,
+            SessionPhaseV1::FailedClosed,
+        ];
+        let alice_key = identity(21)?;
+        for phase in forbidden {
+            let initial = [phase as u16 as u8; 32];
+            let mut receiver = abort_receiver(phase, initial)?;
+            let abort = signed_abort(&alice_key, [0xa5; 32], 0, initial, [0x73; 32])?;
+            assert_eq!(
+                receiver.accept(abort.as_bytes(), SessionPhaseV1::Aborted),
+                Err(TransportError::InvalidTransition),
+                "Abort unexpectedly accepted from {phase:?}"
+            );
+            assert_eq!(receiver.phase(), phase);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn abort_enforces_sender_local_sequence_and_transcript_for_both_participants(
+    ) -> Result<(), Box<dyn Error>> {
+        let initial = [0x51; 32];
+        let alice_key = identity(21)?;
+        let bob_key = identity(22)?;
+        for (key, sender, binding_byte) in
+            [(&alice_key, [0xa5; 32], 0x74), (&bob_key, [0xb6; 32], 0x75)]
+        {
+            let mut receiver = abort_receiver(SessionPhaseV1::Created, initial)?;
+            let gap = signed_abort(key, sender, 1, initial, [binding_byte; 32])?;
+            assert_eq!(
+                receiver.accept(gap.as_bytes(), SessionPhaseV1::Aborted),
+                Err(TransportError::SequenceGap)
+            );
+            assert_eq!(receiver.phase(), SessionPhaseV1::Created);
+
+            let fork = signed_abort(key, sender, 0, [0x99; 32], [binding_byte; 32])?;
+            assert_eq!(
+                receiver.accept(fork.as_bytes(), SessionPhaseV1::Aborted),
+                Err(TransportError::ForkedTranscript)
+            );
+            assert_eq!(receiver.phase(), SessionPhaseV1::Created);
+
+            let wrong_destination = signed_abort(key, sender, 0, initial, [binding_byte; 32])?;
+            assert_eq!(
+                receiver.accept(wrong_destination.as_bytes(), SessionPhaseV1::ClaimPrepared),
+                Err(TransportError::PhaseMismatch)
+            );
+            assert_eq!(receiver.phase(), SessionPhaseV1::Created);
+
+            let exact = signed_abort(key, sender, 0, initial, [binding_byte; 32])?;
+            receiver.accept(exact.as_bytes(), SessionPhaseV1::Aborted)?;
+            assert_eq!(receiver.phase(), SessionPhaseV1::Aborted);
+        }
+        Ok(())
     }
 
     #[test]

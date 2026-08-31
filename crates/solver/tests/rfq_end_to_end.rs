@@ -681,3 +681,47 @@ fn a_zero_rate_refuses() {
         );
     }
 }
+
+/// AD-1.2 requires checked addition of the per-leg fee caps. Even a quote
+/// whose own fee is small must not turn an invalid, overflowing cap into an
+/// effectively unlimited allowance.
+#[test]
+fn an_overflowing_fee_cap_refuses_at_the_solver() {
+    let invalid_cap = RfqV1::create(
+        INITIATOR,
+        route(),
+        RfqModeV1::ExactIn {
+            input_amount: 1_000,
+            minimum_output: 1_000,
+        },
+        FeeLimitV1 {
+            dom_max: u128::MAX,
+            counterparty_max: 1,
+        },
+        TimelockDomainV1::TimestampSeconds,
+        TimelockSpec::TimestampSeconds { value: 5_000 },
+        PolicyId([0xAA; 32]),
+        1,
+        SESSION,
+    )
+    .unwrap();
+    let zero_fee_solver = ReferenceSolverV1::new(
+        SOLVER,
+        SolverPolicyV1 {
+            rate_num: 1,
+            rate_den: 1,
+            spread_bps: 0,
+            execution_delta: 1_000,
+            expiry_delta: 500,
+        },
+        SOLVER_SECRET,
+        [0x99; 32],
+    );
+
+    assert_eq!(
+        zero_fee_solver
+            .answer(&invalid_cap, DOM, bond(), [0x02; 32])
+            .unwrap_err(),
+        SolverRefusal::FeeAboveLimit
+    );
+}

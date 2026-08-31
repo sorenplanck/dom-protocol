@@ -31,6 +31,8 @@ pub use uspe::objects::PolicyId;
 
 pub mod fee_policy;
 pub mod selection;
+/// Versioned heterogeneous-clock F6 objects for production routes.
+pub mod v2;
 
 /// Leading magic of every canonical [`RfqV1`] encoding.
 pub const RFQ_MAGIC: &[u8; 8] = b"DOMIRFQ1";

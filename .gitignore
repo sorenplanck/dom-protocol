@@ -45,6 +45,10 @@ dom-testnet-data/
 **/fuzz/corpus/
 **/fuzz/artifacts/
 
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+
 # build dirs alternativos (toolchain /tmp etc)
 /target-s2
 /target-s3
@@ -55,3 +59,6 @@ dom-testnet-data/
 *ETAPA*.md
 AUTO_BACKUP_*.md
 docs/FIX-014_*.md
+
+target/
+**/target/

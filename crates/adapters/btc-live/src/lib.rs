@@ -49,7 +49,10 @@ pub use funding::{
     BitcoinPrebroadcastStoreV1, BitcoinRefundContractV1, BitcoinRefundOutputV1,
     PreparedBitcoinFundingV1, ReopenedBitcoinFundingV1,
 };
-pub use rpc::{BitcoinCoreNetworkV1, BitcoinCoreRpcClientV1, BitcoinCoreRpcConfigV1};
+pub use rpc::{
+    bitcoin_signet_challenge_digest_v1, BitcoinCoreNetworkV1, BitcoinCoreRpcClientV1,
+    BitcoinCoreRpcConfigV1,
+};
 
 /// Failures from the concrete Bitcoin Core boundary.
 ///

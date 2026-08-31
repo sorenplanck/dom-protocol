@@ -31,6 +31,8 @@ uspe = { path = "../uspe" }
 f6-engine = { path = "../f6-engine" }
 rfq = { path = "../rfq" }
 serde_json = "1"
+serde = { workspace = true }
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
 
 [dev-dependencies]
 getrandom = "=0.3.4"

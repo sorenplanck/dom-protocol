@@ -15,18 +15,11 @@
 //! are cheap. Run with a small max_len.
 
 use libfuzzer_sys::fuzz_target;
-use serde::Deserialize;
 use std::io::Write;
 
 const MAGIC: &[u8; 14] = b"DOM-TEST-ENV\0\0";
 
-#[derive(Debug, Deserialize)]
-struct Payload {
-    #[allow(dead_code)]
-    a: u32,
-    #[allow(dead_code)]
-    b: String,
-}
+type Payload = std::collections::BTreeMap<String, String>;
 
 fuzz_target!(|data: &[u8]| {
     let mut f = match tempfile::NamedTempFile::new() {

@@ -357,6 +357,46 @@ fn canonical_bytes_round_trip_and_the_decoder_fails_closed() {
     assert!(!printed.contains("78"), "no key byte leaks: {printed}");
 }
 
+#[test]
+fn publish_refuses_invalid_intents_without_inserting_them() {
+    let mut board = IntentBoardV1::new(ledger_with_privileged(&[]));
+
+    let mut wrong_version = intent();
+    wrong_version.version = 2;
+    assert_eq!(
+        board.publish(wrong_version),
+        Err(BoardRefusal::MalformedIntent(IntentError::UnknownVersion))
+    );
+    assert_eq!(
+        board.phase_at(&INTENT_ID, PUBLISHED),
+        Err(BoardRefusal::UnknownIntent)
+    );
+
+    let mut divergent_deadline = intent();
+    divergent_deadline.quote_deadline_seconds += 1;
+    assert_eq!(
+        board.publish(divergent_deadline),
+        Err(BoardRefusal::MalformedIntent(
+            IntentError::RfqDeadlineMismatch
+        ))
+    );
+    assert_eq!(
+        board.phase_at(&INTENT_ID, PUBLISHED),
+        Err(BoardRefusal::UnknownIntent)
+    );
+
+    let mut tampered_rfq = intent();
+    tampered_rfq.rfq.rfq_id[0] ^= 1;
+    assert_eq!(
+        board.publish(tampered_rfq),
+        Err(BoardRefusal::MalformedIntent(IntentError::MalformedRfq))
+    );
+    assert_eq!(
+        board.phase_at(&INTENT_ID, PUBLISHED),
+        Err(BoardRefusal::UnknownIntent)
+    );
+}
+
 /// 7. End to end: intent → private window → quotes from two solver
 ///    instances → one ratified selection → frozen terms carrying the
 ///    winner's `solver_id` — with the adversarial candidates adjudicated by
@@ -477,7 +517,7 @@ fn end_to_end_intent_to_frozen_terms_with_adversaries() {
 /// the registry (OQ-S3).
 #[test]
 fn a_board_message_kind_is_refused_by_the_relay_registry() {
-    use relay::auth::{message_type, CanonicalMessageTypePolicyV1, MessageTypePolicy};
+    use relay::auth::{message_type, CanonicalMessageTypePolicyV1};
     use relay::SenderRoleV1;
 
     const INTENT_KIND: u16 = 0x0006;

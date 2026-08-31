@@ -15,12 +15,12 @@ revisions (see `laboratory/design/LINEAGE_RECONCILIATION_MAP.md`).
   the first compilation, both in `src/wire.rs` (`Digest32` is a type alias
   for `[u8; 32]` in `kaystra-core`, not a tuple struct; the original code
   used tuple-struct syntax at the two `intent_id` sites).
-- `cargo test -p intent-book`: **8 passed, 0 failed** (`tests/board.rs`).
+- `cargo test -p intent-book`: **9 passed, 0 failed** (`tests/board.rs`).
 - Regression over the crates the board touches
   (`cargo test -p rfq -p kaystra-core -p solver -p relay -p f6-engine`):
   **195 passed, 0 failed** across 24 suites.
 
-The eight tests cover the seven proofs this file required before any
+The nine tests cover the eight proofs this file required before any
 behavioural claim, in order:
 
 1. `the_public_phase_opens_exactly_at_solver_window_end` — the public
@@ -39,7 +39,11 @@ behavioural claim, in order:
 6. `canonical_bytes_round_trip_and_the_decoder_fails_closed` — round-trip,
    truncation at every prefix, trailing bytes, hostile length prefix,
    unknown version, dead-on-arrival deadline, redacted negotiation key;
-7. `end_to_end_intent_to_frozen_terms_with_adversaries` — intent →
+7. `publish_refuses_invalid_intents_without_inserting_them` — the live board
+   applies structural/cross-object validation before insertion, including the
+   embedded RFQ id and exact deadline correspondence, and leaves no residue on
+   refusal;
+8. `end_to_end_intent_to_frozen_terms_with_adversaries` — intent →
    private window → quotes from two `solver` instances → one ratified
    selection → `TermsBindingV1` carrying the winner's `solver_id`; the
    unregistered and suspended candidates are adjudicated by their §4.1

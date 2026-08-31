@@ -164,12 +164,15 @@ impl<R: JsonRpc> EvidenceVerifier for RevealedScalarVerifier<R> {
         // §8 item 3: the policy arithmetic. The adapter proved "a claim
         // of the bound leg revealed these bytes"; the policy asks "and
         // do these bytes open THIS obligation's commitment?".
-        if !is_canonical_scalar(&revealed.0) {
+        // One exposure point for both checks; `revealed` itself is moved on
+        // into the verdict below, so this reads it rather than consuming it.
+        let scalar = revealed.expose_scalar_bytes();
+        if !is_canonical_scalar(&scalar) {
             return Ok(EvidenceVerdict::Invalid(
                 InvalidEvidence::NonCanonicalScalar,
             ));
         }
-        if adaptor_address_of_scalar(&revealed.0)? != self.policy_adaptor {
+        if adaptor_address_of_scalar(&scalar)? != self.policy_adaptor {
             return Ok(EvidenceVerdict::Invalid(InvalidEvidence::WrongScalarPoint));
         }
 

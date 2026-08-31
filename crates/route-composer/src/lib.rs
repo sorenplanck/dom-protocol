@@ -23,8 +23,9 @@
 //!    the EVM leg uses — I15); and each terms object must be valid on its
 //!    own ([`kaystra_core::terms::SettlementTermsV1::validate`]).
 //! 2. **One hub.** Both DOM legs must sit on the SAME DOM chain — the
-//!    hub of §1.2 is one chain, and only deadlines on one chain share a
-//!    clock.
+//!    hub of §1.2 is one chain, use the same DOM asset and adapter profile,
+//!    and both use the DOM adaptor 2-of-2 mechanism. Only deadlines on one
+//!    chain share a clock.
 //! 3. **The timelock ladder, compared only inside one clock.** Deadlines
 //!    on different chains do not share a clock — the same height number
 //!    means different times on chains with different block intervals —
@@ -43,10 +44,11 @@
 //!    that produced `UnsafeCrossChainWindow` in B-F7-013) and is NOT
 //!    re-implemented here; with each settlement internally coherent, the
 //!    two same-clock pair checks order the whole route.
-//! 4. **DOM transit conservation.** The DOM amount leaving the upstream
-//!    settlement equals the DOM amount entering the downstream one —
-//!    funds transit the hub, they do not rest there (swap-tab design
-//!    premise 1, agreed with the operator).
+//! 4. **DOM transit conservation.** Both settlements execute the same route
+//!    intent under one policy version, require refund-before-funding, and the
+//!    DOM asset and amount leaving the upstream settlement equal the asset and
+//!    amount entering the downstream one. A numeric amount without its asset
+//!    denomination is never conservation.
 //!
 //! ## What the runtime gates enforce
 //!
@@ -73,6 +75,14 @@
 //! no byte can migrate across the upstream/downstream boundary without
 //! changing the digest.
 //!
+//! V2 is an explicit, separate constructor for mixed native clocks. Its
+//! digest additionally commits the complete threshold-signed policy digest,
+//! fresh evidence digest and sequence, issuance/freshness boundary, final
+//! durable-store revalidation time, and both worst-case interval proofs. A V2
+//! binding is an authenticated admission snapshot, not permission to fund
+//! after its exposed `valid_until`; every later economic action still needs a
+//! current capability from the durable time authority.
+//!
 //! The revealed scalar `t` lives only in zeroizing memory here, is never
 //! logged, never encoded and never stored — the durable stores are the
 //! engines' business and the level-2 proof sweeps both for `t` (spec §18
@@ -85,16 +95,30 @@ use blake2::{
     digest::{Update, VariableOutput},
     Blake2bVar,
 };
+pub use dom_final_claim_binding::{
+    ComposedFinalClaimRolePlanInputV1, ComposedFinalClaimRolePlanV1, ComposedSettlementLegV1,
+    FinalClaimBindingError, FinalClaimRevealModeV1, FinalClaimRoleSelectionV1,
+    FinalClaimSecretSourceScopeInputV1, FinalClaimSecretSourceScopeV1, FinalClaimSecretSourceV1,
+};
 use kaystra_core::state::SettlementState;
 use kaystra_core::terms::SettlementTermsV1;
 use kaystra_core::types::{Digest32, TimelockSpec};
 use rfq::fee_policy::{treasury_share, FeePolicyRefusal, RouteShapeV1};
+use route_time_anchor::{
+    route_scope_digest, CurrentRouteTimeLadderV2, LadderIntervalProofV2,
+    VerifiedFrozenRouteTimeLadderV2,
+};
 use zeroize::Zeroizing;
 
 /// Domain tag of [`ComposedBindingV1::binding_digest`] (A3 pattern:
 /// `BLAKE2b-256(domain || canonical bytes)`, same construction as
 /// `SettlementTermsV1::terms_hash` and the F6 object digests).
 pub const COMPOSED_BINDING_DOMAIN: &[u8] = b"DOM-INTEROP/COMPOSED-BINDING/V1\0";
+
+/// Domain tag for [`ComposedBindingV2::binding_digest`]. V2 commits the exact
+/// authenticated time policy, live evidence and conservative interval proof;
+/// it never changes the byte format or acceptance rules of V1.
+pub const COMPOSED_BINDING_DOMAIN_V2: &[u8] = b"DOM-INTEROP/COMPOSED-BINDING/V2\0";
 
 /// Everything a composition can refuse, by name (I13). Every refusal is
 /// terminal for the attempted step: there is no partial composition.
@@ -117,6 +141,25 @@ pub enum ComposerRefusal {
     /// two "DOM" clocks cannot anchor one ladder.
     #[error("hub chain mismatch")]
     HubChainMismatch,
+    /// The two DOM legs name different assets, so equal integers do not
+    /// represent conserved value.
+    #[error("hub asset mismatch")]
+    HubAssetMismatch,
+    /// The two DOM legs were interpreted under different adapter profiles.
+    #[error("hub adapter profile mismatch")]
+    HubProfileMismatch,
+    /// A DOM leg does not use the scriptless adaptor 2-of-2 mechanism.
+    #[error("invalid DOM hub locking mechanism")]
+    InvalidHubMechanism,
+    /// The two settlements do not execute the same originating route intent.
+    #[error("route intent mismatch")]
+    RouteIntentMismatch,
+    /// The two settlements interpret their fields under different policies.
+    #[error("route policy version mismatch")]
+    RoutePolicyMismatch,
+    /// One settlement does not commit to arming its refund before funding.
+    #[error("refund-before-funding policy is required")]
+    UnsafeRecoveryPolicy,
     /// A same-clock deadline pair spans two `TimelockSpec` variants.
     /// A4: deadlines are compared, never converted.
     #[error("mixed timelock domains")]
@@ -138,6 +181,18 @@ pub enum ComposerRefusal {
     /// each must be a real, positive budget.
     #[error("zero safety margin")]
     ZeroSafetyMargin,
+    /// The supplied time capability was issued for different settlement
+    /// terms or for the opposite upstream/downstream order.
+    #[error("authenticated route time scope mismatch")]
+    TimeAnchorMismatch,
+    /// The explicit bilateral FinalClaim roles or source scopes do not bind
+    /// byte-exactly to this composition and its two settlement terms.
+    #[error("invalid composed final-claim role plan")]
+    InvalidFinalClaimRolePlan,
+    /// The opaque time capability contains a zero, reversed, overflowing or
+    /// otherwise non-conservative ladder commitment.
+    #[error("invalid authenticated route time proof")]
+    InvalidTimeAnchorProof,
     /// The DOM amount leaving the upstream settlement differs from the
     /// DOM amount entering the downstream one.
     #[error("dom transit mismatch")]
@@ -187,9 +242,9 @@ pub enum ComposedLeg {
 
 /// The revealed route scalar, verified against the committed `T`.
 ///
-/// Exists only through [`ComposedBindingV1::verify_revealed_scalar`]; the
-/// bytes zeroize on drop, and `Debug` is redacted (I6: a secret is never
-/// echoed).
+/// Exists only through a verified V1 or V2 binding's
+/// `verify_revealed_scalar` method; the bytes zeroize on drop, and `Debug` is
+/// redacted (I6: a secret is never echoed).
 pub struct RouteScalar(Zeroizing<[u8; 32]>);
 
 impl RouteScalar {
@@ -222,7 +277,8 @@ pub struct ComposedBindingV1 {
 /// One same-clock ladder rung: `up` must mature at least `margin` after
 /// `dn`, both already established to share one clock and one variant.
 fn rung_holds(up: u64, dn: u64, margin: u64) -> bool {
-    up >= dn.saturating_add(margin)
+    dn.checked_add(margin)
+        .is_some_and(|minimum_upstream| up >= minimum_upstream)
 }
 
 impl ComposedBindingV1 {
@@ -246,6 +302,16 @@ impl ComposedBindingV1 {
             .validate()
             .map_err(|_| ComposerRefusal::InvalidTerms)?;
 
+        if upstream.intent_hash != downstream.intent_hash {
+            return Err(ComposerRefusal::RouteIntentMismatch);
+        }
+        if upstream.policy_version != downstream.policy_version {
+            return Err(ComposerRefusal::RoutePolicyMismatch);
+        }
+        if !upstream.recovery.refund_before_funding || !downstream.recovery.refund_before_funding {
+            return Err(ComposerRefusal::UnsafeRecoveryPolicy);
+        }
+
         // 2. Two independent settlements, not one wearing two hats.
         if upstream.settlement_id == downstream.settlement_id
             || upstream.session_id == downstream.session_id
@@ -268,6 +334,17 @@ impl ComposedBindingV1 {
         //    clock exists for the hub rung of the ladder.
         if upstream.dom_leg.chain_id != downstream.dom_leg.chain_id {
             return Err(ComposerRefusal::HubChainMismatch);
+        }
+        if upstream.dom_leg.asset_id != downstream.dom_leg.asset_id {
+            return Err(ComposerRefusal::HubAssetMismatch);
+        }
+        if upstream.dom_leg.adapter_profile_hash != downstream.dom_leg.adapter_profile_hash {
+            return Err(ComposerRefusal::HubProfileMismatch);
+        }
+        if upstream.dom_leg.mechanism != kaystra_core::types::LockMechanism::DomAdaptor2of2
+            || downstream.dom_leg.mechanism != kaystra_core::types::LockMechanism::DomAdaptor2of2
+        {
+            return Err(ComposerRefusal::InvalidHubMechanism);
         }
 
         // 5. The ladder, pairwise inside one clock (module docs §3).
@@ -314,8 +391,9 @@ impl ComposedBindingV1 {
             _ => return Err(ComposerRefusal::MixedTimelockDomains),
         }
 
-        // 6. DOM transit conservation: what leaves the hub is what
-        //    entered it.
+        // 6. DOM transit conservation: chain, asset and profile were already
+        //    proven identical; now require the denominated quantities to
+        //    match as well.
         if upstream.dom_leg.amount != downstream.dom_leg.amount {
             return Err(ComposerRefusal::DomTransitMismatch);
         }
@@ -406,6 +484,400 @@ impl ComposedBindingV1 {
             RouteShapeV1::Composed,
         )?)
     }
+}
+
+/// A composition whose mixed native timelocks were compared only through a
+/// fresh, threshold-authenticated V2 time capability.
+///
+/// Unlike [`ComposedBindingV1`], this binding can represent a three-chain
+/// `EVM -> DOM -> Bitcoin` route. It does not convert clocks itself. New
+/// admission consumes [`CurrentRouteTimeLadderV2`], which can be minted only by
+/// the exclusively locked durable route-time authority after authenticating
+/// registry profiles, fixed canonical checkpoints, timing bounds, freshness
+/// and the current evidence revision. Recovery consumes only the separate
+/// opaque [`VerifiedFrozenRouteTimeLadderV2`] reconstructed from the exact
+/// historical policy/evidence retained by that authority.
+#[derive(Debug)]
+pub struct ComposedBindingV2 {
+    upstream: SettlementTermsV1,
+    downstream: SettlementTermsV1,
+    route_scope_digest: Digest32,
+    time_policy_digest: Digest32,
+    time_evidence_digest: Digest32,
+    time_proof_digest: Digest32,
+    evidence_sequence: u64,
+    time_proof_issued_at_seconds: u64,
+    time_proof_valid_until_seconds: u64,
+    time_proof_validated_at_seconds: u64,
+    hub_time_proof: LadderIntervalProofV2,
+    counterparty_time_proof: LadderIntervalProofV2,
+    binding_digest: Digest32,
+}
+
+impl ComposedBindingV2 {
+    /// Validates the non-temporal route invariants and consumes an exact,
+    /// authenticated worst-case ladder proof for these two terms.
+    ///
+    /// The proof is move-only. A different terms byte, reversed leg order,
+    /// zero digest, reversed interval or overflowing inequality fails closed.
+    pub fn bind(
+        upstream: SettlementTermsV1,
+        downstream: SettlementTermsV1,
+        time_proof: CurrentRouteTimeLadderV2<'_>,
+    ) -> Result<Self, ComposerRefusal> {
+        let facts = V2TimeProofFacts::from(&time_proof);
+        Self::bind_with_time_facts(upstream, downstream, facts)
+    }
+
+    /// Reconstructs the exact original binding from a historically verified
+    /// ladder proof recovered by the durable time authority.
+    ///
+    /// This constructor does not authorize new funding and performs no current
+    /// freshness check. It consumes an opaque proof whose signed policy,
+    /// evidence row, issuance window and conservative rungs were rederived
+    /// against retained history. Both constructors share this type's single
+    /// invariant and digest implementation, so recovery cannot silently use a
+    /// second composition format.
+    pub fn bind_recovered(
+        upstream: SettlementTermsV1,
+        downstream: SettlementTermsV1,
+        time_proof: VerifiedFrozenRouteTimeLadderV2,
+    ) -> Result<Self, ComposerRefusal> {
+        let facts = V2TimeProofFacts::from(&time_proof);
+        Self::bind_with_time_facts(upstream, downstream, facts)
+    }
+
+    fn bind_with_time_facts(
+        upstream: SettlementTermsV1,
+        downstream: SettlementTermsV1,
+        time_proof: V2TimeProofFacts,
+    ) -> Result<Self, ComposerRefusal> {
+        validate_v2_route_shape(&upstream, &downstream)?;
+
+        let upstream_terms_hash = upstream
+            .terms_hash()
+            .map_err(|_| ComposerRefusal::InvalidTerms)?;
+        let downstream_terms_hash = downstream
+            .terms_hash()
+            .map_err(|_| ComposerRefusal::InvalidTerms)?;
+        let route_scope_digest = route_scope_digest(&upstream, &downstream)
+            .map_err(|_| ComposerRefusal::TimeAnchorMismatch)?;
+        if time_proof.upstream_terms_hash != upstream_terms_hash
+            || time_proof.downstream_terms_hash != downstream_terms_hash
+            || time_proof.route_scope_digest != route_scope_digest
+        {
+            return Err(ComposerRefusal::TimeAnchorMismatch);
+        }
+
+        let time_policy_digest = time_proof.policy_digest;
+        let time_evidence_digest = time_proof.evidence_digest;
+        let time_proof_digest = time_proof.binding_digest;
+        let evidence_sequence = time_proof.evidence_sequence;
+        let time_proof_issued_at_seconds = time_proof.issued_at_seconds;
+        let time_proof_valid_until_seconds = time_proof.valid_until_seconds;
+        let time_proof_validated_at_seconds = time_proof.validated_at_seconds;
+        let hub_time_proof = time_proof.hub;
+        let counterparty_time_proof = time_proof.counterparty;
+        if time_policy_digest == [0; 32]
+            || time_evidence_digest == [0; 32]
+            || time_proof_digest == [0; 32]
+            || evidence_sequence == 0
+            || time_proof_validated_at_seconds < time_proof_issued_at_seconds
+            || time_proof_validated_at_seconds >= time_proof_valid_until_seconds
+            || !time_rung_is_conservative(hub_time_proof)
+            || !time_rung_is_conservative(counterparty_time_proof)
+        {
+            return Err(ComposerRefusal::InvalidTimeAnchorProof);
+        }
+
+        let upstream_bytes = upstream
+            .canonical_bytes()
+            .map_err(|_| ComposerRefusal::InvalidTerms)?;
+        let downstream_bytes = downstream
+            .canonical_bytes()
+            .map_err(|_| ComposerRefusal::InvalidTerms)?;
+        let upstream_len =
+            u64::try_from(upstream_bytes.len()).map_err(|_| ComposerRefusal::InvalidTerms)?;
+        let downstream_len =
+            u64::try_from(downstream_bytes.len()).map_err(|_| ComposerRefusal::InvalidTerms)?;
+        let mut hash = Blake2bVar::new(32).map_err(|_| ComposerRefusal::HashInitialization)?;
+        hash.update(COMPOSED_BINDING_DOMAIN_V2);
+        hash.update(&upstream_len.to_be_bytes());
+        hash.update(&upstream_bytes);
+        hash.update(&downstream_len.to_be_bytes());
+        hash.update(&downstream_bytes);
+        hash.update(&route_scope_digest);
+        hash.update(&time_policy_digest);
+        hash.update(&time_evidence_digest);
+        hash.update(&time_proof_digest);
+        hash.update(&evidence_sequence.to_be_bytes());
+        hash.update(&time_proof_issued_at_seconds.to_be_bytes());
+        hash.update(&time_proof_valid_until_seconds.to_be_bytes());
+        hash.update(&time_proof_validated_at_seconds.to_be_bytes());
+        update_time_rung_digest(&mut hash, hub_time_proof);
+        update_time_rung_digest(&mut hash, counterparty_time_proof);
+        let mut binding_digest = [0u8; 32];
+        hash.finalize_variable(&mut binding_digest)
+            .map_err(|_| ComposerRefusal::HashInitialization)?;
+
+        Ok(Self {
+            upstream,
+            downstream,
+            route_scope_digest,
+            time_policy_digest,
+            time_evidence_digest,
+            time_proof_digest,
+            evidence_sequence,
+            time_proof_issued_at_seconds,
+            time_proof_valid_until_seconds,
+            time_proof_validated_at_seconds,
+            hub_time_proof,
+            counterparty_time_proof,
+            binding_digest,
+        })
+    }
+
+    /// The upstream settlement's exact frozen terms.
+    pub fn upstream(&self) -> &SettlementTermsV1 {
+        &self.upstream
+    }
+
+    /// The downstream settlement's exact frozen terms.
+    pub fn downstream(&self) -> &SettlementTermsV1 {
+        &self.downstream
+    }
+
+    /// Length-delimited digest of the ordered upstream/downstream terms.
+    pub const fn route_scope_digest(&self) -> Digest32 {
+        self.route_scope_digest
+    }
+
+    /// Digest of the threshold-authenticated static timing policy.
+    pub const fn time_policy_digest(&self) -> Digest32 {
+        self.time_policy_digest
+    }
+
+    /// Digest of the fresh threshold-authenticated checkpoint evidence.
+    pub const fn time_evidence_digest(&self) -> Digest32 {
+        self.time_evidence_digest
+    }
+
+    /// Digest of the exact worst-case ladder capability consumed at binding.
+    pub const fn time_proof_digest(&self) -> Digest32 {
+        self.time_proof_digest
+    }
+
+    /// Monotonic checkpoint-evidence sequence used for this binding.
+    pub const fn evidence_sequence(&self) -> u64 {
+        self.evidence_sequence
+    }
+
+    /// Trusted second at which the time authority issued the consumed proof.
+    pub const fn time_proof_issued_at_seconds(&self) -> u64 {
+        self.time_proof_issued_at_seconds
+    }
+
+    /// First trusted second at which freshness or a relative funding-anchor
+    /// horizon makes this binding unusable for a new economic action.
+    pub const fn time_proof_valid_until_seconds(&self) -> u64 {
+        self.time_proof_valid_until_seconds
+    }
+
+    /// Trusted second of the final durable-store revalidation immediately
+    /// consumed by this binding.
+    pub const fn time_proof_validated_at_seconds(&self) -> u64 {
+        self.time_proof_validated_at_seconds
+    }
+
+    /// Proven DOM-height rung projected to conservative absolute seconds.
+    pub const fn hub_time_proof(&self) -> LadderIntervalProofV2 {
+        self.hub_time_proof
+    }
+
+    /// Proven mixed counterparty rung projected to conservative seconds.
+    pub const fn counterparty_time_proof(&self) -> LadderIntervalProofV2 {
+        self.counterparty_time_proof
+    }
+
+    /// Shared adaptor point `T`, SEC1 compressed.
+    pub fn adaptor_point_sec1(&self) -> [u8; 33] {
+        self.upstream.adaptor_point_sec1
+    }
+
+    /// Final V2 commitment to exact terms, policy, evidence and both interval
+    /// inequalities.
+    pub const fn binding_digest(&self) -> Digest32 {
+        self.binding_digest
+    }
+
+    /// Bind explicit bilateral FinalClaim roles and already constructed
+    /// source scopes to this exact composition.
+    ///
+    /// No role or claim template is inferred from roster position, transport
+    /// direction, or upstream/downstream position.  Both selections are
+    /// authenticated against their exact settlement terms, shared `T`, route
+    /// scope, and this binding digest.
+    pub fn bind_final_claim_role_plan(
+        &self,
+        route_id: Digest32,
+        upstream_explicit: FinalClaimRoleSelectionV1,
+        downstream_explicit: FinalClaimRoleSelectionV1,
+    ) -> Result<ComposedFinalClaimRolePlanV1, ComposerRefusal> {
+        ComposedFinalClaimRolePlanV1::bind(ComposedFinalClaimRolePlanInputV1 {
+            route_id,
+            route_scope_digest: self.route_scope_digest,
+            composition_binding_digest: self.binding_digest,
+            upstream_terms: &self.upstream,
+            downstream_terms: &self.downstream,
+            upstream_selection: upstream_explicit,
+            downstream_selection: downstream_explicit,
+        })
+        .map_err(|_| ComposerRefusal::InvalidFinalClaimRolePlan)
+    }
+
+    /// Accepts a revealed scalar only when `t*G` is the route's committed
+    /// adaptor point.
+    pub fn verify_revealed_scalar(
+        &self,
+        observed: &[u8; 32],
+    ) -> Result<RouteScalar, ComposerRefusal> {
+        let point = adapter_evm::binding::adaptor_point_of_scalar(observed)
+            .map_err(|_| ComposerRefusal::WrongSecret)?;
+        if point != self.upstream.adaptor_point_sec1 {
+            return Err(ComposerRefusal::WrongSecret);
+        }
+        Ok(RouteScalar(Zeroizing::new(*observed)))
+    }
+
+    /// Composed treasury share over the DOM transit amount, charged once.
+    pub fn composed_treasury_share(&self) -> Result<u128, ComposerRefusal> {
+        Ok(treasury_share(
+            self.upstream.dom_leg.amount,
+            RouteShapeV1::Composed,
+        )?)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct V2TimeProofFacts {
+    upstream_terms_hash: Digest32,
+    downstream_terms_hash: Digest32,
+    route_scope_digest: Digest32,
+    policy_digest: Digest32,
+    evidence_digest: Digest32,
+    binding_digest: Digest32,
+    evidence_sequence: u64,
+    issued_at_seconds: u64,
+    valid_until_seconds: u64,
+    validated_at_seconds: u64,
+    hub: LadderIntervalProofV2,
+    counterparty: LadderIntervalProofV2,
+}
+
+impl From<&CurrentRouteTimeLadderV2<'_>> for V2TimeProofFacts {
+    fn from(proof: &CurrentRouteTimeLadderV2<'_>) -> Self {
+        Self {
+            upstream_terms_hash: proof.upstream_terms_hash(),
+            downstream_terms_hash: proof.downstream_terms_hash(),
+            route_scope_digest: proof.route_scope_digest(),
+            policy_digest: proof.policy_digest(),
+            evidence_digest: proof.evidence_digest(),
+            binding_digest: proof.binding_digest(),
+            evidence_sequence: proof.evidence_sequence(),
+            issued_at_seconds: proof.issued_at_seconds(),
+            valid_until_seconds: proof.valid_until_seconds(),
+            validated_at_seconds: proof.validated_at_seconds(),
+            hub: proof.hub_proof(),
+            counterparty: proof.counterparty_proof(),
+        }
+    }
+}
+
+impl From<&VerifiedFrozenRouteTimeLadderV2> for V2TimeProofFacts {
+    fn from(proof: &VerifiedFrozenRouteTimeLadderV2) -> Self {
+        Self {
+            upstream_terms_hash: proof.upstream_terms_hash(),
+            downstream_terms_hash: proof.downstream_terms_hash(),
+            route_scope_digest: proof.route_scope_digest(),
+            policy_digest: proof.policy_digest(),
+            evidence_digest: proof.evidence_digest(),
+            binding_digest: proof.binding_digest(),
+            evidence_sequence: proof.evidence_sequence(),
+            issued_at_seconds: proof.issued_at_seconds(),
+            valid_until_seconds: proof.valid_until_seconds(),
+            validated_at_seconds: proof.validated_at_seconds(),
+            hub: proof.hub_proof(),
+            counterparty: proof.counterparty_proof(),
+        }
+    }
+}
+
+fn validate_v2_route_shape(
+    upstream: &SettlementTermsV1,
+    downstream: &SettlementTermsV1,
+) -> Result<(), ComposerRefusal> {
+    upstream
+        .validate()
+        .map_err(|_| ComposerRefusal::InvalidTerms)?;
+    downstream
+        .validate()
+        .map_err(|_| ComposerRefusal::InvalidTerms)?;
+    if upstream.intent_hash != downstream.intent_hash {
+        return Err(ComposerRefusal::RouteIntentMismatch);
+    }
+    if upstream.policy_version != downstream.policy_version {
+        return Err(ComposerRefusal::RoutePolicyMismatch);
+    }
+    if !upstream.recovery.refund_before_funding || !downstream.recovery.refund_before_funding {
+        return Err(ComposerRefusal::UnsafeRecoveryPolicy);
+    }
+    if upstream.settlement_id == downstream.settlement_id
+        || upstream.session_id == downstream.session_id
+    {
+        return Err(ComposerRefusal::SettlementsNotDistinct);
+    }
+    if upstream.adaptor_point_sec1 != downstream.adaptor_point_sec1 {
+        return Err(ComposerRefusal::AdaptorPointMismatch);
+    }
+    adapter_evm::binding::adaptor_address(&upstream.adaptor_point_sec1)
+        .map_err(|_| ComposerRefusal::InvalidAdaptorPoint)?;
+    if upstream.dom_leg.chain_id != downstream.dom_leg.chain_id {
+        return Err(ComposerRefusal::HubChainMismatch);
+    }
+    if upstream.dom_leg.asset_id != downstream.dom_leg.asset_id {
+        return Err(ComposerRefusal::HubAssetMismatch);
+    }
+    if upstream.dom_leg.adapter_profile_hash != downstream.dom_leg.adapter_profile_hash {
+        return Err(ComposerRefusal::HubProfileMismatch);
+    }
+    if upstream.dom_leg.mechanism != kaystra_core::types::LockMechanism::DomAdaptor2of2
+        || downstream.dom_leg.mechanism != kaystra_core::types::LockMechanism::DomAdaptor2of2
+    {
+        return Err(ComposerRefusal::InvalidHubMechanism);
+    }
+    if upstream.dom_leg.amount != downstream.dom_leg.amount {
+        return Err(ComposerRefusal::DomTransitMismatch);
+    }
+    Ok(())
+}
+
+fn time_rung_is_conservative(proof: LadderIntervalProofV2) -> bool {
+    proof.margin_seconds != 0
+        && proof.upstream.earliest_seconds <= proof.upstream.latest_seconds
+        && proof.downstream.earliest_seconds <= proof.downstream.latest_seconds
+        && proof
+            .downstream
+            .latest_seconds
+            .checked_add(proof.margin_seconds)
+            .is_some_and(|minimum| proof.upstream.earliest_seconds >= minimum)
+}
+
+fn update_time_rung_digest(hash: &mut Blake2bVar, proof: LadderIntervalProofV2) {
+    hash.update(&proof.upstream.earliest_seconds.to_be_bytes());
+    hash.update(&proof.upstream.latest_seconds.to_be_bytes());
+    hash.update(&proof.downstream.earliest_seconds.to_be_bytes());
+    hash.update(&proof.downstream.latest_seconds.to_be_bytes());
+    hash.update(&proof.margin_seconds.to_be_bytes());
 }
 
 /// The ONLY permitted funding order of a composition.

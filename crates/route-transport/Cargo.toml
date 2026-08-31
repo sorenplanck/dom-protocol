@@ -20,3 +20,19 @@ thiserror = { workspace = true }
 kaystra-core = { path = "../kaystra-core", default-features = false }
 # The sender's signing secret lives only in zeroizing memory (I6).
 zeroize = { workspace = true }
+# The durable recipient inbox uses the workspace-pinned SQLite/WAL backend
+# and the same BLAKE2b-256 family as Relay V1.  They are Linux-only because
+# the retained single-writer authority relies on owner/mode checks and flock.
+blake2 = "=0.10.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rusqlite = { workspace = true }
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
+
+[dev-dependencies]
+tempfile = "=3.24.0"
+dom-scriptless-store = { path = "../dom-scriptless-store", features = ["evidence-only"] }
+dom-scriptless-crypto = { path = "../dom-scriptless-crypto" }
+dom-scriptless-transport = { path = "../dom-scriptless-transport" }
+dom-crypto.workspace = true
+cap-std.workspace = true

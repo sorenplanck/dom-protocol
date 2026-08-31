@@ -37,8 +37,14 @@ impl SecpContext {
         // SAFETY: valid flags; the size query has no preconditions.
         let size = unsafe { secp256k1_context_preallocated_size(SECP256K1_CONTEXT_NONE) };
         assert!(size > 0, "context size query returned zero");
-        let layout = Layout::from_size_align(size, 16).expect("valid context layout"); // I14-ALLOW: 16 is a constant power of two
-                                                                                       // SAFETY: layout has non-zero size.
+        let layout = match Layout::from_size_align(size, 16) {
+            Ok(layout) => layout,
+            // The alignment is a compile-time power of two; a size outside
+            // `Layout`'s range means the linked backend violated its own
+            // preallocation ABI and continuing cannot be memory-safe.
+            Err(_) => std::process::abort(),
+        };
+        // SAFETY: layout has non-zero size.
         let memory = unsafe { alloc(layout) };
         assert!(!memory.is_null(), "context allocation failed");
         // SAFETY: `memory` is `size` bytes, 16-byte aligned, exclusively

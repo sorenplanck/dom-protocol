@@ -10,7 +10,8 @@
 use rusqlite::Connection;
 use store::{
     CommitOutcome, ExternalCustodyCompletion, ExternalCustodyInsert, F2OutboxDeliveryStatusV1,
-    F2OutboxDispatchClassV1, SettlementCommit, SettlementCreate, Store, StoreError, SCHEMA_VERSION,
+    F2OutboxDispatchClassV1, ProductionStoreBindingV1, SettlementCommit, SettlementCreate, Store,
+    StoreError, SCHEMA_VERSION,
 };
 use tempfile::tempdir;
 
@@ -108,6 +109,89 @@ fn fresh_database_carries_the_full_f2_schema_at_current_version() {
     for table in F2_TABLES {
         assert!(table_exists(&conn, table), "missing table {table}");
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn production_empty_authority_refuses_any_retained_record() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().expect("production owner root");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("owner-only production root");
+    let path = dir.path().join("participant-state.sqlite3");
+    let binding = ProductionStoreBindingV1::new([0x91; 32]).expect("nonzero binding");
+    let mut store = Store::create_production(&path, binding).expect("production authority");
+    store
+        .require_empty_production()
+        .expect("new authority is empty");
+    store
+        .put_opaque(b"test-namespace", b"test-key", b"test-value")
+        .expect("retained economic state");
+    assert!(matches!(
+        store.require_empty_production(),
+        Err(StoreError::CorruptState)
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn production_monotonic_high_water_is_idempotent_persistent_and_rejects_rollback() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempdir().expect("production owner root");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("owner-only production root");
+    let path = dir.path().join("high-water.sqlite3");
+    let binding = ProductionStoreBindingV1::new([0x92; 32]).expect("nonzero binding");
+    let mut store = Store::create_production(&path, binding).expect("production authority");
+    assert!(matches!(
+        store.record_monotonic_high_water(b"", 1_000),
+        Err(StoreError::InvalidStorageAuthority)
+    ));
+    assert!(matches!(
+        store.record_monotonic_high_water(b"DOM-INTEROP/TEST/HIGH-WATER/V1", 0),
+        Err(StoreError::InvalidStorageAuthority)
+    ));
+    assert!(matches!(
+        store.record_monotonic_high_water(b"DOM-INTEROP/TEST/HIGH-WATER/OVERFLOW/V1", u64::MAX,),
+        Err(StoreError::CounterOverflow)
+    ));
+    assert_eq!(
+        store
+            .record_monotonic_high_water(b"DOM-INTEROP/TEST/HIGH-WATER/V1", 1_000)
+            .expect("first observation"),
+        1_000
+    );
+    assert_eq!(
+        store
+            .record_monotonic_high_water(b"DOM-INTEROP/TEST/HIGH-WATER/V1", 1_000)
+            .expect("equal replay"),
+        1_000
+    );
+    assert!(matches!(
+        store.record_monotonic_high_water(b"DOM-INTEROP/TEST/HIGH-WATER/V1", 999),
+        Err(StoreError::RevisionConflict)
+    ));
+    assert_eq!(
+        store
+            .record_monotonic_high_water(b"DOM-INTEROP/TEST/HIGH-WATER/V1", 1_001)
+            .expect("forward observation"),
+        1_001
+    );
+    drop(store);
+
+    let mut reopened = Store::open_production(&path, binding).expect("reopen production authority");
+    assert!(matches!(
+        reopened.record_monotonic_high_water(b"DOM-INTEROP/TEST/HIGH-WATER/V1", 1_000),
+        Err(StoreError::RevisionConflict)
+    ));
+    assert_eq!(
+        reopened
+            .record_monotonic_high_water(b"DOM-INTEROP/TEST/HIGH-WATER/V1", 1_002)
+            .expect("forward after restart"),
+        1_002
+    );
 }
 
 #[test]

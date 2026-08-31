@@ -38,9 +38,8 @@
 
 use btc_crypto::SecpContext;
 use relay::auth::{
-    accept_envelope, accept_envelope_with_policy, message_type, AuthRefusal,
-    CanonicalMessageTypePolicyV1, MessageTypePolicy, RecipientContextV1, RosterMemberV1,
-    RosterRegistryV1, RosterSnapshotV1, TranscriptStateV1, ValidationStep,
+    accept_envelope, message_type, AuthRefusal, CanonicalMessageTypePolicyV1, RecipientContextV1,
+    RosterMemberV1, RosterRegistryV1, RosterSnapshotV1, TranscriptStateV1, ValidationStep,
 };
 use relay::server::{IdempotencyKeyV1, RelayV1};
 use relay::{ParticipantId, RelayEnvelopeV1, SenderRoleV1, TimelockSpec};
@@ -386,61 +385,17 @@ fn t07_a_sender_absent_from_the_roster_is_refused() {
     }
 }
 
-/// **D-019 test 8** — an alternative policy is IMPOSSIBLE on the
-/// production composition root.
-///
-/// The proof is in two halves, because a type signature alone would not
-/// show the seam is real and a runtime check alone would not show it is
-/// unreachable:
-///
-/// * a maximally permissive policy — one that authorizes every role for
-///   every kind, including the reserved ones — visibly changes the
-///   outcome when it is injected through the test-only entry point, so
-///   the seam is genuine and this test is not vacuous;
-/// * the production [`accept_envelope`] takes NO policy parameter, so
-///   the same bytes are refused there. There is no argument, no
-///   builder, no configuration field and no environment variable
-///   through which a caller could reach the permissive behaviour.
-///
-/// The remaining half of the guarantee is structural and cannot be
-/// written as a unit test: `scripts/guards.sh` refuses
-/// `accept_envelope_with_policy` and any `impl MessageTypePolicy`
-/// outside a test tree, exactly as it refuses the F2 store failpoints
-/// outside `[dev-dependencies]`.
+/// **D-019 test 8** — the production entry point enforces the canonical
+/// policy. The implementation seam and policy trait are private to the
+/// crate, so an external composition root cannot inject an alternative.
 #[test]
 fn t08_an_alternative_policy_cannot_reach_the_production_path() {
-    /// Everything permitted — the policy a compromised or careless
-    /// composition root would install. It exists ONLY inside this test.
-    struct PermitEverything;
-    impl MessageTypePolicy for PermitEverything {
-        fn permits(&self, _role: SenderRoleV1, _message_type: u16) -> bool {
-            true
-        }
-    }
-
     // The observer emitting a RESERVED kind: forbidden twice over.
     let envelope = sign(
         unsigned(OBSERVER, SenderRoleV1::Observer, 0xffff, 0, [0u8; 32]),
         &OBSERVER_SECRET,
     );
     let raw = envelope.canonical_bytes().unwrap();
-
-    // Injected through the test-only seam, the permissive policy
-    // ACCEPTS it — so the seam is real and the canonical policy is what
-    // does the refusing.
-    let mut state = TranscriptStateV1::new();
-    assert!(
-        accept_envelope_with_policy(
-            &raw,
-            &recipient(),
-            &rosters(),
-            &PermitEverything,
-            &mut state,
-            now(),
-        )
-        .is_ok(),
-        "the permissive policy did not change the outcome; this test would be vacuous"
-    );
 
     // The production entry point refuses the very same bytes, and no
     // caller can hand it anything else.

@@ -27,7 +27,7 @@
 //! | `binding`, `lock_id` | re-derived | never trusted |
 //! | `block_number` / `block_hash` / `tx_hash` / `log_index` | chain-side | where the fact was observed |
 //! | `finalized_height` / `finalized_block_hash` | chain-side | *which* finalized chain it was observed on |
-//! | `payload` | re-derived | the scalar (claim) or the amount (funding/refund) |
+//! | `payload` | re-derived | an [`EvidencePayload`]: the scalar (claim) **or** the amount (funding/refund), named by variant rather than by convention |
 //!
 //! The distinction between the two columns is the whole of round 3's finding,
 //! so it is worth stating plainly: **re-derivation is not comparison.**
@@ -108,7 +108,10 @@
 //!
 //! `payload` may hold the revealed scalar. [`EvmEvidence`] therefore has a
 //! hand-written `Debug` that prints `<redacted>` for it, and no code path
-//! anywhere in this crate formats it.
+//! anywhere in this crate formats it. [`EvidencePayload`] carries a
+//! hand-written `Debug` of its own for the same reason: its scalar variant
+//! holds a bare array, whose derived formatting would print the scalar in
+//! full. The amount variant is shown, because an amount is public on chain.
 
 use counterparty_api::{AdapterError, RevealedSecretBytes, VerifiedOutcome};
 
@@ -198,6 +201,96 @@ impl EvidenceKind {
     }
 }
 
+/// What the 32-byte payload slot means, named rather than inferred.
+///
+/// The wire has exactly one 32-byte slot at a fixed offset whose meaning is
+/// decided by `kind`. That is a property of the format and is not changing.
+/// What is changing is that the meaning is now carried in the type instead of
+/// living in a doc comment: a `Claimed` record holds a revealed scalar, a
+/// `Funded` or `Refunded` record holds an amount, and no expression treats one
+/// as the other by accident.
+///
+/// # Why the scalar variant holds bare bytes
+///
+/// It would be natural to write `ClaimedScalar(RevealedSecretBytes)`, and that
+/// was the first shape proposed. It is not used, for one measured reason:
+/// [`EvmEvidence`] is `Copy`, and stage 2 of the `RevealedSecretBytes`
+/// migration removes `Copy` from that wrapper in exchange for
+/// `Clone + ZeroizeOnDrop`. Embedding it here would propagate that removal into
+/// a durable record type used across 83 sites in three crates, and would give a
+/// decoded evidence record a `Drop` that scrubs — including on the two thirds
+/// of records whose payload is a public amount. The naming goal is met without
+/// paying that: [`Self::claimed_scalar`] hands the scalar out already wrapped,
+/// which is the same shape `SettlementLog::claimed_scalar` uses one layer up.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EvidencePayload {
+    /// A `Claimed` record: the scalar the claim published on chain.
+    ClaimedScalar([u8; 32]),
+    /// A `Funded` or `Refunded` record: the amount, big-endian `uint256`.
+    Amount([u8; 32]),
+}
+
+impl core::fmt::Debug for EvidencePayload {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // I6. Hand-written because the scalar variant holds a bare array, whose
+        // derived `Debug` would print the scalar in full. The amount is public
+        // on chain and is shown.
+        match self {
+            Self::ClaimedScalar(_) => f.write_str("ClaimedScalar(<redacted>)"),
+            Self::Amount(amount) => write!(f, "Amount({})", short(amount)),
+        }
+    }
+}
+
+impl EvidencePayload {
+    /// Reads the slot back with the meaning `kind` assigns it.
+    ///
+    /// This is what makes the encoding survive unchanged. `kind` sits at offset
+    /// 2 and the payload slot is the last field, so by the time these 32 bytes
+    /// are read the kind is already decoded and the variant is determined. No
+    /// byte moves and no version changes; only the in-memory type learns what
+    /// it is holding.
+    #[must_use]
+    pub const fn from_wire(kind: EvidenceKind, slot: [u8; 32]) -> Self {
+        match kind {
+            EvidenceKind::Claimed => Self::ClaimedScalar(slot),
+            EvidenceKind::Funded | EvidenceKind::Refunded => Self::Amount(slot),
+        }
+    }
+
+    /// The 32 bytes exactly as the wire carries them.
+    #[must_use]
+    pub const fn wire_bytes(&self) -> [u8; 32] {
+        match self {
+            Self::ClaimedScalar(slot) | Self::Amount(slot) => *slot,
+        }
+    }
+
+    /// The revealed scalar, wrapped, or `None` for an amount.
+    ///
+    /// Not `const`, and its sibling `SettlementLog::claimed_scalar` never was:
+    /// the two are the same operation on different types and had drifted apart.
+    /// `RevealedSecretBytes` carries a `ZeroizeOnDrop` destructor and its
+    /// constructor is not `const` either, so either reason alone would settle
+    /// it.
+    #[must_use]
+    pub fn claimed_scalar(&self) -> Option<RevealedSecretBytes> {
+        match self {
+            Self::ClaimedScalar(slot) => Some(RevealedSecretBytes::new(*slot)),
+            Self::Amount(_) => None,
+        }
+    }
+
+    /// The amount, or `None` for a revealed scalar.
+    #[must_use]
+    pub const fn locked_amount(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Amount(slot) => Some(*slot),
+            Self::ClaimedScalar(_) => None,
+        }
+    }
+}
+
 /// A canonical, fully-bound record of one observed settlement log.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct EvmEvidence {
@@ -231,8 +324,15 @@ pub struct EvmEvidence {
     pub finalized_height: u64,
     /// Hash of the finalized block at that height.
     pub finalized_block_hash: [u8; 32],
-    /// `Claimed` → the scalar `t`; `Funded`/`Refunded` → the amount.
-    pub payload: [u8; 32],
+    /// The payload slot, carrying which of the two things it is.
+    ///
+    /// This was a bare `[u8; 32]` whose documentation said `Claimed` → the
+    /// scalar, `Funded`/`Refunded` → the amount, and left it there. One public
+    /// field of one type held a secret or an amount depending on `kind`, and
+    /// nothing but the reader's attention kept them apart. The encoding is
+    /// unchanged — same 32 bytes at the same offset — and only the type now
+    /// says which.
+    pub payload: EvidencePayload,
 }
 
 impl core::fmt::Debug for EvmEvidence {
@@ -271,7 +371,7 @@ impl EvmEvidence {
         o.extend_from_slice(&self.log_index.to_be_bytes());
         o.extend_from_slice(&self.finalized_height.to_be_bytes());
         o.extend_from_slice(&self.finalized_block_hash);
-        o.extend_from_slice(&self.payload);
+        o.extend_from_slice(&self.payload.wire_bytes());
         o
     }
 
@@ -308,7 +408,10 @@ impl EvmEvidence {
             log_index: c.take_u32()?,
             finalized_height: c.take_u64()?,
             finalized_block_hash: c.take32()?,
-            payload: c.take32()?,
+            // `kind` was decoded at offset 2, far above; this slot is the
+            // last field. The meaning is therefore already settled when the
+            // bytes are read, which is why naming it costs no format change.
+            payload: EvidencePayload::from_wire(kind, c.take32()?),
         };
         if c.at != bytes.len() {
             return Err(AdapterError::EvidenceInvalid);
@@ -380,20 +483,27 @@ impl EvmEvidence {
         }
         match self.kind {
             EvidenceKind::Claimed => {
+                // A `Claimed` record whose payload is not a scalar is a record
+                // whose kind and payload disagree, which decoding cannot
+                // produce and which is refused rather than reinterpreted.
+                let revealed = self
+                    .payload
+                    .claimed_scalar()
+                    .ok_or(AdapterError::EvidenceInvalid)?;
                 // The strongest re-derivation available: the scalar must
                 // actually open the adaptor point the terms committed to.
-                let addr = adaptor_address_of_scalar(&self.payload)
+                let addr = adaptor_address_of_scalar(&revealed.expose_scalar_bytes())
                     .map_err(|_| AdapterError::EvidenceInvalid)?;
                 if addr != self.terms.adaptor_address {
                     return Err(AdapterError::EvidenceInvalid);
                 }
                 Ok(VerifiedOutcome::Claimed {
-                    revealed: RevealedSecretBytes(self.payload),
+                    revealed,
                     height: self.block_number,
                 })
             }
             EvidenceKind::Funded => {
-                if self.payload != self.terms.amount {
+                if self.payload.locked_amount() != Some(self.terms.amount) {
                     return Err(AdapterError::EvidenceInvalid);
                 }
                 Ok(VerifiedOutcome::Funded {
@@ -401,7 +511,7 @@ impl EvmEvidence {
                 })
             }
             EvidenceKind::Refunded => {
-                if self.payload != self.terms.amount {
+                if self.payload.locked_amount() != Some(self.terms.amount) {
                     return Err(AdapterError::EvidenceInvalid);
                 }
                 Ok(VerifiedOutcome::Refunded {
@@ -607,8 +717,13 @@ impl EvmEvidence {
             .map_err(AdapterError::from)?;
 
         let decoded = decode_settlement_log(log, &cfg.contract)?;
-        let (lock_id, binding, payload) = decoded.identity();
-        if lock_id != self.lock_id || binding != self.binding || payload != self.payload {
+        let identity = decoded.identity();
+        // Wire-level identity: the payload slot is compared verbatim, because
+        // what is being checked is that this is byte-for-byte the same log.
+        if identity.lock_id != self.lock_id
+            || identity.binding != self.binding
+            || decoded.payload() != self.payload
+        {
             return Err(AdapterError::EvidenceInvalid);
         }
         if decoded.kind() != self.kind {
@@ -693,34 +808,90 @@ impl SettlementLog {
         }
     }
 
-    /// `(lock_id, binding, payload)` — the triple every kind shares.
-    pub fn identity(&self) -> ([u8; 32], [u8; 32], [u8; 32]) {
+    /// The two identifiers every kind shares.
+    ///
+    /// This used to return a third `[u8; 32]` beside them, and that third slot
+    /// held a **revealed scalar** for `Claimed` and a **locked amount** for
+    /// `Opened` and `Refunded` — same type, no name, meaning decided by
+    /// whichever variant the caller happened to hold. It reached production
+    /// destructured as `let (_, binding, payload) = ...`, so a secret arrived
+    /// bound to a variable indistinguishable from money.
+    ///
+    /// There is no honest name for that slot: naming it `amount` lies about
+    /// `Claimed` and naming it `t` lies about `Refunded`. So it is not here.
+    /// Ask for what you actually want, through [`Self::claimed_scalar`] or
+    /// [`Self::locked_amount`], each of which answers `None` where it does not
+    /// apply.
+    pub fn identity(&self) -> SettlementLogIdentity {
         match self {
             Self::Opened {
-                lock_id,
-                binding,
-                amount,
-                ..
-            } => (*lock_id, *binding, *amount),
-            Self::Claimed {
-                lock_id,
-                binding,
-                t,
-                ..
-            } => (*lock_id, *binding, *t),
-            Self::Refunded {
-                lock_id,
-                binding,
-                amount,
-                ..
-            } => (*lock_id, *binding, *amount),
+                lock_id, binding, ..
+            }
+            | Self::Claimed {
+                lock_id, binding, ..
+            }
+            | Self::Refunded {
+                lock_id, binding, ..
+            } => SettlementLogIdentity {
+                lock_id: *lock_id,
+                binding: *binding,
+            },
+        }
+    }
+
+    /// The scalar a `Claimed` log published, or `None` for the other kinds.
+    ///
+    /// It leaves this type inside [`RevealedSecretBytes`], not as a bare array,
+    /// so the redacting `Debug` travels with it and a caller cannot print it by
+    /// accident. That is the whole reason this accessor exists rather than a
+    /// named field on the old tuple.
+    pub fn claimed_scalar(&self) -> Option<RevealedSecretBytes> {
+        match self {
+            Self::Claimed { t, .. } => Some(RevealedSecretBytes::new(*t)),
+            Self::Opened { .. } | Self::Refunded { .. } => None,
+        }
+    }
+
+    /// The amount an `Opened` or `Refunded` log carries, or `None` for a claim.
+    pub fn locked_amount(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Opened { amount, .. } | Self::Refunded { amount, .. } => Some(*amount),
+            Self::Claimed { .. } => None,
+        }
+    }
+
+    /// The payload this log carries, with its meaning attached.
+    ///
+    /// This replaces the crate-private `wire_payload_slot`, which existed only
+    /// because there was no type that could say which of the two things the 32
+    /// bytes were. There is one now, so the codec paths carry the meaning
+    /// instead of carrying bytes and remembering.
+    pub fn payload(&self) -> EvidencePayload {
+        match self {
+            Self::Opened { amount, .. } | Self::Refunded { amount, .. } => {
+                EvidencePayload::Amount(*amount)
+            }
+            Self::Claimed { t, .. } => EvidencePayload::ClaimedScalar(*t),
         }
     }
 
     /// Lock identifier.
     pub fn lock_id(&self) -> [u8; 32] {
-        self.identity().0
+        self.identity().lock_id
     }
+}
+
+/// The `(lock_id, binding)` pair every settlement log carries.
+///
+/// Named fields rather than a tuple: both are `[u8; 32]`, so a positional
+/// return let a caller swap them silently. Nothing here is secret — the payload
+/// that was is no longer part of this value.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SettlementLogIdentity {
+    /// Lock identifier.
+    pub lock_id: [u8; 32],
+    /// Binding hash.
+    pub binding: [u8; 32],
 }
 
 /// Strictly decodes one settlement log.
@@ -858,7 +1029,7 @@ mod tests {
                 log_index: 0,
                 finalized_height: 7,
                 finalized_block_hash: [0x53; 32],
-                payload: t,
+                payload: EvidencePayload::ClaimedScalar(t),
             },
             cfg,
         )
@@ -909,7 +1080,7 @@ mod tests {
         assert_eq!(
             e.verify_static(&cfg),
             Ok(VerifiedOutcome::Claimed {
-                revealed: RevealedSecretBytes(e.payload),
+                revealed: e.payload.claimed_scalar().expect("claimed fixture"),
                 height: 5
             })
         );
@@ -956,7 +1127,11 @@ mod tests {
         assert_eq!(e.verify_static(&cfg), Err(AdapterError::EvidenceInvalid));
 
         let mut e = base;
-        e.payload[0] ^= 1;
+        // Flip one byte of the slot and rebuild the variant from `kind`, so the
+        // mutation is the same one the old bare array allowed.
+        let mut slot = e.payload.wire_bytes();
+        slot[0] ^= 1;
+        e.payload = EvidencePayload::from_wire(e.kind, slot);
         assert_eq!(
             e.verify_static(&cfg),
             Err(AdapterError::EvidenceInvalid),
@@ -983,12 +1158,125 @@ mod tests {
         );
     }
 
+    /// The payload enum moved no byte of the durable format.
+    ///
+    /// This is the assertion the enum is not allowed to ship without. The
+    /// argument for why naming the slot costs no format change is that `kind`
+    /// sits at offset 2, far above the payload, which is the last field — so
+    /// the meaning is already known when those 32 bytes are read, and encoding
+    /// writes the same bytes back. That is an argument. A durable record broken
+    /// in silence is the worst failure class this codebase has, so it is also
+    /// checked.
+    ///
+    /// The expected image is **built by hand here**, field by field, in the
+    /// order the old encoder used, ending with the raw 32-byte slot exactly as
+    /// the bare `[u8; 32]` field used to be written. It is deliberately not
+    /// obtained by calling `encode`: comparing the encoder against itself would
+    /// pass no matter what the encoder did.
+    #[test]
+    fn the_payload_enum_moved_no_byte_of_the_durable_format() {
+        let (claimed, _) = claimed_evidence();
+        let scalar_slot = claimed.payload.wire_bytes();
+        let amount_slot = [0x7e_u8; 32];
+
+        for (kind, slot) in [
+            (EvidenceKind::Claimed, scalar_slot),
+            (EvidenceKind::Funded, amount_slot),
+            (EvidenceKind::Refunded, amount_slot),
+        ] {
+            let record = EvmEvidence {
+                kind,
+                payload: EvidencePayload::from_wire(kind, slot),
+                ..claimed
+            };
+            let encoded = record.encode();
+
+            // The width is part of the format: a payload that changed size
+            // would move every byte after it and silently break every stored
+            // record. Asserted two ways. The first is the composition — every
+            // field but the payload sums to 295, and the payload contributes
+            // exactly 32 — which is the claim that matters and which a reader
+            // can check against the constant's own arithmetic. The second is
+            // the absolute width, computed here (295 + 229) rather than copied
+            // out of the constant, so it is not a mirror of what it checks.
+            assert_eq!(EVIDENCE_LEN, 295 + LOCK_TERMS_FIXED_LEN);
+            assert_eq!(EVIDENCE_LEN, 524);
+            assert_eq!(encoded.len(), EVIDENCE_LEN);
+
+            let mut expected = Vec::with_capacity(EVIDENCE_LEN);
+            expected.extend_from_slice(&EVIDENCE_VERSION.to_be_bytes());
+            expected.push(kind.as_u8());
+            expected.extend_from_slice(&record.chain_id.to_be_bytes());
+            expected.extend_from_slice(&record.contract);
+            expected.extend_from_slice(&record.code_hash);
+            expected.extend_from_slice(&record.funder);
+            expected.extend_from_slice(&record.terms.encode_fixed());
+            expected.extend_from_slice(&record.binding);
+            expected.extend_from_slice(&record.lock_id);
+            expected.extend_from_slice(&record.block_number.to_be_bytes());
+            expected.extend_from_slice(&record.block_hash);
+            expected.extend_from_slice(&record.tx_hash);
+            expected.extend_from_slice(&record.log_index.to_be_bytes());
+            expected.extend_from_slice(&record.finalized_height.to_be_bytes());
+            expected.extend_from_slice(&record.finalized_block_hash);
+            // The old field was a bare `[u8; 32]` written verbatim, right here.
+            expected.extend_from_slice(&slot);
+            assert_eq!(encoded, expected, "{kind:?} encoding moved a byte");
+
+            // The two offsets the whole argument rests on, pinned.
+            assert_eq!(encoded[2], kind.as_u8(), "kind must stay at offset 2");
+            assert_eq!(
+                &encoded[EVIDENCE_LEN - 32..],
+                &slot,
+                "the payload slot must stay last"
+            );
+
+            assert_eq!(EvmEvidence::decode(&encoded), Ok(record));
+        }
+
+        // The meaning comes from `kind` and from nothing else. The same 32
+        // trailing bytes decode to a scalar or to an amount depending only on
+        // the byte at offset 2 — which is what makes the variant recoverable
+        // without a format change, and what would have failed loudly had the
+        // ordering argument been wrong.
+        let mut image = EvmEvidence {
+            kind: EvidenceKind::Claimed,
+            payload: EvidencePayload::ClaimedScalar(amount_slot),
+            ..claimed
+        }
+        .encode();
+        assert_eq!(
+            EvmEvidence::decode(&image)
+                .expect("claimed decodes")
+                .payload,
+            EvidencePayload::ClaimedScalar(amount_slot)
+        );
+        image[2] = EvidenceKind::Refunded.as_u8();
+        assert_eq!(
+            EvmEvidence::decode(&image)
+                .expect("refunded decodes from the same trailing bytes")
+                .payload,
+            EvidencePayload::Amount(amount_slot)
+        );
+    }
+
     #[test]
     fn debug_never_renders_the_payload() {
         let (e, _) = claimed_evidence();
         let rendered = format!("{e:?}");
         assert!(rendered.contains("<redacted>"));
         assert!(!rendered.contains("payload: [9"));
+        // The payload type is now formattable on its own, so its `Debug` is a
+        // second I6 surface and is pinned here rather than left to the record's.
+        // The scalar variant holds a bare array; a derived `Debug` would print
+        // it, which is exactly what this refuses.
+        let scalar = format!("{:?}", EvidencePayload::ClaimedScalar([0x9a; 32]));
+        assert!(scalar.contains("<redacted>"));
+        assert!(!scalar.contains("154"), "0x9a prints as 154 when derived");
+        // An amount is public on chain and is shown, so the redaction is about
+        // the secret and not a blanket blindfold.
+        let amount = format!("{:?}", EvidencePayload::Amount([0x9a; 32]));
+        assert!(!amount.contains("<redacted>"));
         let l = SettlementLog::Claimed {
             lock_id: [1u8; 32],
             binding: [2u8; 32],

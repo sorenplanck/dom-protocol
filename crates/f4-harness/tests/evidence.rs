@@ -170,7 +170,7 @@ fn a_finalized_bound_claim_inside_the_window_is_valid() {
             revealed,
             claim_height,
         } => {
-            assert_eq!(revealed, RevealedSecretBytes(secret()));
+            assert_eq!(revealed, RevealedSecretBytes::new(secret()));
             assert!(claim_height > 0);
         }
         other => panic!("expected Valid, got {other:?}"),

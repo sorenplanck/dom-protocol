@@ -1326,12 +1326,13 @@ fn anvil_evm_to_dom_direction() {
     let revealed = events
         .iter()
         .find_map(|ev| match ev {
-            ObservedEvent::LockClaimed { revealed, .. } => Some(*revealed),
+            ObservedEvent::LockClaimed { revealed, .. } => Some(revealed.clone()),
             _ => None,
         })
         .expect("the finalized Claimed log must be observed");
     assert_eq!(
-        revealed.0, rig.t,
+        revealed.expose_scalar_bytes(),
+        rig.t,
         "`t` must come back byte-identical out of a real on-chain log"
     );
     println!("  t extracted from   a real on-chain Claimed log (value redacted)");
@@ -1394,7 +1395,9 @@ fn anvil_evm_to_dom_direction() {
             revealed,
             pre_signature: &dom_leg.pre,
             dom_now: TimelockPoint::height(dom.height()),
-            dom_deadline: TimelockPoint::height(dom.height() + dom_policy.total_margin() + 10),
+            dom_deadline: TimelockPoint::height(
+                dom.height() + dom_policy.total_margin().unwrap() + 10,
+            ),
         },
     );
 
@@ -1519,14 +1522,14 @@ fn anvil_dom_to_evm_direction() {
     let revealed = events
         .iter()
         .find_map(|ev| match ev {
-            ObservedEvent::LockClaimed { revealed, .. } => Some(*revealed),
+            ObservedEvent::LockClaimed { revealed, .. } => Some(revealed.clone()),
             _ => None,
         })
         .expect("the finalized Claimed log must be observed");
-    assert_eq!(revealed.0, rig.t);
+    assert_eq!(revealed.expose_scalar_bytes(), rig.t);
     assert_eq!(
         port.revealed_secret(&lock_id).expect("registry"),
-        Some(RevealedSecretBytes(rig.t))
+        Some(RevealedSecretBytes::new(rig.t))
     );
 }
 
@@ -1577,7 +1580,7 @@ fn anvil_reorg_rewinds_to_the_common_ancestor_and_t_stays_known() {
         .any(|ev| matches!(ev, ObservedEvent::LockClaimed { .. })));
     assert_eq!(
         port.revealed_secret(&lock_id).expect("registry"),
-        Some(RevealedSecretBytes(rig.t)),
+        Some(RevealedSecretBytes::new(rig.t)),
         "the scalar must be known before the reorg"
     );
 
@@ -1629,7 +1632,7 @@ fn anvil_reorg_rewinds_to_the_common_ancestor_and_t_stays_known() {
     // I11: the settlement effect is gone; the publicity of `t` is not.
     assert_eq!(
         port.revealed_secret(&lock_id).expect("registry"),
-        Some(RevealedSecretBytes(rig.t)),
+        Some(RevealedSecretBytes::new(rig.t)),
         "a reorg must never un-reveal a scalar"
     );
     anvil.advance_to_finality();
@@ -1642,7 +1645,7 @@ fn anvil_reorg_rewinds_to_the_common_ancestor_and_t_stays_known() {
     );
     assert_eq!(
         port.revealed_secret(&lock_id).expect("registry"),
-        Some(RevealedSecretBytes(rig.t))
+        Some(RevealedSecretBytes::new(rig.t))
     );
     println!("  after replay       claim gone, t still known");
 }
@@ -1719,7 +1722,7 @@ fn run_anvil_scenario(e: &Env, seed: u16, crash: bool) -> (bool, bool) {
         let (events, next) = port.observe(&cursor);
         cursor = next;
         if events.iter().any(
-            |ev| matches!(ev, ObservedEvent::LockClaimed { revealed, .. } if revealed.0 == rig.t),
+            |ev| matches!(ev, ObservedEvent::LockClaimed { revealed, .. } if revealed.expose_scalar_bytes() == rig.t),
         ) {
             claim_observed = true;
         }
@@ -2154,12 +2157,13 @@ fn anvil_erc20_open_claim_and_observe() {
     let revealed = events
         .iter()
         .find_map(|ev| match ev {
-            ObservedEvent::LockClaimed { revealed, .. } => Some(*revealed),
+            ObservedEvent::LockClaimed { revealed, .. } => Some(revealed.clone()),
             _ => None,
         })
         .expect("the finalized Claimed log must be observed");
     assert_eq!(
-        revealed.0, rig.t,
+        revealed.expose_scalar_bytes(),
+        rig.t,
         "`t` must survive a real on-chain round trip"
     );
     println!("  t observed         from a real on-chain Claimed log (value redacted)");
@@ -2340,7 +2344,7 @@ fn anvil_erc20_deferred_payout_then_withdraw_in_instalments() {
     assert!(
         events.iter().any(|ev| matches!(
             ev,
-            ObservedEvent::LockClaimed { revealed, .. } if revealed.0 == rig.t
+            ObservedEvent::LockClaimed { revealed, .. } if revealed.expose_scalar_bytes() == rig.t
         )),
         "the claim must still be observed even though the payout was deferred"
     );
@@ -2904,7 +2908,7 @@ fn anvil_erc20_estimated_gas_silently_degrades_to_the_pull_path() {
     assert!(
         events.iter().any(|ev| matches!(
             ev,
-            ObservedEvent::LockClaimed { revealed, .. } if revealed.0 == rig.t
+            ObservedEvent::LockClaimed { revealed, .. } if revealed.expose_scalar_bytes() == rig.t
         )),
         "the claim must still be observed"
     );

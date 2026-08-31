@@ -19,7 +19,7 @@ use adapter_dom_sim::{
     encode_cursor, DetailedRecord, LockState, ObservedKind, RejectReason, SimChain, SimTx,
     SubmitResult,
 };
-use counterparty_api::ChainCursor;
+use counterparty_api::{ChainCursor, RevealedSecretBytes};
 use kaystra_core::settlement_engine::{
     ChainCursorV1, ChainRecordV1, ChainSourceErrorV1, ChainSourceV1, EffectOutcome, EffectSinkV1,
 };
@@ -95,13 +95,20 @@ impl SimSettlementChain {
     /// is the chain-layer observation the counterparty performs off to the
     /// side, so it cannot violate the "secret never reaches the database"
     /// invariant the engine boundary enforces.
-    pub fn observe_revealed_secret(&self) -> Option<[u8; 32]> {
-        use counterparty_api::{ChainCursor, ObservedEvent};
+    ///
+    /// It returns the scalar **inside** [`RevealedSecretBytes`]. It used to
+    /// return a bare `[u8; 32]`, which unwrapped the one type that redacts the
+    /// scalar in `Debug` at the very boundary whose job is to hand it onward.
+    /// The name said what it was, so nothing was ambiguous — but a caller that
+    /// logged the result printed the scalar in full, and that is what the
+    /// wrapper exists to stop.
+    pub fn observe_revealed_secret(&self) -> Option<RevealedSecretBytes> {
+        use counterparty_api::ObservedEvent;
         let (events, _) = self.inner.borrow().scan(&ChainCursor::default());
         events.into_iter().find_map(|event| match event {
             ObservedEvent::LockClaimed {
                 lock_id, revealed, ..
-            } if lock_id == self.lock_id => Some(revealed.0),
+            } if lock_id == self.lock_id => Some(revealed),
             _ => None,
         })
     }

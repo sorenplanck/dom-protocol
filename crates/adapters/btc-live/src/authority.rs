@@ -2,6 +2,7 @@
 
 use bitcoin::secp256k1::schnorr::Signature;
 
+use crate::rpc::BitcoinCoreNetworkV1;
 use crate::LiveBitcoinError;
 
 /// Explicit BIP68 delay committed by the Bitcoin refund input.
@@ -290,6 +291,9 @@ pub trait RetainedBitcoinRefundSignerV1 {
 /// second broadcaster or a competing raw-funding outbox entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BitcoinExternalFundingCustodyV1 {
+    pub(crate) network: BitcoinCoreNetworkV1,
+    pub(crate) genesis_hash: [u8; 32],
+    pub(crate) signet_challenge_digest: [u8; 32],
     pub(crate) route_binding: [u8; 32],
     pub(crate) plan_digest: [u8; 32],
     pub(crate) prepared_record_digest: [u8; 32],
@@ -305,6 +309,24 @@ pub struct BitcoinExternalFundingCustodyV1 {
 }
 
 impl BitcoinExternalFundingCustodyV1 {
+    /// Exact Bitcoin network retained with the signed funding bytes.
+    #[must_use]
+    pub const fn network(&self) -> BitcoinCoreNetworkV1 {
+        self.network
+    }
+
+    /// Exact genesis hash retained with the signed funding bytes.
+    #[must_use]
+    pub const fn genesis_hash(&self) -> [u8; 32] {
+        self.genesis_hash
+    }
+
+    /// Domain-separated digest of the retained Signet challenge.
+    #[must_use]
+    pub const fn signet_challenge_digest(&self) -> [u8; 32] {
+        self.signet_challenge_digest
+    }
+
     /// Complete route binding accepted by the prebroadcast store.
     #[must_use]
     pub const fn route_binding(&self) -> [u8; 32] {

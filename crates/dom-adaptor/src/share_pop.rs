@@ -100,6 +100,23 @@ impl SharePoPStatementV1 {
         trusted_chain_id: &TrustedChainIdV1,
         participant_roster: &[[u8; 32]],
     ) -> Result<Self> {
+        Self::from_bytes_against_frozen_chain(
+            bytes,
+            trusted_chain_id.as_bytes(),
+            participant_roster,
+        )
+    }
+
+    pub(crate) fn from_bytes_against_frozen_chain(
+        bytes: &[u8],
+        frozen_chain_id: &[u8; 32],
+        participant_roster: &[[u8; 32]],
+    ) -> Result<Self> {
+        if frozen_chain_id == &[0; 32] {
+            return Err(AdaptorError::InvalidContext(
+                "frozen share PoK chain ID must be nonzero",
+            ));
+        }
         let bytes = exact_array::<{ Self::ENCODED_LEN }>("SharePoPStatementV1", bytes)?;
         if &bytes[..4] != MAGIC {
             return Err(AdaptorError::InvalidContext("share PoK magic mismatch"));
@@ -117,7 +134,7 @@ impl SharePoPStatementV1 {
                 "share PoK participant does not match roster index",
             ));
         }
-        if bytes[6..38] != *trusted_chain_id.as_bytes() {
+        if bytes[6..38] != *frozen_chain_id {
             return Err(AdaptorError::InvalidContext(
                 "share PoK chain ID differs from the trusted local chain",
             ));
@@ -164,6 +181,41 @@ impl SharePoPStatementV1 {
     /// Return the authenticated participant index.
     pub fn participant_index(&self) -> u16 {
         u16::from_le_bytes([self.bytes[103], self.bytes[104]])
+    }
+
+    /// Return the frozen chain identifier carried by the statement.
+    pub fn chain_id(&self) -> [u8; 32] {
+        let mut value = [0; 32];
+        value.copy_from_slice(&self.bytes[6..38]);
+        value
+    }
+
+    /// Return the exact contract session identifier.
+    pub fn session_id(&self) -> [u8; 32] {
+        let mut value = [0; 32];
+        value.copy_from_slice(&self.bytes[38..70]);
+        value
+    }
+
+    /// Return the participant identifier selected by the roster index.
+    pub fn participant_id(&self) -> [u8; 32] {
+        let mut value = [0; 32];
+        value.copy_from_slice(&self.bytes[70..102]);
+        value
+    }
+
+    /// Return the frozen economic terms commitment.
+    pub fn terms_hash(&self) -> [u8; 32] {
+        let mut value = [0; 32];
+        value.copy_from_slice(&self.bytes[138..170]);
+        value
+    }
+
+    /// Return the exact recovery/capsule binding commitment.
+    pub fn recovery_binding_hash(&self) -> [u8; 32] {
+        let mut value = [0; 32];
+        value.copy_from_slice(&self.bytes[170..202]);
+        value
     }
 
     fn context_digest(&self) -> [u8; 32] {

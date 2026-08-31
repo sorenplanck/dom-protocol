@@ -641,7 +641,11 @@ fn anvil_slash_path_survives_a_crash_at_every_transition() {
             .expect("decidable")
         {
             EvidenceVerdict::Valid { revealed, .. } => {
-                assert_eq!(revealed.0, r.secret, "the chain revealed exactly t");
+                assert_eq!(
+                    revealed.expose_scalar_bytes(),
+                    r.secret,
+                    "the chain revealed exactly t"
+                );
                 revealed
             }
             other => panic!("the real claim must verify, got {other:?}"),
@@ -673,7 +677,7 @@ fn anvil_slash_path_survives_a_crash_at_every_transition() {
         anvil.advance_to_finality();
         let seen = observe_all(&mut bond);
         let claimed = seen.iter().find_map(|ev| match ev {
-            BondEvent::BondClaimed { revealed, .. } => Some(revealed.0),
+            BondEvent::BondClaimed { revealed, .. } => Some(revealed.expose_scalar_bytes()),
             _ => None,
         });
         assert_eq!(claimed, Some(r.secret), "the bond claim republished t");

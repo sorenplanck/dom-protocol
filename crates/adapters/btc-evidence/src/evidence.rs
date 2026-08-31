@@ -81,8 +81,17 @@ pub struct KeystoneBitcoinEvidenceV1 {
     pub outcome: BitcoinOutcomeV1,
 }
 
-/// The verified outcome the USPE consumes (M.9.5). Carries only public,
-/// verified facts — never `t`, a nonce or a preimage.
+impl KeystoneBitcoinEvidenceV1 {
+    /// The only codec version accepted by the frozen V1 verifier.
+    pub const CODEC_VERSION: u16 = 1;
+}
+
+/// Legacy V1 structurally verified facts.
+///
+/// V1 does not authenticate expected difficulty, retarget, MTP, chain work or
+/// an external checkpoint and therefore is not accepted by the operational
+/// USPE bridge. The type remains byte/source compatible for explicit migration
+/// and historical evidence handling.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct VerifiedBitcoinOutcomeV1 {
     /// The settlement this outcome settles.

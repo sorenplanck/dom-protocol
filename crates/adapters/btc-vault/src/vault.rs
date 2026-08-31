@@ -1,10 +1,14 @@
 //! The durable one-shot nonce vault (Annex M M.6.4, M.6.5, M.10).
 
+use std::collections::BTreeSet;
 use std::path::Path;
+use std::time::Duration;
 
-use blake2::digest::{Update, VariableOutput};
-use blake2::Blake2bVar;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use blake2::digest::consts::U32;
+use blake2::{Blake2b, Digest};
+use rusqlite::{
+    config::DbConfig, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 use zeroize::Zeroize;
 
 use crate::entropy::{EntropySource, OsEntropy};
@@ -22,6 +26,9 @@ pub enum VaultError {
     /// The underlying storage failed or is unavailable.
     #[error("storage unavailable")]
     StorageUnavailable,
+    /// Strict production reopen found only an authenticated pristine prefix.
+    #[error("production nonce vault creation is incomplete")]
+    CreationIncomplete,
     /// The stored state is corrupt (unknown discriminant, missing row).
     #[error("corrupt vault state")]
     CorruptState,
@@ -65,14 +72,72 @@ pub enum VaultError {
 }
 
 const SCHEMA_VERSION: i64 = 3;
+const PRODUCTION_APPLICATION_ID: i64 = 0x4254_4356;
+const PRODUCTION_PROFILE: i64 = 1;
+const SCHEMA_V1: &str = "CREATE TABLE btc_nonce_reservations (
+     reservation_id BLOB PRIMARY KEY CHECK(length(reservation_id) = 32),
+     binding_digest BLOB NOT NULL CHECK(length(binding_digest) = 32),
+     state          INTEGER NOT NULL,
+     revision       INTEGER NOT NULL CHECK(revision >= 0),
+     created_at      INTEGER NOT NULL
+ ) STRICT;
+ CREATE TABLE btc_nonce_artifacts (
+     reservation_id BLOB NOT NULL
+         REFERENCES btc_nonce_reservations(reservation_id),
+     artifact_kind  INTEGER NOT NULL,
+     bytes          BLOB NOT NULL,
+     byte_length    INTEGER NOT NULL,
+     outbound_digest BLOB NOT NULL CHECK(length(outbound_digest) = 32),
+     exposed        INTEGER NOT NULL CHECK(exposed IN (0,1)),
+     PRIMARY KEY (reservation_id, artifact_kind)
+ ) STRICT;";
+const SCHEMA_V2: &str = "CREATE TABLE btc_m8_anchor_bindings (
+     reservation_id       BLOB PRIMARY KEY
+         REFERENCES btc_nonce_reservations(reservation_id),
+     anchor_evidence_digest BLOB NOT NULL
+         CHECK(length(anchor_evidence_digest) = 32),
+     CHECK(anchor_evidence_digest != zeroblob(32))
+ ) STRICT;";
+const SCHEMA_V3: &str = "CREATE TABLE btc_nonce_owners (
+     reservation_id BLOB PRIMARY KEY
+         REFERENCES btc_nonce_reservations(reservation_id),
+     continuation_binding_digest BLOB NOT NULL
+         CHECK(length(continuation_binding_digest) = 32),
+     sealed_session_secrand BLOB,
+     public_nonce_digest BLOB NOT NULL
+         CHECK(length(public_nonce_digest) = 32),
+     tombstoned INTEGER NOT NULL CHECK(tombstoned IN (0,1)),
+     CHECK((tombstoned = 0 AND sealed_session_secrand IS NOT NULL)
+        OR (tombstoned = 1 AND sealed_session_secrand IS NULL))
+ ) STRICT;";
+const PRODUCTION_SCHEMA: &str = "CREATE TABLE btc_nonce_production_authority (
+     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+     profile INTEGER NOT NULL CHECK(profile = 1),
+     binding_digest BLOB NOT NULL CHECK(length(binding_digest) = 32)
+ ) STRICT;";
 const OUTBOUND_DOMAIN: &[u8] = b"DOM-INTEROP/BTC/F5/V1/VAULT-ARTIFACT\0";
 const CONTINUATION_DOMAIN: &[u8] = b"DOM-INTEROP/BTC/F7/NONCE-CONTINUATION/V1\0";
+const MAX_PRODUCTION_ROWS: i64 = 1_000_000;
+
+type Blake2b256 = Blake2b<U32>;
+type SchemaObjectV1 = (String, String, String, String);
 
 /// The one-shot nonce vault over a durable SQLite database (M.6, M.10).
 pub struct BitcoinNonceVault<E: EntropySource = OsEntropy> {
     connection: Connection,
     entropy: E,
     logical_clock: i64,
+    production_binding: Option<[u8; 32]>,
+}
+
+struct PersistArtifactRequestV1<'a> {
+    id: &'a BitcoinNonceReservationIdV1,
+    permit: &'a BitcoinNoncePermitV1,
+    kind: ArtifactKind,
+    bytes: &'a [u8],
+    from: BitcoinNonceStateV1,
+    to: BitcoinNonceStateV1,
+    expected_anchor: Option<&'a [u8; 32]>,
 }
 
 impl BitcoinNonceVault<OsEntropy> {
@@ -81,6 +146,75 @@ impl BitcoinNonceVault<OsEntropy> {
     pub fn open(path: &Path) -> Result<Self, VaultError> {
         Self::open_with_entropy(path, OsEntropy)
     }
+
+    /// Atomically initializes an already-created pristine production database.
+    ///
+    /// The caller owns path creation, permissions, retained descriptors and
+    /// the process lock. This method never creates a missing file and never
+    /// migrates or reinterprets a non-pristine database.
+    pub fn initialize_production(path: &Path, binding: [u8; 32]) -> Result<Self, VaultError> {
+        validate_production_binding(binding)?;
+        let connection = open_existing_connection(path)?;
+        require_pristine_production_database(&connection)?;
+        Self::configure_production(&connection, true)?;
+        initialize_production_schema(&connection, binding)?;
+        let mut vault = Self {
+            connection,
+            entropy: OsEntropy,
+            logical_clock: 0,
+            production_binding: Some(binding),
+        };
+        vault.reconcile_on_open()?;
+        vault.audit_production_connection()?;
+        Ok(vault)
+    }
+
+    /// Reopens one exact production vault without creation or migration.
+    pub fn open_production(path: &Path, binding: [u8; 32]) -> Result<Self, VaultError> {
+        validate_production_binding(binding)?;
+        let connection = open_existing_connection(path)?;
+        if production_database_is_pristine(&connection)? {
+            return Err(VaultError::CreationIncomplete);
+        }
+        Self::configure_production(&connection, false)?;
+        let mut vault = Self {
+            connection,
+            entropy: OsEntropy,
+            logical_clock: 0,
+            production_binding: Some(binding),
+        };
+        vault.audit_production_connection()?;
+        vault.reconcile_on_open()?;
+        vault.audit_production_connection()?;
+        Ok(vault)
+    }
+
+    /// Proves that this production authority contains no nonce reservation,
+    /// anchor, artifact, or sealed owner. This is the only initialized state
+    /// accepted by an external provisioning journal's strict resume path.
+    pub fn require_empty_production(&self) -> Result<(), VaultError> {
+        let binding = self.production_binding.ok_or(VaultError::CorruptState)?;
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_production_transaction(&tx, binding)?;
+        for table in [
+            "btc_nonce_reservations",
+            "btc_m8_anchor_bindings",
+            "btc_nonce_artifacts",
+            "btc_nonce_owners",
+        ] {
+            let query = format!("SELECT COUNT(*) FROM {table}");
+            let rows: i64 = tx
+                .query_row(&query, [], |row| row.get(0))
+                .map_err(|_| VaultError::StorageUnavailable)?;
+            if rows != 0 {
+                return Err(VaultError::CorruptState);
+            }
+        }
+        tx.commit().map_err(|_| VaultError::StorageUnavailable)
+    }
 }
 
 impl<E: EntropySource> BitcoinNonceVault<E> {
@@ -88,11 +222,18 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
     /// a deterministic one; production uses [`OsEntropy`]).
     pub fn open_with_entropy(path: &Path, entropy: E) -> Result<Self, VaultError> {
         let connection = Connection::open(path).map_err(|_| VaultError::StorageUnavailable)?;
+        let application_id: i64 = connection
+            .pragma_query_value(None, "application_id", |row| row.get(0))
+            .map_err(|_| VaultError::StorageUnavailable)?;
+        if application_id == PRODUCTION_APPLICATION_ID {
+            return Err(VaultError::CorruptState);
+        }
         Self::configure(&connection)?;
         let mut vault = Self {
             connection,
             entropy,
             logical_clock: 0,
+            production_binding: None,
         };
         vault.migrate()?;
         vault.reconcile_on_open()?;
@@ -116,7 +257,51 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         Ok(())
     }
 
+    fn configure_production(connection: &Connection, install_wal: bool) -> Result<(), VaultError> {
+        connection
+            .busy_timeout(Duration::from_millis(30_000))
+            .map_err(|_| VaultError::StorageUnavailable)?;
+        if !connection
+            .set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
+            .map_err(|_| VaultError::StorageUnavailable)?
+            || !connection
+                .db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE)
+                .map_err(|_| VaultError::StorageUnavailable)?
+        {
+            return Err(VaultError::CorruptState);
+        }
+        let mode: String = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .map_err(|_| VaultError::StorageUnavailable)?;
+        if install_wal {
+            if !mode.eq_ignore_ascii_case("wal") {
+                let installed: String = connection
+                    .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
+                    .map_err(|_| VaultError::StorageUnavailable)?;
+                if !installed.eq_ignore_ascii_case("wal") {
+                    return Err(VaultError::CorruptState);
+                }
+            }
+        } else if !mode.eq_ignore_ascii_case("wal") {
+            return Err(VaultError::CorruptState);
+        }
+        connection
+            .execute_batch(
+                "PRAGMA synchronous = FULL;
+                 PRAGMA foreign_keys = ON;
+                 PRAGMA trusted_schema = OFF;
+                 PRAGMA read_uncommitted = OFF;
+                 PRAGMA secure_delete = ON;
+                 PRAGMA temp_store = MEMORY;",
+            )
+            .map_err(|_| VaultError::StorageUnavailable)?;
+        Ok(())
+    }
+
     fn migrate(&mut self) -> Result<(), VaultError> {
+        if self.production_binding.is_some() {
+            return Err(VaultError::CorruptState);
+        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -128,55 +313,16 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
             return Err(VaultError::CorruptState);
         }
         if found < 1 {
-            tx.execute_batch(
-                "CREATE TABLE btc_nonce_reservations (
-                     reservation_id BLOB PRIMARY KEY CHECK(length(reservation_id) = 32),
-                     binding_digest BLOB NOT NULL CHECK(length(binding_digest) = 32),
-                     state          INTEGER NOT NULL,
-                     revision       INTEGER NOT NULL CHECK(revision >= 0),
-                     created_at      INTEGER NOT NULL
-                 ) STRICT;
-                 CREATE TABLE btc_nonce_artifacts (
-                     reservation_id BLOB NOT NULL
-                         REFERENCES btc_nonce_reservations(reservation_id),
-                     artifact_kind  INTEGER NOT NULL,
-                     bytes          BLOB NOT NULL,
-                     byte_length    INTEGER NOT NULL,
-                     outbound_digest BLOB NOT NULL CHECK(length(outbound_digest) = 32),
-                     exposed        INTEGER NOT NULL CHECK(exposed IN (0,1)),
-                     PRIMARY KEY (reservation_id, artifact_kind)
-                 ) STRICT;",
-            )
-            .map_err(|_| VaultError::StorageUnavailable)?;
+            tx.execute_batch(SCHEMA_V1)
+                .map_err(|_| VaultError::StorageUnavailable)?;
         }
         if found < 2 {
-            tx.execute_batch(
-                "CREATE TABLE btc_m8_anchor_bindings (
-                     reservation_id       BLOB PRIMARY KEY
-                         REFERENCES btc_nonce_reservations(reservation_id),
-                     anchor_evidence_digest BLOB NOT NULL
-                         CHECK(length(anchor_evidence_digest) = 32),
-                     CHECK(anchor_evidence_digest != zeroblob(32))
-                 ) STRICT;",
-            )
-            .map_err(|_| VaultError::StorageUnavailable)?;
+            tx.execute_batch(SCHEMA_V2)
+                .map_err(|_| VaultError::StorageUnavailable)?;
         }
         if found < 3 {
-            tx.execute_batch(
-                "CREATE TABLE btc_nonce_owners (
-                     reservation_id BLOB PRIMARY KEY
-                         REFERENCES btc_nonce_reservations(reservation_id),
-                     continuation_binding_digest BLOB NOT NULL
-                         CHECK(length(continuation_binding_digest) = 32),
-                     sealed_session_secrand BLOB,
-                     public_nonce_digest BLOB NOT NULL
-                         CHECK(length(public_nonce_digest) = 32),
-                     tombstoned INTEGER NOT NULL CHECK(tombstoned IN (0,1)),
-                     CHECK((tombstoned = 0 AND sealed_session_secrand IS NOT NULL)
-                        OR (tombstoned = 1 AND sealed_session_secrand IS NULL))
-                 ) STRICT;",
-            )
-            .map_err(|_| VaultError::StorageUnavailable)?;
+            tx.execute_batch(SCHEMA_V3)
+                .map_err(|_| VaultError::StorageUnavailable)?;
         }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|_| VaultError::StorageUnavailable)?;
@@ -191,10 +337,12 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
     /// public nonce survive and are reopened explicitly by the route owner.
     /// Corrupt/incomplete owner records are terminal; a normal crash is not.
     fn reconcile_on_open(&mut self) -> Result<(), VaultError> {
+        let production_binding = self.production_binding;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         // Advance the logical clock past any stored row so new rows sort
         // after old ones deterministically.
         let max_clock: i64 = tx
@@ -229,9 +377,20 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
             ],
         )
         .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         tx.commit().map_err(|_| VaultError::StorageUnavailable)?;
         self.logical_clock = max_clock;
         Ok(())
+    }
+
+    fn audit_production_connection(&self) -> Result<(), VaultError> {
+        let binding = self.production_binding.ok_or(VaultError::CorruptState)?;
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_production_transaction(&tx, binding)?;
+        tx.commit().map_err(|_| VaultError::StorageUnavailable)
     }
 
     fn next_clock(&mut self) -> i64 {
@@ -275,10 +434,12 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         let id = permit.reservation_id();
         let binding = permit.binding_digest();
         let clock = self.next_clock();
+        let production_binding = self.production_binding;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         let existing: Option<Vec<u8>> = tx
             .query_row(
                 "SELECT binding_digest FROM btc_nonce_reservations WHERE reservation_id = ?1",
@@ -336,6 +497,7 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
                 .map_err(|_| VaultError::StorageUnavailable)?;
             }
         }
+        audit_transaction_for_production(&tx, production_binding)?;
         tx.commit().map_err(|_| VaultError::StorageUnavailable)?;
         Ok(id)
     }
@@ -394,11 +556,14 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         permit: &BitcoinNoncePermitV1,
         anchor_evidence_digest: &[u8; 32],
     ) -> Result<(), VaultError> {
+        let production_binding = self.production_binding;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         Self::load_checked(&tx, id, permit, Some(anchor_evidence_digest))?;
+        audit_transaction_for_production(&tx, production_binding)?;
         tx.commit().map_err(|_| VaultError::StorageUnavailable)
     }
 
@@ -463,10 +628,12 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
             .fill(&mut secrand)
             .map_err(|_| VaultError::EntropyUnavailable)?;
 
+        let production_binding = self.production_binding;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         let (state, revision) = Self::load_checked(&tx, id, permit, expected_anchor)?;
         match state {
             BitcoinNonceStateV1::Reserved => {}
@@ -480,6 +647,7 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
             }
         }
         Self::cas_state(&tx, id, revision, BitcoinNonceStateV1::ConsumptionCommitted)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         tx.commit().map_err(|_| VaultError::StorageUnavailable)?;
         // Only AFTER the durable commit does the secret leave.
         Ok(OneShotSessionSecrandV1::new(secrand))
@@ -530,10 +698,12 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         sealing_nonce.zeroize();
         let sealed = sealed?;
         let digest = Self::outbound_digest(id, ArtifactKind::PublicNonce, &public_nonce);
+        let production_binding = self.production_binding;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         let (state, revision) = Self::load_checked(&tx, id, permit, Some(anchor_evidence_digest))?;
         if state != BitcoinNonceStateV1::Reserved {
             return Err(VaultError::AlreadyConsumed);
@@ -570,6 +740,7 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
             revision,
             BitcoinNonceStateV1::PublicArtifactCommitted,
         )?;
+        audit_transaction_for_production(&tx, production_binding)?;
         tx.commit().map_err(|_| VaultError::StorageUnavailable)?;
         Ok((
             owner,
@@ -596,10 +767,12 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         seal_key: &BitcoinNonceSealKeyV1,
         reconstruct: impl FnOnce(&[u8; 32]) -> Result<(R, [u8; 66]), ()>,
     ) -> Result<(R, [u8; 66], PersistedArtifactDescriptorV1), VaultError> {
+        let production_binding = self.production_binding;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         let (state, _) = Self::load_checked(&tx, id, permit, Some(anchor_evidence_digest))?;
         if !matches!(
             state,
@@ -642,6 +815,7 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         {
             return Err(VaultError::SealAuthenticationFailed);
         }
+        audit_transaction_for_production(&tx, production_binding)?;
         tx.commit().map_err(|_| VaultError::StorageUnavailable)?;
         Ok((
             owner,
@@ -674,10 +848,12 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         ),
         VaultError,
     > {
+        let production_binding = self.production_binding;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         let (state, _) = Self::load_checked(&tx, id, permit, Some(anchor_evidence_digest))?;
         if !matches!(
             state,
@@ -707,6 +883,7 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         let partial: [u8; 32] = partial_bytes
             .try_into()
             .map_err(|_| VaultError::CorruptState)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         tx.commit().map_err(|_| VaultError::StorageUnavailable)?;
         Ok((
             public,
@@ -731,15 +908,12 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         kind: ArtifactKind,
         bytes: &[u8],
     ) -> [u8; 32] {
-        let mut h = Blake2bVar::new(32).expect("BLAKE2b-256 output size is valid"); // I14-ALLOW: fixed 32-byte output is always valid
+        let mut h = Blake2b256::new();
         h.update(OUTBOUND_DOMAIN);
-        h.update(&id.0);
-        h.update(&[kind as u8]);
+        h.update(id.0);
+        h.update([kind as u8]);
         h.update(bytes);
-        let mut out = [0u8; 32];
-        h.finalize_variable(&mut out)
-            .expect("BLAKE2b-256 output size is valid"); // I14-ALLOW: fixed 32-byte output
-        out
+        h.finalize().into()
     }
 
     /// Canonical public continuation binding used by the sealed nonce owner.
@@ -752,35 +926,36 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         key_aggregation_digest: &[u8; 32],
         output_xonly: &[u8; 32],
     ) -> [u8; 32] {
-        let mut h = Blake2bVar::new(32).expect("BLAKE2b-256 output size is valid"); // I14-ALLOW
+        let mut h = Blake2b256::new();
         h.update(CONTINUATION_DOMAIN);
-        h.update(&permit.binding_digest());
+        h.update(permit.binding_digest());
         h.update(signer_public_key);
         h.update(key_aggregation_digest);
         h.update(output_xonly);
-        let mut out = [0u8; 32];
-        h.finalize_variable(&mut out)
-            .expect("BLAKE2b-256 output size is valid"); // I14-ALLOW
-        out
+        h.finalize().into()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn persist_artifact(
         &mut self,
-        id: &BitcoinNonceReservationIdV1,
-        permit: &BitcoinNoncePermitV1,
-        kind: ArtifactKind,
-        bytes: &[u8],
-        from: BitcoinNonceStateV1,
-        to: BitcoinNonceStateV1,
-        expected_anchor: Option<&[u8; 32]>,
+        request: PersistArtifactRequestV1<'_>,
     ) -> Result<PersistedArtifactDescriptorV1, VaultError> {
+        let PersistArtifactRequestV1 {
+            id,
+            permit,
+            kind,
+            bytes,
+            from,
+            to,
+            expected_anchor,
+        } = request;
         let digest = Self::outbound_digest(id, kind, bytes);
         let byte_length = u32::try_from(bytes.len()).map_err(|_| VaultError::CorruptState)?;
+        let production_binding = self.production_binding;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         let (state, revision) = Self::load_checked(&tx, id, permit, expected_anchor)?;
         if state != from {
             // Idempotent redelivery: the artifact already exists with the
@@ -793,6 +968,7 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
                     {
                         return Err(VaultError::CorruptState);
                     }
+                    audit_transaction_for_production(&tx, production_binding)?;
                     tx.commit().map_err(|_| VaultError::StorageUnavailable)?;
                     return Ok(PersistedArtifactDescriptorV1 {
                         reservation_id: id.0,
@@ -833,6 +1009,7 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
             }
         }
         Self::cas_state(&tx, id, revision, to)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         tx.commit().map_err(|_| VaultError::StorageUnavailable)?;
         Ok(PersistedArtifactDescriptorV1 {
             reservation_id: id.0,
@@ -889,15 +1066,15 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         permit: &BitcoinNoncePermitV1,
         bytes: &[u8],
     ) -> Result<PersistedArtifactDescriptorV1, VaultError> {
-        self.persist_artifact(
+        self.persist_artifact(PersistArtifactRequestV1 {
             id,
             permit,
-            ArtifactKind::PublicNonce,
+            kind: ArtifactKind::PublicNonce,
             bytes,
-            BitcoinNonceStateV1::ConsumptionCommitted,
-            BitcoinNonceStateV1::PublicArtifactCommitted,
-            None,
-        )
+            from: BitcoinNonceStateV1::ConsumptionCommitted,
+            to: BitcoinNonceStateV1::PublicArtifactCommitted,
+            expected_anchor: None,
+        })
     }
 
     /// Persists an F7 public nonce only under the exact durable M.8 binding.
@@ -908,15 +1085,15 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         anchor_evidence_digest: &[u8; 32],
         bytes: &[u8],
     ) -> Result<PersistedArtifactDescriptorV1, VaultError> {
-        self.persist_artifact(
+        self.persist_artifact(PersistArtifactRequestV1 {
             id,
             permit,
-            ArtifactKind::PublicNonce,
+            kind: ArtifactKind::PublicNonce,
             bytes,
-            BitcoinNonceStateV1::ConsumptionCommitted,
-            BitcoinNonceStateV1::PublicArtifactCommitted,
-            Some(anchor_evidence_digest),
-        )
+            from: BitcoinNonceStateV1::ConsumptionCommitted,
+            to: BitcoinNonceStateV1::PublicArtifactCommitted,
+            expected_anchor: Some(anchor_evidence_digest),
+        })
     }
 
     /// Authorizes exposure of a persisted public nonce and returns its
@@ -945,10 +1122,12 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         expected_anchor: Option<&[u8; 32]>,
     ) -> Result<Vec<u8>, VaultError> {
         let id = BitcoinNonceReservationIdV1(descriptor.reservation_id);
+        let production_binding = self.production_binding;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         let state_raw: Option<i64> = tx
             .query_row(
                 "SELECT state FROM btc_nonce_reservations WHERE reservation_id = ?1",
@@ -993,6 +1172,7 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
             }
             _ => return Err(VaultError::IllegalTransition),
         }
+        audit_transaction_for_production(&tx, production_binding)?;
         tx.commit().map_err(|_| VaultError::StorageUnavailable)?;
         Ok(bytes)
     }
@@ -1026,15 +1206,15 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         permit: &BitcoinNoncePermitV1,
         bytes: &[u8],
     ) -> Result<PersistedArtifactDescriptorV1, VaultError> {
-        self.persist_artifact(
+        self.persist_artifact(PersistArtifactRequestV1 {
             id,
             permit,
-            ArtifactKind::PartialSignature,
+            kind: ArtifactKind::PartialSignature,
             bytes,
-            BitcoinNonceStateV1::PublicArtifactExposed,
-            BitcoinNonceStateV1::PartialArtifactCommitted,
-            None,
-        )
+            from: BitcoinNonceStateV1::PublicArtifactExposed,
+            to: BitcoinNonceStateV1::PartialArtifactCommitted,
+            expected_anchor: None,
+        })
     }
 
     /// Persists an F7 partial signature only under the exact durable M.8
@@ -1046,15 +1226,15 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         anchor_evidence_digest: &[u8; 32],
         bytes: &[u8],
     ) -> Result<PersistedArtifactDescriptorV1, VaultError> {
-        self.persist_artifact(
+        self.persist_artifact(PersistArtifactRequestV1 {
             id,
             permit,
-            ArtifactKind::PartialSignature,
+            kind: ArtifactKind::PartialSignature,
             bytes,
-            BitcoinNonceStateV1::PublicArtifactExposed,
-            BitcoinNonceStateV1::PartialArtifactCommitted,
-            Some(anchor_evidence_digest),
-        )
+            from: BitcoinNonceStateV1::PublicArtifactExposed,
+            to: BitcoinNonceStateV1::PartialArtifactCommitted,
+            expected_anchor: Some(anchor_evidence_digest),
+        })
     }
 
     /// Byte-identical resend of an already-persisted artifact (M.6.5,
@@ -1088,15 +1268,19 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
             2 => ArtifactKind::PartialSignature,
             _ => return Err(VaultError::CorruptState),
         };
+        let production_binding = self.production_binding;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         Self::validate_m8_binding(&tx, &id, expected_anchor)?;
         let (bytes, digest) = Self::load_artifact_bytes(&tx, &id, kind)?;
         if digest != descriptor.outbound_digest {
             return Err(VaultError::BindingMismatch);
         }
+        audit_transaction_for_production(&tx, production_binding)?;
+        tx.commit().map_err(|_| VaultError::StorageUnavailable)?;
         Ok(bytes)
     }
 
@@ -1106,15 +1290,18 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         id: &BitcoinNonceReservationIdV1,
         permit: &BitcoinNoncePermitV1,
     ) -> Result<(), VaultError> {
+        let production_binding = self.production_binding;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         let (state, revision) = Self::load_checked(&tx, id, permit, None)?;
         if state != BitcoinNonceStateV1::PartialArtifactCommitted {
             return Err(VaultError::IllegalTransition);
         }
         Self::cas_state(&tx, id, revision, BitcoinNonceStateV1::Spent)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         tx.commit().map_err(|_| VaultError::StorageUnavailable)?;
         Ok(())
     }
@@ -1127,15 +1314,18 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         permit: &BitcoinNoncePermitV1,
         anchor_evidence_digest: &[u8; 32],
     ) -> Result<(), VaultError> {
+        let production_binding = self.production_binding;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         let (state, revision) = Self::load_checked(&tx, id, permit, Some(anchor_evidence_digest))?;
         if state != BitcoinNonceStateV1::PartialArtifactCommitted {
             return Err(VaultError::IllegalTransition);
         }
         Self::cas_state(&tx, id, revision, BitcoinNonceStateV1::Spent)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         tx.commit().map_err(|_| VaultError::StorageUnavailable)?;
         Ok(())
     }
@@ -1149,10 +1339,12 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         id: &BitcoinNonceReservationIdV1,
         _reason: PublicAbortReasonV1,
     ) -> Result<(), VaultError> {
+        let production_binding = self.production_binding;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         let row: Option<(i64, i64)> = tx
             .query_row(
                 "SELECT state, revision FROM btc_nonce_reservations WHERE reservation_id = ?1",
@@ -1164,10 +1356,21 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         let (state_raw, revision) = row.ok_or(VaultError::NoSuchReservation)?;
         let state = BitcoinNonceStateV1::from_i64(state_raw).ok_or(VaultError::CorruptState)?;
         if state.is_terminal() {
+            audit_transaction_for_production(&tx, production_binding)?;
             tx.commit().map_err(|_| VaultError::StorageUnavailable)?;
             return Ok(());
         }
+        tx.execute(
+            "UPDATE btc_nonce_owners
+                 SET sealed_session_secrand = NULL, tombstoned = 1
+                 WHERE reservation_id = ?1
+                   AND tombstoned = 0
+                   AND sealed_session_secrand IS NOT NULL",
+            [&id.0[..]],
+        )
+        .map_err(|_| VaultError::StorageUnavailable)?;
         Self::cas_state(&tx, id, revision, BitcoinNonceStateV1::Aborted)?;
+        audit_transaction_for_production(&tx, production_binding)?;
         tx.commit().map_err(|_| VaultError::StorageUnavailable)?;
         Ok(())
     }
@@ -1178,8 +1381,13 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
         &self,
         id: &BitcoinNonceReservationIdV1,
     ) -> Result<BitcoinNonceStateV1, VaultError> {
-        let raw: Option<i64> = self
+        let production_binding = self.production_binding;
+        let tx = self
             .connection
+            .unchecked_transaction()
+            .map_err(|_| VaultError::StorageUnavailable)?;
+        audit_transaction_for_production(&tx, production_binding)?;
+        let raw: Option<i64> = tx
             .query_row(
                 "SELECT state FROM btc_nonce_reservations WHERE reservation_id = ?1",
                 [&id.0[..]],
@@ -1188,6 +1396,445 @@ impl<E: EntropySource> BitcoinNonceVault<E> {
             .optional()
             .map_err(|_| VaultError::StorageUnavailable)?;
         let raw = raw.ok_or(VaultError::NoSuchReservation)?;
-        BitcoinNonceStateV1::from_i64(raw).ok_or(VaultError::CorruptState)
+        let state = BitcoinNonceStateV1::from_i64(raw).ok_or(VaultError::CorruptState)?;
+        audit_transaction_for_production(&tx, production_binding)?;
+        tx.commit().map_err(|_| VaultError::StorageUnavailable)?;
+        Ok(state)
     }
+}
+
+fn validate_production_binding(binding: [u8; 32]) -> Result<(), VaultError> {
+    if binding == [0; 32] {
+        return Err(VaultError::CorruptState);
+    }
+    Ok(())
+}
+
+fn open_existing_connection(path: &Path) -> Result<Connection, VaultError> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| VaultError::StorageUnavailable)?;
+    validate_database_path(&connection, path)?;
+    Ok(connection)
+}
+
+fn validate_database_path(connection: &Connection, expected_path: &Path) -> Result<(), VaultError> {
+    let expected =
+        std::fs::canonicalize(expected_path).map_err(|_| VaultError::StorageUnavailable)?;
+    if expected != expected_path {
+        return Err(VaultError::CorruptState);
+    }
+    let mut statement = connection
+        .prepare("PRAGMA database_list")
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let mut saw_main = false;
+    for row in rows {
+        let (name, path) = row.map_err(|_| VaultError::StorageUnavailable)?;
+        match name.as_str() {
+            "main" if Path::new(&path) == expected => saw_main = true,
+            "temp" if path.is_empty() => {}
+            _ => return Err(VaultError::CorruptState),
+        }
+    }
+    if !saw_main {
+        return Err(VaultError::CorruptState);
+    }
+    Ok(())
+}
+
+fn require_pristine_production_database(connection: &Connection) -> Result<(), VaultError> {
+    if production_database_is_pristine(connection)? {
+        Ok(())
+    } else {
+        Err(VaultError::CorruptState)
+    }
+}
+
+fn production_database_is_pristine(connection: &Connection) -> Result<bool, VaultError> {
+    let version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    Ok(version == 0 && application_id == 0 && schema_objects(connection)?.is_empty())
+}
+
+fn initialize_production_schema(
+    connection: &Connection,
+    binding: [u8; 32],
+) -> Result<(), VaultError> {
+    let tx = connection
+        .unchecked_transaction()
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    tx.execute_batch(SCHEMA_V1)
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    tx.execute_batch(SCHEMA_V2)
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    tx.execute_batch(SCHEMA_V3)
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    tx.execute_batch(PRODUCTION_SCHEMA)
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    tx.execute(
+        "INSERT INTO btc_nonce_production_authority
+             (singleton, profile, binding_digest) VALUES(1, ?1, ?2)",
+        rusqlite::params![PRODUCTION_PROFILE, binding.as_slice()],
+    )
+    .map_err(|_| VaultError::StorageUnavailable)?;
+    tx.pragma_update(None, "application_id", PRODUCTION_APPLICATION_ID)
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    audit_production_transaction(&tx, binding)?;
+    tx.commit().map_err(|_| VaultError::StorageUnavailable)
+}
+
+fn audit_transaction_for_production(
+    transaction: &Transaction<'_>,
+    binding: Option<[u8; 32]>,
+) -> Result<(), VaultError> {
+    if let Some(binding) = binding {
+        audit_production_transaction(transaction, binding)?;
+    }
+    Ok(())
+}
+
+fn audit_production_transaction(
+    transaction: &Transaction<'_>,
+    binding: [u8; 32],
+) -> Result<(), VaultError> {
+    validate_production_binding(binding)?;
+    let version: i64 = transaction
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let application_id: i64 = transaction
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    if version != SCHEMA_VERSION || application_id != PRODUCTION_APPLICATION_ID {
+        return Err(VaultError::CorruptState);
+    }
+    if schema_objects(transaction)? != reference_schema_objects()? {
+        return Err(VaultError::CorruptState);
+    }
+    let matching: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM btc_nonce_production_authority
+                 WHERE singleton=1 AND profile=?1 AND binding_digest=?2",
+            rusqlite::params![PRODUCTION_PROFILE, binding.as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let total: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM btc_nonce_production_authority",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    if matching != 1 || total != 1 {
+        return Err(VaultError::CorruptState);
+    }
+    audit_production_pragmas(transaction)?;
+    let integrity: String = transaction
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let foreign_failures: i64 = transaction
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    if integrity != "ok" || foreign_failures != 0 {
+        return Err(VaultError::CorruptState);
+    }
+    audit_production_rows(transaction)
+}
+
+fn audit_production_pragmas(connection: &Connection) -> Result<(), VaultError> {
+    let journal_mode: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let synchronous: i64 = connection
+        .pragma_query_value(None, "synchronous", |row| row.get(0))
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let foreign_keys: i64 = connection
+        .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let trusted_schema: i64 = connection
+        .pragma_query_value(None, "trusted_schema", |row| row.get(0))
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let read_uncommitted: i64 = connection
+        .pragma_query_value(None, "read_uncommitted", |row| row.get(0))
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let secure_delete: i64 = connection
+        .pragma_query_value(None, "secure_delete", |row| row.get(0))
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    if !journal_mode.eq_ignore_ascii_case("wal")
+        || synchronous != 2
+        || foreign_keys != 1
+        || trusted_schema != 0
+        || read_uncommitted != 0
+        || secure_delete != 1
+    {
+        return Err(VaultError::CorruptState);
+    }
+    Ok(())
+}
+
+fn audit_production_rows(connection: &Connection) -> Result<(), VaultError> {
+    for table in [
+        "btc_nonce_reservations",
+        "btc_m8_anchor_bindings",
+        "btc_nonce_artifacts",
+        "btc_nonce_owners",
+    ] {
+        let query = format!("SELECT COUNT(*) FROM {table}");
+        let count: i64 = connection
+            .query_row(&query, [], |row| row.get(0))
+            .map_err(|_| VaultError::StorageUnavailable)?;
+        if !(0..=MAX_PRODUCTION_ROWS).contains(&count) {
+            return Err(VaultError::CorruptState);
+        }
+    }
+
+    let malformed_reservations: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM btc_nonce_reservations
+                 WHERE length(reservation_id) != 32
+                    OR length(binding_digest) != 32
+                    OR binding_digest != reservation_id
+                    OR state NOT BETWEEN 0 AND 7
+                    OR revision < 0 OR revision > 5
+                    OR created_at <= 0",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let duplicate_clocks: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) - COUNT(DISTINCT created_at) FROM btc_nonce_reservations",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let malformed_anchors: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM btc_m8_anchor_bindings
+                 WHERE length(reservation_id) != 32
+                    OR length(anchor_evidence_digest) != 32
+                    OR anchor_evidence_digest = zeroblob(32)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    if malformed_reservations != 0 || duplicate_clocks != 0 || malformed_anchors != 0 {
+        return Err(VaultError::CorruptState);
+    }
+
+    audit_artifact_rows(connection)?;
+
+    let invalid_nonterminal: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM btc_nonce_reservations AS reservation
+                 WHERE
+                   (state IN (0,1) AND (
+                       EXISTS (SELECT 1 FROM btc_nonce_artifacts AS artifact
+                               WHERE artifact.reservation_id=reservation.reservation_id)
+                       OR EXISTS (SELECT 1 FROM btc_nonce_owners AS owner
+                                  WHERE owner.reservation_id=reservation.reservation_id)))
+                   OR (state=2 AND (
+                       (SELECT COUNT(*) FROM btc_nonce_artifacts AS artifact
+                        WHERE artifact.reservation_id=reservation.reservation_id
+                          AND artifact.artifact_kind=1 AND artifact.exposed=0) != 1
+                       OR EXISTS (SELECT 1 FROM btc_nonce_artifacts AS artifact
+                                  WHERE artifact.reservation_id=reservation.reservation_id
+                                    AND artifact.artifact_kind=2)))
+                   OR (state=3 AND (
+                       (SELECT COUNT(*) FROM btc_nonce_artifacts AS artifact
+                        WHERE artifact.reservation_id=reservation.reservation_id
+                          AND artifact.artifact_kind=1 AND artifact.exposed=1) != 1
+                       OR EXISTS (SELECT 1 FROM btc_nonce_artifacts AS artifact
+                                  WHERE artifact.reservation_id=reservation.reservation_id
+                                    AND artifact.artifact_kind=2)))
+                   OR (state IN (4,5) AND (
+                       (SELECT COUNT(*) FROM btc_nonce_artifacts AS artifact
+                        WHERE artifact.reservation_id=reservation.reservation_id
+                          AND artifact.artifact_kind=1 AND artifact.exposed=1) != 1
+                       OR (SELECT COUNT(*) FROM btc_nonce_artifacts AS artifact
+                           WHERE artifact.reservation_id=reservation.reservation_id
+                             AND artifact.artifact_kind=2 AND artifact.exposed=0) != 1))",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let invalid_artifact_graph: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM btc_nonce_artifacts AS artifact
+                 WHERE
+                   (artifact.artifact_kind=2 AND NOT EXISTS (
+                       SELECT 1 FROM btc_nonce_artifacts AS public
+                       WHERE public.reservation_id=artifact.reservation_id
+                         AND public.artifact_kind=1 AND public.exposed=1))
+                   OR (artifact.artifact_kind=1 AND artifact.exposed=1 AND EXISTS (
+                       SELECT 1 FROM btc_nonce_reservations AS reservation
+                       WHERE reservation.reservation_id=artifact.reservation_id
+                         AND reservation.state IN (0,1,2)))",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let invalid_owner_graph: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM btc_nonce_owners AS owner
+                 WHERE length(owner.reservation_id) != 32
+                    OR length(owner.continuation_binding_digest) != 32
+                    OR owner.continuation_binding_digest = zeroblob(32)
+                    OR length(owner.public_nonce_digest) != 32
+                    OR NOT EXISTS (
+                       SELECT 1 FROM btc_m8_anchor_bindings AS anchor
+                       WHERE anchor.reservation_id=owner.reservation_id)
+                    OR NOT EXISTS (
+                       SELECT 1 FROM btc_nonce_artifacts AS artifact
+                       WHERE artifact.reservation_id=owner.reservation_id
+                         AND artifact.artifact_kind=1
+                         AND artifact.outbound_digest=owner.public_nonce_digest)
+                    OR (owner.tombstoned=0 AND length(owner.sealed_session_secrand) != 70)
+                    OR (owner.tombstoned=1 AND owner.sealed_session_secrand IS NOT NULL)
+                    OR (owner.tombstoned=0 AND EXISTS (
+                       SELECT 1 FROM btc_nonce_artifacts AS partial
+                       WHERE partial.reservation_id=owner.reservation_id
+                         AND partial.artifact_kind=2))
+                    OR (owner.tombstoned=0 AND NOT EXISTS (
+                       SELECT 1 FROM btc_nonce_reservations AS reservation
+                       WHERE reservation.reservation_id=owner.reservation_id
+                         AND reservation.state IN (2,3)))
+                    OR (owner.tombstoned=1 AND NOT EXISTS (
+                       SELECT 1 FROM btc_nonce_reservations AS reservation
+                       WHERE reservation.reservation_id=owner.reservation_id
+                         AND reservation.state IN (4,5,6,7)))",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    if invalid_nonterminal != 0 || invalid_artifact_graph != 0 || invalid_owner_graph != 0 {
+        return Err(VaultError::CorruptState);
+    }
+    Ok(())
+}
+
+fn audit_artifact_rows(connection: &Connection) -> Result<(), VaultError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT reservation_id, artifact_kind, bytes, byte_length,
+                    outbound_digest, exposed
+                 FROM btc_nonce_artifacts",
+        )
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    for row in rows {
+        let (id, kind_raw, bytes, byte_length, digest, exposed) =
+            row.map_err(|_| VaultError::StorageUnavailable)?;
+        let id: [u8; 32] = id.try_into().map_err(|_| VaultError::CorruptState)?;
+        let digest: [u8; 32] = digest.try_into().map_err(|_| VaultError::CorruptState)?;
+        let kind = match kind_raw {
+            1 => ArtifactKind::PublicNonce,
+            2 => ArtifactKind::PartialSignature,
+            _ => return Err(VaultError::CorruptState),
+        };
+        let expected_length = match kind {
+            ArtifactKind::PublicNonce => 66,
+            ArtifactKind::PartialSignature => 32,
+        };
+        if bytes.len() != expected_length
+            || byte_length != i64::try_from(bytes.len()).map_err(|_| VaultError::CorruptState)?
+            || (kind == ArtifactKind::PartialSignature && exposed != 0)
+            || BitcoinNonceVault::<OsEntropy>::outbound_digest(
+                &BitcoinNonceReservationIdV1(id),
+                kind,
+                &bytes,
+            ) != digest
+        {
+            return Err(VaultError::CorruptState);
+        }
+    }
+    Ok(())
+}
+
+fn schema_objects(connection: &Connection) -> Result<BTreeSet<SchemaObjectV1>, VaultError> {
+    const MAX_SCHEMA_OBJECTS: i64 = 16;
+    const MAX_SCHEMA_SQL_BYTES: i64 = 128 * 1024;
+    let (count, maximum, total): (i64, Option<i64>, Option<i64>) = connection
+        .query_row(
+            "SELECT COUNT(*), MAX(length(sql)), SUM(length(sql))
+                 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    if !(0..=MAX_SCHEMA_OBJECTS).contains(&count)
+        || maximum.is_some_and(|value| !(0..=MAX_SCHEMA_SQL_BYTES).contains(&value))
+        || total.is_some_and(|value| !(0..=MAX_SCHEMA_SQL_BYTES).contains(&value))
+    {
+        return Err(VaultError::CorruptState);
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT type,name,tbl_name,sql FROM sqlite_schema
+                 WHERE name NOT LIKE 'sqlite_%'",
+        )
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    let mut objects = BTreeSet::new();
+    for row in rows {
+        if !objects.insert(row.map_err(|_| VaultError::StorageUnavailable)?) {
+            return Err(VaultError::CorruptState);
+        }
+    }
+    if i64::try_from(objects.len()).map_err(|_| VaultError::CorruptState)? != count {
+        return Err(VaultError::CorruptState);
+    }
+    Ok(objects)
+}
+
+fn reference_schema_objects() -> Result<BTreeSet<SchemaObjectV1>, VaultError> {
+    let reference = Connection::open_in_memory().map_err(|_| VaultError::StorageUnavailable)?;
+    reference
+        .execute_batch(SCHEMA_V1)
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    reference
+        .execute_batch(SCHEMA_V2)
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    reference
+        .execute_batch(SCHEMA_V3)
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    reference
+        .execute_batch(PRODUCTION_SCHEMA)
+        .map_err(|_| VaultError::StorageUnavailable)?;
+    schema_objects(&reference)
 }

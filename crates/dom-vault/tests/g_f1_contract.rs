@@ -41,7 +41,10 @@ use dom_consensus::{Transaction, TransactionKernel};
 use dom_core::Amount;
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::SecretKey;
-use dom_vault::{AcceptedSession, DurableLookupCustody, DurableNonceVault, SessionAuthority};
+use dom_vault::{
+    AcceptedSession, AcceptedSessionFreshRequestV1, DurableLookupCustody, DurableNonceVault,
+    SessionAuthority,
+};
 
 const NETWORK_MAGIC: u32 = 0x0D01_0002;
 
@@ -120,16 +123,16 @@ fn accepted_session(
 ) -> (AcceptedSession, u16) {
     let (roster, local_index) = roster(&chain, local_share);
     let tx = template(&roster);
-    let session = AcceptedSession::fresh(
-        chain,
+    let session = AcceptedSession::fresh(AcceptedSessionFreshRequestV1 {
+        trusted_chain_id: chain,
         session_id,
-        ContractKindV1::WitnessOrTimeout,
-        PurposeV1::Refund,
+        contract_kind: ContractKindV1::WitnessOrTimeout,
+        purpose: PurposeV1::Refund,
         roster,
-        tx,
-        0,
-        None,
-    )
+        transaction_template: tx,
+        kernel_index: 0,
+        adaptor_point: None,
+    })
     .expect("accepted session");
     (session, local_index)
 }

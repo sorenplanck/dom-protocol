@@ -192,12 +192,15 @@ impl TimelockPolicy {
         }
     }
 
-    /// Sum of the four margins.
-    pub const fn total_margin(&self) -> u64 {
+    /// Checked sum of the four margins. A policy whose budget cannot be
+    /// represented is invalid; saturating it could turn an impossible safety
+    /// promise into an actionable `u64::MAX` window.
+    pub fn total_margin(&self) -> core::result::Result<u64, TimelockError> {
         self.finality_margin
-            .saturating_add(self.rpc_lag_margin)
-            .saturating_add(self.propagation_margin)
-            .saturating_add(self.reaction_margin)
+            .checked_add(self.rpc_lag_margin)
+            .and_then(|sum| sum.checked_add(self.propagation_margin))
+            .and_then(|sum| sum.checked_add(self.reaction_margin))
+            .ok_or(TimelockError::Overflow)
     }
 
     /// Rejects a point that is not in this policy's domain.
@@ -234,7 +237,7 @@ impl TimelockPolicy {
         deadline: TimelockPoint,
     ) -> core::result::Result<u64, TimelockError> {
         let remaining = self.remaining(now, deadline)?;
-        let required = self.total_margin();
+        let required = self.total_margin()?;
         if remaining < required {
             return Err(TimelockError::WindowTooNarrow {
                 remaining,
@@ -256,7 +259,10 @@ impl TimelockPolicy {
         let deadline = self.require_domain(deadline)?;
         // Only the observation-side margins apply here: we are asserting that
         // the deadline is behind us even accounting for a stale view.
-        let lag = self.finality_margin.saturating_add(self.rpc_lag_margin);
+        let lag = self
+            .finality_margin
+            .checked_add(self.rpc_lag_margin)
+            .ok_or(TimelockError::Overflow)?;
         let threshold = deadline.checked_add(lag).ok_or(TimelockError::Overflow)?;
         if now < threshold {
             return Err(TimelockError::WindowTooNarrow {
@@ -398,10 +404,10 @@ mod tests {
     #[test]
     fn margins_are_named_summed_and_non_zero() {
         let p = TimelockPolicy::evm();
-        assert_eq!(p.total_margin(), TOTAL_MARGIN_SECS);
+        assert_eq!(p.total_margin(), Ok(TOTAL_MARGIN_SECS));
         assert_eq!(TOTAL_MARGIN_SECS, 3_600, "one hour of EVM-side margin");
         let d = TimelockPolicy::dom_sim();
-        assert_eq!(d.total_margin(), TOTAL_MARGIN_BLOCKS);
+        assert_eq!(d.total_margin(), Ok(TOTAL_MARGIN_BLOCKS));
         assert_eq!(TOTAL_MARGIN_BLOCKS, 20);
         for m in [
             p.finality_margin,
@@ -463,6 +469,32 @@ mod tests {
         assert_eq!(
             p.require_expired(TimelockPoint::timestamp(2_000 + lag), deadline),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn overflowing_margin_sets_fail_closed_in_both_directions() {
+        let p = TimelockPolicy {
+            domain: TimelockDomain::Timestamp,
+            finality_margin: u64::MAX,
+            rpc_lag_margin: 1,
+            propagation_margin: 0,
+            reaction_margin: 0,
+        };
+
+        assert_eq!(
+            p.require_actionable(
+                TimelockPoint::timestamp(0),
+                TimelockPoint::timestamp(u64::MAX),
+            ),
+            Err(TimelockError::Overflow)
+        );
+        assert_eq!(
+            p.require_expired(
+                TimelockPoint::timestamp(u64::MAX),
+                TimelockPoint::timestamp(0),
+            ),
+            Err(TimelockError::Overflow)
         );
     }
 

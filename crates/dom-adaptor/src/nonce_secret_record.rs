@@ -2,7 +2,11 @@
 
 use crate::error::exact_array;
 use crate::secret_nonce::SecretNoncePairV1;
-use crate::{AdaptorError, Result, SessionContextV1, SigningShareV1, TrustedChainIdV1};
+use crate::{
+    AdaptorError, DirectionV1, PurposeV1, Result, SessionContextV1, SigningPhaseV1, SigningShareV1,
+    TrustedChainIdV1,
+};
+use dom_crypto::{blake2b_256_tagged, PublicKey};
 use zeroize::{Zeroize, Zeroizing};
 
 const MAGIC: &[u8; 8] = b"DOMSNSEC";
@@ -69,6 +73,191 @@ impl VaultSecretImportCapabilityV1 {
 /// the capability-gated import path must still perform those checks before use.
 pub fn audit_nonce_secret_plaintext_v1(mut plaintext: Zeroizing<Vec<u8>>) -> Result<()> {
     validate_and_zeroize_plaintext(&mut plaintext)
+}
+
+/// Public facts expected from one retained nonce-secret record.
+///
+/// This is an audit request, not an import capability. It contains no scalar,
+/// has no codec or Debug implementation, and grants no access to the record.
+pub struct NonceSecretPlaintextAuditBindingV1 {
+    reservation_nonce_id: [u8; 32],
+    participant_id: [u8; 32],
+    key_id: [u8; 32],
+    session_id: [u8; 32],
+    purpose: PurposeV1,
+    template_hash: [u8; 32],
+    retry_counter: u64,
+}
+
+impl NonceSecretPlaintextAuditBindingV1 {
+    /// Construct the exact public facts recoverable from a retained reservation.
+    pub fn new(
+        reservation_nonce_id: [u8; 32],
+        participant_id: [u8; 32],
+        key_id: [u8; 32],
+        session_id: [u8; 32],
+        purpose: PurposeV1,
+        template_hash: [u8; 32],
+        retry_counter: u64,
+    ) -> Result<Self> {
+        if [
+            reservation_nonce_id,
+            participant_id,
+            key_id,
+            session_id,
+            template_hash,
+        ]
+        .contains(&[0; 32])
+            || !purpose.is_strict_v1_authorized()
+        {
+            return Err(AdaptorError::InvalidContext(
+                "invalid nonce-secret audit binding",
+            ));
+        }
+        Ok(Self {
+            reservation_nonce_id,
+            participant_id,
+            key_id,
+            session_id,
+            purpose,
+            template_hash,
+            retry_counter,
+        })
+    }
+}
+
+/// Consume and audit a sealed plaintext against every retained comparable fact.
+///
+/// The plaintext is structurally parsed inside its canonical owner, including
+/// canonical roster keys, stage, adaptor-point policy and secret scalars. It
+/// is compiler-visibly zeroized on every success and error path and never
+/// yields a transfer, scalar, context or getter.
+pub fn audit_bound_nonce_secret_plaintext_v1(
+    mut plaintext: Zeroizing<Vec<u8>>,
+    expected: &NonceSecretPlaintextAuditBindingV1,
+) -> Result<()> {
+    let result = audit_bound_plaintext(&plaintext, expected);
+    plaintext.zeroize();
+    result
+}
+
+fn audit_bound_plaintext(
+    plaintext: &[u8],
+    expected: &NonceSecretPlaintextAuditBindingV1,
+) -> Result<()> {
+    validate_structural_bytes(plaintext)?;
+    if plaintext[10..42] != expected.reservation_nonce_id
+        || plaintext[42..74] != expected.participant_id
+    {
+        return Err(AdaptorError::AuthorizationMismatch);
+    }
+    let context_len = u32::from_le_bytes(exact_array::<4>(
+        "NonceSecretRecordV1 context length",
+        &plaintext[74..78],
+    )?) as usize;
+    let context_end = FIXED_PREFIX_LEN
+        .checked_add(context_len)
+        .ok_or(AdaptorError::InvalidContext("context length overflow"))?;
+    let context = &plaintext[FIXED_PREFIX_LEN..context_end];
+    audit_bound_context(context, expected)?;
+    let first = exact_array::<32>(
+        "NonceSecretRecordV1 first scalar",
+        &plaintext[context_end..context_end + 32],
+    )?;
+    let second = exact_array::<32>(
+        "NonceSecretRecordV1 second scalar",
+        &plaintext[context_end + 32..context_end + 64],
+    )?;
+    drop(SecretNoncePairV1::from_be_bytes(first, second)?);
+    Ok(())
+}
+
+fn audit_bound_context(
+    context: &[u8],
+    expected: &NonceSecretPlaintextAuditBindingV1,
+) -> Result<()> {
+    if u16::from_le_bytes([context[0], context[1]]) != SessionContextV1::VERSION
+        || context[2..34] == [0; 32]
+        || context[34..66] != expected.session_id
+        || PurposeV1::try_from(context[66])? != expected.purpose
+        || DirectionV1::try_from(context[67]).is_err()
+        || SigningPhaseV1::try_from(u16::from_le_bytes([context[68], context[69]]))?
+            != SigningPhaseV1::SigNonceCommit
+        || context[70..102] != expected.template_hash
+        || context[102..134] == [0; 32]
+        || context[134..166] == [0; 32]
+        || u64::from_le_bytes(exact_array::<8>(
+            "SessionContextV1 retry counter",
+            &context[166..174],
+        )?) != expected.retry_counter
+    {
+        return Err(AdaptorError::AuthorizationMismatch);
+    }
+    let count = usize::from(u16::from_le_bytes([context[174], context[175]]));
+    let roster_end = 176usize
+        .checked_add(
+            count
+                .checked_mul(33)
+                .ok_or(AdaptorError::InvalidContext("participant byte overflow"))?,
+        )
+        .ok_or(AdaptorError::InvalidContext("context length overflow"))?;
+    let mut prior: Option<[u8; 33]> = None;
+    for encoded in context[176..roster_end].chunks_exact(33) {
+        let parsed = PublicKey::from_compressed_bytes(encoded)?;
+        let canonical = parsed.to_compressed_bytes();
+        if canonical.as_slice() != encoded || prior.is_some_and(|value| value >= canonical) {
+            return Err(AdaptorError::InvalidContext(
+                "nonce-secret roster is not canonical and unique",
+            ));
+        }
+        prior = Some(canonical);
+    }
+    let participant_index = usize::from(u16::from_le_bytes(exact_array::<2>(
+        "SessionContextV1 participant index",
+        &context[roster_end..roster_end + 2],
+    )?));
+    if participant_index >= count {
+        return Err(AdaptorError::InvalidContext(
+            "nonce-secret participant index is outside the roster",
+        ));
+    }
+    let local_key_offset = 176usize
+        .checked_add(
+            participant_index
+                .checked_mul(33)
+                .ok_or(AdaptorError::InvalidContext("local key offset overflow"))?,
+        )
+        .ok_or(AdaptorError::InvalidContext("local key offset overflow"))?;
+    let mut budget_key_preimage = [0_u8; 65];
+    budget_key_preimage[..32].copy_from_slice(&context[2..34]);
+    budget_key_preimage[32..].copy_from_slice(&context[local_key_offset..local_key_offset + 33]);
+    let derived_key_id = *blake2b_256_tagged(
+        crate::DomainTag::VaultBudgetKey.as_str(),
+        &budget_key_preimage,
+    )
+    .as_bytes();
+    if derived_key_id != expected.key_id {
+        return Err(AdaptorError::AuthorizationMismatch);
+    }
+    let presence_offset = roster_end + 2;
+    let adaptor_present = context[presence_offset] == 1;
+    match (expected.purpose, adaptor_present) {
+        (PurposeV1::ClaimAdaptor, true) => {
+            let encoded = &context[presence_offset + 1..];
+            if PublicKey::from_compressed_bytes(encoded)?
+                .to_compressed_bytes()
+                .as_slice()
+                != encoded
+            {
+                return Err(AdaptorError::InvalidContext(
+                    "nonce-secret adaptor point is not canonical",
+                ));
+            }
+        }
+        (PurposeV1::Refund | PurposeV1::Funding, false) => {}
+        _ => return Err(AdaptorError::AuthorizationMismatch),
+    }
+    Ok(())
 }
 
 impl NonceSecretTransferV1 {
@@ -303,6 +492,27 @@ mod tests {
         bytes
     }
 
+    fn audit_binding(
+        context: &SessionContextV1,
+        share: &SigningShareV1,
+    ) -> NonceSecretPlaintextAuditBindingV1 {
+        let mut key_preimage = [0_u8; 65];
+        key_preimage[..32].copy_from_slice(context.chain_id());
+        key_preimage[32..].copy_from_slice(&share.public_key().to_compressed_bytes());
+        let key_id = *blake2b_256_tagged(crate::DomainTag::VaultBudgetKey.as_str(), &key_preimage)
+            .as_bytes();
+        NonceSecretPlaintextAuditBindingV1::new(
+            [7; 32],
+            [8; 32],
+            key_id,
+            [2; 32],
+            PurposeV1::Funding,
+            [3; 32],
+            0,
+        )
+        .expect("valid retained audit binding")
+    }
+
     #[test]
     fn exact_minimum_and_maximum_records_roundtrip() {
         for (participants, purpose, expected_len) in [
@@ -386,6 +596,108 @@ mod tests {
     fn store_audit_accepts_canonical_plaintext_without_importing_it() {
         let (bytes, _, _) = record_bytes(2, PurposeV1::Funding);
         assert!(audit_nonce_secret_plaintext_v1(bytes).is_ok());
+    }
+
+    #[test]
+    fn bound_store_audit_requires_every_comparable_retained_fact() {
+        let (bytes, context, share) = record_bytes(2, PurposeV1::Funding);
+        let binding = audit_binding(&context, &share);
+        assert!(audit_bound_nonce_secret_plaintext_v1(bytes.clone(), &binding).is_ok());
+
+        let key_id = binding.key_id;
+        for rejected in [
+            NonceSecretPlaintextAuditBindingV1::new(
+                [9; 32],
+                [8; 32],
+                key_id,
+                [2; 32],
+                PurposeV1::Funding,
+                [3; 32],
+                0,
+            ),
+            NonceSecretPlaintextAuditBindingV1::new(
+                [7; 32],
+                [9; 32],
+                key_id,
+                [2; 32],
+                PurposeV1::Funding,
+                [3; 32],
+                0,
+            ),
+            NonceSecretPlaintextAuditBindingV1::new(
+                [7; 32],
+                [8; 32],
+                [9; 32],
+                [2; 32],
+                PurposeV1::Funding,
+                [3; 32],
+                0,
+            ),
+            NonceSecretPlaintextAuditBindingV1::new(
+                [7; 32],
+                [8; 32],
+                key_id,
+                [9; 32],
+                PurposeV1::Funding,
+                [3; 32],
+                0,
+            ),
+            NonceSecretPlaintextAuditBindingV1::new(
+                [7; 32],
+                [8; 32],
+                key_id,
+                [2; 32],
+                PurposeV1::Refund,
+                [3; 32],
+                0,
+            ),
+            NonceSecretPlaintextAuditBindingV1::new(
+                [7; 32],
+                [8; 32],
+                key_id,
+                [2; 32],
+                PurposeV1::Funding,
+                [9; 32],
+                0,
+            ),
+            NonceSecretPlaintextAuditBindingV1::new(
+                [7; 32],
+                [8; 32],
+                key_id,
+                [2; 32],
+                PurposeV1::Funding,
+                [3; 32],
+                1,
+            ),
+        ] {
+            let rejected = rejected.expect("nonzero alternate binding");
+            assert!(audit_bound_nonce_secret_plaintext_v1(bytes.clone(), &rejected).is_err());
+        }
+    }
+
+    #[test]
+    fn bound_store_audit_rejects_cross_reservation_and_cross_chain_transplants() {
+        let (bytes, context, share) = record_bytes(2, PurposeV1::Funding);
+        let binding = audit_binding(&context, &share);
+
+        let cross_reservation = NonceSecretPlaintextAuditBindingV1::new(
+            [9; 32],
+            [8; 32],
+            binding.key_id,
+            [2; 32],
+            PurposeV1::Funding,
+            [3; 32],
+            0,
+        )
+        .expect("alternate reservation binding");
+        assert!(audit_bound_nonce_secret_plaintext_v1(bytes.clone(), &cross_reservation).is_err());
+
+        let mut cross_chain = bytes;
+        // Fixed record prefix is 78 bytes; the canonical context chain ID is
+        // its bytes 2..34.  This remains structurally valid, so only the
+        // retained key-owner derivation can reject the transplant.
+        cross_chain[80..112].fill(9);
+        assert!(audit_bound_nonce_secret_plaintext_v1(cross_chain, &binding).is_err());
     }
 
     #[test]

@@ -925,10 +925,10 @@ impl<R: JsonRpc> EvmAdapter<R> {
                     return Err(AdapterError::EvidenceInvalid);
                 }
                 // Append-only: this survives every later reorg.
-                st.revealed.record(lock_id, RevealedSecretBytes(t));
+                st.revealed.record(lock_id, RevealedSecretBytes::new(t));
                 Ok(Some(ObservedEvent::LockClaimed {
                     lock_id,
-                    revealed: RevealedSecretBytes(t),
+                    revealed: RevealedSecretBytes::new(t),
                     height,
                 }))
             }
@@ -971,10 +971,13 @@ impl<R: JsonRpc> EvmAdapter<R> {
                 if decoded.kind() != kind || &decoded.lock_id() != lock_id {
                     continue;
                 }
-                let (_, binding, payload) = decoded.identity();
-                if binding != tracked.binding {
+                if decoded.identity().binding != tracked.binding {
                     continue;
                 }
+                // The payload with its meaning attached: this record is being
+                // rebuilt from the log, so it carries whichever of the two the
+                // log's kind says it is.
+                let payload = decoded.payload();
                 crate::finality::require_final(log.block_number, &head)?;
                 // Never mint evidence no verifier could ever walk.
                 //

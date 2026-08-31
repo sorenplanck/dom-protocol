@@ -1,0 +1,349 @@
+{
+  "schema": "dom.absorption-plan.v1",
+  "generated_at": "2026-08-27",
+  "dom": {
+    "repository": "sorenplanck/dom-protocol",
+    "branch": "feat/domv2-interop-absorption",
+    "commit": "166b55299d5642200e0f5b7e384b14cf8bcbd17f"
+  },
+  "sources": {
+    "cipher": {
+      "repository": "kaystraprotocol/cipher",
+      "branch": "main",
+      "commit": "fbf49ba4f394cf4b3b7739dad159745ad17282c1",
+      "license_policy": "no-license-found-no-production-copy"
+    },
+    "kaystra": {
+      "repository": "Kaystra-Protocol/Kaystra",
+      "branch": "audit/sanitize-evidence-artifacts",
+      "commit": "5f3a39464b4cc038f44a46da07a502db850b7534",
+      "license_policy": "repository-rights-reserved-contract-only-mit"
+    },
+    "kael": {
+      "repository": "KAELPROTOCOL/kaelprotocol",
+      "branch": "audit/30-node-market-testnet-sim",
+      "commit": "f7e022974b19935e105a01bbeb4c257e358606d3",
+      "license_policy": "mit"
+    },
+    "keystone": {
+      "repository": "keystone-settlement/keystone",
+      "branch": "main",
+      "commit": "56535d28f100dfb6aa42145239b5a8b54eaa9e44",
+      "license_policy": "busl-1.1-no-production-copy-before-2028-07-02-without-agreement"
+    }
+  },
+  "decisions": [
+    {
+      "id": "CIP-01",
+      "source": "cipher",
+      "mechanism": "independent-evidence-reviewer-with-pass-fail-inconclusive",
+      "decision": "adapt",
+      "priority": "P0",
+      "target": "crates/adapters/btc-evidence and evidence export tooling",
+      "production_copy_policy": "clean-room",
+      "rationale": "Separates collection from judgment and prevents missing evidence from becoming success.",
+      "acceptance_tests": ["collector cannot emit verdicts", "missing or contradictory evidence is inconclusive or rejected", "review manifest is hash-pinned and signed"],
+      "source_evidence": ["original_harness/bitcoin/regtest/run_s12.py:2", "original_harness/bitcoin/regtest/review_artifacts.py:155"]
+    },
+    {
+      "id": "CIP-02",
+      "source": "cipher",
+      "mechanism": "fresh-bitcoin-core-descriptor-fixtures-and-independent-taproot-cross-checks",
+      "decision": "adapt",
+      "priority": "P1",
+      "target": "crates/adapters/btc/tests and scripts/e2e_bitcoin",
+      "production_copy_policy": "clean-room",
+      "rationale": "Real-node fixtures catch descriptor, control-block, output and conflict-policy mistakes that pure unit tests miss.",
+      "acceptance_tests": ["fresh wallets per run", "descriptor-derived script equals independently derived script", "claim and refund conflict probes execute on Bitcoin Core"],
+      "source_evidence": ["original_harness/bitcoin/regtest/fixture.py:1", "original_harness/bitcoin/regtest/fixture.py:157"]
+    },
+    {
+      "id": "CIP-03",
+      "source": "cipher",
+      "mechanism": "nums-internal-key-two-leaf-taproot-fallback",
+      "decision": "quarantine",
+      "priority": "research",
+      "target": "optional laboratory profile only",
+      "production_copy_policy": "clean-room",
+      "rationale": "Useful as an independent fallback oracle, but it would regress DOM's scriptless key-path claim privacy and uses CLTV rather than DOM's selected CSV refund profile.",
+      "acceptance_tests": [],
+      "source_evidence": ["original_harness/bitcoin/taproot/keys.py:68", "original_harness/bitcoin/taproot/tree.py:74"]
+    },
+    {
+      "id": "CIP-04",
+      "source": "cipher",
+      "mechanism": "fully-bound-cross-chain-instance-schema",
+      "decision": "adapt",
+      "priority": "P1",
+      "target": "crates/settlement-terms and route bundle codec",
+      "production_copy_policy": "clean-room",
+      "rationale": "The ideal model usefully enumerates chain, fork, finality, code hash, recipient, amount, outpoint and deadline bindings even though its cryptography is fake.",
+      "acceptance_tests": ["mutation of every instance field changes the authority digest", "unknown codec and fork versions fail closed", "chain and contract replay vectors are rejected"],
+      "source_evidence": ["cipher-vwe-ideal/cipher_vwe_ideal/types.py:1", "cipher-vwe-ideal/cipher_vwe_ideal/ideal.py:90"]
+    },
+    {
+      "id": "CIP-05",
+      "source": "cipher",
+      "mechanism": "witness-encryption-promotion-gate",
+      "decision": "quarantine",
+      "priority": "research",
+      "target": "research acceptance criteria",
+      "production_copy_policy": "no-code-promotion",
+      "rationale": "Correctly treats general and signature witness encryption as unresolved research; the ideal implementation is deterministic hashing, not cryptography.",
+      "acceptance_tests": [],
+      "source_evidence": ["cipher-vwe-ideal/cipher_vwe_ideal/crypto.py:32", "cipher-vwe-research/cipher_vwe_research/candidates.py:1"]
+    },
+    {
+      "id": "KAY-01",
+      "source": "kaystra",
+      "mechanism": "live-multi-leg-pre-reveal-readiness-guard",
+      "decision": "adapt",
+      "priority": "P0",
+      "target": "new reveal authority in route-composer plus durable store capability",
+      "production_copy_policy": "design-reimplementation",
+      "rationale": "DOM statically orders funding and deadlines, but its EVM claim submission seam does not itself require a fresh all-leg finalized snapshot before publishing the adaptor secret.",
+      "acceptance_tests": ["reorged upstream funding denies reveal", "expired or under-budget leg denies reveal", "wrong secret point, route, caller or terms denies reveal", "RPC error and hostile reverting leg deny without panic", "authorization expires and is one-shot"],
+      "source_evidence": ["contracts/src/KaystraRevealGuard.sol:71", "orchestrator/kaystra_preclaim_guard.py:147"]
+    },
+    {
+      "id": "KAY-02",
+      "source": "kaystra",
+      "mechanism": "measured-margin-and-fee-cap-calibration",
+      "decision": "adapt",
+      "priority": "P1",
+      "target": "policy calibration tool and signed policy artifact",
+      "production_copy_policy": "clean-room",
+      "rationale": "Converts propagation, finality, watcher, censorship and RPC failover observations into explicit action budgets instead of unexplained constants.",
+      "acceptance_tests": ["minimum sample size and schema enforced", "outliers and confidence reported", "policy digest binds dataset and algorithm version", "unsafe zero or negative inputs rejected"],
+      "source_evidence": ["tools/kaystra_calibrate.py:13", "tools/kaystra_calibrate.py:59"]
+    },
+    {
+      "id": "KAY-03",
+      "source": "kaystra",
+      "mechanism": "versioned-operator-bundle-and-deadline-validation",
+      "decision": "adapt",
+      "priority": "P1",
+      "target": "route bundle codec and deployment preflight",
+      "production_copy_policy": "clean-room",
+      "rationale": "A single committed operator artifact can bind ordering, legs, margins, fees and deployment identities across all services.",
+      "acceptance_tests": ["unknown versions rejected", "all chain identities and code hashes bound", "deadline graph and fee caps revalidated by every consumer"],
+      "source_evidence": ["tools/kaystra_bundle.py:27", "tools/kaystra_bundle.py:101"]
+    },
+    {
+      "id": "KAY-04",
+      "source": "kaystra",
+      "mechanism": "watcher-preflight-replacement-and-fee-caps",
+      "decision": "adapt",
+      "priority": "P1",
+      "target": "DOM operational executors and outbox policy",
+      "production_copy_policy": "clean-room",
+      "rationale": "Action preflight, mempool acceptance, bounded replacement and fee/bounty caps complement DOM's stronger durable outbox, but Kaystra's monotonic cursor must not be copied.",
+      "acceptance_tests": ["replacement preserves semantic transaction identity", "fees cannot exceed committed caps", "deep reorg rolls cursor back by block hash", "restart replays identical bytes"],
+      "source_evidence": ["orchestrator/kaystra_watcherd.py:1"]
+    },
+    {
+      "id": "KAY-05",
+      "source": "kaystra",
+      "mechanism": "evidence-secret-sanitization-gate",
+      "decision": "adapt",
+      "priority": "P0",
+      "target": "scripts/check-evidence-secrets and sanitized export pipeline",
+      "production_copy_policy": "clean-room",
+      "rationale": "Secret scanning belongs in CI, but the source mutates text in place, misses binary stores and over-redacts public SIDs.",
+      "acceptance_tests": ["canonical evidence is never modified", "private keys, mnemonics, nonces and adaptor secrets are detected in text and supported structured stores", "public identifiers remain intact", "sanitized exports carry a source integrity map"],
+      "source_evidence": ["scripts/sanitize_evidence_artifacts.py:5", "scripts/sanitize_evidence_artifacts.py:116"]
+    },
+    {
+      "id": "KAY-06",
+      "source": "kaystra",
+      "mechanism": "deadline-invariant-model",
+      "decision": "adapt",
+      "priority": "P2",
+      "target": "route-composer property tests and model checking",
+      "production_copy_policy": "spec-reimplementation",
+      "rationale": "The invariants are valuable, but the executable Rust state and adversarial property tests must remain the release gate.",
+      "acceptance_tests": ["randomized multi-leg deadline graphs preserve refund and claim action budgets"],
+      "source_evidence": ["specs/kaystra_deadlines.qnt:1"]
+    },
+    {
+      "id": "KAE-01",
+      "source": "kael",
+      "mechanism": "pure-counterparty-decision-kernel-with-last-instant-reverification",
+      "decision": "adapt",
+      "priority": "P0",
+      "target": "route reveal authority and chain executors",
+      "production_copy_policy": "mit-compatible-reimplementation",
+      "rationale": "The executor re-evaluates the current world immediately before lock or redeem and explicitly proves that Unsafe never releases the secret.",
+      "acceptance_tests": ["TOCTOU state change between preparation and broadcast invalidates authorization", "unsafe observations never reach secret-bearing broadcaster", "decision code has no network or signing side effects"],
+      "source_evidence": ["swapkit/src/sm.rs:223", "swapkit/src/exec/mod.rs:506"]
+    },
+    {
+      "id": "KAE-02",
+      "source": "kael",
+      "mechanism": "cross-language-eip712-differential-vectors",
+      "decision": "adapt",
+      "priority": "P2",
+      "target": "optional EVM RFQ gateway tests",
+      "production_copy_policy": "mit-compatible",
+      "rationale": "Rust/Solidity vectors are useful only after adding chainId, verifyingContract and complete signed ordering semantics.",
+      "acceptance_tests": ["domain replay across chain and contract rejected", "arrival timestamp cannot be attacker-mutated", "Rust and Solidity digest vectors match"],
+      "source_evidence": ["contracts/src/Order.sol:17", "orderbook/tests/server_integration.rs:44"]
+    },
+    {
+      "id": "KAE-03",
+      "source": "kael",
+      "mechanism": "test-chain-signer-allowlist-and-zero-transaction-preflight",
+      "decision": "adopt",
+      "priority": "P1",
+      "target": "live harness signer boundaries",
+      "production_copy_policy": "mit-compatible",
+      "rationale": "Prevents test tooling and embedded keys from accidentally reaching production chains.",
+      "acceptance_tests": ["mainnet and unknown chains rejected before signer creation", "preflight sends zero transactions", "private keys never appear in debug output"],
+      "source_evidence": ["swapkit/src/exec/signer.rs:111", "swapkit/tests/preflight_no_transactions.rs:1"]
+    },
+    {
+      "id": "KAE-04",
+      "source": "kael",
+      "mechanism": "live-anvil-secret-non-disclosure-and-reorg-tests",
+      "decision": "adopt",
+      "priority": "P1",
+      "target": "f3-harness and route-composer adversarial tests",
+      "production_copy_policy": "mit-compatible",
+      "rationale": "Directly tests the highest consequence property: unsafe/reorged state must not publish the cross-leg secret.",
+      "acceptance_tests": ["reorg rollback before claim leaves secret unpublished", "counterparty field mutation forces refund or abort", "tests use real receipt and block hashes"],
+      "source_evidence": ["swapkit/src/exec/mod.rs:521", "swapkit/src/exec/mod.rs:1"]
+    },
+    {
+      "id": "KAE-05",
+      "source": "kael",
+      "mechanism": "synthetic-thirty-node-scenario-and-jsonl-metrics",
+      "decision": "quarantine",
+      "priority": "research",
+      "target": "scenario catalog only",
+      "production_copy_policy": "mit-compatible",
+      "rationale": "It is a deterministic one-process simulation, not evidence of a 30-node network or real reorg behavior.",
+      "acceptance_tests": [],
+      "source_evidence": ["swapkit/src/bin/market-testnet-sim.rs:1", "swapkit/tests/market_testnet_simulation.rs:1"]
+    },
+    {
+      "id": "KAE-06",
+      "source": "kael",
+      "mechanism": "kael-orderbook-and-public-hashlock-settlement-as-dom-core",
+      "decision": "reject",
+      "priority": "P3",
+      "target": "none",
+      "production_copy_policy": "do-not-import",
+      "rationale": "Unsigned created_at affects roles and priority, the EIP-712 domain is replayable, storage is volatile, and public hashlock correlation regresses DOM privacy.",
+      "acceptance_tests": [],
+      "source_evidence": ["orderbook/src/order.rs:16", "orderbook/src/matching.rs:57", "contracts/src/Order.sol:17"]
+    },
+    {
+      "id": "KEY-01",
+      "source": "keystone",
+      "mechanism": "checkpoint-rooted-full-bitcoin-header-consensus-verification",
+      "decision": "adapt",
+      "priority": "P0",
+      "target": "crates/adapters/btc-evidence v2",
+      "production_copy_policy": "clean-room-or-explicit-relicense",
+      "rationale": "DOM currently checks linkage and each header against its self-declared target, but not expected nBits, retarget boundaries or median-time-past from a trusted checkpoint.",
+      "acceptance_tests": ["easy-target forgery rejected", "mainnet retarget boundary matches Bitcoin Core", "MTP violation rejected", "checkpoint context length and compact target validated", "header and byte caps enforced before allocation"],
+      "source_evidence": ["crates/verifier/src/chain.rs:138", "contracts/src/BtcProofLib.sol:305"]
+    },
+    {
+      "id": "KEY-02",
+      "source": "keystone",
+      "mechanism": "domain-bound-unique-bitcoin-script-per-settlement",
+      "decision": "adapt",
+      "priority": "P1",
+      "target": "Bitcoin adapter settlement descriptor derivation",
+      "production_copy_policy": "clean-room-or-explicit-relicense",
+      "rationale": "Prevents payment reuse and cross-order ambiguity, but the 31-bit derivation index needs collision handling and on-chain binding must be enforceable rather than informational.",
+      "acceptance_tests": ["every settlement field changes script or authority digest", "index collisions retry with committed salt", "script derivation independently verified", "script cannot be reused across live settlements"],
+      "source_evidence": ["crates/verifier/src/bip86.rs:114", "contracts/src/Settler.sol:166"]
+    },
+    {
+      "id": "KEY-03",
+      "source": "keystone",
+      "mechanism": "verified-checkpoint-extension",
+      "decision": "adapt",
+      "priority": "P1",
+      "target": "Bitcoin evidence trust-root service",
+      "production_copy_policy": "clean-room-or-explicit-relicense",
+      "rationale": "Permissionless verified extension is useful, but DOM must additionally define canonical-chain or accumulated-work selection and checkpoint governance.",
+      "acceptance_tests": ["forks tracked by accumulated work", "checkpoint overwrite impossible", "two-step governance and emergency policy tested", "deep reorg invalidates dependent reveal capabilities"],
+      "source_evidence": ["contracts/src/CheckpointRegistry.sol:1", "crates/verifier/src/chain.rs:15"]
+    },
+    {
+      "id": "KEY-04",
+      "source": "keystone",
+      "mechanism": "optimistic-bitcoin-fact-settlement-with-positive-fraud-challenges",
+      "decision": "adapt",
+      "priority": "P2",
+      "target": "optional USPE evidence adapter, never the default atomic path",
+      "production_copy_policy": "clean-room-or-explicit-relicense",
+      "rationale": "Adds a useful low-cost settlement profile for applications that accept challenger-liveness assumptions; it must not weaken adaptor-based atomic settlement.",
+      "acceptance_tests": ["every accepted false claim maps to a concrete on-chain challenge", "no single garbage claim blocks an honest claim", "no honest claim is challengeable in Rust/Solidity differential vectors", "challenger outage is explicit in policy"],
+      "source_evidence": ["contracts/src/Settler.sol:448", "crates/verifier/src/fraud.rs:74"]
+    },
+    {
+      "id": "KEY-05",
+      "source": "keystone",
+      "mechanism": "challenge-bonds-burn-parallel-claims-and-payee-deposit",
+      "decision": "adapt",
+      "priority": "P2",
+      "target": "optional optimistic adapter economics",
+      "production_copy_policy": "clean-room-or-explicit-relicense",
+      "rationale": "Prices spam, self-challenge and free options, but values must be calibrated from worst-case challenge cost and liveness rather than copied constants.",
+      "acceptance_tests": ["minimum bond exceeds bounded challenge cost", "self-challenge is loss-making", "parallel claims cannot strand escrow", "deposit outcomes cover settle and expiry"],
+      "source_evidence": ["contracts/src/Settler.sol:136", "contracts/src/Settler.sol:744"]
+    },
+    {
+      "id": "KEY-06",
+      "source": "keystone",
+      "mechanism": "push-then-pull-payout-and-erc20-balance-delta-accounting",
+      "decision": "adopt",
+      "priority": "P1",
+      "target": "DOM EVM contracts handling external assets",
+      "production_copy_policy": "design-reimplementation",
+      "rationale": "A hostile receiver cannot wedge settlement and fee-on-transfer behavior cannot silently undercollateralize an order.",
+      "acceptance_tests": ["reverting receiver becomes withdrawable credit", "false-return and fee-on-transfer tokens cannot create excess liabilities", "reentrancy and accounting invariants hold"],
+      "source_evidence": ["contracts/src/Settler.sol:159", "contracts/src/Settler.sol:768"]
+    },
+    {
+      "id": "KEY-07",
+      "source": "keystone",
+      "mechanism": "rust-solidity-bitcoin-core-differential-and-retarget-vectors",
+      "decision": "adopt",
+      "priority": "P0",
+      "target": "btc-evidence differential test corpus",
+      "production_copy_policy": "independently-generated-public-chain-vectors",
+      "rationale": "Cross-implementation agreement at real consensus boundaries is the strongest regression oracle for the portable evidence verifier.",
+      "acceptance_tests": ["Rust, Solidity and Bitcoin Core agree on valid and forged vectors", "SegWit txid canonicalization and odd Merkle duplication covered", "no-default-features verifier library passes"],
+      "source_evidence": ["contracts/test/Differential.t.sol:1", "crates/verifier/tests/real_chain.rs:1"]
+    },
+    {
+      "id": "KEY-08",
+      "source": "keystone",
+      "mechanism": "zk-fast-finalization-interface",
+      "decision": "quarantine",
+      "priority": "research",
+      "target": "optional future verifier interface",
+      "production_copy_policy": "no-production-promotion",
+      "rationale": "The repository binds a digest and mock verifier interface but contains no production proof system, circuit or audited verifier.",
+      "acceptance_tests": [],
+      "source_evidence": ["crates/verifier/src/zk.rs:53", "contracts/src/Settler.sol:11"]
+    },
+    {
+      "id": "KEY-09",
+      "source": "keystone",
+      "mechanism": "append-only-challenger-journal-and-fraud-to-action-mapping",
+      "decision": "adapt",
+      "priority": "P2",
+      "target": "optional challenger service over DOM durable store",
+      "production_copy_policy": "clean-room-or-explicit-relicense",
+      "rationale": "The explicit fraud/action mapping is useful; the plain append journal must be replaced by DOM's authenticated durable records and canonical reorg handling.",
+      "acceptance_tests": ["every live fraud has an idempotent action", "journal records are authenticated and fsynced", "reorg rollback cannot suppress a retry"],
+      "source_evidence": ["crates/watcher/src/bin/watcherd.rs:313", "crates/solver/src/lib.rs:325"]
+    }
+  ]
+}

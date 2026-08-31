@@ -1073,7 +1073,9 @@ impl RestartableSharedBlindingVaultV1 for ContractsNonceVaultV1 {
             capability
                 .locate_pending(
                     request,
-                    found.pending.ok_or(InventoryError::RestoreQuarantined)?,
+                    found
+                        .pending
+                        .ok_or(InventoryError::NoMatchingSharedBlinding)?,
                 )
                 .map_err(|_| InventoryError::RestoreQuarantined)
         }
@@ -1584,7 +1586,8 @@ mod tests {
     use dom_adaptor::{
         contribute_vault_backed_blinding_share_v1,
         resume_vault_backed_blinding_share_after_restart_v1, DirectionV1,
-        RestartedSessionBlindingShareV1, SharedBlindingRestartRequestV1, TrustedChainIdV1,
+        RestartedSessionBlindingShareV1, SharedBlindingRestartRequestV1, SharedBlindingVaultError,
+        TrustedChainIdV1,
     };
     use dom_core::Hash256;
     use dom_crypto::recovery::RecoveryCapsule;
@@ -1779,6 +1782,25 @@ mod tests {
         };
         assert_eq!(capability.public_key(), &point);
         assert_eq!(recovered, capsule);
+        Ok(())
+    }
+
+    #[test]
+    fn restart_lookup_distinguishes_authenticated_absence_from_quarantine(
+    ) -> Result<(), Box<dyn Error>> {
+        let directory = TestDirectory::create()?;
+        let mut vault = create_vault(&directory)?;
+        let error = match resume_vault_backed_blinding_share_after_restart_v1(
+            request(&chain(), [0x2a; 32], DirectionV1::Initiator, 0, [0x5a; 32])?,
+            &mut vault,
+        ) {
+            Err(error) => error,
+            Ok(_) => return Err(Box::new(InventoryError::RestoreQuarantined)),
+        };
+        assert!(matches!(
+            error,
+            SharedBlindingVaultError::Vault(InventoryError::NoMatchingSharedBlinding)
+        ));
         Ok(())
     }
 

@@ -20,6 +20,12 @@ pub(crate) struct PubKey(pub(crate) secp256k1_pubkey);
 pub(crate) struct XOnlyKey(pub(crate) secp256k1_xonly_pubkey);
 
 impl SecpContext {
+    /// Validates a canonical on-curve BIP340 x-only public key without
+    /// retaining or exposing a backend point representation.
+    pub fn validate_xonly_key(&self, bytes: &[u8; 32]) -> Result<(), BtcCryptoError> {
+        self.parse_xonly(bytes).map(drop)
+    }
+
     /// Parses a 33-byte compressed point, rejecting non-canonical or
     /// off-curve encodings.
     pub(crate) fn parse_pubkey(&self, bytes: &[u8; 33]) -> Result<PubKey, BtcCryptoError> {

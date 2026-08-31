@@ -9,11 +9,19 @@ publish = false  # D-ORQ-9: explicit, never inherited
 [dependencies]
 blake2.workspace = true
 counterparty-api.workspace = true
+dom-adaptor.workspace = true
 dom-leg = { workspace = true, features = ["real-dom-adaptor"] }
 dom-scriptless-chain-adapter.workspace = true
 dom-scriptless-store.workspace = true
 kaystra-core = { path = "../../kaystra-core" }
 thiserror.workspace = true
+
+[dev-dependencies]
+dom-consensus.workspace = true
+dom-core.workspace = true
+dom-crypto = { workspace = true, features = ["test-helpers"] }
+dom-serialization.workspace = true
+zeroize.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

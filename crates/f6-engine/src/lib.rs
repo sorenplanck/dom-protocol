@@ -22,8 +22,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod candidate_book;
 pub mod composition;
 pub mod consumer;
+/// Versioned F6 binding ledger for heterogeneous-clock composed routes.
+pub mod v2;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -567,6 +570,39 @@ impl StoreLog {
     /// Opens (or creates) the log at `path`.
     pub fn open(path: &Path) -> Result<Self> {
         let store = store::Store::open(path).map_err(|e| EngineError::Log(e.to_string()))?;
+        Ok(Self { store })
+    }
+
+    /// Creates a strict owner-only production F6 journal.
+    ///
+    /// The binding is persisted by the neutral store and rechecked on every
+    /// journal operation.  This constructor never falls back to the migrating
+    /// development opening above.
+    pub fn create_production(path: &Path, binding_digest: Digest32) -> Result<Self> {
+        let binding = store::ProductionStoreBindingV1::new(binding_digest)
+            .map_err(|error| EngineError::Log(error.to_string()))?;
+        let store = store::Store::create_production(path, binding)
+            .map_err(|error| EngineError::Log(error.to_string()))?;
+        Ok(Self { store })
+    }
+
+    /// Opens one exact existing production F6 journal without creation or
+    /// migration.
+    pub fn open_production(path: &Path, binding_digest: Digest32) -> Result<Self> {
+        let binding = store::ProductionStoreBindingV1::new(binding_digest)
+            .map_err(|error| EngineError::Log(error.to_string()))?;
+        let store = store::Store::open_production(path, binding)
+            .map_err(|error| EngineError::Log(error.to_string()))?;
+        Ok(Self { store })
+    }
+
+    /// Completes only a pristine production F6 journal whose provisioning was
+    /// already started by an external durable provisioning journal.
+    pub fn resume_create_production(path: &Path, binding_digest: Digest32) -> Result<Self> {
+        let binding = store::ProductionStoreBindingV1::new(binding_digest)
+            .map_err(|error| EngineError::Log(error.to_string()))?;
+        let store = store::Store::resume_create_production(path, binding)
+            .map_err(|error| EngineError::Log(error.to_string()))?;
         Ok(Self { store })
     }
 }

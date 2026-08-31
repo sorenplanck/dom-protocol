@@ -73,6 +73,65 @@ pub struct ParticipantIdentityV1 {
     direction: DirectionV1,
 }
 
+/// Audit a retained participant identifier against expected chain bytes.
+///
+/// This recovery helper deliberately returns only `()`. Raw retained bytes can
+/// prove that an encoded identifier is internally consistent, but they cannot
+/// mint the operational [`ParticipantIdentityV1`] produced by an authenticated
+/// [`TrustedChainIdV1`].
+///
+/// ```compile_fail
+/// use dom_adaptor::{audit_retained_participant_id_v1, ParticipantIdentityV1};
+/// use dom_crypto::PublicKey;
+///
+/// fn cannot_mint(
+///     chain_id: &[u8; 32],
+///     participant_id: &[u8; 32],
+///     identity_key: &PublicKey,
+/// ) -> ParticipantIdentityV1 {
+///     audit_retained_participant_id_v1(chain_id, participant_id, identity_key)
+///         .expect("audit only")
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use dom_adaptor::{DirectionV1, ParticipantIdentityV1};
+/// use dom_crypto::PublicKey;
+///
+/// fn removed_operational_recovery_constructor(
+///     chain_id: &[u8; 32],
+///     participant_id: &[u8; 32],
+///     identity_key: PublicKey,
+///     signing_key: PublicKey,
+/// ) {
+///     let _ = ParticipantIdentityV1::reauthenticate_retained_entry(
+///         chain_id,
+///         participant_id,
+///         identity_key,
+///         signing_key,
+///         DirectionV1::Initiator,
+///     );
+/// }
+/// ```
+pub fn audit_retained_participant_id_v1(
+    expected_chain_id: &[u8; 32],
+    encoded_participant_id: &[u8; 32],
+    identity_public_key: &PublicKey,
+) -> Result<()> {
+    if expected_chain_id == &[0; 32] || encoded_participant_id == &[0; 32] {
+        return Err(AdaptorError::InvalidContext(
+            "retained participant binding must be nonzero",
+        ));
+    }
+    let participant_id = derive_participant_id(expected_chain_id, identity_public_key)?;
+    if &participant_id != encoded_participant_id {
+        return Err(AdaptorError::InvalidContext(
+            "retained participant ID does not match expected chain",
+        ));
+    }
+    Ok(())
+}
+
 impl ParticipantIdentityV1 {
     /// Construct a participant entry and derive its identifier canonically.
     pub fn new(
@@ -81,15 +140,7 @@ impl ParticipantIdentityV1 {
         signing_public_key: PublicKey,
         direction: DirectionV1,
     ) -> Result<Self> {
-        let mut body = [0u8; 65];
-        body[..32].copy_from_slice(chain_id.as_bytes());
-        body[32..].copy_from_slice(&identity_public_key.to_compressed_bytes());
-        let participant_id = *blake2b_256_tagged(PARTICIPANT_TAG_V1, &body).as_bytes();
-        if participant_id == [0u8; 32] {
-            return Err(AdaptorError::InvalidContext(
-                "derived participant ID must be nonzero",
-            ));
-        }
+        let participant_id = derive_participant_id(chain_id.as_bytes(), &identity_public_key)?;
         Ok(Self {
             participant_id,
             identity_public_key,
@@ -114,6 +165,19 @@ impl ParticipantIdentityV1 {
     pub const fn direction(&self) -> DirectionV1 {
         self.direction
     }
+}
+
+fn derive_participant_id(chain_id: &[u8; 32], identity_public_key: &PublicKey) -> Result<[u8; 32]> {
+    let mut body = [0u8; 65];
+    body[..32].copy_from_slice(chain_id);
+    body[32..].copy_from_slice(&identity_public_key.to_compressed_bytes());
+    let participant_id = *blake2b_256_tagged(PARTICIPANT_TAG_V1, &body).as_bytes();
+    if participant_id == [0u8; 32] {
+        return Err(AdaptorError::InvalidContext(
+            "derived participant ID must be nonzero",
+        ));
+    }
+    Ok(participant_id)
 }
 
 /// Validated protocol roster sorted strictly by participant identifier.
@@ -337,6 +401,39 @@ mod tests {
             initiator,
             *blake2b_256_tagged("DOM:scriptless-transcript:v1", &exact_body).as_bytes(),
             "NAR-002 section 8.2 tag and body must remain byte-exact",
+        );
+    }
+
+    #[test]
+    fn retained_participant_audit_matches_trusted_derivation_without_minting_identity() {
+        let chain = TrustedChainIdV1::from_signed_fixture([7; 32]);
+        let identity_key = point(2);
+        let trusted = ParticipantIdentityV1::new(
+            &chain,
+            identity_key.clone(),
+            point(4),
+            DirectionV1::Responder,
+        )
+        .expect("trusted participant");
+        audit_retained_participant_id_v1(chain.as_bytes(), trusted.participant_id(), &identity_key)
+            .expect("retained participant ID audit");
+
+        let mut wrong_chain = *chain.as_bytes();
+        wrong_chain[0] ^= 1;
+        assert!(audit_retained_participant_id_v1(
+            &wrong_chain,
+            trusted.participant_id(),
+            &identity_key,
+        )
+        .is_err());
+        assert!(audit_retained_participant_id_v1(
+            &[0; 32],
+            trusted.participant_id(),
+            &identity_key,
+        )
+        .is_err());
+        assert!(
+            audit_retained_participant_id_v1(chain.as_bytes(), &[0; 32], &identity_key,).is_err()
         );
     }
 

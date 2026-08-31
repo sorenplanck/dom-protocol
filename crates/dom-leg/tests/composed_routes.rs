@@ -351,7 +351,8 @@ fn assert_one_scalar_binds_all_three() -> ([u8; 33], [u8; 20]) {
     let btc_revealed = btc_claim_reveals_scalar(&t, &btc_t33);
 
     assert_eq!(
-        dom_revealed.0, t,
+        dom_revealed.expose_scalar_bytes(),
+        t,
         "the scalar revealed by the DOM claim is the route scalar"
     );
     assert_eq!(
@@ -361,13 +362,14 @@ fn assert_one_scalar_binds_all_three() -> ([u8; 33], [u8; 20]) {
     // The heart of atomicity: whichever leg is claimed last, the scalar it
     // publishes is exactly the one that finalizes the other legs.
     assert_eq!(
-        dom_revealed.0, btc_revealed,
+        dom_revealed.expose_scalar_bytes(),
+        btc_revealed,
         "the DOM-revealed and BTC-revealed scalars are byte-identical"
     );
     // And that revealed scalar reproduces the EVM commitment, so it also opens
     // the EVM leg.
     assert_eq!(
-        evm_commitment(&dom_revealed.0),
+        evm_commitment(&dom_revealed.expose_scalar_bytes()),
         evm_addr,
         "the revealed scalar reproduces the EVM commitment"
     );

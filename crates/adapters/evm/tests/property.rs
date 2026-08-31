@@ -16,7 +16,8 @@ use adapter_evm::binding::{
 };
 use adapter_evm::cursor::{EvmCursor, CURSOR_LEN, CURSOR_VERSION};
 use adapter_evm::evidence::{
-    decode_settlement_log, EvidenceKind, EvmEvidence, EVIDENCE_LEN, EVIDENCE_VERSION,
+    decode_settlement_log, EvidenceKind, EvidencePayload, EvmEvidence, EVIDENCE_LEN,
+    EVIDENCE_VERSION,
 };
 use adapter_evm::finality::{clamp_to_finalized, gate, FinalizedHead};
 use adapter_evm::mock::Faults;
@@ -320,7 +321,17 @@ proptest! {
     fn well_formed_claim_logs_decode(t in arb_b32()) {
         let decoded = decode_settlement_log(&claimed_log(t), &CONTRACT).expect("decodes");
         prop_assert_eq!(decoded.kind(), EvidenceKind::Claimed);
-        prop_assert_eq!(decoded.identity(), ([0x01; 32], [0x02; 32], t));
+        let identity = decoded.identity();
+        prop_assert_eq!(identity.lock_id, [0x01; 32]);
+        prop_assert_eq!(identity.binding, [0x02; 32]);
+        // The scalar comes back wrapped and by name; the amount accessor says
+        // `None`, which is the property the old anonymous triple could not
+        // state at all.
+        prop_assert_eq!(
+            decoded.claimed_scalar().map(|s| s.expose_scalar_bytes()),
+            Some(t)
+        );
+        prop_assert_eq!(decoded.locked_amount(), None);
     }
 
     #[test]
@@ -426,7 +437,7 @@ fn sample_evidence(t: [u8; 32]) -> (EvmEvidence, adapter_evm::EvmAdapterConfig) 
             log_index: 1,
             finalized_height: 9,
             finalized_block_hash: [0x33; 32],
-            payload: t,
+            payload: EvidencePayload::ClaimedScalar(t),
         },
         cfg,
     )
@@ -947,7 +958,7 @@ proptest! {
         ).expect("verifies");
         match outcome {
             VerifiedOutcome::Claimed { revealed, height } => {
-                prop_assert_eq!(revealed.0, s.secret);
+                prop_assert_eq!(revealed.expose_scalar_bytes(), s.secret);
                 prop_assert_eq!(height, evidence.block_number);
                 // The neutral wrapper never renders the scalar.
                 let rendered = format!("{revealed:?}");

@@ -42,23 +42,43 @@ pub struct AcceptedSession {
     messages: Vec<Vec<u8>>,
 }
 
+/// Complete typed request for one freshly accepted signing session.
+pub struct AcceptedSessionFreshRequestV1 {
+    /// Registry-authenticated DOM chain.
+    pub trusted_chain_id: TrustedChainIdV1,
+    /// Exact Scriptless Contracts session identifier.
+    pub session_id: [u8; 32],
+    /// Closed contract family.
+    pub contract_kind: ContractKindV1,
+    /// Closed signing purpose.
+    pub purpose: PurposeV1,
+    /// Exact authenticated two-party roster.
+    pub roster: ParticipantRosterV1,
+    /// Canonical transaction template retained by the session authority.
+    pub transaction_template: dom_consensus::Transaction,
+    /// Exact kernel position in the template.
+    pub kernel_index: usize,
+    /// Claim adaptor point, absent for non-adaptor purposes.
+    pub adaptor_point: Option<PublicKey>,
+}
+
 impl AcceptedSession {
     /// Builds a fresh accepted session (no accepted messages yet).
     ///
     /// The initial transcript hash is recomputed from the pin's canonical
     /// function, exactly as the round bootstrap will recompute it — a
     /// divergent value makes `from_session_authority` fail closed.
-    #[allow(clippy::too_many_arguments)]
-    pub fn fresh(
-        trusted_chain_id: TrustedChainIdV1,
-        session_id: [u8; 32],
-        contract_kind: ContractKindV1,
-        purpose: PurposeV1,
-        roster: ParticipantRosterV1,
-        transaction_template: dom_consensus::Transaction,
-        kernel_index: usize,
-        adaptor_point: Option<PublicKey>,
-    ) -> Result<Self, VaultError> {
+    pub fn fresh(request: AcceptedSessionFreshRequestV1) -> Result<Self, VaultError> {
+        let AcceptedSessionFreshRequestV1 {
+            trusted_chain_id,
+            session_id,
+            contract_kind,
+            purpose,
+            roster,
+            transaction_template,
+            kernel_index,
+            adaptor_point,
+        } = request;
         if session_id == [0u8; 32] {
             return Err(VaultError::CorruptState);
         }

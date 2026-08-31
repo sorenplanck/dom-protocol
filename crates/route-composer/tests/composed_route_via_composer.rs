@@ -233,7 +233,9 @@ fn the_composer_drives_a_composed_route_to_both_settled() {
         .expect("the downstream claim revealed a scalar");
 
     // A corrupted observation refuses by name and the route stays alive.
-    let mut flipped = observed;
+    // `observed` is now a `RevealedSecretBytes`; the scalar is taken out by
+    // name for the byte flip, which is the only reason this test needs it raw.
+    let mut flipped = observed.expose_scalar_bytes();
     flipped[11] ^= 0x08;
     assert_eq!(
         binding.verify_revealed_scalar(&flipped).unwrap_err(),
@@ -247,7 +249,7 @@ fn the_composer_drives_a_composed_route_to_both_settled() {
 
     // The genuine scalar is released and settles the upstream leg.
     let released = binding
-        .verify_revealed_scalar(&observed)
+        .verify_revealed_scalar(&observed.expose_scalar_bytes())
         .expect("t opens T");
     drive_until(
         &up_chain,

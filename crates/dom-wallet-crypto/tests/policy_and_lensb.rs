@@ -61,32 +61,108 @@ fn atomic_write_leaves_no_tmp_on_success() {
     let tmp = path.with_extension("tmp");
     assert!(path.exists(), "final file exists");
     assert!(!tmp.exists(), "temp file removed by atomic rename");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.permissions().mode() & 0o7777, 0o600);
+        assert_eq!(metadata.nlink(), 1);
+    }
 }
 
-/// [ignore] STATIC-REVIEW FINDING — atomic_write TOCTOU / predictable temp.
-///
-/// lib.rs:260  `let temp_path = path.with_extension("tmp");`
-/// lib.rs:265  `std::fs::File::create(&temp_path)`
-///
-/// The temp filename is DETERMINISTIC (`<wallet>.tmp`, no PID/random suffix) and
-/// `File::create` uses `O_CREAT|O_TRUNC` WITHOUT `O_EXCL`. Consequences:
-///   1. Predictability: an attacker who can write to the wallet directory can
-///      pre-create / symlink `<wallet>.tmp` to redirect the write (symlink/TOCTOU
-///      attack) on shared/multi-user storage.
-///   2. No O_EXCL: a stale or hostile `<wallet>.tmp` is silently truncated and
-///      reused rather than refused.
-///   3. Concurrency: two concurrent saves of the same wallet share one temp
-///      path and can interleave.
-///
-/// THREAT BOUND: exploitation needs write access to the wallet's own directory,
-/// which on a single-user wallet machine is the user themself. So this is a
-/// hardening finding (defence-in-depth: use O_EXCL + a random suffix, e.g.
-/// `tempfile::NamedTempFile` in the same dir), not a remote vector. Untestable
-/// as a passing behaviour without a production change; recorded as ignore+note.
+/// The retired deterministic name is never opened, truncated, or followed.
+/// This turns the former ignored static finding into an observable regression
+/// test on every platform.
 #[test]
-#[ignore = "static-review: predictable .tmp + no O_EXCL (lib.rs:260,265) — hardening finding, dir-write-access bound"]
-fn atomic_write_toctou_o_excl_gap() {
-    unreachable!("documented finding — see note");
+fn stale_deterministic_tmp_is_not_reused() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("env.dat");
+    let retired = path.with_extension("tmp");
+    std::fs::write(&retired, b"do-not-touch").unwrap();
+    save_envelope(&path, TEST_MAGIC, 1, &Payload { a: 9 }, "pw").unwrap();
+    assert_eq!(std::fs::read(&retired).unwrap(), b"do-not-touch");
+    let back: Payload = dom_wallet_crypto::load_envelope(&path, TEST_MAGIC, 1, "pw").unwrap();
+    assert_eq!(back, Payload { a: 9 });
+}
+
+#[cfg(unix)]
+#[test]
+fn retired_tmp_symlink_cannot_redirect_the_write() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("env.dat");
+    let sentinel = dir.path().join("sentinel");
+    let retired = path.with_extension("tmp");
+    std::fs::write(&sentinel, b"sentinel").unwrap();
+    symlink(&sentinel, &retired).unwrap();
+    save_envelope(&path, TEST_MAGIC, 1, &Payload { a: 11 }, "pw").unwrap();
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"sentinel");
+    assert!(std::fs::symlink_metadata(&retired)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[cfg(unix)]
+#[test]
+fn target_symlink_is_replaced_and_never_followed() {
+    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("env.dat");
+    let sentinel = dir.path().join("sentinel");
+    std::fs::write(&sentinel, b"sentinel").unwrap();
+    symlink(&sentinel, &path).unwrap();
+    save_envelope(&path, TEST_MAGIC, 1, &Payload { a: 12 }, "pw").unwrap();
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"sentinel");
+    let metadata = std::fs::symlink_metadata(&path).unwrap();
+    assert!(metadata.file_type().is_file());
+    assert!(!metadata.file_type().is_symlink());
+    assert_eq!(metadata.permissions().mode() & 0o7777, 0o600);
+    assert_eq!(metadata.nlink(), 1);
+}
+
+#[test]
+fn concurrent_saves_publish_only_complete_envelopes_and_clean_staging() {
+    use std::sync::{Arc, Barrier};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("env.dat");
+    let barrier = Arc::new(Barrier::new(2));
+    let results = std::thread::scope(|scope| {
+        let first_path = path.clone();
+        let first_barrier = Arc::clone(&barrier);
+        let first = scope.spawn(move || {
+            first_barrier.wait();
+            save_envelope(&first_path, TEST_MAGIC, 1, &Payload { a: 21 }, "pw")
+        });
+        let second_path = path.clone();
+        let second_barrier = Arc::clone(&barrier);
+        let second = scope.spawn(move || {
+            second_barrier.wait();
+            save_envelope(&second_path, TEST_MAGIC, 1, &Payload { a: 22 }, "pw")
+        });
+        [first.join(), second.join()]
+    });
+    assert!(results
+        .into_iter()
+        .all(|result| matches!(result, Ok(Ok(())))));
+    let back: Payload = dom_wallet_crypto::load_envelope(&path, TEST_MAGIC, 1, "pw").unwrap();
+    assert!(matches!(back.a, 21 | 22));
+    let staging = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".dom-wallet-save-")
+        })
+        .count();
+    assert_eq!(staging, 0);
 }
 
 // ───────────────────────────── Lens B: zeroization ───────────────────────────

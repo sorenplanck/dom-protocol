@@ -322,7 +322,7 @@ pub fn evm_to_dom_from_evidence<R: JsonRpc, L: DomLegOps>(
     // The scalar was already public before this function ran — it came out of
     // a finalized on-chain log — but the working copy still does not outlive
     // the call (I1/I6).
-    inner.revealed.0.zeroize();
+    inner.revealed.zeroize();
     authorised
 }
 
@@ -351,7 +351,7 @@ pub fn evm_to_dom<L: DomLegOps>(
 
     // 2-3-5. Canonicity, the EVM commitment and the DOM commitment.
     verify_scalar_opens_both_commitments(
-        &input.revealed.0,
+        &input.revealed.expose_scalar_bytes(),
         input.pre_signature,
         &input.terms.adaptor_address,
     )?;
@@ -377,7 +377,7 @@ pub fn evm_to_dom<L: DomLegOps>(
 
     // 7. The DOM leg. If it refuses, this function refuses: nothing is
     // fabricated and no claim is authorised.
-    let secret = Zeroizing::new(input.revealed.0);
+    let secret = Zeroizing::new(input.revealed.expose_scalar_bytes());
     let signature = leg.adapt_claim_from_wire(input.pre_signature, &secret)?;
     if signature.is_empty() {
         // A zero-length signature is not a signature. Defensive, because the
@@ -434,8 +434,8 @@ pub fn dom_to_evm<L: DomLegOps>(
     // array the boundary type carries is copied into a zeroizing buffer and
     // then wiped, so from here on there is exactly one live copy.
     let mut recovered = leg.extract_revealed_secret(input.pre_signature, input.final_signature)?;
-    let secret = Zeroizing::new(recovered.0);
-    recovered.0.zeroize();
+    let secret = Zeroizing::new(recovered.expose_scalar_bytes());
+    recovered.zeroize();
 
     // 3. Post-conditions on what came out: canonical, opens the committed point
     // `T`, and opens the EVM contract's `adaptorAddress`.

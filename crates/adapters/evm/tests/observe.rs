@@ -3,7 +3,7 @@
 
 mod common;
 
-use adapter_evm::evidence::{EvidenceKind, EvmEvidence};
+use adapter_evm::evidence::{EvidenceKind, EvidencePayload, EvmEvidence};
 use adapter_evm::mock::Faults;
 use adapter_evm::{EvmCursor, UnsignedEvmCall, ADAPTER_VERSION};
 use common::{block_on, scenario, AMOUNT};
@@ -49,7 +49,7 @@ fn full_lifecycle_is_observed_in_order() {
             },
             ObservedEvent::LockClaimed {
                 lock_id: s.lock_id,
-                revealed: RevealedSecretBytes(s.secret),
+                revealed: RevealedSecretBytes::new(s.secret),
                 height: claim_h
             },
         ]
@@ -222,7 +222,7 @@ fn a_reorg_does_not_un_reveal_the_secret() {
     assert!(a.is_revealed(&s.lock_id).expect("state"));
     assert_eq!(
         a.revealed_secret(&s.lock_id).expect("state"),
-        Some(RevealedSecretBytes(s.secret))
+        Some(RevealedSecretBytes::new(s.secret))
     );
 
     // Orphan the claim. The settlement effect is gone...
@@ -238,7 +238,7 @@ fn a_reorg_does_not_un_reveal_the_secret() {
     );
     assert_eq!(
         a.revealed_secret(&s.lock_id).expect("state"),
-        Some(RevealedSecretBytes(s.secret)),
+        Some(RevealedSecretBytes::new(s.secret)),
         "the scalar itself must survive the rewind unchanged"
     );
 
@@ -330,7 +330,7 @@ fn a_restart_from_a_persisted_cursor_resumes_correctly() {
         events,
         vec![ObservedEvent::LockClaimed {
             lock_id: s.lock_id,
-            revealed: RevealedSecretBytes(s.secret),
+            revealed: RevealedSecretBytes::new(s.secret),
             height: claim_h
         }],
         "a restart must resume from the persisted cursor without replaying"
@@ -630,7 +630,7 @@ fn evidence_round_trips_through_the_neutral_boundary() {
     assert_eq!(
         block_on(a.verify_evidence(&bytes)),
         Ok(VerifiedOutcome::Claimed {
-            revealed: RevealedSecretBytes(s.secret),
+            revealed: RevealedSecretBytes::new(s.secret),
             height: claim_h
         })
     );
@@ -685,7 +685,9 @@ fn tampered_evidence_is_refused_field_by_field() {
     e.lock_id[0] ^= 1;
     mutations.push(("lock id", e));
     let mut e = good;
-    e.payload[0] ^= 1;
+    let mut slot = e.payload.wire_bytes();
+    slot[0] ^= 1;
+    e.payload = EvidencePayload::from_wire(e.kind, slot);
     mutations.push(("payload", e));
     let mut e = good;
     e.block_hash[0] ^= 1;
@@ -800,7 +802,9 @@ fn no_error_and_no_debug_rendering_ever_carries_the_scalar() {
 
     // Every error path is a unit variant, so it cannot carry material.
     let mut broken = evidence;
-    broken.payload[0] ^= 1;
+    let mut slot = broken.payload.wire_bytes();
+    slot[0] ^= 1;
+    broken.payload = EvidencePayload::from_wire(broken.kind, slot);
     let err = block_on(a.verify_evidence(&broken.encode())).expect_err("must fail");
     assert_eq!(format!("{err:?}"), "EvidenceInvalid");
     assert!(!format!("{err:?}{err}").contains(&hex_secret));

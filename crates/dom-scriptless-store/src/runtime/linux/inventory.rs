@@ -165,6 +165,9 @@ pub enum InventoryError {
     Crypto,
     /// Startup or recovery found ambiguous durable authority.
     RestoreQuarantined,
+    /// The fully authenticated shared-blinding namespace contains no stage
+    /// matching the requested public session context.
+    NoMatchingSharedBlinding,
     /// The operating-system CSPRNG failed.
     RandomFailure,
 }
@@ -176,6 +179,9 @@ impl fmt::Display for InventoryError {
             Self::Canonical => "canonical inventory authentication failed",
             Self::Crypto => "storage envelope validation failed",
             Self::RestoreQuarantined => "store inventory is restore quarantined",
+            Self::NoMatchingSharedBlinding => {
+                "no retained shared-blinding stage matches the requested context"
+            }
             Self::RandomFailure => "operating-system randomness failed",
         })
     }

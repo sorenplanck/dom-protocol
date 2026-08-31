@@ -641,7 +641,11 @@ fn sepolia_slash_compensates_without_any_privileged_action() {
         verifier.verify(&policy, &evidence, verify_now)
     }) {
         EvidenceVerdict::Valid { revealed, .. } => {
-            assert_eq!(revealed.0, secret, "Sepolia revealed exactly t");
+            assert_eq!(
+                revealed.expose_scalar_bytes(),
+                secret,
+                "Sepolia revealed exactly t"
+            );
             revealed
         }
         other => panic!("the real claim must verify, got {other:?}"),
@@ -678,7 +682,7 @@ fn sepolia_slash_compensates_without_any_privileged_action() {
         }
     };
     let republished = seen.iter().find_map(|ev| match ev {
-        BondEvent::BondClaimed { revealed, .. } => Some(revealed.0),
+        BondEvent::BondClaimed { revealed, .. } => Some(revealed.expose_scalar_bytes()),
         _ => None,
     });
     assert_eq!(

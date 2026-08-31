@@ -1,0 +1,22 @@
+[package]
+name = "solver-inventory"
+description = "Durable own-inventory authority for the DOM interoperability solver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+blake2 = { workspace = true }
+f6-engine = { path = "../f6-engine" }
+rfq = { path = "../rfq" }
+rusqlite = { workspace = true }
+rustix = { version = "=1.1.4", default-features = false, features = ["fs", "process"] }
+solver = { path = "../solver" }
+thiserror = { workspace = true }
+uspe = { path = "../uspe" }
+
+[dev-dependencies]
+counterparty-api = { path = "../counterparty-api" }
+tempfile = { workspace = true }

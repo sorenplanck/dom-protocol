@@ -1,0 +1,48 @@
+[package]
+name = "dom-actuator"
+description = "Participant-scoped production authority for DOM scriptless settlement"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+production = []
+
+[dependencies]
+adapter-dom-real = { path = "../adapters/dom-real" }
+blake2.workspace = true
+# The receiver-side extraction façade returns the counterparty crate's own
+# redacted secret newtype rather than a bare array, so the scalar keeps its
+# `Debug` redaction across the boundary. `counterparty-api` is a leaf crate
+# whose only dependency is `thiserror`, and it is already in this crate's graph
+# through `adapter-dom-real`; the direct edge adds no new transitive crate.
+counterparty-api.workspace = true
+deployment-registry = { path = "../deployment-registry" }
+dom-adaptor.workspace = true
+dom-consensus.workspace = true
+dom-crypto.workspace = true
+dom-scriptless-chain-adapter.workspace = true
+dom-scriptless-store.workspace = true
+dom-slate.workspace = true
+dom-wallet2.workspace = true
+kaystra-core = { path = "../kaystra-core" }
+rusqlite.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cap-std.workspace = true
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
+
+[dev-dependencies]
+dom-core.workspace = true
+dom-scriptless-crypto = { path = "../dom-scriptless-crypto" }
+static_assertions = "=1.1.0"
+tempfile.workspace = true
+
+[lints]
+workspace = true

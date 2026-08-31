@@ -282,7 +282,7 @@ fn item1_funding_then_claim_confirms_and_is_observed_from_a_cursor() {
         obs.poll(&chain),
         vec![ObservedEvent::LockClaimed {
             lock_id: LOCK,
-            revealed: RevealedSecretBytes(SECRET),
+            revealed: RevealedSecretBytes::new(SECRET),
             height: 3
         }]
     );

@@ -1557,8 +1557,11 @@ pub fn fuzz_nar006_runtime_bindings_v1(data: &[u8]) {
         1 => recovered.kind = ExposureKindV1::NonceReveal,
         2 => recovered.digest[0] ^= 1,
         3 => {
+            let Ok(other_session) = SessionId::from_bytes([0x41; 32]) else {
+                return;
+            };
             if let Ok(identity) = NonceIdentityV1::new(
-                SessionId::from_bytes([0x41; 32]).expect("fixed nonzero session"),
+                other_session,
                 recovered.nonce_identity.participant_id().clone(),
                 PurposeV1::Refund,
                 binding,

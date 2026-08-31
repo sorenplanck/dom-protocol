@@ -7,6 +7,24 @@
 //! CSPRNG, encrypted before use, and rehydrated only into purpose-specific
 //! opaque capabilities. No spending share, wallet seed, witness key, protocol
 //! nonce, adaptor scalar, or route secret is accepted by this boundary.
+//!
+//! The production signing surface accepts only an opaque request already
+//! prepared and persisted by `dom-scriptless-store`. In particular, the old
+//! caller-shaped signer is not available:
+//!
+//! ```compile_fail
+//! use dom_scriptless_identity_store::ContractsTransportIdentityStoreV1;
+//! use dom_scriptless_store::SessionTransportIdentityReferenceV1;
+//! use dom_scriptless_transport::UnsignedMessageV1;
+//!
+//! fn caller_shaped_signing_is_forbidden(
+//!     identity: &ContractsTransportIdentityStoreV1,
+//!     unsigned: UnsignedMessageV1,
+//!     reference: &SessionTransportIdentityReferenceV1,
+//! ) {
+//!     let _ = identity.sign_exact_dsc1_for_session(unsigned, reference);
+//! }
+//! ```
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -18,10 +36,13 @@ use chacha20poly1305::{
     ChaCha20Poly1305,
 };
 use dom_crypto::{blake2b_256_tagged, PublicKey, SecretKey};
-use dom_scriptless_store::SessionTransportIdentityReferenceV1;
+use dom_scriptless_store::{
+    CommittedOutboundDsc1V1, ContractsSessionStoreV1, PreparedDsc1SigningRequestV1,
+    SessionTransportIdentityReferenceV1,
+};
 use dom_scriptless_transport::{
-    EncryptedTransportV1, NoiseRoleV1, NoiseSessionConfigV1, NoiseStaticKeyV1, SignedMessageV1,
-    TransportError, UnsignedMessageV1,
+    AbortPayloadV1, EncryptedTransportV1, MessageTypeV1, NoiseRoleV1, NoiseSessionConfigV1,
+    NoiseStaticKeyV1, SignedMessageV1, TransportError, UnsignedMessageV1,
 };
 use rand_core::{OsRng, RngCore};
 use rustix::{
@@ -78,6 +99,8 @@ pub enum IdentityStoreError {
     StoreBusy,
     /// Exact DSC1 signing failed at the canonical transport boundary.
     SigningFailed,
+    /// The retained Contracts Store rejected the prepared request or commit.
+    StoreRejected,
 }
 
 impl fmt::Display for IdentityStoreError {
@@ -91,6 +114,7 @@ impl fmt::Display for IdentityStoreError {
             Self::InvalidKey => "Contracts identity key material is invalid",
             Self::StoreBusy => "Contracts identity store is busy",
             Self::SigningFailed => "Contracts DSC1 identity signing failed",
+            Self::StoreRejected => "Contracts Store rejected the DSC1 operation",
         })
     }
 }
@@ -172,7 +196,7 @@ impl fmt::Debug for ContractsTransportIdentityReferenceV1 {
 ///
 /// It implements no `Clone`, `Debug`, codec, raw-secret accessor, or generic
 /// signing callback. Noise receives only the opaque static-key object; Schnorr
-/// can sign only a structurally canonical [`UnsignedMessageV1`].
+/// is reachable only inside the Store-issued sign-and-commit bridge.
 struct ContractsTransportIdentityV1 {
     reference: ContractsTransportIdentityReferenceV1,
     noise: NoiseStaticKeyV1,
@@ -180,18 +204,6 @@ struct ContractsTransportIdentityV1 {
 }
 
 impl ContractsTransportIdentityV1 {
-    fn sign_exact_dsc1_for_session(
-        &self,
-        message: UnsignedMessageV1,
-        local_reference: &SessionTransportIdentityReferenceV1,
-    ) -> Result<SignedMessageV1, IdentityStoreError> {
-        self.require_local_reference(local_reference)?;
-        if message.sender_id() != local_reference.participant_id() {
-            return Err(IdentityStoreError::AuthenticationFailed);
-        }
-        SignedMessageV1::sign(message, &self.schnorr).map_err(|_| IdentityStoreError::SigningFailed)
-    }
-
     fn establish_noise_for_session<S: Read + Write>(
         &self,
         stream: S,
@@ -337,17 +349,81 @@ impl ContractsTransportIdentityStoreV1 {
         &self.identity.reference
     }
 
-    /// Signs one exact canonical DSC1 message after revalidating the retained
-    /// inode and exact encrypted envelope, then authenticating the public-only
-    /// local session reference and its sender ID.
-    pub fn sign_exact_dsc1_for_session(
+    /// Signs and immediately commits one opaque Store-issued DSC1 request.
+    ///
+    /// The retained identity inode and envelope are reauthenticated before the
+    /// Store revalidates its request. The unsigned envelope is then rebuilt
+    /// exclusively from the request's getters, signed by the referenced
+    /// retained key, checked against the Store-issued digest, and handed
+    /// directly back to the same Store for durable commit. Neither a
+    /// [`SignedMessageV1`] nor raw signed bytes can leave this operation before
+    /// the Store returns a committed handle.
+    ///
+    /// ```compile_fail
+    /// use dom_scriptless_identity_store::{
+    ///     ContractsTransportIdentityStoreV1, IdentityStoreError,
+    /// };
+    /// use dom_scriptless_store::{ContractsSessionStoreV1, PreparedDsc1SigningRequestV1};
+    /// use dom_scriptless_transport::SignedMessageV1;
+    ///
+    /// fn signed_value_cannot_escape_before_commit(
+    ///     identity: &ContractsTransportIdentityStoreV1,
+    ///     store: &ContractsSessionStoreV1,
+    ///     request: PreparedDsc1SigningRequestV1,
+    /// ) -> Result<SignedMessageV1, IdentityStoreError> {
+    ///     identity.sign_and_commit_store_prepared_dsc1(store, request)
+    /// }
+    /// ```
+    pub fn sign_and_commit_store_prepared_dsc1(
         &self,
-        message: UnsignedMessageV1,
-        local_reference: &SessionTransportIdentityReferenceV1,
-    ) -> Result<SignedMessageV1, IdentityStoreError> {
+        store: &ContractsSessionStoreV1,
+        request: PreparedDsc1SigningRequestV1,
+    ) -> Result<CommittedOutboundDsc1V1, IdentityStoreError> {
         self.revalidate()?;
-        self.identity
-            .sign_exact_dsc1_for_session(message, local_reference)
+        store
+            .revalidate_prepared_outbound_dsc1(&request)
+            .map_err(|_| IdentityStoreError::StoreRejected)?;
+        if request.signer_key_reference() != self.identity.reference.key_reference() {
+            return Err(IdentityStoreError::AuthenticationFailed);
+        }
+
+        let kind = MessageTypeV1::try_from(request.message_type())
+            .map_err(|_| IdentityStoreError::AuthenticationFailed)?;
+        let unsigned = if kind == MessageTypeV1::Abort {
+            let binding_digest = request
+                .payload()
+                .try_into()
+                .map_err(|_| IdentityStoreError::AuthenticationFailed)?;
+            let payload = AbortPayloadV1::new(binding_digest)
+                .map_err(|_| IdentityStoreError::AuthenticationFailed)?;
+            UnsignedMessageV1::new_abort(
+                *request.chain_id(),
+                *request.session_id(),
+                *request.sender_id(),
+                request.sequence(),
+                *request.previous_transcript_hash(),
+                payload,
+            )
+        } else {
+            UnsignedMessageV1::new(
+                kind,
+                *request.chain_id(),
+                *request.session_id(),
+                *request.sender_id(),
+                request.sequence(),
+                *request.previous_transcript_hash(),
+                request.payload().to_vec(),
+            )
+        }
+        .map_err(|_| IdentityStoreError::AuthenticationFailed)?;
+        let signed = SignedMessageV1::sign(unsigned, &self.identity.schnorr)
+            .map_err(|_| IdentityStoreError::SigningFailed)?;
+        if signed.digest() != request.unsigned_message_digest() {
+            return Err(IdentityStoreError::AuthenticationFailed);
+        }
+        store
+            .commit_prepared_outbound_dsc1(request, signed.as_bytes())
+            .map_err(|_| IdentityStoreError::StoreRejected)
     }
 
     /// Establishes authenticated Noise XX only after revalidating the retained
@@ -865,15 +941,24 @@ impl From<TransportError> for IdentityStoreError {
 mod tests {
     use super::*;
     use cap_std::fs::Dir;
+    use dom_adaptor::TrustedChainIdV1;
+    use dom_core::Hash256;
+    use dom_scriptless_store::{
+        BudgetPolicyProfileV1, BudgetPolicyV1, DirectionV1,
+        PreparedOperationalAbortTransportAuthorityV1, SessionChainProjectionV1,
+        SessionIrreversibleV1, SessionPhaseV1, SessionRecordFieldsV1, SessionRecordV1,
+        SessionTransportParticipantV1, SessionTxObservationV1, BUDGET_POLICY_LEN,
+    };
     use dom_scriptless_transport::{MessageTypeV1, NoiseRoleV1};
     use static_assertions::assert_not_impl_any;
     use std::{
+        collections::BTreeMap,
         fs::{self, File as AmbientFile, OpenOptions as AmbientOpenOptions},
         io::{Read, Seek, SeekFrom, Write},
         net::{TcpListener, TcpStream},
         os::unix::fs::PermissionsExt,
         os::unix::process::ExitStatusExt,
-        path::Path,
+        path::{Path, PathBuf},
         process::Command,
         sync::{
             atomic::{AtomicBool, Ordering},
@@ -886,6 +971,8 @@ mod tests {
 
     assert_not_impl_any!(ContractsTransportIdentityV1: Clone, fmt::Debug);
     assert_not_impl_any!(ContractsTransportIdentityStoreV1: Clone, fmt::Debug);
+    assert_not_impl_any!(PreparedDsc1SigningRequestV1: Clone, Copy, fmt::Debug);
+    assert_not_impl_any!(CommittedOutboundDsc1V1: Clone, Copy, fmt::Debug);
 
     type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
 
@@ -922,16 +1009,334 @@ mod tests {
         AmbientFile::open(path).map(|file| Arc::new(Dir::from_std_file(file)))
     }
 
-    fn message(sender_id: [u8; 32], sequence: u64) -> Result<UnsignedMessageV1, TransportError> {
-        UnsignedMessageV1::new(
-            MessageTypeV1::Offer,
-            [0x31; 32],
-            [0x32; 32],
-            sender_id,
-            sequence,
-            [0x33; 32],
-            b"exact-dsc1-custody-test".to_vec(),
-        )
+    fn production_policy() -> Result<BudgetPolicyV1, Box<dyn Error + Send + Sync>> {
+        let mut bytes = [0; BUDGET_POLICY_LEN];
+        bytes[..8].copy_from_slice(b"DOMNVBP1");
+        bytes[8..10].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[10] = BudgetPolicyProfileV1::ProductionRatified as u8;
+        bytes[11] = 1;
+        bytes[16..48].fill(0x41);
+        bytes[48..56].copy_from_slice(&100_u64.to_le_bytes());
+        bytes[56..64].copy_from_slice(&50_u64.to_le_bytes());
+        bytes[64..68].copy_from_slice(&10_u32.to_le_bytes());
+        bytes[72..80].copy_from_slice(&25_u64.to_le_bytes());
+        bytes[80..88].copy_from_slice(&3_600_u64.to_le_bytes());
+        bytes[88..96].copy_from_slice(&60_u64.to_le_bytes());
+        bytes[96..104].copy_from_slice(&86_400_u64.to_le_bytes());
+        bytes[104..112].copy_from_slice(&1_u64.to_le_bytes());
+        let digest = blake2b_256_tagged("DOM:contracts-vault-budget-policy:v1", &bytes[..112]);
+        bytes[112..].copy_from_slice(digest.as_bytes());
+        Ok(BudgetPolicyV1::from_bytes(&bytes)?)
+    }
+
+    fn bridge_session_record(
+        session_id: [u8; 32],
+    ) -> Result<SessionRecordV1, Box<dyn Error + Send + Sync>> {
+        Ok(SessionRecordV1::new(
+            SessionRecordFieldsV1 {
+                session_id,
+                revision: 0,
+                phase: SessionPhaseV1::Created,
+                terms_hash: [0x32; 32],
+                transcript_hash: [0x33; 32],
+                irreversible: SessionIrreversibleV1 {
+                    any_signing_share_sent: false,
+                    funding_authorized: false,
+                    adaptor_secret_exposed: false,
+                    nonce_epoch: 7,
+                },
+                chain: SessionChainProjectionV1 {
+                    tip_id: [0x34; 32],
+                    tip_height: 100,
+                    funding: SessionTxObservationV1::Unknown,
+                    claim: SessionTxObservationV1::Unknown,
+                    refund: SessionTxObservationV1::Unknown,
+                },
+            },
+            b"sealed-identity-bridge-test-payload",
+        )?)
+    }
+
+    struct Dsc1BridgeFixture {
+        temporary: TempDir,
+        parent: Arc<Dir>,
+        policy: BudgetPolicyV1,
+        identity: ContractsTransportIdentityStoreV1,
+        store: ContractsSessionStoreV1,
+        chain: TrustedChainIdV1,
+        local_participant_id: [u8; 32],
+        remote_participant_id: [u8; 32],
+        remote_identity_key: PublicKey,
+    }
+
+    impl Dsc1BridgeFixture {
+        fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
+            let temporary = TempDir::new()?;
+            let parent = open_parent(temporary.path())?;
+            let policy = production_policy()?;
+            let identity = ContractsTransportIdentityStoreV1::create_production(
+                Arc::clone(&parent),
+                "bridge-identity",
+                &passphrase()?,
+            )?;
+            let store = ContractsSessionStoreV1::create_production(
+                Arc::clone(&parent),
+                "bridge-sessions",
+                policy.clone(),
+            )?;
+            let chain = TrustedChainIdV1::from_authenticated_genesis(
+                0x4455_6677,
+                &Hash256::from_bytes([0x91; 32]),
+            );
+            let remote_identity_key = SecretKey::from_bytes(&[0x71; 32])?.public_key();
+            Ok(Self {
+                temporary,
+                parent,
+                policy,
+                identity,
+                store,
+                chain,
+                local_participant_id: [0x11; 32],
+                remote_participant_id: [0x22; 32],
+                remote_identity_key,
+            })
+        }
+
+        fn prepare_abort_authority(
+            &self,
+            session_id: [u8; 32],
+            decision_digest: [u8; 32],
+        ) -> Result<PreparedOperationalAbortTransportAuthorityV1, Box<dyn Error + Send + Sync>>
+        {
+            let initial = bridge_session_record(session_id)?;
+            self.store.create_session(&initial)?;
+            let local_public =
+                PublicKey::from_compressed_bytes(self.identity.reference().schnorr_public_key())?;
+            self.store.bind_transport_roster(
+                session_id,
+                *self.chain.as_bytes(),
+                [
+                    SessionTransportParticipantV1::new(
+                        self.local_participant_id,
+                        local_public,
+                        DirectionV1::Initiator,
+                    )?,
+                    SessionTransportParticipantV1::new(
+                        self.remote_participant_id,
+                        self.remote_identity_key.clone(),
+                        DirectionV1::Responder,
+                    )?,
+                ],
+            )?;
+            let local_reference = self
+                .identity
+                .reference()
+                .bind_session_participant(self.local_participant_id)?;
+            let remote_reference = SessionTransportIdentityReferenceV1::new(
+                self.remote_participant_id,
+                [0xe1; 32],
+                [0xe2; 32],
+                self.remote_identity_key.clone(),
+            )?;
+            self.store.bind_transport_identity_references(
+                session_id,
+                [local_reference, remote_reference],
+            )?;
+            self.store.bind_local_transport_signer(
+                session_id,
+                *self.identity.reference().key_reference(),
+            )?;
+            Ok(self.store.prepare_operational_abort_transport_authority(
+                self.chain,
+                session_id,
+                decision_digest,
+            )?)
+        }
+
+        fn prepare_abort_request(
+            &self,
+            session_id: [u8; 32],
+            decision_digest: [u8; 32],
+        ) -> Result<PreparedDsc1SigningRequestV1, Box<dyn Error + Send + Sync>> {
+            let authority = self.prepare_abort_authority(session_id, decision_digest)?;
+            Ok(self
+                .store
+                .prepare_abort_dsc1_signing_request(&authority)?
+                .ok_or(IdentityStoreError::StoreRejected)?)
+        }
+    }
+
+    fn regular_file_snapshot(
+        root: &Path,
+    ) -> Result<BTreeMap<PathBuf, Vec<u8>>, Box<dyn Error + Send + Sync>> {
+        let mut pending = vec![root.to_path_buf()];
+        let mut files = BTreeMap::new();
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(directory)? {
+                let entry = entry?;
+                let file_type = entry.file_type()?;
+                if file_type.is_dir() {
+                    pending.push(entry.path());
+                } else if file_type.is_file() {
+                    files.insert(entry.path(), fs::read(entry.path())?);
+                }
+            }
+        }
+        Ok(files)
+    }
+
+    #[test]
+    fn store_issued_bridge_commits_only_a_handle_and_rejects_wrong_key_or_store() -> TestResult {
+        let fixture = Dsc1BridgeFixture::new()?;
+
+        let wrong_store_request = fixture.prepare_abort_request([0x41; 32], [0xa1; 32])?;
+        let unrelated_store = ContractsSessionStoreV1::create_production(
+            Arc::clone(&fixture.parent),
+            "unrelated-sessions",
+            fixture.policy.clone(),
+        )?;
+        assert!(matches!(
+            fixture
+                .identity
+                .sign_and_commit_store_prepared_dsc1(&unrelated_store, wrong_store_request,),
+            Err(IdentityStoreError::StoreRejected)
+        ));
+
+        let wrong_key_request = fixture.prepare_abort_request([0x42; 32], [0xa2; 32])?;
+        let wrong_identity = ContractsTransportIdentityStoreV1::create_production(
+            Arc::clone(&fixture.parent),
+            "wrong-identity",
+            &passphrase()?,
+        )?;
+        assert_ne!(
+            wrong_identity.reference().key_reference(),
+            fixture.identity.reference().key_reference()
+        );
+        assert!(matches!(
+            wrong_identity.sign_and_commit_store_prepared_dsc1(&fixture.store, wrong_key_request),
+            Err(IdentityStoreError::AuthenticationFailed)
+        ));
+
+        let request = fixture.prepare_abort_request([0x43; 32], [0xa3; 32])?;
+        let committed: CommittedOutboundDsc1V1 = fixture
+            .identity
+            .sign_and_commit_store_prepared_dsc1(&fixture.store, request)?;
+        assert_ne!(committed.application_id(), &[0; 32]);
+        assert_eq!(committed.session_id(), &[0x43; 32]);
+        assert_eq!(committed.sender_id(), &fixture.local_participant_id);
+        let signed = SignedMessageV1::decode_exact(committed.signed_bytes())?;
+        assert_eq!(signed.unsigned().kind(), MessageTypeV1::Abort);
+        assert_eq!(signed.unsigned().session_id(), committed.session_id());
+        assert_eq!(signed.unsigned().sender_id(), committed.sender_id());
+        assert_eq!(signed.unsigned().sequence(), committed.sequence());
+        assert_eq!(signed.digest(), committed.message_digest());
+        signed.verify_identity(&PublicKey::from_compressed_bytes(
+            fixture.identity.reference().schnorr_public_key(),
+        )?)?;
+        fixture
+            .store
+            .revalidate_committed_outbound_dsc1(&committed)?;
+        Ok(())
+    }
+
+    #[test]
+    fn store_issued_bridge_rejects_a_request_from_an_old_store_opening() -> TestResult {
+        let fixture = Dsc1BridgeFixture::new()?;
+        let request = fixture.prepare_abort_request([0x44; 32], [0xa4; 32])?;
+        let Dsc1BridgeFixture {
+            temporary: _temporary,
+            parent,
+            policy,
+            identity,
+            store,
+            ..
+        } = fixture;
+        drop(store);
+        let reopened = ContractsSessionStoreV1::open_production(
+            Arc::clone(&parent),
+            "bridge-sessions",
+            policy,
+        )?;
+        assert!(matches!(
+            identity.sign_and_commit_store_prepared_dsc1(&reopened, request),
+            Err(IdentityStoreError::StoreRejected)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn store_issued_bridge_revalidates_keystore_before_signing() -> TestResult {
+        let fixture = Dsc1BridgeFixture::new()?;
+        let request = fixture.prepare_abort_request([0x45; 32], [0xa5; 32])?;
+        let envelope_path = fixture
+            .temporary
+            .path()
+            .join("bridge-identity")
+            .join(ENVELOPE_NAME);
+        let mut envelope = AmbientOpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(envelope_path)?;
+        envelope.seek(SeekFrom::Start((HEADER_LEN + 3) as u64))?;
+        let mut byte = [0_u8; 1];
+        envelope.read_exact(&mut byte)?;
+        envelope.seek(SeekFrom::Current(-1))?;
+        byte[0] ^= 0x01;
+        envelope.write_all(&byte)?;
+        envelope.sync_all()?;
+        drop(envelope);
+
+        assert!(matches!(
+            fixture
+                .identity
+                .sign_and_commit_store_prepared_dsc1(&fixture.store, request),
+            Err(IdentityStoreError::AuthenticationFailed)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn store_issued_bridge_revalidates_the_durable_request_before_signing() -> TestResult {
+        let fixture = Dsc1BridgeFixture::new()?;
+        let authority = fixture.prepare_abort_authority([0x46; 32], [0xa6; 32])?;
+        let store_root = fixture.temporary.path().join("bridge-sessions");
+        let before = regular_file_snapshot(&store_root)?;
+        let request = fixture
+            .store
+            .prepare_abort_dsc1_signing_request(&authority)?
+            .ok_or(IdentityStoreError::StoreRejected)?;
+        let after = regular_file_snapshot(&store_root)?;
+        let changed: Vec<_> = after
+            .iter()
+            .filter(|(path, bytes)| before.get(*path) != Some(*bytes))
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert_eq!(changed.len(), 1, "one owner-only request record is added");
+        let mut retained = AmbientOpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&changed[0])?;
+        let offset = after
+            .get(&changed[0])
+            .ok_or(IdentityStoreError::Filesystem)?
+            .len()
+            / 2;
+        retained.seek(SeekFrom::Start(u64::try_from(offset)?))?;
+        let mut byte = [0_u8; 1];
+        retained.read_exact(&mut byte)?;
+        retained.seek(SeekFrom::Current(-1))?;
+        byte[0] ^= 0x80;
+        retained.write_all(&byte)?;
+        retained.sync_all()?;
+        drop(retained);
+
+        assert!(matches!(
+            fixture
+                .identity
+                .sign_and_commit_store_prepared_dsc1(&fixture.store, request),
+            Err(IdentityStoreError::StoreRejected)
+        ));
+        Ok(())
     }
 
     #[test]
@@ -1008,7 +1413,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_rehydrates_the_same_public_identity_and_exact_dsc1_signer() -> TestResult {
+    fn restart_rehydrates_the_same_public_identity() -> TestResult {
         let temp = TempDir::new()?;
         let parent = open_parent(temp.path())?;
         let store = ContractsTransportIdentityStoreV1::create_production(
@@ -1024,16 +1429,7 @@ mod tests {
             session_reference.noise_public_key(),
             reference.noise_public_key()
         );
-        let wrong_participant_reference = reference.bind_session_participant([0x42; 32])?;
-        assert!(matches!(
-            store
-                .sign_exact_dsc1_for_session(message([0x41; 32], 0)?, &wrong_participant_reference),
-            Err(IdentityStoreError::AuthenticationFailed)
-        ));
-        let public = PublicKey::from_compressed_bytes(reference.schnorr_public_key())?;
-        let signed =
-            store.sign_exact_dsc1_for_session(message([0x41; 32], 0)?, &session_reference)?;
-        signed.verify_identity(&public)?;
+        PublicKey::from_compressed_bytes(reference.schnorr_public_key())?;
         store.revalidate()?;
         drop(store);
 
@@ -1043,9 +1439,7 @@ mod tests {
             &passphrase()?,
         )?;
         assert_eq!(reopened.reference(), &reference);
-        let signed_after_restart =
-            reopened.sign_exact_dsc1_for_session(message([0x41; 32], 1)?, &session_reference)?;
-        signed_after_restart.verify_identity(&public)?;
+        reopened.revalidate()?;
         Ok(())
     }
 
@@ -1207,10 +1601,6 @@ mod tests {
             store.revalidate(),
             Err(IdentityStoreError::AuthenticationFailed)
         ));
-        assert!(matches!(
-            store.sign_exact_dsc1_for_session(message([0x41; 32], 0)?, &local),
-            Err(IdentityStoreError::AuthenticationFailed)
-        ));
         let touched = Arc::new(AtomicBool::new(false));
         assert!(matches!(
             store.establish_noise_for_session(
@@ -1286,10 +1676,7 @@ mod tests {
                 &responder_alice_reference,
             )?;
             let received = channel.receive_message()?;
-            let signed = SignedMessageV1::decode_exact(&received)?;
-            let alice_public =
-                PublicKey::from_compressed_bytes(alice_reference.schnorr_public_key())?;
-            signed.verify_identity(&alice_public)?;
+            assert_eq!(received, b"restart-noise-test");
             channel.send_message(b"restart-ack")?;
             Ok(())
         });
@@ -1311,9 +1698,7 @@ mod tests {
             &alice_session_reference,
             &bob_session_reference,
         )?;
-        let signed =
-            alice.sign_exact_dsc1_for_session(message([0x41; 32], 0)?, &alice_session_reference)?;
-        channel.send_message(signed.as_bytes())?;
+        channel.send_message(b"restart-noise-test")?;
         assert_eq!(channel.receive_message()?, b"restart-ack");
         responder
             .join()

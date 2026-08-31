@@ -300,12 +300,12 @@ fn slash_prechecks_mirror_the_contract_and_never_relax_it() {
 
     // Non-canonical scalars: zero and the group order.
     assert!(matches!(
-        bond.submit_slash(&lock_id, &RevealedSecretBytes([0u8; 32]))
+        bond.submit_slash(&lock_id, &RevealedSecretBytes::new([0u8; 32]))
             .expect_err("zero scalar"),
         BondError::NonCanonicalScalar
     ));
     assert!(matches!(
-        bond.submit_slash(&lock_id, &RevealedSecretBytes(SECP256K1_N_BYTES))
+        bond.submit_slash(&lock_id, &RevealedSecretBytes::new(SECP256K1_N_BYTES))
             .expect_err("t = n"),
         BondError::NonCanonicalScalar
     ));
@@ -314,13 +314,13 @@ fn slash_prechecks_mirror_the_contract_and_never_relax_it() {
     let mut wrong = secret();
     wrong[31] ^= 0x01;
     assert!(matches!(
-        bond.submit_slash(&lock_id, &RevealedSecretBytes(wrong))
+        bond.submit_slash(&lock_id, &RevealedSecretBytes::new(wrong))
             .expect_err("wrong scalar"),
         BondError::ScalarPointMismatch
     ));
 
     assert!(matches!(
-        bond.submit_slash(&[0xEE; 32], &RevealedSecretBytes(secret()))
+        bond.submit_slash(&[0xEE; 32], &RevealedSecretBytes::new(secret()))
             .expect_err("foreign lock"),
         BondError::UnknownLock
     ));
@@ -328,12 +328,12 @@ fn slash_prechecks_mirror_the_contract_and_never_relax_it() {
 
     // The right scalar, inside the window: the claim artifact.
     assert_eq!(
-        bond.submit_slash(&lock_id, &RevealedSecretBytes(secret()))
+        bond.submit_slash(&lock_id, &RevealedSecretBytes::new(secret()))
             .expect("slash"),
         BroadcastOutcome::Accepted
     );
     assert_eq!(
-        bond.submit_slash(&lock_id, &RevealedSecretBytes(secret()))
+        bond.submit_slash(&lock_id, &RevealedSecretBytes::new(secret()))
             .expect("byte-identical resend"),
         BroadcastOutcome::Duplicate
     );
@@ -350,7 +350,7 @@ fn slash_after_the_deadline_is_refused_because_the_contract_would_revert() {
     let mut bond = f.adapter(RELEASE_DEADLINE);
     let lock_id = bond.bond_lock_id();
     assert!(matches!(
-        bond.submit_slash(&lock_id, &RevealedSecretBytes(secret()))
+        bond.submit_slash(&lock_id, &RevealedSecretBytes::new(secret()))
             .expect_err("expired"),
         BondError::DeadlineExpired
     ));
@@ -420,7 +420,7 @@ fn observe_surfaces_only_this_bond_and_passes_reorgs_through() {
         } => {
             assert_eq!(*bond_lock_id, lock_id);
             assert_eq!(
-                revealed.0,
+                revealed.expose_scalar_bytes(),
                 secret(),
                 "the revealed scalar survives translation"
             );

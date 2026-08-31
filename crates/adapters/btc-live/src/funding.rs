@@ -28,8 +28,8 @@ use crate::authority::{
     BitcoinRefundSigningRequestV1, RetainedBitcoinRefundSignerV1,
 };
 use crate::rpc::{
-    decode_hex_bounded, display_txid, encode_hex, parse_txid_internal, BitcoinCoreNetworkV1,
-    BitcoinCoreRpcClientV1,
+    bitcoin_signet_challenge_digest_v1, decode_hex_bounded, display_txid, encode_hex,
+    parse_txid_internal, BitcoinCoreNetworkV1, BitcoinCoreRpcClientV1,
 };
 use crate::store::{DurableStageStoreV1, StageKind};
 use crate::LiveBitcoinError;
@@ -184,6 +184,10 @@ impl PreparedBitcoinFundingV1 {
 /// has no public constructor, codec, `Clone`, or `Debug` implementation.
 pub struct ArmedBitcoinFundingV1 {
     prepared: PreparedBitcoinFundingV1,
+    arm: Box<ArmedFundingTailV1>,
+}
+
+struct ArmedFundingTailV1 {
     refund: RefundRecord,
     broadcast: Option<BroadcastRecord>,
 }
@@ -198,13 +202,13 @@ impl ArmedBitcoinFundingV1 {
     /// Exact persisted refund transaction id in internal byte order.
     #[must_use]
     pub const fn refund_txid(&self) -> [u8; 32] {
-        self.refund.txid
+        self.arm.refund.txid
     }
 
     /// Digest of the exact durable refund record.
     #[must_use]
     pub const fn refund_record_digest(&self) -> [u8; 32] {
-        self.refund.record_digest
+        self.arm.refund.record_digest
     }
 
     /// Digest of the authenticated Prepared record retained under this stage.
@@ -226,13 +230,13 @@ impl ArmedBitcoinFundingV1 {
     /// explicit armed-only submit method.
     #[must_use]
     pub fn canonical_refund_transaction(&self) -> &[u8] {
-        &self.refund.raw_transaction
+        &self.arm.refund.raw_transaction
     }
 
     /// Whether this store already persisted a successful funding submission.
     #[must_use]
     pub const fn was_broadcast(&self) -> bool {
-        self.broadcast.is_some()
+        self.arm.broadcast.is_some()
     }
 
     /// Payload-free identity for a runner that records external btc-live custody.
@@ -248,10 +252,6 @@ impl ArmedBitcoinFundingV1 {
 }
 
 /// Durable stage reconstructed after a process restart.
-// The two variants are the two durable funding stages. Boxing either would
-// put a live funding authority on the heap to equalise a value that exists
-// once per route.
-#[allow(clippy::large_enum_variant)]
 pub enum ReopenedBitcoinFundingV1 {
     /// Funding exists but its refund is not yet durably armed.
     Prepared(PreparedBitcoinFundingV1),
@@ -259,11 +259,8 @@ pub enum ReopenedBitcoinFundingV1 {
     Armed(ArmedBitcoinFundingV1),
 }
 
-// The named `_authority` field is deliberate: it makes the impossibility of
-// forging this receipt visible at every construction site inside the crate,
-// which `#[non_exhaustive]` would move into an attribute nobody reads there.
-#[allow(clippy::manual_non_exhaustive)]
 /// Public, non-constructible receipt from an armed-only funding submission.
+#[non_exhaustive]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct BitcoinFundingBroadcastReceiptV1 {
     /// Exact submitted transaction id in internal byte order.
@@ -271,7 +268,6 @@ pub struct BitcoinFundingBroadcastReceiptV1 {
     /// True when an earlier durable receipt or exact node copy proved that the
     /// same transaction was already accepted.
     pub already_known: bool,
-    _authority: (),
 }
 
 impl BitcoinFundingBroadcastReceiptV1 {
@@ -486,8 +482,7 @@ impl BitcoinPrebroadcastStoreV1 {
         Ok(Some(ReopenedBitcoinFundingV1::Armed(
             ArmedBitcoinFundingV1 {
                 prepared,
-                refund,
-                broadcast,
+                arm: Box::new(ArmedFundingTailV1 { refund, broadcast }),
             },
         )))
     }
@@ -590,8 +585,10 @@ impl BitcoinPrebroadcastStoreV1 {
         };
         Ok(ArmedBitcoinFundingV1 {
             prepared,
-            refund: reopened,
-            broadcast,
+            arm: Box::new(ArmedFundingTailV1 {
+                refund: reopened,
+                broadcast,
+            }),
         })
     }
 
@@ -607,7 +604,7 @@ impl BitcoinPrebroadcastStoreV1 {
         armed: &mut ArmedBitcoinFundingV1,
     ) -> Result<BitcoinFundingBroadcastReceiptV1, LiveBitcoinError> {
         self.require_stored_prepared(&armed.prepared)?;
-        require_refund_binding(&armed.prepared, &armed.refund)?;
+        require_refund_binding(&armed.prepared, &armed.arm.refund)?;
         let prepared_bytes = self
             .store
             .read(StageKind::Prepared)?
@@ -617,14 +614,14 @@ impl BitcoinPrebroadcastStoreV1 {
             .read(StageKind::Refund)?
             .ok_or(LiveBitcoinError::FundingNotArmed)?;
         if digest(PREPARED_DIGEST_DOMAIN, &prepared_bytes)? != armed.prepared.record_digest
-            || decode_refund_record(&refund_bytes)?.record_digest != armed.refund.record_digest
+            || decode_refund_record(&refund_bytes)?.record_digest != armed.arm.refund.record_digest
         {
             return Err(LiveBitcoinError::StateConflict);
         }
         let had_durable_receipt = if let Some(existing) = self.store.read(StageKind::Broadcast)? {
             let record = decode_broadcast_record(&existing)?;
-            require_broadcast_binding(&armed.prepared, &armed.refund, &record)?;
-            armed.broadcast = Some(record);
+            require_broadcast_binding(&armed.prepared, &armed.arm.refund, &record)?;
+            armed.arm.broadcast = Some(record);
             true
         } else {
             false
@@ -654,16 +651,15 @@ impl BitcoinPrebroadcastStoreV1 {
         let record = BroadcastRecord {
             route_binding: armed.prepared.record.plan.route_binding,
             prepared_digest: armed.prepared.record_digest,
-            refund_digest: armed.refund.record_digest,
+            refund_digest: armed.arm.refund.record_digest,
             txid,
         };
         self.store
             .publish(StageKind::Broadcast, &encode_broadcast_record(&record))?;
-        armed.broadcast = Some(record);
+        armed.arm.broadcast = Some(record);
         Ok(BitcoinFundingBroadcastReceiptV1 {
             txid,
             already_known: had_durable_receipt || already_known,
-            _authority: (),
         })
     }
 
@@ -1587,7 +1583,7 @@ fn refund_signing_request_digest(
 fn external_funding_custody(
     armed: &ArmedBitcoinFundingV1,
 ) -> Result<BitcoinExternalFundingCustodyV1, LiveBitcoinError> {
-    require_refund_binding(&armed.prepared, &armed.refund)?;
+    require_refund_binding(&armed.prepared, &armed.arm.refund)?;
     validate_funding_summary(
         &armed.prepared.record,
         armed.prepared.record_digest,
@@ -1595,20 +1591,33 @@ fn external_funding_custody(
     )?;
     let summary = armed.prepared.summary;
     let mut custody = BitcoinExternalFundingCustodyV1 {
+        network: armed.prepared.record.network,
+        genesis_hash: armed.prepared.record.genesis_hash,
+        signet_challenge_digest: bitcoin_signet_challenge_digest_v1(
+            armed
+                .prepared
+                .record
+                .signet_challenge
+                .as_deref()
+                .unwrap_or_default(),
+        )?,
         route_binding: summary.route_binding,
         plan_digest: summary.plan_digest,
         prepared_record_digest: summary.prepared_record_digest,
         summary_record_digest: summary.summary_record_digest,
-        refund_record_digest: armed.refund.record_digest,
+        refund_record_digest: armed.arm.refund.record_digest,
         funding_txid: armed.prepared.record.txid,
-        refund_txid: armed.refund.txid,
+        refund_txid: armed.arm.refund.txid,
         contract_vout: summary.contract_vout,
         contract_amount_sat: summary.contract_amount_sat,
         actual_fee_sat: summary.actual_fee_sat,
         virtual_size_vb: summary.virtual_size_vb,
         custody_digest: [0; 32],
     };
-    let mut encoding = Vec::with_capacity(32 * 7 + 4 + 8 * 3);
+    let mut encoding = Vec::with_capacity(1 + 32 * 9 + 4 + 8 * 3);
+    encoding.push(encode_network(custody.network));
+    encoding.extend_from_slice(&custody.genesis_hash);
+    encoding.extend_from_slice(&custody.signet_challenge_digest);
     encoding.extend_from_slice(&custody.route_binding);
     encoding.extend_from_slice(&custody.plan_digest);
     encoding.extend_from_slice(&custody.prepared_record_digest);
@@ -2629,6 +2638,12 @@ mod tests {
             summary.summary_record_digest()
         );
         assert_eq!(custody.actual_fee_sat(), 1_000);
+        assert_eq!(custody.network(), BitcoinCoreNetworkV1::Regtest);
+        assert_eq!(custody.genesis_hash(), [0x53; 32]);
+        assert_eq!(
+            custody.signet_challenge_digest(),
+            bitcoin_signet_challenge_digest_v1(&[])?
+        );
         assert_ne!(custody.custody_digest(), [0; 32]);
 
         drop(store);
@@ -2648,5 +2663,12 @@ mod tests {
         assert_eq!(exact_decimal_btc_amount_sat("0.50000001"), Ok(50_000_001));
         assert!(exact_decimal_btc_amount_sat("0.000000001").is_err());
         assert!(exact_decimal_btc_amount_sat("-1.0").is_err());
+    }
+
+    #[test]
+    fn reopened_authority_variants_remain_layout_balanced() {
+        let prepared = core::mem::size_of::<PreparedBitcoinFundingV1>();
+        let armed = core::mem::size_of::<ArmedBitcoinFundingV1>();
+        assert!(prepared.abs_diff(armed) <= 200);
     }
 }

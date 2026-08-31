@@ -24,10 +24,12 @@ use std::process::ExitCode;
 use btc_vault::{BitcoinNonceReservationIdV1, PersistedArtifactDescriptorV1};
 use f5_e2e::{
     build_public_claim, build_public_claim_durable, build_public_refund, build_signed_claim,
-    build_signed_refund, contract_report, prepare_crash_probe, public_contract_report,
-    regtest_address, resend_persisted_artifact, restore_crash_probe, selected_csv_blocks,
-    verify_custom_evidence_file, verify_public_evidence_file, CrashProbePhase, FundingRef,
-    PublicRow,
+    build_signed_refund, contract_report, create_regtest_authority_from_file, prepare_crash_probe,
+    public_contract_report, regtest_address, resend_persisted_artifact, restore_crash_probe,
+    selected_csv_blocks, verify_custom_evidence_file, verify_public_evidence_file,
+    verify_regtest_evidence_file, CrashProbePhase, FundingRef, HistoricalSignetEvidenceResultV1,
+    PinnedRegtestHeaderAuthorityV2, PublicRow, RegtestAuthorityPinV2, RegtestEvidenceExpectationV2,
+    RegtestExpectedOutcomeV2, RegtestRouteExpectationV2,
 };
 use f6_engine::composition::accepted_negotiation;
 use f6_engine::{binding_complete, BindingEventV1, DurableBinding, StoreLog};
@@ -114,6 +116,14 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(&error),
         },
+        "create-regtest-authority" => match create_regtest_authority(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(&error),
+        },
+        "verify-regtest-evidence" => match verify_regtest_evidence(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(&error),
+        },
         "prepare-crash-probe" => match prepare_crash(&args[1..]) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(&error),
@@ -144,7 +154,7 @@ fn main() -> ExitCode {
         },
         other => {
             eprintln!("unknown command: {other}");
-            eprintln!("commands: derive | address | derive-public | build-claim | build-refund | build-claim-public | build-refund-public | recover-terms");
+            eprintln!("commands: derive | address | derive-public | build-claim | build-refund | build-claim-public | build-refund-public | recover-terms | verify-public-evidence | verify-custom-evidence | create-regtest-authority | verify-regtest-evidence");
             ExitCode::FAILURE
         }
     }
@@ -304,7 +314,7 @@ fn verify_public_evidence(args: &[String]) -> Result<(), String> {
     }
     let row = PublicRow::parse(&args[0]).ok_or("bad public row".to_string())?;
     let result = verify_public_evidence_file(std::path::Path::new(&args[1]), row)?;
-    print_evidence_result(&result);
+    print_historical_evidence_result(&result);
     Ok(())
 }
 
@@ -314,8 +324,105 @@ fn verify_custom_evidence(args: &[String]) -> Result<(), String> {
     }
     let row = PublicRow::parse(&args[0]).ok_or("bad custom-signet row".to_string())?;
     let result = verify_custom_evidence_file(std::path::Path::new(&args[1]), row)?;
-    print_evidence_result(&result);
+    print_historical_evidence_result(&result);
     Ok(())
+}
+
+fn create_regtest_authority(args: &[String]) -> Result<(), String> {
+    if args.len() != 2 {
+        return Err(
+            "usage: create-regtest-authority <new-authority-directory> <authority-input.json>"
+                .to_string(),
+        );
+    }
+    let pinned = create_regtest_authority_from_file(
+        std::path::Path::new(&args[0]),
+        std::path::Path::new(&args[1]),
+    )?;
+    let facts = pinned.facts();
+    println!("authority_pin={}", pinned.pin().to_hex());
+    println!(
+        "minimum_confirmation_depth={}",
+        facts.minimum_confirmation_depth
+    );
+    println!("checkpoint_height={}", facts.checkpoint_height);
+    println!(
+        "checkpoint_block_hash_internal={}",
+        hex(&facts.checkpoint_block_hash)
+    );
+    println!(
+        "checkpoint_chain_work={}",
+        hex(&facts.checkpoint_chain_work)
+    );
+    println!("policy_digest={}", hex(&facts.policy_digest));
+    println!("checkpoint_digest={}", hex(&facts.checkpoint_digest));
+    println!("ancestry_digest={}", hex(&facts.ancestry_digest));
+    println!("authority_store_created_once=true");
+    Ok(())
+}
+
+fn verify_regtest_evidence(args: &[String]) -> Result<(), String> {
+    if args.len() != 12 {
+        return Err("usage: verify-regtest-evidence <evidence-v2-input.json> <authority-directory> <authority-pin> <observer-state-directory> <settlement_id> <terms_hash> <claim|refund> <funding_txid> <vout> <amount_sat> <fee_sat> <destination_spk>".to_string());
+    }
+    let authority_pin = RegtestAuthorityPinV2::from_hex(&args[2])?;
+    let pinned_authority = PinnedRegtestHeaderAuthorityV2::open_existing(
+        std::path::Path::new(&args[1]),
+        authority_pin,
+    )?;
+    let outcome = match args[6].as_str() {
+        "claim" => RegtestExpectedOutcomeV2::Claim,
+        "refund" => RegtestExpectedOutcomeV2::Refund,
+        _ => return Err("expected outcome must be claim or refund".to_string()),
+    };
+    let (funding, destination, fee) = parse_spend_args(&args[7..12])?;
+    let expectation = RegtestEvidenceExpectationV2::new(
+        RegtestRouteExpectationV2::new(
+            parse_32(&args[4], "settlement id")?,
+            parse_32(&args[5], "terms hash")?,
+        )?,
+        funding,
+        destination,
+        fee,
+        outcome,
+    )?;
+    let result = verify_regtest_evidence_file(
+        std::path::Path::new(&args[0]),
+        &expectation,
+        &pinned_authority,
+        std::path::Path::new(&args[3]),
+    )?;
+    print_evidence_result(&result);
+    println!("authority_pin={}", authority_pin.to_hex());
+    println!("external_authority_pin_verified=true");
+    Ok(())
+}
+
+fn print_historical_evidence_result(result: &HistoricalSignetEvidenceResultV1) {
+    println!("txid={}", result.txid);
+    println!("wtxid={}", result.wtxid);
+    println!("block_hash={}", result.block_hash);
+    println!("confirmation_depth={}", result.confirmation_depth);
+    println!("evidence_codec=v1-historical-structural");
+    println!("header_authority=none");
+    println!("full_block_merkle_root_verified=true");
+    println!("full_block_witness_commitment_verified=true");
+    println!("keystone_v1_structural_verified=true");
+    println!("dom_sim_consumed=true");
+    println!("uspe_event_source=none");
+    println!("uspe_state=not-applicable");
+    println!("operational_promotion={}", result.operational_promotion);
+    println!(
+        "economic_terminal_unique={}",
+        result.economic_terminal_unique
+    );
+    println!(
+        "observer_redelivery_idempotent={}",
+        result.observer_redelivery_idempotent
+    );
+    println!("historical_warning=no-external-header-authority");
+    println!("E13_invalid_evidence_rejected=true");
+    println!("E14_tampered_witness_rejected=true");
 }
 
 fn print_evidence_result(result: &f5_e2e::PublicEvidenceResult) {
@@ -323,11 +430,20 @@ fn print_evidence_result(result: &f5_e2e::PublicEvidenceResult) {
     println!("wtxid={}", result.wtxid);
     println!("block_hash={}", result.block_hash);
     println!("confirmation_depth={}", result.confirmation_depth);
+    println!("total_transactions={}", result.total_transactions);
+    println!("transaction_position={}", result.transaction_position);
+    println!("evidence_digest={}", hex(&result.evidence_digest));
+    println!(
+        "header_authority_digest={}",
+        hex(&result.header_authority_digest)
+    );
+    println!("evidence_codec=v2");
+    println!("header_authority=regtest-genesis-rooted-v2");
     println!("full_block_merkle_root_verified=true");
     println!("full_block_witness_commitment_verified=true");
     println!("keystone_verified=true");
     println!("dom_sim_consumed=true");
-    println!("uspe_event_source=verified_outcome_to_uspe_event");
+    println!("uspe_event_source=verified_v2_outcome_to_uspe_event");
     println!("uspe_state={}", result.uspe_state);
     println!(
         "economic_terminal_unique={}",

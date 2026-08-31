@@ -1,0 +1,34 @@
+[package]
+name = "route-time-anchor"
+description = "Authenticated conservative cross-chain time anchors for DOM composed routes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+adapter-btc = { path = "../adapters/btc" }
+blake2 = { workspace = true }
+btc-crypto = { path = "../adapters/btc-crypto" }
+chain-profile = { path = "../chain-profile" }
+deployment-registry = { path = "../deployment-registry" }
+kaystra-core = { path = "../kaystra-core", default-features = false }
+rfq = { path = "../rfq" }
+rusqlite = { workspace = true }
+store = { path = "../store" }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
+
+[dev-dependencies]
+bitcoin = "=0.32.5"
+dom-consensus = { workspace = true }
+dom-core = { workspace = true }
+hex = { workspace = true }
+proptest = "=1.7.0"
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -78,6 +78,50 @@ pub struct MusigSession {
 }
 
 impl SecpContext {
+    /// Derive the canonical BIP340 x-only public key for one scalar.
+    ///
+    /// This is the verification-only provisioning boundary for matching an
+    /// isolated Relay credential to an authenticated roster.  It creates no
+    /// signature, retains no keypair and zeroizes every secret-bearing local
+    /// before returning.
+    pub fn xonly_public_key(&self, secret32: &[u8; 32]) -> Result<[u8; 32], BtcCryptoError> {
+        let mut keypair = secp256k1_keypair { data: [0; 96] };
+        let mut secret = *secret32;
+        // SAFETY: ctx valid; keypair is owned here; secret is exactly 32 bytes.
+        let created =
+            unsafe { secp256k1_keypair_create(self.as_ptr(), &mut keypair, secret.as_ptr()) };
+        secret.zeroize();
+        if created != 1 {
+            keypair.data.zeroize();
+            return Err(BtcCryptoError::NonCanonicalScalar);
+        }
+        let mut pubkey = secp256k1_pubkey { data: [0; 64] };
+        // SAFETY: ctx and keypair valid; pubkey is an owned output.
+        let got_pub = unsafe { secp256k1_keypair_pub(self.as_ptr(), &mut pubkey, &keypair) };
+        keypair.data.zeroize();
+        if got_pub != 1 {
+            return Err(BtcCryptoError::NonCanonicalScalar);
+        }
+        let mut xonly = secp256k1_xonly_pubkey { data: [0; 64] };
+        let mut parity = 0_i32;
+        // SAFETY: ctx and pubkey valid; xonly and parity are owned outputs.
+        let converted = unsafe {
+            secp256k1_xonly_pubkey_from_pubkey(self.as_ptr(), &mut xonly, &mut parity, &pubkey)
+        };
+        if converted != 1 {
+            return Err(BtcCryptoError::InvalidXOnlyKey);
+        }
+        let mut serialized = [0_u8; 32];
+        // SAFETY: ctx and xonly valid; serialized is exactly 32 writable bytes.
+        let serialized_ok = unsafe {
+            secp256k1_xonly_pubkey_serialize(self.as_ptr(), serialized.as_mut_ptr(), &xonly)
+        };
+        if serialized_ok != 1 {
+            return Err(BtcCryptoError::InvalidXOnlyKey);
+        }
+        Ok(serialized)
+    }
+
     /// Derives the compressed public key of a secret key. Used to check
     /// `t·G == T` and to build a signer's pubkey for nonce generation.
     fn pubkey_of_secret(&self, secret: &[u8; 32]) -> Result<PubKey, BtcCryptoError> {
@@ -94,7 +138,6 @@ impl SecpContext {
     /// Generates a nonce for one signer. `session_secrand32` is the
     /// one-shot secret randomness of the vault (M.6): the caller owns its
     /// durability; here it only flows into the backend and is not stored.
-    #[allow(clippy::too_many_arguments)]
     pub fn nonce_gen(
         &self,
         session_secrand32: &[u8; 32],

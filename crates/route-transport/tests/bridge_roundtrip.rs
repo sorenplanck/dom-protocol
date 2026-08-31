@@ -3,6 +3,8 @@
 //! ratified `ROUTE_TRANSPORT` kind — and arrive byte-identical. Plus
 //! every refusal the bridge names, provoked.
 
+#![allow(deprecated)] // This file proves the retained ephemeral compatibility path.
+
 use btc_crypto::SecpContext;
 use kaystra_core::types::Digest32;
 use relay::auth::{
@@ -10,7 +12,10 @@ use relay::auth::{
 };
 use relay::server::{verify_equivocation, RelayRefusal, RelayV1};
 use relay::{ParticipantId, SenderRoleV1, TimelockSpec};
-use route_transport::{receive_route_payloads, BridgeRefusal, RouteSenderV1, RouteWireContextV1};
+use route_transport::{
+    receive_route_payloads, BridgeRefusal, PreparedRouteEnvelopeV1, RouteSenderCheckpointV1,
+    RouteSenderV1, RouteWireContextV1, MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES,
+};
 
 const NETWORK: Digest32 = [0x11; 32];
 const SESSION: Digest32 = [0x22; 32];
@@ -436,13 +441,15 @@ fn a_mixed_mailbox_reconciles_exactly() {
 fn an_oversized_payload_refuses_at_submit_and_the_flow_does_not_advance() {
     let mut relay = RelayV1::new();
     let mut tx = sender();
-    let oversized = vec![0xAB; 1_000_000];
+    let oversized = vec![0xAB; MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES + 1];
     let refusal = tx
         .send(&mut relay, oversized, expiry(), [1; 32])
         .unwrap_err();
     assert!(matches!(
         refusal,
-        BridgeRefusal::Relay(_) | BridgeRefusal::Envelope(_)
+        BridgeRefusal::RoutePayloadTooLarge { actual, maximum }
+            if actual == MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES + 1
+                && maximum == MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES
     ));
 
     // The flow did NOT advance: a normal message still lands at 0.
@@ -450,4 +457,75 @@ fn an_oversized_payload_refuses_at_submit_and_the_flow_does_not_advance() {
         .send(&mut relay, b"normal".to_vec(), expiry(), [2; 32])
         .unwrap();
     assert_eq!(ack.key.sequence, 0);
+}
+
+/// Sender crash safety: exact outbox bytes and the pre-ACK checkpoint are
+/// enough to recover when the Relay committed but the sender did not persist
+/// its advanced flow state.
+#[test]
+fn prepared_outbox_and_checkpoint_recover_ack_loss_without_forking_flow() {
+    let mut relay = RelayV1::new();
+    let mut original = sender();
+    let checkpoint_bytes = original.checkpoint().canonical_bytes().unwrap();
+    let prepared = original
+        .prepare(b"durable-outbox".to_vec(), expiry(), [0x21; 32])
+        .unwrap();
+    let outbox_bytes = prepared.canonical_bytes().to_vec();
+
+    let first_ack = original
+        .submit_prepared(&mut relay, &prepared)
+        .expect("the Relay durably accepted the exact outbox");
+    assert_eq!(original.checkpoint().next_sequence(), 1);
+
+    // Crash: the advanced in-memory sender is lost.  Only the old durable
+    // checkpoint and exact prepared bytes survive.
+    drop(original);
+    let checkpoint = RouteSenderCheckpointV1::from_bytes(&checkpoint_bytes).unwrap();
+    let prepared = PreparedRouteEnvelopeV1::from_canonical_bytes(&outbox_bytes).unwrap();
+    let mut recovered = RouteSenderV1::resume(checkpoint, INITIATOR_SECRET, [0x99; 32]).unwrap();
+    let replayed_ack = recovered.submit_prepared(&mut relay, &prepared).unwrap();
+    assert_eq!(first_ack.canonical_bytes(), replayed_ack.canonical_bytes());
+    assert_eq!(recovered.checkpoint().next_sequence(), 1);
+    assert_eq!(
+        recovered.checkpoint().previous_digest(),
+        prepared.envelope_digest()
+    );
+
+    let next = recovered
+        .prepare(b"next".to_vec(), expiry(), [0x22; 32])
+        .unwrap();
+    let next_envelope = relay::RelayEnvelopeV1::decode(next.canonical_bytes()).unwrap();
+    assert_eq!(next_envelope.sequence, 1);
+    assert_eq!(
+        next_envelope.previous_transcript_hash,
+        *prepared.envelope_digest()
+    );
+}
+
+#[test]
+fn corrupt_sender_checkpoint_and_mismatched_outbox_fail_closed() {
+    let mut bytes = sender().checkpoint().canonical_bytes().unwrap();
+    bytes[42] ^= 0x80;
+    assert!(matches!(
+        RouteSenderCheckpointV1::from_bytes(&bytes),
+        Err(BridgeRefusal::InvalidSenderCheckpoint)
+    ));
+
+    let first = sender();
+    let prepared = first
+        .prepare(b"bound-to-initiator".to_vec(), expiry(), [0x31; 32])
+        .unwrap();
+    let mut wrong = RouteSenderV1::new(
+        ctx(),
+        SOLVER,
+        INITIATOR,
+        SenderRoleV1::Solver,
+        [0x51; 32],
+        [0x99; 32],
+    )
+    .unwrap();
+    assert!(matches!(
+        wrong.submit_prepared(&mut RelayV1::new(), &prepared),
+        Err(BridgeRefusal::PreparedEnvelopeMismatch)
+    ));
 }

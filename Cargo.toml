@@ -48,9 +48,15 @@ members = [
     "crates/adapters/btc-vault",
     "crates/adapters/dom-real",
     "crates/adapters/evm",
+    "crates/btc-actuator",
     "crates/chain-profile",
     "crates/counterparty-api",
+    "crates/deployment-registry",
+    "crates/dom-actuator",
+    "crates/dom-interopd",
+    "crates/evm-actuator",
     "crates/dom-adaptor",
+    "crates/dom-final-claim-binding",
     "crates/dom-leg",
     "crates/dom-scriptless-chain-adapter",
     "crates/dom-scriptless-crypto",
@@ -64,12 +70,19 @@ members = [
     "crates/f7-anchor-authority",
     "crates/intent-book",
     "crates/kaystra-core",
+    "crates/participant-binding",
     "crates/relay",
     "crates/relay-scriptless-wire",
     "crates/rfq",
     "crates/route-composer",
+    "crates/route-executor",
+    "crates/route-secret-vault",
+    "crates/route-time-anchor",
     "crates/route-transport",
+    "crates/settlement-coordinator",
     "crates/solver",
+    "crates/solver-inventory",
+    "crates/solver-status",
     "crates/store",
     "crates/uspe",
 
@@ -196,6 +209,7 @@ proptest = { version = "1" }
 
 # ── DOM interoperability layer: local members ─────────────────────────────
 counterparty-api = { path = "crates/counterparty-api" }
+route-secret-vault = { path = "crates/route-secret-vault" }
 dom-adaptor = { path = "crates/dom-adaptor" }
 dom-leg = { path = "crates/dom-leg" }
 dom-scriptless-bulletproof = { path = "crates/dom-scriptless-bulletproof" }

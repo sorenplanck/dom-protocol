@@ -1,0 +1,22 @@
+[package]
+name = "solver-status"
+description = "Threshold-authenticated durable solver operational status authority"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+blake2 = { workspace = true }
+btc-crypto = { path = "../adapters/btc-crypto" }
+deployment-registry = { path = "../deployment-registry" }
+kaystra-core = { path = "../kaystra-core", default-features = false }
+store = { path = "../store" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

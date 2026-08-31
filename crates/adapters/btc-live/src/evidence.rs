@@ -23,6 +23,8 @@ const MAX_TRANSACTION_BYTES: usize = 4_000_000;
 const MAX_EVIDENCE_BYTES: usize = 96 * 1024 * 1024;
 const SNAPSHOT_ATTEMPTS: usize = 3;
 
+type HeaderChainV1 = (Vec<[u8; 80]>, [u8; 80], Vec<[u8; 80]>);
+
 /// Route/outcome binding applied only after canonical RPC evidence exists.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct BitcoinEvidenceBindingV1 {
@@ -495,16 +497,12 @@ impl<'a> BitcoinCoreEvidenceCollectorV1<'a> {
         Ok(evidence)
     }
 
-    // The triple is ancestry headers, the block header, and confirmation
-    // headers. Naming it would add an alias used exactly once and read
-    // further from the call site than the shape itself.
-    #[allow(clippy::type_complexity)]
     fn collect_header_chain(
         &self,
         block_height: u64,
         tip_height: u64,
         expected_block_hash: [u8; 32],
-    ) -> Result<(Vec<[u8; 80]>, [u8; 80], Vec<[u8; 80]>), LiveBitcoinError> {
+    ) -> Result<HeaderChainV1, LiveBitcoinError> {
         let ancestry_capacity =
             usize::try_from(block_height).map_err(|_| LiveBitcoinError::BoundsExceeded)?;
         let confirmation_capacity = tip_height

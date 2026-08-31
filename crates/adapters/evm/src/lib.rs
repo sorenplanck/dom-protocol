@@ -91,6 +91,6 @@ pub use binding::{
 };
 pub use cursor::EvmCursor;
 pub use error::{RejectReason, Result};
-pub use evidence::{EvidenceKind, EvmEvidence};
+pub use evidence::{EvidenceKind, EvidencePayload, EvmEvidence};
 pub use finality::FinalizedHead;
 pub use rpc::JsonRpc;

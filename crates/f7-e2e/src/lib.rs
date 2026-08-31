@@ -2,12 +2,22 @@
 //!
 //! Real anchor validation lives in the lower, Store-free
 //! `f7-anchor-authority` crate so the Contracts Store can consume its opaque
-//! capability without a dependency cycle.  This crate intentionally adds no
-//! alternate constructor or caller-shaped evidence path.
+//! capability without a dependency cycle. V2 is the only productive
+//! final-claim anchor authority. V1 names remain available solely for legacy
+//! recovery and its validator refuses every fresh mint. This crate
+//! intentionally adds no alternate constructor or caller-shaped evidence path.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub use f7_anchor_authority::{
+    verify_f7_route_anchor_authority_v2, F7AnchorValidationRequestV2,
+    VerifiedF7AnchorAuthorizationV2, VerifiedF7RouteAnchorAuthorizationsV2,
+};
+
+/// Legacy recovery/diagnostic surface. The V1 route validator always returns
+/// [`F7AnchorAuthorityError::LegacyV1RecoveryOnly`] and cannot mint a fresh
+/// final-claim authorization.
 pub use f7_anchor_authority::{
     verify_bitcoin_funding_evidence, verify_f7_route_anchor_authority, F7AnchorAuthorityError,
     F7AnchorValidationRequestV1, VerifiedBitcoinFundingEvidenceV1, VerifiedF7AnchorAuthorizationV1,

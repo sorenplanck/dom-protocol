@@ -1,0 +1,29 @@
+[package]
+name = "dom-interop-btc-evidence-v2-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bitcoin = "=0.32.5"
+btc-evidence = { path = "../crates/adapters/btc-evidence" }
+libfuzzer-sys = "=0.4.10"
+
+[workspace]
+
+[[bin]]
+name = "fuzz_bitcoin_evidence_decode"
+path = "fuzz_targets/fuzz_bitcoin_evidence_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_witness_parser"
+path = "fuzz_targets/fuzz_witness_parser.rs"
+test = false
+doc = false
+bench = false

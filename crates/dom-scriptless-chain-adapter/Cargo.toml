@@ -11,6 +11,7 @@ publish = false  # D-ORQ-9: explicit, never inherited
 [dependencies]
 dom-adaptor.workspace = true
 dom-consensus.workspace = true
+dom-core.workspace = true
 dom-crypto.workspace = true
 dom-serialization.workspace = true
 dom-scriptless-types = { path = "../dom-scriptless-types" }

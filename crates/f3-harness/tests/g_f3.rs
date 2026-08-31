@@ -273,14 +273,18 @@ fn the_evm_leg_is_driven_on_finalized_observations_only() {
     let revealed = events
         .iter()
         .find_map(|e| match e {
-            ObservedEvent::LockClaimed { revealed, .. } => Some(*revealed),
+            ObservedEvent::LockClaimed { revealed, .. } => Some(revealed.clone()),
             _ => None,
         })
         .expect("the finalized claim must surface");
-    assert_eq!(revealed.0, scalar(), "the published scalar must round-trip");
+    assert_eq!(
+        revealed.expose_scalar_bytes(),
+        scalar(),
+        "the published scalar must round-trip"
+    );
     assert_eq!(
         port.revealed_secret(&lock_id).expect("registry"),
-        Some(RevealedSecretBytes(scalar()))
+        Some(RevealedSecretBytes::new(scalar()))
     );
 }
 
@@ -395,7 +399,7 @@ fn the_engine_settles_the_dom_leg_with_the_scalar_the_evm_leg_revealed() {
         if round == 2 {
             assert!(
                 matches!(
-                    dom.submit_claim(revealed.0),
+                    dom.submit_claim(revealed.expose_scalar_bytes()),
                     adapter_dom_sim::SubmitResult::Accepted { .. }
                 ),
                 "the DOM claim carrying the crossed scalar must be accepted"
@@ -427,7 +431,7 @@ fn the_engine_settles_the_dom_leg_with_the_scalar_the_evm_leg_revealed() {
 
     // Provenance: the value that settled the DOM leg is the one the EVM leg
     // revealed — not a look-alike.
-    assert_eq!(revealed.0, scalar());
+    assert_eq!(revealed.expose_scalar_bytes(), scalar());
 
     // I6, strengthened by B-DOM: the settlement store NEVER holds the scalar.
     // The DOM chain source drops the revealed value at the adapter boundary
@@ -765,10 +769,12 @@ mod offline_seam {
             observed_binding: binding,
             observed_height: 3,
             finalized_height: 3,
-            revealed: RevealedSecretBytes(scalar()),
+            revealed: RevealedSecretBytes::new(scalar()),
             pre_signature: pre,
             dom_now: TimelockPoint::height(10),
-            dom_deadline: TimelockPoint::height(10 + TimelockPolicy::dom_sim().total_margin()),
+            dom_deadline: TimelockPoint::height(
+                10 + TimelockPolicy::dom_sim().total_margin().unwrap(),
+            ),
         }
     }
 
@@ -849,7 +855,7 @@ mod offline_seam {
                 pre_signature: &pre,
                 final_signature: &[0u8; 65],
                 evm_now: TimelockPoint::timestamp(
-                    DEADLINE - 10 * TimelockPolicy::evm().total_margin(),
+                    DEADLINE - 10 * TimelockPolicy::evm().total_margin().unwrap(),
                 ),
             },
         );
@@ -913,12 +919,12 @@ mod offline_seam {
         let (binding, lock_id) = rederive(&deployment(&cfg), &terms(&cfg)).expect("derivation");
 
         let mut input = evm_to_dom_input(&cfg, &pre, lock_id, binding);
-        input.revealed = RevealedSecretBytes(other_scalar());
+        input.revealed = RevealedSecretBytes::new(other_scalar());
         assert_eq!(
             evm_to_dom(&counting, &TimelockPolicy::dom_sim(), &input).err(),
             Some(HarnessError::AdaptorPointMismatch)
         );
-        input.revealed = RevealedSecretBytes([0u8; 32]);
+        input.revealed = RevealedSecretBytes::new([0u8; 32]);
         assert_eq!(
             evm_to_dom(&counting, &TimelockPolicy::dom_sim(), &input).err(),
             Some(HarnessError::NonCanonicalScalar)
@@ -1063,7 +1069,7 @@ mod offline_seam {
                     evidence: bytes,
                     pre_signature: &pre,
                     dom_now: TimelockPoint::height(10),
-                    dom_deadline: TimelockPoint::height(10 + dom_policy.total_margin()),
+                    dom_deadline: TimelockPoint::height(10 + dom_policy.total_margin().unwrap()),
                 },
             )
         };
@@ -1100,7 +1106,24 @@ mod offline_seam {
             ("block hash", Box::new(|e| e.block_hash[0] ^= 1)),
             ("tx hash", Box::new(|e| e.tx_hash[0] ^= 1)),
             ("log index", Box::new(|e| e.log_index ^= 1)),
-            ("payload", Box::new(|e| e.payload[31] ^= 1)),
+            // Byte 31 of the payload slot, whatever that slot means for this
+            // record's kind. The variant is rebuilt through `from_wire` rather
+            // than named: hard-coding `ClaimedScalar` would let a fixture that
+            // changed kind produce a record whose kind and payload disagree,
+            // and `verify_static` refuses that on its own — the case would go
+            // green through the wrong refusal.
+            //
+            // Index 31 is the least significant byte, so the scalar stays
+            // canonical and the refusal is the point mismatch this case is
+            // about, not `NonCanonicalScalar`.
+            (
+                "payload",
+                Box::new(|e| {
+                    let mut slot = e.payload.wire_bytes();
+                    slot[31] ^= 1;
+                    e.payload = adapter_evm::EvidencePayload::from_wire(e.kind, slot);
+                }),
+            ),
         ];
         for (name, mutate) in mutations {
             let mut broken = evidence;
@@ -1202,18 +1225,18 @@ fn the_claim_artifact_is_a_real_transaction_the_adapter_then_observes() {
     let claimed = events
         .iter()
         .find_map(|e| match e {
-            ObservedEvent::LockClaimed { revealed, .. } => Some(*revealed),
+            ObservedEvent::LockClaimed { revealed, .. } => Some(revealed.clone()),
             _ => None,
         })
         .expect("the claim must be observable");
     assert_eq!(
-        claimed.0,
+        claimed.expose_scalar_bytes(),
         scalar(),
         "the scalar must survive the round trip"
     );
     assert_eq!(
         port.revealed_secret(&lock_id).expect("registry"),
-        Some(RevealedSecretBytes(scalar()))
+        Some(RevealedSecretBytes::new(scalar()))
     );
 }
 
@@ -1400,7 +1423,7 @@ fn the_adapter_registry_keeps_the_scalar_across_a_reorg() {
         .any(|e| matches!(e, ObservedEvent::LockClaimed { .. })));
     assert_eq!(
         port.revealed_secret(&lock_id).expect("registry"),
-        Some(RevealedSecretBytes(scalar()))
+        Some(RevealedSecretBytes::new(scalar()))
     );
 
     // Orphan the claim's block. The funding block below it is one the observer
@@ -1416,7 +1439,7 @@ fn the_adapter_registry_keeps_the_scalar_across_a_reorg() {
     assert_ne!(rewound, cursor, "the cursor must be rewound");
     assert_eq!(
         port.revealed_secret(&lock_id).expect("registry"),
-        Some(RevealedSecretBytes(scalar())),
+        Some(RevealedSecretBytes::new(scalar())),
         "I11: the revealed-secret registry is append-only by construction"
     );
 
@@ -1431,7 +1454,7 @@ fn the_adapter_registry_keeps_the_scalar_across_a_reorg() {
     );
     assert_eq!(
         port.revealed_secret(&lock_id).expect("registry"),
-        Some(RevealedSecretBytes(scalar()))
+        Some(RevealedSecretBytes::new(scalar()))
     );
 }
 
@@ -1513,7 +1536,7 @@ fn run_claim_scenario(crash_before_step: Option<usize>) -> (Option<[u8; 32]>, bo
         let (_, next) = port.observe(&cursor);
         cursor = next;
         if let Some(s) = port.revealed_secret(&lock_id).expect("registry") {
-            secret_seen = Some(s.0);
+            secret_seen = Some(s.expose_scalar_bytes());
         }
     }
     for _ in 0..3 {
@@ -1521,7 +1544,7 @@ fn run_claim_scenario(crash_before_step: Option<usize>) -> (Option<[u8; 32]>, bo
         cursor = next;
     }
     if let Some(s) = port.revealed_secret(&lock_id).expect("registry") {
-        secret_seen = Some(s.0);
+        secret_seen = Some(s.expose_scalar_bytes());
     }
     let evidence_ok = port
         .adapter()

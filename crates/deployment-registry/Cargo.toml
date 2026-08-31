@@ -1,0 +1,30 @@
+[package]
+name = "deployment-registry"
+description = "Signed, canonical and rollback-resistant deployment registry for the DOM interoperability runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+adapter-btc = { path = "../adapters/btc" }
+adapter-evm = { path = "../adapters/evm" }
+btc-crypto = { path = "../adapters/btc-crypto" }
+blake2 = { workspace = true }
+bitcoin = "=0.32.5"
+chain-profile = { path = "../chain-profile" }
+dom-consensus.workspace = true
+dom-core.workspace = true
+dom-crypto.workspace = true
+kaystra-core = { path = "../kaystra-core", default-features = false }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "=1.1.4", default-features = false, features = ["process"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

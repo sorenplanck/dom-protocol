@@ -13,6 +13,8 @@ use std::time::Duration;
 
 use bitcoin::hashes::Hash;
 use bitcoin::{blockdata::constants::genesis_block, Address, BlockHash, Network, Txid};
+use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 use reqwest::blocking::{Client, Response};
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
@@ -31,6 +33,22 @@ const MAX_WALLET_NAME_BYTES: usize = 128;
 pub(crate) const MAX_SIGNET_CHALLENGE_BYTES: usize = 10_000;
 const PUBLIC_SIGNET_CHALLENGE_HEX: &str = "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae";
 const RPC_ID: &str = "dom-interop-f7";
+const SIGNET_CHALLENGE_DIGEST_DOMAIN: &[u8] = b"DOM-INTEROP/F7/BTC-LIVE/SIGNET-CHALLENGE/V1\0";
+
+/// Commits the exact public Signet challenge used by a live RPC authority.
+pub fn bitcoin_signet_challenge_digest_v1(challenge: &[u8]) -> Result<[u8; 32], LiveBitcoinError> {
+    if challenge.len() > MAX_SIGNET_CHALLENGE_BYTES {
+        return Err(LiveBitcoinError::BoundsExceeded);
+    }
+    let mut hasher = Blake2bVar::new(32).map_err(|_| LiveBitcoinError::CorruptRecord)?;
+    hasher.update(SIGNET_CHALLENGE_DIGEST_DOMAIN);
+    hasher.update(challenge);
+    let mut output = [0; 32];
+    hasher
+        .finalize_variable(&mut output)
+        .map_err(|_| LiveBitcoinError::CorruptRecord)?;
+    Ok(output)
+}
 
 /// Bitcoin Core chain selected by the production boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,6 +221,15 @@ impl BitcoinCoreRpcClientV1 {
     #[must_use]
     pub const fn genesis_hash(&self) -> [u8; 32] {
         self.genesis_hash
+    }
+
+    /// Digest of the exact configured Signet challenge (empty on regtest).
+    pub fn signet_challenge_digest(&self) -> Result<[u8; 32], LiveBitcoinError> {
+        bitcoin_signet_challenge_digest_v1(
+            self.expected_signet_challenge
+                .as_deref()
+                .unwrap_or_default(),
+        )
     }
 
     pub(crate) fn fresh_wallet_destination_script(

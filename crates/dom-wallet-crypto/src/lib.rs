@@ -29,13 +29,14 @@
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::Aead;
-use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 use hkdf::Hkdf;
 use rand::RngCore;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sha2::Sha256;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -186,14 +187,11 @@ pub fn save_envelope<T: Serialize>(
     let json =
         serde_json::to_vec(value).map_err(|e| EnvelopeError::Serialization(e.to_string()))?;
 
-    // `from_slice` is deprecated in favor of generic-array 1.x; the audited v1
-    // envelope pins generic-array 0.x, so we keep the same call (matches v1).
-    #[allow(deprecated)]
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_bytes()));
-    #[allow(deprecated)]
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(key.as_bytes()).map_err(|_| EnvelopeError::Encryption)?;
+    let nonce = Nonce::from(nonce_bytes);
     let ciphertext = cipher
-        .encrypt(nonce, json.as_slice())
+        .encrypt(&nonce, json.as_slice())
         .map_err(|_| EnvelopeError::Encryption)?;
 
     // Build the 64-byte header.
@@ -242,13 +240,12 @@ pub fn load_envelope<T: DeserializeOwned>(
     nonce_bytes.copy_from_slice(&data[48..60]);
 
     let key = derive_wallet_key(password, &salt, &KdfParams::OWASP_V1)?;
-    #[allow(deprecated)]
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_bytes()));
-    #[allow(deprecated)]
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(key.as_bytes()).map_err(|_| EnvelopeError::Decryption)?;
+    let nonce = Nonce::from(nonce_bytes);
 
     let plaintext = cipher
-        .decrypt(nonce, &data[HEADER_SIZE..])
+        .decrypt(&nonce, &data[HEADER_SIZE..])
         .map_err(|_| EnvelopeError::Decryption)?;
 
     serde_json::from_slice(&plaintext).map_err(|e| EnvelopeError::Serialization(e.to_string()))
@@ -257,39 +254,119 @@ pub fn load_envelope<T: DeserializeOwned>(
 /// Atomic write with fsync (DOM-SEC-007): temp file → `sync_all` → rename →
 /// parent-dir `sync_all` (Unix). After `Ok`, the file survives a crash.
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), EnvelopeError> {
-    let temp_path = path.with_extension("tmp");
-
-    // Step 1+2: write and fsync the temp file.
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&temp_path)
-            .map_err(|e| EnvelopeError::Io(format!("failed to create temp file: {e}")))?;
-        f.write_all(bytes)
-            .map_err(|e| EnvelopeError::Io(format!("failed to write temp file: {e}")))?;
-        f.sync_all()
-            .map_err(|e| EnvelopeError::Io(format!("failed to fsync temp file: {e}")))?;
-        // f is dropped (closed) here.
-    }
-
-    // Step 3: atomic rename.
-    fs::rename(&temp_path, path)
-        .map_err(|e| EnvelopeError::Io(format!("failed to rename file atomically: {e}")))?;
-
-    // Step 4: fsync the parent directory so the rename is durable.
-    //
-    // Windows: NTFS's MoveFileEx (used by std::fs::rename) is durable by
-    // contract and a directory handle cannot be fsync'd; we rely on the rename.
+    let parent = atomic_parent(path)?;
     #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            let dir = std::fs::File::open(parent).map_err(|e| {
-                EnvelopeError::Io(format!("failed to open parent dir for fsync: {e}"))
-            })?;
-            dir.sync_all()
-                .map_err(|e| EnvelopeError::Io(format!("failed to fsync parent dir: {e}")))?;
-        }
+    let parent_authority = open_parent_authority(parent)?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".dom-wallet-save-")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .map_err(|error| {
+            EnvelopeError::Io(format!("failed to create exclusive temp file: {error}"))
+        })?;
+    #[cfg(unix)]
+    audit_named_file(temporary.as_file(), temporary.path())?;
+    temporary
+        .as_file_mut()
+        .write_all(bytes)
+        .map_err(|error| EnvelopeError::Io(format!("failed to write temp file: {error}")))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| EnvelopeError::Io(format!("failed to fsync temp file: {error}")))?;
+    #[cfg(unix)]
+    audit_named_file(temporary.as_file(), temporary.path())?;
+    let persisted = temporary.persist(path).map_err(|error| {
+        EnvelopeError::Io(format!(
+            "failed to persist file atomically: {}",
+            error.error
+        ))
+    })?;
+    #[cfg(unix)]
+    {
+        audit_named_file(&persisted, path)?;
+        audit_parent_authority(&parent_authority, parent)?;
+        parent_authority
+            .sync_all()
+            .map_err(|error| EnvelopeError::Io(format!("failed to fsync parent dir: {error}")))?;
+        audit_parent_authority(&parent_authority, parent)?;
     }
+    Ok(())
+}
 
+fn atomic_parent(path: &Path) -> Result<&Path, EnvelopeError> {
+    if path.file_name().is_none() {
+        return Err(EnvelopeError::Io("wallet path has no file name".to_owned()));
+    }
+    Ok(path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new(".")))
+}
+
+#[cfg(unix)]
+fn open_parent_authority(parent: &Path) -> Result<std::fs::File, EnvelopeError> {
+    let authority = std::fs::File::open(parent)
+        .map_err(|error| EnvelopeError::Io(format!("failed to open parent dir: {error}")))?;
+    audit_parent_authority(&authority, parent)?;
+    Ok(authority)
+}
+
+#[cfg(unix)]
+fn audit_parent_authority(authority: &std::fs::File, parent: &Path) -> Result<(), EnvelopeError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let retained = authority
+        .metadata()
+        .map_err(|error| EnvelopeError::Io(format!("failed to audit parent dir: {error}")))?;
+    let named = fs::symlink_metadata(parent)
+        .map_err(|error| EnvelopeError::Io(format!("failed to audit named parent dir: {error}")))?;
+    let owner = rustix::process::geteuid().as_raw();
+    if !retained.file_type().is_dir()
+        || !named.file_type().is_dir()
+        || named.file_type().is_symlink()
+        || retained.uid() != owner
+        || named.uid() != owner
+        || retained.mode() & 0o7777 != 0o700
+        || named.mode() & 0o7777 != 0o700
+        || retained.nlink() == 0
+        || named.nlink() == 0
+        || retained.dev() != named.dev()
+        || retained.ino() != named.ino()
+    {
+        return Err(EnvelopeError::Io(
+            "invalid owner-only parent directory authority".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn audit_named_file(file: &std::fs::File, path: &Path) -> Result<(), EnvelopeError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let retained = file
+        .metadata()
+        .map_err(|error| EnvelopeError::Io(format!("failed to audit open file: {error}")))?;
+    let named = fs::symlink_metadata(path)
+        .map_err(|error| EnvelopeError::Io(format!("failed to audit named file: {error}")))?;
+    let owner = rustix::process::geteuid().as_raw();
+    if !retained.file_type().is_file()
+        || !named.file_type().is_file()
+        || named.file_type().is_symlink()
+        || retained.uid() != owner
+        || named.uid() != owner
+        || retained.mode() & 0o7777 != 0o600
+        || named.mode() & 0o7777 != 0o600
+        || retained.nlink() != 1
+        || named.nlink() != 1
+        || retained.dev() != named.dev()
+        || retained.ino() != named.ino()
+    {
+        return Err(EnvelopeError::Io(
+            "invalid owner-only file authority".to_owned(),
+        ));
+    }
     Ok(())
 }
 

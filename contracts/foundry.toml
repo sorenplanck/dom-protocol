@@ -1,0 +1,54 @@
+[profile.default]
+src = "src"
+out = "out"
+test = "test"
+script = "script"
+libs = ["lib"]
+# Exact compiler pin required by the F3 interface spec (no caret anywhere).
+solc = "0.8.24"
+evm_version = "shanghai"
+optimizer = true
+optimizer_runs = 20000
+via_ir = false
+bytecode_hash = "none"
+# `Vectors.t.sol` writes the cross-language vector file consumed by the Rust
+# adapter workstream. Nothing else in the suite touches the filesystem.
+fs_permissions = [{ access = "read-write", path = "./test" }]
+gas_reports = ["ConditionLockV2", "ConditionLockERC20V2"]
+
+[lint]
+# The EVM leg is specified as `TimelockDomain::Timestamp` (F3 spec section 1,
+# field 9), so comparing against `block.timestamp` is the required behaviour,
+# not an oversight. Deadlines are chosen with margins far above the few seconds
+# a proposer could shift.
+exclude_lints = ["block-timestamp"]
+
+[profile.default.fuzz]
+runs = 1024
+max_test_rejects = 500000
+
+[profile.default.invariant]
+runs = 256
+depth = 64
+fail_on_revert = false
+call_override = false
+shrink_run_limit = 5000
+
+# A deliberately heavier profile for pre-merge runs: `FOUNDRY_PROFILE=deep forge test`.
+[profile.deep.fuzz]
+runs = 16384
+
+[profile.deep.invariant]
+runs = 1024
+depth = 256
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = false
+int_types = "long"
+quote_style = "double"
+number_underscore = "thousands"
+multiline_func_header = "attributes_first"
+sort_imports = true
+wrap_comments = false

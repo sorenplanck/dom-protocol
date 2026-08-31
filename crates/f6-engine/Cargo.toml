@@ -12,16 +12,21 @@ publish = false  # D-ORQ-9: explicit, never inherited
 # precedent). It holds no key and signs nothing.
 
 [dependencies]
+btc-crypto = { path = "../adapters/btc-crypto" }
+blake2 = { workspace = true }
+deployment-registry = { path = "../deployment-registry" }
 kaystra-core = { path = "../kaystra-core" }
 rfq = { path = "../rfq" }
 # D-019: the recipient-side payload check lives HERE, never in `relay`.
 # `relay` does not depend on `rfq`, so the Relay cannot decode an F6
 # object even by accident (spec section 6.2, structural).
 relay = { path = "../relay" }
+solver-status = { path = "../solver-status" }
 store = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+static_assertions = "=1.1.0"
 tempfile = "3"
 # D-019 test 11 runs the consumer check behind the REAL section-5.4
 # pipeline, so the payload is judged only after a real BIP340 signature

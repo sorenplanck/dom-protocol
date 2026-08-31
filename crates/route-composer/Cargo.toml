@@ -16,6 +16,8 @@ rfq = { path = "../rfq" }
 # the EVM leg and the level-1/level-2 composed proofs already use (I15: reuse,
 # never a second implementation).
 adapter-evm = { path = "../adapters/evm" }
+route-time-anchor = { path = "../route-time-anchor" }
+dom-final-claim-binding = { path = "../dom-final-claim-binding" }
 # Same exact hash crate and version as kaystra-core, uspe and rfq: one
 # BLAKE2b-256 implementation across every canonical digest (I15).
 blake2 = "=0.10.6"
@@ -28,6 +30,15 @@ zeroize = { workspace = true }
 # mirroring the level-2 composed-routes evidence.
 kaystra-core = { path = "../kaystra-core" }
 f2-harness = { path = "../f2-harness" }  # dev-only: audit harness, retained in the residual Interop repository (absorption of 2026-08-25)
+adapter-btc = { path = "../adapters/btc" }
+bitcoin = "=0.32.5"
+btc-crypto = { path = "../adapters/btc-crypto" }
+chain-profile = { path = "../chain-profile" }
+deployment-registry = { path = "../deployment-registry" }
+dom-consensus.workspace = true
+dom-core.workspace = true
+hex.workspace = true
+tempfile.workspace = true
 # Property-based invariants of the ladder, the digest and the hand-off
 # (same exact pin as rfq and kaystra-core).
 proptest = "=1.7.0"

@@ -99,7 +99,10 @@ impl RevealedRegistry {
     ///
     /// Survives every reorg, by design.
     pub fn get(&self, lock_id: &[u8; 32]) -> Option<RevealedSecretBytes> {
-        self.by_lock.get(lock_id).copied()
+        // `cloned`, not `copied`: the wrapper gave up `Copy` so that it
+        // could gain a scrubbing destructor. Handing a caller its own value is
+        // now something this method says out loud.
+        self.by_lock.get(lock_id).cloned()
     }
 
     /// Whether `lock_id`'s scalar is public knowledge as far as this observer
@@ -142,9 +145,9 @@ mod tests {
         // this test will not catch it — but the reorg test below will.
         let mut r = RevealedRegistry::new();
         assert!(r.is_empty());
-        assert!(r.record(LOCK, RevealedSecretBytes([7u8; 32])));
+        assert!(r.record(LOCK, RevealedSecretBytes::new([7u8; 32])));
         assert!(r.is_revealed(&LOCK));
-        assert_eq!(r.get(&LOCK), Some(RevealedSecretBytes([7u8; 32])));
+        assert_eq!(r.get(&LOCK), Some(RevealedSecretBytes::new([7u8; 32])));
         assert_eq!(r.len(), 1);
         assert_eq!(r.lock_ids(), vec![LOCK]);
     }
@@ -152,15 +155,18 @@ mod tests {
     #[test]
     fn recording_is_idempotent_and_first_observation_wins() {
         let mut r = RevealedRegistry::new();
-        assert!(r.record(LOCK, RevealedSecretBytes([7u8; 32])));
-        assert!(r.record(LOCK, RevealedSecretBytes([7u8; 32])), "idempotent");
+        assert!(r.record(LOCK, RevealedSecretBytes::new([7u8; 32])));
         assert!(
-            !r.record(LOCK, RevealedSecretBytes([8u8; 32])),
+            r.record(LOCK, RevealedSecretBytes::new([7u8; 32])),
+            "idempotent"
+        );
+        assert!(
+            !r.record(LOCK, RevealedSecretBytes::new([8u8; 32])),
             "a contradicting scalar must be refused"
         );
         assert_eq!(
             r.get(&LOCK),
-            Some(RevealedSecretBytes([7u8; 32])),
+            Some(RevealedSecretBytes::new([7u8; 32])),
             "the first observation must survive"
         );
     }
@@ -171,17 +177,17 @@ mod tests {
         for i in 0..MAX_TRACKED_SECRETS {
             let mut k = [0u8; 32];
             k[..8].copy_from_slice(&(i as u64).to_be_bytes());
-            assert!(r.record(k, RevealedSecretBytes([1u8; 32])));
+            assert!(r.record(k, RevealedSecretBytes::new([1u8; 32])));
         }
         assert_eq!(r.len(), MAX_TRACKED_SECRETS);
-        assert!(!r.record([0xFF; 32], RevealedSecretBytes([1u8; 32])));
+        assert!(!r.record([0xFF; 32], RevealedSecretBytes::new([1u8; 32])));
         assert_eq!(r.refused(), 1);
     }
 
     #[test]
     fn debug_never_renders_a_scalar() {
         let mut r = RevealedRegistry::new();
-        r.record(LOCK, RevealedSecretBytes([0xAB; 32]));
+        r.record(LOCK, RevealedSecretBytes::new([0xAB; 32]));
         let rendered = format!("{r:?}");
         assert!(rendered.contains("known: 1"));
         assert!(

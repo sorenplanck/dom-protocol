@@ -9,6 +9,8 @@ publish = false  # D-ORQ-9: explicit, never inherited
 [dependencies]
 adapter-btc = { path = "../adapters/btc", default-features = false }
 bitcoin = "=0.32.5"
+dom-adaptor.workspace = true
+dom-final-claim-binding = { path = "../dom-final-claim-binding" }
 dom-scriptless-chain-adapter.workspace = true
 kaystra-core = { path = "../kaystra-core", default-features = false }
 thiserror.workspace = true

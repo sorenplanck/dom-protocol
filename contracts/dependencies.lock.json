@@ -1,0 +1,21 @@
+{
+  "dependencies": [
+    {
+      "install_path": "lib/forge-std",
+      "name": "forge-std",
+      "release_source_digest": "0xf645cecd33af83eda8bd738626f82367db7fded6b00c6d48c69e9ebf19b9a8b1",
+      "repository": "https://github.com/foundry-rs/forge-std.git",
+      "revision": "3b20d60d14b343ee4f908cb8079495c07f5e8981",
+      "version": "1.9.6"
+    },
+    {
+      "install_path": "lib/openzeppelin-contracts",
+      "name": "openzeppelin-contracts",
+      "release_source_digest": "0xc95ba50657b4de83adc87e5e0067631b3859118cae7e3d61a4657704c3915c76",
+      "repository": "https://github.com/OpenZeppelin/openzeppelin-contracts.git",
+      "revision": "69c8def5f222ff96f2b5beff05dfba996368aa79",
+      "version": "5.1.0"
+    }
+  ],
+  "schema": "dom.evm-contract-dependencies.v1"
+}

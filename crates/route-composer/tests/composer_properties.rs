@@ -97,8 +97,12 @@ proptest! {
         let up = terms(0xa0, up_dom, up_cp, t33);
         let dn = terms(0xd0, dn_dom, dn_cp, t33);
         let policy = ComposedWindowPolicyV1 { hub_margin, counterparty_margin: cp_margin };
-        let hub_ok = up_dom >= dn_dom.saturating_add(hub_margin);
-        let cp_ok = up_cp >= dn_cp.saturating_add(cp_margin);
+        let hub_ok = dn_dom
+            .checked_add(hub_margin)
+            .is_some_and(|minimum_upstream| up_dom >= minimum_upstream);
+        let cp_ok = dn_cp
+            .checked_add(cp_margin)
+            .is_some_and(|minimum_upstream| up_cp >= minimum_upstream);
         match ComposedBindingV1::bind(up, dn, policy) {
             Ok(_) => prop_assert!(hub_ok && cp_ok, "accepted an unsafe window"),
             Err(ComposerRefusal::UnsafeComposedWindow) =>

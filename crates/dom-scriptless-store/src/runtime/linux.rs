@@ -17,13 +17,14 @@ use rustix::{
     process::geteuid,
 };
 use std::{
+    collections::BTreeMap,
     error::Error,
     fmt,
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
     mem::MaybeUninit,
     os::fd::AsFd,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 mod backup;
@@ -36,19 +37,41 @@ mod signer_e2e;
 #[cfg(feature = "evidence-only")]
 pub use backup::{BackupPolicyLimitsV1, CompletedBackupV1};
 pub use inventory::{ContractsNonceVaultV1, InventoryError, RetainedRestoreTargetV1};
+#[cfg(feature = "evidence-only")]
+pub use session_store::evidence_only_staging::{
+    evidence_only_stage_post_anchor_v2_graph, EvidenceOnlyStagedPostAnchorV2,
+};
+#[cfg(feature = "evidence-only")]
+pub use session_store::EvidenceOnlyPostAnchorAnchorFactsV2;
 pub use session_store::{
     verify_funding_artifacts_v1, verify_operational_funding_gate_evidence_v1,
     verify_operational_m8_funding_gate_evidence_v1, AcceptedContractsSigningSessionV1,
     AuthenticatedContractsRefundV1, AuthenticatedOperationalBpContinuationV1,
     AuthenticatedOperationalBpFinalProofV1, AuthenticatedPostAnchorClaimPreSignatureV1,
-    ClaimSigningAuthorizationV1, ConsumedClaimSigningAuthorizationV1,
-    ContractsReservationLookupCustodyV1, ContractsSessionStoreV1,
-    ContractsSigningSessionAuthorityV1, DomTransactionValidationContextV1,
+    AuthenticatedPostAnchorClaimPreSignatureV2, ClaimSigningAuthorizationV1,
+    ClaimSigningAuthorizationV2, CommittedOutboundDsc1V1, ConsumedClaimSigningAuthorizationV1,
+    ConsumedClaimSigningAuthorizationV2, ContractsReservationLookupCustodyV1,
+    ContractsSessionStoreV1, ContractsSigningSessionAuthorityV1, DomTransactionValidationContextV1,
     DurableContractsReservationLookupV1, DurableTransportOutcomeV1, DurableTransportReceiptV1,
-    ExactDomFundingBroadcasterV1, ExactDomRefundBroadcasterV1, FundingAuthorizationV1,
-    FundingBroadcastV1, FundingRetransmissionV1, OperationalBpContinuationStageV1,
-    OperationalFundingGateVerificationRequestV1, OperationalM8FundingGateVerificationRequestV1,
-    PreparedOperationalM8FundingGateV1, PreparedOperationalM8ReadyToFundVoteV1, RefundBroadcastV1,
+    ExactDomFundingBroadcasterV1, ExactDomRefundBroadcasterV1, FinalClaimTransactionSinkRefV2,
+    FundingAuthorizationRefV1, FundingAuthorizationV1, FundingBroadcastV1, FundingRetransmissionV1,
+    FundingTransactionSinkRefV1, M8FundingAuthorizationRefV1, M8FundingTransactionSinkRefV1,
+    M8FundingTransactionSinkRefV2, ObservedFinalClaimExposureV2, OperationalBpContinuationStageV1,
+    OperationalFundingGateVerificationRequestV1, OperationalM8BackupParticipantAuditV2,
+    OperationalM8BackupProvenanceAuditV2, OperationalM8FundingGatePreparationV2,
+    OperationalM8FundingGateVerificationRequestV1, OutboundDsc1RecoveryV1,
+    PreparedContractsSessionStoreOpenV1, PreparedDsc1SigningRequestV1,
+    PreparedEarlyTransportAuthorityV1, PreparedOperationalAbortTransportAuthorityV1,
+    PreparedOperationalBpTransportAuthorityV1, PreparedOperationalFinalClaimIngressAuthorityV2,
+    PreparedOperationalFinalClaimSubmissionV2, PreparedOperationalFinalClaimTransportAuthorityV2,
+    PreparedOperationalFinalRefundTransportAuthorityV1, PreparedOperationalM8BackupProvenanceV2,
+    PreparedOperationalM8FundingGateV1, PreparedOperationalM8FundingGateV2,
+    PreparedOperationalM8ReadyToFundVoteV1, PreparedOperationalM8ReadyToFundVoteV2,
+    PreparedOperationalSigningTransportAuthorityV1,
+    PreparedOperationalTemplateTransportAuthorityV1,
+    PreparedPostAnchorClaimPreSignatureTransportAuthorityV1,
+    PreparedPostAnchorClaimPreSignatureTransportAuthorityV2, RealDomContractFactsV2,
+    ReconciledOperationalFinalClaimTransportV2, RefundBroadcastV1, RetainedClaimRoundFactsV2,
     SessionStoreError, SessionTransportIdentityReferenceV1, SessionTransportParticipantV1,
     TerminalCollaborativeSessionEvidenceV1, VerifiedFundingArtifactsV1,
     VerifiedOperationalFundingGateEvidenceV1, VerifiedOperationalM8FundingGateEvidenceV1,
@@ -253,6 +276,7 @@ struct RetainedDirectory {
     descriptor: Arc<Dir>,
     identity: NodeIdentity,
     reopen: ReopenAuthority,
+    scan_exclusions: Arc<Mutex<BTreeMap<String, NodeIdentity>>>,
 }
 
 impl RetainedDirectory {
@@ -267,6 +291,7 @@ impl RetainedDirectory {
                 parent: Arc::clone(&self.reopen.parent),
                 component: self.reopen.component.clone(),
             },
+            scan_exclusions: Arc::clone(&self.scan_exclusions),
         })
     }
 
@@ -301,6 +326,7 @@ impl RetainedDirectory {
             descriptor,
             identity,
             reopen: ReopenAuthority { parent, component },
+            scan_exclusions: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -320,6 +346,7 @@ impl RetainedDirectory {
             descriptor,
             identity,
             reopen: ReopenAuthority { parent, component },
+            scan_exclusions: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -327,6 +354,7 @@ impl RetainedDirectory {
         &self,
         component: ValidatedComponent,
     ) -> Result<Self, LinuxCapabilityError> {
+        self.revalidate()?;
         Self::create_under(Arc::clone(&self.descriptor), component)
     }
 
@@ -350,6 +378,7 @@ impl RetainedDirectory {
         if component.expected_type != ExpectedNodeType::RegularFile {
             return Err(LinuxCapabilityError::InvalidComponent);
         }
+        self.revalidate()?;
         require_name_max(self.descriptor.as_ref())?;
         let descriptor = openat2(
             self.descriptor.as_fd(),
@@ -429,6 +458,7 @@ impl RetainedDirectory {
         {
             return Err(LinuxCapabilityError::InvalidComponent);
         }
+        self.revalidate()?;
         self.require_named_file_identity(source, retained_source)?;
         renameat_with(
             self.descriptor.as_fd(),
@@ -464,6 +494,7 @@ impl RetainedDirectory {
         {
             return Err(LinuxCapabilityError::InvalidComponent);
         }
+        self.revalidate()?;
         retained_staging.revalidate()?;
         let named_stat = statat(
             self.descriptor.as_fd(),
@@ -513,6 +544,7 @@ impl RetainedDirectory {
         {
             return Err(LinuxCapabilityError::InvalidComponent);
         }
+        self.revalidate()?;
         retained_staging.revalidate()?;
         let source_stat = statat(
             self.descriptor.as_fd(),
@@ -557,6 +589,7 @@ impl RetainedDirectory {
         {
             return Err(LinuxCapabilityError::InvalidComponent);
         }
+        self.revalidate()?;
         pending.revalidate()?;
         successor.revalidate()?;
         let source_stat = statat(
@@ -602,6 +635,7 @@ impl RetainedDirectory {
         {
             return Err(LinuxCapabilityError::InvalidComponent);
         }
+        self.revalidate()?;
         pending.revalidate()?;
         activation.revalidate()?;
         activation.require_named_file_identity(&source, retained_active)?;
@@ -642,6 +676,7 @@ impl RetainedDirectory {
         {
             return Err(LinuxCapabilityError::InvalidComponent);
         }
+        self.revalidate()?;
         pending.revalidate()?;
         let source_stat = statat(
             self.descriptor.as_fd(),
@@ -680,6 +715,7 @@ impl RetainedDirectory {
         {
             return Err(LinuxCapabilityError::InvalidComponent);
         }
+        self.revalidate()?;
         self.require_named_file_identity(staging, retained_staging)?;
         renameat(
             self.descriptor.as_fd(),
@@ -711,6 +747,7 @@ impl RetainedDirectory {
         if component.expected_type != ExpectedNodeType::RegularFile {
             return Err(LinuxCapabilityError::InvalidComponent);
         }
+        self.revalidate()?;
         self.require_named_file_identity(component, retained)?;
         unlinkat(
             self.descriptor.as_fd(),
@@ -754,6 +791,7 @@ impl RetainedDirectory {
         &self,
         component: &ValidatedComponent,
     ) -> Result<RetainedExclusiveLock, LinuxCapabilityError> {
+        self.revalidate()?;
         let lock_file = self.open_file(component, true)?;
         flock(
             lock_file.file.as_fd(),
@@ -780,6 +818,31 @@ impl RetainedDirectory {
         .map_err(|error| map_errno("statat-directory", error))?;
         let named = NodeIdentity::from_stat(&named, ExpectedNodeType::Directory)?;
         self.identity.require_same(&named)
+    }
+
+    fn install_scan_exclusions(
+        &self,
+        exclusions: BTreeMap<String, NodeIdentity>,
+    ) -> Result<(), LinuxCapabilityError> {
+        self.revalidate()?;
+        let mut retained = self
+            .scan_exclusions
+            .lock()
+            .map_err(|_| LinuxCapabilityError::StoreBusy)?;
+        if !retained.is_empty() {
+            return Err(LinuxCapabilityError::IdentityMismatch);
+        }
+        *retained = exclusions;
+        Ok(())
+    }
+
+    fn clear_scan_exclusions(&self) -> Result<(), LinuxCapabilityError> {
+        self.revalidate()?;
+        self.scan_exclusions
+            .lock()
+            .map_err(|_| LinuxCapabilityError::StoreBusy)?
+            .clear();
+        Ok(())
     }
 
     fn scan_independent<F>(&self, mut inspect: F) -> Result<(), LinuxCapabilityError>
@@ -822,6 +885,27 @@ impl RetainedDirectory {
     where
         F: FnMut(&str, NodeIdentity) -> Result<(), LinuxCapabilityError>,
     {
+        let exclusions = self
+            .scan_exclusions
+            .lock()
+            .map_err(|_| LinuxCapabilityError::StoreBusy)?
+            .clone();
+        self.scan_lexicographic_including_exclusions(|name, identity| {
+            if let Some(expected) = exclusions.get(name) {
+                expected.require_same(&identity)?;
+                return Ok(());
+            }
+            inspect(name, identity)
+        })
+    }
+
+    fn scan_lexicographic_including_exclusions<F>(
+        &self,
+        mut inspect: F,
+    ) -> Result<(), LinuxCapabilityError>
+    where
+        F: FnMut(&str, NodeIdentity) -> Result<(), LinuxCapabilityError>,
+    {
         let mut previous: Option<String> = None;
         loop {
             let mut next: Option<(String, NodeIdentity)> = None;
@@ -854,6 +938,16 @@ impl RetainedDirectory {
         let bytes = retained.read_bounded(maximum_length)?;
         self.require_named_file_identity(component, &retained)?;
         Ok(bytes)
+    }
+
+    fn read_exact_file_prefix<const N: usize>(
+        &self,
+        component: &ValidatedComponent,
+    ) -> Result<[u8; N], LinuxCapabilityError> {
+        let mut retained = self.open_file(component, false)?;
+        let prefix = retained.read_exact_prefix()?;
+        self.require_named_file_identity(component, &retained)?;
+        Ok(prefix)
     }
 }
 
@@ -905,6 +999,21 @@ impl RetainedFile {
         }
         self.revalidate()?;
         Ok(bytes)
+    }
+
+    fn read_exact_prefix<const N: usize>(&mut self) -> Result<[u8; N], LinuxCapabilityError> {
+        self.file
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| map_io("seek-file-prefix", error))?;
+        let mut prefix = [0; N];
+        if let Err(error) = self.file.read_exact(&mut prefix) {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                return Err(LinuxCapabilityError::ExactBytesMismatch);
+            }
+            return Err(map_io("read-exact-file-prefix", error));
+        }
+        self.revalidate()?;
+        Ok(prefix)
     }
 }
 
@@ -1045,16 +1154,41 @@ fn classify_dynamic_component(value: &str) -> Option<ExpectedNodeType> {
         || exact_wrapped_hex(value, ".", 64, ".operational-funding-gate.staging")
         || exact_wrapped_hex(value, "", 64, ".operational-m8-funding-gate")
         || exact_wrapped_hex(value, ".", 64, ".operational-m8-funding-gate.staging")
+        || exact_wrapped_hex(value, "", 64, ".operational-m8-backup-provenance-v2")
+        || exact_wrapped_hex(
+            value,
+            ".",
+            64,
+            ".operational-m8-backup-provenance-v2.staging",
+        )
+        || exact_wrapped_hex(value, "", 64, ".operational-m8-funding-gate-v2")
+        || exact_wrapped_hex(value, ".", 64, ".operational-m8-funding-gate-v2.staging")
         || exact_wrapped_hex(value, "", 64, ".operational-funding-issuance")
         || exact_wrapped_hex(value, ".", 64, ".operational-funding-issuance.staging")
         || exact_wrapped_hex(value, "", 64, ".operational-m8-funding-issuance")
         || exact_wrapped_hex(value, ".", 64, ".operational-m8-funding-issuance.staging")
+        || exact_wrapped_hex(value, "", 64, ".operational-m8-funding-issuance-v2")
+        || exact_wrapped_hex(
+            value,
+            ".",
+            64,
+            ".operational-m8-funding-issuance-v2.staging",
+        )
         || exact_wrapped_hex(value, "", 64, ".operational-funding-commit")
         || exact_wrapped_hex(value, ".", 64, ".operational-funding-commit.staging")
         || exact_wrapped_hex(value, "", 64, ".operational-m8-funding-commit")
         || exact_wrapped_hex(value, ".", 64, ".operational-m8-funding-commit.staging")
+        || exact_wrapped_hex(value, "", 64, ".operational-m8-funding-commit-v2")
+        || exact_wrapped_hex(value, ".", 64, ".operational-m8-funding-commit-v2.staging")
         || exact_wrapped_hex(value, "", 64, ".post-anchor-claim-signing-issued")
         || exact_wrapped_hex(value, ".", 64, ".post-anchor-claim-signing-issued.staging")
+        || exact_wrapped_hex(value, "", 64, ".post-anchor-claim-signing-issued-v2")
+        || exact_wrapped_hex(
+            value,
+            ".",
+            64,
+            ".post-anchor-claim-signing-issued-v2.staging",
+        )
         || exact_wrapped_hex(value, "", 64, ".post-anchor-claim-signing-consumed")
         || exact_wrapped_hex(
             value,
@@ -1062,16 +1196,72 @@ fn classify_dynamic_component(value: &str) -> Option<ExpectedNodeType> {
             64,
             ".post-anchor-claim-signing-consumed.staging",
         )
+        || exact_wrapped_hex(value, "", 64, ".post-anchor-claim-signing-consumed-v2")
+        || exact_wrapped_hex(
+            value,
+            ".",
+            64,
+            ".post-anchor-claim-signing-consumed-v2.staging",
+        )
         || exact_wrapped_hex(value, "", 64, ".post-anchor-claim-signing-binding")
         || exact_wrapped_hex(value, ".", 64, ".post-anchor-claim-signing-binding.staging")
+        || exact_wrapped_hex(value, "", 64, ".post-anchor-claim-signing-binding-v2")
+        || exact_wrapped_hex(
+            value,
+            ".",
+            64,
+            ".post-anchor-claim-signing-binding-v2.staging",
+        )
         || exact_wrapped_hex(value, "", 64, ".post-anchor-claim-pre-signature")
         || exact_wrapped_hex(value, ".", 64, ".post-anchor-claim-pre-signature.staging")
+        || exact_wrapped_hex(value, "", 64, ".post-anchor-claim-pre-signature-v2")
+        || exact_wrapped_hex(
+            value,
+            ".",
+            64,
+            ".post-anchor-claim-pre-signature-v2.staging",
+        )
+        || exact_wrapped_hex(value, "", 64, ".operational-final-refund")
+        || exact_wrapped_hex(value, ".", 64, ".operational-final-refund.staging")
+        || exact_wrapped_hex(value, "", 64, ".operational-final-refund-v2")
+        || exact_wrapped_hex(value, ".", 64, ".operational-final-refund-v2.staging")
+        || exact_wrapped_hex(value, "", 64, ".operational-final-claim-exposure-v2")
+        || exact_wrapped_hex(
+            value,
+            ".",
+            64,
+            ".operational-final-claim-exposure-v2.staging",
+        )
+        || exact_wrapped_hex(value, "", 64, ".operational-final-claim-admission-v2")
+        || exact_wrapped_hex(
+            value,
+            ".",
+            64,
+            ".operational-final-claim-admission-v2.staging",
+        )
+        || exact_wrapped_hex(value, "", 64, ".operational-final-claim-observation-v2")
+        || exact_wrapped_hex(
+            value,
+            ".",
+            64,
+            ".operational-final-claim-observation-v2.staging",
+        )
         || exact_wrapped_hex(value, "", 64, ".funding-consumed")
         || exact_wrapped_hex(value, ".", 64, ".funding-consumed.staging")
         || exact_wrapped_hex(value, "", 64, ".transport-roster")
         || exact_wrapped_hex(value, ".", 64, ".transport-roster.staging")
         || exact_wrapped_hex(value, "", 64, ".transport-identities")
         || exact_wrapped_hex(value, ".", 64, ".transport-identities.staging")
+        || exact_wrapped_hex(value, "", 64, ".local-transport-signer")
+        || exact_wrapped_hex(value, ".", 64, ".local-transport-signer.staging")
+        || exact_wrapped_hex(value, "", 64, ".early-transport-authority")
+        || exact_wrapped_hex(value, ".", 64, ".early-transport-authority.staging")
+        || exact_wrapped_hex(value, "", 64, ".bp-transport-authority")
+        || exact_wrapped_hex(value, ".", 64, ".bp-transport-authority.staging")
+        || exact_wrapped_hex(value, "", 64, ".template-transport-authority")
+        || exact_wrapped_hex(value, ".", 64, ".template-transport-authority.staging")
+        || exact_wrapped_hex(value, "", 64, ".operational-abort-authority")
+        || exact_wrapped_hex(value, ".", 64, ".operational-abort-authority.staging")
         || exact_wrapped_hex(value, "", 64, ".reservation-lookup")
         || exact_wrapped_hex(value, ".", 64, ".reservation-lookup.staging")
         || exact_wrapped_hex(value, "", 64, ".reservation-abandoned")
@@ -1082,6 +1272,12 @@ fn classify_dynamic_component(value: &str) -> Option<ExpectedNodeType> {
         || transport_message_component(value, true, false)
         || transport_message_component(value, false, true)
         || transport_message_component(value, true, true)
+        || outbound_dsc1_component(value, false, false)
+        || outbound_dsc1_component(value, true, false)
+        || outbound_dsc1_component(value, false, true)
+        || outbound_dsc1_component(value, true, true)
+        || outbound_dsc1_reconciled_component(value, false)
+        || outbound_dsc1_reconciled_component(value, true)
     {
         return Some(ExpectedNodeType::RegularFile);
     }
@@ -1120,6 +1316,51 @@ fn transport_message_component(value: &str, staging: bool, equivocation: bool) -
         }
     } else {
         terminal
+    };
+    let expected = prefix.len() + 64 + 1 + 64 + 1 + 20 + suffix.len();
+    value.len() == expected
+        && value.starts_with(prefix)
+        && value.ends_with(suffix)
+        && is_lower_hex(&value[prefix.len()..prefix.len() + 64], 64)
+        && value.as_bytes()[prefix.len() + 64] == b'-'
+        && is_lower_hex(&value[prefix.len() + 65..prefix.len() + 129], 64)
+        && value.as_bytes()[prefix.len() + 129] == b'-'
+        && is_decimal(&value[prefix.len() + 130..prefix.len() + 150], 20)
+}
+
+fn outbound_dsc1_component(value: &str, staging: bool, committed: bool) -> bool {
+    let prefix = if staging { "." } else { "" };
+    let terminal = if committed {
+        ".outbound-dsc1-committed"
+    } else {
+        ".outbound-dsc1-request"
+    };
+    let suffix = if staging {
+        if committed {
+            ".outbound-dsc1-committed.staging"
+        } else {
+            ".outbound-dsc1-request.staging"
+        }
+    } else {
+        terminal
+    };
+    let expected = prefix.len() + 64 + 1 + 64 + 1 + 20 + suffix.len();
+    value.len() == expected
+        && value.starts_with(prefix)
+        && value.ends_with(suffix)
+        && is_lower_hex(&value[prefix.len()..prefix.len() + 64], 64)
+        && value.as_bytes()[prefix.len() + 64] == b'-'
+        && is_lower_hex(&value[prefix.len() + 65..prefix.len() + 129], 64)
+        && value.as_bytes()[prefix.len() + 129] == b'-'
+        && is_decimal(&value[prefix.len() + 130..prefix.len() + 150], 20)
+}
+
+fn outbound_dsc1_reconciled_component(value: &str, staging: bool) -> bool {
+    let prefix = if staging { "." } else { "" };
+    let suffix = if staging {
+        ".outbound-dsc1-reconciled.staging"
+    } else {
+        ".outbound-dsc1-reconciled"
     };
     let expected = prefix.len() + 64 + 1 + 64 + 1 + 20 + suffix.len();
     value.len() == expected
@@ -1700,6 +1941,57 @@ mod tests {
             )?,
             b"replacement"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn retained_directory_mutators_refuse_renamed_root_before_any_effect(
+    ) -> Result<(), Box<dyn Error>> {
+        let (temporary, root) = create_root()?;
+        let staging = ValidatedComponent::registered(".active-vault-generation.staging")?;
+        let active = ValidatedComponent::registered("active-vault-generation")?;
+        let unlink = ValidatedComponent::registered("restore-only-root.bin")?;
+        let retained_staging = root.create_immutable_file(&staging, b"staged")?;
+        let retained_unlink = root.create_immutable_file(&unlink, b"must-survive")?;
+        let canonical = temporary.path().join("contracts-store");
+        let displaced = temporary.path().join("contracts-store-displaced");
+        fs::rename(&canonical, &displaced)?;
+        fs::create_dir(&canonical)?;
+        fs::set_permissions(&canonical, fs::Permissions::from_mode(DIRECTORY_MODE))?;
+
+        let fresh_file = ValidatedComponent::registered("store-root-identity.bin")?;
+        assert_eq!(
+            root.create_immutable_file(&fresh_file, b"must-not-publish")
+                .map(|_| ()),
+            Err(LinuxCapabilityError::IdentityMismatch)
+        );
+        assert_eq!(
+            root.create_child_directory(ValidatedComponent::registered("journal")?)
+                .map(|_| ()),
+            Err(LinuxCapabilityError::IdentityMismatch)
+        );
+        assert_eq!(
+            root.rename_no_replace(&staging, &active, &retained_staging),
+            Err(LinuxCapabilityError::IdentityMismatch)
+        );
+        assert_eq!(
+            root.replace_active_pointer(&staging, &active, &retained_staging),
+            Err(LinuxCapabilityError::IdentityMismatch)
+        );
+        assert_eq!(
+            root.unlink_verified_file(&unlink, &retained_unlink),
+            Err(LinuxCapabilityError::IdentityMismatch)
+        );
+
+        assert!(!canonical.join(fresh_file.as_str()).exists());
+        assert!(!displaced.join(fresh_file.as_str()).exists());
+        assert!(!canonical.join("journal").exists());
+        assert!(!displaced.join("journal").exists());
+        assert!(!canonical.join(active.as_str()).exists());
+        assert!(!displaced.join(active.as_str()).exists());
+        assert_eq!(fs::read(displaced.join(staging.as_str()))?, b"staged");
+        assert_eq!(fs::read(displaced.join(unlink.as_str()))?, b"must-survive");
+        assert!(fs::read_dir(&canonical)?.next().is_none());
         Ok(())
     }
 

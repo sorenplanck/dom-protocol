@@ -481,7 +481,7 @@ impl SimChain {
                     },
                     SimTx::Claim { lock_id, revealed } => ObservedEvent::LockClaimed {
                         lock_id: *lock_id,
-                        revealed: RevealedSecretBytes(*revealed),
+                        revealed: RevealedSecretBytes::new(*revealed),
                         height: b.height,
                     },
                     SimTx::Refund { lock_id, .. } => ObservedEvent::LockRefunded {
@@ -810,13 +810,20 @@ mod tests {
             ev1[0],
             ObservedEvent::LockOpened { height: 1, .. }
         ));
+        // Matched through a guard rather than a tuple-struct pattern. Stage 2
+        // of the `RevealedSecretBytes` migration makes the field private, and a
+        // tuple pattern is the one use of that field with **no** constructor
+        // equivalent — `new` builds values, it cannot destructure. Written this
+        // way the assertion is identical today and survives that day; written
+        // the old way it would have been the single site in the workspace that
+        // stage 2 could not mechanically convert.
         assert!(matches!(
-            ev1[1],
+            &ev1[1],
             ObservedEvent::LockClaimed {
-                revealed: RevealedSecretBytes(SECRET),
+                revealed,
                 height: 2,
                 ..
-            }
+            } if *revealed == RevealedSecretBytes::new(SECRET)
         ));
         // Same cursor => same events (determinism/idempotency).
         let (ev1b, _) = c.scan(&ChainCursor::default());

@@ -228,10 +228,13 @@ pub fn admissibility(
         }
     }
     // §4.1.4 + AD-1.2 — the consolidated fee against the ratified caps.
-    let fee_cap = rfq
+    let Some(fee_cap) = rfq
         .fee_limit
         .dom_max
-        .saturating_add(rfq.fee_limit.counterparty_max);
+        .checked_add(rfq.fee_limit.counterparty_max)
+    else {
+        return Err(AdmissibilityRefusal::FeeAboveLimit);
+    };
     if quote.total_fee > fee_cap {
         return Err(AdmissibilityRefusal::FeeAboveLimit);
     }
@@ -486,6 +489,26 @@ mod tests {
         assert_eq!(
             select_winner(&rfq, &[(a, facts()), (b, facts())], DOM, ts(500)).unwrap_err(),
             SelectionError::TieUnresolved
+        );
+    }
+
+    #[test]
+    fn overflowing_fee_cap_refuses_instead_of_saturating() {
+        let mut rfq = sample_rfq(dom_route());
+        rfq.fee_limit = FeeLimitV1 {
+            dom_max: u128::MAX,
+            counterparty_max: 1,
+        };
+        // Recompute the self-authenticating id after changing the RFQ.
+        rfq.rfq_id = rfq.derive_id().unwrap();
+
+        let mut candidate = quote(&rfq, 95, 6);
+        candidate.total_fee = u128::MAX;
+        candidate.quote_id = candidate.derive_id().unwrap();
+
+        assert_eq!(
+            admissibility(&rfq, &candidate, &facts(), DOM, ts(500)).unwrap_err(),
+            AdmissibilityRefusal::FeeAboveLimit
         );
     }
 }

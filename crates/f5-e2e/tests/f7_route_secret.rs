@@ -104,14 +104,14 @@ fn authorization(terms_hash: [u8; 32]) -> adapter_btc::timelock::AnchoredCrossCh
 
 fn point(secret: &RevealedSecretBytes) -> AdaptorPointBytes {
     let secp = Secp256k1::new();
-    let key = SecretKey::from_slice(&secret.0).unwrap();
+    let key = SecretKey::from_slice(&secret.expose_scalar_bytes()).unwrap();
     AdaptorPointBytes(PublicKey::from_secret_key(&secp, &key).serialize())
 }
 
 #[test]
 fn same_route_secret_crosses_the_m8_gated_claim_and_delayed_extraction() {
     let terms_hash = [0x13; 32];
-    let revealed = RevealedSecretBytes([0x2b; 32]);
+    let revealed = RevealedSecretBytes::new([0x2b; 32]);
     let adaptor_point = point(&revealed);
     let funding = FundingRef {
         txid: [0x91; 32],
@@ -188,8 +188,8 @@ fn same_route_secret_crosses_the_m8_gated_claim_and_delayed_extraction() {
             .is_err()
     );
 
-    assert_secret_not_persisted(&vault_one, &revealed.0);
-    assert_secret_not_persisted(&vault_two, &revealed.0);
+    assert_secret_not_persisted(&vault_one, &revealed.expose_scalar_bytes());
+    assert_secret_not_persisted(&vault_two, &revealed.expose_scalar_bytes());
 
     remove_vault(&vault_one);
     remove_vault(&vault_two);
@@ -198,7 +198,7 @@ fn same_route_secret_crosses_the_m8_gated_claim_and_delayed_extraction() {
 #[test]
 fn prepared_route_continuation_rejects_tamper_and_cross_route_replay() {
     let terms_hash = [0x33; 32];
-    let secret = RevealedSecretBytes([0x2b; 32]);
+    let secret = RevealedSecretBytes::new([0x2b; 32]);
     let adaptor_point = point(&secret);
     let funding = FundingRef {
         txid: [0xa2; 32],
@@ -256,8 +256,8 @@ fn prepared_route_continuation_rejects_tamper_and_cross_route_replay() {
 #[test]
 fn prepared_route_rejects_a_secret_revealed_by_another_route() {
     let terms_hash = [0x13; 32];
-    let expected = RevealedSecretBytes([0x2b; 32]);
-    let wrong_route = RevealedSecretBytes([0x2c; 32]);
+    let expected = RevealedSecretBytes::new([0x2b; 32]);
+    let wrong_route = RevealedSecretBytes::new([0x2c; 32]);
     let funding = FundingRef {
         txid: [0x92; 32],
         vout: 1,
@@ -295,8 +295,8 @@ fn prepared_route_rejects_a_secret_revealed_by_another_route() {
 #[test]
 fn mismatched_t_and_t_point_fail_before_vault_creation() {
     let terms_hash = [0x13; 32];
-    let revealed = RevealedSecretBytes([0x2b; 32]);
-    let other_point = point(&RevealedSecretBytes([0x2c; 32]));
+    let revealed = RevealedSecretBytes::new([0x2b; 32]);
+    let other_point = point(&RevealedSecretBytes::new([0x2c; 32]));
     let funding = FundingRef {
         txid: [0x91; 32],
         vout: 0,

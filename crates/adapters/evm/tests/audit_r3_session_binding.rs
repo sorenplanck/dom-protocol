@@ -38,8 +38,8 @@ mod common;
 use adapter_evm::adapter::test_support::{sample_config, sample_terms};
 use adapter_evm::rpc::EthClient;
 use adapter_evm::{
-    adaptor_address_of_scalar, derive_binding, derive_lock_id, EvidenceKind, EvmAdapterConfig,
-    EvmEvidence,
+    adaptor_address_of_scalar, derive_binding, derive_lock_id, EvidenceKind, EvidencePayload,
+    EvmAdapterConfig, EvmEvidence,
 };
 use counterparty_api::AdapterError;
 
@@ -83,7 +83,7 @@ fn coherent_claim(
         log_index: 0,
         finalized_height: 7,
         finalized_block_hash: [0x53; 32],
-        payload: t,
+        payload: EvidencePayload::ClaimedScalar(t),
     }
 }
 
@@ -181,7 +181,7 @@ fn the_adapter_must_not_verify_another_sessions_settlement_end_to_end() {
         log_index: log.log_index,
         finalized_height: head.height,
         finalized_block_hash: head.hash,
-        payload: s.secret,
+        payload: EvidencePayload::ClaimedScalar(s.secret),
     };
 
     let outcome = s.adapter().verify_evidence_blocking(&evidence.encode());

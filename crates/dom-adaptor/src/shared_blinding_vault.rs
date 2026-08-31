@@ -271,6 +271,74 @@ impl fmt::Debug for SharedBlindingBindingV1 {
     }
 }
 
+/// Linear process-local witness for one authenticated bound-share backup.
+///
+/// This witness can only be obtained by consuming the acknowledgement retained
+/// by [`SessionBlindingShareCapabilityV1`] after the selected vault completed
+/// its authenticated backup roundtrip. It owns the complete public binding and
+/// the matching public acknowledgement, but contains no blinding scalar,
+/// backup plaintext or ciphertext, key, nonce, or recovery-capsule bytes.
+///
+/// It deliberately has no public constructor, codec, `Clone`, `Copy`, `Debug`,
+/// equality, or dereference implementation. A durable consumer must accept it
+/// by value and persist independently auditable public facts rather than try to
+/// recreate authority from bytes.
+///
+/// ```compile_fail
+/// use dom_adaptor::{BoundShareBackupAckV2, ShareBackupAckV1, SharedBlindingBindingV1};
+///
+/// fn forge(binding: SharedBlindingBindingV1, acknowledgement: ShareBackupAckV1) {
+///     let _ = BoundShareBackupAckV2::from_authenticated_roundtrip(
+///         binding,
+///         acknowledgement,
+///     );
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use dom_adaptor::BoundShareBackupAckV2;
+///
+/// fn serialize(authority: BoundShareBackupAckV2) {
+///     let _ = authority.to_bytes();
+/// }
+/// ```
+pub struct BoundShareBackupAckV2 {
+    binding: SharedBlindingBindingV1,
+    acknowledgement: ShareBackupAckV1,
+}
+
+impl BoundShareBackupAckV2 {
+    fn from_authenticated_roundtrip(
+        binding: SharedBlindingBindingV1,
+        acknowledgement: ShareBackupAckV1,
+    ) -> Result<Self> {
+        if acknowledgement.participant_index() != binding.participant_index()
+            || acknowledgement.share_point() != binding.share_point()
+        {
+            return Err(AdaptorError::AuthorizationMismatch);
+        }
+        Ok(Self {
+            binding,
+            acknowledgement,
+        })
+    }
+
+    /// Complete authenticated public identity of the backed-up share.
+    pub const fn binding(&self) -> &SharedBlindingBindingV1 {
+        &self.binding
+    }
+
+    /// Canonical participant index recovered by the backup roundtrip.
+    pub const fn participant_index(&self) -> u16 {
+        self.acknowledgement.participant_index()
+    }
+
+    /// Public point independently reproduced from the authenticated backup.
+    pub const fn recovered_share_point(&self) -> &PublicKey {
+        self.acknowledgement.share_point()
+    }
+}
+
 /// Public restart context for locating one participant's durable shared
 /// blinding without caller knowledge of `R_i` or the recovery capsule.
 ///
@@ -1252,6 +1320,21 @@ impl SessionBlindingShareCapabilityV1 {
         ))
     }
 
+    /// Consume the authenticated backup acknowledgement into its complete
+    /// capsule-bound V2 authority exactly once.
+    ///
+    /// The acknowledgement was minted only after the selected vault recovered
+    /// the AEAD-authenticated backup and reproduced this capability's public
+    /// share point. The complete binding is captured here rather than accepted
+    /// from a caller, so a legacy acknowledgement cannot be re-paired with a
+    /// different session.
+    pub fn take_bound_durable_backup_ack_v2(&mut self) -> Result<BoundShareBackupAckV2> {
+        let acknowledgement = self.backup_ack.take().ok_or(AdaptorError::InvalidContext(
+            "durable shared-blinding backup acknowledgement was already consumed",
+        ))?;
+        BoundShareBackupAckV2::from_authenticated_roundtrip(self.binding.clone(), acknowledgement)
+    }
+
     /// Request terminal retirement of this exact capsule-bound record.
     ///
     /// The selected Store must reject this call until it has independently
@@ -1438,6 +1521,9 @@ mod tests {
         aggregate_shared_commitment_v1, combine_decoy_capsule_v1, BpStatementV1,
         DomCollaborativeRangeProofV1,
     };
+    use static_assertions::assert_not_impl_any;
+
+    assert_not_impl_any!(BoundShareBackupAckV2: Clone, Copy, fmt::Debug, PartialEq, Eq, core::ops::Deref);
 
     #[derive(Debug, thiserror::Error)]
     #[error("test shared-blinding vault rejected operation")]
@@ -1703,6 +1789,133 @@ mod tests {
             &remote_commitment,
         )
         .expect("capsule")
+    }
+
+    fn bound_share_fixture(
+        session_id: [u8; 32],
+        terms_hash: [u8; 32],
+    ) -> SessionBlindingShareCapabilityV1 {
+        let (chain, roster) = fixture();
+        let mut vault = TestVault::default();
+        let pending = contribute_vault_backed_blinding_share_v1(
+            &chain,
+            session_id,
+            &roster,
+            DirectionV1::Initiator,
+            0,
+            terms_hash,
+            &mut vault,
+        )
+        .expect("pending share");
+        let capsule = capsule_for(&pending, 7);
+        pending
+            .bind_recovery_capsule_v1(&capsule, &mut vault)
+            .expect("bound share")
+    }
+
+    fn deterministic_capsule() -> RecoveryCapsule {
+        let session = SessionId::from_bytes([0x61; 32]).expect("capsule session");
+        let local_share = SigningShareV1::from_be_bytes(scalar(8)).expect("local share");
+        let remote_share = SigningShareV1::from_be_bytes(scalar(9)).expect("remote share");
+        let local = DecoyContributionV1::derive(&local_share, &session);
+        let remote = DecoyContributionV1::derive(&remote_share, &session);
+        let remote_commitment = remote.commitment();
+        combine_decoy_capsule_v1(
+            &local.into_reveal(),
+            &remote.into_reveal(),
+            &remote_commitment,
+        )
+        .expect("deterministic capsule")
+    }
+
+    fn deterministic_bound_share_capability(
+        session_id: [u8; 32],
+        terms_hash: [u8; 32],
+        capsule: &RecoveryCapsule,
+    ) -> SessionBlindingShareCapabilityV1 {
+        let (chain, roster) = fixture();
+        let signing_share = SigningShareV1::from_be_bytes(scalar(10)).expect("signing share");
+        let pending = PendingSharedBlindingBindingV1::new(
+            &chain,
+            session_id,
+            &roster,
+            DirectionV1::Initiator,
+            0,
+            terms_hash,
+            signing_share.public_key().clone(),
+        )
+        .expect("pending binding");
+        let binding = SharedBlindingBindingV1::bind_recovery_capsule(&pending, capsule);
+        let backup_ack = ShareBackupAckV1::new_durable(0, signing_share.public_key().clone());
+        SessionBlindingShareCapabilityV1 {
+            binding,
+            signing_share,
+            backup_ack: Some(backup_ack),
+        }
+    }
+
+    #[test]
+    fn bound_backup_ack_v2_is_linear_and_keeps_the_complete_binding() {
+        let mut share = bound_share_fixture([0x22; 32], [0x51; 32]);
+        let expected_binding = share.binding().clone();
+        let expected_point = share.public_key().clone();
+
+        let acknowledgement = share
+            .take_bound_durable_backup_ack_v2()
+            .expect("bound backup acknowledgement");
+
+        assert_eq!(acknowledgement.binding(), &expected_binding);
+        assert_eq!(
+            acknowledgement.participant_index(),
+            expected_binding.participant_index()
+        );
+        assert_eq!(acknowledgement.recovered_share_point(), &expected_point);
+        assert_eq!(share.public_key(), &expected_point);
+        assert!(share.take_bound_durable_backup_ack_v2().is_err());
+        assert!(share.take_durable_backup_ack_v1().is_err());
+    }
+
+    #[test]
+    fn bound_backup_ack_v2_keeps_same_point_sessions_disjoint() {
+        let capsule = deterministic_capsule();
+        let mut share_a = deterministic_bound_share_capability([0x22; 32], [0x51; 32], &capsule);
+        let mut share_b = deterministic_bound_share_capability([0x23; 32], [0x52; 32], &capsule);
+        assert_eq!(share_a.public_key(), share_b.public_key());
+        assert_eq!(
+            share_a.binding().participant_index(),
+            share_b.binding().participant_index()
+        );
+
+        let expected_a = share_a.binding().clone();
+        let expected_b = share_b.binding().clone();
+        let acknowledgement_a = share_a
+            .take_bound_durable_backup_ack_v2()
+            .expect("bound acknowledgement A");
+        let acknowledgement_b = share_b
+            .take_bound_durable_backup_ack_v2()
+            .expect("bound acknowledgement B");
+
+        assert_eq!(acknowledgement_a.binding(), &expected_a);
+        assert_eq!(acknowledgement_b.binding(), &expected_b);
+        assert_eq!(
+            acknowledgement_a.recovered_share_point(),
+            acknowledgement_b.recovered_share_point()
+        );
+        assert_ne!(expected_a.session_id(), expected_b.session_id());
+        assert_ne!(expected_a.terms_hash(), expected_b.terms_hash());
+        assert_ne!(
+            expected_a.binding_digest_v1(),
+            expected_b.binding_digest_v1()
+        );
+    }
+
+    #[test]
+    fn bound_backup_ack_v2_is_unavailable_after_legacy_ack_take() {
+        let mut share = bound_share_fixture([0x22; 32], [0x51; 32]);
+        share
+            .take_durable_backup_ack_v1()
+            .expect("legacy acknowledgement");
+        assert!(share.take_bound_durable_backup_ack_v2().is_err());
     }
 
     #[test]

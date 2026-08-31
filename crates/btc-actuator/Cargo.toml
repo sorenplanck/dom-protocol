@@ -1,0 +1,48 @@
+[package]
+name = "btc-actuator"
+description = "Participant-separated durable Bitcoin actuator for DOM interoperability"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rpc-http = ["dep:reqwest", "dep:serde", "dep:serde_json"]
+
+[dependencies]
+adapter-btc = { path = "../adapters/btc" }
+adapter-btc-live = { path = "../adapters/btc-live" }
+bitcoin = "=0.32.5"
+blake2 = { version = "=0.10.6", default-features = false }
+btc-crypto = { path = "../adapters/btc-crypto" }
+btc-vault = { path = "../adapters/btc-vault" }
+chain-profile = { path = "../chain-profile" }
+counterparty-api = { workspace = true }
+deployment-registry = { path = "../deployment-registry" }
+getrandom = "=0.2.16"
+reqwest = { workspace = true, optional = true }
+rusqlite = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "=1.1.4", default-features = false, features = ["fs", "process"] }
+
+[dev-dependencies]
+kaystra-core = { path = "../kaystra-core" }
+tempfile = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"

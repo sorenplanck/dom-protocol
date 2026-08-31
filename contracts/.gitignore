@@ -1,0 +1,10 @@
+# Foundry build artifacts and vendored dependencies.
+# `lib/` is populated by `forge install --no-git` with exact tags:
+#   OpenZeppelin/openzeppelin-contracts@v5.1.0
+#   foundry-rs/forge-std@v1.9.6
+out/
+cache/
+lib/
+broadcast/
+__pycache__/
+*.py[cod]

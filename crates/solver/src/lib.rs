@@ -227,10 +227,13 @@ impl ReferenceSolverV1 {
 
         // The RFQ's consolidated fee cap (§4.1.4 + AD-1.2), refused
         // HERE rather than emitted for the initiator to reject.
-        let fee_cap = rfq
+        let Some(fee_cap) = rfq
             .fee_limit
             .dom_max
-            .saturating_add(rfq.fee_limit.counterparty_max);
+            .checked_add(rfq.fee_limit.counterparty_max)
+        else {
+            return Err(SolverRefusal::FeeAboveLimit);
+        };
         if total_fee > fee_cap {
             return Err(SolverRefusal::FeeAboveLimit);
         }

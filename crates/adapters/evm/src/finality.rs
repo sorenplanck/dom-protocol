@@ -98,7 +98,12 @@ pub fn fetch_finalized_checked<R: JsonRpc + ?Sized>(
         // guess.
         Err(_) => return Err(RejectReason::FinalizedHeaderMalformed),
     };
-    if header.hash == [0u8; 32] {
+    // The cursor stores the *next* height to scan. At `u64::MAX` that
+    // successor is unrepresentable and the paginated loops would otherwise
+    // keep scanning the same final page forever (`saturating_add(1)`). A
+    // hostile endpoint must not be able to turn a syntactically valid header
+    // into an infinite observer loop.
+    if header.hash == [0u8; 32] || header.number == u64::MAX {
         return Err(RejectReason::FinalizedHeaderMalformed);
     }
     Ok(FinalizedHead {
@@ -131,6 +136,20 @@ pub fn clamp_to_finalized(requested_to: u64, finalized: &FinalizedHead) -> u64 {
 mod tests {
     use super::*;
     use crate::mock::MockChain;
+    use serde_json::{json, Value};
+
+    struct MaxHeightRpc;
+
+    impl JsonRpc for MaxHeightRpc {
+        fn call(&self, method: &str, _params: Value) -> Result<Value> {
+            assert_eq!(method, "eth_getBlockByNumber");
+            Ok(json!({
+                "number": "0xffffffffffffffff",
+                "hash": "0x0101010101010101010101010101010101010101010101010101010101010101",
+                "parentHash": "0x0202020202020202020202020202020202020202020202020202020202020202"
+            }))
+        }
+    }
 
     #[test]
     fn finalized_head_is_read_from_the_tag() {
@@ -193,6 +212,14 @@ mod tests {
         assert_eq!(
             fetch_finalized(&chain),
             Err(AdapterError::AdapterUnavailable)
+        );
+    }
+
+    #[test]
+    fn a_finalized_height_without_a_representable_successor_is_malformed() {
+        assert_eq!(
+            fetch_finalized_checked(&MaxHeightRpc),
+            Err(RejectReason::FinalizedHeaderMalformed)
         );
     }
 
