@@ -54,7 +54,12 @@ use crate::production_child_solana::{
 use crate::production_child_xmr::{ProductionXmrChildPortV1, SystemProductionXmrChildClockV1};
 use crate::production_config::{read_owner_file_bounded, ProductionConfigErrorV1};
 use crate::production_inputs::AuthenticatedProductionInputsV1;
-use crate::production_refund_arming::production_bitcoin_refund_route_binding_v1;
+use crate::production_refund_arming::{
+    production_bitcoin_refund_route_binding_v1, ProductionBitcoinRefundFaceV1,
+    ProductionCounterpartyRefundFaceV1, ProductionEvmRefundFaceV1, ProductionSolanaRefundFaceV1,
+    ProductionXmrRefundFaceV1,
+};
+use xmr_refund_policy::XmrRefundArtifactV1;
 
 const ENDPOINTS_MAGIC_V1: &[u8; 8] = b"DOMCEND1";
 const ENDPOINTS_VERSION_V1: u16 = 1;
@@ -93,6 +98,10 @@ pub(crate) enum ProductionChildCompositionErrorV1 {
     /// A child constructor refused its authenticated inputs.
     #[error("counterparty child construction refused")]
     Child,
+    /// The Monero leg carries no registered refund arm, so its refund face
+    /// cannot exist without inventing one.
+    #[error("Monero refund arm is not registered in the participant bundle")]
+    RefundArmNotRegistered,
 }
 
 /// Endpoint set for one EVM face.
@@ -499,6 +508,10 @@ pub(crate) struct ProductionCounterpartyChildrenV1 {
     pub(crate) bitcoin: Option<AuthenticatedBitcoinChildPortV1>,
     pub(crate) solana: Option<AuthenticatedSolanaChildPortV1>,
     pub(crate) monero: Option<AuthenticatedXmrChildPortV1>,
+    /// Per-leg counterparty refund faces, in [upstream, downstream] order,
+    /// built from the same authorities as the children so exclusive stores
+    /// are opened exactly once.
+    pub(crate) refund_faces: [Option<ProductionCounterpartyRefundFaceV1>; 2],
 }
 
 impl core::fmt::Debug for ProductionCounterpartyChildrenV1 {
@@ -509,6 +522,13 @@ impl core::fmt::Debug for ProductionCounterpartyChildrenV1 {
             .field("bitcoin", &self.bitcoin.is_some())
             .field("solana", &self.solana.is_some())
             .field("monero", &self.monero.is_some())
+            .field(
+                "refund_faces",
+                &[
+                    self.refund_faces[0].is_some(),
+                    self.refund_faces[1].is_some(),
+                ],
+            )
             .finish()
     }
 }
@@ -549,6 +569,7 @@ pub(crate) struct ProductionCounterpartyCompositionRequestV1<'a> {
     pub(crate) owner_id: Digest32,
     pub(crate) now_unix_ms: u64,
     pub(crate) actuator_lease_ms: u64,
+    pub(crate) external_call_timeout_ms: u64,
 }
 
 /// Composes the counterparty children for exactly the authenticated legs.
@@ -566,8 +587,12 @@ pub(crate) fn compose_production_counterparty_children_v1(
         bitcoin: None,
         solana: None,
         monero: None,
+        refund_faces: [None, None],
     };
-    for leg in [LegIdV1::Upstream, LegIdV1::Downstream] {
+    for (index, leg) in [LegIdV1::Upstream, LegIdV1::Downstream]
+        .into_iter()
+        .enumerate()
+    {
         if inputs.evm_session(leg).is_some() {
             if children.evm.is_some() {
                 // One durable EVM child carries one settlement; a route with
@@ -575,22 +600,30 @@ pub(crate) fn compose_production_counterparty_children_v1(
                 // provision. Refused, never split silently.
                 return Err(ProductionChildCompositionErrorV1::Capability);
             }
-            children.evm = Some(compose_evm_child(&mut request, leg)?);
+            let (child, face) = compose_evm_child(&mut request, leg)?;
+            children.evm = Some(child);
+            children.refund_faces[index] = Some(face);
         } else if inputs.bitcoin_session(leg).is_some() {
             if children.bitcoin.is_some() {
                 return Err(ProductionChildCompositionErrorV1::Capability);
             }
-            children.bitcoin = Some(compose_bitcoin_child(&mut request, leg)?);
+            let (child, face) = compose_bitcoin_child(&mut request, leg)?;
+            children.bitcoin = Some(child);
+            children.refund_faces[index] = Some(face);
         } else if inputs.solana_session(leg).is_some() {
             if children.solana.is_some() {
                 return Err(ProductionChildCompositionErrorV1::Capability);
             }
-            children.solana = Some(compose_solana_child(&mut request, leg, route_id)?);
+            let (child, face) = compose_solana_child(&mut request, leg, route_id)?;
+            children.solana = Some(child);
+            children.refund_faces[index] = Some(face);
         } else if inputs.monero_session(leg).is_some() {
             if children.monero.is_some() {
                 return Err(ProductionChildCompositionErrorV1::Capability);
             }
-            children.monero = Some(compose_monero_child(&mut request, leg, route_id)?);
+            let (child, face) = compose_monero_child(&mut request, leg, route_id)?;
+            children.monero = Some(child);
+            children.refund_faces[index] = Some(face);
         } else {
             return Err(ProductionChildCompositionErrorV1::Capability);
         }
@@ -617,7 +650,13 @@ fn leg_settlement_id(inputs: &AuthenticatedProductionInputsV1, leg: LegIdV1) -> 
 fn compose_evm_child(
     request: &mut ProductionCounterpartyCompositionRequestV1<'_>,
     leg: LegIdV1,
-) -> Result<AuthenticatedEvmChildPortV1, ProductionChildCompositionErrorV1> {
+) -> Result<
+    (
+        AuthenticatedEvmChildPortV1,
+        ProductionCounterpartyRefundFaceV1,
+    ),
+    ProductionChildCompositionErrorV1,
+> {
     let inputs = request.inputs;
     let session = inputs
         .evm_session(leg)
@@ -657,6 +696,10 @@ fn compose_evm_child(
         )
         .map_err(|_| ProductionChildCompositionErrorV1::Store)?
         .lease();
+    let timeout_seconds = request.external_call_timeout_ms.div_ceil(1000).max(1);
+    let face =
+        ProductionEvmRefundFaceV1::connect(endpoints.url.clone(), timeout_seconds, deployment)
+            .map_err(|_| ProductionChildCompositionErrorV1::Child)?;
     let port = crate::production_child_evm::ProductionEvmChildPortV1::new(
         actuator,
         rpc,
@@ -667,13 +710,22 @@ fn compose_evm_child(
         leg_settlement_id(inputs, leg),
     )
     .map_err(|_| ProductionChildCompositionErrorV1::Child)?;
-    Ok(ProductionSettlementChildRouterV1::authenticate_evm(port))
+    Ok((
+        ProductionSettlementChildRouterV1::authenticate_evm(port),
+        ProductionCounterpartyRefundFaceV1::Evm(face),
+    ))
 }
 
 fn compose_bitcoin_child(
     request: &mut ProductionCounterpartyCompositionRequestV1<'_>,
     leg: LegIdV1,
-) -> Result<AuthenticatedBitcoinChildPortV1, ProductionChildCompositionErrorV1> {
+) -> Result<
+    (
+        AuthenticatedBitcoinChildPortV1,
+        ProductionCounterpartyRefundFaceV1,
+    ),
+    ProductionChildCompositionErrorV1,
+> {
     let inputs = request.inputs;
     let admission = inputs.admission();
     let deployment = admission
@@ -734,6 +786,13 @@ fn compose_bitcoin_child(
     };
     let store = Rc::new(store);
     let client = Rc::new(client);
+    let face = ProductionBitcoinRefundFaceV1::new(
+        Rc::clone(&store),
+        Rc::clone(&client),
+        deployment.clone(),
+        &armed,
+    )
+    .map_err(|_| ProductionChildCompositionErrorV1::Child)?;
     let funding = ProductionBitcoinFundingAuthorityV1::new(
         Rc::clone(&store),
         Rc::clone(&client),
@@ -764,8 +823,9 @@ fn compose_bitcoin_child(
         funding,
     )
     .map_err(|_| ProductionChildCompositionErrorV1::Child)?;
-    Ok(ProductionSettlementChildRouterV1::authenticate_bitcoin(
-        port,
+    Ok((
+        ProductionSettlementChildRouterV1::authenticate_bitcoin(port),
+        ProductionCounterpartyRefundFaceV1::Bitcoin(face),
     ))
 }
 
@@ -773,7 +833,13 @@ fn compose_solana_child(
     request: &mut ProductionCounterpartyCompositionRequestV1<'_>,
     leg: LegIdV1,
     route_id: Digest32,
-) -> Result<AuthenticatedSolanaChildPortV1, ProductionChildCompositionErrorV1> {
+) -> Result<
+    (
+        AuthenticatedSolanaChildPortV1,
+        ProductionCounterpartyRefundFaceV1,
+    ),
+    ProductionChildCompositionErrorV1,
+> {
     let inputs = request.inputs;
     let session = inputs
         .solana_session(leg)
@@ -840,6 +906,12 @@ fn compose_solana_child(
         lease_until,
     )
     .map_err(|_| ProductionChildCompositionErrorV1::Store)?;
+    let face = ProductionSolanaRefundFaceV1::new(
+        pool.clone(),
+        session.setup().clone(),
+        deployment.clone(),
+    )
+    .map_err(|_| ProductionChildCompositionErrorV1::Child)?;
     let port = ProductionSolanaChildPortV1::new(
         actuator,
         pool,
@@ -850,14 +922,23 @@ fn compose_solana_child(
         SystemProductionSolanaChildClockV1,
     )
     .map_err(|_| ProductionChildCompositionErrorV1::Child)?;
-    Ok(ProductionSettlementChildRouterV1::authenticate_solana(port))
+    Ok((
+        ProductionSettlementChildRouterV1::authenticate_solana(port),
+        ProductionCounterpartyRefundFaceV1::Solana(face),
+    ))
 }
 
 fn compose_monero_child(
     request: &mut ProductionCounterpartyCompositionRequestV1<'_>,
     leg: LegIdV1,
     route_id: Digest32,
-) -> Result<AuthenticatedXmrChildPortV1, ProductionChildCompositionErrorV1> {
+) -> Result<
+    (
+        AuthenticatedXmrChildPortV1,
+        ProductionCounterpartyRefundFaceV1,
+    ),
+    ProductionChildCompositionErrorV1,
+> {
     let inputs = request.inputs;
     let session = inputs
         .monero_session(leg)
@@ -916,6 +997,22 @@ fn compose_monero_child(
         LegIdV1::Downstream => inputs.composition().downstream(),
     };
     let min_confirmations = u64::from(terms.counterparty_leg.finality.min_confirmations);
+    let refund_bundle = session
+        .refund_bundle()
+        .ok_or(ProductionChildCompositionErrorV1::RefundArmNotRegistered)?;
+    let face = ProductionXmrRefundFaceV1::new(
+        *session.profile(),
+        session.setup().clone(),
+        deployment.clone(),
+        refund_bundle.proof.clone(),
+        XmrRefundArtifactV1 {
+            template_hash: refund_bundle.template_hash,
+            adaptor_point_sec1: refund_bundle.adaptor_point_sec1,
+            executor_profile_hash: refund_bundle.executor_profile_hash,
+            deadline: refund_bundle.deadline,
+        },
+    )
+    .map_err(|_| ProductionChildCompositionErrorV1::Child)?;
     let port = ProductionXmrChildPortV1::new(
         actuator,
         broadcast,
@@ -927,7 +1024,10 @@ fn compose_monero_child(
         SystemProductionXmrChildClockV1,
     )
     .map_err(|_| ProductionChildCompositionErrorV1::Child)?;
-    Ok(ProductionSettlementChildRouterV1::authenticate_monero(port))
+    Ok((
+        ProductionSettlementChildRouterV1::authenticate_monero(port),
+        ProductionCounterpartyRefundFaceV1::Monero(face),
+    ))
 }
 
 #[cfg(test)]

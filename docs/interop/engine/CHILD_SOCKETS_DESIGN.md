@@ -280,3 +280,54 @@ exists, the full `ProductionSettlementChildRouterV1` is one call away.
 Remaining in `MISSING_PRODUCTION_PARTS_V1`: the runner, the timer, the
 refund-arming faces, F6, and — behind F6 — the DOM child that completes
 the router.
+
+## 11. Progress — F6, refund faces and the honest remaining gap (2026-09-01)
+
+This round took `MISSING_PRODUCTION_PARTS_V1` from six vague entries to a
+precise map, and closed or advanced most of them:
+
+1. **Counterparty refund faces (all four chains).** `production_refund_arming`
+   gained `ProductionSolanaRefundFaceV1` (verifies the `Funded` escrow state
+   at the quorum — the program *is* the armed refund, paying the pinned
+   recipient after the deadline permissionlessly) and
+   `ProductionXmrRefundFaceV1` (re-verifies the role-2 cross-curve
+   refund-share proof against the same economic context the shared-spend
+   setup used, and requires the executor artifact armed with exactly the
+   adaptor point that proof certifies). The receipt kind space is closed at
+   `{2,3,4,5}`. `compose_production_counterparty_children_v1` builds all four
+   faces from the same authorities as the children (one exclusive store
+   opening) and returns them in `ProductionCounterpartyChildrenV1::refund_faces`.
+   The Monero participant-bundle leg carries an optional refund arm
+   (role-2 proof + executor artifact), strictly encoded and authenticated.
+2. **Deadline timer.** `deadline_context_digest_v1` gives one canonical
+   context derivation; `compose_production_deadline_timer_v1` builds the
+   `ProductionDeadlineTimerAuthorityV1` from the two authenticated
+   counterparty deadlines. Fully composed in `run_production_v1`.
+3. **F6 — what exists and the one thing that does not.** The durable F6
+   port `ProductionSolverF6AuthorityV2` is a complete `F6TransportPortV1`
+   engine (3.9k lines), and `UnavailableF6AuthorityV1` is the fail-closed
+   alternative the codebase already sanctions for deployments that have not
+   wired F6 — it *blocks* F6 traffic rather than skipping it, so a route can
+   be composed and driven over it with F6 negotiation explicitly refused.
+   The **one genuine gap** is `ProductionF6TermsAuthorityV2`: it has only a
+   test `UnreachableTermsV2` impl. Building it is new cross-object
+   cryptographic authority code — RFQ/quote/terms authentication against a
+   real evidence source — **not composition glue**, and improvising it would
+   violate this crate's own rule against reporting progress it did not make.
+
+### The remaining interlocked block, stated plainly
+
+Removing `NotComposable` needs the settlement bridge, which needs the DOM
+child. The DOM child is composable **today** over `UnavailableF6AuthorityV1`
+— it needs the Relay worker (`DurableRelayWorkerV1::create`, provisioning
+stages 11–12), a Contracts opening (stage 10, already reached), the DOM
+node RPC runtime (one endpoint, to be added to the V4 chain-endpoints
+artifact), and the per-leg DOM session bindings (derivable via
+`DomSessionBindingV1::from_resolved_deployment`). That is bounded glue plus
+two provisioning stages. Served RFQ **negotiation** additionally needs the
+real `ProductionF6TermsAuthorityV2`, which is the true sub-project.
+
+So the honest state: everything below the settlement bridge is either
+composed or bounded glue with no missing authority, **except** the F6 terms
+source, which is genuine new cryptographic-authority work and the one place
+this round deliberately stops rather than improvise.

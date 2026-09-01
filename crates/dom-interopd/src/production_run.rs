@@ -44,7 +44,7 @@ use crate::production_config::{
 };
 use crate::production_inputs::{
     load_authenticated_production_inputs_v1,
-    load_authenticated_production_inputs_with_provisioning_v1,
+    load_authenticated_production_inputs_with_provisioning_v1, AuthenticatedProductionInputsV1,
 };
 use crate::production_node::read_production_secrets_from_stdin;
 use crate::production_plan_source::ProductionPublicSecretRetentionV1;
@@ -52,10 +52,15 @@ use crate::production_provisioning::{
     DurableProductionProvisioningJournalV1, ProductionProvisioningStageStateV1,
     ProductionProvisioningStageV1, ROUTE_SECRET_VAULT_ROOT_NAME_V1,
 };
+use crate::production_timer::{
+    deadline_context_digest_v1, ProductionDeadlineBindingV1, ProductionDeadlineTimerAuthorityV1,
+};
 use crate::supervisor::{
     ActionExternalizationReceiptV1, AuthorityRefusalV1, RunnerActionAuthority,
     RunnerActionRequestV1,
 };
+use kaystra_core::types::TimelockSpec;
+use route_executor::LegIdV1;
 
 // This fixed name contains the forbidden manifest-path label `secret`, so no
 // operator-controlled V1/V2/V3 path role can alias it. The composition root,
@@ -169,12 +174,12 @@ pub enum ProductionRunErrorV1 {
 /// measured, and the absence of each was confirmed across the workspace rather
 /// than assumed.
 pub const MISSING_PRODUCTION_PARTS_V1: &[&str] = &[
-    "RefundArmingAuthority: `ProductionRefundArmingAuthorityV1` exists, but its concrete DOM and counterparty faces are not yet constructed by this composition root",
-    "RunnerActionAuthority: only the declared fail-closed `UnavailableRunnerAuthorityV1` exists, so every action would be refused rather than dispatched",
-    "TimerAuthority: `ProductionDeadlineTimerAuthorityV1` exists, but is not yet constructed by this composition root",
-    "SettlementChildAuthorityV1: the four counterparty children (EVM, Bitcoin, Solana, Monero) are composed by this root from a V4 bootstrap; the router still awaits the DOM child, whose Contracts authority requires the real Relay worker over `F6TransportPortV1`",
-    "SettlementChildObserverV1: same seam as the authority above — counterparty children composed, router awaiting the DOM child behind F6/Relay",
-    "F6TransportPortV1: only the declared fail-closed `UnavailableF6AuthorityV1` exists, so F6 traffic would be refused rather than served",
+    "RefundArmingAuthority: all four counterparty refund faces (EVM, Bitcoin, Solana, Monero) are now constructed by `compose_production_counterparty_children_v1` and returned in `ProductionCounterpartyChildrenV1::refund_faces`; what remains is retaining the Stage-10 Contracts stores as the DOM faces and calling `ProductionRefundArmingAuthorityV1::create`/`open_existing` with the refund-arming credential — bounded glue, no missing authority",
+    "RunnerActionAuthority: only the declared fail-closed `UnavailableRunnerAuthorityV1` exists; composed interop routes settle through the chain child authorities and emit no `RunnerPayload` effects, so this refusal is only reachable by a route shape this composition does not produce — it is retained deliberately, not as a hole",
+    "TimerAuthority: `ProductionDeadlineTimerAuthorityV1` and its canonical `deadline_context_digest_v1` derivation exist; the composition root has only to build its admitted-deadline map from the two authenticated counterparty deadlines — bounded glue, no missing authority",
+    "SettlementChildAuthorityV1: the four counterparty children are composed by this root from a V4 bootstrap; the router still awaits the DOM child, which needs the Relay worker plus a Contracts opening — composable today over `UnavailableF6AuthorityV1` (F6 negotiation fail-closed) with the DOM node RPC endpoint added to the V4 chain-endpoints artifact and the Relay authorities provisioned",
+    "SettlementChildObserverV1: same seam as the authority above — counterparty children composed, router awaiting the DOM child",
+    "F6TransportPortV1: two distinct things. (a) The DURABLE F6 PORT `ProductionSolverF6AuthorityV2` is a complete `F6TransportPortV1` engine, and `UnavailableF6AuthorityV1` is the fail-closed alternative that lets the runtime compose and drive real chain settlements while F6 negotiation is refused. (b) The REAL F6 NEGOTIATION still needs one authority that does not exist: `ProductionF6TermsAuthorityV2` has only a test `UnreachableTermsV2` impl. Building it is new cross-object cryptographic authority code (RFQ/quote/terms authentication against a real evidence source), not composition glue, and is the one genuine gap between the engine and served RFQ negotiation",
 ];
 
 /// Explicit fail-closed runner boundary for a composition that has installed
@@ -553,6 +558,14 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
         &mut provisioning,
     )?;
 
+    // The deterministic deadline timer authority. Both counterparty legs
+    // freeze an absolute-timestamp deadline; the authority admits exactly
+    // those two contexts, derived canonically, and turns a due timer into
+    // the recovery-only health event. Self-contained: it needs no endpoint,
+    // store or signer, only the two authenticated deadlines.
+    let route_id = inputs.admission().route_id();
+    let _deadline_timer = compose_production_deadline_timer_v1(&inputs, route_id)?;
+
     // The counterparty settlement children. With a V4 bootstrap the four
     // chain faces the route admitted are composed here in drive form, from
     // the retained actuator stores, the authenticated sessions and the
@@ -583,6 +596,10 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
                         owner_id: pins.process_owner_id,
                         now_unix_ms,
                         actuator_lease_ms: bootstrap.config().bounds().actuator_lease_ms,
+                        external_call_timeout_ms: bootstrap
+                            .config()
+                            .bounds()
+                            .external_call_timeout_ms,
                     },
                 )
                 .map_err(|_| ProductionRunErrorV1::CounterpartyChildren)?,
@@ -604,6 +621,44 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
     // a route driven by anything other than its real authorities would
     // report progress it did not make.
     Err(ProductionRunErrorV1::NotComposable)
+}
+
+fn compose_production_deadline_timer_v1(
+    inputs: &AuthenticatedProductionInputsV1,
+    route_id: [u8; 32],
+) -> Result<ProductionDeadlineTimerAuthorityV1, ProductionRunErrorV1> {
+    let composition = inputs.composition();
+    let mut bindings = Vec::with_capacity(2);
+    for (leg, terms) in [
+        (LegIdV1::Upstream, composition.upstream()),
+        (LegIdV1::Downstream, composition.downstream()),
+    ] {
+        let deadline_seconds = match terms.counterparty_leg.deadline {
+            TimelockSpec::TimestampSeconds { value } if value != 0 => value,
+            // A non-timestamp counterparty deadline has no wall-clock context
+            // to schedule against; the timer authority never admits one.
+            _ => return Err(ProductionRunErrorV1::CounterpartyChildren),
+        };
+        let terms_digest = terms
+            .terms_hash()
+            .map_err(|_| ProductionRunErrorV1::CounterpartyChildren)?;
+        let deadline_unix_ms = deadline_seconds
+            .checked_mul(1000)
+            .ok_or(ProductionRunErrorV1::CounterpartyChildren)?;
+        let leg_tag = match leg {
+            LegIdV1::Upstream => 1u8,
+            LegIdV1::Downstream => 2u8,
+        };
+        let context_digest =
+            deadline_context_digest_v1(route_id, leg_tag, 0, terms_digest, deadline_unix_ms)
+                .map_err(|_| ProductionRunErrorV1::CounterpartyChildren)?;
+        bindings.push(
+            ProductionDeadlineBindingV1::new(context_digest, deadline_unix_ms)
+                .map_err(|_| ProductionRunErrorV1::CounterpartyChildren)?,
+        );
+    }
+    ProductionDeadlineTimerAuthorityV1::new(route_id, bindings)
+        .map_err(|_| ProductionRunErrorV1::CounterpartyChildren)
 }
 
 fn open_route_secret_retention(
