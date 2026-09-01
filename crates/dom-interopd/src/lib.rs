@@ -55,6 +55,8 @@ pub mod production_refund_arming;
 #[cfg(feature = "production")]
 mod production_run;
 #[cfg(feature = "production")]
+mod production_service;
+#[cfg(feature = "production")]
 pub(crate) mod production_settlement;
 #[cfg(feature = "production")]
 mod production_signal;

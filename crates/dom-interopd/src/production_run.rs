@@ -52,6 +52,9 @@ use crate::production_provisioning::{
     DurableProductionProvisioningJournalV1, ProductionProvisioningStageStateV1,
     ProductionProvisioningStageV1, ROUTE_SECRET_VAULT_ROOT_NAME_V1,
 };
+use crate::production_service::{
+    compose_production_route_service_v1, ProductionRouteServiceRequestV1,
+};
 use crate::production_timer::{
     deadline_context_digest_v1, ProductionDeadlineBindingV1, ProductionDeadlineTimerAuthorityV1,
 };
@@ -137,6 +140,11 @@ pub enum ProductionRunErrorV1 {
     /// be provisioned or reopened under one exact authenticated participant.
     #[error("production chain signer authorities unavailable")]
     ChainSignerAuthorities,
+    /// The phase-1 service plane (transport identity, Relay queue and the two
+    /// Relay-backed Contracts owners over the fail-closed F6 authority) could
+    /// not be composed or its two provisioning stages refused.
+    #[error("production relay/F6 service plane unavailable")]
+    RelayAuthorities,
     /// The solver inventory/bond authority could not be created, resumed from
     /// its exact pristine prefix, or reopened under the authenticated binding.
     #[error("production solver inventory store unavailable")]
@@ -274,7 +282,7 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
     let _bearer = secrets.bearer;
     let upstream_relay_signing_secret = secrets.upstream_relay_signing_secret;
     let downstream_relay_signing_secret = secrets.downstream_relay_signing_secret;
-    let _identity_passphrase = secrets.identity_passphrase;
+    let identity_passphrase = secrets.identity_passphrase;
     let dom_wallet_passphrase = secrets.dom_wallet_passphrase;
     let bitcoin_participant_secret = secrets.bitcoin_participant_secret;
     let route_secret_seal_key = secrets.route_secret_seal_key;
@@ -469,7 +477,7 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
         &mut provisioning,
     )?;
 
-    let _chain_signers =
+    let chain_signers =
         provision_production_chain_signers_v1(ProductionChainSignerProvisioningRequestV1 {
             bootstrap: &bootstrap,
             inputs: &inputs,
@@ -543,7 +551,7 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
             .map_err(|_| ProductionRunErrorV1::Provisioning)?,
         ProductionRunModeV1::ReopenExisting => contracts_stage_before_begin,
     };
-    let _contracts_stores = open_contracts_store_pair(ContractsStorePairRequestV1 {
+    let contracts_stores = open_contracts_store_pair(ContractsStorePairRequestV1 {
         mode: options.mode,
         stage_before_begin: contracts_stage_before_begin,
         stage: contracts_stage,
@@ -614,7 +622,28 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
         }
     };
 
-    // The composition point. Stages 1 through 10 above exist and have run,
+    // Stages 11 and 12: the phase-1 service plane. The transport identity
+    // store, the durable Relay queue and the two Relay-backed Contracts
+    // owners compose over the sanctioned fail-closed F6 authority; the two
+    // remaining provisioning stages complete inside, in journal order.
+    let _route_service = compose_production_route_service_v1(
+        ProductionRouteServiceRequestV1 {
+            mode: options.mode,
+            bootstrap: &bootstrap,
+            inputs: &inputs,
+            signers: &chain_signers,
+            state_capability: Arc::clone(&state_capability),
+            upstream_store: contracts_stores.upstream,
+            downstream_store: contracts_stores.downstream,
+            identity_passphrase,
+            upstream_relay_signing_secret,
+            downstream_relay_signing_secret,
+        },
+        &mut provisioning,
+    )
+    .map_err(|_| ProductionRunErrorV1::RelayAuthorities)?;
+
+    // The composition point. Stages 1 through 12 above exist and have run,
     // and with a V4 bootstrap the counterparty settlement children exist
     // beside them; everything below is named in
     // `MISSING_PRODUCTION_PARTS_V1`. The two raw Contracts store owners are
@@ -721,8 +750,8 @@ fn open_route_secret_retention(
 }
 
 struct ProductionContractsStoresV1 {
-    _upstream: ContractsSessionStoreV1,
-    _downstream: ContractsSessionStoreV1,
+    upstream: ContractsSessionStoreV1,
+    downstream: ContractsSessionStoreV1,
 }
 
 struct ContractsStorePairRequestV1<'a> {
@@ -838,8 +867,8 @@ fn open_contracts_store_pair(
             )
             .map_err(|_| ProductionRunErrorV1::ContractsStores)?;
             Ok(ProductionContractsStoresV1 {
-                _upstream: upstream,
-                _downstream: downstream,
+                upstream,
+                downstream,
             })
         }
         (ProductionRunModeV1::Create, ProductionProvisioningStageStateV1::Complete)
@@ -860,8 +889,8 @@ fn open_contracts_store_pair(
                 .finish()
                 .map_err(|_| ProductionRunErrorV1::ContractsStores)?;
             Ok(ProductionContractsStoresV1 {
-                _upstream: upstream,
-                _downstream: downstream,
+                upstream,
+                downstream,
             })
         }
         (ProductionRunModeV1::Create, _) | (ProductionRunModeV1::ReopenExisting, _) => {
