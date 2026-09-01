@@ -146,6 +146,22 @@ impl CrossCurveSecret252 {
     pub fn xmr_share_little_endian(&self) -> [u8; 32] {
         self.little_endian
     }
+
+    /// Public two-curve image of the witness, computed exactly as the
+    /// verification side recomputes it in [`revealed_dom_secret_to_xmr_scalar`].
+    /// This is a deterministic derivation, not a proof: callers that need a
+    /// third party to trust the claim must still carry the DLEQ bundle.
+    pub fn public_claim(&self) -> Result<CrossCurvePublicClaim, DleqError> {
+        let ed_scalar = self.scalar()?;
+        let secp_scalar = SecpScalar::<Secret, NonZero>::from_bytes(self.dom_secret_big_endian())
+            .ok_or(DleqError::Outside252BitDomain)?;
+        Ok(CrossCurvePublicClaim {
+            secp_compressed: g!(secp_scalar * G).normalize().to_bytes(),
+            ed_compressed: (&ed_scalar * &ED25519_BASEPOINT_TABLE)
+                .compress()
+                .to_bytes(),
+        })
+    }
 }
 
 /// Public claim proved by DLEQ.

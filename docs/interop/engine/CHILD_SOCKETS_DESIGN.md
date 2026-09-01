@@ -331,3 +331,48 @@ So the honest state: everything below the settlement bridge is either
 composed or bounded glue with no missing authority, **except** the F6 terms
 source, which is genuine new cryptographic-authority work and the one place
 this round deliberately stops rather than improvise.
+
+## 12. Progress — upstream secret sources closed for every extractable chain (2026-09-01)
+
+Front 2 of the final composition, done before the DOM-child glue by explicit
+adjudication of order.
+
+**Solana (built).** `ProductionSolanaPublicSecretSourceV1`
+(`production_plan_source.rs`) is the fourth slot of
+`ProductionPublicSecretSourceRouterV1`. The counterparty's Claim instruction
+is the only path that reveals the scalar on the Solana chain, and the
+program persists it in the state PDA it verified on-chain
+(`verify_shared_secret`: `t·G_ed = claim_point_ed25519`, processor.rs:336).
+Extraction re-reads that account at finalized commitment through the quorum
+pool, matches the full escrow identity frozen by the DLEQ-authenticated
+setup (settlement, terms, setup id, funder/recipient/refund recipient,
+vault, amount, deadline, both stored curve points), and re-verifies the
+scalar against **both** DLEQ-certified points via
+`revealed_dom_secret_to_xmr_scalar` — a quorum answer cannot substitute a
+scalar that satisfies only the ed25519 relation. Status mapping is exact:
+`Claimed` extracts; `Refunded` is a conflicting terminal (`Inconsistent`,
+never a fallback); pre-terminal and absent (including a post-claim `Close`,
+which drains the state PDA) are `Unavailable` — the sealed vault record is
+the only recovery, per the plan-source contract. The pure core
+(`extract_solana_revealed_secret_v1`) is exercised by adversarial tests:
+per-field transplants, every status, flipped-scalar and cross-witness
+substitution. `CrossCurveSecret252::public_claim()` was added to
+`xmr-dleq-sigma` as the deterministic public image used by those tests.
+
+**Monero (adjudicated: no source, ever).** A CLSAG ring signature hides the
+spend scalar; the shared-spend sweep never places the route secret on the
+Monero chain, so a Monero-chain exposure is unextractable by construction —
+this is cryptography, not a missing implementation. The XMR leg's real
+reveal is the DOM adaptor completion, whose source chain is the DOM chain
+(`LocalOrigin`) and which the DOM source already serves. The refusal is now
+enforced where role plans are authenticated: `authenticate_leg`
+(`production_materializer.rs`) refuses any plan that pins
+`VerifiedCounterpartyClaim` to a Monero counterparty leg
+(`secret_source_is_extractable_v1`), and the router refuses unknown chain
+digests as before. EVM, Bitcoin and Solana counterparty claims all carry
+the scalar on their own chain and stay admissible.
+
+With this, `MISSING_PRODUCTION_PARTS_V1`'s secret-source entry is closed:
+every chain whose reveal exists on-chain has a production extraction
+authority, and the one chain whose reveal cannot exist on-chain is refused
+at materialization instead of failing somewhere deeper.

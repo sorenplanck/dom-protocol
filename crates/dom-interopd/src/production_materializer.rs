@@ -952,6 +952,9 @@ fn authenticate_leg(
     if profile != admission_profile || entry.secret_source_scope_digest() == ZERO_DIGEST {
         return Err(AuthorityRefusalV1::Inconsistent);
     }
+    if !secret_source_is_extractable_v1(counterparty_face, entry.secret_source()) {
+        return Err(AuthorityRefusalV1::Inconsistent);
+    }
     Ok(ProductionLegMaterializationBindingsV1 {
         settlement_id: settlement.settlement_id.0,
         counterparty_face,
@@ -962,6 +965,28 @@ fn authenticate_leg(
         reveal_mode: entry.reveal_mode(),
         secret_source: entry.secret_source(),
     })
+}
+
+/// Whether a leg's pinned secret-source chain can ever expose the scalar.
+///
+/// A CLSAG ring signature hides the spend scalar, so a Monero sweep never
+/// places the shared secret on the Monero chain: a role plan that pins
+/// `VerifiedCounterpartyClaim` to a Monero counterparty leg is unextractable
+/// by construction and is refused before any child can materialize. The XMR
+/// leg's real reveal is the DOM adaptor completion, whose source chain is the
+/// DOM chain (`LocalOrigin`). EVM, Bitcoin and Solana counterparty claims all
+/// carry the scalar on their own chain and stay admissible.
+const fn secret_source_is_extractable_v1(
+    counterparty_face: SettlementFaceV1,
+    secret_source: FinalClaimSecretSourceV1,
+) -> bool {
+    !matches!(
+        (counterparty_face, secret_source),
+        (
+            SettlementFaceV1::Monero,
+            FinalClaimSecretSourceV1::VerifiedCounterpartyClaim,
+        )
+    )
 }
 
 fn digest_parts(domain: &[u8], parts: &[&[u8]]) -> Result<Digest32, AuthorityRefusalV1> {
@@ -1378,5 +1403,28 @@ mod tests {
             DEFERRED_MATERIALIZER_AUTHORITY_DOMAIN_V1,
             CHILD_MATERIALIZATION_REQUEST_DOMAIN_V1
         );
+    }
+
+    #[test]
+    fn monero_counterparty_reveal_source_is_refused_all_other_faces_admissible() {
+        for face in [
+            SettlementFaceV1::Evm,
+            SettlementFaceV1::Bitcoin,
+            SettlementFaceV1::Solana,
+            SettlementFaceV1::Monero,
+        ] {
+            assert!(secret_source_is_extractable_v1(
+                face,
+                FinalClaimSecretSourceV1::LocalOrigin,
+            ));
+            assert_eq!(
+                secret_source_is_extractable_v1(
+                    face,
+                    FinalClaimSecretSourceV1::VerifiedCounterpartyClaim,
+                ),
+                !matches!(face, SettlementFaceV1::Monero),
+                "face {face:?}",
+            );
+        }
     }
 }
