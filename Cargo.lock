@@ -1651,6 +1651,8 @@ dependencies = [
  "xmr-live-sidecar-api",
  "xmr-observer",
  "xmr-raw-tx-verify",
+ "xmr-refund-adaptor",
+ "xmr-refund-policy",
  "xmr-rpc-broadcast-blocking",
  "xmr-secret-store",
  "xmr-setup-profile",

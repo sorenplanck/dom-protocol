@@ -2114,25 +2114,24 @@ fn resolve_v4_extras(
             Some(path)
         }
     };
-    let mut managed =
-        |relative: Option<&Path>| -> Result<Option<PathBuf>, ProductionConfigErrorV1> {
-            match relative {
-                None => Ok(None),
-                Some(relative) => {
-                    let path = state_dir.join(relative);
-                    validate_parent_chain(state_dir, &path)?;
-                    match fs::symlink_metadata(&path) {
-                        Ok(_) => validate_owner_file(
-                            &path,
-                            ProductionConfigErrorV1::RecoveryStateUnavailable,
-                        )?,
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(_) => return Err(ProductionConfigErrorV1::StorageUnavailable),
-                    }
-                    Ok(Some(path))
+    let managed = |relative: Option<&Path>| -> Result<Option<PathBuf>, ProductionConfigErrorV1> {
+        match relative {
+            None => Ok(None),
+            Some(relative) => {
+                let path = state_dir.join(relative);
+                validate_parent_chain(state_dir, &path)?;
+                match fs::symlink_metadata(&path) {
+                    Ok(_) => validate_owner_file(
+                        &path,
+                        ProductionConfigErrorV1::RecoveryStateUnavailable,
+                    )?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return Err(ProductionConfigErrorV1::StorageUnavailable),
                 }
+                Ok(Some(path))
             }
-        };
+        }
+    };
     let solana_actuator_store = managed(config.solana_actuator_store())?;
     let xmr_actuator_store = managed(config.xmr_actuator_store())?;
     let bitcoin_prebroadcast_store = managed(config.bitcoin_prebroadcast_store())?;

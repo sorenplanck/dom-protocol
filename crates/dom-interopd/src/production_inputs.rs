@@ -99,7 +99,7 @@ pub const MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1: usize =
         + 4
         + 2 * (4
             + XMR_LEG_SETUP_FIXED_BYTES_V1
-            + xmr_dleq_sigma::MAX_PROOF_BYTES
+            + 2 * xmr_dleq_sigma::MAX_PROOF_BYTES
             + xmr_live_sidecar_api::MAX_DESTINATION_BYTES);
 /// Fixed-width prefix of one Monero leg setup: adapter profile plus every
 /// binding field except the variable-length DLEQ proof body and destination.
@@ -108,7 +108,11 @@ pub const XMR_LEG_SETUP_FIXED_BYTES_V1: usize = 11 // adapter profile
     + 2 + 32 + 32 + 1         // dleq envelope header
     + 2 + 65 + 4              // proof bundle header: version, claim, proof length
     + 32 + 8 + 2              // funding tx, amount, destination length
-    + 32; // combined spend public key
+    + 32                      // combined spend public key
+    + 1                       // refund-arm flag
+    + 2 + 32 + 32 + 1         // refund dleq envelope header
+    + 2 + 65 + 4              // refund proof bundle header
+    + 32 + 33 + 32 + 8; // refund artifact: template, point, profile, deadline
 
 const AUTHORITY_BUNDLE_MAGIC_V1: &[u8; 8] = b"DOMPAUB1";
 const ROSTER_BUNDLE_MAGIC_V1: &[u8; 8] = b"DOMRSTR1";
@@ -966,6 +970,27 @@ fn decode_bool(value: u8) -> Result<bool, ProductionInputErrorV1> {
     }
 }
 
+/// The Monero leg's refund arm: the role-2 cross-curve proof binding the
+/// refund share to this settlement, plus the non-cooperative executor
+/// artifact whose adaptor point that proof certifies. Verified end to end by
+/// the refund-arming authority's Monero face, never here.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ProductionXmrRefundBundleV1 {
+    pub(crate) proof: BoundCrossCurveProofV1,
+    pub(crate) template_hash: Digest32,
+    pub(crate) adaptor_point_sec1: [u8; 33],
+    pub(crate) executor_profile_hash: Digest32,
+    pub(crate) deadline: u64,
+}
+
+impl core::fmt::Debug for ProductionXmrRefundBundleV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ProductionXmrRefundBundleV1")
+            .finish_non_exhaustive()
+    }
+}
+
 /// One route leg's registered Monero shared-spend setup: the adapter profile
 /// the frozen terms committed to and the DLEQ-bound setup binding. As with
 /// Solana, there is no participant signature — the anchor is the cross-curve
@@ -976,6 +1001,7 @@ pub struct ProductionXmrLegSetupV1 {
     pub(crate) position: ProductionRoutePositionV1,
     pub(crate) profile: XmrAdapterProfileV1,
     pub(crate) binding: XmrSetupBindingV1,
+    pub(crate) refund: Option<ProductionXmrRefundBundleV1>,
 }
 
 impl core::fmt::Debug for ProductionXmrLegSetupV1 {
@@ -1014,7 +1040,26 @@ impl ProductionXmrLegSetupV1 {
             position,
             profile,
             binding,
+            refund: None,
         })
+    }
+
+    /// Attaches the refund arm after structural bounds checks.
+    pub fn with_refund(
+        mut self,
+        refund: ProductionXmrRefundBundleV1,
+    ) -> Result<Self, ProductionInputErrorV1> {
+        if refund.template_hash == ZERO_DIGEST
+            || refund.executor_profile_hash == ZERO_DIGEST
+            || refund.deadline == 0
+            || refund.proof.bundle.proof.is_empty()
+            || refund.proof.bundle.proof.len() > xmr_dleq_sigma::MAX_PROOF_BYTES
+            || !matches!(refund.adaptor_point_sec1[0], 0x02 | 0x03)
+        {
+            return Err(ProductionInputErrorV1::InvalidParticipantBundle);
+        }
+        self.refund = Some(refund);
+        Ok(self)
     }
 
     fn encode_into(&self, bytes: &mut Vec<u8>) -> Result<(), ProductionInputErrorV1> {
@@ -1045,6 +1090,26 @@ impl ProductionXmrLegSetupV1 {
         bytes.extend_from_slice(&destination_len.to_be_bytes());
         bytes.extend_from_slice(binding.destination.as_bytes());
         bytes.extend_from_slice(&binding.combined_spend_public_key);
+        match &self.refund {
+            None => bytes.push(0),
+            Some(refund) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&refund.proof.version.to_be_bytes());
+                bytes.extend_from_slice(&refund.proof.settlement_id);
+                bytes.extend_from_slice(&refund.proof.context_hash);
+                bytes.push(refund.proof.role);
+                bytes.extend_from_slice(&refund.proof.bundle.version.to_be_bytes());
+                bytes.extend_from_slice(&refund.proof.bundle.claim.to_canonical_bytes());
+                let proof_len = u32::try_from(refund.proof.bundle.proof.len())
+                    .map_err(|_| ProductionInputErrorV1::InputBoundExceeded)?;
+                bytes.extend_from_slice(&proof_len.to_be_bytes());
+                bytes.extend_from_slice(&refund.proof.bundle.proof);
+                bytes.extend_from_slice(&refund.template_hash);
+                bytes.extend_from_slice(&refund.adaptor_point_sec1);
+                bytes.extend_from_slice(&refund.executor_profile_hash);
+                bytes.extend_from_slice(&refund.deadline.to_be_bytes());
+            }
+        }
         Ok(())
     }
 
@@ -1094,7 +1159,47 @@ impl ProductionXmrLegSetupV1 {
         let destination = String::from_utf8(cursor.bytes(destination_len)?.to_vec())
             .map_err(|_| ProductionInputErrorV1::NonCanonicalEncoding)?;
         let combined_spend_public_key = cursor.take::<32>()?;
-        Self::new(
+        let refund = match cursor.u8()? {
+            0 => None,
+            1 => {
+                let version = cursor.u16()?;
+                let settlement_id = cursor.take::<32>()?;
+                let context_hash = cursor.take::<32>()?;
+                let role = cursor.u8()?;
+                let bundle_version = cursor.u16()?;
+                let claim = CrossCurvePublicClaim::from_canonical_bytes(&cursor.take::<65>()?)
+                    .ok_or(ProductionInputErrorV1::InvalidParticipantBundle)?;
+                let proof_len = usize::try_from(u32::from_be_bytes(cursor.take::<4>()?))
+                    .map_err(|_| ProductionInputErrorV1::InputBoundExceeded)?;
+                if proof_len == 0 || proof_len > xmr_dleq_sigma::MAX_PROOF_BYTES {
+                    return Err(ProductionInputErrorV1::InvalidParticipantBundle);
+                }
+                let proof = cursor.bytes(proof_len)?.to_vec();
+                let template_hash = cursor.take::<32>()?;
+                let adaptor_point_sec1 = cursor.take::<33>()?;
+                let executor_profile_hash = cursor.take::<32>()?;
+                let deadline = u64::from_be_bytes(cursor.take::<8>()?);
+                Some(ProductionXmrRefundBundleV1 {
+                    proof: BoundCrossCurveProofV1 {
+                        version,
+                        settlement_id,
+                        context_hash,
+                        role,
+                        bundle: CrossCurveProofBytes {
+                            version: bundle_version,
+                            proof,
+                            claim,
+                        },
+                    },
+                    template_hash,
+                    adaptor_point_sec1,
+                    executor_profile_hash,
+                    deadline,
+                })
+            }
+            _ => return Err(ProductionInputErrorV1::NonCanonicalEncoding),
+        };
+        let value = Self::new(
             position,
             profile,
             XmrSetupBindingV1 {
@@ -1116,7 +1221,11 @@ impl ProductionXmrLegSetupV1 {
                 destination,
                 combined_spend_public_key,
             },
-        )
+        )?;
+        match refund {
+            None => Ok(value),
+            Some(refund) => value.with_refund(refund),
+        }
     }
 }
 
@@ -1598,6 +1707,7 @@ pub struct AuthenticatedXmrSessionBindingsV1 {
     deployment: ResolvedMoneroDeploymentV1,
     profile: XmrAdapterProfileV1,
     setup: ValidatedXmrSetup,
+    refund: Option<ProductionXmrRefundBundleV1>,
 }
 
 impl core::fmt::Debug for AuthenticatedXmrSessionBindingsV1 {
@@ -1648,6 +1758,13 @@ impl AuthenticatedXmrSessionBindingsV1 {
     /// DLEQ-verified shared-spend setup.
     pub const fn setup(&self) -> &ValidatedXmrSetup {
         &self.setup
+    }
+
+    /// The leg's refund arm, when the bundle registered one. Structural
+    /// bounds are checked at decode; the role-2 proof itself is verified by
+    /// the refund-arming authority's Monero face, which owns that meaning.
+    pub const fn refund_bundle(&self) -> Option<&ProductionXmrRefundBundleV1> {
+        self.refund.as_ref()
     }
 }
 
@@ -2947,6 +3064,7 @@ fn authenticate_participant_bundle(
                     deployment,
                     profile: leg.profile,
                     setup,
+                    refund: leg.refund.clone(),
                 });
             }
         }
@@ -4676,6 +4794,57 @@ mod tests {
             combined_spend_public_key: [0x47; 32],
         };
         ProductionXmrLegSetupV1::new(position, profile, binding).expect("monero leg")
+    }
+
+    #[test]
+    fn monero_leg_refund_arm_round_trips_and_bounds_are_enforced() {
+        let leg = synthetic_monero_leg(ProductionRoutePositionV1::Upstream);
+        let refund_claim = {
+            let mut bytes = [0x27u8; 65];
+            bytes[0] = 0x02;
+            CrossCurvePublicClaim::from_canonical_bytes(&bytes).expect("claim bytes")
+        };
+        let refund = ProductionXmrRefundBundleV1 {
+            proof: BoundCrossCurveProofV1 {
+                version: 1,
+                settlement_id: [0x41; 32],
+                context_hash: [0x48; 32],
+                role: 2,
+                bundle: CrossCurveProofBytes {
+                    version: 1,
+                    proof: vec![0x49; 64],
+                    claim: refund_claim,
+                },
+            },
+            template_hash: [0x4a; 32],
+            adaptor_point_sec1: {
+                let mut point = [0x4b; 33];
+                point[0] = 0x02;
+                point
+            },
+            executor_profile_hash: [0x4c; 32],
+            deadline: 1_900_000_100,
+        };
+        let leg = leg.with_refund(refund.clone()).expect("refund arm");
+        let bundle = ProductionParticipantBindingBundleV1::new_with_all_counterparty_bindings(
+            ROUTE_ID,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![leg.clone()],
+        )
+        .expect("bundle");
+        let bytes = bundle.canonical_bytes().expect("encode");
+        let decoded =
+            ProductionParticipantBindingBundleV1::decode_canonical(&bytes).expect("decode");
+        assert_eq!(decoded, bundle);
+        assert_eq!(decoded.monero_legs()[0].refund, Some(refund.clone()));
+        // A zero template hash cannot enter through the constructor.
+        let mut broken = refund;
+        broken.template_hash = ZERO_DIGEST;
+        assert!(synthetic_monero_leg(ProductionRoutePositionV1::Upstream)
+            .with_refund(broken)
+            .is_err());
     }
 
     #[test]

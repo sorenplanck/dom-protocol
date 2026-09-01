@@ -57,6 +57,8 @@ production = [
     "dep:xmr-live-sidecar-api",
     "dep:xmr-observer",
     "dep:xmr-raw-tx-verify",
+    "dep:xmr-refund-adaptor",
+    "dep:xmr-refund-policy",
     "dep:xmr-rpc-broadcast-blocking",
     "dep:xmr-secret-store",
     "dep:xmr-setup-profile",
@@ -162,6 +164,8 @@ xmr-actuator = { path = "../xmr-actuator", optional = true }
 xmr-live-sidecar-api = { path = "../adapters/xmr-live-sidecar-api", optional = true }
 xmr-observer = { path = "../adapters/xmr-observer", optional = true }
 xmr-raw-tx-verify = { path = "../adapters/xmr-raw-tx-verify", optional = true }
+xmr-refund-adaptor = { path = "../adapters/xmr-refund-adaptor", optional = true }
+xmr-refund-policy = { path = "../adapters/xmr-refund-policy", optional = true }
 xmr-rpc-broadcast-blocking = { path = "../adapters/xmr-rpc-broadcast-blocking", optional = true }
 xmr-secret-store = { path = "../adapters/xmr-secret-store", optional = true }
 xmr-setup-profile = { path = "../adapters/xmr-setup-profile", optional = true }

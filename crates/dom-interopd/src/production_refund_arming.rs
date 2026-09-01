@@ -27,6 +27,7 @@ use blake2::{Blake2bMac, Blake2bVar};
 use chain_profile::ChainKindV1;
 use deployment_registry::{
     AssetRepresentationV1, ResolvedBitcoinDeploymentV1, ResolvedEvmDeploymentV1,
+    ResolvedMoneroDeploymentV1, ResolvedSolanaDeploymentV1,
 };
 use dom_actuator::{DomContractsActuatorV1, DomSessionBindingV1};
 use dom_adaptor::TrustedChainIdV1;
@@ -41,6 +42,17 @@ use route_executor::{
     RefundBindingsV1, RouteIdV1, SecretVisibilityV1,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use solana_escrow_wire::{EscrowStateV1, EscrowStatus};
+use solana_profile::ValidatedSolanaSetup;
+use solana_rpc::HttpSolanaRpc;
+use solana_rpc_pool::SolanaRpcPool;
+use solana_types::Commitment;
+use xmr_dleq_sigma::BoundCrossCurveProofV1;
+use xmr_refund_adaptor::verify_refund_bundle;
+use xmr_refund_policy::XmrRefundArtifactV1;
+use xmr_setup_profile::{
+    proof_context_hash, ValidatedXmrSetup, XmrAdapterProfileV1, XmrProofContextV1,
+};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::admission::AuthenticatedRouteAdmissionV1;
@@ -58,6 +70,8 @@ const DOM_FACE_DOMAIN: &[u8] = b"DOM-INTEROP/REFUND-ARMING/DOM-FACE/V1\0";
 const BTC_FACE_DOMAIN: &[u8] = b"DOM-INTEROP/REFUND-ARMING/BTC-FACE/V1\0";
 const BTC_ROUTE_DOMAIN: &[u8] = b"DOM-INTEROP/REFUND-ARMING/BTC-ROUTE/V1\0";
 const EVM_FACE_DOMAIN: &[u8] = b"DOM-INTEROP/REFUND-ARMING/EVM-FACE/V1\0";
+const SOLANA_FACE_DOMAIN: &[u8] = b"DOM-INTEROP/REFUND-ARMING/SOLANA-FACE/V1\0";
+const XMR_FACE_DOMAIN: &[u8] = b"DOM-INTEROP/REFUND-ARMING/XMR-FACE/V1\0";
 const EVM_EFFECT_DOMAIN: &[u8] = b"DOM-INTEROP/REFUND-ARMING/EVM-EFFECT/V1\0";
 const CONFIG_DOMAIN: &[u8] = b"DOM-INTEROP/REFUND-ARMING/CONFIG/V1\0";
 const MAX_RECORD_BYTES: usize = 16 * 1024;
@@ -282,6 +296,85 @@ pub enum ProductionCounterpartyRefundFaceV1 {
     Bitcoin(ProductionBitcoinRefundFaceV1),
     /// Exact EVM escrow timeout path.
     Evm(ProductionEvmRefundFaceV1),
+    /// On-chain Solana escrow whose Refund instruction is unconditionally
+    /// executable after the frozen deadline once the vault is funded.
+    Solana(ProductionSolanaRefundFaceV1),
+    /// DOM-revealed Monero refund share: the role-2 cross-curve proof plus
+    /// the non-cooperative executor artifact.
+    Monero(ProductionXmrRefundFaceV1),
+}
+
+/// Solana refund face: the escrow program itself is the refund arm. Once the
+/// state account is `Funded`, the `Refund` instruction pays the pinned
+/// refund recipient after `refund_after_unix`, permissionlessly; verifying
+/// the account at the quorum is verifying the armed refund.
+pub struct ProductionSolanaRefundFaceV1 {
+    pool: SolanaRpcPool<HttpSolanaRpc>,
+    setup: ValidatedSolanaSetup,
+    deployment: ResolvedSolanaDeploymentV1,
+}
+
+impl ProductionSolanaRefundFaceV1 {
+    /// Joins the quorum pool to one DLEQ-authenticated escrow setup.
+    pub fn new(
+        pool: SolanaRpcPool<HttpSolanaRpc>,
+        setup: ValidatedSolanaSetup,
+        deployment: ResolvedSolanaDeploymentV1,
+    ) -> Result<Self, ProductionRefundArmingOpenErrorV1> {
+        let pinned_program = match deployment.profile().kind {
+            ChainKindV1::Solana { escrow_program, .. } => escrow_program,
+            _ => return Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration),
+        };
+        if setup.program_id().0 != pinned_program {
+            return Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration);
+        }
+        Ok(Self {
+            pool,
+            setup,
+            deployment,
+        })
+    }
+}
+
+/// Monero refund face: there is no counterparty transaction to pre-arm — the
+/// refund sweep is built on demand from the share a DOM refund reveals. What
+/// must verifiably exist before funding is (a) the role-2 cross-curve proof
+/// binding the refund share to this settlement's economic context, and (b)
+/// the non-cooperative executor artifact whose adaptor point that proof
+/// certifies.
+pub struct ProductionXmrRefundFaceV1 {
+    profile: XmrAdapterProfileV1,
+    setup: ValidatedXmrSetup,
+    deployment: ResolvedMoneroDeploymentV1,
+    refund_proof: BoundCrossCurveProofV1,
+    artifact: XmrRefundArtifactV1,
+}
+
+impl ProductionXmrRefundFaceV1 {
+    /// Joins the DLEQ-authenticated shared-spend setup to its refund-share
+    /// proof and the executor artifact.
+    pub fn new(
+        profile: XmrAdapterProfileV1,
+        setup: ValidatedXmrSetup,
+        deployment: ResolvedMoneroDeploymentV1,
+        refund_proof: BoundCrossCurveProofV1,
+        artifact: XmrRefundArtifactV1,
+    ) -> Result<Self, ProductionRefundArmingOpenErrorV1> {
+        if refund_proof.settlement_id != setup.settlement_id()
+            || artifact.template_hash == ZERO_DIGEST
+            || artifact.executor_profile_hash == ZERO_DIGEST
+            || artifact.deadline == 0
+        {
+            return Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration);
+        }
+        Ok(Self {
+            profile,
+            setup,
+            deployment,
+            refund_proof,
+            artifact,
+        })
+    }
 }
 
 /// Derives the only btc-live route binding accepted by this authority.
@@ -706,6 +799,285 @@ fn bind_counterparty_face(
         ProductionCounterpartyRefundFaceV1::Evm(inner) => {
             bind_evm_face(inner, route_id, composition_digest, leg, settlement, pins)
         }
+        ProductionCounterpartyRefundFaceV1::Solana(inner) => {
+            bind_solana_face(inner, route_id, settlement, pins)
+        }
+        ProductionCounterpartyRefundFaceV1::Monero(inner) => {
+            bind_monero_face(inner, route_id, settlement, pins)
+        }
+    }
+}
+
+fn bind_solana_face(
+    inner: ProductionSolanaRefundFaceV1,
+    route_id: RouteIdV1,
+    settlement: &SettlementTermsV1,
+    pins: AdmissionFacePinsV1,
+) -> Result<Box<dyn ProductionRefundFaceVerifierV1>, ProductionRefundArmingOpenErrorV1> {
+    let terms_digest = settlement
+        .terms_hash()
+        .map_err(|_| ProductionRefundArmingOpenErrorV1::InvalidConfiguration)?;
+    let expected_deadline = match settlement.counterparty_leg.deadline {
+        TimelockSpec::TimestampSeconds { value } if value != 0 => value,
+        _ => return Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration),
+    };
+    if inner.setup.terms_hash() != terms_digest
+        || inner.setup.settlement_id() != settlement.settlement_id.0
+        || u128::from(inner.setup.amount()) != settlement.counterparty_leg.amount
+        || i64::try_from(expected_deadline)
+            .map(|deadline| deadline != inner.setup.refund_after_unix())
+            .unwrap_or(true)
+        || inner.deployment.registry_digest() != pins.registry_digest
+        || inner.deployment.registry_epoch() != pins.registry_epoch
+        || inner.deployment.profile().chain_id.0 != settlement.counterparty_leg.chain_id.0
+        || inner.deployment.asset_binding().asset_id != settlement.counterparty_leg.asset_id
+    {
+        return Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration);
+    }
+    let static_digest = digest_parts(
+        SOLANA_FACE_DOMAIN,
+        &[
+            &route_id,
+            &settlement.settlement_id.0,
+            &terms_digest,
+            &inner.setup.binding_hash(),
+            &inner.setup.state_pda().0,
+            &inner.deployment.deployment().genesis_hash,
+        ],
+    )
+    .map_err(|_| ProductionRefundArmingOpenErrorV1::InvalidConfiguration)?;
+    Ok(Box::new(BoundSolanaRefundFaceV1 {
+        inner,
+        route_id,
+        settlement_id: settlement.settlement_id.0,
+        session_id: settlement.session_id.0,
+        terms_digest,
+        chain_digest: settlement.counterparty_leg.chain_id.0,
+        static_digest,
+    }))
+}
+
+fn bind_monero_face(
+    inner: ProductionXmrRefundFaceV1,
+    route_id: RouteIdV1,
+    settlement: &SettlementTermsV1,
+    pins: AdmissionFacePinsV1,
+) -> Result<Box<dyn ProductionRefundFaceVerifierV1>, ProductionRefundArmingOpenErrorV1> {
+    let terms_digest = settlement
+        .terms_hash()
+        .map_err(|_| ProductionRefundArmingOpenErrorV1::InvalidConfiguration)?;
+    let expected_deadline = match settlement.counterparty_leg.deadline {
+        TimelockSpec::TimestampSeconds { value } if value != 0 => value,
+        _ => return Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration),
+    };
+    if inner.setup.terms_hash() != terms_digest
+        || inner.setup.settlement_id() != settlement.settlement_id.0
+        || u128::from(inner.setup.expected_amount_piconero()) != settlement.counterparty_leg.amount
+        || inner.artifact.deadline != expected_deadline
+        || inner.profile.profile_hash() != settlement.counterparty_leg.adapter_profile_hash
+        || inner.deployment.registry_digest() != pins.registry_digest
+        || inner.deployment.registry_epoch() != pins.registry_epoch
+        || inner.deployment.profile().chain_id.0 != settlement.counterparty_leg.chain_id.0
+        || inner.deployment.asset_binding().asset_id != settlement.counterparty_leg.asset_id
+    {
+        return Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration);
+    }
+    let static_digest = digest_parts(
+        XMR_FACE_DOMAIN,
+        &[
+            &route_id,
+            &settlement.settlement_id.0,
+            &terms_digest,
+            &inner.setup.binding_hash(),
+            &inner.artifact.template_hash,
+            &inner.artifact.adaptor_point_sec1,
+            &inner.artifact.executor_profile_hash,
+            &inner.artifact.deadline.to_be_bytes(),
+            &inner.deployment.deployment().genesis_hash,
+        ],
+    )
+    .map_err(|_| ProductionRefundArmingOpenErrorV1::InvalidConfiguration)?;
+    Ok(Box::new(BoundXmrRefundFaceV1 {
+        inner,
+        route_id,
+        settlement_id: settlement.settlement_id.0,
+        session_id: settlement.session_id.0,
+        terms_digest,
+        chain_digest: settlement.counterparty_leg.chain_id.0,
+        min_confirmations: settlement.counterparty_leg.finality.min_confirmations,
+        max_reorg_depth: settlement.counterparty_leg.finality.max_reorg_depth,
+        static_digest,
+    }))
+}
+
+struct BoundSolanaRefundFaceV1 {
+    inner: ProductionSolanaRefundFaceV1,
+    route_id: RouteIdV1,
+    settlement_id: Digest32,
+    session_id: Digest32,
+    terms_digest: Digest32,
+    chain_digest: Digest32,
+    static_digest: Digest32,
+}
+
+impl ProductionRefundFaceVerifierV1 for BoundSolanaRefundFaceV1 {
+    fn static_digest(&self) -> Digest32 {
+        self.static_digest
+    }
+
+    fn binding_identity(&self) -> Result<FaceBindingIdentityV1, AuthorityRefusalV1> {
+        Ok(FaceBindingIdentityV1 {
+            kind: 4,
+            route_id: self.route_id,
+            settlement_id: self.settlement_id,
+            session_id: self.session_id,
+            terms_digest: self.terms_digest,
+            chain_digest: self.chain_digest,
+            deployment_digest: self.inner.deployment.registry_digest(),
+        })
+    }
+
+    fn verify(&self) -> Result<FaceEvidenceV1, AuthorityRefusalV1> {
+        let snapshot = self
+            .inner
+            .pool
+            .account(self.inner.setup.state_pda(), Commitment::Finalized)
+            .map_err(|_| AuthorityRefusalV1::Unavailable)?
+            .ok_or(AuthorityRefusalV1::Refused)?;
+        let state =
+            EscrowStateV1::decode(&snapshot.data).map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+        let setup = &self.inner.setup;
+        // Funded is the armed refund: from here the program pays the pinned
+        // refund recipient after the deadline, permissionlessly.
+        if state.status != EscrowStatus::Funded
+            || state.settlement_id != setup.settlement_id()
+            || state.terms_hash != setup.terms_hash()
+            || state.setup_id != setup.setup_id()
+            || state.recipient != setup.recipient().0
+            || state.refund_recipient != setup.refund_recipient().0
+            || state.amount != setup.amount()
+            || state.funded_amount != setup.amount()
+            || state.refund_after_unix != setup.refund_after_unix()
+        {
+            return Err(AuthorityRefusalV1::Inconsistent);
+        }
+        let encoded = state.encode();
+        let primary_artifact_digest = digest_parts(SOLANA_FACE_DOMAIN, &[&encoded])
+            .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+        let secondary_artifact_digest = setup.binding_hash();
+        let evidence_digest = digest_parts(
+            SOLANA_FACE_DOMAIN,
+            &[
+                &self.static_digest,
+                &primary_artifact_digest,
+                &secondary_artifact_digest,
+            ],
+        )
+        .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+        Ok(FaceEvidenceV1 {
+            kind: 4,
+            route_id: self.route_id,
+            settlement_id: self.settlement_id,
+            session_id: self.session_id,
+            terms_digest: self.terms_digest,
+            chain_digest: self.chain_digest,
+            deployment_digest: self.inner.deployment.registry_digest(),
+            primary_artifact_digest,
+            secondary_artifact_digest,
+            evidence_digest,
+        })
+    }
+}
+
+struct BoundXmrRefundFaceV1 {
+    inner: ProductionXmrRefundFaceV1,
+    route_id: RouteIdV1,
+    settlement_id: Digest32,
+    session_id: Digest32,
+    terms_digest: Digest32,
+    chain_digest: Digest32,
+    min_confirmations: u32,
+    max_reorg_depth: u32,
+    static_digest: Digest32,
+}
+
+impl ProductionRefundFaceVerifierV1 for BoundXmrRefundFaceV1 {
+    fn static_digest(&self) -> Digest32 {
+        self.static_digest
+    }
+
+    fn binding_identity(&self) -> Result<FaceBindingIdentityV1, AuthorityRefusalV1> {
+        Ok(FaceBindingIdentityV1 {
+            kind: 5,
+            route_id: self.route_id,
+            settlement_id: self.settlement_id,
+            session_id: self.session_id,
+            terms_digest: self.terms_digest,
+            chain_digest: self.chain_digest,
+            deployment_digest: self.inner.deployment.registry_digest(),
+        })
+    }
+
+    fn verify(&self) -> Result<FaceEvidenceV1, AuthorityRefusalV1> {
+        // The refund-share proof is re-verified against the same economic
+        // context derivation the shared-spend setup used: same settlement,
+        // chain, asset, amount and finality policy, under the closed role
+        // registry's refund-share role.
+        let context = XmrProofContextV1 {
+            settlement_id: self.settlement_id,
+            chain_id: self.chain_digest,
+            asset_id: self.inner.deployment.asset_binding().asset_id.0,
+            amount_piconero: u128::from(self.inner.setup.expected_amount_piconero()),
+            min_confirmations: self.min_confirmations,
+            max_reorg_depth: self.max_reorg_depth,
+        };
+        let context_hash = proof_context_hash(&self.inner.profile, &context)
+            .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+        let claim =
+            verify_refund_bundle(&self.inner.refund_proof, &self.settlement_id, &context_hash)
+                .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+        // The executor artifact must be armed with exactly the adaptor point
+        // this proof certifies: a DOM refund then reveals exactly the scalar
+        // that completes the Monero refund share.
+        if claim.secp_compressed != self.inner.artifact.adaptor_point_sec1 {
+            return Err(AuthorityRefusalV1::Inconsistent);
+        }
+        let primary_artifact_digest = self
+            .inner
+            .refund_proof
+            .binding_hash()
+            .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+        let secondary_artifact_digest = digest_parts(
+            XMR_FACE_DOMAIN,
+            &[
+                &self.inner.artifact.template_hash,
+                &self.inner.artifact.adaptor_point_sec1,
+                &self.inner.artifact.executor_profile_hash,
+                &self.inner.artifact.deadline.to_be_bytes(),
+            ],
+        )
+        .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+        let evidence_digest = digest_parts(
+            XMR_FACE_DOMAIN,
+            &[
+                &self.static_digest,
+                &primary_artifact_digest,
+                &secondary_artifact_digest,
+            ],
+        )
+        .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+        Ok(FaceEvidenceV1 {
+            kind: 5,
+            route_id: self.route_id,
+            settlement_id: self.settlement_id,
+            session_id: self.session_id,
+            terms_digest: self.terms_digest,
+            chain_digest: self.chain_digest,
+            deployment_digest: self.inner.deployment.registry_digest(),
+            primary_artifact_digest,
+            secondary_artifact_digest,
+            evidence_digest,
+        })
     }
 }
 
@@ -1773,8 +2145,8 @@ fn decode_receipt_full(bytes: &[u8]) -> Result<DecodedReceiptV1, AuthorityRefusa
     if cursor != bytes.len()
         || upstream_dom.kind != 1
         || downstream_dom.kind != 1
-        || !matches!(upstream_counterparty.kind, 2 | 3)
-        || !matches!(downstream_counterparty.kind, 2 | 3)
+        || !matches!(upstream_counterparty.kind, 2 | 3 | 4 | 5)
+        || !matches!(downstream_counterparty.kind, 2 | 3 | 4 | 5)
         || header.event_id == ZERO_DIGEST
         || header.fencing_epoch == 0
         || header.snapshot_revision == 0
