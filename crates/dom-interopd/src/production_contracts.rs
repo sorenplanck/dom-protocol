@@ -21,7 +21,9 @@ use relay::auth::RosterRegistryV1;
 use relay::{SenderRoleV1, TimelockSpec};
 use route_transport::{F6TransportPortV1, RelayQueueV1, RouteApplicationDispositionV2};
 
-use crate::production_plan_source::ProductionDomPublicSecretSourceV1;
+use crate::production_plan_source::{
+    ProductionDomPublicSecretSourceV1, ProductionDomPublicSecretSourceV2,
+};
 use crate::relay_worker::{
     ContractsRelayIngressErrorV1, ContractsSessionStatusV1, DurableRelayWorkerV1,
     PreparedContractsIngressV1, RelayOutboundStepV1, RelayWorkerConfigV1, RelayWorkerOpenErrorV1,
@@ -579,6 +581,46 @@ where
             opening.binding,
             opening.trusted_chain_id,
             consumer,
+        )
+    }
+
+    /// Composition-root variant of the receiver authority: no transaction
+    /// pin exists yet, so the issued source corroborates the journal
+    /// exposure against the Store's own observed final-claim record.
+    pub(crate) fn dom_public_secret_source_v2(
+        &self,
+        composition_digest: [u8; 32],
+        binding: DomSessionBindingV1,
+        trusted_chain_id: TrustedChainIdV1,
+        consumer: RealDomClaimConsumerV1,
+    ) -> Result<ProductionDomPublicSecretSourceV2, AuthorityRefusalV1> {
+        let opening = self.prepare_dom_public_secret_opening(binding, trusted_chain_id)?;
+        ProductionDomPublicSecretSourceV2::new(
+            self.route_id,
+            composition_digest,
+            opening.store,
+            opening.binding,
+            opening.trusted_chain_id,
+            consumer,
+        )
+    }
+
+    /// Issues the DOM refund face over this exact physical Store opening.
+    pub(crate) fn dom_refund_face(
+        &self,
+        binding: DomSessionBindingV1,
+        trusted_chain_id: TrustedChainIdV1,
+    ) -> Result<
+        crate::production_refund_arming::ProductionDomRefundFaceV1,
+        crate::production_refund_arming::ProductionRefundArmingOpenErrorV1,
+    > {
+        self.validate_dom_binding(binding).map_err(|_| {
+            crate::production_refund_arming::ProductionRefundArmingOpenErrorV1::InvalidConfiguration
+        })?;
+        crate::production_refund_arming::ProductionDomRefundFaceV1::new(
+            Rc::clone(&self.store),
+            binding,
+            trusted_chain_id,
         )
     }
 

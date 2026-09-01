@@ -52,12 +52,19 @@ use crate::production_provisioning::{
     DurableProductionProvisioningJournalV1, ProductionProvisioningStageStateV1,
     ProductionProvisioningStageV1, ROUTE_SECRET_VAULT_ROOT_NAME_V1,
 };
+use crate::production_role_plan::load_production_role_plan_v1;
 use crate::production_service::{
     compose_production_route_service_v1, ProductionRouteServiceRequestV1,
 };
+use crate::production_settlement_runtime::{
+    compose_production_settlement_runtime_v1, ComposedProductionRouteV1,
+    ProductionSettlementRuntimeRequestV1,
+};
+use crate::production_signal::ProductionSignalBridgeV1;
 use crate::production_timer::{
     deadline_context_digest_v1, ProductionDeadlineBindingV1, ProductionDeadlineTimerAuthorityV1,
 };
+use crate::runtime::SystemRouteRunControlV1;
 use crate::supervisor::{
     ActionExternalizationReceiptV1, AuthorityRefusalV1, RunnerActionAuthority,
     RunnerActionRequestV1,
@@ -145,6 +152,18 @@ pub enum ProductionRunErrorV1 {
     /// not be composed or its two provisioning stages refused.
     #[error("production relay/F6 service plane unavailable")]
     RelayAuthorities,
+    /// The role-plan artifact existed but decoded or authenticated wrongly.
+    #[error("production role-plan artifact refused")]
+    RolePlan,
+    /// Every provisioning stage is complete but the negotiated role-plan
+    /// artifact does not exist yet: the route has not finished its
+    /// Contracts/F7 negotiation. Not a fault — rerun once it has.
+    #[error("production route awaits its negotiated role plan")]
+    AwaitingNegotiatedRolePlan,
+    /// The phase-2 settlement runtime refused to compose or exited with an
+    /// error while driving the route.
+    #[error("production settlement runtime unavailable")]
+    SettlementRuntime,
     /// The solver inventory/bond authority could not be created, resumed from
     /// its exact pristine prefix, or reopened under the authenticated binding.
     #[error("production solver inventory store unavailable")]
@@ -163,13 +182,12 @@ pub enum ProductionRunErrorV1 {
     /// V4 chain-endpoints artifact and the provisioned durable stores.
     #[error("production counterparty children unavailable")]
     CounterpartyChildren,
-    /// Everything above succeeded and the route still cannot be composed,
-    /// because parts of the composition have no production implementation.
-    ///
-    /// This is the honest terminal state of this binary today. The parts are
-    /// named in [`MISSING_PRODUCTION_PARTS_V1`] and printed by `main`, so an
-    /// operator learns exactly what is absent instead of reading "failed".
-    #[error("production route is not composable yet")]
+    /// A V3 bootstrap names no chain-endpoints artifact, so no counterparty
+    /// settlement child can exist and the settlement runtime cannot compose.
+    /// This is a configuration shape, not a missing authority: provide the
+    /// V4 bootstrap. [`MISSING_PRODUCTION_PARTS_V1`] (printed by `main`)
+    /// records what remains named-and-open beyond composition itself.
+    #[error("production route is not composable from a V3 bootstrap")]
     NotComposable,
 }
 
@@ -182,14 +200,11 @@ pub enum ProductionRunErrorV1 {
 /// measured, and the absence of each was confirmed across the workspace rather
 /// than assumed.
 pub const MISSING_PRODUCTION_PARTS_V1: &[&str] = &[
-    "RefundArmingAuthority: all four counterparty refund faces (EVM, Bitcoin, Solana, Monero) are now constructed by `compose_production_counterparty_children_v1` and returned in `ProductionCounterpartyChildrenV1::refund_faces`; what remains is retaining the Stage-10 Contracts stores as the DOM faces and calling `ProductionRefundArmingAuthorityV1::create`/`open_existing` with the refund-arming credential — bounded glue, no missing authority",
-    "RunnerActionAuthority: only the declared fail-closed `UnavailableRunnerAuthorityV1` exists; composed interop routes settle through the chain child authorities and emit no `RunnerPayload` effects, so this refusal is only reachable by a route shape this composition does not produce — it is retained deliberately, not as a hole",
-    "PublicSecretSource (upstream reveal extraction): DONE for every extractable chain — `ProductionPublicSecretSourceRouterV1` now routes DOM, EVM, Bitcoin and Solana (`ProductionSolanaPublicSecretSourceV1` re-reads the finalized escrow state PDA through the quorum pool and re-verifies the revealed scalar against BOTH DLEQ-certified curve points). Monero deliberately has no source and never will: a CLSAG ring signature keeps the spend scalar off the Monero chain, so the XMR leg's reveal is the DOM adaptor completion served by the DOM source, and `authenticate_leg` refuses any role plan that pins `VerifiedCounterpartyClaim` to a Monero counterparty leg.",
-    "SettlementPlanAuthorityV1 (base): DONE — `ProductionRoutePlanAuthorityV1` re-authenticates every plan against the frozen route pins and issues the coordinator-pinned authorization; unit-tested.",
-    "TimerAuthority: `ProductionDeadlineTimerAuthorityV1` and its canonical `deadline_context_digest_v1` derivation exist; the composition root has only to build its admitted-deadline map from the two authenticated counterparty deadlines — bounded glue, no missing authority",
-    "SettlementChildAuthorityV1: the four counterparty children are composed by this root from a V4 bootstrap; the router still awaits the DOM child, which needs the Relay worker plus a Contracts opening — composable today over `UnavailableF6AuthorityV1` (F6 negotiation fail-closed) with the DOM node RPC endpoint added to the V4 chain-endpoints artifact and the Relay authorities provisioned",
-    "SettlementChildObserverV1: same seam as the authority above — counterparty children composed, router awaiting the DOM child",
-    "F6TransportPortV1: two distinct things. (a) The DURABLE F6 PORT `ProductionSolverF6AuthorityV2` is a complete `F6TransportPortV1` engine, and `UnavailableF6AuthorityV1` is the fail-closed alternative that lets the runtime compose and drive real chain settlements while F6 negotiation is refused. (b) The REAL F6 NEGOTIATION still needs one authority that does not exist: `ProductionF6TermsAuthorityV2` has only a test `UnreachableTermsV2` impl. Building it is new cross-object cryptographic authority code (RFQ/quote/terms authentication against a real evidence source), not composition glue, and is the one genuine gap between the engine and served RFQ negotiation",
+    "COMPOSITION: DONE. With a V4 bootstrap, a complete secret stream, the negotiated `role-plan.v1` artifact and the `node.v1` configuration, `run_production_v1` composes the full route runtime: provisioning stages 1-12, the four counterparty children, the DOM child over the sole Contracts store openings, the deadline timer, refund arming across all four chain faces plus both DOM faces, the verified plan source (DOM public-secret source, retention vault, materialization owner), the base plan authority behind the V2 time guard, the settlement bridge over the durable coordinator, and the supervisor-driven `ProductionRouteRuntimeV1` under the system signal bridge. The remaining entries below are named open seams, none of which block composition.",
+    "F6TermsAuthorityV2 (real RFQ negotiation): the durable F6 engine `ProductionSolverF6AuthorityV2` exists; the composed runtime deliberately runs over `UnavailableF6AuthorityV1`, which refuses every negotiation while chain settlement stays fully operational. Serving real RFQs needs `ProductionF6TermsAuthorityV2` (only a test `UnreachableTermsV2` exists) - new cross-object cryptographic authority work, not composition glue.",
+    "SecretExposure observer seam (counterparty-reveal upstream routes): the production observer refuses `ChainObservationQueryV1::SecretExposure` by design - independent scalar extraction is a chain-specific observer boundary that does not exist yet. The extraction authorities behind it are ready (EVM, Bitcoin and Solana public-secret sources, router slots included); what is missing is the observer that turns a finalized counterparty claim into an authenticated `SecretObserved` route event. Until it exists, the one live reveal path is the DOM-face first exposure, and the composed router correctly carries only the DOM source.",
+    "Relay negotiation driver: the daemon composes the durable Relay queue and both Relay-backed Contracts owners, and the runtime drives settlements; it does not itself pump DSC1 negotiation rounds. The role plan and frozen templates arrive from the wallet-side Contracts/F7 flow, and the daemon consumes them as the authenticated `role-plan.v1` artifact. An in-daemon negotiation driver would need the real F6 terms authority above.",
+    "Live-fixture validation: the composed runtime is fail-closed by construction at every boundary, and the full happy path (fund, first exposure, cross-chain claim, retirement) is exercisable only against live chain fixtures; the engine-level (level-2) and live (level-3) proofs cover the authorities individually, not this exact composed binary end to end.",
 ];
 
 /// Explicit fail-closed runner boundary for a composition that has installed
@@ -279,14 +294,14 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
     let secrets =
         read_production_secrets_from_stdin().map_err(|_| ProductionRunErrorV1::Secrets)?;
     let secrets = secrets.into_parts();
-    let _bearer = secrets.bearer;
+    let bearer = secrets.bearer;
     let upstream_relay_signing_secret = secrets.upstream_relay_signing_secret;
     let downstream_relay_signing_secret = secrets.downstream_relay_signing_secret;
     let identity_passphrase = secrets.identity_passphrase;
     let dom_wallet_passphrase = secrets.dom_wallet_passphrase;
     let bitcoin_participant_secret = secrets.bitcoin_participant_secret;
     let route_secret_seal_key = secrets.route_secret_seal_key;
-    let _refund_arming_credential = secrets.refund_arming_credential;
+    let refund_arming_credential = secrets.refund_arming_credential;
 
     let bootstrap = load_bootstrap(options).map_err(|_| ProductionRunErrorV1::Configuration)?;
     let provisioning_binding = provisioning_binding_for_bootstrap(&bootstrap)
@@ -334,7 +349,7 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
             .map_err(|_| ProductionRunErrorV1::Provisioning)?,
         ProductionRunModeV1::ReopenExisting => vault_stage_before_begin,
     };
-    let _route_secret_retention = open_route_secret_retention(
+    let route_secret_retention = open_route_secret_retention(
         options.mode,
         vault_stage_before_begin,
         vault_stage,
@@ -372,7 +387,7 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
     let now_unix_ms = trusted_now_seconds
         .checked_mul(1_000)
         .ok_or(ProductionRunErrorV1::CoordinatorStore)?;
-    let _coordinator = open_settlement_coordinator(
+    let coordinator = open_settlement_coordinator(
         options.mode,
         coordinator_stage_before_begin,
         coordinator_stage,
@@ -408,7 +423,7 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
             .map_err(|_| ProductionRunErrorV1::Provisioning)?,
         ProductionRunModeV1::ReopenExisting => dom_stage_before_begin,
     };
-    let _dom_actuator_store =
+    let dom_actuator_store =
         open_dom_actuator_store(options.mode, dom_stage_before_begin, dom_stage, dom_path)?;
     if options.mode == ProductionRunModeV1::Create
         && dom_stage != ProductionProvisioningStageStateV1::Complete
@@ -574,7 +589,7 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
     // the recovery-only health event. Self-contained: it needs no endpoint,
     // store or signer, only the two authenticated deadlines.
     let route_id = inputs.admission().route_id();
-    let _deadline_timer = compose_production_deadline_timer_v1(&inputs, route_id)?;
+    let deadline_timer = compose_production_deadline_timer_v1(&inputs, route_id)?;
 
     // The counterparty settlement children. With a V4 bootstrap the four
     // chain faces the route admitted are composed here in drive form, from
@@ -582,7 +597,7 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
     // operator's chain-endpoints artifact — exactly one child per admitted
     // leg, or a named refusal. A V3 bootstrap has no endpoints artifact and
     // composes nothing, which is the old behaviour unchanged.
-    let _counterparty_children = match bootstrap.layout().chain_endpoints() {
+    let counterparty_children = match bootstrap.layout().chain_endpoints() {
         Some(endpoints_path) => {
             let endpoints = load_production_chain_endpoints(endpoints_path)
                 .map_err(|_| ProductionRunErrorV1::CounterpartyChildren)?;
@@ -626,7 +641,7 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
     // store, the durable Relay queue and the two Relay-backed Contracts
     // owners compose over the sanctioned fail-closed F6 authority; the two
     // remaining provisioning stages complete inside, in journal order.
-    let _route_service = compose_production_route_service_v1(
+    let route_service = compose_production_route_service_v1(
         ProductionRouteServiceRequestV1 {
             mode: options.mode,
             bootstrap: &bootstrap,
@@ -643,15 +658,69 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
     )
     .map_err(|_| ProductionRunErrorV1::RelayAuthorities)?;
 
-    // The composition point. Stages 1 through 12 above exist and have run,
-    // and with a V4 bootstrap the counterparty settlement children exist
-    // beside them; everything below is named in
-    // `MISSING_PRODUCTION_PARTS_V1`. The two raw Contracts store owners are
-    // retained above; the relay worker, the DOM child and the route runtime
-    // are composed here once those parts exist, and deliberately not before:
-    // a route driven by anything other than its real authorities would
-    // report progress it did not make.
-    Err(ProductionRunErrorV1::NotComposable)
+    // The composition point. Stages 1 through 12 above exist and have run.
+    // A V3 bootstrap names no chain-endpoints artifact, so no counterparty
+    // child can exist and the settlement runtime cannot compose: that is the
+    // one remaining `NotComposable` refusal, and it is a configuration
+    // shape, not a missing authority.
+    let Some(counterparty_children) = counterparty_children else {
+        return Err(ProductionRunErrorV1::NotComposable);
+    };
+
+    // The negotiated role-plan artifact is the phase-2 gate: its source
+    // scopes commit to the claim template hashes only the Contracts/F7
+    // negotiation can freeze. Its authenticated absence is the honest
+    // pre-negotiation lifecycle state — every provisioning stage above is
+    // complete and a rerun after negotiation composes the full runtime.
+    let Some(role_plan) = load_production_role_plan_v1(bootstrap.layout().state_dir(), &inputs)
+        .map_err(|_| ProductionRunErrorV1::RolePlan)?
+    else {
+        return Err(ProductionRunErrorV1::AwaitingNegotiatedRolePlan);
+    };
+
+    let composition_now_unix_ms = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| ProductionRunErrorV1::HostClock)?
+            .as_millis(),
+    )
+    .map_err(|_| ProductionRunErrorV1::HostClock)?;
+    let composed = compose_production_settlement_runtime_v1(
+        &bootstrap,
+        &chain_signers,
+        ProductionSettlementRuntimeRequestV1 {
+            inputs,
+            role_plan,
+            service: route_service,
+            children: counterparty_children,
+            deadline_timer,
+            retention: route_secret_retention,
+            coordinator,
+            dom_actuator_store,
+            bearer,
+            refund_arming_credential,
+            trusted_now_seconds,
+            now_unix_ms: composition_now_unix_ms,
+        },
+    )
+    .map_err(|_| ProductionRunErrorV1::SettlementRuntime)?;
+    let ComposedProductionRouteV1 {
+        mut runtime,
+        upstream_contracts: _upstream_contracts,
+        downstream_contracts: _downstream_contracts,
+        relay_queue: _relay_queue,
+    } = composed;
+
+    // Drive the route to its terminal state or a coordinated shutdown. The
+    // service plane stays alive beside the runtime: its Contracts stores are
+    // the same physical openings every DOM authority above retains.
+    let (mut control, shutdown) = SystemRouteRunControlV1::new();
+    let _signal_bridge = ProductionSignalBridgeV1::install(shutdown)
+        .map_err(|_| ProductionRunErrorV1::SettlementRuntime)?;
+    runtime
+        .run(&mut control)
+        .map_err(|_| ProductionRunErrorV1::SettlementRuntime)?;
+    Ok(())
 }
 
 fn compose_production_deadline_timer_v1(

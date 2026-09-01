@@ -379,6 +379,121 @@ impl ProductionChainPublicSecretSourceV1 for ProductionDomPublicSecretSourceV1 {
     }
 }
 
+/// Restart-safe DOM receiver authority pinned by the Store's own record.
+///
+/// The V1 source freezes the exact claim transaction at construction, which
+/// fits a mid-flight reopen where that identity is already durable. At the
+/// composition root the first DOM exposure has not happened yet, so nothing
+/// honest can supply that pin. This variant replaces the construction pin
+/// with a cross-check between two independent durable authorities that both
+/// exist by the time extraction is legal: the route journal's authenticated
+/// exposure (carried in the request) and the Contracts Store's own observed
+/// final-claim exposure record. A transaction id that appears in only one of
+/// them is refused; before the Store observation exists the source is
+/// `Unavailable`, never permissive.
+pub(crate) struct ProductionDomPublicSecretSourceV2 {
+    route_id: RouteIdV1,
+    composition_digest: Digest32,
+    chain_id: Digest32,
+    store: Rc<ContractsSessionStoreV1>,
+    binding: DomSessionBindingV1,
+    trusted_chain_id: TrustedChainIdV1,
+    consumer: RealDomClaimConsumerV1,
+}
+
+impl core::fmt::Debug for ProductionDomPublicSecretSourceV2 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ProductionDomPublicSecretSourceV2")
+            .field("route_id", &self.route_id)
+            .field("composition_digest", &self.composition_digest)
+            .field("chain_id", &self.chain_id)
+            .field("authorities", &"<redacted>")
+            .finish()
+    }
+}
+
+impl ProductionDomPublicSecretSourceV2 {
+    pub(crate) fn new(
+        route_id: RouteIdV1,
+        composition_digest: Digest32,
+        store: Rc<ContractsSessionStoreV1>,
+        binding: DomSessionBindingV1,
+        trusted_chain_id: TrustedChainIdV1,
+        consumer: RealDomClaimConsumerV1,
+    ) -> Result<Self, AuthorityRefusalV1> {
+        let chain_id = *trusted_chain_id.as_bytes();
+        if [route_id, composition_digest, chain_id].contains(&ZERO_DIGEST)
+            || binding.route_id() != route_id
+            || binding.chain_id() != chain_id
+        {
+            return Err(AuthorityRefusalV1::Inconsistent);
+        }
+        DomContractsActuatorV1::bind(store.as_ref(), binding)
+            .map_err(map_dom_secret_source_error)?;
+        Ok(Self {
+            route_id,
+            composition_digest,
+            chain_id,
+            store,
+            binding,
+            trusted_chain_id,
+            consumer,
+        })
+    }
+}
+
+impl ProductionChainPublicSecretSourceV1 for ProductionDomPublicSecretSourceV2 {
+    fn chain_id(&self) -> Digest32 {
+        self.chain_id
+    }
+
+    fn reextract_for_chain(
+        &mut self,
+        request: ProductionPublicSecretRequestV1<'_>,
+    ) -> Result<RevealedSecretBytes, AuthorityRefusalV1> {
+        let exposure = request.exposure();
+        if request.route_id() != self.route_id
+            || request.composition_digest() != self.composition_digest
+            || exposure.chain_id != self.chain_id
+            || exposure.transaction_id == ZERO_DIGEST
+            || exposure.evidence_digest == ZERO_DIGEST
+            || exposure.observed_at_unix_ms == 0
+        {
+            return Err(AuthorityRefusalV1::Inconsistent);
+        }
+        let actuator = DomContractsActuatorV1::bind(self.store.as_ref(), self.binding)
+            .map_err(map_dom_secret_source_error)?;
+        match actuator
+            .classify_final_claim_receiver_custody_v2(&self.trusted_chain_id)
+            .map_err(map_dom_secret_source_error)?
+        {
+            DomClaimCustodyClassificationV1::PotentiallyExposed => {}
+            DomClaimCustodyClassificationV1::Unattempted => {
+                return Err(AuthorityRefusalV1::Unavailable);
+            }
+            DomClaimCustodyClassificationV1::Admitted => {
+                return Err(AuthorityRefusalV1::Inconsistent);
+            }
+        }
+        let observed = actuator
+            .resume_observed_final_claim_exposure_v2(&self.trusted_chain_id)
+            .map_err(map_dom_secret_source_error)?;
+        // The journal exposure and the Store observation must agree on the
+        // exact transaction before any scalar work happens.
+        if observed.session_id() != &self.binding.session_id()
+            || observed.chain_id() != &self.chain_id
+            || observed.tx_hash() != &exposure.transaction_id
+            || observed.observation_record_digest() == &ZERO_DIGEST
+        {
+            return Err(AuthorityRefusalV1::Inconsistent);
+        }
+        actuator
+            .extract_observed_claim_secret_v2(&self.consumer, &observed)
+            .map_err(map_dom_secret_source_error)
+    }
+}
+
 fn require_dom_public_secret_request(
     route_id: RouteIdV1,
     composition_digest: Digest32,

@@ -24,6 +24,7 @@ production = [
     "dep:counterparty-api",
     "dep:adapter-dom-real",
     "dep:dom-adaptor",
+    "dep:dom-core",
     "adapter-evm/rpc-http",
     "dep:btc-actuator",
     "btc-actuator/rpc-http",
@@ -178,6 +179,9 @@ rfq = { path = "../rfq", optional = true }
 settlement-coordinator = { path = "../settlement-coordinator", optional = true }
 solver-inventory = { path = "../solver-inventory", optional = true }
 solver-status = { path = "../solver-status", optional = true }
+# The composition root recomputes the trusted DOM chain id from the node's
+# authenticated network magic and genesis; `Hash256` is the only type used.
+dom-core = { workspace = true, optional = true }
 store = { workspace = true, optional = true }
 
 [build-dependencies]

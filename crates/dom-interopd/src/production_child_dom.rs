@@ -470,7 +470,7 @@ pub(crate) struct ProductionDomChildPortV1<C, A> {
     sessions: [ProductionDomChildSessionV1<A>; 2],
     lease: DomLeaseV1,
     trusted_chain_id: TrustedChainIdV1,
-    runtime: RealDomRpcRuntimeV1,
+    runtime: std::sync::Arc<RealDomRpcRuntimeV1>,
     clock: C,
     route_terms_digest: Digest32,
     materialization_scope: ProductionDomMaterializationScopeV1,
@@ -554,7 +554,7 @@ pub(crate) struct ProductionDomChildBindingsV1 {
     pub(crate) sessions: [ProductionDomChildSessionBindingsV1; 2],
     pub(crate) lease: DomLeaseV1,
     pub(crate) trusted_chain_id: TrustedChainIdV1,
-    pub(crate) runtime: RealDomRpcRuntimeV1,
+    pub(crate) runtime: std::sync::Arc<RealDomRpcRuntimeV1>,
     pub(crate) route_terms_digest: Digest32,
     pub(crate) materialization_scope: ProductionDomMaterializationScopeV1,
 }

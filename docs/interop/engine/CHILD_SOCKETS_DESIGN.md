@@ -376,3 +376,65 @@ With this, `MISSING_PRODUCTION_PARTS_V1`'s secret-source entry is closed:
 every chain whose reveal exists on-chain has a production extraction
 authority, and the one chain whose reveal cannot exist on-chain is refused
 at materialization instead of failing somewhere deeper.
+
+## 13. Progress — the settlement runtime composes; NotComposable falls (2026-09-01)
+
+`run_production_v1` now runs the full composition. Two phases, because the
+lifecycle forces two phases:
+
+**Phase 1 — service plane (always composable).** Provisioning stages 11-12
+complete: the Contracts transport identity store (operator passphrase, state
+capability), the durable Relay queue and both per-leg Relay workers over
+deterministic domain-separated store identities, and one
+`ProductionContractsV1` owner per settlement leg over the sanctioned
+fail-closed `UnavailableF6AuthorityV1` (`production_service.rs`).
+
+**Phase 2 — settlement runtime (gated on the negotiated role plan).** Two
+structural facts surfaced while mapping this and were adjudicated rather
+than improvised:
+
+1. **The role plan is a negotiated artifact, not a derivable one.** Its
+   source scopes commit to the exact claim template hashes frozen during
+   the Contracts/F7 negotiation, which the wallet-side compositor produces.
+   The daemon therefore consumes `role-plan.v1` (role plan + both scopes,
+   fixed-length canonical bytes) the way it consumes terms — authenticated
+   byte-for-byte against the admitted composition, with the one production
+   shape enforced (downstream `LocalOrigin`/`DomRevealsFirst`, upstream
+   `VerifiedCounterpartyClaim`/`DomReactsToCounterpartyReveal`)
+   (`production_role_plan.rs`). Its authenticated absence is the honest
+   pre-negotiation state: `AwaitingNegotiatedRolePlan`, with all
+   provisioning complete and a rerun composing fully.
+2. **The DOM claim transaction id is a mid-lifecycle store fact.** The V1
+   DOM public-secret source pins it at construction, which fits a reopen
+   but nothing honest at cold start. `ProductionDomPublicSecretSourceV2`
+   replaces the construction pin with a cross-check between two independent
+   durable authorities that both exist when extraction is legal: the route
+   journal's authenticated exposure and the Contracts Store's own observed
+   final-claim record. Before the Store observation exists it is
+   `Unavailable`, never permissive.
+
+The composed router carries the DOM source only: the production observer
+refuses `SecretExposure` queries by design, so the DOM-face first exposure
+is the one live reveal path; the EVM/Bitcoin/Solana extraction authorities
+stay ready behind the future chain-specific observer seam.
+
+Assembly (`production_settlement_runtime.rs`): one authenticated node
+runtime shared via `Arc` between the DOM child port and the claim consumer;
+DOM lease + per-leg one-shot child store authorities bound to the frozen
+DOM deadlines; refund arming created/reopened at `refund-arming.v1.sqlite3`
+across both DOM faces and both counterparty faces; materialization scope,
+DOM child port, completed five-child router, first-exposure authority,
+materialization owner; verified plan source over the secret router and
+retention vault; base plan authority pinned to the coordinator's plan
+authority id behind the V2 time guard (evidence installed at composition);
+settlement bridge over the durable coordinator; supervisor over the sole
+route store; `ProductionRouteRuntimeV1` driven under the system signal
+bridge until terminal or coordinated shutdown.
+
+`NotComposable` survives only as the V3-bootstrap refusal (no
+chain-endpoints artifact means no counterparty children — a configuration
+shape). `MISSING_PRODUCTION_PARTS_V1` now records COMPOSITION: DONE plus
+the named open seams: the real F6 terms authority, the SecretExposure
+observer seam, the in-daemon negotiation driver, and the live-fixture
+caveat — the composed binary is fail-closed by construction everywhere,
+and its full happy path is exercisable only against live fixtures.

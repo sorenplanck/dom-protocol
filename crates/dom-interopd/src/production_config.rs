@@ -1217,6 +1217,10 @@ pub enum ProductionConfigErrorV1 {
     AmbiguousPathReference,
     /// An immutable input artifact was missing or physically unsafe.
     InputArtifactUnavailable,
+    /// The negotiated role-plan artifact was missing or physically unsafe.
+    RolePlanUnavailable,
+    /// The role-plan artifact decoded or authenticated wrongly.
+    RolePlanRefused,
     /// Create mode found a managed state leaf already present.
     StateAlreadyPresent,
     /// Recovery found a missing or wrong-type managed state authority.
@@ -1299,6 +1303,8 @@ impl core::fmt::Display for ProductionConfigErrorV1 {
                 "production identity authority directory unavailable"
             }
             Self::NodeConfigUnavailable => "production node configuration unavailable",
+            Self::RolePlanUnavailable => "production role-plan artifact unavailable",
+            Self::RolePlanRefused => "production role-plan artifact refused",
             Self::InvalidNodeEndpoint => "production DOM endpoint is invalid",
             Self::InvalidNodeIdentity => "production DOM node identity is invalid",
             Self::InvalidNodeBounds => "production node bounds are invalid",

@@ -44,15 +44,15 @@ const DEFERRED_MATERIALIZER_AUTHORITY_DOMAIN_V1: &[u8] =
     b"DOM-INTEROPD/PRODUCTION-DEFERRED-MATERIALIZER/AUTHORITY/V1\0";
 
 #[derive(Clone, Copy)]
-struct ProductionLegMaterializationBindingsV1 {
-    settlement_id: Digest32,
-    counterparty_face: SettlementFaceV1,
-    counterparty_chain_id: Digest32,
-    counterparty_profile_digest: Digest32,
-    counterparty_deployment_digest: Digest32,
-    source_scope_digest: Digest32,
-    reveal_mode: FinalClaimRevealModeV1,
-    secret_source: FinalClaimSecretSourceV1,
+pub(crate) struct ProductionLegMaterializationBindingsV1 {
+    pub(crate) settlement_id: Digest32,
+    pub(crate) counterparty_face: SettlementFaceV1,
+    pub(crate) counterparty_chain_id: Digest32,
+    pub(crate) counterparty_profile_digest: Digest32,
+    pub(crate) counterparty_deployment_digest: Digest32,
+    pub(crate) source_scope_digest: Digest32,
+    pub(crate) reveal_mode: FinalClaimRevealModeV1,
+    pub(crate) secret_source: FinalClaimSecretSourceV1,
 }
 
 /// Exact private-claim request passed to the sole local-origin secret owner.
@@ -873,7 +873,7 @@ impl ProductionSettlementDraftMaterializerV2 {
     }
 }
 
-fn authenticate_leg(
+pub(crate) fn authenticate_leg(
     inputs: &AuthenticatedProductionInputsV1,
     role_plan: &ComposedFinalClaimRolePlanV1,
     leg: LegIdV1,
