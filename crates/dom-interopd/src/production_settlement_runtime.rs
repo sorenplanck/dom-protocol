@@ -117,9 +117,6 @@ pub(crate) enum ProductionSettlementRuntimeErrorV1 {
     /// The route supervisor or runtime constructor refused.
     #[error("production route runtime refused")]
     RouteRuntime,
-    /// The trusted host clock refused.
-    #[error("production host clock refused")]
-    HostClock,
 }
 
 /// Everything phase 2 consumes, all of it already authenticated upstream.
