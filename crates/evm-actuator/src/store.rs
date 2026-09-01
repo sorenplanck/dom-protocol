@@ -16,6 +16,8 @@ use adapter_evm::{
     },
     derive_binding, derive_lock_id, keccak256, LockTerms,
 };
+use blake2::digest::consts::U32;
+use blake2::{Blake2b, Digest as BlakeDigest};
 use deployment_registry::{AssetRepresentationV1, ResolvedEvmDeploymentV1};
 use rusqlite::{
     config::DbConfig, params, Connection, OpenFlags, OptionalExtension, Transaction,
@@ -33,28 +35,38 @@ use crate::model::{
     EvmOperationPreparationRequestV1, EvmOperationViewV1, EvmRefundAuthorizationViewV1,
     EvmRetainedMutationKindV1, EvmSignerRoleV1, EvmTxStageV1, LeaseAcquireOutcomeV1,
     MutationOutcomeV1, MutationStatusV1, NonceSnapshotV1, ReconciliationKindV1,
-    ScopedEip1559SignerV1, ScopedEvmClaimV1, ScopedEvmOpenV1, ScopedEvmRefundV1,
-    ValidatedEvmLockV1, ZERO_DIGEST,
+    RemoteEvmActionCustodyAcquireOutcomeV1, RemoteEvmActionCustodyV1,
+    RemoteEvmActionMutationRequestV1, RemoteEvmActionRequestInputV1, RemoteEvmActionRequestV1,
+    RemoteEvmObservationMutationRequestV1, RemoteEvmOperationCustodyResumeInputV1,
+    RemoteEvmSignedActionV1, ScopedEip1559SignerV1, ScopedEvmClaimV1, ScopedEvmOpenV1,
+    ScopedEvmRefundV1, ValidatedEvmLockV1, ZERO_DIGEST,
 };
 use crate::rpc::{
     EvmRpcV1, RpcFinalizedTimeV1, RpcLogV1, RpcReceiptLookupV1, RpcReceiptV1,
     RpcTransactionLookupV1, RpcTransactionV1,
 };
 use crate::transaction::{
-    domain_digest, fields_digest, signing_hash, verify_and_encode_signed, Eip1559FieldsV1,
-    CLAIM_CALLDATA_LEN, MAX_RAW_TRANSACTION_BYTES_V1, REFUND_CALLDATA_LEN,
+    decode_and_verify_remote_signed_eip1559, domain_digest, fields_digest,
+    remote_claim_unsigned_call_digest_v1, remote_open_unsigned_call_digest_v1,
+    remote_refund_unsigned_call_digest_v1, remote_signed_raw_digest_v1, signing_hash,
+    verify_and_encode_signed, Eip1559FieldsV1, CLAIM_CALLDATA_LEN, MAX_RAW_TRANSACTION_BYTES_V1,
+    REFUND_CALLDATA_LEN,
 };
 use crate::{EvmActuatorErrorV1, Result};
 
 use zeroize::Zeroizing;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const APPLICATION_ID: i64 = 1_163_280_689;
 const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 const MAX_LEASE_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_OBSERVATION_TTL_MS: u64 = 60 * 60 * 1_000;
 const MAX_BUSY_TIMEOUT_MS: u64 = 30_000;
+const LEGACY_V3_SCHEMA_DIGEST: Digest32 = [
+    0x32, 0x41, 0x19, 0xfa, 0xdb, 0x02, 0x82, 0x38, 0x89, 0xfc, 0xf5, 0x6d, 0x71, 0x24, 0x51, 0xae,
+    0xfb, 0xb9, 0x7c, 0x2a, 0xb5, 0xc8, 0x24, 0x04, 0xbd, 0x3b, 0xf0, 0x84, 0x46, 0x77, 0x58, 0x6e,
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CreationBoundaryV1 {
@@ -68,6 +80,7 @@ enum CreationBoundaryV1 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ResumableCreationStateV1 {
     PristineSqlite,
+    LegacyV3,
     InitializedExact,
 }
 
@@ -95,6 +108,54 @@ struct OperationPreparationV1<'a> {
     value: Digest32,
     calldata: &'a [u8],
     refund_authorization: Option<RefundAuthorizationV1>,
+}
+
+#[derive(Clone, Copy)]
+enum OperationControlCapabilityV1 {
+    Local(EvmActuatorLeaseV1),
+    Remote(RemoteEvmActionCustodyV1),
+}
+
+#[derive(Clone, Copy)]
+struct OperationControlV1 {
+    capability: OperationControlCapabilityV1,
+    authority_id: Digest32,
+    chain_id: u64,
+    account: EvmAddressV1,
+    fencing_epoch: u64,
+}
+
+impl From<EvmActuatorLeaseV1> for OperationControlV1 {
+    fn from(value: EvmActuatorLeaseV1) -> Self {
+        Self {
+            capability: OperationControlCapabilityV1::Local(value),
+            authority_id: value.authority_id,
+            chain_id: value.chain_id,
+            account: value.account,
+            fencing_epoch: value.fencing_epoch,
+        }
+    }
+}
+
+impl From<RemoteEvmActionCustodyV1> for OperationControlV1 {
+    fn from(value: RemoteEvmActionCustodyV1) -> Self {
+        Self {
+            capability: OperationControlCapabilityV1::Remote(value),
+            authority_id: value.custody_id,
+            chain_id: value.chain_id,
+            account: value.signer_account,
+            fencing_epoch: value.fencing_epoch,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct OperationControlMutationRequestV1 {
+    control: OperationControlV1,
+    mutation_id: Digest32,
+    operation_id: Digest32,
+    expected_revision: u64,
+    now_unix_ms: u64,
 }
 
 /// Durable SQLite/WAL authority for scoped EIP-1559 operations.
@@ -209,6 +270,7 @@ impl DurableEvmActuatorV1 {
         validate_open_file_identity(&database_authority, path)?;
         match state {
             ResumableCreationStateV1::PristineSqlite => Self::create_schema(&connection)?,
+            ResumableCreationStateV1::LegacyV3 => migrate_v3_to_v4(&connection)?,
             ResumableCreationStateV1::InitializedExact => {}
         }
         validate_pristine_initialized_store(&connection)?;
@@ -239,9 +301,8 @@ impl DurableEvmActuatorV1 {
         validate_resumable_sidecars(path)?;
         let process_lock = acquire_process_lock(path, false)?;
         let database_authority = open_database_authority(path)?;
-        if preflight_resumable_creation_state(path, &database_authority)?
-            == ResumableCreationStateV1::PristineSqlite
-        {
+        let state = preflight_resumable_creation_state(path, &database_authority)?;
+        if state == ResumableCreationStateV1::PristineSqlite {
             return Err(EvmActuatorErrorV1::CreationIncomplete);
         }
         let connection = Connection::open_with_flags(
@@ -250,6 +311,9 @@ impl DurableEvmActuatorV1 {
         )?;
         configure_connection(&connection, false)?;
         validate_database_path(&connection, path)?;
+        if state == ResumableCreationStateV1::LegacyV3 {
+            migrate_v3_to_v4(&connection)?;
+        }
         validate_backend_and_schema(&connection)?;
         let store = Self {
             connection,
@@ -275,7 +339,7 @@ impl DurableEvmActuatorV1 {
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                  version INTEGER NOT NULL
              ) STRICT;
-             INSERT INTO evm_schema(singleton, version) VALUES (1, 3);
+             INSERT INTO evm_schema(singleton, version) VALUES (1, 4);
 
              CREATE TABLE evm_leases (
                  authority_id BLOB PRIMARY KEY CHECK(length(authority_id)=32),
@@ -297,6 +361,48 @@ impl DurableEvmActuatorV1 {
                  valid_until_be BLOB NOT NULL CHECK(length(valid_until_be)=8)
              ) STRICT;
 
+             CREATE TABLE evm_remote_custodies (
+                 custody_id BLOB PRIMARY KEY CHECK(length(custody_id)=32),
+                 operation_kind INTEGER NOT NULL CHECK(operation_kind IN (1,2,3)),
+                 signer_role INTEGER NOT NULL CHECK(signer_role IN (1,2)),
+                 owner_id BLOB NOT NULL CHECK(length(owner_id)=32),
+                 owner_epoch_be BLOB NOT NULL CHECK(length(owner_epoch_be)=8),
+                 action_id BLOB NOT NULL UNIQUE CHECK(length(action_id)=32),
+                 route_id BLOB NOT NULL CHECK(length(route_id)=32),
+                 settlement_id BLOB NOT NULL CHECK(length(settlement_id)=32),
+                 composition_binding_digest BLOB NOT NULL CHECK(length(composition_binding_digest)=32),
+                 execution_plan_digest BLOB NOT NULL CHECK(length(execution_plan_digest)=32),
+                 unsigned_call_digest BLOB NOT NULL CHECK(length(unsigned_call_digest)=32),
+                 request_message_digest BLOB NOT NULL UNIQUE CHECK(length(request_message_digest)=32),
+                 requester_id BLOB NOT NULL CHECK(length(requester_id)=32),
+                 signer_id BLOB NOT NULL CHECK(length(signer_id)=32),
+                 chain_id_be BLOB NOT NULL CHECK(length(chain_id_be)=8),
+                 contract BLOB NOT NULL CHECK(length(contract)=20),
+                 signer_account BLOB NOT NULL CHECK(length(signer_account)=20),
+                 fencing_epoch_be BLOB NOT NULL CHECK(length(fencing_epoch_be)=8),
+                 lease_until_be BLOB NOT NULL CHECK(length(lease_until_be)=8),
+                 clock_high_water_be BLOB NOT NULL CHECK(length(clock_high_water_be)=8)
+             ) STRICT;
+
+             CREATE TABLE evm_remote_allowances (
+                 custody_id BLOB NOT NULL REFERENCES evm_remote_custodies(custody_id),
+                 token BLOB NOT NULL CHECK(length(token)=20),
+                 spender BLOB NOT NULL CHECK(length(spender)=20),
+                 revision_be BLOB NOT NULL CHECK(length(revision_be)=8),
+                 amount BLOB NOT NULL CHECK(length(amount)=32),
+                 block_number_be BLOB NOT NULL CHECK(length(block_number_be)=8),
+                 block_hash BLOB NOT NULL CHECK(length(block_hash)=32),
+                 source_code_evidence BLOB NOT NULL CHECK(length(source_code_evidence)=32),
+                 source_allowance_evidence BLOB NOT NULL CHECK(length(source_allowance_evidence)=32),
+                 evidence_digest BLOB NOT NULL CHECK(length(evidence_digest)=32),
+                 registry_digest BLOB NOT NULL CHECK(length(registry_digest)=32),
+                 profile_digest BLOB NOT NULL CHECK(length(profile_digest)=32),
+                 asset_digest BLOB NOT NULL CHECK(length(asset_digest)=32),
+                 observed_at_be BLOB NOT NULL CHECK(length(observed_at_be)=8),
+                 valid_until_be BLOB NOT NULL CHECK(length(valid_until_be)=8),
+                 PRIMARY KEY(custody_id, token, spender)
+             ) STRICT;
+
              CREATE TABLE evm_allowances (
                  authority_id BLOB NOT NULL REFERENCES evm_leases(authority_id),
                  token BLOB NOT NULL CHECK(length(token)=20),
@@ -316,7 +422,12 @@ impl DurableEvmActuatorV1 {
 
              CREATE TABLE evm_operations (
                  operation_id BLOB PRIMARY KEY CHECK(length(operation_id)=32),
-                 authority_id BLOB NOT NULL REFERENCES evm_leases(authority_id),
+                 local_authority_id BLOB REFERENCES evm_leases(authority_id)
+                     CHECK(local_authority_id IS NULL OR length(local_authority_id)=32),
+                 remote_custody_id BLOB REFERENCES evm_remote_custodies(custody_id)
+                     CHECK(remote_custody_id IS NULL OR length(remote_custody_id)=32),
+                 authority_id BLOB GENERATED ALWAYS AS
+                     (coalesce(local_authority_id,remote_custody_id)) VIRTUAL,
                  route_id BLOB NOT NULL CHECK(length(route_id)=32),
                  effect_id BLOB NOT NULL CHECK(length(effect_id)=32),
                  request_digest BLOB NOT NULL CHECK(length(request_digest)=32),
@@ -373,8 +484,11 @@ impl DurableEvmActuatorV1 {
                  reconciled_from_stage INTEGER,
                  created_at_be BLOB NOT NULL CHECK(length(created_at_be)=8),
                  updated_at_be BLOB NOT NULL CHECK(length(updated_at_be)=8),
-                 UNIQUE(authority_id, effect_id),
-                 UNIQUE(authority_id, nonce_be)
+                 CHECK((local_authority_id IS NULL) != (remote_custody_id IS NULL)),
+                 UNIQUE(local_authority_id, effect_id),
+                 UNIQUE(local_authority_id, nonce_be),
+                 UNIQUE(remote_custody_id, effect_id),
+                 UNIQUE(remote_custody_id, nonce_be)
              ) STRICT;
 
              CREATE TABLE evm_attempts (
@@ -396,16 +510,29 @@ impl DurableEvmActuatorV1 {
              ) STRICT;
 
              CREATE TABLE evm_mutations (
-                 authority_id BLOB NOT NULL REFERENCES evm_leases(authority_id),
+                 local_authority_id BLOB REFERENCES evm_leases(authority_id)
+                     CHECK(local_authority_id IS NULL OR length(local_authority_id)=32),
+                 remote_custody_id BLOB REFERENCES evm_remote_custodies(custody_id)
+                     CHECK(remote_custody_id IS NULL OR length(remote_custody_id)=32),
+                 authority_id BLOB GENERATED ALWAYS AS
+                     (coalesce(local_authority_id,remote_custody_id)) VIRTUAL,
                  mutation_id BLOB NOT NULL CHECK(length(mutation_id)=32),
                  mutation_digest BLOB NOT NULL CHECK(length(mutation_digest)=32),
                  operation_id BLOB REFERENCES evm_operations(operation_id)
                      CHECK(operation_id IS NULL OR length(operation_id)=32),
                  resulting_revision_be BLOB NOT NULL CHECK(length(resulting_revision_be)=8),
-                 PRIMARY KEY(authority_id, mutation_id)
+                 CHECK((local_authority_id IS NULL) != (remote_custody_id IS NULL)),
+                 UNIQUE(local_authority_id, mutation_id),
+                 UNIQUE(remote_custody_id, mutation_id)
+             ) STRICT;
+
+             CREATE TABLE evm_remote_signed_actions (
+                 operation_id BLOB PRIMARY KEY REFERENCES evm_operations(operation_id),
+                 custody_id BLOB NOT NULL UNIQUE REFERENCES evm_remote_custodies(custody_id),
+                 signed_raw_digest BLOB NOT NULL CHECK(length(signed_raw_digest)=32)
              ) STRICT;
              PRAGMA application_id = 1163280689;
-             PRAGMA user_version = 3;",
+             PRAGMA user_version = 4;",
         )?;
         before_commit()?;
         let version: i64 = transaction.query_row(
@@ -612,6 +739,232 @@ impl DurableEvmActuatorV1 {
         Ok(match status {
             MutationStatusV1::Committed => LeaseAcquireOutcomeV1::Acquired(lease),
             MutationStatusV1::DuplicateSameBytes => LeaseAcquireOutcomeV1::AlreadyOwned(lease),
+        })
+    }
+
+    /// Acquires route/action-scoped custody for one authenticated remote
+    /// signing request without claiming account-wide nonce authority.
+    pub fn acquire_remote_action_custody(
+        &mut self,
+        request: RemoteEvmActionRequestV1,
+        now_unix_ms: u64,
+        lease_duration_ms: u64,
+    ) -> Result<RemoteEvmActionCustodyAcquireOutcomeV1> {
+        validate_time_window(now_unix_ms, lease_duration_ms, MAX_LEASE_DURATION_MS)?;
+        let custody_id = remote_custody_id(&request);
+        validate_id(custody_id)?;
+        let until = now_unix_ms
+            .checked_add(lease_duration_ms)
+            .ok_or(EvmActuatorErrorV1::InvalidTime)?;
+        let transaction = self.immediate()?;
+        let existing = load_remote_custody(&transaction, custody_id)?;
+        let (custody, status) = match existing {
+            None => {
+                transaction.execute(
+                    "INSERT INTO evm_remote_custodies
+                     (custody_id,operation_kind,signer_role,owner_id,owner_epoch_be,
+                      action_id,route_id,settlement_id,composition_binding_digest,
+                      execution_plan_digest,unsigned_call_digest,request_message_digest,
+                      requester_id,signer_id,chain_id_be,contract,signer_account,
+                      fencing_epoch_be,lease_until_be,clock_high_water_be)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,
+                             ?15,?16,?17,?18,?19,?20)",
+                    params![
+                        custody_id.as_slice(),
+                        request.kind.tag(),
+                        request.role.tag(),
+                        request.owner_id.as_slice(),
+                        request.owner_epoch.to_be_bytes().as_slice(),
+                        request.action_id.as_slice(),
+                        request.route_id.as_slice(),
+                        request.settlement_id.as_slice(),
+                        request.composition_binding_digest.as_slice(),
+                        request.execution_plan_digest.as_slice(),
+                        request.unsigned_call_digest.as_slice(),
+                        request.request_message_digest.as_slice(),
+                        request.requester_id.as_slice(),
+                        request.signer_id.as_slice(),
+                        request.chain_id.to_be_bytes().as_slice(),
+                        request.contract.as_slice(),
+                        request.signer_account.as_slice(),
+                        1u64.to_be_bytes().as_slice(),
+                        until.to_be_bytes().as_slice(),
+                        now_unix_ms.to_be_bytes().as_slice(),
+                    ],
+                )?;
+                (
+                    remote_custody_capability(custody_id, &request, 1, until),
+                    MutationStatusV1::Committed,
+                )
+            }
+            Some(existing) => {
+                if existing.request != request {
+                    return Err(EvmActuatorErrorV1::IdempotencyConflict);
+                }
+                if now_unix_ms < existing.clock_high_water {
+                    return Err(EvmActuatorErrorV1::InvalidTime);
+                }
+                if existing.lease_until >= now_unix_ms {
+                    transaction.execute(
+                        "UPDATE evm_remote_custodies SET clock_high_water_be=?2
+                         WHERE custody_id=?1 AND fencing_epoch_be=?3",
+                        params![
+                            custody_id.as_slice(),
+                            now_unix_ms.to_be_bytes().as_slice(),
+                            existing.fencing_epoch.to_be_bytes().as_slice(),
+                        ],
+                    )?;
+                    (
+                        remote_custody_capability(
+                            custody_id,
+                            &request,
+                            existing.fencing_epoch,
+                            existing.lease_until,
+                        ),
+                        MutationStatusV1::DuplicateSameBytes,
+                    )
+                } else {
+                    let fence = existing
+                        .fencing_epoch
+                        .checked_add(1)
+                        .ok_or(EvmActuatorErrorV1::BoundExceeded)?;
+                    transaction.execute(
+                        "UPDATE evm_remote_custodies SET fencing_epoch_be=?2,
+                         lease_until_be=?3,clock_high_water_be=?4 WHERE custody_id=?1",
+                        params![
+                            custody_id.as_slice(),
+                            fence.to_be_bytes().as_slice(),
+                            until.to_be_bytes().as_slice(),
+                            now_unix_ms.to_be_bytes().as_slice(),
+                        ],
+                    )?;
+                    (
+                        remote_custody_capability(custody_id, &request, fence, until),
+                        MutationStatusV1::Committed,
+                    )
+                }
+            }
+        };
+        transaction.commit()?;
+        Ok(match status {
+            MutationStatusV1::Committed => {
+                RemoteEvmActionCustodyAcquireOutcomeV1::Acquired(custody)
+            }
+            MutationStatusV1::DuplicateSameBytes => {
+                RemoteEvmActionCustodyAcquireOutcomeV1::AlreadyOwned(custody)
+            }
+        })
+    }
+
+    /// Renews the exact route/action custody without changing its fence.
+    pub fn renew_remote_action_custody(
+        &mut self,
+        custody: RemoteEvmActionCustodyV1,
+        now_unix_ms: u64,
+        lease_duration_ms: u64,
+    ) -> Result<RemoteEvmActionCustodyV1> {
+        validate_time_window(now_unix_ms, lease_duration_ms, MAX_LEASE_DURATION_MS)?;
+        let until = now_unix_ms
+            .checked_add(lease_duration_ms)
+            .ok_or(EvmActuatorErrorV1::InvalidTime)?;
+        let transaction = self.immediate()?;
+        validate_remote_custody(&transaction, custody, now_unix_ms)?;
+        let changed = transaction.execute(
+            "UPDATE evm_remote_custodies SET lease_until_be=?2
+             WHERE custody_id=?1 AND fencing_epoch_be=?3",
+            params![
+                custody.custody_id.as_slice(),
+                until.to_be_bytes().as_slice(),
+                custody.fencing_epoch.to_be_bytes().as_slice(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(EvmActuatorErrorV1::StaleFencing);
+        }
+        transaction.commit()?;
+        Ok(RemoteEvmActionCustodyV1 {
+            lease_until_unix_ms: until,
+            ..custody
+        })
+    }
+
+    /// Reacquires custody of an already imported remote operation after
+    /// process loss without requiring the raw transaction, scalar-bearing
+    /// calldata or a second Contracts import grant.
+    ///
+    /// The operation id is only a locator. Every route, owner, settlement,
+    /// economic, deployment, chain, account and transaction binding supplied
+    /// by the caller is crossed against both audited durable rows before the
+    /// custody clock or fence can advance. An expired custody is taken over by
+    /// incrementing only its route/action-local fence; this never grants the
+    /// remote account-wide nonce authority.
+    pub fn acquire_existing_remote_operation_custody(
+        &mut self,
+        input: RemoteEvmOperationCustodyResumeInputV1,
+        now_unix_ms: u64,
+        lease_duration_ms: u64,
+    ) -> Result<RemoteEvmActionCustodyAcquireOutcomeV1> {
+        validate_remote_operation_resume_input(&input)?;
+        validate_time_window(now_unix_ms, lease_duration_ms, MAX_LEASE_DURATION_MS)?;
+        let until = now_unix_ms
+            .checked_add(lease_duration_ms)
+            .ok_or(EvmActuatorErrorV1::InvalidTime)?;
+        let transaction = self.immediate()?;
+        let operation = load_operation_row(&transaction, input.operation_id)?;
+        let custody_id = operation
+            .remote_custody_id
+            .ok_or(EvmActuatorErrorV1::InvalidScope)?;
+        let retained = load_remote_custody(&transaction, custody_id)?
+            .ok_or(EvmActuatorErrorV1::CorruptState)?;
+        validate_existing_remote_operation_binding(&input, &operation, custody_id, &retained)?;
+        if now_unix_ms < retained.clock_high_water {
+            return Err(EvmActuatorErrorV1::InvalidTime);
+        }
+        let (fencing_epoch, lease_until_unix_ms, status) = if retained.lease_until >= now_unix_ms {
+            (
+                retained.fencing_epoch,
+                retained.lease_until,
+                MutationStatusV1::DuplicateSameBytes,
+            )
+        } else {
+            (
+                retained
+                    .fencing_epoch
+                    .checked_add(1)
+                    .ok_or(EvmActuatorErrorV1::BoundExceeded)?,
+                until,
+                MutationStatusV1::Committed,
+            )
+        };
+        let changed = transaction.execute(
+            "UPDATE evm_remote_custodies
+             SET fencing_epoch_be=?2,lease_until_be=?3,clock_high_water_be=?4
+             WHERE custody_id=?1 AND fencing_epoch_be=?5 AND clock_high_water_be<=?4",
+            params![
+                custody_id.as_slice(),
+                fencing_epoch.to_be_bytes().as_slice(),
+                lease_until_unix_ms.to_be_bytes().as_slice(),
+                now_unix_ms.to_be_bytes().as_slice(),
+                retained.fencing_epoch.to_be_bytes().as_slice(),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(EvmActuatorErrorV1::StaleFencing);
+        }
+        let custody = remote_custody_capability(
+            custody_id,
+            &retained.request,
+            fencing_epoch,
+            lease_until_unix_ms,
+        );
+        transaction.commit()?;
+        Ok(match status {
+            MutationStatusV1::Committed => {
+                RemoteEvmActionCustodyAcquireOutcomeV1::Acquired(custody)
+            }
+            MutationStatusV1::DuplicateSameBytes => {
+                RemoteEvmActionCustodyAcquireOutcomeV1::AlreadyOwned(custody)
+            }
         })
     }
 
@@ -921,6 +1274,198 @@ impl DurableEvmActuatorV1 {
         Ok(MutationStatusV1::Committed)
     }
 
+    /// Refreshes finalized ERC-20 allowance evidence for one exact remote
+    /// funding action. The observation is custody-scoped and never creates an
+    /// account-wide nonce or signing lease.
+    pub fn refresh_remote_finalized_allowance<R: EvmRpcV1, F: FnOnce() -> Result<u64>>(
+        &mut self,
+        request: RemoteEvmObservationMutationRequestV1,
+        deployment: &ResolvedEvmDeploymentV1,
+        rpc: &mut R,
+        post_rpc_time: F,
+    ) -> Result<MutationStatusV1> {
+        let RemoteEvmObservationMutationRequestV1 {
+            custody,
+            mutation_id,
+            expected_revision,
+            now_unix_ms,
+            valid_for_ms,
+        } = request;
+        validate_id(mutation_id)?;
+        validate_time_window(now_unix_ms, valid_for_ms, MAX_OBSERVATION_TTL_MS)?;
+        let retained = {
+            let transaction = self.deferred()?;
+            let retained = require_remote_custody_read_only(&transaction, custody, now_unix_ms)?;
+            validate_remote_deployment(&retained.request, deployment, EvmOperationKindV1::Open)?;
+            transaction.commit()?;
+            retained
+        };
+        let config = deployment.adapter_config();
+        let (token, token_code_hash) = match deployment.asset_binding().representation {
+            AssetRepresentationV1::EvmErc20 {
+                token,
+                token_code_hash,
+            } => (token, token_code_hash),
+            AssetRepresentationV1::Native => return Err(EvmActuatorErrorV1::InvalidState),
+        };
+        rpc_preflight(deployment, rpc)?;
+        let (observed_code_hash, code_evidence) = rpc.finalized_code_hash(token)?;
+        if observed_code_hash != token_code_hash || code_evidence == ZERO_DIGEST {
+            return Err(EvmActuatorErrorV1::RpcScopeMismatch);
+        }
+        let allowance =
+            rpc.finalized_allowance(token, retained.request.signer_account, config.contract)?;
+        if allowance.block_hash == ZERO_DIGEST || allowance.evidence_digest == ZERO_DIGEST {
+            return Err(EvmActuatorErrorV1::RpcScopeMismatch);
+        }
+        let post_rpc_now_unix_ms = post_rpc_time()?;
+        require_post_rpc_time(now_unix_ms, post_rpc_now_unix_ms)?;
+        validate_time_window(post_rpc_now_unix_ms, valid_for_ms, MAX_OBSERVATION_TTL_MS)?;
+        let valid_until = post_rpc_now_unix_ms
+            .checked_add(valid_for_ms)
+            .ok_or(EvmActuatorErrorV1::InvalidTime)?;
+        let evidence = remote_allowance_evidence_digest(RemoteAllowanceEvidenceFieldsV1 {
+            custody_id: custody.custody_id,
+            token,
+            account: retained.request.signer_account,
+            spender: config.contract,
+            amount: allowance.amount,
+            block_number: allowance.block_number,
+            block_hash: allowance.block_hash,
+            source_code_evidence: code_evidence,
+            source_allowance_evidence: allowance.evidence_digest,
+            registry_digest: deployment.registry_digest(),
+            profile_digest: deployment.profile_digest(),
+            asset_digest: deployment.asset_binding_digest(),
+            observed_at: post_rpc_now_unix_ms,
+            valid_until,
+        });
+        let mutation_digest = domain_digest(
+            b"DOM-INTEROP/EVM-ACTUATOR/REMOTE-ALLOWANCE-MUTATION/V1\0",
+            &[
+                &custody.custody_id,
+                &token,
+                &config.contract,
+                &allowance.amount,
+                &allowance.block_number.to_be_bytes(),
+                &allowance.block_hash,
+                &evidence,
+                &valid_until.to_be_bytes(),
+            ],
+        );
+        let transaction = self.immediate()?;
+        let current_request =
+            validate_remote_custody(&transaction, custody, post_rpc_now_unix_ms)?.request;
+        if current_request != retained.request {
+            return Err(EvmActuatorErrorV1::RevisionConflict);
+        }
+        if let Some(status) = existing_remote_mutation(
+            &transaction,
+            custody.custody_id,
+            mutation_id,
+            mutation_digest,
+        )? {
+            transaction.commit()?;
+            return Ok(status);
+        }
+        let current: Option<RetainedRemoteAllowanceHeadV1> = transaction
+            .query_row(
+                "SELECT revision_be,amount,block_number_be,block_hash,
+                        source_code_evidence,source_allowance_evidence,
+                        registry_digest,profile_digest,asset_digest
+                 FROM evm_remote_allowances
+                 WHERE custody_id=?1 AND token=?2 AND spender=?3",
+                params![
+                    custody.custody_id.as_slice(),
+                    token.as_slice(),
+                    config.contract.as_slice(),
+                ],
+                |row| {
+                    Ok(RetainedRemoteAllowanceHeadV1 {
+                        revision: row.get(0)?,
+                        amount: row.get(1)?,
+                        block_number: row.get(2)?,
+                        block_hash: row.get(3)?,
+                        source_code_evidence: row.get(4)?,
+                        source_allowance_evidence: row.get(5)?,
+                        registry_digest: row.get(6)?,
+                        profile_digest: row.get(7)?,
+                        asset_digest: row.get(8)?,
+                    })
+                },
+            )
+            .optional()?;
+        let revision = match current {
+            None if expected_revision == 0 => 1,
+            Some(stored) => {
+                let stored_revision = blob_u64(stored.revision)?;
+                let stored_block = blob_u64(stored.block_number)?;
+                if stored_revision != expected_revision || allowance.block_number < stored_block {
+                    return Err(EvmActuatorErrorV1::RevisionConflict);
+                }
+                if allowance.block_number == stored_block
+                    && (blob32(stored.amount)? != allowance.amount
+                        || blob32(stored.block_hash)? != allowance.block_hash
+                        || blob32(stored.source_code_evidence)? != code_evidence
+                        || blob32(stored.source_allowance_evidence)? != allowance.evidence_digest
+                        || blob32(stored.registry_digest)? != deployment.registry_digest()
+                        || blob32(stored.profile_digest)? != deployment.profile_digest()
+                        || blob32(stored.asset_digest)? != deployment.asset_binding_digest())
+                {
+                    return Err(EvmActuatorErrorV1::ObservationMismatch);
+                }
+                stored_revision
+                    .checked_add(1)
+                    .ok_or(EvmActuatorErrorV1::BoundExceeded)?
+            }
+            _ => return Err(EvmActuatorErrorV1::RevisionConflict),
+        };
+        transaction.execute(
+            "INSERT INTO evm_remote_allowances
+             (custody_id,token,spender,revision_be,amount,block_number_be,block_hash,
+              source_code_evidence,source_allowance_evidence,evidence_digest,
+              registry_digest,profile_digest,asset_digest,observed_at_be,valid_until_be)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+             ON CONFLICT(custody_id,token,spender) DO UPDATE SET
+               revision_be=excluded.revision_be,amount=excluded.amount,
+               block_number_be=excluded.block_number_be,block_hash=excluded.block_hash,
+               source_code_evidence=excluded.source_code_evidence,
+               source_allowance_evidence=excluded.source_allowance_evidence,
+               evidence_digest=excluded.evidence_digest,
+               registry_digest=excluded.registry_digest,
+               profile_digest=excluded.profile_digest,asset_digest=excluded.asset_digest,
+               observed_at_be=excluded.observed_at_be,
+               valid_until_be=excluded.valid_until_be",
+            params![
+                custody.custody_id.as_slice(),
+                token.as_slice(),
+                config.contract.as_slice(),
+                revision.to_be_bytes().as_slice(),
+                allowance.amount.as_slice(),
+                allowance.block_number.to_be_bytes().as_slice(),
+                allowance.block_hash.as_slice(),
+                code_evidence.as_slice(),
+                allowance.evidence_digest.as_slice(),
+                evidence.as_slice(),
+                deployment.registry_digest().as_slice(),
+                deployment.profile_digest().as_slice(),
+                deployment.asset_binding_digest().as_slice(),
+                post_rpc_now_unix_ms.to_be_bytes().as_slice(),
+                valid_until.to_be_bytes().as_slice(),
+            ],
+        )?;
+        insert_remote_mutation(
+            &transaction,
+            custody.custody_id,
+            mutation_id,
+            mutation_digest,
+            None,
+            revision,
+        )?;
+        transaction.commit()?;
+        Ok(MutationStatusV1::Committed)
+    }
+
     /// Atomically reserves a nonce and persists a fully validated open call.
     /// ERC-20 calls require a sufficient, non-stale finalized allowance first.
     pub fn prepare_open(
@@ -1003,6 +1548,306 @@ impl DurableEvmActuatorV1 {
             refund_authorization: Some(authorization),
         };
         self.prepare_operation(request, &preparation)
+    }
+
+    /// Imports one exact remote-signed native/ERC-20 opening after verifying
+    /// the canonical type-2 envelope and every authenticated call binding.
+    pub fn import_remote_open_signed<F: FnOnce() -> Result<u64>>(
+        &mut self,
+        request: RemoteEvmActionMutationRequestV1,
+        scope: &ScopedEvmOpenV1,
+        signed: RemoteEvmSignedActionV1,
+        post_verify_time: F,
+    ) -> Result<MutationOutcomeV1<EvmOperationViewV1>> {
+        let preparation = OperationPreparationV1 {
+            kind: EvmOperationKindV1::Open,
+            signer_role: EvmSignerRoleV1::Funder,
+            route_id: scope.route_id,
+            effect_id: scope.effect_id,
+            semantic_digest: scope.semantic_digest,
+            lock: &scope.lock,
+            value: scope.call.value,
+            calldata: &scope.call.calldata,
+            refund_authorization: None,
+        };
+        self.import_remote_signed_operation(
+            request,
+            &preparation,
+            remote_open_unsigned_call_digest_v1(scope)?,
+            signed,
+            post_verify_time,
+        )
+    }
+
+    /// Imports one exact remote-beneficiary claim without exposing raw bytes
+    /// or scalar-bearing calldata through a public operation view.
+    pub fn import_remote_claim_signed<F: FnOnce() -> Result<u64>>(
+        &mut self,
+        request: RemoteEvmActionMutationRequestV1,
+        scope: ScopedEvmClaimV1,
+        signed: RemoteEvmSignedActionV1,
+        post_verify_time: F,
+    ) -> Result<MutationOutcomeV1<EvmOperationViewV1>> {
+        let unsigned_call_digest = remote_claim_unsigned_call_digest_v1(&scope)?;
+        let preparation = OperationPreparationV1 {
+            kind: EvmOperationKindV1::Claim,
+            signer_role: EvmSignerRoleV1::Beneficiary,
+            route_id: scope.route_id,
+            effect_id: scope.effect_id,
+            semantic_digest: scope.semantic_digest,
+            lock: &scope.lock,
+            value: ZERO_DIGEST,
+            calldata: &scope.calldata,
+            refund_authorization: None,
+        };
+        self.import_remote_signed_operation(
+            request,
+            &preparation,
+            unsigned_call_digest,
+            signed,
+            post_verify_time,
+        )
+    }
+
+    /// Verifies canonical finalized deadline evidence and imports one exact
+    /// remote-funder refund under fresh post-RPC custody time.
+    pub fn import_remote_refund_signed<R: EvmRpcV1, F: FnOnce() -> Result<u64>>(
+        &mut self,
+        request: RemoteEvmActionMutationRequestV1,
+        scope: &ScopedEvmRefundV1,
+        signed: RemoteEvmSignedActionV1,
+        rpc: &mut R,
+        post_rpc_time: F,
+    ) -> Result<MutationOutcomeV1<EvmOperationViewV1>> {
+        rpc_preflight(&scope.lock.deployment, rpc)?;
+        let authorization = validate_refund_time(
+            scope.lock.deployment.adapter_config().chain_id,
+            scope.lock.deployment.deployment().genesis_hash,
+            scope.lock.deadline,
+            rpc.finalized_block_time()?,
+        )?;
+        let preparation = OperationPreparationV1 {
+            kind: EvmOperationKindV1::Refund,
+            signer_role: EvmSignerRoleV1::Funder,
+            route_id: scope.route_id,
+            effect_id: scope.effect_id,
+            semantic_digest: scope.semantic_digest,
+            lock: &scope.lock,
+            value: ZERO_DIGEST,
+            calldata: &scope.calldata,
+            refund_authorization: Some(authorization),
+        };
+        self.import_remote_signed_operation(
+            request,
+            &preparation,
+            remote_refund_unsigned_call_digest_v1(scope)?,
+            signed,
+            post_rpc_time,
+        )
+    }
+
+    fn import_remote_signed_operation<F: FnOnce() -> Result<u64>>(
+        &mut self,
+        request: RemoteEvmActionMutationRequestV1,
+        scope: &OperationPreparationV1<'_>,
+        unsigned_call_digest: Digest32,
+        signed: RemoteEvmSignedActionV1,
+        post_verify_time: F,
+    ) -> Result<MutationOutcomeV1<EvmOperationViewV1>> {
+        let RemoteEvmActionMutationRequestV1 {
+            custody,
+            mutation_id,
+            operation_id,
+            expected_revision,
+            now_unix_ms,
+        } = request;
+        validate_id(mutation_id)?;
+        validate_id(operation_id)?;
+        if expected_revision != 0 {
+            return Err(EvmActuatorErrorV1::RevisionConflict);
+        }
+        let retained = {
+            let transaction = self.deferred()?;
+            let retained = require_remote_custody_read_only(&transaction, custody, now_unix_ms)?;
+            validate_remote_scope(&retained.request, scope, unsigned_call_digest)?;
+            transaction.commit()?;
+            retained
+        };
+        if signed.request_message_digest != retained.request.request_message_digest {
+            return Err(EvmActuatorErrorV1::InvalidScope);
+        }
+        let decoded = decode_and_verify_remote_signed_eip1559(
+            &signed.raw_transaction,
+            retained.request.signer_account,
+        )?;
+        if decoded.signed_raw_digest != signed.signed_raw_digest
+            || decoded.transaction_hash != signed.transaction_hash
+        {
+            return Err(EvmActuatorErrorV1::InvalidTransaction);
+        }
+        validate_remote_fields(scope, &decoded.fields)?;
+        let post_verify_now_unix_ms = post_verify_time()?;
+        require_post_rpc_time(now_unix_ms, post_verify_now_unix_ms)?;
+        let request_digest = operation_request_digest(operation_id, scope, decoded.fields.fees)?;
+        let mutation_digest = domain_digest(
+            b"DOM-INTEROP/EVM-ACTUATOR/REMOTE-IMPORT/V1\0",
+            &[
+                &custody.custody_id,
+                &operation_id,
+                &request_digest,
+                &retained.request.request_message_digest,
+                &decoded.signed_raw_digest,
+                &decoded.transaction_hash,
+            ],
+        );
+        let transaction = self.immediate()?;
+        let current_request =
+            validate_remote_custody(&transaction, custody, post_verify_now_unix_ms)?.request;
+        if current_request != retained.request {
+            return Err(EvmActuatorErrorV1::RevisionConflict);
+        }
+        if let Some(status) = existing_remote_mutation(
+            &transaction,
+            custody.custody_id,
+            mutation_id,
+            mutation_digest,
+        )? {
+            let value = load_operation_view(&transaction, operation_id)?;
+            if value.transaction_hash != Some(decoded.transaction_hash) {
+                return Err(EvmActuatorErrorV1::IdempotencyConflict);
+            }
+            transaction.commit()?;
+            return Ok(MutationOutcomeV1 { status, value });
+        }
+        if transaction
+            .query_row(
+                "SELECT 1 FROM evm_operations WHERE operation_id=?1",
+                params![operation_id.as_slice()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some()
+        {
+            return Err(EvmActuatorErrorV1::IdempotencyConflict);
+        }
+        let (erc20_token, allowance_revision) = require_remote_allowance_if_needed(
+            &transaction,
+            custody.custody_id,
+            scope,
+            post_verify_now_unix_ms,
+        )?;
+        let config = scope.lock.deployment.adapter_config();
+        let deployment = scope.lock.deployment.deployment();
+        let refund = scope.refund_authorization;
+        transaction.execute(
+            "INSERT INTO evm_operations
+             (operation_id,remote_custody_id,route_id,effect_id,request_digest,operation_kind,
+              signer_role,revision_be,stage_tag,fencing_epoch_be,chain_id_be,account,nonce_be,
+              destination,value,calldata,calldata_digest,gas_limit_be,max_fee_be,
+              max_priority_fee_be,max_fee_cap_be,max_priority_fee_cap_be,registry_digest,
+              profile_digest,asset_digest,deployment_digest,destination_code_hash,genesis_hash,
+              semantic_digest,terms_digest,lock_id,binding,beneficiary,funder,adaptor_address,
+              deadline_be,erc20_token,lock_amount,allowance_revision_be,
+              refund_auth_block_number_be,refund_auth_block_hash,refund_auth_timestamp_be,
+              refund_auth_evidence,current_attempt,transaction_hash,ambiguous_after_send,
+              secret_exposed,execution_success,observed_evidence,final_block_number_be,
+              final_block_hash,final_evidence,terminal_event_digest,
+              finality_invalidation_evidence,reconciliation_kind,reconciled_from_stage,
+              created_at_be,updated_at_be)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,
+                     ?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,
+                     ?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,
+                     ?42,?43,1,?44,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
+                     ?45,?45)",
+            params![
+                operation_id.as_slice(),
+                custody.custody_id.as_slice(),
+                scope.route_id.as_slice(),
+                scope.effect_id.as_slice(),
+                request_digest.as_slice(),
+                scope.kind.tag(),
+                scope.signer_role.tag(),
+                1u64.to_be_bytes().as_slice(),
+                EvmTxStageV1::Signed.tag(),
+                custody.fencing_epoch.to_be_bytes().as_slice(),
+                decoded.fields.chain_id.to_be_bytes().as_slice(),
+                retained.request.signer_account.as_slice(),
+                decoded.fields.nonce.to_be_bytes().as_slice(),
+                decoded.fields.to.as_slice(),
+                decoded.fields.value.as_slice(),
+                decoded.fields.calldata.as_slice(),
+                keccak256(&decoded.fields.calldata).as_slice(),
+                decoded.fields.gas_limit.to_be_bytes().as_slice(),
+                decoded.fields.fees.max_fee_per_gas.to_be_bytes().as_slice(),
+                decoded
+                    .fields
+                    .fees
+                    .max_priority_fee_per_gas
+                    .to_be_bytes()
+                    .as_slice(),
+                deployment.max_fee_per_gas.to_be_bytes().as_slice(),
+                deployment.max_priority_fee_per_gas.to_be_bytes().as_slice(),
+                scope.lock.deployment.registry_digest().as_slice(),
+                scope.lock.deployment.profile_digest().as_slice(),
+                scope.lock.deployment.asset_binding_digest().as_slice(),
+                deployment.deployment_digest.as_slice(),
+                config.expected_code_hash.as_slice(),
+                deployment.genesis_hash.as_slice(),
+                scope.semantic_digest.as_slice(),
+                config.terms_hash.as_slice(),
+                scope.lock.lock_id.as_slice(),
+                scope.lock.binding.as_slice(),
+                scope.lock.beneficiary.as_slice(),
+                scope.lock.funder.as_slice(),
+                scope.lock.adaptor_address.as_slice(),
+                scope.lock.deadline.to_be_bytes().as_slice(),
+                erc20_token.map(|value| value.to_vec()),
+                scope.lock.amount.as_slice(),
+                allowance_revision.map(|value| value.to_be_bytes().to_vec()),
+                refund.map(|value| value.block_number.to_be_bytes().to_vec()),
+                refund.map(|value| value.block_hash.to_vec()),
+                refund.map(|value| value.timestamp.to_be_bytes().to_vec()),
+                refund.map(|value| value.evidence_digest.to_vec()),
+                decoded.transaction_hash.as_slice(),
+                post_verify_now_unix_ms.to_be_bytes().as_slice(),
+            ],
+        )?;
+        insert_signed_attempt(
+            &transaction,
+            SignedAttemptMaterialV1 {
+                operation_id,
+                attempt: 1,
+                stage: EvmTxStageV1::Signed,
+                fees: decoded.fields.fees,
+                signing_hash: signing_hash(&decoded.fields)?,
+                raw: &signed.raw_transaction,
+                transaction_hash: decoded.transaction_hash,
+                signature: decoded.signature,
+            },
+        )?;
+        transaction.execute(
+            "INSERT INTO evm_remote_signed_actions
+             (operation_id,custody_id,signed_raw_digest) VALUES (?1,?2,?3)",
+            params![
+                operation_id.as_slice(),
+                custody.custody_id.as_slice(),
+                decoded.signed_raw_digest.as_slice(),
+            ],
+        )?;
+        insert_remote_mutation(
+            &transaction,
+            custody.custody_id,
+            mutation_id,
+            mutation_digest,
+            Some(operation_id),
+            1,
+        )?;
+        let value = load_operation_view(&transaction, operation_id)?;
+        transaction.commit()?;
+        Ok(MutationOutcomeV1 {
+            status: MutationStatusV1::Committed,
+            value,
+        })
     }
 
     fn prepare_operation(
@@ -1111,7 +1956,7 @@ impl DurableEvmActuatorV1 {
         let refund = scope.refund_authorization;
         transaction.execute(
             "INSERT INTO evm_operations
-             (operation_id,authority_id,route_id,effect_id,request_digest,operation_kind,
+             (operation_id,local_authority_id,route_id,effect_id,request_digest,operation_kind,
               signer_role,revision_be,stage_tag,fencing_epoch_be,chain_id_be,account,nonce_be,destination,value,
               calldata,calldata_digest,gas_limit_be,max_fee_be,max_priority_fee_be,
               max_fee_cap_be,max_priority_fee_cap_be,registry_digest,profile_digest,
@@ -1516,8 +2361,48 @@ impl DurableEvmActuatorV1 {
         rpc: &mut R,
         post_rpc_time: F,
     ) -> Result<BroadcastOutcomeV1> {
-        let EvmOperationMutationRequestV1 {
-            lease,
+        self.broadcast_controlled_current(
+            OperationControlMutationRequestV1 {
+                control: request.lease.into(),
+                mutation_id: request.mutation_id,
+                operation_id: request.operation_id,
+                expected_revision: request.expected_revision,
+                now_unix_ms: request.now_unix_ms,
+            },
+            rpc,
+            post_rpc_time,
+        )
+    }
+
+    /// Broadcasts one already persisted remote-signed action under its exact
+    /// route/action custody fence. No account-wide nonce lease is consulted.
+    pub fn broadcast_remote_current<R: EvmRpcV1, F: FnOnce() -> Result<u64>>(
+        &mut self,
+        request: RemoteEvmActionMutationRequestV1,
+        rpc: &mut R,
+        post_rpc_time: F,
+    ) -> Result<BroadcastOutcomeV1> {
+        self.broadcast_controlled_current(
+            OperationControlMutationRequestV1 {
+                control: request.custody.into(),
+                mutation_id: request.mutation_id,
+                operation_id: request.operation_id,
+                expected_revision: request.expected_revision,
+                now_unix_ms: request.now_unix_ms,
+            },
+            rpc,
+            post_rpc_time,
+        )
+    }
+
+    fn broadcast_controlled_current<R: EvmRpcV1, F: FnOnce() -> Result<u64>>(
+        &mut self,
+        request: OperationControlMutationRequestV1,
+        rpc: &mut R,
+        post_rpc_time: F,
+    ) -> Result<BroadcastOutcomeV1> {
+        let OperationControlMutationRequestV1 {
+            control: lease,
             mutation_id,
             operation_id,
             expected_revision,
@@ -1534,7 +2419,7 @@ impl DurableEvmActuatorV1 {
             refund_deadline,
         ) = {
             let transaction = self.deferred()?;
-            require_lease_read_only(&transaction, lease, now_unix_ms)?;
+            require_operation_control_read_only(&transaction, lease, now_unix_ms)?;
             let row = load_operation_row(&transaction, operation_id)?;
             if row.authority_id != lease.authority_id || row.account != lease.account {
                 return Err(EvmActuatorErrorV1::InvalidScope);
@@ -1637,7 +2522,7 @@ impl DurableEvmActuatorV1 {
         require_post_rpc_time(now_unix_ms, post_rpc_now_unix_ms)?;
         let (raw, expected_hash, genesis_hash, destination, destination_code_hash, status) = {
             let transaction = self.immediate()?;
-            validate_lease(&transaction, lease, post_rpc_now_unix_ms)?;
+            validate_operation_control(&transaction, lease, post_rpc_now_unix_ms)?;
             let row = load_operation_row(&transaction, operation_id)?;
             if row.authority_id != lease.authority_id || row.account != lease.account {
                 return Err(EvmActuatorErrorV1::InvalidScope);
@@ -1736,9 +2621,9 @@ impl DurableEvmActuatorV1 {
                         post_rpc_now_unix_ms.to_be_bytes().as_slice(),
                     ],
                 )?;
-                insert_mutation(
+                insert_control_mutation(
                     &transaction,
-                    lease.authority_id,
+                    lease,
                     mutation_id,
                     mutation_digest,
                     Some(operation_id),
@@ -1783,8 +2668,47 @@ impl DurableEvmActuatorV1 {
         rpc: &mut R,
         post_rpc_time: F,
     ) -> Result<MutationOutcomeV1<EvmOperationViewV1>> {
-        let EvmOperationMutationRequestV1 {
-            lease,
+        self.observe_controlled_current(
+            OperationControlMutationRequestV1 {
+                control: request.lease.into(),
+                mutation_id: request.mutation_id,
+                operation_id: request.operation_id,
+                expected_revision: request.expected_revision,
+                now_unix_ms: request.now_unix_ms,
+            },
+            rpc,
+            post_rpc_time,
+        )
+    }
+
+    /// Observes one remote-signed action under its route/action custody fence.
+    pub fn observe_remote_current<R: EvmRpcV1, F: FnOnce() -> Result<u64>>(
+        &mut self,
+        request: RemoteEvmActionMutationRequestV1,
+        rpc: &mut R,
+        post_rpc_time: F,
+    ) -> Result<MutationOutcomeV1<EvmOperationViewV1>> {
+        self.observe_controlled_current(
+            OperationControlMutationRequestV1 {
+                control: request.custody.into(),
+                mutation_id: request.mutation_id,
+                operation_id: request.operation_id,
+                expected_revision: request.expected_revision,
+                now_unix_ms: request.now_unix_ms,
+            },
+            rpc,
+            post_rpc_time,
+        )
+    }
+
+    fn observe_controlled_current<R: EvmRpcV1, F: FnOnce() -> Result<u64>>(
+        &mut self,
+        request: OperationControlMutationRequestV1,
+        rpc: &mut R,
+        post_rpc_time: F,
+    ) -> Result<MutationOutcomeV1<EvmOperationViewV1>> {
+        let OperationControlMutationRequestV1 {
+            control: lease,
             mutation_id,
             operation_id,
             expected_revision,
@@ -1798,7 +2722,7 @@ impl DurableEvmActuatorV1 {
         );
         let row = {
             let transaction = self.deferred()?;
-            require_lease_read_only(&transaction, lease, now_unix_ms)?;
+            require_operation_control_read_only(&transaction, lease, now_unix_ms)?;
             if let Some(status) = existing_mutation(
                 &transaction,
                 lease.authority_id,
@@ -1810,7 +2734,7 @@ impl DurableEvmActuatorV1 {
                 return Ok(MutationOutcomeV1 { status, value });
             }
             let row = load_operation_row(&transaction, operation_id)?;
-            require_current_operation(
+            require_current_control_operation(
                 &row,
                 lease,
                 expected_revision,
@@ -1843,7 +2767,7 @@ impl DurableEvmActuatorV1 {
         let post_rpc_now_unix_ms = post_rpc_time()?;
         require_post_rpc_time(now_unix_ms, post_rpc_now_unix_ms)?;
         let transaction = self.immediate()?;
-        validate_lease(&transaction, lease, post_rpc_now_unix_ms)?;
+        validate_operation_control(&transaction, lease, post_rpc_now_unix_ms)?;
         if let Some(status) = existing_mutation(
             &transaction,
             lease.authority_id,
@@ -1855,7 +2779,7 @@ impl DurableEvmActuatorV1 {
             return Ok(MutationOutcomeV1 { status, value });
         }
         let current = load_operation_row(&transaction, operation_id)?;
-        require_current_operation(
+        require_current_control_operation(
             &current,
             lease,
             expected_revision,
@@ -1917,9 +2841,9 @@ impl DurableEvmActuatorV1 {
                 ],
             )?;
         }
-        insert_mutation(
+        insert_control_mutation(
             &transaction,
-            lease.authority_id,
+            lease,
             mutation_id,
             mutation_digest,
             Some(operation_id),
@@ -1942,8 +2866,47 @@ impl DurableEvmActuatorV1 {
         rpc: &mut R,
         post_rpc_time: F,
     ) -> Result<MutationOutcomeV1<EvmOperationViewV1>> {
-        let EvmOperationMutationRequestV1 {
-            lease,
+        self.reconcile_controlled_takeover(
+            OperationControlMutationRequestV1 {
+                control: request.lease.into(),
+                mutation_id: request.mutation_id,
+                operation_id: request.operation_id,
+                expected_revision: request.expected_revision,
+                now_unix_ms: request.now_unix_ms,
+            },
+            rpc,
+            post_rpc_time,
+        )
+    }
+
+    /// Reconciles an expired remote custody fence from exact RPC evidence.
+    pub fn reconcile_remote_takeover<R: EvmRpcV1, F: FnOnce() -> Result<u64>>(
+        &mut self,
+        request: RemoteEvmActionMutationRequestV1,
+        rpc: &mut R,
+        post_rpc_time: F,
+    ) -> Result<MutationOutcomeV1<EvmOperationViewV1>> {
+        self.reconcile_controlled_takeover(
+            OperationControlMutationRequestV1 {
+                control: request.custody.into(),
+                mutation_id: request.mutation_id,
+                operation_id: request.operation_id,
+                expected_revision: request.expected_revision,
+                now_unix_ms: request.now_unix_ms,
+            },
+            rpc,
+            post_rpc_time,
+        )
+    }
+
+    fn reconcile_controlled_takeover<R: EvmRpcV1, F: FnOnce() -> Result<u64>>(
+        &mut self,
+        request: OperationControlMutationRequestV1,
+        rpc: &mut R,
+        post_rpc_time: F,
+    ) -> Result<MutationOutcomeV1<EvmOperationViewV1>> {
+        let OperationControlMutationRequestV1 {
+            control: lease,
             mutation_id,
             operation_id,
             expected_revision,
@@ -1961,7 +2924,7 @@ impl DurableEvmActuatorV1 {
         );
         let row = {
             let transaction = self.deferred()?;
-            require_lease_read_only(&transaction, lease, now_unix_ms)?;
+            require_operation_control_read_only(&transaction, lease, now_unix_ms)?;
             if let Some(status) = existing_mutation(
                 &transaction,
                 lease.authority_id,
@@ -2102,7 +3065,7 @@ impl DurableEvmActuatorV1 {
             }
         };
         let transaction = self.immediate()?;
-        validate_lease(&transaction, lease, commit_now_unix_ms)?;
+        validate_operation_control(&transaction, lease, commit_now_unix_ms)?;
         if let Some(status) = existing_mutation(
             &transaction,
             lease.authority_id,
@@ -2158,9 +3121,9 @@ impl DurableEvmActuatorV1 {
         if changed != 1 {
             return Err(EvmActuatorErrorV1::RevisionConflict);
         }
-        insert_mutation(
+        insert_control_mutation(
             &transaction,
-            lease.authority_id,
+            lease,
             mutation_id,
             mutation_digest,
             Some(operation_id),
@@ -2184,6 +3147,42 @@ impl DurableEvmActuatorV1 {
         expected_revision: u64,
         now_unix_ms: u64,
     ) -> Result<MutationOutcomeV1<EvmOperationViewV1>> {
+        self.adopt_controlled_reconciled(
+            lease.into(),
+            mutation_id,
+            operation_id,
+            expected_revision,
+            now_unix_ms,
+        )
+    }
+
+    /// Adopts a safely reconciled remote action under its current custody
+    /// fence. Unknown outcomes remain non-adoptable.
+    pub fn adopt_remote_reconciled(
+        &mut self,
+        custody: RemoteEvmActionCustodyV1,
+        mutation_id: Digest32,
+        operation_id: Digest32,
+        expected_revision: u64,
+        now_unix_ms: u64,
+    ) -> Result<MutationOutcomeV1<EvmOperationViewV1>> {
+        self.adopt_controlled_reconciled(
+            custody.into(),
+            mutation_id,
+            operation_id,
+            expected_revision,
+            now_unix_ms,
+        )
+    }
+
+    fn adopt_controlled_reconciled(
+        &mut self,
+        lease: OperationControlV1,
+        mutation_id: Digest32,
+        operation_id: Digest32,
+        expected_revision: u64,
+        now_unix_ms: u64,
+    ) -> Result<MutationOutcomeV1<EvmOperationViewV1>> {
         validate_id(mutation_id)?;
         validate_id(operation_id)?;
         let mutation_digest = domain_digest(
@@ -2195,7 +3194,7 @@ impl DurableEvmActuatorV1 {
             ],
         );
         let transaction = self.immediate()?;
-        validate_lease(&transaction, lease, now_unix_ms)?;
+        validate_operation_control(&transaction, lease, now_unix_ms)?;
         if let Some(status) = existing_mutation(
             &transaction,
             lease.authority_id,
@@ -2284,9 +3283,9 @@ impl DurableEvmActuatorV1 {
                 return Err(EvmActuatorErrorV1::CorruptState);
             }
         }
-        insert_mutation(
+        insert_control_mutation(
             &transaction,
-            lease.authority_id,
+            lease,
             mutation_id,
             mutation_digest,
             Some(operation_id),
@@ -2321,9 +3320,29 @@ impl DurableEvmActuatorV1 {
         operation_id: Digest32,
         now_unix_ms: u64,
     ) -> Result<EvmOperationBindingViewV1> {
+        self.controlled_operation_binding(lease.into(), operation_id, now_unix_ms)
+    }
+
+    /// Loads one fully reaudited remote operation binding under its exact
+    /// route/action custody fence.
+    pub fn remote_operation_binding(
+        &mut self,
+        custody: RemoteEvmActionCustodyV1,
+        operation_id: Digest32,
+        now_unix_ms: u64,
+    ) -> Result<EvmOperationBindingViewV1> {
+        self.controlled_operation_binding(custody.into(), operation_id, now_unix_ms)
+    }
+
+    fn controlled_operation_binding(
+        &mut self,
+        lease: OperationControlV1,
+        operation_id: Digest32,
+        now_unix_ms: u64,
+    ) -> Result<EvmOperationBindingViewV1> {
         validate_id(operation_id)?;
         let transaction = self.deferred()?;
-        require_lease_read_only(&transaction, lease, now_unix_ms)?;
+        require_operation_control_read_only(&transaction, lease, now_unix_ms)?;
         let row = load_operation_row(&transaction, operation_id)?;
         if row.authority_id != lease.authority_id
             || row.account != lease.account
@@ -2357,10 +3376,46 @@ impl DurableEvmActuatorV1 {
         operation_id: Digest32,
         now_unix_ms: u64,
     ) -> Result<Option<u64>> {
+        self.retained_control_mutation_input_revision(
+            lease.into(),
+            kind,
+            mutation_id,
+            operation_id,
+            now_unix_ms,
+        )
+    }
+
+    /// Recovers the exact input revision of one retained remote-custody
+    /// lifecycle mutation after a crash.
+    pub fn retained_remote_mutation_input_revision(
+        &mut self,
+        custody: RemoteEvmActionCustodyV1,
+        kind: EvmRetainedMutationKindV1,
+        mutation_id: Digest32,
+        operation_id: Digest32,
+        now_unix_ms: u64,
+    ) -> Result<Option<u64>> {
+        self.retained_control_mutation_input_revision(
+            custody.into(),
+            kind,
+            mutation_id,
+            operation_id,
+            now_unix_ms,
+        )
+    }
+
+    fn retained_control_mutation_input_revision(
+        &mut self,
+        lease: OperationControlV1,
+        kind: EvmRetainedMutationKindV1,
+        mutation_id: Digest32,
+        operation_id: Digest32,
+        now_unix_ms: u64,
+    ) -> Result<Option<u64>> {
         validate_id(mutation_id)?;
         validate_id(operation_id)?;
         let transaction = self.deferred()?;
-        require_lease_read_only(&transaction, lease, now_unix_ms)?;
+        require_operation_control_read_only(&transaction, lease, now_unix_ms)?;
         let operation = load_operation_row(&transaction, operation_id)?;
         if operation.authority_id != lease.authority_id || operation.account != lease.account {
             return Err(EvmActuatorErrorV1::InvalidScope);
@@ -2463,10 +3518,134 @@ impl DurableEvmActuatorV1 {
     }
 }
 
+fn migrate_v3_to_v4(connection: &Connection) -> Result<()> {
+    migrate_v3_to_v4_with_boundary_hook(connection, || Ok(()))
+}
+
+fn migrate_v3_to_v4_with_boundary_hook<F>(connection: &Connection, before_commit: F) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    validate_legacy_v3_connection(connection)?;
+    let reference = Connection::open_in_memory()?;
+    DurableEvmActuatorV1::create_schema(&reference)?;
+    let canonical_sql = |name: &str| -> Result<String> {
+        reference
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",
+                params![name],
+                |row| row.get(0),
+            )
+            .map_err(EvmActuatorErrorV1::from)
+    };
+    let remote_custodies_sql = canonical_sql("evm_remote_custodies")?;
+    let remote_allowances_sql = canonical_sql("evm_remote_allowances")?;
+    let operations_sql = canonical_sql("evm_operations")?;
+    let attempts_sql = canonical_sql("evm_attempts")?;
+    let mutations_sql = canonical_sql("evm_mutations")?;
+    let remote_signed_sql = canonical_sql("evm_remote_signed_actions")?;
+    let operation_copy_sql = legacy_operation_copy_sql(connection)?;
+
+    let transaction = connection.unchecked_transaction()?;
+    validate_legacy_v3_connection(&transaction)?;
+    transaction.execute_batch(
+        "PRAGMA defer_foreign_keys=ON;
+         ALTER TABLE evm_attempts RENAME TO evm_attempts_v3;
+         ALTER TABLE evm_mutations RENAME TO evm_mutations_v3;
+         ALTER TABLE evm_operations RENAME TO evm_operations_v3;",
+    )?;
+    for sql in [
+        &remote_custodies_sql,
+        &remote_allowances_sql,
+        &operations_sql,
+        &attempts_sql,
+        &mutations_sql,
+        &remote_signed_sql,
+    ] {
+        transaction.execute_batch(sql)?;
+    }
+    transaction.execute_batch(&operation_copy_sql)?;
+    transaction.execute_batch(
+        "INSERT INTO evm_attempts SELECT * FROM evm_attempts_v3;
+         INSERT INTO evm_mutations
+             (local_authority_id,remote_custody_id,mutation_id,mutation_digest,
+              operation_id,resulting_revision_be)
+         SELECT authority_id,NULL,mutation_id,mutation_digest,operation_id,
+                resulting_revision_be FROM evm_mutations_v3;
+         DROP TABLE evm_mutations_v3;
+         DROP TABLE evm_attempts_v3;
+         DROP TABLE evm_operations_v3;
+         UPDATE evm_schema SET version=4 WHERE singleton=1 AND version=3;
+         PRAGMA user_version=4;",
+    )?;
+    before_commit()?;
+    validate_backend_and_schema(&transaction)?;
+    audit_retained_state_in_transaction(&transaction)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn legacy_operation_copy_sql(connection: &Connection) -> Result<String> {
+    let mut statement =
+        connection.prepare("SELECT name FROM pragma_table_info('evm_operations')")?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let mut retained = Vec::new();
+    for row in rows {
+        let name = row?;
+        if name != "operation_id" && name != "authority_id" {
+            retained.push(name);
+        }
+    }
+    if retained.len() != 56
+        || retained.iter().any(|name| {
+            name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+        })
+    {
+        return Err(EvmActuatorErrorV1::CorruptState);
+    }
+    let suffix = retained.join(",");
+    Ok(format!(
+        "INSERT INTO evm_operations
+         (operation_id,local_authority_id,remote_custody_id,{suffix})
+         SELECT operation_id,authority_id,NULL,{suffix} FROM evm_operations_v3;"
+    ))
+}
+
+fn validate_legacy_v3_connection(connection: &Connection) -> Result<()> {
+    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let application_id: i64 =
+        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    let quick: String = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    let foreign_key_violations: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    let schema_row: Option<(i64, i64)> = connection
+        .query_row("SELECT singleton,version FROM evm_schema", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()?;
+    let objects = schema_objects(connection)?;
+    if version != 3
+        || application_id != APPLICATION_ID
+        || quick != "ok"
+        || foreign_key_violations != 0
+        || schema_row != Some((1, 3))
+        || schema_objects_digest(&objects) != LEGACY_V3_SCHEMA_DIGEST
+    {
+        return Err(EvmActuatorErrorV1::CorruptState);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct OperationRow {
     operation_id: Digest32,
     authority_id: Digest32,
+    remote_custody_id: Option<Digest32>,
     kind: EvmOperationKindV1,
     signer_role: EvmSignerRoleV1,
     route_id: Digest32,
@@ -2570,6 +3749,8 @@ struct RawOperationRow {
     reconciled_from_stage: Option<i64>,
     created_at: Vec<u8>,
     updated_at: Vec<u8>,
+    local_authority_id: Option<Vec<u8>>,
+    remote_custody_id: Option<Vec<u8>>,
 }
 
 struct RawAttemptIntegrityRow {
@@ -2605,7 +3786,8 @@ fn load_operation_row(
                     current_attempt,transaction_hash,ambiguous_after_send,secret_exposed,
                     execution_success,final_block_number_be,final_block_hash,final_evidence,
                     terminal_event_digest,finality_invalidation_evidence,reconciliation_kind,
-                    reconciled_from_stage,created_at_be,updated_at_be
+                    reconciled_from_stage,created_at_be,updated_at_be,
+                    local_authority_id,remote_custody_id
              FROM evm_operations WHERE operation_id=?1",
             params![operation_id.as_slice()],
             |row| {
@@ -2663,6 +3845,8 @@ fn load_operation_row(
                     reconciled_from_stage: row.get(50)?,
                     created_at: row.get(51)?,
                     updated_at: row.get(52)?,
+                    local_authority_id: row.get(53)?,
+                    remote_custody_id: row.get(54)?,
                 })
             },
         )
@@ -2709,6 +3893,8 @@ fn parse_operation_row(raw: RawOperationRow) -> Result<OperationRow> {
     }
     let operation_id = blob32(raw.operation_id)?;
     let stored_authority_id = blob32(raw.authority_id)?;
+    let local_authority_id = raw.local_authority_id.map(blob32).transpose()?;
+    let remote_custody_id = raw.remote_custody_id.map(blob32).transpose()?;
     let route_id = blob32(raw.route_id)?;
     let effect_id = blob32(raw.effect_id)?;
     let revision = blob_u64(raw.revision)?;
@@ -2783,7 +3969,11 @@ fn parse_operation_row(raw: RawOperationRow) -> Result<OperationRow> {
         || adaptor_address == [0; 20]
         || deadline == 0
         || lock_amount == ZERO_DIGEST
-        || stored_authority_id != authority_id(fields.chain_id, account)
+        || (local_authority_id.is_some() == remote_custody_id.is_some())
+        || local_authority_id.is_some_and(|local| {
+            local != stored_authority_id || local != authority_id(fields.chain_id, account)
+        })
+        || remote_custody_id.is_some_and(|remote| remote != stored_authority_id)
         || max_fee_cap == 0
         || max_priority_fee_cap == 0
         || fields.fees.max_fee_per_gas > max_fee_cap
@@ -2797,6 +3987,7 @@ fn parse_operation_row(raw: RawOperationRow) -> Result<OperationRow> {
     Ok(OperationRow {
         operation_id,
         authority_id: stored_authority_id,
+        remote_custody_id,
         kind,
         signer_role,
         route_id,
@@ -2868,25 +4059,30 @@ fn validate_operation_integrity(transaction: &Transaction<'_>, row: &OperationRo
     let erc20_token = retained.2.map(blob20).transpose()?;
     let allowance_revision = retained.3.map(blob_u64).transpose()?;
     let observed_evidence = retained.4.map(blob32).transpose()?;
-    let lease: (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) = transaction.query_row(
-        "SELECT chain_id_be,account,fencing_epoch_be,clock_high_water_be
-         FROM evm_leases WHERE authority_id=?1",
-        params![row.authority_id.as_slice()],
-        |record| {
-            Ok((
-                record.get(0)?,
-                record.get(1)?,
-                record.get(2)?,
-                record.get(3)?,
-            ))
-        },
-    )?;
-    if blob_u64(lease.0)? != row.fields.chain_id
-        || blob20(lease.1)? != row.account
-        || blob_u64(lease.2)? < row.fencing_epoch
-        || blob_u64(lease.3)? < row.updated_at_unix_ms
-    {
-        return Err(EvmActuatorErrorV1::CorruptState);
+    match row.remote_custody_id {
+        None => {
+            let lease: (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) = transaction.query_row(
+                "SELECT chain_id_be,account,fencing_epoch_be,clock_high_water_be
+                 FROM evm_leases WHERE authority_id=?1",
+                params![row.authority_id.as_slice()],
+                |record| {
+                    Ok((
+                        record.get(0)?,
+                        record.get(1)?,
+                        record.get(2)?,
+                        record.get(3)?,
+                    ))
+                },
+            )?;
+            if blob_u64(lease.0)? != row.fields.chain_id
+                || blob20(lease.1)? != row.account
+                || blob_u64(lease.2)? < row.fencing_epoch
+                || blob_u64(lease.3)? < row.updated_at_unix_ms
+            {
+                return Err(EvmActuatorErrorV1::CorruptState);
+            }
+        }
+        Some(custody_id) => validate_remote_operation_binding(transaction, row, custody_id)?,
     }
     let request_fees = operation_initial_fees(transaction, row)?;
     let expected_request_digest = stored_operation_request_digest(row, request_fees)?;
@@ -3001,6 +4197,76 @@ fn validate_operation_integrity(transaction: &Transaction<'_>, row: &OperationRo
         _ => return Err(EvmActuatorErrorV1::CorruptState),
     }
     validate_attempt_integrity(transaction, row, observed_evidence)
+}
+
+fn validate_remote_operation_binding(
+    transaction: &Transaction<'_>,
+    row: &OperationRow,
+    custody_id: Digest32,
+) -> Result<()> {
+    let custody =
+        load_remote_custody(transaction, custody_id)?.ok_or(EvmActuatorErrorV1::CorruptState)?;
+    let request = custody.request;
+    let kind = [u8::try_from(row.kind.tag()).map_err(|_| EvmActuatorErrorV1::CorruptState)?];
+    let role = [u8::try_from(row.signer_role.tag()).map_err(|_| EvmActuatorErrorV1::CorruptState)?];
+    let expected_unsigned = domain_digest(
+        b"DOM-INTEROP/EVM-ACTUATOR/REMOTE-UNSIGNED-CALL/V1\0",
+        &[
+            &kind,
+            &role,
+            &row.route_id,
+            &row.effect_id,
+            &row.semantic_digest,
+            &row.fields.chain_id.to_be_bytes(),
+            &row.fields.to,
+            &row.fields.value,
+            &row.fields.gas_limit.to_be_bytes(),
+            &row.fields.calldata,
+            &row.registry_digest,
+            &row.profile_digest,
+            &row.asset_digest,
+            &row.deployment_digest,
+            &row.destination_code_hash,
+            &row.genesis_hash,
+            &row.terms_digest,
+            &row.lock_id,
+            &row.binding,
+            &row.beneficiary,
+            &row.funder,
+            &row.adaptor_address,
+            &row.deadline.to_be_bytes(),
+            &row.lock_amount,
+            &row.max_fee_cap.to_be_bytes(),
+            &row.max_priority_fee_cap.to_be_bytes(),
+        ],
+    );
+    let (binding_custody, raw_digest): (Vec<u8>, Vec<u8>) = transaction
+        .query_row(
+            "SELECT custody_id,signed_raw_digest FROM evm_remote_signed_actions
+             WHERE operation_id=?1",
+            params![row.operation_id.as_slice()],
+            |record| Ok((record.get(0)?, record.get(1)?)),
+        )
+        .optional()?
+        .ok_or(EvmActuatorErrorV1::CorruptState)?;
+    let (raw, hash, _) = load_attempt_payload(transaction, row.operation_id, row.current_attempt)?;
+    if request.kind != row.kind
+        || request.role != row.signer_role
+        || request.route_id != row.route_id
+        || request.chain_id != row.fields.chain_id
+        || request.contract != row.fields.to
+        || request.signer_account != row.account
+        || request.unsigned_call_digest != expected_unsigned
+        || custody.fencing_epoch < row.fencing_epoch
+        || custody.clock_high_water < row.updated_at_unix_ms
+        || row.current_attempt != 1
+        || blob32(binding_custody)? != custody_id
+        || blob32(raw_digest)? != remote_signed_raw_digest_v1(&raw)?
+        || Some(hash) != row.transaction_hash
+    {
+        return Err(EvmActuatorErrorV1::CorruptState);
+    }
+    Ok(())
 }
 
 fn operation_initial_fees(transaction: &Transaction<'_>, row: &OperationRow) -> Result<EvmFeesV1> {
@@ -3681,6 +4947,27 @@ fn require_current_operation(
     Ok(())
 }
 
+fn require_current_control_operation(
+    row: &OperationRow,
+    control: OperationControlV1,
+    expected_revision: u64,
+    allowed: &[EvmTxStageV1],
+) -> Result<()> {
+    if row.authority_id != control.authority_id || row.account != control.account {
+        return Err(EvmActuatorErrorV1::InvalidScope);
+    }
+    if row.fencing_epoch != control.fencing_epoch {
+        return Err(EvmActuatorErrorV1::ReconciliationRequired);
+    }
+    if row.revision != expected_revision {
+        return Err(EvmActuatorErrorV1::RevisionConflict);
+    }
+    if !allowed.contains(&row.stage) {
+        return Err(EvmActuatorErrorV1::InvalidState);
+    }
+    Ok(())
+}
+
 fn validate_replacement(row: &OperationRow, replacement: EvmFeesV1) -> Result<()> {
     if replacement.max_fee_per_gas < row.fields.fees.max_fee_per_gas
         || replacement.max_priority_fee_per_gas < row.fields.fees.max_priority_fee_per_gas
@@ -4067,6 +5354,140 @@ fn require_allowance_if_needed(
     Ok((Some(token), Some(revision)))
 }
 
+fn require_remote_allowance_if_needed(
+    transaction: &Transaction<'_>,
+    custody_id: Digest32,
+    scope: &OperationPreparationV1<'_>,
+    now_unix_ms: u64,
+) -> Result<(Option<EvmAddressV1>, Option<u64>)> {
+    if scope.kind != EvmOperationKindV1::Open {
+        return Ok((None, None));
+    }
+    let token = match scope.lock.deployment.asset_binding().representation {
+        AssetRepresentationV1::Native => return Ok((None, None)),
+        AssetRepresentationV1::EvmErc20 { token, .. } => token,
+    };
+    let spender = scope.lock.deployment.adapter_config().contract;
+    let row = transaction
+        .query_row(
+            "SELECT revision_be,amount,registry_digest,profile_digest,asset_digest,
+                    valid_until_be
+             FROM evm_remote_allowances WHERE custody_id=?1 AND token=?2 AND spender=?3",
+            params![custody_id.as_slice(), token.as_slice(), spender.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(EvmActuatorErrorV1::AllowanceRequired)?;
+    let revision = blob_u64(row.0)?;
+    let amount = blob32(row.1)?;
+    if blob32(row.2)? != scope.lock.deployment.registry_digest()
+        || blob32(row.3)? != scope.lock.deployment.profile_digest()
+        || blob32(row.4)? != scope.lock.deployment.asset_binding_digest()
+        || blob_u64(row.5)? < now_unix_ms
+    {
+        return Err(EvmActuatorErrorV1::StaleObservation);
+    }
+    if compare_word(scope.lock.amount, amount).is_gt() {
+        return Err(EvmActuatorErrorV1::AllowanceRequired);
+    }
+    Ok((Some(token), Some(revision)))
+}
+
+struct RemoteAllowanceEvidenceFieldsV1 {
+    custody_id: Digest32,
+    token: EvmAddressV1,
+    account: EvmAddressV1,
+    spender: EvmAddressV1,
+    amount: [u8; 32],
+    block_number: u64,
+    block_hash: Digest32,
+    source_code_evidence: Digest32,
+    source_allowance_evidence: Digest32,
+    registry_digest: Digest32,
+    profile_digest: Digest32,
+    asset_digest: Digest32,
+    observed_at: u64,
+    valid_until: u64,
+}
+
+struct RetainedRemoteAllowanceHeadV1 {
+    revision: Vec<u8>,
+    amount: Vec<u8>,
+    block_number: Vec<u8>,
+    block_hash: Vec<u8>,
+    source_code_evidence: Vec<u8>,
+    source_allowance_evidence: Vec<u8>,
+    registry_digest: Vec<u8>,
+    profile_digest: Vec<u8>,
+    asset_digest: Vec<u8>,
+}
+
+fn remote_allowance_evidence_digest(fields: RemoteAllowanceEvidenceFieldsV1) -> Digest32 {
+    domain_digest(
+        b"DOM-INTEROP/EVM-ACTUATOR/REMOTE-ALLOWANCE-EVIDENCE/V1\0",
+        &[
+            &fields.custody_id,
+            &fields.token,
+            &fields.account,
+            &fields.spender,
+            &fields.amount,
+            &fields.block_number.to_be_bytes(),
+            &fields.block_hash,
+            &fields.source_code_evidence,
+            &fields.source_allowance_evidence,
+            &fields.registry_digest,
+            &fields.profile_digest,
+            &fields.asset_digest,
+            &fields.observed_at.to_be_bytes(),
+            &fields.valid_until.to_be_bytes(),
+        ],
+    )
+}
+
+fn validate_remote_scope(
+    request: &RemoteEvmActionRequestV1,
+    scope: &OperationPreparationV1<'_>,
+    unsigned_call_digest: Digest32,
+) -> Result<()> {
+    validate_remote_deployment(request, &scope.lock.deployment, scope.kind)?;
+    if request.route_id != scope.route_id
+        || request.unsigned_call_digest != unsigned_call_digest
+        || scope.signer_role != request.role
+        || scope.calldata.is_empty()
+        || scope.calldata.len() > adapter_evm::abi::MAX_CALLDATA_BYTES
+        || (scope.kind == EvmOperationKindV1::Refund) != scope.refund_authorization.is_some()
+    {
+        return Err(EvmActuatorErrorV1::InvalidScope);
+    }
+    Ok(())
+}
+
+fn validate_remote_fields(
+    scope: &OperationPreparationV1<'_>,
+    fields: &Eip1559FieldsV1,
+) -> Result<()> {
+    let config = scope.lock.deployment.adapter_config();
+    validate_fees(scope.lock.deployment.deployment(), fields.fees)?;
+    if fields.chain_id != config.chain_id
+        || fields.to != config.contract
+        || fields.value != scope.value
+        || fields.gas_limit != config.gas_limit_hint
+        || fields.calldata.as_slice() != scope.calldata
+    {
+        return Err(EvmActuatorErrorV1::CallScopeMismatch);
+    }
+    Ok(())
+}
+
 fn validate_deployment_lease(
     deployment: &ResolvedEvmDeploymentV1,
     lease: EvmActuatorLeaseV1,
@@ -4305,6 +5726,314 @@ fn authority_id(chain_id: u64, account: EvmAddressV1) -> Digest32 {
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RemoteCustodyRowV1 {
+    request: RemoteEvmActionRequestV1,
+    fencing_epoch: u64,
+    lease_until: u64,
+    clock_high_water: u64,
+}
+
+fn remote_custody_id(request: &RemoteEvmActionRequestV1) -> Digest32 {
+    let kind = [u8::try_from(request.kind.tag()).unwrap_or(0)];
+    let role = [u8::try_from(request.role.tag()).unwrap_or(0)];
+    domain_digest(
+        b"DOM-INTEROP/EVM-ACTUATOR/REMOTE-CUSTODY/V1\0",
+        &[
+            &kind,
+            &role,
+            &request.owner_id,
+            &request.owner_epoch.to_be_bytes(),
+            &request.action_id,
+            &request.route_id,
+            &request.settlement_id,
+            &request.composition_binding_digest,
+            &request.execution_plan_digest,
+            &request.unsigned_call_digest,
+            &request.request_message_digest,
+            &request.requester_id,
+            &request.signer_id,
+            &request.chain_id.to_be_bytes(),
+            &request.contract,
+            &request.signer_account,
+        ],
+    )
+}
+
+fn remote_custody_capability(
+    custody_id: Digest32,
+    request: &RemoteEvmActionRequestV1,
+    fencing_epoch: u64,
+    lease_until_unix_ms: u64,
+) -> RemoteEvmActionCustodyV1 {
+    RemoteEvmActionCustodyV1 {
+        custody_id,
+        owner_id: request.owner_id,
+        owner_epoch: request.owner_epoch,
+        action_id: request.action_id,
+        route_id: request.route_id,
+        chain_id: request.chain_id,
+        signer_account: request.signer_account,
+        fencing_epoch,
+        lease_until_unix_ms,
+    }
+}
+
+fn validate_remote_operation_resume_input(
+    input: &RemoteEvmOperationCustodyResumeInputV1,
+) -> Result<()> {
+    if [
+        input.operation_id,
+        input.owner_id,
+        input.route_id,
+        input.settlement_id,
+        input.composition_binding_digest,
+        input.effect_id,
+        input.semantic_digest,
+        input.terms_digest,
+        input.registry_digest,
+        input.profile_digest,
+        input.deployment_digest,
+        input.transaction_hash,
+    ]
+    .contains(&ZERO_DIGEST)
+        || input.owner_epoch == 0
+        || input.chain_id == 0
+        || input.contract == [0; 20]
+        || input.signer_account == [0; 20]
+    {
+        return Err(EvmActuatorErrorV1::InvalidScope);
+    }
+    Ok(())
+}
+
+fn validate_existing_remote_operation_binding(
+    input: &RemoteEvmOperationCustodyResumeInputV1,
+    operation: &OperationRow,
+    custody_id: Digest32,
+    retained: &RemoteCustodyRowV1,
+) -> Result<()> {
+    let request = retained.request;
+    if remote_custody_id(&request) != custody_id
+        || operation.authority_id != custody_id
+        || operation.remote_custody_id != Some(custody_id)
+        || operation.operation_id != input.operation_id
+        || operation.kind != input.kind
+        || operation.signer_role != input.role
+        || operation.route_id != input.route_id
+        || operation.effect_id != input.effect_id
+        || operation.semantic_digest != input.semantic_digest
+        || operation.terms_digest != input.terms_digest
+        || operation.registry_digest != input.registry_digest
+        || operation.profile_digest != input.profile_digest
+        || operation.deployment_digest != input.deployment_digest
+        || operation.fields.chain_id != input.chain_id
+        || operation.fields.to != input.contract
+        || operation.account != input.signer_account
+        || operation.transaction_hash != Some(input.transaction_hash)
+        || operation.stage == EvmTxStageV1::Prepared
+        || request.kind != input.kind
+        || request.role != input.role
+        || request.owner_id != input.owner_id
+        || request.owner_epoch != input.owner_epoch
+        || request.route_id != input.route_id
+        || request.settlement_id != input.settlement_id
+        || request.composition_binding_digest != input.composition_binding_digest
+        || request.chain_id != input.chain_id
+        || request.contract != input.contract
+        || request.signer_account != input.signer_account
+        || operation.fencing_epoch > retained.fencing_epoch
+    {
+        return Err(EvmActuatorErrorV1::InvalidScope);
+    }
+    Ok(())
+}
+
+fn load_remote_custody(
+    transaction: &Transaction<'_>,
+    custody_id: Digest32,
+) -> Result<Option<RemoteCustodyRowV1>> {
+    let raw = transaction
+        .query_row(
+            "SELECT operation_kind,signer_role,owner_id,owner_epoch_be,action_id,
+                    route_id,settlement_id,composition_binding_digest,execution_plan_digest,
+                    unsigned_call_digest,request_message_digest,requester_id,signer_id,
+                    chain_id_be,contract,signer_account,fencing_epoch_be,lease_until_be,
+                    clock_high_water_be
+             FROM evm_remote_custodies WHERE custody_id=?1",
+            params![custody_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                    row.get::<_, Vec<u8>>(8)?,
+                    row.get::<_, Vec<u8>>(9)?,
+                    row.get::<_, Vec<u8>>(10)?,
+                    row.get::<_, Vec<u8>>(11)?,
+                    row.get::<_, Vec<u8>>(12)?,
+                    row.get::<_, Vec<u8>>(13)?,
+                    row.get::<_, Vec<u8>>(14)?,
+                    row.get::<_, Vec<u8>>(15)?,
+                    row.get::<_, Vec<u8>>(16)?,
+                    row.get::<_, Vec<u8>>(17)?,
+                    row.get::<_, Vec<u8>>(18)?,
+                ))
+            },
+        )
+        .optional()?;
+    raw.map(|raw| {
+        let request = RemoteEvmActionRequestV1::new(RemoteEvmActionRequestInputV1 {
+            kind: EvmOperationKindV1::from_tag(raw.0)?,
+            role: EvmSignerRoleV1::from_tag(raw.1)?,
+            owner_id: blob32(raw.2)?,
+            owner_epoch: blob_u64(raw.3)?,
+            action_id: blob32(raw.4)?,
+            route_id: blob32(raw.5)?,
+            settlement_id: blob32(raw.6)?,
+            composition_binding_digest: blob32(raw.7)?,
+            execution_plan_digest: blob32(raw.8)?,
+            unsigned_call_digest: blob32(raw.9)?,
+            request_message_digest: blob32(raw.10)?,
+            requester_id: blob32(raw.11)?,
+            signer_id: blob32(raw.12)?,
+            chain_id: blob_u64(raw.13)?,
+            contract: blob20(raw.14)?,
+            signer_account: blob20(raw.15)?,
+        })
+        .map_err(|_| EvmActuatorErrorV1::CorruptState)?;
+        let fencing_epoch = blob_u64(raw.16)?;
+        let lease_until = blob_u64(raw.17)?;
+        let clock_high_water = blob_u64(raw.18)?;
+        if remote_custody_id(&request) != custody_id
+            || fencing_epoch == 0
+            || lease_until == 0
+            || clock_high_water == 0
+            || clock_high_water > lease_until
+        {
+            return Err(EvmActuatorErrorV1::CorruptState);
+        }
+        Ok(RemoteCustodyRowV1 {
+            request,
+            fencing_epoch,
+            lease_until,
+            clock_high_water,
+        })
+    })
+    .transpose()
+}
+
+fn require_remote_custody_read_only(
+    transaction: &Transaction<'_>,
+    custody: RemoteEvmActionCustodyV1,
+    now_unix_ms: u64,
+) -> Result<RemoteCustodyRowV1> {
+    if now_unix_ms == 0 || now_unix_ms > custody.lease_until_unix_ms {
+        return Err(EvmActuatorErrorV1::StaleFencing);
+    }
+    let row = load_remote_custody(transaction, custody.custody_id)?
+        .ok_or(EvmActuatorErrorV1::StaleFencing)?;
+    if row.request.owner_id != custody.owner_id
+        || row.request.owner_epoch != custody.owner_epoch
+        || row.request.action_id != custody.action_id
+        || row.request.route_id != custody.route_id
+        || row.request.chain_id != custody.chain_id
+        || row.request.signer_account != custody.signer_account
+        || row.fencing_epoch != custody.fencing_epoch
+        || row.lease_until != custody.lease_until_unix_ms
+    {
+        return Err(EvmActuatorErrorV1::StaleFencing);
+    }
+    if now_unix_ms < row.clock_high_water {
+        return Err(EvmActuatorErrorV1::InvalidTime);
+    }
+    Ok(row)
+}
+
+fn validate_remote_custody(
+    transaction: &Transaction<'_>,
+    custody: RemoteEvmActionCustodyV1,
+    now_unix_ms: u64,
+) -> Result<RemoteCustodyRowV1> {
+    let row = require_remote_custody_read_only(transaction, custody, now_unix_ms)?;
+    let changed = transaction.execute(
+        "UPDATE evm_remote_custodies SET clock_high_water_be=?2
+         WHERE custody_id=?1 AND fencing_epoch_be=?3 AND clock_high_water_be<=?2",
+        params![
+            custody.custody_id.as_slice(),
+            now_unix_ms.to_be_bytes().as_slice(),
+            custody.fencing_epoch.to_be_bytes().as_slice(),
+        ],
+    )?;
+    if changed != 1 {
+        return Err(EvmActuatorErrorV1::StaleFencing);
+    }
+    Ok(row)
+}
+
+fn require_operation_control_read_only(
+    transaction: &Transaction<'_>,
+    control: OperationControlV1,
+    now_unix_ms: u64,
+) -> Result<()> {
+    match control.capability {
+        OperationControlCapabilityV1::Local(lease) => {
+            require_lease_read_only(transaction, lease, now_unix_ms)
+        }
+        OperationControlCapabilityV1::Remote(custody) => {
+            require_remote_custody_read_only(transaction, custody, now_unix_ms).map(|_| ())
+        }
+    }
+}
+
+fn validate_operation_control(
+    transaction: &Transaction<'_>,
+    control: OperationControlV1,
+    now_unix_ms: u64,
+) -> Result<()> {
+    match control.capability {
+        OperationControlCapabilityV1::Local(lease) => {
+            validate_lease(transaction, lease, now_unix_ms)
+        }
+        OperationControlCapabilityV1::Remote(custody) => {
+            validate_remote_custody(transaction, custody, now_unix_ms).map(|_| ())
+        }
+    }
+}
+
+fn insert_control_mutation(
+    transaction: &Transaction<'_>,
+    control: OperationControlV1,
+    mutation_id: Digest32,
+    mutation_digest: Digest32,
+    operation_id: Option<Digest32>,
+    resulting_revision: u64,
+) -> Result<()> {
+    match control.capability {
+        OperationControlCapabilityV1::Local(lease) => insert_mutation(
+            transaction,
+            lease.authority_id,
+            mutation_id,
+            mutation_digest,
+            operation_id,
+            resulting_revision,
+        ),
+        OperationControlCapabilityV1::Remote(custody) => insert_remote_mutation(
+            transaction,
+            custody.custody_id,
+            mutation_id,
+            mutation_digest,
+            operation_id,
+            resulting_revision,
+        ),
+    }
+}
+
 fn existing_mutation(
     transaction: &Transaction<'_>,
     authority_id: Digest32,
@@ -4315,6 +6044,80 @@ fn existing_mutation(
         existing_mutation_revision(transaction, authority_id, mutation_id, mutation_digest)?
             .map(|_| MutationStatusV1::DuplicateSameBytes),
     )
+}
+
+fn existing_remote_mutation(
+    transaction: &Transaction<'_>,
+    custody_id: Digest32,
+    mutation_id: Digest32,
+    mutation_digest: Digest32,
+) -> Result<Option<MutationStatusV1>> {
+    let stored: Option<Vec<u8>> = transaction
+        .query_row(
+            "SELECT mutation_digest FROM evm_mutations
+             WHERE remote_custody_id=?1 AND mutation_id=?2",
+            params![custody_id.as_slice(), mutation_id.as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match stored {
+        None => Ok(None),
+        Some(stored) => {
+            if blob32(stored)? == mutation_digest {
+                Ok(Some(MutationStatusV1::DuplicateSameBytes))
+            } else {
+                Err(EvmActuatorErrorV1::IdempotencyConflict)
+            }
+        }
+    }
+}
+
+fn insert_remote_mutation(
+    transaction: &Transaction<'_>,
+    custody_id: Digest32,
+    mutation_id: Digest32,
+    mutation_digest: Digest32,
+    operation_id: Option<Digest32>,
+    resulting_revision: u64,
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO evm_mutations
+         (remote_custody_id,mutation_id,mutation_digest,operation_id,resulting_revision_be)
+         VALUES (?1,?2,?3,?4,?5)",
+        params![
+            custody_id.as_slice(),
+            mutation_id.as_slice(),
+            mutation_digest.as_slice(),
+            operation_id.map(|value| value.to_vec()),
+            resulting_revision.to_be_bytes().as_slice(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn validate_remote_deployment(
+    request: &RemoteEvmActionRequestV1,
+    deployment: &ResolvedEvmDeploymentV1,
+    kind: EvmOperationKindV1,
+) -> Result<()> {
+    let config = deployment.adapter_config();
+    let expected_role = match kind {
+        EvmOperationKindV1::Open | EvmOperationKindV1::Refund => EvmSignerRoleV1::Funder,
+        EvmOperationKindV1::Claim => EvmSignerRoleV1::Beneficiary,
+    };
+    let expected_account = match expected_role {
+        EvmSignerRoleV1::Funder => config.funder,
+        EvmSignerRoleV1::Beneficiary => config.beneficiary,
+    };
+    if request.kind != kind
+        || request.role != expected_role
+        || request.chain_id != config.chain_id
+        || request.contract != config.contract
+        || request.signer_account != expected_account
+    {
+        return Err(EvmActuatorErrorV1::InvalidScope);
+    }
+    Ok(())
 }
 
 fn existing_mutation_revision(
@@ -4353,7 +6156,7 @@ fn insert_mutation(
 ) -> Result<()> {
     transaction.execute(
         "INSERT INTO evm_mutations
-         (authority_id,mutation_id,mutation_digest,operation_id,resulting_revision_be)
+         (local_authority_id,mutation_id,mutation_digest,operation_id,resulting_revision_be)
          VALUES (?1,?2,?3,?4,?5)",
         params![
             authority_id.as_slice(),
@@ -4536,6 +6339,21 @@ fn schema_objects(connection: &Connection) -> Result<BTreeSet<SchemaObjectV1>> {
     Ok(objects)
 }
 
+fn schema_objects_digest(objects: &BTreeSet<SchemaObjectV1>) -> Digest32 {
+    let mut hasher = Blake2b::<U32>::new();
+    hasher.update(b"DOM-INTEROP/EVM-ACTUATOR/SCHEMA-OBJECTS/V1\0");
+    for object in objects {
+        for field in [&object.0, &object.1, &object.2, &object.3] {
+            hasher.update((field.len() as u64).to_be_bytes());
+            hasher.update(field.as_bytes());
+        }
+    }
+    let digest = hasher.finalize();
+    let mut output = [0; 32];
+    output.copy_from_slice(&digest);
+    output
+}
+
 fn reference_schema_objects() -> Result<BTreeSet<SchemaObjectV1>> {
     let reference = Connection::open_in_memory()?;
     DurableEvmActuatorV1::create_schema(&reference)?;
@@ -4639,15 +6457,27 @@ fn preflight_resumable_creation_state(
             Err(EvmActuatorErrorV1::CorruptState)
         };
     }
-    if version != SCHEMA_VERSION
-        || application_id != APPLICATION_ID
-        || !journal_mode.eq_ignore_ascii_case("wal")
-        || objects != reference_schema_objects()?
-    {
+    if application_id != APPLICATION_ID || !journal_mode.eq_ignore_ascii_case("wal") {
         return Err(EvmActuatorErrorV1::CorruptState);
     }
+    let state = if version == SCHEMA_VERSION && objects == reference_schema_objects()? {
+        ResumableCreationStateV1::InitializedExact
+    } else if version == 3 && schema_objects_digest(&objects) == LEGACY_V3_SCHEMA_DIGEST {
+        let schema_row: Option<(i64, i64)> = connection
+            .query_row("SELECT singleton,version FROM evm_schema", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()
+            .map_err(|_| EvmActuatorErrorV1::CorruptState)?;
+        if schema_row != Some((1, 3)) {
+            return Err(EvmActuatorErrorV1::CorruptState);
+        }
+        ResumableCreationStateV1::LegacyV3
+    } else {
+        return Err(EvmActuatorErrorV1::CorruptState);
+    };
     validate_open_file_identity(database_authority, path)?;
-    Ok(ResumableCreationStateV1::InitializedExact)
+    Ok(state)
 }
 
 fn validate_pristine_initialized_store(connection: &Connection) -> Result<()> {
@@ -4655,11 +6485,14 @@ fn validate_pristine_initialized_store(connection: &Connection) -> Result<()> {
     let economic_rows: i64 = connection.query_row(
         "SELECT
              (SELECT COUNT(*) FROM evm_leases) +
+             (SELECT COUNT(*) FROM evm_remote_custodies) +
              (SELECT COUNT(*) FROM evm_nonce_snapshots) +
              (SELECT COUNT(*) FROM evm_allowances) +
+             (SELECT COUNT(*) FROM evm_remote_allowances) +
              (SELECT COUNT(*) FROM evm_operations) +
              (SELECT COUNT(*) FROM evm_attempts) +
-             (SELECT COUNT(*) FROM evm_mutations)",
+             (SELECT COUNT(*) FROM evm_mutations) +
+             (SELECT COUNT(*) FROM evm_remote_signed_actions)",
         [],
         |row| row.get(0),
     )?;
@@ -4751,7 +6584,8 @@ struct RetainedAllowanceAuditRowV1 {
 }
 
 struct RetainedMutationAuditRowV1 {
-    authority_id: Vec<u8>,
+    local_authority_id: Option<Vec<u8>>,
+    remote_custody_id: Option<Vec<u8>>,
     mutation_id: Vec<u8>,
     mutation_digest: Vec<u8>,
     operation_id: Option<Vec<u8>>,
@@ -4759,11 +6593,130 @@ struct RetainedMutationAuditRowV1 {
 }
 
 fn audit_retained_state_in_transaction(transaction: &Transaction<'_>) -> Result<()> {
+    let authority_class_collision: i64 = transaction.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM evm_leases AS local
+             INNER JOIN evm_remote_custodies AS remote
+               ON remote.custody_id=local.authority_id
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if authority_class_collision != 0 {
+        return Err(EvmActuatorErrorV1::CorruptState);
+    }
     audit_retained_leases(transaction)?;
+    audit_retained_remote_custodies(transaction)?;
     audit_retained_nonce_snapshots(transaction)?;
     audit_retained_allowances(transaction)?;
+    audit_retained_remote_allowances(transaction)?;
     audit_retained_operations(transaction)?;
     audit_retained_mutations(transaction)
+}
+
+fn audit_retained_remote_custodies(transaction: &Transaction<'_>) -> Result<()> {
+    let mut statement = transaction
+        .prepare("SELECT custody_id FROM evm_remote_custodies ORDER BY custody_id LIMIT 4097")?;
+    let rows = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+    let mut count = 0usize;
+    for row in rows {
+        count = count
+            .checked_add(1)
+            .ok_or(EvmActuatorErrorV1::BoundExceeded)?;
+        if count > 4_096 {
+            return Err(EvmActuatorErrorV1::BoundExceeded);
+        }
+        let custody_id = blob32(row?)?;
+        load_remote_custody(transaction, custody_id)?.ok_or(EvmActuatorErrorV1::CorruptState)?;
+    }
+    Ok(())
+}
+
+fn audit_retained_remote_allowances(transaction: &Transaction<'_>) -> Result<()> {
+    let mut statement = transaction.prepare(
+        "SELECT custody_id,token,spender,revision_be,amount,block_number_be,block_hash,
+                source_code_evidence,source_allowance_evidence,evidence_digest,
+                registry_digest,profile_digest,asset_digest,observed_at_be,valid_until_be
+         FROM evm_remote_allowances ORDER BY custody_id,token,spender LIMIT 4097",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, Vec<u8>>(0)?,
+            row.get::<_, Vec<u8>>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+            row.get::<_, Vec<u8>>(3)?,
+            row.get::<_, Vec<u8>>(4)?,
+            row.get::<_, Vec<u8>>(5)?,
+            row.get::<_, Vec<u8>>(6)?,
+            row.get::<_, Vec<u8>>(7)?,
+            row.get::<_, Vec<u8>>(8)?,
+            row.get::<_, Vec<u8>>(9)?,
+            row.get::<_, Vec<u8>>(10)?,
+            row.get::<_, Vec<u8>>(11)?,
+            row.get::<_, Vec<u8>>(12)?,
+            row.get::<_, Vec<u8>>(13)?,
+            row.get::<_, Vec<u8>>(14)?,
+        ))
+    })?;
+    let mut count = 0usize;
+    for row in rows {
+        count = count
+            .checked_add(1)
+            .ok_or(EvmActuatorErrorV1::BoundExceeded)?;
+        if count > 4_096 {
+            return Err(EvmActuatorErrorV1::BoundExceeded);
+        }
+        let row = row?;
+        let custody_id = blob32(row.0)?;
+        let custody = load_remote_custody(transaction, custody_id)?
+            .ok_or(EvmActuatorErrorV1::CorruptState)?;
+        let token = blob20(row.1)?;
+        let spender = blob20(row.2)?;
+        let revision = blob_u64(row.3)?;
+        let amount = blob32(row.4)?;
+        let block_number = blob_u64(row.5)?;
+        let block_hash = blob32(row.6)?;
+        let source_code_evidence = blob32(row.7)?;
+        let source_allowance_evidence = blob32(row.8)?;
+        let evidence = blob32(row.9)?;
+        let registry_digest = blob32(row.10)?;
+        let profile_digest = blob32(row.11)?;
+        let asset_digest = blob32(row.12)?;
+        let observed = blob_u64(row.13)?;
+        let valid_until = blob_u64(row.14)?;
+        let expected_evidence = remote_allowance_evidence_digest(RemoteAllowanceEvidenceFieldsV1 {
+            custody_id,
+            token,
+            account: custody.request.signer_account,
+            spender,
+            amount,
+            block_number,
+            block_hash,
+            source_code_evidence,
+            source_allowance_evidence,
+            registry_digest,
+            profile_digest,
+            asset_digest,
+            observed_at: observed,
+            valid_until,
+        });
+        if token == [0; 20]
+            || spender != custody.request.contract
+            || revision == 0
+            || block_hash == ZERO_DIGEST
+            || source_code_evidence == ZERO_DIGEST
+            || source_allowance_evidence == ZERO_DIGEST
+            || evidence != expected_evidence
+            || registry_digest == ZERO_DIGEST
+            || profile_digest == ZERO_DIGEST
+            || asset_digest == ZERO_DIGEST
+            || observed == 0
+            || valid_until <= observed
+        {
+            return Err(EvmActuatorErrorV1::CorruptState);
+        }
+    }
+    Ok(())
 }
 
 fn audit_retained_leases(transaction: &Transaction<'_>) -> Result<()> {
@@ -4812,8 +6765,9 @@ fn audit_retained_nonce_snapshots(transaction: &Transaction<'_>) -> Result<()> {
     let orphaned_operations: i64 = transaction.query_row(
         "SELECT COUNT(*) FROM evm_operations AS operation
          LEFT JOIN evm_nonce_snapshots AS snapshot
-           ON snapshot.authority_id=operation.authority_id
-         WHERE snapshot.authority_id IS NULL",
+           ON snapshot.authority_id=operation.local_authority_id
+         WHERE operation.local_authority_id IS NOT NULL
+           AND snapshot.authority_id IS NULL",
         [],
         |row| row.get(0),
     )?;
@@ -4834,7 +6788,7 @@ fn audit_retained_nonce_snapshots(transaction: &Transaction<'_>) -> Result<()> {
         let snapshot =
             load_nonce_snapshot(transaction, authority)?.ok_or(EvmActuatorErrorV1::CorruptState)?;
         let operation_count: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM evm_operations WHERE authority_id=?1",
+            "SELECT COUNT(*) FROM evm_operations WHERE local_authority_id=?1",
             params![authority.as_slice()],
             |row| row.get(0),
         )?;
@@ -4924,18 +6878,32 @@ fn audit_retained_operations(transaction: &Transaction<'_>) -> Result<()> {
             (Some(token), Some(revision)) => {
                 let token = blob20(token)?;
                 let revision = blob_u64(revision)?;
-                let current: Option<Vec<u8>> = transaction
-                    .query_row(
-                        "SELECT revision_be FROM evm_allowances
-                         WHERE authority_id=?1 AND token=?2 AND spender=?3",
-                        params![
-                            row.authority_id.as_slice(),
-                            token.as_slice(),
-                            row.fields.to.as_slice()
-                        ],
-                        |record| record.get(0),
-                    )
-                    .optional()?;
+                let current: Option<Vec<u8>> = match row.remote_custody_id {
+                    None => transaction
+                        .query_row(
+                            "SELECT revision_be FROM evm_allowances
+                             WHERE authority_id=?1 AND token=?2 AND spender=?3",
+                            params![
+                                row.authority_id.as_slice(),
+                                token.as_slice(),
+                                row.fields.to.as_slice()
+                            ],
+                            |record| record.get(0),
+                        )
+                        .optional()?,
+                    Some(custody_id) => transaction
+                        .query_row(
+                            "SELECT revision_be FROM evm_remote_allowances
+                             WHERE custody_id=?1 AND token=?2 AND spender=?3",
+                            params![
+                                custody_id.as_slice(),
+                                token.as_slice(),
+                                row.fields.to.as_slice()
+                            ],
+                            |record| record.get(0),
+                        )
+                        .optional()?,
+                };
                 if revision == 0
                     || current
                         .map(blob_u64)
@@ -4953,21 +6921,30 @@ fn audit_retained_operations(transaction: &Transaction<'_>) -> Result<()> {
 
 fn audit_retained_mutations(transaction: &Transaction<'_>) -> Result<()> {
     let mut statement = transaction.prepare(
-        "SELECT authority_id,mutation_id,mutation_digest,operation_id,resulting_revision_be
+        "SELECT local_authority_id,remote_custody_id,mutation_id,mutation_digest,
+                operation_id,resulting_revision_be
          FROM evm_mutations ORDER BY authority_id,mutation_id",
     )?;
     let rows = statement.query_map([], |row| {
         Ok(RetainedMutationAuditRowV1 {
-            authority_id: row.get(0)?,
-            mutation_id: row.get(1)?,
-            mutation_digest: row.get(2)?,
-            operation_id: row.get(3)?,
-            resulting_revision: row.get(4)?,
+            local_authority_id: row.get(0)?,
+            remote_custody_id: row.get(1)?,
+            mutation_id: row.get(2)?,
+            mutation_digest: row.get(3)?,
+            operation_id: row.get(4)?,
+            resulting_revision: row.get(5)?,
         })
     })?;
     for retained in rows {
         let retained = retained?;
-        let authority_id = blob32(retained.authority_id)?;
+        let local_authority_id = retained.local_authority_id.map(blob32).transpose()?;
+        let remote_custody_id = retained.remote_custody_id.map(blob32).transpose()?;
+        if local_authority_id.is_some() == remote_custody_id.is_some() {
+            return Err(EvmActuatorErrorV1::CorruptState);
+        }
+        let authority_id = local_authority_id
+            .or(remote_custody_id)
+            .ok_or(EvmActuatorErrorV1::CorruptState)?;
         let mutation_id = blob32(retained.mutation_id)?;
         let mutation_digest = blob32(retained.mutation_digest)?;
         let resulting_revision = blob_u64(retained.resulting_revision)?;
@@ -4983,11 +6960,39 @@ fn audit_retained_mutations(transaction: &Transaction<'_>) -> Result<()> {
             if operation.authority_id != authority_id || resulting_revision > operation.revision {
                 return Err(EvmActuatorErrorV1::CorruptState);
             }
-        } else if !non_operation_revision_exists(transaction, authority_id, resulting_revision)? {
+        } else if let Some(local) = local_authority_id {
+            if !non_operation_revision_exists(transaction, local, resulting_revision)? {
+                return Err(EvmActuatorErrorV1::CorruptState);
+            }
+        } else if !remote_allowance_revision_exists(
+            transaction,
+            remote_custody_id.ok_or(EvmActuatorErrorV1::CorruptState)?,
+            resulting_revision,
+        )? {
             return Err(EvmActuatorErrorV1::CorruptState);
         }
     }
     Ok(())
+}
+
+fn remote_allowance_revision_exists(
+    transaction: &Transaction<'_>,
+    custody_id: Digest32,
+    revision: u64,
+) -> Result<bool> {
+    let revisions = {
+        let mut statement = transaction
+            .prepare("SELECT revision_be FROM evm_remote_allowances WHERE custody_id=?1 LIMIT 2")?;
+        let rows = statement.query_map(params![custody_id.as_slice()], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })?;
+        let mut values = Vec::new();
+        for row in rows {
+            values.push(blob_u64(row?)?);
+        }
+        values
+    };
+    Ok(revisions.len() == 1 && revisions[0] >= revision)
 }
 
 fn non_operation_revision_exists(
@@ -5399,6 +7404,86 @@ mod provisioning_tests {
         Ok(())
     }
 
+    fn canonical_table_sql(connection: &Connection, name: &str) -> TestResult<String> {
+        connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",
+                params![name],
+                |row| row.get(0),
+            )
+            .test_context("load canonical table SQL")
+    }
+
+    fn replace_exact_once(source: String, from: &str, to: &str) -> TestResult<String> {
+        if source.matches(from).count() != 1 {
+            return Err(std::io::Error::other("schema rewrite source was not exact").into());
+        }
+        Ok(source.replacen(from, to, 1))
+    }
+
+    fn downgrade_empty_v4_to_exact_v3_for_test(connection: &Connection) -> TestResult {
+        let operations = canonical_table_sql(connection, "evm_operations")?;
+        let attempts = canonical_table_sql(connection, "evm_attempts")?;
+        let mutations = canonical_table_sql(connection, "evm_mutations")?;
+        let operations = replace_exact_once(
+            operations,
+            "                 local_authority_id BLOB REFERENCES evm_leases(authority_id)\n                     CHECK(local_authority_id IS NULL OR length(local_authority_id)=32),\n                 remote_custody_id BLOB REFERENCES evm_remote_custodies(custody_id)\n                     CHECK(remote_custody_id IS NULL OR length(remote_custody_id)=32),\n                 authority_id BLOB GENERATED ALWAYS AS\n                     (coalesce(local_authority_id,remote_custody_id)) VIRTUAL,",
+            "                 authority_id BLOB NOT NULL REFERENCES evm_leases(authority_id),",
+        )?;
+        let operations = replace_exact_once(
+            operations,
+            "                 CHECK((local_authority_id IS NULL) != (remote_custody_id IS NULL)),\n                 UNIQUE(local_authority_id, effect_id),\n                 UNIQUE(local_authority_id, nonce_be),\n                 UNIQUE(remote_custody_id, effect_id),\n                 UNIQUE(remote_custody_id, nonce_be)",
+            "                 UNIQUE(authority_id, effect_id),\n                 UNIQUE(authority_id, nonce_be)",
+        )?;
+        let mutations = replace_exact_once(
+            mutations,
+            "                 local_authority_id BLOB REFERENCES evm_leases(authority_id)\n                     CHECK(local_authority_id IS NULL OR length(local_authority_id)=32),\n                 remote_custody_id BLOB REFERENCES evm_remote_custodies(custody_id)\n                     CHECK(remote_custody_id IS NULL OR length(remote_custody_id)=32),\n                 authority_id BLOB GENERATED ALWAYS AS\n                     (coalesce(local_authority_id,remote_custody_id)) VIRTUAL,",
+            "                 authority_id BLOB NOT NULL REFERENCES evm_leases(authority_id),",
+        )?;
+        let mutations = replace_exact_once(
+            mutations,
+            "                 CHECK((local_authority_id IS NULL) != (remote_custody_id IS NULL)),\n                 UNIQUE(local_authority_id, mutation_id),\n                 UNIQUE(remote_custody_id, mutation_id)",
+            "                 PRIMARY KEY(authority_id, mutation_id)",
+        )?;
+        let transaction = connection.unchecked_transaction()?;
+        let retained_rows: i64 = transaction.query_row(
+            "SELECT (SELECT COUNT(*) FROM evm_operations) +
+                    (SELECT COUNT(*) FROM evm_attempts) +
+                    (SELECT COUNT(*) FROM evm_mutations) +
+                    (SELECT COUNT(*) FROM evm_remote_custodies) +
+                    (SELECT COUNT(*) FROM evm_remote_allowances) +
+                    (SELECT COUNT(*) FROM evm_remote_signed_actions)",
+            [],
+            |row| row.get(0),
+        )?;
+        if retained_rows != 0 {
+            return Err(
+                std::io::Error::other("test downgrade requires empty V4 extensions").into(),
+            );
+        }
+        transaction.execute_batch(
+            "PRAGMA defer_foreign_keys=ON;
+             DROP TABLE evm_remote_signed_actions;
+             ALTER TABLE evm_attempts RENAME TO evm_attempts_v4;
+             ALTER TABLE evm_mutations RENAME TO evm_mutations_v4;
+             ALTER TABLE evm_operations RENAME TO evm_operations_v4;",
+        )?;
+        transaction.execute_batch(&operations)?;
+        transaction.execute_batch(&attempts)?;
+        transaction.execute_batch(&mutations)?;
+        transaction.execute_batch(
+            "DROP TABLE evm_mutations_v4;
+             DROP TABLE evm_attempts_v4;
+             DROP TABLE evm_operations_v4;
+             DROP TABLE evm_remote_allowances;
+             DROP TABLE evm_remote_custodies;
+             UPDATE evm_schema SET version=3 WHERE singleton=1 AND version=4;
+             PRAGMA user_version=3;",
+        )?;
+        transaction.commit()?;
+        validate_legacy_v3_connection(connection).test_context("validate exact V3 fixture")
+    }
+
     #[test]
     fn creation_fault_child() -> TestResult {
         let Some(path) = std::env::var_os(CREATION_FAULT_PATH_ENV) else {
@@ -5589,6 +7674,73 @@ mod provisioning_tests {
             store.operation([0x52; 32]),
             Err(EvmActuatorErrorV1::InvalidStorageAuthority)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn v3_migration_is_atomic_preserves_economic_rows_and_reopens_idempotently() -> TestResult {
+        let (_directory, path) = secure_path("legacy-v3.sqlite3")?;
+        drop(DurableEvmActuatorV1::create(&path).test_context("create V4 fixture")?);
+        let connection = Connection::open(&path).test_context("open V4 fixture")?;
+        configure_connection(&connection, false).test_context("configure V4 fixture")?;
+        downgrade_empty_v4_to_exact_v3_for_test(&connection)?;
+        let chain_id = 31_337u64;
+        let account = [0x61; 20];
+        let authority = authority_id(chain_id, account);
+        connection.execute(
+            "INSERT INTO evm_leases
+             (authority_id,chain_id_be,account,owner_id,fencing_epoch_be,
+              lease_until_be,clock_high_water_be)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                authority.as_slice(),
+                chain_id.to_be_bytes().as_slice(),
+                account.as_slice(),
+                [0x62u8; 32].as_slice(),
+                1u64.to_be_bytes().as_slice(),
+                20u64.to_be_bytes().as_slice(),
+                10u64.to_be_bytes().as_slice(),
+            ],
+        )?;
+        validate_legacy_v3_connection(&connection).test_context("validate seeded V3")?;
+        assert!(matches!(
+            migrate_v3_to_v4_with_boundary_hook(&connection, || {
+                Err(EvmActuatorErrorV1::CorruptState)
+            }),
+            Err(EvmActuatorErrorV1::CorruptState)
+        ));
+        validate_legacy_v3_connection(&connection)
+            .test_context("crash boundary rolled back all migration writes")?;
+        let retained: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM evm_leases WHERE authority_id=?1",
+            params![authority.as_slice()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(retained, 1);
+        drop(connection);
+
+        drop(
+            DurableEvmActuatorV1::open_existing(&path)
+                .test_context("migrate exact V3 through production open")?,
+        );
+        let connection = Connection::open(&path).test_context("inspect migrated V4")?;
+        configure_connection(&connection, false).test_context("configure migrated V4")?;
+        validate_backend_and_schema(&connection).test_context("validate migrated V4 schema")?;
+        let transaction = connection.unchecked_transaction()?;
+        audit_retained_state_in_transaction(&transaction)
+            .test_context("audit migrated economic state")?;
+        transaction.commit()?;
+        let retained: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM evm_leases WHERE authority_id=?1",
+            params![authority.as_slice()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(retained, 1);
+        drop(connection);
+        drop(
+            DurableEvmActuatorV1::open_existing(&path)
+                .test_context("idempotently reopen migrated V4")?,
+        );
         Ok(())
     }
 

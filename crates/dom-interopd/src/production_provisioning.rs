@@ -55,10 +55,15 @@ pub(crate) enum ProductionProvisioningStageV1 {
     ContractsStores = 10,
     F6Authorities = 11,
     RelayAuthorities = 12,
+    // Refund arming borrows purpose-specific faces from both live Contracts
+    // owners and from the already-armed counterparty authorities. It is
+    // therefore provisioned after Relay/Contracts ownership is assembled and
+    // before any route funding may be authorized.
+    RefundArmingAuthority = 13,
 }
 
 impl ProductionProvisioningStageV1 {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::TimeAnchorStore,
         Self::RouteStore,
         Self::RouteSecretVault,
@@ -71,6 +76,7 @@ impl ProductionProvisioningStageV1 {
         Self::ContractsStores,
         Self::F6Authorities,
         Self::RelayAuthorities,
+        Self::RefundArmingAuthority,
     ];
 
     const fn tag(self) -> u8 {
@@ -91,6 +97,7 @@ impl ProductionProvisioningStageV1 {
             Self::ContractsStores => "10-contracts-stores",
             Self::F6Authorities => "11-f6-authorities",
             Self::RelayAuthorities => "12-relay-authorities",
+            Self::RefundArmingAuthority => "13-refund-arming-authority",
         }
     }
 }
@@ -858,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn contracts_and_f6_are_durably_complete_before_relay_can_begin(
+    fn contracts_f6_and_relay_are_durably_complete_before_refund_can_begin(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let root = owner_temp()?;
         let binding = provisioning_binding_v1(b"create", b"reopen", [15; 32])?;
@@ -884,6 +891,15 @@ mod tests {
         journal.complete(ProductionProvisioningStageV1::F6Authorities)?;
         assert_eq!(
             journal.begin(ProductionProvisioningStageV1::RelayAuthorities)?,
+            ProductionProvisioningStageStateV1::Started
+        );
+        assert_eq!(
+            journal.begin(ProductionProvisioningStageV1::RefundArmingAuthority),
+            Err(ProductionProvisioningErrorV1::Inconsistent)
+        );
+        journal.complete(ProductionProvisioningStageV1::RelayAuthorities)?;
+        assert_eq!(
+            journal.begin(ProductionProvisioningStageV1::RefundArmingAuthority)?,
             ProductionProvisioningStageStateV1::Started
         );
         Ok(())

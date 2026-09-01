@@ -12,7 +12,7 @@ blake2 = { workspace = true }
 f6-engine = { path = "../f6-engine" }
 rfq = { path = "../rfq" }
 rusqlite = { workspace = true }
-rustix = { version = "=1.1.4", default-features = false, features = ["fs", "process"] }
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
 solver = { path = "../solver" }
 thiserror = { workspace = true }
 uspe = { path = "../uspe" }

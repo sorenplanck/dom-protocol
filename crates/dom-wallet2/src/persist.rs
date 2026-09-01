@@ -17,8 +17,9 @@
 //!   panic.
 
 use crate::store::StoreError;
-use crate::wallet_state::{WalletV2State, SCHEMA_VERSION};
-use std::path::Path;
+use crate::wallet_state::{WalletV2State, LEGACY_SCHEMA_VERSION_V2, SCHEMA_VERSION};
+use std::fs::File;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// v2 wallet-file magic. 14 bytes, distinct from v1's `DOM-WALLET-V1\0`, so a
@@ -43,6 +44,27 @@ pub enum PersistError {
     /// commitment) — corruption that the AEAD tag did not catch.
     #[error("invalid persisted wallet state: {0}")]
     Store(#[from] StoreError),
+    /// The migration caller did not retain the exact owner-lock file belonging
+    /// to this wallet path.
+    #[error("invalid wallet migration owner lock")]
+    InvalidOwnerLock,
+    /// The exact owner-lock inode is already exclusively retained through a
+    /// different open-file description/process.
+    #[error("wallet migration owner lock is already held")]
+    ProcessLocked,
+    /// A purported legacy V2 payload already contains a field introduced in
+    /// V3 and therefore cannot be interpreted as an authentic legacy state.
+    #[error("legacy wallet payload contains a payout pin")]
+    LegacyContainsPayoutPin,
+}
+
+/// Outcome of an owner-locked wallet payload migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalletMigrationDispositionV1 {
+    /// An exact schema-V2 payload was atomically replaced by schema V3.
+    MigratedV2ToV3,
+    /// The retained wallet already used schema V3; no bytes were rewritten.
+    AlreadyCurrent,
 }
 
 /// Encrypt and atomically write the whole wallet state to `path`.
@@ -55,8 +77,130 @@ pub fn save_wallet_state(
     path: &Path,
     password: &str,
 ) -> Result<(), PersistError> {
+    if state.schema_version != SCHEMA_VERSION {
+        return Err(PersistError::UnsupportedSchema(state.schema_version));
+    }
     dom_wallet_crypto::save_envelope(path, WALLET_V2_MAGIC, ENVELOPE_VERSION, state, password)?;
     Ok(())
+}
+
+/// Atomically migrate one exact schema-V2 wallet to schema V3 while retaining
+/// the wallet's production owner lock.
+///
+/// `owner_lock` must be the open file at `<wallet-path>.interop.lock`. This
+/// function validates that path/handle identity and itself acquires (or verifies
+/// on the exact already-locked handle) a nonblocking exclusive OS lock before
+/// decrypting or writing. The lock remains attached to the caller's retained
+/// handle after return. A separately opened handle is refused even in the same
+/// process, so correctness does not depend on a caller honoring documentation.
+/// Callers must open/pass this handle before retaining the wallet ciphertext
+/// inode, because the successful atomic replacement changes that inode.
+///
+/// V2 can migrate losslessly because it predates payout pins: every decoded
+/// output must have `payout_for == None`. Unknown schemas and V2 payloads that
+/// contain a V3-only pin fail without writing. V3 is an idempotent read-only
+/// success.
+pub fn migrate_wallet_state_v2_to_v3_under_owner_lock(
+    path: &Path,
+    password: &str,
+    owner_lock: &mut File,
+) -> Result<WalletMigrationDispositionV1, PersistError> {
+    acquire_and_validate_migration_owner_lock(path, owner_lock)?;
+
+    let mut state: WalletV2State =
+        dom_wallet_crypto::load_envelope(path, WALLET_V2_MAGIC, ENVELOPE_VERSION, password)?;
+    match state.schema_version {
+        SCHEMA_VERSION => Ok(WalletMigrationDispositionV1::AlreadyCurrent),
+        LEGACY_SCHEMA_VERSION_V2 => {
+            if state
+                .outputs
+                .iter()
+                .any(|output| output.payout_for().is_some())
+            {
+                return Err(PersistError::LegacyContainsPayoutPin);
+            }
+            state.schema_version = SCHEMA_VERSION;
+            acquire_and_validate_migration_owner_lock(path, owner_lock)?;
+            save_wallet_state(&state, path, password)?;
+            let reopened = load_wallet_state(path, password)?;
+            if reopened
+                .outputs
+                .iter()
+                .any(|output| output.payout_for().is_some())
+            {
+                return Err(PersistError::LegacyContainsPayoutPin);
+            }
+            acquire_and_validate_migration_owner_lock(path, owner_lock)?;
+            Ok(WalletMigrationDispositionV1::MigratedV2ToV3)
+        }
+        version => Err(PersistError::UnsupportedSchema(version)),
+    }
+}
+
+#[cfg(unix)]
+fn acquire_and_validate_migration_owner_lock(
+    path: &Path,
+    owner_lock: &File,
+) -> Result<(), PersistError> {
+    validate_migration_owner_lock(path, owner_lock)?;
+    fs2::FileExt::try_lock_exclusive(owner_lock).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            PersistError::ProcessLocked
+        } else {
+            PersistError::InvalidOwnerLock
+        }
+    })?;
+    // Close the path/handle substitution window around lock acquisition before
+    // any ciphertext is read or an atomic replacement can begin.
+    validate_migration_owner_lock(path, owner_lock)
+}
+
+#[cfg(not(unix))]
+fn acquire_and_validate_migration_owner_lock(
+    _path: &Path,
+    _owner_lock: &File,
+) -> Result<(), PersistError> {
+    Err(PersistError::InvalidOwnerLock)
+}
+
+fn migration_owner_lock_path(path: &Path) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(".interop.lock");
+    PathBuf::from(value)
+}
+
+#[cfg(unix)]
+fn validate_migration_owner_lock(path: &Path, owner_lock: &File) -> Result<(), PersistError> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !path.is_absolute() {
+        return Err(PersistError::InvalidOwnerLock);
+    }
+    let lock_path = migration_owner_lock_path(path);
+    let named =
+        std::fs::symlink_metadata(&lock_path).map_err(|_| PersistError::InvalidOwnerLock)?;
+    let retained = owner_lock
+        .metadata()
+        .map_err(|_| PersistError::InvalidOwnerLock)?;
+    if !named.file_type().is_file()
+        || !retained.file_type().is_file()
+        || named.dev() != retained.dev()
+        || named.ino() != retained.ino()
+        || named.nlink() != 1
+        || retained.nlink() != 1
+        || named.mode() & 0o077 != 0
+        || retained.mode() & 0o077 != 0
+        || named.len() != 0
+        || retained.len() != 0
+    {
+        return Err(PersistError::InvalidOwnerLock);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_migration_owner_lock(_path: &Path, _owner_lock: &File) -> Result<(), PersistError> {
+    Err(PersistError::InvalidOwnerLock)
 }
 
 /// Decrypt and reconstruct the wallet state from `path`.
@@ -83,7 +227,9 @@ mod tests {
     use super::*;
     use crate::pending::{PendingSlate, SlateLifecycle, SlateRole, SlateSecrets};
     use crate::store::OutputStore;
-    use crate::types::{BlockRef, DerivIndex, Network, OutputOrigin, OutputStatus, StoredOutput};
+    use crate::types::{
+        BlockRef, DerivIndex, Network, OutputOrigin, OutputStatus, PayoutForV1, StoredOutput,
+    };
     use zeroize::Zeroizing;
 
     /// Distinctive 64-byte seed pattern, so the "not in plaintext" scan is exact.
@@ -170,6 +316,9 @@ mod tests {
             )
             .unwrap();
         receive.mark_reorged(1002).unwrap();
+        receive
+            .pin_payout(PayoutForV1::new([0xD4; 32]).unwrap(), 1003)
+            .unwrap();
         store.insert(receive).unwrap();
 
         store
@@ -233,6 +382,10 @@ mod tests {
         }
         let receive = back.outputs.get(&[0xC7u8; 33]).unwrap();
         assert_eq!(receive.status, OutputStatus::Reorged);
+        assert_eq!(
+            receive.payout_for(),
+            Some(PayoutForV1::new([0xD4; 32]).unwrap())
+        );
 
         // Pending slates (and their secrets) round-trip.
         assert_eq!(back.pending_slates.len(), 2);
@@ -439,6 +592,194 @@ mod tests {
             matches!(err, PersistError::UnsupportedSchema(v) if v == SCHEMA_VERSION + 7),
             "got {err:?}"
         );
+    }
+
+    #[cfg(unix)]
+    fn open_migration_lock(path: &Path) -> File {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::PermissionsExt;
+
+        let lock_path = migration_owner_lock_path(path);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(lock_path)
+            .unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        file
+    }
+
+    #[cfg(unix)]
+    fn migration_lock(path: &Path) -> File {
+        let file = open_migration_lock(path);
+        fs2::FileExt::try_lock_exclusive(&file).unwrap();
+        file
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_v2_golden_requires_owner_locked_atomic_migration() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("wallet.dat");
+        let mut legacy = WalletV2State::new(Network::Regtest, [0x7E; 32]);
+        legacy
+            .outputs
+            .insert(StoredOutput::new_unconfirmed(
+                [0xC7; 33],
+                500,
+                RECEIVE_BLINDING,
+                OutputOrigin::ReceiveSlate,
+                false,
+                None,
+                1001,
+            ))
+            .unwrap();
+        // Build an authentic pre-payout V2 fixture: no output may carry the
+        // V3-only field, and skip_serializing_if makes its JSON shape identical
+        // to the old schema.
+        legacy.schema_version = LEGACY_SCHEMA_VERSION_V2;
+        dom_wallet_crypto::save_envelope(&path, WALLET_V2_MAGIC, ENVELOPE_VERSION, &legacy, "pw")
+            .unwrap();
+        assert!(matches!(
+            load_wallet_state(&path, "pw").unwrap_err(),
+            PersistError::UnsupportedSchema(LEGACY_SCHEMA_VERSION_V2)
+        ));
+
+        let mut lock = migration_lock(&path);
+        assert_eq!(
+            migrate_wallet_state_v2_to_v3_under_owner_lock(&path, "pw", &mut lock).unwrap(),
+            WalletMigrationDispositionV1::MigratedV2ToV3
+        );
+        let migrated = load_wallet_state(&path, "pw").unwrap();
+        assert_eq!(migrated.schema_version, SCHEMA_VERSION);
+        assert!(migrated
+            .outputs
+            .iter()
+            .all(|output| output.payout_for().is_none()));
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            migrate_wallet_state_v2_to_v3_under_owner_lock(&path, "pw", &mut lock).unwrap(),
+            WalletMigrationDispositionV1::AlreadyCurrent
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_rejects_wrong_owner_lock_without_mutating_wallet() {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("wallet.dat");
+        save_wallet_state(&populated_state(), &path, "pw").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let wrong_path = dir.path().join("unrelated.lock");
+        let mut wrong = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(wrong_path)
+            .unwrap();
+        wrong
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        assert!(matches!(
+            migrate_wallet_state_v2_to_v3_under_owner_lock(&path, "pw", &mut wrong).unwrap_err(),
+            PersistError::InvalidOwnerLock
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_acquires_and_retains_lock_on_an_unlocked_exact_handle() {
+        use std::fs::OpenOptions;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("wallet.dat");
+        save_wallet_state(&populated_state(), &path, "pw").unwrap();
+        let mut owner = open_migration_lock(&path);
+
+        assert_eq!(
+            migrate_wallet_state_v2_to_v3_under_owner_lock(&path, "pw", &mut owner).unwrap(),
+            WalletMigrationDispositionV1::AlreadyCurrent
+        );
+
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(migration_owner_lock_path(&path))
+            .unwrap();
+        let error = fs2::FileExt::try_lock_exclusive(&contender).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_rejects_second_handle_lock_without_decrypt_or_mutation() {
+        use std::fs::OpenOptions;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("wallet.dat");
+        let mut legacy = WalletV2State::new(Network::Regtest, [0x73; 32]);
+        legacy.schema_version = LEGACY_SCHEMA_VERSION_V2;
+        dom_wallet_crypto::save_envelope(&path, WALLET_V2_MAGIC, ENVELOPE_VERSION, &legacy, "pw")
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let _owner = migration_lock(&path);
+        let mut contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(migration_owner_lock_path(&path))
+            .unwrap();
+        assert!(matches!(
+            migrate_wallet_state_v2_to_v3_under_owner_lock(&path, "wrong-password", &mut contender)
+                .unwrap_err(),
+            PersistError::ProcessLocked
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_rejects_a_v3_pin_disguised_as_legacy_without_mutation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("wallet.dat");
+        let mut disguised = populated_state();
+        disguised.schema_version = LEGACY_SCHEMA_VERSION_V2;
+        dom_wallet_crypto::save_envelope(
+            &path,
+            WALLET_V2_MAGIC,
+            ENVELOPE_VERSION,
+            &disguised,
+            "pw",
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut lock = migration_lock(&path);
+        assert!(matches!(
+            migrate_wallet_state_v2_to_v3_under_owner_lock(&path, "pw", &mut lock).unwrap_err(),
+            PersistError::LegacyContainsPayoutPin
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn ordinary_save_refuses_a_legacy_schema() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("wallet.dat");
+        let mut state = WalletV2State::new(Network::Regtest, [1; 32]);
+        state.schema_version = LEGACY_SCHEMA_VERSION_V2;
+        assert!(matches!(
+            save_wallet_state(&state, &path, "pw").unwrap_err(),
+            PersistError::UnsupportedSchema(LEGACY_SCHEMA_VERSION_V2)
+        ));
+        assert!(!path.exists());
     }
 
     #[test]

@@ -4,11 +4,11 @@
 //! memory dumps, swap, core files, logs, or the on-disk file. The OBSERVABLE
 //! contracts (Debug redaction, never-plaintext-on-disk, secrets wiped at
 //! finalize) are exercised here; the genuinely non-observable ones (does freed
-//! memory get zeroed?) are recorded as `#[ignore]`d probes with the static
-//! finding, per the anti-theater rule (proving a vector by analysis is worth as
-//! much as a test).
+//! memory get zeroed?) are pinned through static source assertions paired with
+//! compile-time owner-type checks, without unsafe freed-memory inspection.
 
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
+use dom_slate::{build_send, respond_receive, SlateInput};
 use dom_wallet2::{
     create_send, finalize, receive, BlockRef, KeychainDeriver, KeychainV2, Network, OutputOrigin,
     SlateLifecycle, StoredOutput, WalletV2State,
@@ -126,38 +126,92 @@ fn funded_state(values: &[u64]) -> WalletV2State {
     state
 }
 
-// ── NON-OBSERVABLE (recorded findings, anti-theater) ─────────────────────────
+// ── STATIC + TYPE-SURFACE PROOFS FOR DROP-ONLY PROPERTIES ────────────────────
 
 #[test]
-#[ignore = "STATIC FINDING (behaviorally untestable in safe Rust): \
-KeychainDeriver { root: ExtendedPrivKey, account } has NO Drop/ZeroizeOnDrop. \
-The HD master key bytes inside `root` live for the deriver's lifetime and are \
-freed without zeroization unless ExtendedPrivKey itself zeroizes on drop. \
-Confirm by inspecting dom-wallet-keys::hd_wallet::ExtendedPrivKey for a Drop/\
-Zeroize impl on its key_bytes; if absent, the master key can persist in freed \
-heap/stack (Lazarus memory-scrape surface). Cannot be asserted from a test \
-without unsafe freed-memory inspection."]
-fn keychain_deriver_root_zeroization_static_finding() {
-    // Construct one so the type is exercised at least at compile time.
+fn keychain_deriver_root_has_a_zeroizing_non_clone_owner() {
+    const HD_WALLET_SOURCE: &str = include_str!("../../dom-wallet-keys/src/hd_wallet.rs");
+    const KEYCHAIN_SOURCE: &str = include_str!("../src/keychain.rs");
+    assert!(HD_WALLET_SOURCE.contains("key: Zeroizing<[u8; 32]>"));
+    assert!(HD_WALLET_SOURCE.contains("chain_code: Zeroizing<[u8; 32]>"));
+    assert!(HD_WALLET_SOURCE.contains("impl Drop for ExtendedPrivKey"));
+    assert!(HD_WALLET_SOURCE.contains("impl Zeroize for ExtendedPrivKey"));
+    assert!(!HD_WALLET_SOURCE.contains("#[derive(Clone)]\npub struct ExtendedPrivKey"));
+    assert!(KEYCHAIN_SOURCE.contains("impl Drop for KeychainDeriver"));
+    assert!(KEYCHAIN_SOURCE.contains("self.root.zeroize();"));
+
+    // The real KeychainDeriver owns the non-exportable root for its complete
+    // lifetime; dropping this value exercises ExtendedPrivKey::drop.
     let k = keychain();
-    let _d = KeychainDeriver::new(&k).unwrap();
+    drop(KeychainDeriver::new(&k).unwrap());
 }
 
 #[test]
-#[ignore = "STATIC FINDING (behaviorally untestable): dom_slate::SlateInput.blinding \
-and the change OutputData.blinding are bare `[u8; 32]` (not Zeroizing). In \
-payment::create_send these transient copies of input/change blindings are \
-built from the store's Zeroizing blindings but live as bare arrays for the \
-duration of build_send and are dropped WITHOUT zeroization. The leak window is \
-small but real; fixing requires Zeroizing in dom-slate's public structs \
-(cross-crate, HUMAN DECISION — touches a shared API). Recorded, not patched."]
-fn slate_input_change_blinding_bare_static_finding() {}
+fn slate_and_payment_transients_are_zeroizing_owned() {
+    fn assert_zeroizing(_: &Zeroizing<[u8; 32]>) {}
+
+    let input_blinding = BlindingFactor::random();
+    let input_value = 1_510;
+    let input = SlateInput {
+        commitment: *Commitment::commit(input_value, &input_blinding).as_bytes(),
+        blinding: Zeroizing::new(*input_blinding.as_bytes()),
+    };
+    assert_zeroizing(&input.blinding);
+
+    let sender = build_send(&[input], 500, 1_000, 10, [0x77; 32]).unwrap();
+    assert_zeroizing(&sender.excess_blinding);
+    assert_zeroizing(&sender.nonce);
+    assert_zeroizing(&sender.change.as_ref().unwrap().blinding);
+    let receiver = respond_receive(sender.slate, &[0x77; 32]).unwrap();
+    assert_zeroizing(&receiver.recipient_output_blinding);
+
+    const SLATE_SOURCE: &str = include_str!("../../dom-slate/src/lib.rs");
+    const PAYMENT_SOURCE: &str = include_str!("../src/payment.rs");
+    assert!(!SLATE_SOURCE.contains("pub blinding: [u8; 32]"));
+    assert!(!SLATE_SOURCE.contains("pub excess_blinding: [u8; 32]"));
+    assert!(!SLATE_SOURCE.contains("pub nonce: [u8; 32]"));
+    assert!(!SLATE_SOURCE.contains("pub recipient_output_blinding: [u8; 32]"));
+    assert!(PAYMENT_SOURCE.contains("blinding: out.blinding.clone()"));
+    assert!(!PAYMENT_SOURCE.contains("blinding: *out.blinding"));
+}
 
 #[test]
-#[ignore = "STATIC FINDING (behaviorally untestable): the serde codecs \
-serde_blinding / serde_seed64_opt allocate a transient `Vec<u8>` during \
-DESERIALIZE (from the decrypted plaintext) before copying into the Zeroizing \
-array; that Vec is dropped without zeroization. The plaintext only exists in \
-memory post-decrypt, but the transient Vec is an extra unzeroized copy of \
-secret bytes. Fix = zeroize the temp Vec in the deserialize path. Recorded."]
-fn serde_transient_vec_not_zeroized_static_finding() {}
+fn serde_secret_buffers_are_zeroizing_on_success_and_rejection() {
+    const TYPES_SOURCE: &str = include_str!("../src/types.rs");
+    assert!(
+        TYPES_SOURCE.contains("let bytes = Zeroizing::new(Vec::<u8>::deserialize(deserializer)?);")
+    );
+    assert!(TYPES_SOURCE.contains("let v = Zeroizing::new(v);"));
+    assert!(TYPES_SOURCE.contains("let mut array = Zeroizing::new([0u8; 32]);"));
+    assert!(TYPES_SOURCE.contains("let mut a = Zeroizing::new([0u8; 64]);"));
+
+    // Preserve the existing serde wire representation while the temporary
+    // decode owners changed: both a 32-byte blinding and a 64-byte seed make a
+    // byte-identical JSON round trip.
+    let output = StoredOutput::new_unconfirmed(
+        [0x31; 33],
+        99,
+        [0x42; 32],
+        OutputOrigin::ReceiveSlate,
+        false,
+        None,
+        1,
+    );
+    let encoded = serde_json::to_vec(&output).unwrap();
+    let decoded: StoredOutput = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(*decoded.blinding, [0x42; 32]);
+    let mut malformed_output: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    malformed_output["blinding"] = serde_json::json!([1, 2]);
+    assert!(serde_json::from_value::<StoredOutput>(malformed_output).is_err());
+
+    let keychain = keychain();
+    let encoded = serde_json::to_vec(&keychain).unwrap();
+    let decoded: KeychainV2 = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        decoded.seed_bytes.as_deref(),
+        keychain.seed_bytes.as_deref()
+    );
+    let mut malformed_keychain: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    malformed_keychain["seed_bytes"] = serde_json::json!([3, 4]);
+    assert!(serde_json::from_value::<KeychainV2>(malformed_keychain).is_err());
+}

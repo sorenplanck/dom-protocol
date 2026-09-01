@@ -388,6 +388,48 @@ where
         Ok(report)
     }
 
+    /// Renews the route lease before a bounded blocking operation owned by the
+    /// production composition root. The bound is checked against the same
+    /// renewal window used by this runtime's internal waits, so an external
+    /// Relay cycle cannot silently outlive the route operation lock.
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
+    pub(crate) fn prepare_bounded_external_block(
+        &mut self,
+        bound: Duration,
+    ) -> Result<(), RouteRuntimeErrorV1> {
+        let bound_ms = u64::try_from(bound.as_millis())
+            .map_err(|_| RouteRuntimeErrorV1::InvalidConfiguration)?;
+        let safe_ceiling = self
+            .supervisor
+            .config()
+            .lease_duration_ms()
+            .checked_sub(self.supervisor.config().renew_before_ms())
+            .ok_or(RouteRuntimeErrorV1::InvalidConfiguration)?;
+        if bound_ms == 0 || bound_ms > safe_ceiling {
+            return Err(RouteRuntimeErrorV1::InvalidConfiguration);
+        }
+        self.supervisor.renew()?;
+        Ok(())
+    }
+
+    /// Returns the existing fail-closed shutdown decision without consuming a
+    /// driver step. Composite loops must use this instead of treating an OS
+    /// shutdown request as unconditional permission to abandon the route.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
+    pub(crate) fn composite_shutdown_is_safe(&self) -> Result<bool, RouteRuntimeErrorV1> {
+        let snapshot = self.supervisor.snapshot()?;
+        self.shutdown_is_safe(&snapshot)
+    }
+
     fn drive_step(&mut self) -> Result<RouteDriveReportV1, RouteRuntimeErrorV1> {
         let authorities = &mut self.authorities;
         let mut driver_authorities = RouteDriverAuthoritiesV1 {

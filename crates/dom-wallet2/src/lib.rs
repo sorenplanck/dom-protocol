@@ -73,14 +73,20 @@ pub use payment::{
     SentSlate, SubmitError,
 };
 pub use pending::{PendingSlate, SlateLifecycle, SlateRole, SlateSecrets};
-pub use persist::{load_wallet_state, save_wallet_state, PersistError, WALLET_V2_MAGIC};
+pub use persist::{
+    load_wallet_state, migrate_wallet_state_v2_to_v3_under_owner_lock, save_wallet_state,
+    PersistError, WalletMigrationDispositionV1, WALLET_V2_MAGIC,
+};
 pub use reconcile::{reconcile, CanonicalView, ReconcileReport, ScanBlock};
-pub use rpc_source::{RpcChainSource, RpcSourceError};
+pub use rpc_source::{
+    RpcChainSource, RpcSourceError, MAX_RPC_SCAN_BLOCKS_PER_PAGE, MAX_RPC_SCAN_RESPONSE_BYTES,
+};
 pub use state::TransitionError;
 pub use store::{MergeReport, OutputStore, StoreError};
 pub use transport::{sync, ChainSource, InMemoryChainSource, SyncError};
 pub use tx_sink::{FakeSinkError, InMemoryTxSink, SubmitOutcome, TxSink};
 pub use types::{
-    BlockRef, DerivIndex, KeychainV2, Network, OutputOrigin, OutputStatus, StoreMeta, StoredOutput,
+    BlockRef, DerivIndex, KeychainV2, Network, OutputOrigin, OutputStatus, PayoutForV1,
+    PayoutPinDisposition, PayoutPinError, StoreMeta, StoredOutput,
 };
 pub use wallet_state::{WalletV2State, SCHEMA_VERSION};

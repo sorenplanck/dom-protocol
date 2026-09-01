@@ -20,17 +20,24 @@ pub use model::{
     EvmOperationMutationRequestV1, EvmOperationPreparationRequestV1, EvmOperationViewV1,
     EvmRefundAuthorizationViewV1, EvmRetainedMutationKindV1, EvmSignerRoleV1, EvmTxStageV1,
     LeaseAcquireOutcomeV1, MutationOutcomeV1, MutationStatusV1, NonceSnapshotV1,
-    ReconciliationKindV1, ScopedEip1559SignerV1, ScopedEvmClaimV1, ScopedEvmOpenV1,
+    ReconciliationKindV1, RemoteEvmActionCustodyAcquireOutcomeV1, RemoteEvmActionCustodyV1,
+    RemoteEvmActionMutationRequestV1, RemoteEvmActionRequestInputV1, RemoteEvmActionRequestV1,
+    RemoteEvmObservationMutationRequestV1, RemoteEvmOperationCustodyResumeInputV1,
+    RemoteEvmSignedActionV1, ScopedEip1559SignerV1, ScopedEvmClaimV1, ScopedEvmOpenV1,
     ScopedEvmRefundV1, SignerRefusalV1,
 };
-#[cfg(feature = "rpc-http")]
-pub use rpc::HttpEvmRpcV1;
 pub use rpc::{
     EvmRpcErrorV1, EvmRpcV1, RpcAllowanceV1, RpcFinalizedTimeV1, RpcLogV1, RpcPendingNonceV1,
     RpcReceiptLookupV1, RpcReceiptV1, RpcTransactionLookupV1, RpcTransactionV1,
     MAX_RPC_RESPONSE_BYTES_V1,
 };
+#[cfg(feature = "rpc-http")]
+pub use rpc::{HttpEvmRpcTimeoutsV1, HttpEvmRpcV1};
 pub use store::DurableEvmActuatorV1;
+pub use transaction::{
+    remote_claim_unsigned_call_digest_v1, remote_open_unsigned_call_digest_v1,
+    remote_refund_unsigned_call_digest_v1, remote_signed_raw_digest_v1,
+};
 
 /// Fail-closed actuator result.
 pub type Result<T> = core::result::Result<T, EvmActuatorErrorV1>;

@@ -245,7 +245,58 @@ mod http {
     use super::*;
 
     const MAX_ENDPOINT_BYTES: usize = 2048;
-    const REQUEST_TIMEOUT_SECONDS: u64 = 20;
+    const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+    const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+    const MAX_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+    const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+    /// Validated connection and whole-request deadlines for the blocking EVM
+    /// JSON-RPC client.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct HttpEvmRpcTimeoutsV1 {
+        connect: Duration,
+        request: Duration,
+    }
+
+    impl HttpEvmRpcTimeoutsV1 {
+        /// Validates non-zero bounded deadlines. Connection establishment may
+        /// not outlive the complete request budget.
+        pub fn new(
+            connect: Duration,
+            request: Duration,
+        ) -> core::result::Result<Self, EvmRpcErrorV1> {
+            if connect.is_zero()
+                || request.is_zero()
+                || connect > MAX_CONNECT_TIMEOUT
+                || request > MAX_REQUEST_TIMEOUT
+                || connect > request
+            {
+                return Err(EvmRpcErrorV1::InvalidEndpoint);
+            }
+            Ok(Self { connect, request })
+        }
+
+        /// Default production deadlines retained by [`HttpEvmRpcV1::new`].
+        #[must_use]
+        pub const fn production_default() -> Self {
+            Self {
+                connect: DEFAULT_CONNECT_TIMEOUT,
+                request: DEFAULT_REQUEST_TIMEOUT,
+            }
+        }
+
+        /// Connection-establishment deadline.
+        #[must_use]
+        pub const fn connect(&self) -> Duration {
+            self.connect
+        }
+
+        /// Whole-request deadline, including response body reads.
+        #[must_use]
+        pub const fn request(&self) -> Duration {
+            self.request
+        }
+    }
 
     /// Blocking HTTP JSON-RPC implementation with bounded responses and no
     /// credential/header persistence. Debug output always redacts the endpoint.
@@ -266,6 +317,15 @@ mod http {
         /// fragment. Provider-specific path tokens remain memory-only and are
         /// always redacted. Plain HTTP is accepted only for loopback nodes.
         pub fn new(endpoint: &str) -> core::result::Result<Self, EvmRpcErrorV1> {
+            Self::new_with_timeouts(endpoint, HttpEvmRpcTimeoutsV1::production_default())
+        }
+
+        /// Constructs the same endpoint authority with explicit validated
+        /// connection and whole-request deadlines.
+        pub fn new_with_timeouts(
+            endpoint: &str,
+            timeouts: HttpEvmRpcTimeoutsV1,
+        ) -> core::result::Result<Self, EvmRpcErrorV1> {
             if endpoint.is_empty() || endpoint.len() > MAX_ENDPOINT_BYTES {
                 return Err(EvmRpcErrorV1::InvalidEndpoint);
             }
@@ -283,7 +343,8 @@ mod http {
                 return Err(EvmRpcErrorV1::InvalidEndpoint);
             }
             let client = Client::builder()
-                .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECONDS))
+                .connect_timeout(timeouts.connect())
+                .timeout(timeouts.request())
                 .build()
                 .map_err(|_| EvmRpcErrorV1::Unavailable)?;
             Ok(Self {
@@ -994,8 +1055,27 @@ mod http {
             assert_eq!(debug, "HttpEvmRpcV1([endpoint redacted])");
             assert!(!debug.contains("127.0.0.1"));
         }
+
+        #[test]
+        fn timeout_policy_is_explicit_bounded_and_backward_compatible() {
+            let defaults = HttpEvmRpcTimeoutsV1::production_default();
+            assert_eq!(defaults.connect(), Duration::from_secs(5));
+            assert_eq!(defaults.request(), Duration::from_secs(20));
+            assert!(HttpEvmRpcTimeoutsV1::new(Duration::ZERO, Duration::from_secs(1)).is_err());
+            assert!(
+                HttpEvmRpcTimeoutsV1::new(Duration::from_secs(2), Duration::from_secs(1),).is_err()
+            );
+            assert!(
+                HttpEvmRpcTimeoutsV1::new(Duration::from_secs(5), Duration::from_secs(121),)
+                    .is_err()
+            );
+            let explicit =
+                HttpEvmRpcTimeoutsV1::new(Duration::from_millis(250), Duration::from_secs(2))
+                    .unwrap();
+            assert!(HttpEvmRpcV1::new_with_timeouts("http://127.0.0.1:8545", explicit,).is_ok());
+        }
     }
 }
 
 #[cfg(feature = "rpc-http")]
-pub use http::HttpEvmRpcV1;
+pub use http::{HttpEvmRpcTimeoutsV1, HttpEvmRpcV1};

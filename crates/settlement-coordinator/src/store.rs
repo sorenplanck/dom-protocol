@@ -294,6 +294,15 @@ impl core::fmt::Debug for DurableSettlementCoordinatorV1 {
 }
 
 impl DurableSettlementCoordinatorV1 {
+    /// Stable identity of the sole plan authority accepted by this store.
+    ///
+    /// Composition roots use this retained value to construct the concrete
+    /// route/deployment plan authority without accepting an identity copied
+    /// from a second configuration surface.
+    pub const fn plan_authority_id(&self) -> Digest32 {
+        self.plan_authority_id
+    }
+
     /// Create a new owner-only Linux authority and pin its coordinator and
     /// plan-authority identities.
     pub fn create(

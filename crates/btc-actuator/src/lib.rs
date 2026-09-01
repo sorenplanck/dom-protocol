@@ -32,7 +32,7 @@ pub use rpc::{
     BitcoinRpcV1,
 };
 #[cfg(feature = "rpc-http")]
-pub use rpc::{HttpBitcoinCoreRpcConfigV1, HttpBitcoinCoreRpcV1};
+pub use rpc::{HttpBitcoinCoreRpcConfigV1, HttpBitcoinCoreRpcTimeoutsV1, HttpBitcoinCoreRpcV1};
 pub use signer::{
     BitcoinAdaptorSecretV1, BitcoinClaimSessionV1, BitcoinLocalPartialV1, BitcoinLocalPubNonceV1,
     BitcoinParticipantClaimAuthorityRequestV1, BitcoinParticipantClaimAuthorityV1,

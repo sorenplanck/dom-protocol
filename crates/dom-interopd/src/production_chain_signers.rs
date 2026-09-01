@@ -15,6 +15,7 @@ use btc_actuator::{
     BitcoinParticipantNonceVaultV1, BitcoinParticipantRoleV1,
 };
 use btc_crypto::SecpContext;
+use btc_vault::BitcoinNonceSealKeyV1;
 use dom_actuator::{
     DomParticipantV1, DomParticipantWalletSessionV1, DomParticipantWalletV1, DomSessionBindingV1,
     DomWalletAuthorityBindingV1, DomWalletSessionLegV1,
@@ -44,6 +45,8 @@ const MATCH_CONTEXT_SEED_V1: [u8; 32] = [0xC8; 32];
 const DOM_STATE_BINDING_DOMAIN_V1: &[u8] = b"DOM-INTEROPD/PRODUCTION-DOM-PARTICIPANT-STATE/V1\0";
 const CHAIN_SIGNER_BINDING_DOMAIN_V1: &[u8] =
     b"DOM-INTEROPD/PRODUCTION-CHAIN-SIGNER-AUTHORITIES/V1\0";
+const BITCOIN_NONCE_SEAL_KEY_DOMAIN_V1: &[u8] =
+    b"DOM-INTEROPD/PRODUCTION-BITCOIN-NONCE-SEAL-KEY/V1\0";
 
 /// Secret-bearing inputs consumed or borrowed while Stage 8 is provisioned.
 ///
@@ -89,8 +92,27 @@ pub(crate) struct ProductionChainSignerAuthoritiesV1 {
     downstream: ProductionDomLegAuthorityV1,
     dom_wallet: DomParticipantWalletV1,
     bitcoin_leg: LegIdV1,
+    #[expect(
+        dead_code,
+        reason = "bitcoin claim path frozen until the authenticated M8 round"
+    )]
     bitcoin_authority: BitcoinParticipantClaimAuthorityV1,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "bitcoin claim path frozen until the authenticated M8 round"
+        )
+    )]
     bitcoin_state: BitcoinParticipantNonceVaultV1,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "bitcoin claim path frozen until the authenticated M8 round"
+        )
+    )]
+    bitcoin_nonce_seal_key: BitcoinNonceSealKeyV1,
     binding_digest: Digest32,
 }
 
@@ -102,6 +124,10 @@ impl core::fmt::Debug for ProductionChainSignerAuthoritiesV1 {
 
 struct ProductionDomLegAuthorityV1 {
     binding: DomSessionBindingV1,
+    #[expect(
+        dead_code,
+        reason = "bitcoin claim path frozen until the authenticated M8 round"
+    )]
     state_binding_digest: Digest32,
     nonce_vault: DurableNonceVault,
 }
@@ -112,16 +138,38 @@ struct ProductionDomLegAuthorityV1 {
 /// both secret-bearing owners.  It cannot outlive the aggregate owner and it
 /// cannot be constructed by a caller.
 pub(crate) struct ProductionDomParticipantAuthorityV1<'authority> {
+    #[expect(
+        dead_code,
+        reason = "bitcoin claim path frozen until the authenticated M8 round"
+    )]
     binding: DomSessionBindingV1,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "bitcoin claim path frozen until the authenticated M8 round"
+        )
+    )]
     nonce_vault: &'authority mut DurableNonceVault,
     wallet: DomParticipantWalletSessionV1<'authority>,
 }
 
 impl<'authority> ProductionDomParticipantAuthorityV1<'authority> {
+    #[expect(
+        dead_code,
+        reason = "bitcoin claim path frozen until the authenticated M8 round"
+    )]
     pub(crate) const fn binding(&self) -> DomSessionBindingV1 {
         self.binding
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "bitcoin claim path frozen until the authenticated M8 round"
+        )
+    )]
     pub(crate) fn nonce_vault(&mut self) -> &mut DurableNonceVault {
         self.nonce_vault
     }
@@ -132,13 +180,22 @@ impl<'authority> ProductionDomParticipantAuthorityV1<'authority> {
 }
 
 /// Temporary Bitcoin participant authority paired with its sole nonce store.
+#[expect(
+    dead_code,
+    reason = "bitcoin claim path frozen until the authenticated M8 round"
+)]
 pub(crate) struct ProductionBitcoinParticipantAuthorityV1<'authority> {
     leg: LegIdV1,
     authority: &'authority BitcoinParticipantClaimAuthorityV1,
     state: &'authority mut BitcoinParticipantNonceVaultV1,
+    nonce_seal_key: &'authority BitcoinNonceSealKeyV1,
 }
 
 impl ProductionBitcoinParticipantAuthorityV1<'_> {
+    #[expect(
+        dead_code,
+        reason = "bitcoin claim path frozen until the authenticated M8 round"
+    )]
     pub(crate) const fn leg(&self) -> LegIdV1 {
         self.leg
     }
@@ -147,8 +204,26 @@ impl ProductionBitcoinParticipantAuthorityV1<'_> {
         self.authority
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "bitcoin claim path frozen until the authenticated M8 round"
+        )
+    )]
     pub(crate) fn state(&mut self) -> &mut BitcoinParticipantNonceVaultV1 {
         self.state
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "bitcoin claim path frozen until the authenticated M8 round"
+        )
+    )]
+    pub(crate) const fn nonce_seal_key(&self) -> &BitcoinNonceSealKeyV1 {
+        self.nonce_seal_key
     }
 }
 
@@ -161,6 +236,10 @@ impl ProductionChainSignerAuthoritiesV1 {
         self.relay_role
     }
 
+    #[expect(
+        dead_code,
+        reason = "bitcoin claim path frozen until the authenticated M8 round"
+    )]
     pub(crate) const fn binding_digest(&self) -> Digest32 {
         self.binding_digest
     }
@@ -176,6 +255,13 @@ impl ProductionChainSignerAuthoritiesV1 {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "bitcoin claim path frozen until the authenticated M8 round"
+        )
+    )]
     pub(crate) const fn dom_state_binding_digest(&self, leg: LegIdV1) -> Digest32 {
         match leg {
             LegIdV1::Upstream => self.upstream.state_binding_digest,
@@ -220,11 +306,19 @@ impl ProductionChainSignerAuthoritiesV1 {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "bitcoin claim path frozen until the authenticated M8 round"
+        )
+    )]
     pub(crate) fn bitcoin_authority(&mut self) -> ProductionBitcoinParticipantAuthorityV1<'_> {
         ProductionBitcoinParticipantAuthorityV1 {
             leg: self.bitcoin_leg,
             authority: &self.bitcoin_authority,
             state: &mut self.bitcoin_state,
+            nonce_seal_key: &self.bitcoin_nonce_seal_key,
         }
     }
 }
@@ -325,6 +419,15 @@ pub(crate) fn provision_production_chain_signers_v1(
         BitcoinSignerRoleV1::Maker => BitcoinParticipantRoleV1::Maker,
         BitcoinSignerRoleV1::Taker => BitcoinParticipantRoleV1::Taker,
     };
+    let bitcoin_nonce_seal_key = BitcoinNonceSealKeyV1::new(derive_bitcoin_nonce_seal_key_v1(
+        &bitcoin_participant_secret,
+        pins.route_id,
+        bitcoin_binding.terms_digest(),
+        local.participant_id,
+        bitcoin_leg,
+        bitcoin_role,
+    ))
+    .map_err(|_| ProductionChainSignerErrorV1::BitcoinAuthorityRefused)?;
     let bitcoin_authority = BitcoinParticipantClaimAuthorityV1::authorize_local_key(
         BitcoinParticipantClaimAuthorityRequestV1 {
             deployment: bitcoin_binding.deployment(),
@@ -392,6 +495,7 @@ pub(crate) fn provision_production_chain_signers_v1(
         wallet_binding: wallet_binding.digest(),
         bitcoin_leg,
         bitcoin_authority: bitcoin_authority.authority_digest(),
+        bitcoin_nonce_seal_key_id: *bitcoin_nonce_seal_key.key_id(),
     });
     if binding_digest == [0; 32] {
         return Err(ProductionChainSignerErrorV1::InvalidBinding);
@@ -421,6 +525,7 @@ pub(crate) fn provision_production_chain_signers_v1(
         bitcoin_leg,
         bitcoin_authority,
         bitcoin_state,
+        bitcoin_nonce_seal_key,
         binding_digest,
     })
 }
@@ -772,6 +877,7 @@ struct ChainSignerBindingMaterialV1 {
     wallet_binding: Digest32,
     bitcoin_leg: LegIdV1,
     bitcoin_authority: Digest32,
+    bitcoin_nonce_seal_key_id: Digest32,
 }
 
 fn chain_signer_binding_digest(material: ChainSignerBindingMaterialV1) -> Digest32 {
@@ -787,6 +893,29 @@ fn chain_signer_binding_digest(material: ChainSignerBindingMaterialV1) -> Digest
     hasher.update(material.wallet_binding);
     hasher.update([leg_tag(material.bitcoin_leg)]);
     hasher.update(material.bitcoin_authority);
+    hasher.update(material.bitcoin_nonce_seal_key_id);
+    hasher.finalize().into()
+}
+
+fn derive_bitcoin_nonce_seal_key_v1(
+    participant_secret: &[u8; 32],
+    route_id: Digest32,
+    terms_digest: Digest32,
+    participant_id: ParticipantId,
+    leg: LegIdV1,
+    role: BitcoinParticipantRoleV1,
+) -> Digest32 {
+    let mut hasher = Blake2b::<U32>::new();
+    hasher.update(BITCOIN_NONCE_SEAL_KEY_DOMAIN_V1);
+    hasher.update(route_id);
+    hasher.update(terms_digest);
+    hasher.update(participant_id.0);
+    hasher.update([leg_tag(leg)]);
+    hasher.update([match role {
+        BitcoinParticipantRoleV1::Maker => 1,
+        BitcoinParticipantRoleV1::Taker => 2,
+    }]);
+    hasher.update(participant_secret);
     hasher.finalize().into()
 }
 
@@ -1016,6 +1145,7 @@ mod tests {
             wallet_binding: [0x25; 32],
             bitcoin_leg,
             bitcoin_authority,
+            bitcoin_nonce_seal_key_id: [0x28; 32],
         };
         let base = chain_signer_binding_digest(material(
             SenderRoleV1::Initiator,
@@ -1049,6 +1179,82 @@ mod tests {
         let mut changed_owner = material(SenderRoleV1::Initiator, LegIdV1::Downstream, [0x26; 32]);
         changed_owner.pins.process_owner_id = [0x91; 32];
         assert_ne!(base, chain_signer_binding_digest(changed_owner));
+        let mut changed_seal_key =
+            material(SenderRoleV1::Initiator, LegIdV1::Downstream, [0x26; 32]);
+        changed_seal_key.bitcoin_nonce_seal_key_id = [0x92; 32];
+        assert_ne!(base, chain_signer_binding_digest(changed_seal_key));
+    }
+
+    #[test]
+    fn bitcoin_nonce_seal_derivation_is_stable_and_scope_separated() {
+        let derive = |route_id, terms_digest, participant_id, leg, role| {
+            derive_bitcoin_nonce_seal_key_v1(
+                &[0xA7; 32],
+                route_id,
+                terms_digest,
+                participant_id,
+                leg,
+                role,
+            )
+        };
+        let base = derive(
+            [0x31; 32],
+            [0x32; 32],
+            PARTICIPANT_A,
+            LegIdV1::Downstream,
+            BitcoinParticipantRoleV1::Maker,
+        );
+        assert_ne!(base, [0; 32]);
+        assert_eq!(
+            base,
+            derive(
+                [0x31; 32],
+                [0x32; 32],
+                PARTICIPANT_A,
+                LegIdV1::Downstream,
+                BitcoinParticipantRoleV1::Maker,
+            )
+        );
+        for changed in [
+            derive(
+                [0x41; 32],
+                [0x32; 32],
+                PARTICIPANT_A,
+                LegIdV1::Downstream,
+                BitcoinParticipantRoleV1::Maker,
+            ),
+            derive(
+                [0x31; 32],
+                [0x42; 32],
+                PARTICIPANT_A,
+                LegIdV1::Downstream,
+                BitcoinParticipantRoleV1::Maker,
+            ),
+            derive(
+                [0x31; 32],
+                [0x32; 32],
+                PARTICIPANT_B,
+                LegIdV1::Downstream,
+                BitcoinParticipantRoleV1::Maker,
+            ),
+            derive(
+                [0x31; 32],
+                [0x32; 32],
+                PARTICIPANT_A,
+                LegIdV1::Upstream,
+                BitcoinParticipantRoleV1::Maker,
+            ),
+            derive(
+                [0x31; 32],
+                [0x32; 32],
+                PARTICIPANT_A,
+                LegIdV1::Downstream,
+                BitcoinParticipantRoleV1::Taker,
+            ),
+        ] {
+            assert_ne!(base, changed);
+        }
+        assert!(BitcoinNonceSealKeyV1::new(base).is_ok());
     }
 
     #[test]

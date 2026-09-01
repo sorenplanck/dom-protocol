@@ -1215,7 +1215,8 @@ mod tests {
     }
 
     #[test]
-    fn exact_location_rechecks_depth_and_reinclusion_invalidates_old_checkpoint() {
+    fn exact_location_rechecks_depth_and_reinclusion_invalidates_old_checkpoint(
+    ) -> Result<(), RealDomError> {
         let same_chain = BTreeMap::from([
             (7, ([0x17; 32], 7)),
             (8, ([0x18; 32], 8)),
@@ -1265,11 +1266,11 @@ mod tests {
                 [0x2a; 32],
                 Some((9, [0x29; 32])),
                 [0x55; 32],
-            )
-            .expect("reinclusion invalidates old checkpoint");
+            )?;
             assert_eq!(reorg.prior_block_height, 8);
             assert_eq!(reorg.prior_block_hash, [0x18; 32]);
         }
+        Ok(())
     }
 
     #[test]

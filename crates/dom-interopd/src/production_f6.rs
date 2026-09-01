@@ -7,8 +7,9 @@
 
 pub(crate) mod candidate_attestation;
 pub(crate) mod terminal_release;
+pub(crate) mod terms;
 
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::rc::Rc;
@@ -54,6 +55,7 @@ const RECEIPT_DOMAIN: &[u8] = b"DOM-INTEROP/INTEROPD/F6-DELIVERY/V2\0";
 const OPERATION_DOMAIN: &[u8] = b"DOM-INTEROP/INTEROPD/F6-OPERATION/V2\0";
 const TERMS_CONTEXT_DOMAIN: &[u8] = b"DOM-INTEROP/INTEROPD/F6-TERMS-CONTEXT/V2\0";
 const OUTBOUND_QUOTE_RECEIPT_DOMAIN: &[u8] = b"DOM-INTEROP/INTEROPD/F6-OUTBOUND-QUOTE-RECEIPT/V2\0";
+const PREPARED_STORE_DOMAIN_V2: &[u8] = b"DOM-INTEROP/INTEROPD/F6-PREPARED-STORE/V2\0";
 const RFQ_NAMESPACE: &[u8] = b"interopd-f6-rfq-v2";
 const QUOTE_NAMESPACE: &[u8] = b"interopd-f6-quote-v2";
 const TERMS_NAMESPACE: &[u8] = b"interopd-f6-terms-v2";
@@ -63,6 +65,11 @@ const OUTBOUND_QUOTE_RECEIPT_KIND: u16 = 0xF621;
 const OUTBOUND_QUOTE_RECEIPT_VERSION: u16 = 2;
 const MAX_OUTBOUND_QUOTE_REVISIONS: usize = 256;
 const MAX_OUTBOUND_QUOTE_DELIVERY_BYTES: usize = 12_288;
+#[expect(
+    dead_code,
+    reason = "retained surface not yet wired by the stage-7 composition root"
+)]
+const MAX_F6_INVENTORY_LEASE_DURATION_MS: u64 = 86_400_000;
 
 /// Exact files jointly provisioned for one F6 V2 position.
 #[derive(Clone, Copy, Debug)]
@@ -73,6 +80,81 @@ pub struct ProductionF6PathsV2<'path> {
     pub receipt_store: &'path Path,
     /// Threshold-authenticated remote candidate journal.
     pub candidate_book: &'path Path,
+}
+
+/// Stage-11 bindings of the three empty prefixes provisioned before an RFQ
+/// fixes this position's final F6 store bindings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProductionF6PreparedBindingsV2 {
+    binding_log: Digest32,
+    receipt_store: Digest32,
+    candidate_book: Digest32,
+}
+
+impl ProductionF6PreparedBindingsV2 {
+    pub(crate) fn new(
+        binding_log: Digest32,
+        receipt_store: Digest32,
+        candidate_book: Digest32,
+    ) -> Result<Self, ProductionF6ErrorV2> {
+        if [binding_log, receipt_store, candidate_book].contains(&ZERO_DIGEST)
+            || binding_log == receipt_store
+            || binding_log == candidate_book
+            || receipt_store == candidate_book
+        {
+            return Err(ProductionF6ErrorV2::InvalidBinding);
+        }
+        Ok(Self {
+            binding_log,
+            receipt_store,
+            candidate_book,
+        })
+    }
+
+    /// Derives the three distinct Stage-11 prefix bindings from the exact V6+
+    /// provisioning identity and authenticated route/composition scope.
+    pub(crate) fn derive_stage11(
+        provisioning_binding: Digest32,
+        route_id: Digest32,
+        composition_v2_digest: Digest32,
+        position: SettlementPositionV2,
+    ) -> Result<Self, ProductionF6ErrorV2> {
+        if [provisioning_binding, route_id, composition_v2_digest].contains(&ZERO_DIGEST) {
+            return Err(ProductionF6ErrorV2::InvalidBinding);
+        }
+        let derive = |role: u8| {
+            digest_parts(&[
+                PREPARED_STORE_DOMAIN_V2,
+                &provisioning_binding,
+                &route_id,
+                &composition_v2_digest,
+                &[position as u8],
+                &[role],
+            ])
+        };
+        Self::new(derive(1)?, derive(2)?, derive(3)?)
+    }
+
+    /// Publishes or exactly resumes all three empty prefixes in fixed order.
+    /// A caller may invoke this only while the global Stage-11 journal is
+    /// `Started`; each member is independently idempotent after a crash.
+    pub(crate) fn prepare_stage11(
+        self,
+        paths: ProductionF6PathsV2<'_>,
+    ) -> Result<(), ProductionF6ErrorV2> {
+        let binding_log = ProductionStoreBindingV1::new(self.binding_log)
+            .map_err(|_| ProductionF6ErrorV2::Binding)?;
+        Store::prepare_resume_create_production(paths.binding_log, binding_log)
+            .map_err(|_| ProductionF6ErrorV2::Binding)?;
+        let receipt_store = ProductionStoreBindingV1::new(self.receipt_store)
+            .map_err(|_| ProductionF6ErrorV2::Receipt)?;
+        Store::prepare_resume_create_production(paths.receipt_store, receipt_store)
+            .map_err(|_| ProductionF6ErrorV2::Receipt)?;
+        let candidate_book = ProductionStoreBindingV1::new(self.candidate_book)
+            .map_err(|_| ProductionF6ErrorV2::Binding)?;
+        Store::prepare_resume_create_production(paths.candidate_book, candidate_book)
+            .map_err(|_| ProductionF6ErrorV2::Binding)
+    }
 }
 
 /// Authenticated registry/profile/economic authority pins.
@@ -179,6 +261,20 @@ impl ProductionSolverF6BindingV2 {
             return Err(ProductionF6ErrorV2::InvalidBinding);
         }
         Ok(())
+    }
+
+    /// Reconstructs this exact binding from an authenticated Relay RFQ.
+    /// Kept crate-private so activation code can validate a restart delivery
+    /// without exposing the frozen production pins as caller-shaped fields.
+    pub(crate) fn authenticates_pending_rfq(
+        self,
+        wire: RouteWireContextV1,
+        rfq: &RfqV2,
+        solver: ParticipantId,
+        dom_chain_id: ChainId,
+    ) -> bool {
+        Self::new(wire, rfq, solver, dom_chain_id, self.pins)
+            .is_ok_and(|reconstructed| reconstructed == self)
     }
 
     fn authority_digest(self, domain: &[u8]) -> Result<Digest32, ProductionF6ErrorV2> {
@@ -435,10 +531,13 @@ impl<Authority> SharedF6PhysicalAuthorityHandleV2<Authority> {
 /// an implementation detail and cannot mint another economic authority.
 pub(crate) struct ProductionF6SharedAuthorityOwnerV2 {
     inventory: SharedF6PhysicalAuthorityOwnerV2<DurableInventoryStoreV1>,
-    status: SharedF6PhysicalAuthorityOwnerV2<DurableSolverStatusStoreV1>,
+    upstream_status: DurableSolverStatusStoreV1,
+    downstream_status: DurableSolverStatusStoreV1,
     upstream_pre_f6_time: DurablePreF6TimeStoreV2,
     downstream_pre_f6_time: DurablePreF6TimeStoreV2,
     inventory_lease: InventoryLeaseV1,
+    inventory_owner_id: Digest32,
+    inventory_lease_duration_ms: u64,
 }
 
 impl core::fmt::Debug for ProductionF6SharedAuthorityOwnerV2 {
@@ -459,8 +558,15 @@ pub(crate) struct ProductionF6LegSharedAuthoritiesV2 {
 /// The upstream and downstream wrappers are distinct values even though the
 /// physical inventory authority is opened and fenced only once.
 struct ProductionF6LegInventoryLeaseV2 {
-    lease: InventoryLeaseV1,
+    lease: Rc<Cell<InventoryLeaseV1>>,
     position: SettlementPositionV2,
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
+    solver: ParticipantId,
+    owner_id: Digest32,
+    duration_ms: u64,
 }
 
 /// Move-only RFQ/position-bound time store. Unlike solver inventory and
@@ -479,19 +585,29 @@ impl core::fmt::Debug for ProductionF6LegSharedAuthoritiesV2 {
 
 impl ProductionF6SharedAuthorityOwnerV2 {
     /// Takes ownership of exactly one physical opening of each durable store.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     pub(crate) fn new(
         inventory: DurableInventoryStoreV1,
         inventory_lease: InventoryLeaseV1,
-        status: DurableSolverStatusStoreV1,
+        inventory_owner_id: Digest32,
+        inventory_lease_duration_ms: u64,
+        upstream_status: DurableSolverStatusStoreV1,
+        downstream_status: DurableSolverStatusStoreV1,
         upstream_pre_f6_time: DurablePreF6TimeStoreV2,
         downstream_pre_f6_time: DurablePreF6TimeStoreV2,
     ) -> Self {
         Self {
             inventory: SharedF6PhysicalAuthorityOwnerV2::new(inventory),
-            status: SharedF6PhysicalAuthorityOwnerV2::new(status),
+            upstream_status,
+            downstream_status,
             upstream_pre_f6_time,
             downstream_pre_f6_time,
             inventory_lease,
+            inventory_owner_id,
+            inventory_lease_duration_ms,
         }
     }
 
@@ -505,29 +621,37 @@ impl ProductionF6SharedAuthorityOwnerV2 {
         ProductionF6LegSharedAuthoritiesV2,
     ) {
         let (upstream_inventory, downstream_inventory) = self.inventory.into_two();
-        let (upstream_status, downstream_status) = self.status.into_two();
+        let inventory_lease = Rc::new(Cell::new(self.inventory_lease));
         let downstream = ProductionF6LegSharedAuthoritiesV2 {
             inventory: downstream_inventory,
-            status: downstream_status,
+            status: SharedF6PhysicalAuthorityHandleV2(Rc::new(RefCell::new(
+                self.downstream_status,
+            ))),
             pre_f6_time: ProductionF6LegPreF6TimeAuthorityV2 {
                 authority: self.downstream_pre_f6_time,
                 position: SettlementPositionV2::Downstream,
             },
             inventory_lease: ProductionF6LegInventoryLeaseV2 {
-                lease: self.inventory_lease,
+                lease: Rc::clone(&inventory_lease),
                 position: SettlementPositionV2::Downstream,
+                solver: self.inventory_lease.authority_id,
+                owner_id: self.inventory_owner_id,
+                duration_ms: self.inventory_lease_duration_ms,
             },
         };
         let upstream = ProductionF6LegSharedAuthoritiesV2 {
             inventory: upstream_inventory,
-            status: upstream_status,
+            status: SharedF6PhysicalAuthorityHandleV2(Rc::new(RefCell::new(self.upstream_status))),
             pre_f6_time: ProductionF6LegPreF6TimeAuthorityV2 {
                 authority: self.upstream_pre_f6_time,
                 position: SettlementPositionV2::Upstream,
             },
             inventory_lease: ProductionF6LegInventoryLeaseV2 {
-                lease: self.inventory_lease,
+                lease: inventory_lease,
                 position: SettlementPositionV2::Upstream,
+                solver: self.inventory_lease.authority_id,
+                owner_id: self.inventory_owner_id,
+                duration_ms: self.inventory_lease_duration_ms,
             },
         };
         (upstream, downstream)
@@ -568,7 +692,25 @@ impl ProductionF6LegSharedAuthoritiesV2 {
     }
 
     fn inventory_lease(&self) -> InventoryLeaseV1 {
-        self.inventory_lease.lease
+        self.inventory_lease.lease.get()
+    }
+
+    /// Renews only the retained exact solver/owner lease. The runtime cannot
+    /// substitute an identity, fencing generation, duration, or wall time.
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
+    fn renew_inventory_lease_at(&self, now_unix_ms: u64) -> Result<(), ProductionF6ErrorV2> {
+        let mut inventory = self.inventory_mut()?;
+        renew_exact_inventory_lease_at(
+            &mut inventory,
+            &self.inventory_lease.lease,
+            self.inventory_lease.solver,
+            self.inventory_lease.owner_id,
+            self.inventory_lease.duration_ms,
+            now_unix_ms,
+        )
     }
 
     fn position(&self) -> SettlementPositionV2 {
@@ -578,6 +720,47 @@ impl ProductionF6LegSharedAuthoritiesV2 {
     fn time_position(&self) -> SettlementPositionV2 {
         self.pre_f6_time.position
     }
+}
+
+#[expect(
+    dead_code,
+    reason = "retained surface not yet wired by the stage-7 composition root"
+)]
+fn renew_exact_inventory_lease_at(
+    inventory: &mut DurableInventoryStoreV1,
+    retained_lease: &Cell<InventoryLeaseV1>,
+    authenticated_solver: ParticipantId,
+    owner_id: Digest32,
+    duration_ms: u64,
+    now_unix_ms: u64,
+) -> Result<(), ProductionF6ErrorV2> {
+    let current = retained_lease.get();
+    if now_unix_ms == 0
+        || duration_ms == 0
+        || duration_ms > MAX_F6_INVENTORY_LEASE_DURATION_MS
+        || authenticated_solver.0 == ZERO_DIGEST
+        || owner_id == ZERO_DIGEST
+        || current.authority_id != authenticated_solver
+        || current.owner_id != owner_id
+        || current.fencing_epoch == 0
+    {
+        return Err(ProductionF6ErrorV2::InvalidBinding);
+    }
+    let renewed = inventory
+        .renew_lease(current, now_unix_ms, duration_ms)
+        .map_err(map_inventory)?;
+    let expected_until = now_unix_ms
+        .checked_add(duration_ms)
+        .ok_or(ProductionF6ErrorV2::InvalidBinding)?;
+    if renewed.authority_id != current.authority_id
+        || renewed.owner_id != current.owner_id
+        || renewed.fencing_epoch != current.fencing_epoch
+        || renewed.lease_until_unix_ms != expected_until
+    {
+        return Err(ProductionF6ErrorV2::Inventory);
+    }
+    retained_lease.set(renewed);
+    Ok(())
 }
 
 /// Move-only proof that quote bytes are backed by exclusive inventory and a
@@ -701,9 +884,18 @@ pub(crate) struct ProductionF6AuthoritiesV2 {
 
 #[derive(Clone, Copy)]
 enum OpenModeV2 {
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     Create,
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     Open,
     Resume,
+    Prepared(ProductionF6PreparedBindingsV2),
 }
 
 #[derive(Clone, Copy)]
@@ -713,8 +905,26 @@ enum RequiredF6ReceiptV2 {
 }
 
 impl ProductionSolverF6AuthorityV2 {
+    /// Extends the retained inventory lease using fresh local wall time and
+    /// the owner/duration fixed when the authenticated pair factory was built.
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
+    pub(crate) fn renew_inventory_lease(&mut self) -> Result<(), ProductionF6ErrorV2> {
+        let wall = observe_trusted_wall()?;
+        self.shared.renew_inventory_lease_at(wall.milliseconds)
+    }
+
     /// Creates both empty local F6 authorities after a global provisioning
     /// journal has durably authorized the step.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "retained surface not yet wired by the stage-7 composition root"
+        )
+    )]
     pub(crate) fn create_production(
         paths: ProductionF6PathsV2<'_>,
         binding: ProductionSolverF6BindingV2,
@@ -739,6 +949,17 @@ impl ProductionSolverF6AuthorityV2 {
         authorities: ProductionF6AuthoritiesV2,
     ) -> Result<Self, ProductionF6ErrorV2> {
         Self::open_with_mode(paths, binding, authorities, OpenModeV2::Resume)
+    }
+
+    /// Opens retained F6 state or completes the exact Stage-11 prefixes after
+    /// the authenticated RFQ has fixed the final store bindings.
+    pub(crate) fn open_or_resume_prepared_production(
+        paths: ProductionF6PathsV2<'_>,
+        prepared: ProductionF6PreparedBindingsV2,
+        binding: ProductionSolverF6BindingV2,
+        authorities: ProductionF6AuthoritiesV2,
+    ) -> Result<Self, ProductionF6ErrorV2> {
+        Self::open_with_mode(paths, binding, authorities, OpenModeV2::Prepared(prepared))
     }
 
     fn open_with_mode(
@@ -782,6 +1003,13 @@ impl ProductionSolverF6AuthorityV2 {
                     OpenModeV2::Resume => {
                         StoreLogV2::resume_create_production(paths.binding_log, log_binding)
                     }
+                    OpenModeV2::Prepared(prepared) => {
+                        StoreLogV2::open_or_resume_prepared_production(
+                            paths.binding_log,
+                            prepared.binding_log,
+                            log_binding,
+                        )
+                    }
                 }
                 .map_err(|_| ProductionF6ErrorV2::Binding)
             },
@@ -795,6 +1023,15 @@ impl ProductionSolverF6AuthorityV2 {
             OpenModeV2::Open => Store::open_production(paths.receipt_store, receipt_binding),
             OpenModeV2::Resume => {
                 Store::resume_create_production(paths.receipt_store, receipt_binding)
+            }
+            OpenModeV2::Prepared(prepared) => {
+                let preparation = ProductionStoreBindingV1::new(prepared.receipt_store)
+                    .map_err(|_| ProductionF6ErrorV2::Receipt)?;
+                Store::open_or_resume_prepared_production(
+                    paths.receipt_store,
+                    preparation,
+                    receipt_binding,
+                )
             }
         }
         .map_err(|_| ProductionF6ErrorV2::Receipt)?;
@@ -810,6 +1047,13 @@ impl ProductionSolverF6AuthorityV2 {
                 paths.candidate_book,
                 candidate_scope,
             ),
+            OpenModeV2::Prepared(prepared) => {
+                CandidateBookStoreLogV2::open_or_resume_prepared_production(
+                    paths.candidate_book,
+                    prepared.candidate_book,
+                    candidate_scope,
+                )
+            }
         }
         .map_err(map_candidate)?;
         let candidate_verifiers = CandidateVerificationAuthoritiesV2::new(
@@ -2535,6 +2779,51 @@ mod tests {
     assert_not_impl_any!(AuthenticatedF6TermsV2: Clone, Copy);
     assert_not_impl_any!(TerminalInventoryReleaseV2: Clone, Copy);
 
+    #[test]
+    fn stage11_prepared_f6_prefixes_are_exact_replayable_and_position_bound(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+        let binding_log = directory.path().join("binding.sqlite3");
+        let receipt_store = directory.path().join("receipts.sqlite3");
+        let candidate_book = directory.path().join("candidates.sqlite3");
+        let paths = ProductionF6PathsV2 {
+            binding_log: &binding_log,
+            receipt_store: &receipt_store,
+            candidate_book: &candidate_book,
+        };
+        let prepared = ProductionF6PreparedBindingsV2::derive_stage11(
+            [0xa1; 32],
+            [0xb1; 32],
+            [0xc1; 32],
+            SettlementPositionV2::Upstream,
+        )?;
+        prepared.prepare_stage11(paths)?;
+        prepared.prepare_stage11(paths)?;
+        for path in [
+            binding_log.as_path(),
+            receipt_store.as_path(),
+            candidate_book.as_path(),
+        ] {
+            assert!(
+                !path.exists(),
+                "Stage11 must not invent a final RFQ-bound database"
+            );
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(".prepare");
+            assert!(std::path::PathBuf::from(sidecar).is_file());
+        }
+        let downstream = ProductionF6PreparedBindingsV2::derive_stage11(
+            [0xa1; 32],
+            [0xb1; 32],
+            [0xc1; 32],
+            SettlementPositionV2::Downstream,
+        )?;
+        assert_ne!(prepared, downstream);
+        assert!(downstream.prepare_stage11(paths).is_err());
+        Ok(())
+    }
+
     struct UnreachableTermsV2;
     struct UnreachableTerminalV2;
     struct UnreachableCandidateAttestationV2;
@@ -2659,16 +2948,99 @@ mod tests {
             fencing_epoch: 7,
             lease_until_unix_ms: 1_000,
         };
+        let shared_lease = Rc::new(Cell::new(raw));
         let upstream_lease = ProductionF6LegInventoryLeaseV2 {
-            lease: raw,
+            lease: Rc::clone(&shared_lease),
             position: SettlementPositionV2::Upstream,
+            solver: raw.authority_id,
+            owner_id: raw.owner_id,
+            duration_ms: 1_000,
         };
         let downstream_lease = ProductionF6LegInventoryLeaseV2 {
-            lease: raw,
+            lease: shared_lease,
             position: SettlementPositionV2::Downstream,
+            solver: raw.authority_id,
+            owner_id: raw.owner_id,
+            duration_ms: 1_000,
         };
-        assert_eq!(upstream_lease.lease, downstream_lease.lease);
+        assert_eq!(upstream_lease.lease.get(), downstream_lease.lease.get());
+        assert!(Rc::ptr_eq(&upstream_lease.lease, &downstream_lease.lease));
         assert_ne!(upstream_lease.position, downstream_lease.position);
+    }
+
+    #[test]
+    fn exact_inventory_lease_renewal_preserves_epoch_and_rejects_identity_substitution(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+        let binding = [0x35; 32];
+        let solver = ParticipantId([0x36; 32]);
+        let owner = [0x37; 32];
+        let mut inventory =
+            DurableInventoryStoreV1::create(&directory.path().join("inventory.sqlite3"), binding)?;
+        let initial = inventory
+            .acquire_lease(solver, owner, 1_000, 10_000)?
+            .lease();
+        let retained = Cell::new(initial);
+
+        assert!(matches!(
+            renew_exact_inventory_lease_at(
+                &mut inventory,
+                &retained,
+                ParticipantId([0x38; 32]),
+                owner,
+                2_000,
+                2_000,
+            ),
+            Err(ProductionF6ErrorV2::InvalidBinding)
+        ));
+        assert!(matches!(
+            renew_exact_inventory_lease_at(
+                &mut inventory,
+                &retained,
+                solver,
+                [0x39; 32],
+                2_000,
+                2_000,
+            ),
+            Err(ProductionF6ErrorV2::InvalidBinding)
+        ));
+        assert_eq!(retained.get(), initial);
+
+        renew_exact_inventory_lease_at(&mut inventory, &retained, solver, owner, 2_000, 2_000)?;
+        let renewed = retained.get();
+        assert_eq!(renewed.authority_id, solver);
+        assert_eq!(renewed.owner_id, owner);
+        assert_eq!(renewed.fencing_epoch, initial.fencing_epoch);
+        assert_eq!(renewed.lease_until_unix_ms, 4_000);
+        Ok(())
+    }
+
+    #[test]
+    fn expired_inventory_lease_renewal_fails_before_persistent_or_retained_mutation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+        let binding = [0x3a; 32];
+        let solver = ParticipantId([0x3b; 32]);
+        let owner = [0x3c; 32];
+        let mut inventory =
+            DurableInventoryStoreV1::create(&directory.path().join("inventory.sqlite3"), binding)?;
+        let expired = inventory.acquire_lease(solver, owner, 1_000, 100)?.lease();
+        let retained = Cell::new(expired);
+
+        assert!(matches!(
+            renew_exact_inventory_lease_at(&mut inventory, &retained, solver, owner, 1_000, 1_101,),
+            Err(ProductionF6ErrorV2::Inventory)
+        ));
+        assert_eq!(retained.get(), expired);
+
+        let takeover = inventory
+            .acquire_lease(solver, [0x3d; 32], 1_101, 1_000)?
+            .lease();
+        assert_eq!(takeover.fencing_epoch, expired.fencing_epoch + 1);
+        assert_eq!(takeover.owner_id, [0x3d; 32]);
+        Ok(())
     }
 
     #[test]
@@ -2794,13 +3166,20 @@ mod tests {
                 max_status_lifetime_seconds: 60,
             },
         )?;
-        let status = DurableSolverStatusStoreV1::create_production(
-            &sources.join("status.sqlite3"),
+        let upstream_status = DurableSolverStatusStoreV1::create_production(
+            &sources.join("upstream-status.sqlite3"),
             status_config,
             registry_authorities.clone(),
             &secp,
         )?;
-        let status_scope_digest = status.scope_digest()?;
+        let downstream_status = DurableSolverStatusStoreV1::create_production(
+            &sources.join("downstream-status.sqlite3"),
+            status_config,
+            registry_authorities.clone(),
+            &secp,
+        )?;
+        let status_scope_digest = upstream_status.scope_digest()?;
+        assert_eq!(downstream_status.scope_digest()?, status_scope_digest);
 
         let upstream_clock = NegotiationClockV2 {
             chain_id: manifest.dom.chain_id,
@@ -2849,7 +3228,10 @@ mod tests {
             ProductionF6SharedAuthorityOwnerV2::new(
                 inventory,
                 inventory_lease,
-                status,
+                [0x65; 32],
+                10_000,
+                upstream_status,
+                downstream_status,
                 downstream_time,
                 upstream_time,
             )
@@ -2857,7 +3239,10 @@ mod tests {
             ProductionF6SharedAuthorityOwnerV2::new(
                 inventory,
                 inventory_lease,
-                status,
+                [0x65; 32],
+                10_000,
+                upstream_status,
+                downstream_status,
                 upstream_time,
                 downstream_time,
             )

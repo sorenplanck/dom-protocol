@@ -16,6 +16,7 @@ dom-serialization.workspace = true
 thiserror.workspace         = true
 rand.workspace              = true
 k256.workspace              = true
+zeroize.workspace           = true
 
 [dev-dependencies]
 proptest.workspace = true

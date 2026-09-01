@@ -29,17 +29,23 @@ use dom_scriptless_transport::SignedMessageV1;
 use kaystra_core::types::Digest32;
 use relay::auth::{message_type, RosterRegistryV1};
 use relay::{ParticipantId, SenderRoleV1, TimelockSpec};
+use route_executor::LegIdV1;
 use route_transport::{
     ContractsRouteDeliveryV1, ContractsTransportPortV1, DurableFrameReassemblerConfigV2,
     DurableFrameReassemblerErrorV2, DurableFrameReassemblerStatsV2, DurableFrameReassemblerV2,
     DurableInboxConfigV1, DurableInboxError, DurableInboxIngestReportV1, DurableInboxStatsV1,
     DurableOutboundEnvelopeV1, DurablePayloadCommitV1, DurablePayloadDispositionV1,
-    DurableProductionCreationStateV1, DurableRelayInboxV1, DurableRelaySenderConfigV1,
-    DurableRelaySenderErrorV1, DurableRelaySenderStatsV1, DurableRelaySenderV1, F6DispatchErrorV1,
+    DurableProductionCreationStateV1, DurableQuarantineAuthorityV1,
+    DurableQuarantineResolutionErrorV1, DurableQuarantineResolutionReportV1, DurableRelayInboxV1,
+    DurableRelaySenderConfigV1, DurableRelaySenderErrorV1, DurableRelaySenderStatsV1,
+    DurableRelaySenderV1, F6AppliedReplayErrorV1, F6AppliedReplayReportV1, F6DispatchErrorV1,
     F6DispatchReportV1, F6PayloadDeliveryV1, F6TransportPortV1, FramedContractsTransportErrorV2,
-    FramedContractsTransportV2, RelayQueueV1, RouteApplicationDispositionV2, RouteDispatchErrorV1,
-    RouteDispatchReportV1,
+    FramedContractsTransportV2, RelayQueueV1, RelaySubmitQueueV1, RouteApplicationDispositionV2,
+    RouteDispatchErrorV1, RouteDispatchReportV1,
 };
+
+use crate::production_config::ProductionRelayAuthorityPinsV6;
+use crate::production_f6_lifecycle::{ProductionF6LifecycleErrorV2, ProductionF6LifecyclePortV2};
 
 const RECEIPT_DOMAIN: &[u8] = b"DOM-INTEROP/CONTRACTS-RELAY-RECEIPT/V1\0";
 const FAILED_CLOSED_RECEIPT_DOMAIN: &[u8] = b"DOM-INTEROP/CONTRACTS-RELAY-FAILED-CLOSED/V1\0";
@@ -100,6 +106,7 @@ pub struct RelayWorkerConfigV1 {
     sender: DurableRelaySenderConfigV1,
     inbox: DurableInboxConfigV1,
     frames: DurableFrameReassemblerConfigV2,
+    production_v6_bound: bool,
 }
 
 impl RelayWorkerConfigV1 {
@@ -121,7 +128,66 @@ impl RelayWorkerConfigV1 {
             sender,
             inbox,
             frames,
+            production_v6_bound: false,
         })
+    }
+
+    /// Constructs the production worker config only when every Relay store
+    /// identity and bound matches the official V6 manifest for this leg.
+    pub fn new_production_v6(
+        sender: DurableRelaySenderConfigV1,
+        inbox: DurableInboxConfigV1,
+        frames: DurableFrameReassemblerConfigV2,
+        relay_pins: ProductionRelayAuthorityPinsV6,
+        leg: LegIdV1,
+    ) -> Result<Self, RelayWorkerOpenErrorV1> {
+        let authority_ids = [
+            relay_pins.relay_database_id,
+            relay_pins.upstream_sender_store_id,
+            relay_pins.upstream_inbox_id,
+            relay_pins.upstream_reassembler_id,
+            relay_pins.downstream_sender_store_id,
+            relay_pins.downstream_inbox_id,
+            relay_pins.downstream_reassembler_id,
+        ];
+        let ids_are_distinct = authority_ids
+            .iter()
+            .enumerate()
+            .all(|(index, id)| id != &ZERO_DIGEST && !authority_ids[..index].contains(id));
+        let (sender_store_id, inbox_id, reassembler_id) = match leg {
+            LegIdV1::Upstream => (
+                relay_pins.upstream_sender_store_id,
+                relay_pins.upstream_inbox_id,
+                relay_pins.upstream_reassembler_id,
+            ),
+            LegIdV1::Downstream => (
+                relay_pins.downstream_sender_store_id,
+                relay_pins.downstream_inbox_id,
+                relay_pins.downstream_reassembler_id,
+            ),
+        };
+        if !ids_are_distinct
+            || !(1..=65_536).contains(&relay_pins.relay_max_envelopes)
+            || !(1..=65_536).contains(&relay_pins.sender_max_envelopes)
+            || !(1..=65_536).contains(&relay_pins.inbox_max_entries)
+            || !(1..=256).contains(&relay_pins.frame_max_messages)
+            || !(16_385..=67_108_864).contains(&relay_pins.frame_max_active_bytes)
+            || !(1..=8_448).contains(&relay_pins.frame_max_active_chunks)
+            || sender.sender_store_id() != &sender_store_id
+            || inbox.inbox_id() != &inbox_id
+            || inbox.expected_relay_database_id() != &relay_pins.relay_database_id
+            || frames.reassembler_id() != &reassembler_id
+            || sender.max_envelopes() != relay_pins.sender_max_envelopes
+            || inbox.max_entries() != relay_pins.inbox_max_entries
+            || frames.max_messages() != relay_pins.frame_max_messages
+            || frames.max_active_bytes() != relay_pins.frame_max_active_bytes
+            || frames.max_active_chunks() != relay_pins.frame_max_active_chunks
+        {
+            return Err(RelayWorkerOpenErrorV1::InvalidConfiguration);
+        }
+        let mut config = Self::new(sender, inbox, frames)?;
+        config.production_v6_bound = true;
+        Ok(config)
     }
 
     /// Shared frozen route wire context.
@@ -137,6 +203,15 @@ impl RelayWorkerConfigV1 {
     /// Remote participant addressed by the outbound flow.
     pub const fn remote_participant(&self) -> ParticipantId {
         self.sender.recipient_id()
+    }
+
+    /// V6-pinned production Relay database identity accepted by the inbox.
+    pub const fn relay_database_id(&self) -> &Digest32 {
+        self.inbox.expected_relay_database_id()
+    }
+
+    pub(crate) const fn is_production_v6_bound(&self) -> bool {
+        self.production_v6_bound
     }
 
     pub(crate) const fn relay_signer_xonly(&self) -> &[u8; 32] {
@@ -1160,11 +1235,6 @@ where
         self.contracts.contracts_mut().session_status()
     }
 
-    /// Mutable access to the installed F6 authority for coordinated recovery.
-    pub fn f6_mut(&mut self) -> &mut F {
-        &mut self.f6
-    }
-
     /// Persists one F6 envelope before any Relay submission.
     pub fn prepare_f6(
         &mut self,
@@ -1239,7 +1309,7 @@ where
     /// was just acknowledged, the next frame is persisted only by repeating
     /// [`Self::stage_store_outbound_dsc1`] with the Store-recovered handle;
     /// this method never enters the legacy caller-shaped frame path.
-    pub fn submit_outbound_once<Q: RelayQueueV1>(
+    pub fn submit_outbound_once<Q: RelaySubmitQueueV1>(
         &mut self,
         queue: &mut Q,
     ) -> Result<RelayOutboundStepV1, RelayWorkerOutboundErrorV1> {
@@ -1257,12 +1327,22 @@ where
 
     /// Pulls and authenticates the mailbox through the one durable transcript,
     /// without dispatching any downstream payload.
-    pub fn ingest_mailbox<Q: RelayQueueV1>(
+    pub fn ingest_mailbox(
+        &mut self,
+        queue: &mut relay::production::ProductionRelayV1,
+        now: TimelockSpec,
+    ) -> Result<DurableInboxIngestReportV1, DurableInboxError> {
+        self.inbox.ingest(queue, &self.rosters, now)
+    }
+
+    /// Compatibility-only full-mailbox harness. Production callers must use
+    /// [`Self::ingest_mailbox`] so retained history is never materialized.
+    pub fn ingest_mailbox_ephemeral_v1<Q: RelayQueueV1>(
         &mut self,
         queue: &Q,
         now: TimelockSpec,
     ) -> Result<DurableInboxIngestReportV1, DurableInboxError> {
-        self.inbox.ingest(queue, &self.rosters, now)
+        self.inbox.ingest_ephemeral_v1(queue, &self.rosters, now)
     }
 
     /// Dispatches the already-durable inbox in shared F6/route order.  F6 is
@@ -1293,13 +1373,38 @@ where
         })
     }
 
+    /// Resolves one quarantined Relay envelope only through the caller's
+    /// explicit durable quarantine authority. The worker supplies its frozen
+    /// roster and never manufactures a release or successful reprocess.
+    pub fn resolve_quarantine<A: DurableQuarantineAuthorityV1>(
+        &mut self,
+        ordinal: u64,
+        now: TimelockSpec,
+        authority: &mut A,
+    ) -> Result<DurableQuarantineResolutionReportV1, DurableQuarantineResolutionErrorV1<A::Error>>
+    {
+        self.inbox
+            .resolve_quarantine(ordinal, &self.rosters, now, authority)
+    }
+
     /// Executes one mailbox pull followed by the ordered downstream step.
-    pub fn poll_inbound<Q: RelayQueueV1>(
+    pub fn poll_inbound(
+        &mut self,
+        queue: &mut relay::production::ProductionRelayV1,
+        now: TimelockSpec,
+    ) -> Result<RelayInboundPollReportV1, RelayWorkerInboundErrorV1<F::Error>> {
+        let ingest = self.ingest_mailbox(queue, now)?;
+        let dispatch = self.dispatch_inbound()?;
+        Ok(RelayInboundPollReportV1 { ingest, dispatch })
+    }
+
+    /// Compatibility-only poll for in-memory V1 harnesses.
+    pub fn poll_inbound_ephemeral_v1<Q: RelayQueueV1>(
         &mut self,
         queue: &Q,
         now: TimelockSpec,
     ) -> Result<RelayInboundPollReportV1, RelayWorkerInboundErrorV1<F::Error>> {
-        let ingest = self.ingest_mailbox(queue, now)?;
+        let ingest = self.ingest_mailbox_ephemeral_v1(queue, now)?;
         let dispatch = self.dispatch_inbound()?;
         Ok(RelayInboundPollReportV1 { ingest, dispatch })
     }
@@ -1314,11 +1419,33 @@ where
         self.inbox.stats()
     }
 
+    /// Durable timestamp rollback floor retained by this worker's sole inbox.
+    pub(crate) fn retained_timestamp_floor(&self) -> Result<Option<u64>, DurableInboxError> {
+        self.inbox.retained_timestamp_floor()
+    }
+
     /// Bounded V2 frame counters.
     pub fn frame_stats(
         &self,
     ) -> Result<DurableFrameReassemblerStatsV2, DurableFrameReassemblerErrorV2> {
         self.contracts.stats()
+    }
+}
+
+impl DurableRelayWorkerV1<ProductionF6LifecyclePortV2> {
+    /// Reauthenticates every retained applied F6 row against the exact
+    /// production lifecycle before this reopened worker may dispatch pending
+    /// F6 traffic.
+    ///
+    /// This deliberately exposes neither the inbox nor a mutable lifecycle
+    /// reference. The retained inbox is replayed read-only by the lifecycle's
+    /// purpose-specific recovery boundary; any divergent receipt, corrupted
+    /// row, transplanted position or unavailable downstream authority leaves
+    /// the lifecycle in `RecoveryRequired`.
+    pub(crate) fn recover_production_f6_applied_history(
+        &mut self,
+    ) -> Result<F6AppliedReplayReportV1, F6AppliedReplayErrorV1<ProductionF6LifecycleErrorV2>> {
+        self.f6.recover_applied_history(&self.inbox)
     }
 }
 
@@ -1405,6 +1532,22 @@ fn first_delivery_receipt_from_prepared_readback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_f6_recovery_surface_is_concrete_and_does_not_expose_authorities() {
+        let _recover: fn(
+            &mut DurableRelayWorkerV1<ProductionF6LifecyclePortV2>,
+        ) -> Result<
+            F6AppliedReplayReportV1,
+            F6AppliedReplayErrorV1<ProductionF6LifecycleErrorV2>,
+        > = DurableRelayWorkerV1::<
+            ProductionF6LifecyclePortV2,
+        >::recover_production_f6_applied_history;
+
+        let source = include_str!("relay_worker.rs");
+        assert!(!source.contains(&["pub fn ", "f6_mut"].concat()));
+        assert!(!source.contains(&["pub(crate) fn ", "f6_mut"].concat()));
+    }
 
     #[test]
     fn post_anchor_claim_pre_signature_ingress_has_a_linear_typed_surface() {

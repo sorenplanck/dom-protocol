@@ -1098,6 +1098,23 @@ impl CandidateBookStoreLogV2 {
                 .map_err(|_| CandidateBookErrorV2::Storage)?,
         })
     }
+
+    /// Opens an initialized candidate book or completes an externally
+    /// provisioned lazy-binding prefix without discarding retained quotes.
+    pub fn open_or_resume_prepared_production(
+        path: &Path,
+        preparation_digest: Digest32,
+        scope: CandidateBookScopeV2,
+    ) -> Result<Self, CandidateBookErrorV2> {
+        let preparation = store::ProductionStoreBindingV1::new(preparation_digest)
+            .map_err(|_| CandidateBookErrorV2::Storage)?;
+        let binding = store::ProductionStoreBindingV1::new(scope.binding_digest()?)
+            .map_err(|_| CandidateBookErrorV2::Storage)?;
+        Ok(Self {
+            store: store::Store::open_or_resume_prepared_production(path, preparation, binding)
+                .map_err(|_| CandidateBookErrorV2::Storage)?,
+        })
+    }
 }
 
 impl BindingLog for CandidateBookStoreLogV2 {

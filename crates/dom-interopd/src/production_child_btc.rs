@@ -7,9 +7,14 @@
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use adapter_btc::timelock::BitcoinCsvDelayV1;
+use adapter_btc::types::BitcoinNetworkV1;
 use adapter_btc_live::{
-    ArmedBitcoinFundingV1, BitcoinCoreRpcClientV1, BitcoinExternalFundingCustodyV1,
-    BitcoinPrebroadcastStoreV1, LiveBitcoinError, ReopenedBitcoinFundingV1,
+    ArmedBitcoinFundingV1, BitcoinCoreNetworkV1, BitcoinCoreRpcClientV1,
+    BitcoinExternalFundingCustodyV1, BitcoinPrebroadcastStoreV1, BitcoinRefundDelayV1,
+    FreshBitcoinClaimExtractionAuthorityV1, FreshBitcoinPreparedClaimPublicV1,
+    FreshBitcoinRevealedSecretV1, LiveBitcoinError, ReopenedBitcoinFundingV1,
+    ReopenedFreshBitcoinClaimV1,
 };
 use blake2::digest::{Update, VariableOutput};
 use blake2::Blake2bVar;
@@ -44,7 +49,8 @@ use crate::production_child_evidence::{
     ChildObservationEvidenceBindingV1,
 };
 use crate::production_child_router::{
-    ProductionChildMaterializationRequestV1, ProductionSettlementChildPortV1,
+    ProductionBitcoinExtractionHandoffScopeV1, ProductionChildMaterializationRequestV1,
+    ProductionSettlementChildPortV1,
 };
 use crate::production_refund_arming::production_bitcoin_refund_route_binding_v1;
 use crate::{AuthenticatedProductionInputsV1, AuthenticatedRouteAdmissionV1};
@@ -55,21 +61,103 @@ const RECONCILIATION_REQUEST_DOMAIN_V1: &[u8] =
     b"DOM-INTEROP/INTEROPD/BTC-CHILD/RECONCILIATION-REQUEST/V1\0";
 const OBSERVATION_REQUEST_DOMAIN_V1: &[u8] =
     b"DOM-INTEROP/INTEROPD/BTC-CHILD/OBSERVATION-REQUEST/V1\0";
+#[expect(
+    dead_code,
+    reason = "bitcoin claim path frozen until the authenticated M8 round"
+)]
+const FRESH_CLAIM_FUNDING_OWNER_DOMAIN_V1: &[u8] =
+    b"DOM-INTEROP/INTEROPD/BTC-CHILD/FRESH-CLAIM-FUNDING-OWNER/V1\0";
 
 /// Concrete, move-only owner of one exact Bitcoin adaptor pre-signature.
 /// It retains a finalized claim for idempotent retry but has no byte/scalar
 /// getter, codec, clone or generic signing surface.
 pub(crate) struct ProductionBitcoinClaimMaterializationAuthorityV1 {
     session: BitcoinClaimSessionV1,
-    pre_signature: Option<BitcoinPreSignatureV1>,
-    exact: Option<ExactBitcoinTransactionV1>,
+    state: ProductionBitcoinClaimMaterializationStateV1,
     route_scope_digest: Digest32,
     composition_digest: Digest32,
     role_plan_digest: Digest32,
     source_scope_digest: Digest32,
+    #[expect(
+        dead_code,
+        reason = "bitcoin claim path frozen until the authenticated M8 round"
+    )]
+    fresh_funding_owner_digest: Option<Digest32>,
+    fresh_public: Option<FreshBitcoinPreparedClaimPublicV1>,
+}
+
+enum ProductionBitcoinClaimMaterializationStateV1 {
+    #[expect(
+        dead_code,
+        reason = "bitcoin claim path frozen until the authenticated M8 round"
+    )]
+    ActuatorReady(BitcoinPreSignatureV1),
+    Finalized {
+        exact: ExactBitcoinTransactionV1,
+        fresh_extraction: Option<FreshBitcoinClaimExtractionAuthorityV1>,
+        durably_retained: bool,
+    },
+    RecoveryExtractionOnly {
+        expected_txid: Digest32,
+        fresh_extraction: Option<FreshBitcoinClaimExtractionAuthorityV1>,
+        durably_retained: bool,
+    },
+    FailedClosed,
+}
+
+/// Sole same-process handoff from a finalized fresh claim to canonical public
+/// extraction. It retains the already-open Bitcoin Core authority by `Rc`; no
+/// second RPC client, credential, or store is opened.
+pub(crate) struct ProductionBitcoinPublicExtractionHandoffV1 {
+    route_id: Digest32,
+    composition_digest: Digest32,
+    chain_id: Digest32,
+    minimum_confirmations: u32,
+    store: Rc<BitcoinPrebroadcastStoreV1>,
+    rpc: Rc<BitcoinCoreRpcClientV1>,
+    extraction: FreshBitcoinClaimExtractionAuthorityV1,
+}
+
+impl core::fmt::Debug for ProductionBitcoinPublicExtractionHandoffV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("ProductionBitcoinPublicExtractionHandoffV1([authority redacted])")
+    }
+}
+
+impl ProductionBitcoinPublicExtractionHandoffV1 {
+    /// Exact canonical claim transaction id in internal byte order.
+    pub(crate) const fn expected_txid(&self) -> Digest32 {
+        self.extraction.expected_txid()
+    }
+
+    pub(crate) const fn route_id(&self) -> Digest32 {
+        self.route_id
+    }
+
+    pub(crate) const fn composition_digest(&self) -> Digest32 {
+        self.composition_digest
+    }
+
+    pub(crate) const fn chain_id(&self) -> Digest32 {
+        self.chain_id
+    }
+
+    /// Extracts only after the retained Core authority proves the exact claim
+    /// canonical with the requested nonzero confirmation depth.
+    pub(crate) fn extract_confirmed(
+        &mut self,
+    ) -> Result<FreshBitcoinRevealedSecretV1, ChildAuthorityRefusalV1> {
+        self.extraction
+            .extract_confirmed(&self.store, &self.rpc, self.minimum_confirmations)
+            .map_err(map_live_bitcoin_error)
+    }
 }
 
 impl ProductionBitcoinClaimMaterializationAuthorityV1 {
+    #[expect(
+        dead_code,
+        reason = "bitcoin claim path frozen until the authenticated M8 round"
+    )]
     pub(crate) fn bind(
         inputs: &AuthenticatedProductionInputsV1,
         role_plan: &ComposedFinalClaimRolePlanV1,
@@ -122,13 +210,184 @@ impl ProductionBitcoinClaimMaterializationAuthorityV1 {
         }
         Ok(Self {
             session,
-            pre_signature: Some(pre_signature),
-            exact: None,
+            state: ProductionBitcoinClaimMaterializationStateV1::ActuatorReady(pre_signature),
             route_scope_digest: composition.route_scope_digest(),
             composition_digest: composition.binding_digest(),
             role_plan_digest: role_plan.digest(),
             source_scope_digest: entry.secret_source_scope_digest(),
+            fresh_funding_owner_digest: None,
+            fresh_public: None,
         })
+    }
+
+    /// Imports only a secret-free V1 claim recovery stage from durable storage.
+    ///
+    /// Fresh V1 retains both signer secrets and is therefore never a
+    /// production signing path. A merely Prepared record is refused. A durable
+    /// finalization intent may recover extraction without `t`, but only after
+    /// the actuator proves the exact Terminal transaction is retained.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
+    pub(crate) fn bind_recovered_fresh_v1(
+        inputs: &AuthenticatedProductionInputsV1,
+        role_plan: &ComposedFinalClaimRolePlanV1,
+        upstream_scope: &FinalClaimSecretSourceScopeV1,
+        downstream_scope: &FinalClaimSecretSourceScopeV1,
+        leg: LegIdV1,
+        session: BitcoinClaimSessionV1,
+        recovered: ReopenedFreshBitcoinClaimV1,
+        funding: &ProductionBitcoinFundingAuthorityV1,
+    ) -> Result<Self, ChildAuthorityRefusalV1> {
+        let (public, prepared_record_digest, authenticates_store, state) = match recovered {
+            ReopenedFreshBitcoinClaimV1::Prepared(_) => {
+                return Err(ChildAuthorityRefusalV1::Refused)
+            }
+            ReopenedFreshBitcoinClaimV1::ExtractionReady(prepared) => {
+                let public = prepared.public().clone();
+                let prepared_record_digest = prepared.prepared_record_digest();
+                let authenticates_store = prepared.authenticates_store(&funding.store);
+                let (_stored_public, extraction) = prepared
+                    .into_recovery_extraction_parts()
+                    .map_err(map_live_bitcoin_error)?;
+                let expected_txid = extraction.expected_txid();
+                (
+                    public,
+                    prepared_record_digest,
+                    authenticates_store,
+                    ProductionBitcoinClaimMaterializationStateV1::RecoveryExtractionOnly {
+                        expected_txid,
+                        fresh_extraction: Some(extraction),
+                        durably_retained: false,
+                    },
+                )
+            }
+            ReopenedFreshBitcoinClaimV1::Finalized(finalized) => {
+                let public = finalized.public().clone();
+                let prepared_record_digest = finalized.prepared_record_digest();
+                let authenticates_store = finalized.authenticates_store(&funding.store);
+                let (_stored_public, canonical_transaction, extraction) = finalized.into_parts();
+                let exact = ExactBitcoinTransactionV1::from_consensus_bytes(canonical_transaction)
+                    .map_err(map_actuator_error)?;
+                if exact.txid() != extraction.expected_txid() {
+                    return Err(ChildAuthorityRefusalV1::Conflict);
+                }
+                (
+                    public,
+                    prepared_record_digest,
+                    authenticates_store,
+                    ProductionBitcoinClaimMaterializationStateV1::Finalized {
+                        exact,
+                        fresh_extraction: Some(extraction),
+                        durably_retained: false,
+                    },
+                )
+            }
+        };
+        let fresh_funding_owner_digest = authenticate_fresh_claim_funding_owner_fields(
+            &public,
+            prepared_record_digest,
+            authenticates_store,
+            funding,
+        )?;
+        validate_fresh_claim_session(&session, &public)?;
+        let composition = inputs.composition();
+        role_plan
+            .authenticate(
+                composition.upstream(),
+                composition.downstream(),
+                upstream_scope.clone(),
+                downstream_scope.clone(),
+            )
+            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+        let (settlement, plan_leg) = match leg {
+            LegIdV1::Upstream => (composition.upstream(), ComposedSettlementLegV1::Upstream),
+            LegIdV1::Downstream => (
+                composition.downstream(),
+                ComposedSettlementLegV1::Downstream,
+            ),
+        };
+        let entry = role_plan.entry(plan_leg);
+        let deployment = inputs
+            .admission()
+            .bitcoin_deployment_capability(leg)
+            .map_err(|_| ChildAuthorityRefusalV1::Conflict)?;
+        if role_plan.route_id() != inputs.admission().route_id()
+            || role_plan.route_scope_digest() != composition.route_scope_digest()
+            || role_plan.composition_binding_digest() != composition.binding_digest()
+            || entry.settlement_id().0 != settlement.settlement_id.0
+            || entry.session_id().0 != settlement.session_id.0
+            || entry.secret_source_scope_digest() == ZERO_DIGEST
+            || session.route_id != role_plan.route_id()
+            || session.settlement_id != settlement.settlement_id.0
+            || session.session_id != settlement.session_id.0
+            || session.terms_digest != inputs.admission().frozen_bindings().terms_digest
+            || funding.route_id != role_plan.route_id()
+            || funding.leg != leg
+            || funding.terms_digest != session.terms_digest
+            || funding.deployment.registry_digest() != deployment.registry_digest()
+            || funding.deployment.profile_digest() != deployment.profile_digest()
+            || resolved_bitcoin_deployment_digest_v1(&funding.deployment)
+                .map_err(map_actuator_error)?
+                != session.deployment_digest
+            || session.registry_digest != deployment.registry_digest()
+            || session.profile_digest != deployment.profile_digest()
+            || session.deployment_digest
+                != resolved_bitcoin_deployment_digest_v1(&deployment).map_err(map_actuator_error)?
+            || session.adaptor_point != composition.adaptor_point_sec1()
+        {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        Ok(Self {
+            session,
+            state,
+            route_scope_digest: composition.route_scope_digest(),
+            composition_digest: composition.binding_digest(),
+            role_plan_digest: role_plan.digest(),
+            source_scope_digest: entry.secret_source_scope_digest(),
+            fresh_funding_owner_digest: Some(fresh_funding_owner_digest),
+            fresh_public: Some(public),
+        })
+    }
+
+    fn authenticates_fresh_funding_owner(
+        &self,
+        funding: &ProductionBitcoinFundingAuthorityV1,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        let (Some(expected), Some(public)) =
+            (self.fresh_funding_owner_digest, self.fresh_public.as_ref())
+        else {
+            return match &self.state {
+                ProductionBitcoinClaimMaterializationStateV1::ActuatorReady(_) => Ok(()),
+                _ => Err(ChildAuthorityRefusalV1::Conflict),
+            };
+        };
+        let (prepared_record_digest, authenticates_store) = match &self.state {
+            ProductionBitcoinClaimMaterializationStateV1::Finalized {
+                fresh_extraction: Some(extraction),
+                ..
+            }
+            | ProductionBitcoinClaimMaterializationStateV1::RecoveryExtractionOnly {
+                fresh_extraction: Some(extraction),
+                ..
+            } => (
+                extraction.prepared_record_digest(),
+                extraction.authenticates_store(&funding.store),
+            ),
+            _ => return Err(ChildAuthorityRefusalV1::Conflict),
+        };
+        if authenticate_fresh_claim_funding_owner_fields(
+            public,
+            prepared_record_digest,
+            authenticates_store,
+            funding,
+        )? == expected
+        {
+            Ok(())
+        } else {
+            Err(ChildAuthorityRefusalV1::Conflict)
+        }
     }
 
     fn ensure_exact_claim(
@@ -155,23 +414,194 @@ impl ProductionBitcoinClaimMaterializationAuthorityV1 {
         let mut scalar_bytes = *scalar.expose();
         let secret = BitcoinAdaptorSecretV1::verify(&mut scalar_bytes, self.session.adaptor_point)
             .map_err(map_actuator_error)?;
-        if self.exact.is_none() {
-            let pre_signature = self
-                .pre_signature
-                .take()
-                .ok_or(ChildAuthorityRefusalV1::Conflict)?;
-            self.exact = Some(
-                pre_signature
-                    .finalize_claim(secret)
-                    .map_err(map_actuator_error)?,
-            );
+        if matches!(
+            self.state,
+            ProductionBitcoinClaimMaterializationStateV1::Finalized { .. }
+                | ProductionBitcoinClaimMaterializationStateV1::RecoveryExtractionOnly { .. }
+        ) {
+            return Ok(());
         }
+        let state = core::mem::replace(
+            &mut self.state,
+            ProductionBitcoinClaimMaterializationStateV1::FailedClosed,
+        );
+        let finalized = match state {
+            ProductionBitcoinClaimMaterializationStateV1::ActuatorReady(pre_signature) => {
+                let exact = pre_signature
+                    .finalize_claim(secret)
+                    .map_err(map_actuator_error)?;
+                ProductionBitcoinClaimMaterializationStateV1::Finalized {
+                    exact,
+                    fresh_extraction: None,
+                    durably_retained: false,
+                }
+            }
+            ProductionBitcoinClaimMaterializationStateV1::Finalized { .. }
+            | ProductionBitcoinClaimMaterializationStateV1::RecoveryExtractionOnly { .. }
+            | ProductionBitcoinClaimMaterializationStateV1::FailedClosed => {
+                return Err(ChildAuthorityRefusalV1::Conflict)
+            }
+        };
+        self.state = finalized;
         Ok(())
     }
 
     fn exact(&self) -> Result<&ExactBitcoinTransactionV1, ChildAuthorityRefusalV1> {
-        self.exact.as_ref().ok_or(ChildAuthorityRefusalV1::Conflict)
+        match &self.state {
+            ProductionBitcoinClaimMaterializationStateV1::Finalized { exact, .. } => Ok(exact),
+            _ => Err(ChildAuthorityRefusalV1::Conflict),
+        }
     }
+
+    fn expected_txid(&self) -> Result<Digest32, ChildAuthorityRefusalV1> {
+        match &self.state {
+            ProductionBitcoinClaimMaterializationStateV1::Finalized { exact, .. } => {
+                Ok(exact.txid())
+            }
+            ProductionBitcoinClaimMaterializationStateV1::RecoveryExtractionOnly {
+                expected_txid,
+                ..
+            } => Ok(*expected_txid),
+            _ => Err(ChildAuthorityRefusalV1::Conflict),
+        }
+    }
+
+    fn exact_intent_digest(&self) -> Option<Digest32> {
+        match &self.state {
+            ProductionBitcoinClaimMaterializationStateV1::Finalized { exact, .. } => {
+                Some(exact.intent_digest())
+            }
+            _ => None,
+        }
+    }
+
+    fn take_fresh_extraction(
+        &mut self,
+        expected_txid: Digest32,
+    ) -> Result<FreshBitcoinClaimExtractionAuthorityV1, ChildAuthorityRefusalV1> {
+        match &mut self.state {
+            ProductionBitcoinClaimMaterializationStateV1::Finalized {
+                exact,
+                fresh_extraction,
+                durably_retained: true,
+                ..
+            } => {
+                let authenticated = exact.txid() == expected_txid
+                    && fresh_extraction
+                        .as_ref()
+                        .is_some_and(|extraction| extraction.expected_txid() == expected_txid);
+                take_validated_handoff_authority(fresh_extraction, authenticated)
+            }
+            ProductionBitcoinClaimMaterializationStateV1::RecoveryExtractionOnly {
+                expected_txid: retained_txid,
+                fresh_extraction,
+                durably_retained: true,
+            } => {
+                let authenticated = *retained_txid == expected_txid
+                    && fresh_extraction
+                        .as_ref()
+                        .is_some_and(|extraction| extraction.expected_txid() == expected_txid);
+                take_validated_handoff_authority(fresh_extraction, authenticated)
+            }
+            _ => Err(ChildAuthorityRefusalV1::Refused),
+        }
+    }
+
+    fn fresh_extraction_expected_txid(&self) -> Result<Digest32, ChildAuthorityRefusalV1> {
+        match &self.state {
+            ProductionBitcoinClaimMaterializationStateV1::Finalized {
+                exact,
+                fresh_extraction: Some(extraction),
+                ..
+            } if exact.txid() == extraction.expected_txid() => Ok(exact.txid()),
+            ProductionBitcoinClaimMaterializationStateV1::RecoveryExtractionOnly {
+                expected_txid,
+                fresh_extraction: Some(extraction),
+                ..
+            } if *expected_txid == extraction.expected_txid() => Ok(*expected_txid),
+            _ => Err(ChildAuthorityRefusalV1::Refused),
+        }
+    }
+
+    fn mark_exact_durably_retained(
+        &mut self,
+        expected_txid: Digest32,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        match &mut self.state {
+            ProductionBitcoinClaimMaterializationStateV1::Finalized {
+                exact,
+                durably_retained,
+                ..
+            } if exact.txid() == expected_txid => {
+                *durably_retained = true;
+                Ok(())
+            }
+            ProductionBitcoinClaimMaterializationStateV1::RecoveryExtractionOnly {
+                expected_txid: retained_txid,
+                durably_retained,
+                ..
+            } if *retained_txid == expected_txid => {
+                *durably_retained = true;
+                Ok(())
+            }
+            _ => Err(ChildAuthorityRefusalV1::Conflict),
+        }
+    }
+}
+
+#[expect(
+    dead_code,
+    reason = "bitcoin claim path frozen until the authenticated M8 round"
+)]
+fn validate_fresh_claim_session(
+    session: &BitcoinClaimSessionV1,
+    public: &FreshBitcoinPreparedClaimPublicV1,
+) -> Result<(), ChildAuthorityRefusalV1> {
+    let network_matches = matches!(
+        (session.network, public.network),
+        (BitcoinNetworkV1::Regtest, BitcoinCoreNetworkV1::Regtest)
+            | (
+                BitcoinNetworkV1::PublicSignet,
+                BitcoinCoreNetworkV1::PublicSignet
+            )
+            | (
+                BitcoinNetworkV1::CustomSignet,
+                BitcoinCoreNetworkV1::CustomSignet
+            )
+    );
+    let delay_matches = matches!(
+        (session.refund_delay, public.refund_delay),
+        (BitcoinCsvDelayV1::Blocks(left), BitcoinRefundDelayV1::Blocks(right)) if left == right
+    ) || matches!(
+        (session.refund_delay, public.refund_delay),
+        (
+            BitcoinCsvDelayV1::Time512s(left),
+            BitcoinRefundDelayV1::Time512Seconds(right)
+        ) if left == right
+    );
+    if !network_matches
+        || !delay_matches
+        || session.route_id == ZERO_DIGEST
+        || session.effect_id == ZERO_DIGEST
+        || session.fence_epoch == 0
+        || session.attempt != 0
+        || session.settlement_id != public.settlement_id
+        || session.session_id != public.session_id
+        || session.terms_digest != public.terms_hash
+        || session.funding_txid != public.funding_txid
+        || session.funding_vout != public.funding_vout
+        || session.funding_amount_sat != public.funding_amount_sat
+        || session.roster != public.roster
+        || session.contract_script_pubkey != public.contract_script_pubkey
+        || session.refund_key_xonly != public.refund_key_xonly
+        || session.destination_script_pubkey != public.destination_script_pubkey
+        || session.fee_sat != public.fee_sat
+        || session.expected_template_hash != public.template_digest
+        || session.adaptor_point != public.adaptor_point
+    {
+        return Err(ChildAuthorityRefusalV1::Conflict);
+    }
+    Ok(())
 }
 
 pub(crate) struct ProductionBitcoinMaterializationScopeV1 {
@@ -185,6 +615,10 @@ pub(crate) struct ProductionBitcoinMaterializationScopeV1 {
 }
 
 impl ProductionBitcoinMaterializationScopeV1 {
+    #[expect(
+        dead_code,
+        reason = "bitcoin claim path frozen until the authenticated M8 round"
+    )]
     pub(crate) fn authenticate(
         inputs: &AuthenticatedProductionInputsV1,
         role_plan: &ComposedFinalClaimRolePlanV1,
@@ -475,6 +909,7 @@ pub(crate) struct ProductionBitcoinChildPortV1<R, C> {
     clock: C,
     funding: ProductionBitcoinFundingAuthorityV1,
     claim: Option<ProductionBitcoinClaimMaterializationAuthorityV1>,
+    returned_extraction_handoff: Option<ProductionBitcoinPublicExtractionHandoffV1>,
     materialization_scope: Option<ProductionBitcoinMaterializationScopeV1>,
 }
 
@@ -506,10 +941,15 @@ where
             clock,
             funding,
             claim: None,
+            returned_extraction_handoff: None,
             materialization_scope: None,
         })
     }
 
+    #[expect(
+        dead_code,
+        reason = "bitcoin claim path frozen until the authenticated M8 round"
+    )]
     pub(crate) fn new_materializing(
         actuator: DurableBitcoinActuatorV1,
         rpc: R,
@@ -529,9 +969,98 @@ where
         {
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
+        claim.authenticates_fresh_funding_owner(&port.funding)?;
         port.claim = Some(claim);
         port.materialization_scope = Some(scope);
         Ok(port)
+    }
+
+    /// Moves the sole fresh public-extraction authority out only after the
+    /// exact claim has been finalized and retained by the durable actuator.
+    /// The handoff shares the already-open Core client owned by the funding
+    /// authority and cannot create another RPC or nonce session.
+    pub(crate) fn take_fresh_public_extraction_handoff(
+        &mut self,
+        expected: ProductionBitcoinExtractionHandoffScopeV1,
+    ) -> Result<ProductionBitcoinPublicExtractionHandoffV1, ChildAuthorityRefusalV1> {
+        if let Some(handoff) = self.returned_extraction_handoff.as_ref() {
+            let authenticated = handoff_authenticates_expected(handoff, expected);
+            return take_validated_handoff_authority(
+                &mut self.returned_extraction_handoff,
+                authenticated,
+            );
+        }
+        let now = self.clock.now_unix_ms()?;
+        let claim = self
+            .claim
+            .as_ref()
+            .ok_or(ChildAuthorityRefusalV1::Refused)?;
+        let exact_txid = claim.expected_txid()?;
+        let exact_intent_digest = claim.exact_intent_digest();
+        let extraction_txid = claim.fresh_extraction_expected_txid()?;
+        let chain_id = self.funding.deployment.profile().chain_id.0;
+        let minimum_confirmations = self.funding.deployment.profile().finality.min_confirmations;
+        if claim.session.route_id != self.funding.route_id
+            || claim.composition_digest == ZERO_DIGEST
+            || chain_id == ZERO_DIGEST
+            || minimum_confirmations == 0
+            || extraction_txid != exact_txid
+            || expected.route_id != claim.session.route_id
+            || expected.composition_digest != claim.composition_digest
+            || expected.chain_id != chain_id
+            || expected
+                .expected_txid
+                .is_some_and(|expected_txid| expected_txid != exact_txid)
+        {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        let binding = self
+            .actuator
+            .operation_binding(
+                self.lease,
+                BitcoinOperationKindV1::Terminal,
+                claim.session.effect_id,
+                now,
+            )
+            .map_err(map_actuator_error)?;
+        validate_existing_exact_claim_binding(&binding, exact_txid, exact_intent_digest)?;
+        self.claim
+            .as_mut()
+            .ok_or(ChildAuthorityRefusalV1::Refused)?
+            .mark_exact_durably_retained(exact_txid)?;
+        let extraction = self
+            .claim
+            .as_mut()
+            .ok_or(ChildAuthorityRefusalV1::Refused)?
+            .take_fresh_extraction(exact_txid)?;
+        Ok(ProductionBitcoinPublicExtractionHandoffV1 {
+            route_id: expected.route_id,
+            composition_digest: expected.composition_digest,
+            chain_id,
+            minimum_confirmations,
+            store: Rc::clone(&self.funding.store),
+            rpc: Rc::clone(&self.funding.rpc),
+            extraction,
+        })
+    }
+
+    pub(crate) fn restore_fresh_public_extraction_handoff(
+        &mut self,
+        handoff: ProductionBitcoinPublicExtractionHandoffV1,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        let chain_id = self.funding.deployment.profile().chain_id.0;
+        if self.returned_extraction_handoff.is_some()
+            || handoff.route_id != self.funding.route_id
+            || handoff.chain_id != chain_id
+            || handoff.composition_digest == ZERO_DIGEST
+            || handoff.minimum_confirmations == 0
+            || !Rc::ptr_eq(&handoff.store, &self.funding.store)
+            || !Rc::ptr_eq(&handoff.rpc, &self.funding.rpc)
+        {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        self.returned_extraction_handoff = Some(handoff);
+        Ok(())
     }
 
     fn validate_dispatch(
@@ -826,6 +1355,16 @@ where
     }
 }
 
+fn take_validated_handoff_authority<T>(
+    authority: &mut Option<T>,
+    authenticated: bool,
+) -> Result<T, ChildAuthorityRefusalV1> {
+    if !authenticated {
+        return Err(ChildAuthorityRefusalV1::Conflict);
+    }
+    authority.take().ok_or(ChildAuthorityRefusalV1::Refused)
+}
+
 const fn funding_reconciliation_disposition(
     result: BitcoinReconciliationV1,
 ) -> FundingReconciliationDispositionV1 {
@@ -855,6 +1394,29 @@ fn funding_broadcast_failure(
     }
 }
 
+impl<R, C> ProductionBitcoinChildPortV1<R, C>
+where
+    R: BitcoinRpcV1,
+    C: ProductionBitcoinChildClockV1,
+{
+    fn recover_existing_exact_claim(
+        &mut self,
+        request: &ProductionChildMaterializationRequestV1,
+        scalar: &route_composer::RouteScalar,
+        binding: &BitcoinOperationBindingViewV1,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        let claim = self
+            .claim
+            .as_mut()
+            .ok_or(ChildAuthorityRefusalV1::Refused)?;
+        claim.ensure_exact_claim(request, scalar)?;
+        let exact_txid = claim.expected_txid()?;
+        let exact_intent_digest = claim.exact_intent_digest();
+        validate_existing_exact_claim_binding(binding, exact_txid, exact_intent_digest)?;
+        claim.mark_exact_durably_retained(exact_txid)
+    }
+}
+
 impl<R, C> ProductionSettlementChildPortV1 for ProductionBitcoinChildPortV1<R, C>
 where
     R: BitcoinRpcV1,
@@ -876,19 +1438,18 @@ where
         if !materialization_scope.validates(&request) {
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
-        let scalar_shape = match (request.action, request.exposure, public_scalar) {
+        let scalar_shape = matches!(
+            (request.action, request.exposure, public_scalar),
             (
                 SettlementActionV1::Funding | SettlementActionV1::Refund,
                 ChildExposureV1::NonSecret,
                 None,
-            )
-            | (
+            ) | (
                 SettlementActionV1::Claim,
                 ChildExposureV1::FirstSecretExposure | ChildExposureV1::UsesPublicSecret,
                 Some(_),
-            ) => true,
-            _ => false,
-        };
+            )
+        );
         let deployment = &self.funding.deployment;
         if !scalar_shape
             || request.route_id != self.funding.route_id
@@ -919,7 +1480,12 @@ where
             .operation_binding(self.lease, operation_kind, request.effect_id, now)
         {
             Ok(binding) => {
-                return materialized_bitcoin_plan(deployment, self.lease, &request, &binding)
+                let plan = materialized_bitcoin_plan(deployment, self.lease, &request, &binding)?;
+                if request.action == SettlementActionV1::Claim {
+                    let scalar = public_scalar.ok_or(ChildAuthorityRefusalV1::Refused)?;
+                    self.recover_existing_exact_claim(&request, scalar, &binding)?;
+                }
+                return Ok(plan);
             }
             Err(BitcoinActuatorErrorV1::EffectNotFound) => {}
             Err(error) => return Err(map_actuator_error(error)),
@@ -1025,6 +1591,7 @@ where
                 self.actuator
                     .prepare_terminal_retained(&scope, exact, post_authority_now)
                     .map_err(map_actuator_error)?;
+                claim.mark_exact_durably_retained(scope.expected_txid())?;
                 self.actuator
                     .operation_binding(
                         self.lease,
@@ -1293,6 +1860,56 @@ where
             .commit_port_call_outcome(self.lease, key, outcome, committed_at)
             .map_err(map_actuator_error)?;
         Self::observation_outcome(request, committed)
+    }
+
+    fn take_bitcoin_public_extraction_handoff(
+        &mut self,
+        expected: ProductionBitcoinExtractionHandoffScopeV1,
+    ) -> Result<ProductionBitcoinPublicExtractionHandoffV1, ChildAuthorityRefusalV1> {
+        ProductionBitcoinChildPortV1::take_fresh_public_extraction_handoff(self, expected)
+    }
+
+    fn restore_bitcoin_public_extraction_handoff(
+        &mut self,
+        handoff: ProductionBitcoinPublicExtractionHandoffV1,
+    ) -> Result<(), ChildAuthorityRefusalV1> {
+        ProductionBitcoinChildPortV1::restore_fresh_public_extraction_handoff(self, handoff)
+    }
+}
+
+fn handoff_authenticates_expected(
+    handoff: &ProductionBitcoinPublicExtractionHandoffV1,
+    expected: ProductionBitcoinExtractionHandoffScopeV1,
+) -> bool {
+    handoff.route_id == expected.route_id
+        && handoff.composition_digest == expected.composition_digest
+        && handoff.chain_id == expected.chain_id
+        && expected.expected_txid.map_or(true, |expected_txid| {
+            expected_txid == handoff.expected_txid()
+        })
+}
+
+fn validate_existing_exact_claim_binding(
+    binding: &BitcoinOperationBindingViewV1,
+    exact_txid: Digest32,
+    exact_intent_digest: Option<Digest32>,
+) -> Result<(), ChildAuthorityRefusalV1> {
+    match binding.operation() {
+        BitcoinDurableOperationViewV1::Terminal(view)
+            if view.action == BitcoinActionV1::Claim
+                && view.txid == exact_txid
+                && binding.scope().expected_txid() == exact_txid
+                && view.intent_digest == binding.scope().intent_digest()
+                && exact_intent_digest.map_or(true, |intent_digest| {
+                    view.intent_digest == intent_digest
+                        && binding.scope().intent_digest() == intent_digest
+                }) =>
+        {
+            Ok(())
+        }
+        BitcoinDurableOperationViewV1::Terminal(_) | BitcoinDurableOperationViewV1::Funding(_) => {
+            Err(ChildAuthorityRefusalV1::Conflict)
+        }
     }
 }
 
@@ -1637,6 +2254,51 @@ fn validate_external_funding_custody(
         return Err(ChildAuthorityRefusalV1::Conflict);
     }
     Ok(())
+}
+
+#[expect(
+    dead_code,
+    reason = "bitcoin claim path frozen until the authenticated M8 round"
+)]
+fn authenticate_fresh_claim_funding_owner_fields(
+    public: &FreshBitcoinPreparedClaimPublicV1,
+    prepared_record_digest: Digest32,
+    authenticates_store: bool,
+    funding: &ProductionBitcoinFundingAuthorityV1,
+) -> Result<Digest32, ChildAuthorityRefusalV1> {
+    let custody = &funding.custody;
+    if !authenticates_store
+        || public.route_binding != custody.route_binding()
+        || public.plan_digest != custody.plan_digest()
+        || public.receipt_digest == ZERO_DIGEST
+        || prepared_record_digest == ZERO_DIGEST
+        || public.funding_txid != custody.funding_txid()
+        || public.funding_vout != custody.contract_vout()
+        || public.funding_amount_sat != custody.contract_amount_sat()
+    {
+        return Err(ChildAuthorityRefusalV1::Conflict);
+    }
+    request_digest(
+        FRESH_CLAIM_FUNDING_OWNER_DOMAIN_V1,
+        &[
+            &funding.route_id,
+            &[match funding.leg {
+                LegIdV1::Upstream => 1,
+                LegIdV1::Downstream => 2,
+            }],
+            &public.route_binding,
+            &public.plan_digest,
+            &public.receipt_digest,
+            &prepared_record_digest,
+            &custody.prepared_record_digest(),
+            &custody.summary_record_digest(),
+            &custody.refund_record_digest(),
+            &custody.custody_digest(),
+            &public.funding_txid,
+            &public.funding_vout.to_be_bytes(),
+            &public.funding_amount_sat.to_be_bytes(),
+        ],
+    )
 }
 
 fn validate_funding_call(
@@ -2005,6 +2667,92 @@ fn map_live_bitcoin_error(error: LiveBitcoinError) -> ChildAuthorityRefusalV1 {
 mod tests {
     use super::*;
 
+    use adapter_btc::roster::{BitcoinSignerRoleV1, ParticipantKeyRosterV1, ParticipantKeyV1};
+    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use static_assertions::assert_not_impl_any;
+
+    assert_not_impl_any!(ProductionBitcoinPublicExtractionHandoffV1: Clone, Copy);
+    assert_not_impl_any!(FreshBitcoinClaimExtractionAuthorityV1: Clone, Copy, core::fmt::Debug);
+
+    #[test]
+    fn rejected_handoff_authentication_preserves_authority_for_exact_retry() {
+        let mut authority = Some(0x51_u8);
+        assert_eq!(
+            take_validated_handoff_authority(&mut authority, false),
+            Err(ChildAuthorityRefusalV1::Conflict)
+        );
+        assert_eq!(authority, Some(0x51));
+        assert_eq!(
+            take_validated_handoff_authority(&mut authority, true),
+            Ok(0x51)
+        );
+        assert_eq!(authority, None);
+    }
+
+    fn fresh_session_fixture() -> (BitcoinClaimSessionV1, FreshBitcoinPreparedClaimPublicV1) {
+        let secp = Secp256k1::new();
+        let maker = SecretKey::from_slice(&[1; 32]).unwrap_or_else(|_| std::process::abort());
+        let taker = SecretKey::from_slice(&[2; 32]).unwrap_or_else(|_| std::process::abort());
+        let roster = ParticipantKeyRosterV1::new([
+            ParticipantKeyV1 {
+                participant_id: [0x11; 32],
+                role: BitcoinSignerRoleV1::Maker,
+                compressed_key: PublicKey::from_secret_key(&secp, &maker).serialize(),
+            },
+            ParticipantKeyV1 {
+                participant_id: [0x12; 32],
+                role: BitcoinSignerRoleV1::Taker,
+                compressed_key: PublicKey::from_secret_key(&secp, &taker).serialize(),
+            },
+        ])
+        .unwrap_or_else(|_| std::process::abort());
+        let public = FreshBitcoinPreparedClaimPublicV1 {
+            route_binding: [0x21; 32],
+            plan_digest: [0x22; 32],
+            receipt_digest: [0x23; 32],
+            network: BitcoinCoreNetworkV1::Regtest,
+            settlement_id: [0x24; 32],
+            session_id: [0x25; 32],
+            terms_hash: [0x26; 32],
+            funding_txid: [0x27; 32],
+            funding_vout: 3,
+            funding_amount_sat: 80_000,
+            roster,
+            contract_script_pubkey: vec![0x51, 0x20, 0x31],
+            refund_key_xonly: [0x32; 32],
+            refund_delay: BitcoinRefundDelayV1::Blocks(18),
+            destination_script_pubkey: vec![0x51, 0x20, 0x33],
+            fee_sat: 900,
+            template_digest: [0x34; 32],
+            adaptor_point: PublicKey::from_secret_key(&secp, &maker).serialize(),
+        };
+        let session = BitcoinClaimSessionV1 {
+            route_id: [0x41; 32],
+            effect_id: [0x42; 32],
+            fence_epoch: 7,
+            settlement_id: public.settlement_id,
+            session_id: public.session_id,
+            terms_digest: public.terms_hash,
+            registry_digest: [0x43; 32],
+            profile_digest: [0x44; 32],
+            deployment_digest: [0x45; 32],
+            network: BitcoinNetworkV1::Regtest,
+            roster: public.roster,
+            funding_txid: public.funding_txid,
+            funding_vout: public.funding_vout,
+            funding_amount_sat: public.funding_amount_sat,
+            contract_script_pubkey: public.contract_script_pubkey.clone(),
+            refund_key_xonly: public.refund_key_xonly,
+            refund_delay: BitcoinCsvDelayV1::Blocks(18),
+            destination_script_pubkey: public.destination_script_pubkey.clone(),
+            fee_sat: public.fee_sat,
+            expected_template_hash: public.template_digest,
+            adaptor_point: public.adaptor_point,
+            attempt: 0,
+        };
+        (session, public)
+    }
+
     #[test]
     fn action_mapping_separates_funding_from_both_terminal_paths() {
         assert_eq!(
@@ -2135,6 +2883,40 @@ mod tests {
                 block_height: 9,
             }),
             FundingReconciliationDispositionV1::Externalized
+        );
+    }
+
+    #[test]
+    fn fresh_claim_session_refuses_transplant_attempt_network_and_template_changes() {
+        let (session, public) = fresh_session_fixture();
+        assert_eq!(validate_fresh_claim_session(&session, &public), Ok(()));
+
+        let mut changed_attempt = session.clone();
+        changed_attempt.attempt = 1;
+        assert_eq!(
+            validate_fresh_claim_session(&changed_attempt, &public),
+            Err(ChildAuthorityRefusalV1::Conflict)
+        );
+
+        let mut changed_network = session.clone();
+        changed_network.network = BitcoinNetworkV1::PublicSignet;
+        assert_eq!(
+            validate_fresh_claim_session(&changed_network, &public),
+            Err(ChildAuthorityRefusalV1::Conflict)
+        );
+
+        let mut changed_template = public.clone();
+        changed_template.template_digest[0] ^= 0x80;
+        assert_eq!(
+            validate_fresh_claim_session(&session, &changed_template),
+            Err(ChildAuthorityRefusalV1::Conflict)
+        );
+
+        let mut transplanted = public.clone();
+        transplanted.session_id[0] ^= 0x40;
+        assert_eq!(
+            validate_fresh_claim_session(&session, &transplanted),
+            Err(ChildAuthorityRefusalV1::Conflict)
         );
     }
 }

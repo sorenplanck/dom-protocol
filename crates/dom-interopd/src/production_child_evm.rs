@@ -1,11 +1,11 @@
 //! Production settlement-child authority for the EVM face.
 //!
 //! The coordinator journals every dispatch before this boundary. When the
-//! materialization owner is installed, this port also owns two independently
-//! scoped EIP-1559 signer handles and imports a composition-verified scalar
-//! only into an exact claim scope; the scalar is immediately zeroized after
-//! the actuator durably retains its calldata. Raw transactions never leave the
-//! actuator.
+//! materialization owner is installed, this port owns exactly one local scoped
+//! EIP-1559 signer and an authenticated Contracts handoff for the complementary
+//! remote role. A composition-verified scalar enters only the exact claim
+//! scope and is zeroized after the actuator durably retains its calldata. Raw
+//! transactions never leave the actuator.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,12 +19,14 @@ use blake2::Blake2bVar;
 use deployment_registry::AssetRepresentationV1;
 use deployment_registry::ResolvedEvmDeploymentV1;
 use evm_actuator::{
-    BroadcastDispositionV1, DurableEvmActuatorV1, EvmActuatorErrorV1, EvmActuatorLeaseV1,
-    EvmClaimSecretV1, EvmFeesV1, EvmObservationMutationRequestV1, EvmOperationBindingViewV1,
-    EvmOperationKindV1, EvmOperationMutationRequestV1, EvmOperationPreparationRequestV1,
-    EvmOperationViewV1, EvmRetainedMutationKindV1, EvmRpcV1, EvmSignerRoleV1, EvmTxStageV1,
-    ReconciliationKindV1, ScopedEip1559SignerV1, ScopedEvmClaimV1, ScopedEvmOpenV1,
-    ScopedEvmRefundV1,
+    remote_claim_unsigned_call_digest_v1, remote_open_unsigned_call_digest_v1,
+    remote_refund_unsigned_call_digest_v1, BroadcastDispositionV1, DurableEvmActuatorV1,
+    EvmActuatorErrorV1, EvmActuatorLeaseV1, EvmClaimSecretV1, EvmFeesV1,
+    EvmObservationMutationRequestV1, EvmOperationBindingViewV1, EvmOperationKindV1,
+    EvmOperationMutationRequestV1, EvmOperationPreparationRequestV1, EvmOperationViewV1,
+    EvmRetainedMutationKindV1, EvmRpcV1, EvmSignerRoleV1, EvmTxStageV1, ReconciliationKindV1,
+    RemoteEvmActionCustodyV1, RemoteEvmActionMutationRequestV1, ScopedEip1559SignerV1,
+    ScopedEvmClaimV1, ScopedEvmOpenV1, ScopedEvmRefundV1,
 };
 use kaystra_core::{terms::SettlementTermsV1, types::TimelockSpec};
 use route_composer::{
@@ -48,6 +50,9 @@ use crate::production_child_evidence::{
 use crate::production_child_router::{
     ProductionChildMaterializationRequestV1, ProductionSettlementChildPortV1,
 };
+use crate::production_evm_remote_signer::{
+    ProductionEvmRemoteSignerBindingV1, ProductionEvmRemoteTransportV1,
+};
 use crate::production_inputs::AuthenticatedProductionInputsV1;
 
 const ZERO_DIGEST: Digest32 = [0; 32];
@@ -56,6 +61,7 @@ const MATERIALIZATION_ID_DOMAIN_V1: &[u8] =
     b"DOM-INTEROP/INTEROPD/EVM-CHILD/MATERIALIZATION-ID/V1\0";
 const NONCE_REFRESH_ID_DOMAIN_V1: &[u8] = b"DOM-INTEROP/INTEROPD/EVM-CHILD/NONCE-REFRESH-ID/V1\0";
 const PREPARE_ID_DOMAIN_V1: &[u8] = b"DOM-INTEROP/INTEROPD/EVM-CHILD/PREPARE-ID/V1\0";
+const REMOTE_IMPORT_ID_DOMAIN_V1: &[u8] = b"DOM-INTEROP/INTEROPD/EVM-CHILD/REMOTE-IMPORT-ID/V1\0";
 const SIGN_ID_DOMAIN_V1: &[u8] = b"DOM-INTEROP/INTEROPD/EVM-CHILD/SIGN-ID/V1\0";
 const ZERO_U256: Digest32 = [0; 32];
 
@@ -63,8 +69,9 @@ struct ProductionEvmMaterializationAuthorityV1 {
     opening_call: UnsignedEvmCall,
     fees: EvmFeesV1,
     observation_valid_for_ms: u64,
-    funder_signer: Box<dyn ScopedEip1559SignerV1>,
-    beneficiary_signer: Box<dyn ScopedEip1559SignerV1>,
+    local_signer: Box<dyn ScopedEip1559SignerV1>,
+    local_role: EvmSignerRoleV1,
+    remote_transport: Box<dyn ProductionEvmRemoteTransportV1>,
     route_id: Digest32,
     leg: settlement_coordinator::SettlementLegV1,
     route_scope_digest: Digest32,
@@ -161,11 +168,72 @@ pub(crate) struct ProductionEvmChildPortV1<R, C> {
     actuator: DurableEvmActuatorV1,
     rpc: R,
     deployment: ResolvedEvmDeploymentV1,
-    funder_lease: EvmActuatorLeaseV1,
-    beneficiary_lease: EvmActuatorLeaseV1,
+    funder_lease: Option<EvmActuatorLeaseV1>,
+    beneficiary_lease: Option<EvmActuatorLeaseV1>,
+    remote_binding: Option<ProductionEvmRemoteSignerBindingV1>,
+    remote_custody_lease_duration_ms: u64,
     clock: C,
     settlement_id: Digest32,
     materialization: Option<ProductionEvmMaterializationAuthorityV1>,
+}
+
+/// Move-only composition input for a materializing EVM child port. Grouping
+/// the actuator, one local lease/signer, one remote Contracts authority and the
+/// authenticated scope makes their shared settlement boundary explicit and
+/// prevents positional wiring mistakes.
+pub(crate) struct ProductionEvmMaterializingPortInputV1<'settlement, R, C> {
+    pub(crate) actuator: DurableEvmActuatorV1,
+    pub(crate) rpc: R,
+    pub(crate) deployment: ResolvedEvmDeploymentV1,
+    pub(crate) local_lease: EvmActuatorLeaseV1,
+    pub(crate) clock: C,
+    pub(crate) settlement: &'settlement SettlementTermsV1,
+    pub(crate) fees: EvmFeesV1,
+    pub(crate) observation_valid_for_ms: u64,
+    pub(crate) local_signer: Box<dyn ScopedEip1559SignerV1>,
+    pub(crate) remote_binding: ProductionEvmRemoteSignerBindingV1,
+    pub(crate) remote_transport: Box<dyn ProductionEvmRemoteTransportV1>,
+    pub(crate) remote_custody_lease_duration_ms: u64,
+    pub(crate) scope: ProductionEvmMaterializationScopeV1,
+}
+
+#[derive(Clone, Copy)]
+enum ProductionEvmOperationControlV1 {
+    Local(EvmActuatorLeaseV1),
+    Remote(RemoteEvmActionCustodyV1),
+}
+
+enum ProductionRemoteEvmScopeV1 {
+    Open(Box<ScopedEvmOpenV1>),
+    Claim(Box<ScopedEvmClaimV1>),
+    Refund(Box<ScopedEvmRefundV1>),
+}
+
+impl ProductionRemoteEvmScopeV1 {
+    fn unsigned_call_digest(&self) -> Result<Digest32, ChildAuthorityRefusalV1> {
+        match self {
+            Self::Open(scope) => remote_open_unsigned_call_digest_v1(scope),
+            Self::Claim(scope) => remote_claim_unsigned_call_digest_v1(scope),
+            Self::Refund(scope) => remote_refund_unsigned_call_digest_v1(scope),
+        }
+        .map_err(map_actuator_error)
+    }
+}
+
+impl ProductionEvmOperationControlV1 {
+    const fn local_account(self) -> Option<[u8; 20]> {
+        match self {
+            Self::Local(lease) => Some(lease.account()),
+            Self::Remote(_) => None,
+        }
+    }
+
+    const fn fencing_epoch(self) -> u64 {
+        match self {
+            Self::Local(lease) => lease.fencing_epoch(),
+            Self::Remote(custody) => custody.fencing_epoch(),
+        }
+    }
 }
 
 impl<R, C> core::fmt::Debug for ProductionEvmChildPortV1<R, C> {
@@ -175,6 +243,10 @@ impl<R, C> core::fmt::Debug for ProductionEvmChildPortV1<R, C> {
 }
 
 impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionEvmChildPortV1<R, C> {
+    #[expect(
+        dead_code,
+        reason = "retained surface not yet wired by the stage-7 composition root"
+    )]
     pub(crate) fn new(
         actuator: DurableEvmActuatorV1,
         rpc: R,
@@ -203,8 +275,10 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionEvmChildPortV1<R, C> {
             actuator,
             rpc,
             deployment,
-            funder_lease,
-            beneficiary_lease,
+            funder_lease: Some(funder_lease),
+            beneficiary_lease: Some(beneficiary_lease),
+            remote_binding: None,
+            remote_custody_lease_duration_ms: 0,
             clock,
             settlement_id,
             materialization: None,
@@ -212,38 +286,79 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionEvmChildPortV1<R, C> {
     }
 
     pub(crate) fn new_materializing(
-        actuator: DurableEvmActuatorV1,
-        rpc: R,
-        deployment: ResolvedEvmDeploymentV1,
-        funder_lease: EvmActuatorLeaseV1,
-        beneficiary_lease: EvmActuatorLeaseV1,
-        clock: C,
-        settlement: &SettlementTermsV1,
-        fees: EvmFeesV1,
-        observation_valid_for_ms: u64,
-        funder_signer: Box<dyn ScopedEip1559SignerV1>,
-        beneficiary_signer: Box<dyn ScopedEip1559SignerV1>,
-        scope: ProductionEvmMaterializationScopeV1,
+        input: ProductionEvmMaterializingPortInputV1<'_, R, C>,
     ) -> Result<Self, ChildAuthorityRefusalV1> {
-        if observation_valid_for_ms == 0 || scope.settlement_id != settlement.settlement_id.0 {
+        let ProductionEvmMaterializingPortInputV1 {
+            actuator,
+            rpc,
+            deployment,
+            local_lease,
+            clock,
+            settlement,
+            fees,
+            observation_valid_for_ms,
+            local_signer,
+            remote_binding,
+            remote_transport,
+            remote_custody_lease_duration_ms,
+            scope,
+        } = input;
+        let config = deployment.adapter_config();
+        let local_role = match local_lease.account() {
+            account if account == config.funder && account != config.beneficiary => {
+                EvmSignerRoleV1::Funder
+            }
+            account if account == config.beneficiary && account != config.funder => {
+                EvmSignerRoleV1::Beneficiary
+            }
+            _ => return Err(ChildAuthorityRefusalV1::Conflict),
+        };
+        let remote_role = match local_role {
+            EvmSignerRoleV1::Funder => EvmSignerRoleV1::Beneficiary,
+            EvmSignerRoleV1::Beneficiary => EvmSignerRoleV1::Funder,
+        };
+        let remote_account = match remote_role {
+            EvmSignerRoleV1::Funder => config.funder,
+            EvmSignerRoleV1::Beneficiary => config.beneficiary,
+        };
+        if observation_valid_for_ms == 0
+            || remote_custody_lease_duration_ms == 0
+            || scope.settlement_id != settlement.settlement_id.0
+            || local_lease.chain_id() != config.chain_id
+            || local_lease.owner_id() == ZERO_DIGEST
+            || local_lease.fencing_epoch() == 0
+            || local_lease.lease_until_unix_ms() == 0
+            || remote_binding.role() != remote_role
+            || remote_binding.session_id() != settlement.session_id.0
+            || remote_binding.signer_account() != remote_account
+            || !remote_binding.binds_local_owner(local_lease.owner_id())
+        {
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
         let opening_call = authenticated_opening_call(&deployment, settlement)?;
-        let mut port = Self::new(
+        let (funder_lease, beneficiary_lease) = match local_role {
+            EvmSignerRoleV1::Funder => (Some(local_lease), None),
+            EvmSignerRoleV1::Beneficiary => (None, Some(local_lease)),
+        };
+        let mut port = Self {
             actuator,
             rpc,
             deployment,
             funder_lease,
             beneficiary_lease,
+            remote_binding: Some(remote_binding),
+            remote_custody_lease_duration_ms,
             clock,
-            settlement.settlement_id.0,
-        )?;
+            settlement_id: settlement.settlement_id.0,
+            materialization: None,
+        };
         port.materialization = Some(ProductionEvmMaterializationAuthorityV1 {
             opening_call,
             fees,
             observation_valid_for_ms,
-            funder_signer,
-            beneficiary_signer,
+            local_signer,
+            local_role,
+            remote_transport,
             route_id: scope.route_id,
             leg: scope.leg,
             route_scope_digest: scope.route_scope_digest,
@@ -260,7 +375,26 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionEvmChildPortV1<R, C> {
         now_unix_ms: u64,
     ) -> Result<ValidatedEvmOperationV1, ChildAuthorityRefusalV1> {
         let expected = ExpectedEvmBindingsV1::from_dispatch(request);
-        self.validate_operation(expected, now_unix_ms)
+        expected.validate_static(&self.deployment, self.settlement_id)?;
+        let control = match self.remote_binding_for_action(expected.action) {
+            Some(binding) => {
+                let resume = binding.custody_resume_input_from_dispatch(request)?;
+                ProductionEvmOperationControlV1::Remote(
+                    self.actuator
+                        .acquire_existing_remote_operation_custody(
+                            resume,
+                            now_unix_ms,
+                            self.remote_custody_lease_duration_ms,
+                        )
+                        .map_err(map_actuator_error)?
+                        .custody(),
+                )
+            }
+            None => ProductionEvmOperationControlV1::Local(
+                self.local_lease(operation_for_action(expected.action).1)?,
+            ),
+        };
+        self.validate_operation(expected, control, now_unix_ms)
     }
 
     fn validate_observation(
@@ -269,36 +403,71 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionEvmChildPortV1<R, C> {
         now_unix_ms: u64,
     ) -> Result<ValidatedEvmOperationV1, ChildAuthorityRefusalV1> {
         let expected = ExpectedEvmBindingsV1::from_observation(request);
-        self.validate_operation(expected, now_unix_ms)
+        expected.validate_static(&self.deployment, self.settlement_id)?;
+        let control = match self.remote_binding_for_action(expected.action) {
+            Some(binding) => {
+                let resume = binding.custody_resume_input_from_observation(request)?;
+                ProductionEvmOperationControlV1::Remote(
+                    self.actuator
+                        .acquire_existing_remote_operation_custody(
+                            resume,
+                            now_unix_ms,
+                            self.remote_custody_lease_duration_ms,
+                        )
+                        .map_err(map_actuator_error)?
+                        .custody(),
+                )
+            }
+            None => ProductionEvmOperationControlV1::Local(
+                self.local_lease(operation_for_action(expected.action).1)?,
+            ),
+        };
+        self.validate_operation(expected, control, now_unix_ms)
     }
 
     fn validate_operation(
         &mut self,
         expected: ExpectedEvmBindingsV1,
+        control: ProductionEvmOperationControlV1,
         now_unix_ms: u64,
     ) -> Result<ValidatedEvmOperationV1, ChildAuthorityRefusalV1> {
-        expected.validate_static(&self.deployment, self.settlement_id)?;
-        let (_, role) = operation_for_action(expected.action);
-        let lease = self.lease(role);
-        let retained = self
-            .actuator
-            .operation_binding(lease, expected.custody_digest, now_unix_ms)
-            .map_err(map_actuator_error)?;
+        let retained = match control {
+            ProductionEvmOperationControlV1::Local(lease) => {
+                self.actuator
+                    .operation_binding(lease, expected.custody_digest, now_unix_ms)
+            }
+            ProductionEvmOperationControlV1::Remote(custody) => self
+                .actuator
+                .remote_operation_binding(custody, expected.custody_digest, now_unix_ms),
+        }
+        .map_err(map_actuator_error)?;
         let view = retained.operation().clone();
-        expected.validate_retained(&self.deployment, lease, &view, retained.intent_digest())?;
+        expected.validate_retained(&self.deployment, control, &view, retained.intent_digest())?;
         Ok(ValidatedEvmOperationV1 {
             expected,
-            lease,
+            control,
             view,
             retained_intent_digest: retained.intent_digest(),
         })
     }
 
-    const fn lease(&self, role: EvmSignerRoleV1) -> EvmActuatorLeaseV1 {
+    fn local_lease(
+        &self,
+        role: EvmSignerRoleV1,
+    ) -> Result<EvmActuatorLeaseV1, ChildAuthorityRefusalV1> {
         match role {
             EvmSignerRoleV1::Funder => self.funder_lease,
             EvmSignerRoleV1::Beneficiary => self.beneficiary_lease,
         }
+        .ok_or(ChildAuthorityRefusalV1::Conflict)
+    }
+
+    fn remote_binding_for_action(
+        &self,
+        action: SettlementActionV1,
+    ) -> Option<ProductionEvmRemoteSignerBindingV1> {
+        let role = operation_for_action(action).1;
+        self.remote_binding.filter(|binding| binding.role() == role)
     }
 
     fn externalized_receipt(
@@ -330,7 +499,7 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionEvmChildPortV1<R, C> {
             EvmTxStageV1::Signed => Ok(validated.view.clone()),
             EvmTxStageV1::SendAttempted => {
                 let revision = self.replay_revision_or_current(
-                    validated.lease,
+                    validated.control,
                     EvmRetainedMutationKindV1::ObserveCurrent,
                     request.reconciliation_attempt_id,
                     validated.expected.custody_digest,
@@ -338,23 +507,39 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionEvmChildPortV1<R, C> {
                     now_unix_ms,
                 )?;
                 let mut clock_refusal = None;
-                let outcome = self.actuator.observe_current(
-                    EvmOperationMutationRequestV1::new(
-                        validated.lease,
-                        request.reconciliation_attempt_id,
-                        validated.expected.custody_digest,
-                        revision,
-                        now_unix_ms,
+                let mut mutation = |clock: &mut C| match clock.now_unix_ms() {
+                    Ok(value) => Ok(value),
+                    Err(error) => {
+                        clock_refusal = Some(error);
+                        Err(EvmActuatorErrorV1::InvalidTime)
+                    }
+                };
+                let outcome = match validated.control {
+                    ProductionEvmOperationControlV1::Local(lease) => self.actuator.observe_current(
+                        EvmOperationMutationRequestV1::new(
+                            lease,
+                            request.reconciliation_attempt_id,
+                            validated.expected.custody_digest,
+                            revision,
+                            now_unix_ms,
+                        ),
+                        &mut self.rpc,
+                        || mutation(&mut self.clock),
                     ),
-                    &mut self.rpc,
-                    || match self.clock.now_unix_ms() {
-                        Ok(value) => Ok(value),
-                        Err(error) => {
-                            clock_refusal = Some(error);
-                            Err(EvmActuatorErrorV1::InvalidTime)
-                        }
-                    },
-                );
+                    ProductionEvmOperationControlV1::Remote(custody) => {
+                        self.actuator.observe_remote_current(
+                            RemoteEvmActionMutationRequestV1::new(
+                                custody,
+                                request.reconciliation_attempt_id,
+                                validated.expected.custody_digest,
+                                revision,
+                                now_unix_ms,
+                            ),
+                            &mut self.rpc,
+                            || mutation(&mut self.clock),
+                        )
+                    }
+                };
                 if let Some(error) = clock_refusal {
                     return Err(error);
                 }
@@ -376,7 +561,7 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionEvmChildPortV1<R, C> {
         now_unix_ms: u64,
     ) -> Result<EvmOperationViewV1, ChildAuthorityRefusalV1> {
         let revision = self.replay_revision_or_current(
-            validated.lease,
+            validated.control,
             EvmRetainedMutationKindV1::ReconcileTakeover,
             request.reconciliation_attempt_id,
             validated.expected.custody_digest,
@@ -385,26 +570,42 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionEvmChildPortV1<R, C> {
         )?;
         let mut clock_refusal = None;
         let mut commit_now_unix_ms = now_unix_ms;
-        let reconciled = self.actuator.reconcile_takeover(
-            EvmOperationMutationRequestV1::new(
-                validated.lease,
-                request.reconciliation_attempt_id,
-                validated.expected.custody_digest,
-                revision,
-                now_unix_ms,
+        let mut mutation = |clock: &mut C| match clock.now_unix_ms() {
+            Ok(value) => {
+                commit_now_unix_ms = value;
+                Ok(value)
+            }
+            Err(error) => {
+                clock_refusal = Some(error);
+                Err(EvmActuatorErrorV1::InvalidTime)
+            }
+        };
+        let reconciled = match validated.control {
+            ProductionEvmOperationControlV1::Local(lease) => self.actuator.reconcile_takeover(
+                EvmOperationMutationRequestV1::new(
+                    lease,
+                    request.reconciliation_attempt_id,
+                    validated.expected.custody_digest,
+                    revision,
+                    now_unix_ms,
+                ),
+                &mut self.rpc,
+                || mutation(&mut self.clock),
             ),
-            &mut self.rpc,
-            || match self.clock.now_unix_ms() {
-                Ok(value) => {
-                    commit_now_unix_ms = value;
-                    Ok(value)
-                }
-                Err(error) => {
-                    clock_refusal = Some(error);
-                    Err(EvmActuatorErrorV1::InvalidTime)
-                }
-            },
-        );
+            ProductionEvmOperationControlV1::Remote(custody) => {
+                self.actuator.reconcile_remote_takeover(
+                    RemoteEvmActionMutationRequestV1::new(
+                        custody,
+                        request.reconciliation_attempt_id,
+                        validated.expected.custody_digest,
+                        revision,
+                        now_unix_ms,
+                    ),
+                    &mut self.rpc,
+                    || mutation(&mut self.clock),
+                )
+            }
+        };
         if let Some(error) = clock_refusal {
             return Err(error);
         }
@@ -415,31 +616,59 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionEvmChildPortV1<R, C> {
             return Ok(reconciled);
         }
         let adopt_id = adopt_mutation_id(request.reconciliation_attempt_id)?;
-        self.actuator
-            .adopt_reconciled(
-                validated.lease,
+        match validated.control {
+            ProductionEvmOperationControlV1::Local(lease) => self.actuator.adopt_reconciled(
+                lease,
                 adopt_id,
                 validated.expected.custody_digest,
                 reconciled.revision,
                 commit_now_unix_ms,
-            )
-            .map(|outcome| outcome.value)
-            .map_err(map_actuator_error)
+            ),
+            ProductionEvmOperationControlV1::Remote(custody) => {
+                self.actuator.adopt_remote_reconciled(
+                    custody,
+                    adopt_id,
+                    validated.expected.custody_digest,
+                    reconciled.revision,
+                    commit_now_unix_ms,
+                )
+            }
+        }
+        .map(|outcome| outcome.value)
+        .map_err(map_actuator_error)
     }
 
     fn replay_revision_or_current(
         &mut self,
-        lease: EvmActuatorLeaseV1,
+        control: ProductionEvmOperationControlV1,
         kind: EvmRetainedMutationKindV1,
         mutation_id: Digest32,
         operation_id: Digest32,
         current_revision: u64,
         now_unix_ms: u64,
     ) -> Result<u64, ChildAuthorityRefusalV1> {
-        self.actuator
-            .retained_mutation_input_revision(lease, kind, mutation_id, operation_id, now_unix_ms)
-            .map(|retained| retained.unwrap_or(current_revision))
-            .map_err(map_actuator_error)
+        match control {
+            ProductionEvmOperationControlV1::Local(lease) => {
+                self.actuator.retained_mutation_input_revision(
+                    lease,
+                    kind,
+                    mutation_id,
+                    operation_id,
+                    now_unix_ms,
+                )
+            }
+            ProductionEvmOperationControlV1::Remote(custody) => {
+                self.actuator.retained_remote_mutation_input_revision(
+                    custody,
+                    kind,
+                    mutation_id,
+                    operation_id,
+                    now_unix_ms,
+                )
+            }
+        }
+        .map(|retained| retained.unwrap_or(current_revision))
+        .map_err(map_actuator_error)
     }
 
     fn materialize_evm_child(
@@ -456,7 +685,19 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionEvmChildPortV1<R, C> {
             authority,
         )?;
         let (_, role) = operation_for_action(request.action);
-        let lease = self.lease(role);
+        if let Some(binding) = self.remote_binding_for_action(request.action) {
+            return self.materialize_remote_evm_child(
+                request,
+                public_scalar,
+                authority,
+                binding,
+                role,
+            );
+        }
+        if authority.local_role != role {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        let lease = self.local_lease(role)?;
         if lease.fencing_epoch() != request.fencing_epoch {
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
@@ -481,7 +722,13 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionEvmChildPortV1<R, C> {
                 );
             }
             Ok(binding) => {
-                return materialized_evm_plan(&self.deployment, lease, &request, role, binding)
+                return materialized_evm_plan(
+                    &self.deployment,
+                    ProductionEvmOperationControlV1::Local(lease),
+                    &request,
+                    role,
+                    binding,
+                )
             }
             Err(EvmActuatorErrorV1::OperationNotFound) => {}
             Err(error) => return Err(map_actuator_error(error)),
@@ -613,10 +860,10 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionEvmChildPortV1<R, C> {
         prepared_revision: u64,
         authority: &mut ProductionEvmMaterializationAuthorityV1,
     ) -> Result<SettlementChildPlanV1, ChildAuthorityRefusalV1> {
-        let signer = match role {
-            EvmSignerRoleV1::Funder => authority.funder_signer.as_mut(),
-            EvmSignerRoleV1::Beneficiary => authority.beneficiary_signer.as_mut(),
-        };
+        if authority.local_role != role {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        let signer = authority.local_signer.as_mut();
         let now = self.clock.now_unix_ms()?;
         let clock = &mut self.clock;
         let signed = self
@@ -650,7 +897,191 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionEvmChildPortV1<R, C> {
             .actuator
             .operation_binding(lease, operation_id, post_sign_now)
             .map_err(map_actuator_error)?;
-        materialized_evm_plan(&self.deployment, lease, &request, role, binding)
+        materialized_evm_plan(
+            &self.deployment,
+            ProductionEvmOperationControlV1::Local(lease),
+            &request,
+            role,
+            binding,
+        )
+    }
+
+    fn materialize_remote_evm_child(
+        &mut self,
+        request: ProductionChildMaterializationRequestV1,
+        public_scalar: Option<&route_composer::RouteScalar>,
+        authority: &mut ProductionEvmMaterializationAuthorityV1,
+        binding: ProductionEvmRemoteSignerBindingV1,
+        role: EvmSignerRoleV1,
+    ) -> Result<SettlementChildPlanV1, ChildAuthorityRefusalV1> {
+        if authority.local_role == role || binding.role() != role {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        let operation_id = materialization_digest(MATERIALIZATION_ID_DOMAIN_V1, &request, role)?;
+        let scope = match request.action {
+            SettlementActionV1::Funding => ProductionRemoteEvmScopeV1::Open(Box::new(
+                ScopedEvmOpenV1::new(
+                    request.route_id,
+                    request.effect_id,
+                    request.semantic_digest,
+                    self.deployment,
+                    authority.opening_call.clone(),
+                )
+                .map_err(map_actuator_error)?,
+            )),
+            SettlementActionV1::Claim => {
+                let scalar = public_scalar.ok_or(ChildAuthorityRefusalV1::Refused)?;
+                let mut bytes = *scalar.expose();
+                let secret =
+                    EvmClaimSecretV1::import_and_zeroize(&mut bytes).map_err(map_actuator_error)?;
+                bytes.zeroize();
+                ProductionRemoteEvmScopeV1::Claim(Box::new(
+                    ScopedEvmClaimV1::new(
+                        request.route_id,
+                        request.effect_id,
+                        request.semantic_digest,
+                        self.deployment,
+                        authority.opening_call.clone(),
+                        secret,
+                    )
+                    .map_err(map_actuator_error)?,
+                ))
+            }
+            SettlementActionV1::Refund => ProductionRemoteEvmScopeV1::Refund(Box::new(
+                ScopedEvmRefundV1::new(
+                    request.route_id,
+                    request.effect_id,
+                    request.semantic_digest,
+                    self.deployment,
+                    authority.opening_call.clone(),
+                )
+                .map_err(map_actuator_error)?,
+            )),
+        };
+        let remote_request = binding.request(
+            &request,
+            scope.unsigned_call_digest()?,
+            request.fencing_epoch,
+        )?;
+        // The public request must be durably staged before the actuator can
+        // acquire custody or consume any signed response.
+        let request_message_digest = authority.remote_transport.stage_request(&remote_request)?;
+        let authenticated_request =
+            binding.authenticate_request(&remote_request, request_message_digest)?;
+        let now = self.clock.now_unix_ms()?;
+        let custody = self
+            .actuator
+            .acquire_remote_action_custody(
+                authenticated_request,
+                now,
+                self.remote_custody_lease_duration_ms,
+            )
+            .map_err(map_actuator_error)?
+            .custody();
+        match self
+            .actuator
+            .remote_operation_binding(custody, operation_id, now)
+        {
+            Ok(existing) => {
+                return materialized_evm_plan(
+                    &self.deployment,
+                    ProductionEvmOperationControlV1::Remote(custody),
+                    &request,
+                    role,
+                    existing,
+                )
+            }
+            Err(EvmActuatorErrorV1::OperationNotFound) => {}
+            Err(error) => return Err(map_actuator_error(error)),
+        }
+        let prepared = authority
+            .remote_transport
+            .take_response(&remote_request, request_message_digest)?
+            .ok_or(ChildAuthorityRefusalV1::Unavailable)?;
+        let imported = binding.authenticate_import(&remote_request, prepared)?;
+        if imported.session_id() != binding.session_id()
+            || imported.terms_digest() != request.terms_digest
+        {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        let response_message_digest = imported.response_message_digest();
+        let (import_request, signed) = imported.into_parts();
+        if import_request != authenticated_request {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        let import_id = remote_import_mutation_id(&request, role, response_message_digest)?;
+        let mut clock_refusal = None;
+        let mut post_import_now = now;
+        let imported_view = match scope {
+            ProductionRemoteEvmScopeV1::Open(scope) => self.actuator.import_remote_open_signed(
+                RemoteEvmActionMutationRequestV1::new(custody, import_id, operation_id, 0, now),
+                &scope,
+                signed,
+                || match self.clock.now_unix_ms() {
+                    Ok(value) => {
+                        post_import_now = value;
+                        Ok(value)
+                    }
+                    Err(error) => {
+                        clock_refusal = Some(error);
+                        Err(EvmActuatorErrorV1::InvalidTime)
+                    }
+                },
+            ),
+            ProductionRemoteEvmScopeV1::Claim(scope) => self.actuator.import_remote_claim_signed(
+                RemoteEvmActionMutationRequestV1::new(custody, import_id, operation_id, 0, now),
+                *scope,
+                signed,
+                || match self.clock.now_unix_ms() {
+                    Ok(value) => {
+                        post_import_now = value;
+                        Ok(value)
+                    }
+                    Err(error) => {
+                        clock_refusal = Some(error);
+                        Err(EvmActuatorErrorV1::InvalidTime)
+                    }
+                },
+            ),
+            ProductionRemoteEvmScopeV1::Refund(scope) => self.actuator.import_remote_refund_signed(
+                RemoteEvmActionMutationRequestV1::new(custody, import_id, operation_id, 0, now),
+                &scope,
+                signed,
+                &mut self.rpc,
+                || match self.clock.now_unix_ms() {
+                    Ok(value) => {
+                        post_import_now = value;
+                        Ok(value)
+                    }
+                    Err(error) => {
+                        clock_refusal = Some(error);
+                        Err(EvmActuatorErrorV1::InvalidTime)
+                    }
+                },
+            ),
+        };
+        if let Some(error) = clock_refusal {
+            return Err(error);
+        }
+        let imported_view = imported_view.map_err(map_actuator_error)?.value;
+        if imported_view.stage != EvmTxStageV1::Signed
+            || imported_view.operation_id != operation_id
+            || imported_view.signer_role != role
+            || imported_view.transaction_hash.is_none()
+        {
+            return Err(ChildAuthorityRefusalV1::Conflict);
+        }
+        let retained = self
+            .actuator
+            .remote_operation_binding(custody, operation_id, post_import_now)
+            .map_err(map_actuator_error)?;
+        materialized_evm_plan(
+            &self.deployment,
+            ProductionEvmOperationControlV1::Remote(custody),
+            &request,
+            role,
+            retained,
+        )
     }
 }
 
@@ -681,7 +1112,7 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionSettlementChildPortV1
     ) -> Result<ChildExecutionOutcomeV1, ChildAuthorityRefusalV1> {
         let now = self.clock.now_unix_ms()?;
         let validated = self.validate_dispatch(request, now)?;
-        if validated.view.fencing_epoch != validated.lease.fencing_epoch()
+        if validated.view.fencing_epoch != validated.control.fencing_epoch()
             || !matches!(
                 validated.view.stage,
                 EvmTxStageV1::Signed | EvmTxStageV1::SendAttempted
@@ -690,7 +1121,7 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionSettlementChildPortV1
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
         let revision = self.replay_revision_or_current(
-            validated.lease,
+            validated.control,
             EvmRetainedMutationKindV1::BroadcastCurrent,
             request.attempt_id(),
             validated.expected.custody_digest,
@@ -699,26 +1130,42 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionSettlementChildPortV1
         )?;
         let mut clock_refusal = None;
         let mut post_rpc_now = now;
-        let broadcast = self.actuator.broadcast_current(
-            EvmOperationMutationRequestV1::new(
-                validated.lease,
-                request.attempt_id(),
-                validated.expected.custody_digest,
-                revision,
-                now,
+        let mut mutation = |clock: &mut C| match clock.now_unix_ms() {
+            Ok(value) => {
+                post_rpc_now = value;
+                Ok(value)
+            }
+            Err(error) => {
+                clock_refusal = Some(error);
+                Err(EvmActuatorErrorV1::InvalidTime)
+            }
+        };
+        let broadcast = match validated.control {
+            ProductionEvmOperationControlV1::Local(lease) => self.actuator.broadcast_current(
+                EvmOperationMutationRequestV1::new(
+                    lease,
+                    request.attempt_id(),
+                    validated.expected.custody_digest,
+                    revision,
+                    now,
+                ),
+                &mut self.rpc,
+                || mutation(&mut self.clock),
             ),
-            &mut self.rpc,
-            || match self.clock.now_unix_ms() {
-                Ok(value) => {
-                    post_rpc_now = value;
-                    Ok(value)
-                }
-                Err(error) => {
-                    clock_refusal = Some(error);
-                    Err(EvmActuatorErrorV1::InvalidTime)
-                }
-            },
-        );
+            ProductionEvmOperationControlV1::Remote(custody) => {
+                self.actuator.broadcast_remote_current(
+                    RemoteEvmActionMutationRequestV1::new(
+                        custody,
+                        request.attempt_id(),
+                        validated.expected.custody_digest,
+                        revision,
+                        now,
+                    ),
+                    &mut self.rpc,
+                    || mutation(&mut self.clock),
+                )
+            }
+        };
         if let Some(error) = clock_refusal {
             return Err(error);
         }
@@ -759,18 +1206,18 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionSettlementChildPortV1
         if request.current_route_fencing_epoch < request.dispatch.route_fencing_epoch()
             || request.current_coordinator_fencing_epoch
                 < request.dispatch.coordinator_fencing_epoch()
-            || validated.view.fencing_epoch > validated.lease.fencing_epoch()
+            || validated.view.fencing_epoch > validated.control.fencing_epoch()
         {
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
-        let view = if validated.view.fencing_epoch == validated.lease.fencing_epoch() {
+        let view = if validated.view.fencing_epoch == validated.control.fencing_epoch() {
             self.reconcile_current_fence(request, &validated, now)?
         } else {
             self.reconcile_takeover(request, &validated, now)?
         };
         validated.expected.validate_retained(
             &self.deployment,
-            validated.lease,
+            validated.control,
             &view,
             validated.retained_intent_digest,
         )?;
@@ -807,7 +1254,7 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionSettlementChildPortV1
     ) -> Result<ChildObservationOutcomeV1, ChildAuthorityRefusalV1> {
         let now = self.clock.now_unix_ms()?;
         let validated = self.validate_observation(request, now)?;
-        if validated.view.fencing_epoch != validated.lease.fencing_epoch()
+        if validated.view.fencing_epoch != validated.control.fencing_epoch()
             || !matches!(
                 validated.view.stage,
                 EvmTxStageV1::SendAttempted
@@ -819,7 +1266,7 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionSettlementChildPortV1
             return Err(ChildAuthorityRefusalV1::Conflict);
         }
         let revision = self.replay_revision_or_current(
-            validated.lease,
+            validated.control,
             EvmRetainedMutationKindV1::ObserveCurrent,
             request.observation_attempt_id,
             validated.expected.custody_digest,
@@ -827,30 +1274,46 @@ impl<R: EvmRpcV1, C: ProductionEvmChildClockV1> ProductionSettlementChildPortV1
             now,
         )?;
         let mut clock_refusal = None;
-        let view = self.actuator.observe_current(
-            EvmOperationMutationRequestV1::new(
-                validated.lease,
-                request.observation_attempt_id,
-                validated.expected.custody_digest,
-                revision,
-                now,
+        let mut mutation = |clock: &mut C| match clock.now_unix_ms() {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                clock_refusal = Some(error);
+                Err(EvmActuatorErrorV1::InvalidTime)
+            }
+        };
+        let view = match validated.control {
+            ProductionEvmOperationControlV1::Local(lease) => self.actuator.observe_current(
+                EvmOperationMutationRequestV1::new(
+                    lease,
+                    request.observation_attempt_id,
+                    validated.expected.custody_digest,
+                    revision,
+                    now,
+                ),
+                &mut self.rpc,
+                || mutation(&mut self.clock),
             ),
-            &mut self.rpc,
-            || match self.clock.now_unix_ms() {
-                Ok(value) => Ok(value),
-                Err(error) => {
-                    clock_refusal = Some(error);
-                    Err(EvmActuatorErrorV1::InvalidTime)
-                }
-            },
-        );
+            ProductionEvmOperationControlV1::Remote(custody) => {
+                self.actuator.observe_remote_current(
+                    RemoteEvmActionMutationRequestV1::new(
+                        custody,
+                        request.observation_attempt_id,
+                        validated.expected.custody_digest,
+                        revision,
+                        now,
+                    ),
+                    &mut self.rpc,
+                    || mutation(&mut self.clock),
+                )
+            }
+        };
         if let Some(error) = clock_refusal {
             return Err(error);
         }
         let view = view.map_err(map_actuator_error)?.value;
         validated.expected.validate_retained(
             &self.deployment,
-            validated.lease,
+            validated.control,
             &view,
             validated.retained_intent_digest,
         )?;
@@ -964,7 +1427,7 @@ impl ExpectedEvmBindingsV1 {
     fn validate_retained(
         &self,
         deployment: &ResolvedEvmDeploymentV1,
-        lease: EvmActuatorLeaseV1,
+        control: ProductionEvmOperationControlV1,
         view: &EvmOperationViewV1,
         retained_intent_digest: Digest32,
     ) -> Result<(), ChildAuthorityRefusalV1> {
@@ -976,7 +1439,9 @@ impl ExpectedEvmBindingsV1 {
         };
         if view.kind != kind
             || view.signer_role != role
-            || lease.account() != account
+            || control
+                .local_account()
+                .is_some_and(|local_account| local_account != account)
             || view.signing_account != account
             || view.route_id != self.route_id
             || view.effect_id != self.effect_id
@@ -1002,7 +1467,7 @@ impl ExpectedEvmBindingsV1 {
 
 struct ValidatedEvmOperationV1 {
     expected: ExpectedEvmBindingsV1,
-    lease: EvmActuatorLeaseV1,
+    control: ProductionEvmOperationControlV1,
     view: EvmOperationViewV1,
     retained_intent_digest: Digest32,
 }
@@ -1014,19 +1479,18 @@ fn validate_materialization_request(
     scalar: Option<&route_composer::RouteScalar>,
     authority: &ProductionEvmMaterializationAuthorityV1,
 ) -> Result<(), ChildAuthorityRefusalV1> {
-    let scalar_shape = match (request.action, request.exposure, scalar) {
+    let scalar_shape = matches!(
+        (request.action, request.exposure, scalar),
         (
             SettlementActionV1::Funding | SettlementActionV1::Refund,
             ChildExposureV1::NonSecret,
             None,
-        )
-        | (
+        ) | (
             SettlementActionV1::Claim,
             ChildExposureV1::FirstSecretExposure | ChildExposureV1::UsesPublicSecret,
             Some(_),
-        ) => true,
-        _ => false,
-    };
+        )
+    );
     if !scalar_shape
         || request.route_id == ZERO_DIGEST
         || request.effect_id == ZERO_DIGEST
@@ -1138,9 +1602,32 @@ fn materialization_digest(
     Ok(output)
 }
 
+fn remote_import_mutation_id(
+    request: &ProductionChildMaterializationRequestV1,
+    role: EvmSignerRoleV1,
+    response_message_digest: Digest32,
+) -> Result<Digest32, ChildAuthorityRefusalV1> {
+    if response_message_digest == ZERO_DIGEST {
+        return Err(ChildAuthorityRefusalV1::Conflict);
+    }
+    let materialization_id = materialization_digest(MATERIALIZATION_ID_DOMAIN_V1, request, role)?;
+    let mut hasher = Blake2bVar::new(32).map_err(|_| ChildAuthorityRefusalV1::Unavailable)?;
+    hasher.update(REMOTE_IMPORT_ID_DOMAIN_V1);
+    hasher.update(&materialization_id);
+    hasher.update(&response_message_digest);
+    let mut output = ZERO_DIGEST;
+    hasher
+        .finalize_variable(&mut output)
+        .map_err(|_| ChildAuthorityRefusalV1::Unavailable)?;
+    if output == ZERO_DIGEST {
+        return Err(ChildAuthorityRefusalV1::Conflict);
+    }
+    Ok(output)
+}
+
 fn materialized_evm_plan(
     deployment: &ResolvedEvmDeploymentV1,
-    lease: EvmActuatorLeaseV1,
+    control: ProductionEvmOperationControlV1,
     request: &ProductionChildMaterializationRequestV1,
     role: EvmSignerRoleV1,
     binding: EvmOperationBindingViewV1,
@@ -1169,19 +1656,19 @@ fn materialized_evm_plan(
         return Err(ChildAuthorityRefusalV1::Conflict);
     }
     expected.validate_static(deployment, request.settlement_id)?;
-    let lease_account = match role {
+    let expected_account = match role {
         EvmSignerRoleV1::Funder => deployment.adapter_config().funder,
         EvmSignerRoleV1::Beneficiary => deployment.adapter_config().beneficiary,
     };
-    if view.signing_account != lease_account
+    if view.signing_account != expected_account
         || view.route_id != request.route_id
         || view.effect_id != request.effect_id
         || view.semantic_digest != request.semantic_digest
-        || view.fencing_epoch != request.fencing_epoch
+        || view.fencing_epoch != control.fencing_epoch()
     {
         return Err(ChildAuthorityRefusalV1::Conflict);
     }
-    expected.validate_retained(deployment, lease, view, binding.intent_digest())?;
+    expected.validate_retained(deployment, control, view, binding.intent_digest())?;
     Ok(SettlementChildPlanV1 {
         face: SettlementFaceV1::Evm,
         exposure: request.exposure,
@@ -1416,6 +1903,29 @@ fn map_actuator_error(error: EvmActuatorErrorV1) -> ChildAuthorityRefusalV1 {
 mod tests {
     use super::*;
 
+    fn materialization_request(
+        action: SettlementActionV1,
+    ) -> ProductionChildMaterializationRequestV1 {
+        ProductionChildMaterializationRequestV1 {
+            route_id: [1; 32],
+            effect_id: [2; 32],
+            settlement_id: [3; 32],
+            leg: settlement_coordinator::SettlementLegV1::Upstream,
+            action,
+            fencing_epoch: 7,
+            semantic_digest: [4; 32],
+            terms_digest: [5; 32],
+            registry_digest: [6; 32],
+            profile_digest: [7; 32],
+            deployment_digest: [8; 32],
+            route_scope_digest: [9; 32],
+            composition_digest: [10; 32],
+            role_plan_digest: [11; 32],
+            source_scope_digest: [12; 32],
+            exposure: ChildExposureV1::NonSecret,
+        }
+    }
+
     #[test]
     fn action_mapping_never_assigns_claim_to_the_funder() {
         assert_eq!(
@@ -1444,6 +1954,38 @@ mod tests {
             adopt_mutation_id(ZERO_DIGEST),
             Err(ChildAuthorityRefusalV1::Conflict)
         ));
+    }
+
+    #[test]
+    fn remote_import_identity_is_bound_to_response_action_and_role() {
+        let funding = materialization_request(SettlementActionV1::Funding);
+        let first = remote_import_mutation_id(&funding, EvmSignerRoleV1::Funder, [13; 32])
+            .expect("remote import id");
+        assert_eq!(
+            first,
+            remote_import_mutation_id(&funding, EvmSignerRoleV1::Funder, [13; 32]).expect("replay")
+        );
+        assert_ne!(first, ZERO_DIGEST);
+        assert_ne!(
+            first,
+            remote_import_mutation_id(&funding, EvmSignerRoleV1::Funder, [14; 32])
+                .expect("other response")
+        );
+        assert_ne!(
+            first,
+            remote_import_mutation_id(&funding, EvmSignerRoleV1::Beneficiary, [13; 32])
+                .expect("other role")
+        );
+        let refund = materialization_request(SettlementActionV1::Refund);
+        assert_ne!(
+            first,
+            remote_import_mutation_id(&refund, EvmSignerRoleV1::Funder, [13; 32])
+                .expect("other action")
+        );
+        assert_eq!(
+            remote_import_mutation_id(&funding, EvmSignerRoleV1::Funder, ZERO_DIGEST),
+            Err(ChildAuthorityRefusalV1::Conflict)
+        );
     }
 
     #[test]

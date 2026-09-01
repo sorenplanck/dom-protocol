@@ -21,7 +21,7 @@ use crate::wallet_state::WalletV2State;
 use dom_consensus::transaction::Transaction;
 use dom_serialization::{DomDeserialize, DomSerialize};
 use dom_slate::{build_send, finalize as slate_finalize, respond_receive, sender_phase_slate};
-use dom_slate::{SlateError, SlateInput};
+use dom_slate::{ReceiveResponse, SenderSlate, SlateError, SlateInput};
 use dom_tx::slate::Slate;
 use zeroize::Zeroizing;
 
@@ -152,7 +152,7 @@ pub fn create_send(
             let out = state.outputs.get(c).expect("selected output exists");
             SlateInput {
                 commitment: *c,
-                blinding: *out.blinding,
+                blinding: out.blinding.clone(),
             }
         })
         .collect();
@@ -165,14 +165,20 @@ pub fn create_send(
         .to_bytes()
         .map_err(|e| PaymentError::Serialization(e.to_string()))?;
     let slate_hash = *dom_crypto::blake2b_256(&slate_bytes).as_bytes();
+    let SenderSlate {
+        slate,
+        excess_blinding,
+        nonce,
+        change,
+    } = sender;
 
     // 3) Mutate (all infallible from here): C0 change, pending slate, reservation.
-    let produced_output = sender.change.as_ref().map(|c| c.commitment);
-    if let Some(change) = &sender.change {
+    let produced_output = change.as_ref().map(|c| c.commitment);
+    if let Some(change) = change {
         // Use the change material VERBATIM — never recompute the commitment.
         state
             .outputs
-            .insert(StoredOutput::new_unconfirmed(
+            .insert(StoredOutput::new_unconfirmed_with_blinding(
                 change.commitment,
                 change.value,
                 change.blinding,
@@ -189,8 +195,8 @@ pub fn create_send(
         role: SlateRole::Sender,
         slate_bytes,
         secrets: Some(SlateSecrets::Sender {
-            excess_blinding: Zeroizing::new(sender.excess_blinding),
-            nonce: Zeroizing::new(sender.nonce),
+            excess_blinding,
+            nonce,
         }),
         reserved_inputs: selected.clone(),
         produced_output,
@@ -204,10 +210,7 @@ pub fn create_send(
         }
     }
 
-    Ok(SentSlate {
-        slate: sender.slate,
-        slate_hash,
-    })
+    Ok(SentSlate { slate, slate_hash })
 }
 
 /// Cancel an in-flight slate (design §2.5 / §3 D1). Releases the reserved inputs
@@ -259,17 +262,18 @@ pub fn cancel(
 /// runs before any mutation).
 pub fn receive(state: &mut WalletV2State, slate: Slate, now: u64) -> Result<Slate, PaymentError> {
     // 1) Crypto first (fallible): validates chain_id, builds the recipient output.
-    let resp = respond_receive(slate, &state.chain_id)?;
-    let commitment = *resp
-        .slate
+    let ReceiveResponse {
+        slate,
+        recipient_output_blinding,
+    } = respond_receive(slate, &state.chain_id)?;
+    let commitment = *slate
         .recipient_output
         .as_ref()
         .ok_or(PaymentError::MissingRecipientOutput)?
         .commitment
         .as_bytes();
-    let value = resp.slate.amount; // the receiver knows the amount
-    let slate_bytes = resp
-        .slate
+    let value = slate.amount; // the receiver knows the amount
+    let slate_bytes = slate
         .to_bytes()
         .map_err(|e| PaymentError::Serialization(e.to_string()))?;
     let slate_hash = *dom_crypto::blake2b_256(&slate_bytes).as_bytes();
@@ -277,10 +281,10 @@ pub fn receive(state: &mut WalletV2State, slate: Slate, now: u64) -> Result<Slat
     // 2) Mutate: C0 recipient output + pending receiver slate.
     state
         .outputs
-        .insert(StoredOutput::new_unconfirmed(
+        .insert(StoredOutput::new_unconfirmed_with_blinding(
             commitment,
             value,
-            resp.recipient_output_blinding,
+            recipient_output_blinding.clone(),
             OutputOrigin::ReceiveSlate,
             false,
             None,
@@ -293,7 +297,7 @@ pub fn receive(state: &mut WalletV2State, slate: Slate, now: u64) -> Result<Slat
         role: SlateRole::Receiver,
         slate_bytes,
         secrets: Some(SlateSecrets::Receiver {
-            output_blinding: Zeroizing::new(resp.recipient_output_blinding),
+            output_blinding: recipient_output_blinding,
         }),
         reserved_inputs: Vec::new(),
         produced_output: Some(commitment),
@@ -301,7 +305,7 @@ pub fn receive(state: &mut WalletV2State, slate: Slate, now: u64) -> Result<Slat
         status: SlateLifecycle::Built,
     });
 
-    Ok(resp.slate)
+    Ok(slate)
 }
 
 /// Sender step 3: finalize a recipient-answered slate into a validated
@@ -443,7 +447,7 @@ pub fn submit_finalized<S: TxSink>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{BlockRef, Network};
+    use crate::types::{BlockRef, Network, PayoutForV1};
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
 
     /// A confirmed, mature, non-coinbase output with a real (commitment,blinding)
@@ -544,6 +548,29 @@ mod tests {
         assert!(
             matches!(err, PaymentError::InsufficientFunds { .. }),
             "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_never_deletes_an_unconfirmed_payout_pin() {
+        let mut sender = funded_state(&[1_100]);
+        let sent = create_send(&mut sender, 1_000, 10, 2_000).unwrap();
+        let mut receiver = WalletV2State::new(Network::Regtest, [0x77; 32]);
+        receive(&mut receiver, sent.slate, 2_001).unwrap();
+        let pending = receiver.pending_slates[0].clone();
+        let commitment = pending.produced_output.unwrap();
+        receiver
+            .outputs
+            .get_mut(&commitment)
+            .unwrap()
+            .pin_payout(PayoutForV1::new([0x71; 32]).unwrap(), 2_002)
+            .unwrap();
+
+        cancel(&mut receiver, pending.slate_hash, 2_003).unwrap();
+        assert!(receiver.outputs.get(&commitment).is_some());
+        assert_eq!(
+            receiver.outputs.get(&commitment).unwrap().payout_for(),
+            Some(PayoutForV1::new([0x71; 32]).unwrap())
         );
     }
 

@@ -30,7 +30,7 @@
 
 use crate::store::{MergeReport, OutputStore, StoreError};
 use crate::types::StoredOutput;
-use crate::wallet_state::WalletV2State;
+use crate::wallet_state::{WalletV2State, LEGACY_SCHEMA_VERSION_V2, SCHEMA_VERSION};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -45,10 +45,16 @@ pub const BACKUP_VERSION: u16 = 1;
 
 /// Backup payload schema version; an unknown value is rejected, gating future
 /// growth of [`BackupEnvelopeV2`].
-pub const BACKUP_SCHEMA: u16 = 3;
+pub const BACKUP_SCHEMA: u16 = 4;
+
+/// Last output-only backup schema, which predates payout pins.
+const LEGACY_BACKUP_SCHEMA: u16 = 3;
 
 /// Full wallet-state backup payload schema.
-pub const FULL_BACKUP_SCHEMA: u16 = 4;
+pub const FULL_BACKUP_SCHEMA: u16 = 5;
+
+/// Last full-state backup schema, whose inner wallet used schema V2.
+const LEGACY_FULL_BACKUP_SCHEMA: u16 = 4;
 
 /// Explicit backup payload kind. Legacy schema-3 files omit this field and are
 /// interpreted as [`BackupKind::OutputStore`] by default.
@@ -90,6 +96,14 @@ pub enum BackupError {
     /// A full backup payload was missing its wallet state.
     #[error("full backup payload missing wallet state")]
     MissingWalletState,
+    /// The inner wallet payload does not match the schema promised by this
+    /// backup version.
+    #[error("unsupported wallet schema version in backup: {0}")]
+    UnsupportedWalletSchema(u16),
+    /// A purported legacy backup contains a payout pin introduced only in its
+    /// successor format.
+    #[error("legacy backup contains a payout pin")]
+    LegacyContainsPayoutPin,
 }
 
 /// The serialized backup payload. Versioned independently of the envelope.
@@ -149,6 +163,9 @@ pub fn export_full_backup(
     passphrase: &str,
     exported_at: u64,
 ) -> Result<(), BackupError> {
+    if state.schema_version != SCHEMA_VERSION {
+        return Err(BackupError::UnsupportedWalletSchema(state.schema_version));
+    }
     let payload = BackupEnvelopeV2 {
         schema_version: FULL_BACKUP_SCHEMA,
         kind: BackupKind::WalletState,
@@ -179,20 +196,30 @@ pub fn import_backup(
     let payload: BackupEnvelopeV2 =
         dom_wallet_crypto::load_envelope(path, BACKUP_MAGIC, BACKUP_VERSION, passphrase)?;
 
-    if payload.schema_version != BACKUP_SCHEMA {
-        return Err(BackupError::UnsupportedSchema(payload.schema_version));
-    }
     if payload.kind != BackupKind::OutputStore {
         return Err(BackupError::KindMismatch {
             expected: BackupKind::OutputStore,
             actual: payload.kind,
         });
     }
+    if !matches!(payload.schema_version, LEGACY_BACKUP_SCHEMA | BACKUP_SCHEMA) {
+        return Err(BackupError::UnsupportedSchema(payload.schema_version));
+    }
+    if payload.schema_version == LEGACY_BACKUP_SCHEMA
+        && payload
+            .outputs
+            .iter()
+            .any(|output| output.payout_for().is_some())
+    {
+        return Err(BackupError::LegacyContainsPayoutPin);
+    }
     if payload.chain_id != expected_chain_id {
         return Err(BackupError::ChainMismatch);
     }
 
-    Ok(store.merge_backup(payload.outputs))
+    store
+        .merge_backup(payload.outputs)
+        .map_err(BackupError::from)
 }
 
 /// Decrypt and return a complete [`WalletV2State`] backup.
@@ -208,27 +235,44 @@ pub fn import_full_backup(
     let payload: BackupEnvelopeV2 =
         dom_wallet_crypto::load_envelope(path, BACKUP_MAGIC, BACKUP_VERSION, passphrase)?;
 
-    if payload.schema_version != FULL_BACKUP_SCHEMA {
-        return Err(BackupError::UnsupportedSchema(payload.schema_version));
-    }
     if payload.kind != BackupKind::WalletState {
         return Err(BackupError::KindMismatch {
             expected: BackupKind::WalletState,
             actual: payload.kind,
         });
     }
+    if !matches!(
+        payload.schema_version,
+        LEGACY_FULL_BACKUP_SCHEMA | FULL_BACKUP_SCHEMA
+    ) {
+        return Err(BackupError::UnsupportedSchema(payload.schema_version));
+    }
     if payload.chain_id != expected_chain_id {
         return Err(BackupError::ChainMismatch);
     }
 
-    let state = payload
+    let mut state = payload
         .wallet_state
         .ok_or(BackupError::MissingWalletState)?;
     if state.chain_id != expected_chain_id {
         return Err(BackupError::ChainMismatch);
     }
 
-    Ok(state)
+    match payload.schema_version {
+        FULL_BACKUP_SCHEMA if state.schema_version == SCHEMA_VERSION => Ok(state),
+        LEGACY_FULL_BACKUP_SCHEMA if state.schema_version == LEGACY_SCHEMA_VERSION_V2 => {
+            if state
+                .outputs
+                .iter()
+                .any(|output| output.payout_for().is_some())
+            {
+                return Err(BackupError::LegacyContainsPayoutPin);
+            }
+            state.schema_version = SCHEMA_VERSION;
+            Ok(state)
+        }
+        _ => Err(BackupError::UnsupportedWalletSchema(state.schema_version)),
+    }
 }
 
 #[cfg(test)]
@@ -237,7 +281,8 @@ mod tests {
     use crate::pending::{PendingSlate, SlateLifecycle, SlateRole, SlateSecrets};
     use crate::tx_sink::InMemoryTxSink;
     use crate::types::{
-        BlockRef, DerivIndex, KeychainV2, Network, OutputOrigin, OutputStatus, StoreMeta,
+        BlockRef, DerivIndex, KeychainV2, Network, OutputOrigin, OutputStatus, PayoutForV1,
+        StoreMeta,
     };
     use crate::{create_send, receive, submit_finalized};
     use dom_crypto::pedersen::{BlindingFactor, Commitment};
@@ -356,6 +401,9 @@ mod tests {
             .unwrap();
         let mut receive = confirmed_output(2, 500, OutputOrigin::ReceiveSlate, 2);
         receive.derivable = Some(DerivIndex::ReceiveRequest(7));
+        receive
+            .pin_payout(PayoutForV1::new([0xB4; 32]).unwrap(), 1001)
+            .unwrap();
         state.outputs.insert(receive).unwrap();
         state
             .outputs
@@ -397,6 +445,7 @@ mod tests {
             assert_eq!(back.origin_block, original.origin_block);
             assert_eq!(back.derivable, original.derivable);
             assert_eq!(back.reserved_for, original.reserved_for);
+            assert_eq!(back.payout_for(), original.payout_for());
             assert_eq!(back.created_at, original.created_at);
             assert_eq!(back.updated_at, original.updated_at);
         }
@@ -446,9 +495,11 @@ mod tests {
         source
             .insert(confirmed_output(1, 1000, OutputOrigin::Coinbase, 1))
             .unwrap();
-        source
-            .insert(confirmed_output(2, 500, OutputOrigin::ReceiveSlate, 2))
+        let mut payout = confirmed_output(2, 500, OutputOrigin::ReceiveSlate, 2);
+        payout
+            .pin_payout(PayoutForV1::new([0xD2; 32]).unwrap(), 1001)
             .unwrap();
+        source.insert(payout).unwrap();
         source
             .insert(unconfirmed_output(3, 400, OutputOrigin::Change))
             .unwrap();
@@ -467,6 +518,7 @@ mod tests {
             assert_eq!(*back.blinding, *original.blinding);
             assert_eq!(back.status, original.status);
             assert_eq!(back.origin_block, original.origin_block);
+            assert_eq!(back.payout_for(), original.payout_for());
         }
     }
 
@@ -520,7 +572,16 @@ mod tests {
         src.insert(unconfirmed_output(7, 700, OutputOrigin::Change))
             .unwrap();
 
-        export_backup(&src, &path, "pw", CHAIN_ID, 123).unwrap();
+        let payload = BackupEnvelopeV2 {
+            schema_version: LEGACY_BACKUP_SCHEMA,
+            kind: BackupKind::OutputStore,
+            chain_id: CHAIN_ID,
+            exported_at: 123,
+            outputs: src.iter().cloned().collect(),
+            wallet_state: None,
+        };
+        dom_wallet_crypto::save_envelope(&path, BACKUP_MAGIC, BACKUP_VERSION, &payload, "pw")
+            .unwrap();
         let mut dst = OutputStore::new();
         let report = import_backup(&mut dst, &path, "pw", CHAIN_ID).unwrap();
 
@@ -528,9 +589,66 @@ mod tests {
         assert_eq!(dst.get(&key(7)).unwrap().value, 700);
         let err = import_full_backup(&path, "pw", CHAIN_ID).unwrap_err();
         assert!(
-            matches!(err, BackupError::UnsupportedSchema(BACKUP_SCHEMA)),
+            matches!(err, BackupError::KindMismatch { .. }),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn legacy_full_backup_explicitly_migrates_inner_wallet_v2() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("legacy-full.dombak");
+        let mut legacy = WalletV2State::new(Network::Regtest, FULL_CHAIN_ID);
+        legacy.schema_version = LEGACY_SCHEMA_VERSION_V2;
+        legacy
+            .outputs
+            .insert(unconfirmed_output(7, 700, OutputOrigin::ReceiveSlate))
+            .unwrap();
+        let payload = BackupEnvelopeV2 {
+            schema_version: LEGACY_FULL_BACKUP_SCHEMA,
+            kind: BackupKind::WalletState,
+            chain_id: FULL_CHAIN_ID,
+            exported_at: 123,
+            outputs: Vec::new(),
+            wallet_state: Some(legacy),
+        };
+        dom_wallet_crypto::save_envelope(&path, BACKUP_MAGIC, BACKUP_VERSION, &payload, "pw")
+            .unwrap();
+
+        let migrated = import_full_backup(&path, "pw", FULL_CHAIN_ID).unwrap();
+        assert_eq!(migrated.schema_version, SCHEMA_VERSION);
+        assert!(migrated
+            .outputs
+            .get(&key(7))
+            .unwrap()
+            .payout_for()
+            .is_none());
+    }
+
+    #[test]
+    fn legacy_output_backup_with_a_v3_pin_is_rejected_without_merge() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("disguised-legacy.dombak");
+        let mut disguised = unconfirmed_output(7, 700, OutputOrigin::ReceiveSlate);
+        disguised
+            .pin_payout(PayoutForV1::new([0x77; 32]).unwrap(), 1001)
+            .unwrap();
+        let payload = BackupEnvelopeV2 {
+            schema_version: LEGACY_BACKUP_SCHEMA,
+            kind: BackupKind::OutputStore,
+            chain_id: CHAIN_ID,
+            exported_at: 123,
+            outputs: vec![disguised],
+            wallet_state: None,
+        };
+        dom_wallet_crypto::save_envelope(&path, BACKUP_MAGIC, BACKUP_VERSION, &payload, "pw")
+            .unwrap();
+        let mut destination = OutputStore::new();
+        assert!(matches!(
+            import_backup(&mut destination, &path, "pw", CHAIN_ID).unwrap_err(),
+            BackupError::LegacyContainsPayoutPin
+        ));
+        assert!(destination.is_empty());
     }
 
     #[test]

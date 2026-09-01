@@ -9,6 +9,7 @@
 use dom_crypto::pedersen::Commitment;
 use dom_crypto::BlindingFactor;
 use dom_slate::{build_send, finalize, respond_receive, SenderSlate, SlateInput};
+use zeroize::Zeroizing;
 
 /// A fixed but arbitrary chain id for the test network.
 pub const TEST_CHAIN_ID: [u8; 32] = [7u8; 32];
@@ -23,7 +24,7 @@ pub fn make_input(value: u64, blinding_byte: u8) -> SlateInput {
     let commitment = Commitment::commit(value, &blinding);
     SlateInput {
         commitment: *commitment.as_bytes(),
-        blinding: *blinding.as_bytes(),
+        blinding: Zeroizing::new(*blinding.as_bytes()),
     }
 }
 

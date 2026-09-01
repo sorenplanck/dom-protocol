@@ -2473,7 +2473,10 @@ mod tests {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+    )]
     fn restore_transition(
         target_head: Option<&JournalEntryV1>,
         marker: u8,

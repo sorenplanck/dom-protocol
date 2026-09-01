@@ -28,9 +28,8 @@ use chain_profile::ChainKindV1;
 use deployment_registry::{
     AssetRepresentationV1, ResolvedBitcoinDeploymentV1, ResolvedEvmDeploymentV1,
 };
-use dom_actuator::{DomContractsActuatorV1, DomSessionBindingV1};
-use dom_adaptor::TrustedChainIdV1;
-use dom_scriptless_store::{ContractsSessionStoreV1, SessionStoreError};
+use dom_actuator::DomSessionBindingV1;
+use dom_scriptless_store::SessionStoreError;
 use evm_actuator::ScopedEvmRefundV1;
 use fs2::FileExt;
 use kaystra_core::terms::SettlementTermsV1;
@@ -44,6 +43,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::admission::AuthenticatedRouteAdmissionV1;
+use crate::production_contracts::ProductionDomRefundStoreFaceV1;
 #[cfg(not(any(feature = "development", feature = "simulation", test)))]
 use crate::supervisor::authority_seal;
 use crate::supervisor::{AuthorityRefusalV1, RefundArmingAuthority, RefundArmingRequestV1};
@@ -149,30 +149,72 @@ trait ProductionRefundFaceVerifierV1 {
     fn verify(&self) -> Result<FaceEvidenceV1, AuthorityRefusalV1>;
 }
 
-/// DOM face backed by one retained Contracts session store.
-pub struct ProductionDomRefundFaceV1 {
-    store: Rc<ContractsSessionStoreV1>,
-    binding: DomSessionBindingV1,
-    trusted_chain_id: TrustedChainIdV1,
+/// Immutable, purpose-specific facts accepted by the Contracts refund issuer.
+///
+/// Route and session identity are never accepted as loose fields: they remain
+/// attached to the authenticated admission and composed settlement selected
+/// for this exact canonical leg.
+pub(crate) struct ProductionDomRefundFaceScopeV1<'a> {
+    admission: &'a AuthenticatedRouteAdmissionV1,
+    composition: &'a ComposedBindingV2,
+    position: LegIdV1,
+    owner_id: Digest32,
+    authority_epoch: u64,
 }
 
-impl ProductionDomRefundFaceV1 {
-    /// Binds the route/session/terms authority to an already-open store.
-    pub fn new(
-        store: Rc<ContractsSessionStoreV1>,
-        binding: DomSessionBindingV1,
-        trusted_chain_id: TrustedChainIdV1,
+impl<'a> ProductionDomRefundFaceScopeV1<'a> {
+    pub(crate) fn new(
+        admission: &'a AuthenticatedRouteAdmissionV1,
+        composition: &'a ComposedBindingV2,
+        position: LegIdV1,
+        owner_id: Digest32,
+        authority_epoch: u64,
     ) -> Result<Self, ProductionRefundArmingOpenErrorV1> {
-        if trusted_chain_id.as_bytes() != &binding.chain_id()
-            || DomContractsActuatorV1::bind(store.as_ref(), binding).is_err()
+        if admission.route_id() == ZERO_DIGEST
+            || composition.binding_digest() == ZERO_DIGEST
+            || owner_id == ZERO_DIGEST
+            || authority_epoch == 0
         {
             return Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration);
         }
         Ok(Self {
-            store,
-            binding,
-            trusted_chain_id,
+            admission,
+            composition,
+            position,
+            owner_id,
+            authority_epoch,
         })
+    }
+
+    pub(crate) const fn admission(&self) -> &'a AuthenticatedRouteAdmissionV1 {
+        self.admission
+    }
+
+    pub(crate) const fn composition(&self) -> &'a ComposedBindingV2 {
+        self.composition
+    }
+
+    pub(crate) const fn position(&self) -> LegIdV1 {
+        self.position
+    }
+
+    pub(crate) const fn owner_id(&self) -> Digest32 {
+        self.owner_id
+    }
+
+    pub(crate) const fn authority_epoch(&self) -> u64 {
+        self.authority_epoch
+    }
+}
+
+/// DOM face backed by one retained Contracts session store.
+pub struct ProductionDomRefundFaceV1 {
+    authority: ProductionDomRefundStoreFaceV1,
+}
+
+impl ProductionDomRefundFaceV1 {
+    pub(crate) fn from_contracts_owner(authority: ProductionDomRefundStoreFaceV1) -> Self {
+        Self { authority }
     }
 }
 
@@ -448,29 +490,30 @@ impl ProductionRefundFaceVerifierV1 for BoundDomRefundFaceV1 {
     }
 
     fn binding_identity(&self) -> Result<FaceBindingIdentityV1, AuthorityRefusalV1> {
+        let binding = self.inner.authority.binding();
         Ok(FaceBindingIdentityV1 {
             kind: 1,
-            route_id: self.inner.binding.route_id(),
+            route_id: binding.route_id(),
             settlement_id: self.settlement_id,
-            session_id: self.inner.binding.session_id(),
-            terms_digest: self.inner.binding.terms_digest(),
-            chain_digest: self.inner.binding.chain_id(),
-            deployment_digest: self.inner.binding.deployment_digest(),
+            session_id: binding.session_id(),
+            terms_digest: binding.terms_digest(),
+            chain_digest: binding.chain_id(),
+            deployment_digest: binding.deployment_digest(),
         })
     }
 
     fn verify(&self) -> Result<FaceEvidenceV1, AuthorityRefusalV1> {
-        DomContractsActuatorV1::bind(self.inner.store.as_ref(), self.inner.binding)
+        self.inner
+            .authority
+            .bind()
             .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+        let binding = self.inner.authority.binding();
         let artifact = self
             .inner
-            .store
-            .prepare_operational_final_refund_transport_authority(
-                self.inner.trusted_chain_id,
-                self.inner.binding.session_id(),
-            )
+            .authority
+            .prepare_final_refund()
             .map_err(map_dom_error)?;
-        if artifact.session_id() != &self.inner.binding.session_id()
+        if artifact.session_id() != &binding.session_id()
             || artifact.refund_tx_hash() == &ZERO_DIGEST
             || artifact.final_refund_payload().is_empty()
         {
@@ -487,12 +530,12 @@ impl ProductionRefundFaceVerifierV1 for BoundDomRefundFaceV1 {
         )?;
         Ok(FaceEvidenceV1 {
             kind: 1,
-            route_id: self.inner.binding.route_id(),
+            route_id: binding.route_id(),
             settlement_id: self.settlement_id,
-            session_id: self.inner.binding.session_id(),
-            terms_digest: self.inner.binding.terms_digest(),
-            chain_digest: self.inner.binding.chain_id(),
-            deployment_digest: self.inner.binding.deployment_digest(),
+            session_id: binding.session_id(),
+            terms_digest: binding.terms_digest(),
+            chain_digest: binding.chain_id(),
+            deployment_digest: binding.deployment_digest(),
             primary_artifact_digest: *artifact.refund_tx_hash(),
             secondary_artifact_digest: payload_digest,
             evidence_digest,
@@ -650,21 +693,37 @@ impl ProductionRefundFaceVerifierV1 for BoundEvmRefundFaceV1 {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+)]
 fn bind_dom_face(
     face: ProductionDomRefundFaceV1,
     route_id: RouteIdV1,
+    composition_digest: Digest32,
+    position: LegIdV1,
+    owner_id: Digest32,
+    authority_epoch: u64,
+    frozen_bindings: &FrozenBindingsV1,
     settlement: &SettlementTermsV1,
     pins: AdmissionFacePinsV1,
 ) -> Result<Box<dyn ProductionRefundFaceVerifierV1>, ProductionRefundArmingOpenErrorV1> {
+    let binding = face.authority.binding();
     let terms_digest = settlement
         .terms_hash()
         .map_err(|_| ProductionRefundArmingOpenErrorV1::InvalidConfiguration)?;
-    if face.binding.route_id() != route_id
-        || face.binding.session_id() != settlement.session_id.0
-        || face.binding.terms_digest() != terms_digest
-        || face.binding.chain_id() != settlement.dom_leg.chain_id.0
-        || face.binding.profile_digest() != settlement.dom_leg.adapter_profile_hash
-        || validate_dom_admission_pins(face.binding, pins).is_err()
+    if !face.authority.authenticates_scope(
+        position,
+        owner_id,
+        authority_epoch,
+        composition_digest,
+        frozen_bindings,
+    ) || binding.route_id() != route_id
+        || binding.session_id() != settlement.session_id.0
+        || binding.terms_digest() != terms_digest
+        || binding.chain_id() != settlement.dom_leg.chain_id.0
+        || binding.profile_digest() != settlement.dom_leg.adapter_profile_hash
+        || validate_dom_admission_pins(binding, pins).is_err()
     {
         return Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration);
     }
@@ -673,14 +732,14 @@ fn bind_dom_face(
         &[
             &route_id,
             &settlement.settlement_id.0,
-            &face.binding.session_id(),
+            &binding.session_id(),
             &terms_digest,
-            &face.binding.chain_id(),
-            &face.binding.genesis_hash(),
-            &face.binding.profile_digest(),
-            &face.binding.deployment_digest(),
-            &face.binding.asset_binding_digest(),
-            &face.binding.registry_epoch().to_be_bytes(),
+            &binding.chain_id(),
+            &binding.genesis_hash(),
+            &binding.profile_digest(),
+            &binding.deployment_digest(),
+            &binding.asset_binding_digest(),
+            &binding.registry_epoch().to_be_bytes(),
         ],
     )
     .map_err(map_authority_open)?;
@@ -1470,6 +1529,9 @@ fn bind_configuration(
         route_id,
         composition_v2_digest,
         LegIdV1::Upstream,
+        owner_id,
+        authority_epoch,
+        admission.frozen_bindings(),
         composition.upstream(),
         common_pins(
             admission.upstream_profile_digest(),
@@ -1481,6 +1543,9 @@ fn bind_configuration(
         route_id,
         composition_v2_digest,
         LegIdV1::Downstream,
+        owner_id,
+        authority_epoch,
+        admission.frozen_bindings(),
         composition.downstream(),
         common_pins(
             admission.downstream_profile_digest(),
@@ -1531,15 +1596,32 @@ fn bind_configuration(
     ))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+)]
 fn bind_leg(
     leg: ProductionRefundLegV1,
     route_id: RouteIdV1,
     composition_digest: Digest32,
     position: LegIdV1,
+    owner_id: Digest32,
+    authority_epoch: u64,
+    frozen_bindings: &FrozenBindingsV1,
     settlement: &SettlementTermsV1,
     pins: AdmissionFacePinsV1,
 ) -> Result<BoundRefundLegV1, ProductionRefundArmingOpenErrorV1> {
-    let dom = bind_dom_face(leg.dom, route_id, settlement, pins)?;
+    let dom = bind_dom_face(
+        leg.dom,
+        route_id,
+        composition_digest,
+        position,
+        owner_id,
+        authority_epoch,
+        frozen_bindings,
+        settlement,
+        pins,
+    )?;
     let counterparty = bind_counterparty_face(
         leg.counterparty,
         route_id,

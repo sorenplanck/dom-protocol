@@ -15,6 +15,7 @@ simulation = [
     "dep:adapter-btc",
     "dep:fs2",
     "dep:rusqlite",
+    "dep:rustix",
     "route-executor/development",
 ]
 production = [
@@ -26,11 +27,15 @@ production = [
     "dep:dom-adaptor",
     "adapter-evm/rpc-http",
     "dep:btc-actuator",
+    "dep:btc-vault",
     "btc-actuator/rpc-http",
     "dep:dom-actuator",
     "dom-actuator/production",
     "dep:dom-leg",
     "dom-leg/real-dom-adaptor",
+    "dep:dom-core",
+    "dep:dom-crypto",
+    "dep:dom-final-claim-binding",
     "dep:dom-scriptless-chain-adapter",
     "dep:dom-scriptless-store",
     "dep:dom-scriptless-identity-store",
@@ -39,7 +44,9 @@ production = [
     "dom-vault/real-dom-adaptor",
     "dep:evm-actuator",
     "dep:fs2",
+    "dep:k256",
     "dep:f6-engine",
+    "dep:f7-anchor-authority",
     "evm-actuator/rpc-http",
     "dep:nix",
     "dep:relay",
@@ -90,8 +97,11 @@ tracing = { workspace = true }
 zeroize.workspace = true
 
 fs2 = { version = "=0.4.3", optional = true }
+k256 = { workspace = true, features = ["ecdsa"], optional = true }
 f6-engine = { path = "../f6-engine", optional = true }
+f7-anchor-authority = { path = "../f7-anchor-authority", optional = true }
 rusqlite = { workspace = true, optional = true }
+rustix = { version = "=1.1.4", default-features = false, features = ["process", "std"], optional = true }
 adapter-btc = { path = "../adapters/btc", optional = true }
 
 # Directory capabilities for the composition root. This edge rose from
@@ -110,9 +120,13 @@ counterparty-api = { workspace = true, optional = true }
 adapter-btc-live = { path = "../adapters/btc-live", optional = true }
 adapter-dom-real = { path = "../adapters/dom-real", optional = true }
 btc-actuator = { path = "../btc-actuator", default-features = false, optional = true }
+btc-vault = { path = "../adapters/btc-vault", optional = true }
 dom-actuator = { path = "../dom-actuator", default-features = false, optional = true }
 dom-leg = { path = "../dom-leg", default-features = false, optional = true }
 dom-adaptor = { workspace = true, optional = true }
+dom-core = { workspace = true, optional = true }
+dom-crypto = { workspace = true, optional = true }
+dom-final-claim-binding = { path = "../dom-final-claim-binding", optional = true }
 dom-scriptless-chain-adapter = { path = "../dom-scriptless-chain-adapter", optional = true }
 dom-scriptless-identity-store = { path = "../dom-scriptless-identity-store", optional = true }
 dom-scriptless-store = { path = "../dom-scriptless-store", default-features = false, optional = true }

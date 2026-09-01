@@ -30,6 +30,7 @@ use dom_core::BlockHeight;
 use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_wallet_keys::{coinbase_blinding, spend_output_blinding, ExtendedPrivKey, SeedError};
 use thiserror::Error;
+use zeroize::Zeroize;
 
 /// Errors from keychain derivation.
 #[derive(Debug, Error)]
@@ -62,6 +63,15 @@ pub struct ReceiveRequest {
 pub struct KeychainDeriver {
     root: ExtendedPrivKey,
     account: u32,
+}
+
+impl Drop for KeychainDeriver {
+    fn drop(&mut self) {
+        // Keep the real wallet owner explicit as well as relying on recursive
+        // field drop. ExtendedPrivKey::zeroize covers both private key and
+        // chain code; its subsequent Drop is an idempotent second wipe.
+        self.root.zeroize();
+    }
 }
 
 impl KeychainDeriver {

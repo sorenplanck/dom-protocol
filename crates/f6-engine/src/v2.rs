@@ -843,6 +843,23 @@ impl StoreLogV2 {
             .map_err(|error| EngineErrorV2::Log(error.to_string()))?;
         Ok(Self { store })
     }
+
+    /// Opens an initialized journal or completes an externally provisioned
+    /// lazy-binding prefix. Both the preparation and final bindings must be
+    /// exact; initialized economic state is retained across restart.
+    pub fn open_or_resume_prepared_production(
+        path: &Path,
+        preparation_digest: Digest32,
+        binding_digest: Digest32,
+    ) -> ResultV2<Self> {
+        let preparation = store::ProductionStoreBindingV1::new(preparation_digest)
+            .map_err(|error| EngineErrorV2::Log(error.to_string()))?;
+        let binding = store::ProductionStoreBindingV1::new(binding_digest)
+            .map_err(|error| EngineErrorV2::Log(error.to_string()))?;
+        let store = store::Store::open_or_resume_prepared_production(path, preparation, binding)
+            .map_err(|error| EngineErrorV2::Log(error.to_string()))?;
+        Ok(Self { store })
+    }
 }
 
 impl BindingLog for StoreLogV2 {

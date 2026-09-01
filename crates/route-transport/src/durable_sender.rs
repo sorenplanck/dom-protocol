@@ -32,7 +32,7 @@ use rustix::process::geteuid;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
-    framing::full_message_digest_v2, DurableProductionCreationStateV1, RelayQueueV1,
+    framing::full_message_digest_v2, DurableProductionCreationStateV1, RelaySubmitQueueV1,
     RouteFramePlanV2, RouteSenderCheckpointV1, RouteWireContextV1, MAX_FRAMED_DSC1_BYTES_V2,
     MAX_ROUTE_FRAME_COUNT_V2, MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES, ROUTE_SENDER_CHECKPOINT_LEN,
 };
@@ -206,7 +206,6 @@ pub struct DurableRelaySenderConfigV1 {
 
 impl DurableRelaySenderConfigV1 {
     /// Constructs a non-null configuration bound to the roster signing key.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         sender_store_id: Digest32,
         wire: RouteWireContextV1,
@@ -630,6 +629,23 @@ struct FrameTransferRowV2 {
     next_frame: u16,
 }
 
+#[derive(Clone, Copy)]
+struct FrameEnvelopeBindingV1 {
+    index: u16,
+    count: u16,
+    binding: Digest32,
+}
+
+struct EnvelopeBuildRequestV1 {
+    checkpoint: RouteSenderCheckpointV1,
+    kind: u16,
+    payload: Vec<u8>,
+    expiry: TimelockSpec,
+    aux_rand: [u8; 32],
+    application_id: Option<Digest32>,
+    frame: Option<FrameEnvelopeBindingV1>,
+}
+
 /// Owner-only sender authority retaining public state and one in-memory signer.
 pub struct DurableRelaySenderV1 {
     connection: Connection,
@@ -1039,17 +1055,15 @@ impl DurableRelaySenderV1 {
 
         let (application, pending, frame) =
             if signed_dsc1.len() <= MAX_ROUTE_TRANSPORT_PAYLOAD_BYTES {
-                let pending = self.build_envelope(
-                    meta.checkpoint,
-                    message_type::ROUTE_TRANSPORT,
-                    signed_dsc1.to_vec(),
+                let pending = self.build_envelope(EnvelopeBuildRequestV1 {
+                    checkpoint: meta.checkpoint,
+                    kind: message_type::ROUTE_TRANSPORT,
+                    payload: signed_dsc1.to_vec(),
                     expiry,
-                    *aux_rand,
-                    Some(application_id),
-                    None,
-                    None,
-                    ZERO_DIGEST,
-                )?;
+                    aux_rand: *aux_rand,
+                    application_id: Some(application_id),
+                    frame: None,
+                })?;
                 (
                     RouteApplicationRowV2 {
                         application_id,
@@ -1079,17 +1093,19 @@ impl DurableRelaySenderV1 {
                 let first_payload = plan
                     .frame_payload_for_checkpoint(meta.checkpoint, 0)
                     .map_err(|_| DurableRelaySenderErrorV1::CorruptState)?;
-                let pending = self.build_envelope(
-                    meta.checkpoint,
-                    message_type::ROUTE_TRANSPORT,
-                    first_payload.to_vec(),
+                let pending = self.build_envelope(EnvelopeBuildRequestV1 {
+                    checkpoint: meta.checkpoint,
+                    kind: message_type::ROUTE_TRANSPORT,
+                    payload: first_payload.to_vec(),
                     expiry,
-                    *aux_rand,
-                    Some(application_id),
-                    Some(0),
-                    Some(frame_count),
-                    *plan.binding_digest(),
-                )?;
+                    aux_rand: *aux_rand,
+                    application_id: Some(application_id),
+                    frame: Some(FrameEnvelopeBindingV1 {
+                        index: 0,
+                        count: frame_count,
+                        binding: *plan.binding_digest(),
+                    }),
+                })?;
                 let frame = FrameTransferRowV2 {
                     application_id: Some(application_id),
                     base: plan.base_checkpoint(),
@@ -1170,17 +1186,19 @@ impl DurableRelaySenderV1 {
         let payload = plan
             .frame_payload_for_checkpoint(meta.checkpoint, usize::from(frame.next_frame))
             .map_err(|_| DurableRelaySenderErrorV1::CorruptState)?;
-        let pending = self.build_envelope(
-            meta.checkpoint,
-            message_type::ROUTE_TRANSPORT,
-            payload.to_vec(),
-            frame.expiry,
+        let pending = self.build_envelope(EnvelopeBuildRequestV1 {
+            checkpoint: meta.checkpoint,
+            kind: message_type::ROUTE_TRANSPORT,
+            payload: payload.to_vec(),
+            expiry: frame.expiry,
             aux_rand,
-            Some(application.application_id),
-            Some(frame.next_frame),
-            Some(frame.frame_count),
-            frame.binding_digest,
-        )?;
+            application_id: Some(application.application_id),
+            frame: Some(FrameEnvelopeBindingV1 {
+                index: frame.next_frame,
+                count: frame.frame_count,
+                binding: frame.binding_digest,
+            }),
+        })?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1226,17 +1244,15 @@ impl DurableRelaySenderV1 {
         if self.row_exists("frame_transfer")? {
             return Err(DurableRelaySenderErrorV1::FramedTransferActive);
         }
-        let pending = self.build_envelope(
-            meta.checkpoint,
+        let pending = self.build_envelope(EnvelopeBuildRequestV1 {
+            checkpoint: meta.checkpoint,
             kind,
-            payload.to_vec(),
+            payload: payload.to_vec(),
             expiry,
             aux_rand,
-            None,
-            None,
-            None,
-            ZERO_DIGEST,
-        )?;
+            application_id: None,
+            frame: None,
+        })?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1278,17 +1294,19 @@ impl DurableRelaySenderV1 {
         let first_payload = plan
             .frame_payload_for_checkpoint(meta.checkpoint, 0)
             .map_err(|_| DurableRelaySenderErrorV1::CorruptState)?;
-        let pending = self.build_envelope(
-            meta.checkpoint,
-            message_type::ROUTE_TRANSPORT,
-            first_payload.to_vec(),
+        let pending = self.build_envelope(EnvelopeBuildRequestV1 {
+            checkpoint: meta.checkpoint,
+            kind: message_type::ROUTE_TRANSPORT,
+            payload: first_payload.to_vec(),
             expiry,
             aux_rand,
-            None,
-            Some(0),
-            Some(frame_count),
-            *plan.binding_digest(),
-        )?;
+            application_id: None,
+            frame: Some(FrameEnvelopeBindingV1 {
+                index: 0,
+                count: frame_count,
+                binding: *plan.binding_digest(),
+            }),
+        })?;
         let frame = FrameTransferRowV2 {
             application_id: None,
             base: plan.base_checkpoint(),
@@ -1337,17 +1355,19 @@ impl DurableRelaySenderV1 {
         let payload = plan
             .frame_payload_for_checkpoint(meta.checkpoint, index)
             .map_err(|_| DurableRelaySenderErrorV1::CorruptState)?;
-        let pending = self.build_envelope(
-            meta.checkpoint,
-            message_type::ROUTE_TRANSPORT,
-            payload.to_vec(),
-            frame.expiry,
+        let pending = self.build_envelope(EnvelopeBuildRequestV1 {
+            checkpoint: meta.checkpoint,
+            kind: message_type::ROUTE_TRANSPORT,
+            payload: payload.to_vec(),
+            expiry: frame.expiry,
             aux_rand,
-            frame.application_id,
-            Some(frame.next_frame),
-            Some(frame.frame_count),
-            frame.binding_digest,
-        )?;
+            application_id: frame.application_id,
+            frame: Some(FrameEnvelopeBindingV1 {
+                index: frame.next_frame,
+                count: frame.frame_count,
+                binding: frame.binding_digest,
+            }),
+        })?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1367,7 +1387,7 @@ impl DurableRelaySenderV1 {
     /// inconsistent ACK leaves the row unchanged.  A valid ACK atomically
     /// appends history, advances the shared checkpoint and clears the pending
     /// row; frame progress advances in that same commit.
-    pub fn submit_pending<Q: RelayQueueV1>(
+    pub fn submit_pending<Q: RelaySubmitQueueV1>(
         &mut self,
         queue: &mut Q,
     ) -> Result<DurableSenderCommitV1, DurableRelaySenderErrorV1> {
@@ -1478,46 +1498,42 @@ impl DurableRelaySenderV1 {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn build_envelope(
         &self,
-        checkpoint: RouteSenderCheckpointV1,
-        kind: u16,
-        payload: Vec<u8>,
-        expiry: TimelockSpec,
-        mut aux_rand: [u8; 32],
-        application_id: Option<Digest32>,
-        frame_index: Option<u16>,
-        frame_count: Option<u16>,
-        frame_binding: Digest32,
+        request: EnvelopeBuildRequestV1,
     ) -> Result<DurableOutboundEnvelopeV1, DurableRelaySenderErrorV1> {
-        self.validate_kind_and_payload(kind, &payload)?;
-        if checkpoint.next_sequence() == u64::MAX {
+        self.validate_kind_and_payload(request.kind, &request.payload)?;
+        if request.checkpoint.next_sequence() == u64::MAX {
             return Err(DurableRelaySenderErrorV1::CapacityExceeded);
         }
-        if frame_index.is_some() != frame_count.is_some()
-            || frame_index.is_some() != (frame_binding != ZERO_DIGEST)
-            || application_id.is_some_and(|id| id == ZERO_DIGEST)
-            || (application_id.is_some() && kind != message_type::ROUTE_TRANSPORT)
-            || (frame_index.is_some() && kind != message_type::ROUTE_TRANSPORT)
-            || frame_index.zip(frame_count).is_some_and(|(index, count)| {
-                !(2..=MAX_ROUTE_FRAME_COUNT_V2).contains(&count) || index >= count
+        if request.application_id.is_some_and(|id| id == ZERO_DIGEST)
+            || (request.application_id.is_some() && request.kind != message_type::ROUTE_TRANSPORT)
+            || (request.frame.is_some() && request.kind != message_type::ROUTE_TRANSPORT)
+            || request.frame.is_some_and(|frame| {
+                frame.binding == ZERO_DIGEST
+                    || !(2..=MAX_ROUTE_FRAME_COUNT_V2).contains(&frame.count)
+                    || frame.index >= frame.count
             })
         {
             return Err(DurableRelaySenderErrorV1::CorruptState);
         }
+        let (frame_index, frame_count, frame_binding) = request
+            .frame
+            .map(|frame| (Some(frame.index), Some(frame.count), frame.binding))
+            .unwrap_or((None, None, ZERO_DIGEST));
+        let mut aux_rand = request.aux_rand;
         let mut envelope = RelayEnvelopeV1 {
             network_id: self.config.wire.network_id,
-            message_type: kind,
+            message_type: request.kind,
             session_id: self.config.wire.session_id,
             route_id: self.config.wire.route_id,
             sender_id: self.config.sender_id,
             recipient_id: self.config.recipient_id,
             sender_role: self.config.sender_role,
-            sequence: checkpoint.next_sequence(),
-            previous_transcript_hash: *checkpoint.previous_digest(),
-            payload,
-            expiry,
+            sequence: request.checkpoint.next_sequence(),
+            previous_transcript_hash: *request.checkpoint.previous_digest(),
+            payload: request.payload,
+            expiry: request.expiry,
             policy_version: self.config.wire.policy_version,
             roster_snapshot: self.config.wire.roster_snapshot,
             signature: [0; 64],
@@ -1540,10 +1556,10 @@ impl DurableRelaySenderV1 {
             .map_err(|_| DurableRelaySenderErrorV1::EnvelopePreparation)?;
         Ok(DurableOutboundEnvelopeV1 {
             raw,
-            application_id,
-            message_type: kind,
-            sequence: checkpoint.next_sequence(),
-            previous_digest: *checkpoint.previous_digest(),
+            application_id: request.application_id,
+            message_type: request.kind,
+            sequence: request.checkpoint.next_sequence(),
+            previous_digest: *request.checkpoint.previous_digest(),
             digest,
             key: IdempotencyKeyV1::of(&envelope),
             frame_index,

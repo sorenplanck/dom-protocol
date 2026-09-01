@@ -22,10 +22,20 @@ use crate::tx_sink::{SubmitOutcome, TxSink};
 use crate::types::BlockRef;
 use crate::ChainSource;
 use dom_consensus::transaction::Transaction;
+use dom_core::MAX_BLOCK_WEIGHT;
 use dom_serialization::DomSerialize;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::time::Duration;
 use thiserror::Error;
+
+/// Maximum JSON bytes accepted from one bounded chain-scan page.
+pub const MAX_RPC_SCAN_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum blocks requested in one page, keeping a consensus-maximal projected
+/// page below the response cap instead of trusting the remote node's own cap.
+pub const MAX_RPC_SCAN_BLOCKS_PER_PAGE: u64 = 16;
+const MAX_RPC_CONTROL_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// Errors from the RPC-backed chain source.
 #[derive(Debug, Error)]
@@ -50,6 +60,12 @@ pub enum RpcSourceError {
     /// The response could not be decoded (bad JSON / bad hex / wrong length).
     #[error("decode error: {0}")]
     Decode(String),
+    /// A remote response exceeded the fixed client-side allocation budget.
+    #[error("rpc response exceeds {limit} bytes")]
+    ResponseTooLarge {
+        /// Exact maximum accepted by this response class.
+        limit: usize,
+    },
 }
 
 // ── JSON DTOs mirroring the node's `/chain/scan` response ────────────────────
@@ -76,7 +92,6 @@ struct ScanBlockDto {
 #[derive(Deserialize)]
 struct ChainScanDto {
     tip: TipDto,
-    #[allow(dead_code)]
     from: u64,
     to: u64,
     blocks: Vec<ScanBlockDto>,
@@ -96,6 +111,104 @@ fn decode_commitment(s: &str) -> Result<[u8; 33], RpcSourceError> {
 
 fn decode_commitments(items: &[String]) -> Result<Vec<[u8; 33]>, RpcSourceError> {
     items.iter().map(|s| decode_commitment(s)).collect()
+}
+
+fn read_bounded_response(
+    response: reqwest::blocking::Response,
+    limit: usize,
+) -> Result<Vec<u8>, RpcSourceError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(RpcSourceError::ResponseTooLarge { limit });
+    }
+    let initial_capacity = response
+        .content_length()
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(0)
+        .min(limit);
+    read_bounded_stream(response, limit, initial_capacity)
+}
+
+fn read_bounded_stream<R: Read>(
+    mut reader: R,
+    limit: usize,
+    initial_capacity: usize,
+) -> Result<Vec<u8>, RpcSourceError> {
+    let mut bytes = Vec::with_capacity(initial_capacity.min(limit));
+    reader
+        .by_ref()
+        .take((limit as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| RpcSourceError::Request(error.to_string()))?;
+    if bytes.len() > limit {
+        return Err(RpcSourceError::ResponseTooLarge { limit });
+    }
+    Ok(bytes)
+}
+
+fn decode_bounded_json<T: DeserializeOwned>(
+    response: reqwest::blocking::Response,
+    limit: usize,
+) -> Result<T, RpcSourceError> {
+    let bytes = read_bounded_response(response, limit)?;
+    serde_json::from_slice(&bytes).map_err(|error| RpcSourceError::Decode(error.to_string()))
+}
+
+fn validate_scan_page(
+    scan: &ChainScanDto,
+    requested_from: u64,
+    requested_to: u64,
+) -> Result<(), RpcSourceError> {
+    if scan.from != requested_from
+        || scan.to > requested_to
+        || scan.blocks.len() > MAX_RPC_SCAN_BLOCKS_PER_PAGE as usize
+    {
+        return Err(RpcSourceError::Decode(
+            "scan page lies outside the requested bounded range".into(),
+        ));
+    }
+    if requested_from > requested_to || scan.to < requested_from {
+        if !scan.blocks.is_empty() {
+            return Err(RpcSourceError::Decode(
+                "empty scan range carried blocks".into(),
+            ));
+        }
+        return Ok(());
+    }
+    let expected_len = scan
+        .to
+        .checked_sub(requested_from)
+        .and_then(|span| span.checked_add(1))
+        .and_then(|length| usize::try_from(length).ok())
+        .ok_or_else(|| RpcSourceError::Decode("scan page length overflow".into()))?;
+    if scan.blocks.len() != expected_len
+        || scan
+            .blocks
+            .iter()
+            .enumerate()
+            .any(|(offset, block)| block.height != requested_from + offset as u64)
+    {
+        return Err(RpcSourceError::Decode(
+            "scan page heights are not exact and contiguous".into(),
+        ));
+    }
+    if scan.blocks.iter().any(|block| {
+        match block
+            .output_commitments
+            .len()
+            .checked_add(block.input_commitments.len())
+        {
+            Some(commitments) => commitments > MAX_BLOCK_WEIGHT as usize,
+            None => true,
+        }
+    }) {
+        return Err(RpcSourceError::Decode(
+            "scan block exceeds the consensus-derived commitment count bound".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// A [`ChainSource`] that reads the canonical chain from a node's REST RPC.
@@ -133,9 +246,9 @@ impl RpcChainSource {
                 .map_err(|e| RpcSourceError::Request(e.to_string()))?;
             let status = resp.status();
             if status.is_success() {
-                return resp
-                    .json::<ChainScanDto>()
-                    .map_err(|e| RpcSourceError::Decode(e.to_string()));
+                let scan = decode_bounded_json(resp, MAX_RPC_SCAN_RESPONSE_BYTES)?;
+                validate_scan_page(&scan, from, to)?;
+                return Ok(scan);
             }
             // 503 → chain busy (the node yielded the lock to mining): retry.
             if status.as_u16() == 503 {
@@ -148,7 +261,8 @@ impl RpcChainSource {
             }
             // 500 mentioning "not supported" → the node lacks the endpoint.
             if status.as_u16() == 500 {
-                let body = resp.text().unwrap_or_default();
+                let body = read_bounded_response(resp, MAX_RPC_CONTROL_RESPONSE_BYTES)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?;
                 if body.contains("not supported") {
                     return Err(RpcSourceError::Unsupported);
                 }
@@ -191,7 +305,8 @@ impl RpcChainSource {
         let mut blocks = Vec::new();
         let mut cur = from;
         while cur <= to {
-            let scan = self.fetch(cur, to)?;
+            let page_to = to.min(cur.saturating_add(MAX_RPC_SCAN_BLOCKS_PER_PAGE - 1));
+            let scan = self.fetch(cur, page_to)?;
             for dto in scan.blocks {
                 blocks.push(RestoreBlock {
                     height: dto.height,
@@ -230,7 +345,8 @@ impl ChainSource for RpcChainSource {
         let mut blocks = Vec::new();
         let mut cur = from;
         while cur <= to {
-            let scan = self.fetch(cur, to)?;
+            let page_to = to.min(cur.saturating_add(MAX_RPC_SCAN_BLOCKS_PER_PAGE - 1));
+            let scan = self.fetch(cur, page_to)?;
             for dto in scan.blocks {
                 blocks.push(Self::to_scan_block(dto)?);
             }
@@ -292,9 +408,8 @@ impl TxSink for RpcChainSource {
             let status = resp.status();
 
             if status.is_success() {
-                let parsed: SubmitRespDto = resp
-                    .json()
-                    .map_err(|e| RpcSourceError::Decode(e.to_string()))?;
+                let parsed: SubmitRespDto =
+                    decode_bounded_json(resp, MAX_RPC_CONTROL_RESPONSE_BYTES)?;
                 if !parsed.accepted {
                     return Err(RpcSourceError::Rejected(
                         parsed.error.unwrap_or_else(|| "not accepted".into()),
@@ -320,8 +435,8 @@ impl TxSink for RpcChainSource {
                 continue;
             }
             // Read the node's error body for context.
-            let msg = resp
-                .json::<SubmitRespDto>()
+            let error_bytes = read_bounded_response(resp, MAX_RPC_CONTROL_RESPONSE_BYTES)?;
+            let msg = serde_json::from_slice::<SubmitRespDto>(&error_bytes)
                 .ok()
                 .and_then(|p| p.error)
                 .unwrap_or_default();
@@ -340,9 +455,64 @@ impl TxSink for RpcChainSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::{Cursor, Read, Write};
     use std::net::{Shutdown, TcpListener, TcpStream};
     use std::sync::{mpsc, Arc, Mutex};
+
+    #[test]
+    fn streaming_response_without_content_length_is_bounded() {
+        let limit = 64;
+        let error = read_bounded_stream(Cursor::new(vec![0x41; limit + 1]), limit, 0)
+            .expect_err("stream larger than its allocation budget must fail");
+        assert!(matches!(
+            error,
+            RpcSourceError::ResponseTooLarge { limit: 64 }
+        ));
+    }
+
+    #[test]
+    fn scan_page_requires_exact_range_and_consensus_bounded_commitments() {
+        let tip = TipDto {
+            height: 0,
+            hash: "00".repeat(32),
+        };
+        let wrong_range = ChainScanDto {
+            tip,
+            from: 1,
+            to: 1,
+            blocks: vec![ScanBlockDto {
+                height: 1,
+                hash: "00".repeat(32),
+                output_commitments: Vec::new(),
+                input_commitments: Vec::new(),
+                fees: 0,
+            }],
+        };
+        assert!(matches!(
+            validate_scan_page(&wrong_range, 0, 0),
+            Err(RpcSourceError::Decode(_))
+        ));
+
+        let excessive_commitments = ChainScanDto {
+            tip: TipDto {
+                height: 0,
+                hash: "00".repeat(32),
+            },
+            from: 0,
+            to: 0,
+            blocks: vec![ScanBlockDto {
+                height: 0,
+                hash: "00".repeat(32),
+                output_commitments: vec![String::new(); MAX_BLOCK_WEIGHT as usize + 1],
+                input_commitments: Vec::new(),
+                fees: 0,
+            }],
+        };
+        assert!(matches!(
+            validate_scan_page(&excessive_commitments, 0, 0),
+            Err(RpcSourceError::Decode(_))
+        ));
+    }
 
     /// A minimal blocking mock HTTP server. For each connection it reads the
     /// request line, parses `from`/`to`, and writes whatever the handler returns
@@ -513,8 +683,8 @@ mod tests {
 
     #[test]
     fn scan_range_pages_across_the_cap() {
-        // Node caps at 1000/call, tip 2500 → the client must page 3 times and
-        // collect all 2501 blocks (0..=2500).
+        // The node permits 1000/call, but the client independently requests
+        // bounded 16-block pages and still collects all 2501 blocks.
         let (base, stop) = spawn_mock(|from, to| scan_body(from, to, 2500, 1000));
         let src = source(&base);
         let blocks = src.scan_range(0, 2500).unwrap();
@@ -564,8 +734,8 @@ mod tests {
 
     #[test]
     fn scan_for_restore_carries_fees_and_pages() {
-        // Tip 1500, cap 1000 → the restore scan must page twice and preserve the
-        // per-block `fees` (which the reconciler's ScanBlock drops) verbatim.
+        // Tip 1500, server cap 1000: the client still uses its smaller fixed
+        // page and preserves per-block fees verbatim.
         let requests = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&requests);
         let (base, stop) = spawn_mock(move |from, to| {
@@ -574,7 +744,16 @@ mod tests {
         });
         let src = source(&base);
         let blocks = src.scan_for_restore(0, 1500).unwrap();
-        assert_eq!(*requests.lock().unwrap(), vec![(0, 1500), (1000, 1500)]);
+        let expected_requests: Vec<(u64, u64)> = (0..=1500)
+            .step_by(MAX_RPC_SCAN_BLOCKS_PER_PAGE as usize)
+            .map(|from| {
+                (
+                    from,
+                    1500.min(from + MAX_RPC_SCAN_BLOCKS_PER_PAGE.saturating_sub(1)),
+                )
+            })
+            .collect();
+        assert_eq!(*requests.lock().unwrap(), expected_requests);
         assert_eq!(blocks.len(), 1501);
         assert_eq!(blocks.first().unwrap().height, 0);
         assert_eq!(blocks[999].height, 999);

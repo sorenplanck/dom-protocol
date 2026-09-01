@@ -13,6 +13,7 @@ rpc-http = ["dep:reqwest", "dep:serde", "dep:serde_json"]
 
 [dependencies]
 adapter-evm = { path = "../adapters/evm", default-features = false }
+blake2 = { workspace = true }
 deployment-registry = { path = "../deployment-registry" }
 k256 = { workspace = true }
 reqwest = { workspace = true, optional = true }
@@ -23,7 +24,7 @@ thiserror = { workspace = true }
 zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "=1.1.4", default-features = false, features = ["fs", "process"] }
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
 
 [dev-dependencies]
 adapter-btc = { path = "../adapters/btc" }

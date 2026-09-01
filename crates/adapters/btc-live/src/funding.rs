@@ -1,7 +1,9 @@
 //! Real-wallet, durable prebroadcast Bitcoin funding boundary.
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::rc::Rc;
 
 use adapter_btc::templates::{
     frozen_template_digest_v1, BitcoinPrevoutV1, BitcoinTxInV1, BitcoinTxOutV1,
@@ -291,6 +293,8 @@ impl BitcoinFundingBroadcastReceiptV1 {
 /// `sendrawtransaction` during preparation or refund arming.
 pub struct BitcoinPrebroadcastStoreV1 {
     pub(crate) store: DurableStageStoreV1,
+    pub(crate) authority_instance: Rc<()>,
+    pub(crate) fresh_claim_issued: Cell<bool>,
 }
 
 impl core::fmt::Debug for BitcoinPrebroadcastStoreV1 {
@@ -339,7 +343,26 @@ struct BroadcastRecord {
 impl BitcoinPrebroadcastStoreV1 {
     /// Opens or creates an owner-only, exclusively locked route store.
     pub fn open_or_create(path: &Path) -> Result<Self, LiveBitcoinError> {
-        DurableStageStoreV1::open_or_create(path).map(|store| Self { store })
+        DurableStageStoreV1::open_or_create(path).map(|store| Self {
+            store,
+            authority_instance: Rc::new(()),
+            fresh_claim_issued: Cell::new(false),
+        })
+    }
+
+    /// Opens a fully provisioned owner authority without creating any missing
+    /// directory, process lock, or authentication key.
+    ///
+    /// This is the only acceptable composition-root entrypoint: the fresh
+    /// route and its refund must already exist before the final production
+    /// bootstrap can authenticate them.  Missing custody therefore fails
+    /// closed instead of being replaced with a new unrelated store.
+    pub fn open_existing(path: &Path) -> Result<Self, LiveBitcoinError> {
+        DurableStageStoreV1::open_existing(path).map(|store| Self {
+            store,
+            authority_instance: Rc::new(()),
+            fresh_claim_issued: Cell::new(false),
+        })
     }
 
     /// Uses the concrete wallet to select/lock real UTXOs and return a fully

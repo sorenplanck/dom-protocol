@@ -1455,22 +1455,22 @@ impl<C: Clock> RouteSupervisorV1<C> {
 
     /// Current route snapshot.
     pub fn snapshot(&self) -> Result<RouteSnapshotV1, RouteSupervisorErrorV1> {
-        Ok(self.store.load_snapshot(self.lease.route_id)?)
+        self.store.load_snapshot(self.lease.route_id)
     }
 
     /// Verified public route journal, primarily for recovery/diagnostics.
     pub fn journal(&self) -> Result<Vec<RouteJournalEntryV1>, RouteSupervisorErrorV1> {
-        Ok(self.store.journal(self.lease.route_id)?)
+        self.store.journal(self.lease.route_id)
     }
 
     /// Number of pending outbox rows across fencing generations.
     pub fn pending_effect_count(&self) -> Result<u64, RouteSupervisorErrorV1> {
-        Ok(self.store.pending_effect_count(self.lease.route_id)?)
+        self.store.pending_effect_count(self.lease.route_id)
     }
 
     /// Number of active timers across fencing generations.
     pub fn active_timer_count(&self) -> Result<u64, RouteSupervisorErrorV1> {
-        Ok(self.store.active_timer_count(self.lease.route_id)?)
+        self.store.active_timer_count(self.lease.route_id)
     }
 
     /// Mint the move-only terminal proof used to retire this route's encrypted
@@ -2057,9 +2057,8 @@ impl<C: Clock> RouteSupervisorV1<C> {
         expected_revision: u64,
         now: u64,
     ) -> Result<CommitOutcomeV1, RouteSupervisorErrorV1> {
-        Ok(self
-            .store
-            .apply_event(self.lease, expected_revision, event_id, event, now)?)
+        self.store
+            .apply_event(self.lease, expected_revision, event_id, event, now)
     }
 
     fn submit_fresh_event(

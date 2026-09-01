@@ -992,7 +992,7 @@ impl RestartableSharedBlindingVaultV1 for ContractsNonceVaultV1 {
                 // fallible and multi-line: a `?` in a guard is harder to read
                 // and to audit than the explicit arm, and this arm decides a
                 // quarantine.
-                #[allow(clippy::collapsible_match)]
+                #[expect(clippy::collapsible_match, reason = "the explicit arm keeps a fallible quarantine decision readable and auditable")]
                 StateKind::SharedBoundRetired => {
                     if capability
                         .bound_candidate(request, &record.binding)

@@ -104,8 +104,12 @@ pub use durable::{
     ContractsRouteDeliveryEvidenceV2, ContractsRouteDeliveryV1, ContractsTransportPortV1,
     DurableInboxConfigV1, DurableInboxEnvelopeRefusalV1, DurableInboxError,
     DurableInboxIngestReportV1, DurableInboxStatsV1, DurablePayloadCommitV1,
-    DurablePayloadDispositionV1, DurableRelayInboxV1, F6DispatchErrorV1, F6DispatchReportV1,
-    F6PayloadDeliveryV1, F6TransportPortV1, RouteDispatchErrorV1, RouteDispatchReportV1,
+    DurablePayloadDispositionV1, DurableQuarantineAuthorityV1, DurableQuarantineReasonV1,
+    DurableQuarantineResolutionCommitV1, DurableQuarantineResolutionErrorV1,
+    DurableQuarantineResolutionReportV1, DurableQuarantineResolutionRequestV1,
+    DurableQuarantineResolutionV1, DurableRelayInboxV1, F6AppliedReplayErrorV1,
+    F6AppliedReplayReportV1, F6DispatchErrorV1, F6DispatchReportV1, F6PayloadDeliveryV1,
+    F6TransportPortV1, RouteDispatchErrorV1, RouteDispatchReportV1,
 };
 #[cfg(target_os = "linux")]
 pub use durable_sender::{
@@ -189,16 +193,65 @@ pub enum BridgeRefusal {
     SequenceExhausted,
 }
 
-/// Closed queue surface shared by the in-memory protocol reference and the
-/// durable Linux Relay.  Transport code cannot accidentally call an API that
-/// exists on only one backend, and queue failures stay named.
+/// Compatibility-only full-mailbox surface for the in-memory protocol
+/// reference and explicit ephemeral harnesses. Production Relay deliberately
+/// does not implement this trait; outbound production code receives only
+/// [`RelaySubmitQueueV1`] and inbound production code receives the concrete
+/// bounded V2 authority.
 pub trait RelayQueueV1 {
     /// Durably (or, for the reference queue, atomically in memory) retain one
     /// exact canonical envelope before returning its acknowledgement.
     fn queue_submit(&mut self, raw: &[u8]) -> Result<AckV1, BridgeRefusal>;
 
     /// Return the at-least-once mailbox for one recipient.
-    fn queue_deliver(&self, recipient: &ParticipantId) -> Result<Vec<Vec<u8>>, BridgeRefusal>;
+    fn queue_deliver_ephemeral_v1(
+        &self,
+        recipient: &ParticipantId,
+    ) -> Result<Vec<Vec<u8>>, BridgeRefusal>;
+}
+
+/// Minimal Relay submission authority.  Production outbound code receives no
+/// mailbox-reading capability through this boundary.
+pub trait RelaySubmitQueueV1 {
+    /// Durably (or, for a reference harness, atomically in memory) retain one
+    /// exact canonical envelope before returning its acknowledgement.
+    fn queue_submit(&mut self, raw: &[u8]) -> Result<AckV1, BridgeRefusal>;
+}
+
+impl<T: RelayQueueV1 + ?Sized> RelaySubmitQueueV1 for T {
+    fn queue_submit(&mut self, raw: &[u8]) -> Result<AckV1, BridgeRefusal> {
+        RelayQueueV1::queue_submit(self, raw)
+    }
+}
+
+/// Bounded production delivery surface. Unlike [`RelayQueueV1`], this API
+/// never exposes a recipient's full retained history: one page is durably
+/// pinned, locally persisted by the inbox, and only then acknowledged.
+#[cfg(target_os = "linux")]
+trait RelayQueueV2 {
+    /// Stable database identity retained by the concrete Relay authority.
+    fn queue_database_id_v2(&self) -> relay::production::RelayDatabaseIdV1;
+
+    /// Exact currently acknowledged cursor for one recipient.
+    fn queue_acknowledged_cursor_v2(
+        &self,
+        recipient: &ParticipantId,
+    ) -> Result<relay::production::DeliveryCursorV2, BridgeRefusal>;
+
+    /// Pins or redelivers one exact bounded page.
+    fn queue_delivery_page_v2(
+        &mut self,
+        recipient: &ParticipantId,
+        current: &relay::production::DeliveryCursorV2,
+        limits: relay::production::DeliveryPageLimitsV2,
+    ) -> Result<relay::production::DeliveryPageV2, BridgeRefusal>;
+
+    /// Durably advances only the exact pending page.
+    fn queue_acknowledge_delivery_page_v2(
+        &mut self,
+        recipient: &ParticipantId,
+        next: &relay::production::DeliveryCursorV2,
+    ) -> Result<relay::production::DeliveryAckV2, BridgeRefusal>;
 }
 
 impl RelayQueueV1 for RelayV1 {
@@ -206,19 +259,52 @@ impl RelayQueueV1 for RelayV1 {
         self.submit(raw).map_err(BridgeRefusal::Relay)
     }
 
-    fn queue_deliver(&self, recipient: &ParticipantId) -> Result<Vec<Vec<u8>>, BridgeRefusal> {
+    fn queue_deliver_ephemeral_v1(
+        &self,
+        recipient: &ParticipantId,
+    ) -> Result<Vec<Vec<u8>>, BridgeRefusal> {
         Ok(self.deliver(recipient))
     }
 }
 
 #[cfg(target_os = "linux")]
-impl RelayQueueV1 for relay::production::ProductionRelayV1 {
+impl RelaySubmitQueueV1 for relay::production::ProductionRelayV1 {
     fn queue_submit(&mut self, raw: &[u8]) -> Result<AckV1, BridgeRefusal> {
         self.submit(raw).map_err(BridgeRefusal::DurableRelay)
     }
+}
 
-    fn queue_deliver(&self, recipient: &ParticipantId) -> Result<Vec<Vec<u8>>, BridgeRefusal> {
-        self.deliver(recipient).map_err(BridgeRefusal::DurableRelay)
+#[cfg(target_os = "linux")]
+impl RelayQueueV2 for relay::production::ProductionRelayV1 {
+    fn queue_database_id_v2(&self) -> relay::production::RelayDatabaseIdV1 {
+        self.database_id()
+    }
+
+    fn queue_acknowledged_cursor_v2(
+        &self,
+        recipient: &ParticipantId,
+    ) -> Result<relay::production::DeliveryCursorV2, BridgeRefusal> {
+        self.acknowledged_delivery_cursor_v2(recipient)
+            .map_err(BridgeRefusal::DurableRelay)
+    }
+
+    fn queue_delivery_page_v2(
+        &mut self,
+        recipient: &ParticipantId,
+        current: &relay::production::DeliveryCursorV2,
+        limits: relay::production::DeliveryPageLimitsV2,
+    ) -> Result<relay::production::DeliveryPageV2, BridgeRefusal> {
+        self.delivery_page_v2(recipient, current, limits)
+            .map_err(BridgeRefusal::DurableRelay)
+    }
+
+    fn queue_acknowledge_delivery_page_v2(
+        &mut self,
+        recipient: &ParticipantId,
+        next: &relay::production::DeliveryCursorV2,
+    ) -> Result<relay::production::DeliveryAckV2, BridgeRefusal> {
+        self.acknowledge_delivery_page_v2(recipient, next)
+            .map_err(BridgeRefusal::DurableRelay)
     }
 }
 
@@ -637,7 +723,7 @@ impl RouteSenderV1 {
     /// Submits exact already-persisted outbox bytes and advances only after an
     /// ACK binds both their idempotency key and digest.  Repeating this call
     /// from the old checkpoint after ACK loss is safe and deterministic.
-    pub fn submit_prepared<Q: RelayQueueV1>(
+    pub fn submit_prepared<Q: RelaySubmitQueueV1>(
         &mut self,
         relay: &mut Q,
         prepared: &PreparedRouteEnvelopeV1,
@@ -702,7 +788,7 @@ impl RouteSenderV1 {
     #[deprecated(
         note = "ephemeral convenience only; production must persist prepare()+checkpoint() before submit_prepared()"
     )]
-    pub fn send<Q: RelayQueueV1>(
+    pub fn send<Q: RelaySubmitQueueV1>(
         &mut self,
         relay: &mut Q,
         payload: Vec<u8>,
@@ -750,7 +836,7 @@ pub fn receive_route_payloads<Q: RelayQueueV1>(
         refused: Vec::new(),
         skipped: 0,
     };
-    let mailbox = match relay.queue_deliver(&ctx.recipient_id) {
+    let mailbox = match relay.queue_deliver_ephemeral_v1(&ctx.recipient_id) {
         Ok(mailbox) => mailbox,
         Err(refusal) => {
             delivery.refused.push(refusal);

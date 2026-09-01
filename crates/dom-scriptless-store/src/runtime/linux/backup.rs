@@ -703,7 +703,10 @@ fn hex_lower(input: &[u8]) -> String {
 
 /// Creates, verifies, and atomically publishes one exact canonical backup.
 #[cfg(any(test, feature = "evidence-only"))]
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct authenticated authority; bundling would blur ownership"
+)]
 pub(super) fn create_backup(
     root: &RetainedDirectory,
     master_key: &VaultMasterKey,

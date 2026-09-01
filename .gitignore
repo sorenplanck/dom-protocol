@@ -62,3 +62,4 @@ docs/FIX-014_*.md
 
 target/
 **/target/
+docs/interop/DOM-INTEROP-IMPLEMENTATION-LOG.md

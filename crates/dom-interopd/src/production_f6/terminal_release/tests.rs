@@ -24,7 +24,10 @@ fn binding(position: SettlementPositionV2) -> ProductionSolverF6BindingV2 {
     ProductionSolverF6BindingV2 {
         wire: RouteWireContextV1 {
             network_id: id(1),
-            session_id: id(2),
+            session_id: match position {
+                SettlementPositionV2::Upstream => id(2),
+                SettlementPositionV2::Downstream => id(24),
+            },
             route_id: id(3),
             roster_snapshot: id(4),
             policy_version: 1,
@@ -33,7 +36,7 @@ fn binding(position: SettlementPositionV2) -> ProductionSolverF6BindingV2 {
             SettlementPositionV2::Upstream => id(5),
             SettlementPositionV2::Downstream => id(6),
         },
-        composition_id: id(7),
+        composition_id: id(25),
         position,
         initiator: ParticipantId(id(8)),
         solver: ParticipantId(id(9)),
@@ -157,7 +160,7 @@ fn terminal_release_is_route_replayed_position_bound_and_busy_fail_closed(
         CommitOutcomeV1::Committed { revision: 2, .. }
     ));
     let upstream_proof = upstream.prove_terminal_release(&upstream_binding, id(44))?;
-    assert_eq!(upstream_proof.composition_id, id(7));
+    assert_eq!(upstream_proof.composition_id, id(25));
     assert_eq!(upstream_proof.position, SettlementPositionV2::Upstream);
     assert_eq!(upstream_proof.rfq_id, id(5));
     assert_eq!(upstream_proof.reservation_id, id(44));

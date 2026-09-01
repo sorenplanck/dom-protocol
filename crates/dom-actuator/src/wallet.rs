@@ -9,8 +9,10 @@ use std::path::{Path, PathBuf};
 use blake2::digest::{consts::U32, Digest};
 use blake2::Blake2b;
 use dom_adaptor::{SessionBlindingShareCapabilityV1, SigningShareV1};
+use dom_crypto::pedersen::{BlindingFactor, Commitment};
 use dom_wallet2::{
-    load_wallet_state, save_wallet_state, OutputStatus, StoredOutput, WalletV2State,
+    load_wallet_state, migrate_wallet_state_v2_to_v3_under_owner_lock, save_wallet_state,
+    OutputOrigin, OutputStatus, PayoutForV1, PayoutPinDisposition, StoredOutput, WalletV2State,
 };
 #[cfg(target_os = "linux")]
 use rustix::fs::{flock, FlockOperation};
@@ -22,12 +24,15 @@ use crate::model::{
     Digest32, DomActionV1, DomActuatorCapabilityV1, DomActuatorError, DomActuatorResult,
     DomParticipantSigningShareV1, DomSessionBindingV1,
 };
-use crate::store::{DomActuatorStoreV1, DomLeaseV1, DomOperationDispositionV1};
+use crate::store::{
+    DomActuatorStoreV1, DomLeaseV1, DomOperationDispositionV1, RetainedDomPayoutFaceEvidenceV1,
+};
 
 const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 const RESERVATION_ACTIVE: i64 = 1;
 const MAX_WALLET_CIPHERTEXT_BYTES: u64 = 64 * 1024 * 1024;
+const PAYOUT_OWNERSHIP_DOMAIN: &[u8] = b"DOM:wallet-payout-ownership:v1";
 
 /// Closed position of one Scriptless Contracts session served by the wallet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +164,88 @@ pub struct DomOutputReservationV1 {
     outputs: Vec<DomReservedOutputV1>,
 }
 
+/// Exact wallet-owned payout requested for one route session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DomPayoutFaceRequestV1 {
+    payout_commitment: [u8; 33],
+    payout_value: u64,
+    now_unix_ms: u64,
+}
+
+/// Purpose-specific request to select the only wallet-owned payout matching
+/// one authenticated settlement amount. No caller supplies a commitment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DomPayoutFaceSelectionRequestV1 {
+    payout_value: u64,
+    now_unix_ms: u64,
+}
+
+impl DomPayoutFaceSelectionRequestV1 {
+    /// Constructs a bounded selection request. The F6 terms authority later
+    /// rechecks this value against the authenticated composed settlement.
+    pub fn new(payout_value: u64, now_unix_ms: u64) -> DomActuatorResult<Self> {
+        if payout_value == 0 || now_unix_ms == 0 {
+            return Err(DomActuatorError::InvalidBinding);
+        }
+        Ok(Self {
+            payout_value,
+            now_unix_ms,
+        })
+    }
+}
+
+impl DomPayoutFaceRequestV1 {
+    /// Constructs a nonzero payout request. Ownership is proven by the wallet,
+    /// not by this public value.
+    pub fn new(
+        payout_commitment: [u8; 33],
+        payout_value: u64,
+        now_unix_ms: u64,
+    ) -> DomActuatorResult<Self> {
+        if payout_value == 0 {
+            return Err(DomActuatorError::InvalidBinding);
+        }
+        Ok(Self {
+            payout_commitment,
+            payout_value,
+            now_unix_ms,
+        })
+    }
+}
+
+/// Move-only proof that the retained wallet and DOM actuator store jointly
+/// pinned one real payout output to one route/session revision.
+pub struct AuthenticatedDomPayoutFaceV1 {
+    retained: RetainedDomPayoutFaceEvidenceV1,
+}
+
+impl AuthenticatedDomPayoutFaceV1 {
+    /// Exact session that owns this payout face.
+    pub const fn binding(&self) -> DomSessionBindingV1 {
+        self.retained.binding
+    }
+
+    /// Wallet-owned Pedersen payout commitment.
+    pub const fn payout_commitment(&self) -> [u8; 33] {
+        self.retained.payout_commitment
+    }
+
+    /// Wallet-authenticated payout value in noms.
+    pub const fn payout_value(&self) -> u64 {
+        self.retained.payout_value
+    }
+
+    /// Durable owner record digest.
+    pub const fn evidence_digest(&self) -> Digest32 {
+        self.retained.record_digest
+    }
+
+    /// Monotonic DOM session journal revision at which the face was pinned.
+    pub const fn evidence_revision(&self) -> u64 {
+        self.retained.evidence_revision
+    }
+}
+
 impl DomOutputReservationV1 {
     /// Public commitment written into each wallet output's `reserved_for` field.
     pub const fn reservation_digest(&self) -> Digest32 {
@@ -192,8 +279,8 @@ pub struct FundingSigningShareRequestV1<'authority> {
 
 /// Public context required to compose one shared-output spend signing share.
 pub struct SharedOutputSpendSigningShareRequestV1<'authority> {
-    /// Exact local payout commitment whose blinding remains in the wallet.
-    pub payout_commitment: [u8; 33],
+    /// Store- and wallet-authenticated local payout face.
+    pub payout: &'authority AuthenticatedDomPayoutFaceV1,
     /// Participant offset supplied by the authenticated signing transcript.
     pub participant_offset: &'authority [u8; 32],
     /// Opaque shared-output blinding authority for this exact session.
@@ -243,8 +330,12 @@ impl DomParticipantWalletV1 {
         }
         authority.validate()?;
         validate_wallet_path(path)?;
-        let process_lock = acquire_wallet_lock(path)?;
+        let mut process_lock = acquire_wallet_lock(path)?;
         reject_ambiguous_temp(path)?;
+        migrate_wallet_state_v2_to_v3_under_owner_lock(path, password.as_str(), &mut process_lock)
+            .map_err(|_| DomActuatorError::WalletUnavailable)?;
+        reject_ambiguous_temp(path)?;
+        validate_wallet_path(path)?;
         let wallet_file = open_wallet_file(path)?;
         validate_open_file_identity(&wallet_file, path)?;
         let state = load_wallet_state(path, password.as_str())
@@ -438,6 +529,181 @@ impl DomParticipantWalletV1 {
         })
     }
 
+    fn authenticate_payout_face_for_session(
+        &mut self,
+        leg: DomWalletSessionLegV1,
+        store: &mut DomActuatorStoreV1,
+        lease: DomLeaseV1,
+        request: DomPayoutFaceRequestV1,
+    ) -> DomActuatorResult<AuthenticatedDomPayoutFaceV1> {
+        let binding = self.require_session(leg)?;
+        self.audit_physical_authority()?;
+        let (payout_commitment, payout_value, wallet_ownership_digest, existing_pin) = {
+            let output = self
+                .state
+                .outputs
+                .get(&request.payout_commitment)
+                .ok_or(DomActuatorError::WalletUnavailable)?;
+            if output.value != request.payout_value
+                || output.origin != OutputOrigin::ReceiveSlate
+                || output.is_coinbase
+                || output.derivable.is_some()
+                || output.reserved_for.is_some()
+            {
+                return Err(DomActuatorError::InvalidBinding);
+            }
+            if output.payout_for().is_none()
+                && (output.status != OutputStatus::Unconfirmed || output.origin_block.is_some())
+            {
+                return Err(DomActuatorError::InvalidBinding);
+            }
+            let blinding = BlindingFactor::from_bytes(*output.blinding)
+                .map_err(|_| DomActuatorError::WalletUnavailable)?;
+            if Commitment::commit(output.value, &blinding).as_bytes() != &output.commitment {
+                return Err(DomActuatorError::WalletUnavailable);
+            }
+            (
+                output.commitment,
+                output.value,
+                payout_ownership_digest(binding, output),
+                output.payout_for(),
+            )
+        };
+        let prepared = match existing_pin {
+            Some(pin) => store.recover_payout_face_preparation(
+                lease,
+                binding,
+                pin.prepare_digest(),
+                request.now_unix_ms,
+            )?,
+            None => store.prepare_payout_face(
+                lease,
+                binding,
+                payout_commitment,
+                payout_value,
+                wallet_ownership_digest,
+                request.now_unix_ms,
+            )?,
+        };
+        if prepared.binding != binding
+            || prepared.payout_commitment != payout_commitment
+            || prepared.payout_value != payout_value
+            || prepared.wallet_ownership_digest != wallet_ownership_digest
+            || prepared.store_instance_id == [0; 32]
+            || prepared.prepare_digest == [0; 32]
+            || prepared.created_at_unix_ms == 0
+        {
+            return Err(DomActuatorError::InvalidStorageAuthority);
+        }
+        let expected_pin = PayoutForV1::new(prepared.prepare_digest)
+            .map_err(|_| DomActuatorError::InvalidStorageAuthority)?;
+        if let Some(pin) = existing_pin {
+            if pin != expected_pin {
+                return Err(DomActuatorError::CapabilityMismatch);
+            }
+        }
+        match self
+            .state
+            .outputs
+            .pin_payout(
+                &payout_commitment,
+                expected_pin,
+                request.now_unix_ms / 1_000,
+            )
+            .map_err(|_| DomActuatorError::OutputReservationConflict)?
+        {
+            PayoutPinDisposition::Pinned => self.persist_securely()?,
+            PayoutPinDisposition::Idempotent => {}
+        }
+        self.audit_physical_authority()?;
+        let pinned = self
+            .state
+            .outputs
+            .get(&payout_commitment)
+            .ok_or(DomActuatorError::WalletUnavailable)?;
+        let pinned_blinding = BlindingFactor::from_bytes(*pinned.blinding)
+            .map_err(|_| DomActuatorError::WalletUnavailable)?;
+        if pinned.payout_for() != Some(expected_pin)
+            || pinned.value != payout_value
+            || Commitment::commit(pinned.value, &pinned_blinding).as_bytes() != &pinned.commitment
+            || payout_ownership_digest(binding, pinned) != wallet_ownership_digest
+        {
+            return Err(DomActuatorError::InvalidStorageAuthority);
+        }
+        let retained = store.activate_payout_face(
+            lease,
+            &prepared,
+            self.ciphertext_digest,
+            request.now_unix_ms,
+        )?;
+        if retained.binding != binding
+            || retained.payout_commitment != payout_commitment
+            || retained.payout_value != payout_value
+            || retained.wallet_ownership_digest != wallet_ownership_digest
+            || retained.store_instance_id != prepared.store_instance_id
+            || retained.prepare_digest != prepared.prepare_digest
+            || retained.wallet_ciphertext_digest == [0; 32]
+            || retained.evidence_revision == 0
+            || retained.record_digest == [0; 32]
+            || retained.created_at_unix_ms == 0
+        {
+            return Err(DomActuatorError::InvalidStorageAuthority);
+        }
+        self.audit_physical_authority()?;
+        Ok(AuthenticatedDomPayoutFaceV1 { retained })
+    }
+
+    fn authenticate_unique_payout_face_for_session(
+        &mut self,
+        leg: DomWalletSessionLegV1,
+        store: &mut DomActuatorStoreV1,
+        lease: DomLeaseV1,
+        request: DomPayoutFaceSelectionRequestV1,
+    ) -> DomActuatorResult<AuthenticatedDomPayoutFaceV1> {
+        let binding = self.require_session(leg)?;
+        self.audit_physical_authority()?;
+        let selection =
+            store.retained_payout_face_selection(lease, binding, request.now_unix_ms)?;
+        let payout_commitment = match selection {
+            Some((commitment, value)) => {
+                if value != request.payout_value {
+                    return Err(DomActuatorError::InvalidBinding);
+                }
+                commitment
+            }
+            None => {
+                let mut candidates = self.state.outputs.iter().filter(|output| {
+                    output.value == request.payout_value
+                        && output.origin == OutputOrigin::ReceiveSlate
+                        && !output.is_coinbase
+                        && output.derivable.is_none()
+                        && output.reserved_for.is_none()
+                        && output.payout_for().is_none()
+                        && output.status == OutputStatus::Unconfirmed
+                        && output.origin_block.is_none()
+                });
+                let commitment = candidates
+                    .next()
+                    .map(|output| output.commitment)
+                    .ok_or(DomActuatorError::InvalidBinding)?;
+                if candidates.next().is_some() {
+                    return Err(DomActuatorError::OutputReservationConflict);
+                }
+                commitment
+            }
+        };
+        self.authenticate_payout_face_for_session(
+            leg,
+            store,
+            lease,
+            DomPayoutFaceRequestV1::new(
+                payout_commitment,
+                request.payout_value,
+                request.now_unix_ms,
+            )?,
+        )
+    }
+
     /// Compose this participant's funding kernel share without exporting any blinding.
     ///
     /// The scalar arithmetic is delegated to `dom-slate` and `dom-adaptor`.
@@ -509,7 +775,7 @@ impl DomParticipantWalletV1 {
         request: SharedOutputSpendSigningShareRequestV1<'_>,
     ) -> DomActuatorResult<DomParticipantSigningShareV1> {
         let SharedOutputSpendSigningShareRequestV1 {
-            payout_commitment,
+            payout,
             participant_offset,
             shared,
             now_unix_ms,
@@ -519,11 +785,38 @@ impl DomParticipantWalletV1 {
         self.require_signing_capability(binding, capability)?;
         store.validate_live_capability(lease, capability, now_unix_ms)?;
         self.require_shared_binding(binding, shared)?;
+        if payout.retained.binding != binding
+            || payout.retained.payout_value == 0
+            || payout.retained.record_digest == [0; 32]
+            || payout.retained.evidence_revision == 0
+        {
+            return Err(DomActuatorError::CapabilityMismatch);
+        }
+        store.validate_payout_face(lease, &payout.retained, now_unix_ms)?;
         let output = self
             .state
             .outputs
-            .get(&payout_commitment)
+            .get(&payout.retained.payout_commitment)
             .ok_or(DomActuatorError::WalletUnavailable)?;
+        if output.value != payout.retained.payout_value
+            || output.origin != OutputOrigin::ReceiveSlate
+            || output.status != OutputStatus::Unconfirmed
+            || output.origin_block.is_some()
+            || output.is_coinbase
+            || output.derivable.is_some()
+            || output.reserved_for.is_some()
+        {
+            return Err(DomActuatorError::CapabilityMismatch);
+        }
+        let blinding = BlindingFactor::from_bytes(*output.blinding)
+            .map_err(|_| DomActuatorError::WalletUnavailable)?;
+        if Commitment::commit(output.value, &blinding).as_bytes() != &output.commitment
+            || payout_ownership_digest(binding, output) != payout.retained.wallet_ownership_digest
+            || output.payout_for().map(PayoutForV1::prepare_digest)
+                != Some(payout.retained.prepare_digest)
+        {
+            return Err(DomActuatorError::CapabilityMismatch);
+        }
         let mut payout_excess = Zeroizing::new(
             dom_slate::sender_excess_blinding(
                 core::iter::empty::<&[u8; 32]>(),
@@ -685,6 +978,31 @@ impl DomParticipantWalletSessionV1<'_> {
         self.leg
     }
 
+    /// Recomputes ownership inside the encrypted wallet and durably pins the
+    /// exact payout output to this session before it can enter F6 terms.
+    pub fn authenticate_payout_face(
+        &mut self,
+        store: &mut DomActuatorStoreV1,
+        lease: DomLeaseV1,
+        request: DomPayoutFaceRequestV1,
+    ) -> DomActuatorResult<AuthenticatedDomPayoutFaceV1> {
+        self.wallet
+            .authenticate_payout_face_for_session(self.leg, store, lease, request)
+    }
+
+    /// Selects and pins the sole eligible wallet-owned payout for this exact
+    /// session and value. A missing or ambiguous output fails before the
+    /// actuator Store or encrypted wallet is mutated.
+    pub fn authenticate_unique_payout_face(
+        &mut self,
+        store: &mut DomActuatorStoreV1,
+        lease: DomLeaseV1,
+        request: DomPayoutFaceSelectionRequestV1,
+    ) -> DomActuatorResult<AuthenticatedDomPayoutFaceV1> {
+        self.wallet
+            .authenticate_unique_payout_face_for_session(self.leg, store, lease, request)
+    }
+
     /// Select, durably reserve and encrypt the exact wallet outputs.
     pub fn reserve_outputs(
         &mut self,
@@ -832,6 +1150,38 @@ fn hash_session_binding(
         hasher.update((part.len() as u64).to_be_bytes());
         hasher.update(part);
     }
+}
+
+fn payout_ownership_digest(binding: DomSessionBindingV1, output: &StoredOutput) -> Digest32 {
+    let runtime = binding.runtime_identity();
+    let mut hasher = Blake2b::<U32>::new();
+    for part in [
+        PAYOUT_OWNERSHIP_DOMAIN,
+        binding.route_id().as_slice(),
+        binding.session_id().as_slice(),
+        binding.participant().participant_id().as_slice(),
+        [binding.participant().protocol_index()].as_slice(),
+        binding.chain_id().as_slice(),
+        binding.genesis_hash().as_slice(),
+        [runtime.network as u8].as_slice(),
+        runtime.network_magic.to_be_bytes().as_slice(),
+        runtime.protocol_version.to_be_bytes().as_slice(),
+        [runtime.range_proof_serialization_version].as_slice(),
+        binding.terms_digest().as_slice(),
+        binding.profile_digest().as_slice(),
+        binding.deployment_digest().as_slice(),
+        binding.asset_binding_digest().as_slice(),
+        binding.registry_epoch().to_be_bytes().as_slice(),
+        binding.min_confirmations().to_be_bytes().as_slice(),
+        binding.max_reorg_depth().to_be_bytes().as_slice(),
+        output.commitment.as_slice(),
+        output.value.to_be_bytes().as_slice(),
+        output.created_at.to_be_bytes().as_slice(),
+    ] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    hasher.finalize().into()
 }
 
 fn reservation_digest(
@@ -1052,9 +1402,10 @@ mod tests {
 
     use deployment_registry::{DomNetworkV1, DomRuntimeIdentityV1};
     use dom_wallet2::{BlockRef, Network, OutputOrigin, StoredOutput};
+    use static_assertions::assert_not_impl_any;
 
     use crate::model::{CapabilityIssuanceV1, StoredDomSessionBindingPartsV1};
-    use crate::store::tests::{TestContext, TestResult};
+    use crate::store::tests::{payout_face_progress, TestContext, TestResult};
     use crate::{DomParticipantV1, ScopedDomActionV1};
 
     fn digest(tag: u8) -> Digest32 {
@@ -1145,6 +1496,60 @@ mod tests {
         Ok(())
     }
 
+    fn create_payout_wallet(path: &Path, binding: DomSessionBindingV1) -> TestResult<[u8; 33]> {
+        const BLINDING: [u8; 32] = [0x9a; 32];
+        const VALUE: u64 = 50;
+        let blinding = BlindingFactor::from_bytes(BLINDING).test_context("payout blinding")?;
+        let commitment = *Commitment::commit(VALUE, &blinding).as_bytes();
+        let mut state = WalletV2State::new(Network::Regtest, binding.chain_id());
+        state.meta.last_reconciled_tip = 10;
+        state
+            .outputs
+            .insert(StoredOutput::new_unconfirmed(
+                commitment,
+                VALUE,
+                BLINDING,
+                OutputOrigin::ReceiveSlate,
+                false,
+                None,
+                1,
+            ))
+            .test_context("insert payout")?;
+        save_wallet_state(&state, path, "test-password").test_context("save payout wallet")?;
+        fs::set_permissions(path, fs::Permissions::from_mode(FILE_MODE))
+            .test_context("payout wallet mode")?;
+        Ok(commitment)
+    }
+
+    fn create_ambiguous_payout_wallet(path: &Path, binding: DomSessionBindingV1) -> TestResult {
+        const VALUE: u64 = 50;
+        let mut state = WalletV2State::new(Network::Regtest, binding.chain_id());
+        state.meta.last_reconciled_tip = 10;
+        for blinding_bytes in [[0x91; 32], [0x92; 32]] {
+            let blinding =
+                BlindingFactor::from_bytes(blinding_bytes).test_context("payout blinding")?;
+            state
+                .outputs
+                .insert(StoredOutput::new_unconfirmed(
+                    *Commitment::commit(VALUE, &blinding).as_bytes(),
+                    VALUE,
+                    blinding_bytes,
+                    OutputOrigin::ReceiveSlate,
+                    false,
+                    None,
+                    1,
+                ))
+                .test_context("insert ambiguous payout")?;
+        }
+        save_wallet_state(&state, path, "test-password")
+            .test_context("save ambiguous payout wallet")?;
+        fs::set_permissions(path, fs::Permissions::from_mode(FILE_MODE))
+            .test_context("ambiguous payout wallet mode")?;
+        Ok(())
+    }
+
+    assert_not_impl_any!(AuthenticatedDomPayoutFaceV1: Clone, Copy, core::fmt::Debug);
+
     #[test]
     fn reservation_survives_restart_and_no_secret_enters_public_store() -> TestResult {
         const BLINDING: [u8; 32] = [0x9a; 32];
@@ -1232,6 +1637,390 @@ mod tests {
             )
             .test_context("idempotent restart")?;
         assert_eq!(repeated, reservation);
+        Ok(())
+    }
+
+    #[test]
+    fn payout_face_proves_wallet_ownership_and_recovers_exact_revision() -> TestResult {
+        const BLINDING: [u8; 32] = [0x9a; 32];
+        let directory = tempfile::tempdir().test_context("tempdir")?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .test_context("directory mode")?;
+        let wallet_path = directory.path().join("wallet.v2");
+        let store_path = directory.path().join("actuator.sqlite");
+        let (upstream, _, authority) = bindings()?;
+        let commitment = create_payout_wallet(&wallet_path, upstream)?;
+
+        let mut store = DomActuatorStoreV1::create(&store_path).test_context("store")?;
+        let lease = store
+            .acquire_lease(digest(3), digest(20), 1_000, 10_000)
+            .test_context("lease")?;
+        store
+            .bind_session(lease, upstream, 1_000)
+            .test_context("bind")?;
+        let mut wallet = DomParticipantWalletV1::open_existing(
+            &wallet_path,
+            Zeroizing::new("test-password".to_owned()),
+            authority,
+        )
+        .test_context("open wallet")?;
+
+        let wrong_value = wallet
+            .session(DomWalletSessionLegV1::Upstream)?
+            .authenticate_payout_face(
+                &mut store,
+                lease,
+                DomPayoutFaceRequestV1::new(commitment, 51, 1_001)?,
+            );
+        assert_eq!(wrong_value.err(), Some(DomActuatorError::InvalidBinding));
+        assert_eq!(payout_face_progress(&store, upstream)?, (0, 0, 0, 0));
+
+        let first_digest = {
+            let face = wallet
+                .session(DomWalletSessionLegV1::Upstream)?
+                .authenticate_payout_face(
+                    &mut store,
+                    lease,
+                    DomPayoutFaceRequestV1::new(commitment, 50, 1_002)?,
+                )?;
+            assert_eq!(face.binding(), upstream);
+            assert_eq!(face.payout_commitment(), commitment);
+            assert_eq!(face.payout_value(), 50);
+            assert_eq!(face.evidence_revision(), 1);
+            assert_ne!(face.evidence_digest(), [0; 32]);
+            face.evidence_digest()
+        };
+        assert_eq!(payout_face_progress(&store, upstream)?, (1, 1, 1, 1));
+        drop(wallet);
+        drop(store);
+
+        for path in [
+            store_path.clone(),
+            PathBuf::from(format!("{}-wal", store_path.display())),
+        ] {
+            if let Ok(bytes) = fs::read(path) {
+                assert!(
+                    !bytes
+                        .windows(BLINDING.len())
+                        .any(|window| window == BLINDING),
+                    "payout blinding leaked into public actuator storage"
+                );
+            }
+        }
+
+        let mut reopened = DomActuatorStoreV1::open_existing(&store_path)?;
+        let resumed = reopened.acquire_lease(digest(3), digest(20), 1_003, 10_000)?;
+        let mut reopened_wallet = DomParticipantWalletV1::open_existing(
+            &wallet_path,
+            Zeroizing::new("test-password".to_owned()),
+            authority,
+        )?;
+        let recovered = reopened_wallet
+            .session(DomWalletSessionLegV1::Upstream)?
+            .authenticate_payout_face(
+                &mut reopened,
+                resumed,
+                DomPayoutFaceRequestV1::new(commitment, 50, 1_004)?,
+            )?;
+        assert_eq!(recovered.evidence_revision(), 1);
+        assert_eq!(recovered.evidence_digest(), first_digest);
+        assert_eq!(payout_face_progress(&reopened, upstream)?, (1, 1, 1, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn payout_face_recovers_both_prepared_crash_boundaries() -> TestResult {
+        for wallet_was_persisted in [false, true] {
+            let directory = tempfile::tempdir().test_context("tempdir")?;
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+                .test_context("directory mode")?;
+            let wallet_path = directory.path().join("wallet.v2");
+            let store_path = directory.path().join("actuator.sqlite");
+            let (upstream, _, authority) = bindings()?;
+            let commitment = create_payout_wallet(&wallet_path, upstream)?;
+            let mut store = DomActuatorStoreV1::create(&store_path)?;
+            let lease = store.acquire_lease(digest(3), digest(20), 1_000, 10_000)?;
+            store.bind_session(lease, upstream, 1_000)?;
+            let mut wallet = DomParticipantWalletV1::open_existing(
+                &wallet_path,
+                Zeroizing::new("test-password".to_owned()),
+                authority,
+            )?;
+            let ownership = payout_ownership_digest(
+                upstream,
+                wallet
+                    .state
+                    .outputs
+                    .get(&commitment)
+                    .ok_or(DomActuatorError::WalletUnavailable)?,
+            );
+            let prepared =
+                store.prepare_payout_face(lease, upstream, commitment, 50, ownership, 1_001)?;
+            assert_eq!(payout_face_progress(&store, upstream)?, (0, 1, 0, 0));
+            if wallet_was_persisted {
+                let pin = PayoutForV1::new(prepared.prepare_digest)
+                    .map_err(|_| DomActuatorError::InvalidStorageAuthority)?;
+                assert_eq!(
+                    wallet
+                        .state
+                        .outputs
+                        .pin_payout(&commitment, pin, 1)
+                        .map_err(|_| DomActuatorError::OutputReservationConflict)?,
+                    PayoutPinDisposition::Pinned
+                );
+                wallet.persist_securely()?;
+            }
+            drop(wallet);
+            drop(store);
+
+            let mut reopened = DomActuatorStoreV1::open_existing(&store_path)?;
+            let resumed = reopened.acquire_lease(digest(3), digest(20), 1_002, 10_000)?;
+            let mut reopened_wallet = DomParticipantWalletV1::open_existing(
+                &wallet_path,
+                Zeroizing::new("test-password".to_owned()),
+                authority,
+            )?;
+            let recovered = reopened_wallet
+                .session(DomWalletSessionLegV1::Upstream)?
+                .authenticate_payout_face(
+                    &mut reopened,
+                    resumed,
+                    DomPayoutFaceRequestV1::new(commitment, 50, 1_003)?,
+                )?;
+            assert_eq!(recovered.evidence_revision(), 1);
+            assert_eq!(payout_face_progress(&reopened, upstream)?, (1, 1, 1, 1));
+            assert!(reopened_wallet
+                .state
+                .outputs
+                .get(&commitment)
+                .and_then(StoredOutput::payout_for)
+                .is_some());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn payout_face_refuses_store_loss_and_stale_wallet_restore_without_adoption() -> TestResult {
+        let directory = tempfile::tempdir().test_context("tempdir")?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .test_context("directory mode")?;
+        let wallet_path = directory.path().join("wallet.v2");
+        let first_store_path = directory.path().join("first.sqlite");
+        let second_store_path = directory.path().join("second.sqlite");
+        let (upstream, _, authority) = bindings()?;
+        let commitment = create_payout_wallet(&wallet_path, upstream)?;
+        let stale_wallet_bytes = fs::read(&wallet_path).test_context("retain stale wallet")?;
+        let mut first_store = DomActuatorStoreV1::create(&first_store_path)?;
+        let first_lease = first_store.acquire_lease(digest(3), digest(20), 1_000, 10_000)?;
+        first_store.bind_session(first_lease, upstream, 1_000)?;
+        let mut wallet = DomParticipantWalletV1::open_existing(
+            &wallet_path,
+            Zeroizing::new("test-password".to_owned()),
+            authority,
+        )?;
+        let ownership = payout_ownership_digest(
+            upstream,
+            wallet
+                .state
+                .outputs
+                .get(&commitment)
+                .ok_or(DomActuatorError::WalletUnavailable)?,
+        );
+        let prepared = first_store.prepare_payout_face(
+            first_lease,
+            upstream,
+            commitment,
+            50,
+            ownership,
+            1_001,
+        )?;
+        let pin = PayoutForV1::new(prepared.prepare_digest)
+            .map_err(|_| DomActuatorError::InvalidStorageAuthority)?;
+        wallet
+            .state
+            .outputs
+            .pin_payout(&commitment, pin, 1)
+            .map_err(|_| DomActuatorError::OutputReservationConflict)?;
+        wallet.persist_securely()?;
+        drop(wallet);
+        drop(first_store);
+
+        let mut second_store = DomActuatorStoreV1::create(&second_store_path)?;
+        let second_lease = second_store.acquire_lease(digest(3), digest(20), 1_002, 10_000)?;
+        second_store.bind_session(second_lease, upstream, 1_002)?;
+        let pinned_wallet_bytes = fs::read(&wallet_path).test_context("retain pinned wallet")?;
+        let mut pinned_wallet = DomParticipantWalletV1::open_existing(
+            &wallet_path,
+            Zeroizing::new("test-password".to_owned()),
+            authority,
+        )?;
+        let store_loss = pinned_wallet
+            .session(DomWalletSessionLegV1::Upstream)?
+            .authenticate_payout_face(
+                &mut second_store,
+                second_lease,
+                DomPayoutFaceRequestV1::new(commitment, 50, 1_003)?,
+            );
+        assert_eq!(store_loss.err(), Some(DomActuatorError::CapabilityMismatch));
+        assert_eq!(payout_face_progress(&second_store, upstream)?, (0, 0, 0, 0));
+        assert_eq!(fs::read(&wallet_path)?, pinned_wallet_bytes);
+        drop(pinned_wallet);
+        drop(second_store);
+
+        let mut first_store = DomActuatorStoreV1::open_existing(&first_store_path)?;
+        let resumed = first_store.acquire_lease(digest(3), digest(20), 1_004, 10_000)?;
+        let mut pinned_wallet = DomParticipantWalletV1::open_existing(
+            &wallet_path,
+            Zeroizing::new("test-password".to_owned()),
+            authority,
+        )?;
+        pinned_wallet
+            .session(DomWalletSessionLegV1::Upstream)?
+            .authenticate_payout_face(
+                &mut first_store,
+                resumed,
+                DomPayoutFaceRequestV1::new(commitment, 50, 1_005)?,
+            )?;
+        assert_eq!(payout_face_progress(&first_store, upstream)?, (1, 1, 1, 1));
+        drop(pinned_wallet);
+        drop(first_store);
+
+        fs::write(&wallet_path, &stale_wallet_bytes).test_context("restore stale wallet")?;
+        let mut first_store = DomActuatorStoreV1::open_existing(&first_store_path)?;
+        let resumed = first_store.acquire_lease(digest(3), digest(20), 1_006, 10_000)?;
+        let mut stale_wallet = DomParticipantWalletV1::open_existing(
+            &wallet_path,
+            Zeroizing::new("test-password".to_owned()),
+            authority,
+        )?;
+        let stale_restore = stale_wallet
+            .session(DomWalletSessionLegV1::Upstream)?
+            .authenticate_payout_face(
+                &mut first_store,
+                resumed,
+                DomPayoutFaceRequestV1::new(commitment, 50, 1_007)?,
+            );
+        assert_eq!(
+            stale_restore.err(),
+            Some(DomActuatorError::CapabilityMismatch)
+        );
+        assert_eq!(payout_face_progress(&first_store, upstream)?, (1, 1, 1, 1));
+        assert_eq!(fs::read(&wallet_path)?, stale_wallet_bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn payout_face_rejects_nonpending_or_caller_shaped_output_without_store_mutation() -> TestResult
+    {
+        let directory = tempfile::tempdir().test_context("tempdir")?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .test_context("directory mode")?;
+        let wallet_path = directory.path().join("wallet.v2");
+        let store_path = directory.path().join("actuator.sqlite");
+        let (upstream, _, authority) = bindings()?;
+        create_wallet(&wallet_path, upstream)?;
+        let mut store = DomActuatorStoreV1::create(&store_path)?;
+        let lease = store.acquire_lease(digest(3), digest(20), 1_000, 10_000)?;
+        store.bind_session(lease, upstream, 1_000)?;
+        let mut wallet = DomParticipantWalletV1::open_existing(
+            &wallet_path,
+            Zeroizing::new("test-password".to_owned()),
+            authority,
+        )?;
+        let result = wallet
+            .session(DomWalletSessionLegV1::Upstream)?
+            .authenticate_payout_face(
+                &mut store,
+                lease,
+                DomPayoutFaceRequestV1::new([0x41; 33], 50, 1_001)?,
+            );
+        assert_eq!(result.err(), Some(DomActuatorError::InvalidBinding));
+        assert_eq!(payout_face_progress(&store, upstream)?, (0, 0, 0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn unique_payout_selection_is_commitment_free_and_restart_exact() -> TestResult {
+        let directory = tempfile::tempdir().test_context("tempdir")?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .test_context("directory mode")?;
+        let wallet_path = directory.path().join("wallet.v2");
+        let store_path = directory.path().join("actuator.sqlite");
+        let (upstream, _, authority) = bindings()?;
+        let commitment = create_payout_wallet(&wallet_path, upstream)?;
+        let mut store = DomActuatorStoreV1::create(&store_path)?;
+        let lease = store.acquire_lease(digest(3), digest(20), 1_000, 10_000)?;
+        store.bind_session(lease, upstream, 1_000)?;
+        let mut wallet = DomParticipantWalletV1::open_existing(
+            &wallet_path,
+            Zeroizing::new("test-password".to_owned()),
+            authority,
+        )?;
+        let selected = wallet
+            .session(DomWalletSessionLegV1::Upstream)?
+            .authenticate_unique_payout_face(
+                &mut store,
+                lease,
+                DomPayoutFaceSelectionRequestV1::new(50, 1_001)?,
+            )?;
+        assert_eq!(selected.payout_commitment(), commitment);
+        assert_eq!(selected.payout_value(), 50);
+        assert_eq!(payout_face_progress(&store, upstream)?, (1, 1, 1, 1));
+        drop(wallet);
+        drop(store);
+
+        let mut store = DomActuatorStoreV1::open_existing(&store_path)?;
+        let resumed = store.acquire_lease(digest(3), digest(20), 1_002, 10_000)?;
+        let mut wallet = DomParticipantWalletV1::open_existing(
+            &wallet_path,
+            Zeroizing::new("test-password".to_owned()),
+            authority,
+        )?;
+        let replay = wallet
+            .session(DomWalletSessionLegV1::Upstream)?
+            .authenticate_unique_payout_face(
+                &mut store,
+                resumed,
+                DomPayoutFaceSelectionRequestV1::new(50, 1_003)?,
+            )?;
+        assert_eq!(replay.payout_commitment(), commitment);
+        assert_eq!(replay.evidence_digest(), selected.evidence_digest());
+        assert_eq!(replay.evidence_revision(), selected.evidence_revision());
+        assert_eq!(payout_face_progress(&store, upstream)?, (1, 1, 1, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn unique_payout_selection_refuses_ambiguity_before_mutation() -> TestResult {
+        let directory = tempfile::tempdir().test_context("tempdir")?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .test_context("directory mode")?;
+        let wallet_path = directory.path().join("wallet.v2");
+        let store_path = directory.path().join("actuator.sqlite");
+        let (upstream, _, authority) = bindings()?;
+        create_ambiguous_payout_wallet(&wallet_path, upstream)?;
+        let original_wallet = fs::read(&wallet_path)?;
+        let mut store = DomActuatorStoreV1::create(&store_path)?;
+        let lease = store.acquire_lease(digest(3), digest(20), 1_000, 10_000)?;
+        store.bind_session(lease, upstream, 1_000)?;
+        let mut wallet = DomParticipantWalletV1::open_existing(
+            &wallet_path,
+            Zeroizing::new("test-password".to_owned()),
+            authority,
+        )?;
+        let result = wallet
+            .session(DomWalletSessionLegV1::Upstream)?
+            .authenticate_unique_payout_face(
+                &mut store,
+                lease,
+                DomPayoutFaceSelectionRequestV1::new(50, 1_001)?,
+            );
+        assert_eq!(
+            result.err(),
+            Some(DomActuatorError::OutputReservationConflict)
+        );
+        assert_eq!(payout_face_progress(&store, upstream)?, (0, 0, 0, 0));
+        assert_eq!(fs::read(&wallet_path)?, original_wallet);
         Ok(())
     }
 

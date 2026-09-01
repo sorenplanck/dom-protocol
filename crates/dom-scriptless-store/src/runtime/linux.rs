@@ -46,12 +46,13 @@ pub use session_store::EvidenceOnlyPostAnchorAnchorFactsV2;
 pub use session_store::{
     verify_funding_artifacts_v1, verify_operational_funding_gate_evidence_v1,
     verify_operational_m8_funding_gate_evidence_v1, AcceptedContractsSigningSessionV1,
-    AuthenticatedContractsRefundV1, AuthenticatedOperationalBpContinuationV1,
-    AuthenticatedOperationalBpFinalProofV1, AuthenticatedPostAnchorClaimPreSignatureV1,
-    AuthenticatedPostAnchorClaimPreSignatureV2, ClaimSigningAuthorizationV1,
-    ClaimSigningAuthorizationV2, CommittedOutboundDsc1V1, ConsumedClaimSigningAuthorizationV1,
-    ConsumedClaimSigningAuthorizationV2, ContractsReservationLookupCustodyV1,
-    ContractsSessionStoreV1, ContractsSigningSessionAuthorityV1, DomTransactionValidationContextV1,
+    AcceptedEvmActionRequestV1, AcceptedEvmSignedActionV1, AuthenticatedContractsRefundV1,
+    AuthenticatedOperationalBpContinuationV1, AuthenticatedOperationalBpFinalProofV1,
+    AuthenticatedPostAnchorClaimPreSignatureV1, AuthenticatedPostAnchorClaimPreSignatureV2,
+    ClaimSigningAuthorizationV1, ClaimSigningAuthorizationV2, CommittedOutboundDsc1V1,
+    ConsumedClaimSigningAuthorizationV1, ConsumedClaimSigningAuthorizationV2,
+    ContractsReservationLookupCustodyV1, ContractsSessionStoreV1,
+    ContractsSigningSessionAuthorityV1, DomTransactionValidationContextV1,
     DurableContractsReservationLookupV1, DurableTransportOutcomeV1, DurableTransportReceiptV1,
     ExactDomFundingBroadcasterV1, ExactDomRefundBroadcasterV1, FinalClaimTransactionSinkRefV2,
     FundingAuthorizationRefV1, FundingAuthorizationV1, FundingBroadcastV1, FundingRetransmissionV1,
@@ -61,9 +62,10 @@ pub use session_store::{
     OperationalM8BackupProvenanceAuditV2, OperationalM8FundingGatePreparationV2,
     OperationalM8FundingGateVerificationRequestV1, OutboundDsc1RecoveryV1,
     PreparedContractsSessionStoreOpenV1, PreparedDsc1SigningRequestV1,
-    PreparedEarlyTransportAuthorityV1, PreparedOperationalAbortTransportAuthorityV1,
-    PreparedOperationalBpTransportAuthorityV1, PreparedOperationalFinalClaimIngressAuthorityV2,
-    PreparedOperationalFinalClaimSubmissionV2, PreparedOperationalFinalClaimTransportAuthorityV2,
+    PreparedEarlyTransportAuthorityV1, PreparedEvmSignedActionImportV1,
+    PreparedOperationalAbortTransportAuthorityV1, PreparedOperationalBpTransportAuthorityV1,
+    PreparedOperationalFinalClaimIngressAuthorityV2, PreparedOperationalFinalClaimSubmissionV2,
+    PreparedOperationalFinalClaimTransportAuthorityV2,
     PreparedOperationalFinalRefundTransportAuthorityV1, PreparedOperationalM8BackupProvenanceV2,
     PreparedOperationalM8FundingGateV1, PreparedOperationalM8FundingGateV2,
     PreparedOperationalM8ReadyToFundVoteV1, PreparedOperationalM8ReadyToFundVoteV2,
@@ -234,7 +236,13 @@ impl NodeIdentity {
             // real on aarch64 and reflexive on x86_64, where clippy calls it
             // useless — so the allow is scoped to this one field rather than
             // the field's type being pinned to whatever the build host uses.
-            #[allow(clippy::useless_conversion)]
+            #[cfg_attr(
+                target_arch = "x86_64",
+                expect(
+                    clippy::useless_conversion,
+                    reason = "st_nlink width is architecture-dependent; the conversion is real on aarch64"
+                )
+            )]
             link_count: u64::from(stat.st_nlink),
             owner: stat.st_uid,
             node_type: expected_type,

@@ -5,11 +5,14 @@ use adapter_evm::{
     },
     derive_binding, derive_lock_id, keccak256, LockTerms, UnsignedEvmCall,
 };
+use blake2::digest::consts::U32;
+use blake2::{Blake2b, Digest};
 use deployment_registry::{AssetRepresentationV1, ResolvedEvmDeploymentV1};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 
 use crate::model::{
-    Digest32, Eip1559SignatureV1, EvmAddressV1, EvmClaimSecretV1, EvmFeesV1, ScopedEvmClaimV1,
+    Digest32, Eip1559SignatureV1, EvmAddressV1, EvmClaimSecretV1, EvmFeesV1, EvmOperationKindV1,
+    EvmSignerRoleV1, RemoteEvmActionRequestInputV1, RemoteEvmActionRequestV1, ScopedEvmClaimV1,
     ScopedEvmOpenV1, ScopedEvmRefundV1, ValidatedEvmLockV1, ZERO_ADDRESS, ZERO_DIGEST,
 };
 use crate::{EvmActuatorErrorV1, Result};
@@ -21,6 +24,7 @@ const OPEN_CALLDATA_LEN: usize = 4 + 10 * 32;
 pub(crate) const CLAIM_CALLDATA_LEN: usize = 4 + 2 * 32;
 pub(crate) const REFUND_CALLDATA_LEN: usize = 4 + 32;
 pub(crate) const MAX_RAW_TRANSACTION_BYTES_V1: usize = 8 * 1024;
+const REMOTE_RAW_TAG_V1: &str = "DOM:evm-signed-action-raw:v1";
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct Eip1559FieldsV1 {
@@ -46,6 +50,230 @@ impl core::fmt::Debug for Eip1559FieldsV1 {
             .field("calldata_digest", &keccak256(&self.calldata))
             .finish()
     }
+}
+
+pub(crate) struct DecodedRemoteEip1559V1 {
+    pub fields: Eip1559FieldsV1,
+    pub signature: Eip1559SignatureV1,
+    pub transaction_hash: Digest32,
+    pub signed_raw_digest: Digest32,
+}
+
+pub(crate) fn validate_remote_action_request(
+    input: RemoteEvmActionRequestInputV1,
+) -> Result<RemoteEvmActionRequestV1> {
+    let expected_role = match input.kind {
+        EvmOperationKindV1::Open | EvmOperationKindV1::Refund => EvmSignerRoleV1::Funder,
+        EvmOperationKindV1::Claim => EvmSignerRoleV1::Beneficiary,
+    };
+    if input.role != expected_role
+        || input.owner_epoch == 0
+        || input.chain_id == 0
+        || input.contract == ZERO_ADDRESS
+        || input.signer_account == ZERO_ADDRESS
+        || input.requester_id == input.signer_id
+        || [
+            input.owner_id,
+            input.action_id,
+            input.route_id,
+            input.settlement_id,
+            input.composition_binding_digest,
+            input.execution_plan_digest,
+            input.unsigned_call_digest,
+            input.request_message_digest,
+            input.requester_id,
+            input.signer_id,
+        ]
+        .contains(&ZERO_DIGEST)
+    {
+        return Err(EvmActuatorErrorV1::InvalidScope);
+    }
+    Ok(RemoteEvmActionRequestV1 {
+        kind: input.kind,
+        role: input.role,
+        owner_id: input.owner_id,
+        owner_epoch: input.owner_epoch,
+        action_id: input.action_id,
+        route_id: input.route_id,
+        settlement_id: input.settlement_id,
+        composition_binding_digest: input.composition_binding_digest,
+        execution_plan_digest: input.execution_plan_digest,
+        unsigned_call_digest: input.unsigned_call_digest,
+        request_message_digest: input.request_message_digest,
+        requester_id: input.requester_id,
+        signer_id: input.signer_id,
+        chain_id: input.chain_id,
+        contract: input.contract,
+        signer_account: input.signer_account,
+    })
+}
+
+/// Canonical immutable remote-signing commitment for an `open` call.
+///
+/// The digest includes the authenticated fee caps but deliberately excludes
+/// the concrete nonce and fee tuple selected by the remote account owner.
+pub fn remote_open_unsigned_call_digest_v1(scope: &ScopedEvmOpenV1) -> Result<Digest32> {
+    remote_unsigned_call_digest(RemoteUnsignedCallBindingV1 {
+        kind: EvmOperationKindV1::Open,
+        role: EvmSignerRoleV1::Funder,
+        route_id: scope.route_id,
+        effect_id: scope.effect_id,
+        semantic_digest: scope.semantic_digest,
+        lock: &scope.lock,
+        value: scope.call.value,
+        calldata: &scope.call.calldata,
+    })
+}
+
+/// Canonical immutable remote-signing commitment for a `claim` call.
+///
+/// The scalar remains inside the zeroizing scoped call; only this commitment
+/// is intended for the public request.
+pub fn remote_claim_unsigned_call_digest_v1(scope: &ScopedEvmClaimV1) -> Result<Digest32> {
+    remote_unsigned_call_digest(RemoteUnsignedCallBindingV1 {
+        kind: EvmOperationKindV1::Claim,
+        role: EvmSignerRoleV1::Beneficiary,
+        route_id: scope.route_id,
+        effect_id: scope.effect_id,
+        semantic_digest: scope.semantic_digest,
+        lock: &scope.lock,
+        value: ZERO_DIGEST,
+        calldata: &scope.calldata,
+    })
+}
+
+/// Canonical immutable remote-signing commitment for a `refund` call.
+pub fn remote_refund_unsigned_call_digest_v1(scope: &ScopedEvmRefundV1) -> Result<Digest32> {
+    remote_unsigned_call_digest(RemoteUnsignedCallBindingV1 {
+        kind: EvmOperationKindV1::Refund,
+        role: EvmSignerRoleV1::Funder,
+        route_id: scope.route_id,
+        effect_id: scope.effect_id,
+        semantic_digest: scope.semantic_digest,
+        lock: &scope.lock,
+        value: ZERO_DIGEST,
+        calldata: &scope.calldata,
+    })
+}
+
+struct RemoteUnsignedCallBindingV1<'a> {
+    kind: EvmOperationKindV1,
+    role: EvmSignerRoleV1,
+    route_id: Digest32,
+    effect_id: Digest32,
+    semantic_digest: Digest32,
+    lock: &'a ValidatedEvmLockV1,
+    value: Digest32,
+    calldata: &'a [u8],
+}
+
+fn remote_unsigned_call_digest(binding: RemoteUnsignedCallBindingV1<'_>) -> Result<Digest32> {
+    let config = binding.lock.deployment.adapter_config();
+    let deployed = binding.lock.deployment.deployment();
+    if binding.calldata.is_empty() || binding.calldata.len() > adapter_evm::abi::MAX_CALLDATA_BYTES
+    {
+        return Err(EvmActuatorErrorV1::InvalidTransaction);
+    }
+    let kind = [u8::try_from(binding.kind.tag()).map_err(|_| EvmActuatorErrorV1::InvalidScope)?];
+    let role = [u8::try_from(binding.role.tag()).map_err(|_| EvmActuatorErrorV1::InvalidScope)?];
+    Ok(domain_digest(
+        b"DOM-INTEROP/EVM-ACTUATOR/REMOTE-UNSIGNED-CALL/V1\0",
+        &[
+            &kind,
+            &role,
+            &binding.route_id,
+            &binding.effect_id,
+            &binding.semantic_digest,
+            &config.chain_id.to_be_bytes(),
+            &config.contract,
+            &binding.value,
+            &config.gas_limit_hint.to_be_bytes(),
+            binding.calldata,
+            &binding.lock.deployment.registry_digest(),
+            &binding.lock.deployment.profile_digest(),
+            &binding.lock.deployment.asset_binding_digest(),
+            &deployed.deployment_digest,
+            &config.expected_code_hash,
+            &deployed.genesis_hash,
+            &config.terms_hash,
+            &binding.lock.lock_id,
+            &binding.lock.binding,
+            &binding.lock.beneficiary,
+            &binding.lock.funder,
+            &binding.lock.adaptor_address,
+            &binding.lock.deadline.to_be_bytes(),
+            &binding.lock.amount,
+            &deployed.max_fee_per_gas.to_be_bytes(),
+            &deployed.max_priority_fee_per_gas.to_be_bytes(),
+        ],
+    ))
+}
+
+/// DOM-tagged digest used by the DSC1 signed-action response.
+pub fn remote_signed_raw_digest_v1(raw: &[u8]) -> Result<Digest32> {
+    if raw.is_empty() || raw.len() > MAX_RAW_TRANSACTION_BYTES_V1 {
+        return Err(EvmActuatorErrorV1::BoundExceeded);
+    }
+    let tag = REMOTE_RAW_TAG_V1.as_bytes();
+    let tag_len = u16::try_from(tag.len()).map_err(|_| EvmActuatorErrorV1::BoundExceeded)?;
+    let mut hasher = Blake2b::<U32>::new();
+    hasher.update(tag_len.to_le_bytes());
+    hasher.update(tag);
+    hasher.update(raw);
+    let digest = hasher.finalize();
+    let mut output = [0; 32];
+    output.copy_from_slice(&digest);
+    Ok(output)
+}
+
+pub(crate) fn decode_and_verify_remote_signed_eip1559(
+    raw: &[u8],
+    expected_account: EvmAddressV1,
+) -> Result<DecodedRemoteEip1559V1> {
+    if raw.len() < 2 || raw.len() > MAX_RAW_TRANSACTION_BYTES_V1 || raw[0] != TYPE_2 {
+        return Err(EvmActuatorErrorV1::InvalidTransaction);
+    }
+    let payload = decode_exact_list(&raw[1..])?;
+    let mut cursor = RlpCursorV1::new(payload);
+    let chain_id = decode_u64_rlp(cursor.take_bytes()?)?;
+    let nonce = decode_u64_rlp(cursor.take_bytes()?)?;
+    let priority = decode_u128_rlp(cursor.take_bytes()?)?;
+    let maximum = decode_u128_rlp(cursor.take_bytes()?)?;
+    let gas_limit = decode_u64_rlp(cursor.take_bytes()?)?;
+    let to = exact_address(cursor.take_bytes()?)?;
+    let value = padded_word(cursor.take_bytes()?)?;
+    let calldata = cursor.take_bytes()?;
+    if calldata.is_empty() || calldata.len() > adapter_evm::abi::MAX_CALLDATA_BYTES {
+        return Err(EvmActuatorErrorV1::InvalidTransaction);
+    }
+    cursor.take_empty_list()?;
+    let y_parity = u8::try_from(decode_u64_rlp(cursor.take_bytes()?)?)
+        .map_err(|_| EvmActuatorErrorV1::InvalidSignature)?;
+    let r = padded_word(cursor.take_bytes()?)?;
+    let s = padded_word(cursor.take_bytes()?)?;
+    cursor.finish()?;
+    let fields = Eip1559FieldsV1 {
+        chain_id,
+        nonce,
+        fees: EvmFeesV1::new(maximum, priority)?,
+        gas_limit,
+        to,
+        value,
+        calldata: Zeroizing::new(calldata.to_vec()),
+    };
+    validate_fields(&fields)?;
+    let signature = Eip1559SignatureV1 { y_parity, r, s };
+    let (canonical, transaction_hash) =
+        verify_and_encode_signed(&fields, expected_account, signature)?;
+    if canonical.as_slice() != raw {
+        return Err(EvmActuatorErrorV1::InvalidTransaction);
+    }
+    Ok(DecodedRemoteEip1559V1 {
+        fields,
+        signature,
+        transaction_hash,
+        signed_raw_digest: remote_signed_raw_digest_v1(raw)?,
+    })
 }
 
 pub(crate) fn validate_open_scope(
@@ -416,9 +644,172 @@ fn minimal_usize(value: usize) -> Vec<u8> {
     bytes[first..].to_vec()
 }
 
+#[derive(Clone, Copy)]
+enum RlpItemV1<'a> {
+    Bytes(&'a [u8]),
+    List(&'a [u8]),
+}
+
+struct RlpCursorV1<'a> {
+    remaining: &'a [u8],
+}
+
+impl<'a> RlpCursorV1<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { remaining: bytes }
+    }
+
+    fn take_bytes(&mut self) -> Result<&'a [u8]> {
+        let (item, remaining) = decode_rlp_item(self.remaining)?;
+        self.remaining = remaining;
+        match item {
+            RlpItemV1::Bytes(bytes) => Ok(bytes),
+            RlpItemV1::List(_) => Err(EvmActuatorErrorV1::InvalidTransaction),
+        }
+    }
+
+    fn take_empty_list(&mut self) -> Result<()> {
+        let (item, remaining) = decode_rlp_item(self.remaining)?;
+        self.remaining = remaining;
+        match item {
+            RlpItemV1::List([]) => Ok(()),
+            _ => Err(EvmActuatorErrorV1::InvalidTransaction),
+        }
+    }
+
+    fn finish(self) -> Result<()> {
+        if self.remaining.is_empty() {
+            Ok(())
+        } else {
+            Err(EvmActuatorErrorV1::InvalidTransaction)
+        }
+    }
+}
+
+fn decode_exact_list(bytes: &[u8]) -> Result<&[u8]> {
+    let (item, remaining) = decode_rlp_item(bytes)?;
+    if !remaining.is_empty() {
+        return Err(EvmActuatorErrorV1::InvalidTransaction);
+    }
+    match item {
+        RlpItemV1::List(payload) => Ok(payload),
+        RlpItemV1::Bytes(_) => Err(EvmActuatorErrorV1::InvalidTransaction),
+    }
+}
+
+fn decode_rlp_item(bytes: &[u8]) -> Result<(RlpItemV1<'_>, &[u8])> {
+    let prefix = *bytes
+        .first()
+        .ok_or(EvmActuatorErrorV1::InvalidTransaction)?;
+    match prefix {
+        0x00..=0x7f => Ok((RlpItemV1::Bytes(&bytes[..1]), &bytes[1..])),
+        0x80..=0xb7 => {
+            let length = usize::from(prefix - 0x80);
+            let end = 1usize
+                .checked_add(length)
+                .ok_or(EvmActuatorErrorV1::BoundExceeded)?;
+            let payload = bytes
+                .get(1..end)
+                .ok_or(EvmActuatorErrorV1::InvalidTransaction)?;
+            if length == 1 && payload[0] < 0x80 {
+                return Err(EvmActuatorErrorV1::InvalidTransaction);
+            }
+            Ok((RlpItemV1::Bytes(payload), &bytes[end..]))
+        }
+        0xb8..=0xbf => decode_long_rlp(bytes, prefix - 0xb7, false),
+        0xc0..=0xf7 => {
+            let length = usize::from(prefix - 0xc0);
+            let end = 1usize
+                .checked_add(length)
+                .ok_or(EvmActuatorErrorV1::BoundExceeded)?;
+            let payload = bytes
+                .get(1..end)
+                .ok_or(EvmActuatorErrorV1::InvalidTransaction)?;
+            Ok((RlpItemV1::List(payload), &bytes[end..]))
+        }
+        0xf8..=0xff => decode_long_rlp(bytes, prefix - 0xf7, true),
+    }
+}
+
+fn decode_long_rlp(
+    bytes: &[u8],
+    length_of_length: u8,
+    is_list: bool,
+) -> Result<(RlpItemV1<'_>, &[u8])> {
+    let length_of_length = usize::from(length_of_length);
+    if length_of_length == 0 || length_of_length > core::mem::size_of::<usize>() {
+        return Err(EvmActuatorErrorV1::InvalidTransaction);
+    }
+    let length_bytes = bytes
+        .get(1..1 + length_of_length)
+        .ok_or(EvmActuatorErrorV1::InvalidTransaction)?;
+    if length_bytes[0] == 0 {
+        return Err(EvmActuatorErrorV1::InvalidTransaction);
+    }
+    let mut length = 0usize;
+    for byte in length_bytes {
+        length = length
+            .checked_mul(256)
+            .and_then(|value| value.checked_add(usize::from(*byte)))
+            .ok_or(EvmActuatorErrorV1::BoundExceeded)?;
+    }
+    if length <= 55 {
+        return Err(EvmActuatorErrorV1::InvalidTransaction);
+    }
+    let start = 1usize
+        .checked_add(length_of_length)
+        .ok_or(EvmActuatorErrorV1::BoundExceeded)?;
+    let end = start
+        .checked_add(length)
+        .ok_or(EvmActuatorErrorV1::BoundExceeded)?;
+    let payload = bytes
+        .get(start..end)
+        .ok_or(EvmActuatorErrorV1::InvalidTransaction)?;
+    let item = if is_list {
+        RlpItemV1::List(payload)
+    } else {
+        RlpItemV1::Bytes(payload)
+    };
+    Ok((item, &bytes[end..]))
+}
+
+fn decode_u64_rlp(bytes: &[u8]) -> Result<u64> {
+    if bytes.len() > 8 || bytes.first() == Some(&0) {
+        return Err(EvmActuatorErrorV1::InvalidTransaction);
+    }
+    let mut encoded = [0; 8];
+    encoded[8 - bytes.len()..].copy_from_slice(bytes);
+    Ok(u64::from_be_bytes(encoded))
+}
+
+fn decode_u128_rlp(bytes: &[u8]) -> Result<u128> {
+    if bytes.len() > 16 || bytes.first() == Some(&0) {
+        return Err(EvmActuatorErrorV1::InvalidTransaction);
+    }
+    let mut encoded = [0; 16];
+    encoded[16 - bytes.len()..].copy_from_slice(bytes);
+    Ok(u128::from_be_bytes(encoded))
+}
+
+fn exact_address(bytes: &[u8]) -> Result<EvmAddressV1> {
+    bytes
+        .try_into()
+        .map_err(|_| EvmActuatorErrorV1::InvalidTransaction)
+}
+
+fn padded_word(bytes: &[u8]) -> Result<Digest32> {
+    if bytes.len() > 32 || bytes.first() == Some(&0) {
+        return Err(EvmActuatorErrorV1::InvalidTransaction);
+    }
+    let mut output = [0; 32];
+    output[32 - bytes.len()..].copy_from_slice(bytes);
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k256::ecdsa::SigningKey;
 
     #[test]
     fn terminal_calldata_is_exact_static_abi() {
@@ -448,5 +839,61 @@ mod tests {
             hex::encode(event_topic0(SIG_REFUNDED)),
             "6c5895acb60b66e78106939eaaa3976db6325f801ff434fe24ff7cb0a6795a5f"
         );
+    }
+
+    #[test]
+    fn remote_type_two_decoder_is_canonical_bounded_and_recovers_low_s_signer() {
+        let key = SigningKey::from_bytes((&[7u8; 32]).into()).unwrap();
+        let encoded = key.verifying_key().to_encoded_point(false);
+        let digest = keccak256(&encoded.as_bytes()[1..]);
+        let mut account = [0; 20];
+        account.copy_from_slice(&digest[12..]);
+        let fields = Eip1559FieldsV1 {
+            chain_id: 31_337,
+            nonce: 19,
+            fees: EvmFeesV1::new(100, 2).unwrap(),
+            gas_limit: 300_000,
+            to: [0x31; 20],
+            value: [0; 32],
+            calldata: Zeroizing::new(vec![0x12, 0x34, 0x56, 0x78]),
+        };
+        let hash = signing_hash(&fields).unwrap();
+        let (signature, recovery) = key.sign_prehash_recoverable(&hash).unwrap();
+        let bytes = signature.to_bytes();
+        let mut r = [0; 32];
+        let mut s = [0; 32];
+        r.copy_from_slice(&bytes[..32]);
+        s.copy_from_slice(&bytes[32..]);
+        let signature = Eip1559SignatureV1 {
+            y_parity: recovery.to_byte(),
+            r,
+            s,
+        };
+        let (raw, expected_hash) = verify_and_encode_signed(&fields, account, signature).unwrap();
+        let decoded = decode_and_verify_remote_signed_eip1559(&raw, account).unwrap();
+        assert_eq!(decoded.fields, fields);
+        assert_eq!(decoded.signature, signature);
+        assert_eq!(decoded.transaction_hash, expected_hash);
+        assert_eq!(
+            decoded.signed_raw_digest,
+            remote_signed_raw_digest_v1(&raw).unwrap()
+        );
+
+        let mut trailing = raw.to_vec();
+        trailing.push(0);
+        assert!(matches!(
+            decode_and_verify_remote_signed_eip1559(&trailing, account),
+            Err(EvmActuatorErrorV1::InvalidTransaction)
+        ));
+        assert!(matches!(
+            decode_and_verify_remote_signed_eip1559(&raw, [0x99; 20]),
+            Err(EvmActuatorErrorV1::WrongSigner)
+        ));
+        let mut noncanonical = raw.to_vec();
+        noncanonical[0] = 0x01;
+        assert!(matches!(
+            decode_and_verify_remote_signed_eip1559(&noncanonical, account),
+            Err(EvmActuatorErrorV1::InvalidTransaction)
+        ));
     }
 }

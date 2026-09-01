@@ -810,15 +810,17 @@ impl DurableFrameReassemblerV2 {
         };
         let row_digest = message_row_digest(
             &config,
-            &message.binding_digest,
-            message.sender_id,
-            message.recipient_id,
-            &message.message_digest,
-            message.total_len,
-            message.chunk_count,
-            state,
-            commit.durable_receipt(),
-            commit.duplicate(),
+            MessageRowFieldsV2 {
+                binding: &message.binding_digest,
+                sender: message.sender_id,
+                recipient: message.recipient_id,
+                message_digest: &message.message_digest,
+                total_len: message.total_len,
+                chunk_count: message.chunk_count,
+                state,
+                receipt: commit.durable_receipt(),
+                duplicate: commit.duplicate(),
+            },
         )?;
         let changed = transaction.execute(
             "UPDATE reassembly_messages
@@ -1037,15 +1039,17 @@ fn new_message(
 ) -> Result<StoredMessageV2, DurableFrameReassemblerErrorV2> {
     let row_digest = message_row_digest(
         config,
-        frame.binding_digest(),
-        sender_id,
-        config.recipient_id,
-        frame.message_digest(),
-        frame.total_len(),
-        frame.count(),
-        0,
-        &ZERO_DIGEST,
-        false,
+        MessageRowFieldsV2 {
+            binding: frame.binding_digest(),
+            sender: sender_id,
+            recipient: config.recipient_id,
+            message_digest: frame.message_digest(),
+            total_len: frame.total_len(),
+            chunk_count: frame.count(),
+            state: 0,
+            receipt: &ZERO_DIGEST,
+            duplicate: false,
+        },
     )?;
     Ok(StoredMessageV2 {
         binding_digest: *frame.binding_digest(),
@@ -1228,13 +1232,15 @@ fn insert_frame(
 ) -> Result<(), DurableFrameReassemblerErrorV2> {
     let row_digest = frame_row_digest(
         config,
-        frame.binding_digest(),
-        frame.index(),
-        frame.offset(),
-        frame.chunk_digest(),
-        frame.chunk(),
-        source_sequence,
-        source_envelope_digest,
+        FrameRowFieldsV2 {
+            binding: frame.binding_digest(),
+            index: frame.index(),
+            offset: frame.offset(),
+            chunk_digest: frame.chunk_digest(),
+            chunk: frame.chunk(),
+            source_sequence,
+            source_envelope_digest,
+        },
     )?;
     transaction.execute(
         "INSERT INTO reassembly_frames
@@ -1262,15 +1268,17 @@ fn mark_ready(
 ) -> Result<(), DurableFrameReassemblerErrorV2> {
     let row_digest = message_row_digest(
         config,
-        &message.binding_digest,
-        message.sender_id,
-        message.recipient_id,
-        &message.message_digest,
-        message.total_len,
-        message.chunk_count,
-        1,
-        &ZERO_DIGEST,
-        false,
+        MessageRowFieldsV2 {
+            binding: &message.binding_digest,
+            sender: message.sender_id,
+            recipient: message.recipient_id,
+            message_digest: &message.message_digest,
+            total_len: message.total_len,
+            chunk_count: message.chunk_count,
+            state: 1,
+            receipt: &ZERO_DIGEST,
+            duplicate: false,
+        },
     )?;
     let changed = transaction.execute(
         "UPDATE reassembly_messages SET state = 1, row_digest = ?1
@@ -1296,15 +1304,17 @@ fn fail_message_digest(
 ) -> Result<(), DurableFrameReassemblerErrorV2> {
     let row_digest = message_row_digest(
         config,
-        &message.binding_digest,
-        message.sender_id,
-        message.recipient_id,
-        &message.message_digest,
-        message.total_len,
-        message.chunk_count,
-        3,
-        &receipt,
-        false,
+        MessageRowFieldsV2 {
+            binding: &message.binding_digest,
+            sender: message.sender_id,
+            recipient: message.recipient_id,
+            message_digest: &message.message_digest,
+            total_len: message.total_len,
+            chunk_count: message.chunk_count,
+            state: 3,
+            receipt: &receipt,
+            duplicate: false,
+        },
     )?;
     let changed = transaction.execute(
         "UPDATE reassembly_messages
@@ -1501,15 +1511,17 @@ fn validate_message(
         || (state >= 2 && delivery_receipt == ZERO_DIGEST)
         || message_row_digest(
             config,
-            &binding_digest,
-            sender_id,
-            recipient_id,
-            &message_digest,
-            total_len,
-            chunk_count,
-            state,
-            &delivery_receipt,
-            downstream_duplicate,
+            MessageRowFieldsV2 {
+                binding: &binding_digest,
+                sender: sender_id,
+                recipient: recipient_id,
+                message_digest: &message_digest,
+                total_len,
+                chunk_count,
+                state,
+                receipt: &delivery_receipt,
+                duplicate: downstream_duplicate,
+            },
         )? != row_digest
     {
         return Err(DurableFrameReassemblerErrorV2::CorruptState);
@@ -1643,13 +1655,15 @@ fn validate_frame(
         || chunk.len() > MAX_ROUTE_FRAME_CHUNK_BYTES_V2
         || frame_row_digest(
             config,
-            &binding_digest,
-            index,
-            offset,
-            &chunk_digest,
-            &chunk,
-            source_sequence,
-            &source_envelope_digest,
+            FrameRowFieldsV2 {
+                binding: &binding_digest,
+                index,
+                offset,
+                chunk_digest: &chunk_digest,
+                chunk: &chunk,
+                source_sequence,
+                source_envelope_digest: &source_envelope_digest,
+            },
         )? != row_digest
     {
         return Err(DurableFrameReassemblerErrorV2::CorruptState);
@@ -1792,61 +1806,67 @@ fn validate_terminal_frame(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn message_row_digest(
-    config: &DurableFrameReassemblerConfigV2,
-    binding: &Digest32,
+struct MessageRowFieldsV2<'a> {
+    binding: &'a Digest32,
     sender: ParticipantId,
     recipient: ParticipantId,
-    message_digest: &Digest32,
+    message_digest: &'a Digest32,
     total_len: u32,
     chunk_count: u16,
     state: u8,
-    receipt: &Digest32,
+    receipt: &'a Digest32,
     duplicate: bool,
+}
+
+fn message_row_digest(
+    config: &DurableFrameReassemblerConfigV2,
+    fields: MessageRowFieldsV2<'_>,
 ) -> Result<Digest32, DurableFrameReassemblerErrorV2> {
     digest_parts(
         MESSAGE_ROW_DOMAIN,
         &[
             config.reassembler_id.as_slice(),
-            binding.as_slice(),
-            sender.0.as_slice(),
-            recipient.0.as_slice(),
-            message_digest.as_slice(),
-            &total_len.to_be_bytes(),
-            &chunk_count.to_be_bytes(),
-            &[state],
-            receipt.as_slice(),
-            &[u8::from(duplicate)],
+            fields.binding.as_slice(),
+            fields.sender.0.as_slice(),
+            fields.recipient.0.as_slice(),
+            fields.message_digest.as_slice(),
+            &fields.total_len.to_be_bytes(),
+            &fields.chunk_count.to_be_bytes(),
+            &[fields.state],
+            fields.receipt.as_slice(),
+            &[u8::from(fields.duplicate)],
         ],
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn frame_row_digest(
-    config: &DurableFrameReassemblerConfigV2,
-    binding: &Digest32,
+struct FrameRowFieldsV2<'a> {
+    binding: &'a Digest32,
     index: u16,
     offset: u32,
-    chunk_digest: &Digest32,
-    chunk: &[u8],
+    chunk_digest: &'a Digest32,
+    chunk: &'a [u8],
     source_sequence: u64,
-    source_envelope_digest: &Digest32,
+    source_envelope_digest: &'a Digest32,
+}
+
+fn frame_row_digest(
+    config: &DurableFrameReassemblerConfigV2,
+    fields: FrameRowFieldsV2<'_>,
 ) -> Result<Digest32, DurableFrameReassemblerErrorV2> {
-    let chunk_len =
-        u32::try_from(chunk.len()).map_err(|_| DurableFrameReassemblerErrorV2::CorruptState)?;
+    let chunk_len = u32::try_from(fields.chunk.len())
+        .map_err(|_| DurableFrameReassemblerErrorV2::CorruptState)?;
     digest_parts(
         FRAME_ROW_DOMAIN,
         &[
             config.reassembler_id.as_slice(),
-            binding.as_slice(),
-            &index.to_be_bytes(),
-            &offset.to_be_bytes(),
-            chunk_digest.as_slice(),
+            fields.binding.as_slice(),
+            &fields.index.to_be_bytes(),
+            &fields.offset.to_be_bytes(),
+            fields.chunk_digest.as_slice(),
             &chunk_len.to_be_bytes(),
-            chunk,
-            &source_sequence.to_be_bytes(),
-            source_envelope_digest.as_slice(),
+            fields.chunk,
+            &fields.source_sequence.to_be_bytes(),
+            fields.source_envelope_digest.as_slice(),
         ],
     )
 }

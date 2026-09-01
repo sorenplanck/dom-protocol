@@ -13,6 +13,7 @@ use blake2::digest::{consts::U32, Digest};
 use blake2::Blake2b;
 use deployment_registry::{DomNetworkV1, DomRuntimeIdentityV1};
 use dom_adaptor::{OperationalClaimPersistenceCapabilityV1, OperationalClaimTransactionSinkV1};
+use dom_crypto::pedersen::Commitment;
 use dom_scriptless_chain_adapter::{
     canonical_transaction_hash_v1, validate_submission_receipt_facts_v1, SubmissionReceiptV1,
     SubmissionStateV1, MAX_CANONICAL_TRANSACTION_BYTES_V1,
@@ -36,10 +37,14 @@ use crate::model::{
     StoredDomSessionBindingPartsV1,
 };
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 const MAX_LEASE_DURATION_MS: u64 = 86_400_000;
+const PAYOUT_FACE_EFFECT_DOMAIN: &[u8] = b"DOM:actuator-payout-face-effect:v1";
+const PAYOUT_FACE_EVENT_DOMAIN: &[u8] = b"DOM:actuator-payout-face-event:v1";
+const PAYOUT_FACE_PREPARE_DOMAIN: &[u8] = b"DOM:actuator-payout-face-prepare:v1";
+const PAYOUT_FACE_RECORD_DOMAIN: &[u8] = b"DOM:actuator-payout-face-record:v1";
 
 const OP_PREPARED: i64 = 0;
 const OP_COMPLETED: i64 = 1;
@@ -78,6 +83,11 @@ enum ResumableCreationStateV1 {
 }
 
 const SCHEMA_SQL: &str = "
+CREATE TABLE dom_store_identity (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
+    instance_id BLOB UNIQUE NOT NULL CHECK(length(instance_id) = 32)
+) STRICT;
+
 CREATE TABLE dom_leases (
     participant_id BLOB PRIMARY KEY NOT NULL CHECK(length(participant_id) = 32),
     owner_id BLOB NOT NULL CHECK(length(owner_id) = 32),
@@ -318,6 +328,35 @@ CREATE UNIQUE INDEX dom_output_active_once
 ON dom_output_reservation_items(commitment)
 WHERE active = 1;
 
+CREATE TABLE dom_payout_face_preparations (
+    session_id BLOB PRIMARY KEY NOT NULL REFERENCES dom_sessions(session_id) ON DELETE RESTRICT,
+    route_id BLOB NOT NULL CHECK(length(route_id) = 32),
+    participant_id BLOB NOT NULL CHECK(length(participant_id) = 32),
+    payout_commitment BLOB UNIQUE NOT NULL CHECK(length(payout_commitment) = 33),
+    payout_value INTEGER NOT NULL CHECK(payout_value > 0),
+    wallet_ownership_digest BLOB NOT NULL CHECK(length(wallet_ownership_digest) = 32),
+    store_instance_id BLOB NOT NULL CHECK(length(store_instance_id) = 32),
+    prepare_digest BLOB UNIQUE NOT NULL CHECK(length(prepare_digest) = 32),
+    created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0)
+) STRICT;
+
+CREATE TABLE dom_payout_face_evidence (
+    session_id BLOB PRIMARY KEY NOT NULL REFERENCES dom_sessions(session_id) ON DELETE RESTRICT,
+    prepare_digest BLOB UNIQUE NOT NULL REFERENCES dom_payout_face_preparations(prepare_digest) ON DELETE RESTRICT,
+    route_id BLOB NOT NULL CHECK(length(route_id) = 32),
+    participant_id BLOB NOT NULL CHECK(length(participant_id) = 32),
+    payout_commitment BLOB UNIQUE NOT NULL CHECK(length(payout_commitment) = 33),
+    payout_value INTEGER NOT NULL CHECK(payout_value > 0),
+    wallet_ownership_digest BLOB NOT NULL CHECK(length(wallet_ownership_digest) = 32),
+    store_instance_id BLOB NOT NULL CHECK(length(store_instance_id) = 32),
+    wallet_ciphertext_digest BLOB NOT NULL CHECK(length(wallet_ciphertext_digest) = 32),
+    evidence_revision INTEGER NOT NULL CHECK(evidence_revision > 0),
+    event_effect_id BLOB UNIQUE NOT NULL CHECK(length(event_effect_id) = 32),
+    event_digest BLOB UNIQUE NOT NULL CHECK(length(event_digest) = 32),
+    record_digest BLOB NOT NULL CHECK(length(record_digest) = 32),
+    created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0)
+) STRICT;
+
 CREATE TABLE dom_session_events (
     session_id BLOB NOT NULL REFERENCES dom_sessions(session_id) ON DELETE RESTRICT,
     revision INTEGER NOT NULL CHECK(revision > 0),
@@ -331,7 +370,7 @@ CREATE TABLE dom_session_events (
     UNIQUE(session_id, effect_id, event_digest)
 ) STRICT;
 
-PRAGMA user_version = 9;
+PRAGMA user_version = 10;
 ";
 
 /// Exact process lease and signer fencing generation for one participant.
@@ -1180,11 +1219,112 @@ pub(crate) struct RetainedOutputReservationV1 {
     pub(crate) status: i64,
 }
 
+pub(crate) struct PreparedDomPayoutFaceV1 {
+    pub(crate) binding: DomSessionBindingV1,
+    pub(crate) payout_commitment: [u8; 33],
+    pub(crate) payout_value: u64,
+    pub(crate) wallet_ownership_digest: Digest32,
+    pub(crate) store_instance_id: Digest32,
+    pub(crate) prepare_digest: Digest32,
+    pub(crate) created_at_unix_ms: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RetainedDomPayoutFaceEvidenceV1 {
+    pub(crate) binding: DomSessionBindingV1,
+    pub(crate) payout_commitment: [u8; 33],
+    pub(crate) payout_value: u64,
+    pub(crate) wallet_ownership_digest: Digest32,
+    pub(crate) store_instance_id: Digest32,
+    pub(crate) prepare_digest: Digest32,
+    pub(crate) wallet_ciphertext_digest: Digest32,
+    pub(crate) evidence_revision: u64,
+    pub(crate) record_digest: Digest32,
+    pub(crate) created_at_unix_ms: u64,
+}
+
+#[derive(Clone, Copy)]
+struct DomPayoutFaceRecordFactsV1 {
+    binding: DomSessionBindingV1,
+    payout_commitment: [u8; 33],
+    payout_value: u64,
+    wallet_ownership_digest: Digest32,
+    store_instance_id: Digest32,
+    prepare_digest: Digest32,
+    wallet_ciphertext_digest: Digest32,
+    evidence_revision: u64,
+    event_effect_id: Digest32,
+    event_digest: Digest32,
+    created_at_unix_ms: u64,
+}
+
 struct RawOutputReservationByEffectRowV1 {
     reservation_digest: Vec<u8>,
     route_id: Vec<u8>,
     session_id: Vec<u8>,
     status: i64,
+}
+
+struct RawDomPayoutFaceEvidenceRowV1 {
+    prepare_digest: Vec<u8>,
+    route_id: Vec<u8>,
+    participant_id: Vec<u8>,
+    payout_commitment: Vec<u8>,
+    payout_value: i64,
+    wallet_ownership_digest: Vec<u8>,
+    store_instance_id: Vec<u8>,
+    wallet_ciphertext_digest: Vec<u8>,
+    evidence_revision: i64,
+    event_effect_id: Vec<u8>,
+    event_digest: Vec<u8>,
+    record_digest: Vec<u8>,
+    created_at_unix_ms: i64,
+}
+
+impl RawDomPayoutFaceEvidenceRowV1 {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            prepare_digest: row.get(0)?,
+            route_id: row.get(1)?,
+            participant_id: row.get(2)?,
+            payout_commitment: row.get(3)?,
+            payout_value: row.get(4)?,
+            wallet_ownership_digest: row.get(5)?,
+            store_instance_id: row.get(6)?,
+            wallet_ciphertext_digest: row.get(7)?,
+            evidence_revision: row.get(8)?,
+            event_effect_id: row.get(9)?,
+            event_digest: row.get(10)?,
+            record_digest: row.get(11)?,
+            created_at_unix_ms: row.get(12)?,
+        })
+    }
+}
+
+struct RawDomPayoutFacePreparationRowV1 {
+    route_id: Vec<u8>,
+    participant_id: Vec<u8>,
+    payout_commitment: Vec<u8>,
+    payout_value: i64,
+    wallet_ownership_digest: Vec<u8>,
+    store_instance_id: Vec<u8>,
+    prepare_digest: Vec<u8>,
+    created_at_unix_ms: i64,
+}
+
+impl RawDomPayoutFacePreparationRowV1 {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            route_id: row.get(0)?,
+            participant_id: row.get(1)?,
+            payout_commitment: row.get(2)?,
+            payout_value: row.get(3)?,
+            wallet_ownership_digest: row.get(4)?,
+            store_instance_id: row.get(5)?,
+            prepare_digest: row.get(6)?,
+            created_at_unix_ms: row.get(7)?,
+        })
+    }
 }
 
 impl RawOutputReservationByEffectRowV1 {
@@ -1551,6 +1691,7 @@ impl ValidatedSubmissionReceiptFactsV1 {
 pub struct DomActuatorStoreV1 {
     connection: Connection,
     path: PathBuf,
+    store_instance_id: Digest32,
     database_authority: File,
     _process_lock: File,
 }
@@ -1595,9 +1736,11 @@ impl DomActuatorStoreV1 {
             boundary(CreationBoundaryV1::BeforeSchemaCommit)
         })?;
         boundary(CreationBoundaryV1::SchemaCommitted)?;
+        let store_instance_id = load_store_instance_id(&connection)?;
         let store = Self {
             connection,
             path: path.to_path_buf(),
+            store_instance_id,
             database_authority,
             _process_lock: process_lock,
         };
@@ -1611,7 +1754,7 @@ impl DomActuatorStoreV1 {
     ///
     /// The owner-only lock published by [`Self::create`] must already exist
     /// and be exclusively acquirable. The database may be absent, pristine
-    /// SQLite, or the exact V8 schema with every economic table empty. Foreign
+    /// SQLite, or the exact V10 schema with every economic table empty. Foreign
     /// schema, metadata, sidecars, or retained economic state are refused.
     pub fn resume_create_production(path: &Path) -> DomActuatorResult<Self> {
         require_linux()?;
@@ -1646,9 +1789,11 @@ impl DomActuatorStoreV1 {
             ResumableCreationStateV1::InitializedExact => {}
         }
         validate_pristine_initialized_store(&connection)?;
+        let store_instance_id = load_store_instance_id(&connection)?;
         let store = Self {
             connection,
             path: path.to_path_buf(),
+            store_instance_id,
             database_authority,
             _process_lock: process_lock,
         };
@@ -1657,13 +1802,12 @@ impl DomActuatorStoreV1 {
         Ok(store)
     }
 
-    /// Reopen an existing exact V8 production store; never create or migrate it.
+    /// Reopen an existing exact V10 production store; never create or migrate it.
     ///
     /// The schema version is part of the authenticated identity of this store.
-    /// Prior databases — including V8, whose exposed V2 claim attempt did not
-    /// retain the process owner needed for safe same-owner replay — are refused
-    /// with `UnsupportedFormat` rather than upgraded in place, so no migration
-    /// can run under a live route.
+    /// Prior databases — including V9, which has no wallet-authenticated payout
+    /// evidence — are refused with `UnsupportedFormat` rather than upgraded in
+    /// place, so no migration can run under a live route.
     pub fn open_existing(path: &Path) -> DomActuatorResult<Self> {
         require_linux()?;
         match fs::symlink_metadata(path) {
@@ -1694,9 +1838,11 @@ impl DomActuatorStoreV1 {
         configure_connection(&connection)?;
         validate_database_path(&connection, path)?;
         validate_backend_and_schema(&connection)?;
+        let store_instance_id = load_store_instance_id(&connection)?;
         let store = Self {
             connection,
             path: path.to_path_buf(),
+            store_instance_id,
             database_authority,
             _process_lock: process_lock,
         };
@@ -1872,6 +2018,287 @@ impl DomActuatorStoreV1 {
             .map_err(storage)?;
         transaction.commit().map_err(storage)?;
         Ok(DomOperationDispositionV1::Prepared)
+    }
+
+    /// Persists the exact owner-minted intent before the encrypted wallet is
+    /// mutated. This phase never advances the session revision and cannot mint
+    /// an F6 authority.
+    pub(crate) fn prepare_payout_face(
+        &mut self,
+        lease: DomLeaseV1,
+        binding: DomSessionBindingV1,
+        payout_commitment: [u8; 33],
+        payout_value: u64,
+        wallet_ownership_digest: Digest32,
+        now_unix_ms: u64,
+    ) -> DomActuatorResult<PreparedDomPayoutFaceV1> {
+        binding.validate()?;
+        validate_digest(wallet_ownership_digest)?;
+        if payout_value == 0 || Commitment::from_compressed_bytes(&payout_commitment).is_err() {
+            return Err(DomActuatorError::InvalidBinding);
+        }
+        let store_instance_id = self.store_instance_id;
+        let transaction = self.immediate()?;
+        validate_lease(&transaction, lease, now_unix_ms)?;
+        require_binding(&transaction, lease, binding)?;
+        if let Some(prepared) = load_payout_face_preparation(&transaction, binding)? {
+            if prepared.payout_commitment != payout_commitment
+                || prepared.payout_value != payout_value
+                || prepared.wallet_ownership_digest != wallet_ownership_digest
+                || prepared.store_instance_id != store_instance_id
+            {
+                return Err(DomActuatorError::IdempotencyConflict);
+            }
+            if load_payout_face_evidence(&transaction, binding)?.is_some() {
+                return Err(DomActuatorError::CapabilityMismatch);
+            }
+            transaction.commit().map_err(storage)?;
+            return Ok(prepared);
+        }
+        if load_stage(&transaction, binding.session_id())? != STAGE_BOUND {
+            return Err(DomActuatorError::InvalidStage);
+        }
+        let prepare_digest = payout_face_prepare_digest(
+            binding,
+            payout_commitment,
+            payout_value,
+            wallet_ownership_digest,
+            store_instance_id,
+            now_unix_ms,
+        );
+        transaction
+            .execute(
+                "INSERT INTO dom_payout_face_preparations
+                 (session_id,route_id,participant_id,payout_commitment,payout_value,
+                  wallet_ownership_digest,store_instance_id,prepare_digest,created_at_unix_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    binding.session_id().as_slice(),
+                    binding.route_id().as_slice(),
+                    binding.participant().participant_id().as_slice(),
+                    payout_commitment.as_slice(),
+                    to_sql(payout_value)?,
+                    wallet_ownership_digest.as_slice(),
+                    store_instance_id.as_slice(),
+                    prepare_digest.as_slice(),
+                    to_sql(now_unix_ms)?,
+                ],
+            )
+            .map_err(|_| DomActuatorError::IdempotencyConflict)?;
+        transaction.commit().map_err(storage)?;
+        Ok(PreparedDomPayoutFaceV1 {
+            binding,
+            payout_commitment,
+            payout_value,
+            wallet_ownership_digest,
+            store_instance_id,
+            prepare_digest,
+            created_at_unix_ms: now_unix_ms,
+        })
+    }
+
+    /// Reissues an existing preparation for an already-pinned wallet. It never
+    /// creates a row, so a wallet restored without its exact actuator Store is
+    /// refused instead of being adopted by a fresh Store.
+    pub(crate) fn recover_payout_face_preparation(
+        &mut self,
+        lease: DomLeaseV1,
+        binding: DomSessionBindingV1,
+        prepare_digest: Digest32,
+        now_unix_ms: u64,
+    ) -> DomActuatorResult<PreparedDomPayoutFaceV1> {
+        validate_digest(prepare_digest)?;
+        let store_instance_id = self.store_instance_id;
+        let transaction = self.immediate()?;
+        validate_lease(&transaction, lease, now_unix_ms)?;
+        require_binding(&transaction, lease, binding)?;
+        let prepared = load_payout_face_preparation(&transaction, binding)?
+            .ok_or(DomActuatorError::CapabilityMismatch)?;
+        if prepared.prepare_digest != prepare_digest
+            || prepared.store_instance_id != store_instance_id
+        {
+            return Err(DomActuatorError::CapabilityMismatch);
+        }
+        transaction.commit().map_err(storage)?;
+        Ok(prepared)
+    }
+
+    /// Recovers the exact wallet selection already bound to this session.
+    ///
+    /// This read-only seam exists so the wallet can resume payout ownership
+    /// without accepting a commitment from the composition root. It returns
+    /// no blinding, capability or generic store handle.
+    pub(crate) fn retained_payout_face_selection(
+        &mut self,
+        lease: DomLeaseV1,
+        binding: DomSessionBindingV1,
+        now_unix_ms: u64,
+    ) -> DomActuatorResult<Option<([u8; 33], u64)>> {
+        binding.validate()?;
+        let store_instance_id = self.store_instance_id;
+        let transaction = self.immediate()?;
+        validate_lease(&transaction, lease, now_unix_ms)?;
+        require_binding(&transaction, lease, binding)?;
+        let Some(prepared) = load_payout_face_preparation(&transaction, binding)? else {
+            transaction.commit().map_err(storage)?;
+            return Ok(None);
+        };
+        if prepared.store_instance_id != store_instance_id {
+            return Err(DomActuatorError::InvalidStorageAuthority);
+        }
+        if let Some(retained) = load_payout_face_evidence(&transaction, binding)? {
+            if !active_payout_face_matches_preparation(&retained, &prepared) {
+                return Err(DomActuatorError::IdempotencyConflict);
+            }
+        }
+        transaction.commit().map_err(storage)?;
+        Ok(Some((prepared.payout_commitment, prepared.payout_value)))
+    }
+
+    /// Activates one exact preparation only after the encrypted wallet pin was
+    /// fsynced. The first activation appends exactly one session event; restart
+    /// reissues the same active evidence without another revision.
+    pub(crate) fn activate_payout_face(
+        &mut self,
+        lease: DomLeaseV1,
+        prepared: &PreparedDomPayoutFaceV1,
+        wallet_ciphertext_digest: Digest32,
+        now_unix_ms: u64,
+    ) -> DomActuatorResult<RetainedDomPayoutFaceEvidenceV1> {
+        validate_digest(wallet_ciphertext_digest)?;
+        let binding = prepared.binding;
+        let store_instance_id = self.store_instance_id;
+        let transaction = self.immediate()?;
+        validate_lease(&transaction, lease, now_unix_ms)?;
+        require_binding(&transaction, lease, binding)?;
+        let stored = load_payout_face_preparation(&transaction, binding)?
+            .ok_or(DomActuatorError::CapabilityMismatch)?;
+        if !prepared_payout_face_matches(&stored, prepared)
+            || prepared.store_instance_id != store_instance_id
+        {
+            return Err(DomActuatorError::CapabilityMismatch);
+        }
+        if let Some(retained) = load_payout_face_evidence(&transaction, binding)? {
+            if !active_payout_face_matches_preparation(&retained, prepared) {
+                return Err(DomActuatorError::IdempotencyConflict);
+            }
+            transaction.commit().map_err(storage)?;
+            return Ok(retained);
+        }
+        if load_stage(&transaction, binding.session_id())? != STAGE_BOUND {
+            return Err(DomActuatorError::InvalidStage);
+        }
+        let event_effect_id = hash_parts(&[
+            PAYOUT_FACE_EFFECT_DOMAIN,
+            prepared.prepare_digest.as_slice(),
+            prepared.store_instance_id.as_slice(),
+        ]);
+        let event_digest = hash_parts(&[
+            PAYOUT_FACE_EVENT_DOMAIN,
+            event_effect_id.as_slice(),
+            prepared.wallet_ownership_digest.as_slice(),
+            wallet_ciphertext_digest.as_slice(),
+            binding.terms_digest().as_slice(),
+            binding.deployment_digest().as_slice(),
+            binding.asset_binding_digest().as_slice(),
+        ]);
+        let current_revision: i64 = transaction
+            .query_row(
+                "SELECT revision FROM dom_sessions WHERE session_id=?1",
+                params![binding.session_id().as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        let evidence_revision = from_sql(current_revision)?
+            .checked_add(1)
+            .ok_or(DomActuatorError::RevisionConflict)?;
+        append_event(
+            &transaction,
+            binding.session_id(),
+            event_effect_id,
+            event_digest,
+            STAGE_BOUND,
+            lease.fencing_epoch,
+            now_unix_ms,
+        )?;
+        let record_digest = payout_face_record_digest(&DomPayoutFaceRecordFactsV1 {
+            binding,
+            payout_commitment: prepared.payout_commitment,
+            payout_value: prepared.payout_value,
+            wallet_ownership_digest: prepared.wallet_ownership_digest,
+            store_instance_id: prepared.store_instance_id,
+            prepare_digest: prepared.prepare_digest,
+            wallet_ciphertext_digest,
+            evidence_revision,
+            event_effect_id,
+            event_digest,
+            created_at_unix_ms: now_unix_ms,
+        });
+        transaction
+            .execute(
+                "INSERT INTO dom_payout_face_evidence
+                 (session_id,prepare_digest,route_id,participant_id,payout_commitment,payout_value,
+                  wallet_ownership_digest,store_instance_id,wallet_ciphertext_digest,
+                  evidence_revision,event_effect_id,event_digest,record_digest,created_at_unix_ms)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                params![
+                    binding.session_id().as_slice(),
+                    prepared.prepare_digest.as_slice(),
+                    binding.route_id().as_slice(),
+                    binding.participant().participant_id().as_slice(),
+                    prepared.payout_commitment.as_slice(),
+                    to_sql(prepared.payout_value)?,
+                    prepared.wallet_ownership_digest.as_slice(),
+                    prepared.store_instance_id.as_slice(),
+                    wallet_ciphertext_digest.as_slice(),
+                    to_sql(evidence_revision)?,
+                    event_effect_id.as_slice(),
+                    event_digest.as_slice(),
+                    record_digest.as_slice(),
+                    to_sql(now_unix_ms)?,
+                ],
+            )
+            .map_err(|_| DomActuatorError::IdempotencyConflict)?;
+        transaction.commit().map_err(storage)?;
+        Ok(RetainedDomPayoutFaceEvidenceV1 {
+            binding,
+            payout_commitment: prepared.payout_commitment,
+            payout_value: prepared.payout_value,
+            wallet_ownership_digest: prepared.wallet_ownership_digest,
+            store_instance_id: prepared.store_instance_id,
+            prepare_digest: prepared.prepare_digest,
+            wallet_ciphertext_digest,
+            evidence_revision,
+            record_digest,
+            created_at_unix_ms: now_unix_ms,
+        })
+    }
+
+    pub(crate) fn validate_payout_face(
+        &mut self,
+        lease: DomLeaseV1,
+        expected: &RetainedDomPayoutFaceEvidenceV1,
+        now_unix_ms: u64,
+    ) -> DomActuatorResult<()> {
+        let transaction = self.immediate()?;
+        validate_lease(&transaction, lease, now_unix_ms)?;
+        require_binding(&transaction, lease, expected.binding)?;
+        let retained = load_payout_face_evidence(&transaction, expected.binding)?
+            .ok_or(DomActuatorError::CapabilityMismatch)?;
+        if retained.binding != expected.binding
+            || retained.payout_commitment != expected.payout_commitment
+            || retained.payout_value != expected.payout_value
+            || retained.wallet_ownership_digest != expected.wallet_ownership_digest
+            || retained.store_instance_id != expected.store_instance_id
+            || retained.prepare_digest != expected.prepare_digest
+            || retained.wallet_ciphertext_digest != expected.wallet_ciphertext_digest
+            || retained.record_digest != expected.record_digest
+            || retained.evidence_revision != expected.evidence_revision
+            || retained.created_at_unix_ms != expected.created_at_unix_ms
+        {
+            return Err(DomActuatorError::CapabilityMismatch);
+        }
+        transaction.commit().map_err(storage)
     }
 
     /// Persist an exact action intent before returning its move-only capability.
@@ -4034,6 +4461,9 @@ impl DomActuatorStoreV1 {
             .map_err(storage)?;
         validate_database_path(&transaction, &self.path)?;
         validate_backend_and_schema(&transaction)?;
+        if load_store_instance_id(&transaction)? != self.store_instance_id {
+            return Err(DomActuatorError::InvalidStorageAuthority);
+        }
         audit_retained_state_in_transaction(&transaction)?;
         Ok(transaction)
     }
@@ -4043,6 +4473,9 @@ impl DomActuatorStoreV1 {
         let transaction = self.connection.unchecked_transaction().map_err(storage)?;
         validate_database_path(&transaction, &self.path)?;
         validate_backend_and_schema(&transaction)?;
+        if load_store_instance_id(&transaction)? != self.store_instance_id {
+            return Err(DomActuatorError::InvalidStorageAuthority);
+        }
         audit_retained_state_in_transaction(&transaction)?;
         Ok(transaction)
     }
@@ -5558,6 +5991,251 @@ fn require_scope(
     require_binding(transaction, lease, scope.binding())
 }
 
+fn payout_face_prepare_digest(
+    binding: DomSessionBindingV1,
+    payout_commitment: [u8; 33],
+    payout_value: u64,
+    wallet_ownership_digest: Digest32,
+    store_instance_id: Digest32,
+    created_at_unix_ms: u64,
+) -> Digest32 {
+    let runtime = binding.runtime_identity();
+    hash_parts(&[
+        PAYOUT_FACE_PREPARE_DOMAIN,
+        binding.route_id().as_slice(),
+        binding.session_id().as_slice(),
+        binding.participant().participant_id().as_slice(),
+        &[binding.participant().protocol_index()],
+        binding.chain_id().as_slice(),
+        binding.genesis_hash().as_slice(),
+        &[runtime.network as u8],
+        &runtime.network_magic.to_be_bytes(),
+        &runtime.protocol_version.to_be_bytes(),
+        &[runtime.range_proof_serialization_version],
+        binding.terms_digest().as_slice(),
+        binding.profile_digest().as_slice(),
+        binding.deployment_digest().as_slice(),
+        binding.asset_binding_digest().as_slice(),
+        &binding.registry_epoch().to_be_bytes(),
+        &binding.min_confirmations().to_be_bytes(),
+        &binding.max_reorg_depth().to_be_bytes(),
+        payout_commitment.as_slice(),
+        &payout_value.to_be_bytes(),
+        wallet_ownership_digest.as_slice(),
+        store_instance_id.as_slice(),
+        &created_at_unix_ms.to_be_bytes(),
+    ])
+}
+
+fn prepared_payout_face_matches(
+    left: &PreparedDomPayoutFaceV1,
+    right: &PreparedDomPayoutFaceV1,
+) -> bool {
+    left.binding == right.binding
+        && left.payout_commitment == right.payout_commitment
+        && left.payout_value == right.payout_value
+        && left.wallet_ownership_digest == right.wallet_ownership_digest
+        && left.store_instance_id == right.store_instance_id
+        && left.prepare_digest == right.prepare_digest
+        && left.created_at_unix_ms == right.created_at_unix_ms
+}
+
+fn active_payout_face_matches_preparation(
+    active: &RetainedDomPayoutFaceEvidenceV1,
+    prepared: &PreparedDomPayoutFaceV1,
+) -> bool {
+    active.binding == prepared.binding
+        && active.payout_commitment == prepared.payout_commitment
+        && active.payout_value == prepared.payout_value
+        && active.wallet_ownership_digest == prepared.wallet_ownership_digest
+        && active.store_instance_id == prepared.store_instance_id
+        && active.prepare_digest == prepared.prepare_digest
+}
+
+fn load_payout_face_preparation(
+    transaction: &Transaction<'_>,
+    binding: DomSessionBindingV1,
+) -> DomActuatorResult<Option<PreparedDomPayoutFaceV1>> {
+    let row = transaction
+        .query_row(
+            "SELECT route_id,participant_id,payout_commitment,payout_value,
+                    wallet_ownership_digest,store_instance_id,prepare_digest,created_at_unix_ms
+             FROM dom_payout_face_preparations WHERE session_id=?1",
+            params![binding.session_id().as_slice()],
+            RawDomPayoutFacePreparationRowV1::from_row,
+        )
+        .optional()
+        .map_err(storage)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let payout_commitment = blob33(row.payout_commitment)?;
+    Commitment::from_compressed_bytes(&payout_commitment)
+        .map_err(|_| DomActuatorError::UnsupportedFormat)?;
+    let payout_value = from_sql(row.payout_value)?;
+    let wallet_ownership_digest = blob32(row.wallet_ownership_digest)?;
+    let store_instance_id = blob32(row.store_instance_id)?;
+    let prepare_digest = blob32(row.prepare_digest)?;
+    let created_at_unix_ms = from_sql(row.created_at_unix_ms)?;
+    if blob32(row.route_id)? != binding.route_id()
+        || blob32(row.participant_id)? != binding.participant().participant_id()
+        || payout_value == 0
+        || wallet_ownership_digest == [0; 32]
+        || store_instance_id == [0; 32]
+        || prepare_digest == [0; 32]
+        || payout_face_prepare_digest(
+            binding,
+            payout_commitment,
+            payout_value,
+            wallet_ownership_digest,
+            store_instance_id,
+            created_at_unix_ms,
+        ) != prepare_digest
+    {
+        return Err(DomActuatorError::UnsupportedFormat);
+    }
+    Ok(Some(PreparedDomPayoutFaceV1 {
+        binding,
+        payout_commitment,
+        payout_value,
+        wallet_ownership_digest,
+        store_instance_id,
+        prepare_digest,
+        created_at_unix_ms,
+    }))
+}
+
+fn payout_face_record_digest(facts: &DomPayoutFaceRecordFactsV1) -> Digest32 {
+    let binding = facts.binding;
+    let runtime = binding.runtime_identity();
+    hash_parts(&[
+        PAYOUT_FACE_RECORD_DOMAIN,
+        binding.route_id().as_slice(),
+        binding.session_id().as_slice(),
+        binding.participant().participant_id().as_slice(),
+        &[binding.participant().protocol_index()],
+        binding.chain_id().as_slice(),
+        binding.genesis_hash().as_slice(),
+        &[runtime.network as u8],
+        &runtime.network_magic.to_be_bytes(),
+        &runtime.protocol_version.to_be_bytes(),
+        &[runtime.range_proof_serialization_version],
+        binding.terms_digest().as_slice(),
+        binding.profile_digest().as_slice(),
+        binding.deployment_digest().as_slice(),
+        binding.asset_binding_digest().as_slice(),
+        &binding.registry_epoch().to_be_bytes(),
+        &binding.min_confirmations().to_be_bytes(),
+        &binding.max_reorg_depth().to_be_bytes(),
+        facts.payout_commitment.as_slice(),
+        &facts.payout_value.to_be_bytes(),
+        facts.wallet_ownership_digest.as_slice(),
+        facts.store_instance_id.as_slice(),
+        facts.prepare_digest.as_slice(),
+        facts.wallet_ciphertext_digest.as_slice(),
+        &facts.evidence_revision.to_be_bytes(),
+        facts.event_effect_id.as_slice(),
+        facts.event_digest.as_slice(),
+        &facts.created_at_unix_ms.to_be_bytes(),
+    ])
+}
+
+fn load_payout_face_evidence(
+    transaction: &Transaction<'_>,
+    binding: DomSessionBindingV1,
+) -> DomActuatorResult<Option<RetainedDomPayoutFaceEvidenceV1>> {
+    let row = transaction
+        .query_row(
+            "SELECT prepare_digest,route_id,participant_id,payout_commitment,payout_value,
+                    wallet_ownership_digest,store_instance_id,wallet_ciphertext_digest,
+                    evidence_revision,event_effect_id,event_digest,record_digest,created_at_unix_ms
+             FROM dom_payout_face_evidence WHERE session_id=?1",
+            params![binding.session_id().as_slice()],
+            RawDomPayoutFaceEvidenceRowV1::from_row,
+        )
+        .optional()
+        .map_err(storage)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let prepare_digest = blob32(row.prepare_digest)?;
+    let payout_commitment = blob33(row.payout_commitment)?;
+    Commitment::from_compressed_bytes(&payout_commitment)
+        .map_err(|_| DomActuatorError::UnsupportedFormat)?;
+    let payout_value = from_sql(row.payout_value)?;
+    let wallet_ownership_digest = blob32(row.wallet_ownership_digest)?;
+    let store_instance_id = blob32(row.store_instance_id)?;
+    let wallet_ciphertext_digest = blob32(row.wallet_ciphertext_digest)?;
+    let evidence_revision = from_sql(row.evidence_revision)?;
+    let event_effect_id = blob32(row.event_effect_id)?;
+    let event_digest = blob32(row.event_digest)?;
+    let record_digest = blob32(row.record_digest)?;
+    let created_at_unix_ms = from_sql(row.created_at_unix_ms)?;
+    let preparation = load_payout_face_preparation(transaction, binding)?;
+    let preparation_matches = preparation.as_ref().is_some_and(|prepared| {
+        prepared.payout_commitment == payout_commitment
+            && prepared.payout_value == payout_value
+            && prepared.wallet_ownership_digest == wallet_ownership_digest
+            && prepared.store_instance_id == store_instance_id
+            && prepared.prepare_digest == prepare_digest
+    });
+    let event: Option<(Vec<u8>, Vec<u8>)> = transaction
+        .query_row(
+            "SELECT effect_id,event_digest FROM dom_session_events
+             WHERE session_id=?1 AND revision=?2",
+            params![binding.session_id().as_slice(), to_sql(evidence_revision)?],
+            |event| Ok((event.get(0)?, event.get(1)?)),
+        )
+        .optional()
+        .map_err(storage)?;
+    let event_matches = match event {
+        Some((effect, digest)) => {
+            blob32(effect)? == event_effect_id && blob32(digest)? == event_digest
+        }
+        None => false,
+    };
+    if blob32(row.route_id)? != binding.route_id()
+        || blob32(row.participant_id)? != binding.participant().participant_id()
+        || payout_value == 0
+        || wallet_ownership_digest == [0; 32]
+        || store_instance_id == [0; 32]
+        || prepare_digest == [0; 32]
+        || wallet_ciphertext_digest == [0; 32]
+        || evidence_revision == 0
+        || event_effect_id == [0; 32]
+        || event_digest == [0; 32]
+        || !preparation_matches
+        || !event_matches
+        || payout_face_record_digest(&DomPayoutFaceRecordFactsV1 {
+            binding,
+            payout_commitment,
+            payout_value,
+            wallet_ownership_digest,
+            store_instance_id,
+            prepare_digest,
+            wallet_ciphertext_digest,
+            evidence_revision,
+            event_effect_id,
+            event_digest,
+            created_at_unix_ms,
+        }) != record_digest
+    {
+        return Err(DomActuatorError::UnsupportedFormat);
+    }
+    Ok(Some(RetainedDomPayoutFaceEvidenceV1 {
+        binding,
+        payout_commitment,
+        payout_value,
+        wallet_ownership_digest,
+        store_instance_id,
+        prepare_digest,
+        wallet_ciphertext_digest,
+        evidence_revision,
+        record_digest,
+        created_at_unix_ms,
+    }))
+}
+
 fn load_stage(transaction: &Transaction<'_>, session_id: Digest32) -> DomActuatorResult<i64> {
     transaction
         .query_row(
@@ -5863,10 +6541,35 @@ fn create_schema_with_boundary_hook<F>(
 where
     F: FnOnce() -> DomActuatorResult<()>,
 {
+    let mut instance_id = [0_u8; 32];
+    getrandom::getrandom(&mut instance_id).map_err(|_| DomActuatorError::StorageUnavailable)?;
+    validate_digest(instance_id)?;
     let transaction = connection.unchecked_transaction().map_err(storage)?;
     transaction.execute_batch(SCHEMA_SQL).map_err(storage)?;
+    transaction
+        .execute(
+            "INSERT INTO dom_store_identity(singleton,instance_id) VALUES (1,?1)",
+            params![instance_id.as_slice()],
+        )
+        .map_err(storage)?;
     before_commit()?;
     transaction.commit().map_err(storage)
+}
+
+fn load_store_instance_id(connection: &Connection) -> DomActuatorResult<Digest32> {
+    let (count, raw): (i64, Vec<u8>) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM dom_store_identity),instance_id
+             FROM dom_store_identity WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| DomActuatorError::UnsupportedFormat)?;
+    let instance_id = blob32(raw)?;
+    if count != 1 || instance_id == [0; 32] {
+        return Err(DomActuatorError::UnsupportedFormat);
+    }
+    Ok(instance_id)
 }
 
 fn preflight_resumable_creation_state(
@@ -5937,6 +6640,7 @@ fn preflight_resumable_creation_state(
 
 fn validate_pristine_initialized_store(connection: &Connection) -> DomActuatorResult<()> {
     validate_backend_and_schema(connection)?;
+    load_store_instance_id(connection)?;
     let economic_rows: i64 = connection
         .query_row(
             "SELECT
@@ -5952,6 +6656,8 @@ fn validate_pristine_initialized_store(connection: &Connection) -> DomActuatorRe
                  (SELECT COUNT(*) FROM dom_terminal_finality) +
                  (SELECT COUNT(*) FROM dom_output_reservations) +
                  (SELECT COUNT(*) FROM dom_output_reservation_items) +
+                 (SELECT COUNT(*) FROM dom_payout_face_preparations) +
+                 (SELECT COUNT(*) FROM dom_payout_face_evidence) +
                  (SELECT COUNT(*) FROM dom_session_events)",
             [],
             |row| row.get(0),
@@ -6036,6 +6742,8 @@ fn audit_retained_state_in_transaction(transaction: &Transaction<'_>) -> DomActu
     audit_claim_admission_records(transaction)?;
     audit_terminal_finality_records(transaction)?;
     audit_output_reservation_records(transaction)?;
+    audit_payout_face_preparation_records(transaction)?;
+    audit_payout_face_evidence_records(transaction)?;
     audit_settlement_child_records(transaction)
 }
 
@@ -6555,6 +7263,53 @@ fn audit_output_reservation_records(transaction: &Transaction<'_>) -> DomActuato
     Ok(())
 }
 
+fn audit_payout_face_evidence_records(transaction: &Transaction<'_>) -> DomActuatorResult<()> {
+    let mut statement = transaction
+        .prepare("SELECT session_id FROM dom_payout_face_evidence ORDER BY session_id")
+        .map_err(storage)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(storage)?;
+    let mut session_ids = Vec::new();
+    for row in rows {
+        session_ids.push(blob32(row.map_err(storage)?)?);
+    }
+    drop(statement);
+    for session_id in session_ids {
+        let binding =
+            load_binding(transaction, session_id)?.ok_or(DomActuatorError::UnsupportedFormat)?;
+        if load_payout_face_evidence(transaction, binding)?.is_none() {
+            return Err(DomActuatorError::UnsupportedFormat);
+        }
+    }
+    Ok(())
+}
+
+fn audit_payout_face_preparation_records(transaction: &Transaction<'_>) -> DomActuatorResult<()> {
+    let store_instance_id = load_store_instance_id(transaction)?;
+    let mut statement = transaction
+        .prepare("SELECT session_id FROM dom_payout_face_preparations ORDER BY session_id")
+        .map_err(storage)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(storage)?;
+    let mut session_ids = Vec::new();
+    for row in rows {
+        session_ids.push(blob32(row.map_err(storage)?)?);
+    }
+    drop(statement);
+    for session_id in session_ids {
+        let binding =
+            load_binding(transaction, session_id)?.ok_or(DomActuatorError::UnsupportedFormat)?;
+        let prepared = load_payout_face_preparation(transaction, binding)?
+            .ok_or(DomActuatorError::UnsupportedFormat)?;
+        if prepared.store_instance_id != store_instance_id {
+            return Err(DomActuatorError::UnsupportedFormat);
+        }
+    }
+    Ok(())
+}
+
 fn audit_claim_admission_records(transaction: &Transaction<'_>) -> DomActuatorResult<()> {
     let session_ids = {
         let mut statement = transaction
@@ -7042,6 +7797,7 @@ fn sync_directory(path: &Path) -> DomActuatorResult<()> {
 pub(crate) mod tests {
     use super::*;
     use crate::{DomParticipantV1, WalletReservationRequestV1};
+    use dom_crypto::pedersen::BlindingFactor;
     use static_assertions::assert_not_impl_any;
     use std::error::Error;
     use std::process::{Command, Stdio};
@@ -7127,6 +7883,7 @@ pub(crate) mod tests {
     );
     assert_not_impl_any!(FinalClaimAttemptFactsV2: Clone, Copy, core::fmt::Debug);
     assert_not_impl_any!(FinalClaimTransportAuthorityFactsV2: Clone, Copy, core::fmt::Debug);
+    assert_not_impl_any!(PreparedDomPayoutFaceV1: Clone, Copy, core::fmt::Debug);
     assert_not_impl_any!(DomSettlementChildBindingV1:
         Clone,
         Copy,
@@ -7175,6 +7932,30 @@ pub(crate) mod tests {
 
     pub(crate) fn digest(tag: u8) -> Digest32 {
         [tag; 32]
+    }
+
+    fn payout_commitment(tag: u8) -> TestResult<[u8; 33]> {
+        let blinding = BlindingFactor::from_bytes([tag; 32]).test_context("payout blinding")?;
+        Ok(*Commitment::commit(50, &blinding).as_bytes())
+    }
+
+    fn activate_payout_face_for_test(
+        store: &mut DomActuatorStoreV1,
+        lease: DomLeaseV1,
+        binding: DomSessionBindingV1,
+        commitment: [u8; 33],
+        ownership_digest: Digest32,
+        now_unix_ms: u64,
+    ) -> DomActuatorResult<RetainedDomPayoutFaceEvidenceV1> {
+        let prepared = store.prepare_payout_face(
+            lease,
+            binding,
+            commitment,
+            50,
+            ownership_digest,
+            now_unix_ms,
+        )?;
+        store.activate_payout_face(lease, &prepared, digest(70), now_unix_ms + 1)
     }
 
     pub(crate) fn binding(route: u8, session: u8) -> TestResult<DomSessionBindingV1> {
@@ -7584,7 +8365,7 @@ pub(crate) mod tests {
             .test_context("prepared claim state snapshot")
     }
 
-    fn actuator_row_counts(store: &DomActuatorStoreV1) -> TestResult<[i64; 11]> {
+    fn actuator_row_counts(store: &DomActuatorStoreV1) -> TestResult<[i64; 13]> {
         Ok([
             store
                 .connection
@@ -7632,6 +8413,20 @@ pub(crate) mod tests {
                 .test_context("reservation item row count")?,
             store
                 .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM dom_payout_face_preparations",
+                    [],
+                    |row| row.get(0),
+                )
+                .test_context("payout face preparation row count")?,
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM dom_payout_face_evidence", [], |row| {
+                    row.get(0)
+                })
+                .test_context("payout face evidence row count")?,
+            store
+                .connection
                 .query_row("SELECT COUNT(*) FROM dom_session_events", [], |row| {
                     row.get(0)
                 })
@@ -7653,6 +8448,27 @@ pub(crate) mod tests {
                 )
                 .test_context("V2 final-claim admission row count")?,
         ])
+    }
+
+    pub(crate) fn payout_face_progress(
+        store: &DomActuatorStoreV1,
+        binding: DomSessionBindingV1,
+    ) -> TestResult<(i64, i64, i64, i64)> {
+        store
+            .connection
+            .query_row(
+                "SELECT s.revision,
+                        (SELECT COUNT(*) FROM dom_payout_face_preparations p
+                         WHERE p.session_id=s.session_id),
+                        (SELECT COUNT(*) FROM dom_payout_face_evidence p
+                         WHERE p.session_id=s.session_id),
+                        (SELECT COUNT(*) FROM dom_session_events e
+                         WHERE e.session_id=s.session_id)
+                 FROM dom_sessions s WHERE s.session_id=?1",
+                params![binding.session_id().as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .test_context("payout face progress")
     }
 
     pub(crate) fn mark_claim_potentially_exposed_for_test(
@@ -9323,7 +10139,7 @@ pub(crate) mod tests {
         attempt_updated_at: Option<i64>,
         admission_record: Option<Vec<u8>>,
         admission_receipt: Option<Vec<u8>>,
-        counts: [i64; 11],
+        counts: [i64; 13],
     }
 
     pub(crate) fn final_claim_v2_state_snapshot(
@@ -10187,7 +11003,7 @@ pub(crate) mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .test_context("schema version")?;
         assert_eq!(version, SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 9);
+        assert_eq!(SCHEMA_VERSION, 10);
         for table in ["dom_final_claim_attempt_v2", "dom_final_claim_admission_v2"] {
             let mut statement = store
                 .connection
@@ -10692,6 +11508,168 @@ pub(crate) mod tests {
             second_latched.attempt_record_digest(),
             first_latched.attempt_record_digest()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn payout_face_is_one_immutable_journal_revision_across_restart() -> TestResult {
+        let (_directory, path, mut store, lease) = setup()?;
+        let bound = binding(1, 2)?;
+        store.bind_session(lease, bound, 1_000)?;
+        let commitment = payout_commitment(2)?;
+        let prepare_digest = {
+            let prepared =
+                store.prepare_payout_face(lease, bound, commitment, 50, digest(61), 1_001)?;
+            assert_eq!(payout_face_progress(&store, bound)?, (0, 1, 0, 0));
+            prepared.prepare_digest
+        };
+        drop(store);
+        let mut store = DomActuatorStoreV1::open_existing(&path)?;
+        let lease = store.acquire_lease(digest(9), digest(20), 1_002, 10_000)?;
+        let recovered_prepared =
+            store.prepare_payout_face(lease, bound, commitment, 50, digest(61), 1_003)?;
+        assert_eq!(recovered_prepared.prepare_digest, prepare_digest);
+        assert_eq!(payout_face_progress(&store, bound)?, (0, 1, 0, 0));
+        require_dom_error(
+            store.prepare_payout_face(lease, bound, commitment, 51, digest(61), 1_003),
+            DomActuatorError::IdempotencyConflict,
+        )?;
+        require_dom_error(
+            store.prepare_payout_face(lease, bound, commitment, 50, digest(62), 1_003),
+            DomActuatorError::IdempotencyConflict,
+        )?;
+        assert_eq!(payout_face_progress(&store, bound)?, (0, 1, 0, 0));
+        let first = store.activate_payout_face(lease, &recovered_prepared, digest(70), 1_004)?;
+        assert_eq!(first.evidence_revision, 1);
+        assert_eq!(payout_face_progress(&store, bound)?, (1, 1, 1, 1));
+        store.validate_payout_face(lease, &first, 1_005)?;
+        let wrong = RetainedDomPayoutFaceEvidenceV1 {
+            record_digest: digest(99),
+            ..first
+        };
+        require_dom_error(
+            store.validate_payout_face(lease, &wrong, 1_005),
+            DomActuatorError::CapabilityMismatch,
+        )?;
+        require_dom_error(
+            store.prepare_payout_face(lease, bound, commitment, 50, digest(61), 1_006),
+            DomActuatorError::CapabilityMismatch,
+        )?;
+        let repeated_prepared =
+            store.recover_payout_face_preparation(lease, bound, prepare_digest, 1_006)?;
+        let repeated = store.activate_payout_face(lease, &repeated_prepared, digest(71), 1_007)?;
+        assert_eq!(repeated.evidence_revision, first.evidence_revision);
+        assert_eq!(repeated.record_digest, first.record_digest);
+        assert_eq!(payout_face_progress(&store, bound)?, (1, 1, 1, 1));
+        drop(store);
+
+        let mut reopened = DomActuatorStoreV1::open_existing(&path)?;
+        let resumed = reopened.acquire_lease(digest(9), digest(20), 1_008, 10_000)?;
+        let recovered_prepared =
+            reopened.recover_payout_face_preparation(resumed, bound, prepare_digest, 1_009)?;
+        let recovered =
+            reopened.activate_payout_face(resumed, &recovered_prepared, digest(72), 1_010)?;
+        assert_eq!(recovered.evidence_revision, first.evidence_revision);
+        assert_eq!(recovered.record_digest, first.record_digest);
+        assert_eq!(payout_face_progress(&reopened, bound)?, (1, 1, 1, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn payout_face_commitment_cannot_be_promised_to_two_sessions() -> TestResult {
+        let (_directory, _path, mut store, lease) = setup()?;
+        let first = binding(1, 2)?;
+        let second = binding(1, 3)?;
+        store.bind_session(lease, first, 1_000)?;
+        store.bind_session(lease, second, 1_000)?;
+        for malformed in [[0_u8; 33], [0x04; 33]] {
+            require_dom_error(
+                store.prepare_payout_face(lease, first, malformed, 50, digest(61), 1_001),
+                DomActuatorError::InvalidBinding,
+            )?;
+        }
+        assert_eq!(payout_face_progress(&store, first)?, (0, 0, 0, 0));
+        let commitment = payout_commitment(3)?;
+        activate_payout_face_for_test(&mut store, lease, first, commitment, digest(61), 1_001)?;
+        require_dom_error(
+            store.prepare_payout_face(lease, second, commitment, 50, digest(62), 1_003),
+            DomActuatorError::IdempotencyConflict,
+        )?;
+        assert_eq!(payout_face_progress(&store, first)?, (1, 1, 1, 1));
+        assert_eq!(payout_face_progress(&store, second)?, (0, 0, 0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn payout_face_preparation_cannot_cross_store_identity() -> TestResult {
+        let (_first_directory, _first_path, mut first_store, first_lease) = setup()?;
+        let (_second_directory, _second_path, mut second_store, second_lease) = setup()?;
+        let bound = binding(1, 2)?;
+        first_store.bind_session(first_lease, bound, 1_000)?;
+        second_store.bind_session(second_lease, bound, 1_000)?;
+        let commitment = payout_commitment(4)?;
+        let first = first_store.prepare_payout_face(
+            first_lease,
+            bound,
+            commitment,
+            50,
+            digest(61),
+            1_001,
+        )?;
+        let second = second_store.prepare_payout_face(
+            second_lease,
+            bound,
+            commitment,
+            50,
+            digest(61),
+            1_001,
+        )?;
+        assert_ne!(first.store_instance_id, second.store_instance_id);
+        assert_ne!(first.prepare_digest, second.prepare_digest);
+        require_dom_error(
+            second_store.activate_payout_face(second_lease, &first, digest(70), 1_002),
+            DomActuatorError::CapabilityMismatch,
+        )?;
+        assert_eq!(payout_face_progress(&second_store, bound)?, (0, 1, 0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn payout_face_tamper_is_rejected_on_reopen() -> TestResult {
+        for statement in [
+            "UPDATE dom_store_identity SET instance_id=zeroblob(32)",
+            "UPDATE dom_payout_face_preparations SET prepare_digest=zeroblob(32)",
+            "UPDATE dom_payout_face_preparations SET created_at_unix_ms=created_at_unix_ms+1",
+            "UPDATE dom_payout_face_evidence SET payout_value=payout_value+1",
+            "UPDATE dom_payout_face_evidence SET evidence_revision=evidence_revision+1",
+            "UPDATE dom_payout_face_evidence SET record_digest=zeroblob(32)",
+            "UPDATE dom_payout_face_evidence SET created_at_unix_ms=created_at_unix_ms+1",
+            "UPDATE dom_payout_face_evidence SET payout_commitment=zeroblob(33)",
+            "UPDATE dom_payout_face_evidence SET wallet_ciphertext_digest=zeroblob(32)",
+            "UPDATE dom_payout_face_evidence SET store_instance_id=zeroblob(32)",
+            "UPDATE dom_session_events SET event_digest=zeroblob(32)",
+        ] {
+            let (_directory, path, mut store, lease) = setup()?;
+            let bound = binding(1, 2)?;
+            store.bind_session(lease, bound, 1_000)?;
+            activate_payout_face_for_test(
+                &mut store,
+                lease,
+                bound,
+                payout_commitment(2)?,
+                digest(61),
+                1_001,
+            )?;
+            drop(store);
+            let tamper = Connection::open(&path)?;
+            tamper.pragma_update(None, "foreign_keys", "OFF")?;
+            tamper.execute(statement, [])?;
+            drop(tamper);
+            require_dom_error(
+                DomActuatorStoreV1::open_existing(&path),
+                DomActuatorError::UnsupportedFormat,
+            )?;
+        }
         Ok(())
     }
 
