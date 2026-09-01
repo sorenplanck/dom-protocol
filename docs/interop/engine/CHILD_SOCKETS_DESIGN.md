@@ -143,3 +143,50 @@ cause; none was skipped or weakened:
 | staging census ×2 | **fail-open**: staged M8/F7 artifacts are excluded from the census scan, and `PreRecoveryStagingInventoryV1::capture` never checked their magic or the V1-xor-V2 rule — a crash cut could smuggle a wrong-typed or profile-mixed artifact past quarantine | `capture` now enforces magic-matches-name and per-session profile exclusivity for staged descriptor artifacts, before any staging replay; legitimate crash-cut recovery unaffected (`every_published_staging_name_survives_a_crash_cut_and_is_recovered` still green) |
 | purpose registry ×1 | test froze the closed signed-purpose set at 0x01..=0x04; `PurposeV1::RefundAdaptor = 0x05` was ratified into it (NAR-DC-P1-009 §4.1) | range widened to exactly 0x05, refusal from 0x06 |
 | equivocation semantics ×2 (+1 revealed) | two operational tests demanded a duplicate-ACK for the accepted bytes after an equivocation poisoned the key; four restart tests and the relay worker's `was_failed_closed` handling encode the opposite | **adjudicated for the majority and for fail-closed**: a poisoned key never ACKs again, including for previously accepted bytes; the two tests corrected, `DurableTransportOutcomeV1::EquivocationPersisted`'s doc now states the rule so it cannot be re-litigated silently |
+
+## 8. Progress — Solana socket landed (2026-09-01)
+
+Everything §4 asked for is now in the tree and green under
+`cargo check -p dom-interopd --no-default-features --features production`:
+
+1. **`solana-actuator`** (new crate): SQLite durable store, one row per
+   `(settlement_id, kind)`, exact signed bytes retained write-once, fenced
+   idempotent mutations by attempt id, monotone stages
+   `Signed → SendAttempted → Observed → Final / Reconciled /
+   FinalityInvalidated`. The stage moves to `SendAttempted` **before** any
+   node sees a byte. Takeover reconciliation turns blockhash expiry at the
+   quorum finalized-height floor into the positive `ExpiredNeverLanded`
+   proof; absence inside the window stays `Unknown` and writes nothing.
+   16 adversarial tests.
+2. **RPC surface**: `SolanaRpc::get_block_height` and
+   `get_latest_blockhash_with_validity`; pool gains
+   `finalized_block_height_floor` with a bounded quorum spread.
+3. **Authenticated Solana session** (`production_inputs.rs`): the
+   participant bundle's reserved u16 became the layout marker — `0` stays
+   byte-identical to the legacy encoding, `1` appends
+   `ProductionSolanaLegSetupV1` entries (adapter profile + DLEQ-bound
+   setup binding, fixed-width codec, proof bounded by the DLEQ system's
+   own limit). Authentication cross-checks the registry-pinned escrow
+   program, cluster and immutable program hash, then runs
+   `solana_profile::validate_setup` — the DLEQ against the frozen terms is
+   the anchor, exactly as §3 decided. Produces
+   `AuthenticatedSolanaSessionBindingsV1`; Monero legs remain refused
+   fail-closed until their child lands.
+4. **`production_child_solana.rs`**: `ProductionSolanaChildPortV1`
+   implements `ProductionSettlementChildPortV1` over the actuator + quorum
+   pool. Funding is initialize-plus-fund in one atomic transaction; every
+   escrow transaction has exactly one signer (its fee payer), so retained
+   custody revalidation rebuilds the deterministic message and re-verifies
+   the one ed25519 signature. The claim scalar is borrowed only into exact
+   message bytes and zeroized after the actuator retains them.
+   Reconciliation maps `ExpiredNeverLanded → ProvenNotExternalized`.
+5. **Router**: `AuthenticatedSolanaChildPortV1`, `authenticate_solana`,
+   `new_with_counterparties(…, solana)`; the Solana face routes the moment
+   a child is installed. **Materializer**: `authenticate_leg` resolves
+   Solana legs through `solana_deployment_capability` and the derived
+   `resolved_solana_deployment_digest_v1`.
+
+Still open from §2: the Monero actuator + `production_child_xmr` (§5),
+and the final graph wiring that constructs the production children inside
+`production_run` (the dead-code warnings on the materializer subsystem
+mark exactly that seam, unchanged from before this work).

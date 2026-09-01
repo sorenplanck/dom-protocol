@@ -18,6 +18,7 @@ use crate::production_child_dom::{
     ProductionDomActionAuthorityV1, ProductionDomChildClockV1, ProductionDomChildPortV1,
 };
 use crate::production_child_evm::{ProductionEvmChildClockV1, ProductionEvmChildPortV1};
+use crate::production_child_solana::{ProductionSolanaChildClockV1, ProductionSolanaChildPortV1};
 use btc_actuator::BitcoinRpcV1;
 use evm_actuator::EvmRpcV1;
 
@@ -86,6 +87,7 @@ pub(crate) trait ProductionSettlementChildPortV1 {
 pub(crate) struct AuthenticatedDomChildPortV1(Box<dyn ProductionSettlementChildPortV1>);
 pub(crate) struct AuthenticatedEvmChildPortV1(Box<dyn ProductionSettlementChildPortV1>);
 pub(crate) struct AuthenticatedBitcoinChildPortV1(Box<dyn ProductionSettlementChildPortV1>);
+pub(crate) struct AuthenticatedSolanaChildPortV1(Box<dyn ProductionSettlementChildPortV1>);
 
 /// Exact face router owned by the production settlement bridge.
 ///
@@ -113,9 +115,19 @@ impl ProductionSettlementChildRouterV1 {
         evm: Option<AuthenticatedEvmChildPortV1>,
         bitcoin: Option<AuthenticatedBitcoinChildPortV1>,
     ) -> Result<Self, ChildAuthorityRefusalV1> {
+        Self::new_with_counterparties(dom, evm, bitcoin, None)
+    }
+
+    pub(crate) fn new_with_counterparties(
+        dom: AuthenticatedDomChildPortV1,
+        evm: Option<AuthenticatedEvmChildPortV1>,
+        bitcoin: Option<AuthenticatedBitcoinChildPortV1>,
+        solana: Option<AuthenticatedSolanaChildPortV1>,
+    ) -> Result<Self, ChildAuthorityRefusalV1> {
         let AuthenticatedDomChildPortV1(dom) = dom;
         let evm = evm.map(|AuthenticatedEvmChildPortV1(port)| port);
         let bitcoin = bitcoin.map(|AuthenticatedBitcoinChildPortV1(port)| port);
+        let solana = solana.map(|AuthenticatedSolanaChildPortV1(port)| port);
         if dom.face() != SettlementFaceV1::Dom
             || evm
                 .as_ref()
@@ -123,7 +135,10 @@ impl ProductionSettlementChildRouterV1 {
             || bitcoin
                 .as_ref()
                 .is_some_and(|port| port.face() != SettlementFaceV1::Bitcoin)
-            || (evm.is_none() && bitcoin.is_none())
+            || solana
+                .as_ref()
+                .is_some_and(|port| port.face() != SettlementFaceV1::Solana)
+            || (evm.is_none() && bitcoin.is_none() && solana.is_none())
         {
             return Err(ChildAuthorityRefusalV1::Refused);
         }
@@ -132,7 +147,7 @@ impl ProductionSettlementChildRouterV1 {
             evm,
             bitcoin,
             monero: None,
-            solana: None,
+            solana,
         })
     }
 
@@ -164,6 +179,16 @@ impl ProductionSettlementChildRouterV1 {
         C: ProductionBitcoinChildClockV1 + 'static,
     {
         AuthenticatedBitcoinChildPortV1(Box::new(port))
+    }
+
+    pub(crate) fn authenticate_solana<R, C>(
+        port: ProductionSolanaChildPortV1<R, C>,
+    ) -> AuthenticatedSolanaChildPortV1
+    where
+        R: solana_rpc::SolanaRpc + 'static,
+        C: ProductionSolanaChildClockV1 + 'static,
+    {
+        AuthenticatedSolanaChildPortV1(Box::new(port))
     }
 
     #[cfg(test)]

@@ -1625,6 +1625,7 @@ dependencies = [
  "serde_json",
  "settlement-coordinator",
  "sha3",
+ "solana-actuator",
  "solana-delivery",
  "solana-delivery-sqlite",
  "solana-escrow-wire",

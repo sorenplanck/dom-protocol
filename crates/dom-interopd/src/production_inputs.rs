@@ -19,7 +19,7 @@ use btc_crypto::SecpContext;
 use chain_profile::ChainKindV1;
 use deployment_registry::{
     AuthoritySetV1, RegistryStoreV1, RegistryValidationPolicyV1, ResolvedBitcoinDeploymentV1,
-    ResolvedRegistryV1, MAX_AUTHORITY_SET_BYTES,
+    ResolvedRegistryV1, ResolvedSolanaDeploymentV1, MAX_AUTHORITY_SET_BYTES,
 };
 use kaystra_core::{
     terms::SettlementTermsV1,
@@ -33,6 +33,12 @@ use participant_binding::{
 use relay::auth::{RosterMemberV1, RosterRegistryV1, RosterSnapshotV1};
 use relay::SenderRoleV1;
 use route_composer::ComposedBindingV2;
+use solana_profile::{
+    validate_setup as validate_solana_setup, SolanaAdapterProfileV1, SolanaAssetV1,
+    SolanaNetwork as SolanaAdapterNetworkV1, SolanaSetupBindingV1, ValidatedSolanaSetup,
+};
+use solana_types::SolanaPubkey;
+use xmr_dleq_sigma::{BoundCrossCurveProofV1, CrossCurveProofBytes, CrossCurvePublicClaim};
 use route_executor::{
     CanonicalCodecV1, CommitOutcomeV1, DurableRouteStoreV1, FrozenRouteAdmissionCheckpointV2,
     LegIdV1, RouteEventV1, RouteIdV1, RouteStoreErrorV1,
@@ -68,6 +74,23 @@ pub const MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1: usize = 12
     + 2 * (4 + 2 * BITCOIN_PARTICIPANT_KEY_PROOF_BYTES_V1);
 /// Exact encoding of one Relay-authenticated Bitcoin participant key proof.
 pub const BITCOIN_PARTICIPANT_KEY_PROOF_BYTES_V1: usize = 32 + 1 + 33 + 64;
+/// Fixed-width prefix of one Solana leg setup: adapter profile plus every
+/// binding field except the variable-length DLEQ proof body.
+pub const SOLANA_LEG_SETUP_FIXED_BYTES_V1: usize = 43 // adapter profile
+    + 32 + 32                 // settlement_id, terms_hash
+    + 2 + 32 + 32 + 1         // dleq envelope header
+    + 2 + 65 + 4              // proof bundle header: version, claim, proof length
+    + 32 * 4 + 3              // program and PDA identities, bumps
+    + 1 + 32 + 1              // asset tag, mint, decimals
+    + 32 * 3 + 8 + 8          // parties, amount, refund deadline
+    + 32 + 32; // program_data_hash, setup_id
+/// Maximum size of a participant bundle that also carries Solana leg setups.
+/// The DLEQ proof body dominates; it is bounded by the proof system's own
+/// frozen limit, never by what a peer claims.
+pub const MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1: usize =
+    MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1
+        + 4
+        + 2 * (4 + SOLANA_LEG_SETUP_FIXED_BYTES_V1 + xmr_dleq_sigma::MAX_PROOF_BYTES);
 
 const AUTHORITY_BUNDLE_MAGIC_V1: &[u8; 8] = b"DOMPAUB1";
 const ROSTER_BUNDLE_MAGIC_V1: &[u8; 8] = b"DOMRSTR1";
@@ -717,12 +740,221 @@ impl ProductionBitcoinLegKeyProofsV1 {
     }
 }
 
+/// One route leg's registered Solana escrow setup: the adapter profile the
+/// frozen terms committed to and the DLEQ-bound setup binding. Unlike the EVM
+/// and Bitcoin legs there is no participant signature to verify here — the
+/// authentication anchor is the cross-curve DLEQ inside the binding, which
+/// `solana_profile::validate_setup` verifies against the frozen terms.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ProductionSolanaLegSetupV1 {
+    pub(crate) position: ProductionRoutePositionV1,
+    pub(crate) profile: SolanaAdapterProfileV1,
+    pub(crate) binding: SolanaSetupBindingV1,
+}
+
+impl core::fmt::Debug for ProductionSolanaLegSetupV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ProductionSolanaLegSetupV1")
+            .field("position", &self.position)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProductionSolanaLegSetupV1 {
+    /// Builds one Solana leg setup after structural zero/bounds checks. Full
+    /// cryptographic authentication happens only inside bundle verification.
+    pub fn new(
+        position: ProductionRoutePositionV1,
+        profile: SolanaAdapterProfileV1,
+        binding: SolanaSetupBindingV1,
+    ) -> Result<Self, ProductionInputErrorV1> {
+        if profile.program_id.is_zero()
+            || profile.rpc_quorum == 0
+            || profile.rpc_quorum > profile.rpc_node_count
+            || binding.settlement_id == ZERO_DIGEST
+            || binding.terms_hash == ZERO_DIGEST
+            || binding.program_id.is_zero()
+            || binding.dleq.bundle.proof.is_empty()
+            || binding.dleq.bundle.proof.len() > xmr_dleq_sigma::MAX_PROOF_BYTES
+        {
+            return Err(ProductionInputErrorV1::InvalidParticipantBundle);
+        }
+        Ok(Self {
+            position,
+            profile,
+            binding,
+        })
+    }
+
+    fn encode_into(&self, bytes: &mut Vec<u8>) -> Result<(), ProductionInputErrorV1> {
+        bytes.push(self.position.tag());
+        bytes.extend_from_slice(&[0; 3]);
+        bytes.push(self.profile.network as u8);
+        bytes.extend_from_slice(&self.profile.program_id.0);
+        bytes.extend_from_slice(&self.profile.rpc_node_count.to_be_bytes());
+        bytes.extend_from_slice(&self.profile.rpc_quorum.to_be_bytes());
+        bytes.push(u8::from(self.profile.allow_legacy_spl));
+        bytes.push(u8::from(self.profile.require_immutable_program));
+        bytes.extend_from_slice(&self.profile.max_signed_transaction_bytes.to_be_bytes());
+        let binding = &self.binding;
+        bytes.extend_from_slice(&binding.settlement_id);
+        bytes.extend_from_slice(&binding.terms_hash);
+        bytes.extend_from_slice(&binding.dleq.version.to_be_bytes());
+        bytes.extend_from_slice(&binding.dleq.settlement_id);
+        bytes.extend_from_slice(&binding.dleq.context_hash);
+        bytes.push(binding.dleq.role);
+        bytes.extend_from_slice(&binding.dleq.bundle.version.to_be_bytes());
+        bytes.extend_from_slice(&binding.dleq.bundle.claim.to_canonical_bytes());
+        let proof_len = u32::try_from(binding.dleq.bundle.proof.len())
+            .map_err(|_| ProductionInputErrorV1::InputBoundExceeded)?;
+        bytes.extend_from_slice(&proof_len.to_be_bytes());
+        bytes.extend_from_slice(&binding.dleq.bundle.proof);
+        bytes.extend_from_slice(&binding.program_id.0);
+        bytes.extend_from_slice(&binding.state_pda.0);
+        bytes.extend_from_slice(&binding.vault_pda.0);
+        bytes.extend_from_slice(&binding.vault_authority.0);
+        bytes.push(binding.state_bump);
+        bytes.push(binding.vault_bump);
+        bytes.push(binding.authority_bump);
+        match binding.asset {
+            SolanaAssetV1::NativeSol => {
+                bytes.push(1);
+                bytes.extend_from_slice(&[0; 32]);
+                bytes.push(0);
+            }
+            SolanaAssetV1::LegacySpl { mint, decimals } => {
+                bytes.push(2);
+                bytes.extend_from_slice(&mint.0);
+                bytes.push(decimals);
+            }
+        }
+        bytes.extend_from_slice(&binding.funder.0);
+        bytes.extend_from_slice(&binding.recipient.0);
+        bytes.extend_from_slice(&binding.refund_recipient.0);
+        bytes.extend_from_slice(&binding.amount.to_be_bytes());
+        bytes.extend_from_slice(&binding.refund_after_unix.to_be_bytes());
+        bytes.extend_from_slice(&binding.program_data_hash);
+        bytes.extend_from_slice(&binding.setup_id);
+        Ok(())
+    }
+
+    fn decode_from(cursor: &mut InputCursorV1<'_>) -> Result<Self, ProductionInputErrorV1> {
+        let position = ProductionRoutePositionV1::from_tag(cursor.u8()?)?;
+        if cursor.take::<3>()? != [0; 3] {
+            return Err(ProductionInputErrorV1::NonCanonicalEncoding);
+        }
+        let network = SolanaAdapterNetworkV1::from_u8(cursor.u8()?)
+            .ok_or(ProductionInputErrorV1::InvalidParticipantBundle)?;
+        let program_pubkey = SolanaPubkey(cursor.take::<32>()?);
+        let rpc_node_count = cursor.u16()?;
+        let rpc_quorum = cursor.u16()?;
+        let allow_legacy_spl = decode_bool(cursor.u8()?)?;
+        let require_immutable_program = decode_bool(cursor.u8()?)?;
+        let max_signed_transaction_bytes = u32::from_be_bytes(cursor.take::<4>()?);
+        let profile = SolanaAdapterProfileV1 {
+            network,
+            program_id: program_pubkey,
+            rpc_node_count,
+            rpc_quorum,
+            allow_legacy_spl,
+            require_immutable_program,
+            max_signed_transaction_bytes,
+        };
+        let settlement_id = cursor.take::<32>()?;
+        let terms_hash = cursor.take::<32>()?;
+        let dleq_version = cursor.u16()?;
+        let dleq_settlement_id = cursor.take::<32>()?;
+        let dleq_context_hash = cursor.take::<32>()?;
+        let dleq_role = cursor.u8()?;
+        let bundle_version = cursor.u16()?;
+        let claim = CrossCurvePublicClaim::from_canonical_bytes(&cursor.take::<65>()?)
+            .ok_or(ProductionInputErrorV1::InvalidParticipantBundle)?;
+        let proof_len = usize::try_from(u32::from_be_bytes(cursor.take::<4>()?))
+            .map_err(|_| ProductionInputErrorV1::InputBoundExceeded)?;
+        if proof_len == 0 || proof_len > xmr_dleq_sigma::MAX_PROOF_BYTES {
+            return Err(ProductionInputErrorV1::InvalidParticipantBundle);
+        }
+        let proof = cursor.bytes(proof_len)?.to_vec();
+        let program_id = SolanaPubkey(cursor.take::<32>()?);
+        let state_pda = SolanaPubkey(cursor.take::<32>()?);
+        let vault_pda = SolanaPubkey(cursor.take::<32>()?);
+        let vault_authority = SolanaPubkey(cursor.take::<32>()?);
+        let state_bump = cursor.u8()?;
+        let vault_bump = cursor.u8()?;
+        let authority_bump = cursor.u8()?;
+        let asset_tag = cursor.u8()?;
+        let mint = SolanaPubkey(cursor.take::<32>()?);
+        let decimals = cursor.u8()?;
+        let asset = match asset_tag {
+            1 => {
+                if !mint.is_zero() || decimals != 0 {
+                    return Err(ProductionInputErrorV1::NonCanonicalEncoding);
+                }
+                SolanaAssetV1::NativeSol
+            }
+            2 => SolanaAssetV1::LegacySpl { mint, decimals },
+            _ => return Err(ProductionInputErrorV1::InvalidParticipantBundle),
+        };
+        let funder = SolanaPubkey(cursor.take::<32>()?);
+        let recipient = SolanaPubkey(cursor.take::<32>()?);
+        let refund_recipient = SolanaPubkey(cursor.take::<32>()?);
+        let amount = u64::from_be_bytes(cursor.take::<8>()?);
+        let refund_after_unix = i64::from_be_bytes(cursor.take::<8>()?);
+        let program_data_hash = cursor.take::<32>()?;
+        let setup_id = cursor.take::<32>()?;
+        Self::new(
+            position,
+            profile,
+            SolanaSetupBindingV1 {
+                settlement_id,
+                terms_hash,
+                dleq: BoundCrossCurveProofV1 {
+                    version: dleq_version,
+                    settlement_id: dleq_settlement_id,
+                    context_hash: dleq_context_hash,
+                    role: dleq_role,
+                    bundle: CrossCurveProofBytes {
+                        version: bundle_version,
+                        proof,
+                        claim,
+                    },
+                },
+                program_id,
+                state_pda,
+                vault_pda,
+                vault_authority,
+                state_bump,
+                vault_bump,
+                authority_bump,
+                asset,
+                funder,
+                recipient,
+                refund_recipient,
+                amount,
+                refund_after_unix,
+                program_data_hash,
+                setup_id,
+            },
+        )
+    }
+}
+
+fn decode_bool(value: u8) -> Result<bool, ProductionInputErrorV1> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(ProductionInputErrorV1::NonCanonicalEncoding),
+    }
+}
+
 /// Canonical set of participant proofs for exactly the applicable route legs.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProductionParticipantBindingBundleV1 {
     route_id: RouteIdV1,
     legs: Vec<ProductionEvmLegProofsV1>,
     bitcoin_legs: Vec<ProductionBitcoinLegKeyProofsV1>,
+    solana_legs: Vec<ProductionSolanaLegSetupV1>,
 }
 
 impl core::fmt::Debug for ProductionParticipantBindingBundleV1 {
@@ -731,6 +963,7 @@ impl core::fmt::Debug for ProductionParticipantBindingBundleV1 {
             .debug_struct("ProductionParticipantBindingBundleV1")
             .field("evm_proof_leg_count", &self.legs.len())
             .field("bitcoin_proof_leg_count", &self.bitcoin_legs.len())
+            .field("solana_setup_leg_count", &self.solana_legs.len())
             .finish_non_exhaustive()
     }
 }
@@ -750,13 +983,27 @@ impl ProductionParticipantBindingBundleV1 {
         legs: Vec<ProductionEvmLegProofsV1>,
         bitcoin_legs: Vec<ProductionBitcoinLegKeyProofsV1>,
     ) -> Result<Self, ProductionInputErrorV1> {
+        Self::new_with_counterparty_bindings(route_id, legs, bitcoin_legs, Vec::new())
+    }
+
+    /// Builds ordered EVM, Bitcoin and Solana proof sets for their legs.
+    pub fn new_with_counterparty_bindings(
+        route_id: RouteIdV1,
+        legs: Vec<ProductionEvmLegProofsV1>,
+        bitcoin_legs: Vec<ProductionBitcoinLegKeyProofsV1>,
+        solana_legs: Vec<ProductionSolanaLegSetupV1>,
+    ) -> Result<Self, ProductionInputErrorV1> {
         if route_id == ZERO_DIGEST
             || legs.len() > 2
             || bitcoin_legs.len() > 2
+            || solana_legs.len() > 2
             || legs
                 .windows(2)
                 .any(|pair| pair[0].position >= pair[1].position)
             || bitcoin_legs
+                .windows(2)
+                .any(|pair| pair[0].position >= pair[1].position)
+            || solana_legs
                 .windows(2)
                 .any(|pair| pair[0].position >= pair[1].position)
             || legs.iter().any(|leg| {
@@ -770,6 +1017,7 @@ impl ProductionParticipantBindingBundleV1 {
             route_id,
             legs,
             bitcoin_legs,
+            solana_legs,
         })
     }
 
@@ -788,17 +1036,29 @@ impl ProductionParticipantBindingBundleV1 {
         &self.bitcoin_legs
     }
 
+    /// Canonical Solana-applicable legs and their DLEQ-bound setups.
+    pub fn solana_legs(&self) -> &[ProductionSolanaLegSetupV1] {
+        &self.solana_legs
+    }
+
     /// Bounded reject-trailing representation.
+    ///
+    /// The reserved field after the version doubles as the layout marker: a
+    /// bundle without Solana legs writes `0` and stays byte-identical to the
+    /// pre-Solana encoding; a bundle with Solana legs writes `1` and appends
+    /// the Solana section after the Bitcoin one.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ProductionInputErrorV1> {
-        Self::new_with_bitcoin_bindings(
+        Self::new_with_counterparty_bindings(
             self.route_id,
             self.legs.clone(),
             self.bitcoin_legs.clone(),
+            self.solana_legs.clone(),
         )?;
+        let layout: u16 = if self.solana_legs.is_empty() { 0 } else { 1 };
         let mut bytes = Vec::with_capacity(MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1);
         bytes.extend_from_slice(PARTICIPANT_BUNDLE_MAGIC_V1);
         bytes.extend_from_slice(&INPUT_VERSION_V1.to_be_bytes());
-        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&layout.to_be_bytes());
         bytes.extend_from_slice(&self.route_id);
         bytes.push(
             u8::try_from(self.legs.len())
@@ -834,7 +1094,22 @@ impl ProductionParticipantBindingBundleV1 {
                 bytes.extend_from_slice(&participant.signature);
             }
         }
-        if bytes.len() > MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1 {
+        if layout == 1 {
+            bytes.push(
+                u8::try_from(self.solana_legs.len())
+                    .map_err(|_| ProductionInputErrorV1::InputBoundExceeded)?,
+            );
+            bytes.extend_from_slice(&[0; 3]);
+            for leg in &self.solana_legs {
+                leg.encode_into(&mut bytes)?;
+            }
+        }
+        let bound = if layout == 0 {
+            MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1
+        } else {
+            MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1
+        };
+        if bytes.len() > bound {
             return Err(ProductionInputErrorV1::InputBoundExceeded);
         }
         Ok(bytes)
@@ -842,15 +1117,20 @@ impl ProductionParticipantBindingBundleV1 {
 
     /// Strictly decodes a participant proof bundle.
     pub fn decode_canonical(bytes: &[u8]) -> Result<Self, ProductionInputErrorV1> {
-        if bytes.len() > MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1 {
+        if bytes.len() > MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1 {
             return Err(ProductionInputErrorV1::InputBoundExceeded);
         }
         let mut cursor = InputCursorV1::new(bytes);
-        if cursor.take::<8>()? != *PARTICIPANT_BUNDLE_MAGIC_V1
-            || cursor.u16()? != INPUT_VERSION_V1
-            || cursor.u16()? != 0
+        if cursor.take::<8>()? != *PARTICIPANT_BUNDLE_MAGIC_V1 || cursor.u16()? != INPUT_VERSION_V1
         {
             return Err(ProductionInputErrorV1::NonCanonicalEncoding);
+        }
+        let layout = cursor.u16()?;
+        if layout > 1 {
+            return Err(ProductionInputErrorV1::NonCanonicalEncoding);
+        }
+        if layout == 0 && bytes.len() > MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1 {
+            return Err(ProductionInputErrorV1::InputBoundExceeded);
         }
         let route_id = cursor.take::<32>()?;
         let count = usize::from(cursor.u8()?);
@@ -904,8 +1184,19 @@ impl ProductionParticipantBindingBundleV1 {
                     .map_err(|_| ProductionInputErrorV1::NonCanonicalEncoding)?,
             )?);
         }
+        let mut solana_legs = Vec::new();
+        if layout == 1 {
+            let solana_count = usize::from(cursor.u8()?);
+            if solana_count == 0 || solana_count > 2 || cursor.take::<3>()? != [0; 3] {
+                return Err(ProductionInputErrorV1::NonCanonicalEncoding);
+            }
+            for _ in 0..solana_count {
+                solana_legs.push(ProductionSolanaLegSetupV1::decode_from(&mut cursor)?);
+            }
+        }
         cursor.finish()?;
-        let value = Self::new_with_bitcoin_bindings(route_id, legs, bitcoin_legs)?;
+        let value =
+            Self::new_with_counterparty_bindings(route_id, legs, bitcoin_legs, solana_legs)?;
         if value.canonical_bytes()?.as_slice() != bytes {
             return Err(ProductionInputErrorV1::NonCanonicalEncoding);
         }
@@ -989,6 +1280,75 @@ impl AuthenticatedBitcoinParticipantBindingsV1 {
     }
 }
 
+/// Fully verified Solana escrow session for one admitted route leg.
+///
+/// Construction is private to the production input verifier. The anchor is
+/// the registered setup's cross-curve DLEQ, verified against the frozen
+/// settlement terms via `solana_profile::validate_setup`, plus the registry's
+/// pinned escrow program identity. No `Clone` and no generic constructor, so
+/// a validated setup cannot be detached from its authenticated route context.
+pub struct AuthenticatedSolanaSessionBindingsV1 {
+    position: ProductionRoutePositionV1,
+    network_id: Digest32,
+    route_id: RouteIdV1,
+    session_id: Digest32,
+    terms_digest: Digest32,
+    deployment: ResolvedSolanaDeploymentV1,
+    profile: SolanaAdapterProfileV1,
+    setup: ValidatedSolanaSetup,
+}
+
+impl core::fmt::Debug for AuthenticatedSolanaSessionBindingsV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("AuthenticatedSolanaSessionBindingsV1")
+            .field("position", &self.position)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AuthenticatedSolanaSessionBindingsV1 {
+    /// Upstream or downstream route position.
+    pub const fn position(&self) -> ProductionRoutePositionV1 {
+        self.position
+    }
+
+    /// Authenticated interoperability network.
+    pub const fn network_id(&self) -> Digest32 {
+        self.network_id
+    }
+
+    /// Exact composed route identity.
+    pub const fn route_id(&self) -> RouteIdV1 {
+        self.route_id
+    }
+
+    /// Exact settlement session identity.
+    pub const fn session_id(&self) -> Digest32 {
+        self.session_id
+    }
+
+    /// Canonical settlement-terms digest the DLEQ-bound setup commits to.
+    pub const fn terms_digest(&self) -> Digest32 {
+        self.terms_digest
+    }
+
+    /// Threshold-authenticated Solana deployment selected for this leg.
+    pub const fn deployment(&self) -> &ResolvedSolanaDeploymentV1 {
+        &self.deployment
+    }
+
+    /// Adapter profile the frozen terms committed to by hash.
+    pub const fn profile(&self) -> &SolanaAdapterProfileV1 {
+        &self.profile
+    }
+
+    /// DLEQ-verified, PDA-verified escrow setup.
+    pub const fn setup(&self) -> &ValidatedSolanaSetup {
+        &self.setup
+    }
+}
+
 /// Fully authenticated public input handoff for one route.
 ///
 /// This type intentionally implements neither `Clone` nor `Debug`. Its fields
@@ -1020,6 +1380,7 @@ pub struct AuthenticatedProductionInputsV1 {
     pub(crate) roster_bundle: ProductionRelayRosterBundleV1,
     pub(crate) evm_sessions: [Option<AuthenticatedEvmSessionBindingsV1>; 2],
     pub(crate) bitcoin_sessions: [Option<AuthenticatedBitcoinParticipantBindingsV1>; 2],
+    pub(crate) solana_sessions: [Option<AuthenticatedSolanaSessionBindingsV1>; 2],
     pub(crate) current_time_ancestry_ready: bool,
 }
 
@@ -1045,6 +1406,11 @@ impl AuthenticatedProductionInputsV1 {
         leg: LegIdV1,
     ) -> Option<&AuthenticatedBitcoinParticipantBindingsV1> {
         self.bitcoin_sessions[leg_index(leg)].as_ref()
+    }
+
+    /// Verified DLEQ-anchored Solana escrow session for an applicable leg.
+    pub fn solana_session(&self, leg: LegIdV1) -> Option<&AuthenticatedSolanaSessionBindingsV1> {
+        self.solana_sessions[leg_index(leg)].as_ref()
     }
 
     /// Public Relay roster registry reconstructed from the pinned artifact.
@@ -1720,6 +2086,7 @@ fn load_authenticated_production_inputs_inner_v1(
         roster_bundle,
         evm_sessions: participant_sessions.evm,
         bitcoin_sessions: participant_sessions.bitcoin,
+        solana_sessions: participant_sessions.solana,
         current_time_ancestry_ready,
     })
 }
@@ -2027,6 +2394,7 @@ struct ParticipantAuthenticationContextV1<'a> {
 struct AuthenticatedParticipantBundleV1 {
     evm: [Option<AuthenticatedEvmSessionBindingsV1>; 2],
     bitcoin: [Option<AuthenticatedBitcoinParticipantBindingsV1>; 2],
+    solana: [Option<AuthenticatedSolanaSessionBindingsV1>; 2],
 }
 
 fn authenticate_participant_bundle(
@@ -2037,8 +2405,11 @@ fn authenticate_participant_bundle(
         std::array::from_fn(|_| None);
     let mut bitcoin_sessions: [Option<AuthenticatedBitcoinParticipantBindingsV1>; 2] =
         std::array::from_fn(|_| None);
+    let mut solana_sessions: [Option<AuthenticatedSolanaSessionBindingsV1>; 2] =
+        std::array::from_fn(|_| None);
     let mut expected_evm_count = 0usize;
     let mut expected_bitcoin_count = 0usize;
+    let mut expected_solana_count = 0usize;
     for (index, (position, terms)) in [
         (ProductionRoutePositionV1::Upstream, context.upstream),
         (ProductionRoutePositionV1::Downstream, context.downstream),
@@ -2182,25 +2553,73 @@ fn authenticate_participant_bundle(
                     roster,
                 });
             }
-            // The Monero and Solana authenticated sessions anchor on the
-            // registered setup's cross-curve DLEQ rather than participant
-            // key statements, and are being built with their children
-            // (docs/interop/engine/CHILD_SOCKETS_DESIGN.md §3). Until they
-            // land, a production route selecting one of these legs is
-            // refused here, fail closed, never half-authenticated.
-            ChainKindV1::Monero { .. } | ChainKindV1::Solana { .. } => {
+            ChainKindV1::Solana {
+                network,
+                escrow_program,
+                program_data_hash,
+            } => {
+                expected_solana_count += 1;
+                let leg = bundle
+                    .solana_legs
+                    .iter()
+                    .find(|candidate| candidate.position == position)
+                    .ok_or(ProductionInputErrorV1::InvalidParticipantBundle)?;
+                // The registry, not the peer, names the escrow program, the
+                // cluster and the immutable program hash. A profile that
+                // disagrees with the pinned deployment authenticates nothing
+                // even if its hash matches the frozen terms.
+                if leg.profile.program_id.0 != escrow_program
+                    || leg.binding.program_data_hash != program_data_hash
+                    || leg.profile.network as u8 != network as u8
+                    || !leg.profile.require_immutable_program
+                {
+                    return Err(ProductionInputErrorV1::InvalidParticipantBundle);
+                }
+                let deployment = context
+                    .admission
+                    .solana_deployment_capability(position.leg())
+                    .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                let terms_digest = terms
+                    .terms_hash()
+                    .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                // The DLEQ inside the binding is the authentication anchor:
+                // validate_setup verifies it against the frozen terms, the
+                // adaptor point, the closed role byte and the derived PDAs.
+                let setup =
+                    validate_solana_setup(&leg.profile, terms, leg.binding.clone())
+                        .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                solana_sessions[index] = Some(AuthenticatedSolanaSessionBindingsV1 {
+                    position,
+                    network_id: context.registry.manifest().network_id,
+                    route_id: bundle.route_id,
+                    session_id: terms.session_id.0,
+                    terms_digest,
+                    deployment,
+                    profile: leg.profile,
+                    setup,
+                });
+            }
+            // The Monero authenticated session anchors on the registered
+            // setup's cross-curve DLEQ rather than participant key
+            // statements, and is being built with its child
+            // (docs/interop/engine/CHILD_SOCKETS_DESIGN.md §3). Until it
+            // lands, a production route selecting a Monero leg is refused
+            // here, fail closed, never half-authenticated.
+            ChainKindV1::Monero { .. } => {
                 return Err(ProductionInputErrorV1::InvalidParticipantBundle);
             }
         }
     }
     if bundle.legs.len() != expected_evm_count
         || bundle.bitcoin_legs.len() != expected_bitcoin_count
+        || bundle.solana_legs.len() != expected_solana_count
     {
         return Err(ProductionInputErrorV1::InvalidParticipantBundle);
     }
     Ok(AuthenticatedParticipantBundleV1 {
         evm: evm_sessions,
         bitcoin: bitcoin_sessions,
+        solana: solana_sessions,
     })
 }
 
@@ -3784,5 +4203,116 @@ mod tests {
     fn write_owner_file(path: &Path, bytes: &[u8]) {
         fs::write(path, bytes).expect("write owner file");
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("owner file mode");
+    }
+
+    fn synthetic_solana_leg(position: ProductionRoutePositionV1) -> ProductionSolanaLegSetupV1 {
+        let profile = SolanaAdapterProfileV1 {
+            network: SolanaAdapterNetworkV1::Devnet,
+            program_id: SolanaPubkey([0x11; 32]),
+            rpc_node_count: 3,
+            rpc_quorum: 2,
+            allow_legacy_spl: false,
+            require_immutable_program: true,
+            max_signed_transaction_bytes: 1232,
+        };
+        let claim = {
+            // A structurally valid 65-byte claim: compressed secp prefix plus
+            // arbitrary coordinates. Codec tests never verify the DLEQ.
+            let mut bytes = [0x22u8; 65];
+            bytes[0] = 0x02;
+            CrossCurvePublicClaim::from_canonical_bytes(&bytes).expect("claim bytes")
+        };
+        let binding = SolanaSetupBindingV1 {
+            settlement_id: [0x31; 32],
+            terms_hash: [0x32; 32],
+            dleq: BoundCrossCurveProofV1 {
+                version: 1,
+                settlement_id: [0x31; 32],
+                context_hash: [0x33; 32],
+                role: 3,
+                bundle: CrossCurveProofBytes {
+                    version: 1,
+                    proof: vec![0x44; 96],
+                    claim,
+                },
+            },
+            program_id: SolanaPubkey([0x11; 32]),
+            state_pda: SolanaPubkey([0x51; 32]),
+            vault_pda: SolanaPubkey([0x52; 32]),
+            vault_authority: SolanaPubkey([0x53; 32]),
+            state_bump: 254,
+            vault_bump: 253,
+            authority_bump: 252,
+            asset: SolanaAssetV1::NativeSol,
+            funder: SolanaPubkey([0x61; 32]),
+            recipient: SolanaPubkey([0x62; 32]),
+            refund_recipient: SolanaPubkey([0x63; 32]),
+            amount: 5_000_000,
+            refund_after_unix: 1_900_000_000,
+            program_data_hash: [0x71; 32],
+            setup_id: [0x72; 32],
+        };
+        ProductionSolanaLegSetupV1::new(position, profile, binding).expect("solana leg")
+    }
+
+    #[test]
+    fn solana_leg_bundle_round_trips_canonically() {
+        let bundle = ProductionParticipantBindingBundleV1::new_with_counterparty_bindings(
+            ROUTE_ID,
+            Vec::new(),
+            Vec::new(),
+            vec![synthetic_solana_leg(ProductionRoutePositionV1::Downstream)],
+        )
+        .expect("bundle");
+        let bytes = bundle.canonical_bytes().expect("encode");
+        let decoded =
+            ProductionParticipantBindingBundleV1::decode_canonical(&bytes).expect("decode");
+        assert_eq!(decoded.solana_legs().len(), 1);
+        assert_eq!(decoded.canonical_bytes().expect("re-encode"), bytes);
+        assert_eq!(decoded, bundle);
+    }
+
+    #[test]
+    fn solana_leg_bundle_refuses_tampered_and_trailing_bytes() {
+        let bundle = ProductionParticipantBindingBundleV1::new_with_counterparty_bindings(
+            ROUTE_ID,
+            Vec::new(),
+            Vec::new(),
+            vec![
+                synthetic_solana_leg(ProductionRoutePositionV1::Upstream),
+                synthetic_solana_leg(ProductionRoutePositionV1::Downstream),
+            ],
+        )
+        .expect("bundle");
+        let bytes = bundle.canonical_bytes().expect("encode");
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(ProductionParticipantBindingBundleV1::decode_canonical(&trailing).is_err());
+        // A layout marker claiming the extended section without carrying it.
+        let mut hollow = bytes.clone();
+        hollow.truncate(bytes.len() - 1);
+        assert!(ProductionParticipantBindingBundleV1::decode_canonical(&hollow).is_err());
+        // Flipping the layout marker back to the legacy encoding must refuse
+        // the trailing Solana section rather than silently ignoring it.
+        let mut relabeled = bytes;
+        relabeled[10] = 0;
+        relabeled[11] = 0;
+        assert!(ProductionParticipantBindingBundleV1::decode_canonical(&relabeled).is_err());
+    }
+
+    #[test]
+    fn legacy_bundle_encoding_is_unchanged_and_still_decodes() {
+        let bundle = ProductionParticipantBindingBundleV1::new_with_bitcoin_bindings(
+            ROUTE_ID,
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("bundle");
+        let bytes = bundle.canonical_bytes().expect("encode");
+        // Reserved field still zero: byte-identical to the pre-Solana layout.
+        assert_eq!(&bytes[10..12], &[0, 0]);
+        let decoded =
+            ProductionParticipantBindingBundleV1::decode_canonical(&bytes).expect("decode");
+        assert!(decoded.solana_legs().is_empty());
     }
 }

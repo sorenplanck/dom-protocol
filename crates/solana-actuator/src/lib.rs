@@ -105,6 +105,12 @@ impl DurableSolanaActuatorV1 {
         self.store.view(locator)
     }
 
+    /// The exact retained bytes, for byte-identical revalidation and
+    /// retransmission only.
+    pub fn retained(&self, locator: SolanaOperationLocatorV1) -> Result<Vec<u8>> {
+        self.store.retained_transaction(locator)
+    }
+
     /// Broadcasts the retained exact bytes to every configured node.
     ///
     /// The durable stage moves to `SendAttempted` **before** any node sees a

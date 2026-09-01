@@ -94,6 +94,10 @@ impl SolanaRpc for MockRpc {
         Err(RpcError::Unavailable)
     }
 
+    fn get_latest_blockhash_with_validity(&self) -> Result<(SolanaHash, u64), RpcError> {
+        Err(RpcError::Unavailable)
+    }
+
     fn send_transaction(&self, raw_transaction: &[u8]) -> Result<SolanaSignature, RpcError> {
         let mut guard = self.state.lock().map_err(|_| RpcError::Unavailable)?;
         guard.sent.push(raw_transaction.to_vec());

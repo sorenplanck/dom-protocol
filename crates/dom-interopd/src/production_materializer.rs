@@ -922,6 +922,16 @@ fn authenticate_leg(
             btc_actuator::resolved_bitcoin_deployment_digest_v1(&resolved)
                 .map_err(|_| AuthorityRefusalV1::Inconsistent)?,
         )
+    } else if inputs.solana_session(leg).is_some() {
+        let resolved = admission
+            .solana_deployment_capability(leg)
+            .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+        (
+            SettlementFaceV1::Solana,
+            resolved.profile_digest(),
+            crate::production_child_solana::resolved_solana_deployment_digest_v1(&resolved)
+                .map_err(|_| AuthorityRefusalV1::Inconsistent)?,
+        )
     } else {
         return Err(AuthorityRefusalV1::Inconsistent);
     };

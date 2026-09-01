@@ -50,6 +50,9 @@ pub trait SolanaRpc: Send + Sync {
         commitment: Commitment,
     ) -> Result<Option<SolanaTransactionRecord>, RpcError>;
     fn get_latest_blockhash(&self) -> Result<SolanaHash, RpcError>;
+    /// Latest finalized blockhash together with the last block height at
+    /// which a transaction carrying it can still land.
+    fn get_latest_blockhash_with_validity(&self) -> Result<(SolanaHash, u64), RpcError>;
     fn send_transaction(&self, raw_transaction: &[u8]) -> Result<SolanaSignature, RpcError>;
 }
 
@@ -341,13 +344,28 @@ impl SolanaRpc for HttpSolanaRpc {
     }
 
     fn get_latest_blockhash(&self) -> Result<SolanaHash, RpcError> {
+        self.get_latest_blockhash_with_validity()
+            .map(|(hash, _)| hash)
+    }
+
+    fn get_latest_blockhash_with_validity(&self) -> Result<(SolanaHash, u64), RpcError> {
         let result = self.call("getLatestBlockhash", json!([{"commitment":"finalized"}]))?;
-        let hash = result
-            .get("value")
-            .and_then(|v| v.get("blockhash"))
+        let value = result.get("value").ok_or(RpcError::InvalidResponse)?;
+        let hash = value
+            .get("blockhash")
             .and_then(Value::as_str)
             .ok_or(RpcError::InvalidResponse)?;
-        SolanaHash::from_base58(hash).map_err(|_| RpcError::InvalidResponse)
+        let last_valid_block_height = value
+            .get("lastValidBlockHeight")
+            .and_then(Value::as_u64)
+            .ok_or(RpcError::InvalidResponse)?;
+        if last_valid_block_height == 0 {
+            return Err(RpcError::InvalidResponse);
+        }
+        Ok((
+            SolanaHash::from_base58(hash).map_err(|_| RpcError::InvalidResponse)?,
+            last_valid_block_height,
+        ))
     }
 
     fn send_transaction(&self, raw_transaction: &[u8]) -> Result<SolanaSignature, RpcError> {

@@ -42,6 +42,7 @@ production = [
     "dep:solana-delivery-sqlite",
     "dep:solana-escrow-wire",
     "dep:solana-observer",
+    "dep:solana-actuator",
     "dep:solana-profile",
     "dep:solana-program-attestation",
     "dep:solana-program-client",
@@ -145,6 +146,7 @@ solana-delivery = { path = "../adapters/solana-delivery", optional = true }
 solana-delivery-sqlite = { path = "../adapters/solana-delivery-sqlite", optional = true }
 solana-escrow-wire = { path = "../adapters/solana-escrow-wire", optional = true }
 solana-observer = { path = "../adapters/solana-observer", optional = true }
+solana-actuator = { path = "../solana-actuator", optional = true }
 solana-profile = { path = "../adapters/solana-profile", optional = true }
 solana-program-attestation = { path = "../adapters/solana-program-attestation", optional = true }
 solana-program-client = { path = "../adapters/solana-program-client", optional = true }
