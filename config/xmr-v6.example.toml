@@ -1,0 +1,8 @@
+socket = "/run/user/1000/dom-xmr-sidecar.sock"
+monerod = "http://127.0.0.1:38081"
+network = "stagenet"
+cache_db = "/home/user/.local/share/dom/xmr-sidecar-cache.sqlite"
+auth_key_file = "/home/user/.config/dom/xmr-sidecar.key"
+confirmation_target = 10
+rpc_quorum = 2
+max_frame_bytes = 2097152

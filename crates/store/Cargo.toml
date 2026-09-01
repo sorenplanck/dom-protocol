@@ -19,7 +19,13 @@ failpoints = []
 
 [dependencies]
 rusqlite = { workspace = true }
-rustix = { version = "=1.1.4", default-features = false, features = ["fs", "process"] }
+# `std` is not optional here: `lib.rs` hands `std::os::fd::BorrowedFd` to
+# `rustix::fs::flock`, and without this feature `rustix` defines its own
+# `BorrowedFd` and the call does not type-check. It built until now only
+# because the dev-dependency on `tempfile` enabled `rustix/std` in the same
+# resolution unit; any unit that builds this crate as a plain dependency
+# had no such accident.
+rustix = { version = "=1.1.4", default-features = false, features = ["fs", "process", "std"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]

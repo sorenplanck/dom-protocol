@@ -20,10 +20,11 @@ fn purpose_registry_is_closed_and_versioned() {
     assert_eq!(PurposeV1::ClaimAdaptor.to_byte(), 2);
     assert_eq!(PurposeV1::Funding.to_byte(), 3);
     assert_eq!(PurposeV1::Sponsor.to_byte(), 4);
+    assert_eq!(PurposeV1::RefundAdaptor.to_byte(), 5);
     for value in 0u8..=u8::MAX {
         assert_eq!(
             PurposeV1::try_from(value).is_ok(),
-            (1..=4).contains(&value),
+            (1..=5).contains(&value),
             "purpose 0x{value:02x}"
         );
     }
@@ -36,6 +37,7 @@ fn purpose_registry_is_closed_and_versioned() {
         PurposeV1::Refund,
         PurposeV1::ClaimAdaptor,
         PurposeV1::Funding,
+        PurposeV1::RefundAdaptor,
     ] {
         assert_eq!(
             purpose.require_strict_phase1().expect("authorized purpose"),

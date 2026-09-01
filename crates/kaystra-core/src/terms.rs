@@ -20,6 +20,16 @@ use crate::types::*;
 /// Leading magic of every canonical `SettlementTermsV1` encoding.
 pub const TERMS_MAGIC: &[u8; 8] = b"DOMITRM1";
 /// Frozen wire version. Any other version fails closed.
+///
+/// Adding a lock mechanism does not bump this, and must not. The version is
+/// inside the canonical bytes and therefore inside `terms_hash()`, so bumping
+/// it would change the hash of every settlement — including the legs that have
+/// nothing to do with the new mechanism — and invalidate the frozen vectors.
+/// It buys nothing in exchange: `take_mechanism` already refuses any tag it
+/// does not know, so a decoder built before a mechanism existed fails closed
+/// on terms that use it. There is no encoding an older decoder accepts with a
+/// different meaning than a newer one gives it, which is the downgrade the
+/// version exists to prevent.
 pub const TERMS_VERSION: u16 = 1;
 /// Domain-separation prefix hashed before the canonical bytes.
 pub const TERMS_DOMAIN: &[u8] = b"DOM-INTEROP/SETTLEMENT-TERMS/V1\0";
@@ -234,6 +244,8 @@ fn take_mechanism(c: &mut Cursor<'_>) -> Result<LockMechanism, TermsError> {
         0x02 => Ok(LockMechanism::ConditionLock),
         0x03 => Ok(LockMechanism::SchnorrAdaptor),
         0x04 => Ok(LockMechanism::HashlockFallback),
+        0x05 => Ok(LockMechanism::CrossCurveSharedSpend),
+        0x06 => Ok(LockMechanism::CrossCurveConditionLock),
         _ => Err(TermsError::UnknownTag),
     }
 }

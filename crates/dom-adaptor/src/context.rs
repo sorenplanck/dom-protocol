@@ -185,7 +185,7 @@ impl SessionContextV1 {
             ));
         }
         match (inputs.purpose, inputs.adaptor_point.as_ref()) {
-            (PurposeV1::ClaimAdaptor, Some(point)) => {
+            (PurposeV1::ClaimAdaptor | PurposeV1::RefundAdaptor, Some(point)) => {
                 let encoded = point.to_compressed_bytes();
                 if PublicKey::from_compressed_bytes(&encoded)?.to_compressed_bytes() != encoded {
                     return Err(AdaptorError::InvalidContext(
@@ -193,9 +193,9 @@ impl SessionContextV1 {
                     ));
                 }
             }
-            (PurposeV1::ClaimAdaptor, None) => {
+            (PurposeV1::ClaimAdaptor | PurposeV1::RefundAdaptor, None) => {
                 return Err(AdaptorError::InvalidContext(
-                    "ClaimAdaptor requires an adaptor point",
+                    "ClaimAdaptor and RefundAdaptor require an adaptor point",
                 ));
             }
             (PurposeV1::Refund | PurposeV1::Funding, None) => {}

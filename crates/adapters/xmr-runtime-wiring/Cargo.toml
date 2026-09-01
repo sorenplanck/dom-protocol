@@ -1,0 +1,20 @@
+[package]
+name = "xmr-runtime-wiring"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+xmr-refund-policy = { path = "../xmr-refund-policy" }
+adapter-dom-real = { path = "../dom-real" }
+thiserror = { workspace = true }
+xmr-delivery-sqlite = { path = "../xmr-delivery-sqlite" }
+xmr-kaystra-bridge = { path = "../xmr-kaystra-bridge" }
+xmr-live-sidecar-blocking-client = { path = "../xmr-live-sidecar-blocking-client" }
+xmr-live-sidecar-uds-client = { path = "../xmr-live-sidecar-uds-client" }
+xmr-rpc-broadcast-blocking = { path = "../xmr-rpc-broadcast-blocking" }
+xmr-secret-store = { path = "../xmr-secret-store" }
+xmr-setup-profile = { path = "../xmr-setup-profile" }
+xmr-sidecar-auth = { path = "../xmr-sidecar-auth" }

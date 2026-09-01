@@ -1,0 +1,12 @@
+[package]
+name = "xmr-live-sidecar-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }

@@ -392,7 +392,10 @@ pub fn finalize_plain_signature_v1(
 ) -> Result<SchnorrSignature> {
     match purpose {
         PurposeV1::Funding | PurposeV1::Refund => {}
-        PurposeV1::ClaimAdaptor | PurposeV1::Sponsor => {
+        PurposeV1::ClaimAdaptor | PurposeV1::RefundAdaptor | PurposeV1::Sponsor => {
+            // Both adaptor purposes complete through adaptation, never through
+            // plain finalization: taking this path would produce a signature
+            // that reveals no witness, which is the whole point of the round.
             return Err(AdaptorError::InvalidTranscript(
                 "plain finalization is restricted to Funding and Refund",
             ));

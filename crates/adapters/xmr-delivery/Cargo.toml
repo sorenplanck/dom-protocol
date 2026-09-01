@@ -1,0 +1,11 @@
+[package]
+name = "xmr-delivery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+sha2 = { workspace = true }
+thiserror = { workspace = true }

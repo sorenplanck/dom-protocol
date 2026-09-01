@@ -1,0 +1,13 @@
+[package]
+name = "xmr-route-secret"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+rand = { workspace = true }
+counterparty-api = { workspace = true }
+xmr-dleq-sigma = { path = "../xmr-dleq-sigma" }

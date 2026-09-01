@@ -1,0 +1,34 @@
+[package]
+name = "f8-solana-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+blake2 = { workspace = true }
+rand = { workspace = true }
+tempfile = { workspace = true }
+ed25519-dalek = { workspace = true }
+kaystra-core = { path = "../kaystra-core" }
+solana-escrow-wire = { path = "../adapters/solana-escrow-wire" }
+solana-types = { path = "../adapters/solana-types" }
+solana-pda = { path = "../adapters/solana-pda" }
+solana-route-secret = { path = "../adapters/solana-route-secret" }
+solana-profile = { path = "../adapters/solana-profile" }
+solana-setup-store = { path = "../adapters/solana-setup-store" }
+solana-session-init = { path = "../adapters/solana-session-init" }
+solana-program-client = { path = "../adapters/solana-program-client" }
+solana-transaction-builder = { path = "../adapters/solana-transaction-builder" }
+solana-evidence = { path = "../adapters/solana-evidence" }
+solana-kaystra-records = { path = "../adapters/solana-kaystra-records" }
+solana-kaystra-source = { path = "../adapters/solana-kaystra-source" }
+solana-observation-store = { path = "../adapters/solana-observation-store" }
+solana-delivery = { path = "../adapters/solana-delivery" }
+solana-delivery-sqlite = { path = "../adapters/solana-delivery-sqlite" }
+f8-solana-model = { path = "../f8-solana-model" }
+
+[dev-dependencies]
+xmr-dleq-sigma = { path = "../adapters/xmr-dleq-sigma" }
+xmr-refund-adaptor = { path = "../adapters/xmr-refund-adaptor" }

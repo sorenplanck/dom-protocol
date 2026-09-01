@@ -1,0 +1,12 @@
+[package]
+name = "xmr-kaystra-records"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+kaystra-core = { path = "../../kaystra-core" }
+xmr-evidence = { path = "../xmr-evidence" }

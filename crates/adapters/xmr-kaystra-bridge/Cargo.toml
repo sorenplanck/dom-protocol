@@ -1,0 +1,19 @@
+[package]
+name = "xmr-kaystra-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+adapter-dom-real = { path = "../dom-real" }
+counterparty-api = { workspace = true }
+kaystra-core = { path = "../../kaystra-core" }
+xmr-crypto = { path = "../xmr-crypto" }
+xmr-delivery = { path = "../xmr-delivery" }
+xmr-dleq-sigma = { path = "../xmr-dleq-sigma" }
+xmr-live-sidecar-api = { path = "../xmr-live-sidecar-api" }
+xmr-secret-store = { path = "../xmr-secret-store" }
+xmr-setup-profile = { path = "../xmr-setup-profile" }
+xmr-spend-port = { path = "../xmr-spend-port" }

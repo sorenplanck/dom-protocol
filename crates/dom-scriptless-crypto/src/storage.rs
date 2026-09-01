@@ -1626,17 +1626,21 @@ fn validate_backup_manifest_plaintext(
 fn parse_purpose(value: u8) -> Result<PurposeV1, CryptoError> {
     let purpose = PurposeV1::try_from(value).map_err(|_| CryptoError::InvalidEnvelope)?;
     match purpose {
-        PurposeV1::Refund | PurposeV1::ClaimAdaptor | PurposeV1::Funding | PurposeV1::Sponsor => {
-            Ok(purpose)
-        }
+        PurposeV1::Refund
+        | PurposeV1::ClaimAdaptor
+        | PurposeV1::RefundAdaptor
+        | PurposeV1::Funding
+        | PurposeV1::Sponsor => Ok(purpose),
     }
 }
 
 const fn canonical_purpose_byte(purpose: PurposeV1) -> u8 {
     match purpose {
-        PurposeV1::Refund | PurposeV1::ClaimAdaptor | PurposeV1::Funding | PurposeV1::Sponsor => {
-            purpose.to_byte()
-        }
+        PurposeV1::Refund
+        | PurposeV1::ClaimAdaptor
+        | PurposeV1::RefundAdaptor
+        | PurposeV1::Funding
+        | PurposeV1::Sponsor => purpose.to_byte(),
     }
 }
 
@@ -1915,11 +1919,18 @@ mod tests {
         assert_eq!(KeyRoleV1::SecretRecord.hkdf_label(), SECRET_ROLE_LABEL);
         assert_eq!(KeyRoleV1::Tombstone.hkdf_label(), TOMBSTONE_ROLE_LABEL);
         assert_eq!(KeyRoleV1::Backup.hkdf_label(), BACKUP_ROLE_LABEL);
+        // The registry is closed at 0x05 since NAR-DC-P1-009 ratified the
+        // refund adaptor purpose. Everything outside it is still refused, which
+        // is what keeps an unknown byte from being decoded as a known purpose.
         for value in 0_u8..=u8::MAX {
-            let expected = (0x01..=0x04).contains(&value);
+            let expected = (0x01..=0x05).contains(&value);
             assert_eq!(parse_purpose(value).is_ok(), expected, "{value:#04x}");
         }
         assert!(matches!(parse_purpose(0x04), Ok(PurposeV1::Sponsor)));
+        assert!(matches!(parse_purpose(0x05), Ok(PurposeV1::RefundAdaptor)));
+        // Unlike Sponsor, the refund adaptor purpose is authorized: it is the
+        // path that makes a DOM refund reveal its witness.
+        assert!(PurposeV1::RefundAdaptor.require_strict_phase1().is_ok());
         assert!(PurposeV1::Sponsor.require_strict_phase1().is_err());
         let mut sponsor = structural_object_envelope(
             KeyRoleV1::SecretRecord,
@@ -1954,7 +1965,10 @@ mod tests {
             open_nonce_secret_plaintext(&sponsor_envelope, ids(), &master_key(), &sponsor_expected,),
             Err(CryptoError::InvalidEnvelope)
         ));
-        sponsor[150] = 0x05;
+        // 0x06 is the first byte past the closed registry. It stood at 0x05
+        // until the refund adaptor purpose was ratified; the property under
+        // test is unchanged — a purpose outside the registry is refused.
+        sponsor[150] = 0x06;
         assert!(VaultObjectEnvelopeV1::from_bytes(&sponsor).is_err());
     }
 

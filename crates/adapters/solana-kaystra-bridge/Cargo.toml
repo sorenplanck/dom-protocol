@@ -1,0 +1,26 @@
+[package]
+name = "solana-kaystra-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+adapter-dom-real = { path = "../dom-real" }
+counterparty-api = { workspace = true }
+kaystra-core = { path = "../../kaystra-core" }
+solana-delivery = { path = "../solana-delivery" }
+solana-profile = { path = "../solana-profile" }
+solana-secret-store = { path = "../solana-secret-store" }
+solana-types = { path = "../solana-types" }
+xmr-dleq-sigma = { path = "../xmr-dleq-sigma" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }
+tempfile = { workspace = true }
+solana-route-secret = { path = "../solana-route-secret" }
+solana-session-init = { path = "../solana-session-init" }
+solana-pda = { path = "../solana-pda" }
+solana-setup-store = { path = "../solana-setup-store" }

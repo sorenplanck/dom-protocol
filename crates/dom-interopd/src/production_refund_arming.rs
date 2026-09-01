@@ -2374,7 +2374,7 @@ fn validate_bitcoin_deployment(
         ChainKindV1::Bitcoin {
             network: BitcoinNetworkV1::CustomSignet,
         } => BitcoinCoreNetworkV1::CustomSignet,
-        ChainKindV1::Evm { .. } => {
+        ChainKindV1::Evm { .. } | ChainKindV1::Monero { .. } | ChainKindV1::Solana { .. } => {
             return Err(ProductionRefundArmingOpenErrorV1::InvalidConfiguration)
         }
     };

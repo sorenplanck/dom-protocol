@@ -1,0 +1,15 @@
+[package]
+name = "solana-transaction-builder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+ed25519-dalek = { workspace = true }
+solana-types = { path = "../solana-types" }
+
+[dev-dependencies]
+rand = { workspace = true }

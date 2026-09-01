@@ -34,9 +34,10 @@ use dom_interopd::{
 use kaystra_core::types::{AssetId, ChainId, FinalityPolicyV1};
 use route_executor::{
     digest_bytes_v1, ActionIntentV1, ActionKindV1, ActionProgressV1, ActionStateV1,
-    CoordinationPhaseV1, Digest32, DurableRouteStoreV1, EffectDispatchV1, ExposureSourceV1,
-    HealthStateV1, LegIdV1, PublicExposureV1, RefundBindingsV1, RouteEventV1,
-    RouteSecretRetirementCapabilityV1, TimerKindV1,
+    CommitOutcomeV1, CoordinationPhaseV1, Digest32, DurableRouteStoreV1, EffectDispatchV1,
+    ExposureSourceV1, FrozenRouteAdmissionCheckpointV2, FrozenRouteTimeFactsV2, HealthStateV1,
+    LegIdV1, PublicExposureV1, RefundBindingsV1, RouteEventV1, RouteSecretRetirementCapabilityV1,
+    TimerKindV1,
 };
 
 const NETWORK: Digest32 = [0x90; 32];
@@ -585,7 +586,23 @@ type TestRouteRuntime = ProductionRouteRuntimeV1<
 >;
 
 impl Fixture {
+    /// Legacy-admission fixture: the route is created bare and the driver
+    /// journals `FreezeTerms` itself, so the stage sequence starts at
+    /// Admission. Routes born this way can run to terminal but can never
+    /// retire a public secret: that gate demands the V2 checkpoint.
     fn new() -> Self {
+        Self::build(false)
+    }
+
+    /// Production-shaped fixture: the route is born with its V2 admission
+    /// checkpoint as revision 1, exactly as `persist_new_route_checkpoint`
+    /// journals it, so the retirement gate has its checkpoint and the drive
+    /// sequence starts past admission.
+    fn new_production() -> Self {
+        Self::build(true)
+    }
+
+    fn build(production_checkpoint: bool) -> Self {
         let temporary = tempfile::tempdir().expect("temporary directory");
         std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))
             .expect("owner-only test directory");
@@ -594,6 +611,9 @@ impl Fixture {
         let route_database = temporary.path().join("routes.sqlite3");
         let mut store = DurableRouteStoreV1::create(&route_database).expect("create route store");
         store.create_route(ROUTE, 1_990).expect("create route");
+        if production_checkpoint {
+            Self::freeze_production_checkpoint(&mut store, &admission);
+        }
         let clock = ManualClockV1::new(2_000).expect("manual clock");
         let supervisor =
             RouteSupervisorV1::acquire(store, ROUTE, OWNER_A, Self::config(), clock.clone())
@@ -613,6 +633,60 @@ impl Fixture {
             reconciler: TestReconciler::default(),
             retirement: TestRetirement::default(),
         }
+    }
+
+    fn freeze_production_checkpoint(
+        store: &mut DurableRouteStoreV1,
+        admission: &AuthenticatedRouteAdmissionV1,
+    ) {
+        // The bindings must equal the authenticated admission's, or the
+        // driver refuses the route as an admission mismatch.
+        let checkpoint = FrozenRouteAdmissionCheckpointV2 {
+            network_id: NETWORK,
+            route_id: ROUTE,
+            bindings: admission.frozen_bindings().clone(),
+            composition_v2_digest: id(0x61),
+            registry_epoch: 1,
+            // The store validator demands this equal the bindings deployment
+            // bundle digest, as production admission produces.
+            registry_manifest_digest: admission.frozen_bindings().deployment_bundle_digest,
+            upstream_terms_digest: id(0x63),
+            downstream_terms_digest: id(0x64),
+            upstream_roster_snapshot: id(0x65),
+            downstream_roster_snapshot: id(0x66),
+            participant_bindings_digest: id(0x67),
+            relay_binding_digest: id(0x68),
+            registry_authority_set_digest: id(0x69),
+            time_policy_authority_set_digest: id(0x6a),
+            time_evidence_authority_set_digest: id(0x6b),
+            time: FrozenRouteTimeFactsV2 {
+                route_scope_digest: id(0x6c),
+                policy_digest: id(0x6d),
+                evidence_digest: id(0x6e),
+                proof_digest: id(0x6f),
+                evidence_sequence: 1,
+                issued_at_seconds: 1_900,
+                valid_until_seconds: 1_000_000,
+                validated_at_seconds: 1_950,
+            },
+        };
+        let freeze_lease = store
+            .acquire_lease(ROUTE, OWNER_A, 1_995, 1_000)
+            .expect("freeze lease")
+            .lease();
+        let outcome = store
+            .apply_event(
+                freeze_lease,
+                0,
+                id(0x70),
+                &RouteEventV1::FreezeTermsV2(Box::new(checkpoint)),
+                1_995,
+            )
+            .expect("freeze production checkpoint");
+        assert!(matches!(
+            outcome,
+            CommitOutcomeV1::Committed { revision: 1, .. }
+        ));
     }
 
     fn config() -> RouteSupervisorConfigV1 {
@@ -729,6 +803,14 @@ impl Fixture {
     }
 
     fn reach_both_funding_final(&mut self) {
+        // A production-born route already carries its V2 admission
+        // checkpoint, so the drive sequence starts past admission.
+        let already_admitted = self
+            .supervisor()
+            .snapshot()
+            .expect("snapshot")
+            .bindings
+            .is_some();
         for stage in [
             RouteDriveStageV1::Admission,
             RouteDriveStageV1::RefundArming,
@@ -739,6 +821,9 @@ impl Fixture {
             RouteDriveStageV1::DownstreamFunding,
             RouteDriveStageV1::DownstreamFunding,
         ] {
+            if already_admitted && stage == RouteDriveStageV1::Admission {
+                continue;
+            }
             self.assert_step(stage, RouteDriveDispositionV1::Progressed);
         }
         let snapshot = self.supervisor().snapshot().unwrap();
@@ -1369,7 +1454,7 @@ fn runtime_stops_without_a_step_when_shutdown_is_safe_and_unfunded() {
 
 #[test]
 fn runtime_owns_the_incremental_loop_until_both_legs_are_terminal() {
-    let (_temporary, mut runtime) = Fixture::new().into_runtime();
+    let (_temporary, mut runtime) = Fixture::new_production().into_runtime();
     let mut control = TestRunControl::default();
     let exit = runtime
         .run_bounded(&mut control, 64)
@@ -1385,7 +1470,7 @@ fn runtime_owns_the_incremental_loop_until_both_legs_are_terminal() {
 
 #[test]
 fn runtime_never_reports_public_terminal_until_retirement_retry_succeeds() {
-    let mut fixture = Fixture::new();
+    let mut fixture = Fixture::new_production();
     fixture
         .retirement
         .outcomes
@@ -1439,7 +1524,7 @@ fn private_refund_terminal_does_not_mint_a_public_secret_retirement() {
 
 #[test]
 fn shutdown_is_deferred_through_the_public_secret_urgent_lane() {
-    let mut fixture = Fixture::new();
+    let mut fixture = Fixture::new_production();
     fixture.reach_downstream_claim_externalized();
     assert!(fixture
         .supervisor()

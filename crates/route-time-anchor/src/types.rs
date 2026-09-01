@@ -23,6 +23,16 @@ pub const MAX_TIME_ANCHOR_AUTHORITIES_V2: usize = 16;
 /// Bitcoin MTP uses eleven blocks and therefore spans ten block intervals.
 pub const BTC_MTP_SAMPLE_INTERVALS_V2: u64 = 10;
 
+/// Symmetric uncertainty band, in seconds, between the Solana cluster clock
+/// (`Clock::unix_timestamp`, a stake-weighted vote estimate) and wall time.
+///
+/// The bank bounds the clock's drift rate but not its accumulated offset, and
+/// the cluster has historically run tens of minutes behind wall time during
+/// degraded periods. One hour covers every observed excursion with margin;
+/// the cost of the conservatism is only that a route's legs must be spaced
+/// further apart, never that a deadline fires earlier than proven.
+pub const SOLANA_CLOCK_DRIFT_SECONDS_V2: u64 = 3_600;
+
 /// Fixed role of one checkpoint in a three-chain composed route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -45,6 +55,15 @@ pub enum ClockKindV2 {
     EvmTimestamp = 2,
     /// Bitcoin height or BIP68 512-second MTP units.
     Bitcoin = 3,
+    /// Monero block height. Absolute height is the only clock the XMR leg
+    /// offers that an observer can evaluate deterministically, so it is the
+    /// only one admitted here.
+    Monero = 4,
+    /// Solana cluster timestamp. Unlike an EVM timestamp it is an estimate,
+    /// not a consensus-checked value, so its projection carries the
+    /// [`SOLANA_CLOCK_DRIFT_SECONDS_V2`] band on both sides instead of the
+    /// exact interval EVM gets.
+    Solana = 5,
 }
 
 /// Exact authenticated facts a checkpoint must reproduce.
@@ -1207,7 +1226,21 @@ fn project_deadline(
                 latest_seconds: value,
             })
         }
-        (ClockKindV2::DomHeight | ClockKindV2::Bitcoin, TimelockSpec::BlockHeight { value }) => {
+        (ClockKindV2::Solana, TimelockSpec::TimestampSeconds { value }) => {
+            if value == 0 {
+                return Err(RouteTimeAnchorErrorV2::DeadlinePassed);
+            }
+            Ok(DeadlineIntervalV2 {
+                earliest_seconds: value.saturating_sub(SOLANA_CLOCK_DRIFT_SECONDS_V2),
+                latest_seconds: value
+                    .checked_add(SOLANA_CLOCK_DRIFT_SECONDS_V2)
+                    .ok_or(RouteTimeAnchorErrorV2::Overflow)?,
+            })
+        }
+        (
+            ClockKindV2::DomHeight | ClockKindV2::Bitcoin | ClockKindV2::Monero,
+            TimelockSpec::BlockHeight { value },
+        ) => {
             let delta = value
                 .checked_sub(checkpoint.anchor_height)
                 .ok_or(RouteTimeAnchorErrorV2::DeadlinePassed)?;
@@ -1410,6 +1443,20 @@ fn counterparty_binding(
             (ClockKindV2::Bitcoin, deployment.genesis_hash)
         }
         (
+            ChainKindV1::Monero { .. },
+            ChainDeploymentV1::Monero(deployment),
+            TimelockSpec::BlockHeight { .. },
+        ) if leg.mechanism == LockMechanism::CrossCurveSharedSpend => {
+            (ClockKindV2::Monero, deployment.genesis_hash)
+        }
+        (
+            ChainKindV1::Solana { .. },
+            ChainDeploymentV1::Solana(deployment),
+            TimelockSpec::TimestampSeconds { .. },
+        ) if leg.mechanism == LockMechanism::CrossCurveConditionLock => {
+            (ClockKindV2::Solana, deployment.genesis_hash)
+        }
+        (
             ChainKindV1::Evm {
                 evm_chain_id: 1, ..
             },
@@ -1553,6 +1600,61 @@ mod tests {
                 CanonicalTipObservationV2::new(anchor_height, [4; 32], [6; 32]),
             ),
         )
+    }
+
+    #[test]
+    fn a_monero_height_deadline_projects_like_the_other_height_clocks() {
+        // Regression: the Monero clock was bindable but had no projection
+        // arm, so a route with an XMR leg failed closed at proof time.
+        let binding = binding(ClockKindV2::Monero, 100, 140);
+        let checkpoint = checkpoint(1_000, 5_000, 5_050);
+        assert_eq!(
+            project_deadline(
+                TimelockSpec::BlockHeight { value: 1_010 },
+                &binding,
+                &checkpoint,
+                0,
+            ),
+            Ok(DeadlineIntervalV2 {
+                earliest_seconds: 5_000 + 10 * 100,
+                latest_seconds: 5_050 + 10 * 140,
+            }),
+        );
+    }
+
+    #[test]
+    fn a_solana_timestamp_projects_with_the_drift_band_on_both_sides() {
+        let binding = binding(ClockKindV2::Solana, 1, 1);
+        let checkpoint = checkpoint(1, 1, 1);
+        assert_eq!(
+            project_deadline(
+                TimelockSpec::TimestampSeconds {
+                    value: 2_000_000_000,
+                },
+                &binding,
+                &checkpoint,
+                0,
+            ),
+            Ok(DeadlineIntervalV2 {
+                earliest_seconds: 2_000_000_000 - SOLANA_CLOCK_DRIFT_SECONDS_V2,
+                latest_seconds: 2_000_000_000 + SOLANA_CLOCK_DRIFT_SECONDS_V2,
+            }),
+        );
+        // Zero refuses, and a Solana clock holds no height deadline.
+        assert!(project_deadline(
+            TimelockSpec::TimestampSeconds { value: 0 },
+            &binding,
+            &checkpoint,
+            0,
+        )
+        .is_err());
+        assert!(project_deadline(
+            TimelockSpec::BlockHeight { value: 5 },
+            &binding,
+            &checkpoint,
+            0,
+        )
+        .is_err());
     }
 
     proptest! {

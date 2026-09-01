@@ -19,6 +19,8 @@
 //! - for a Bitcoin chain: the F5 network (`BitcoinNetworkV1` — an enum
 //!   in which mainnet DOES NOT EXIST, by D-027; this crate cannot relax
 //!   that by construction);
+//! - for a Monero chain: the network (`MoneroNetworkV1` — the same rule,
+//!   mainnet is absent from the enum rather than refused by a check);
 //! - `ChainTimingBoundsV1` — block-interval bounds and the reorg,
 //!   observation and broadcast budgets;
 //! - `FinalityPolicyV1` — confirmations and tolerated reorg depth;
@@ -127,6 +129,93 @@ pub enum ChainKindV1 {
         /// The F5 network.
         network: BitcoinNetworkV1,
     },
+    /// A Monero network. Mainnet does not exist in [`MoneroNetworkV1`], for
+    /// the same reason it does not exist in [`BitcoinNetworkV1`] and EVM
+    /// chain id 1 refuses: this branch settles on laboratory networks, and a
+    /// profile must not be able to relax that.
+    Monero {
+        /// The Monero network.
+        network: MoneroNetworkV1,
+    },
+    /// A Solana cluster running the immutable dom-solana-escrow program.
+    /// Mainnet-beta does not exist in [`SolanaNetworkV1`], for the same
+    /// reason it does not exist in the Bitcoin and Monero enums.
+    ///
+    /// The program pinning lives here, next to the EVM contract pinning,
+    /// because it is the safety-critical half: a profile that cannot name
+    /// the exact immutable program it settles through must not validate.
+    Solana {
+        /// The Solana cluster.
+        network: SolanaNetworkV1,
+        /// Deployed `dom-solana-escrow` program id. Zero refuses.
+        escrow_program: [u8; 32],
+        /// Blake2b-256 of the immutable program's programdata account, as
+        /// produced by `attest_immutable_program`. Zero refuses: an
+        /// unpinned program is an unpinned counterparty.
+        program_data_hash: [u8; 32],
+    },
+}
+
+/// A Monero network that may be profiled.
+///
+/// Mainnet is deliberately absent rather than present-and-refused, so that
+/// enabling it is a visible change to this enum rather than a value someone
+/// can pass. The discriminants match `xmr_profile::XmrNetworkId` so the two
+/// spellings of "which Monero network" can never drift apart; a test in
+/// `xmr-profile` holds them together.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum MoneroNetworkV1 {
+    /// The public stagenet.
+    Stagenet = 0x02,
+    /// Testnet, and the regtest-compatible address network.
+    Testnet = 0x03,
+}
+
+impl MoneroNetworkV1 {
+    /// Decode the frozen discriminant. `0x01` is Monero mainnet in the
+    /// adapter's own numbering and is refused here by omission, not by a
+    /// special case.
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0x02 => Some(Self::Stagenet),
+            0x03 => Some(Self::Testnet),
+            _ => None,
+        }
+    }
+}
+
+/// A Solana cluster that may be profiled.
+///
+/// Mainnet-beta is deliberately absent rather than present-and-refused, so
+/// that enabling it is a visible change to this enum rather than a value
+/// someone can pass. The discriminants match
+/// `solana_profile::SolanaNetwork` so the two spellings of "which Solana
+/// cluster" can never drift apart; a test in `solana-profile` holds them
+/// together.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum SolanaNetworkV1 {
+    /// The public devnet.
+    Devnet = 0x02,
+    /// The public testnet.
+    Testnet = 0x03,
+    /// A local test validator.
+    LocalValidator = 0x04,
+}
+
+impl SolanaNetworkV1 {
+    /// Decode the frozen discriminant. `0x01` is Solana mainnet-beta in the
+    /// adapter's own numbering and is refused here by omission, not by a
+    /// special case.
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0x02 => Some(Self::Devnet),
+            0x03 => Some(Self::Testnet),
+            0x04 => Some(Self::LocalValidator),
+            _ => None,
+        }
+    }
 }
 
 /// One enabled chain: the explicit, validated, digest-committed facts
@@ -205,6 +294,20 @@ impl ChainProfileV1 {
             // Mainnet is unrepresentable in BitcoinNetworkV1 (D-027):
             // nothing further to refuse here by construction.
             ChainKindV1::Bitcoin { .. } => {}
+            // Same by construction for Monero: MoneroNetworkV1 has no mainnet
+            // variant, so there is nothing left to refuse here either.
+            ChainKindV1::Monero { .. } => {}
+            // Mainnet-beta is unrepresentable in SolanaNetworkV1; what is
+            // left to refuse is an unpinned program, exactly as for EVM.
+            ChainKindV1::Solana {
+                escrow_program,
+                program_data_hash,
+                ..
+            } => {
+                if escrow_program == [0u8; 32] || program_data_hash == [0u8; 32] {
+                    return Err(ProfileRefusal::UnpinnedCodeHash);
+                }
+            }
         }
 
         if self.allowed_assets.len() > MAX_ALLOWED_ASSETS {
@@ -247,6 +350,20 @@ impl ChainProfileV1 {
             ChainKindV1::Bitcoin { network } => {
                 out.push(0x02);
                 out.push(network as u8);
+            }
+            ChainKindV1::Monero { network } => {
+                out.push(0x03);
+                out.push(network as u8);
+            }
+            ChainKindV1::Solana {
+                network,
+                escrow_program,
+                program_data_hash,
+            } => {
+                out.push(0x04);
+                out.push(network as u8);
+                out.extend_from_slice(&escrow_program);
+                out.extend_from_slice(&program_data_hash);
             }
         }
         for v in [

@@ -1,0 +1,12 @@
+[package]
+name = "solana-delivery-sqlite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rusqlite = { workspace = true }
+solana-types = { path = "../solana-types" }
+solana-delivery = { path = "../solana-delivery" }

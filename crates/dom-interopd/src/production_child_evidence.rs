@@ -147,6 +147,8 @@ mod tags {
             SettlementFaceV1::Dom => 1,
             SettlementFaceV1::Evm => 2,
             SettlementFaceV1::Bitcoin => 3,
+            SettlementFaceV1::Monero => 4,
+            SettlementFaceV1::Solana => 5,
         }
     }
 

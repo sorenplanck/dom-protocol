@@ -213,7 +213,9 @@ impl BitcoinActuationScopeV1 {
             .map_err(|_| BitcoinActuatorErrorV1::InvalidScope)?;
         let network = match deployment.profile().kind {
             chain_profile::ChainKindV1::Bitcoin { network } => network,
-            chain_profile::ChainKindV1::Evm { .. } => {
+            chain_profile::ChainKindV1::Evm { .. }
+            | chain_profile::ChainKindV1::Monero { .. }
+            | chain_profile::ChainKindV1::Solana { .. } => {
                 return Err(BitcoinActuatorErrorV1::InvalidScope)
             }
         };

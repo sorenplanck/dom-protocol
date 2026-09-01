@@ -97,6 +97,8 @@ pub(crate) struct ProductionSettlementChildRouterV1 {
     dom: Box<dyn ProductionSettlementChildPortV1>,
     evm: Option<Box<dyn ProductionSettlementChildPortV1>>,
     bitcoin: Option<Box<dyn ProductionSettlementChildPortV1>>,
+    monero: Option<Box<dyn ProductionSettlementChildPortV1>>,
+    solana: Option<Box<dyn ProductionSettlementChildPortV1>>,
 }
 
 impl core::fmt::Debug for ProductionSettlementChildRouterV1 {
@@ -125,7 +127,13 @@ impl ProductionSettlementChildRouterV1 {
         {
             return Err(ChildAuthorityRefusalV1::Refused);
         }
-        Ok(Self { dom, evm, bitcoin })
+        Ok(Self {
+            dom,
+            evm,
+            bitcoin,
+            monero: None,
+            solana: None,
+        })
     }
 
     pub(crate) fn authenticate_dom<C, A>(
@@ -175,7 +183,13 @@ impl ProductionSettlementChildRouterV1 {
         {
             return Err(ChildAuthorityRefusalV1::Refused);
         }
-        Ok(Self { dom, evm, bitcoin })
+        Ok(Self {
+            dom,
+            evm,
+            bitcoin,
+            monero: None,
+            solana: None,
+        })
     }
 
     fn port(
@@ -189,6 +203,19 @@ impl ProductionSettlementChildRouterV1 {
                 None => Err(ChildAuthorityRefusalV1::Refused),
             },
             SettlementFaceV1::Bitcoin => match self.bitcoin.as_mut() {
+                Some(port) => Ok(port.as_mut()),
+                None => Err(ChildAuthorityRefusalV1::Refused),
+            },
+            // The Monero and Solana children are being built
+            // (docs/interop/engine/CHILD_SOCKETS_DESIGN.md). Their slots
+            // exist so the faces are routable the moment a child is
+            // installed; an uninstalled child refuses, exactly as an
+            // uninstalled EVM or Bitcoin child does.
+            SettlementFaceV1::Monero => match self.monero.as_mut() {
+                Some(port) => Ok(port.as_mut()),
+                None => Err(ChildAuthorityRefusalV1::Refused),
+            },
+            SettlementFaceV1::Solana => match self.solana.as_mut() {
                 Some(port) => Ok(port.as_mut()),
                 None => Err(ChildAuthorityRefusalV1::Refused),
             },

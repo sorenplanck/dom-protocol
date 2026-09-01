@@ -6,7 +6,7 @@ use adapter_btc::timelock::{minimum_safety_margin_seconds, ChainTimingBoundsV1};
 use adapter_btc::types::BitcoinNetworkV1;
 use chain_profile::{
     composed_counterparty_margin_floor_seconds, composed_hub_margin_floor_blocks, ChainKindV1,
-    ChainProfileV1, ProfileRefusal, MAX_ALLOWED_ASSETS,
+    ChainProfileV1, ProfileRefusal, SolanaNetworkV1, MAX_ALLOWED_ASSETS,
 };
 use kaystra_core::types::{AssetId, ChainId, FinalityPolicyV1};
 
@@ -403,4 +403,102 @@ fn the_asset_list_order_is_committed() {
     let mut b = evm_profile();
     b.allowed_assets = vec![AssetId(b32(0x04)), AssetId(b32(0x03))];
     assert_ne!(a.profile_digest().unwrap(), b.profile_digest().unwrap());
+}
+
+/// A realistic Solana-side profile: 400ms slots with generous bounds, the
+/// escrow program pinned by id and programdata hash.
+fn solana_profile() -> ChainProfileV1 {
+    ChainProfileV1 {
+        chain_id: ChainId(b32(0x50)),
+        kind: ChainKindV1::Solana {
+            network: SolanaNetworkV1::Devnet,
+            escrow_program: b32(0x5a),
+            program_data_hash: b32(0x5b),
+        },
+        timing: ChainTimingBoundsV1 {
+            min_block_seconds: 1,
+            max_block_seconds: 2,
+            max_reorg_seconds: 120,
+            observation_seconds: 30,
+            broadcast_seconds: 30,
+        },
+        finality: FinalityPolicyV1 {
+            min_confirmations: 32,
+            max_reorg_depth: 32,
+        },
+        native_asset: AssetId(b32(0x05)),
+        allowed_assets: vec![],
+    }
+}
+
+#[test]
+fn a_solana_profile_validates_and_commits_its_program_pinning() {
+    let profile = solana_profile();
+    profile.validate().expect("valid Solana profile");
+    let baseline = profile.profile_digest().expect("digest");
+
+    // Both halves of the program pinning move the digest.
+    let mut moved = profile.clone();
+    moved.kind = ChainKindV1::Solana {
+        network: SolanaNetworkV1::Devnet,
+        escrow_program: b32(0x5c),
+        program_data_hash: b32(0x5b),
+    };
+    assert_ne!(moved.profile_digest().expect("digest"), baseline);
+    let mut moved = profile.clone();
+    moved.kind = ChainKindV1::Solana {
+        network: SolanaNetworkV1::Devnet,
+        escrow_program: b32(0x5a),
+        program_data_hash: b32(0x5d),
+    };
+    assert_ne!(moved.profile_digest().expect("digest"), baseline);
+
+    // Each admitted cluster is a distinct commitment.
+    let mut testnet = profile.clone();
+    testnet.kind = ChainKindV1::Solana {
+        network: SolanaNetworkV1::Testnet,
+        escrow_program: b32(0x5a),
+        program_data_hash: b32(0x5b),
+    };
+    assert_ne!(testnet.profile_digest().expect("digest"), baseline);
+}
+
+#[test]
+fn an_unpinned_solana_program_refuses_on_either_half() {
+    for kind in [
+        ChainKindV1::Solana {
+            network: SolanaNetworkV1::Devnet,
+            escrow_program: [0; 32],
+            program_data_hash: b32(0x5b),
+        },
+        ChainKindV1::Solana {
+            network: SolanaNetworkV1::Devnet,
+            escrow_program: b32(0x5a),
+            program_data_hash: [0; 32],
+        },
+    ] {
+        let mut profile = solana_profile();
+        profile.kind = kind;
+        assert_eq!(profile.validate(), Err(ProfileRefusal::UnpinnedCodeHash));
+    }
+}
+
+#[test]
+fn solana_mainnet_beta_is_unrepresentable_and_refused_on_decode() {
+    // 0x01 is mainnet-beta in the adapter's numbering: refused by omission.
+    assert_eq!(SolanaNetworkV1::from_u8(0x01), None);
+    assert_eq!(SolanaNetworkV1::from_u8(0x00), None);
+    assert_eq!(SolanaNetworkV1::from_u8(0x05), None);
+    assert_eq!(
+        SolanaNetworkV1::from_u8(0x02),
+        Some(SolanaNetworkV1::Devnet)
+    );
+    assert_eq!(
+        SolanaNetworkV1::from_u8(0x03),
+        Some(SolanaNetworkV1::Testnet)
+    );
+    assert_eq!(
+        SolanaNetworkV1::from_u8(0x04),
+        Some(SolanaNetworkV1::LocalValidator)
+    );
 }

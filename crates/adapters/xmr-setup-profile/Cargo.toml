@@ -1,0 +1,14 @@
+[package]
+name = "xmr-setup-profile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+blake2 = { version = "=0.10.6", default-features = false }
+thiserror = { workspace = true }
+kaystra-core = { path = "../../kaystra-core" }
+xmr-dleq-sigma = { path = "../xmr-dleq-sigma" }
+xmr-live-sidecar-api = { path = "../xmr-live-sidecar-api" }

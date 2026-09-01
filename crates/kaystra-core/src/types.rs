@@ -88,6 +88,18 @@ pub enum LockMechanism {
     SchnorrAdaptor = 0x03,
     /// Hashlock fallback for chains without adaptor support.
     HashlockFallback = 0x04,
+    /// Shared spend key on a curve the DOM leg does not use, opened by a
+    /// same-witness cross-curve DLEQ proof. Monero is the first chain that
+    /// needs it: its spend authority is an ed25519 scalar, so the leg is not
+    /// a Schnorr adaptor on the DOM curve and must not be labelled as one.
+    CrossCurveSharedSpend = 0x05,
+    /// Discrete-log condition lock verified on a curve the DOM leg does not
+    /// use, opened by the same-witness cross-curve DLEQ proof. Solana is the
+    /// first chain that needs it: the escrow program checks
+    /// `s * G_ed25519 == P` through the curve25519 syscall, so the leg is
+    /// neither the same-curve EVM `ConditionLock` (ecrecover on t*G, no DLEQ
+    /// involved) nor a shared spend key, and must not be labelled as either.
+    CrossCurveConditionLock = 0x06,
 }
 
 /// Refund-timelock specification for one leg.

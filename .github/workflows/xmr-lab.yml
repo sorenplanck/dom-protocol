@@ -1,0 +1,25 @@
+name: DOM XMR laboratory gates
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'crates/adapters/xmr-**'
+      - 'crates/f8-xmr-kaystra-e2e/**'
+      - 'crates/adapters/dom-real/**'
+      - 'sidecar-gpl/xmr-live-sidecar-eigenwallet/**'
+      - 'scripts/xmr-v6/**'
+
+jobs:
+  xmr-lab:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Static package validation
+        run: python3 scripts/xmr-v6/static-validate.py .
+      - name: DOM-side gates
+        run: |
+          cargo fmt --all -- --check
+          bash scripts/xmr-v6/run-v6-gates.sh

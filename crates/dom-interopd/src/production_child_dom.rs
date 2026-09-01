@@ -1995,6 +1995,8 @@ const fn face_tag(value: SettlementFaceV1) -> u8 {
         SettlementFaceV1::Dom => 1,
         SettlementFaceV1::Evm => 2,
         SettlementFaceV1::Bitcoin => 3,
+        SettlementFaceV1::Monero => 4,
+        SettlementFaceV1::Solana => 5,
     }
 }
 

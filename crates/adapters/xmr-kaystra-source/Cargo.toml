@@ -1,0 +1,11 @@
+[package]
+name = "xmr-kaystra-source"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+kaystra-core = { path = "../../kaystra-core" }
+thiserror = { workspace = true }

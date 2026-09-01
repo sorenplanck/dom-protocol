@@ -256,6 +256,8 @@ fn take_clock(value: u8) -> Result<ClockKindV2> {
         1 => Ok(ClockKindV2::DomHeight),
         2 => Ok(ClockKindV2::EvmTimestamp),
         3 => Ok(ClockKindV2::Bitcoin),
+        4 => Ok(ClockKindV2::Monero),
+        5 => Ok(ClockKindV2::Solana),
         _ => Err(RouteTimeAnchorErrorV2::NonCanonicalEncoding),
     }
 }

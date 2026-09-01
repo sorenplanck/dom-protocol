@@ -1,0 +1,19 @@
+diff --git a/crates/store/Cargo.toml b/crates/store/Cargo.toml
+index 5c2d5cdb..d3669a99 100644
+--- a/crates/store/Cargo.toml
++++ b/crates/store/Cargo.toml
+@@ -19,7 +19,13 @@ failpoints = []
+ 
+ [dependencies]
+ rusqlite = { workspace = true }
+-rustix = { version = "=1.1.4", default-features = false, features = ["fs", "process"] }
++# `std` is not optional here: `lib.rs` hands `std::os::fd::BorrowedFd` to
++# `rustix::fs::flock`, and without this feature `rustix` defines its own
++# `BorrowedFd` and the call does not type-check. It built until now only
++# because the dev-dependency on `tempfile` enabled `rustix/std` in the same
++# resolution unit; any unit that builds this crate as a plain dependency
++# had no such accident.
++rustix = { version = "=1.1.4", default-features = false, features = ["fs", "process", "std"] }
+ thiserror = { workspace = true }
+ 
+ [dev-dependencies]

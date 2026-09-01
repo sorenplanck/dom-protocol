@@ -52,12 +52,13 @@ impl BindingFactorV1 {
 fn validate_adaptor_grammar(purpose: PurposeV1, adaptor_point: Option<&PublicKey>) -> Result<()> {
     purpose.require_strict_phase1()?;
     match (purpose, adaptor_point) {
-        (PurposeV1::ClaimAdaptor, Some(_)) | (PurposeV1::Funding | PurposeV1::Refund, None) => {
-            Ok(())
+        (PurposeV1::ClaimAdaptor | PurposeV1::RefundAdaptor, Some(_))
+        | (PurposeV1::Funding | PurposeV1::Refund, None) => Ok(()),
+        (PurposeV1::ClaimAdaptor | PurposeV1::RefundAdaptor, None) => {
+            Err(AdaptorError::InvalidTranscript(
+                "ClaimAdaptorV1 and RefundAdaptorV1 require an adaptor point",
+            ))
         }
-        (PurposeV1::ClaimAdaptor, None) => Err(AdaptorError::InvalidTranscript(
-            "ClaimAdaptorV1 requires an adaptor point",
-        )),
         (PurposeV1::Funding | PurposeV1::Refund, Some(_)) => Err(AdaptorError::InvalidTranscript(
             "FundingV1 and RefundV1 omit the adaptor point",
         )),

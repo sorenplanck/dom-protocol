@@ -28,6 +28,12 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Where a kernel was found: the block that contains it, and the hash of the
+/// transaction that carried it when there is one. A coinbase kernel is not a
+/// `Transaction` and has no canonical transaction hash, so the inner option
+/// is absent for it.
+type LocatedKernel = (BlockRef, Option<[u8; 32]>);
+
 /// Embedded-node implementation of the Wallet V3 core API.
 #[derive(Clone)]
 pub struct EmbeddedWalletCoreApi {
@@ -149,10 +155,7 @@ impl EmbeddedWalletCoreApi {
     /// in hand rather than another store round trip. Returns `None` for the hash
     /// when the excess is the block's coinbase kernel, which is not a
     /// `Transaction` and has no canonical transaction hash.
-    fn locate_kernel(
-        &self,
-        excess: &[u8; 33],
-    ) -> Result<Option<(BlockRef, Option<[u8; 32]>)>, WalletCoreError> {
+    fn locate_kernel(&self, excess: &[u8; 33]) -> Result<Option<LocatedKernel>, WalletCoreError> {
         let chain = self
             .node
             .chain

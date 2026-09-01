@@ -1,0 +1,27 @@
+{
+  "dom_protocol": {
+    "repository": "https://github.com/sorenplanck/dom-protocol",
+    "branch": "mainnetswap",
+    "commit": "7ea7f96836730a2b79fb4eaf1f3b8c34b1b511ff"
+  },
+  "eigenwallet_core": {
+    "repository": "https://github.com/eigenwallet/core",
+    "commit": "0e17c7f7cd8f0657af176c8852aa4c9949586051"
+  },
+  "monero_oxide": {
+    "repository": "https://github.com/kayabaNerve/monero-oxide",
+    "commit": "c8be5d3d1287669946a83fbfcb296ce2a8852e47",
+    "license": "MIT",
+    "minimum_rust": "1.85"
+  },
+  "sigma_fun": {
+    "version": "0.7.0",
+    "status": "experimental; independent cryptographic audit required"
+  },
+  "ecdsa_fun": {
+    "version": "0.10.0"
+  },
+  "curve25519_dalek_ng": {
+    "version": "4.1.1"
+  }
+}

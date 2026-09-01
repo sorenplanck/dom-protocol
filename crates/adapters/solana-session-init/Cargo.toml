@@ -1,0 +1,18 @@
+[package]
+name = "solana-session-init"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+rand = { workspace = true }
+kaystra-core = { path = "../../kaystra-core" }
+solana-types = { path = "../solana-types" }
+solana-pda = { path = "../solana-pda" }
+solana-route-secret = { path = "../solana-route-secret" }
+solana-profile = { path = "../solana-profile" }
+solana-setup-store = { path = "../solana-setup-store" }
+solana-secret-store = { path = "../solana-secret-store" }

@@ -1,0 +1,19 @@
+[package]
+name = "xmr-refund-adaptor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+rand = { workspace = true }
+blake2 = { version = "=0.10.6", default-features = false }
+counterparty-api = { workspace = true }
+xmr-crypto = { path = "../xmr-crypto" }
+xmr-dleq-sigma = { path = "../xmr-dleq-sigma" }
+xmr-refund-policy = { path = "../xmr-refund-policy" }
+
+[dev-dependencies]
+rand = { workspace = true }

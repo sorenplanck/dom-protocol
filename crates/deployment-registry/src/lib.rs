@@ -26,10 +26,11 @@ pub use signed::{
 pub use store::{InstallOutcomeV1, RegistryStoreV1};
 pub use types::{
     AssetBindingV1, AssetRepresentationV1, BitcoinDeploymentV1, ChainDeploymentV1, DomDeploymentV1,
-    DomNetworkV1, DomRuntimeIdentityV1, EvmDeploymentV1, EvmSessionBindingsV1,
+    DomNetworkV1, DomRuntimeIdentityV1, EvmDeploymentV1, EvmSessionBindingsV1, MoneroDeploymentV1,
     RegistryChainProfileV1, RegistryManifestV1, RegistryValidationPolicyV1,
     ResolvedBitcoinDeploymentV1, ResolvedChainProfileV1, ResolvedDomDeploymentV1,
-    ResolvedEvmDeploymentV1, ResolvedRegistryV1, MAX_ASSET_BINDINGS, MAX_CHAINS,
+    ResolvedEvmDeploymentV1, ResolvedMoneroDeploymentV1, ResolvedRegistryV1,
+    ResolvedSolanaDeploymentV1, SolanaDeploymentV1, MAX_ASSET_BINDINGS, MAX_CHAINS,
     MAX_MANIFEST_BYTES, MAX_SIGNET_CHALLENGE_BYTES,
 };
 
@@ -72,6 +73,13 @@ pub enum RegistryError {
     /// A chain profile and its deployment facts disagree.
     #[error("deployment does not match chain profile")]
     DeploymentMismatch,
+    /// A Monero network was profiled before its genesis block hash was
+    /// ratified. Unlike Bitcoin, no library in this workspace derives the
+    /// Monero genesis, so the value is a ratified fact rather than a computed
+    /// one — and an unratified network refuses instead of trusting whatever
+    /// hash the manifest happens to carry.
+    #[error("Monero network genesis is not ratified")]
+    MoneroGenesisUnratified,
     /// An asset does not have a valid chain representation.
     #[error("invalid asset binding")]
     InvalidAssetBinding,

@@ -2182,6 +2182,15 @@ fn authenticate_participant_bundle(
                     roster,
                 });
             }
+            // The Monero and Solana authenticated sessions anchor on the
+            // registered setup's cross-curve DLEQ rather than participant
+            // key statements, and are being built with their children
+            // (docs/interop/engine/CHILD_SOCKETS_DESIGN.md §3). Until they
+            // land, a production route selecting one of these legs is
+            // refused here, fail closed, never half-authenticated.
+            ChainKindV1::Monero { .. } | ChainKindV1::Solana { .. } => {
+                return Err(ProductionInputErrorV1::InvalidParticipantBundle);
+            }
         }
     }
     if bundle.legs.len() != expected_evm_count

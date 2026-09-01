@@ -1614,6 +1614,19 @@ pub struct RealDomClaimConsumerV1 {
     verifier: Arc<RealDomClaimVerifierV1>,
 }
 
+/// Optional consumer of the scalar already verified and extracted by the
+/// canonical real-DOM claim path. The scalar is borrowed only for this call;
+/// implementations must not place it in Kaystra state or outbox payloads.
+pub trait RevealedSecretSinkV1: Send {
+    /// Consume a verified public-after-claim scalar for an additive route leg.
+    fn consume_revealed_secret(
+        &mut self,
+        effect: &ClaimedEffectV1,
+        evidence: &EvidenceRefV1,
+        revealed: &RevealedSecretBytes,
+    ) -> EffectOutcome;
+}
+
 /// Narrow adapter used by the Contracts Store's linear funding/refund
 /// capabilities. Exact bytes are borrowed only for the duration of the
 /// authenticated DOM RPC call and are never retained by this adapter.
@@ -1668,6 +1681,7 @@ pub struct RealDomEffectSinkV1 {
     session_id: [u8; 32],
     claim_consumer: RealDomClaimConsumerV1,
     consumed_claims: Vec<EvidenceRefV1>,
+    revealed_secret_sink: Option<Box<dyn RevealedSecretSinkV1>>,
 }
 
 impl core::fmt::Debug for RealDomEffectSinkV1 {
@@ -1676,6 +1690,10 @@ impl core::fmt::Debug for RealDomEffectSinkV1 {
             .debug_struct("RealDomEffectSinkV1")
             .field("settlement_id", &self.settlement_id)
             .field("consumed_claims", &self.consumed_claims.len())
+            .field(
+                "has_revealed_secret_sink",
+                &self.revealed_secret_sink.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -1702,6 +1720,7 @@ impl RealDomEffectSinkV1 {
             session_id,
             claim_consumer,
             consumed_claims: Vec::new(),
+            revealed_secret_sink: None,
         })
     }
 
@@ -1725,7 +1744,16 @@ impl RealDomEffectSinkV1 {
             session_id,
             claim_consumer,
             consumed_claims: Vec::new(),
+            revealed_secret_sink: None,
         })
+    }
+
+    /// Installs an additive consumer for an already-verified revealed scalar.
+    /// Existing DOM-only callers remain unchanged when no sink is installed.
+    #[must_use]
+    pub fn with_revealed_secret_sink(mut self, sink: Box<dyn RevealedSecretSinkV1>) -> Self {
+        self.revealed_secret_sink = Some(sink);
+        self
     }
 
     /// Public evidence references whose claim scalar was verified/consumed.
@@ -1823,7 +1851,13 @@ impl EffectSinkV1 for RealDomEffectSinkV1 {
             Effect::ArmRefundPath => self.submit_refund(),
             Effect::RequestClaimConsumption { evidence } => {
                 match self.claim_consumer.consume(evidence) {
-                    Ok(_) => {
+                    Ok(revealed) => {
+                        if let Some(sink) = self.revealed_secret_sink.as_mut() {
+                            let outcome = sink.consume_revealed_secret(effect, evidence, &revealed);
+                            if !matches!(outcome, EffectOutcome::Completed) {
+                                return outcome;
+                            }
+                        }
                         if !self.consumed_claims.contains(evidence) {
                             self.consumed_claims.push(*evidence);
                         }

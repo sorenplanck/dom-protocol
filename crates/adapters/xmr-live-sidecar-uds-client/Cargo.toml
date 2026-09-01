@@ -1,0 +1,14 @@
+[package]
+name = "xmr-live-sidecar-uds-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+xmr-live-sidecar-api = { path = "../xmr-live-sidecar-api" }
+xmr-sidecar-auth = { path = "../xmr-sidecar-auth" }
+xmr-spend-port = { path = "../xmr-spend-port" }

@@ -16,6 +16,16 @@ pub enum PurposeV1 {
     Funding = 0x03,
     /// Sponsor codec value; strict Phase 1 execution is not yet authorized.
     Sponsor = 0x04,
+    /// Refund adaptor pre-signature.
+    ///
+    /// Distinct from [`Self::Refund`], which is the plain timelock refund and
+    /// reveals nothing. This purpose is the refund-side mirror of
+    /// [`Self::ClaimAdaptor`]: the refund is bound to its own adaptor point, so
+    /// completing it exposes the refund witness the counterparty needs to
+    /// recover a cross-curve leg. Sharing a purpose byte with the plain refund
+    /// would let one binding transcript stand for both, which is exactly the
+    /// confusion the separate tag prevents.
+    RefundAdaptor = 0x05,
 }
 
 impl PurposeV1 {
@@ -35,7 +45,7 @@ impl PurposeV1 {
     /// Phase 1 signing flow. Recognizing its byte must never activate it.
     pub fn require_strict_phase1(self) -> Result<Self> {
         match self {
-            Self::Refund | Self::ClaimAdaptor | Self::Funding => Ok(self),
+            Self::Refund | Self::ClaimAdaptor | Self::Funding | Self::RefundAdaptor => Ok(self),
             Self::Sponsor => Err(AdaptorError::PurposeNotAuthorized(self.to_byte())),
         }
     }
@@ -50,6 +60,7 @@ impl TryFrom<u8> for PurposeV1 {
             0x02 => Ok(Self::ClaimAdaptor),
             0x03 => Ok(Self::Funding),
             0x04 => Ok(Self::Sponsor),
+            0x05 => Ok(Self::RefundAdaptor),
             other => Err(AdaptorError::UnknownPurpose(other)),
         }
     }

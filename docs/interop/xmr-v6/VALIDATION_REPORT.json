@@ -1,0 +1,31 @@
+{
+  "root": "/home/user/dom-protocol",
+  "metadata_root": "/home/user/dom-protocol/docs/interop/xmr-v6",
+  "active_components": 19,
+  "manifests_parsed": 20,
+  "packages": {
+    "xmr-crypto": "crates/adapters/xmr-crypto/Cargo.toml",
+    "xmr-dleq-sigma": "crates/adapters/xmr-dleq-sigma/Cargo.toml",
+    "xmr-route-secret": "crates/adapters/xmr-route-secret/Cargo.toml",
+    "xmr-profile": "crates/adapters/xmr-profile/Cargo.toml",
+    "xmr-claim-registry": "crates/adapters/xmr-claim-registry/Cargo.toml",
+    "xmr-evidence": "crates/adapters/xmr-evidence/Cargo.toml",
+    "xmr-observer": "crates/adapters/xmr-observer/Cargo.toml",
+    "xmr-kaystra-records": "crates/adapters/xmr-kaystra-records/Cargo.toml",
+    "xmr-secret-store": "crates/adapters/xmr-secret-store/Cargo.toml",
+    "xmr-sidecar-auth": "crates/adapters/xmr-sidecar-auth/Cargo.toml",
+    "xmr-live-sidecar-api": "crates/adapters/xmr-live-sidecar-api/Cargo.toml",
+    "xmr-live-sidecar-uds-client": "crates/adapters/xmr-live-sidecar-uds-client/Cargo.toml",
+    "xmr-raw-tx-verify": "crates/adapters/xmr-raw-tx-verify/Cargo.toml",
+    "xmr-spend-port": "crates/adapters/xmr-spend-port/Cargo.toml",
+    "xmr-delivery": "crates/adapters/xmr-delivery/Cargo.toml",
+    "xmr-delivery-sqlite": "crates/adapters/xmr-delivery-sqlite/Cargo.toml",
+    "xmr-settlement-observer": "crates/adapters/xmr-settlement-observer/Cargo.toml",
+    "xmr-kaystra-bridge": "crates/adapters/xmr-kaystra-bridge/Cargo.toml",
+    "f8-xmr-kaystra-e2e": "crates/f8-xmr-kaystra-e2e/Cargo.toml",
+    "xmr-live-sidecar-eigenwallet": "sidecar-gpl/xmr-live-sidecar-eigenwallet/Cargo.toml"
+  },
+  "errors": [],
+  "warnings": [],
+  "status": "PASS"
+}

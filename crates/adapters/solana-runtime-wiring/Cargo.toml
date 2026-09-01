@@ -1,0 +1,24 @@
+[package]
+name = "solana-runtime-wiring"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+adapter-dom-real = { path = "../dom-real" }
+ed25519-dalek = { workspace = true }
+solana-delivery = { path = "../solana-delivery" }
+solana-delivery-sqlite = { path = "../solana-delivery-sqlite" }
+solana-kaystra-bridge = { path = "../solana-kaystra-bridge" }
+solana-profile = { path = "../solana-profile" }
+solana-program-attestation = { path = "../solana-program-attestation" }
+solana-program-client = { path = "../solana-program-client" }
+solana-rpc = { path = "../solana-rpc" }
+solana-rpc-pool = { path = "../solana-rpc-pool" }
+solana-secret-store = { path = "../solana-secret-store" }
+solana-transaction-builder = { path = "../solana-transaction-builder" }
+solana-types = { path = "../solana-types" }
+thiserror = { workspace = true }
+zeroize = { workspace = true }

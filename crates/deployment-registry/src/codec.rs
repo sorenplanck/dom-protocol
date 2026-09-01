@@ -1,13 +1,15 @@
 use adapter_btc::timelock::ChainTimingBoundsV1;
 use adapter_btc::types::BitcoinNetworkV1;
-use chain_profile::{ChainKindV1, ChainProfileV1, MAX_ALLOWED_ASSETS};
+use chain_profile::{
+    ChainKindV1, ChainProfileV1, MoneroNetworkV1, SolanaNetworkV1, MAX_ALLOWED_ASSETS,
+};
 use kaystra_core::types::{AssetId, ChainId, FinalityPolicyV1};
 
 use crate::types::{
     AssetBindingV1, AssetRepresentationV1, BitcoinDeploymentV1, ChainDeploymentV1, DomDeploymentV1,
-    DomNetworkV1, DomRuntimeIdentityV1, EvmDeploymentV1, RegistryChainProfileV1,
-    RegistryManifestV1, MAX_ASSET_BINDINGS, MAX_CHAINS, MAX_MANIFEST_BYTES,
-    MAX_SIGNET_CHALLENGE_BYTES,
+    DomNetworkV1, DomRuntimeIdentityV1, EvmDeploymentV1, MoneroDeploymentV1,
+    RegistryChainProfileV1, RegistryManifestV1, SolanaDeploymentV1, MAX_ASSET_BINDINGS, MAX_CHAINS,
+    MAX_MANIFEST_BYTES, MAX_SIGNET_CHALLENGE_BYTES,
 };
 use crate::{RegistryError, Result, REGISTRY_VERSION};
 
@@ -183,6 +185,20 @@ fn encode_chain(out: &mut Vec<u8>, chain: &RegistryChainProfileV1) -> Result<()>
             out.push(0x02);
             out.push(network as u8);
         }
+        ChainKindV1::Monero { network } => {
+            out.push(0x03);
+            out.push(network as u8);
+        }
+        ChainKindV1::Solana {
+            network,
+            escrow_program,
+            program_data_hash,
+        } => {
+            out.push(0x04);
+            out.push(network as u8);
+            out.extend_from_slice(&escrow_program);
+            out.extend_from_slice(&program_data_hash);
+        }
     }
     encode_timing(out, profile.timing);
     encode_finality(out, profile.finality);
@@ -215,6 +231,16 @@ fn encode_chain(out: &mut Vec<u8>, chain: &RegistryChainProfileV1) -> Result<()>
             put_u64(out, deployment.gas_limit_hint);
             put_u128(out, deployment.max_fee_per_gas);
             put_u128(out, deployment.max_priority_fee_per_gas);
+        }
+        ChainDeploymentV1::Monero(deployment) => {
+            out.push(0x03);
+            out.extend_from_slice(&deployment.genesis_hash);
+            put_u64(out, deployment.max_fee_piconero);
+        }
+        ChainDeploymentV1::Solana(deployment) => {
+            out.push(0x04);
+            out.extend_from_slice(&deployment.genesis_hash);
+            put_u64(out, deployment.max_fee_lamports);
         }
         ChainDeploymentV1::Bitcoin(deployment) => {
             out.push(0x02);
@@ -253,6 +279,16 @@ fn decode_chain(reader: &mut Reader<'_>) -> Result<RegistryChainProfileV1> {
         }
         0x02 => ChainKindV1::Bitcoin {
             network: decode_bitcoin_network(reader.u8()?)?,
+        },
+        0x03 => ChainKindV1::Monero {
+            network: MoneroNetworkV1::from_u8(reader.u8()?)
+                .ok_or(RegistryError::NonCanonicalEncoding)?,
+        },
+        0x04 => ChainKindV1::Solana {
+            network: SolanaNetworkV1::from_u8(reader.u8()?)
+                .ok_or(RegistryError::NonCanonicalEncoding)?,
+            escrow_program: reader.take::<32>()?,
+            program_data_hash: reader.take::<32>()?,
         },
         _ => return Err(RegistryError::NonCanonicalEncoding),
     };
@@ -314,6 +350,22 @@ fn decode_chain(reader: &mut Reader<'_>) -> Result<RegistryChainProfileV1> {
                 signet_challenge,
                 max_fee_rate_sat_vbyte,
                 min_relay_fee_sat_kvb,
+            })
+        }
+        0x03 => {
+            let genesis_hash = reader.take::<32>()?;
+            let max_fee_piconero = reader.u64()?;
+            ChainDeploymentV1::Monero(MoneroDeploymentV1 {
+                genesis_hash,
+                max_fee_piconero,
+            })
+        }
+        0x04 => {
+            let genesis_hash = reader.take::<32>()?;
+            let max_fee_lamports = reader.u64()?;
+            ChainDeploymentV1::Solana(SolanaDeploymentV1 {
+                genesis_hash,
+                max_fee_lamports,
             })
         }
         _ => return Err(RegistryError::NonCanonicalEncoding),

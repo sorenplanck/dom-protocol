@@ -734,6 +734,22 @@ fn counterparty_leg_matches_chain_kind(
                     TimelockSpec::BlockHeight { .. } | TimelockSpec::BtcTime512s { .. }
                 )
         }
+        // Monero has no script and no adaptor on the DOM curve: the leg is a
+        // shared spend key opened by a cross-curve DLEQ. Absolute Monero
+        // height is the only deadline an observer of that chain can evaluate
+        // deterministically, so it is the only one admitted.
+        ChainKindV1::Monero { .. } => {
+            mechanism == LockMechanism::CrossCurveSharedSpend
+                && matches!(deadline, TimelockSpec::BlockHeight { .. })
+        }
+        // Solana's escrow enforces its refund on Clock::unix_timestamp, so a
+        // timestamp deadline is the only one the program can hold, and the
+        // lock is the cross-curve discrete-log condition, never the same-curve
+        // EVM ConditionLock and never a shared spend key.
+        ChainKindV1::Solana { .. } => {
+            mechanism == LockMechanism::CrossCurveConditionLock
+                && matches!(deadline, TimelockSpec::TimestampSeconds { .. })
+        }
     }
 }
 
@@ -897,6 +913,38 @@ impl AuthenticatedRouteAdmissionV1 {
             .map_err(RouteAdmissionRefusalV1::Registry)
     }
 
+    /// Returns the complete public Monero capability for one selected leg.
+    pub fn monero_deployment_capability(
+        &self,
+        leg: LegIdV1,
+    ) -> Result<deployment_registry::ResolvedMoneroDeploymentV1, RouteAdmissionRefusalV1> {
+        let selection = match leg {
+            LegIdV1::Upstream => self.upstream,
+            LegIdV1::Downstream => self.downstream,
+        };
+        self.registry
+            .resolve_chain(selection.chain_id)
+            .ok_or(RouteAdmissionRefusalV1::UnknownSelection)?
+            .monero_deployment_capability()
+            .map_err(RouteAdmissionRefusalV1::Registry)
+    }
+
+    /// Returns the complete public Solana capability for one selected leg.
+    pub fn solana_deployment_capability(
+        &self,
+        leg: LegIdV1,
+    ) -> Result<deployment_registry::ResolvedSolanaDeploymentV1, RouteAdmissionRefusalV1> {
+        let selection = match leg {
+            LegIdV1::Upstream => self.upstream,
+            LegIdV1::Downstream => self.downstream,
+        };
+        self.registry
+            .resolve_chain(selection.chain_id)
+            .ok_or(RouteAdmissionRefusalV1::UnknownSelection)?
+            .solana_deployment_capability()
+            .map_err(RouteAdmissionRefusalV1::Registry)
+    }
+
     /// Builds an EVM adapter only from dual-signed participant/account facts
     /// and the exact validated composed settlement admitted for this route.
     pub fn evm_adapter_config(
@@ -939,7 +987,9 @@ impl AuthenticatedRouteAdmissionV1 {
             .ok_or(RouteAdmissionRefusalV1::UnknownSelection)?;
         let expected_evm_chain_id = match chain.profile().kind {
             ChainKindV1::Evm { evm_chain_id, .. } => evm_chain_id,
-            ChainKindV1::Bitcoin { .. } => return Err(RouteAdmissionRefusalV1::UnknownSelection),
+            ChainKindV1::Bitcoin { .. }
+            | ChainKindV1::Monero { .. }
+            | ChainKindV1::Solana { .. } => return Err(RouteAdmissionRefusalV1::UnknownSelection),
         };
         let bindings = session.bindings();
         if session.network_id() != self.registry.manifest().network_id
@@ -1026,4 +1076,158 @@ fn digest_parts(domain: &[u8], parts: &[&[u8]]) -> Result<Digest32, RouteAdmissi
         return Err(RouteAdmissionRefusalV1::DigestFailure);
     }
     Ok(digest)
+}
+
+#[cfg(test)]
+mod chain_kind_policy_tests {
+    use super::*;
+    use chain_profile::MoneroNetworkV1;
+
+    fn monero() -> ChainKindV1 {
+        ChainKindV1::Monero {
+            network: MoneroNetworkV1::Stagenet,
+        }
+    }
+
+    fn bitcoin() -> ChainKindV1 {
+        ChainKindV1::Bitcoin {
+            network: adapter_btc::types::BitcoinNetworkV1::Regtest,
+        }
+    }
+
+    #[test]
+    fn a_monero_leg_is_admitted_only_under_the_ratified_mechanism_and_a_height_deadline() {
+        assert!(counterparty_leg_matches_chain_kind(
+            LockMechanism::CrossCurveSharedSpend,
+            TimelockSpec::BlockHeight { value: 400 },
+            monero(),
+        ));
+        // Monero has no script and no adaptor on the DOM curve. Admitting the
+        // Bitcoin or EVM mechanism on this chain would let a leg claim a lock
+        // the chain cannot perform.
+        for mechanism in [
+            LockMechanism::SchnorrAdaptor,
+            LockMechanism::ConditionLock,
+            LockMechanism::HashlockFallback,
+            LockMechanism::DomAdaptor2of2,
+        ] {
+            assert!(!counterparty_leg_matches_chain_kind(
+                mechanism,
+                TimelockSpec::BlockHeight { value: 400 },
+                monero(),
+            ));
+        }
+        // Only absolute Monero height is evaluable by an observer of that
+        // chain; the other two clocks belong to other chains.
+        for deadline in [
+            TimelockSpec::TimestampSeconds { value: 400 },
+            TimelockSpec::BtcTime512s { value: 400 },
+        ] {
+            assert!(!counterparty_leg_matches_chain_kind(
+                LockMechanism::CrossCurveSharedSpend,
+                deadline,
+                monero(),
+            ));
+        }
+    }
+
+    fn solana() -> ChainKindV1 {
+        ChainKindV1::Solana {
+            network: chain_profile::SolanaNetworkV1::Devnet,
+            escrow_program: [0x5a; 32],
+            program_data_hash: [0x5b; 32],
+        }
+    }
+
+    #[test]
+    fn a_solana_leg_is_admitted_only_under_cross_curve_condition_lock_and_a_timestamp_deadline() {
+        assert!(counterparty_leg_matches_chain_kind(
+            LockMechanism::CrossCurveConditionLock,
+            TimelockSpec::TimestampSeconds {
+                value: 2_000_000_000
+            },
+            solana(),
+        ));
+        // The escrow verifies an ed25519 discrete log through the cross-curve
+        // DLEQ. The same-curve EVM ConditionLock, the shared spend key, and
+        // the rest would let a leg claim a lock the program does not perform.
+        for mechanism in [
+            LockMechanism::ConditionLock,
+            LockMechanism::CrossCurveSharedSpend,
+            LockMechanism::SchnorrAdaptor,
+            LockMechanism::HashlockFallback,
+            LockMechanism::DomAdaptor2of2,
+        ] {
+            assert!(!counterparty_leg_matches_chain_kind(
+                mechanism,
+                TimelockSpec::TimestampSeconds {
+                    value: 2_000_000_000
+                },
+                solana(),
+            ));
+        }
+        // The escrow's refund clock is Clock::unix_timestamp; heights and
+        // BTC 512s units belong to other chains.
+        for deadline in [
+            TimelockSpec::BlockHeight { value: 400 },
+            TimelockSpec::BtcTime512s { value: 400 },
+        ] {
+            assert!(!counterparty_leg_matches_chain_kind(
+                LockMechanism::CrossCurveConditionLock,
+                deadline,
+                solana(),
+            ));
+        }
+    }
+
+    #[test]
+    fn the_solana_mechanism_does_not_leak_onto_the_other_chains() {
+        for kind in [monero(), bitcoin()] {
+            assert!(!counterparty_leg_matches_chain_kind(
+                LockMechanism::CrossCurveConditionLock,
+                TimelockSpec::TimestampSeconds {
+                    value: 2_000_000_000
+                },
+                kind,
+            ));
+        }
+        assert!(!counterparty_leg_matches_chain_kind(
+            LockMechanism::CrossCurveConditionLock,
+            TimelockSpec::TimestampSeconds {
+                value: 2_000_000_000
+            },
+            ChainKindV1::Evm {
+                evm_chain_id: 11_155_111,
+                native_lock_contract: [0x11; 20],
+                native_code_hash: [0xcc; 32],
+                erc20_lock_contract: None,
+            },
+        ));
+    }
+
+    #[test]
+    fn the_ratified_mechanism_does_not_leak_onto_the_other_chains() {
+        // Adding a mechanism must not widen what any existing chain accepts.
+        assert!(!counterparty_leg_matches_chain_kind(
+            LockMechanism::CrossCurveSharedSpend,
+            TimelockSpec::BlockHeight { value: 400 },
+            bitcoin(),
+        ));
+        assert!(!counterparty_leg_matches_chain_kind(
+            LockMechanism::CrossCurveSharedSpend,
+            TimelockSpec::TimestampSeconds { value: 400 },
+            ChainKindV1::Evm {
+                evm_chain_id: 31337,
+                native_lock_contract: [1; 20],
+                native_code_hash: [2; 32],
+                erc20_lock_contract: None,
+            },
+        ));
+        // And the chains that were already admitted still are.
+        assert!(counterparty_leg_matches_chain_kind(
+            LockMechanism::SchnorrAdaptor,
+            TimelockSpec::BlockHeight { value: 400 },
+            bitcoin(),
+        ));
+    }
 }

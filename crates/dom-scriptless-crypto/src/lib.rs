@@ -9,6 +9,7 @@
 
 mod claim_adaptor;
 mod claim_adaptor_round;
+mod refund_adaptor_round;
 mod shared_output;
 mod storage;
 
@@ -20,6 +21,11 @@ pub use claim_adaptor::{
 pub use claim_adaptor_round::{
     begin_claim_adaptor_round_v1, ClaimAdaptorRoundError, ClaimAdaptorRoundInputsV1,
     ClaimAdaptorRoundV1, CompletedClaimAdaptorCycleV1, CLAIM_ADAPTOR_PARTICIPANTS,
+};
+pub use refund_adaptor_round::{
+    begin_refund_adaptor_round_v1, CompletedRefundAdaptorCycleV1, RefundAdaptorRoundError,
+    RefundAdaptorRoundInputsV1, RefundAdaptorRoundV1, REFUND_ADAPTOR_PARTICIPANTS,
+    REFUND_ADAPTOR_PRE_SIGNATURE_LEN,
 };
 pub use shared_output::{
     commit_to_reveal, freeze_shared_output_statement_v1, CommonNonceError, CommonNonceRoundV1,

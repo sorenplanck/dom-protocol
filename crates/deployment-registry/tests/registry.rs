@@ -9,6 +9,7 @@ use deployment_registry::{
     DomDeploymentV1, DomNetworkV1, DomRuntimeIdentityV1, EvmDeploymentV1, EvmSessionBindingsV1,
     InstallOutcomeV1, RegistryChainProfileV1, RegistryError, RegistryManifestV1,
     RegistrySignatureV1, RegistryStoreV1, RegistryValidationPolicyV1, SignedRegistryV1,
+    SolanaDeploymentV1,
 };
 use dom_consensus::derive_chain_id;
 use dom_core::{
@@ -791,5 +792,106 @@ fn hardened_store_never_recreates_or_accepts_ambiguous_retained_state() {
     assert!(matches!(
         RegistryStoreV1::open_existing(&path),
         Err(RegistryError::CorruptState)
+    ));
+}
+
+const SOLANA_CHAIN: ChainId = ChainId([0x05; 32]);
+const SOLANA_ASSET: AssetId = AssetId([0x15; 32]);
+
+fn with_solana_chain(mut value: RegistryManifestV1) -> RegistryManifestV1 {
+    value.chains.push(RegistryChainProfileV1 {
+        profile: ChainProfileV1 {
+            chain_id: SOLANA_CHAIN,
+            kind: ChainKindV1::Solana {
+                network: chain_profile::SolanaNetworkV1::Devnet,
+                escrow_program: [0x5a; 32],
+                program_data_hash: [0x5b; 32],
+            },
+            timing: timing(),
+            finality: finality(),
+            native_asset: SOLANA_ASSET,
+            allowed_assets: vec![],
+        },
+        deployment: ChainDeploymentV1::Solana(SolanaDeploymentV1 {
+            genesis_hash: [0x5c; 32],
+            max_fee_lamports: 50_000,
+        }),
+    });
+    value.assets.push(AssetBindingV1 {
+        chain_id: SOLANA_CHAIN,
+        asset_id: SOLANA_ASSET,
+        decimals: 9,
+        representation: AssetRepresentationV1::Native,
+    });
+    value
+        .assets
+        .sort_by_key(|asset| (asset.chain_id.0, asset.asset_id.0));
+    value
+}
+
+#[test]
+fn a_solana_chain_entry_validates_and_round_trips_canonically() {
+    let value = with_solana_chain(manifest(7));
+    value.validate().expect("solana entry validates");
+    let bytes = value.canonical_bytes().unwrap();
+    assert_eq!(RegistryManifestV1::decode(&bytes).unwrap(), value);
+    assert_eq!(
+        RegistryManifestV1::decode(&bytes)
+            .unwrap()
+            .canonical_bytes()
+            .unwrap(),
+        bytes
+    );
+}
+
+#[test]
+fn solana_deployment_refusals_fail_closed() {
+    // Zero fee ceiling: an unbounded loss on the operator-funded leg.
+    let mut value = with_solana_chain(manifest(7));
+    if let ChainDeploymentV1::Solana(solana) = &mut value.chains[2].deployment {
+        solana.max_fee_lamports = 0;
+    }
+    assert!(matches!(
+        value.validate(),
+        Err(RegistryError::DeploymentMismatch)
+    ));
+
+    // Zero genesis: no chain identity to pin.
+    let mut value = with_solana_chain(manifest(7));
+    if let ChainDeploymentV1::Solana(solana) = &mut value.chains[2].deployment {
+        solana.genesis_hash = [0; 32];
+    }
+    assert!(matches!(
+        value.validate(),
+        Err(RegistryError::DeploymentMismatch)
+    ));
+
+    // SPL mints are not admitted until they get their own representation
+    // and ratification: a non-empty allowed list refuses.
+    let mut value = with_solana_chain(manifest(7));
+    value.chains[2].profile.allowed_assets = vec![AssetId([0x16; 32])];
+    assert!(value.validate().is_err());
+
+    // A Solana kind over a non-Solana deployment refuses.
+    let mut value = with_solana_chain(manifest(7));
+    value.chains[2].deployment =
+        ChainDeploymentV1::Monero(deployment_registry::MoneroDeploymentV1 {
+            genesis_hash: [0x5c; 32],
+            max_fee_piconero: 1,
+        });
+    assert!(matches!(
+        value.validate(),
+        Err(RegistryError::DeploymentMismatch)
+    ));
+
+    // Two entries with the same cluster identity refuse as duplicates.
+    let mut value = with_solana_chain(with_solana_chain(manifest(7)));
+    value.chains[3].profile.chain_id = ChainId([0x06; 32]);
+    value
+        .assets
+        .retain(|asset| asset.chain_id != ChainId([0x06; 32]));
+    assert!(matches!(
+        value.validate(),
+        Err(RegistryError::DuplicateEntry)
     ));
 }
