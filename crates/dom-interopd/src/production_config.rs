@@ -60,12 +60,25 @@ pub const PRODUCTION_REOPEN_CONFIG_FILE_V3: &str = "bootstrap-reopen-v3.conf";
 /// the line count a decoder expects is a function of the family it was asked
 /// for, never of the newest one.
 pub const PRODUCTION_PATH_ROLE_COUNT_V3: usize = 30;
+/// Fixed V4 provisioning manifest name. No earlier loader accepts it.
+pub const PRODUCTION_CREATE_CONFIG_FILE_V4: &str = "bootstrap-create-v4.conf";
+/// Fixed V4 recovery manifest name. No earlier loader accepts it.
+pub const PRODUCTION_REOPEN_CONFIG_FILE_V4: &str = "bootstrap-reopen-v4.conf";
+/// Exact number of public path references in the V4 layout: the V3 set plus
+/// the chain-endpoints artifact, the Solana and Monero actuator stores, and
+/// the Bitcoin prebroadcast store the external arming flow writes into.
+pub const PRODUCTION_PATH_ROLE_COUNT_V4: usize = 34;
 
 const HEADER_V1: &str = "DOM-INTEROPD-BOOTSTRAP-V1";
 const HEADER_V2: &str = "DOM-INTEROPD-BOOTSTRAP-V2";
 const HEADER_V3: &str = "DOM-INTEROPD-BOOTSTRAP-V3";
+const HEADER_V4: &str = "DOM-INTEROPD-BOOTSTRAP-V4";
 const IDENTITY_STORE_KEY_V2: &str = "path_contracts_transport_identity_store";
 const BUDGET_POLICY_KEY_V3: &str = "path_contracts_budget_policy";
+const CHAIN_ENDPOINTS_KEY_V4: &str = "path_chain_endpoints";
+const SOLANA_ACTUATOR_STORE_KEY_V4: &str = "path_solana_actuator_store";
+const XMR_ACTUATOR_STORE_KEY_V4: &str = "path_xmr_actuator_store";
+const BITCOIN_PREBROADCAST_STORE_KEY_V4: &str = "path_bitcoin_prebroadcast_store";
 const END_V1: &str = "end=1";
 const CONFIG_DIGEST_DOMAIN_V1: &[u8] = b"DOM-INTEROPD/BOOTSTRAP-CONFIG/V1\0";
 const DIRECTORY_MODE_V1: u32 = 0o700;
@@ -108,6 +121,7 @@ enum ProductionBootstrapFamilyV1 {
     V1,
     V2,
     V3,
+    V4,
 }
 
 impl ProductionBootstrapFamilyV1 {
@@ -116,6 +130,7 @@ impl ProductionBootstrapFamilyV1 {
             Self::V1 => HEADER_V1,
             Self::V2 => HEADER_V2,
             Self::V3 => HEADER_V3,
+            Self::V4 => HEADER_V4,
         }
     }
 
@@ -124,6 +139,7 @@ impl ProductionBootstrapFamilyV1 {
             Self::V1 => PRODUCTION_PATH_ROLE_COUNT_V1,
             Self::V2 => PRODUCTION_PATH_ROLE_COUNT_V2,
             Self::V3 => PRODUCTION_PATH_ROLE_COUNT_V3,
+            Self::V4 => PRODUCTION_PATH_ROLE_COUNT_V4,
         }
     }
 }
@@ -564,6 +580,20 @@ enum ProductionFamilyExtrasV1 {
         identity_store: String,
         budget_policy: String,
     },
+    /// The V4 family adds what the counterparty settlement children need:
+    /// the chain-endpoints artifact and the durable stores of the Solana and
+    /// Monero actuators, plus the Bitcoin prebroadcast store the external
+    /// funding-arming flow writes into. One variant, six references — a
+    /// configuration carrying the endpoints without the stores they feed is
+    /// unrepresentable, not merely discouraged.
+    V4 {
+        identity_store: String,
+        budget_policy: String,
+        chain_endpoints: String,
+        solana_actuator_store: String,
+        xmr_actuator_store: String,
+        bitcoin_prebroadcast_store: String,
+    },
 }
 
 impl core::fmt::Debug for ProductionBootstrapConfigV1 {
@@ -652,13 +682,59 @@ impl ProductionBootstrapConfigV1 {
         })
     }
 
+    /// Builds a V4 configuration: the V3 set plus the chain-endpoints
+    /// artifact, the Solana and Monero actuator stores and the Bitcoin
+    /// prebroadcast store.
+    ///
+    /// All four new references arrive together, for the same reason V3's two
+    /// did: the counterparty children consume them as one unit, and a partial
+    /// set is a state nobody should be able to write down.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts_v4(
+        mode: ProductionBootstrapModeV1,
+        pins: ProductionRoutePinsV1,
+        bounds: ProductionRuntimeBoundsV1,
+        paths: ProductionPathReferencesV1,
+        contracts_transport_identity_store: String,
+        contracts_budget_policy: String,
+        chain_endpoints: String,
+        solana_actuator_store: String,
+        xmr_actuator_store: String,
+        bitcoin_prebroadcast_store: String,
+    ) -> Result<Self, ProductionConfigErrorV1> {
+        let mut extended = Vec::with_capacity(PRODUCTION_PATH_ROLE_COUNT_V4);
+        extended.extend_from_slice(&paths.paths);
+        extended.push(contracts_transport_identity_store.clone());
+        extended.push(contracts_budget_policy.clone());
+        extended.push(chain_endpoints.clone());
+        extended.push(solana_actuator_store.clone());
+        extended.push(xmr_actuator_store.clone());
+        extended.push(bitcoin_prebroadcast_store.clone());
+        validate_path_set(&extended)?;
+        Ok(Self {
+            mode,
+            pins: pins.validate()?,
+            bounds: bounds.validate()?,
+            paths,
+            extras: ProductionFamilyExtrasV1::V4 {
+                identity_store: contracts_transport_identity_store,
+                budget_policy: contracts_budget_policy,
+                chain_endpoints,
+                solana_actuator_store,
+                xmr_actuator_store,
+                bitcoin_prebroadcast_store,
+            },
+        })
+    }
+
     /// Externally provisioned Contracts transport identity authority, present
     /// only in the V2 family.
     pub fn contracts_transport_identity_store(&self) -> Option<&Path> {
         match &self.extras {
             ProductionFamilyExtrasV1::None => None,
             ProductionFamilyExtrasV1::V2 { identity_store }
-            | ProductionFamilyExtrasV1::V3 { identity_store, .. } => {
+            | ProductionFamilyExtrasV1::V3 { identity_store, .. }
+            | ProductionFamilyExtrasV1::V4 { identity_store, .. } => {
                 Some(Path::new(identity_store))
             }
         }
@@ -676,7 +752,50 @@ impl ProductionBootstrapConfigV1 {
     pub fn contracts_budget_policy(&self) -> Option<&Path> {
         match &self.extras {
             ProductionFamilyExtrasV1::None | ProductionFamilyExtrasV1::V2 { .. } => None,
-            ProductionFamilyExtrasV1::V3 { budget_policy, .. } => Some(Path::new(budget_policy)),
+            ProductionFamilyExtrasV1::V3 { budget_policy, .. }
+            | ProductionFamilyExtrasV1::V4 { budget_policy, .. } => Some(Path::new(budget_policy)),
+        }
+    }
+
+    /// Chain-endpoints artifact reference, present only in the V4 family.
+    pub fn chain_endpoints(&self) -> Option<&Path> {
+        match &self.extras {
+            ProductionFamilyExtrasV1::V4 {
+                chain_endpoints, ..
+            } => Some(Path::new(chain_endpoints)),
+            _ => None,
+        }
+    }
+
+    /// Solana actuator store reference, present only in the V4 family.
+    pub fn solana_actuator_store(&self) -> Option<&Path> {
+        match &self.extras {
+            ProductionFamilyExtrasV1::V4 {
+                solana_actuator_store,
+                ..
+            } => Some(Path::new(solana_actuator_store)),
+            _ => None,
+        }
+    }
+
+    /// Monero actuator store reference, present only in the V4 family.
+    pub fn xmr_actuator_store(&self) -> Option<&Path> {
+        match &self.extras {
+            ProductionFamilyExtrasV1::V4 {
+                xmr_actuator_store, ..
+            } => Some(Path::new(xmr_actuator_store)),
+            _ => None,
+        }
+    }
+
+    /// Bitcoin prebroadcast store reference, present only in the V4 family.
+    pub fn bitcoin_prebroadcast_store(&self) -> Option<&Path> {
+        match &self.extras {
+            ProductionFamilyExtrasV1::V4 {
+                bitcoin_prebroadcast_store,
+                ..
+            } => Some(Path::new(bitcoin_prebroadcast_store)),
+            _ => None,
         }
     }
 
@@ -690,6 +809,7 @@ impl ProductionBootstrapConfigV1 {
             ProductionFamilyExtrasV1::None => ProductionBootstrapFamilyV1::V1,
             ProductionFamilyExtrasV1::V2 { .. } => ProductionBootstrapFamilyV1::V2,
             ProductionFamilyExtrasV1::V3 { .. } => ProductionBootstrapFamilyV1::V3,
+            ProductionFamilyExtrasV1::V4 { .. } => ProductionBootstrapFamilyV1::V4,
         }
     }
 
@@ -723,6 +843,16 @@ impl ProductionBootstrapConfigV1 {
         expected_mode: ProductionBootstrapModeV1,
     ) -> Result<Self, ProductionConfigErrorV1> {
         decode_config(bytes, expected_mode, ProductionBootstrapFamilyV1::V3)
+    }
+
+    /// Decodes only the exact canonical V4 bytes for the requested mode. As
+    /// with every earlier family, the family is an argument and never a
+    /// guess.
+    pub fn decode_canonical_v4_for_mode(
+        bytes: &[u8],
+        expected_mode: ProductionBootstrapModeV1,
+    ) -> Result<Self, ProductionConfigErrorV1> {
+        decode_config(bytes, expected_mode, ProductionBootstrapFamilyV1::V4)
     }
 
     /// Returns exact canonical bytes, including the integrity digest.
@@ -779,6 +909,10 @@ impl ProductionBootstrapConfigV1 {
             }
             ProductionBootstrapFamilyV1::V3 => {
                 body.push_str(HEADER_V3);
+                body.push('\n');
+            }
+            ProductionBootstrapFamilyV1::V4 => {
+                body.push_str(HEADER_V4);
                 body.push('\n');
             }
         }
@@ -932,6 +1066,31 @@ impl ProductionBootstrapConfigV1 {
                 push_reference(&mut body, IDENTITY_STORE_KEY_V2, identity_store);
                 push_reference(&mut body, BUDGET_POLICY_KEY_V3, budget_policy);
             }
+            // Same discipline as V3: a V4 document is a V3 document plus four
+            // lines in one fixed order, never a reordering of it.
+            ProductionFamilyExtrasV1::V4 {
+                identity_store,
+                budget_policy,
+                chain_endpoints,
+                solana_actuator_store,
+                xmr_actuator_store,
+                bitcoin_prebroadcast_store,
+            } => {
+                push_reference(&mut body, IDENTITY_STORE_KEY_V2, identity_store);
+                push_reference(&mut body, BUDGET_POLICY_KEY_V3, budget_policy);
+                push_reference(&mut body, CHAIN_ENDPOINTS_KEY_V4, chain_endpoints);
+                push_reference(
+                    &mut body,
+                    SOLANA_ACTUATOR_STORE_KEY_V4,
+                    solana_actuator_store,
+                );
+                push_reference(&mut body, XMR_ACTUATOR_STORE_KEY_V4, xmr_actuator_store);
+                push_reference(
+                    &mut body,
+                    BITCOIN_PREBROADCAST_STORE_KEY_V4,
+                    bitcoin_prebroadcast_store,
+                );
+            }
         }
         body
     }
@@ -950,6 +1109,10 @@ pub struct ValidatedProductionLayoutV1 {
     paths: [PathBuf; PRODUCTION_PATH_ROLE_COUNT_V1],
     contracts_transport_identity_store: Option<PathBuf>,
     contracts_budget_policy: Option<PathBuf>,
+    chain_endpoints: Option<PathBuf>,
+    solana_actuator_store: Option<PathBuf>,
+    xmr_actuator_store: Option<PathBuf>,
+    bitcoin_prebroadcast_store: Option<PathBuf>,
 }
 
 impl core::fmt::Debug for ValidatedProductionLayoutV1 {
@@ -979,6 +1142,27 @@ impl ValidatedProductionLayoutV1 {
     /// present only in the V3 family.
     pub fn contracts_budget_policy(&self) -> Option<&Path> {
         self.contracts_budget_policy.as_deref()
+    }
+
+    /// Absolute path of the chain-endpoints artifact, V4 only.
+    pub fn chain_endpoints(&self) -> Option<&Path> {
+        self.chain_endpoints.as_deref()
+    }
+
+    /// Absolute path of the Solana actuator store, V4 only.
+    pub fn solana_actuator_store(&self) -> Option<&Path> {
+        self.solana_actuator_store.as_deref()
+    }
+
+    /// Absolute path of the Monero actuator store, V4 only.
+    pub fn xmr_actuator_store(&self) -> Option<&Path> {
+        self.xmr_actuator_store.as_deref()
+    }
+
+    /// Absolute path of the Bitcoin prebroadcast store, V4 only. Written by
+    /// the external funding-arming flow; validated here only when present.
+    pub fn bitcoin_prebroadcast_store(&self) -> Option<&Path> {
+        self.bitcoin_prebroadcast_store.as_deref()
     }
 }
 
@@ -1303,6 +1487,109 @@ pub(crate) fn load_production_create_or_resume_bootstrap_v3(
     })
 }
 
+/// V4 twin of [`load_production_create_or_resume_bootstrap_v3`], reading only
+/// the fixed V4 manifest pair.
+pub(crate) fn load_production_create_or_resume_bootstrap_v4(
+    state_dir: &Path,
+) -> Result<ValidatedProductionBootstrapV1, ProductionConfigErrorV1> {
+    let canonical_state = validate_state_dir(state_dir)?;
+    let create = load_manifest(
+        &canonical_state,
+        PRODUCTION_CREATE_CONFIG_FILE_V4,
+        ProductionBootstrapModeV1::Create,
+        ProductionBootstrapFamilyV1::V4,
+    )?;
+    let reopen = load_manifest(
+        &canonical_state,
+        PRODUCTION_REOPEN_CONFIG_FILE_V4,
+        ProductionBootstrapModeV1::ReopenExisting,
+        ProductionBootstrapFamilyV1::V4,
+    )?;
+    if !create.equivalent_except_mode(&reopen) {
+        return Err(ProductionConfigErrorV1::CompanionMismatch);
+    }
+    let binding = provisioning_binding_for_configs(&create, &reopen)?;
+    let layout = match DurableProductionProvisioningJournalV1::open(&canonical_state, binding) {
+        Ok(journal) => {
+            resolve_and_validate_layout_for_provisioning(&canonical_state, &create, &journal)?
+        }
+        Err(ProductionProvisioningErrorV1::NotFound) => {
+            let layout = resolve_and_validate_layout(&canonical_state, &create, true)?;
+            require_absent(
+                &canonical_state.join(ROUTE_SECRET_VAULT_ROOT_NAME_V1),
+                ProductionConfigErrorV1::StateAlreadyPresent,
+            )?;
+            layout
+        }
+        Err(_) => return Err(ProductionConfigErrorV1::ProvisioningJournalRefused),
+    };
+    Ok(ValidatedProductionBootstrapV1 {
+        config: create,
+        layout,
+    })
+}
+
+/// V4 twin of [`load_production_reopen_bootstrap_v3`].
+pub fn load_production_reopen_bootstrap_v4(
+    state_dir: &Path,
+) -> Result<ValidatedProductionBootstrapV1, ProductionConfigErrorV1> {
+    let canonical_state = validate_state_dir(state_dir)?;
+    let config = load_manifest(
+        &canonical_state,
+        PRODUCTION_REOPEN_CONFIG_FILE_V4,
+        ProductionBootstrapModeV1::ReopenExisting,
+        ProductionBootstrapFamilyV1::V4,
+    )?;
+    let layout = resolve_and_validate_layout(&canonical_state, &config, false)?;
+    Ok(ValidatedProductionBootstrapV1 { config, layout })
+}
+
+/// Provisioning binding for a V3 **or** V4 bootstrap: the companion manifest
+/// is loaded with the same family and the binding covers both documents. Any
+/// other family is refused, exactly as the V3-only predecessor refused
+/// non-V3.
+#[cfg(feature = "production")]
+pub(crate) fn provisioning_binding_for_bootstrap(
+    bootstrap: &ValidatedProductionBootstrapV1,
+) -> Result<[u8; 32], ProductionConfigErrorV1> {
+    let family = bootstrap.config.family();
+    let (create_file, reopen_file) = match family {
+        ProductionBootstrapFamilyV1::V3 => (
+            PRODUCTION_CREATE_CONFIG_FILE_V3,
+            PRODUCTION_REOPEN_CONFIG_FILE_V3,
+        ),
+        ProductionBootstrapFamilyV1::V4 => (
+            PRODUCTION_CREATE_CONFIG_FILE_V4,
+            PRODUCTION_REOPEN_CONFIG_FILE_V4,
+        ),
+        _ => return Err(ProductionConfigErrorV1::ProvisioningJournalRefused),
+    };
+    let (create, reopen) = match bootstrap.config.mode() {
+        ProductionBootstrapModeV1::Create => (
+            bootstrap.config.clone(),
+            load_manifest(
+                bootstrap.layout.state_dir(),
+                reopen_file,
+                ProductionBootstrapModeV1::ReopenExisting,
+                family,
+            )?,
+        ),
+        ProductionBootstrapModeV1::ReopenExisting => (
+            load_manifest(
+                bootstrap.layout.state_dir(),
+                create_file,
+                ProductionBootstrapModeV1::Create,
+                family,
+            )?,
+            bootstrap.config.clone(),
+        ),
+    };
+    if !create.equivalent_except_mode(&reopen) {
+        return Err(ProductionConfigErrorV1::CompanionMismatch);
+    }
+    provisioning_binding_for_configs(&create, &reopen)
+}
+
 #[cfg(feature = "production")]
 pub(crate) fn provisioning_binding_for_v3_bootstrap(
     bootstrap: &ValidatedProductionBootstrapV1,
@@ -1448,16 +1735,29 @@ fn decode_config(
     // format has. A family that adds a reference adds it after the ones it
     // inherits, so an earlier family's document is a prefix of a later one's
     // reference block and never a permutation.
+    enum DecodedExtrasV1 {
+        None,
+        V2(String),
+        V3(String, String),
+        V4(String, String, String, String, String, String),
+    }
     let extras = match family {
-        ProductionBootstrapFamilyV1::V1 => None,
-        ProductionBootstrapFamilyV1::V2 => Some((
+        ProductionBootstrapFamilyV1::V1 => DecodedExtrasV1::None,
+        ProductionBootstrapFamilyV1::V2 => {
+            DecodedExtrasV1::V2(take_value(&lines, &mut cursor, IDENTITY_STORE_KEY_V2)?.to_owned())
+        }
+        ProductionBootstrapFamilyV1::V3 => DecodedExtrasV1::V3(
             take_value(&lines, &mut cursor, IDENTITY_STORE_KEY_V2)?.to_owned(),
-            None,
-        )),
-        ProductionBootstrapFamilyV1::V3 => Some((
+            take_value(&lines, &mut cursor, BUDGET_POLICY_KEY_V3)?.to_owned(),
+        ),
+        ProductionBootstrapFamilyV1::V4 => DecodedExtrasV1::V4(
             take_value(&lines, &mut cursor, IDENTITY_STORE_KEY_V2)?.to_owned(),
-            Some(take_value(&lines, &mut cursor, BUDGET_POLICY_KEY_V3)?.to_owned()),
-        )),
+            take_value(&lines, &mut cursor, BUDGET_POLICY_KEY_V3)?.to_owned(),
+            take_value(&lines, &mut cursor, CHAIN_ENDPOINTS_KEY_V4)?.to_owned(),
+            take_value(&lines, &mut cursor, SOLANA_ACTUATOR_STORE_KEY_V4)?.to_owned(),
+            take_value(&lines, &mut cursor, XMR_ACTUATOR_STORE_KEY_V4)?.to_owned(),
+            take_value(&lines, &mut cursor, BITCOIN_PREBROADCAST_STORE_KEY_V4)?.to_owned(),
+        ),
     };
     let supplied_digest = decode_digest(take_value(&lines, &mut cursor, "config_digest")?)?;
     if lines.get(cursor) != Some(&END_V1) || cursor + 1 != lines.len() {
@@ -1501,21 +1801,42 @@ fn decode_config(
         ProductionPathReferencesV1::from_ordered(paths)?,
     )?;
     let config = match extras {
-        None => config,
-        Some((identity_store, None)) => ProductionBootstrapConfigV1::from_parts_v2(
+        DecodedExtrasV1::None => config,
+        DecodedExtrasV1::V2(identity_store) => ProductionBootstrapConfigV1::from_parts_v2(
             config.mode,
             config.pins,
             config.bounds,
             config.paths,
             identity_store,
         )?,
-        Some((identity_store, Some(budget_policy))) => ProductionBootstrapConfigV1::from_parts_v3(
+        DecodedExtrasV1::V3(identity_store, budget_policy) => {
+            ProductionBootstrapConfigV1::from_parts_v3(
+                config.mode,
+                config.pins,
+                config.bounds,
+                config.paths,
+                identity_store,
+                budget_policy,
+            )?
+        }
+        DecodedExtrasV1::V4(
+            identity_store,
+            budget_policy,
+            chain_endpoints,
+            solana_actuator_store,
+            xmr_actuator_store,
+            bitcoin_prebroadcast_store,
+        ) => ProductionBootstrapConfigV1::from_parts_v4(
             config.mode,
             config.pins,
             config.bounds,
             config.paths,
             identity_store,
             budget_policy,
+            chain_endpoints,
+            solana_actuator_store,
+            xmr_actuator_store,
+            bitcoin_prebroadcast_store,
         )?,
     };
     let body = config.canonical_body();
@@ -1765,6 +2086,64 @@ fn load_manifest(
     decode_config(&bytes, expected_mode, family)
 }
 
+/// Resolves and validates the V4 extras for either layout path.
+///
+/// The chain-endpoints artifact is a provisioned input; the two actuator
+/// stores are managed files whose lifecycle the run's provisioning stages
+/// own, so here they are only required to be an owner file when present.
+/// The Bitcoin prebroadcast store is written by the external arming flow and
+/// may legitimately be absent until that flow runs.
+fn resolve_v4_extras(
+    state_dir: &Path,
+    config: &ProductionBootstrapConfigV1,
+) -> Result<
+    (
+        Option<PathBuf>,
+        Option<PathBuf>,
+        Option<PathBuf>,
+        Option<PathBuf>,
+    ),
+    ProductionConfigErrorV1,
+> {
+    let chain_endpoints = match config.chain_endpoints() {
+        None => None,
+        Some(relative) => {
+            let path = state_dir.join(relative);
+            validate_parent_chain(state_dir, &path)?;
+            validate_input_file(&path)?;
+            Some(path)
+        }
+    };
+    let mut managed =
+        |relative: Option<&Path>| -> Result<Option<PathBuf>, ProductionConfigErrorV1> {
+            match relative {
+                None => Ok(None),
+                Some(relative) => {
+                    let path = state_dir.join(relative);
+                    validate_parent_chain(state_dir, &path)?;
+                    match fs::symlink_metadata(&path) {
+                        Ok(_) => validate_owner_file(
+                            &path,
+                            ProductionConfigErrorV1::RecoveryStateUnavailable,
+                        )?,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => return Err(ProductionConfigErrorV1::StorageUnavailable),
+                    }
+                    Ok(Some(path))
+                }
+            }
+        };
+    let solana_actuator_store = managed(config.solana_actuator_store())?;
+    let xmr_actuator_store = managed(config.xmr_actuator_store())?;
+    let bitcoin_prebroadcast_store = managed(config.bitcoin_prebroadcast_store())?;
+    Ok((
+        chain_endpoints,
+        solana_actuator_store,
+        xmr_actuator_store,
+        bitcoin_prebroadcast_store,
+    ))
+}
+
 fn resolve_and_validate_layout(
     state_dir: &Path,
     config: &ProductionBootstrapConfigV1,
@@ -1825,11 +2204,17 @@ fn resolve_and_validate_layout(
             Some(path)
         }
     };
+    let (chain_endpoints, solana_actuator_store, xmr_actuator_store, bitcoin_prebroadcast_store) =
+        resolve_v4_extras(state_dir, config)?;
     Ok(ValidatedProductionLayoutV1 {
         state_dir: state_dir.to_path_buf(),
         paths,
         contracts_transport_identity_store,
         contracts_budget_policy,
+        chain_endpoints,
+        solana_actuator_store,
+        xmr_actuator_store,
+        bitcoin_prebroadcast_store,
     })
 }
 
@@ -1891,11 +2276,17 @@ fn resolve_and_validate_layout_for_provisioning(
             Some(path)
         }
     };
+    let (chain_endpoints, solana_actuator_store, xmr_actuator_store, bitcoin_prebroadcast_store) =
+        resolve_v4_extras(state_dir, config)?;
     Ok(ValidatedProductionLayoutV1 {
         state_dir: state_dir.to_path_buf(),
         paths,
         contracts_transport_identity_store,
         contracts_budget_policy,
+        chain_endpoints,
+        solana_actuator_store,
+        xmr_actuator_store,
+        bitcoin_prebroadcast_store,
     })
 }
 
@@ -2759,6 +3150,90 @@ mod tests {
             BUDGET_POLICY_PATH_V3.to_owned(),
         )
         .expect("the V3 fixture config is canonical")
+    }
+
+    fn golden_create_config_v4() -> ProductionBootstrapConfigV1 {
+        ProductionBootstrapConfigV1::from_parts_v4(
+            ProductionBootstrapModeV1::Create,
+            pins(),
+            bounds(),
+            ProductionPathReferencesV1::from_ordered(standard_paths())
+                .expect("the fixture path set is canonical"),
+            IDENTITY_STORE_PATH_V2.to_owned(),
+            BUDGET_POLICY_PATH_V3.to_owned(),
+            "inputs/chain-endpoints".to_owned(),
+            "solana-actuator-store".to_owned(),
+            "xmr-actuator-store".to_owned(),
+            "bitcoin-prebroadcast-store".to_owned(),
+        )
+        .expect("the V4 fixture config is canonical")
+    }
+
+    #[test]
+    fn v4_config_round_trips_canonically_and_no_other_family_accepts_it() {
+        let config = golden_create_config_v4();
+        let bytes = config.canonical_bytes().expect("encode V4");
+        let decoded = ProductionBootstrapConfigV1::decode_canonical_v4_for_mode(
+            &bytes,
+            ProductionBootstrapModeV1::Create,
+        )
+        .expect("decode V4");
+        assert_eq!(decoded, config);
+        assert_eq!(decoded.canonical_bytes().expect("re-encode"), bytes);
+        assert!(ProductionBootstrapConfigV1::decode_canonical_v3_for_mode(
+            &bytes,
+            ProductionBootstrapModeV1::Create,
+        )
+        .is_err());
+        assert!(ProductionBootstrapConfigV1::decode_canonical_for_mode(
+            &bytes,
+            ProductionBootstrapModeV1::Create,
+        )
+        .is_err());
+        // And the V4 decoder refuses the V3 document.
+        let v3_bytes = golden_create_config_v3()
+            .canonical_bytes()
+            .expect("encode V3");
+        assert!(ProductionBootstrapConfigV1::decode_canonical_v4_for_mode(
+            &v3_bytes,
+            ProductionBootstrapModeV1::Create,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn v4_accessors_expose_exactly_the_new_references() {
+        let config = golden_create_config_v4();
+        assert!(config.chain_endpoints().is_some());
+        assert!(config.solana_actuator_store().is_some());
+        assert!(config.xmr_actuator_store().is_some());
+        assert!(config.bitcoin_prebroadcast_store().is_some());
+        assert!(config.contracts_budget_policy().is_some());
+        assert!(config.contracts_transport_identity_store().is_some());
+        let v3 = golden_create_config_v3();
+        assert!(v3.chain_endpoints().is_none());
+        assert!(v3.solana_actuator_store().is_none());
+        assert!(v3.xmr_actuator_store().is_none());
+        assert!(v3.bitcoin_prebroadcast_store().is_none());
+    }
+
+    #[test]
+    fn v4_refuses_aliased_new_references() {
+        assert!(ProductionBootstrapConfigV1::from_parts_v4(
+            ProductionBootstrapModeV1::Create,
+            pins(),
+            bounds(),
+            ProductionPathReferencesV1::from_ordered(standard_paths())
+                .expect("the fixture path set is canonical"),
+            IDENTITY_STORE_PATH_V2.to_owned(),
+            BUDGET_POLICY_PATH_V3.to_owned(),
+            "inputs/chain-endpoints".to_owned(),
+            // Aliases the V1 EVM actuator store reference.
+            "state/evm-actuator.sqlite3".to_owned(),
+            "xmr-actuator-store".to_owned(),
+            "bitcoin-prebroadcast-store".to_owned(),
+        )
+        .is_err());
     }
 
     fn golden_create_config_v2() -> ProductionBootstrapConfigV1 {

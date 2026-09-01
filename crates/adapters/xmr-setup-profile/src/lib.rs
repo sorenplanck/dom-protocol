@@ -180,6 +180,7 @@ pub enum SetupError {
 }
 
 /// Unforgeable validated setup token.
+#[derive(Clone)]
 pub struct ValidatedXmrSetup {
     settlement_id: [u8; 32],
     terms_hash: [u8; 32],

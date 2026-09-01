@@ -8020,6 +8020,7 @@ version = "0.2.0"
 dependencies = [
  "reqwest",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "xmr-raw-tx-verify",
  "xmr-spend-port",

@@ -25,6 +25,8 @@ mod production_child_solana;
 #[cfg(feature = "production")]
 mod production_child_xmr;
 #[cfg(feature = "production")]
+mod production_children;
+#[cfg(feature = "production")]
 pub mod production_f6;
 // `config-only` compiles this module for its own codec/golden tests without
 // the production graph; it deliberately re-exports nothing (see below), so its

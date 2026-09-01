@@ -227,3 +227,56 @@ Everything §5 asked for, same recipe as §8:
 
 Still open from §2: the final graph wiring that constructs the
 production children inside `production_run` (unchanged seam).
+
+## 10. Progress — the composition seam (2026-09-01, second round)
+
+`run_production_v1` now **constructs the counterparty children**. What
+landed, and the two adjudications that shaped it:
+
+1. **V4 bootstrap family** (`production_config.rs`): the V3 document plus
+   four references — `path_chain_endpoints`,
+   `path_solana_actuator_store`, `path_xmr_actuator_store`,
+   `path_bitcoin_prebroadcast_store` — one variant, six extras, so a
+   half-configured V4 is unrepresentable. V4 manifests win when present;
+   a V3 state directory keeps its exact old behaviour. Golden round-trip
+   plus cross-family refusal tests.
+2. **Chain-endpoints artifact** (`production_children.rs`): strict
+   canonical binary (`DOMCEND1`), faces as a bitmask, bounded URLs,
+   quorum shapes cross-checked against the *authenticated adapter
+   profiles* — the artifact can configure where, never how much.
+3. **`compose_production_counterparty_children_v1`**: one child per
+   authenticated leg in drive (non-materializing) form — EVM over its
+   provisioned actuator and `HttpEvmRpcV1`, Bitcoin over its actuator,
+   Core cookie RPC and the **armed** prebroadcast funding (un-armed
+   funding is a named refusal, `FundingNotArmed`), Solana over its
+   store, quorum pool and per-role fee-payer leases, Monero over its
+   store, the loopback broadcaster and a new quorum observation port.
+   Exact face binding: an endpoint for a face the route did not admit
+   refuses composition.
+4. **Quorum Monero observation** (`QuorumXmrObservationPortV1` over the
+   new `BlockingMoneroDaemonReaderV1` in `xmr-rpc-broadcast-blocking`):
+   inclusion requires `quorum` daemons agreeing on the exact
+   `(height, block hash)`; confirmations count from the lowest agreeing
+   daemon height; absence requires `quorum` answered-and-missing;
+   key-image spent anywhere reports spent (the conservative direction).
+
+**Adjudication — no journal stages for the new stores.** The
+provisioning journal's audit demands a monotone stage prefix and the
+stages that would precede any new ones (F6, Relay) cannot complete yet;
+appending stages would deadlock `begin`. The Solana and Monero stores
+are idempotent open-or-create SQLite files whose rows are self-fencing
+and write-once, exactly like the Bitcoin prebroadcast store the external
+arming flow writes, so their creation is layout-validated (owner file
+when present) rather than journaled.
+
+**Adjudication — the DOM child stays uncomposed.** Its Contracts
+authority requires the real Relay worker over `F6TransportPortV1`
+(missing part 6, ordered before it by the provisioning enum's own
+comment). Composing it over the refusing transport would dress absence
+as presence. `ProductionCounterpartyChildrenV1::into_router` holds the
+one remaining step in the type system: the moment a real DOM child
+exists, the full `ProductionSettlementChildRouterV1` is one call away.
+
+Remaining in `MISSING_PRODUCTION_PARTS_V1`: the runner, the timer, the
+refund-arming faces, F6, and — behind F6 — the DOM child that completes
+the router.

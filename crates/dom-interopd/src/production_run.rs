@@ -32,9 +32,14 @@ use solver_inventory::DurableInventoryStoreV1;
 use crate::production_chain_signers::{
     provision_production_chain_signers_v1, ProductionChainSignerProvisioningRequestV1,
 };
+use crate::production_children::{
+    compose_production_counterparty_children_v1, load_production_chain_endpoints,
+    ProductionCounterpartyCompositionRequestV1,
+};
 use crate::production_config::{
-    load_production_create_or_resume_bootstrap_v3, load_production_reopen_bootstrap_v3,
-    provisioning_binding_for_v3_bootstrap, read_owner_file_bounded, ProductionConfigErrorV1,
+    load_production_create_or_resume_bootstrap_v3, load_production_create_or_resume_bootstrap_v4,
+    load_production_reopen_bootstrap_v3, load_production_reopen_bootstrap_v4,
+    provisioning_binding_for_bootstrap, read_owner_file_bounded, ProductionConfigErrorV1,
     ProductionPathRoleV1, ValidatedProductionBootstrapV1,
 };
 use crate::production_inputs::{
@@ -141,6 +146,10 @@ pub enum ProductionRunErrorV1 {
     /// The host clock is before the Unix epoch, so no trusted second exists.
     #[error("production host clock is unusable")]
     HostClock,
+    /// The counterparty settlement children could not be composed from the
+    /// V4 chain-endpoints artifact and the provisioned durable stores.
+    #[error("production counterparty children unavailable")]
+    CounterpartyChildren,
     /// Everything above succeeded and the route still cannot be composed,
     /// because parts of the composition have no production implementation.
     ///
@@ -163,8 +172,8 @@ pub const MISSING_PRODUCTION_PARTS_V1: &[&str] = &[
     "RefundArmingAuthority: `ProductionRefundArmingAuthorityV1` exists, but its concrete DOM and counterparty faces are not yet constructed by this composition root",
     "RunnerActionAuthority: only the declared fail-closed `UnavailableRunnerAuthorityV1` exists, so every action would be refused rather than dispatched",
     "TimerAuthority: `ProductionDeadlineTimerAuthorityV1` exists, but is not yet constructed by this composition root",
-    "SettlementChildAuthorityV1: `ProductionSettlementChildRouterV1` exists, but is not yet constructed by this composition root",
-    "SettlementChildObserverV1: `ProductionSettlementChildRouterV1` exists, but is not yet constructed by this composition root",
+    "SettlementChildAuthorityV1: the four counterparty children (EVM, Bitcoin, Solana, Monero) are composed by this root from a V4 bootstrap; the router still awaits the DOM child, whose Contracts authority requires the real Relay worker over `F6TransportPortV1`",
+    "SettlementChildObserverV1: same seam as the authority above — counterparty children composed, router awaiting the DOM child behind F6/Relay",
     "F6TransportPortV1: only the declared fail-closed `UnavailableF6AuthorityV1` exists, so F6 traffic would be refused rather than served",
 ];
 
@@ -265,7 +274,7 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
     let _refund_arming_credential = secrets.refund_arming_credential;
 
     let bootstrap = load_bootstrap(options).map_err(|_| ProductionRunErrorV1::Configuration)?;
-    let provisioning_binding = provisioning_binding_for_v3_bootstrap(&bootstrap)
+    let provisioning_binding = provisioning_binding_for_bootstrap(&bootstrap)
         .map_err(|_| ProductionRunErrorV1::Provisioning)?;
     let mut provisioning = match options.mode {
         ProductionRunModeV1::Create => {
@@ -413,7 +422,7 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
             .map_err(|_| ProductionRunErrorV1::Provisioning)?,
         ProductionRunModeV1::ReopenExisting => evm_stage_before_begin,
     };
-    let _evm_actuator_store =
+    let evm_actuator_store =
         open_evm_actuator_store(options.mode, evm_stage_before_begin, evm_stage, evm_path)?;
     complete_provisioning_stage(
         options.mode,
@@ -439,7 +448,7 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
             .map_err(|_| ProductionRunErrorV1::Provisioning)?,
         ProductionRunModeV1::ReopenExisting => bitcoin_stage_before_begin,
     };
-    let _bitcoin_actuator_store = open_bitcoin_actuator_store(
+    let bitcoin_actuator_store = open_bitcoin_actuator_store(
         options.mode,
         bitcoin_stage_before_begin,
         bitcoin_stage,
@@ -544,13 +553,56 @@ pub fn run_production_v1(options: &ProductionRunOptionsV1) -> Result<(), Product
         &mut provisioning,
     )?;
 
-    // The composition point. Stages 1 through 10 above exist and have run;
-    // everything
-    // below is named in `MISSING_PRODUCTION_PARTS_V1`. The two raw Contracts
-    // store owners are retained above; the relay worker and route runtime are
-    // composed here once those parts exist, and deliberately not before: a route driven by
-    // anything other than its real authorities would report progress it did
-    // not make.
+    // The counterparty settlement children. With a V4 bootstrap the four
+    // chain faces the route admitted are composed here in drive form, from
+    // the retained actuator stores, the authenticated sessions and the
+    // operator's chain-endpoints artifact — exactly one child per admitted
+    // leg, or a named refusal. A V3 bootstrap has no endpoints artifact and
+    // composes nothing, which is the old behaviour unchanged.
+    let _counterparty_children = match bootstrap.layout().chain_endpoints() {
+        Some(endpoints_path) => {
+            let endpoints = load_production_chain_endpoints(endpoints_path)
+                .map_err(|_| ProductionRunErrorV1::CounterpartyChildren)?;
+            let now_unix_ms = u64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| ProductionRunErrorV1::HostClock)?
+                    .as_millis(),
+            )
+            .map_err(|_| ProductionRunErrorV1::HostClock)?;
+            Some(
+                compose_production_counterparty_children_v1(
+                    ProductionCounterpartyCompositionRequestV1 {
+                        inputs: &inputs,
+                        endpoints: &endpoints,
+                        evm_actuator: Some(evm_actuator_store),
+                        bitcoin_actuator: Some(bitcoin_actuator_store),
+                        bitcoin_prebroadcast_path: bootstrap.layout().bitcoin_prebroadcast_store(),
+                        solana_store_path: bootstrap.layout().solana_actuator_store(),
+                        xmr_store_path: bootstrap.layout().xmr_actuator_store(),
+                        owner_id: pins.process_owner_id,
+                        now_unix_ms,
+                        actuator_lease_ms: bootstrap.config().bounds().actuator_lease_ms,
+                    },
+                )
+                .map_err(|_| ProductionRunErrorV1::CounterpartyChildren)?,
+            )
+        }
+        None => {
+            drop(evm_actuator_store);
+            drop(bitcoin_actuator_store);
+            None
+        }
+    };
+
+    // The composition point. Stages 1 through 10 above exist and have run,
+    // and with a V4 bootstrap the counterparty settlement children exist
+    // beside them; everything below is named in
+    // `MISSING_PRODUCTION_PARTS_V1`. The two raw Contracts store owners are
+    // retained above; the relay worker, the DOM child and the route runtime
+    // are composed here once those parts exist, and deliberately not before:
+    // a route driven by anything other than its real authorities would
+    // report progress it did not make.
     Err(ProductionRunErrorV1::NotComposable)
 }
 
@@ -1090,12 +1142,28 @@ fn coordinator_process_lock_path(path: &Path) -> PathBuf {
 fn load_bootstrap(
     options: &ProductionRunOptionsV1,
 ) -> Result<ValidatedProductionBootstrapV1, ProductionConfigErrorV1> {
+    // The V4 manifest pair wins when present; a state directory without it
+    // stays on the V3 family and everything V3 could do keeps working. The
+    // fallback is on the exact absent-manifest refusal only, so a corrupt V4
+    // manifest is an error, never silently a V3 deployment.
     match options.mode {
         ProductionRunModeV1::Create => {
-            load_production_create_or_resume_bootstrap_v3(&options.state_dir)
+            match load_production_create_or_resume_bootstrap_v4(&options.state_dir) {
+                Ok(bootstrap) => Ok(bootstrap),
+                Err(ProductionConfigErrorV1::ConfigUnavailable) => {
+                    load_production_create_or_resume_bootstrap_v3(&options.state_dir)
+                }
+                Err(error) => Err(error),
+            }
         }
         ProductionRunModeV1::ReopenExisting => {
-            load_production_reopen_bootstrap_v3(&options.state_dir)
+            match load_production_reopen_bootstrap_v4(&options.state_dir) {
+                Ok(bootstrap) => Ok(bootstrap),
+                Err(ProductionConfigErrorV1::ConfigUnavailable) => {
+                    load_production_reopen_bootstrap_v3(&options.state_dir)
+                }
+                Err(error) => Err(error),
+            }
         }
     }
 }

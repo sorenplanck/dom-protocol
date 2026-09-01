@@ -123,6 +123,208 @@ impl ExactBroadcastPort for BlockingMoneroBroadcaster {
     }
 }
 
+/// Read-only loopback monerod reader for reconciliation and observation.
+///
+/// Same endpoint policy as the broadcaster: loopback only, finite timeouts.
+/// Every answer is a single daemon's view; quorum assembly is the caller's
+/// job, never this client's.
+pub struct BlockingMoneroDaemonReaderV1 {
+    base_url: String,
+    client: Client,
+}
+
+impl core::fmt::Debug for BlockingMoneroDaemonReaderV1 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BlockingMoneroDaemonReaderV1")
+            .field("base_url", &self.base_url)
+            .finish()
+    }
+}
+
+/// One daemon's answer about an exact txid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MoneroTransactionLocationV1 {
+    /// Still in the transaction pool.
+    pub in_pool: bool,
+    /// Inclusion height when mined.
+    pub block_height: Option<u64>,
+}
+
+impl BlockingMoneroDaemonReaderV1 {
+    /// Creates a finite-timeout loopback reader.
+    pub fn new(base_url: impl Into<String>) -> Result<Self, SpendPortError> {
+        let base_url = base_url.into().trim_end_matches('/').to_owned();
+        if !(base_url.starts_with("http://127.0.0.1:")
+            || base_url.starts_with("http://localhost:")
+            || base_url.starts_with("http://[::1]:"))
+        {
+            return Err(SpendPortError::Rejected);
+        }
+        let client = Client::builder()
+            .connect_timeout(core::time::Duration::from_secs(5))
+            .timeout(core::time::Duration::from_secs(30))
+            .build()
+            .map_err(|_| SpendPortError::Retryable)?;
+        Ok(Self { base_url, client })
+    }
+
+    /// Where the daemon sees an exact txid, `None` when unknown to it.
+    pub fn transaction_location(
+        &self,
+        tx_hash: [u8; 32],
+    ) -> Result<Option<MoneroTransactionLocationV1>, SpendPortError> {
+        let wanted = hex_lower(&tx_hash);
+        let response = self
+            .client
+            .post(format!("{}/get_transactions", self.base_url))
+            .json(&GetTransactionsRequest {
+                txs_hashes: vec![wanted.clone()],
+                decode_as_json: false,
+            })
+            .send()
+            .map_err(|_| SpendPortError::Retryable)?;
+        if !response.status().is_success() {
+            return Err(SpendPortError::Retryable);
+        }
+        let body = response
+            .json::<GetTransactionsLocationResponse>()
+            .map_err(|_| SpendPortError::Retryable)?;
+        if body.missed_tx.iter().any(|value| value == &wanted) {
+            return Ok(None);
+        }
+        let Some(entry) = body.txs.first() else {
+            return Ok(None);
+        };
+        if entry.tx_hash != wanted {
+            return Err(SpendPortError::Retryable);
+        }
+        Ok(Some(MoneroTransactionLocationV1 {
+            in_pool: entry.in_pool,
+            block_height: (!entry.in_pool).then_some(entry.block_height),
+        }))
+    }
+
+    /// The daemon's current chain height.
+    pub fn daemon_height(&self) -> Result<u64, SpendPortError> {
+        let response = self
+            .client
+            .get(format!("{}/get_height", self.base_url))
+            .send()
+            .map_err(|_| SpendPortError::Retryable)?;
+        if !response.status().is_success() {
+            return Err(SpendPortError::Retryable);
+        }
+        let body = response
+            .json::<GetHeightResponse>()
+            .map_err(|_| SpendPortError::Retryable)?;
+        if body.height == 0 {
+            return Err(SpendPortError::Retryable);
+        }
+        Ok(body.height)
+    }
+
+    /// The canonical block hash at one height, from the daemon's chain view.
+    pub fn block_hash_at(&self, height: u64) -> Result<[u8; 32], SpendPortError> {
+        let response = self
+            .client
+            .post(format!("{}/json_rpc", self.base_url))
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "0",
+                "method": "get_block_header_by_height",
+                "params": { "height": height },
+            }))
+            .send()
+            .map_err(|_| SpendPortError::Retryable)?;
+        if !response.status().is_success() {
+            return Err(SpendPortError::Retryable);
+        }
+        let body = response
+            .json::<serde_json::Value>()
+            .map_err(|_| SpendPortError::Retryable)?;
+        let hash = body
+            .get("result")
+            .and_then(|result| result.get("block_header"))
+            .and_then(|header| header.get("hash"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or(SpendPortError::Retryable)?;
+        decode_hex_32(hash).ok_or(SpendPortError::Retryable)
+    }
+
+    /// Whether the exact key image is spent in the daemon's view (chain or
+    /// pool alike: either way the shared output is contested).
+    pub fn key_image_spent(&self, key_image: [u8; 32]) -> Result<bool, SpendPortError> {
+        let response = self
+            .client
+            .post(format!("{}/is_key_image_spent", self.base_url))
+            .json(&IsKeyImageSpentRequest {
+                key_images: vec![hex_lower(&key_image)],
+            })
+            .send()
+            .map_err(|_| SpendPortError::Retryable)?;
+        if !response.status().is_success() {
+            return Err(SpendPortError::Retryable);
+        }
+        let body = response
+            .json::<IsKeyImageSpentResponse>()
+            .map_err(|_| SpendPortError::Retryable)?;
+        match body.spent_status.as_slice() {
+            [0] => Ok(false),
+            [1] | [2] => Ok(true),
+            _ => Err(SpendPortError::Retryable),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct IsKeyImageSpentRequest {
+    key_images: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct IsKeyImageSpentResponse {
+    #[serde(default)]
+    spent_status: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+struct GetHeightResponse {
+    #[serde(default)]
+    height: u64,
+}
+
+#[derive(Deserialize)]
+struct GetTransactionsLocationResponse {
+    #[serde(default)]
+    missed_tx: Vec<String>,
+    #[serde(default)]
+    txs: Vec<TransactionLocationEntry>,
+}
+
+#[derive(Deserialize)]
+struct TransactionLocationEntry {
+    #[serde(default)]
+    tx_hash: String,
+    #[serde(default)]
+    in_pool: bool,
+    #[serde(default)]
+    block_height: u64,
+}
+
+fn decode_hex_32(value: &str) -> Option<[u8; 32]> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (index, chunk) in bytes.chunks_exact(2).enumerate() {
+        let high = (chunk[0] as char).to_digit(16)?;
+        let low = (chunk[1] as char).to_digit(16)?;
+        out[index] = u8::try_from(high * 16 + low).ok()?;
+    }
+    Some(out)
+}
+
 #[derive(Serialize)]
 struct SendRawTransactionRequest {
     tx_as_hex: String,

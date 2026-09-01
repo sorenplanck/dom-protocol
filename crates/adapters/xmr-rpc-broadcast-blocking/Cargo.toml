@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 xmr-raw-tx-verify = { path = "../xmr-raw-tx-verify" }
 reqwest = { workspace = true }
+serde_json = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 xmr-spend-port = { path = "../xmr-spend-port" }
