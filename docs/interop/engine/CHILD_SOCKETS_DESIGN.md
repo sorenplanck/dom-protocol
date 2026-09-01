@@ -190,3 +190,40 @@ Still open from §2: the Monero actuator + `production_child_xmr` (§5),
 and the final graph wiring that constructs the production children inside
 `production_run` (the dead-code warnings on the materializer subsystem
 mark exactly that seam, unchanged from before this work).
+
+## 9. Progress — Monero socket landed (2026-09-01)
+
+Everything §5 asked for, same recipe as §8:
+
+1. **`xmr-actuator`** (new crate): the solana-actuator discipline for
+   sweeps — exact signed bytes retained write-once, fenced idempotent
+   mutations, `SendAttempted` before any daemon sees a byte, finality only
+   at the profile's confirmation depth. Reconciliation records
+   `KeyImageUnspentAbsent` only when the txid is absent **and** the
+   sweep's own key image is unspent — the §5-adjudicated absence
+   statement, documented as point-in-time; a spent key image with an
+   absent txid is a conflicting spend and stays `Unknown`, written
+   nowhere. 14 adversarial tests.
+2. **Authenticated Monero session** (`production_inputs.rs`): the layout
+   marker became a bitmask (bit 0 = Solana, bit 1 = Monero);
+   `ProductionXmrLegSetupV1` carries the adapter profile and DLEQ-bound
+   `XmrSetupBindingV1`. Authentication pins the network to the registry
+   (mainnet unrepresentable) and anchors on
+   `xmr_setup_profile::validate_setup` under the ratified
+   `CrossCurveSharedSpend` mechanism, no admission token. The fail-closed
+   Monero refusal is gone because the real thing replaced it.
+3. **`production_child_xmr.rs`**: funding is external custody — the child
+   verifies the pinned funding transaction through the scoped view-key
+   scan and the quorum observation boundary, and never holds funding
+   bytes. Sweep construction stays behind
+   `ScopedXmrSweepAuthorityV1`; every sidecar answer and every retained
+   transaction is independently re-verified with
+   `xmr_raw_tx_verify::verify_exact_raw_transaction` before it is
+   trusted. Claim exposure is `UsesPublicSecret` only — a Monero sweep
+   never first-exposes the witness.
+4. **Router/materializer**: `authenticate_monero`,
+   `new_with_all_counterparties`, and the Monero materializer arm over
+   `resolved_monero_deployment_digest_v1`.
+
+Still open from §2: the final graph wiring that constructs the
+production children inside `production_run` (unchanged seam).

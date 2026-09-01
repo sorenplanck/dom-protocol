@@ -932,6 +932,16 @@ fn authenticate_leg(
             crate::production_child_solana::resolved_solana_deployment_digest_v1(&resolved)
                 .map_err(|_| AuthorityRefusalV1::Inconsistent)?,
         )
+    } else if inputs.monero_session(leg).is_some() {
+        let resolved = admission
+            .monero_deployment_capability(leg)
+            .map_err(|_| AuthorityRefusalV1::Inconsistent)?;
+        (
+            SettlementFaceV1::Monero,
+            resolved.profile_digest(),
+            crate::production_child_xmr::resolved_monero_deployment_digest_v1(&resolved)
+                .map_err(|_| AuthorityRefusalV1::Inconsistent)?,
+        )
     } else {
         return Err(AuthorityRefusalV1::Inconsistent);
     };

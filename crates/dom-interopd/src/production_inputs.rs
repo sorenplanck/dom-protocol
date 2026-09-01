@@ -19,7 +19,8 @@ use btc_crypto::SecpContext;
 use chain_profile::ChainKindV1;
 use deployment_registry::{
     AuthoritySetV1, RegistryStoreV1, RegistryValidationPolicyV1, ResolvedBitcoinDeploymentV1,
-    ResolvedRegistryV1, ResolvedSolanaDeploymentV1, MAX_AUTHORITY_SET_BYTES,
+    ResolvedMoneroDeploymentV1, ResolvedRegistryV1, ResolvedSolanaDeploymentV1,
+    MAX_AUTHORITY_SET_BYTES,
 };
 use kaystra_core::{
     terms::SettlementTermsV1,
@@ -39,6 +40,10 @@ use solana_profile::{
 };
 use solana_types::SolanaPubkey;
 use xmr_dleq_sigma::{BoundCrossCurveProofV1, CrossCurveProofBytes, CrossCurvePublicClaim};
+use xmr_setup_profile::{
+    validate_setup as validate_xmr_setup, ValidatedXmrSetup, XmrAdapterProfileV1, XmrNetwork,
+    XmrSetupBindingV1,
+};
 use route_executor::{
     CanonicalCodecV1, CommitOutcomeV1, DurableRouteStoreV1, FrozenRouteAdmissionCheckpointV2,
     LegIdV1, RouteEventV1, RouteIdV1, RouteStoreErrorV1,
@@ -90,7 +95,19 @@ pub const SOLANA_LEG_SETUP_FIXED_BYTES_V1: usize = 43 // adapter profile
 pub const MAX_PRODUCTION_PARTICIPANT_BUNDLE_EXTENDED_BYTES_V1: usize =
     MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1
         + 4
-        + 2 * (4 + SOLANA_LEG_SETUP_FIXED_BYTES_V1 + xmr_dleq_sigma::MAX_PROOF_BYTES);
+        + 2 * (4 + SOLANA_LEG_SETUP_FIXED_BYTES_V1 + xmr_dleq_sigma::MAX_PROOF_BYTES)
+        + 4
+        + 2 * (4 + XMR_LEG_SETUP_FIXED_BYTES_V1
+            + xmr_dleq_sigma::MAX_PROOF_BYTES
+            + xmr_live_sidecar_api::MAX_DESTINATION_BYTES);
+/// Fixed-width prefix of one Monero leg setup: adapter profile plus every
+/// binding field except the variable-length DLEQ proof body and destination.
+pub const XMR_LEG_SETUP_FIXED_BYTES_V1: usize = 11 // adapter profile
+    + 32 + 32                 // settlement_id, terms_hash
+    + 2 + 32 + 32 + 1         // dleq envelope header
+    + 2 + 65 + 4              // proof bundle header: version, claim, proof length
+    + 32 + 8 + 2              // funding tx, amount, destination length
+    + 32; // combined spend public key
 
 const AUTHORITY_BUNDLE_MAGIC_V1: &[u8; 8] = b"DOMPAUB1";
 const ROSTER_BUNDLE_MAGIC_V1: &[u8; 8] = b"DOMRSTR1";
@@ -948,6 +965,161 @@ fn decode_bool(value: u8) -> Result<bool, ProductionInputErrorV1> {
     }
 }
 
+/// One route leg's registered Monero shared-spend setup: the adapter profile
+/// the frozen terms committed to and the DLEQ-bound setup binding. As with
+/// Solana, there is no participant signature — the anchor is the cross-curve
+/// DLEQ verified by `xmr_setup_profile::validate_setup` under the ratified
+/// `CrossCurveSharedSpend` mechanism (no admission token).
+#[derive(Clone, Eq, PartialEq)]
+pub struct ProductionXmrLegSetupV1 {
+    pub(crate) position: ProductionRoutePositionV1,
+    pub(crate) profile: XmrAdapterProfileV1,
+    pub(crate) binding: XmrSetupBindingV1,
+}
+
+impl core::fmt::Debug for ProductionXmrLegSetupV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ProductionXmrLegSetupV1")
+            .field("position", &self.position)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProductionXmrLegSetupV1 {
+    /// Builds one Monero leg setup after structural zero/bounds checks. Full
+    /// cryptographic authentication happens only inside bundle verification.
+    pub fn new(
+        position: ProductionRoutePositionV1,
+        profile: XmrAdapterProfileV1,
+        binding: XmrSetupBindingV1,
+    ) -> Result<Self, ProductionInputErrorV1> {
+        if profile.rpc_node_count == 0
+            || profile.rpc_quorum == 0
+            || profile.rpc_quorum > profile.rpc_node_count
+            || binding.settlement_id == ZERO_DIGEST
+            || binding.terms_hash == ZERO_DIGEST
+            || binding.funding_tx_hash == ZERO_DIGEST
+            || binding.combined_spend_public_key == ZERO_DIGEST
+            || binding.destination.is_empty()
+            || binding.destination.len() > xmr_live_sidecar_api::MAX_DESTINATION_BYTES
+            || !binding.destination.is_ascii()
+            || binding.dleq.bundle.proof.is_empty()
+            || binding.dleq.bundle.proof.len() > xmr_dleq_sigma::MAX_PROOF_BYTES
+        {
+            return Err(ProductionInputErrorV1::InvalidParticipantBundle);
+        }
+        Ok(Self {
+            position,
+            profile,
+            binding,
+        })
+    }
+
+    fn encode_into(&self, bytes: &mut Vec<u8>) -> Result<(), ProductionInputErrorV1> {
+        bytes.push(self.position.tag());
+        bytes.extend_from_slice(&[0; 3]);
+        bytes.push(self.profile.network as u8);
+        bytes.extend_from_slice(&self.profile.sidecar_api_version.to_be_bytes());
+        bytes.extend_from_slice(&self.profile.rpc_node_count.to_be_bytes());
+        bytes.extend_from_slice(&self.profile.rpc_quorum.to_be_bytes());
+        bytes.extend_from_slice(&self.profile.max_raw_tx_bytes.to_be_bytes());
+        let binding = &self.binding;
+        bytes.extend_from_slice(&binding.settlement_id);
+        bytes.extend_from_slice(&binding.terms_hash);
+        bytes.extend_from_slice(&binding.dleq.version.to_be_bytes());
+        bytes.extend_from_slice(&binding.dleq.settlement_id);
+        bytes.extend_from_slice(&binding.dleq.context_hash);
+        bytes.push(binding.dleq.role);
+        bytes.extend_from_slice(&binding.dleq.bundle.version.to_be_bytes());
+        bytes.extend_from_slice(&binding.dleq.bundle.claim.to_canonical_bytes());
+        let proof_len = u32::try_from(binding.dleq.bundle.proof.len())
+            .map_err(|_| ProductionInputErrorV1::InputBoundExceeded)?;
+        bytes.extend_from_slice(&proof_len.to_be_bytes());
+        bytes.extend_from_slice(&binding.dleq.bundle.proof);
+        bytes.extend_from_slice(&binding.funding_tx_hash);
+        bytes.extend_from_slice(&binding.expected_amount_piconero.to_be_bytes());
+        let destination_len = u16::try_from(binding.destination.len())
+            .map_err(|_| ProductionInputErrorV1::InputBoundExceeded)?;
+        bytes.extend_from_slice(&destination_len.to_be_bytes());
+        bytes.extend_from_slice(binding.destination.as_bytes());
+        bytes.extend_from_slice(&binding.combined_spend_public_key);
+        Ok(())
+    }
+
+    fn decode_from(cursor: &mut InputCursorV1<'_>) -> Result<Self, ProductionInputErrorV1> {
+        let position = ProductionRoutePositionV1::from_tag(cursor.u8()?)?;
+        if cursor.take::<3>()? != [0; 3] {
+            return Err(ProductionInputErrorV1::NonCanonicalEncoding);
+        }
+        let network = match cursor.u8()? {
+            1 => XmrNetwork::Mainnet,
+            2 => XmrNetwork::Stagenet,
+            3 => XmrNetwork::Testnet,
+            _ => return Err(ProductionInputErrorV1::InvalidParticipantBundle),
+        };
+        let sidecar_api_version = cursor.u16()?;
+        let rpc_node_count = cursor.u16()?;
+        let rpc_quorum = cursor.u16()?;
+        let max_raw_tx_bytes = u32::from_be_bytes(cursor.take::<4>()?);
+        let profile = XmrAdapterProfileV1 {
+            network,
+            sidecar_api_version,
+            rpc_node_count,
+            rpc_quorum,
+            max_raw_tx_bytes,
+        };
+        let settlement_id = cursor.take::<32>()?;
+        let terms_hash = cursor.take::<32>()?;
+        let dleq_version = cursor.u16()?;
+        let dleq_settlement_id = cursor.take::<32>()?;
+        let dleq_context_hash = cursor.take::<32>()?;
+        let dleq_role = cursor.u8()?;
+        let bundle_version = cursor.u16()?;
+        let claim = CrossCurvePublicClaim::from_canonical_bytes(&cursor.take::<65>()?)
+            .ok_or(ProductionInputErrorV1::InvalidParticipantBundle)?;
+        let proof_len = usize::try_from(u32::from_be_bytes(cursor.take::<4>()?))
+            .map_err(|_| ProductionInputErrorV1::InputBoundExceeded)?;
+        if proof_len == 0 || proof_len > xmr_dleq_sigma::MAX_PROOF_BYTES {
+            return Err(ProductionInputErrorV1::InvalidParticipantBundle);
+        }
+        let proof = cursor.bytes(proof_len)?.to_vec();
+        let funding_tx_hash = cursor.take::<32>()?;
+        let expected_amount_piconero = u64::from_be_bytes(cursor.take::<8>()?);
+        let destination_len = usize::from(cursor.u16()?);
+        if destination_len == 0 || destination_len > xmr_live_sidecar_api::MAX_DESTINATION_BYTES
+        {
+            return Err(ProductionInputErrorV1::InvalidParticipantBundle);
+        }
+        let destination = String::from_utf8(cursor.bytes(destination_len)?.to_vec())
+            .map_err(|_| ProductionInputErrorV1::NonCanonicalEncoding)?;
+        let combined_spend_public_key = cursor.take::<32>()?;
+        Self::new(
+            position,
+            profile,
+            XmrSetupBindingV1 {
+                settlement_id,
+                terms_hash,
+                dleq: BoundCrossCurveProofV1 {
+                    version: dleq_version,
+                    settlement_id: dleq_settlement_id,
+                    context_hash: dleq_context_hash,
+                    role: dleq_role,
+                    bundle: CrossCurveProofBytes {
+                        version: bundle_version,
+                        proof,
+                        claim,
+                    },
+                },
+                funding_tx_hash,
+                expected_amount_piconero,
+                destination,
+                combined_spend_public_key,
+            },
+        )
+    }
+}
+
 /// Canonical set of participant proofs for exactly the applicable route legs.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProductionParticipantBindingBundleV1 {
@@ -955,6 +1127,7 @@ pub struct ProductionParticipantBindingBundleV1 {
     legs: Vec<ProductionEvmLegProofsV1>,
     bitcoin_legs: Vec<ProductionBitcoinLegKeyProofsV1>,
     solana_legs: Vec<ProductionSolanaLegSetupV1>,
+    monero_legs: Vec<ProductionXmrLegSetupV1>,
 }
 
 impl core::fmt::Debug for ProductionParticipantBindingBundleV1 {
@@ -964,6 +1137,7 @@ impl core::fmt::Debug for ProductionParticipantBindingBundleV1 {
             .field("evm_proof_leg_count", &self.legs.len())
             .field("bitcoin_proof_leg_count", &self.bitcoin_legs.len())
             .field("solana_setup_leg_count", &self.solana_legs.len())
+            .field("monero_setup_leg_count", &self.monero_legs.len())
             .finish_non_exhaustive()
     }
 }
@@ -993,10 +1167,28 @@ impl ProductionParticipantBindingBundleV1 {
         bitcoin_legs: Vec<ProductionBitcoinLegKeyProofsV1>,
         solana_legs: Vec<ProductionSolanaLegSetupV1>,
     ) -> Result<Self, ProductionInputErrorV1> {
+        Self::new_with_all_counterparty_bindings(
+            route_id,
+            legs,
+            bitcoin_legs,
+            solana_legs,
+            Vec::new(),
+        )
+    }
+
+    /// Builds ordered EVM, Bitcoin, Solana and Monero sets for their legs.
+    pub fn new_with_all_counterparty_bindings(
+        route_id: RouteIdV1,
+        legs: Vec<ProductionEvmLegProofsV1>,
+        bitcoin_legs: Vec<ProductionBitcoinLegKeyProofsV1>,
+        solana_legs: Vec<ProductionSolanaLegSetupV1>,
+        monero_legs: Vec<ProductionXmrLegSetupV1>,
+    ) -> Result<Self, ProductionInputErrorV1> {
         if route_id == ZERO_DIGEST
             || legs.len() > 2
             || bitcoin_legs.len() > 2
             || solana_legs.len() > 2
+            || monero_legs.len() > 2
             || legs
                 .windows(2)
                 .any(|pair| pair[0].position >= pair[1].position)
@@ -1004,6 +1196,9 @@ impl ProductionParticipantBindingBundleV1 {
                 .windows(2)
                 .any(|pair| pair[0].position >= pair[1].position)
             || solana_legs
+                .windows(2)
+                .any(|pair| pair[0].position >= pair[1].position)
+            || monero_legs
                 .windows(2)
                 .any(|pair| pair[0].position >= pair[1].position)
             || legs.iter().any(|leg| {
@@ -1018,6 +1213,7 @@ impl ProductionParticipantBindingBundleV1 {
             legs,
             bitcoin_legs,
             solana_legs,
+            monero_legs,
         })
     }
 
@@ -1041,6 +1237,11 @@ impl ProductionParticipantBindingBundleV1 {
         &self.solana_legs
     }
 
+    /// Canonical Monero-applicable legs and their DLEQ-bound setups.
+    pub fn monero_legs(&self) -> &[ProductionXmrLegSetupV1] {
+        &self.monero_legs
+    }
+
     /// Bounded reject-trailing representation.
     ///
     /// The reserved field after the version doubles as the layout marker: a
@@ -1048,13 +1249,20 @@ impl ProductionParticipantBindingBundleV1 {
     /// pre-Solana encoding; a bundle with Solana legs writes `1` and appends
     /// the Solana section after the Bitcoin one.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ProductionInputErrorV1> {
-        Self::new_with_counterparty_bindings(
+        Self::new_with_all_counterparty_bindings(
             self.route_id,
             self.legs.clone(),
             self.bitcoin_legs.clone(),
             self.solana_legs.clone(),
+            self.monero_legs.clone(),
         )?;
-        let layout: u16 = if self.solana_legs.is_empty() { 0 } else { 1 };
+        let mut layout: u16 = 0;
+        if !self.solana_legs.is_empty() {
+            layout |= 1;
+        }
+        if !self.monero_legs.is_empty() {
+            layout |= 2;
+        }
         let mut bytes = Vec::with_capacity(MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1);
         bytes.extend_from_slice(PARTICIPANT_BUNDLE_MAGIC_V1);
         bytes.extend_from_slice(&INPUT_VERSION_V1.to_be_bytes());
@@ -1094,13 +1302,23 @@ impl ProductionParticipantBindingBundleV1 {
                 bytes.extend_from_slice(&participant.signature);
             }
         }
-        if layout == 1 {
+        if layout & 1 != 0 {
             bytes.push(
                 u8::try_from(self.solana_legs.len())
                     .map_err(|_| ProductionInputErrorV1::InputBoundExceeded)?,
             );
             bytes.extend_from_slice(&[0; 3]);
             for leg in &self.solana_legs {
+                leg.encode_into(&mut bytes)?;
+            }
+        }
+        if layout & 2 != 0 {
+            bytes.push(
+                u8::try_from(self.monero_legs.len())
+                    .map_err(|_| ProductionInputErrorV1::InputBoundExceeded)?,
+            );
+            bytes.extend_from_slice(&[0; 3]);
+            for leg in &self.monero_legs {
                 leg.encode_into(&mut bytes)?;
             }
         }
@@ -1126,7 +1344,7 @@ impl ProductionParticipantBindingBundleV1 {
             return Err(ProductionInputErrorV1::NonCanonicalEncoding);
         }
         let layout = cursor.u16()?;
-        if layout > 1 {
+        if layout > 3 {
             return Err(ProductionInputErrorV1::NonCanonicalEncoding);
         }
         if layout == 0 && bytes.len() > MAX_PRODUCTION_PARTICIPANT_BUNDLE_BYTES_V1 {
@@ -1185,7 +1403,7 @@ impl ProductionParticipantBindingBundleV1 {
             )?);
         }
         let mut solana_legs = Vec::new();
-        if layout == 1 {
+        if layout & 1 != 0 {
             let solana_count = usize::from(cursor.u8()?);
             if solana_count == 0 || solana_count > 2 || cursor.take::<3>()? != [0; 3] {
                 return Err(ProductionInputErrorV1::NonCanonicalEncoding);
@@ -1194,9 +1412,24 @@ impl ProductionParticipantBindingBundleV1 {
                 solana_legs.push(ProductionSolanaLegSetupV1::decode_from(&mut cursor)?);
             }
         }
+        let mut monero_legs = Vec::new();
+        if layout & 2 != 0 {
+            let monero_count = usize::from(cursor.u8()?);
+            if monero_count == 0 || monero_count > 2 || cursor.take::<3>()? != [0; 3] {
+                return Err(ProductionInputErrorV1::NonCanonicalEncoding);
+            }
+            for _ in 0..monero_count {
+                monero_legs.push(ProductionXmrLegSetupV1::decode_from(&mut cursor)?);
+            }
+        }
         cursor.finish()?;
-        let value =
-            Self::new_with_counterparty_bindings(route_id, legs, bitcoin_legs, solana_legs)?;
+        let value = Self::new_with_all_counterparty_bindings(
+            route_id,
+            legs,
+            bitcoin_legs,
+            solana_legs,
+            monero_legs,
+        )?;
         if value.canonical_bytes()?.as_slice() != bytes {
             return Err(ProductionInputErrorV1::NonCanonicalEncoding);
         }
@@ -1349,6 +1582,75 @@ impl AuthenticatedSolanaSessionBindingsV1 {
     }
 }
 
+/// Fully verified Monero shared-spend session for one admitted route leg.
+///
+/// Construction is private to the production input verifier. The anchor is
+/// the registered setup's cross-curve DLEQ under the ratified
+/// `CrossCurveSharedSpend` mechanism, verified against the frozen terms via
+/// `xmr_setup_profile::validate_setup`. No `Clone` and no generic
+/// constructor.
+pub struct AuthenticatedXmrSessionBindingsV1 {
+    position: ProductionRoutePositionV1,
+    network_id: Digest32,
+    route_id: RouteIdV1,
+    session_id: Digest32,
+    terms_digest: Digest32,
+    deployment: ResolvedMoneroDeploymentV1,
+    profile: XmrAdapterProfileV1,
+    setup: ValidatedXmrSetup,
+}
+
+impl core::fmt::Debug for AuthenticatedXmrSessionBindingsV1 {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("AuthenticatedXmrSessionBindingsV1")
+            .field("position", &self.position)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AuthenticatedXmrSessionBindingsV1 {
+    /// Upstream or downstream route position.
+    pub const fn position(&self) -> ProductionRoutePositionV1 {
+        self.position
+    }
+
+    /// Authenticated interoperability network.
+    pub const fn network_id(&self) -> Digest32 {
+        self.network_id
+    }
+
+    /// Exact composed route identity.
+    pub const fn route_id(&self) -> RouteIdV1 {
+        self.route_id
+    }
+
+    /// Exact settlement session identity.
+    pub const fn session_id(&self) -> Digest32 {
+        self.session_id
+    }
+
+    /// Canonical settlement-terms digest the DLEQ-bound setup commits to.
+    pub const fn terms_digest(&self) -> Digest32 {
+        self.terms_digest
+    }
+
+    /// Threshold-authenticated Monero deployment selected for this leg.
+    pub const fn deployment(&self) -> &ResolvedMoneroDeploymentV1 {
+        &self.deployment
+    }
+
+    /// Adapter profile the frozen terms committed to by hash.
+    pub const fn profile(&self) -> &XmrAdapterProfileV1 {
+        &self.profile
+    }
+
+    /// DLEQ-verified shared-spend setup.
+    pub const fn setup(&self) -> &ValidatedXmrSetup {
+        &self.setup
+    }
+}
+
 /// Fully authenticated public input handoff for one route.
 ///
 /// This type intentionally implements neither `Clone` nor `Debug`. Its fields
@@ -1381,6 +1683,7 @@ pub struct AuthenticatedProductionInputsV1 {
     pub(crate) evm_sessions: [Option<AuthenticatedEvmSessionBindingsV1>; 2],
     pub(crate) bitcoin_sessions: [Option<AuthenticatedBitcoinParticipantBindingsV1>; 2],
     pub(crate) solana_sessions: [Option<AuthenticatedSolanaSessionBindingsV1>; 2],
+    pub(crate) monero_sessions: [Option<AuthenticatedXmrSessionBindingsV1>; 2],
     pub(crate) current_time_ancestry_ready: bool,
 }
 
@@ -1411,6 +1714,12 @@ impl AuthenticatedProductionInputsV1 {
     /// Verified DLEQ-anchored Solana escrow session for an applicable leg.
     pub fn solana_session(&self, leg: LegIdV1) -> Option<&AuthenticatedSolanaSessionBindingsV1> {
         self.solana_sessions[leg_index(leg)].as_ref()
+    }
+
+    /// Verified DLEQ-anchored Monero shared-spend session for an applicable
+    /// route leg.
+    pub fn monero_session(&self, leg: LegIdV1) -> Option<&AuthenticatedXmrSessionBindingsV1> {
+        self.monero_sessions[leg_index(leg)].as_ref()
     }
 
     /// Public Relay roster registry reconstructed from the pinned artifact.
@@ -2087,6 +2396,7 @@ fn load_authenticated_production_inputs_inner_v1(
         evm_sessions: participant_sessions.evm,
         bitcoin_sessions: participant_sessions.bitcoin,
         solana_sessions: participant_sessions.solana,
+        monero_sessions: participant_sessions.monero,
         current_time_ancestry_ready,
     })
 }
@@ -2395,6 +2705,7 @@ struct AuthenticatedParticipantBundleV1 {
     evm: [Option<AuthenticatedEvmSessionBindingsV1>; 2],
     bitcoin: [Option<AuthenticatedBitcoinParticipantBindingsV1>; 2],
     solana: [Option<AuthenticatedSolanaSessionBindingsV1>; 2],
+    monero: [Option<AuthenticatedXmrSessionBindingsV1>; 2],
 }
 
 fn authenticate_participant_bundle(
@@ -2407,9 +2718,12 @@ fn authenticate_participant_bundle(
         std::array::from_fn(|_| None);
     let mut solana_sessions: [Option<AuthenticatedSolanaSessionBindingsV1>; 2] =
         std::array::from_fn(|_| None);
+    let mut monero_sessions: [Option<AuthenticatedXmrSessionBindingsV1>; 2] =
+        std::array::from_fn(|_| None);
     let mut expected_evm_count = 0usize;
     let mut expected_bitcoin_count = 0usize;
     let mut expected_solana_count = 0usize;
+    let mut expected_monero_count = 0usize;
     for (index, (position, terms)) in [
         (ProductionRoutePositionV1::Upstream, context.upstream),
         (ProductionRoutePositionV1::Downstream, context.downstream),
@@ -2599,20 +2913,50 @@ fn authenticate_participant_bundle(
                     setup,
                 });
             }
-            // The Monero authenticated session anchors on the registered
-            // setup's cross-curve DLEQ rather than participant key
-            // statements, and is being built with its child
-            // (docs/interop/engine/CHILD_SOCKETS_DESIGN.md §3). Until it
-            // lands, a production route selecting a Monero leg is refused
-            // here, fail closed, never half-authenticated.
-            ChainKindV1::Monero { .. } => {
-                return Err(ProductionInputErrorV1::InvalidParticipantBundle);
+            ChainKindV1::Monero { network } => {
+                expected_monero_count += 1;
+                let leg = bundle
+                    .monero_legs
+                    .iter()
+                    .find(|candidate| candidate.position == position)
+                    .ok_or(ProductionInputErrorV1::InvalidParticipantBundle)?;
+                // The registry names the network; Monero mainnet is
+                // unrepresentable there, so an adapter profile claiming
+                // mainnet can never authenticate.
+                if leg.profile.network as u8 != network as u8 {
+                    return Err(ProductionInputErrorV1::InvalidParticipantBundle);
+                }
+                let deployment = context
+                    .admission
+                    .monero_deployment_capability(position.leg())
+                    .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                let terms_digest = terms
+                    .terms_hash()
+                    .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                // The DLEQ inside the binding is the authentication anchor:
+                // validate_setup verifies it against the frozen terms, the
+                // adaptor point and the closed shared-spend role, under the
+                // ratified mechanism (no admission token).
+                let setup =
+                    validate_xmr_setup(terms, &leg.profile, leg.binding.clone(), None)
+                        .map_err(|_| ProductionInputErrorV1::InvalidParticipantBundle)?;
+                monero_sessions[index] = Some(AuthenticatedXmrSessionBindingsV1 {
+                    position,
+                    network_id: context.registry.manifest().network_id,
+                    route_id: bundle.route_id,
+                    session_id: terms.session_id.0,
+                    terms_digest,
+                    deployment,
+                    profile: leg.profile,
+                    setup,
+                });
             }
         }
     }
     if bundle.legs.len() != expected_evm_count
         || bundle.bitcoin_legs.len() != expected_bitcoin_count
         || bundle.solana_legs.len() != expected_solana_count
+        || bundle.monero_legs.len() != expected_monero_count
     {
         return Err(ProductionInputErrorV1::InvalidParticipantBundle);
     }
@@ -2620,6 +2964,7 @@ fn authenticate_participant_bundle(
         evm: evm_sessions,
         bitcoin: bitcoin_sessions,
         solana: solana_sessions,
+        monero: monero_sessions,
     })
 }
 
@@ -4297,6 +4642,85 @@ mod tests {
         let mut relabeled = bytes;
         relabeled[10] = 0;
         relabeled[11] = 0;
+        assert!(ProductionParticipantBindingBundleV1::decode_canonical(&relabeled).is_err());
+    }
+
+    fn synthetic_monero_leg(position: ProductionRoutePositionV1) -> ProductionXmrLegSetupV1 {
+        let profile = XmrAdapterProfileV1 {
+            network: XmrNetwork::Stagenet,
+            sidecar_api_version: 2,
+            rpc_node_count: 3,
+            rpc_quorum: 2,
+            max_raw_tx_bytes: 131_072,
+        };
+        let claim = {
+            let mut bytes = [0x25u8; 65];
+            bytes[0] = 0x03;
+            CrossCurvePublicClaim::from_canonical_bytes(&bytes).expect("claim bytes")
+        };
+        let binding = XmrSetupBindingV1 {
+            settlement_id: [0x41; 32],
+            terms_hash: [0x42; 32],
+            dleq: BoundCrossCurveProofV1 {
+                version: 1,
+                settlement_id: [0x41; 32],
+                context_hash: [0x43; 32],
+                role: 1,
+                bundle: CrossCurveProofBytes {
+                    version: 1,
+                    proof: vec![0x45; 128],
+                    claim,
+                },
+            },
+            funding_tx_hash: [0x46; 32],
+            expected_amount_piconero: 7_000_000_000,
+            destination: "5stagenetDestinationAddressFixture".to_string(),
+            combined_spend_public_key: [0x47; 32],
+        };
+        ProductionXmrLegSetupV1::new(position, profile, binding).expect("monero leg")
+    }
+
+    #[test]
+    fn monero_leg_bundle_round_trips_canonically() {
+        let bundle = ProductionParticipantBindingBundleV1::new_with_all_counterparty_bindings(
+            ROUTE_ID,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![synthetic_monero_leg(ProductionRoutePositionV1::Upstream)],
+        )
+        .expect("bundle");
+        let bytes = bundle.canonical_bytes().expect("encode");
+        // Layout bitmask: monero only.
+        assert_eq!(&bytes[10..12], &[0, 2]);
+        let decoded =
+            ProductionParticipantBindingBundleV1::decode_canonical(&bytes).expect("decode");
+        assert_eq!(decoded.monero_legs().len(), 1);
+        assert_eq!(decoded.canonical_bytes().expect("re-encode"), bytes);
+        assert_eq!(decoded, bundle);
+    }
+
+    #[test]
+    fn combined_solana_and_monero_bundle_round_trips_and_refuses_tampering() {
+        let bundle = ProductionParticipantBindingBundleV1::new_with_all_counterparty_bindings(
+            ROUTE_ID,
+            Vec::new(),
+            Vec::new(),
+            vec![synthetic_solana_leg(ProductionRoutePositionV1::Upstream)],
+            vec![synthetic_monero_leg(ProductionRoutePositionV1::Downstream)],
+        )
+        .expect("bundle");
+        let bytes = bundle.canonical_bytes().expect("encode");
+        assert_eq!(&bytes[10..12], &[0, 3]);
+        let decoded =
+            ProductionParticipantBindingBundleV1::decode_canonical(&bytes).expect("decode");
+        assert_eq!(decoded, bundle);
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(ProductionParticipantBindingBundleV1::decode_canonical(&trailing).is_err());
+        // Claiming only the Solana section while carrying both refuses.
+        let mut relabeled = bytes;
+        relabeled[11] = 1;
         assert!(ProductionParticipantBindingBundleV1::decode_canonical(&relabeled).is_err());
     }
 

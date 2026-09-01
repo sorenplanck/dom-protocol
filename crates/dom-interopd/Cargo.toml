@@ -53,6 +53,7 @@ production = [
     "dep:xmr-delivery",
     "dep:xmr-delivery-sqlite",
     "dep:xmr-dleq-sigma",
+    "dep:xmr-actuator",
     "dep:xmr-live-sidecar-api",
     "dep:xmr-observer",
     "dep:xmr-raw-tx-verify",
@@ -157,6 +158,7 @@ solana-types = { path = "../adapters/solana-types", optional = true }
 xmr-delivery = { path = "../adapters/xmr-delivery", optional = true }
 xmr-delivery-sqlite = { path = "../adapters/xmr-delivery-sqlite", optional = true }
 xmr-dleq-sigma = { path = "../adapters/xmr-dleq-sigma", optional = true }
+xmr-actuator = { path = "../xmr-actuator", optional = true }
 xmr-live-sidecar-api = { path = "../adapters/xmr-live-sidecar-api", optional = true }
 xmr-observer = { path = "../adapters/xmr-observer", optional = true }
 xmr-raw-tx-verify = { path = "../adapters/xmr-raw-tx-verify", optional = true }

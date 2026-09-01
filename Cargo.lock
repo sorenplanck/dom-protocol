@@ -1644,6 +1644,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tracing",
+ "xmr-actuator",
  "xmr-delivery",
  "xmr-delivery-sqlite",
  "xmr-dleq-sigma",

@@ -19,6 +19,7 @@ use crate::production_child_dom::{
 };
 use crate::production_child_evm::{ProductionEvmChildClockV1, ProductionEvmChildPortV1};
 use crate::production_child_solana::{ProductionSolanaChildClockV1, ProductionSolanaChildPortV1};
+use crate::production_child_xmr::{ProductionXmrChildClockV1, ProductionXmrChildPortV1};
 use btc_actuator::BitcoinRpcV1;
 use evm_actuator::EvmRpcV1;
 
@@ -88,6 +89,7 @@ pub(crate) struct AuthenticatedDomChildPortV1(Box<dyn ProductionSettlementChildP
 pub(crate) struct AuthenticatedEvmChildPortV1(Box<dyn ProductionSettlementChildPortV1>);
 pub(crate) struct AuthenticatedBitcoinChildPortV1(Box<dyn ProductionSettlementChildPortV1>);
 pub(crate) struct AuthenticatedSolanaChildPortV1(Box<dyn ProductionSettlementChildPortV1>);
+pub(crate) struct AuthenticatedXmrChildPortV1(Box<dyn ProductionSettlementChildPortV1>);
 
 /// Exact face router owned by the production settlement bridge.
 ///
@@ -124,10 +126,21 @@ impl ProductionSettlementChildRouterV1 {
         bitcoin: Option<AuthenticatedBitcoinChildPortV1>,
         solana: Option<AuthenticatedSolanaChildPortV1>,
     ) -> Result<Self, ChildAuthorityRefusalV1> {
+        Self::new_with_all_counterparties(dom, evm, bitcoin, solana, None)
+    }
+
+    pub(crate) fn new_with_all_counterparties(
+        dom: AuthenticatedDomChildPortV1,
+        evm: Option<AuthenticatedEvmChildPortV1>,
+        bitcoin: Option<AuthenticatedBitcoinChildPortV1>,
+        solana: Option<AuthenticatedSolanaChildPortV1>,
+        monero: Option<AuthenticatedXmrChildPortV1>,
+    ) -> Result<Self, ChildAuthorityRefusalV1> {
         let AuthenticatedDomChildPortV1(dom) = dom;
         let evm = evm.map(|AuthenticatedEvmChildPortV1(port)| port);
         let bitcoin = bitcoin.map(|AuthenticatedBitcoinChildPortV1(port)| port);
         let solana = solana.map(|AuthenticatedSolanaChildPortV1(port)| port);
+        let monero = monero.map(|AuthenticatedXmrChildPortV1(port)| port);
         if dom.face() != SettlementFaceV1::Dom
             || evm
                 .as_ref()
@@ -138,7 +151,10 @@ impl ProductionSettlementChildRouterV1 {
             || solana
                 .as_ref()
                 .is_some_and(|port| port.face() != SettlementFaceV1::Solana)
-            || (evm.is_none() && bitcoin.is_none() && solana.is_none())
+            || monero
+                .as_ref()
+                .is_some_and(|port| port.face() != SettlementFaceV1::Monero)
+            || (evm.is_none() && bitcoin.is_none() && solana.is_none() && monero.is_none())
         {
             return Err(ChildAuthorityRefusalV1::Refused);
         }
@@ -146,7 +162,7 @@ impl ProductionSettlementChildRouterV1 {
             dom,
             evm,
             bitcoin,
-            monero: None,
+            monero,
             solana,
         })
     }
@@ -191,6 +207,17 @@ impl ProductionSettlementChildRouterV1 {
         AuthenticatedSolanaChildPortV1(Box::new(port))
     }
 
+    pub(crate) fn authenticate_monero<B, O, C>(
+        port: ProductionXmrChildPortV1<B, O, C>,
+    ) -> AuthenticatedXmrChildPortV1
+    where
+        B: xmr_spend_port::ExactBroadcastPort + 'static,
+        O: xmr_actuator::XmrObservationPortV1 + 'static,
+        C: ProductionXmrChildClockV1 + 'static,
+    {
+        AuthenticatedXmrChildPortV1(Box::new(port))
+    }
+
     #[cfg(test)]
     pub(crate) fn new_test(
         dom: Box<dyn ProductionSettlementChildPortV1>,
@@ -231,11 +258,8 @@ impl ProductionSettlementChildRouterV1 {
                 Some(port) => Ok(port.as_mut()),
                 None => Err(ChildAuthorityRefusalV1::Refused),
             },
-            // The Monero and Solana children are being built
-            // (docs/interop/engine/CHILD_SOCKETS_DESIGN.md). Their slots
-            // exist so the faces are routable the moment a child is
-            // installed; an uninstalled child refuses, exactly as an
-            // uninstalled EVM or Bitcoin child does.
+            // An uninstalled child refuses, exactly as an uninstalled EVM
+            // or Bitcoin child does; nothing is ever redirected.
             SettlementFaceV1::Monero => match self.monero.as_mut() {
                 Some(port) => Ok(port.as_mut()),
                 None => Err(ChildAuthorityRefusalV1::Refused),
