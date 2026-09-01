@@ -1625,6 +1625,17 @@ dependencies = [
  "serde_json",
  "settlement-coordinator",
  "sha3",
+ "solana-delivery",
+ "solana-delivery-sqlite",
+ "solana-escrow-wire",
+ "solana-observer",
+ "solana-profile",
+ "solana-program-attestation",
+ "solana-program-client",
+ "solana-rpc",
+ "solana-rpc-pool",
+ "solana-transaction-builder",
+ "solana-types",
  "solver-inventory",
  "solver-status",
  "static_assertions",
@@ -1632,6 +1643,17 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tracing",
+ "xmr-delivery",
+ "xmr-delivery-sqlite",
+ "xmr-dleq-sigma",
+ "xmr-live-sidecar-api",
+ "xmr-observer",
+ "xmr-raw-tx-verify",
+ "xmr-rpc-broadcast-blocking",
+ "xmr-secret-store",
+ "xmr-setup-profile",
+ "xmr-sidecar-auth",
+ "xmr-spend-port",
  "zeroize",
 ]
 
@@ -5903,6 +5925,19 @@ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "solana-actuator"
+version = "0.2.0"
+dependencies = [
+ "blake2",
+ "rusqlite",
+ "solana-rpc",
+ "solana-rpc-pool",
+ "solana-types",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

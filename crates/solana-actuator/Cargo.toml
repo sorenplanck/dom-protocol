@@ -1,0 +1,18 @@
+[package]
+name = "solana-actuator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+blake2 = { workspace = true }
+rusqlite = { workspace = true }
+solana-rpc = { path = "../adapters/solana-rpc" }
+solana-rpc-pool = { path = "../adapters/solana-rpc-pool" }
+solana-types = { path = "../adapters/solana-types" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

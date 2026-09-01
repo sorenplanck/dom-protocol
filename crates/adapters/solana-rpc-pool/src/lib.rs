@@ -72,6 +72,30 @@ impl<R: SolanaRpc> SolanaRpcPool<R> {
         Ok(first)
     }
 
+    /// Lowest block height among the best `quorum` finalized readings.
+    ///
+    /// A floor is the safe direction for expiry proofs: the cluster is at
+    /// least this far, so a `last_valid_block_height` below it is expired at
+    /// every node that voted.
+    pub fn finalized_block_height_floor(&self, max_lag: u64) -> Result<u64, QuorumError> {
+        let mut heights: Vec<u64> = self
+            .nodes
+            .iter()
+            .filter_map(|node| node.get_block_height(Commitment::Finalized).ok())
+            .collect();
+        if heights.len() < self.quorum {
+            return Err(QuorumError::Unavailable);
+        }
+        heights.sort_unstable();
+        let selected = &heights[heights.len() - self.quorum..];
+        let first = selected[0];
+        let last = *selected.last().ok_or(QuorumError::Unavailable)?;
+        if last.saturating_sub(first) > max_lag {
+            return Err(QuorumError::StaleNode);
+        }
+        Ok(first)
+    }
+
     pub fn block_anchor(&self, slot: u64) -> Result<SolanaBlockAnchor, QuorumError> {
         let values = self
             .nodes

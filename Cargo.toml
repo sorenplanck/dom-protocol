@@ -55,6 +55,7 @@ members = [
     "crates/dom-actuator",
     "crates/dom-interopd",
     "crates/evm-actuator",
+    "crates/solana-actuator",
     "crates/dom-adaptor",
     "crates/dom-final-claim-binding",
     "crates/dom-leg",

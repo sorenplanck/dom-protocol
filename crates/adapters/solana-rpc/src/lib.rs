@@ -33,6 +33,7 @@ pub enum RpcError {
 /// Minimal RPC surface consumed by the quorum and observer layers.
 pub trait SolanaRpc: Send + Sync {
     fn get_slot(&self, commitment: Commitment) -> Result<u64, RpcError>;
+    fn get_block_height(&self, commitment: Commitment) -> Result<u64, RpcError>;
     fn get_block_anchor(&self, slot: u64) -> Result<Option<SolanaBlockAnchor>, RpcError>;
     fn get_account(
         &self,
@@ -121,6 +122,15 @@ impl SolanaRpc for HttpSolanaRpc {
         self.call("getSlot", json!([{"commitment": commitment.as_rpc_str()}]))?
             .as_u64()
             .ok_or(RpcError::InvalidResponse)
+    }
+
+    fn get_block_height(&self, commitment: Commitment) -> Result<u64, RpcError> {
+        self.call(
+            "getBlockHeight",
+            json!([{"commitment": commitment.as_rpc_str()}]),
+        )?
+        .as_u64()
+        .ok_or(RpcError::InvalidResponse)
     }
 
     fn get_block_anchor(&self, slot: u64) -> Result<Option<SolanaBlockAnchor>, RpcError> {
